@@ -30,6 +30,13 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      # node-pty's native rebuild (postinstall: electron-builder install-app-deps)
+      # imports distutils, removed in Python 3.12. Runners default to 3.12 → pin 3.11.
+      - name: Setup Python (node-gyp needs distutils)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies
         # `npm ci` is faster + uses the exact lockfile contents (no resolution).
         # If install fails on a clean lock we want to see it loudly here, not
@@ -89,6 +96,11 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+
+      - name: Setup Python (node-gyp needs distutils)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Install dependencies
         run: npm ci
