@@ -1,0 +1,166 @@
+import { readdir, readFile, stat } from 'fs/promises'
+import { homedir } from 'os'
+import { join } from 'path'
+import type { ClaudeUsage } from '../types'
+
+const WINDOW_HOURS = 5
+const WINDOW_MS = WINDOW_HOURS * 60 * 60 * 1000
+// Skip files whose mtime is older than (now - WINDOW - slack). 1h slack covers
+// long-running sessions whose last write is fresh but oldest line is old.
+const FILE_MTIME_SLACK_MS = 60 * 60 * 1000
+
+const claudeProjectsDir = () => join(homedir(), '.claude', 'projects')
+
+interface UsageLine {
+  timestamp: string
+  model?: string
+  messageId?: string
+  requestId?: string
+  usage: {
+    input_tokens?: number
+    output_tokens?: number
+    cache_creation_input_tokens?: number
+    cache_read_input_tokens?: number
+  }
+}
+
+const walkJsonl = async (root: string): Promise<string[]> => {
+  const out: string[] = []
+  const walk = async (dir: string) => {
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) await walk(p)
+      else if (e.isFile() && e.name.endsWith('.jsonl')) out.push(p)
+    }
+  }
+  await walk(root)
+  return out
+}
+
+const parseLine = (raw: string): UsageLine | null => {
+  if (!raw || raw[0] !== '{') return null
+  // Cheap pre-filter: only assistant messages carry a usage block.
+  if (raw.indexOf('"usage"') < 0) return null
+  try {
+    const obj = JSON.parse(raw)
+    if (obj?.type !== 'assistant') return null
+    const usage = obj?.message?.usage
+    const timestamp = obj?.timestamp
+    if (!usage || typeof timestamp !== 'string') return null
+    return {
+      timestamp,
+      model: obj?.message?.model,
+      messageId: obj?.message?.id,
+      requestId: obj?.requestId,
+      usage,
+    }
+  } catch {
+    return null
+  }
+}
+
+export const collectClaudeUsage = async (): Promise<ClaudeUsage> => {
+  const root = claudeProjectsDir()
+  const cutoffMs = Date.now() - WINDOW_MS
+  const fileCutoffMs = cutoffMs - FILE_MTIME_SLACK_MS
+
+  let files: string[] = []
+  try {
+    files = await walkJsonl(root)
+  } catch {
+    // ~/.claude/projects missing — empty usage.
+  }
+
+  let input = 0
+  let output = 0
+  let cacheRead = 0
+  let cacheWrite = 0
+  let messageCount = 0
+  let oldestMs: number | null = null
+  let newestMs: number | null = null
+  let currentModel: string | null = null
+  const byModel: Record<string, number> = {}
+  // Claude Code writes the same assistant turn into multiple jsonl files when
+  // sessions resume, branch, or spawn subagents — counting every line gives
+  // wildly inflated totals (the symptom: gauge pinned past 100% while the
+  // real per-window usage is ~10%). Dedupe by message id (with requestId as a
+  // tiebreaker for entries that carry one) to match what ccusage / Claude
+  // Code Usage Monitor report.
+  const seen = new Set<string>()
+
+  for (const file of files) {
+    let st
+    try {
+      st = await stat(file)
+    } catch {
+      continue
+    }
+    if (st.mtimeMs < fileCutoffMs) continue
+
+    let raw: string
+    try {
+      raw = await readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+
+    // Walk lines once; jsonl writes append-only so reading whole file is fine
+    // for the typical (small-to-mid) Claude session log.
+    const lines = raw.split('\n')
+    for (const line of lines) {
+      const parsed = parseLine(line)
+      if (!parsed) continue
+      const ts = Date.parse(parsed.timestamp)
+      if (!Number.isFinite(ts) || ts < cutoffMs) continue
+
+      if (parsed.messageId) {
+        const dedupKey = parsed.requestId
+          ? `${parsed.messageId}|${parsed.requestId}`
+          : parsed.messageId
+        if (seen.has(dedupKey)) continue
+        seen.add(dedupKey)
+      }
+
+      const u = parsed.usage
+      const ti = u.input_tokens ?? 0
+      const to = u.output_tokens ?? 0
+      const tcr = u.cache_read_input_tokens ?? 0
+      const tcw = u.cache_creation_input_tokens ?? 0
+      input += ti
+      output += to
+      cacheRead += tcr
+      cacheWrite += tcw
+      messageCount += 1
+      if (oldestMs === null || ts < oldestMs) oldestMs = ts
+      if (newestMs === null || ts > newestMs) {
+        newestMs = ts
+        if (parsed.model) currentModel = parsed.model
+      }
+
+      if (parsed.model) {
+        // Bill model usage by the same metric as the headline total
+        // (input + output + cache writes — cache reads are heavily discounted).
+        byModel[parsed.model] = (byModel[parsed.model] ?? 0) + ti + to + tcw
+      }
+    }
+  }
+
+  const total = input + output + cacheWrite
+
+  return {
+    windowHours: WINDOW_HOURS,
+    windowStart: oldestMs !== null ? new Date(oldestMs).toISOString() : null,
+    nextResetAt:
+      oldestMs !== null ? new Date(oldestMs + WINDOW_MS).toISOString() : null,
+    tokens: { input, output, cacheRead, cacheWrite, total },
+    messageCount,
+    byModel,
+    currentModel,
+  }
+}

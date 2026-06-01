@@ -1,0 +1,172 @@
+import { useEffect, useState } from 'react'
+import { X, LogIn, LogOut, Loader2 } from 'lucide-react'
+import { Btn } from '@/components/ui/Btn'
+import { useAuth } from '@/lib/auth/AuthContext'
+
+interface Props {
+  open: boolean
+  onClose: () => void
+}
+
+// The optional app-account modal. Modeled on FeedbackModal (same shell, Btn
+// usage, ESC handling). Signed-out: Continue with Google / GitHub. Signed-in:
+// show identity + Sign out. The login is optional and gates nothing — it is the
+// seam a future entitlement check will read (see docs/BILLING_PLAN.md). The
+// toolbar only mounts this when /api/auth/config reports enabled, so by the time
+// it's open the routes are wired.
+//
+// Interactive-state coverage (per the project UI rules): the provider buttons
+// use the shared Btn (`ghost`/`subtle`/`primary`) which already defines default
+// / hover / disabled, plus focus-visible from the global stylesheet; busy state
+// disables them and swaps in a spinner.
+export const AccountModal = ({ open, onClose }: Props) => {
+  const { user, status, signingIn, authError, signIn, signOut } = useAuth()
+  // Fall back to initials if the provider avatar fails to load (broken/blocked URL).
+  const [avatarError, setAvatarError] = useState(false)
+
+  // ESC closes — match FeedbackModal's keyboard behaviour.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  // Disable the provider buttons during the initial session probe AND while a
+  // sign-in round-trip is in flight, so they can't be re-clicked into a second
+  // browser tab + poll.
+  const busy = signingIn || status === 'loading'
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex flex-col w-[420px] max-w-[92vw] bg-bg-card border border-line shadow-card-hover overflow-hidden rounded-[3px]"
+      >
+        <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
+          <div>
+            <p className="label-cap text-accent mb-1.5">アカウント</p>
+            <h2
+              className="font-display text-[22px] text-ink leading-none tracking-tightest"
+              style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
+            >
+              {user ? 'アカウント' : 'サインイン'}
+            </h2>
+          </div>
+          <Btn variant="icon" size="sm" onClick={onClose} aria-label="閉じる">
+            <X size={16} />
+          </Btn>
+        </header>
+
+        {user ? (
+          // --- Signed in --------------------------------------------------
+          <>
+            <div className="px-6 py-5 space-y-4">
+              <div className="flex items-center gap-3">
+                {user.avatarUrl && !avatarError ? (
+                  <img
+                    src={user.avatarUrl}
+                    alt=""
+                    referrerPolicy="no-referrer"
+                    onError={() => setAvatarError(true)}
+                    className="h-11 w-11 rounded-full border border-line object-cover"
+                  />
+                ) : (
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg-inset text-[15px] font-display text-ink">
+                    {(user.name || user.email || '?').slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  {user.name && (
+                    <p className="text-[14px] text-ink leading-tight truncate">
+                      {user.name}
+                    </p>
+                  )}
+                  {user.email && (
+                    <p className="text-[12px] text-ink-muted leading-tight truncate">
+                      {user.email}
+                    </p>
+                  )}
+                  <p className="label-cap text-ink-faint mt-1">
+                    {user.provider} でサインイン中
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="shrink-0 flex items-center justify-end gap-2 border-t border-line bg-bg-elevated px-6 py-3.5">
+              <Btn variant="subtle" size="md" onClick={onClose}>
+                閉じる
+              </Btn>
+              <Btn variant="ghost" size="md" onClick={() => signOut()} danger>
+                <LogOut size={13} />
+                サインアウト
+              </Btn>
+            </div>
+          </>
+        ) : (
+          // --- Signed out -------------------------------------------------
+          <>
+            <div className="px-6 py-5 space-y-3">
+              <p className="text-[13px] text-ink-muted leading-relaxed">
+                サインインは任意です。OPEN GROUND はアカウントなしでも全機能を使えます。
+                サインインすると、設定を複数のマシン間で引き継げます。
+              </p>
+              <div className="space-y-2 pt-1">
+                <Btn
+                  variant="ghost"
+                  size="md"
+                  onClick={() => signIn('google')}
+                  disabled={busy}
+                  className="w-full justify-center"
+                >
+                  {busy ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}
+                  Google で続ける
+                </Btn>
+                <Btn
+                  variant="ghost"
+                  size="md"
+                  onClick={() => signIn('github')}
+                  disabled={busy}
+                  className="w-full justify-center"
+                >
+                  {busy ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}
+                  GitHub で続ける
+                </Btn>
+              </div>
+              {authError ? (
+                <p className="text-[12px] text-accent leading-relaxed pt-1">
+                  {authError}
+                </p>
+              ) : signingIn ? (
+                <p className="text-[11px] text-ink-faint leading-relaxed pt-1">
+                  ブラウザでサインインを完了してください。完了後、この画面に戻ると自動的に反映されます。
+                </p>
+              ) : (
+                <p className="text-[11px] text-ink-faint leading-relaxed pt-1">
+                  サインイン用のブラウザウィンドウが開きます。完了したらこの画面に戻ってください。
+                </p>
+              )}
+            </div>
+
+            <div className="shrink-0 flex items-center justify-end gap-2 border-t border-line bg-bg-elevated px-6 py-3.5">
+              <Btn variant="subtle" size="md" onClick={onClose}>
+                キャンセル
+              </Btn>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

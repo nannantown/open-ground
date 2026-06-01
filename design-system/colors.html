@@ -1,0 +1,1329 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>OPEN GROUND — Color System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    /* ── Paper / surface ───────────────────────────── */
+    --paper:        #F2EDDE; /* page body */
+    --paper-warm:   #EDE6D2; /* elevated panel */
+    --paper-card:   #F8F4E8; /* card surface */
+    --paper-inset:  #E6DEC6; /* well / inset */
+    --paper-deep:   #2A1F1A; /* inverted ground */
+
+    /* ── Ink / typography ──────────────────────────── */
+    --ink:          #2A1F1A;
+    --ink-muted:    #6B5847;
+    --ink-subtle:   #9A8B76;
+    --ink-faint:    #C2B6A0;
+    --ink-inverse:  #F8F4E8;
+
+    /* ── Line / rule ───────────────────────────────── */
+    --line:         #D6C9AC;
+    --line-soft:    #E2D8BE;
+    --line-strong:  #B8A988;
+
+    /* ── Accent (brick) ────────────────────────────── */
+    --accent:        #B23A2C;
+    --accent-hover:  #9A2F22;
+    --accent-deeper: #7A2519;
+    --accent-soft:   #E8D5CE;
+
+    /* ── Semantic earth tones ──────────────────────── */
+    --moss:        #5C6B3D;
+    --moss-soft:   #DCE0CC;
+    --azure:       #3A6B8C;
+    --azure-soft:  #D2DEE6;
+    --ochre:       #9A6E20;
+    --ochre-soft:  #E9DFC4;
+
+    /* ── Sticky / element palette ──────────────────── */
+    --st-amber:     #ECD79A;
+    --st-clay:      #E3B7A4;
+    --st-sage:      #C9D2AC;
+    --st-dusty:     #A9C2C9;
+    --st-mauve:     #D4BBCF;
+    --st-parchment: #E2DAC6;
+
+    /* ── Terminal (dark surface) ───────────────────── */
+    --term-bg:     #1a1a1a;
+    --term-fg:     #e8e8e8;
+    --term-cursor: #ffffff;
+    --term-sel:    rgba(255,255,255,0.20);
+
+    /* ── Type stacks ───────────────────────────────── */
+    --f-display: 'Fraunces', ui-serif, Georgia, serif;
+    --f-body:    'Instrument Sans', ui-sans-serif, system-ui, sans-serif;
+    --f-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Paper grain, lifted straight from app/globals.css */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.55;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.16  0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0.045 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    mix-blend-mode: multiply;
+  }
+
+  main {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 88px 56px 160px;
+  }
+
+  /* ── Header ────────────────────────────────────────── */
+  .masthead {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+    gap: 32px;
+    padding-bottom: 22px;
+    border-bottom: 1px solid rgba(42,31,26,0.16);
+    box-shadow: 0 3px 0 -2px rgba(42,31,26,0.16);
+    margin-bottom: 72px;
+  }
+  .stamp {
+    font-family: var(--f-body);
+    font-size: 10px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 350;
+    font-style: italic;
+    font-size: clamp(64px, 9vw, 124px);
+    line-height: 0.92;
+    letter-spacing: -0.045em;
+    margin: 0;
+    color: var(--ink);
+  }
+  h1 em {
+    font-style: normal;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .meta {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--ink-muted);
+    text-align: right;
+    letter-spacing: 0.02em;
+  }
+  .meta b { color: var(--ink); font-weight: 500; }
+
+  /* ── Section scaffolding ───────────────────────────── */
+  section { margin-bottom: 96px; scroll-margin-top: 24px; }
+  .section-head {
+    display: grid;
+    grid-template-columns: 88px 1fr auto;
+    gap: 24px;
+    align-items: baseline;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 36px;
+  }
+  .section-no {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--ink-subtle);
+  }
+  .section-title {
+    font-family: var(--f-display);
+    font-weight: 400;
+    font-size: 30px;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .section-blurb {
+    font-family: var(--f-body);
+    font-size: 13px;
+    color: var(--ink-muted);
+    max-width: 520px;
+    text-align: right;
+    line-height: 1.55;
+  }
+
+  /* ── Swatch grid ───────────────────────────────────── */
+  .grid {
+    display: grid;
+    gap: 18px;
+    grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  }
+
+  .swatch {
+    background: var(--paper-card);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow:
+      0 1px 0 rgba(42,31,26,0.04),
+      0 1px 2px rgba(42,31,26,0.06);
+    transition: transform 220ms ease, box-shadow 220ms ease;
+  }
+  .swatch:hover {
+    transform: translateY(-2px);
+    box-shadow:
+      0 1px 0 rgba(42,31,26,0.06),
+      0 8px 18px rgba(42,31,26,0.10);
+  }
+  .chip {
+    height: 132px;
+    border-bottom: 1px solid var(--line);
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding: 12px 14px;
+  }
+  .chip .corner {
+    position: absolute;
+    top: 10px; left: 12px;
+    font-family: var(--f-mono);
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.72;
+  }
+  .chip .tick {
+    position: absolute;
+    top: 10px; right: 12px;
+    width: 14px; height: 14px;
+    border-right: 1px solid currentColor;
+    border-top: 1px solid currentColor;
+    opacity: 0.45;
+  }
+  .chip .hex {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.03em;
+  }
+  .chip .pair {
+    font-family: var(--f-display);
+    font-style: italic;
+    font-weight: 300;
+    font-size: 26px;
+    letter-spacing: -0.015em;
+    line-height: 1;
+  }
+
+  .swatch-body {
+    padding: 14px 16px 16px;
+  }
+  .swatch-name {
+    font-family: var(--f-display);
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    margin: 0 0 2px;
+  }
+  .swatch-token {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    color: var(--accent);
+    letter-spacing: 0.03em;
+    margin: 0 0 10px;
+  }
+  .swatch-role {
+    font-family: var(--f-body);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  /* light-ink chips need dark corner text */
+  .ink-light .corner, .ink-light .hex, .ink-light .pair { color: var(--ink); }
+  .ink-dark  .corner, .ink-dark  .hex, .ink-dark  .pair { color: var(--ink-inverse); }
+
+  /* ── Pairings panel (ink-on-paper combinations) ───── */
+  .pairings {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .pair-card {
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 22px 22px 18px;
+    position: relative;
+    overflow: hidden;
+  }
+  .pair-card .lbl {
+    font-family: var(--f-mono);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    opacity: 0.72;
+    margin: 0 0 14px;
+  }
+  .pair-card .sample-display {
+    font-family: var(--f-display);
+    font-size: 30px;
+    font-weight: 400;
+    letter-spacing: -0.022em;
+    line-height: 1.05;
+    margin: 0 0 6px;
+  }
+  .pair-card .sample-body {
+    font-family: var(--f-body);
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 0 0 12px;
+    opacity: 0.78;
+  }
+  .pair-card .ratio {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    border-top: 1px dashed currentColor;
+    padding-top: 8px;
+    opacity: 0.55;
+  }
+
+  /* ── Stickies (slight rotation, paper feel) ──────── */
+  .stickies {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 24px;
+    padding-top: 8px;
+  }
+  .sticky {
+    aspect-ratio: 1 / 1;
+    border-radius: 2px;
+    padding: 16px 18px;
+    color: var(--ink);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    box-shadow:
+      0 1px 0 rgba(42,31,26,0.05),
+      0 8px 14px -6px rgba(42,31,26,0.18);
+    transition: transform 240ms ease;
+  }
+  .sticky:nth-child(odd)  { transform: rotate(-1.2deg); }
+  .sticky:nth-child(even) { transform: rotate(0.8deg); }
+  .sticky:hover { transform: rotate(0deg) translateY(-3px); }
+  .sticky .s-top {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.75;
+  }
+  .sticky .s-name {
+    font-family: var(--f-display);
+    font-style: italic;
+    font-weight: 350;
+    font-size: 22px;
+    letter-spacing: -0.015em;
+    line-height: 1.05;
+  }
+  .sticky .s-hex {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  /* ── Terminal block ───────────────────────────────── */
+  .terminal {
+    background: var(--term-bg);
+    color: var(--term-fg);
+    border-radius: 5px;
+    padding: 20px 22px 24px;
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    box-shadow:
+      inset 0 0 0 1px rgba(255,255,255,0.04),
+      0 12px 30px -10px rgba(42,31,26,0.32);
+  }
+  .terminal .t-head {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+    opacity: 0.65;
+  }
+  .terminal .t-head span {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: rgba(255,255,255,0.18);
+  }
+  .terminal pre {
+    margin: 0;
+    font: inherit;
+    white-space: pre-wrap;
+  }
+  .terminal .prompt { color: var(--accent); }
+  .terminal .ok     { color: #9DB36B; }
+  .terminal .cur    { background: var(--term-cursor); color: var(--term-bg); padding: 0 2px; }
+  .terminal .sel    { background: var(--term-sel); }
+
+  /* ── Reference table (token list at the bottom) ────── */
+  table.tokens {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+  }
+  table.tokens th, table.tokens td {
+    text-align: left;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  table.tokens th {
+    font-weight: 500;
+    font-size: 9.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-subtle);
+    background: var(--paper-warm);
+  }
+  table.tokens td .sq {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border-radius: 2px;
+    border: 1px solid rgba(42,31,26,0.18);
+    vertical-align: -3px;
+    margin-right: 10px;
+  }
+  table.tokens td.usage {
+    font-family: var(--f-body);
+    font-size: 11.5px;
+    color: var(--ink-muted);
+  }
+
+  /* ── Footer ──────────────────────────────────────── */
+  footer {
+    margin-top: 88px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    color: var(--ink-subtle);
+    letter-spacing: 0.06em;
+  }
+  footer .compass {
+    font-family: var(--f-display);
+    font-style: italic;
+    font-size: 14px;
+    color: var(--ink-muted);
+  }
+
+  /* ── Canvas Preview (live ground surface) ─────────── */
+  .canvas-stage {
+    position: relative;
+    height: 560px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow:
+      inset 0 0 0 1px rgba(42,31,26,0.04),
+      0 18px 40px -22px rgba(42,31,26,0.28);
+    background-color: var(--paper);
+    background-image:
+      linear-gradient(to right, rgba(42, 31, 26, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(42, 31, 26, 0.05) 1px, transparent 1px),
+      linear-gradient(to right, rgba(42, 31, 26, 0.10) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(42, 31, 26, 0.10) 1px, transparent 1px);
+    background-size: 24px 24px, 24px 24px, 192px 192px, 192px 192px;
+  }
+  .canvas-stage::before {
+    content: '';
+    position: absolute; inset: 0;
+    pointer-events: none;
+    opacity: 0.55;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.16  0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0.045 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    mix-blend-mode: multiply;
+  }
+  .canvas-coord {
+    position: absolute;
+    font-family: var(--f-mono);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-subtle);
+    opacity: 0.8;
+  }
+
+  /* project card on the ground */
+  .gc-card {
+    position: absolute;
+    width: 240px;
+    background: var(--paper-card);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 14px 16px 16px;
+    box-shadow:
+      0 1px 0 rgba(42,31,26,0.04),
+      0 1px 2px rgba(42,31,26,0.06);
+  }
+  .gc-card.is-running {
+    box-shadow:
+      0 1px 0 rgba(178,58,44,0.20),
+      0 8px 24px rgba(178,58,44,0.18);
+    border-color: var(--accent);
+  }
+  .gc-stamp {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--f-body);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin-bottom: 8px;
+  }
+  .gc-stamp.run { color: var(--accent); }
+  .gc-stamp.run .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    animation: survey-pulse 1.35s ease-in-out infinite;
+  }
+  .gc-stamp.done { color: var(--moss); }
+  .gc-stamp.done .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--moss);
+  }
+  .gc-stamp.q { color: var(--azure); }
+  .gc-stamp.q .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--azure);
+  }
+  .gc-title {
+    font-family: var(--f-display);
+    font-weight: 500;
+    font-size: 17px;
+    letter-spacing: -0.015em;
+    margin: 0 0 4px;
+    color: var(--ink);
+  }
+  .gc-summary {
+    font-family: var(--f-body);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    margin: 0 0 10px;
+  }
+  .gc-meta {
+    display: flex;
+    gap: 10px;
+    font-family: var(--f-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    color: var(--ink-subtle);
+    border-top: 1px dashed var(--line);
+    padding-top: 8px;
+  }
+  .gc-meta b { color: var(--ink); font-weight: 500; }
+  .gc-scanbar {
+    position: absolute;
+    top: -1px; left: 0; right: 0; height: 2px;
+    overflow: hidden;
+    border-radius: 3px 3px 0 0;
+  }
+  .gc-scanbar::after {
+    content: '';
+    position: absolute; top: 0; left: 0;
+    width: 30%; height: 100%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: survey-scan 1.7s linear infinite;
+  }
+  @keyframes survey-scan {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(360%); }
+  }
+  @keyframes survey-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.28; transform: scale(0.62); }
+  }
+
+  /* floating sticky on the ground */
+  .gc-sticky {
+    position: absolute;
+    width: 140px; height: 140px;
+    padding: 14px 16px;
+    border-radius: 2px;
+    font-family: var(--f-display);
+    font-style: italic;
+    font-weight: 350;
+    font-size: 17px;
+    line-height: 1.15;
+    color: var(--ink);
+    box-shadow:
+      0 1px 0 rgba(42,31,26,0.05),
+      0 10px 18px -8px rgba(42,31,26,0.22);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .gc-sticky .s-tag {
+    font-family: var(--f-mono);
+    font-style: normal;
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+  .gc-sticky .s-hex {
+    font-family: var(--f-mono);
+    font-style: normal;
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    opacity: 0.55;
+  }
+
+  /* badge floating on canvas */
+  .gc-pill {
+    position: absolute;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--f-body);
+    font-size: 11px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: var(--paper-warm);
+    border: 1px solid var(--line);
+    color: var(--ink-muted);
+  }
+  .gc-pill b { color: var(--ink); font-weight: 500; }
+  .gc-pill .swatch-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(42,31,26,0.18);
+  }
+
+  /* compass mark */
+  .gc-compass {
+    position: absolute;
+    right: 24px; top: 24px;
+    width: 56px; height: 56px;
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-family: var(--f-display);
+    font-style: italic;
+    font-size: 14px;
+    color: var(--ink-muted);
+    background: rgba(248,244,232,0.65);
+    backdrop-filter: blur(2px);
+  }
+  .gc-compass::before {
+    content: '';
+    position: absolute;
+    width: 1px; height: 18px;
+    background: var(--accent);
+    top: 6px;
+  }
+
+  /* Reveal on load (no JS) */
+  @keyframes lift { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  section, .masthead { animation: lift 600ms ease both; }
+  .masthead { animation-delay: 0ms; }
+  section:nth-of-type(1) { animation-delay: 80ms; }
+  section:nth-of-type(2) { animation-delay: 130ms; }
+  section:nth-of-type(3) { animation-delay: 180ms; }
+  section:nth-of-type(4) { animation-delay: 230ms; }
+  section:nth-of-type(5) { animation-delay: 280ms; }
+  section:nth-of-type(6) { animation-delay: 330ms; }
+  section:nth-of-type(7) { animation-delay: 380ms; }
+  section:nth-of-type(8) { animation-delay: 430ms; }
+</style>
+</head>
+<body>
+<main>
+
+  <!-- ─────────────────────────────  HEADER  ───────────────────────────── -->
+  <header class="masthead">
+    <div>
+      <p class="stamp">OPEN GROUND · Field Palette · Edition 01</p>
+      <h1>Color <em>System</em></h1>
+    </div>
+    <div class="meta">
+      <b>Survey No.</b> OG-1.0 / 2026<br/>
+      <b>Surface</b> warm paper, deep ink<br/>
+      <b>Source</b> tailwind.config.ts · globals.css<br/>
+      <b>Sheets</b> 8 families · 28 tokens
+    </div>
+  </header>
+
+  <!-- ─────────────────────────────  0. CANVAS PREVIEW  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 00</span>
+      <h2 class="section-title">On the Canvas</h2>
+      <p class="section-blurb">スウォッチを並べる前に、まず実物の Ground 上に色を置く。プロジェクトカード／付箋／状態スタンプ — すべてのトークンが、本物の OPEN GROUND と同じグリッドと紙質に落ちた状態。</p>
+    </div>
+
+    <div class="canvas-stage">
+      <!-- compass / cartographic header overlays -->
+      <span class="canvas-coord" style="top:14px; left:18px;">N 35°41' · E 139°45'</span>
+      <span class="canvas-coord" style="bottom:14px; right:18px;">paper · grain · 0.55</span>
+      <span class="canvas-coord" style="bottom:14px; left:18px;">grid · 24 / 192</span>
+      <div class="gc-compass">N</div>
+
+      <!-- floating pill (legend) -->
+      <span class="gc-pill" style="top:22px; left:200px;">
+        <span class="swatch-dot" style="background:#B23A2C"></span>
+        <b>brick</b> · primary action
+      </span>
+      <span class="gc-pill" style="top:22px; left:400px;">
+        <span class="swatch-dot" style="background:#5C6B3D"></span>
+        <b>moss</b> · success
+      </span>
+      <span class="gc-pill" style="top:22px; left:570px;">
+        <span class="swatch-dot" style="background:#3A6B8C"></span>
+        <b>azure</b> · question
+      </span>
+
+      <!-- project card · running -->
+      <article class="gc-card is-running" style="top:108px; left:64px;">
+        <div class="gc-scanbar"></div>
+        <p class="gc-stamp run"><span class="dot"></span>Running · 00:24</p>
+        <h3 class="gc-title">figma-navi</h3>
+        <p class="gc-summary">依存を更新してから ChromeStore 用のスクリーンショットを再生成中。エラーは出ていない。</p>
+        <p class="gc-meta"><span><b>tasks</b> 4</span><span><b>edits</b> +18 −3</span><span>main</span></p>
+      </article>
+
+      <!-- project card · done -->
+      <article class="gc-card" style="top:108px; left:332px;">
+        <p class="gc-stamp done"><span class="dot"></span>Last run · 12 分前</p>
+        <h3 class="gc-title">coffee-daily-video</h3>
+        <p class="gc-summary">朝の投稿は成功。YouTube・X どちらも該当 ID で配信を確認した。</p>
+        <p class="gc-meta"><span><b>tasks</b> 2</span><span><b>edits</b> +5 −1</span><span>posted</span></p>
+      </article>
+
+      <!-- project card · awaiting answer -->
+      <article class="gc-card" style="top:108px; left:600px;">
+        <p class="gc-stamp q"><span class="dot"></span>Awaiting · 質問あり</p>
+        <h3 class="gc-title">open-ground</h3>
+        <p class="gc-summary">タブの命名「Canvas / Chat」を変更するか確認したい。提案は二案。</p>
+        <p class="gc-meta"><span><b>tasks</b> 7</span><span><b>edits</b> +42 −9</span><span>main</span></p>
+      </article>
+
+      <!-- stickies floating below -->
+      <div class="gc-sticky" style="top:330px; left:80px; background:#ECD79A; transform:rotate(-2deg);">
+        <span class="s-tag">amber</span>
+        <span>明日<br/>やる</span>
+        <span class="s-hex">#ECD79A</span>
+      </div>
+      <div class="gc-sticky" style="top:340px; left:240px; background:#E3B7A4; transform:rotate(1.3deg);">
+        <span class="s-tag">clay</span>
+        <span>Bug<br/>要確認</span>
+        <span class="s-hex">#E3B7A4</span>
+      </div>
+      <div class="gc-sticky" style="top:332px; left:400px; background:#C9D2AC; transform:rotate(-0.8deg);">
+        <span class="s-tag">sage</span>
+        <span>v0.4<br/>reg done</span>
+        <span class="s-hex">#C9D2AC</span>
+      </div>
+      <div class="gc-sticky" style="top:344px; left:560px; background:#A9C2C9; transform:rotate(2.2deg);">
+        <span class="s-tag">dusty</span>
+        <span>調査<br/>あとで</span>
+        <span class="s-hex">#A9C2C9</span>
+      </div>
+      <div class="gc-sticky" style="top:336px; left:720px; background:#D4BBCF; transform:rotate(-1.6deg);">
+        <span class="s-tag">mauve</span>
+        <span>idea<br/>断片</span>
+        <span class="s-hex">#D4BBCF</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  1. PAPER  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 01</span>
+      <h2 class="section-title">Paper &amp; Ground</h2>
+      <p class="section-blurb">OPEN GROUND のベースは温かみのある紙。すべての面はこの 5 階調のいずれかに着地する。深い紙は唯一の反転面でターミナル／コマンドエリアに使う。</p>
+    </div>
+    <div class="grid">
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#F2EDDE">
+          <span class="corner">paper</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#F2EDDE</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Paper</h3>
+          <p class="swatch-token">--paper · bg.DEFAULT</p>
+          <p class="swatch-role">ページ／キャンバス本体。あらゆる UI が乗る基準面。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#EDE6D2">
+          <span class="corner">elevated</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#EDE6D2</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Paper · Warm</h3>
+          <p class="swatch-token">--paper-warm · bg.elevated</p>
+          <p class="swatch-role">ツールバー／パネル等、紙面より一段持ち上げる面。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#F8F4E8">
+          <span class="corner">card</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#F8F4E8</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Paper · Card</h3>
+          <p class="swatch-token">--paper-card · bg.card</p>
+          <p class="swatch-role">ProjectCard・モーダル・チャットバブルなど、注意を集めるカード面。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#E6DEC6">
+          <span class="corner">inset</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#E6DEC6</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Paper · Inset</h3>
+          <p class="swatch-token">--paper-inset · bg.inset</p>
+          <p class="swatch-role">入力欄・コード・ログなど、紙面より凹ませて見せる well。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#2A1F1A">
+          <span class="corner">deep</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#2A1F1A</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Paper · Deep</h3>
+          <p class="swatch-token">--paper-deep · bg.deep</p>
+          <p class="swatch-role">唯一の反転面。ターミナル背景・スタンプ等の暗いコントラスト面。</p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  2. INK  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 02</span>
+      <h2 class="section-title">Ink</h2>
+      <p class="section-blurb">文字のための階調。濃い順に 4 段の暖かい墨色 + 1 つの反転 ink。情報の優先度をそのまま 4 階調にマッピングする。</p>
+    </div>
+    <div class="grid">
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#2A1F1A">
+          <span class="corner">ink</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#2A1F1A</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ink</h3>
+          <p class="swatch-token">--ink · ink.DEFAULT</p>
+          <p class="swatch-role">本文・主要見出し。コントラスト 13.9:1（on paper） — AAA。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#6B5847">
+          <span class="corner">muted</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#6B5847</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ink · Muted</h3>
+          <p class="swatch-token">--ink-muted · ink.muted</p>
+          <p class="swatch-role">説明文・補足テキスト。本文より一歩引いた段。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#9A8B76">
+          <span class="corner">subtle</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#9A8B76</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ink · Subtle</h3>
+          <p class="swatch-token">--ink-subtle · ink.subtle</p>
+          <p class="swatch-role">ラベル・メタ情報・コーナーキャプション。装飾的な文字。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#C2B6A0">
+          <span class="corner">faint</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#C2B6A0</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ink · Faint</h3>
+          <p class="swatch-token">--ink-faint · ink.faint</p>
+          <p class="swatch-role">プレースホルダ・disabled・装飾線の文字版。可読性は捨てる用途。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#F8F4E8">
+          <span class="corner">inverse</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#F8F4E8</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ink · Inverse</h3>
+          <p class="swatch-token">--ink-inverse · ink.inverse</p>
+          <p class="swatch-role">深い面（paper-deep・accent）の上に置く文字。card と同色で意図的に揃える。</p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  3. LINES  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 03</span>
+      <h2 class="section-title">Lines &amp; Rules</h2>
+      <p class="section-blurb">罫線の 3 階調。OPEN GROUND は地図／製図のグリッドが基調なので、border は色の濃度だけで文脈を切り分ける（点線・破線を多用しない）。</p>
+    </div>
+    <div class="grid">
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#E2D8BE">
+          <span class="corner">soft</span><span class="tick"></span>
+          <span class="pair">|</span><span class="hex">#E2D8BE</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Line · Soft</h3>
+          <p class="swatch-token">--line-soft · line.soft</p>
+          <p class="swatch-role">グリッドの細目線・サブ区切り。視覚的にほぼ消える境界。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#D6C9AC">
+          <span class="corner">default</span><span class="tick"></span>
+          <span class="pair">|</span><span class="hex">#D6C9AC</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Line · Default</h3>
+          <p class="swatch-token">--line · line.DEFAULT</p>
+          <p class="swatch-role">カード・パネル・入力欄の標準ボーダー。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#B8A988">
+          <span class="corner">strong</span><span class="tick"></span>
+          <span class="pair">|</span><span class="hex">#B8A988</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Line · Strong</h3>
+          <p class="swatch-token">--line-strong · line.strong</p>
+          <p class="swatch-role">SkillPicker のような、紙面から強めに切り取りたい外枠。</p>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  4. ACCENT  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 04</span>
+      <h2 class="section-title">Accent · Brick</h2>
+      <p class="section-blurb">OPEN GROUND で唯一の「操作系」色。リンク・選択中・focus ring・Run スタンプ。広く塗らず、合計面積が紙の数 % を超えないように使う。</p>
+    </div>
+    <div class="grid">
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#E8D5CE">
+          <span class="corner">soft</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#E8D5CE</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Brick · Soft</h3>
+          <p class="swatch-token">--accent-soft · accent.soft</p>
+          <p class="swatch-role">選択状態の背景・hover の薄塗り・selection 色。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#B23A2C">
+          <span class="corner">accent</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#B23A2C</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Brick</h3>
+          <p class="swatch-token">--accent · accent.DEFAULT</p>
+          <p class="swatch-role">primary ボタン・focus outline・Run スタンプ。操作の旗印。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#9A2F22">
+          <span class="corner">hover</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#9A2F22</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Brick · Hover</h3>
+          <p class="swatch-token">--accent-hover · accent.hover</p>
+          <p class="swatch-role">primary 操作の hover 段。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#7A2519">
+          <span class="corner">deeper</span><span class="tick"></span>
+          <span class="pair">Aa</span><span class="hex">#7A2519</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Brick · Deeper</h3>
+          <p class="swatch-token">--accent-deeper · accent.deeper</p>
+          <p class="swatch-role">active（押下）／長押し／重要な強調。</p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  5. SEMANTIC  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 05</span>
+      <h2 class="section-title">Semantic · Earth</h2>
+      <p class="section-blurb">状態は 3 つの土の色で示す。彩度を抑え、いずれも紙面と争わない。各色は <span style="font-family:var(--f-mono);">default</span> と <span style="font-family:var(--f-mono);">soft</span> のペアで運用。</p>
+    </div>
+    <div class="grid">
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#5C6B3D">
+          <span class="corner">moss</span><span class="tick"></span>
+          <span class="pair">✓</span><span class="hex">#5C6B3D</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Moss</h3>
+          <p class="swatch-token">--moss · moss.DEFAULT</p>
+          <p class="swatch-role">成功 / done / 完了。タスクのチェック、ラン成功スタンプ。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#DCE0CC">
+          <span class="corner">moss · soft</span><span class="tick"></span>
+          <span class="pair">✓</span><span class="hex">#DCE0CC</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Moss · Soft</h3>
+          <p class="swatch-token">--moss-soft · moss.soft</p>
+          <p class="swatch-role">成功バッジの背景。完了行のハイライト。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#3A6B8C">
+          <span class="corner">azure</span><span class="tick"></span>
+          <span class="pair">?</span><span class="hex">#3A6B8C</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Azure</h3>
+          <p class="swatch-token">--azure · azure.DEFAULT</p>
+          <p class="swatch-role">情報 / 質問待ち / インスペクト系。Claude からの質問ブロック。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#D2DEE6">
+          <span class="corner">azure · soft</span><span class="tick"></span>
+          <span class="pair">?</span><span class="hex">#D2DEE6</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Azure · Soft</h3>
+          <p class="swatch-token">--azure-soft · azure.soft</p>
+          <p class="swatch-role">質問待ちバナーの紙面。Notice 系のカード背景。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#9A6E20">
+          <span class="corner">ochre</span><span class="tick"></span>
+          <span class="pair">!</span><span class="hex">#9A6E20</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ochre</h3>
+          <p class="swatch-token">--ochre · ochre.DEFAULT</p>
+          <p class="swatch-role">注意 / 警告 / 衝突。merge conflict・archived の縁取り。</p>
+        </div>
+      </article>
+
+      <article class="swatch">
+        <div class="chip ink-light" style="background:#E9DFC4">
+          <span class="corner">ochre · soft</span><span class="tick"></span>
+          <span class="pair">!</span><span class="hex">#E9DFC4</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Ochre · Soft</h3>
+          <p class="swatch-token">--ochre-soft · ochre.soft</p>
+          <p class="swatch-role">警告バナーの紙面。アーカイブカードの薄い帯。</p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  6. PAIRINGS  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 06</span>
+      <h2 class="section-title">Ink-on-Paper Pairings</h2>
+      <p class="section-blurb">本番でよく出る組み合わせの可読性チェック。下段の比率は WCAG コントラスト比（実計算値）。</p>
+    </div>
+    <div class="pairings">
+
+      <div class="pair-card" style="background:#F2EDDE; color:#2A1F1A;">
+        <p class="lbl">ink · on · paper</p>
+        <p class="sample-display">Ground</p>
+        <p class="sample-body">プロジェクトのカードがここに浮かぶ。本文も同じ ink で組む。</p>
+        <p class="ratio">contrast 13.9 : 1 · AAA</p>
+      </div>
+
+      <div class="pair-card" style="background:#F8F4E8; color:#6B5847;">
+        <p class="lbl">ink·muted · on · card</p>
+        <p class="sample-display">Last run</p>
+        <p class="sample-body">説明文・タスクの補足はこのトーンに落とす。</p>
+        <p class="ratio">contrast 6.5 : 1 · AA+</p>
+      </div>
+
+      <div class="pair-card" style="background:#B23A2C; color:#F8F4E8;">
+        <p class="lbl">inverse · on · brick</p>
+        <p class="sample-display">Run</p>
+        <p class="sample-body">primary ボタン。狭い面積で強く打つ。</p>
+        <p class="ratio">contrast 5.4 : 1 · AA</p>
+      </div>
+
+      <div class="pair-card" style="background:#2A1F1A; color:#F8F4E8;">
+        <p class="lbl">inverse · on · deep</p>
+        <p class="sample-display">$ claude</p>
+        <p class="sample-body">ターミナル領域、コードブロックの濃面。</p>
+        <p class="ratio">contrast 13.9 : 1 · AAA</p>
+      </div>
+
+      <div class="pair-card" style="background:#DCE0CC; color:#3D4A22;">
+        <p class="lbl">moss · success</p>
+        <p class="sample-display">Completed</p>
+        <p class="sample-body">タスク完了・ラン成功バッジ。</p>
+        <p class="ratio">contrast 7.8 : 1 · AAA</p>
+      </div>
+
+      <div class="pair-card" style="background:#D2DEE6; color:#234357;">
+        <p class="lbl">azure · question</p>
+        <p class="sample-display">Awaiting</p>
+        <p class="sample-body">Claude からの質問・確認待ち。</p>
+        <p class="ratio">contrast 8.1 : 1 · AAA</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  7. STICKIES  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 07</span>
+      <h2 class="section-title">Sticky Palette</h2>
+      <p class="section-blurb">キャンバスに貼る付箋／要素の塗り 6 色。彩度を意図的に揃え、どれを選んでも紙面と喧嘩しないように設計されている（<span style="font-family:var(--f-mono);">ElementBar.tsx</span>）。</p>
+    </div>
+    <div class="stickies">
+      <div class="sticky" style="background:#ECD79A">
+        <p class="s-top">amber · default</p>
+        <p class="s-name">明日<br/>やる</p>
+        <p class="s-hex">#ECD79A</p>
+      </div>
+      <div class="sticky" style="background:#E3B7A4">
+        <p class="s-top">clay</p>
+        <p class="s-name">Bug 候補<br/>要確認</p>
+        <p class="s-hex">#E3B7A4</p>
+      </div>
+      <div class="sticky" style="background:#C9D2AC">
+        <p class="s-top">sage</p>
+        <p class="s-name">完了<br/>v0.4 reg</p>
+        <p class="s-hex">#C9D2AC</p>
+      </div>
+      <div class="sticky" style="background:#A9C2C9">
+        <p class="s-top">dusty blue</p>
+        <p class="s-name">調査メモ<br/>あとで</p>
+        <p class="s-hex">#A9C2C9</p>
+      </div>
+      <div class="sticky" style="background:#D4BBCF">
+        <p class="s-top">mauve</p>
+        <p class="s-name">アイデア<br/>断片</p>
+        <p class="s-hex">#D4BBCF</p>
+      </div>
+      <div class="sticky" style="background:#E2DAC6">
+        <p class="s-top">parchment</p>
+        <p class="s-name">ラベル<br/>用</p>
+        <p class="s-hex">#E2DAC6</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  8. TERMINAL  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 08</span>
+      <h2 class="section-title">Terminal Surface</h2>
+      <p class="section-blurb">唯一暗いままの面。紙面のシステムには直接乗らず、独立した 4 トークンで構成。xterm.js のテーマ設定にもそのまま渡る。</p>
+    </div>
+
+    <div class="terminal">
+      <div class="t-head"><span></span><span></span><span></span></div>
+      <pre><span class="prompt">~/openground %</span> npm run dev
+<span class="ok">✓ ready</span> on http://localhost:3000
+
+<span class="prompt">~/openground %</span> claude -p "<span class="sel">summarize the diff</span>"
+OPENGROUND_RESULT: { "topic":"色の体系化", "taskComplete": true }<span class="cur"> </span></pre>
+    </div>
+
+    <div class="grid" style="margin-top:24px;">
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#1a1a1a">
+          <span class="corner">term · bg</span><span class="tick"></span>
+          <span class="pair">$_</span><span class="hex">#1a1a1a</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Terminal · BG</h3>
+          <p class="swatch-token">--term-bg</p>
+          <p class="swatch-role">TerminalPane の地。深いがピュアブラックは避ける。</p>
+        </div>
+      </article>
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#1a1a1a; color:#e8e8e8;">
+          <span class="corner" style="color:#e8e8e8">term · fg</span><span class="tick" style="color:#e8e8e8"></span>
+          <span class="pair" style="color:#e8e8e8">$_</span><span class="hex" style="color:#e8e8e8">#e8e8e8</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Terminal · FG</h3>
+          <p class="swatch-token">--term-fg</p>
+          <p class="swatch-role">ターミナルの本文。純白を避けて目に優しく。</p>
+        </div>
+      </article>
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#1a1a1a; color:#ffffff;">
+          <span class="corner" style="color:#ffffff">cursor</span><span class="tick" style="color:#ffffff"></span>
+          <span class="pair" style="color:#ffffff">|</span><span class="hex" style="color:#ffffff">#ffffff</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Cursor</h3>
+          <p class="swatch-token">--term-cursor</p>
+          <p class="swatch-role">入力カーソル。ここだけ純白を使う。</p>
+        </div>
+      </article>
+      <article class="swatch">
+        <div class="chip ink-dark" style="background:#1a1a1a;">
+          <span class="corner" style="color:#e8e8e8">selection</span><span class="tick" style="color:#e8e8e8"></span>
+          <span class="pair" style="background:rgba(255,255,255,0.20); color:#e8e8e8; padding:0 8px;">sel</span>
+          <span class="hex" style="color:#e8e8e8">rgba 255·.20</span>
+        </div>
+        <div class="swatch-body">
+          <h3 class="swatch-name">Selection</h3>
+          <p class="swatch-token">--term-sel</p>
+          <p class="swatch-role">テキスト選択中のハイライト。低彩度の透過白。</p>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────  9. TOKEN INDEX  ───────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <span class="section-no">§ 09</span>
+      <h2 class="section-title">Token Index</h2>
+      <p class="section-blurb">全 28 トークンの一覧。CSS 変数名 / Tailwind クラス / 用途のリファレンス。</p>
+    </div>
+
+    <table class="tokens">
+      <thead>
+        <tr>
+          <th style="width:34%">Token</th>
+          <th style="width:18%">Tailwind</th>
+          <th style="width:14%">Hex</th>
+          <th>Usage</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="sq" style="background:#F2EDDE"></span>--paper</td><td>bg-bg</td><td>#F2EDDE</td><td class="usage">page body / canvas surface</td></tr>
+        <tr><td><span class="sq" style="background:#EDE6D2"></span>--paper-warm</td><td>bg-bg-elevated</td><td>#EDE6D2</td><td class="usage">toolbar / panel</td></tr>
+        <tr><td><span class="sq" style="background:#F8F4E8"></span>--paper-card</td><td>bg-bg-card</td><td>#F8F4E8</td><td class="usage">project card / modal</td></tr>
+        <tr><td><span class="sq" style="background:#E6DEC6"></span>--paper-inset</td><td>bg-bg-inset</td><td>#E6DEC6</td><td class="usage">inputs / log well</td></tr>
+        <tr><td><span class="sq" style="background:#2A1F1A"></span>--paper-deep</td><td>bg-bg-deep</td><td>#2A1F1A</td><td class="usage">inverted dark surface</td></tr>
+
+        <tr><td><span class="sq" style="background:#2A1F1A"></span>--ink</td><td>text-ink</td><td>#2A1F1A</td><td class="usage">body / titles</td></tr>
+        <tr><td><span class="sq" style="background:#6B5847"></span>--ink-muted</td><td>text-ink-muted</td><td>#6B5847</td><td class="usage">descriptions / captions</td></tr>
+        <tr><td><span class="sq" style="background:#9A8B76"></span>--ink-subtle</td><td>text-ink-subtle</td><td>#9A8B76</td><td class="usage">labels / meta</td></tr>
+        <tr><td><span class="sq" style="background:#C2B6A0"></span>--ink-faint</td><td>text-ink-faint</td><td>#C2B6A0</td><td class="usage">placeholders / disabled</td></tr>
+        <tr><td><span class="sq" style="background:#F8F4E8"></span>--ink-inverse</td><td>text-ink-inverse</td><td>#F8F4E8</td><td class="usage">on accent / on deep</td></tr>
+
+        <tr><td><span class="sq" style="background:#E2D8BE"></span>--line-soft</td><td>border-line-soft</td><td>#E2D8BE</td><td class="usage">grid / sub-dividers</td></tr>
+        <tr><td><span class="sq" style="background:#D6C9AC"></span>--line</td><td>border-line</td><td>#D6C9AC</td><td class="usage">default border</td></tr>
+        <tr><td><span class="sq" style="background:#B8A988"></span>--line-strong</td><td>border-line-strong</td><td>#B8A988</td><td class="usage">popovers / cut-outs</td></tr>
+
+        <tr><td><span class="sq" style="background:#E8D5CE"></span>--accent-soft</td><td>bg-accent-soft</td><td>#E8D5CE</td><td class="usage">selection / soft hover</td></tr>
+        <tr><td><span class="sq" style="background:#B23A2C"></span>--accent</td><td>bg-accent / text-accent</td><td>#B23A2C</td><td class="usage">primary action / focus</td></tr>
+        <tr><td><span class="sq" style="background:#9A2F22"></span>--accent-hover</td><td>bg-accent-hover</td><td>#9A2F22</td><td class="usage">primary hover</td></tr>
+        <tr><td><span class="sq" style="background:#7A2519"></span>--accent-deeper</td><td>bg-accent-deeper</td><td>#7A2519</td><td class="usage">pressed / critical</td></tr>
+
+        <tr><td><span class="sq" style="background:#5C6B3D"></span>--moss</td><td>bg-moss / text-moss</td><td>#5C6B3D</td><td class="usage">success / done</td></tr>
+        <tr><td><span class="sq" style="background:#DCE0CC"></span>--moss-soft</td><td>bg-moss-soft</td><td>#DCE0CC</td><td class="usage">success surface</td></tr>
+        <tr><td><span class="sq" style="background:#3A6B8C"></span>--azure</td><td>bg-azure / text-azure</td><td>#3A6B8C</td><td class="usage">info / question</td></tr>
+        <tr><td><span class="sq" style="background:#D2DEE6"></span>--azure-soft</td><td>bg-azure-soft</td><td>#D2DEE6</td><td class="usage">info surface</td></tr>
+        <tr><td><span class="sq" style="background:#9A6E20"></span>--ochre</td><td>bg-ochre / text-ochre</td><td>#9A6E20</td><td class="usage">warning / conflict</td></tr>
+        <tr><td><span class="sq" style="background:#E9DFC4"></span>--ochre-soft</td><td>bg-ochre-soft</td><td>#E9DFC4</td><td class="usage">warning surface</td></tr>
+
+        <tr><td><span class="sq" style="background:#ECD79A"></span>sticky · amber</td><td>—</td><td>#ECD79A</td><td class="usage">default sticky</td></tr>
+        <tr><td><span class="sq" style="background:#E3B7A4"></span>sticky · clay</td><td>—</td><td>#E3B7A4</td><td class="usage">attention / bug</td></tr>
+        <tr><td><span class="sq" style="background:#C9D2AC"></span>sticky · sage</td><td>—</td><td>#C9D2AC</td><td class="usage">done / safe</td></tr>
+        <tr><td><span class="sq" style="background:#A9C2C9"></span>sticky · dusty</td><td>—</td><td>#A9C2C9</td><td class="usage">cool note</td></tr>
+        <tr><td><span class="sq" style="background:#D4BBCF"></span>sticky · mauve</td><td>—</td><td>#D4BBCF</td><td class="usage">idea / theme</td></tr>
+        <tr><td><span class="sq" style="background:#E2DAC6"></span>sticky · parchment</td><td>—</td><td>#E2DAC6</td><td class="usage">label / neutral</td></tr>
+
+        <tr><td><span class="sq" style="background:#1a1a1a"></span>--term-bg</td><td>bg-[#1a1a1a]</td><td>#1a1a1a</td><td class="usage">terminal surface</td></tr>
+        <tr><td><span class="sq" style="background:#e8e8e8"></span>--term-fg</td><td>—</td><td>#e8e8e8</td><td class="usage">terminal text</td></tr>
+        <tr><td><span class="sq" style="background:#ffffff"></span>--term-cursor</td><td>—</td><td>#ffffff</td><td class="usage">terminal cursor</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <span>OPEN GROUND / DESIGN / COLOR · V 1.0 · 2026·05·27</span>
+    <span class="compass">N ↑</span>
+    <span>tailwind.config.ts · globals.css</span>
+  </footer>
+
+</main>
+</body>
+</html>

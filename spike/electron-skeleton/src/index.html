@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OPEN GROUND Spike</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; padding: 20px; background: #0a0a0a; color: #fff; }
+    pre { background: #141414; padding: 10px; border-radius: 6px; overflow: auto; max-height: 70vh; font-size: 12px; }
+    button { padding: 8px 16px; background: #fff; color: #000; border: none; border-radius: 6px; cursor: pointer; }
+    .status { padding: 8px; border-radius: 6px; margin: 8px 0; }
+    .ok { background: #143; }
+    .err { background: #411; }
+  </style>
+</head>
+<body>
+  <h1>🔬 OPEN GROUND Spike</h1>
+  <div id="status" class="status">Initializing...</div>
+  <button id="run">Run PTY test again</button>
+  <h2>Child output</h2>
+  <pre id="log"></pre>
+  <script>
+    const log = document.getElementById('log')
+    const status = document.getElementById('status')
+    const append = (text) => { log.textContent += text; log.scrollTop = log.scrollHeight }
+    window.spike.onChildLog(append)
+    window.spike.onChildEvent((msg) => {
+      if (msg.type === 'ready') {
+        status.className = 'status ok'
+        status.textContent = '✓ Child ready: node-pty loaded'
+      } else if (msg.type === 'pty-output') {
+        append('[pty] ' + msg.data)
+      } else if (msg.type === 'pty-exit') {
+        append(`\n[pty exited code=${msg.code}]\n`)
+      } else if (msg.type === 'error') {
+        status.className = 'status err'
+        status.textContent = '✗ Error: ' + msg.message
+        append('\n[ERROR] ' + msg.message + '\n')
+      }
+    })
+    document.getElementById('run').onclick = async () => {
+      append('\n--- new test ---\n')
+      const r = await window.spike.runPtyTest()
+      append(`[done code=${r.code}]\n`)
+    }
+  </script>
+</body>
+</html>

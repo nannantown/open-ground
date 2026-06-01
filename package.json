@@ -1,0 +1,114 @@
+{
+  "name": "openground",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts\" \"vite\"",
+    "dev:server": "PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts",
+    "dev:web": "vite",
+    "build": "npm run build:web && npm run build:server",
+    "build:web": "vite build",
+    "build:server": "node scripts/build-server.js",
+    "start": "PORT=47776 node server/dist/index.cjs",
+    "lint": "eslint . --ext .ts,.tsx",
+    "check:screens": "npx tsx scripts/check-screen-modules.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "electron:dev": "concurrently -k \"PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts\" \"vite\" \"wait-on http://127.0.0.1:47776/api/health http://127.0.0.1:5174 && OPENGROUND_ELECTRON_MODE=dev electron electron/main.js\"",
+    "electron:prod": "npm run build && OPENGROUND_ELECTRON_MODE=prod electron electron/main.js",
+    "dist": "npm run build && electron-builder --mac --arm64",
+    "dist:win": "npm run build && electron-builder --win",
+    "deploy:landing": "rm -rf /tmp/og-landing-deploy && cp -R landing /tmp/og-landing-deploy && cd /tmp/og-landing-deploy && wrangler pages deploy . --project-name=open-ground",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "@hono/zod-validator": "^0.8.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron-updater": "^6.3.9",
+    "hono": "^4.12.23",
+    "lucide-react": "^0.460.0",
+    "node-pty": "^1.2.0-beta.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "uuid": "^11.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^20.17.9",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "electron": "^31.7.0",
+    "electron-builder": "^25.1.8",
+    "eslint": "^8.57.1",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "tsx": "^4.22.3",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.7",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "local.openground.app",
+    "productName": "OPEN GROUND",
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "server/dist/**",
+      "dist-web/**",
+      "scripts/openground-hook.js",
+      "src/designs/**",
+      "node_modules/node-pty/**"
+    ],
+    "asar": false,
+    "publish": {
+      "provider": "github",
+      "owner": "nannantown",
+      "repo": "open-ground"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": "arm64"
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "notarize": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "OPEN GROUND raises its own window and coordinates the local Claude Code session."
+      }
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,77 @@
+# Release pipeline — builds + publishes OPEN GROUND installers to a GitHub Release.
+#
+# Triggered by pushing a tag like `v1.2.3` (or run manually via workflow_dispatch).
+# Two platforms build in parallel and publish to the SAME GitHub Release:
+#   - macOS (macos-14, arm64): .dmg, code-signed + notarized
+#   - Windows (windows-latest): .exe (NSIS), UNSIGNED (no Windows code-signing cert)
+#
+# Required repo Secrets (Settings → Secrets and variables → Actions):
+#   CSC_LINK                      base64 of the Developer ID .p12 certificate
+#                                 (create with: base64 -i DeveloperID.p12 | pbcopy)
+#   CSC_KEY_PASSWORD              password for that .p12
+#   APPLE_ID                      Apple ID email used for notarization
+#   APPLE_APP_SPECIFIC_PASSWORD   app-specific password for that Apple ID
+#   APPLE_TEAM_ID                 Apple Developer Team ID
+#   GITHUB_TOKEN                  auto-provided by Actions — no manual setup needed
+#
+# Notes:
+#   - `npm ci` runs the `postinstall` (electron-builder install-app-deps), which
+#     rebuilds the node-pty native addon for the host platform. asar:false is set
+#     in package.json so node-pty ships unpacked.
+#   - electron-builder picks up signing/notarization from the standard env vars
+#     above; Windows intentionally has none.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: mac
+          - os: windows-latest
+            platform: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (web + server)
+        run: npm run build
+
+      - name: Build & publish (macOS, signed + notarized)
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --mac --arm64 --publish always
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & publish (Windows, unsigned)
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-flight run if a newer commit lands on the same branch —
+# saves CI minutes and gives you the latest result first.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: lint + typecheck + build + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 20 LTS. Pin a major to avoid surprise from new LTS lines
+          # while staying in a still-supported window.
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        # `npm ci` is faster + uses the exact lockfile contents (no resolution).
+        # If install fails on a clean lock we want to see it loudly here, not
+        # mid-shipping.
+        run: npm ci
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Typecheck (tsc --noEmit)
+        # Standalone tsc keeps the type feedback isolated and fast — the build
+        # step below also typechecks (vite + esbuild) but failing here first
+        # gives a cleaner error before we bother emitting artifacts.
+        run: npx tsc --noEmit
+
+      - name: check:screens (use-client lint for design modules)
+        run: npm run check:screens
+
+      - name: Build (vite web + esbuild server)
+        # `npm run build` = `vite build` (dist-web/) + esbuild bundle
+        # (server/dist/index.cjs). Vite + esbuild are fast, so building in the
+        # quality gate is cheap and proves the shippable artifacts actually
+        # emit — a typecheck pass alone doesn't guarantee a clean bundle.
+        run: npm run build
+
+      - name: Verify build artifacts exist
+        # Existence + non-empty checks only. We do NOT `require()` the server
+        # bundle here: loading server/dist/index.cjs would start the HTTP
+        # server (binds the port, spawns nothing but blocks) — wrong for CI.
+        # File presence + size is enough to confirm the build produced output.
+        run: |
+          test -f dist-web/index.html
+          test -s dist-web/index.html
+          test -f server/dist/index.cjs
+          test -s server/dist/index.cjs
+          echo "build artifacts present: dist-web/index.html + server/dist/index.cjs"
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+  e2e:
+    # Separate job so a fast quality-gate failure doesn't have to wait for the
+    # slower e2e bootstrap (npm + playwright browser download + first compile).
+    name: e2e (playwright smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Don't run e2e if the cheap checks fail — saves CI minutes and keeps the
+    # signal-to-noise high on dependent-fail PRs.
+    needs: quality-gate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        # `--with-deps` pulls the missing apt packages chromium needs on a
+        # bare ubuntu-latest runner. We only install chromium (not webkit /
+        # firefox) — OPEN GROUND ships as a Chrome --app window so other
+        # engines aren't a coverage target.
+        run: npx playwright install chromium --with-deps
+
+      - name: Run e2e (Playwright)
+        # Playwright's webServer block in playwright.config.ts starts
+        # `npm run dev` automatically and waits for the port to bind, so
+        # we don't need a separate background job here.
+        run: npm run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

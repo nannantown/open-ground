@@ -1,0 +1,49 @@
+{
+  "name": "openground-spike",
+  "version": "0.0.1",
+  "description": "Electron + Next standalone fork + node-pty spike",
+  "main": "src/main.js",
+  "scripts": {
+    "build": "electron-builder --mac --arm64 --dir",
+    "dist": "electron-builder --mac --arm64",
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "local.openground.spike",
+    "productName": "OPEN GROUND Spike",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "resources/**/*"
+    ],
+    "asarUnpack": [
+      "**/node_modules/node-pty/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "identity": "Koki Naniwa (A3FD22BRKP)",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "OPEN GROUND uses Apple Events to manage windows."
+      },
+      "notarize": {
+        "teamId": "A3FD22BRKP"
+      }
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.7.0",
+    "electron-builder": "^25.1.8",
+    "@electron/rebuild": "^3.7.1"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  }
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ja" class="font-vars">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OPEN GROUND · the shore for your AI work</title>
+    <meta
+      name="description"
+      content="A canvas to oversee every project on your machine."
+    />
+    <link rel="icon" type="image/png" href="/src/app/icon.png" />
+
+    <!-- Fonts. The Next.js build used next/font/google for Fraunces
+         (variable, opsz + SOFT axes), Instrument Sans (400/500/600) and
+         JetBrains Mono (400/500). Replicated here as plain Google Fonts
+         links; the CSS variables below feed Tailwind's font-family tokens
+         (--font-fraunces / --font-instrument-sans / --font-jetbrains-mono),
+         matching tailwind.config.ts. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,SOFT@9..144,0..100&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      .font-vars {
+        --font-fraunces: 'Fraunces';
+        --font-instrument-sans: 'Instrument Sans';
+        --font-jetbrains-mono: 'JetBrains Mono';
+      }
+    </style>
+  </head>
+  <body class="font-body antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

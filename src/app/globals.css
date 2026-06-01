@@ -1,0 +1,134 @@
+@import '@xterm/xterm/css/xterm.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper-tint: #F2EDDE;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--paper-tint);
+  color: #2A1F1A;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Paper grain texture on the body so it permeates without a hard background image */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.6;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.16  0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0.045 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  mix-blend-mode: multiply;
+}
+
+/* When the Comment tool is active, the canvas wrapper sets its own
+   speech-bubble cursor inline. Children (mocks, stickies, frames, project
+   cards, even open comment popups) carry their own grab/text cursors that
+   would otherwise win on hover — force every descendant to inherit the
+   wrapper's cursor so the bubble glyph stays everywhere it should. */
+.canvas-comment-cursor,
+.canvas-comment-cursor * {
+  cursor: inherit !important;
+}
+/* Form fields stay text-editable while the Comment tool is on so an open
+   popup's textarea keeps its caret cursor — the override above would
+   otherwise force the bubble glyph there too. */
+.canvas-comment-cursor textarea,
+.canvas-comment-cursor input {
+  cursor: text !important;
+}
+
+/* Fine cartographic grid for the canvas surface */
+.canvas-grid {
+  background-color: var(--paper-tint);
+  background-image:
+    linear-gradient(to right, rgba(42, 31, 26, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(42, 31, 26, 0.05) 1px, transparent 1px),
+    linear-gradient(to right, rgba(42, 31, 26, 0.10) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(42, 31, 26, 0.10) 1px, transparent 1px);
+  background-size: 24px 24px, 24px 24px, 192px 192px, 192px 192px;
+  background-position: 0 0;
+}
+
+/* Double-line rule, cartographic style */
+.rule-double {
+  border-bottom: 1px solid rgba(42, 31, 26, 0.16);
+  box-shadow: 0 3px 0 -2px rgba(42, 31, 26, 0.16);
+}
+
+/* Small caps with cartographic tracking */
+.label-cap {
+  font-family: var(--font-instrument-sans), system-ui, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.coord-label {
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 1.5px solid #B23A2C;
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: rgba(178, 58, 44, 0.25);
+  color: #2A1F1A;
+}
+
+/* Run status — a surveyor's scan travelling a card's top edge while it runs */
+@keyframes survey-scan {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(360%); }
+}
+.run-scan {
+  animation: survey-scan 1.7s linear infinite;
+}
+
+/* Run status — the beacon dot pulsing on a running card's stamp */
+@keyframes survey-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.28; transform: scale(0.62); }
+}
+.run-pulse {
+  animation: survey-pulse 1.35s ease-in-out infinite;
+}
+
+/* Run dock — settles up into view when a background run begins */
+@keyframes dock-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.dock-in {
+  animation: dock-in 0.24s ease-out;
+}
