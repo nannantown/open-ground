@@ -1,38 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, X } from 'lucide-react'
 import { CanvasTabBar } from './CanvasTabBar'
 import { CanvasWorkspace } from './CanvasWorkspace'
 import type {
   CanvasFile,
   CanvasSummary,
   CanvasesIndex,
-  ProjectTask,
-  RunSession,
 } from '@/lib/types'
-import type { RunTaskOpts } from '@/lib/useRuns'
 import { api } from '@/lib/api-client'
 
 interface Props {
   /** Absolute project path — used as the API path argument and as the
    *  remount key so switching projects throws away in-flight state. */
   projectPath: string
-  /** Shared with Chats tab so Canvas chats use the same SSE / runner. */
-  taskRuns: Map<string, RunSession>
-  allTaskRuns: Map<string, RunSession[]>
-  onRunTask: (task: ProjectTask, opts?: RunTaskOpts) => void
-  onCancelTask: (taskId: string) => void
-  /** Server-side observer signal: bumps when CANVAS_ADD: lands a new element
-   *  in any canvas. We compare to the currently-open canvas and re-fetch on
-   *  a match — otherwise the new element only shows up after a manual reload. */
-  canvasAddSignal?: { projectPath: string; canvasId: string; seq: number } | null
-  /** Observer signal: bumps when a CANVAS_ADD / CANVAS_UPDATE marker is
-   *  rejected. Surfaced as a transient toast so a bad marker fails loudly. */
-  canvasErrorSignal?: {
-    projectPath: string
-    canvasId: string
-    message: string
-    seq: number
-  } | null
+  /** Bumped by the parent when canvas files may have changed on disk under us
+   *  (a git-share Sync pulled teammates' edits, or a window-focus refetch
+   *  while the project is shared). A change re-reads the index + the active
+   *  canvas IN PLACE — no loading blank, no remount. */
+  reloadToken?: number
 }
 
 // Persist no faster than once per 400ms — fast pan/zoom and rapid chat edits
@@ -48,21 +32,10 @@ const SAVE_DEBOUNCE_MS = 400
 //  • the full file for the active Canvas (the only one fetched at a time —
 //    inactive Canvases stay on disk so heavy drawings don't all live in memory)
 //  • debounced persistence + flush-on-unmount
-export const ProjectCanvas = ({
-  projectPath,
-  taskRuns,
-  allTaskRuns,
-  onRunTask,
-  onCancelTask,
-  canvasAddSignal,
-  canvasErrorSignal,
-}: Props) => {
+export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
   const [canvases, setCanvases] = useState<CanvasSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [active, setActive] = useState<CanvasFile | null>(null)
-  // Forward-declared so the canvas-add reload effect (which sits above
-  // flushPending's definition) can call the live closure.
-  const flushPendingRef = useRef<() => void>(() => {})
   const [loaded, setLoaded] = useState(false)
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -125,77 +98,57 @@ export const ProjectCanvas = ({
     }
   }, [projectPath, refreshList, fetchCanvas])
 
-  // CANVAS_ADD round-trip: when the observer writes a new element into the
-  // currently-open canvas (Claude responding to a Canvas chat), flush any
-  // unsaved local edits and re-fetch the file so the new element actually
-  // appears on screen. Without this the disk grows but the client never knows.
-  useEffect(() => {
-    if (!canvasAddSignal) return
-    if (canvasAddSignal.projectPath !== projectPath) return
-    if (!activeId || canvasAddSignal.canvasId !== activeId) return
-    // Flush local edits first so we don't immediately overwrite them.
-    flushPendingRef.current()
-    let cancelled = false
-    ;(async () => {
-      const file = await fetchCanvas(activeId)
-      if (cancelled || !file) return
-      setActive(file)
-    })().catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [canvasAddSignal, projectPath, activeId, fetchCanvas])
-
-  // Transient toast for a rejected CANVAS_ADD / CANVAS_UPDATE marker so a bad
-  // marker fails loudly instead of vanishing into the run log.
-  const [errorToast, setErrorToast] = useState<string | null>(null)
-  const lastErrSeqRef = useRef(0)
-  // Show the toast when a new error for THIS project arrives. No timer here, so
-  // a project switch mid-toast can't clear the timer without re-arming it.
-  useEffect(() => {
-    if (!canvasErrorSignal) return
-    if (canvasErrorSignal.projectPath !== projectPath) return
-    if (canvasErrorSignal.seq === lastErrSeqRef.current) return
-    lastErrSeqRef.current = canvasErrorSignal.seq
-    setErrorToast(canvasErrorSignal.message)
-  }, [canvasErrorSignal, projectPath])
-  // Auto-dismiss is armed off the toast value itself, so it always (re)arms when
-  // a toast is shown and clears only when the toast actually goes away.
-  useEffect(() => {
-    if (!errorToast) return
-    const t = setTimeout(() => setErrorToast(null), 7000)
-    return () => clearTimeout(t)
-  }, [errorToast])
-  // Don't carry a stale toast across a project switch (this component re-renders
-  // in place rather than remounting).
-  useEffect(() => {
-    setErrorToast(null)
-  }, [projectPath])
-
   // Flush whatever's pending whenever the active id changes (so switching
   // Canvases doesn't drop the prior one's last unsaved edit). Same on unmount.
-  const flushPending = useCallback(() => {
+  // Returns the save promise so a caller about to RE-READ from disk (the
+  // reloadToken effect below) can await the write instead of racing it; the
+  // fire-and-forget call sites just ignore it.
+  const flushPending = useCallback((): Promise<void> => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
     const payload = pendingRef.current
-    if (!payload) return
+    if (!payload) return Promise.resolve()
     pendingRef.current = null
-    api.api.project.canvases
+    return api.api.project.canvases
       .$post({ json: { path: projectPath, canvas: payload } })
+      .then(() => {})
       .catch(() => {})
   }, [projectPath])
-  // Mirror through a ref so the canvas-add reload effect (declared earlier
-  // in the function) can call the latest closure without re-running every
-  // time `flushPending` is rebuilt.
-  flushPendingRef.current = flushPending
 
   useEffect(() => {
     return () => {
-      flushPending()
+      void flushPending()
     }
   }, [flushPending])
+
+  // External reload (git share). The ref guards the mount run: the parent's
+  // token persists across tab switches, so a remount with a non-zero token
+  // must NOT trigger a redundant reload on top of the bootstrap fetch.
+  const lastReloadRef = useRef(reloadToken)
+  useEffect(() => {
+    if (reloadToken === undefined || reloadToken === lastReloadRef.current)
+      return
+    lastReloadRef.current = reloadToken
+    let cancelled = false
+    ;(async () => {
+      // Write our own pending edit first so the re-read can't resurrect a
+      // pre-edit file (last-writer-wins, same as every other save here).
+      await flushPending()
+      const { index, canvases: list } = await refreshList()
+      if (cancelled) return
+      const id = index.activeId ?? list[0]?.id ?? null
+      if (!id) return
+      const file = await fetchCanvas(id)
+      if (cancelled || !file) return
+      setActiveId(id)
+      setActive(file)
+    })().catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [reloadToken, flushPending, refreshList, fetchCanvas])
 
   const persistActive = useCallback(
     (next: CanvasFile) => {
@@ -357,10 +310,6 @@ export const ProjectCanvas = ({
             projectPath={projectPath}
             canvas={active}
             onChange={handleActiveChange}
-            taskRuns={taskRuns}
-            allTaskRuns={allTaskRuns}
-            onRunTask={onRunTask}
-            onCancelTask={onCancelTask}
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-[12px] text-ink-subtle">
@@ -368,25 +317,6 @@ export const ProjectCanvas = ({
           </div>
         )}
       </div>
-
-      {errorToast && (
-        <div className="dock-in pointer-events-auto absolute bottom-4 left-1/2 z-50 flex max-w-[520px] -translate-x-1/2 items-start gap-2 rounded-[6px] border border-accent/30 bg-bg-card px-3.5 py-2.5 shadow-card-hover">
-          <AlertTriangle size={15} strokeWidth={2} className="mt-px shrink-0 text-accent" />
-          <div className="min-w-0">
-            <p className="label-cap text-accent">Canvas マーカー失敗</p>
-            <p className="mt-0.5 break-words font-mono text-[11.5px] leading-snug text-ink-muted">
-              {errorToast}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setErrorToast(null)}
-            className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-ink-faint hover:bg-bg-inset hover:text-ink"
-          >
-            <X size={13} />
-          </button>
-        </div>
-      )}
     </div>
   )
 }

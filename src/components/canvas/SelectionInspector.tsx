@@ -1,5 +1,6 @@
-import { Type, AlignLeft, AlignCenter, AlignRight, Bold } from 'lucide-react'
+import { Type, AlignLeft, AlignCenter, AlignRight, Bold, Lock, Unlock } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
+import { useT } from '@/i18n/I18nContext'
 import {
   FONT_OPTIONS,
   FONT_DISPLAY_STACK,
@@ -38,6 +39,7 @@ import {
   RESIZE_MIN_W,
   RESIZE_MIN_H,
   RESIZE_MAX,
+  normalizeRotation,
 } from '@/lib/canvasTransform'
 
 // Font-weight catalogue for the weight select. Values are real CSS weights;
@@ -56,15 +58,17 @@ const ALIGN_ICON: Record<TextAlign, typeof AlignLeft> = {
   right: AlignRight,
 }
 
-const TYPE_LABEL: Record<CanvasElement['type'], string> = {
-  text: 'Text',
-  sticky: 'Sticky note',
-  frame: 'Frame',
-  mock: 'Mock',
-  comment: 'Comment',
-  image: 'Image',
-  screen: 'Screen',
-  shape: 'Shape',
+// Type → i18n key for the panel header (resolved with t() at render).
+const TYPE_LABEL_KEY: Record<CanvasElement['type'], string> = {
+  text: 'canvas.insp.text',
+  sticky: 'canvas.insp.sticky',
+  frame: 'canvas.insp.frame',
+  mock: 'canvas.insp.mock',
+  comment: 'canvas.insp.comment',
+  image: 'canvas.insp.image',
+  screen: 'canvas.insp.screen',
+  shape: 'canvas.insp.shape',
+  group: 'canvas.insp.group',
 }
 
 interface Props {
@@ -81,6 +85,7 @@ interface Props {
 // panel exists for all selections. Mounted by CanvasWorkspace, absolutely
 // positioned over the canvas, only when exactly one element is selected.
 export const SelectionInspector = ({ element, onPatch }: Props) => {
+  const { t } = useT()
   return (
     <div
       // Sits above the toolbar/undo affordances; its own pointer events are
@@ -93,9 +98,9 @@ export const SelectionInspector = ({ element, onPatch }: Props) => {
         <span>
           {element.type === 'shape'
             ? resolveShapeKind(element) === 'ellipse'
-              ? 'Ellipse'
-              : 'Rectangle'
-            : TYPE_LABEL[element.type]}
+              ? t('canvas.insp.ellipse')
+              : t('canvas.insp.rectangle')
+            : t(TYPE_LABEL_KEY[element.type])}
         </span>
       </div>
 
@@ -112,6 +117,98 @@ export const SelectionInspector = ({ element, onPatch }: Props) => {
         // controls yet. Still get per-object W/H + opacity.
         <TransformOnlyProperties element={element} onPatch={onPatch} />
       )}
+
+      {/* Shared layer transforms — rotation / blend mode / lock — shown for
+          every element type (Figma-parity). */}
+      <LayerCommonProperties element={element} onPatch={onPatch} />
+    </div>
+  )
+}
+
+// CSS mix-blend-mode catalogue (Figma's blend list maps 1:1 onto these).
+const BLEND_MODES: { value: NonNullable<CanvasElement['blendMode']>; label: string }[] = [
+  { value: 'normal', label: 'Normal' },
+  { value: 'multiply', label: 'Multiply' },
+  { value: 'screen', label: 'Screen' },
+  { value: 'overlay', label: 'Overlay' },
+  { value: 'darken', label: 'Darken' },
+  { value: 'lighten', label: 'Lighten' },
+  { value: 'color-dodge', label: 'Color dodge' },
+  { value: 'color-burn', label: 'Color burn' },
+  { value: 'hard-light', label: 'Hard light' },
+  { value: 'soft-light', label: 'Soft light' },
+  { value: 'difference', label: 'Difference' },
+  { value: 'exclusion', label: 'Exclusion' },
+  { value: 'hue', label: 'Hue' },
+  { value: 'saturation', label: 'Saturation' },
+  { value: 'color', label: 'Color' },
+  { value: 'luminosity', label: 'Luminosity' },
+]
+
+// ── Rotation (deg) + Blend mode + Lock — common to every element. Rotation
+//    normalises to 0..359 and stores `undefined` for 0 (clean default). Lock is
+//    a toggle; a locked element is also un-lockable from the Layers panel (it
+//    becomes pointer-events:none on the canvas, so the panel is the way back). ──
+const LayerCommonProperties = ({ element, onPatch }: Props) => {
+  const { t } = useT()
+  // Shared normalizer → (-180,180], NaN-safe (a cleared field becomes 0, never
+  // NaN). 0 is stored as undefined to keep the field clean.
+  const norm = (n: number) => {
+    const d = normalizeRotation(n)
+    return d === 0 ? undefined : d
+  }
+  return (
+    <div className="flex flex-col gap-2.5 border-t border-line-soft pt-2.5">
+      <div className="grid grid-cols-2 gap-2">
+        <Field label={t('canvas.insp.rotation')}>
+          <NumberInput
+            min={-360}
+            max={360}
+            value={Math.round(element.rotation ?? 0)}
+            onChange={(n) => onPatch({ rotation: norm(n) })}
+          />
+        </Field>
+        <Field label={t('canvas.insp.lock')}>
+          <button
+            type="button"
+            onClick={() => onPatch({ locked: element.locked ? undefined : true })}
+            className={[
+              'flex h-7 w-full items-center justify-center gap-1.5 rounded-[4px] border text-[12px] transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
+              element.locked
+                ? 'border-accent/40 bg-accent/10 text-accent'
+                : 'border-line bg-bg text-ink-subtle hover:border-line-strong hover:text-ink',
+            ].join(' ')}
+          >
+            {element.locked ? <Lock size={12} /> : <Unlock size={12} />}
+            {element.locked ? t('canvas.insp.locked') : t('canvas.insp.unlocked')}
+          </button>
+        </Field>
+      </div>
+      <Field label={t('canvas.insp.blend')}>
+        <select
+          value={element.blendMode ?? 'normal'}
+          onChange={(e) =>
+            onPatch({
+              blendMode:
+                e.target.value === 'normal'
+                  ? undefined
+                  : (e.target.value as NonNullable<CanvasElement['blendMode']>),
+            })
+          }
+          className={[
+            'h-7 w-full rounded-[4px] border border-line bg-bg px-2 text-[12px] text-ink',
+            'transition-colors hover:border-line-strong',
+            'focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
+          ].join(' ')}
+        >
+          {BLEND_MODES.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </Field>
     </div>
   )
 }
@@ -161,9 +258,10 @@ const SizeProperties = ({ element, onPatch }: Props) => {
 // ── Opacity — 0..100% slider + number, mapped to the 0..1 `opacity` field and
 //    applied to the element's rendered container. Shown for every element. ──
 const OpacityField = ({ element, onPatch }: Props) => {
+  const { t } = useT()
   const percent = Math.round(resolveOpacity(element) * 100)
   return (
-    <Field label="Opacity">
+    <Field label={t('canvas.insp.opacity')}>
       <div className="flex items-center gap-2">
         <input
           type="range"
@@ -171,7 +269,7 @@ const OpacityField = ({ element, onPatch }: Props) => {
           max={100}
           value={percent}
           onChange={(e) => onPatch({ opacity: opacityFromPercent(e.target.valueAsNumber) })}
-          className="h-7 min-w-0 flex-1 cursor-pointer accent-accent"
+          className="h-7 min-w-0 flex-1 cursor-pointer accent-accent rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
         />
         <input
           type="number"
@@ -203,12 +301,13 @@ const TransformOnlyProperties = ({ element, onPatch }: Props) => (
 //    background reuses the existing `color` field (NOT a new field), so this
 //    control and the on-canvas swatch row drive the same value. ──
 const StickyProperties = ({ element, onPatch }: Props) => {
+  const { t } = useT()
   const fill = resolveStickyFill(element)
   return (
     <div className="flex flex-col gap-2.5">
       <SizeProperties element={element} onPatch={onPatch} />
       <ColorField
-        label="Fill"
+        label={t('canvas.insp.fill')}
         value={fill}
         onChange={(color) => onPatch({ color })}
       />
@@ -221,23 +320,24 @@ const StickyProperties = ({ element, onPatch }: Props) => {
 //    width → `strokeColor` / `strokeWidth`. All optional + backward-compatible
 //    (a legacy frame resolves to the historical bg-bg/35 body + 1px border). ──
 const FrameProperties = ({ element, onPatch }: Props) => {
+  const { t } = useT()
   const { fill, strokeColor, strokeWidth } = resolveFrameStyle(element)
   const cornerRadius = resolveFrameCornerRadius(element)
   return (
     <div className="flex flex-col gap-2.5">
       <SizeProperties element={element} onPatch={onPatch} />
       <ColorField
-        label="Fill"
+        label={t('canvas.insp.fill')}
         value={fill}
         onChange={(color) => onPatch({ fill: color })}
       />
       <ColorField
-        label="Stroke"
+        label={t('canvas.insp.stroke')}
         value={strokeColor}
         onChange={(color) => onPatch({ strokeColor: color })}
       />
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Stroke width">
+        <Field label={t('canvas.insp.strokeWidth')}>
           <NumberInput
             min={MIN_STROKE_WIDTH}
             max={MAX_STROKE_WIDTH}
@@ -245,7 +345,7 @@ const FrameProperties = ({ element, onPatch }: Props) => {
             onChange={(n) => onPatch({ strokeWidth: clampStrokeWidth(n) })}
           />
         </Field>
-        <Field label="Corner radius">
+        <Field label={t('canvas.insp.cornerRadius')}>
           <NumberInput
             min={MIN_CORNER_RADIUS}
             max={MAX_CORNER_RADIUS}
@@ -264,6 +364,7 @@ const FrameProperties = ({ element, onPatch }: Props) => {
 //    fields as a frame, routed through the shape's own defaults. An ellipse is a
 //    pill at any radius, so the Corner-radius control is shown only for a rect. ──
 const ShapeProperties = ({ element, onPatch }: Props) => {
+  const { t } = useT()
   const { fill, strokeColor, strokeWidth } = resolveShapeStyle(element)
   const kind = resolveShapeKind(element)
   const cornerRadius = resolveFrameCornerRadius(element)
@@ -271,17 +372,17 @@ const ShapeProperties = ({ element, onPatch }: Props) => {
     <div className="flex flex-col gap-2.5">
       <SizeProperties element={element} onPatch={onPatch} />
       <ColorField
-        label="Fill"
+        label={t('canvas.insp.fill')}
         value={fill}
         onChange={(color) => onPatch({ fill: color })}
       />
       <ColorField
-        label="Stroke"
+        label={t('canvas.insp.stroke')}
         value={strokeColor}
         onChange={(color) => onPatch({ strokeColor: color })}
       />
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Stroke width">
+        <Field label={t('canvas.insp.strokeWidth')}>
           <NumberInput
             min={MIN_STROKE_WIDTH}
             max={MAX_STROKE_WIDTH}
@@ -292,7 +393,7 @@ const ShapeProperties = ({ element, onPatch }: Props) => {
         {/* Corner radius is meaningless for an ellipse (always a pill), so it
             only appears for a rectangle. */}
         {kind === 'rect' && (
-          <Field label="Corner radius">
+          <Field label={t('canvas.insp.cornerRadius')}>
             <NumberInput
               min={MIN_CORNER_RADIUS}
               max={MAX_CORNER_RADIUS}
@@ -310,6 +411,7 @@ const ShapeProperties = ({ element, onPatch }: Props) => {
 // ── Text typography controls — the user's named round-1 gaps. Each edit is
 //    applied live + persisted through onPatch. ──
 const TextProperties = ({ element, onPatch }: Props) => {
+  const { t } = useT()
   const fontSize = element.fontSize ?? DEFAULT_TEXT_FONT_SIZE
   const fontFamily = element.fontFamily ?? FONT_DISPLAY_STACK
   const textColor = element.textColor ?? DEFAULT_TEXT_COLOR
@@ -320,7 +422,7 @@ const TextProperties = ({ element, onPatch }: Props) => {
 
   return (
     <div className="flex flex-col gap-2.5">
-      <Field label="Font size">
+      <Field label={t('canvas.insp.fontSize')}>
         <input
           type="number"
           min={MIN_TEXT_FONT_SIZE}
@@ -335,7 +437,7 @@ const TextProperties = ({ element, onPatch }: Props) => {
         />
       </Field>
 
-      <Field label="Font family">
+      <Field label={t('canvas.insp.fontFamily')}>
         <select
           value={fontFamily}
           onChange={(e) => onPatch({ fontFamily: e.target.value })}
@@ -349,24 +451,24 @@ const TextProperties = ({ element, onPatch }: Props) => {
               (e.g. set by Claude or a future build), surface it so the select
               shows the real value instead of silently snapping to option 0. */}
           {!FONT_OPTIONS.some((o) => o.value === fontFamily) && (
-            <option value={fontFamily}>Custom</option>
+            <option value={fontFamily}>{t('canvas.insp.custom')}</option>
           )}
           {FONT_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
-              {o.label}
+              {o.labelKey ? t(o.labelKey) : o.label}
             </option>
           ))}
         </select>
       </Field>
 
-      <Field label="Weight">
+      <Field label={t('canvas.insp.weight')}>
         <div className="flex items-center gap-2">
           {/* Bold toggle — a one-tap shortcut to 700 / back to 400, kept in
               sync with the weight select below (both write `fontWeight`). */}
           <button
             type="button"
             aria-pressed={isBold}
-            title="Bold"
+            title={t('canvas.insp.bold')}
             onClick={() =>
               onPatch({ fontWeight: isBold ? DEFAULT_TEXT_FONT_WEIGHT : BOLD_FONT_WEIGHT })
             }
@@ -403,17 +505,23 @@ const TextProperties = ({ element, onPatch }: Props) => {
         </div>
       </Field>
 
-      <Field label="Alignment">
+      <Field label={t('canvas.insp.alignment')}>
         <div className="flex items-stretch gap-1">
           {TEXT_ALIGN_OPTIONS.map((a) => {
             const Icon = ALIGN_ICON[a]
             const active = textAlign === a
+            const alignTitle =
+              a === 'left'
+                ? t('canvas.insp.alignLeft')
+                : a === 'center'
+                  ? t('canvas.insp.alignCenter')
+                  : t('canvas.insp.alignRight')
             return (
               <button
                 key={a}
                 type="button"
                 aria-pressed={active}
-                title={`Align ${a}`}
+                title={alignTitle}
                 onClick={() => onPatch({ textAlign: a })}
                 className={[
                   'flex h-7 flex-1 items-center justify-center rounded-[4px] border',
@@ -430,7 +538,7 @@ const TextProperties = ({ element, onPatch }: Props) => {
         </div>
       </Field>
 
-      <Field label="Line height">
+      <Field label={t('canvas.insp.lineHeight')}>
         <input
           type="number"
           min={MIN_LINE_HEIGHT}
@@ -447,7 +555,7 @@ const TextProperties = ({ element, onPatch }: Props) => {
       </Field>
 
       <ColorField
-        label="Text color"
+        label={t('canvas.insp.textColor')}
         value={textColor}
         onChange={(color) => onPatch({ textColor: color })}
       />
@@ -526,13 +634,15 @@ const ColorField = ({
   label: string
   value: string
   onChange: (value: string) => void
-}) => (
+}) => {
+  const { t } = useT()
+  return (
   <Field label={label}>
     <div className="flex items-center gap-2">
       <label
-        className="relative h-7 w-7 shrink-0 cursor-pointer overflow-hidden rounded-[4px] border border-line transition-colors hover:border-line-strong"
+        className="relative h-7 w-7 shrink-0 cursor-pointer overflow-hidden rounded-[4px] border border-line transition-colors hover:border-line-strong focus-within:ring-2 focus-within:ring-accent/40"
         style={{ background: value }}
-        title="Pick a colour"
+        title={t('canvas.insp.pickColour')}
       >
         <input
           type="color"
@@ -554,4 +664,5 @@ const ColorField = ({
       />
     </div>
   </Field>
-)
+  )
+}

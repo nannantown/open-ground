@@ -1,14 +1,29 @@
 import { mkdir, readFile, writeFile, readdir, unlink, stat, rm } from 'fs/promises'
 import { join } from 'path'
 import type { CanvasFile } from '../types'
-import { extForMime } from './taskImages'
+import { projectDataDir } from './projectDataPath'
+import { canvasAssetsDir as sharedCanvasAssetsDir, isShared } from './sharedData'
 
-// Re-export the mime → extension helper so this file stays the single import
-// surface for canvas-asset handling — taskImages keeps owning the whitelist.
-export { extForMime } from './taskImages'
+const CANVASES_SUBDIR = 'canvases'
 
-const CANVASES_SUBDIR = '.openground/canvases'
-const ASSETS_SUFFIX = '-assets'
+/** Central asset-dir suffix (canvases/<canvasId>-assets). Exported for the
+ *  canvas share migration (canvasData.ts), which must address the central
+ *  layout explicitly regardless of the project's current mode. */
+export const CANVAS_ASSETS_SUFFIX = '-assets'
+
+// mime <-> extension whitelist. Pasted/uploaded images are effectively always
+// one of these; anything else is rejected rather than guessed at. (Owned here
+// since the task-images store was purged — this file is the single import
+// surface for canvas-asset handling.)
+const MIME_TO_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+}
+
+/** The on-disk extension for a mime, or null if the type is unsupported. */
+export const extForMime = (mime: string): string | null => MIME_TO_EXT[mime] ?? null
 
 // Reverse lookup for read paths. Kept private — callers can't influence the
 // allowed extensions through this module.
@@ -30,11 +45,23 @@ export const isValidAssetId = (id: string) =>
 export const isValidCanvasId = (id: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 
-const assetsDir = (projectPath: string, canvasId: string) =>
-  join(projectPath, CANVASES_SUBDIR, `${canvasId}${ASSETS_SUFFIX}`)
+/** Central (non-shared) asset dir:
+ *  ~/.openground/projects/<uuid>/canvases/<canvasId>-assets. Exported for the
+ *  share migration alongside CANVAS_ASSETS_SUFFIX. */
+export const centralCanvasAssetsDir = async (projectPath: string, canvasId: string) =>
+  join(await projectDataDir(projectPath), CANVASES_SUBDIR, `${canvasId}${CANVAS_ASSETS_SUFFIX}`)
+
+// In git-shared mode (.openground marker — see sharedData.ts) assets live in
+// the repo (.openground/canvas/assets/<canvasId>/) so collaborators get the
+// images through normal git. The asset-id/URL/route contracts are unchanged in
+// both modes — only the disk location branches here.
+const assetsDir = async (projectPath: string, canvasId: string) =>
+  (await isShared(projectPath))
+    ? sharedCanvasAssetsDir(projectPath, canvasId)
+    : centralCanvasAssetsDir(projectPath, canvasId)
 
 /** Persist an uploaded image's bytes. Throws if the mime type isn't on the
- *  whitelist (taskImages.MIME_TO_EXT). */
+ *  whitelist (MIME_TO_EXT above). */
 export const writeCanvasAsset = async (
   projectPath: string,
   canvasId: string,
@@ -44,7 +71,7 @@ export const writeCanvasAsset = async (
 ) => {
   const ext = extForMime(mime)
   if (!ext) throw new Error(`unsupported image type: ${mime}`)
-  const dir = assetsDir(projectPath, canvasId)
+  const dir = await assetsDir(projectPath, canvasId)
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, `${assetId}.${ext}`), data)
 }
@@ -55,7 +82,7 @@ export const readCanvasAsset = async (
   canvasId: string,
   assetId: string,
 ): Promise<{ data: Buffer; mime: string } | null> => {
-  const dir = assetsDir(projectPath, canvasId)
+  const dir = await assetsDir(projectPath, canvasId)
   let entries: string[]
   try {
     entries = await readdir(dir)
@@ -84,7 +111,7 @@ export const deleteCanvasAsset = async (
   canvasId: string,
   assetId: string,
 ) => {
-  const dir = assetsDir(projectPath, canvasId)
+  const dir = await assetsDir(projectPath, canvasId)
   let entries: string[]
   try {
     entries = await readdir(dir)
@@ -109,15 +136,14 @@ export const deleteCanvasAsset = async (
 // round-trips, so a save whose payload predates the upload must not reap it.
 const GC_MIN_AGE_MS = 2 * 60 * 1000
 
-/** Garbage-collect image files no element references. Mirrors pruneTaskImages
- *  for the canvas surface — run after every canvas write so removing an
- *  image element eventually reclaims disk. Never throws. */
+/** Garbage-collect image files no element references — run after every canvas
+ *  write so removing an image element eventually reclaims disk. Never throws. */
 export const pruneCanvasAssets = async (
   projectPath: string,
   canvasId: string,
   canvas: CanvasFile,
 ) => {
-  const dir = assetsDir(projectPath, canvasId)
+  const dir = await assetsDir(projectPath, canvasId)
   let entries: string[]
   try {
     entries = await readdir(dir)
@@ -153,7 +179,7 @@ export const deleteCanvasAssetsDir = async (
   projectPath: string,
   canvasId: string,
 ) => {
-  const dir = assetsDir(projectPath, canvasId)
+  const dir = await assetsDir(projectPath, canvasId)
   try {
     await rm(dir, { recursive: true, force: true })
   } catch {

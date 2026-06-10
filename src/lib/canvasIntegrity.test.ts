@@ -136,4 +136,37 @@ describe('removeElements', () => {
     const els = [el({ id: 'a' })]
     expect(removeElements(els, [])).toBe(els)
   })
+
+  it('prunes a group left empty after its members are deleted', () => {
+    const els = [
+      el({ id: 'g', type: 'group' }),
+      el({ id: 'a', type: 'sticky', parentId: 'g' }),
+      el({ id: 'b', type: 'sticky', parentId: 'g' }),
+    ]
+    const out = removeElements(els, ['a', 'b'])
+    // members gone AND the now-childless group is pruned, not left as a ghost.
+    expect(out.map((e) => e.id)).toEqual([])
+  })
+
+  it('keeps a group that still has a surviving member', () => {
+    const els = [
+      el({ id: 'g', type: 'group' }),
+      el({ id: 'a', type: 'sticky', parentId: 'g' }),
+      el({ id: 'b', type: 'sticky', parentId: 'g' }),
+    ]
+    const out = removeElements(els, ['a'])
+    expect(out.find((e) => e.id === 'g')).toBeDefined()
+    expect(out.find((e) => e.id === 'b')).toBeDefined()
+  })
+
+  it('prunes nested groups to a fixed point', () => {
+    const els = [
+      el({ id: 'go', type: 'group' }),
+      el({ id: 'gi', type: 'group', parentId: 'go' }),
+      el({ id: 'a', type: 'sticky', parentId: 'gi' }),
+    ]
+    // delete the only leaf → inner group empties → outer group empties too.
+    const out = removeElements(els, ['a'])
+    expect(out.map((e) => e.id)).toEqual([])
+  })
 })

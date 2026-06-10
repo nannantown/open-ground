@@ -3,6 +3,7 @@ import { MonitorSmartphone } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { buildScreenSrcdoc, hash32 } from '@/lib/screenSrcdoc'
 import { resolveOpacity } from '@/lib/canvasTransform'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   element: CanvasElement
@@ -76,6 +77,7 @@ export const ScreenView = ({
   ring,
   commentTool,
 }: Props) => {
+  const { t } = useT()
   const ta = useRef<HTMLTextAreaElement>(null)
   const chrome = element.chrome ?? 'none'
   const framework = element.framework ?? 'react'
@@ -159,11 +161,12 @@ export const ScreenView = ({
           >
             <MonitorSmartphone size={22} strokeWidth={1.5} className="text-ink-faint" />
             <span className="text-[13px] font-medium text-ink">
-              {element.moduleId ? '旧形式の Screen です' : '空の Screen'}
+              {element.moduleId
+                ? t('canvasEl.screen.legacyTitle')
+                : t('canvasEl.screen.emptyTitle')}
             </span>
             <span className="max-w-[36ch] text-[11.5px] leading-snug text-ink-muted">
-              ダブルクリックでソースを書くか、Canvas チャットで Claude に
-              「この画面を作って」と頼んでください。
+              {t('canvasEl.screen.emptyHint')}
             </span>
           </button>
         )}

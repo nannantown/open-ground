@@ -1,6 +1,9 @@
 // validateProjectPath in Hono clothing (CONTRACT §3.3). This is the security
-// boundary that every path-accepting endpoint must keep: the resolved path must
-// sit at or under `settings.projectsRoot`, otherwise the request is refused.
+// boundary that every path-accepting endpoint must keep: the resolved-and-
+// canonicalized path must equal or sit under one of the registered projects
+// (the `settings.projects` registry is the allowlist), otherwise the request is
+// refused. "or under" is load-bearing — per-run worktrees live at
+// <project>/.openground/worktrees/<id>.
 //
 // The actual check is NOT reimplemented here — we import the existing
 // `validateProjectPath` from src/lib/server/projectData (the §3.8 "src/lib/server

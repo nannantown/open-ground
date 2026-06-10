@@ -10,15 +10,16 @@ interface Props {
 }
 
 // Floating bar shown when 2+ projects are selected (Shift+click). Bulk
-// Archive / Delete go through a confirmation modal that lists the projects.
+// "Remove from canvas" (unregister; folder untouched) / Delete (Trash) go
+// through a confirmation modal that lists the projects.
 export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
-  const [confirming, setConfirming] = useState<null | 'archive' | 'delete'>(null)
+  const [confirming, setConfirming] = useState<null | 'remove' | 'delete'>(null)
   const [busy, setBusy] = useState(false)
   // Failures surface inline in the modal instead of a native alert, so a partial
   // failure stays readable (which projects failed) rather than being dismissed.
   const [error, setError] = useState<string | null>(null)
 
-  const openConfirm = (kind: 'archive' | 'delete') => {
+  const openConfirm = (kind: 'remove' | 'delete') => {
     setError(null)
     setConfirming(kind)
   }
@@ -63,8 +64,8 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
             {projects.length} selected
           </span>
           <span className="h-4 w-px bg-line-soft" />
-          <Btn variant="subtle" size="sm" onClick={() => openConfirm('archive')}>
-            <Archive size={12} /> Archive
+          <Btn variant="subtle" size="sm" onClick={() => openConfirm('remove')}>
+            <Archive size={12} /> Remove
           </Btn>
           <Btn variant="subtle" size="sm" danger onClick={() => openConfirm('delete')}>
             <Trash2 size={12} /> Delete
@@ -87,17 +88,17 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
           >
             <div className="rule-double px-6 pt-5 pb-4">
               <p className="label-cap text-accent mb-1.5">
-                {confirming === 'delete' ? 'Delete projects' : 'Archive projects'}
+                {confirming === 'delete' ? 'Delete projects' : 'Remove from Ground'}
               </p>
               <h2 className="font-display text-[21px] leading-snug text-ink tracking-tightest">
                 {confirming === 'delete'
                   ? `Move ${projects.length} projects to the Trash?`
-                  : `Archive ${projects.length} projects?`}
+                  : `Remove ${projects.length} projects from the Ground?`}
               </h2>
               <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
                 {confirming === 'delete'
                   ? 'Each folder is moved to the macOS Trash — removed from OPEN GROUND, but restorable from Finder.'
-                  : 'Each folder is moved into the archive folder. You can restore it later from its card.'}
+                  : 'Each card is taken off the canvas. The folders stay on disk — re-import them anytime.'}
               </p>
             </div>
             <ul className="flex-1 divide-y divide-line-soft overflow-y-auto px-6 py-2">
@@ -120,14 +121,14 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
               <Btn
                 variant="primary"
                 size="md"
-                onClick={() => applyBulk(confirming === 'delete' ? '/api/project/delete' : '/api/project/archive')}
+                onClick={() => applyBulk(confirming === 'delete' ? '/api/project/delete' : '/api/projects/remove')}
                 disabled={busy}
               >
                 {busy
                   ? 'Working…'
                   : confirming === 'delete'
                     ? `Delete ${projects.length}`
-                    : `Archive ${projects.length}`}
+                    : `Remove ${projects.length}`}
               </Btn>
             </div>
           </div>

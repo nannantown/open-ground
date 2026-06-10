@@ -11,6 +11,8 @@
 
 import { serve } from '@hono/node-server'
 import { app } from './app'
+import { pruneOldAttachments, pruneOldRunFiles, RAW_RETENTION_DAYS } from '@/lib/server/retention'
+import { getSettings } from '@/lib/server/store'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
@@ -39,6 +41,27 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOSTNAME }, (info
   // Stable startup line the launcher / log tail can grep for.
   console.log(`[openground:hono] listening on http://${HOSTNAME}:${info.port}`)
 })
+
+// Retention sweep — drop the raw episodic layer (run cache + attachments) older
+// than RAW_RETENTION_DAYS. Fire-and-forget after boot so it never blocks
+// startup or crashes the process.
+void (async () => {
+  try {
+    const removedRuns = await pruneOldRunFiles()
+    const settings = await getSettings()
+    let removedFiles = 0
+    for (const p of settings.projects ?? []) {
+      removedFiles += await pruneOldAttachments(p.path).catch(() => 0)
+    }
+    if (removedRuns || removedFiles) {
+      console.log(
+        `[openground:hono] retention(${RAW_RETENTION_DAYS}d): pruned ${removedRuns} run files, ${removedFiles} attachments`,
+      )
+    }
+  } catch (e) {
+    console.error('[openground:hono] retention sweep failed', e)
+  }
+})()
 
 // Listen errors (chiefly EADDRINUSE on the fixed port) are a TRUE fatal: the
 // single-instance contract says we must fail loudly, never silently shift

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api-client'
+import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
 
 export interface TerminalInfo {
   id: string
@@ -11,6 +12,7 @@ export interface TerminalInfo {
   finishedAt?: string
   exitCode?: number
   tag?: 'shell' | 'claude'
+  agentSessionId?: string
 }
 
 interface Props {
@@ -20,6 +22,10 @@ interface Props {
   label?: string
   /** Fired when the PTY exits, so the surrounding panel can collapse / hide. */
   onExit?: (info: TerminalInfo) => void
+  /** Show the built-in header bar (claude · cols×rows · Ctrl-C). Default true.
+   *  Set false when embedded under the split-pane's own header — Ctrl-C still
+   *  works by typing it into the terminal, so no affordance is lost. */
+  chrome?: boolean
 }
 
 // Embedded xterm.js bound to an EXISTING PTY (one launched by the runner via
@@ -29,7 +35,7 @@ interface Props {
 //     entry.terminalId is the source of truth)
 //   - exposes a "Ctrl-C" affordance for soft-cancelling claude in place
 //   - hides itself / signals exit when the PTY closes
-export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
+export const ClaudeTerminalPane = ({ terminalId, label, onExit, chrome = true }: Props) => {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<any>(null)
   const fitRef = useRef<any>(null)
@@ -105,8 +111,18 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
         const r = await api.api.terminal[':id'].$get({ param: { id: terminalId } })
         if (r.ok) probe = (await r.json()) as TerminalInfo
       } catch {}
+      // Unmounted while the probe was in flight? Bail before touching state or
+      // opening the stream. The cleanup already ran (es was still null then, so
+      // its es?.close() was a no-op), so an EventSource created past this point
+      // would leak — an open SSE + a server-side terminal listener that nothing
+      // closes — and write into a disposed term. Mirrors the cancelled check
+      // after the dynamic import above (and TerminalPane's guard before its es).
+      if (cancelled) return
       if (!probe) {
         setError(`PTY ${terminalId} not found — the run's terminal may have exited`)
+        // Signal exit so the embedding split-pane can offer a relaunch instead
+        // of leaving a dead "not found" tile with no recovery.
+        onExitRef.current?.({ id: terminalId } as TerminalInfo)
         return
       }
       setInfo(probe)
@@ -245,6 +261,12 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
       ;(term as any)._ogContextCleanup = () =>
         hostRef.current?.removeEventListener('contextmenu', onContextMenu)
 
+      // Drop a file on the pane → its absolute path is pasted, iTerm-style
+      // (Electron bridge path, or upload fallback in a plain browser).
+      if (hostRef.current) {
+        ;(term as any)._ogDropCleanup = wireTerminalFileDrop(hostRef.current, term)
+      }
+
       if (typeof ResizeObserver !== 'undefined' && hostRef.current) {
         resizeObs = new ResizeObserver(() => {
           if (resizeTimer) clearTimeout(resizeTimer)
@@ -261,6 +283,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
       if (resizeTimer) clearTimeout(resizeTimer)
       try { resizeObs?.disconnect() } catch {}
       try { es?.close() } catch {}
+      try { (term as any)?._ogDropCleanup?.() } catch {}
       try { (term as any)?._ogContextCleanup?.() } catch {}
       try { (term as any)?._ogFocusCleanup?.() } catch {}
       try { term?.dispose() } catch {}
@@ -272,6 +295,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
 
   return (
     <div className="flex h-full w-full min-h-0 flex-col bg-[#1a1a1a]">
+      {chrome ? (
       <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1.5">
         <span className="font-mono text-[10px] text-ink-muted">
           claude {info ? `· ${info.cols}×${info.rows}` : ''}
@@ -285,7 +309,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
           ) : (
             <button
               type="button"
-              onClick={() => sendInput('')}
+              onClick={() => sendInput('\x03')}
               className="font-mono text-[10px] text-ink-muted hover:text-ink"
               title="Send Ctrl-C to interrupt claude (twice within 3s = force-kill)"
             >
@@ -295,6 +319,19 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit }: Props) => {
           {error && <span className="font-mono text-[10px] text-accent">{error}</span>}
         </div>
       </div>
+      ) : (
+        // Embedded: no header bar — surface only a terminal exit/error strip.
+        (exited || error) && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1">
+            {exited && (
+              <span className="font-mono text-[10px] text-accent">
+                exited{exited.exitCode != null ? ` (${exited.exitCode})` : ''}
+              </span>
+            )}
+            {error && <span className="font-mono text-[10px] text-accent">{error}</span>}
+          </div>
+        )
+      )}
       <div
         ref={hostRef}
         className="min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2"

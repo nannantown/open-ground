@@ -1,13 +1,11 @@
 import { useEffect, useRef } from 'react'
 import {
-  ArrowUpRight,
   CheckCircle2,
-  Loader2,
   MessageSquareText,
-  Play,
   RotateCcw,
 } from 'lucide-react'
-import type { CanvasElement, RunEntry } from '@/lib/types'
+import type { CanvasElement } from '@/lib/types'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   element: CanvasElement
@@ -17,10 +15,6 @@ interface Props {
   onPointerDown: (e: React.PointerEvent) => void
   onChangeText: (text: string) => void
   onEditDone: () => void
-  /** Fire the comment as a new Canvas chat message — opens the sidebar with
-   *  the comment text (and the anchor element's metadata when present) as
-   *  the prompt. Disabled when the comment is empty. */
-  onRun?: () => void
   /** Toggle the resolved flag — resolved pins dim out so the canvas isn't
    *  cluttered with stale feedback, but stay clickable to revisit. */
   onToggleResolved?: () => void
@@ -28,23 +22,6 @@ interface Props {
    *  shown in the popup so the user can see what they're commenting on
    *  without zooming out. */
   anchorLabel?: string | null
-  /** Live status + latest reply for the chat this comment's Run spawned. */
-  run?: { status: RunEntry['status']; summary: string } | null
-  /** Jump to the linked chat thread in the sidebar. */
-  onOpenThread?: () => void
-}
-
-// Run status → a compact pill + dot colour. Drives both the pin's status dot
-// and the popup's status row so a comment narrates its own conversation.
-const STATUS_UI: Record<
-  RunEntry['status'],
-  { label: string; dot: string; text: string; spin?: boolean }
-> = {
-  pending: { label: '実行待ち', dot: 'bg-ink-faint', text: 'text-ink-muted' },
-  running: { label: '実行中', dot: 'bg-azure', text: 'text-azure', spin: true },
-  done: { label: '完了', dot: 'bg-moss', text: 'text-moss' },
-  error: { label: '失敗', dot: 'bg-accent', text: 'text-accent' },
-  cancelled: { label: '中断', dot: 'bg-ink-faint', text: 'text-ink-muted' },
 }
 
 // Pin geometry, in world units. Comments are placed at (x, y) in canvas
@@ -55,9 +32,10 @@ const PIN_H = 28
 const POPUP_W = 280
 
 // World-space comment pin: small circular badge plus, when open, an inline
-// popup card with a textarea, "Run" and "Resolve" actions. Drops into the
+// popup card with a textarea and a "Resolve" action. Drops into the
 // CanvasElement render path so it inherits hit-testing, drag, selection,
-// deletion (Backspace) and persistence for free.
+// deletion (Backspace) and persistence for free. (Comments are annotation
+// data only — the old "Run this comment" path went with the batch runner.)
 export const CommentPin = ({
   element,
   selected,
@@ -65,12 +43,10 @@ export const CommentPin = ({
   onPointerDown,
   onChangeText,
   onEditDone,
-  onRun,
   onToggleResolved,
   anchorLabel,
-  run,
-  onOpenThread,
 }: Props) => {
+  const { t } = useT()
   const ta = useRef<HTMLTextAreaElement>(null)
   const open = editing || (selected && !!element.text)
 
@@ -82,8 +58,6 @@ export const CommentPin = ({
   }, [editing])
 
   const resolved = !!element.resolved
-  const status = run ? STATUS_UI[run.status] : null
-  const reply = run?.summary?.trim() || ''
 
   return (
     <div
@@ -114,17 +88,6 @@ export const CommentPin = ({
           <CheckCircle2 size={13} strokeWidth={2.25} />
         ) : (
           <MessageSquareText size={13} strokeWidth={2.25} />
-        )}
-        {/* Status dot — lets the user read queued/running/done at a glance
-            without opening the popup. Hidden once resolved. */}
-        {status && !resolved && (
-          <span
-            className={[
-              'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-bg-card',
-              status.dot,
-              status.spin ? 'run-pulse' : '',
-            ].join(' ')}
-          />
         )}
       </button>
 
@@ -181,20 +144,12 @@ export const CommentPin = ({
               onBlur={onEditDone}
               onKeyDown={(e) => {
                 e.stopPropagation()
-                if (e.key === 'Escape') {
+                if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
                   e.preventDefault()
                   onEditDone()
-                  return
-                }
-                // ⌘/Ctrl+Enter fires Run when the comment has content; a plain
-                // Enter is a newline so multi-line comments still work.
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault()
-                  if (element.text.trim() && onRun) onRun()
-                  else onEditDone()
                 }
               }}
-              placeholder="この要素についてのコメント — ⌘↵ で Run"
+              placeholder={t('canvasEl.comment.placeholder')}
               rows={3}
               className="block w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-[12.5px] leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
             />
@@ -203,56 +158,6 @@ export const CommentPin = ({
               {element.text || <span className="text-ink-faint">No content yet</span>}
             </div>
           )}
-
-          {/* Linked-chat status + latest reply. Turns the pin into a two-way
-              thread: Run asks Claude, this shows where the reply stands. */}
-          {status && (
-            <div className="flex flex-col gap-1.5 rounded-[3px] border border-line-soft bg-bg/60 px-2 py-1.5">
-              <div className="flex items-center gap-1.5">
-                <span className={['flex items-center gap-1 label-cap', status.text].join(' ')}>
-                  {status.spin ? (
-                    <Loader2 size={11} strokeWidth={2.25} className="animate-spin" />
-                  ) : (
-                    <span className={['h-2 w-2 rounded-full', status.dot].join(' ')} />
-                  )}
-                  {status.label}
-                </span>
-                {onOpenThread && (
-                  <button
-                    type="button"
-                    onClick={onOpenThread}
-                    title="リンクされたチャットを開く"
-                    className="ml-auto flex items-center gap-0.5 rounded-[3px] px-1 py-0.5 text-[10.5px] normal-case tracking-normal text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink"
-                  >
-                    スレッド <ArrowUpRight size={11} strokeWidth={2} />
-                  </button>
-                )}
-              </div>
-              {reply && (
-                <p className="line-clamp-3 text-[11.5px] leading-snug text-ink-muted">
-                  {reply}
-                </p>
-              )}
-            </div>
-          )}
-
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              disabled={!onRun || !element.text.trim()}
-              onClick={() => onRun && onRun()}
-              title="Run this comment as a Canvas chat message"
-              className={[
-                'flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[3px] text-[12px] font-medium transition-colors',
-                'bg-accent text-bg-card hover:bg-accent/90',
-                'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent',
-              ].join(' ')}
-            >
-              <Play size={11} strokeWidth={2.25} />
-              {status ? '再 Run' : 'Run'}
-            </button>
-            <span className="font-mono text-[10px] text-ink-faint">⌘↵</span>
-          </div>
         </div>
       )}
     </div>

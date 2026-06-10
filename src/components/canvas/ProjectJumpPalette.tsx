@@ -133,8 +133,8 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
                     : 'hover:bg-bg-inset/60',
                 ].join(' ')}
               >
-                {p.archived ? (
-                  <Archive size={12} className="shrink-0 text-ink-faint" />
+                {p.missing ? (
+                  <Archive size={12} className="shrink-0 text-accent" />
                 ) : (
                   <FolderOpen size={12} className="shrink-0 text-ink-faint" />
                 )}

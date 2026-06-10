@@ -18,11 +18,14 @@
 // client recovers this group's route tree.
 
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { zValidator } from '@hono/zod-validator'
-import { readFile, readdir } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { release } from 'os'
+import { createHash } from 'crypto'
 import { getSettings } from '@/lib/server/store'
+import { readSession } from '@/lib/server/authStore'
 import { FeedbackApiBodySchema } from '@/lib/schemas'
 
 // --- Env-driven configuration ----------------------------------------------
@@ -31,16 +34,102 @@ import { FeedbackApiBodySchema } from '@/lib/schemas'
 // — and so tests can flip them with vi.stubEnv between cases.
 interface FeedbackConfig {
   url: string
-  anonKey: string
+  key: string
   table: string
 }
 
-const readFeedbackConfig = (): FeedbackConfig | null => {
+// SUPABASE_URL + the chosen key env + optional table. Returns null unless BOTH
+// url and key are present. One reader, parameterised by which key it pulls, so
+// the url/table/strip logic lives in exactly one place.
+const readConfig = (
+  keyEnv: 'SUPABASE_ANON_KEY' | 'SUPABASE_SERVICE_ROLE_KEY',
+): FeedbackConfig | null => {
   const url = process.env.SUPABASE_URL?.trim()
-  const anonKey = process.env.SUPABASE_ANON_KEY?.trim()
-  if (!url || !anonKey) return null
+  const key = process.env[keyEnv]?.trim()
+  if (!url || !key) return null
   const table = process.env.SUPABASE_FEEDBACK_TABLE?.trim() || 'feedback'
-  return { url: url.replace(/\/+$/, ''), anonKey, table }
+  return { url: url.replace(/\/+$/, ''), key, table }
+}
+
+// Write path: the anon key (insert-only under RLS). Present on every build that
+// wants to COLLECT feedback.
+const readFeedbackConfig = () => readConfig('SUPABASE_ANON_KEY')
+
+// Read path: the SERVICE-ROLE key bypasses RLS so the owner can READ rows back.
+// Owner machine only — NEVER baked into the public Electron build (the anon key
+// can't SELECT, so a shipped build reports canRead:false and the inbox/dot never
+// appear).
+const readServiceConfig = () => readConfig('SUPABASE_SERVICE_ROLE_KEY')
+
+// Stable, non-secret id for the data source (url+table) so the client can scope
+// its "last seen" marker per Supabase project/table. A one-way hash — never the
+// url or key itself; only emitted to the loopback client when canRead.
+const sourceId = (config: FeedbackConfig): string =>
+  createHash('sha1').update(`${config.url}/${config.table}`).digest('hex').slice(0, 12)
+
+// --- Owner identity gate (optional) ----------------------------------------
+// FEEDBACK_ADMIN_EMAILS is an OPT-IN allowlist of owner emails (comma-separated)
+// that may read feedback. Service-role key present but list UNSET → reads stay
+// gated by the key alone (the prior loopback-trust behaviour, backward-compat).
+// Set the list → reads additionally require a signed-in session whose email is
+// on it, so feedback (which holds third-party PII) is no longer readable by any
+// process that can reach the loopback port. Lowercased for case-insensitive match.
+const readAdminEmails = (): Set<string> => {
+  const raw = process.env.FEEDBACK_ADMIN_EMAILS?.trim()
+  if (!raw) return new Set()
+  return new Set(
+    raw
+      .split(',')
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean),
+  )
+}
+
+// Whether the current request is allowed to READ feedback. True when no
+// allowlist is configured (opt-in); otherwise true only when the persisted app
+// session's email is on the allowlist. Reads identity from authStore — the same
+// single session /api/auth/session serves — never a token.
+const isOwner = async (): Promise<boolean> => {
+  const admins = readAdminEmails()
+  if (admins.size === 0) return true
+  const session = await readSession()
+  const email = session?.user.email?.trim().toLowerCase()
+  return !!email && admins.has(email)
+}
+
+// --- Supabase REST helpers --------------------------------------------------
+// One call with this feature's auth + a 10s timeout. `path` is appended after
+// /rest/v1/<table>; callers branch on status/body. Centralising this keeps the
+// auth headers and timeout from drifting between the insert/list/unread paths.
+const supabaseFetch = (
+  config: FeedbackConfig,
+  path: string,
+  init: RequestInit = {},
+) =>
+  fetch(`${config.url}/rest/v1/${config.table}${path}`, {
+    ...init,
+    headers: {
+      apikey: config.key,
+      Authorization: `Bearer ${config.key}`,
+      ...(init.headers as Record<string, string> | undefined),
+    },
+    signal: AbortSignal.timeout(10_000),
+  })
+
+// Shared 502 for a non-ok Supabase response: log Supabase's reason server-side
+// (RLS/schema hints the operator needs) but return a generic message so the url
+// and key context never leak to the loopback client.
+const badGateway = async (c: Context, res: Response, label: string) => {
+  const detail = await res.text().catch(() => '')
+  console.error(`[openground:feedback] ${label} supabase ${res.status}: ${detail}`)
+  return c.json({ error: `feedback service responded ${res.status}` }, 502)
+}
+
+// Shared 502 for a thrown request (network error / timeout / bad body).
+const unreachable = (c: Context, label: string, e: unknown) => {
+  const msg = e instanceof Error ? e.message : `feedback ${label} failed`
+  console.error(`[openground:feedback] ${label} failed`, msg)
+  return c.json({ error: 'could not reach feedback service' }, 502)
 }
 
 // --- Server-side metadata helpers ------------------------------------------
@@ -56,23 +145,13 @@ const readAppVersion = async (): Promise<string> => {
   }
 }
 
-// Cheap project count: count immediate subdirectories of projectsRoot
-// (skipping dotfolders + the archive sentinel). This deliberately avoids
-// scanProjects() — which reads every project's .openground/tasks.json — since
-// feedback metadata only needs a rough number and must never be slow or fatal.
+// Cheap project count for feedback metadata: just the registry size. Must
+// never be slow or fatal, so it avoids scanProjects() (which reads every
+// project's .openground/tasks.json).
 const countProjects = async (): Promise<number | null> => {
   try {
     const settings = await getSettings()
-    if (!settings.projectsRoot) return null
-    const entries = await readdir(settings.projectsRoot, { withFileTypes: true })
-    let n = 0
-    for (const e of entries) {
-      if (!e.isDirectory()) continue
-      if (e.name.startsWith('.')) continue
-      if (e.name === settings.archiveDirName) continue
-      n++
-    }
-    return n
+    return settings.projects?.length ?? 0
   } catch {
     return null
   }
@@ -82,10 +161,94 @@ const osString = (): string => `${process.platform} ${release()}`.trim()
 
 export const feedbackRoutes = new Hono()
   // --- GET /api/feedback/config ---------------------------------------------
-  // Lets the SPA decide whether to show the "Send feedback" entry. Reports only
-  // a boolean — never echoes the URL or key back to the client.
-  .get('/api/feedback/config', (c) => {
-    return c.json({ enabled: readFeedbackConfig() !== null })
+  // Lets the SPA decide what to show. `enabled` gates the "Send feedback" entry
+  // (anon key present); `canRead` gates the owner-only "Incoming feedback" inbox
+  // (service-role key present AND — when an admin allowlist is set — the signed-in
+  // user is on it). Reports only booleans/an opaque id — never the url or key.
+  .get('/api/feedback/config', async (c) => {
+    const service = readServiceConfig()
+    const canRead = service !== null && (await isOwner())
+    return c.json({
+      enabled: readFeedbackConfig() !== null,
+      canRead,
+      // Owner-only: lets the client scope its 'last seen' marker per data source.
+      ...(canRead && service ? { sourceId: sourceId(service) } : {}),
+    })
+  })
+  // --- GET /api/feedback/list -----------------------------------------------
+  // Owner-only inbox: reads submissions with the SERVICE-ROLE key (which alone
+  // can SELECT past the insert-only RLS). 503 when no service key is configured
+  // — exactly the public build, where the inbox is never shown anyway. Rows are
+  // returned ONLY to the loopback client; the key itself never leaves the server.
+  .get('/api/feedback/list', async (c) => {
+    const config = readServiceConfig()
+    if (!config) {
+      return c.json({ error: 'feedback reading not configured' }, 503)
+    }
+    if (!(await isOwner())) {
+      return c.json({ error: 'not authorized' }, 403)
+    }
+
+    try {
+      // Fetch one past the cap so we can flag truncation without a 2nd query.
+      const res = await supabaseFetch(
+        config,
+        '?select=*&order=created_at.desc&limit=201',
+      )
+      if (!res.ok) return badGateway(c, res, 'list')
+
+      const body = (await res.json()) as unknown
+      const rows = Array.isArray(body) ? body : []
+      const truncated = rows.length > 200
+      return c.json({ items: truncated ? rows.slice(0, 200) : rows, truncated })
+    } catch (e) {
+      return unreachable(c, 'list', e)
+    }
+  })
+  // --- GET /api/feedback/unread ---------------------------------------------
+  // Cheap badge feed for the owner-only "new feedback" dot on the settings gear.
+  // Returns just a COUNT (never row bodies) of submissions newer than `since`
+  // (an ISO timestamp the client last marked as seen); omit `since` to count
+  // all rows. Uses a HEAD + `Prefer: count=exact`, so Supabase reports the total
+  // in the Content-Range header without transferring any rows. 503 (like /list)
+  // when no service key is configured — the public build never polls this.
+  .get('/api/feedback/unread', async (c) => {
+    const config = readServiceConfig()
+    if (!config) {
+      return c.json({ error: 'feedback reading not configured' }, 503)
+    }
+    if (!(await isOwner())) {
+      return c.json({ error: 'not authorized' }, 403)
+    }
+
+    const since = c.req.query('since')?.trim()
+    const filter = since ? `&created_at=gt.${encodeURIComponent(since)}` : ''
+
+    try {
+      // count=exact makes PostgREST put the total after the slash in
+      // Content-Range (e.g. "*/12"); HEAD returns no body.
+      const res = await supabaseFetch(config, `?select=id${filter}`, {
+        method: 'HEAD',
+        headers: { Prefer: 'count=exact' },
+      })
+
+      // PostgREST answers HEAD count requests with 200 or 206.
+      if (!res.ok && res.status !== 206) return badGateway(c, res, 'unread')
+
+      const range = res.headers.get('content-range') || ''
+      const total = Number.parseInt(range.split('/')[1] ?? '', 10)
+      if (!Number.isFinite(total)) {
+        // A 2xx with no usable count means a dropped Prefer header / proxy issue,
+        // not "genuinely zero new rows" — log it so the dot's silence is
+        // explainable rather than silently swallowed.
+        console.error(
+          `[openground:feedback] unread: no count in Content-Range "${range}"`,
+        )
+      }
+      return c.json({ count: Number.isFinite(total) ? total : 0 })
+    } catch (e) {
+      return unreachable(c, 'unread', e)
+    }
   })
   // --- POST /api/feedback ---------------------------------------------------
   // zValidator emits a 400 with a clear message on an empty/over-long body
@@ -97,15 +260,22 @@ export const feedbackRoutes = new Hono()
       return c.json({ error: 'feedback not configured' }, 503)
     }
 
-    const { message, email } = c.req.valid('json')
+    const { message, email, context } = c.req.valid('json')
 
     const [appVersion, projectCount] = await Promise.all([
       readAppVersion(),
       countProjects(),
     ])
 
+    // Persist the UI context WITHOUT assuming a new DB column: prefix the
+    // stored message with a parseable tag (e.g. "[ctx:board] …"). Non-breaking
+    // with the existing insert-only feedback table — readers can strip the
+    // leading "[ctx:…] " to recover the bare message + its source tab.
+    const ctx = context?.trim()
+    const taggedMessage = ctx ? `[ctx:${ctx}] ${message}` : message
+
     const row = {
-      message,
+      message: taggedMessage,
       // Normalise an empty/absent email to null so the column stays clean.
       email: email && email.trim() ? email.trim() : null,
       app_version: appVersion,
@@ -114,32 +284,19 @@ export const feedbackRoutes = new Hono()
     }
 
     try {
-      const res = await fetch(`${config.url}/rest/v1/${config.table}`, {
+      const res = await supabaseFetch(config, '', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          apikey: config.anonKey,
-          Authorization: `Bearer ${config.anonKey}`,
           // We only insert; never read rows back to the loopback client.
           Prefer: 'return=minimal',
         },
         body: JSON.stringify(row),
-        signal: AbortSignal.timeout(10_000),
       })
 
-      if (!res.ok) {
-        // Surface Supabase's reason in the server log (it may contain RLS /
-        // schema hints the operator needs) but return a generic message to the
-        // client so we never leak the URL/key context downstream.
-        const detail = await res.text().catch(() => '')
-        console.error(`[openground:feedback] supabase ${res.status}: ${detail}`)
-        return c.json({ error: `feedback service responded ${res.status}` }, 502)
-      }
-
+      if (!res.ok) return badGateway(c, res, 'insert')
       return c.json({ ok: true })
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'feedback request failed'
-      console.error('[openground:feedback] forward failed', msg)
-      return c.json({ error: 'could not reach feedback service' }, 502)
+      return unreachable(c, 'insert', e)
     }
   })

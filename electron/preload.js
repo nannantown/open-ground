@@ -21,11 +21,18 @@
 // Keep this surface small. Adding capabilities means adding a matching,
 // validated ipcMain handler in main.js — never widen the bridge speculatively.
 
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('openground', {
   // Static OS identity. Plain string, safe to expose.
   platform: process.platform,
+
+  // Absolute on-disk path of a File dragged into the window (terminal panes
+  // paste it iTerm-style). Synchronous and read-only — webUtils only maps the
+  // DOM File back to the path the OS drag already carried; it grants no fs
+  // access. In a plain dev browser this is absent and the renderer falls back
+  // to uploading the bytes (see src/lib/terminalFileDrop.ts).
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 
   // App version, owned by main (works in dev and packaged builds).
   getVersion: () => ipcRenderer.invoke('app:getVersion'),

@@ -30,6 +30,7 @@ const TYPE_LABEL: Record<CanvasElement['type'], string> = {
   image: 'Image',
   screen: 'Screen',
   shape: 'Shape',
+  group: 'Group',
 }
 
 // Floating bar shown when exactly one canvas element is selected: recolour

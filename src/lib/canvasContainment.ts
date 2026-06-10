@@ -6,7 +6,9 @@
 // box. When it's dragged out of every container, the `parentId` is cleared.
 //
 // Two kinds of container exist:
-//   - a `frame` can own ANY non-frame child (the original Slice-1 behaviour);
+//   - a `frame` can own ANY child, including another `frame` (Figma-style
+//     nesting — the dropped frame gets parentId = the enclosing frame; cycles
+//     are prevented by excluding the frame's own descendants as candidates);
 //   - a `mock` / `screen` ("a design") can own a `text` child — this is the
 //     "annotation text on top of a generated design" feature: the label sits on
 //     the design and travels with it when the design is dragged.
@@ -29,18 +31,68 @@ import type { CanvasElement } from './types'
  *  rendered design. */
 export const CONTAINER_TYPES: ReadonlySet<CanvasElement['type']> = new Set<
   CanvasElement['type']
->(['frame', 'mock', 'screen'])
+>(['frame', 'mock', 'screen', 'group'])
 
 /** True when an element of `containerType` is allowed to own a child of
- *  `childType`. Frames own anything that isn't itself a frame; a design
- *  (mock/screen) owns only `text` annotations. */
+ *  `childType`. Frames own ANY element — including another frame (Figma-style
+ *  nesting; cycle prevention lives in the caller via {@link descendantIds}). A
+ *  design (mock/screen) owns only `text` annotations. */
 export const canContain = (
   containerType: CanvasElement['type'],
   childType: CanvasElement['type'],
 ): boolean => {
-  if (containerType === 'frame') return childType !== 'frame'
+  if (containerType === 'frame') return true
+  // A group owns any element (membership is explicit via ⌘G, never geometric —
+  // groups are excluded from the geometric `containerList` in InfiniteCanvas).
+  if (containerType === 'group') return true
   if (containerType === 'mock' || containerType === 'screen') return childType === 'text'
   return false
+}
+
+/** Every element transitively parented to `rootId` (its children, their
+ *  children, …) via `parentId`. Used to keep a frame from being dropped into
+ *  its own descendant — that would form a containment cycle. `rootId` itself is
+ *  not included. Cycle-safe even if the input already contains one. */
+export const descendantIds = (
+  els: CanvasElement[],
+  rootId: string,
+): Set<string> => {
+  const childrenOf = new Map<string, string[]>()
+  for (const e of els) {
+    if (!e.parentId) continue
+    const list = childrenOf.get(e.parentId)
+    if (list) list.push(e.id)
+    else childrenOf.set(e.parentId, [e.id])
+  }
+  const out = new Set<string>()
+  const stack = [rootId]
+  while (stack.length) {
+    const id = stack.pop()!
+    for (const child of childrenOf.get(id) ?? []) {
+      if (!out.has(child)) {
+        out.add(child)
+        stack.push(child)
+      }
+    }
+  }
+  return out
+}
+
+/** Nesting depth of `id` along the `parentId` chain (0 = top-level). Used to
+ *  paint container frames behind the frames they contain. Cycle-safe. */
+export const containmentDepth = (
+  byId: Map<string, CanvasElement>,
+  id: string,
+): number => {
+  let depth = 0
+  const seen = new Set<string>()
+  let cur = byId.get(id)
+  while (cur?.parentId && byId.has(cur.parentId) && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    cur = byId.get(cur.parentId)
+    depth++
+  }
+  return depth
 }
 
 export interface Rect {

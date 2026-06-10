@@ -10,16 +10,21 @@
 import { Hono } from 'hono'
 import { execFile as execFileCb, spawn } from 'child_process'
 import { promisify } from 'util'
-import { rename, stat } from 'fs/promises'
-import { dirname, join, resolve, basename, sep } from 'path'
-import { createHash, randomUUID } from 'crypto'
+import { rename, rm, stat } from 'fs/promises'
+import { dirname, join, resolve } from 'path'
+import { randomUUID } from 'crypto'
 import {
+  ProjectDataConflictError,
   readProjectData,
   writeProjectData,
-  archiveProject,
-  restoreProject,
   validateProjectPath,
 } from '@/lib/server/projectData'
+import {
+  updateProjectEntryPath,
+  removeProjectEntry,
+  relocateProjectEntry,
+} from '@/lib/server/registry'
+import { projectCentralDir } from '@/lib/server/paths'
 import {
   getSettings,
   setSettings,
@@ -37,16 +42,12 @@ import {
   setActiveCanvas,
   writeCanvasFile,
 } from '@/lib/server/canvasData'
-import {
-  deleteTaskImage,
-  extForMime,
-  isValidImageId,
-  readTaskImage,
-  writeTaskImage,
-} from '@/lib/server/taskImages'
-import type { ProjectData, ProjectTask, TaskImage, CanvasFile } from '@/lib/types'
+import type { BoardColumn, ProjectData, ProjectTask, CanvasFile } from '@/lib/types'
 import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
+import { probeClaudeCli } from '@/lib/server/claudeCli'
+import { generateProjectDescription } from '@/lib/server/generateDescription'
+import { getPromptLang } from '@/lib/server/promptLang'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -80,9 +81,6 @@ const detectLaunchMode = async (appPath: string): Promise<'open' | 'cwd'> => {
   }
 }
 
-const projectId = (folderName: string) =>
-  createHash('sha1').update(folderName).digest('hex').slice(0, 12)
-
 // POST /api/project/delete moves the folder to the macOS Trash via JXA /
 // NSFileManager.
 const TRASH_JXA = `ObjC.import('Foundation');
@@ -97,12 +95,12 @@ interface TasksBody {
   path: string
   add?: string[]
   markDone?: string[]
-  attachImages?: { taskId: string; images: TaskImage[] }
-  detachImage?: { taskId: string; imageId: string }
+  /** Move cards between board columns (e.g. a task claude finished a PR for
+   *  moves to 'review'). Marking 'done' via here also sets done:true. */
+  setColumn?: { id: string; column: BoardColumn }[]
 }
 
-// A clipboard screenshot is rarely more than a couple of MB.
-const MAX_BYTES = 12 * 1024 * 1024
+const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'review', 'done', 'blocked']
 
 // ── The chain ────────────────────────────────────────────────────────────────
 // All routes are method-chained off the router instance so hc<AppType> on the
@@ -116,15 +114,27 @@ export const projectRoutes = new Hono()
   .get('/api/project', async (c) => {
   const path = await requireProjectPath(c)
   if (path instanceof Response) return path
-  const data = await readProjectData(path)
-  return c.json(data)
+  return c.json(await readProjectData(path))
 })
   .put('/api/project', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
     const body = (await c.req.json()) as ProjectData
-    const saved = await writeProjectData(path, body)
-    return c.json(saved)
+    try {
+      // The body's updatedAt is the snapshot token the client last READ —
+      // writeProjectData refuses the write (CAS) when the store has moved on,
+      // so a stale window can never wipe newer data (incident 2026-06-10:
+      // a pre-share empty board overwrote freshly-shared card files).
+      const saved = await writeProjectData(path, body, {
+        expectUpdatedAt: typeof body.updatedAt === 'string' ? body.updatedAt : undefined,
+      })
+      return c.json(saved)
+    } catch (e) {
+      if (e instanceof ProjectDataConflictError) {
+        return c.json({ error: 'conflict: project data changed since it was loaded', conflict: true }, 409)
+      }
+      throw e
+    }
   })
   // ── /api/project/open ──────────────────────────────────────────────────
   // GET → { apps } ; POST { path, app } → open folder in app ; PUT { apps } → save list
@@ -176,6 +186,30 @@ export const projectRoutes = new Hono()
     await setSettings({ ...s, openApps: cleaned })
     return c.json({ apps: cleaned })
   })
+  // ── /api/project/reveal ───────────────────────────────────────────────────
+  // POST { path } → reveal the project folder in the OS file manager.
+  // macOS: `open`, Windows: `explorer`, Linux/other: `xdg-open`.
+  // `explorer` exits non-zero even on success, so we fire-and-forget via spawn
+  // and never inspect the exit code.
+  .post('/api/project/reveal', async (c) => {
+  const { path } = (await c.req.json()) as { path?: string }
+  if (!path) return c.json({ error: 'path required' }, 400)
+  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+  try {
+    if (process.platform === 'win32') {
+      const child = spawn('explorer', [path], { detached: true, stdio: 'ignore' })
+      child.unref()
+    } else if (process.platform === 'darwin') {
+      await execFileAsync('open', [path])
+    } else {
+      const child = spawn('xdg-open', [path], { detached: true, stdio: 'ignore' })
+      child.unref()
+    }
+    return c.json({ ok: true })
+  } catch (e: any) {
+    return c.json({ error: e?.message ?? 'failed to reveal' }, 500)
+  }
+})
   // ── /api/project/open/pick ────────────────────────────────────────────────
   // POST → Finder file picker for a .app, returns { name, path, mode } | { cancelled }
   .post('/api/project/open/pick', async (c) => {
@@ -199,14 +233,14 @@ export const projectRoutes = new Hono()
   }
 })
   // ── /api/project/rename ───────────────────────────────────────────────────
-  // POST { path, name } → rename folder on disk, migrate canvas position
+  // POST { path, name } → rename folder on disk, repoint the registry entry.
+  // The entry's id is stable (UUID), so the canvas position needs no remap.
   .post('/api/project/rename', async (c) => {
   const { path, name } = (await c.req.json()) as { path?: string; name?: string }
   if (!path) return c.json({ error: 'path is required' }, 400)
   if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-  const settings = await getSettings()
   const clean = (name ?? '').trim()
-  const err = validateName(clean, settings.archiveDirName)
+  const err = validateName(clean)
   if (err) return c.json({ error: err }, 400)
 
   const sourceDir = resolve(path)
@@ -225,82 +259,76 @@ export const projectRoutes = new Hono()
 
   try {
     await rename(sourceDir, targetDir)
-    const oldId = projectId(basename(sourceDir))
-    const newId = projectId(clean)
-    if (oldId !== newId) {
-      const canvas = await getCanvas()
-      const pos = canvas.positions[oldId]
-      if (pos) {
-        const positions = { ...canvas.positions }
-        delete positions[oldId]
-        positions[newId] = pos
-        await setCanvas({ ...canvas, positions })
-      }
-    }
-    return c.json({ ok: true, path: targetDir, id: newId })
+    const updated = await updateProjectEntryPath(sourceDir, targetDir)
+    return c.json({ ok: true, path: targetDir, id: updated?.id })
   } catch (e: any) {
     return c.json({ error: e.message ?? 'rename failed' }, 500)
   }
 })
-  // ── /api/project/archive ──────────────────────────────────────────────────
-  // POST { path } → fs.rename into _archive
-  .post('/api/project/archive', async (c) => {
-  const { path } = await c.req.json()
-  if (!path) return c.json({ error: 'path required' }, 400)
-  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-  try {
-    const settings = await getSettings()
-    const newPath = await archiveProject(path, settings)
-    return c.json({ ok: true, path: newPath })
-  } catch (e: any) {
-    return c.json({ error: e.message ?? 'archive failed' }, 500)
-  }
-})
-  // ── /api/project/restore ──────────────────────────────────────────────────
-  // POST { path } → fs.rename out of _archive
-  .post('/api/project/restore', async (c) => {
-  const { path } = await c.req.json()
-  if (!path) return c.json({ error: 'path required' }, 400)
-  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-  try {
-    const settings = await getSettings()
-    const newPath = await restoreProject(path, settings)
-    return c.json({ ok: true, path: newPath })
-  } catch (e: any) {
-    return c.json({ error: e.message ?? 'restore failed' }, 500)
-  }
-})
   // ── /api/project/delete ───────────────────────────────────────────────────
-  // POST { path } → move folder to macOS Trash via JXA / NSFileManager.
-  // NOTE: this route does its OWN root-containment check (target must sit strictly
-  // UNDER projectsRoot, never equal it) rather than validateProjectPath, exactly
-  // as the Next handler did — preserved verbatim. TRASH_JXA is hoisted above.
+  // POST { path } → move folder to the macOS Trash AND unregister it. Only a
+  // registered project (or a path under one) may be deleted — the registry is
+  // the allowlist, enforced via validateProjectPath.
   .post('/api/project/delete', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const path = typeof body?.path === 'string' ? body.path : ''
   if (!path) return c.json({ error: 'path is required' }, 400)
-
-  const settings = await getSettings()
-  const root = settings.projectsRoot ? resolve(settings.projectsRoot) : null
-  const target = resolve(path)
-  if (!root || target === root || !target.startsWith(root + sep)) {
+  if (!(await validateProjectPath(path))) {
     return c.json({ error: 'path not allowed' }, 403)
   }
+  const target = resolve(path)
 
   try {
     await execFileAsync('osascript', ['-l', 'JavaScript', '-e', TRASH_JXA, target], {
       timeout: 30_000,
     })
-    return c.json({ ok: true })
   } catch (e: any) {
     return c.json(
       { error: e?.stderr?.toString().trim() || e?.message || 'delete failed' },
       500,
     )
   }
+
+  // Trashed successfully — drop the registry entry, its canvas position, AND its
+  // central data dir. The folder is already gone, so any in-flight run is dead;
+  // without this the per-project store (~/.openground/projects/<id>/) would
+  // orphan forever under a dead uuid (Export isn't built, so it's unrecoverable).
+  const removed = await removeProjectEntry(target)
+  if (removed) {
+    const canvas = await getCanvas()
+    if (canvas.positions[removed.id]) {
+      const { [removed.id]: _drop, ...rest } = canvas.positions
+      await setCanvas({ ...canvas, positions: rest })
+    }
+    await rm(projectCentralDir(removed.id), { recursive: true, force: true }).catch(() => {})
+  }
+  return c.json({ ok: true })
+})
+  // ── /api/projects/relocate ────────────────────────────────────────────────
+  // POST { id, newPath } → re-point a (typically missing) project at a folder the
+  // user selected, KEEPING its uuid so central data + canvas position reconnect.
+  // The native folder picker is the trust boundary (same as Import), so this is
+  // an allowlist-growing action and does NOT pre-check validateProjectPath.
+  .post('/api/projects/relocate', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const id = typeof body?.id === 'string' ? body.id : ''
+  const newPath = typeof body?.newPath === 'string' ? body.newPath : ''
+  if (!id || !newPath) return c.json({ error: 'id and newPath are required' }, 400)
+  try {
+    const st = await stat(newPath)
+    if (!st.isDirectory()) return c.json({ error: 'not a directory' }, 400)
+  } catch {
+    return c.json({ error: 'folder does not exist' }, 400)
+  }
+  const result = await relocateProjectEntry(id, newPath)
+  if ('rejection' in result) {
+    const status = result.rejection === 'not-found' ? 404 : 409
+    return c.json({ error: result.rejection }, status)
+  }
+  return c.json({ ok: true, id: result.entry.id, path: result.entry.path })
 })
   // ── /api/project/tasks ────────────────────────────────────────────────────
-  // POST { path, add?, markDone?, attachImages?, detachImage? } → mutate task list
+  // POST { path, add?, markDone? } → mutate task list
   .post('/api/project/tasks', async (c) => {
   const body = (await c.req.json()) as TasksBody
   if (!body.path) return c.json({ error: 'path required' }, 400)
@@ -315,81 +343,32 @@ export const projectRoutes = new Hono()
       id: randomUUID(),
       title,
       done: false,
-      milestoneId: null,
       createdAt: new Date().toISOString(),
+      // Every task IS a Board card; readProjectData drops legacy non-board
+      // entries by "no boardColumn", so a new card must always carry one.
+      boardColumn: 'todo',
     }
     data.tasks.push(task)
   }
 
   if (body.markDone?.length) {
     const ids = new Set(body.markDone)
-    data.tasks = data.tasks.map((t) => (ids.has(t.id) ? { ...t, done: true } : t))
-  }
-
-  const attach = body.attachImages
-  if (attach?.taskId && attach.images?.length) {
     data.tasks = data.tasks.map((t) =>
-      t.id === attach.taskId
-        ? { ...t, images: [...(t.images ?? []), ...attach.images] }
-        : t,
+      ids.has(t.id) ? { ...t, done: true, boardColumn: 'done' as BoardColumn } : t,
     )
   }
 
-  const detach = body.detachImage
-  if (detach?.taskId && detach.imageId) {
+  for (const mv of body.setColumn ?? []) {
+    if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) continue
     data.tasks = data.tasks.map((t) =>
-      t.id === detach.taskId
-        ? { ...t, images: (t.images ?? []).filter((im) => im.id !== detach.imageId) }
-        : t,
+      t.id === mv.id ? { ...t, boardColumn: mv.column, done: mv.column === 'done' } : t,
     )
   }
 
-  const saved = await writeProjectData(body.path, data)
-  return c.json(saved)
-})
-  // ── /api/project/task-image ───────────────────────────────────────────────
-  // GET ?path&id → image bytes ; POST ?path&id (raw body) → store ; DELETE ?path&id
-  // (MAX_BYTES hoisted above)
-  .get('/api/project/task-image', async (c) => {
-  const path = c.req.query('path')
-  const id = c.req.query('id')
-  if (!path || !id) return c.json({ error: 'path and id are required' }, 400)
-  if (!isValidImageId(id)) return c.json({ error: 'invalid image id' }, 400)
-  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-
-  const img = await readTaskImage(path, id)
-  if (!img) return c.json({ error: 'image not found' }, 404)
-  return c.body(new Uint8Array(img.data), 200, {
-    'content-type': img.mime,
-    'cache-control': 'private, max-age=31536000, immutable',
+  const saved = await writeProjectData(body.path, data, {
+    expectUpdatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
   })
-})
-  .post('/api/project/task-image', async (c) => {
-  const path = c.req.query('path')
-  const id = c.req.query('id')
-  if (!path || !id) return c.json({ error: 'path and id are required' }, 400)
-  if (!isValidImageId(id)) return c.json({ error: 'invalid image id' }, 400)
-  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-
-  const mime = c.req.header('content-type') ?? ''
-  if (!extForMime(mime)) return c.json({ error: `unsupported image type: ${mime || '(none)'}` }, 400)
-
-  const data = Buffer.from(await c.req.arrayBuffer())
-  if (data.length === 0) return c.json({ error: 'empty image body' }, 400)
-  if (data.length > MAX_BYTES) return c.json({ error: 'image too large' }, 413)
-
-  await writeTaskImage(path, id, mime, data)
-  return c.json({ id, mime })
-})
-  .delete('/api/project/task-image', async (c) => {
-  const path = c.req.query('path')
-  const id = c.req.query('id')
-  if (!path || !id) return c.json({ error: 'path and id are required' }, 400)
-  if (!isValidImageId(id)) return c.json({ error: 'invalid image id' }, 400)
-  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-
-  await deleteTaskImage(path, id)
-  return c.json({ id })
+  return c.json(saved)
 })
   // ── /api/project/canvases ─────────────────────────────────────────────────
   // GET ?path[&id] → list | full CanvasFile
@@ -453,3 +432,33 @@ export const projectRoutes = new Hono()
   const saved = await writeCanvasFile(body.path, canvas)
   return c.json(saved)
 })
+  // ── /api/project/describe ─────────────────────────────────────────────────
+  // POST ?path → auto-generate a project description by briefly running the
+  // local `claude` CLI in the project (read-only). Thin adapter; the
+  // subscription-safe PTY logic lives in generateDescription.ts. Returns
+  // { description } on success; does NOT persist — the UI prefills it into the
+  // editor for the user to review and save.
+  .post('/api/project/describe', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    // Pre-flight: a missing CLI means a doomed run. Surface it as a 503 with a
+    // machine-readable flag so the UI can disable the affordance.
+    const probe = await probeClaudeCli()
+    if (!probe.installed) {
+      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    }
+    try {
+      const pair = await generateProjectDescription(path)
+      const lang = await getPromptLang()
+      // Active-language copy first; fall back to the other so `description`
+      // is never empty when at least one language landed.
+      const description = (lang === 'ja' ? pair.ja : pair.en) ?? pair.en ?? pair.ja ?? ''
+      return c.json({
+        description,
+        ...(pair.ja ? { descriptionJa: pair.ja } : {}),
+        ...(pair.en ? { descriptionEn: pair.en } : {}),
+      })
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'description generation failed' }, 500)
+    }
+  })

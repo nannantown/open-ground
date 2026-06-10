@@ -1,0 +1,273 @@
+import { useEffect, useState, type ReactNode } from 'react'
+import { Trash2, X } from 'lucide-react'
+import { BoardTab } from '@/components/canvas/BoardTab'
+import { newId } from '@/lib/ids'
+import { api } from '@/lib/api-client'
+import type { BoardColumn, ProjectData, ProjectMeta, ProjectTask, Settings } from '@/lib/types'
+import { useT } from '@/i18n/I18nContext'
+import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
+
+// The Board tab as a self-contained module (Phase D — render extraction).
+// Owns: the kanban (BoardTab), board-native card creation, and the in-tab
+// detail drawer (title/notes edit + the injected conversation pane). It depends
+// on ProjectPanel only through this explicit prop surface — the seam a future
+// pluggable-Ground contract formalizes.
+export interface BoardModuleProps {
+  data: ProjectData
+  project: ProjectMeta
+  persist: (next: ProjectData) => void
+  /** Which card's detail drawer is open (lifted to ProjectPanel so it survives
+   *  this module unmounting on tab switch). */
+  detailId: string | null
+  onOpenDetail: (id: string | null) => void
+  /** Inject the per-card conversation pane (the claude terminal launcher). */
+  renderConversation: (task: ProjectTask, onClose: () => void) => ReactNode
+  /** True when the task already has a Terminal-tab slot (a launched claude
+   *  session) — such a card is "touched" and must survive drawer close. */
+  hasTerminalSlot: (taskId: string) => boolean
+  /** Delete a card with full teardown (close its terminal slot, remove from
+   *  tasks.json). Rendered in the drawer header, not the conversation pane. */
+  onDeleteTask: (id: string) => void
+}
+
+export const BoardModule = ({
+  data,
+  project,
+  persist,
+  detailId,
+  onOpenDetail,
+  renderConversation,
+  hasTerminalSlot,
+  onDeleteTask,
+}: BoardModuleProps) => {
+  const { t } = useT()
+  // The user's display name (Settings.displayName) — feeds the drawer's "Me"
+  // button and the toolbar's "Mine only" filter. The module doesn't receive
+  // Settings from the panel, so fetch it lazily once per mount (cheap local
+  // GET); unset/failed just hides both affordances.
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    api.api.settings
+      .$get()
+      .then(r => r.json() as Promise<Settings>)
+      .then(s => {
+        if (!cancelled) setDisplayName(s.displayName?.trim() || null)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  // "+ Add" inline input for a brand-new assignee name; closed whenever the
+  // drawer switches cards so a half-typed name never leaks across tasks.
+  const [addingAssignee, setAddingAssignee] = useState(false)
+  useEffect(() => setAddingAssignee(false), [detailId])
+  const detailTask = detailId ? data.tasks.find(t => t.id === detailId) : null
+  const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>
+    persist({
+      ...data,
+      tasks: data.tasks.map(t => (t.id === task.id ? { ...t, ...patch } : t)),
+    })
+
+  // A just-created card the user opened but never filled in: no title, no memo,
+  // no launched terminal. Closing the drawer on such a card discards it, so
+  // "Add a card" → open drawer → change-your-mind doesn't litter empty cards
+  // (mirrors the old inline editor, which dropped an unnamed card on blur).
+  const isUntouchedEmpty = (task: ProjectTask): boolean =>
+    !task.title.trim() &&
+    !(task.notes ?? '').trim() &&
+    !hasTerminalSlot(task.id)
+  const closeDrawer = () => {
+    if (detailTask && isUntouchedEmpty(detailTask))
+      persist({ ...data, tasks: data.tasks.filter(t => t.id !== detailTask.id) })
+    onOpenDetail(null)
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1">
+        <BoardTab
+          data={data}
+          onPersist={persist}
+          openTaskId={detailId}
+          // Board self-contained (P1): open the card's conversation in an
+          // in-tab drawer.
+          onOpenTask={id => onOpenDetail(id)}
+          // Board self-contained (Phase A): author plan cards right here.
+          // "Add a card" creates the card immediately with an EMPTY title and
+          // returns its id; the Board then OPENS ITS DETAIL DRAWER so the user
+          // types the title in a roomy field (an untouched card is discarded on
+          // close — see isUntouchedEmpty).
+          onCreateTask={(column: BoardColumn) => {
+            const task: ProjectTask = {
+              id: newId(),
+              title: '',
+              done: false,
+              createdAt: new Date().toISOString(),
+              boardColumn: column,
+            }
+            persist({ ...data, tasks: [...data.tasks, task] })
+            return task.id
+          }}
+          projectMissing={project.missing}
+          projectId={project.id}
+          displayName={displayName}
+        />
+      </div>
+      {detailTask && (
+        <aside className="flex w-[560px] max-w-[55%] shrink-0 flex-col border-l border-line">
+          {/* Header — delete (left) + close (right). The title is a labelled
+              field below so it reads the same as the memo. Delete sits here, an
+              anchored header action, instead of floating in the conversation
+              pane (whose own delete is hidden via hideDelete). */}
+          <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-5 py-2">
+            <button
+              type="button"
+              onClick={() => {
+                onDeleteTask(detailTask.id)
+                onOpenDetail(null)
+              }}
+              title={t('projectPanel.deleteTask')}
+              aria-label={t('projectPanel.deleteTask')}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-accent/10 hover:text-accent"
+            >
+              <Trash2 size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={closeDrawer}
+              title={t('common.close')}
+              aria-label={t('common.close')}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink"
+            >
+              <X size={15} />
+            </button>
+          </div>
+          {/* The two kept fields: the task itself (title) + a free memo that
+              does NOT affect the run. Both labelled, same styling. */}
+          <div className="shrink-0 space-y-3 border-b border-line-soft px-5 py-3">
+            <div>
+              <label className="mb-1 block label-cap text-ink-faint">{t('board.detail.titleLabel')}</label>
+              <input
+                key={detailTask.id}
+                // Focus the title for a freshly-created (untitled) card so the
+                // user can type immediately — "Add a card" opens here, not on
+                // the cramped card.
+                autoFocus={!detailTask.title.trim()}
+                defaultValue={detailTask.title}
+                onBlur={e => {
+                  const v = e.target.value.trim()
+                  if (v && v !== detailTask.title) patchTask(detailTask, { title: v })
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') e.currentTarget.blur()
+                }}
+                placeholder={t('board.detail.titlePlaceholder')}
+                className="w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block label-cap text-ink-faint">{t('board.detail.notesLabel')}</label>
+              <textarea
+                key={detailTask.id + ':notes'}
+                defaultValue={detailTask.notes ?? ''}
+                onBlur={e => {
+                  const v = e.target.value
+                  if (v !== (detailTask.notes ?? ''))
+                    patchTask(detailTask, { notes: v || undefined })
+                }}
+                placeholder={t('board.detail.notesPlaceholder')}
+                rows={3}
+                className="w-full resize-y rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+              />
+            </div>
+            {/* Assignee — a chip picker, no free-floating input (the old
+                input+chips combo left "what do I do next?" unanswered).
+                Click a chip to assign; click the selected chip to unassign;
+                "+ Add" opens a small inline input (Enter or the Add button
+                commits, Esc cancels): the name is REGISTERED into the shared
+                member list (config.members — deletable in project settings)
+                and assigned to this card, so every card offers it from now
+                on. */}
+            <div>
+              <label className="mb-1 block label-cap text-ink-faint">
+                {t('board.detail.assigneeLabel')}
+              </label>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {assigneeCandidates(data, displayName, detailTask.assignee).map(name => {
+                  const active =
+                    (detailTask.assignee ?? '').trim().toLowerCase() === name.toLowerCase()
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() =>
+                        patchTask(detailTask, { assignee: active ? undefined : name })
+                      }
+                      title={active ? t('board.detail.assigneeUnassign') : t('board.detail.assigneeAssign', { name })}
+                      aria-pressed={active}
+                      className={
+                        active
+                          ? 'shrink-0 rounded-sm border border-accent bg-accent px-2.5 py-1 text-[11px] text-bg-card transition-colors hover:bg-accent/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                          : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                      }
+                    >
+                      {name}
+                    </button>
+                  )
+                })}
+                {addingAssignee ? (
+                  <span className="flex items-center gap-1">
+                    <input
+                      autoFocus
+                      defaultValue=""
+                      placeholder={t('board.detail.assigneeAddPlaceholder')}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                          const v = e.currentTarget.value.trim()
+                          // Register into the shared member list AND assign —
+                          // the name is now a chip on EVERY card.
+                          if (v) persist(withRegisteredAssignee(data, detailTask.id, v))
+                          setAddingAssignee(false)
+                        } else if (e.key === 'Escape') {
+                          setAddingAssignee(false)
+                        }
+                      }}
+                      className="w-28 rounded-[3px] border border-accent bg-bg px-2 py-1 text-[12px] text-ink placeholder:text-ink-faint focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onMouseDown={e => {
+                        // commit BEFORE the input's blur (mousedown fires first)
+                        e.preventDefault()
+                        const input = e.currentTarget.previousElementSibling as HTMLInputElement | null
+                        const v = input?.value.trim() ?? ''
+                        if (v) persist(withRegisteredAssignee(data, detailTask.id, v))
+                        setAddingAssignee(false)
+                      }}
+                      className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {t('board.detail.assigneeAddConfirm')}
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setAddingAssignee(true)}
+                    className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    {t('board.detail.assigneeAdd')}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col">
+            {renderConversation(detailTask, () => onOpenDetail(null))}
+          </div>
+        </aside>
+      )}
+    </div>
+  )
+}

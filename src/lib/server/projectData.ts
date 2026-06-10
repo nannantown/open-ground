@@ -1,37 +1,72 @@
-import { mkdir, readFile, rename, stat, realpath } from 'fs/promises'
-import { basename, dirname, join, resolve, sep } from 'path'
-import type { ProjectData, Settings } from '../types'
-import { getSettings } from './store'
-import { atomicWriteJson } from './atomicWrite'
-import { pruneTaskImages } from './taskImages'
-import { ensureOpenGroundProjectDir } from './projectMigration'
+import { mkdir, readFile, readdir, unlink } from 'fs/promises'
+import { join } from 'path'
+import type { BoardColumn, ProjectConfig, ProjectData, ProjectTask } from '../types'
+import { atomicWriteJson, atomicWriteText } from './atomicWrite'
+import { isValidProjectPath, projectDataDir, projectDataFile } from './projectDataPath'
+import { ProjectDataSchema, ProjectTaskSchema } from '../schemas'
 import {
-  ProjectDataSchema,
-  ProjectTaskSchema,
-  ProjectMilestoneSchema,
-  GoalSchema,
-} from '../schemas'
+  SHARED_DATA_VERSION,
+  boardCardsDir,
+  boardNotesPath,
+  isShared,
+  readSharedMarker,
+  writeSharedMarker,
+} from './sharedData'
 
-const DATA_FILE = '.openground/tasks.json'
+const TASKS_FILE = 'tasks.json'
 
 const empty = (): ProjectData => ({
   description: '',
   tasks: [],
-  milestones: [],
-  // Phase 6: Goals live alongside tasks/milestones in the same tasks.json.
-  // Optional in the type so legacy files (missing the field) still load —
-  // the `...empty(), ...parsed` spread in readProjectData ensures this
-  // field is always defined after read.
-  goals: [],
   notes: '',
   updatedAt: new Date().toISOString(),
 })
 
-export const readProjectData = async (projectPath: string): Promise<ProjectData> => {
-  await ensureOpenGroundProjectDir(projectPath)
+// Tasks are Board cards — the only task kind that survives. Legacy disk data
+// may still carry the old `kind` discriminator ('board' | 'chat' | 'assistant')
+// or kind-less entries from before the split. Filter on the RAW parsed JSON
+// (before zod strips unknown keys like `kind`):
+//   - kind === 'board'                     → keep
+//   - kind absent AND has a boardColumn    → legacy board card → keep
+//   - everything else (chat / assistant / kind-less without boardColumn) → DROP
+// No migration write — the dropped items simply vanish on the next save.
+// Local single-user tool; old chats live on in claude's own JSONL logs.
+const isLegacyBoardCard = (t: unknown): boolean => {
+  if (!t || typeof t !== 'object') return true // let the schema decide
+  const o = t as Record<string, unknown>
+  if (o.kind === 'board') return true
+  return o.kind == null && o.boardColumn != null
+}
+
+const dropLegacyNonBoardTasks = (parsed: unknown): unknown => {
+  if (!parsed || typeof parsed !== 'object') return parsed
+  const obj = parsed as Record<string, unknown>
+  if (!Array.isArray(obj.tasks)) return parsed
+  const tasks = obj.tasks.filter(isLegacyBoardCard).map(t => {
+    // A legacy kind:'board' card might lack boardColumn (the schema strips
+    // `kind`, so without a column it would read as "legacy chat" on the NEXT
+    // load and silently vanish). Materialize the column once here so a kept
+    // card stays a board card across write cycles.
+    if (!t || typeof t !== 'object') return t
+    const o = t as Record<string, unknown>
+    if (o.boardColumn != null) return t
+    return { ...o, boardColumn: o.done === true ? 'done' : 'todo' }
+  })
+  return { ...obj, tasks }
+}
+
+// Read the CENTRAL tasks.json (~/.openground/projects/<uuid>/tasks.json).
+// This is the whole story in normal mode; in git-shared mode it still holds
+// the PERSONAL fields (tabOrder, updatedAt) plus a stale backup of the shared
+// ones (the marker decides the live source — see readProjectData).
+const readCentralProjectData = async (projectPath: string): Promise<ProjectData> => {
+  // Resolve the central file path OUTSIDE the try: an unregistered path throws
+  // loud (a real bug — every route here has passed validateProjectPath), while a
+  // genuinely-missing file (registered, no data yet) falls through to empty().
+  const file = await projectDataFile(projectPath, TASKS_FILE)
   let rawText: string
   try {
-    rawText = await readFile(join(projectPath, DATA_FILE), 'utf8')
+    rawText = await readFile(file, 'utf8')
   } catch {
     return empty()
   }
@@ -46,14 +81,16 @@ export const readProjectData = async (projectPath: string): Promise<ProjectData>
     console.warn(`[projectData] tasks.json is not valid JSON at ${projectPath}`)
     return empty()
   }
+  // Silently drop legacy chat/assistant tasks BEFORE schema validation (the
+  // schema strips the legacy `kind` key, so the filter must see the raw JSON).
+  parsed = dropLegacyNonBoardTasks(parsed)
   // Schema-validate. When validation fails (claude wrote a half-formed
   // entry, an old format we didn't migrate, etc) we DON'T just return
   // empty — that would wipe the user's task list from their POV.
   // Instead we shallow-merge with empty() so missing/invalid sections
   // get sane defaults, and the per-field schema fields that DID validate
-  // get preserved. This matches the prior behaviour of `{ ...empty(),
-  // ...parsed }` but with a final schema pass to fix obvious wrong-shape
-  // fields (e.g. milestones: null → milestones: []).
+  // get preserved. Legacy fields the schema no longer knows (milestones,
+  // goals, kind, milestoneId) are stripped here and vanish on next write.
   const validated = ProjectDataSchema.safeParse(parsed)
   if (validated.success) {
     return { ...empty(), ...validated.data }
@@ -80,52 +117,373 @@ export const readProjectData = async (projectPath: string): Promise<ProjectData>
   return {
     description: typeof obj.description === 'string' ? obj.description : '',
     tasks: filterValid(obj.tasks, ProjectTaskSchema) as ProjectData['tasks'],
-    milestones: filterValid(obj.milestones, ProjectMilestoneSchema) as ProjectData['milestones'],
-    goals: filterValid(obj.goals, GoalSchema) as NonNullable<ProjectData['goals']>,
+    tabOrder: Array.isArray(obj.tabOrder)
+      ? obj.tabOrder.filter((x): x is string => typeof x === 'string')
+      : undefined,
     notes: typeof obj.notes === 'string' ? obj.notes : '',
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
   }
 }
 
-// Phase 6.E — automatic Goal status derivation from milestone children.
-// Runs on every write so the GoalsTab and dashboard never go stale.
-// Rules:
-//   - all milestones verified → 'done'
-//   - any milestone blocked   → 'blocked'
-//   - any in_progress/verifying → 'running'
-//   - otherwise → keep the existing status (draft / planning preserved)
-const reconcileGoalStatuses = (data: ProjectData): ProjectData => {
-  const goals = data.goals
-  if (!goals || goals.length === 0) return data
-  const next = goals.map(g => {
-    const ms = data.milestones.filter(m => m.goalId === g.id)
-    if (ms.length === 0) return g
-    const allVerified = ms.every(m => m.status === 'verified')
-    const anyBlocked = ms.some(m => m.status === 'blocked')
-    const anyRunning = ms.some(
-      m => m.status === 'in_progress' || m.status === 'verifying',
-    )
-    let derived = g.status
-    if (allVerified) derived = 'done'
-    else if (anyBlocked) derived = 'blocked'
-    else if (anyRunning) derived = 'running'
-    // else: leave existing status alone (draft / planning are user-driven)
-    if (derived === g.status) return g
-    return { ...g, status: derived, updatedAt: new Date().toISOString() }
-  })
-  return { ...data, goals: next }
+// ── Git-shared mode (".openground/" inside the repo) ─────────────────────────
+// When the repo carries a parseable .openground/openground.json marker, the
+// SHARED fields live in the repo (one card file per task + notes.md + the
+// marker's description) and only the PERSONAL fields (tabOrder, updatedAt)
+// stay in the central tasks.json. The public readProjectData/writeProjectData
+// API is unchanged — callers never know which mode a project is in. See
+// docs/SHARED_DATA_PLAN.md.
+
+// A card's file name is its task id. Task ids are crypto.randomUUID() from our
+// own routes, but a claude session (or a teammate's hand edit) could invent
+// one — never let an id traverse out of board/cards/.
+const isSafeCardId = (id: string): boolean => /^[A-Za-z0-9._-]+$/.test(id) && id !== '.' && id !== '..'
+
+// Stable on-disk shape: fixed key order, undefined keys omitted — so the
+// "did it change?" diff (and git itself) never churns on key reordering.
+const normalizeCard = (t: ProjectTask): ProjectTask => ({
+  id: t.id,
+  title: t.title,
+  ...(t.notes !== undefined ? { notes: t.notes } : {}),
+  done: t.done,
+  createdAt: t.createdAt,
+  ...(t.boardColumn !== undefined ? { boardColumn: t.boardColumn } : {}),
+  ...(t.boardOrder !== undefined ? { boardOrder: t.boardOrder } : {}),
+})
+
+const serializeCard = (t: ProjectTask): string => JSON.stringify(normalizeCard(t), null, 2)
+
+// Deterministic read order for cards composed from a directory listing
+// (readdir order is filesystem-dependent): column → boardOrder → createdAt →
+// id. Mirrors the Board UI's columnOf/byColumnOrder (BoardTab.tsx), with id as
+// the final total-order tiebreak.
+const COLUMN_RANK: Record<BoardColumn, number> = { todo: 0, doing: 1, review: 2, done: 3, blocked: 4 }
+const columnRank = (t: ProjectTask): number =>
+  COLUMN_RANK[t.boardColumn ?? (t.done ? 'done' : 'todo')]
+const byBoardPosition = (a: ProjectTask, b: ProjectTask): number => {
+  const col = columnRank(a) - columnRank(b)
+  if (col !== 0) return col
+  const ao = a.boardOrder
+  const bo = b.boardOrder
+  if (ao != null && bo != null && ao !== bo) return ao - bo
+  if (ao != null && bo == null) return -1
+  if (ao == null && bo != null) return 1
+  if ((a.createdAt || '') !== (b.createdAt || '')) return (a.createdAt || '') < (b.createdAt || '') ? -1 : 1
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 }
 
-export const writeProjectData = async (projectPath: string, data: ProjectData) => {
-  await ensureOpenGroundProjectDir(projectPath)
-  await mkdir(join(projectPath, '.openground'), { recursive: true })
-  const reconciled = reconcileGoalStatuses(data)
-  const next = { ...reconciled, updatedAt: new Date().toISOString() }
-  await atomicWriteJson(join(projectPath, DATA_FILE), next)
-  // Reclaim image files no surviving task references (best-effort, never throws).
-  await pruneTaskImages(projectPath, next)
-  return next
+// One ProjectTask per file under .openground/board/cards/. A corrupt or
+// schema-invalid file is SKIPPED (warn + keep the file on disk for the user /
+// git to recover) — a teammate's bad merge must never nuke the whole board.
+// Missing dir = no tasks (fresh share, or notes-only board).
+const readSharedBoardTasks = async (projectPath: string): Promise<ProjectTask[]> => {
+  const dir = boardCardsDir(projectPath)
+  let files: string[]
+  try {
+    files = (await readdir(dir)).filter((f) => f.endsWith('.json'))
+  } catch {
+    return []
+  }
+  const tasks: ProjectTask[] = []
+  for (const f of files) {
+    try {
+      const raw: unknown = JSON.parse(await readFile(join(dir, f), 'utf8'))
+      const r = ProjectTaskSchema.safeParse(raw)
+      if (r.success) {
+        tasks.push(r.data)
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[projectData] shared board card ${f} failed schema validation at ${projectPath} — skipped`)
+      }
+    } catch {
+      // eslint-disable-next-line no-console
+      console.warn(`[projectData] shared board card ${f} is not valid JSON at ${projectPath} — skipped`)
+    }
+  }
+  return tasks.sort(byBoardPosition)
 }
+
+const readSharedNotes = async (projectPath: string): Promise<string> => {
+  try {
+    return await readFile(boardNotesPath(projectPath), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+export const readProjectData = async (projectPath: string): Promise<ProjectData> => {
+  // Central read FIRST in both modes: it routes through projectDataPath, so an
+  // unregistered path throws loud here before we touch any repo files. In
+  // shared mode it supplies the personal fields; a missing central file (fresh
+  // clone on a new machine) just yields empty() = no tabOrder yet.
+  const central = await readCentralProjectData(projectPath)
+  if (!(await isShared(projectPath))) return central
+  const [marker, tasks, notes] = await Promise.all([
+    readSharedMarker(projectPath),
+    readSharedBoardTasks(projectPath),
+    readSharedNotes(projectPath),
+  ])
+  return {
+    description: marker?.description ?? '',
+    ...(marker?.descriptionJa ? { descriptionJa: marker.descriptionJa } : {}),
+    ...(marker?.descriptionEn ? { descriptionEn: marker.descriptionEn } : {}),
+    tasks,
+    ...(central.tabOrder !== undefined ? { tabOrder: central.tabOrder } : {}),
+    // Shared policy rides the marker; personal launch prefs stay central.
+    ...(marker?.config ? { config: parseSharedConfig(marker.config) } : {}),
+    ...(central.launch !== undefined ? { launch: central.launch } : {}),
+    notes,
+    updatedAt: central.updatedAt,
+  }
+}
+
+// Validate a marker's raw config blob into ProjectConfig (drop junk fields /
+// wrong types — a hand-edited marker must never crash the read).
+const parseSharedConfig = (raw: Record<string, unknown>): ProjectConfig => {
+  const out: ProjectConfig = {}
+  if (raw.completionFlow === 'merge' || raw.completionFlow === 'pr') out.completionFlow = raw.completionFlow
+  if (typeof raw.targetBranch === 'string') out.targetBranch = raw.targetBranch
+  if (Array.isArray(raw.verifyCommands)) {
+    out.verifyCommands = raw.verifyCommands.filter((c): c is string => typeof c === 'string')
+  }
+  if (typeof raw.reviewColumn === 'boolean') out.reviewColumn = raw.reviewColumn
+  if (Array.isArray(raw.members)) {
+    out.members = raw.members.filter((m): m is string => typeof m === 'string')
+  }
+  return out
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __openground_board_writes: Map<string, Promise<unknown>> | undefined
+}
+
+// Per-project serial queue for SHARED board writes (and the share migrations).
+// The shared write is a read-diff-write across many files (card files + notes
+// + marker + central personal fields); two concurrent writes interleaving
+// could resurrect a just-deleted card file. The central-only path stays a
+// single atomic whole-file write and is NOT queued — exactly as before. Same
+// shape as canvasData's index queue; survives tsx-watch reloads via globalThis.
+const boardWriteQueue: Map<string, Promise<unknown>> =
+  globalThis.__openground_board_writes ??
+  (globalThis.__openground_board_writes = new Map())
+
+const withBoardLock = <T>(projectPath: string, fn: () => Promise<T>): Promise<T> => {
+  const prev = boardWriteQueue.get(projectPath) ?? Promise.resolve()
+  const myRun = prev.then(fn)
+  // Keep the queue advancing even if one op throws.
+  boardWriteQueue.set(projectPath, myRun.catch(() => undefined))
+  return myRun
+}
+
+// Write the SHARED side of a ProjectData into the repo: diff card files (write
+// changed/new, unlink removed), notes.md only when changed, marker description
+// preserving an existing marker's version (creating the marker only when
+// `ensureMarker` — writeProjectData must never flip an unshared repo into
+// shared mode; only the migration does). Caller holds the board lock.
+const writeSharedBoard = async (
+  projectPath: string,
+  data: Pick<ProjectData, 'description' | 'descriptionJa' | 'descriptionEn' | 'config' | 'tasks' | 'notes'>,
+  opts?: { ensureMarker?: boolean; ensureNotesFile?: boolean },
+): Promise<void> => {
+  const cardsDir = boardCardsDir(projectPath)
+  await mkdir(cardsDir, { recursive: true })
+  let existing: string[] = []
+  try {
+    existing = (await readdir(cardsDir)).filter((f) => f.endsWith('.json'))
+  } catch {}
+  const nextById = new Map<string, ProjectTask>()
+  for (const t of data.tasks) {
+    if (!isSafeCardId(t.id)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[projectData] task id ${JSON.stringify(t.id)} is not a safe file name — not written to the shared board at ${projectPath}`)
+      continue
+    }
+    nextById.set(t.id, t)
+  }
+  // Write changed/new cards. Skip-if-identical keeps git (and mtimes) quiet
+  // when e.g. only the notes changed.
+  for (const [id, task] of Array.from(nextById.entries())) {
+    const file = join(cardsDir, `${id}.json`)
+    const serialized = serializeCard(task)
+    let current: string | null = null
+    try {
+      current = await readFile(file, 'utf8')
+    } catch {}
+    if (current !== serialized) await atomicWriteText(file, serialized)
+  }
+  // Unlink removed cards' files.
+  for (const f of existing) {
+    const id = f.slice(0, -'.json'.length)
+    if (!nextById.has(id)) await unlink(join(cardsDir, f)).catch(() => {})
+  }
+  // notes.md — plain utf-8 markdown; write only when changed (a missing file
+  // reads as '', so an empty-notes board doesn't churn the file — except the
+  // migration, which materializes it so the shared layout is complete).
+  let currentNotes: string | null = null
+  try {
+    currentNotes = await readFile(boardNotesPath(projectPath), 'utf8')
+  } catch {}
+  if ((currentNotes ?? '') !== data.notes || (opts?.ensureNotesFile && currentNotes === null)) {
+    await atomicWriteText(boardNotesPath(projectPath), data.notes)
+  }
+  // Marker description (the Ground card's one-liner travels with the repo).
+  // Preserve an existing marker's version — never downgrade a newer share.
+  const marker = await readSharedMarker(projectPath)
+  const descFields = {
+    description: data.description,
+    ...(data.descriptionJa !== undefined ? { descriptionJa: data.descriptionJa } : {}),
+    ...(data.descriptionEn !== undefined ? { descriptionEn: data.descriptionEn } : {}),
+    ...(data.config !== undefined ? { config: data.config as Record<string, unknown> } : {}),
+  }
+  if (marker) {
+    if (
+      (marker.description ?? '') !== data.description ||
+      marker.descriptionJa !== data.descriptionJa ||
+      marker.descriptionEn !== data.descriptionEn ||
+      (data.config !== undefined &&
+        JSON.stringify(marker.config ?? null) !== JSON.stringify(data.config))
+    ) {
+      await writeSharedMarker(projectPath, { ...marker, ...descFields })
+    }
+  } else if (opts?.ensureMarker) {
+    await writeSharedMarker(projectPath, { version: SHARED_DATA_VERSION, ...descFields })
+  }
+}
+
+/** Thrown by {@link writeProjectData} when the caller's snapshot is stale —
+ *  the store was written (by another window, another client, or a git pull
+ *  reflected through a later read) after the caller last read it. The route
+ *  maps this to HTTP 409; the client reloads instead of clobbering. Born from
+ *  a real incident: a second window holding a PRE-share empty board persisted
+ *  it and wiped the shared card files of a freshly-shared project. */
+export class ProjectDataConflictError extends Error {
+  constructor(readonly currentUpdatedAt: string | undefined) {
+    super('project data conflict: store changed since the caller last read it')
+    this.name = 'ProjectDataConflictError'
+  }
+}
+
+/** Strictly-monotonic write stamp. `updatedAt` doubles as the CAS token, and
+ *  ISO strings only carry millisecond resolution — two writes inside the same
+ *  ms would mint IDENTICAL tokens and let a stale third writer slip past the
+ *  compare. Bump past the stored stamp when the clock hasn't moved. */
+const nextUpdatedAt = (current: string | undefined): string => {
+  const now = Date.now()
+  const cur = current ? Date.parse(current) : NaN
+  return new Date(Number.isFinite(cur) && cur >= now ? cur + 1 : now).toISOString()
+}
+
+/** The CAS token lives in the CENTRAL tasks.json's `updatedAt` in BOTH modes
+ *  (shared writes bump it too — it's the personal-fields holder). Missing /
+ *  unreadable file ⇒ undefined ⇒ first write always passes. */
+const storedUpdatedAt = async (dir: string): Promise<string | undefined> => {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(dir, TASKS_FILE), 'utf8'))
+    const v = (parsed as { updatedAt?: unknown } | null)?.updatedAt
+    return typeof v === 'string' ? v : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export const writeProjectData = async (
+  projectPath: string,
+  data: ProjectData,
+  opts?: {
+    /** Compare-and-swap guard: the `updatedAt` the caller last READ. When set
+     *  and the store currently holds a DIFFERENT updatedAt, the write is
+     *  refused with {@link ProjectDataConflictError}. Omit for trusting
+     *  callers (migrations, server-side read-modify-write under the lock). */
+    expectUpdatedAt?: string
+  },
+) => {
+  // Resolve the central dir FIRST in both modes — it is the registry check
+  // (throws on an unregistered path) and shared mode needs it anyway.
+  const dir = await projectDataDir(projectPath)
+  await mkdir(dir, { recursive: true })
+  const checkCas = async (): Promise<void> => {
+    if (opts?.expectUpdatedAt === undefined) return
+    const current = await storedUpdatedAt(dir)
+    if (current !== undefined && current !== opts.expectUpdatedAt) {
+      throw new ProjectDataConflictError(current)
+    }
+  }
+  if (!(await isShared(projectPath))) {
+    // Normal mode: the pre-share single-file write, under the same per-project
+    // lock when (and only when) a CAS check rides along — the compare and the
+    // write must be atomic against a concurrent writer.
+    const write = async () => {
+      await checkCas()
+      const next = { ...data, updatedAt: nextUpdatedAt(await storedUpdatedAt(dir)) }
+      await atomicWriteJson(join(dir, TASKS_FILE), next)
+      return next
+    }
+    return opts?.expectUpdatedAt !== undefined ? withBoardLock(projectPath, write) : write()
+  }
+  return withBoardLock(projectPath, async () => {
+    await checkCas()
+    const now = nextUpdatedAt(await storedUpdatedAt(dir))
+    await writeSharedBoard(projectPath, data)
+    // Personal fields stay central. Keep whatever shared-fields backup the
+    // central file holds from the enable migration (the marker decides the
+    // live source); only tabOrder/updatedAt move.
+    let centralRaw: Record<string, unknown>
+    try {
+      const parsed: unknown = JSON.parse(await readFile(join(dir, TASKS_FILE), 'utf8'))
+      centralRaw = parsed && typeof parsed === 'object' ? { ...(parsed as Record<string, unknown>) } : {}
+    } catch {
+      centralRaw = { description: '', tasks: [], notes: '' }
+    }
+    delete centralRaw.tabOrder
+    if (data.tabOrder !== undefined) centralRaw.tabOrder = data.tabOrder
+    delete centralRaw.launch
+    if (data.launch !== undefined) centralRaw.launch = data.launch
+    centralRaw.updatedAt = now
+    await atomicWriteJson(join(dir, TASKS_FILE), centralRaw)
+    return { ...data, updatedAt: now }
+  })
+}
+
+// ── Share migrations (called by the enable/disable routes) ──────────────────
+
+// central → repo: split tasks.json into one card file per task + notes.md, and
+// carry the description into the marker. Creates the marker (version
+// SHARED_DATA_VERSION) if absent, PRESERVES an existing one's version — the
+// canvas migration also ensures the marker, so this must be idempotent and
+// merge-safe in either order. The central file is left in place as a stale
+// backup (the marker decides the live source from now on).
+export const migrateBoardToShared = (projectPath: string): Promise<void> =>
+  withBoardLock(projectPath, async () => {
+    const central = await readCentralProjectData(projectPath)
+    await writeSharedBoard(projectPath, central, { ensureMarker: true, ensureNotesFile: true })
+  })
+
+// repo → central: fold the shared files back into the central tasks.json
+// (overwriting its tasks/notes/description backup) while KEEPING the central
+// personal fields. Does NOT delete .openground/ — the disable route does that.
+// No-op when the project isn't actually shared (defensive: overwriting central
+// with an empty board because a route raced disable would lose data).
+export const migrateBoardFromShared = (projectPath: string): Promise<ProjectData> =>
+  withBoardLock(projectPath, async () => {
+    const central = await readCentralProjectData(projectPath)
+    const marker = await readSharedMarker(projectPath)
+    if (!marker) return central
+    const [tasks, notes] = await Promise.all([
+      readSharedBoardTasks(projectPath),
+      readSharedNotes(projectPath),
+    ])
+    const next: ProjectData = {
+      description: marker.description ?? '',
+      tasks,
+      ...(central.tabOrder !== undefined ? { tabOrder: central.tabOrder } : {}),
+      notes,
+      updatedAt: new Date().toISOString(),
+    }
+    const dir = await projectDataDir(projectPath)
+    await mkdir(dir, { recursive: true })
+    await atomicWriteJson(join(dir, TASKS_FILE), next)
+    return next
+  })
 
 export const taskCounts = (data: ProjectData) => {
   const total = data.tasks.length
@@ -133,75 +491,16 @@ export const taskCounts = (data: ProjectData) => {
   return { total, open }
 }
 
-// Canonicalize a path by resolving symlinks. `resolve()` only collapses `..`
-// lexically — it does NOT follow symlinks — so a symlink sitting inside
-// projectsRoot but pointing OUTSIDE it would pass a naive prefix check and let
-// fs ops (and `claude --dangerously-skip-permissions`) escape the sandbox. We
-// realpath the nearest existing ancestor and re-append the not-yet-created
-// tail, so creation flows still work while existing symlinks are fully
-// resolved. ENOENT walks up; any other error falls back to the lexical path.
-const canonicalize = async (p: string): Promise<string> => {
-  let cur = resolve(p)
-  const tail: string[] = []
-  for (;;) {
-    try {
-      const real = await realpath(cur)
-      return tail.length ? join(real, ...tail.reverse()) : real
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') return cur
-      const parent = dirname(cur)
-      if (parent === cur) return resolve(p) // hit the fs root, nothing real
-      tail.push(basename(cur))
-      cur = parent
-    }
-  }
-}
-
 // Security boundary (CONTRACT §3.3): the resolved-and-canonicalized path must
-// sit at or under projectsRoot. Symlinks are followed (see canonicalize) so a
-// symlink can't be used to escape the root.
-export const validateProjectPath = async (projectPath: string): Promise<boolean> => {
-  const settings = await getSettings()
-  if (!settings.projectsRoot) return false
-  const target = await canonicalize(projectPath)
-  const root = await canonicalize(settings.projectsRoot)
-  return target === root || target.startsWith(root + sep)
-}
-
-const ensureDir = (p: string) => mkdir(p, { recursive: true })
-
-export const archiveProject = async (projectPath: string, settings: Settings) => {
-  if (!settings.projectsRoot) throw new Error('projectsRoot not set')
-  const root = resolve(settings.projectsRoot)
-  const archiveDir = join(root, settings.archiveDirName)
-  await ensureDir(archiveDir)
-  const name = projectPath.split(sep).pop()!
-  const target = join(archiveDir, name)
-  try {
-    await stat(target)
-    throw new Error(`A project named "${name}" already exists in archive`)
-  } catch (e: any) {
-    if (e.code !== 'ENOENT' && !e.message?.includes('already exists')) {
-      // not the "no exists" check
-    }
-    if (e.message?.includes('already exists')) throw e
-  }
-  await rename(projectPath, target)
-  return target
-}
-
-export const restoreProject = async (projectPath: string, settings: Settings) => {
-  if (!settings.projectsRoot) throw new Error('projectsRoot not set')
-  const root = resolve(settings.projectsRoot)
-  const name = projectPath.split(sep).pop()!
-  const target = join(root, name)
-  try {
-    await stat(target)
-    throw new Error(`A project named "${name}" already exists at the root`)
-  } catch (e: any) {
-    if (e.message?.includes('already exists')) throw e
-  }
-  await ensureDir(dirname(target))
-  await rename(projectPath, target)
-  return target
-}
+// sit AT or UNDER one of the registered projects, OR under that project's
+// central worktrees dir (~/.openground/projects/<uuid>/worktrees/). The registry
+// (Settings.projects) is the allowlist — it can only grow via explicit user
+// action (Create new / Import existing folder). Symlinks are followed (see
+// canonicalize) so a symlink can't be used to escape a registered root.
+//
+// The full predicate (incl. the central-worktree arm, the UUID-from-registry-
+// only rule and the bare-data-root rejection) lives in projectDataPath.ts so
+// the security boundary and the data resolver can never drift. Kept exported
+// here because middleware/projectPath.ts imports it from this module.
+export const validateProjectPath = (projectPath: string): Promise<boolean> =>
+  isValidProjectPath(projectPath)

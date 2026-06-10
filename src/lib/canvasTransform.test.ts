@@ -10,6 +10,9 @@ import {
   clampWidth,
   clampHeight,
   lockAspectRatio,
+  resizeRotatedBR,
+  rotatedCornerBR,
+  normalizeRotation,
   DEFAULT_OPACITY,
   DEFAULT_FRAME_CORNER_RADIUS,
   MIN_CORNER_RADIUS,
@@ -158,3 +161,98 @@ describe('lockAspectRatio', () => {
     expect(r).toEqual({ width: 100, height: 50 })
   })
 })
+
+const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps
+
+describe('normalizeRotation', () => {
+  it('maps equivalent angles into [-180, 180) and 0/360 → 0', () => {
+    expect(normalizeRotation(0)).toBe(0)
+    expect(normalizeRotation(360)).toBe(0)
+    expect(normalizeRotation(270)).toBe(-90)
+    expect(normalizeRotation(-90)).toBe(-90)
+    expect(normalizeRotation(450)).toBe(90)
+    // 180 and -180 are the same visual angle → canonicalised to -180.
+    expect(normalizeRotation(180)).toBe(-180)
+    expect(normalizeRotation(-180)).toBe(-180)
+  })
+  it('returns 0 for NaN / non-finite (cleared field never persists NaN)', () => {
+    expect(normalizeRotation(NaN)).toBe(0)
+    expect(normalizeRotation(Infinity)).toBe(0)
+  })
+})
+
+describe('rotatedCornerBR', () => {
+  it('returns the plain bottom-right corner when unrotated', () => {
+    expect(rotatedCornerBR({ x: 10, y: 20, w: 100, h: 40 }, 0)).toEqual({ x: 110, y: 60 })
+  })
+  it('rotates the corner about the centre', () => {
+    // Square centred at origin, rotated 90°: BR (100,100) → (-100,100).
+    const c = rotatedCornerBR({ x: -100, y: -100, w: 200, h: 200 }, 90)
+    expect(near(c.x, -100)).toBe(true)
+    expect(near(c.y, 100)).toBe(true)
+  })
+})
+
+describe('resizeRotatedBR', () => {
+  const opts = { minW: 0, minH: 0 }
+  it('reduces to top-left-anchored resize when unrotated', () => {
+    const r = resizeRotatedBR({ x: 10, y: 20, w: 100, h: 40 }, 0, { x: 160, y: 120 }, opts)
+    expect(near(r.x, 10)).toBe(true)
+    expect(near(r.y, 20)).toBe(true)
+    expect(near(r.w, 150)).toBe(true)
+    expect(near(r.h, 100)).toBe(true)
+  })
+
+  it('keeps the anchored (top-left) corner fixed in world space when rotated', () => {
+    const box = { x: 0, y: 0, w: 100, h: 100 }
+    const deg = 30
+    const before = rotatedTL(box, deg)
+    const r = resizeRotatedBR(box, deg, { x: 50, y: 200 }, opts)
+    const after = rotatedTL(r, deg)
+    expect(near(after.x, before.x, 1e-6)).toBe(true)
+    expect(near(after.y, before.y, 1e-6)).toBe(true)
+  })
+
+  it('measures the new size along the box local axes', () => {
+    // 90°-rotated unit-ish box: dragging the corner in world maps onto local
+    // axes. Anchor stays put and w/h come out positive.
+    const r = resizeRotatedBR({ x: 0, y: 0, w: 100, h: 100 }, 90, { x: -60, y: 140 }, opts)
+    expect(r.w).toBeGreaterThan(0)
+    expect(r.h).toBeGreaterThan(0)
+  })
+
+  it('honours the min floors', () => {
+    const r = resizeRotatedBR({ x: 0, y: 0, w: 100, h: 100 }, 0, { x: 1, y: 1 }, {
+      minW: 130,
+      minH: 96,
+    })
+    expect(r.w).toBe(130)
+    expect(r.h).toBe(96)
+  })
+
+  it('preserves the locked ratio even when a floor kicks in', () => {
+    // 10:1 box (1000×100). Shrink hard so the locked height would fall below the
+    // 96 floor; both axes must scale together so the 10:1 ratio is preserved.
+    const r = resizeRotatedBR({ x: 0, y: 0, w: 1000, h: 100 }, 0, { x: 50, y: 5 }, {
+      minW: 0,
+      minH: 96,
+      lockAspect: true,
+    })
+    expect(r.h).toBeGreaterThanOrEqual(96)
+    expect(near(r.w / r.h, 10, 1e-3)).toBe(true)
+  })
+})
+
+// The anchored corner = top-left local corner in world space (mirror of the
+// helper's internal math), used to assert it doesn't drift.
+function rotatedTL(box: { x: number; y: number; w: number; h: number }, deg: number) {
+  const r = (deg * Math.PI) / 180
+  const cos = Math.cos(r)
+  const sin = Math.sin(r)
+  const cx = box.x + box.w / 2
+  const cy = box.y + box.h / 2
+  return {
+    x: cx + cos * (-box.w / 2) - sin * (-box.h / 2),
+    y: cy + sin * (-box.w / 2) + cos * (-box.h / 2),
+  }
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BringToFront, Copy, SendToBack, Trash2 } from 'lucide-react'
+import { BringToFront, Copy, Group, SendToBack, Trash2, Ungroup } from 'lucide-react'
 import { ProjectCard } from './ProjectCard'
 import { ElementView } from './ElementView'
 import { FrameView } from './FrameView'
@@ -7,9 +7,6 @@ import type {
   CanvasElement,
   CanvasState,
   ProjectMeta,
-  RunEntry,
-  RunStatusInfo,
-  RunSummaryInfo,
   Tool,
 } from '@/lib/types'
 import { newId } from '@/lib/ids'
@@ -17,14 +14,33 @@ import { clearDanglingAnchors, removeElements } from '@/lib/canvasIntegrity'
 import {
   resolveContainerId,
   CONTAINER_TYPES,
+  descendantIds,
+  containmentDepth,
+  rectInside,
   type Container,
   type Rect,
 } from '@/lib/canvasContainment'
-import { lockAspectRatio } from '@/lib/canvasTransform'
+import {
+  groupElements,
+  ungroupElements,
+  expandSelectionForElement,
+  topGroupId,
+  groupLeafIds,
+  groupCascadeSets,
+  withGroupAncestors,
+} from '@/lib/canvasGroup'
+import { resizeRotatedBR, rotatedCornerBR, normalizeRotation } from '@/lib/canvasTransform'
+import { computeSnap, type SnapBox, type SnapGuide } from '@/lib/canvasSnap'
+import { resizeGroup, unionBounds, type GResizeItem } from '@/lib/canvasGroupResize'
 import { SHAPE_DEFAULT_W, SHAPE_DEFAULT_H, drawRectFromDrag } from '@/lib/canvasShape'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   projects: ProjectMeta[]
+  /** Ground-only: ids of projects with at least one live PTY — shows the
+   *  pulsing "Terminal" beacon on their cards. The per-project Canvas tab
+   *  renders no project cards, so it leaves this undefined. */
+  terminalActiveIds?: ReadonlySet<string>
   canvas: CanvasState
   onCanvasChange: (c: CanvasState) => void
   selectedIds: string[]
@@ -34,17 +50,6 @@ interface Props {
   onEditingIdChange: (id: string | null) => void
   tool: Tool
   onToolChange: (t: Tool) => void
-  runStatuses?: Map<string, RunStatusInfo>
-  runSummaries?: Map<string, RunSummaryInfo>
-  /** Project-Canvas-only: fire a comment element's text as a Canvas chat. */
-  onRunComment?: (comment: CanvasElement) => void
-  /** Project-Canvas-only: live run status + reply for a comment's linked chat,
-   *  so the pin can show queued/running/done and the latest summary. */
-  commentRunInfo?: (
-    chatId: string,
-  ) => { status: RunEntry['status']; summary: string } | null
-  /** Project-Canvas-only: focus a comment's linked chat thread in the sidebar. */
-  onOpenCommentThread?: (chatId: string) => void
   /** Project-Canvas-only: duplicate the current selection (⌘D / context menu).
    *  Owned by CanvasWorkspace so it shares the clipboard + history wiring. */
   onDuplicate?: () => void
@@ -92,6 +97,27 @@ const CARD_W = 256
 const CARD_H = 140
 const TEXT_W = 300
 const TEXT_H = 44
+// Drag snapping: an element's edges/centers snap to other elements' within this
+// many SCREEN px (converted to world by dividing by zoom). Hold Alt to bypass.
+const SNAP_PX = 6
+// Element types that carry a resizable width/height (so group-resize scales
+// their box, not just their position).
+const SIZABLE_TYPES = new Set<CanvasElement['type']>([
+  'sticky',
+  'frame',
+  'mock',
+  'shape',
+  'image',
+  'screen',
+])
+// Smallest a group-resize bounding box may shrink to (world px), so a selection
+// can't collapse to zero.
+const GROUP_RESIZE_MIN = 20
+// "整理" (tidy) grid geometry, in world px. HEADER mirrors FrameView's h-9
+// header bar; PAD is the inset from the frame edge; GAP separates cells.
+const FRAME_HEADER_H = 36
+const TIDY_PAD = 24
+const TIDY_GAP = 20
 
 // Custom cursor for the Comment tool — a small chat-bubble glyph whose
 // bottom-left tail is the cursor hotspot. SVG colours come straight from the
@@ -120,6 +146,12 @@ interface DragPress {
    *  rigidly with this element while it drags, captured at press time with
    *  their own origins. Empty for a plain element with no children. */
   children?: { id: string; ox: number; oy: number }[]
+  /** Multi-select drag: when the pressed item is part of a selection of >1,
+   *  the FULL set of items to move together (project cards + non-frame elements
+   *  + frames), captured with their own origins at press time. Undefined for a
+   *  single-item drag. Lets a marquee selection move as one unit instead of
+   *  dragging out only the item directly under the cursor. */
+  group?: { id: string; isCard: boolean; ox: number; oy: number }[]
 }
 
 type Press =
@@ -158,9 +190,31 @@ type Press =
       lastP: { x: number; y: number }
       repos: { x: number; y: number } | null
     }
-  // resize: ow/oh are the pre-drag dimensions; Shift-to-lock reads e.shiftKey
-  // live in the move handler, so no `shift` field is captured at press time.
-  | { kind: 'resize'; id: string; sx: number; sy: number; ow: number; oh: number }
+  // resize: box is the pre-drag rect, rot its rotation; gx/gy is the grab offset
+  // (pointer-world minus the handle corner at press) so the drag doesn't jump.
+  // Shift-to-lock reads e.shiftKey live in the move handler.
+  | {
+      kind: 'resize'
+      id: string
+      box: { x: number; y: number; w: number; h: number }
+      rot: number
+      gx: number
+      gy: number
+    }
+  // rotate: cx/cy are the element centre in world space; startAngle is the
+  // pointer's angle from that centre at press time, startRot the element's
+  // rotation then — so the drag applies a RELATIVE turn (no jump on grab).
+  | { kind: 'rotate'; id: string; cx: number; cy: number; startAngle: number; startRot: number }
+  // groupresize: scale a whole multi-selection from the bbox top-left anchor.
+  // box is the pre-drag union bbox; items are each selected element's pre-drag
+  // box + sizable flag; gx/gy is the grab offset from the bottom-right corner.
+  | {
+      kind: 'groupresize'
+      box: { x: number; y: number; w: number; h: number }
+      items: import('@/lib/canvasGroupResize').GResizeItem[]
+      gx: number
+      gy: number
+    }
   // marquee: sx/sy are viewport-relative screen coordinates
   | { kind: 'marquee'; sx: number; sy: number; shift: boolean }
 
@@ -168,6 +222,7 @@ type Press =
 // frames, all freely positioned. The active tool decides what a press does.
 export const InfiniteCanvas = ({
   projects,
+  terminalActiveIds,
   canvas,
   onCanvasChange,
   selectedIds,
@@ -177,16 +232,12 @@ export const InfiniteCanvas = ({
   onEditingIdChange,
   tool,
   onToolChange,
-  runStatuses,
-  runSummaries,
-  onRunComment,
-  commentRunInfo,
-  onOpenCommentThread,
   onDuplicate,
   projectPath,
   canvasId,
   onImagePaste,
 }: Props) => {
+  const { t } = useT()
   // editingId is owned by the page (so the toolbar / shortcuts can drive it);
   // this alias keeps the rest of the component unchanged.
   const setEditingId = onEditingIdChange
@@ -210,6 +261,15 @@ export const InfiniteCanvas = ({
 
   const [panning, setPanning] = useState(false)
   const [draw, setDraw] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  // Alignment guide lines shown while a single element is being snap-dragged.
+  // The ref mirrors the state so the pointer-up handler can clear them without a
+  // stale-closure read (and skip a needless re-render on a plain click).
+  const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([])
+  const snapGuidesRef = useRef<SnapGuide[]>([])
+  const setGuides = (g: SnapGuide[]) => {
+    snapGuidesRef.current = g
+    setSnapGuides(g)
+  }
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(
     null,
   )
@@ -219,6 +279,10 @@ export const InfiniteCanvas = ({
   const [spaceHeld, setSpaceHeld] = useState(false)
   const spaceDown = useRef(false)
   const press = useRef<Press | null>(null)
+  // The pointerId that owns the active press. A second pointer (multi-touch)
+  // must not hijack or overwrite an in-progress gesture, so every pointer
+  // down/move/up is filtered against this (single-active-pointer rule).
+  const activePointerId = useRef<number | null>(null)
   // Last pointer client position + modifier state seen during an active draw —
   // lets a modifier-key press/release (Shift / Alt / Space) re-render the
   // in-progress box even when the mouse hasn't moved (Figma evaluates modifiers
@@ -233,12 +297,32 @@ export const InfiniteCanvas = ({
   // pass (frames / notes / comments / anchor hints) and from hit-testing below,
   // so it neither paints nor catches clicks — but it stays in `elements`, so it
   // keeps its z-order and can be un-hidden from the panel. Omitted = visible.
-  const visible = elements.filter((el) => !el.hidden)
-  const frames = visible.filter((el) => el.type === 'frame')
+  // A group is invisible, so hiding/locking a GROUP must cascade to its members.
+  // Precompute the affected id sets ONCE (O(n)); the render passes below then do
+  // O(1) lookups instead of an O(depth) ancestor walk per element.
+  const { hiddenViaGroup, lockedViaGroup } = groupCascadeSets(elements)
+  const visible = elements.filter((el) => !el.hidden && !hiddenViaGroup.has(el.id))
+  // Frames paint shallowest-first so a CONTAINER frame sits behind the frames it
+  // nests (Figma-style): a child frame (deeper) must render after — and so on
+  // top of — its parent, otherwise the outer frame would cover the inner one's
+  // header. Stable sort preserves insertion order within a depth.
+  const frameById = new Map(
+    visible.filter((el) => el.type === 'frame').map((el) => [el.id, el]),
+  )
+  const frames = visible
+    .filter((el) => el.type === 'frame')
+    .sort(
+      (a, b) => containmentDepth(frameById, a.id) - containmentDepth(frameById, b.id),
+    )
   // Render order: non-comment notes first, then comments. Comment popups
   // need to layer above sibling stickies / mocks so a pin dropped on a
   // mockup can still open its editor cleanly.
-  const notes = visible.filter((el) => el.type !== 'frame' && el.type !== 'comment')
+  // A `group` is an invisible container (membership only) — it never paints on
+  // the canvas; it's managed entirely from the Layers panel + as a selection
+  // unit. So it's dropped from every render pass and from hit-testing below.
+  const notes = visible.filter(
+    (el) => el.type !== 'frame' && el.type !== 'comment' && el.type !== 'group',
+  )
   const comments = visible.filter((el) => el.type === 'comment')
 
   // Anchor-visibility: while a comment is selected or being edited, outline the
@@ -282,13 +366,36 @@ export const InfiniteCanvas = ({
     })
   }
 
+  // A locked element (directly, or via a locked group ancestor) shows no
+  // resize/rotate handles — its body is already pointer-events:none, and the
+  // handles are separate overlays that would otherwise defeat the lock.
+  const isManipulable = (el: CanvasElement) => !el.locked && !lockedViaGroup.has(el.id)
+
   // The lone selected sticky/frame/mock gets a corner resize handle. Text
   // elements size themselves from their content; comments are fixed-size
   // pins by design (resizing a pin makes no UX sense).
   const resizeTarget =
     tool === 'select' && selectedIds.length === 1 && !editingId
       ? elements.find(
-          (el) => el.id === selectedIds[0] && el.type !== 'text' && el.type !== 'comment',
+          (el) =>
+            el.id === selectedIds[0] &&
+            el.type !== 'text' &&
+            el.type !== 'comment' &&
+            isManipulable(el),
+        ) ?? null
+      : null
+
+  // The lone selected element (any visible type but a comment pin or an
+  // invisible group) gets a rotation handle above its top edge. Drag it to spin
+  // the element about its centre; hold Shift to snap to 15°.
+  const rotateTarget =
+    tool === 'select' && selectedIds.length === 1 && !editingId
+      ? elements.find(
+          (el) =>
+            el.id === selectedIds[0] &&
+            el.type !== 'comment' &&
+            el.type !== 'group' &&
+            isManipulable(el),
         ) ?? null
       : null
 
@@ -423,8 +530,13 @@ export const InfiniteCanvas = ({
       const c = canvasRef.current
       // removeElements scrubs any comment whose anchor — or element whose parent
       // frame — was just deleted (no dangling anchorId / parentId), and returns
-      // the same reference when nothing matched.
-      const next = removeElements(c.elements, selectedIds)
+      // the same reference when nothing matched. Locked elements are filtered out
+      // so Delete can't remove them (matches the pointer/keyboard lock).
+      const locked = lockedIds(c.elements)
+      const next = removeElements(
+        c.elements,
+        selectedIds.filter((id) => !locked.has(id)),
+      )
       if (next === c.elements) return
       e.preventDefault()
       onCanvasChange({ ...c, elements: next })
@@ -432,6 +544,24 @@ export const InfiniteCanvas = ({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [editingId, selectedIds, onCanvasChange])
+
+  // ⌘G groups the selection; ⌘⇧G ungroups. Gated on no active editor / field so
+  // typing a "g" is never swallowed. groupSelection / ungroupSelection read live
+  // refs, so re-subscribe only when the change sinks change.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key !== 'g' && e.key !== 'G') || !(e.metaKey || e.ctrlKey)) return
+      if (editingId) return
+      const ae = document.activeElement
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      e.preventDefault()
+      if (e.shiftKey) ungroupSelection()
+      else groupSelection()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId, onCanvasChange, onSelectIds])
 
   // Dismiss the context menu on Escape or any press outside it. Capture-phase
   // pointerdown so it fires before an element's own handler stopPropagation —
@@ -558,10 +688,19 @@ export const InfiniteCanvas = ({
   }, [editingId, onCanvasChange])
 
   const capture = (e: React.PointerEvent) => {
+    activePointerId.current = e.pointerId
     try {
       ;(viewportRef.current as HTMLElement | null)?.setPointerCapture(e.pointerId)
     } catch {}
   }
+
+  // True when a press is already active and THIS event belongs to a different
+  // pointer — used to ignore a second finger/stylus so it can't overwrite or
+  // drive the in-progress gesture.
+  const isForeignPointer = (e: React.PointerEvent) =>
+    press.current !== null &&
+    activePointerId.current !== null &&
+    e.pointerId !== activePointerId.current
 
   // Bounds of an element in world space — used both for anchoring a fresh
   // comment to whatever it was dropped on, and (separately) by marquee
@@ -592,10 +731,25 @@ export const InfiniteCanvas = ({
     let best: { id: string; area: number } | null = null
     for (let i = canvasRef.current.elements.length - 1; i >= 0; i--) {
       const el = canvasRef.current.elements[i]
-      if (el.type === 'comment' || el.hidden) continue
+      if (el.type === 'comment' || el.type === 'group' || el.hidden) continue
       const b = elementBounds(el)
       if (!b) continue
-      if (wx < b.x || wx > b.x + b.w || wy < b.y || wy > b.y + b.h) continue
+      // Rotation-aware hit-test: map the point into the element's LOCAL frame
+      // (rotate by -rotation about its centre) before the axis-aligned check, so
+      // dropping a comment on a rotated element anchors to what's visually there.
+      let px = wx
+      let py = wy
+      const rot = normalizeRotation(el.rotation ?? 0)
+      if (rot) {
+        const cx = b.x + b.w / 2
+        const cy = b.y + b.h / 2
+        const r = (-rot * Math.PI) / 180
+        const dx = wx - cx
+        const dy = wy - cy
+        px = cx + dx * Math.cos(r) - dy * Math.sin(r)
+        py = cy + dx * Math.sin(r) + dy * Math.cos(r)
+      }
+      if (px < b.x || px > b.x + b.w || py < b.y || py > b.y + b.h) continue
       const area = b.w * b.h
       if (!best || area < best.area) best = { id: el.id, area }
     }
@@ -677,6 +831,7 @@ export const InfiniteCanvas = ({
   }
 
   const onViewportPointerDown = (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (menu) setMenu(null)
     // Space+drag pans, regardless of tool or what is under the cursor.
     if (spaceDown.current) {
@@ -731,12 +886,73 @@ export const InfiniteCanvas = ({
     capture(e)
   }
 
+  // Capture the origins of EVERY currently-selected item (project cards via the
+  // positions map, elements/frames via their x/y) so a drag started on any one
+  // of them moves the whole selection rigidly. Returns undefined for a single
+  // selection so the caller keeps the lighter single-item drag path.
+  const buildGroupItems = (
+    c: CanvasState,
+    pressedId: string,
+  ): { id: string; isCard: boolean; ox: number; oy: number }[] | undefined => {
+    const sel = selectedRef.current
+    if (!sel.includes(pressedId) || sel.length < 2) return undefined
+    const projIds = new Set(projects.map((p) => p.id))
+    const items: { id: string; isCard: boolean; ox: number; oy: number }[] = []
+    for (const id of sel) {
+      if (projIds.has(id)) {
+        const pos = c.positions[id]
+        if (pos) items.push({ id, isCard: true, ox: pos.x, oy: pos.y })
+      } else {
+        const el = c.elements.find((e) => e.id === id)
+        if (el) items.push({ id, isCard: false, ox: el.x, oy: el.y })
+      }
+    }
+    return items.length > 1 ? items : undefined
+  }
+
+  // Move-set for a drag started on `pressedId`, group-aware: it expands the
+  // active multi-selection (if the pressed item is part of it, else just the
+  // pressed item) by the GROUP each id belongs to — clicking any group member
+  // moves the whole group — and then by every descendant (frame children /
+  // design annotations / nested), so a container carries its contents. Group
+  // elements themselves have no position, so they're omitted. Returns undefined
+  // for a lone item so the caller keeps the lighter single-item drag path.
+  const dragMoveItems = (
+    c: CanvasState,
+    pressedId: string,
+  ): { id: string; isCard: boolean; ox: number; oy: number }[] | undefined => {
+    const sel = selectedRef.current
+    const base = sel.includes(pressedId) && sel.length > 1 ? sel : [pressedId]
+    const ids = new Set<string>()
+    for (const id of base) {
+      for (const gid of expandSelectionForElement(c.elements, id)) ids.add(gid)
+    }
+    for (const id of Array.from(ids)) {
+      descendantIds(c.elements, id).forEach((d) => ids.add(d))
+    }
+    const projIds = new Set(projects.map((p) => p.id))
+    const items: { id: string; isCard: boolean; ox: number; oy: number }[] = []
+    for (const id of Array.from(ids)) {
+      if (projIds.has(id)) {
+        const pos = c.positions[id]
+        if (pos) items.push({ id, isCard: true, ox: pos.x, oy: pos.y })
+      } else {
+        const el = c.elements.find((e) => e.id === id)
+        if (el && el.type !== 'group') items.push({ id, isCard: false, ox: el.x, oy: el.y })
+      }
+    }
+    return items.length > 1 ? items : undefined
+  }
+
   const onCardPointerDown = (project: ProjectMeta) => (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     setEditingId(null)
-    const pos = canvasRef.current.positions[project.id]
+    const c = canvasRef.current
+    const pos = c.positions[project.id]
     if (!pos) return
+    const group = buildGroupItems(c, project.id)
     press.current = {
       kind: 'card',
       id: project.id,
@@ -746,12 +962,14 @@ export const InfiniteCanvas = ({
       oy: pos.y,
       moved: false,
       shift: e.shiftKey,
+      ...(group ? { group } : {}),
     }
     setPanning(true)
     capture(e)
   }
 
   const onElementPointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     if (editingId === el.id) return
@@ -765,6 +983,7 @@ export const InfiniteCanvas = ({
             .filter((c) => c.parentId === el.id)
             .map((c) => ({ id: c.id, ox: c.x, oy: c.y }))
         : undefined
+    const group = dragMoveItems(canvasRef.current, el.id)
     press.current = {
       kind: 'element',
       id: el.id,
@@ -775,17 +994,40 @@ export const InfiniteCanvas = ({
       moved: false,
       shift: e.shiftKey,
       ...(children && children.length ? { children } : {}),
+      ...(group ? { group } : {}),
     }
     setPanning(true)
     capture(e)
   }
 
   const onFramePointerDown = (frame: CanvasElement) => (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     if (editingId === frame.id) return
     setEditingId(null)
     const c = canvasRef.current
+    // A frame that's been grouped (⌘G) drags as part of its group — the group is
+    // the selection unit, so route through the multi-item element drag.
+    if (topGroupId(c.elements, frame.id)) {
+      const group = dragMoveItems(c, frame.id)
+      if (group) {
+        press.current = {
+          kind: 'element',
+          id: frame.id,
+          sx: e.clientX,
+          sy: e.clientY,
+          ox: frame.x,
+          oy: frame.y,
+          moved: false,
+          shift: e.shiftKey,
+          group,
+        }
+        setPanning(true)
+        capture(e)
+        return
+      }
+    }
     // Membership is now PERSISTED on each element as `parentId === frame.id`,
     // so moving a frame carries exactly the children it actually contains —
     // independent of where they sit at this instant — and that survives a
@@ -796,22 +1038,26 @@ export const InfiniteCanvas = ({
     const items: { id: string; isCard: boolean; ox: number; oy: number }[] = [
       { id: frame.id, isCard: false, ox: frame.x, oy: frame.y },
     ]
-    // Direct children of the frame…
-    const directChildIds = new Set<string>()
+    // Every DESCENDANT element rides along, preserving relative positions:
+    // direct children, a design's text annotations, AND — now that frames can
+    // nest — child frames and everything inside them, recursively. Driven off
+    // the persisted `parentId` chain so it always matches true membership.
+    const descIds = descendantIds(c.elements, frame.id)
     for (const el of c.elements) {
-      if (el.id === frame.id || el.type === 'frame') continue
-      if (el.parentId === frame.id) {
-        directChildIds.add(el.id)
+      if (descIds.has(el.id)) {
         items.push({ id: el.id, isCard: false, ox: el.x, oy: el.y })
       }
     }
-    // …plus a design's text annotations (grandchildren): a text parented to a
-    // mock/screen that itself sits in this frame must ride along too, else
-    // dragging the frame would strand the label off its design.
-    for (const el of c.elements) {
-      if (el.type === 'text' && el.parentId && directChildIds.has(el.parentId)) {
-        items.push({ id: el.id, isCard: false, ox: el.x, oy: el.y })
-      }
+    // …plus any PROJECT CARD geometrically sitting on the frame. Cards have no
+    // `parentId` (their positions live in a separate map), so frame membership
+    // for cards is decided by geometry at drag-start: a card whose centre lies
+    // inside the frame's box rides along — including a card inside a nested
+    // child frame, which is also inside this frame's box. This is what makes a
+    // frame group cards on the Ground canvas — drop cards onto the frame, then
+    // drag its header to move the whole cluster.
+    for (const id of cardsInFrame(frame)) {
+      const pos = c.positions[id]
+      if (pos) items.push({ id, isCard: true, ox: pos.x, oy: pos.y })
     }
     press.current = {
       kind: 'frame',
@@ -827,16 +1073,65 @@ export const InfiniteCanvas = ({
   }
 
   // Drag the bottom-right handle of the selected sticky/frame to resize it.
+  // Captures the full pre-drag box + rotation so a rotated element resizes along
+  // its own axes (the corner is rotated about the centre), plus the grab offset
+  // so the corner doesn't jump to the pointer on press.
   const onResizePointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
+    const b = fullBounds(el)
+    const rot = normalizeRotation(el.rotation ?? 0) // NaN-safe (guards bad JSON)
+    const corner = rotatedCornerBR(b, rot)
+    const w = worldFromEvent(e)
     press.current = {
       kind: 'resize',
       id: el.id,
-      sx: e.clientX,
-      sy: e.clientY,
-      ow: el.width ?? STICKY_DEFAULT,
-      oh: el.height ?? STICKY_DEFAULT,
+      box: b,
+      rot,
+      gx: w.x - corner.x,
+      gy: w.y - corner.y,
+    }
+    setPanning(true)
+    capture(e)
+  }
+
+  // Drag the bottom-right handle of a MULTI-selection's bounding box to scale the
+  // whole selection from its top-left anchor (Shift = proportional).
+  const onGroupResizePointerDown =
+    (box: { x: number; y: number; w: number; h: number }, items: GResizeItem[]) =>
+    (e: React.PointerEvent) => {
+      if (press.current) return
+      if (tool !== 'select' || spaceDown.current) return
+      e.stopPropagation()
+      const w = worldFromEvent(e)
+      press.current = {
+        kind: 'groupresize',
+        box,
+        items,
+        gx: w.x - (box.x + box.w),
+        gy: w.y - (box.y + box.h),
+      }
+      setPanning(true)
+      capture(e)
+    }
+
+  // Drag the handle above the selected element to rotate it about its centre.
+  const onRotatePointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
+    e.stopPropagation()
+    const b = fullBounds(el)
+    const cx = b.x + b.w / 2
+    const cy = b.y + b.h / 2
+    const w = worldFromEvent(e)
+    press.current = {
+      kind: 'rotate',
+      id: el.id,
+      cx,
+      cy,
+      startAngle: Math.atan2(w.y - cy, w.x - cx),
+      startRot: normalizeRotation(el.rotation ?? 0), // NaN-safe (guards bad JSON)
     }
     setPanning(true)
     capture(e)
@@ -901,26 +1196,72 @@ export const InfiniteCanvas = ({
   }
 
   const onViewportPointerMove = (e: React.PointerEvent) => {
+    if (isForeignPointer(e)) return // a 2nd pointer must not drive the gesture
     const p = press.current
     if (!p) return
     const c = canvasRef.current
     if (p.kind === 'resize') {
-      let w = Math.max(RESIZE_MIN_W, p.ow + (e.clientX - p.sx) / c.viewport.zoom)
-      let h = Math.max(RESIZE_MIN_H, p.oh + (e.clientY - p.sy) / c.viewport.zoom)
-      // Hold Shift to lock the aspect ratio (Figma-style proportional resize).
-      // Read live from the event so the user can toggle Shift mid-drag. Lock
-      // off the *original* (pre-drag) dimensions, then re-apply the per-axis
-      // floor so a proportional shrink can't drive either side below its min.
-      if (e.shiftKey) {
-        const locked = lockAspectRatio(w, h, p.ow, p.oh)
-        w = Math.max(RESIZE_MIN_W, locked.width)
-        h = Math.max(RESIZE_MIN_H, locked.height)
-      }
+      // Map the pointer (minus the grab offset) onto the box's local axes,
+      // keeping the opposite corner anchored — correct for a rotated element and
+      // identical to the legacy top-left-anchored resize when rot === 0. Shift
+      // locks the aspect ratio (read live so it can toggle mid-drag).
+      const pw = worldFromEvent(e)
+      const next = resizeRotatedBR(
+        p.box,
+        p.rot,
+        { x: pw.x - p.gx, y: pw.y - p.gy },
+        { minW: RESIZE_MIN_W, minH: RESIZE_MIN_H, lockAspect: e.shiftKey },
+      )
       onCanvasChange({
         ...c,
         elements: c.elements.map((el) =>
-          el.id === p.id ? { ...el, width: w, height: h } : el,
+          el.id === p.id
+            ? { ...el, x: next.x, y: next.y, width: next.w, height: next.h }
+            : el,
         ),
+      })
+      return
+    }
+    if (p.kind === 'rotate') {
+      const w = worldFromEvent(e)
+      const angle = Math.atan2(w.y - p.cy, w.x - p.cx)
+      let raw = p.startRot + ((angle - p.startAngle) * 180) / Math.PI
+      // Shift snaps to 15° increments (Figma). Read live off the event.
+      if (e.shiftKey) raw = Math.round(raw / 15) * 15
+      // Shared normalizer → (-180,180], matching the inspector field.
+      const deg = normalizeRotation(raw)
+      onCanvasChange({
+        ...c,
+        elements: c.elements.map((el) =>
+          el.id === p.id ? { ...el, rotation: deg === 0 ? undefined : deg } : el,
+        ),
+      })
+      return
+    }
+    if (p.kind === 'groupresize') {
+      const w = worldFromEvent(e)
+      let newW = Math.max(GROUP_RESIZE_MIN, w.x - p.gx - p.box.x)
+      let newH = Math.max(GROUP_RESIZE_MIN, w.y - p.gy - p.box.y)
+      if (e.shiftKey && p.box.w > 0 && p.box.h > 0) {
+        // Proportional: one uniform scale (the dominant axis drives it).
+        const s = Math.max(newW / p.box.w, newH / p.box.h)
+        newW = Math.max(GROUP_RESIZE_MIN, p.box.w * s)
+        newH = Math.max(GROUP_RESIZE_MIN, p.box.h * s)
+      }
+      const sx = newW / p.box.w
+      const sy = newH / p.box.h
+      const updates = new Map(
+        resizeGroup(p.items, { x: p.box.x, y: p.box.y }, sx, sy).map((u) => [u.id, u]),
+      )
+      onCanvasChange({
+        ...c,
+        elements: c.elements.map((el) => {
+          const u = updates.get(el.id)
+          if (!u) return el
+          return u.w !== undefined
+            ? { ...el, x: u.x, y: u.y, width: u.w, height: u.h }
+            : { ...el, x: u.x, y: u.y }
+        }),
       })
       return
     }
@@ -953,25 +1294,64 @@ export const InfiniteCanvas = ({
     if (!p.moved) return
     const dx = (e.clientX - p.sx) / c.viewport.zoom
     const dy = (e.clientY - p.sy) / c.viewport.zoom
+    // Multi-select drag: move every captured item (cards + elements + frames)
+    // by the same delta so the whole selection travels together.
+    if ((p.kind === 'card' || p.kind === 'element') && p.group) {
+      const nextPositions = { ...c.positions }
+      const elMoves = new Map<string, { x: number; y: number }>()
+      for (const it of p.group) {
+        const np = { x: it.ox + dx, y: it.oy + dy }
+        if (it.isCard) nextPositions[it.id] = np
+        else elMoves.set(it.id, np)
+      }
+      onCanvasChange({
+        ...c,
+        positions: nextPositions,
+        elements: c.elements.map((el) =>
+          elMoves.has(el.id) ? { ...el, ...elMoves.get(el.id)! } : el,
+        ),
+      })
+      return
+    }
     if (p.kind === 'card') {
       onCanvasChange({
         ...c,
         positions: { ...c.positions, [p.id]: { x: p.ox + dx, y: p.oy + dy } },
       })
     } else if (p.kind === 'element') {
-      // Move the element, plus any carried children (a design's annotations) by
-      // the same delta so they ride along rigidly.
+      // Snap the dragged element's edges/centers to the other elements (unless
+      // Alt is held to bypass), then move it + any carried children by the same
+      // (snapped) delta so they ride along rigidly.
+      let sdx = dx
+      let sdy = dy
+      let guides: SnapGuide[] = []
+      const moved = c.elements.find((el) => el.id === p.id)
+      if (moved && !e.altKey) {
+        const movingBox = { ...moved, x: p.ox + dx, y: p.oy + dy }
+        const carried = new Set<string>([p.id, ...(p.children?.map((ch) => ch.id) ?? [])])
+        const targets: SnapBox[] = []
+        for (const el of c.elements) {
+          if (carried.has(el.id) || el.hidden || el.type === 'group' || el.type === 'comment')
+            continue
+          targets.push(fullBounds(el))
+        }
+        const snap = computeSnap(fullBounds(movingBox), targets, SNAP_PX / c.viewport.zoom)
+        sdx = dx + snap.dx
+        sdy = dy + snap.dy
+        guides = snap.guides
+      }
       const childMoves = p.children
-        ? new Map(p.children.map((ch) => [ch.id, { x: ch.ox + dx, y: ch.oy + dy }]))
+        ? new Map(p.children.map((ch) => [ch.id, { x: ch.ox + sdx, y: ch.oy + sdy }]))
         : null
       onCanvasChange({
         ...c,
         elements: c.elements.map((el) => {
-          if (el.id === p.id) return { ...el, x: p.ox + dx, y: p.oy + dy }
+          if (el.id === p.id) return { ...el, x: p.ox + sdx, y: p.oy + sdy }
           const m = childMoves?.get(el.id)
           return m ? { ...el, x: m.x, y: m.y } : el
         }),
       })
+      setGuides(guides)
     } else {
       // frame: move the frame and everything captured inside it
       const nextPositions = { ...c.positions }
@@ -992,31 +1372,58 @@ export const InfiniteCanvas = ({
   }
 
   const onViewportPointerUp = (e: React.PointerEvent) => {
+    // Ignore a 2nd pointer lifting; only the owning pointer ends the gesture.
+    // (pointercancel routes here too — for that we always clean up.)
+    if (e.type !== 'pointercancel' && isForeignPointer(e)) return
     const p = press.current
     if (p) {
       if (p.kind === 'card' || p.kind === 'element' || p.kind === 'frame') {
         if (p.moved) {
           // A drag is not a click — don't let it pair with the next one.
           lastClick.current = null
-          // Frame containment: when a non-frame element is dropped, recompute
-          // its frame membership from where it actually landed (rect inside a
-          // frame → parentId = that frame; outside every frame → cleared). This
-          // persists through the normal save path. A *frame* drag carries its
-          // children rigidly, so their membership is unchanged — only an
-          // element drag can change containment in this single-level slice.
-          if (p.kind === 'element') {
-            const cur = canvasRef.current
-            const reparented = reparentMoved(cur.elements, new Set([p.id]))
-            // Keep design annotations painting on top of their design after a
-            // (re)parent — a text just dropped on a mock/screen must sit above
-            // the iframe, not behind it.
-            const ordered = raiseDesignAnnotations(reparented)
-            if (ordered !== cur.elements) {
-              onCanvasChange({ ...cur, elements: ordered })
+          // Frame containment: when an element is dropped, recompute its frame
+          // membership from where it landed (rect inside a frame → parentId =
+          // that frame; outside every frame → cleared). A *frame* drag carries
+          // its descendants rigidly, so their membership is unchanged — but the
+          // dragged frame ITSELF can now nest into (or out of) another frame, so
+          // reparent it too. A lone card has no parentId, so nothing to do.
+          if (p.kind === 'card' || p.kind === 'element' || p.kind === 'frame') {
+            // Reparent every moved non-card element (a group drag can carry
+            // several); a single element/frame drag reparents just itself; a
+            // single card drag has nothing to reparent (cards have no parentId).
+            const movedIds =
+              p.kind === 'frame'
+                ? new Set([p.id])
+                : p.group
+                  ? new Set(p.group.filter((it) => !it.isCard).map((it) => it.id))
+                  : p.kind === 'element'
+                    ? new Set([p.id])
+                    : null
+            if (movedIds) {
+              const cur = canvasRef.current
+              const reparented = reparentMoved(cur.elements, movedIds)
+              // Keep design annotations painting on top of their design after a
+              // (re)parent — a text just dropped on a mock/screen must sit above
+              // the iframe, not behind it.
+              const ordered = raiseDesignAnnotations(reparented)
+              if (ordered !== cur.elements) {
+                onCanvasChange({ ...cur, elements: ordered })
+              }
             }
           }
         } else {
-          onSelect(p.id, p.shift)
+          // Group-aware selection: clicking any member of a group selects the
+          // whole group (the selection unit), so a follow-up drag moves it all.
+          const groupSel = expandSelectionForElement(canvasRef.current.elements, p.id)
+          if (groupSel.length > 1) {
+            onSelectIds(
+              p.shift
+                ? Array.from(new Set([...selectedRef.current, ...groupSel]))
+                : groupSel,
+            )
+          } else {
+            onSelect(p.id, p.shift)
+          }
           // Detect double-clicks here rather than via the DOM dblclick event:
           // the viewport holds pointer capture during a press, which retargets
           // the browser's click/dblclick away from the pressed element.
@@ -1032,6 +1439,17 @@ export const InfiniteCanvas = ({
             lastClick.current = { id: p.id, t: now }
           }
         }
+      }
+      if (p.kind === 'resize') {
+        // A resize changes the RESIZED element's own box, so ITS OWN container
+        // membership can change (a sticky resized into a frame joins it; a frame
+        // resized so it now nests in another frame reparents) — recompute it for
+        // that element, like a drag-drop. (It does not pull stationary elements
+        // in.) Rotation leaves x/y/w/h unchanged, so it needs no reparent.
+        const cur = canvasRef.current
+        const reparented = reparentMoved(cur.elements, new Set([p.id]))
+        const ordered = raiseDesignAnnotations(reparented)
+        if (ordered !== cur.elements) onCanvasChange({ ...cur, elements: ordered })
       }
       if (p.kind === 'marquee') {
         const rect = viewportRef.current!.getBoundingClientRect()
@@ -1055,8 +1473,17 @@ export const InfiniteCanvas = ({
             const pos = c.positions[proj.id]
             if (pos && overlaps(pos.x, pos.y, CARD_W, CARD_H)) hit.push(proj.id)
           }
+          const lockedForMarquee = lockedIds(c.elements)
           for (const el of c.elements) {
-            if (el.type === 'frame' || el.hidden) continue
+            // Skip frames/groups/hidden AND locked elements — a locked layer
+            // shouldn't be marquee-selectable (else keyboard ops could mutate it).
+            if (
+              el.type === 'frame' ||
+              el.type === 'group' ||
+              el.hidden ||
+              lockedForMarquee.has(el.id)
+            )
+              continue
             const ew =
               el.type === 'sticky' || el.type === 'mock'
                 ? el.width ?? (el.type === 'mock' ? MOCK_DEFAULT_W : STICKY_DEFAULT)
@@ -1075,8 +1502,15 @@ export const InfiniteCanvas = ({
                     : TEXT_H
             if (overlaps(el.x, el.y, ew, eh)) hit.push(el.id)
           }
+          // A marquee that grazes any group member pulls in the whole group, so
+          // the selection stays a coherent unit (matches click selection).
+          const expanded = Array.from(
+            new Set(hit.flatMap((id) => expandSelectionForElement(c.elements, id))),
+          )
           onSelectIds(
-            p.shift ? Array.from(new Set([...selectedRef.current, ...hit])) : hit,
+            p.shift
+              ? Array.from(new Set([...selectedRef.current, ...expanded]))
+              : expanded,
           )
         }
         setMarquee(null)
@@ -1099,13 +1533,37 @@ export const InfiniteCanvas = ({
           const fh = sized ? box.h : FRAME_DEFAULT_H
           const x = sized ? box.x : anchorX
           const y = sized ? box.y : anchorY
-          onCanvasChange({
-            ...c,
-            elements: [
-              ...c.elements,
-              { id, type: 'frame', x, y, width: fw, height: fh, text: '' },
-            ],
-          })
+          const newFrame: CanvasElement = {
+            id,
+            type: 'frame',
+            x,
+            y,
+            width: fw,
+            height: fh,
+            text: '',
+          }
+          const withFrame = [...c.elements, newFrame]
+          // Figma-style: a frame drawn around existing content ADOPTS what it
+          // fully encloses — including other frames (nesting). reparentMoved
+          // picks the innermost frame and excludes a frame's own descendants, so
+          // already-nested elements keep their tighter parent and no cycle forms.
+          // (Project cards are geometric, not parentId-based, so they need no
+          // adoption — they're already "in" any frame whose box covers them.)
+          const frameBox = fullBounds(newFrame) as Rect
+          const moved = new Set<string>(
+            withFrame
+              .filter(
+                (el) =>
+                  el.id !== id && rectInside(fullBounds(el) as Rect, frameBox),
+              )
+              .map((el) => el.id),
+          )
+          // Also resolve the NEW frame's own parent: drawn INSIDE an existing
+          // frame, it nests into it (parentId = the enclosing frame). Including
+          // its id makes reparentMoved set both directions in one pass.
+          moved.add(id)
+          const adopted = reparentMoved(withFrame, moved)
+          onCanvasChange({ ...c, elements: adopted })
           // A fresh frame jumps straight into its label editor.
           setEditingId(id)
         } else {
@@ -1131,6 +1589,8 @@ export const InfiniteCanvas = ({
       }
     }
     press.current = null
+    activePointerId.current = null
+    if (snapGuidesRef.current.length) setGuides([]) // clear alignment guides on release
     setPanning(false)
     try {
       ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
@@ -1153,12 +1613,29 @@ export const InfiniteCanvas = ({
     })
   }
 
+  // Ids that are locked — directly, or via a locked group ancestor — and so must
+  // be immune to EVERY mutation, not just pointer drags: keyboard nudge, z-order,
+  // delete, and marquee selection. (The body already has pointer-events:none; a
+  // lock that keyboard/marquee could bypass wouldn't be a lock.)
+  const lockedIds = (els: CanvasElement[]): Set<string> => {
+    const { lockedViaGroup } = groupCascadeSets(els)
+    const out = new Set(lockedViaGroup)
+    for (const e of els) if (e.locked) out.add(e.id)
+    return out
+  }
+
   // Z-order is implicit in array order: front = end of array, back = start.
   // Moves the whole selection while preserving its internal order.
   const reorderSelection = (toFront: boolean) => {
     const c = canvasRef.current
-    const sel = new Set(selectedRef.current)
-    if (!sel.size) return
+    const locked = lockedIds(c.elements)
+    const base = selectedRef.current.filter((id) => !locked.has(id))
+    if (!base.length) return
+    // Expand to the whole group block — the group element(s) + every descendant —
+    // so bringing a grouped element to front/back moves the group as one unit,
+    // matching the Layers-panel drag (reorderLayer's contiguous-block model).
+    const sel = new Set(withGroupAncestors(c.elements, base))
+    for (const id of Array.from(sel)) descendantIds(c.elements, id).forEach((d) => sel.add(d))
     const picked = c.elements.filter((el) => sel.has(el.id))
     const rest = c.elements.filter((el) => !sel.has(el.id))
     onCanvasChange({ ...c, elements: toFront ? [...rest, ...picked] : [...picked, ...rest] })
@@ -1166,7 +1643,8 @@ export const InfiniteCanvas = ({
 
   const nudgeSelection = (dx: number, dy: number) => {
     const c = canvasRef.current
-    const sel = new Set(selectedRef.current)
+    const locked = lockedIds(c.elements)
+    const sel = new Set(selectedRef.current.filter((id) => !locked.has(id)))
     if (!sel.size) return
     onCanvasChange({
       ...c,
@@ -1178,9 +1656,13 @@ export const InfiniteCanvas = ({
 
   const deleteSelection = () => {
     const c = canvasRef.current
+    const locked = lockedIds(c.elements)
     // removeElements scrubs any comment whose anchor — or element whose parent
     // frame — was just deleted (no dangling anchorId / parentId).
-    const next = removeElements(c.elements, selectedRef.current)
+    const next = removeElements(
+      c.elements,
+      selectedRef.current.filter((id) => !locked.has(id)),
+    )
     if (next !== c.elements) onCanvasChange({ ...c, elements: next })
   }
 
@@ -1213,24 +1695,48 @@ export const InfiniteCanvas = ({
   const topElementAt = (wx: number, wy: number): string | undefined => {
     for (let i = canvasRef.current.elements.length - 1; i >= 0; i--) {
       const el = canvasRef.current.elements[i]
-      if (el.hidden) continue
+      if (el.hidden || el.type === 'group') continue
       const b = fullBounds(el)
       if (wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) return el.id
     }
     return undefined
   }
 
+  // ⌘G — wrap the selected top-level elements in a new (invisible) group. The
+  // new selection becomes the group's leaf members so a follow-up drag moves the
+  // whole group. No-op for fewer than two groupable elements.
+  const groupSelection = () => {
+    const c = canvasRef.current
+    const res = groupElements(c.elements, selectedRef.current, newId, fullBounds)
+    if (!res) return
+    onCanvasChange({ ...c, elements: res.elements })
+    onSelectIds(groupLeafIds(res.elements, res.groupId))
+  }
+
+  // ⌘⇧G — dissolve every group implicated by the selection, freeing its children
+  // back to the group's own parent. The freed elements become the new selection.
+  const ungroupSelection = () => {
+    const c = canvasRef.current
+    const res = ungroupElements(c.elements, selectedRef.current)
+    if (!res) return
+    onCanvasChange({ ...c, elements: res.elements })
+    onSelectIds(res.freedIds)
+  }
+
   // Recompute container membership for the moved elements after a drag settles,
   // and return the elements array with each one's `parentId` set / cleared to
   // match where it actually landed (rect containment). Containers are frames AND
-  // designs (mock/screen): a frame owns any non-frame child, a design owns a
-  // `text` annotation dropped on top of it (see canContain). Frames never get a
-  // parentId in this slice (no nested-frame parenting yet) so they're skipped as
-  // movers but still serve as containers. Returns the same array reference when
-  // nothing changed so callers can skip a redundant write.
+  // designs (mock/screen): a frame owns any child (including another frame —
+  // Figma-style nesting), a design owns a `text` annotation dropped on top of it
+  // (see canContain). A frame's own descendants are excluded as candidates so it
+  // can't nest into itself. Returns the same array reference when nothing changed
+  // so callers can skip a redundant write.
+  // Geometric containers only — a `group` is a semantic (explicit) container, so
+  // it's a CONTAINER_TYPE for the panel/dangling logic but has no real box and
+  // must be kept OUT of geometric auto-parenting.
   const containerList = (els: CanvasElement[]): Container[] =>
     els
-      .filter((el) => CONTAINER_TYPES.has(el.type))
+      .filter((el) => CONTAINER_TYPES.has(el.type) && el.type !== 'group')
       .map((el) => ({ id: el.id, type: el.type, rect: fullBounds(el) as Rect }))
 
   const reparentMoved = (
@@ -1238,14 +1744,28 @@ export const InfiniteCanvas = ({
     movedIds: Set<string>,
   ): CanvasElement[] => {
     const containers = containerList(els)
+    const groupIds = new Set(els.filter((e) => e.type === 'group').map((e) => e.id))
     let changed = false
     const next = els.map((el) => {
-      if (!movedIds.has(el.id) || el.type === 'frame') return el
+      if (!movedIds.has(el.id)) return el
+      // An element explicitly grouped (parent is a group) keeps that membership —
+      // groups aren't geometric, so geometric reparenting must not rip it out.
+      if (el.parentId && groupIds.has(el.parentId)) return el
+      // A frame may now nest inside another frame — but never inside one of its
+      // own descendants (that would be a containment cycle), so drop those from
+      // the candidate containers. Non-frames have no descendants to exclude.
+      const candidates =
+        el.type === 'frame'
+          ? (() => {
+              const desc = descendantIds(els, el.id)
+              return containers.filter((c) => !desc.has(c.id))
+            })()
+          : containers
       const parentId = resolveContainerId(
         el.id,
         el.type,
         fullBounds(el) as Rect,
-        containers,
+        candidates,
       )
       if (parentId === el.parentId) return el
       changed = true
@@ -1280,6 +1800,118 @@ export const InfiniteCanvas = ({
     return [...rest, ...labels]
   }
 
+  // Project cards whose CENTRE lies inside `frame`'s box, by id. Cards carry no
+  // `parentId` (positions are a separate map), so a frame's card membership is
+  // purely geometric and recomputed on demand. Shared by the frame drag (carry
+  // contents) and the "整理" tidy action.
+  //
+  // `directOnly` restricts the result to cards whose INNERMOST frame is this one
+  // — a card that sits inside a nested child frame belongs to that child, not to
+  // this outer frame. The drag uses the full geometric set (everything inside
+  // rides along); tidy + the 整理 badge use directOnly so an outer frame doesn't
+  // reshuffle a nested frame's cards.
+  const cardsInFrame = (
+    frame: CanvasElement,
+    opts?: { directOnly?: boolean },
+  ): string[] => {
+    const c = canvasRef.current
+    const fb = fullBounds(frame)
+    const otherFrames = opts?.directOnly
+      ? c.elements
+          .filter((e) => e.type === 'frame' && e.id !== frame.id)
+          .map((e) => ({ id: e.id, b: fullBounds(e), area: 0 }))
+          .map((f) => ({ ...f, area: f.b.w * f.b.h }))
+      : null
+    const thisArea = fb.w * fb.h
+    const ids: string[] = []
+    for (const proj of projects) {
+      const pos = c.positions[proj.id]
+      if (!pos) continue
+      const cx = pos.x + CARD_W / 2
+      const cy = pos.y + CARD_H / 2
+      if (!(cx >= fb.x && cx <= fb.x + fb.w && cy >= fb.y && cy <= fb.y + fb.h))
+        continue
+      // Skip when a smaller (nested) frame also holds this card's centre — it is
+      // that nested frame's card, not ours.
+      if (
+        otherFrames?.some(
+          (f) =>
+            f.area < thisArea &&
+            cx >= f.b.x &&
+            cx <= f.b.x + f.b.w &&
+            cy >= f.b.y &&
+            cy <= f.b.y + f.b.h,
+        )
+      )
+        continue
+      ids.push(proj.id)
+    }
+    return ids
+  }
+
+  // "整理": snap the cards inside a frame into a tidy grid, keeping them in their
+  // current reading order (row, then column) so each card barely moves from
+  // where it already sits — the closest neat arrangement. The frame grows (never
+  // shrinks) to fit the grid, so nothing spills outside it.
+  const tidyFrame = (frame: CanvasElement) => {
+    const c = canvasRef.current
+    const ids = cardsInFrame(frame, { directOnly: true })
+    if (ids.length === 0) return
+    // Real rendered card heights: offsetHeight is the pre-transform layout size
+    // (= world px, the CSS `scale` doesn't change it), so the grid rows can't
+    // overlap a tall card. Width is fixed (w-64 = CARD_W).
+    const heightById = new Map<string, number>()
+    const root = viewportRef.current
+    if (root) {
+      for (const id of ids) {
+        const node = root.querySelector(
+          `[data-card-id="${CSS.escape(id)}"]`,
+        ) as HTMLElement | null
+        if (node) heightById.set(id, node.offsetHeight)
+      }
+    }
+    const cellH = Math.max(CARD_H, ...ids.map((id) => heightById.get(id) ?? 0))
+    const rowBand = cellH + TIDY_GAP
+    const ordered = ids
+      .map((id) => ({ id, pos: c.positions[id]! }))
+      .sort((a, b) => {
+        const ra = Math.round(a.pos.y / rowBand)
+        const rb = Math.round(b.pos.y / rowBand)
+        if (ra !== rb) return ra - rb
+        return a.pos.x - b.pos.x
+      })
+    const fb = fullBounds(frame)
+    const usableW = Math.max(fb.w, CARD_W + TIDY_PAD * 2)
+    const cols = Math.max(
+      1,
+      Math.floor((usableW - TIDY_PAD * 2 + TIDY_GAP) / (CARD_W + TIDY_GAP)),
+    )
+    const rows = Math.ceil(ordered.length / cols)
+    const nextPositions = { ...c.positions }
+    ordered.forEach((item, i) => {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      nextPositions[item.id] = {
+        x: fb.x + TIDY_PAD + col * (CARD_W + TIDY_GAP),
+        y: fb.y + FRAME_HEADER_H + TIDY_PAD + row * (cellH + TIDY_GAP),
+      }
+    })
+    // Grow the frame to contain the grid (never shrink — respect the user's
+    // chosen shape; only extend when the grid needs more room).
+    const neededW = TIDY_PAD * 2 + cols * CARD_W + (cols - 1) * TIDY_GAP
+    const neededH =
+      FRAME_HEADER_H + TIDY_PAD * 2 + rows * cellH + (rows - 1) * TIDY_GAP
+    const nextW = Math.max(frame.width ?? 0, neededW)
+    const nextH = Math.max(frame.height ?? 0, neededH)
+    const grew = nextW !== (frame.width ?? 0) || nextH !== (frame.height ?? 0)
+    const nextElements = grew
+      ? c.elements.map((el) =>
+          el.id === frame.id ? { ...el, width: nextW, height: nextH } : el,
+        )
+      : c.elements
+    onCanvasChange({ ...c, positions: nextPositions, elements: nextElements })
+  }
+
   const onContextMenu = (e: React.MouseEvent) => {
     const rect = viewportRef.current!.getBoundingClientRect()
     const v = canvasRef.current.viewport
@@ -1294,6 +1926,44 @@ export const InfiniteCanvas = ({
     if (!selectedRef.current.includes(id)) onSelect(id)
     setMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top })
   }
+
+  // Context-menu gating for group/ungroup. Groupable = ≥2 selected top-level
+  // elements (a child whose parent is also selected doesn't count). Ungroupable
+  // = the selection includes a group, or a member of one.
+  const selById = new Map(elements.map((e) => [e.id, e]))
+  const selSet = new Set(selectedIds)
+  const canGroup =
+    selectedIds.filter((id) => {
+      const el = selById.get(id)
+      return !!el && !(el.parentId && selSet.has(el.parentId))
+    }).length >= 2
+  const canUngroup = selectedIds.some((id) => {
+    const el = selById.get(id)
+    if (!el) return false
+    return el.type === 'group' || (!!el.parentId && selById.get(el.parentId)?.type === 'group')
+  })
+
+  // Multi-selection group resize: when 2+ live, manipulable (unlocked, non-group,
+  // non-comment) elements are selected, a bounding box + corner handle scales
+  // them all from the top-left anchor. (A single selection uses the per-element
+  // resize handle instead.) Sizable types scale their box; text repositions only.
+  const groupResizeItems: GResizeItem[] =
+    tool === 'select' && !editingId && selectedIds.length >= 2
+      ? selectedIds.flatMap((id) => {
+          const el = selById.get(id)
+          if (
+            !el ||
+            el.type === 'group' ||
+            el.type === 'comment' ||
+            el.hidden ||
+            !isManipulable(el)
+          )
+            return []
+          const b = fullBounds(el)
+          return [{ id, x: b.x, y: b.y, w: b.w, h: b.h, sizable: SIZABLE_TYPES.has(el.type) }]
+        })
+      : []
+  const groupBox = groupResizeItems.length >= 2 ? unionBounds(groupResizeItems) : null
 
   const contentStyle = useMemo<React.CSSProperties>(
     () => ({
@@ -1338,6 +2008,9 @@ export const InfiniteCanvas = ({
       onPointerMove={onViewportPointerMove}
       onPointerUp={onViewportPointerUp}
       onPointerCancel={onViewportPointerUp}
+      // Defensive: if the OS yanks pointer capture without a pointercancel
+      // (rare), still run the up-path so a press can't get stuck.
+      onLostPointerCapture={onViewportPointerUp}
       onContextMenu={onContextMenu}
       onMouseDown={(e) => {
         // The canvas is not focusable, so a press on it would pull focus to
@@ -1373,7 +2046,21 @@ export const InfiniteCanvas = ({
       <div className="absolute inset-0 origin-top-left" style={contentStyle}>
         {/* frames sit behind everything */}
         {frames.map((frame) => (
-          <div key={frame.id} className="absolute" style={{ left: frame.x, top: frame.y }}>
+          <div
+            key={frame.id}
+            className="absolute"
+            style={{
+              left: frame.x,
+              top: frame.y,
+              transform: frame.rotation ? `rotate(${frame.rotation}deg)` : undefined,
+              transformOrigin: 'center',
+              mixBlendMode:
+                frame.blendMode && frame.blendMode !== 'normal' ? frame.blendMode : undefined,
+              ...(frame.locked || lockedViaGroup.has(frame.id)
+                ? { pointerEvents: 'none' as const }
+                : {}),
+            }}
+          >
             <FrameView
               frame={frame}
               selected={selectedIds.includes(frame.id)}
@@ -1381,6 +2068,11 @@ export const InfiniteCanvas = ({
               onHeaderPointerDown={onFramePointerDown(frame)}
               onChangeLabel={(t) => changeText(frame.id, t)}
               onEditDone={() => setEditingId(null)}
+              onTidy={
+                cardsInFrame(frame, { directOnly: true }).length > 0
+                  ? () => tidyFrame(frame)
+                  : undefined
+              }
             />
           </div>
         ))}
@@ -1402,20 +2094,42 @@ export const InfiniteCanvas = ({
           const pos = positions[p.id]
           if (!pos) return null
           return (
-            <div key={p.id} className="absolute" style={{ left: pos.x, top: pos.y }}>
+            <div
+              key={p.id}
+              data-card-id={p.id}
+              className="absolute"
+              style={{ left: pos.x, top: pos.y }}
+            >
               <ProjectCard
                 project={p}
                 onPointerDown={onCardPointerDown(p)}
                 selected={selectedIds.includes(p.id)}
-                run={runStatuses?.get(p.id)}
-                summary={runSummaries?.get(p.id)}
+                terminalActive={terminalActiveIds?.has(p.id) ?? false}
               />
             </div>
           )
         })}
 
         {notes.map((el) => (
-          <div key={el.id} className="absolute" style={{ left: el.x, top: el.y }}>
+          <div
+            key={el.id}
+            className="absolute"
+            style={{
+              left: el.x,
+              top: el.y,
+              // Figma-parity transforms applied at the positioning wrapper so
+              // they cover every element type uniformly: rotate() about centre,
+              // mix-blend-mode, and pointer-events:none for a locked element
+              // (clicks fall through; unlock from the Layers panel).
+              transform: el.rotation ? `rotate(${el.rotation}deg)` : undefined,
+              transformOrigin: 'center',
+              mixBlendMode:
+                el.blendMode && el.blendMode !== 'normal' ? el.blendMode : undefined,
+              ...(el.locked || lockedViaGroup.has(el.id)
+                ? { pointerEvents: 'none' as const }
+                : {}),
+            }}
+          >
             <ElementView
               element={el}
               selected={selectedIds.includes(el.id)}
@@ -1462,6 +2176,12 @@ export const InfiniteCanvas = ({
                   top: b.y,
                   width: b.w,
                   height: b.h,
+                  // Match the anchored element's rotation so the outline hugs it
+                  // (the element renders rotated about its centre too).
+                  transform: anchor.rotation
+                    ? `rotate(${normalizeRotation(anchor.rotation)}deg)`
+                    : undefined,
+                  transformOrigin: 'center',
                   border: `${1.5 / viewport.zoom}px solid rgba(178,58,44,0.55)`,
                   boxShadow: `inset 0 0 0 ${3 / viewport.zoom}px rgba(178,58,44,0.12)`,
                 }}
@@ -1505,30 +2225,88 @@ export const InfiniteCanvas = ({
               onPointerDown={onElementPointerDown(el)}
               onChangeText={(t) => changeText(el.id, t)}
               onEditDone={() => setEditingId(null)}
-              onRunComment={onRunComment}
               onToggleCommentResolved={toggleCommentResolved}
               commentAnchorLabel={anchorLabelFor(el.anchorId)}
-              commentRun={el.chatId && commentRunInfo ? commentRunInfo(el.chatId) : null}
-              onOpenCommentThread={
-                el.chatId && onOpenCommentThread
-                  ? () => onOpenCommentThread(el.chatId!)
-                  : undefined
-              }
             />
           </div>
         ))}
 
-        {resizeTarget && (
+        {/* Alignment guides — thin accent lines shown while snap-dragging. */}
+        {snapGuides.map((g, i) => (
           <div
-            onPointerDown={onResizePointerDown(resizeTarget)}
-            className="absolute h-3.5 w-3.5 rounded-[2px] border-2 border-accent bg-bg-card shadow-card"
-            style={{
-              left: resizeTarget.x + (resizeTarget.width ?? STICKY_DEFAULT) - 7,
-              top: resizeTarget.y + (resizeTarget.height ?? STICKY_DEFAULT) - 7,
-              cursor: 'nwse-resize',
-            }}
+            key={`snap-${i}`}
+            className="pointer-events-none absolute bg-accent"
+            style={
+              g.axis === 'x'
+                ? { left: g.pos, top: g.from, width: 1 / viewport.zoom, height: g.to - g.from }
+                : { left: g.from, top: g.pos, width: g.to - g.from, height: 1 / viewport.zoom }
+            }
           />
+        ))}
+
+        {/* Multi-selection bounding box + corner handle (group resize). */}
+        {groupBox && (
+          <>
+            <div
+              className="pointer-events-none absolute rounded-[2px]"
+              style={{
+                left: groupBox.x,
+                top: groupBox.y,
+                width: groupBox.w,
+                height: groupBox.h,
+                border: `${1 / viewport.zoom}px dashed rgba(178,58,44,0.6)`,
+              }}
+            />
+            <div
+              onPointerDown={onGroupResizePointerDown(groupBox, groupResizeItems)}
+              className="absolute h-3.5 w-3.5 rounded-[2px] border-2 border-accent bg-bg-card shadow-card"
+              style={{ left: groupBox.x + groupBox.w - 7, top: groupBox.y + groupBox.h - 7, cursor: 'nwse-resize' }}
+            />
+          </>
         )}
+
+        {resizeTarget &&
+          (() => {
+            // Sit the handle on the element's ROTATED bottom-right corner so it
+            // tracks a turned element (matches the rotation handle).
+            const corner = rotatedCornerBR(
+              fullBounds(resizeTarget),
+              normalizeRotation(resizeTarget.rotation ?? 0),
+            )
+            return (
+              <div
+                onPointerDown={onResizePointerDown(resizeTarget)}
+                className="absolute h-3.5 w-3.5 rounded-[2px] border-2 border-accent bg-bg-card shadow-card"
+                style={{
+                  left: corner.x - 7,
+                  top: corner.y - 7,
+                  cursor: 'nwse-resize',
+                }}
+              />
+            )
+          })()}
+
+        {/* Rotation handle — a round grip above the element's (visual) top edge.
+            Its position is rotated about the centre so it tracks a turned
+            element; the drag itself sets el.rotation. */}
+        {rotateTarget &&
+          (() => {
+            const b = fullBounds(rotateTarget)
+            const cx = b.x + b.w / 2
+            const cy = b.y + b.h / 2
+            const rot = (normalizeRotation(rotateTarget.rotation ?? 0) * Math.PI) / 180
+            const d = b.h / 2 + 22
+            const hx = cx + d * Math.sin(rot)
+            const hy = cy - d * Math.cos(rot)
+            return (
+              <div
+                onPointerDown={onRotatePointerDown(rotateTarget)}
+                title="Drag to rotate (Shift = 15°)"
+                className="absolute h-3.5 w-3.5 rounded-full border-2 border-accent bg-bg-card shadow-card"
+                style={{ left: hx - 7, top: hy - 7, cursor: 'grab' }}
+              />
+            )
+          })()}
       </div>
 
       {/* Marquee rectangle — drawn in screen space, above the content */}
@@ -1556,7 +2334,7 @@ export const InfiniteCanvas = ({
           {onDuplicate && (
             <ContextItem
               icon={<Copy size={13} strokeWidth={2} />}
-              label="複製"
+              label={t('canvasEl.menu.duplicate')}
               hint="⌘D"
               onClick={() => {
                 onDuplicate()
@@ -1566,7 +2344,7 @@ export const InfiniteCanvas = ({
           )}
           <ContextItem
             icon={<BringToFront size={13} strokeWidth={2} />}
-            label="最前面へ"
+            label={t('canvasEl.menu.bringToFront')}
             hint="]"
             onClick={() => {
               reorderSelection(true)
@@ -1575,17 +2353,44 @@ export const InfiniteCanvas = ({
           />
           <ContextItem
             icon={<SendToBack size={13} strokeWidth={2} />}
-            label="最背面へ"
+            label={t('canvasEl.menu.sendToBack')}
             hint="["
             onClick={() => {
               reorderSelection(false)
               setMenu(null)
             }}
           />
+          {(canGroup || canUngroup) && (
+            <>
+              <div className="my-1 border-t border-line-soft" />
+              {canGroup && (
+                <ContextItem
+                  icon={<Group size={13} strokeWidth={2} />}
+                  label={t('canvasEl.menu.group')}
+                  hint="⌘G"
+                  onClick={() => {
+                    groupSelection()
+                    setMenu(null)
+                  }}
+                />
+              )}
+              {canUngroup && (
+                <ContextItem
+                  icon={<Ungroup size={13} strokeWidth={2} />}
+                  label={t('canvasEl.menu.ungroup')}
+                  hint="⌘⇧G"
+                  onClick={() => {
+                    ungroupSelection()
+                    setMenu(null)
+                  }}
+                />
+              )}
+            </>
+          )}
           <div className="my-1 border-t border-line-soft" />
           <ContextItem
             icon={<Trash2 size={13} strokeWidth={2} />}
-            label="削除"
+            label={t('common.delete')}
             hint="⌫"
             danger
             onClick={() => {

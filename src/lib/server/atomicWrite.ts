@@ -18,13 +18,13 @@ let seq = 0
 // `mode` (when given) is applied to the temp file before the rename, so the
 // final file inherits owner-only perms atomically — there's no window where the
 // destination exists with looser permissions (matters for auth.json = 0600).
-export const atomicWriteJson = async (
+export const atomicWriteText = async (
   path: string,
-  data: unknown,
+  text: string,
   opts?: { mode?: number },
 ): Promise<void> => {
   const tmp = join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${seq++}`)
-  await writeFile(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', ...(opts?.mode != null ? { mode: opts.mode } : {}) })
+  await writeFile(tmp, text, { encoding: 'utf8', ...(opts?.mode != null ? { mode: opts.mode } : {}) })
   try {
     await rename(tmp, path)
   } catch (e) {
@@ -34,3 +34,9 @@ export const atomicWriteJson = async (
     throw e
   }
 }
+
+export const atomicWriteJson = (
+  path: string,
+  data: unknown,
+  opts?: { mode?: number },
+): Promise<void> => atomicWriteText(path, JSON.stringify(data, null, 2), opts)

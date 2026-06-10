@@ -8,6 +8,7 @@ import {
   MonitorSmartphone,
   Square,
   Circle,
+  Boxes,
 } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { resolveShapeKind } from '@/lib/canvasShape'
@@ -35,6 +36,9 @@ const firstLine = (text: string): string => {
 // type-appropriate fallback so an empty / unlabelled element still reads
 // clearly. Never returns an empty string.
 export function canvasElementLabel(el: CanvasElement): string {
+  // A user-given name (Layers-panel rename) always wins — it's the explicit
+  // label for the layer, regardless of type or content.
+  if (el.name && el.name.trim()) return el.name.trim()
   switch (el.type) {
     case 'text':
       return firstLine(el.text) || 'Text'
@@ -52,6 +56,8 @@ export function canvasElementLabel(el: CanvasElement): string {
       return el.label || el.moduleId || 'Screen'
     case 'shape':
       return resolveShapeKind(el) === 'ellipse' ? 'Ellipse' : 'Rectangle'
+    case 'group':
+      return 'Group'
     default:
       return 'Element'
   }
@@ -88,6 +94,8 @@ export function CanvasElementIcon({
       ) : (
         <Square {...props} />
       )
+    case 'group':
+      return <Boxes {...props} />
     default:
       return <Square {...props} />
   }

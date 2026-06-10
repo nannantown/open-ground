@@ -48,6 +48,9 @@ export const MAX_LINE_HEIGHT = 4
  *  and "the default option" resolve to the same rendered glyphs. */
 export interface FontOption {
   label: string
+  /** i18n key the inspector translates at render; `label` is the fallback for
+   *  non-React call sites (this module is a plain constant, outside useT). */
+  labelKey?: string
   value: string
 }
 export const FONT_OPTIONS: FontOption[] = [
@@ -58,7 +61,8 @@ export const FONT_OPTIONS: FontOption[] = [
       'var(--font-instrument-sans), "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, "Noto Sans JP", ui-sans-serif, system-ui, sans-serif',
   },
   {
-    label: '日本語ゴシック',
+    label: 'Japanese Gothic',
+    labelKey: 'canvas.insp.fontJaGothic',
     value:
       '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, "Noto Sans JP", sans-serif',
   },

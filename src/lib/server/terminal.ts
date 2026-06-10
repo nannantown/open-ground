@@ -21,6 +21,11 @@ export interface TerminalInfo {
   // shell) so callers can route observer wiring, UI affordances, and buffer
   // sizing differently. Defaults to 'shell'.
   tag?: 'shell' | 'claude'
+  // For tag:'claude' PTYs — the `--session-id` UUID claude was launched with,
+  // so the client can locate the session JSONL (~/.claude/projects/<cwd>/<uuid>.jsonl)
+  // and render its transcript. Persisted on the PTY so a page reload can
+  // reattach both the raw and the rendered view to the same session.
+  agentSessionId?: string
 }
 
 type Listener = (chunk: string) => void
@@ -78,6 +83,7 @@ export const createTerminal = (opts: {
   rows?: number
   shell?: string
   tag?: 'shell' | 'claude'
+  agentSessionId?: string
 }): TerminalInfo => {
   const pty = loadPty()
   const id = randomUUID()
@@ -104,7 +110,9 @@ export const createTerminal = (opts: {
     rows,
     startedAt: new Date().toISOString(),
     tag: opts.tag ?? 'shell',
+    ...(opts.agentSessionId ? { agentSessionId: opts.agentSessionId } : {}),
   }
+
   const session: PtySession = {
     info,
     pty: proc,
@@ -136,6 +144,19 @@ export const createTerminal = (opts: {
 
 export const getTerminal = (id: string): TerminalInfo | null =>
   sessions.get(id)?.info ?? null
+
+/** Cwds of terminals whose PTY is still alive — feeds the Ground's
+ *  "terminal active" card indicator. A session records `finishedAt` in its
+ *  onExit handler and then lingers in the map for ~30s so the client can
+ *  drain the buffer; those exited-but-lingering sessions are excluded here.
+ *  Deduped (a project can hold several panes) and unordered. */
+export const listActiveTerminalCwds = (): string[] => {
+  const out = new Set<string>()
+  sessions.forEach((s) => {
+    if (!s.info.finishedAt) out.add(s.info.cwd)
+  })
+  return Array.from(out)
+}
 
 export const writeInput = (id: string, data: string): boolean => {
   const s = sessions.get(id)

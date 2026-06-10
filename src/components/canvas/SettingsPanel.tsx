@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   X,
   FolderOpen,
@@ -7,81 +7,95 @@ import {
   AlertCircle,
   Loader2,
   Terminal,
+  Inbox,
+  RefreshCw,
+  MessageSquare,
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
-import type { Settings } from '@/lib/types'
+import type { Settings, SettingsResponse, FeedbackItem, FeedbackListResponse } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
+import { useT } from '@/i18n/I18nContext'
+import type { Lang } from '@/i18n/messages'
 
 interface Props {
   open: boolean
   settings: Settings
   onClose: () => void
   onSave: (s: Settings) => void
+  /** Re-fetch projects/settings after the registered-project list changes. */
+  onReload?: () => void
+  /** When true the server has a service-role key, so the owner-only "Incoming
+   *  feedback" inbox can read submissions. False on the public build. */
+  feedbackCanRead?: boolean
+  /** Called once the inbox has loaded, with the newest submission's created_at. */
+  onFeedbackSeen?: (latestCreatedAt: string | null) => void
+  /** When provided, renders a clear "Send feedback" button that opens the
+   *  composer. Omit to hide the entry entirely. */
+  onOpenFeedback?: () => void
 }
 
-interface FolderInfo {
-  exists: boolean
-  projectCount: number
-  notDir?: boolean
-}
-
-export const SettingsPanel = ({ open, settings, onClose, onSave }: Props) => {
-  const [projectsRoot, setProjectsRoot] = useState(settings.projectsRoot ?? '')
-  const [excludePatterns, setExcludePatterns] = useState(
-    settings.excludePatterns.join(', '),
-  )
-  const [archiveDirName, setArchiveDirName] = useState(settings.archiveDirName)
-  const [runPromptTemplate, setRunPromptTemplate] = useState(
-    settings.runPromptTemplate,
-  )
-  const [notifyOnRunComplete, setNotifyOnRunComplete] = useState(
-    settings.notifyOnRunComplete !== false,
-  )
-  const [notifySound, setNotifySound] = useState(settings.notifySound !== false)
-  const [claudePlan, setClaudePlan] = useState<Settings['claudePlan']>(
-    settings.claudePlan ?? null,
-  )
+// Settings drawer. Deliberately minimal: only real preferences are visible
+// (Language, Feedback). The setup prerequisite (Claude CLI) is taught in
+// onboarding; the knobs with working defaults (workspace, a CLI re-check)
+// live under Advanced so the surface stays calm.
+export const SettingsPanel = ({
+  open,
+  settings,
+  onClose,
+  onSave,
+  onReload,
+  feedbackCanRead = false,
+  onFeedbackSeen,
+  onOpenFeedback,
+}: Props) => {
+  const { t, lang, setLang } = useT()
+  const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
+  const [displayName, setDisplayName] = useState(settings.displayName ?? '')
+  // Non-persisted placeholder for the Display name input: the user's global
+  // git identity, served by GET /api/settings as `suggestedDisplayName`.
+  const [suggestedName, setSuggestedName] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [picking, setPicking] = useState(false)
-  const [checking, setChecking] = useState(false)
-  const [info, setInfo] = useState<FolderInfo | null>(null)
-  // Probe the local `claude` CLI while the panel is open. `claudeNonce` lets
-  // the user re-check after installing it without closing the panel.
   const [claudeNonce, setClaudeNonce] = useState(0)
-  const claudeProbe = useClaudeProbe(open, claudeNonce)
+  const claudeProbe = useClaudeProbe(open && showAdvanced, claudeNonce)
 
-  // Verify the folder (debounced) so the user gets feedback before saving.
+  // Re-seed from live settings only on the open→true transition (see the long
+  // note kept below) so an in-session load() can't wipe unsaved edits.
   useEffect(() => {
-    const path = projectsRoot.trim()
-    if (!path) {
-      setInfo(null)
-      setChecking(false)
-      return
-    }
-    setChecking(true)
-    const t = setTimeout(async () => {
-      try {
-        const res = await fetch(
-          '/api/folder-info?path=' + encodeURIComponent(path),
-        )
-        setInfo((await res.json()) as FolderInfo)
-      } catch {
-        setInfo(null)
-      }
-      setChecking(false)
-    }, 450)
-    return () => clearTimeout(t)
-  }, [projectsRoot])
+    if (!open) return
+    setDefaultWorkspace(settings.defaultWorkspace ?? '')
+    setDisplayName(settings.displayName ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
-  if (!open) return null
+  // Fetch the display-name suggestion when the drawer opens (cheap: the server
+  // caches the git lookup for its process lifetime). Best-effort — without it
+  // the input simply has no placeholder.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    api.api.settings
+      .$get()
+      .then(async (res) => {
+        if (!res.ok) return
+        const body = (await res.json()) as SettingsResponse
+        if (!cancelled) setSuggestedName(body.suggestedDisplayName ?? null)
+      })
+      .catch(() => {
+        /* no suggestion — the input still works */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
 
   const browse = async () => {
     setPicking(true)
     try {
       const res = await api.api['pick-folder'].$post()
       const data = (await res.json()) as { path?: string }
-      if (data.path) setProjectsRoot(data.path)
+      if (data.path) setDefaultWorkspace(data.path)
     } catch {
       /* user can still type the path manually */
     }
@@ -91,31 +105,38 @@ export const SettingsPanel = ({ open, settings, onClose, onSave }: Props) => {
   const save = () => {
     onSave({
       ...settings,
-      projectsRoot: projectsRoot.trim() || null,
-      excludePatterns: excludePatterns
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      archiveDirName: archiveDirName.trim() || '_archive',
-      runPromptTemplate,
-      notifyOnRunComplete,
-      notifySound,
-      claudePlan,
+      defaultWorkspace: defaultWorkspace.trim() || null,
+      // '' is saved explicitly (not dropped) so clearing the field clears the
+      // setting through the server's merge-on-write.
+      displayName: displayName.trim(),
     })
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
+    <>
       <div
+        aria-hidden={!open}
+        onClick={onClose}
+        className={[
+          'fixed inset-0 z-50 bg-ink/30 backdrop-blur-sm transition-opacity duration-200 ease-out',
+          open ? 'opacity-100' : 'opacity-0 pointer-events-none',
+        ].join(' ')}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
         onClick={(e) => e.stopPropagation()}
-        className="flex flex-col w-[520px] max-w-[92vw] max-h-[88vh] bg-bg-card border border-line shadow-card-hover overflow-hidden rounded-[3px]"
+        className={[
+          'fixed top-0 right-0 z-50 h-full w-[440px] max-w-[92vw]',
+          'bg-bg-card border-l border-line shadow-card-hover flex flex-col',
+          'transition-transform duration-200 ease-out',
+          open ? 'translate-x-0' : 'translate-x-full pointer-events-none',
+        ].join(' ')}
       >
         <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
           <div>
-            <p className="label-cap text-accent mb-1.5">Configuration</p>
+            <p className="label-cap text-accent mb-1.5">{t('settings.eyebrow')}</p>
             <h2
               className="font-display text-[22px] text-ink leading-none tracking-tightest"
               style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
@@ -128,125 +149,48 @@ export const SettingsPanel = ({ open, settings, onClose, onSave }: Props) => {
           </Btn>
         </header>
 
-        <div className="overflow-y-auto px-6 py-5">
-          {/* Primary setting — the only thing most people need to touch. */}
-          <div>
-            <label className="label-cap text-ink-muted block mb-1.5">
-              Projects folder
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={projectsRoot}
-                onChange={(e) => setProjectsRoot(e.target.value)}
-                placeholder="/Users/you/projects"
-                className="flex-1 min-w-0 rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
-              />
-              <button
-                onClick={browse}
-                disabled={picking}
-                className="shrink-0 inline-flex items-center gap-1.5 rounded-[2px] border border-line-strong bg-bg-elevated px-3 py-2 label-cap text-ink-muted hover:text-ink hover:bg-bg-inset hover:border-ink-subtle disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                {picking ? (
-                  <Loader2 size={13} className="animate-spin" />
-                ) : (
-                  <FolderOpen size={13} />
-                )}
-                Browse
-              </button>
-            </div>
-            <div className="mt-1.5 min-h-[17px] text-[11px] leading-relaxed">
-              {checking && <span className="text-ink-subtle">Checking…</span>}
-              {!checking && info?.exists && (
-                <span className="inline-flex items-center gap-1 text-moss">
-                  <Check size={12} strokeWidth={2.5} />
-                  {info.projectCount} project
-                  {info.projectCount === 1 ? '' : 's'} found in this folder
-                </span>
-              )}
-              {!checking && info && !info.exists && (
-                <span className="inline-flex items-center gap-1 text-accent">
-                  <AlertCircle size={12} />
-                  {info.notDir
-                    ? 'That path is a file, not a folder.'
-                    : "That folder doesn't exist on this machine."}
-                </span>
-              )}
-              {!checking && !info && (
-                <span className="text-ink-subtle">
-                  Click Browse to choose the folder that holds your projects —
-                  each subfolder becomes a tile.
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Claude Code CLI readiness — OPEN GROUND spawns the local `claude`
-              CLI (subscription-only, no API key), so runs fail until it's
-              installed + authenticated. A green check when present; a clear
-              hint + re-check button when missing. */}
-          <div className="mt-5 border-t border-line pt-4">
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="label-cap text-ink-muted inline-flex items-center gap-1.5">
-                <Terminal size={12} />
-                Claude Code CLI
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+          {/* Feedback — a clear, single call to action (not a label). */}
+          {onOpenFeedback && (
+            <section className="mb-6 rounded-[3px] border border-line bg-bg-inset/40 px-4 py-3.5">
+              <p className="label-cap text-ink-muted mb-1">{t('settings.feedback.heading')}</p>
+              <p className="text-[11px] text-ink-subtle leading-relaxed mb-3">
+                {t('settings.feedback.body')}
               </p>
               <button
-                onClick={() => setClaudeNonce((n) => n + 1)}
-                className="label-cap text-ink-subtle hover:text-ink transition-colors"
+                onClick={onOpenFeedback}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] border border-line-strong bg-bg px-4 py-2.5 text-[13px] text-ink transition-all duration-150 hover:border-accent hover:bg-bg-inset hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
-                Re-check
+                <MessageSquare size={14} strokeWidth={1.75} />
+                {t('settings.feedback.button')}
               </button>
-            </div>
-            <div className="text-[11px] leading-relaxed">
-              {claudeProbe === null && (
-                <span className="inline-flex items-center gap-1 text-ink-subtle">
-                  <Loader2 size={12} className="animate-spin" />
-                  Checking for the claude CLI…
-                </span>
-              )}
-              {claudeProbe?.installed && (
-                <span className="inline-flex items-center gap-1 text-moss">
-                  <Check size={12} strokeWidth={2.5} />
-                  {claudeProbe.message}
-                </span>
-              )}
-              {claudeProbe && !claudeProbe.installed && (
-                <div className="inline-flex items-start gap-1 text-accent">
-                  <AlertCircle size={12} className="mt-[2px] shrink-0" />
-                  <span>{claudeProbe.message}</span>
-                </div>
-              )}
-            </div>
-            <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">
-              OPEN GROUND runs your local{' '}
-              <code className="font-mono text-ink-muted">claude</code> CLI — it
-              never uses an Anthropic API key. Install Claude Code, sign in, and
-              keep an active Claude subscription, then runs work from any tile.
-            </p>
-          </div>
+            </section>
+          )}
 
-          {/* Claude Code usage — drives the top-right HUD chip. */}
-          <div className="mt-5 border-t border-line pt-4">
-            <p className="label-cap text-ink-muted mb-2">Claude Code plan</p>
-            <div className="flex flex-wrap gap-1.5">
+          {/* Language */}
+          <Section heading={t('settings.language.heading')} hint={t('settings.language.hint')}>
+            <div
+              role="group"
+              aria-label={t('settings.language.heading')}
+              className="inline-flex items-center gap-0 border border-line rounded-[3px] p-0.5"
+            >
               {([
-                ['none', 'None'],
-                ['pro', 'Pro'],
-                ['max5x', 'Max 5×'],
-                ['max20x', 'Max 20×'],
-              ] as const).map(([key, label]) => {
-                const value = key === 'none' ? null : key
-                const active = (claudePlan ?? null) === value
+                ['en', t('toolbar.langEn')],
+                ['ja', t('toolbar.langJa')],
+              ] as [Lang, string][]).map(([value, label]) => {
+                const active = lang === value
                 return (
                   <button
-                    key={key}
-                    onClick={() => setClaudePlan(value)}
+                    key={value}
+                    type="button"
+                    onClick={() => setLang(value)}
+                    aria-pressed={active}
                     className={[
-                      'h-7 px-2.5 rounded-[2px] border text-[12px] transition-colors',
+                      'h-7 min-w-[44px] px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                      'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                       active
-                        ? 'bg-accent text-bg border-accent'
-                        : 'bg-bg border-line text-ink-muted hover:text-ink hover:border-ink-subtle',
+                        ? 'bg-accent text-bg-card border-accent'
+                        : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
                     ].join(' ')}
                   >
                     {label}
@@ -254,151 +198,255 @@ export const SettingsPanel = ({ open, settings, onClose, onSave }: Props) => {
                 )
               })}
             </div>
-            <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">
-              Drives the % shown in the top-right HUD. Anthropic does not
-              publish exact per-window limits; the percentage is based on
-              community estimates (~44k / 220k / 880k tokens per 5-hour window).
-              Pick None to show raw token counts instead.
-            </p>
-          </div>
+          </Section>
 
-          {/* Notifications — small enough to stay outside Advanced. */}
-          <div className="mt-5 border-t border-line pt-4 space-y-2">
-            <p className="label-cap text-ink-muted mb-1">Notifications</p>
-            <ToggleRow
-              checked={notifyOnRunComplete}
-              onChange={setNotifyOnRunComplete}
-              label="Notify when a task run finishes"
-              hint="Skipped while you're already viewing that project."
+          {/* Display name — assignee identity on shared boards. Placeholder is
+              the non-persisted git user.name suggestion. */}
+          <Section heading={t('settings.displayName.heading')} hint={t('settings.displayName.hint')}>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder={suggestedName ?? ''}
+              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
             />
-            <ToggleRow
-              checked={notifySound}
-              onChange={setNotifySound}
-              disabled={!notifyOnRunComplete}
-              label="Play a soft sound"
-              hint="A brief chirp alongside the notification."
-            />
-          </div>
+          </Section>
 
-          {/* Everything below has working defaults. */}
-          <div className="mt-5 border-t border-line pt-4">
+          {/* Owner-only inbox — only when the server can read submissions. */}
+          {open && feedbackCanRead && <FeedbackInbox onSeen={onFeedbackSeen} />}
+
+          {/* Advanced — working defaults; hidden until needed. */}
+          <div className="mt-6 border-t border-line pt-4">
             <button
               onClick={() => setShowAdvanced((v) => !v)}
               className="inline-flex items-center gap-1.5 label-cap text-ink-muted hover:text-ink transition-colors"
             >
               <ChevronRight
                 size={13}
-                className={
-                  'transition-transform duration-150 ' +
-                  (showAdvanced ? 'rotate-90' : '')
-                }
+                className={'transition-transform duration-150 ' + (showAdvanced ? 'rotate-90' : '')}
               />
-              Advanced settings
+              {t('settings.advanced')}
             </button>
 
             {showAdvanced && (
-              <div className="space-y-5 mt-4">
-                <Field
-                  label="Archive directory"
-                  hint="Folder name that archived projects are moved into, created inside your projects folder."
-                >
-                  <input
-                    type="text"
-                    value={archiveDirName}
-                    onChange={(e) => setArchiveDirName(e.target.value)}
-                    className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink focus:outline-none focus:border-accent"
-                  />
-                </Field>
+              <div className="mt-4 space-y-6">
+                {/* Default workspace */}
+                <Section heading={t('settings.workspace.heading')} hint={t('settings.workspace.hint')} flush>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={defaultWorkspace}
+                      onChange={(e) => setDefaultWorkspace(e.target.value)}
+                      placeholder="/Users/you/projects"
+                      className="flex-1 min-w-0 rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={browse}
+                      disabled={picking}
+                      className="shrink-0 inline-flex items-center gap-1.5 rounded-[2px] border border-line-strong bg-bg-elevated px-3 py-2 label-cap text-ink-muted hover:text-ink hover:bg-bg-inset hover:border-ink-subtle disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {picking ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}
+                      {t('settings.workspace.browse')}
+                    </button>
+                  </div>
+                </Section>
 
-                <Field
-                  label="Exclude patterns"
-                  hint="Comma-separated folder names skipped while scanning — dependencies, build output, and the like."
-                >
-                  <input
-                    type="text"
-                    value={excludePatterns}
-                    onChange={(e) => setExcludePatterns(e.target.value)}
-                    className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink focus:outline-none focus:border-accent"
-                  />
-                </Field>
-
-                <Field
-                  label="Run prompt template"
-                  hint="Sent to claude -p for each project. {{tasks}} = open tasks · {{description}} = project description · {{notes}} = project notes · {{name}} = project name."
-                >
-                  <textarea
-                    value={runPromptTemplate}
-                    onChange={(e) => setRunPromptTemplate(e.target.value)}
-                    className="w-full min-h-[120px] rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink focus:outline-none focus:border-accent resize-y leading-relaxed"
-                  />
-                </Field>
+                {/* Claude Code CLI status (troubleshooting; the requirement itself
+                    is taught in onboarding) */}
+                <Section flush heading={
+                  <span className="inline-flex items-center gap-1.5"><Terminal size={12} />{t('settings.cli.heading')}</span>
+                } action={
+                  <button
+                    onClick={() => setClaudeNonce((n) => n + 1)}
+                    className="label-cap text-ink-subtle hover:text-ink transition-colors"
+                  >
+                    {t('settings.cli.recheck')}
+                  </button>
+                }>
+                  <div className="text-[11px] leading-relaxed">
+                    {claudeProbe === null && (
+                      <span className="inline-flex items-center gap-1 text-ink-subtle">
+                        <Loader2 size={12} className="animate-spin" />
+                        {t('settings.cli.checking')}
+                      </span>
+                    )}
+                    {claudeProbe?.installed && (
+                      <span className="inline-flex items-center gap-1 text-moss">
+                        <Check size={12} strokeWidth={2.5} />
+                        {claudeProbe.message}
+                      </span>
+                    )}
+                    {claudeProbe && !claudeProbe.installed && (
+                      <div className="inline-flex items-start gap-1 text-accent">
+                        <AlertCircle size={12} className="mt-[2px] shrink-0" />
+                        <span>{claudeProbe.message}</span>
+                      </div>
+                    )}
+                  </div>
+                  <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{t('settings.cli.hint')}</p>
+                </Section>
               </div>
             )}
           </div>
         </div>
 
         <div className="shrink-0 flex items-center justify-end gap-2 border-t border-line bg-bg-elevated px-6 py-3.5">
-          <Btn variant="subtle" size="md" onClick={onClose}>Cancel</Btn>
-          <Btn variant="primary" size="md" onClick={save}>Save</Btn>
+          <Btn variant="subtle" size="md" onClick={onClose}>{t('common.cancel')}</Btn>
+          <Btn variant="primary" size="md" onClick={save}>{t('common.save')}</Btn>
         </div>
       </div>
+    </>
+  )
+}
+
+// A titled settings block. `flush` drops the top divider/margin (used inside the
+// Advanced group, which already provides its own spacing).
+const Section = ({
+  heading,
+  hint,
+  action,
+  flush,
+  children,
+}: {
+  heading: React.ReactNode
+  hint?: string
+  action?: React.ReactNode
+  flush?: boolean
+  children: React.ReactNode
+}) => (
+  <div className={flush ? '' : 'mt-6 border-t border-line pt-4'}>
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <p className="label-cap text-ink-muted">{heading}</p>
+      {action}
+    </div>
+    {children}
+    {hint && <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{hint}</p>}
+  </div>
+)
+
+const FeedbackInbox = ({ onSeen }: { onSeen?: (latestCreatedAt: string | null) => void }) => {
+  const { t } = useT()
+  const [items, setItems] = useState<FeedbackItem[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [truncated, setTruncated] = useState(false)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  const load = useCallback(() => {
+    setLoading(true)
+    setError(null)
+    api.api.feedback.list
+      .$get()
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json() as Promise<FeedbackListResponse>
+      })
+      .then((data) => {
+        if (!mounted.current) return
+        const next = data.items ?? []
+        setItems(next)
+        setTruncated(!!data.truncated)
+        onSeen?.(next[0]?.created_at ?? null)
+      })
+      .catch(() => {
+        if (mounted.current) setError(t('settings.inbox.error'))
+      })
+      .finally(() => {
+        if (mounted.current) setLoading(false)
+      })
+  }, [onSeen, t])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  return (
+    <div className="mt-6 border-t border-line pt-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="label-cap text-ink-muted inline-flex items-center gap-1.5">
+          <Inbox size={12} />
+          {t('settings.inbox.heading')}
+          {items && items.length > 0 && (
+            <span className="text-ink-subtle">({items.length}{truncated ? '+' : ''})</span>
+          )}
+        </p>
+        <button
+          onClick={load}
+          disabled={loading}
+          className="inline-flex items-center gap-1 label-cap text-ink-subtle hover:text-ink disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+          {t('settings.inbox.refresh')}
+        </button>
+      </div>
+
+      {loading && !items && (
+        <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
+          <Loader2 size={12} className="animate-spin" />
+          {t('settings.inbox.loading')}
+        </span>
+      )}
+      {error && (
+        <div className="inline-flex items-start gap-1 text-[11px] text-accent">
+          <AlertCircle size={12} className="mt-[2px] shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {items && items.length === 0 && !error && (
+        <p className="text-[11px] text-ink-subtle leading-relaxed">{t('settings.inbox.empty')}</p>
+      )}
+      {items && items.length > 0 && (
+        <ul className="space-y-2 max-h-[280px] overflow-y-auto -mx-1 px-1">
+          {items.map((f) => (
+            <li key={f.id} className="rounded-[2px] border border-line bg-bg p-3 leading-relaxed">
+              <p className="text-[12px] text-ink whitespace-pre-wrap break-words">{f.message}</p>
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-ink-subtle">
+                <span>{formatFeedbackDate(f.created_at)}</span>
+                {f.email && (
+                  <>
+                    <span className="text-ink-faint">·</span>
+                    <a href={`mailto:${f.email}`} className="font-mono text-ink-muted hover:text-ink transition-colors">{f.email}</a>
+                  </>
+                )}
+                {f.app_version && (
+                  <>
+                    <span className="text-ink-faint">·</span>
+                    <span className="font-mono">v{f.app_version}</span>
+                  </>
+                )}
+                {f.os && (
+                  <>
+                    <span className="text-ink-faint">·</span>
+                    <span className="font-mono">{f.os}</span>
+                  </>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {truncated && (
+        <p className="mt-2 text-[10px] text-ink-faint leading-relaxed">{t('settings.inbox.truncated')}</p>
+      )}
     </div>
   )
 }
 
-const Field = ({
-  label,
-  hint,
-  children,
-}: {
-  label: string
-  hint?: string
-  children: React.ReactNode
-}) => (
-  <div>
-    <label className="label-cap text-ink-muted block mb-1.5">{label}</label>
-    {children}
-    {hint && (
-      <p className="mt-1.5 text-[11px] text-ink-subtle leading-relaxed">{hint}</p>
-    )}
-  </div>
-)
+const formatFeedbackDate = (iso: string): string => {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
 
-// Compact label + native checkbox row — flexible toggle without the bulk of a
-// custom switch. Disables together with its sibling when the parent is off.
-const ToggleRow = ({
-  checked,
-  onChange,
-  label,
-  hint,
-  disabled,
-}: {
-  checked: boolean
-  onChange: (next: boolean) => void
-  label: string
-  hint?: string
-  disabled?: boolean
-}) => (
-  <label
-    className={[
-      'flex items-start gap-2.5 py-1 -mx-1 px-1 rounded-[2px]',
-      disabled
-        ? 'cursor-not-allowed opacity-40'
-        : 'cursor-pointer hover:bg-bg-inset/60',
-    ].join(' ')}
-  >
-    <input
-      type="checkbox"
-      checked={checked}
-      disabled={disabled}
-      onChange={(e) => onChange(e.target.checked)}
-      className="mt-[3px] h-3.5 w-3.5 shrink-0 cursor-[inherit] accent-accent"
-    />
-    <div className="min-w-0 leading-tight">
-      <p className="text-[13px] text-ink">{label}</p>
-      {hint && (
-        <p className="mt-0.5 text-[11px] text-ink-subtle leading-relaxed">{hint}</p>
-      )}
-    </div>
-  </label>
-)

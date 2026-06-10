@@ -62,4 +62,19 @@ describe('canvasElementLabel', () => {
     )
     expect(canvasElementLabel(el({ type: 'comment' }))).toBe('Comment')
   })
+
+  it('labels a group with a fallback (it has no content of its own)', () => {
+    expect(canvasElementLabel(el({ type: 'group' }))).toBe('Group')
+  })
+
+  it('a user-given name overrides the content/type label for ANY type', () => {
+    // The Layers-panel rename sets el.name; it must win over text/type fallback.
+    expect(canvasElementLabel(el({ type: 'sticky', text: 'Ship it', name: 'My note' }))).toBe(
+      'My note',
+    )
+    expect(canvasElementLabel(el({ type: 'group', name: 'Header cluster' }))).toBe('Header cluster')
+    expect(canvasElementLabel(el({ type: 'shape', name: 'Hero box' }))).toBe('Hero box')
+    // a blank / whitespace-only name falls back to the content/type label
+    expect(canvasElementLabel(el({ type: 'text', text: 'Body', name: '   ' }))).toBe('Body')
+  })
 })

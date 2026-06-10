@@ -3,38 +3,39 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OPEN GROUND — Mission control for everything you're building with Claude Code</title>
+  <title>OPEN GROUND — Every Claude Code terminal, on one canvas</title>
 
   <!-- Primary meta -->
-  <meta name="description" content="OPEN GROUND is the cross-project cockpit for Claude Code. See every project folder as a card on an infinite canvas, each card's hero is its last Claude run summary, and launch Claude Code into any of them — no more juggling terminal windows." />
+  <meta name="description" content="OPEN GROUND folds N terminal windows onto one infinite canvas. Every project is a card; one click opens a real claude terminal already sitting in the right folder. A multiplexer for Claude Code — local, subscription-only, never an API key." />
   <meta name="theme-color" content="#F2EDDE" />
   <meta name="color-scheme" content="light" />
 
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
-  <meta property="og:title" content="OPEN GROUND — mission control for everything you're building with Claude Code" />
-  <meta property="og:description" content="One infinite canvas for all your half-built projects. Every folder is a card; every card's hero is its last Claude run summary. Launch Claude Code into any project — no terminal juggling." />
+  <meta property="og:title" content="OPEN GROUND — every Claude Code terminal, on one canvas" />
+  <meta property="og:description" content="Stop juggling terminal windows. Every project is a card on an infinite canvas; one click drops you into a real claude terminal in that folder. Terminal, Board, Canvas — per project." />
   <meta property="og:image" content="https://open-ground.app/og.png" />
   <meta property="og:url" content="https://open-ground.app/" />
   <meta property="og:site_name" content="OPEN GROUND" />
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="OPEN GROUND — mission control for Claude Code" />
-  <meta name="twitter:description" content="One infinite canvas for all the projects you're building with Claude Code." />
+  <meta name="twitter:title" content="OPEN GROUND — every Claude Code terminal, on one canvas" />
+  <meta name="twitter:description" content="A multiplexer for Claude Code: all your projects on one canvas, each one click away from a real claude terminal." />
   <meta name="twitter:image" content="https://open-ground.app/og.png" />
 
-  <!-- SVG favicon: a cartographic compass on paper — the OPEN GROUND mark -->
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 128 128' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='128' height='128' rx='28' fill='%23F2EDDE'/%3E%3Ccircle cx='64' cy='64' r='38' fill='none' stroke='%232A1F1A' stroke-width='4'/%3E%3Cpath d='M64 28 L73 64 L64 100 L55 64 Z' fill='%23B23A2C'/%3E%3Ccircle cx='64' cy='64' r='5' fill='%232A1F1A'/%3E%3C/svg%3E" />
+  <!-- The OPEN GROUND mark — the ring of grains (official brand asset) -->
+  <link rel="icon" type="image/svg+xml" href="brand/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="256x256" href="brand/favicon-256.png" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..600;1,9..144,400..600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- Ambient backdrop -->
+  <!-- Ambient backdrop: cartographic grid + paper glow -->
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="bg-glow bg-glow--1" aria-hidden="true"></div>
   <div class="bg-glow bg-glow--2" aria-hidden="true"></div>
@@ -43,19 +44,14 @@
   <header class="site-header" id="top">
     <div class="container header-inner">
       <a class="brand" href="#top" aria-label="OPEN GROUND home">
-        <svg class="brand-mark" viewBox="0 0 128 128" width="30" height="30" aria-hidden="true">
-          <rect width="128" height="128" rx="28" fill="#F8F4E8" stroke="#D6C9AC" stroke-width="2"/>
-          <circle cx="64" cy="64" r="38" fill="none" stroke="#2A1F1A" stroke-width="4"/>
-          <path d="M64 28 L73 64 L64 100 L55 64 Z" fill="#B23A2C"/>
-          <circle cx="64" cy="64" r="5" fill="#2A1F1A"/>
-        </svg>
-        <span class="brand-word">OPEN&nbsp;GROUND</span>
+        <img class="brand-mark" src="brand/openground-mark-small.svg" width="21" height="21" alt="" aria-hidden="true" />
+        <img class="brand-word" src="brand/openground-wordmark.svg" height="17" alt="OPEN GROUND" />
       </a>
 
       <nav class="site-nav" aria-label="Primary">
         <a href="#pain" data-lang="en">The problem</a><a href="#pain" data-lang="ja">課題</a>
-        <a href="#wedge" data-lang="en">Why it's different</a><a href="#wedge" data-lang="ja">違い</a>
-        <a href="#features" data-lang="en">Features</a><a href="#features" data-lang="ja">機能</a>
+        <a href="#terminal" data-lang="en">The terminal</a><a href="#terminal" data-lang="ja">ターミナル</a>
+        <a href="#grounds" data-lang="en">Per-project</a><a href="#grounds" data-lang="ja">プロジェクト空間</a>
         <a href="#how" data-lang="en">How it works</a><a href="#how" data-lang="ja">使い方</a>
       </nav>
 
@@ -63,8 +59,8 @@
         <button class="lang-toggle" onclick="toggleLanguage()" aria-label="Switch language / 言語を切り替え">
           <span id="lang-ja">JA</span><span class="divider">/</span><span id="lang-en">EN</span>
         </button>
-        <a class="btn btn--primary btn--sm" href="#waitlist">
-          <span data-lang="en">Get early access</span><span data-lang="ja">先行登録</span>
+        <a class="btn btn--primary btn--sm" href="/api/download" rel="nofollow">
+          <span data-lang="en">Download</span><span data-lang="ja">ダウンロード</span>
         </a>
       </div>
     </div>
@@ -73,26 +69,33 @@
   <main>
     <!-- ============ HERO ============ -->
     <section class="hero">
+      <div class="hero-coords" aria-hidden="true">
+        <span class="coord coord--tl">37.7749° N</span>
+        <span class="coord coord--tr">PORT 47776</span>
+        <span class="coord coord--bl">~/projects</span>
+        <span class="coord coord--br">SCALE 1:N</span>
+      </div>
+
       <div class="container hero-inner">
         <span class="eyebrow">
           <span class="eyebrow-dot"></span>
-          <span data-lang="en">Local-first cockpit for Claude Code</span>
-          <span data-lang="ja">Claude Code のためのローカル・コックピット</span>
+          <span data-lang="en">A local cockpit for Claude Code · terminal-native</span>
+          <span data-lang="ja">Claude Code のローカル・コックピット · ターミナルネイティブ</span>
         </span>
 
         <h1 class="hero-title">
-          <span data-lang="en">Mission control for <span class="grad">everything</span> you're building with Claude Code.</span>
-          <span data-lang="ja">Claude Code で作っている<span class="grad">“全プロジェクト”</span>を、ひとつのキャンバスで。</span>
+          <span data-lang="en">Every <em>claude</em> terminal.<br />One <span class="grad">ground</span>.</span>
+          <span data-lang="ja">すべての <em>claude</em> ターミナルを、<br /><span class="grad">1枚の大地</span>に。</span>
         </h1>
 
         <p class="hero-sub">
-          <span data-lang="en">Every project folder becomes a card on one infinite canvas. Each card's hero is its last Claude run summary — so you know where every project stands at a glance. Then launch Claude Code into any of them, without juggling a single terminal window.</span>
-          <span data-lang="ja">プロジェクトフォルダが、ひとつの無限キャンバスにカードとして並ぶ。各カードの主役は「直近の Claude 実行サマリ」── どのプロジェクトが今どこにいるか、一目でわかる。そのまま、どのカードからでも Claude Code を起動。ターミナルのウィンドウを切り替える必要はもうない。</span>
+          <span data-lang="en">OPEN GROUND folds N terminal windows onto one infinite canvas. Every project is a card; one click drops you into a <strong>real <code>claude</code> terminal</strong>, already sitting in the right folder. No <code>cd</code>. No tab roulette. The whole portfolio, one surface.</span>
+          <span data-lang="ja">OPEN GROUND は、N枚のターミナルを1枚の無限キャンバスに畳む。すべてのプロジェクトがカードになり、ワンクリックで<strong>本物の <code>claude</code> ターミナル</strong>へ ── 正しいフォルダに、もう座った状態で。<code>cd</code> も、タブのルーレットも、もう要らない。</span>
         </p>
 
         <div class="hero-cta">
-          <a class="btn btn--primary" href="#waitlist">
-            <span data-lang="en">Get early access</span><span data-lang="ja">先行アクセスを取得</span>
+          <a class="btn btn--primary" href="/api/download" rel="nofollow">
+            <span data-lang="en">Download for Mac</span><span data-lang="ja">Mac 版をダウンロード</span>
           </a>
           <a class="btn btn--ghost" href="#how">
             <span data-lang="en">See how it works</span><span data-lang="ja">使い方を見る</span>
@@ -101,81 +104,99 @@
         </div>
 
         <p class="hero-note">
+          <span data-lang="en">macOS 12+ (Apple Silicon) · free beta · auto-updates built in. Windows? <a href="#waitlist">Join the waitlist</a>.</span>
+          <span data-lang="ja">macOS 12+（Apple Silicon）· 無料ベータ · 自動アップデート内蔵。Windows は<a href="#waitlist">ウェイトリストへ</a>。</span>
+        </p>
+
+        <p class="hero-note">
           <span data-lang="en">Drives <strong>your own</strong> Claude CLI (Pro / Max). Subscription-only — never an API key.</span>
           <span data-lang="ja"><strong>あなた自身の</strong> Claude CLI（Pro / Max）を動かします。サブスクリプション専用 ── API キーは一切不要。</span>
         </p>
 
-        <!-- ===== Product mock / illustration placeholder ===== -->
-        <div class="hero-mock" role="img" aria-label="OPEN GROUND canvas: a grid of project cards, each showing its last Claude run summary">
+        <!-- ===== Product mock: the Ground canvas + a live terminal ===== -->
+        <div class="hero-mock" role="img" aria-label="OPEN GROUND: project cards on a canvas, two with live Terminal beacons, and an open claude terminal pane">
           <div class="mock-window">
             <div class="mock-bar">
               <span class="mock-dot"></span><span class="mock-dot"></span><span class="mock-dot"></span>
               <span class="mock-bar-title">OPEN GROUND — Ground</span>
               <span class="mock-bar-pill">
                 <span class="live-dot"></span>
-                <span data-lang="en">2 running</span><span data-lang="ja">2件 実行中</span>
+                <span data-lang="en">2 terminals live</span><span data-lang="ja">ターミナル2面 稼働中</span>
               </span>
             </div>
             <div class="mock-canvas">
-              <!-- card 1 -->
-              <article class="pcard pcard--done">
-                <header class="pcard-head">
-                  <span class="pcard-name">aurora-api</span>
-                  <span class="badge badge--done"><span data-lang="en">Done</span><span data-lang="ja">完了</span></span>
-                </header>
-                <p class="pcard-hero"><span data-lang="en">Migrated auth to JWT, added 12 tests — all green. Ready to ship.</span><span data-lang="ja">認証を JWT へ移行、テスト12件追加 — 全て成功。リリース可。</span></p>
-                <footer class="pcard-foot"><span class="tag">main</span><span class="tag">7 tasks</span></footer>
-              </article>
-              <!-- card 2 -->
-              <article class="pcard pcard--run">
-                <header class="pcard-head">
-                  <span class="pcard-name">moodboard-web</span>
-                  <span class="badge badge--run"><span class="live-dot"></span><span data-lang="en">Running</span><span data-lang="ja">実行中</span></span>
-                </header>
-                <p class="pcard-hero"><span data-lang="en">Building the drag-and-drop grid… 0:42 elapsed.</span><span data-lang="ja">ドラッグ＆ドロップのグリッドを実装中… 経過 0:42。</span></p>
-                <footer class="pcard-foot"><span class="tag">feat/grid</span><span class="tag">3 tasks</span></footer>
-              </article>
-              <!-- card 3 -->
-              <article class="pcard pcard--block">
-                <header class="pcard-head">
-                  <span class="pcard-name">ledger-cli</span>
-                  <span class="badge badge--done"><span data-lang="en">Done</span><span data-lang="ja">完了</span></span>
-                </header>
-                <p class="pcard-hero"><span data-lang="en">Refactor done, but blocked: needs a Stripe test key to continue.</span><span data-lang="ja">リファクタ完了。ただしブロック：続行に Stripe テストキーが必要。</span></p>
-                <footer class="pcard-foot"><span class="tag">main</span><span class="tag">5 tasks</span></footer>
-              </article>
-              <!-- card 4 -->
-              <article class="pcard pcard--idle">
-                <header class="pcard-head">
-                  <span class="pcard-name">recipe-box</span>
-                  <span class="badge badge--idle"><span data-lang="en">Idle</span><span data-lang="ja">未実行</span></span>
-                </header>
-                <p class="pcard-hero pcard-hero--muted"><span data-lang="en">A tiny app to save weeknight recipes.</span><span data-lang="ja">平日の夕食レシピを保存する小さなアプリ。</span></p>
-                <footer class="pcard-foot"><span class="tag">main</span><span class="tag">0 tasks</span></footer>
-              </article>
-              <!-- card 5 -->
-              <article class="pcard pcard--run">
-                <header class="pcard-head">
-                  <span class="pcard-name">portfolio-2026</span>
-                  <span class="badge badge--run"><span class="live-dot"></span><span data-lang="en">Running</span><span data-lang="ja">実行中</span></span>
-                </header>
-                <p class="pcard-hero"><span data-lang="en">Rewriting the about page copy… 0:18 elapsed.</span><span data-lang="ja">About ページのコピーを書き直し中… 経過 0:18。</span></p>
-                <footer class="pcard-foot"><span class="tag">feat/copy</span><span class="tag">2 tasks</span></footer>
-              </article>
-              <!-- card 6 -->
-              <article class="pcard pcard--done">
-                <header class="pcard-head">
-                  <span class="pcard-name">notes-sync</span>
-                  <span class="badge badge--done"><span data-lang="en">Done</span><span data-lang="ja">完了</span></span>
-                </header>
-                <p class="pcard-hero"><span data-lang="en">Fixed the offline conflict bug. Sync is stable now.</span><span data-lang="ja">オフライン競合のバグを修正。同期は安定。</span></p>
-                <footer class="pcard-foot"><span class="tag">main</span><span class="tag">9 tasks</span></footer>
-              </article>
+              <!-- left: scattered project cards -->
+              <div class="mock-cards">
+                <article class="pcard pcard--live pcard--r1">
+                  <header class="pcard-head">
+                    <span class="pcard-name">aurora-api</span>
+                    <span class="beacon"><span class="live-dot"></span>Terminal</span>
+                  </header>
+                  <p class="pcard-desc"><span data-lang="en">Auth service for the Aurora suite — JWT migration in flight.</span><span data-lang="ja">Aurora スイートの認証サービス ── JWT 移行を進行中。</span></p>
+                </article>
+                <article class="pcard pcard--r2">
+                  <header class="pcard-head">
+                    <span class="pcard-name">recipe-box</span>
+                  </header>
+                  <p class="pcard-desc"><span data-lang="en">A tiny app to save weeknight recipes.</span><span data-lang="ja">平日の夕食レシピを保存する小さなアプリ。</span></p>
+                </article>
+                <article class="pcard pcard--live pcard--r3">
+                  <header class="pcard-head">
+                    <span class="pcard-name">portfolio-2026</span>
+                    <span class="beacon"><span class="live-dot"></span>Terminal</span>
+                  </header>
+                  <p class="pcard-desc"><span data-lang="en">This year's portfolio — copy rewrite on a branch.</span><span data-lang="ja">今年のポートフォリオ ── ブランチでコピーを刷新中。</span></p>
+                </article>
+                <article class="pcard pcard--r4">
+                  <header class="pcard-head">
+                    <span class="pcard-name">notes-sync</span>
+                  </header>
+                  <p class="pcard-desc"><span data-lang="en">Offline-first notes with conflict-free sync.</span><span data-lang="ja">オフラインファーストのノート同期。</span></p>
+                </article>
+              </div>
+
+              <!-- right: a real claude terminal pane -->
+              <div class="mock-term" aria-hidden="true">
+                <div class="term-bar">
+                  <span class="term-title">aurora-api — claude</span>
+                  <span class="term-pill"><span class="live-dot live-dot--green"></span>PTY</span>
+                </div>
+                <div class="term-body">
+                  <p class="tline tline--dim">~/projects/aurora-api</p>
+                  <p class="tline"><span class="tprompt">❯</span> claude</p>
+                  <p class="tline tline--claude">✻ Welcome to Claude Code</p>
+                  <p class="tline tline--type">Migrate the auth middleware to JWT and add tests</p>
+                  <p class="tline tline--dim">⏺ Reading src/middleware/auth.ts…</p>
+                  <p class="tline tline--dim">⏺ Running 12 tests… <span class="tok">all green</span></p>
+                  <p class="tline"><span class="tcursor"></span></p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </section>
+
+    <!-- ============ RITUAL MARQUEE ============ -->
+    <div class="ritual" aria-hidden="true">
+      <div class="ritual-track">
+        <span class="ritual-item">cd ~/projects/aurora-api && claude</span>
+        <span class="ritual-item">cd ~/projects/recipe-box && claude</span>
+        <span class="ritual-item">cd ~/projects/notes-sync && claude</span>
+        <span class="ritual-item">cd ~/projects/portfolio-2026 && claude</span>
+        <span class="ritual-item">cd ~/projects/ledger-cli && claude</span>
+        <span class="ritual-item">cd ~/projects/moodboard-web && claude</span>
+        <span class="ritual-item">cd ~/projects/aurora-api && claude</span>
+        <span class="ritual-item">cd ~/projects/recipe-box && claude</span>
+        <span class="ritual-item">cd ~/projects/notes-sync && claude</span>
+        <span class="ritual-item">cd ~/projects/portfolio-2026 && claude</span>
+        <span class="ritual-item">cd ~/projects/ledger-cli && claude</span>
+        <span class="ritual-item">cd ~/projects/moodboard-web && claude</span>
+      </div>
+      <div class="ritual-stamp">
+        <span data-lang="en">never again</span><span data-lang="ja">もう、やらない</span>
+      </div>
+    </div>
 
     <!-- ============ THE PAIN ============ -->
     <section class="section" id="pain">
@@ -183,12 +204,12 @@
         <div class="section-head">
           <span class="kicker"><span data-lang="en">The problem</span><span data-lang="ja">課題</span></span>
           <h2 class="section-title">
-            <span data-lang="en">Many projects. Too many windows. No map.</span>
-            <span data-lang="ja">プロジェクトは増える。ウィンドウも増える。地図がない。</span>
+            <span data-lang="en">The most powerful tool you own has the poorest UI.</span>
+            <span data-lang="ja">いちばん強い道具の UI が、いちばん貧弱。</span>
           </h2>
           <p class="section-lead">
-            <span data-lang="en">Claude Code is the most powerful tool you own — and it lives in a terminal. So every project means another <code>cd</code>, another <code>claude</code>, another tab. Run a handful at once and your attention dissolves into window-switching.</span>
-            <span data-lang="ja">Claude Code は手元で最強の道具 ── けれど棲み家はターミナル。プロジェクトごとに <code>cd</code> して <code>claude</code> を起動し、またタブが増える。数本を同時に回した瞬間、頭のリソースはウィンドウの切り替えで溶けていく。</span>
+            <span data-lang="en">Terminal AI agents like Claude Code are the strongest way to build — and they live in a bare terminal. Every project means another <code>cd</code>, another <code>claude</code>, another window. Run a handful at once and your attention dissolves into tab-switching. Nobody bridged that power to a many-projects UI. OPEN GROUND is the bridge.</span>
+            <span data-lang="ja">Claude Code のようなターミナル AI エージェントは、最も強力な作り方 ── なのに棲み家は素のターミナル。プロジェクトごとに <code>cd</code> して <code>claude</code>、またウィンドウが増える。数本を同時に回した瞬間、頭のリソースはタブの切り替えで溶けていく。このパワーを「複数プロジェクトの UI」へ橋渡しした者はいなかった。OPEN GROUND がその橋になる。</span>
           </p>
         </div>
 
@@ -200,8 +221,8 @@
           </div>
           <div class="pain-card">
             <div class="pain-icon" aria-hidden="true">▦</div>
-            <h3><span data-lang="en">A wall of tabs</span><span data-lang="ja">タブの壁</span></h3>
-            <p><span data-lang="en">Five terminals, ten tabs. Which one was building the API? Which one stalled an hour ago?</span><span data-lang="ja">ターミナル5枚、タブ10個。API を直してたのはどれ？ 1時間前に止まったのは？</span></p>
+            <h3><span data-lang="en">A wall of windows</span><span data-lang="ja">ウィンドウの壁</span></h3>
+            <p><span data-lang="en">Five terminals, ten tabs. Which one was fixing the API? Which one is waiting on your answer?</span><span data-lang="ja">ターミナル5枚、タブ10個。API を直してたのはどれ？ あなたの返事を待ってるのは？</span></p>
           </div>
           <div class="pain-card">
             <div class="pain-icon" aria-hidden="true">◌</div>
@@ -210,74 +231,85 @@
           </div>
           <div class="pain-card">
             <div class="pain-icon" aria-hidden="true">⌁</div>
-            <h3><span data-lang="en">The terminal wall</span><span data-lang="ja">ターミナルの壁</span></h3>
-            <p><span data-lang="en">If you're a low-coder, the strongest tool also looks the most intimidating.</span><span data-lang="ja">ローコーダーにとっては、最強の道具が、いちばん怖そうに見える。</span></p>
+            <h3><span data-lang="en">Context, evaporated</span><span data-lang="ja">蒸発するコンテキスト</span></h3>
+            <p><span data-lang="en">Tasks in one app, designs in another, terminals in a third. The project's brain is scattered across your dock.</span><span data-lang="ja">タスクは別アプリ、デザインはまた別、ターミナルは第三の場所。プロジェクトの頭脳が Dock 中に散らばる。</span></p>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ============ THE WEDGE / SOLUTION ============ -->
-    <section class="section section--wedge" id="wedge">
+    <!-- ============ THE TERMINAL (hero feature) ============ -->
+    <section class="section section--terminal" id="terminal">
       <div class="container">
-        <div class="wedge-layout">
-          <div class="wedge-copy">
-            <span class="kicker"><span data-lang="en">The wedge</span><span data-lang="ja">立ち位置</span></span>
-            <h2 class="section-title">
-              <span data-lang="en">Anthropic's app does <em>one</em> project well. OPEN GROUND is the map of <em>all</em> of them.</span>
-              <span data-lang="ja">Anthropic の公式アプリは<em>1つ</em>のプロジェクトを上手に進める。OPEN GROUND は<em>全部</em>の地図だ。</span>
+        <div class="term-layout">
+          <div class="term-copy">
+            <span class="kicker kicker--light"><span data-lang="en">The terminal</span><span data-lang="ja">ターミナル</span></span>
+            <h2 class="section-title section-title--light">
+              <span data-lang="en">Real terminals. Not a chat skin.</span>
+              <span data-lang="ja">本物のターミナル。チャット風の皮ではなく。</span>
             </h2>
-            <p class="section-lead">
-              <span data-lang="en">OPEN GROUND is a cross-project portfolio — a <strong>multiplexer</strong>, not a batch tool. It folds N terminal windows onto one pannable, zoomable canvas. Each card carries its own independent work; firing the same prompt at many projects is just a special case. It's a complement to your single-project flow, not a competitor to it.</span>
-              <span data-lang="ja">OPEN GROUND は横断ポートフォリオ ── バッチツールではなく<strong>マルチプレクサ</strong>。N枚のターミナルを、パン＆ズーム可能な1枚のキャンバスに畳む。各カードは独立した別々の作業を持ち、同じ指示の一斉発射は特殊ケースにすぎない。単一プロジェクトのワークフローと競合せず、それを<strong>補完</strong>する。</span>
+            <p class="section-lead section-lead--light">
+              <span data-lang="en">Every pane is a genuine PTY running <strong>your own</strong> <code>claude</code> CLI — the full interactive experience, exactly as Anthropic ships it. Tile several per project, type into any of them, and nothing is lost in translation. OPEN GROUND is a <strong>multiplexer</strong>: N independent jobs, one surface.</span>
+              <span data-lang="ja">どのペインも、<strong>あなた自身の</strong> <code>claude</code> CLI を動かす本物の PTY。Anthropic が出荷したままの、完全なインタラクティブ体験。プロジェクトごとに複数面をタイル表示して、どこにでも直接タイプできる。OPEN GROUND は<strong>マルチプレクサ</strong> ── N個の独立した仕事を、1つの盤面に束ねる。</span>
             </p>
-            <ul class="wedge-list">
-              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Every folder is a card on an infinite canvas.</span><span data-lang="ja">すべてのフォルダが、無限キャンバス上のカードになる。</span></li>
-              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Each card's hero is its last Claude run summary.</span><span data-lang="ja">各カードの主役は、直近の Claude 実行サマリ。</span></li>
-              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Launch Claude Code into any project from the canvas.</span><span data-lang="ja">キャンバスから、どのプロジェクトにも Claude Code を起動。</span></li>
+            <ul class="term-list">
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">One click on a card opens <code>claude</code> in that folder.</span><span data-lang="ja">カードをワンクリックで、そのフォルダの <code>claude</code> が開く。</span></li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Tiled panes — several sessions per project, side by side.</span><span data-lang="ja">タイル表示 ── 1プロジェクトに複数セッションを並べて。</span></li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">A live <strong>Terminal beacon</strong> on every card where Claude is at work.</span><span data-lang="ja">Claude が働いているカードには、<strong>Terminal ビーコン</strong>が灯る。</span></li>
             </ul>
           </div>
 
-          <aside class="wedge-compare" aria-label="Single project vs. all projects">
-            <div class="compare-col compare-col--single">
-              <span class="compare-label"><span data-lang="en">One project</span><span data-lang="ja">1プロジェクト</span></span>
-              <div class="compare-stack"><span></span></div>
-              <p><span data-lang="en">Deep, focused, in a terminal.</span><span data-lang="ja">深く、集中して、ターミナルで。</span></p>
+          <div class="term-visual" aria-hidden="true">
+            <div class="tv-pane tv-pane--1">
+              <div class="tv-bar">aurora-api</div>
+              <p class="tline"><span class="tprompt">❯</span> claude</p>
+              <p class="tline tline--dim">⏺ Refactoring middleware…</p>
+              <p class="tline"><span class="tcursor"></span></p>
             </div>
-            <div class="compare-arrow" aria-hidden="true">→</div>
-            <div class="compare-col compare-col--all">
-              <span class="compare-label"><span data-lang="en">All projects</span><span data-lang="ja">全プロジェクト</span></span>
-              <div class="compare-grid"><span></span><span></span><span></span><span></span><span></span><span></span></div>
-              <p><span data-lang="en">The whole portfolio, at a glance.</span><span data-lang="ja">ポートフォリオ全体を、一目で。</span></p>
+            <div class="tv-pane tv-pane--2">
+              <div class="tv-bar">portfolio-2026</div>
+              <p class="tline"><span class="tprompt">❯</span> claude</p>
+              <p class="tline tline--dim">⏺ Rewriting about page…</p>
+              <p class="tline"><span class="tcursor"></span></p>
             </div>
-          </aside>
+            <div class="tv-pane tv-pane--3">
+              <div class="tv-bar">notes-sync</div>
+              <p class="tline"><span class="tprompt">❯</span> claude</p>
+              <p class="tline tline--dim">⏺ Hunting the sync bug…</p>
+              <p class="tline"><span class="tcursor"></span></p>
+            </div>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- ============ FEATURES ============ -->
-    <section class="section" id="features">
+    <!-- ============ PER-PROJECT SPACES ============ -->
+    <section class="section" id="grounds">
       <div class="container">
         <div class="section-head section-head--center">
-          <span class="kicker"><span data-lang="en">Features</span><span data-lang="ja">機能</span></span>
+          <span class="kicker"><span data-lang="en">Per-project spaces</span><span data-lang="ja">プロジェクトごとの空間</span></span>
           <h2 class="section-title">
-            <span data-lang="en">A surface built for many things in flight at once.</span>
-            <span data-lang="ja">同時にいくつも走らせる、ための土台。</span>
+            <span data-lang="en">Open any card. Three rooms inside.</span>
+            <span data-lang="ja">カードを開けば、3つの部屋。</span>
           </h2>
+          <p class="section-lead section-lead--center">
+            <span data-lang="en">Every project unfolds into Terminal, Board, and Canvas — the work, the plan, and the thinking, all in the same place.</span>
+            <span data-lang="ja">どのプロジェクトも Terminal・Board・Canvas に展開する ── 作業と、計画と、思考が、同じ場所に。</span>
+          </p>
         </div>
 
         <div class="feature-grid">
           <article class="feature feature--wide">
             <div class="feature-visual feature-visual--canvas" aria-hidden="true">
-              <div class="mini-card mini-card--done"><span class="mini-name">aurora-api</span><span class="mini-sum"></span><span class="mini-sum mini-sum--short"></span></div>
-              <div class="mini-card mini-card--run"><span class="mini-name">moodboard</span><span class="mini-sum"></span><span class="mini-sum mini-sum--short"></span></div>
-              <div class="mini-card mini-card--done"><span class="mini-name">notes-sync</span><span class="mini-sum"></span><span class="mini-sum mini-sum--short"></span></div>
-              <div class="mini-card mini-card--idle"><span class="mini-name">recipe-box</span><span class="mini-sum"></span></div>
+              <div class="mini-card mini-card--live"><span class="mini-name">aurora-api</span><span class="mini-beacon"><span class="live-dot"></span>Terminal</span><span class="mini-sum"></span></div>
+              <div class="mini-card"><span class="mini-name">moodboard</span><span class="mini-sum"></span><span class="mini-sum mini-sum--short"></span></div>
+              <div class="mini-card mini-card--live"><span class="mini-name">notes-sync</span><span class="mini-beacon"><span class="live-dot"></span>Terminal</span><span class="mini-sum"></span></div>
+              <div class="mini-card"><span class="mini-name">recipe-box</span><span class="mini-sum"></span></div>
             </div>
             <div class="feature-body">
               <span class="feature-num">01</span>
-              <h3><span data-lang="en">A canvas of project cards — each card's hero is its last run summary</span><span data-lang="ja">プロジェクトカードのキャンバス ── 各カードの主役は直近のランサマリ</span></h3>
-              <p><span data-lang="en">Pan and zoom across everything you're building. Position is a free workspace — it carries no system meaning — so the card's <em>state</em>, chiefly its last-run summary, does all the talking. The wall narrates "where each project stands now."</span><span data-lang="ja">作っている物すべてをパン＆ズームで見渡す。配置は自由なワークスペースで、システム的な意味は持たない ── だからカードの<em>状態</em>、とりわけ直近のランサマリがすべてを語る。壁全体が「いま各プロジェクトはどこにいるか」を物語る。</span></p>
+              <h3><span data-lang="en">The Ground — your whole portfolio as a map</span><span data-lang="ja">Ground ── ポートフォリオ全体がひとつの地図</span></h3>
+              <p><span data-lang="en">Pan and zoom across everything you're building. Each card carries its name and a description, plus a live <strong>Terminal beacon</strong> while Claude works inside it. Arrange cards freely, group them with frames — position is your workspace, not the system's.</span><span data-lang="ja">作っている物すべてをパン＆ズームで見渡す。カードには名前と説明、そして Claude が中で働いている間は <strong>Terminal ビーコン</strong>が灯る。配置は自由、フレームでグルーピングも ── 位置はあなたの作業場であって、システムの都合ではない。</span></p>
             </div>
           </article>
 
@@ -285,10 +317,10 @@
             <div class="feature-body">
               <span class="feature-num">02</span>
               <div class="feature-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+                <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M7 9l2.5 2.5L7 14M12 14h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </div>
-              <h3><span data-lang="en">Run Claude Code in any project</span><span data-lang="ja">どのプロジェクトでも Claude Code を実行</span></h3>
-              <p><span data-lang="en">Fire a prompt at one card, or many at once, from the canvas. A concurrency-limited worker pool keeps it sane; live logs stream back; the summary lands right on the card.</span><span data-lang="ja">キャンバスから、1枚のカードにも、複数まとめても、プロンプトを発射。同時実行数を絞ったワーカープールで暴走させず、ライブログが流れ、終わればサマリがカードに着地する。</span></p>
+              <h3><span data-lang="en">Terminal — tiled <code>claude</code> panes</span><span data-lang="ja">Terminal ── タイル表示の <code>claude</code> ペイン</span></h3>
+              <p><span data-lang="en">Real PTYs, side by side. Launch, type, interrupt, approve — everything the CLI can do, because it <em>is</em> the CLI.</span><span data-lang="ja">本物の PTY を並べて表示。起動も、入力も、中断も、許可も ── CLI にできることは全部できる。それ<em>が</em> CLI そのものだから。</span></p>
             </div>
           </article>
 
@@ -296,24 +328,70 @@
             <div class="feature-body">
               <span class="feature-num">03</span>
               <div class="feature-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M7 9l2.5 2.5L7 14M12 14h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="5" height="18" rx="1" stroke="currentColor" stroke-width="2"/><rect x="10" y="3" width="5" height="12" rx="1" stroke="currentColor" stroke-width="2"/><rect x="17" y="3" width="4" height="8" rx="1" stroke="currentColor" stroke-width="2"/></svg>
               </div>
-              <h3><span data-lang="en">Per-project chats, terminal &amp; a design canvas</span><span data-lang="ja">プロジェクトごとのチャット・ターミナル・デザインキャンバス</span></h3>
-              <p><span data-lang="en">Open any card into its own space: Chats to resume a session, a real Terminal when you want one, and a Canvas for sticky notes, frames, and live React mocks — like an artifact, sandboxed.</span><span data-lang="ja">どのカードも自分の空間に展開：セッションを再開する Chats、欲しい時の本物の Terminal、付箋・フレーム・ライブ React モック（サンドボックス化された artifact のよう）を置く Canvas。</span></p>
+              <h3><span data-lang="en">Board — a kanban that launches terminals</span><span data-lang="ja">Board ── ターミナルを起動するカンバン</span></h3>
+              <p><span data-lang="en">Plan in columns, then press ▶ on any task: a <code>claude</code> terminal opens for exactly that piece of work, tracked per task.</span><span data-lang="ja">列で計画し、タスクの ▶ を押す ── その作業のためだけの <code>claude</code> ターミナルが、タスク単位で開く。</span></p>
             </div>
           </article>
 
           <article class="feature feature--wide feature--flip">
-            <div class="feature-visual feature-visual--summary" aria-hidden="true">
-              <div class="summary-chip"><span class="badge badge--run"><span class="live-dot"></span>Running</span><span class="summary-line"></span></div>
-              <div class="summary-chip"><span class="badge badge--done">Done</span><span class="summary-line"></span><span class="summary-line summary-line--short"></span></div>
-              <div class="summary-chip"><span class="badge badge--idle">Idle</span><span class="summary-line summary-line--short"></span></div>
+            <div class="feature-visual feature-visual--canvasboard" aria-hidden="true">
+              <div class="cb-sticky cb-sticky--1"></div>
+              <div class="cb-sticky cb-sticky--2"></div>
+              <div class="cb-frame"><span class="cb-frame-label">v2 flow</span></div>
+              <div class="cb-mock"><span class="cb-mock-bar"></span><span class="cb-mock-body">⚛︎ live</span></div>
             </div>
             <div class="feature-body">
               <span class="feature-num">04</span>
-              <h3><span data-lang="en">Know the state of every project at a glance</span><span data-lang="ja">すべてのプロジェクトの状態を一目で</span></h3>
-              <p><span data-lang="en">A flat status badge — idle, queued, running, done — tells you <em>how far</em>. The summary tells you <em>how it went</em>. No more reading scrollback to remember what a project was even doing.</span><span data-lang="ja">フラットなステータスバッジ（未実行・待機・実行中・完了）が「<em>どこまで</em>進んだか」を、サマリが「<em>どうだったか</em>」を伝える。何をしていたか思い出すためにログを遡る必要はもうない。</span></p>
+              <h3><span data-lang="en">Canvas — sticky notes, frames &amp; live React mocks</span><span data-lang="ja">Canvas ── 付箋・フレーム・ライブ React モック</span></h3>
+              <p><span data-lang="en">A design and brainstorm surface per project — as many canvases as you need, in tabs. Drop sticky notes, text, frames, comments, and <em>mock elements that render real React</em> in a sandboxed iframe, the same pattern Claude Artifacts uses.</span><span data-lang="ja">プロジェクトごとのデザイン＆ブレスト面 ── キャンバスはタブで何枚でも。付箋・テキスト・フレーム・コメント、そして<em>本物の React を描画するモック要素</em>（サンドボックス iframe、Claude Artifacts と同じ方式）を置ける。</span></p>
             </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CLEAN REPOS + GIT SHARING ============ -->
+    <section class="section section--clean" id="clean">
+      <div class="container">
+        <div class="section-head">
+          <span class="kicker"><span data-lang="en">Your repos, your rules</span><span data-lang="ja">リポジトリとの距離感</span></span>
+          <h2 class="section-title">
+            <span data-lang="en">Untouched by default. Shared when you say so.</span>
+            <span data-lang="ja">基本は、何も書き込まない。共有したい時だけ、git で。</span>
+          </h2>
+          <p class="section-lead">
+            <span data-lang="en">Register any folder, anywhere on disk. Out of the box, all OPEN GROUND data lives centrally in <code>~/.openground</code> — your working tree never gains a dotfile. And when teammates join, flip one switch: the project's Board and Canvas move into the repo and travel through git itself.</span>
+            <span data-lang="ja">ディスク上のどこにあるフォルダでも登録できる。素の状態では、OPEN GROUND のデータはすべて <code>~/.openground</code> に集中管理され、作業ツリーに dotfile は1つも増えない。そして仲間が加わったら、スイッチを1つ ── そのプロジェクトの Board と Canvas はリポジトリに引っ越し、git そのものに乗って共有される。</span>
+          </p>
+        </div>
+
+        <div class="mode-grid">
+          <article class="mode-card">
+            <span class="mode-tag"><span data-lang="en">Default — solo</span><span data-lang="ja">デフォルト ── ソロ</span></span>
+            <h3><span data-lang="en">Zero files written into your projects.</span><span data-lang="ja">プロジェクトには1ファイルも書き込まない。</span></h3>
+            <p><span data-lang="en">Everything lives in <code>~/.openground</code>, keyed by a stable ID that survives renames and moves. Your git history never sees us.</span><span data-lang="ja">すべて <code>~/.openground</code> に置かれ、リネームや移動に耐える安定 ID で紐づく。git 履歴に痕跡は残らない。</span></p>
+            <ul class="mode-points">
+              <li><span data-lang="en">Local-first, single-user macOS app — your code and sessions never leave your machine.</span><span data-lang="ja">ローカルファーストの macOS アプリ ── コードもセッションもマシンの外に出ない。</span></li>
+              <li><span data-lang="en">Subscription-only: drives the <code>claude</code> CLI you already pay for. No API key, no metered bill.</span><span data-lang="ja">サブスク専用：契約済みの <code>claude</code> CLI をそのまま使う。API キーも従量課金も無し。</span></li>
+              <li><span data-lang="en">A curated registry, not a scan — remove a card without touching the folder.</span><span data-lang="ja">スキャンではなくレジストリ ── フォルダに触れずカードだけ外せる。</span></li>
+            </ul>
+          </article>
+
+          <article class="mode-card mode-card--share">
+            <span class="mode-tag mode-tag--share"><span data-lang="en">Opt-in — Share via Git</span><span data-lang="ja">オプトイン ── Git で共有</span></span>
+            <h3><span data-lang="en">Build the board together, over plain git.</span><span data-lang="ja">ボードもキャンバスも、素の git でチーム共有。</span></h3>
+            <p><span data-lang="en">Enable sharing and the Board + Canvas data moves into <code>.openground/</code> inside the repo. A teammate clones, imports the folder — and sees the same board. Zero setup on their side.</span><span data-lang="ja">共有を有効にすると、Board と Canvas のデータはリポジトリ内の <code>.openground/</code> へ。仲間は clone してフォルダをインポートするだけで、同じボードが見える。相手側の設定はゼロ。</span></p>
+            <ul class="mode-points">
+              <li><span data-lang="en"><strong>Pure git.</strong> No accounts, no tokens, no API — your existing remote and your own git auth. Works with GitHub, GitLab, anything.</span><span data-lang="ja"><strong>純 git。</strong>アカウントもトークンも API も不要 ── 既存の remote とあなたの git 認証だけ。GitHub でも GitLab でも動く。</span></li>
+              <li><span data-lang="en"><strong>One-click Sync.</strong> Commit → pull → push, scoped strictly to <code>.openground/</code> — your staged code changes are never touched.</span><span data-lang="ja"><strong>Sync はワンクリック。</strong>commit → pull → push を <code>.openground/</code> だけに限定 ── ステージ済みのコード変更には絶対に触れない。</span></li>
+              <li><span data-lang="en"><strong>Reversible.</strong> Stop sharing and the data moves back to central storage. Personal state (tab order, active canvas) never enters the repo.</span><span data-lang="ja"><strong>いつでも戻せる。</strong>共有を解除すればデータは中央管理へ帰る。個人の状態（タブ順・表示中キャンバス）は最初からリポジトリに入らない。</span></li>
+            </ul>
+            <pre class="file-tree" aria-hidden="true">.openground/
+  openground.json
+  board/cards/&lt;task&gt;.json
+  canvas/canvases/&lt;id&gt;.json</pre>
           </article>
         </div>
       </div>
@@ -333,18 +411,18 @@
         <ol class="steps">
           <li class="step">
             <span class="step-num">1</span>
-            <h3><span data-lang="en">Point it at your projects folder</span><span data-lang="ja">プロジェクトフォルダを指定</span></h3>
-            <p><span data-lang="en">OPEN GROUND scans the root directory you choose. Every subfolder becomes a card — no config, no import, no migration.</span><span data-lang="ja">選んだルートディレクトリをスキャン。サブフォルダがそのままカードになる ── 設定もインポートも移行も不要。</span></p>
+            <h3><span data-lang="en">Put your projects on the ground</span><span data-lang="ja">プロジェクトを大地に並べる</span></h3>
+            <p><span data-lang="en">Create a new project or import any existing folder from anywhere on disk. Each one becomes a card on the canvas — nothing is written into the folder itself.</span><span data-lang="ja">新規プロジェクトを作るか、ディスク上の任意のフォルダをインポート。それぞれがキャンバス上のカードになる ── フォルダの中には何も書き込まれない。</span></p>
           </li>
           <li class="step">
             <span class="step-num">2</span>
-            <h3><span data-lang="en">Launch Claude into any card</span><span data-lang="ja">どのカードにも Claude を起動</span></h3>
-            <p><span data-lang="en">Pick a task or type a prompt, then run. OPEN GROUND drives your own <code>claude</code> CLI in that folder and streams the logs live.</span><span data-lang="ja">タスクを選ぶか、プロンプトを打って実行。OPEN GROUND があなたの <code>claude</code> CLI をそのフォルダで動かし、ログをライブ配信する。</span></p>
+            <h3><span data-lang="en">Click a card, get a terminal</span><span data-lang="ja">カードをクリック、ターミナルが開く</span></h3>
+            <p><span data-lang="en">One click opens a real <code>claude</code> terminal already in that project's folder. Or plan first on the Board and press ▶ on a task.</span><span data-lang="ja">ワンクリックで、そのプロジェクトのフォルダに座った本物の <code>claude</code> ターミナルが開く。先に Board で計画して、タスクの ▶ から始めてもいい。</span></p>
           </li>
           <li class="step">
             <span class="step-num">3</span>
-            <h3><span data-lang="en">Read the wall, steer the work</span><span data-lang="ja">壁を読み、舵を取る</span></h3>
-            <p><span data-lang="en">When a run finishes, its summary becomes the card's hero. Scan the canvas, see what needs you, resume a session, or fire the next prompt.</span><span data-lang="ja">ランが終わると、そのサマリがカードの主役になる。キャンバスを眺め、要対応を見つけ、セッションを再開し、次のプロンプトを撃つ。</span></p>
+            <h3><span data-lang="en">Read the ground, steer the fleet</span><span data-lang="ja">大地を読み、艦隊の舵を取る</span></h3>
+            <p><span data-lang="en">Zoom out: beacons show every card where Claude is at work. Drop into any session, answer its question, launch the next one.</span><span data-lang="ja">ズームアウトすれば、Claude が働いているカードにビーコンが灯っている。気になるセッションに降りて、質問に答え、次を起動する。</span></p>
           </li>
         </ol>
       </div>
@@ -370,12 +448,12 @@
           <article class="who-card">
             <div class="who-emoji" aria-hidden="true">🚀</div>
             <h3><span data-lang="en">Indie makers</span><span data-lang="ja">インディーメーカー</span></h3>
-            <p><span data-lang="en">Shipping solo across many bets. See where every bet stands and move the one that's ready — without losing the others.</span><span data-lang="ja">複数の賭けを一人で回す。どの賭けがどこにいるかを把握し、準備できた1つを動かす ── 他を見失わずに。</span></p>
+            <p><span data-lang="en">Shipping solo across many bets. Keep a Claude working in each one, and see at a glance which bet needs your hand.</span><span data-lang="ja">複数の賭けを一人で回す。それぞれに Claude を働かせながら、手が要る賭けがどれか一目で分かる。</span></p>
           </article>
           <article class="who-card">
             <div class="who-emoji" aria-hidden="true">✨</div>
-            <h3><span data-lang="en">Low-coders</span><span data-lang="ja">ローコーダー</span></h3>
-            <p><span data-lang="en">A canvas of cards is far less intimidating than a blinking cursor. Get the full power of Claude Code without living in a terminal.</span><span data-lang="ja">点滅するカーソルより、カードのキャンバスのほうがずっと優しい。ターミナルに住まずに、Claude Code の全パワーを。</span></p>
+            <h3><span data-lang="en">Terminal maximalists</span><span data-lang="ja">ターミナル最大主義者</span></h3>
+            <p><span data-lang="en">You love the CLI — you just hate juggling nine of them. Keep the real thing, lose the window chaos.</span><span data-lang="ja">CLI は大好き ── 嫌いなのは9枚を捌くこと。本物はそのまま、ウィンドウの混沌だけを消す。</span></p>
           </article>
         </div>
       </div>
@@ -388,12 +466,12 @@
           <div class="cta-glow" aria-hidden="true"></div>
           <span class="kicker"><span data-lang="en">Early access</span><span data-lang="ja">先行アクセス</span></span>
           <h2 class="cta-title">
-            <span data-lang="en">Give your projects a home base.</span>
-            <span data-lang="ja">プロジェクトに、母艦を。</span>
+            <span data-lang="en">Give your terminals a home ground.</span>
+            <span data-lang="ja">ターミナルたちに、ホームグラウンドを。</span>
           </h2>
           <p class="cta-sub">
-            <span data-lang="en">OPEN GROUND is a local, single-user desktop app. Join the waitlist and we'll let you know the moment early builds open up.</span>
-            <span data-lang="ja">OPEN GROUND はローカルで動く単一ユーザーのデスクトップアプリ。ウェイトリストに登録すれば、先行ビルドが開いた瞬間にお知らせします。</span>
+            <span data-lang="en">OPEN GROUND is a local desktop app for macOS — solo by default, team-ready over git. Join the waitlist and we'll let you know the moment early builds open up.</span>
+            <span data-lang="ja">OPEN GROUND はローカルで動く macOS デスクトップアプリ ── 基本はソロ、git に乗ればチームでも。ウェイトリストに登録すれば、先行ビルドが開いた瞬間にお知らせします。</span>
           </p>
 
           <form class="waitlist-form" action="/api/waitlist" method="POST" onsubmit="return handleWaitlist(event)">
@@ -430,30 +508,26 @@
     <div class="container footer-inner">
       <div class="footer-brand">
         <a class="brand" href="#top" aria-label="OPEN GROUND home">
-          <svg class="brand-mark" viewBox="0 0 128 128" width="26" height="26" aria-hidden="true">
-            <rect width="128" height="128" rx="28" fill="#F8F4E8" stroke="#D6C9AC" stroke-width="2"/>
-            <circle cx="64" cy="64" r="38" fill="none" stroke="#2A1F1A" stroke-width="4"/>
-            <path d="M64 28 L73 64 L64 100 L55 64 Z" fill="#B23A2C"/>
-            <circle cx="64" cy="64" r="5" fill="#2A1F1A"/>
-          </svg>
-          <span class="brand-word">OPEN&nbsp;GROUND</span>
+          <img class="brand-mark" src="brand/openground-mark-small.svg" width="19" height="19" alt="" aria-hidden="true" />
+          <img class="brand-word" src="brand/openground-wordmark.svg" height="15" alt="OPEN GROUND" />
         </a>
         <p class="footer-tag">
-          <span data-lang="en">Mission control for everything you're building with Claude Code.</span>
-          <span data-lang="ja">Claude Code で作っている全プロジェクトの、コックピット。</span>
+          <span data-lang="en">Every Claude Code terminal, on one canvas.</span>
+          <span data-lang="ja">すべての Claude Code ターミナルを、1枚のキャンバスに。</span>
         </p>
       </div>
 
       <nav class="footer-nav" aria-label="Footer">
         <div class="footer-col">
           <h4><span data-lang="en">Product</span><span data-lang="ja">プロダクト</span></h4>
-          <a href="#features"><span data-lang="en">Features</span><span data-lang="ja">機能</span></a>
+          <a href="#terminal"><span data-lang="en">The terminal</span><span data-lang="ja">ターミナル</span></a>
+          <a href="#grounds"><span data-lang="en">Per-project spaces</span><span data-lang="ja">プロジェクト空間</span></a>
           <a href="#how"><span data-lang="en">How it works</span><span data-lang="ja">使い方</span></a>
           <a href="#waitlist"><span data-lang="en">Early access</span><span data-lang="ja">先行アクセス</span></a>
         </div>
         <div class="footer-col">
           <h4><span data-lang="en">More</span><span data-lang="ja">その他</span></h4>
-          <a href="#wedge"><span data-lang="en">Why it's different</span><span data-lang="ja">違い</span></a>
+          <a href="#clean"><span data-lang="en">Solo &amp; team</span><span data-lang="ja">ソロでもチームでも</span></a>
           <a href="#who"><span data-lang="en">Who it's for</span><span data-lang="ja">対象</span></a>
         </div>
       </nav>
@@ -544,7 +618,7 @@
             if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
           });
         }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
-        document.querySelectorAll('.section, .feature, .pain-card, .who-card, .step')
+        document.querySelectorAll('.section, .feature, .pain-card, .who-card, .step, .mode-card')
           .forEach((el) => { el.classList.add('reveal'); io.observe(el); });
       }
     });

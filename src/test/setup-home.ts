@@ -21,3 +21,23 @@ if (!process.env.OPENGROUND_HOME.startsWith(tmpdir())) {
     `[setup-home] OPENGROUND_HOME (${process.env.OPENGROUND_HOME}) is not under tmpdir (${tmpdir()}) — refusing to run tests against the real home directory`,
   )
 }
+
+// Env isolation for the feedback proxy (server/routes/feedback.ts).
+//
+// That route reads SUPABASE_* and FEEDBACK_ADMIN_EMAILS LAZILY per request, and
+// its tests assume an unset baseline they flip with vi.stubEnv per case. But the
+// owner's dev shell exports these for real (Supabase is live; creds live in a
+// gitignored .env.local). Inherited, they leak into the test process: the real
+// FEEDBACK_ADMIN_EMAILS makes the "allowlist UNSET" cases gate (403) and a real
+// SUPABASE_URL flips "unconfigured" cases the wrong way. Clear them here so the
+// suite is hermetic regardless of who runs it. Tests that need a value stub it;
+// vi.unstubAllEnvs() then restores it to "unset" rather than the shell's secret.
+for (const key of [
+  'SUPABASE_URL',
+  'SUPABASE_ANON_KEY',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'SUPABASE_FEEDBACK_TABLE',
+  'FEEDBACK_ADMIN_EMAILS',
+]) {
+  delete process.env[key]
+}

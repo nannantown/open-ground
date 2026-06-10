@@ -1,66 +1,93 @@
-import { Compass, AlertCircle, Terminal } from 'lucide-react'
+import { AlertCircle, Terminal, FolderPlus, FolderInput } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
+import { useT } from '@/i18n/I18nContext'
 
+const MARK = '/brand/openground-mark.svg'
+
+// The first surface a brand-new user sees, on the empty Ground canvas. The
+// radial OPEN GROUND mark doubles as a compass rose (cardinal labels around it),
+// leaning into the survey/atlas brand language. A faint oversized mark behind
+// gives the paper some depth.
 export const EmptyState = ({
-  onConfigure,
-  configured,
+  onCreateNew,
+  onImport,
 }: {
-  onConfigure: () => void
-  configured: boolean
+  onCreateNew: () => void
+  onImport: () => void
 }) => {
-  // Probe the local `claude` CLI from the empty-state — this is the first
-  // surface a brand-new user sees, so it's the right place to tell them OPEN
-  // GROUND drives the local CLI (subscription-only) and needs it installed.
+  const { t } = useT()
+  // Probe the local `claude` CLI — this is the right place to tell a new user
+  // OPEN GROUND drives the local CLI (subscription-only) and needs it installed.
   const claude = useClaudeProbe(true)
   const claudeMissing = claude !== null && !claude.installed
 
   return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-      <div className="pointer-events-auto max-w-md text-center px-6 py-10">
-        {/* Compass rose */}
-        <div className="relative mx-auto mb-7 h-20 w-20">
-          <div className="absolute inset-0 rounded-full border border-line-strong" />
-          <div className="absolute inset-2 rounded-full border border-line" />
-          <Compass size={26} strokeWidth={1.25} className="absolute inset-0 m-auto text-accent" />
-          <div className="absolute -top-2 left-1/2 -translate-x-1/2 coord-label text-ink-muted">N</div>
-          <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 coord-label text-ink-faint">S</div>
-          <div className="absolute -left-2 top-1/2 -translate-y-1/2 coord-label text-ink-faint">W</div>
-          <div className="absolute -right-2 top-1/2 -translate-y-1/2 coord-label text-ink-faint">E</div>
-        </div>
+    <div className="fixed inset-0 z-[8] flex items-center justify-center overflow-hidden">
+      <style>{`
+        @keyframes og-empty-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+        @keyframes og-empty-drift{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+      `}</style>
 
-        <p className="label-cap text-accent mb-3">{configured ? 'Vacant Atlas' : 'New Survey'}</p>
+      {/* Modal backdrop — softly blurs and dims the (empty) canvas behind so the
+          first-run focus is on creating a project, and the canvas tools aren't a
+          confusing distraction. Captures clicks so the canvas can't be drawn on. */}
+      <div className="absolute inset-0 bg-bg/55 backdrop-blur-[3px]" />
+
+      {/* Atmospheric oversized mark, slowly turning behind the content. */}
+      <img
+        src={MARK}
+        alt=""
+        aria-hidden="true"
+        className="pointer-events-none absolute h-[620px] w-[620px] select-none opacity-[0.04]"
+        style={{ animation: 'og-empty-drift 300s linear infinite' }}
+        draggable={false}
+      />
+
+      <div
+        className="pointer-events-auto relative max-w-[460px] px-6 text-center"
+        style={{ animation: 'og-empty-in 0.6s cubic-bezier(0.22,1,0.36,1) both' }}
+      >
+        {/* Brand mark, plain — no compass framing. */}
+        <img
+          src={MARK}
+          alt="OPEN GROUND"
+          className="mx-auto mb-8 h-[64px] w-[64px] select-none"
+          draggable={false}
+        />
+
+        <p className="label-cap text-accent mb-3">{t('misc.empty.eyebrow')}</p>
         <h1
-          className="font-display text-[32px] leading-[1.05] text-ink mb-3 tracking-tightest"
+          className="mb-4 font-display text-[34px] leading-[1.05] tracking-tightest text-ink"
           style={{ fontVariationSettings: "'opsz' 36, 'SOFT' 40" }}
         >
-          {configured ? 'No territory to chart yet.' : 'Begin your atlas.'}
+          {t('misc.empty.title')}
         </h1>
-        <p className="text-[13px] text-ink-muted leading-relaxed mb-6 max-w-[340px] mx-auto">
-          {configured
-            ? 'The folder was found but contained no projects to survey. Add a project there or adjust the exclude patterns.'
-            : 'Point OPEN GROUND at your projects folder. Each subdirectory becomes a tile on the canvas — assign chats, run them through Claude Code, verify the results.'}
+        <p className="mx-auto mb-7 max-w-[360px] text-[13px] leading-relaxed text-ink-muted">
+          {t('misc.empty.body')}
         </p>
-        <Btn variant="primary" size="md" onClick={onConfigure}>
-          {configured ? 'Open settings' : 'Configure folder'}
-        </Btn>
 
-        {/* Readiness note: OPEN GROUND spawns the local `claude` CLI
-            (subscription-only). Warn loudly if it's missing; otherwise a quiet
-            reminder of the prerequisite. */}
+        <div className="flex items-center justify-center gap-2.5">
+          <Btn variant="primary" size="md" onClick={onCreateNew}>
+            <FolderPlus size={14} />
+            {t('toolbar.newProject')}
+          </Btn>
+          <Btn variant="subtle" size="md" onClick={onImport}>
+            <FolderInput size={14} />
+            {t('toolbar.importFolder')}
+          </Btn>
+        </div>
+
+        {/* Readiness note for the local claude CLI (subscription-only). */}
         {claudeMissing ? (
-          <div className="mt-7 mx-auto max-w-[360px] flex items-start gap-2 rounded-[3px] border border-accent/40 bg-accent/5 px-3.5 py-3 text-left">
+          <div className="mx-auto mt-8 flex max-w-[380px] items-start gap-2 rounded-[3px] border border-accent/40 bg-accent/5 px-3.5 py-3 text-left">
             <AlertCircle size={14} className="mt-[1px] shrink-0 text-accent" />
-            <p className="text-[11.5px] text-ink-muted leading-relaxed">
-              The <code className="font-mono text-ink">claude</code> CLI wasn't
-              found. OPEN GROUND runs your local Claude Code CLI — install it and
-              sign in with an active Claude subscription before launching a run.
-            </p>
+            <p className="text-[11.5px] leading-relaxed text-ink-muted">{t('misc.empty.cliMissing')}</p>
           </div>
         ) : (
-          <p className="mt-7 mx-auto max-w-[340px] inline-flex items-center gap-1.5 text-[11px] text-ink-faint leading-relaxed">
+          <p className="mx-auto mt-8 inline-flex max-w-[360px] items-center gap-1.5 text-[11px] leading-relaxed text-ink-faint">
             <Terminal size={11} className="shrink-0" />
-            Needs the local <code className="font-mono text-ink-subtle">claude</code> CLI, signed in with a Claude subscription.
+            {t('misc.empty.cliNote')}
           </p>
         )}
       </div>

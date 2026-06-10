@@ -36,12 +36,33 @@ export const clearDanglingAnchors = (els: CanvasElement[]): CanvasElement[] => {
   return changed ? next : els
 }
 
+/** Drop any `group` element that no longer owns a child — a group is an
+ *  invisible container, so an empty one is a ghost (it can't be clicked on the
+ *  canvas, only shows as a stray "Group" row in the Layers panel, and persists
+ *  across reloads). Deleting a group's members typically deletes the leaves but
+ *  not the (unselected, invisible) group element, so this cleans up after them.
+ *  Iterates to a fixed point so a group that contained only now-empty subgroups
+ *  is removed too. Returns the original reference unchanged when nothing was
+ *  pruned. */
+export const pruneEmptyGroups = (els: CanvasElement[]): CanvasElement[] => {
+  let cur = els
+  for (;;) {
+    const hasChild = new Set<string>()
+    for (const e of cur) if (e.parentId) hasChild.add(e.parentId)
+    const next = cur.filter((e) => e.type !== 'group' || hasChild.has(e.id))
+    if (next.length === cur.length) break
+    cur = next
+  }
+  return cur === els ? els : cur
+}
+
 /** Remove the elements named by `ids`, then scrub references the removal would
- *  strand: comment anchors (clearDanglingAnchors) and frame/design parent ids
- *  (clearDanglingParents). This is THE deletion path — the Delete/Backspace key,
- *  the context-menu delete, and Cut all funnel through it so none of them leave
- *  a dangling `anchorId`/`parentId` behind. Returns the original array reference
- *  unchanged when nothing matched, so callers can skip a no-op write. */
+ *  strand: comment anchors (clearDanglingAnchors), frame/design parent ids
+ *  (clearDanglingParents), and now-empty groups (pruneEmptyGroups). This is THE
+ *  deletion path — the Delete/Backspace key, the context-menu delete, and Cut
+ *  all funnel through it so none of them leave a dangling reference or a ghost
+ *  group behind. Returns the original array reference unchanged when nothing
+ *  matched, so callers can skip a no-op write. */
 export const removeElements = (
   els: CanvasElement[],
   ids: Iterable<string>,
@@ -49,5 +70,5 @@ export const removeElements = (
   const drop = ids instanceof Set ? ids : new Set(ids)
   const remaining = els.filter((el) => !drop.has(el.id))
   if (remaining.length === els.length) return els
-  return clearDanglingParents(clearDanglingAnchors(remaining))
+  return pruneEmptyGroups(clearDanglingParents(clearDanglingAnchors(remaining)))
 }

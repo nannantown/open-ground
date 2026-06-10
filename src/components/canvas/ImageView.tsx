@@ -1,5 +1,6 @@
 import type { CanvasElement } from '@/lib/types'
 import { resolveOpacity } from '@/lib/canvasTransform'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   element: CanvasElement
@@ -26,6 +27,7 @@ export const ImageView = ({
   projectPath,
   canvasId,
 }: Props) => {
+  const { t } = useT()
   const w = element.width ?? DEFAULT_W
   const h = element.height ?? DEFAULT_H
   const opacity = resolveOpacity(element)
@@ -42,7 +44,7 @@ export const ImageView = ({
           ring,
         ].join(' ')}
       >
-        画像が見つかりません
+        {t('canvasEl.image.notFound')}
       </div>
     )
   }

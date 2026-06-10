@@ -51,6 +51,12 @@ create policy "anon can insert feedback"
   for insert
   to anon
   with check (true);
+
+-- Index ----------------------------------------------------------------
+-- Both owner read paths (the inbox list and the unread-count poll) sort /
+-- filter on created_at, so index it descending.
+create index if not exists feedback_created_at_desc
+  on public.feedback (created_at desc);
 ```
 
 Why this is safe to expose the anon key for:
@@ -69,8 +75,10 @@ Supabase dashboard → **Project Settings → API**:
 - **Project URL** → e.g. `https://abcdefgh.supabase.co`
 - **Project API keys → `anon` `public`** → the anon key
 
-> Use the **anon** key, never the **service_role** key. The service_role key
-> bypasses RLS and must stay out of any distributed build.
+> For the **collect** (POST) path use the **anon** key. The **service_role** key
+> is only for the optional owner-only **read** path (step 3 /
+> `SUPABASE_SERVICE_ROLE_KEY`); it bypasses RLS and must stay on your own machine
+> — never in any distributed build.
 
 ---
 
@@ -78,14 +86,48 @@ Supabase dashboard → **Project Settings → API**:
 
 The route reads these from the **server** process env (never the client):
 
-| Variable                  | Required | Default    | Notes                                  |
-| ------------------------- | -------- | ---------- | -------------------------------------- |
-| `SUPABASE_URL`            | yes      | —          | Project URL (trailing slash optional). |
-| `SUPABASE_ANON_KEY`       | yes      | —          | The `anon` `public` key.               |
-| `SUPABASE_FEEDBACK_TABLE` | no       | `feedback` | Override only if you renamed the table.|
+| Variable                     | Required | Default    | Notes                                                       |
+| ---------------------------- | -------- | ---------- | ----------------------------------------------------------- |
+| `SUPABASE_URL`               | yes      | —          | Project URL (trailing slash optional).                      |
+| `SUPABASE_ANON_KEY`          | yes      | —          | The `anon` `public` key. Powers the **collect** (POST) path.|
+| `SUPABASE_SERVICE_ROLE_KEY`  | no       | —          | **Owner-only.** Enables the in-app **Incoming feedback** inbox (read path). Never ship it. |
+| `FEEDBACK_ADMIN_EMAILS`      | no       | —          | Optional comma-separated owner allowlist. When set, reads also require a signed-in app account on the list (see below). |
+| `SUPABASE_FEEDBACK_TABLE`    | no       | `feedback` | Override only if you renamed the table.                     |
 
-If **either** of the two required vars is missing/empty, feedback stays
-disabled (entry hidden, `POST` → 503). Both must be set to enable it.
+If **either** required var (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) is
+missing/empty, feedback stays disabled (entry hidden, `POST` → 503). Both must
+be set to enable submitting.
+
+`SUPABASE_SERVICE_ROLE_KEY` is **separate and optional**. When it's also present
+the server can read submissions back: `GET /api/feedback/config` reports
+`canRead:true` and the **Settings → Incoming feedback** inbox appears so you can
+read feedback inside the app. Without it the inbox stays hidden and
+`GET /api/feedback/list` returns `503`. **Only ever set this on your own
+machine's `.env.local` — never in a distributed build or committed file.** The
+service-role key bypasses RLS, so the rows it can read it could also delete;
+keep it loopback-side. The server returns rows to the local client but never the
+key itself.
+
+```bash
+# .env.local (owner machine only — gitignored)
+SUPABASE_URL="https://abcdefgh.supabase.co"
+SUPABASE_ANON_KEY="eyJ...your-anon-key..."
+SUPABASE_SERVICE_ROLE_KEY="eyJ...your-service-role-key..."   # owner-only, optional
+FEEDBACK_ADMIN_EMAILS="you@example.com"                      # optional identity gate
+```
+
+### Restricting reads to a signed-in owner (`FEEDBACK_ADMIN_EMAILS`)
+
+By default the service-role key alone gates reading — anything that can reach the
+loopback port can read submissions. Feedback rows hold third-party emails (PII),
+so you can tighten this: set `FEEDBACK_ADMIN_EMAILS` to a comma-separated list of
+owner emails. When set, `GET /api/feedback/list` and `/unread` (and `canRead` in
+`/config`) **additionally require a signed-in app account** (Settings → account,
+Google/GitHub OAuth) whose email is on the list; everyone else gets `403` and the
+inbox/dot stay hidden. Match is case-insensitive. Leave it unset to keep the
+service-key-only behaviour. The service-role key is still required either way —
+this is an identity layer on top, not a replacement (the email used must be the
+one on your Google/GitHub account you sign in with).
 
 **Dev** (`npm run dev` / `npm run dev:server` / `npm run electron:dev`):
 
@@ -114,10 +156,18 @@ must ship without it.
 
 ## 4. Where to read submissions
 
-Supabase dashboard → **Table Editor → `feedback`**. Each row carries the
-message, optional email, and the server-added `app_version`, `os`, and
-`project_count` metadata. The Table Editor uses the service role, so it sees
-every row regardless of the insert-only anon policy.
+**In the app (recommended):** set `SUPABASE_SERVICE_ROLE_KEY` (step 3) on your
+own machine, then open **Settings → Incoming feedback**. It lists submissions
+newest-first — message, email, `app_version`, `os`, `project_count` — with a
+Refresh button, and the settings gear shows a dot when new feedback has arrived
+since you last opened it. This section only appears when the service key is
+configured (`canRead:true`), so it never shows on a build you distribute. The
+list shows the **newest 200** rows (the count badge appends `+` and a note when
+more exist); read older rows in the Supabase table editor below.
+
+**In Supabase:** dashboard → **Table Editor → `feedback`** works too. The Table
+Editor uses the service role, so it sees every row regardless of the insert-only
+anon policy — handy as a fallback or for bulk editing.
 
 ---
 

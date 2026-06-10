@@ -182,3 +182,38 @@ export const canvasRoutes = new Hono()
     await writeFile(path, buf)
     return c.json({ path })
   })
+  // =========================================================================
+  // /api/paste-file — generic sibling of paste-image. A file DROPPED on a
+  // terminal pane in a plain browser (no Electron bridge → no absolute path)
+  // is uploaded here and the returned ~/.openground/paste/ path is pasted
+  // into the PTY instead. The stored name keeps the original (sanitized)
+  // filename so the path still reads meaningfully in the terminal.
+  // =========================================================================
+  .post('/api/paste-file', async (c) => {
+    let body: { name?: unknown; dataBase64?: unknown }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const rawName = typeof body?.name === 'string' ? body.name : ''
+    const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : ''
+    if (!dataBase64) return c.json({ error: 'missing file data' }, 400)
+    const buf = Buffer.from(dataBase64, 'base64')
+    if (buf.length === 0) return c.json({ error: 'empty file' }, 400)
+    if (buf.length > MAX_BYTES) return c.json({ error: 'file too large' }, 413)
+    // Keep only a safe basename: strip directory components, replace anything
+    // outside a conservative set (word chars, dot, dash, parens, CJK/kana) so
+    // a hostile name can't traverse or inject shell-hostile bytes.
+    const safeName =
+      rawName
+        .split(/[/\\]/)
+        .pop()!
+        .replace(/[^\w.\-()぀-ヿ一-鿿]+/g, '_')
+        .slice(0, 120) || 'file'
+    await ensurePasteDir()
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    const path = join(pasteDir(), `${ts}-${randomUUID().slice(0, 8)}__${safeName}`)
+    await writeFile(path, buf)
+    return c.json({ path })
+  })

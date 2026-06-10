@@ -22,6 +22,20 @@ export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 export const runsArchiveDir = () => join(openGroundHome(), 'runs-archive')
 export const pasteDir = () => join(openGroundHome(), 'paste')
 
+// ─── Per-project central data store ─────────────────────────────────────────
+// Each registered project's OPEN GROUND data (tasks, journal, doc, canvases,
+// images, attachments, verify-logs, worktrees) lives centrally under
+// ~/.openground/projects/<projectUUID>/ — NOT inside the user's repo, so a
+// scanned project's working tree stays free of OPEN GROUND files (mirrors how
+// Claude Code keeps per-project state under ~/.claude/projects/, never in the
+// repo). The UUID is the registry entry id (stable across rename/move). The
+// path→UUID resolution lives in projectDataPath.ts (it needs the registry);
+// these are the pure builders shared by that resolver, worktree.ts and the
+// security boundary so they cannot drift.
+export const projectsDataRootDir = () => join(openGroundHome(), 'projects')
+export const projectCentralDir = (uuid: string) => join(projectsDataRootDir(), uuid)
+export const centralWorktreesDir = (uuid: string) => join(projectCentralDir(uuid), 'worktrees')
+
 // Launcher / single-instance bootstrap files. The launcher and the Next
 // server both read these to coordinate "is a server already up, and is it
 // *this* checkout's server?" — see scripts/openground-launch.sh and

@@ -1,137 +1,146 @@
-# OPEN GROUND: Next.js → Vite + React + Hono 移行の根拠
+# OPEN GROUND: rationale for the Next.js → Vite + React + Hono migration
 
-> 他エージェント/開発者向けハンドオフ。今の実装(Next.js)と Hono のやり方を
-> 対比し、「なぜ書き換えるべきか」と「着手時に壊してはいけない契約」をまとめる。
+> A handoff for other agents/developers. It contrasts the current
+> implementation (Next.js) with the Hono approach, and lays out "why we should
+> rewrite it" and "the contracts you must not break when you start."
 
-## 0. 前提(動かせない制約)
+## 0. Premises (immovable constraints)
 
-OPEN GROUND は **ローカル単一ユーザーのデスクトップツール**(Electron 同梱)。
-バックエンドは **Node 必須** — 中核機能が `node-pty` で `claude` CLI を PTY
-駆動することだから。**Electron 採用と Node バックエンドは確定事項**。本件は
-その内側、「レンダラ + API 層を Next.js のままにするか、Vite+React+Hono に
-するか」の話。
+OPEN GROUND is a **local, single-user desktop tool** (bundled with Electron).
+The back end **requires Node** — because its core feature is PTY-driving the
+`claude` CLI with `node-pty`. **Adopting Electron and a Node back end are
+settled.** This document is about what's inside that: "do we keep the renderer +
+API layer on Next.js, or move to Vite+React+Hono."
 
-**結論:Vite + React + Hono(+ `hc` クライアント + `@hono/zod-validator`)に
-書き換えるべき。** 以下が根拠。
+**Conclusion: we should rewrite it to Vite + React + Hono (+ the `hc` client +
+`@hono/zod-validator`).** The rationale follows.
 
 ---
 
-## 1. Next.js の看板機能が、このアプリでは全滅している
+## 1. Next.js's flagship features are all dead in this app
 
-| Next.js の価値 | OPEN GROUND での該当 |
+| Next.js's value | Relevance in OPEN GROUND |
 |---|---|
-| SSR / RSC | **不要**(ローカル・SEO無関係・初期描画は localhost で一瞬) |
-| ページルーティング | **不要**(UI は `src/app/page.tsx` の 1 ページに全状態が乗る実質 SPA) |
-| 画像最適化 / ISR / Edge | **不要** |
-| ファイルベース **API** ルーティング(45本) | ✅ 効いている(が Hono でも整理可能) |
-| ゼロ設定 dev / HMR | ✅ 効いている(が Vite が同等以上に速い) |
+| SSR / RSC | **Not needed** (local, SEO-irrelevant, the initial render is instant on localhost) |
+| Page routing | **Not needed** (the UI is effectively an SPA where all state lives in the one `src/app/page.tsx` page) |
+| Image optimization / ISR / Edge | **Not needed** |
+| File-based **API** routing (45 of them) | ✅ Useful (but can also be organized in Hono) |
+| Zero-config dev / HMR | ✅ Useful (but Vite is as fast or faster) |
 
-→ **ローカル SPA + API サーバに、フルの SSR Web フレームワークを被せている**。
-使っていない機能の重さを払い続けている状態。
+→ **We've draped a full SSR web framework over a local SPA + API server.** We're
+paying the weight of features we don't use.
 
-## 2. 決定打:Next の standalone トレーサが node-pty と構造的に喧嘩している
+## 2. The clincher: Next's standalone tracer structurally fights node-pty
 
-これが最大の理由。`next.config.js` には、Next の `output:'standalone'` トレーサ
-が **node-pty のネイティブバインディング(`.node`)を追えない**ための手当てが
-必要になっている:
+This is the biggest reason. `next.config.js` requires workarounds because Next's
+`output:'standalone'` tracer **can't follow node-pty's native bindings
+(`.node`)**:
 
 ```js
 output: 'standalone',
 experimental: { serverComponentsExternalPackages: ['node-pty'] },
-outputFileTracingIncludes: {           // .node を手動で同梱
+outputFileTracingIncludes: {           // bundle the .node manually
   './node_modules/node-pty/build/Release/**/*',
   './node_modules/node-pty/prebuilds/**/*',
 }
 ```
 
-さらに `electron/main.js` の `resolveStandaloneServer()` は
-`.next/standalone/server.js` を**複数の候補パスから探し回る**ロジックを抱え、
-`package.json` の `build.asarUnpack` で node-pty を asar 外に出す手当ても要る。
+On top of that, `electron/main.js`'s `resolveStandaloneServer()` carries logic
+that **hunts for `.next/standalone/server.js` across multiple candidate paths**,
+and `package.json`'s `build.asarUnpack` needs a workaround to push node-pty
+outside the asar.
 
-**これらは全部 Next 固有の摩擦。** Hono サーバは「ただの Node ファイル」なので
-Electron から普通に `fork` するだけ。トレーサと戦う必要がなく、node_modules は
-そこにある。**アプリの一番の核(node-pty)と、パッケージング機構の喧嘩が
-丸ごと消える。**
+**These are all Next-specific friction.** A Hono server is "just a Node file",
+so Electron simply `fork`s it. There's no fighting a tracer, and node_modules is
+right there. **The fight between the app's core (node-pty) and the packaging
+machinery disappears entirely.**
 
-## 3. 失う心配のあるものは、Hono で全部維持できる
+## 3. Everything we'd worry about losing can be kept in Hono
 
-現行の HTTP サーバ設計には**温存すべき本物の利点**が 3 つある。Hono を
-**localhost HTTP サーバ**として残せば全部維持される:
+The current HTTP-server design has **three genuine advantages worth keeping**.
+Keep Hono as a **localhost HTTP server** and all three are preserved:
 
-1. **Claude×Chrome デバッグ** — 通常 Chrome で `http://127.0.0.1:47776` を開いて
-   Claude に操作させるワークフロー。localhost HTTP に配信されている限り
-   Next/Hono は無関係 → **維持**
-2. **HMR** — `vite dev` がレンダラを配信、Electron がそれを指す(今の
-   `electron:dev` と同型) → **維持**
-3. **SSE 3系統**(`run/events`・`terminal/[id]/stream`・`screen/watch`)— Hono は
-   `streamSSE` で SSE がネイティブの一級市民 → **書き換え不要の思想で移植可能**
+1. **Claude×Chrome debugging** — the workflow of opening
+   `http://127.0.0.1:47776` in a regular Chrome and having Claude operate it. As
+   long as it's served over localhost HTTP, Next vs Hono is irrelevant →
+   **preserved**
+2. **HMR** — `vite dev` serves the renderer, and Electron points at it (same
+   shape as today's `electron:dev`) → **preserved**
+3. **The 3 SSE channels** (`run/events` · `terminal/[id]/stream` ·
+   `screen/watch`) — SSE is a native first-class citizen in Hono via
+   `streamSSE` → **portable with a "no rewrite needed" mindset**
 
-> ※ pure IPC(`ipcMain`/`ipcRenderer` 全振り)は上記 1 と 3 を壊すので**採らない**。
-> Hono を HTTP サーバとして残すのが要点。
+> ※ pure IPC (going all-in on `ipcMain`/`ipcRenderer`) breaks 1 and 3 above, so
+> we **don't take it**. The point is to keep Hono as an HTTP server.
 
-## 4. むしろ型安全は今より良くなる
+## 4. Type safety actually gets better than it is now
 
-git 履歴に `zod on every API`(026de2d)とある通り、API ごとに zod を手書きして
-いる。Hono なら:
+As the git history shows with `zod on every API` (026de2d), zod is hand-written
+per API. With Hono:
 
-- **`@hono/zod-validator`** → 既存 zod スキーマをそのままルートのバリデータに転用
-- **`hc`(Hono RPC クライアント)** → サーバの型をクライアントに輸入 →
-  **tRPC ライクな end-to-end 型安全**を別フレームワーク無しで獲得
+- **`@hono/zod-validator`** → reuse the existing zod schemas directly as the
+  route validators
+- **`hc` (the Hono RPC client)** → import the server's types into the client →
+  obtain **tRPC-like end-to-end type safety** without a separate framework
 
-`fetch('/api/...')`(クライアント 14 箇所)の文字列 URL + 手動型付けが、
-型付き RPC 呼び出しに置き換わる。
+The string URLs + manual typing of `fetch('/api/...')` (14 sites on the client)
+get replaced by typed RPC calls.
 
-### なぜ Hono で、tRPC や Express/Fastify ではないのか
+### Why Hono, and not tRPC or Express/Fastify
 
-- **Express** → 格下げ。コールバック式・型が弱い・SSE 手動・型付きクライアント無し。
-- **Fastify** → 横移動〜やや重い。大規模 validated REST 向けで、このアプリには過剰。
-- **Elysia** → Bun 前提で真価が出る。Electron は Node を fork するので利点が消える。
-- **tRPC** → 単一 TS クライアント向けには魅力的だが、**subscription(ストリーミング)
-  が素の SSE より配線が重い**。本アプリは SSE 3 系統が中核なので相殺される。
-  → **Hono の `hc` で型安全を取りつつ SSE をネイティブ維持できる方が上**。
+- **Express** → a downgrade. Callback-style, weak types, manual SSE, no typed client.
+- **Fastify** → a sideways move to slightly heavier. Aimed at large-scale validated REST; overkill for this app.
+- **Elysia** → shows its value on Bun. Electron forks Node, so the advantage evaporates.
+- **tRPC** → attractive for a single TS client, but **subscriptions (streaming)
+  are heavier to wire than plain SSE**. SSE's 3 channels are core to this app, so
+  it cancels out. → **It's better to take type safety via Hono's `hc` while
+  keeping SSE native.**
 
 ---
 
-## 5. 移植マッピング(現行 → Hono)
+## 5. Porting map (current → Hono)
 
-| 現行(Next.js) | Hono 版 |
+| Current (Next.js) | Hono version |
 |---|---|
-| `src/app/api/**/route.ts`(45本) | Hono ルート(`app.get/post(...)`、ファイル分割) |
-| Next route handler の `Request`/`Response` | Hono は Fetch API 準拠なのでほぼそのまま移せる |
-| zod バリデーション(手書き) | `@hono/zod-validator` |
-| SSE(`text/event-stream` 手書き 3箇所) | `streamSSE` ヘルパ |
-| クライアント `fetch('/api/...')` ×14 | `hc` RPC クライアント |
-| `src/app/page.tsx` + components | Vite + React の SPA(ロジックはほぼ流用) |
-| `output:'standalone'` + fork + トレーサ手当て | **不要**(Hono を直接 `fork`) |
-| `electron/main.js` の起動シーケンス | **維持**(fork 対象が server.js → Hono entry に変わるだけ) |
+| `src/app/api/**/route.ts` (45) | Hono routes (`app.get/post(...)`, split into files) |
+| `Request`/`Response` in Next route handlers | Hono is Fetch-API-compliant, so it moves over almost as-is |
+| zod validation (hand-written) | `@hono/zod-validator` |
+| SSE (`text/event-stream` hand-written, 3 sites) | the `streamSSE` helper |
+| client `fetch('/api/...')` ×14 | the `hc` RPC client |
+| `src/app/page.tsx` + components | a Vite + React SPA (the logic is largely reused) |
+| `output:'standalone'` + fork + tracer workarounds | **not needed** (Electron `fork`s Hono directly) |
+| the launch sequence in `electron/main.js` | **preserved** (only the fork target changes from server.js → the Hono entry) |
 
 ---
 
-## 6. 壊してはいけない契約(受け取った側が必ず保つこと)
+## 6. Contracts that must not break (the receiving side must keep these)
 
-- **固定ポート 47776 / `127.0.0.1`**(`CLAUDE.md` の単一インスタンス設計の前提)
-- **`GET /api/health` の契約**:`{ app:'openground', bootId, port, projectDir,
-  startedAt }` を返す。`electron/main.js` の `waitForReady` が prod で `bootId`
-  一致を要求する identity probe
-- **`validateProjectPath()` のセキュリティ境界**(`projectsRoot` 配下のみ許可)—
-  path 受け取り API で必ず維持
-- **二ストア構造**:アプリ設定 `~/.openground/` と プロジェクト別
-  `<project>/.openground/`(`src/lib/server/paths.ts` ほか)
-- **`src/lib/types.ts`** をクライアント/サーバ共通契約として維持
-- **レガシー移行 & `OPENGROUND_RESULT:` パーサ**(旧 `HOVE_/PMMAP_` マーカー互換)
-- **`globalThis.__openground_runner`** に in-memory ランナー状態を置く方式
-  (HMR/再読込跨ぎの生存)
+- **Fixed port 47776 / `127.0.0.1`** (a prerequisite for the single-instance design in `CLAUDE.md`)
+- **The `GET /api/health` contract**: returns `{ app:'openground', bootId, port,
+  projectDir, startedAt }`. It is the identity probe that `electron/main.js`'s
+  `waitForReady` uses to require a matching `bootId` in prod
+- **The `validateProjectPath()` security boundary** (allow only under
+  `projectsRoot`) — always preserved on path-accepting APIs
+- **The two-store structure**: app settings `~/.openground/` and per-project
+  `<project>/.openground/` (`src/lib/server/paths.ts` and others)
+- **`src/lib/types.ts`** preserved as the shared client/server contract
+- **Legacy migration & the `OPENGROUND_RESULT:` parser** (compatible with the legacy `HOVE_/PMMAP_` markers)
+- **The approach of placing in-memory runner state on `globalThis.__openground_runner`**
+  (survives across HMR/reloads)
 
 ---
 
-## 7. リスクと留意点
+## 7. Risks and caveats
 
-- **正直な弱点**:Next の「`route.ts` 置くだけ」の規約魔法は減り、Hono は
-  ルートを明示記述。ただし 45 本程度なら整理可能で、得るもの(node-pty 摩擦の
-  消滅・軽量化・型安全)が上回る
-- **SSE のバックプレッシャ/切断**:現行 `EventSource` の自動再接続挙動
-  (`run/events/route.ts` のコメント参照)を Hono `streamSSE` 側でも担保すること
-- **`terminal/[id]` の動的ルート**:Hono のパラメータルーティング
-  (`/terminal/:id/...`)へ
-- **移行は一括 vs 漸進**:`hc` と Hono を導入しつつ、まず SSE 3 系統と node-pty
-  経路を移し、残り REST を順次 — が安全
+- **An honest weakness**: Next's "just drop a `route.ts`" convention magic
+  shrinks, and Hono describes routes explicitly. But around 45 of them are
+  manageable, and what we gain (the disappearance of node-pty friction, the
+  lighter footprint, type safety) outweighs it
+- **SSE backpressure/disconnect**: the auto-reconnect behavior of the current
+  `EventSource` (see the comment in `run/events/route.ts`) must be guaranteed on
+  the Hono `streamSSE` side too
+- **The `terminal/[id]` dynamic route**: move to Hono's parameter routing
+  (`/terminal/:id/...`)
+- **Migration: all-at-once vs incremental**: the safe path is to introduce `hc`
+  and Hono, move the 3 SSE channels and the node-pty path first, then port the
+  rest of the REST incrementally

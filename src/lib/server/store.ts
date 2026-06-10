@@ -3,22 +3,17 @@ import { ensureOpenGroundHome, settingsFile, canvasFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import type { Settings, CanvasState } from '../types'
 
-const DEFAULT_RUN_PROMPT = `{{repoDigest}}
-
----
-
-次のタスクを順に実装してください。コミットはまだ作らず、変更内容と次のステップを最後にまとめて報告してください。
-
-{{tasks}}`
-
 const DEFAULT_SETTINGS: Settings = {
+  projects: [],
+  defaultWorkspace: null,
+  // projectsMigratedAt intentionally absent — its absence is what triggers the
+  // one-shot legacy migration (see ensureProjectsMigrated). A fresh install
+  // (projectsRoot=null) still runs migration once, which simply stamps the
+  // sentinel and leaves `projects` empty.
   projectsRoot: null,
   archiveDirName: '_archive',
   excludePatterns: ['node_modules', '.next', 'dist', 'build', '.cache', '_archive'],
-  runPromptTemplate: DEFAULT_RUN_PROMPT,
   openApps: [],
-  notifyOnRunComplete: true,
-  notifySound: true,
 }
 
 const DEFAULT_CANVAS: CanvasState = {
@@ -48,9 +43,26 @@ const writeJson = async (path: string, data: unknown) => {
 export const getSettings = () => readJson<Settings>(settingsFile(), DEFAULT_SETTINGS)
 // Merge so a partial save from one UI (e.g. the Settings panel) does not
 // clobber fields owned by another (e.g. the project panel's openApps).
-export const setSettings = async (patch: Partial<Settings>) => {
-  const current = await getSettings()
-  await writeJson(settingsFile(), { ...current, ...patch })
+//
+// Serialised through a single-flight chain: setSettings is a read-modify-write
+// (read current → merge patch → write). Two concurrent calls — e.g. a registry
+// mutation patching `projects` and a settings-panel save patching
+// `defaultWorkspace` — would each read the same `current` and the second write
+// would clobber the first caller's keys (a lost update). The chain makes every
+// call re-read inside the lock, so patches to different keys all survive.
+// (registry.ts has its own withRegistryLock for its read-compute-write; this
+// closes the residual cross-caller race that lock can't see. Mirrors the
+// module-level chain pattern registry.ts already uses.)
+let settingsChain: Promise<unknown> = Promise.resolve()
+export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
+  const run = settingsChain.then(async () => {
+    const current = await getSettings()
+    await writeJson(settingsFile(), { ...current, ...patch })
+  })
+  // Keep the chain advancing even if one write throws, so a single failure
+  // can't wedge every subsequent settings save.
+  settingsChain = run.catch(() => {})
+  return run
 }
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)

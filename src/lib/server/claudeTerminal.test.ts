@@ -1,5 +1,177 @@
-import { describe, it, expect } from 'vitest'
-import { shellQuoteArg } from './claudeTerminal'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+// Stub the PTY layer so sendInterrupt's byte contract can be asserted without
+// spawning a real terminal (createTerminal/writeInput hit node-pty).
+vi.mock('./terminal', () => ({
+  writeInput: vi.fn(() => true),
+  killTerminal: vi.fn(() => true),
+  createTerminal: vi.fn(),
+}))
+import {
+  shellQuoteArg,
+  buildClaudeArgv,
+  buildAppContextPrompt,
+  launchOptsFromPrefs,
+  sendInterrupt,
+} from './claudeTerminal'
+import { writeInput } from './terminal'
+
+describe('sendInterrupt (Ctrl-C control byte)', () => {
+  it('writes the ETX byte (\\x03), never an empty string', () => {
+    const mock = vi.mocked(writeInput)
+    mock.mockClear()
+    sendInterrupt('tid-1')
+    expect(mock).toHaveBeenCalledTimes(1)
+    const [id, data] = mock.mock.calls[0]
+    expect(id).toBe('tid-1')
+    // Pin the exact byte. This is a regression guard: the interrupt char was
+    // once stored as an INVISIBLE literal control byte in the source, which is
+    // trivially clobbered to '' by an editor (and reads as empty to the eye) —
+    // sending nothing and silently breaking Ctrl-C. Assert it's the 1-byte ETX.
+    expect(data).toBe('\x03')
+    expect(data.length).toBe(1)
+    expect(data.charCodeAt(0)).toBe(3)
+  })
+})
+
+describe('buildClaudeArgv (launch argv order/quoting contract)', () => {
+  const base = { agentSessionId: 'SID', permissionMode: 'bypass' as const }
+
+  it('emits --add-dir BEFORE --session-id so its variadic list cannot swallow the prompt', () => {
+    const argv = buildClaudeArgv({ ...base, addDir: '/data/dir' }, '/tmp/p.txt')
+    const addIdx = argv.indexOf('--add-dir')
+    const sidIdx = argv.indexOf('--session-id')
+    expect(addIdx).toBeGreaterThanOrEqual(0)
+    expect(addIdx).toBeLessThan(sidIdx)
+    // a flag (not the positional prompt) immediately follows --add-dir's value
+    expect(argv[addIdx + 2]).toBe('--session-id')
+  })
+
+  it('passes the prompt via "$(cat <file>)" as the LAST arg, never inline', () => {
+    const argv = buildClaudeArgv(base, '/tmp/prompt.txt')
+    expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/prompt.txt')"`)
+    // the literal prompt text never appears on the command line
+    expect(argv.join(' ')).not.toContain('reply READY')
+  })
+
+  it('omits the positional prompt entirely for a bare resume (null promptFile)', () => {
+    const argv = buildClaudeArgv({ ...base, resume: true }, null)
+    expect(argv).toContain('--resume')
+    expect(argv).toContain('SID')
+    expect(argv.some((a) => a.includes('$(cat'))).toBe(false)
+  })
+
+  it('uses --resume (not --session-id) when resuming', () => {
+    const argv = buildClaudeArgv({ ...base, resume: true }, null)
+    expect(argv).toContain('--resume')
+    expect(argv).not.toContain('--session-id')
+  })
+
+  it('bypass mode adds --dangerously-skip-permissions', () => {
+    expect(buildClaudeArgv(base, null)).toContain('--dangerously-skip-permissions')
+  })
+
+  it('app context rides --append-system-prompt via "$(cat …)" BEFORE the positional prompt', () => {
+    const argv = buildClaudeArgv(base, '/tmp/prompt.txt', '/tmp/ctx.md')
+    const flagIdx = argv.indexOf('--append-system-prompt')
+    expect(flagIdx).toBeGreaterThanOrEqual(0)
+    expect(argv[flagIdx + 1]).toBe(`"$(cat '/tmp/ctx.md')"`)
+    // positional prompt stays LAST
+    expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/prompt.txt')"`)
+  })
+
+  it('omits --append-system-prompt when no context file (appContext: false)', () => {
+    const argv = buildClaudeArgv(base, '/tmp/prompt.txt', null)
+    expect(argv).not.toContain('--append-system-prompt')
+  })
+})
+
+describe('launchOptsFromPrefs (personal launch prefs → LaunchClaudeOpts)', () => {
+  it('no prefs: interactive default, CLI-default model', () => {
+    expect(launchOptsFromPrefs(undefined)).toEqual({ permissionMode: 'default' })
+    expect(launchOptsFromPrefs(null)).toEqual({ permissionMode: 'default' })
+    expect(launchOptsFromPrefs({})).toEqual({ permissionMode: 'default' })
+  })
+
+  it('maps each stored mode 1:1 (bypass → bypass etc.)', () => {
+    expect(launchOptsFromPrefs({ permissionMode: 'default' }).permissionMode).toBe('default')
+    expect(launchOptsFromPrefs({ permissionMode: 'acceptEdits' }).permissionMode).toBe('acceptEdits')
+    expect(launchOptsFromPrefs({ permissionMode: 'plan' }).permissionMode).toBe('plan')
+    expect(launchOptsFromPrefs({ permissionMode: 'bypass' }).permissionMode).toBe('bypass')
+  })
+
+  it('unknown/junk mode (hand-edited data) falls back to default', () => {
+    expect(
+      launchOptsFromPrefs({ permissionMode: 'sudo' as never }).permissionMode,
+    ).toBe('default')
+  })
+
+  it('passes the model through trimmed; blank means CLI default (omitted)', () => {
+    expect(launchOptsFromPrefs({ model: ' sonnet ' }).model).toBe('sonnet')
+    expect(launchOptsFromPrefs({ model: '   ' }).model).toBeUndefined()
+    expect(launchOptsFromPrefs({ model: '' }).model).toBeUndefined()
+  })
+
+  it('mapped prefs reach the launch argv: --permission-mode / --model / bypass flag', () => {
+    // acceptEdits + model → explicit flags on the claude command line
+    const opts = launchOptsFromPrefs({ permissionMode: 'acceptEdits', model: 'opus' })
+    const argv = buildClaudeArgv({ agentSessionId: 'SID', ...opts }, null)
+    const pmIdx = argv.indexOf('--permission-mode')
+    expect(pmIdx).toBeGreaterThanOrEqual(0)
+    expect(argv[pmIdx + 1]).toBe('acceptEdits')
+    const mIdx = argv.indexOf('--model')
+    expect(argv[mIdx + 1]).toBe("'opus'")
+    // bypass → the dangerously-skip flag, not --permission-mode
+    const bypass = buildClaudeArgv(
+      { agentSessionId: 'SID', ...launchOptsFromPrefs({ permissionMode: 'bypass' }) },
+      null,
+    )
+    expect(bypass).toContain('--dangerously-skip-permissions')
+    expect(bypass).not.toContain('--permission-mode')
+    // default → neither flag
+    const dflt = buildClaudeArgv(
+      { agentSessionId: 'SID', ...launchOptsFromPrefs(undefined) },
+      null,
+    )
+    expect(dflt).not.toContain('--permission-mode')
+    expect(dflt).not.toContain('--dangerously-skip-permissions')
+  })
+})
+
+describe('buildAppContextPrompt', () => {
+  it('names the project path, the tasks API with the right port, and the board rule', () => {
+    const text = buildAppContextPrompt('/Users/me/projects/My App', 47776)
+    expect(text).toContain('/Users/me/projects/My App')
+    expect(text).toContain('http://127.0.0.1:47776/api/project/tasks')
+    expect(text).toContain('"path":"/Users/me/projects/My App"')
+    // The read URL must be safely encoded (spaces never raw in a URL).
+    expect(text).toContain(encodeURIComponent('/Users/me/projects/My App'))
+    expect(text).toMatch(/NOT to your internal todo list/)
+  })
+})
+
+describe('buildClaudeArgv launch-binary seam (OPENGROUND_CLAUDE_BIN)', () => {
+  const base = { agentSessionId: 'SID', permissionMode: 'bypass' as const }
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('defaults to bare `claude` (PATH-resolved) when the env var is unset', () => {
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', '')
+    // stubEnv('') sets an empty string; the seam treats falsy as "use default".
+    expect(buildClaudeArgv(base, null)[0]).toBe('claude')
+  })
+
+  it('uses OPENGROUND_CLAUDE_BIN as argv[0] when set (E2E/test stub)', () => {
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', '/tmp/fake-claude.sh')
+    expect(buildClaudeArgv(base, null)[0]).toBe("'/tmp/fake-claude.sh'")
+  })
+
+  it('shell-quotes a custom path containing spaces (repo dir is `…/OPEN GROUND`)', () => {
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', '/Users/x/OPEN GROUND/e2e/fixtures/fake-claude.sh')
+    // Single-quoted so the PTY command line treats the spaced path as one token.
+    expect(buildClaudeArgv(base, null)[0]).toBe(
+      "'/Users/x/OPEN GROUND/e2e/fixtures/fake-claude.sh'",
+    )
+  })
+})
 
 describe('shellQuoteArg (PowerShell / POSIX prompt quoting)', () => {
   describe('win32 (PowerShell single-quoted string)', () => {

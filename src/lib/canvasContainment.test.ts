@@ -5,7 +5,10 @@ import {
   resolveParentId,
   resolveContainerId,
   canContain,
+  CONTAINER_TYPES,
   clearDanglingParents,
+  descendantIds,
+  containmentDepth,
   type Rect,
   type Container,
 } from './canvasContainment'
@@ -174,17 +177,34 @@ describe('clearDanglingParents', () => {
     ]
     expect(clearDanglingParents(els)).toBe(els)
   })
+
+  it('keeps a child explicitly parented to a live group (any child type)', () => {
+    const els = [
+      el({ id: 'g1', type: 'group' }),
+      el({ id: 's1', type: 'sticky', parentId: 'g1' }),
+    ]
+    const out = clearDanglingParents(els)
+    expect(out).toBe(els) // group owns any child → nothing dangling
+    expect(out[1].parentId).toBe('g1')
+  })
+
+  it('drops parentId when the parent group was deleted', () => {
+    const els = [el({ id: 's1', type: 'sticky', parentId: 'g-gone' })]
+    const out = clearDanglingParents(els)
+    expect(out).not.toBe(els)
+    expect(out[0].parentId).toBeUndefined()
+  })
 })
 
 describe('canContain', () => {
-  it('a frame owns any non-frame child', () => {
+  it('a frame owns any child', () => {
     for (const t of ['text', 'sticky', 'mock', 'screen', 'image', 'comment'] as const) {
       expect(canContain('frame', t)).toBe(true)
     }
   })
 
-  it('a frame never owns another frame (no nested frames in this slice)', () => {
-    expect(canContain('frame', 'frame')).toBe(false)
+  it('a frame can own another frame (Figma-style nesting)', () => {
+    expect(canContain('frame', 'frame')).toBe(true)
   })
 
   it('a design (mock/screen) owns only text annotations', () => {
@@ -200,6 +220,16 @@ describe('canContain', () => {
     for (const c of ['text', 'sticky', 'image', 'comment'] as const) {
       expect(canContain(c, 'text')).toBe(false)
     }
+  })
+
+  it('a group owns any child (explicit membership)', () => {
+    for (const t of ['text', 'sticky', 'frame', 'mock', 'screen', 'image', 'comment', 'group'] as const) {
+      expect(canContain('group', t)).toBe(true)
+    }
+  })
+
+  it('group is a recognised container type', () => {
+    expect(CONTAINER_TYPES.has('group')).toBe(true)
   })
 })
 
@@ -255,5 +285,67 @@ describe('resolveContainerId', () => {
     expect(
       resolveContainerId('m1', 'mock', { x: 0, y: 0, w: 420, h: 320 }, containers),
     ).toBeUndefined()
+  })
+
+  it('nests a frame inside the smallest enclosing frame', () => {
+    const containers = [
+      container('outer', 'frame', { x: 0, y: 0, w: 1000, h: 1000 }),
+      container('inner', 'frame', { x: 50, y: 50, w: 200, h: 200 }),
+    ]
+    // A small frame dropped inside both prefers the tighter one…
+    expect(
+      resolveContainerId('f3', 'frame', { x: 60, y: 60, w: 40, h: 40 }, containers),
+    ).toBe('inner')
+    // …and a frame that only fits the outer one nests there.
+    expect(
+      resolveContainerId('f3', 'frame', { x: 300, y: 300, w: 40, h: 40 }, containers),
+    ).toBe('outer')
+  })
+})
+
+describe('descendantIds', () => {
+  it('collects children transitively, excluding the root', () => {
+    const els = [
+      el({ id: 'outer', type: 'frame', width: 1000, height: 1000 }),
+      el({ id: 'inner', type: 'frame', parentId: 'outer', width: 200, height: 200 }),
+      el({ id: 's1', type: 'sticky', parentId: 'inner' }),
+      el({ id: 's2', type: 'sticky', parentId: 'outer' }),
+      el({ id: 'loose', type: 'sticky' }),
+    ]
+    const d = descendantIds(els, 'outer')
+    expect(Array.from(d).sort()).toEqual(['inner', 's1', 's2'])
+    expect(d.has('outer')).toBe(false)
+    expect(d.has('loose')).toBe(false)
+  })
+
+  it('is cycle-safe', () => {
+    const els = [
+      el({ id: 'a', type: 'frame', parentId: 'b' }),
+      el({ id: 'b', type: 'frame', parentId: 'a' }),
+    ]
+    expect(Array.from(descendantIds(els, 'a')).sort()).toEqual(['a', 'b'])
+  })
+})
+
+describe('containmentDepth', () => {
+  it('counts parent hops (0 at top level)', () => {
+    const els = [
+      el({ id: 'outer', type: 'frame' }),
+      el({ id: 'inner', type: 'frame', parentId: 'outer' }),
+      el({ id: 'leaf', type: 'sticky', parentId: 'inner' }),
+    ]
+    const byId = new Map(els.map((e) => [e.id, e]))
+    expect(containmentDepth(byId, 'outer')).toBe(0)
+    expect(containmentDepth(byId, 'inner')).toBe(1)
+    expect(containmentDepth(byId, 'leaf')).toBe(2)
+  })
+
+  it('is cycle-safe', () => {
+    const els = [
+      el({ id: 'a', type: 'frame', parentId: 'b' }),
+      el({ id: 'b', type: 'frame', parentId: 'a' }),
+    ]
+    const byId = new Map(els.map((e) => [e.id, e]))
+    expect(() => containmentDepth(byId, 'a')).not.toThrow()
   })
 })

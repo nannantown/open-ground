@@ -8,6 +8,16 @@
   --paper-tint: #F2EDDE;
 }
 
+/* Assistant brand mark: a calm continuous rotation while the assistant is
+   running (the ring of grains spins). Slower than Tailwind's 1s animate-spin
+   so it reads as "thinking", not "loading". */
+@keyframes og-spin {
+  to { transform: rotate(360deg); }
+}
+.og-spin {
+  animation: og-spin 2.4s linear infinite;
+}
+
 html,
 body {
   height: 100%;
@@ -95,9 +105,11 @@ body::before {
 
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+a:focus-visible {
   outline: 1.5px solid #B23A2C;
   outline-offset: 2px;
+  border-radius: 2px;
 }
 
 /* Selection */
@@ -106,29 +118,13 @@ textarea:focus-visible {
   color: #2A1F1A;
 }
 
-/* Run status — a surveyor's scan travelling a card's top edge while it runs */
-@keyframes survey-scan {
-  0% { transform: translateX(-120%); }
-  100% { transform: translateX(360%); }
+/* Ground card — live-terminal beacon: the dot breathes while the project has
+   at least one PTY open. Slow and subtle (status, not an alarm). */
+@keyframes term-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
-.run-scan {
-  animation: survey-scan 1.7s linear infinite;
-}
-
-/* Run status — the beacon dot pulsing on a running card's stamp */
-@keyframes survey-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.28; transform: scale(0.62); }
-}
-.run-pulse {
-  animation: survey-pulse 1.35s ease-in-out infinite;
+.term-pulse {
+  animation: term-pulse 2s ease-in-out infinite;
 }
 
-/* Run dock — settles up into view when a background run begins */
-@keyframes dock-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.dock-in {
-  animation: dock-in 0.24s ease-out;
-}

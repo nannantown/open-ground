@@ -1,6 +1,5 @@
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
 import { Toolbar } from '@/components/canvas/Toolbar'
 import { ToolPalette } from '@/components/canvas/ToolPalette'
@@ -10,26 +9,51 @@ import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import { AccountModal } from '@/components/canvas/AccountModal'
 import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
+import { Onboarding } from '@/components/Onboarding'
 import { BulkActionBar } from '@/components/canvas/BulkActionBar'
 import { ElementBar } from '@/components/canvas/ElementBar'
 import { EmptyState } from '@/components/canvas/EmptyState'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { autoLayout, frameLabelFor } from '@/lib/layout'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
-import { useRuns } from '@/lib/useRuns'
 import { newId } from '@/lib/ids'
 import { loadPersistedView, savePersistedView } from '@/lib/persistView'
 import { api } from '@/lib/api-client'
+import { useAuth } from '@/lib/auth/AuthContext'
+import { useT } from '@/i18n/I18nContext'
 import type {
   CanvasState,
   ProjectMeta,
-  RunSummaryInfo,
   Settings,
   ProjectsResponse,
   Tool,
+  FeedbackConfigResponse,
 } from '@/lib/types'
 
+// localStorage key holding the newest feedback created_at the owner has seen in
+// the inbox. Used to compute the unread count for the settings-gear dot. Scoped
+// by the server's sourceId (hash of Supabase url+table) so repointing at another
+// project/table doesn't carry a stale marker; falls back to the bare key when
+// the source isn't known yet.
+const FEEDBACK_SEEN_KEY = 'openground:feedbackSeenAt'
+// First-run onboarding is a once-per-machine gate (sign in vs use as guest +
+// a light tour). Persisted in localStorage so it never reappears after the
+// user has made a choice.
+const ONBOARDED_KEY = 'openground:onboarded'
+const feedbackSeenKey = (sourceId: string | null) =>
+  sourceId ? `${FEEDBACK_SEEN_KEY}:${sourceId}` : FEEDBACK_SEEN_KEY
+
+// Arrow-key nudge vectors for the canvas keyboard shortcuts. Static, so it
+// lives outside the component (and outside the effect's dependency list).
+const ARROW_NUDGE: Record<string, [number, number]> = {
+  arrowleft: [-1, 0],
+  arrowright: [1, 0],
+  arrowup: [0, -1],
+  arrowdown: [0, 1],
+}
+
 export default function App() {
+  const { t } = useT()
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [canvas, setCanvas] = useState<CanvasState | null>(null)
@@ -39,72 +63,56 @@ export default function App() {
   // Whether the server has Supabase env configured. When false the feedback
   // entry stays hidden, so the public build (no env) shows nothing.
   const [feedbackEnabled, setFeedbackEnabled] = useState(false)
+  // Whether the server also has a service-role key (owner-only), so the
+  // "Incoming feedback" inbox in Settings can read submissions. False on the
+  // public build — the inbox never appears there.
+  const [feedbackCanRead, setFeedbackCanRead] = useState(false)
+  // Count of feedback submissions newer than the last time the owner opened the
+  // inbox. Drives the dot on the settings gear. Owner build only (canRead).
+  const [feedbackUnread, setFeedbackUnread] = useState(0)
+  // Stable id of the Supabase data source (from /config) used to scope the
+  // localStorage "seen" marker. Null until the config probe resolves.
+  const [feedbackSourceId, setFeedbackSourceId] = useState<string | null>(null)
+  // Current signed-in app user. `canRead` (owner inbox) can depend on identity
+  // when an admin allowlist is set, so we re-probe feedback config when it changes.
+  const { user: authUser } = useAuth()
   const [accountOpen, setAccountOpen] = useState(false)
   // Whether the optional app login is configured server-side (same Supabase env
   // as feedback). When false the account entry stays hidden — public build clean.
   const [authEnabled, setAuthEnabled] = useState(false)
+  // First-run onboarding gate (sign in / guest). Defaults to "seen" if storage
+  // is unavailable so we never trap the user behind an un-dismissable overlay.
+  const [onboarded, setOnboarded] = useState(() => {
+    try {
+      return localStorage.getItem(ONBOARDED_KEY) === '1'
+    } catch {
+      return true
+    }
+  })
   const [jumpOpen, setJumpOpen] = useState(false)
-  // Bumped when a run mutates the open project's tasks, so ProjectPanel refetches.
-  const [projectDataVersion, setProjectDataVersion] = useState(0)
+  // Project ids that currently have at least one LIVE PTY (plain shell or
+  // claude session) — drives the small pulsing "Terminal" beacon on Ground
+  // cards. Polled from /api/terminal/active; replaces the old run-status edge
+  // bar as the only "something is happening here" signal.
+  const [terminalActiveIds, setTerminalActiveIds] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [showArchived, setShowArchived] = useState(false)
   const [tool, setTool] = useState<Tool>('select')
-  const [refreshing, setRefreshing] = useState(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = useCallback(async (): Promise<ProjectsResponse | null> => {
-    setRefreshing(true)
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    try {
-      const res = await api.api.projects.$get({}, { init: { cache: 'no-store' } })
-      const data = (await res.json()) as ProjectsResponse
-      const positions = autoLayout(data.projects, data.canvas.positions)
-      const canvas = { ...data.canvas, positions }
-      setProjects(data.projects)
-      setSettings(data.settings)
-      setCanvas(canvas)
-      if (!data.settings.projectsRoot) setSettingsOpen(true)
-      return { ...data, canvas }
-    } finally {
-      setRefreshing(false)
-    }
+    const res = await api.api.projects.$get({}, { init: { cache: 'no-store' } })
+    const data = (await res.json()) as ProjectsResponse
+    const positions = autoLayout(data.projects, data.canvas.positions)
+    const canvas = { ...data.canvas, positions }
+    setProjects(data.projects)
+    setSettings(data.settings)
+    setCanvas(canvas)
+    return { ...data, canvas }
   }, [])
-
-  // Every task-run lives here, independent and concurrent. Runs keep streaming
-  // while the user works elsewhere; finishing one refreshes project data —
-  // debounced so a batch finishing together triggers one rescan, not many.
-  const loadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Refs so the notify callbacks see fresh values without re-instantiating
-  // useRuns (which would tear down the SSE) when settings/selection change.
-  const selectedRef = useRef(selectedIds)
-  selectedRef.current = selectedIds
-  const runs = useRuns(
-    () => {
-      if (loadTimer.current) clearTimeout(loadTimer.current)
-      loadTimer.current = setTimeout(load, 600)
-    },
-    {
-      enabled: settings?.notifyOnRunComplete !== false,
-      sound: settings?.notifySound !== false,
-      isViewingProject: (pid) => selectedRef.current.includes(pid),
-      onPick: (pid) => {
-        setSelectedIds([pid])
-      },
-    },
-  )
-
-  // A run that the server refused to start (e.g. the local `claude` CLI is
-  // missing → 503) surfaces here as a dismissable banner, so a no-op run never
-  // fails silently. Auto-clears after a while; clicking opens Settings (where
-  // the Claude Code CLI readiness check + install hint live).
-  const [runErrorToast, setRunErrorToast] = useState<string | null>(null)
-  useEffect(() => {
-    if (!runs.runError) return
-    setRunErrorToast(runs.runError.message)
-    const t = setTimeout(() => setRunErrorToast(null), 12_000)
-    return () => clearTimeout(t)
-  }, [runs.runError])
 
   // Restore "where the user was" exactly once, after the first project scan:
   // re-open the project they had open before reload, if it still exists. A
@@ -161,22 +169,148 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // One-shot probe of whether in-app feedback is configured server-side (the
-  // Supabase env). Gates the toolbar entry so the public build (no env) hides
-  // it. Best-effort: any failure leaves the entry hidden.
+  // Refresh the project scan without a permanent toolbar button: ⌘R / Ctrl+R
+  // does a fast in-app reload (preserving canvas state, unlike a full page
+  // reload), and returning to the window re-scans if it's been a while — this
+  // covers out-of-band folder changes the user made elsewhere.
+  useEffect(() => {
+    let lastFocusLoad = Date.now()
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault()
+        void load()
+      }
+    }
+    const onFocus = () => {
+      if (Date.now() - lastFocusLoad >= 30_000) {
+        lastFocusLoad = Date.now()
+        void load()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [load])
+
+  // Probe whether in-app feedback is configured server-side (the Supabase env)
+  // and whether THIS user may read it. `enabled` gates the "Send feedback" entry;
+  // `canRead` gates the owner inbox — server-computed and identity-dependent when
+  // an admin allowlist is set, so we re-probe whenever the signed-in user changes
+  // (login/logout flips canRead). Best-effort: any failure leaves entries hidden.
   useEffect(() => {
     let cancelled = false
     api.api.feedback.config
       .$get()
-      .then((res) => res.json() as Promise<{ enabled?: boolean }>)
+      .then((res) => res.json() as Promise<Partial<FeedbackConfigResponse>>)
       .then((data) => {
-        if (!cancelled) setFeedbackEnabled(!!data.enabled)
+        if (!cancelled) {
+          setFeedbackEnabled(!!data.enabled)
+          setFeedbackCanRead(!!data.canRead)
+          setFeedbackSourceId(data.sourceId ?? null)
+        }
       })
       .catch(() => {})
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [authUser?.id])
+
+  // Poll the unread feedback count (owner build only) so the settings gear can
+  // show a "new feedback" dot. `since` is the newest created_at we've shown in
+  // the inbox (persisted in localStorage, scoped per data source); the server
+  // counts rows after it. Re-checks on mount, every 5 min, and on window focus
+  // (throttled to once a minute — alt-tab fires focus a lot on a desktop shell).
+  //
+  // Paused while Settings is open: the inbox there IS the live view, and the
+  // moment it loads it marks everything seen — so a poll racing in with a stale
+  // `since` must not resurrect the dot. Opening Settings re-runs this effect,
+  // whose cleanup cancels any in-flight poll; closing it re-runs and polls once
+  // immediately against the now-updated seen marker.
+  useEffect(() => {
+    if (!feedbackCanRead || settingsOpen) return
+    let cancelled = false
+    let lastPoll = 0
+    const poll = () => {
+      lastPoll = Date.now()
+      const since = localStorage.getItem(feedbackSeenKey(feedbackSourceId)) ?? ''
+      api.api.feedback.unread
+        .$get({ query: since ? { since } : {} })
+        .then((res) => (res.ok ? (res.json() as Promise<{ count?: number }>) : null))
+        .then((data) => {
+          if (!cancelled && data) setFeedbackUnread(data.count ?? 0)
+        })
+        .catch(() => {})
+    }
+    // Only poll on focus if it's been a while — avoids hammering on every alt-tab.
+    const onFocus = () => {
+      if (Date.now() - lastPoll >= 60_000) poll()
+    }
+    poll()
+    const id = window.setInterval(poll, 300_000)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [feedbackCanRead, settingsOpen, feedbackSourceId])
+
+  // Called by the Settings inbox once it has loaded submissions: record the
+  // newest timestamp as "seen" (scoped per data source) and clear the gear dot.
+  const markFeedbackSeen = useCallback(
+    (latestCreatedAt: string | null) => {
+      if (latestCreatedAt)
+        localStorage.setItem(feedbackSeenKey(feedbackSourceId), latestCreatedAt)
+      setFeedbackUnread(0)
+    },
+    [feedbackSourceId],
+  )
+
+  // Poll which projects have a live terminal (every 5s, skipped while the tab
+  // is hidden; an immediate re-poll on focus covers the return). Terminals are
+  // always spawned with cwd = the registered project path, so plain equality
+  // matches — "or under" covers the edge case of a subdir cwd. Best-effort: a
+  // failed poll keeps the last known state rather than flashing beacons off.
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      if (document.hidden) return
+      try {
+        const res = await api.api.terminal.active.$get()
+        if (!res.ok) return
+        const { cwds } = (await res.json()) as { cwds: string[] }
+        if (cancelled) return
+        const next = new Set(
+          projects
+            .filter((p) =>
+              cwds.some((cwd) => cwd === p.path || cwd.startsWith(p.path + '/')),
+            )
+            .map((p) => p.id),
+        )
+        // Keep the previous Set identity when nothing changed so the canvas
+        // doesn't re-render every 5 seconds.
+        setTerminalActiveIds((prev) =>
+          prev.size === next.size && Array.from(next).every((id) => prev.has(id))
+            ? prev
+            : next,
+        )
+      } catch {
+        /* server restarting / offline — keep the last known state */
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 5_000)
+    const onFocus = () => void poll()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [projects])
 
   // One-shot probe of whether the optional app login is configured server-side
   // (same Supabase env as feedback). Gates the toolbar account entry; any
@@ -248,39 +382,10 @@ export default function App() {
     setSelectedIds(clones.map((cl) => cl.id))
   }, [canvas, selectedIds, onCanvasChange])
 
-  const visibleProjects = useMemo(
-    () => (showArchived ? projects : projects.filter((p) => !p.archived)),
-    [projects, showArchived],
-  )
-
-  // Phase 5.A — card-hero summaries with a persisted fallback. A live (or
-  // recent disk) run-session always wins: runSummaryByProject reflects what
-  // just happened and carries the freshest state. When the cockpit has no
-  // session for a project (runs/ aged out, or a fresh page with empty
-  // in-memory state), fall back to ProjectMeta.latestRunSummary — derived
-  // server-side from the project's persisted task.latestRun — so the card
-  // still narrates where the project stands instead of dropping to its bare
-  // description.
-  const cardSummaries = useMemo(() => {
-    const live = runs.runSummaryByProject
-    const merged = new Map<string, RunSummaryInfo>()
-    for (const p of projects) {
-      if (p.latestRunSummary) merged.set(p.id, p.latestRunSummary)
-    }
-    // Live/disk session summaries override the persisted fallback.
-    live.forEach((v, k) => merged.set(k, v))
-    return merged
-  }, [projects, runs.runSummaryByProject])
-
-  const ARROW_NUDGE: Record<string, [number, number]> = useMemo(
-    () => ({
-      arrowleft: [-1, 0],
-      arrowright: [1, 0],
-      arrowup: [0, -1],
-      arrowdown: [0, 1],
-    }),
-    [],
-  )
+  // Every registered project is shown (archive was removed; "Remove from
+  // canvas" unregisters instead). Kept as a named binding so the rest of the
+  // file reads the same.
+  const visibleProjects = projects
 
   // Canvas-wide keyboard shortcuts: undo/redo, duplicate, select-all,
   // deselect, enter-to-edit and arrow-key nudging.
@@ -370,7 +475,6 @@ export default function App() {
     editingId,
     visibleProjects,
     mutateCanvas,
-    ARROW_NUDGE,
   ])
 
   const saveSettings = async (s: Settings) => {
@@ -379,12 +483,14 @@ export default function App() {
     await load()
   }
 
-  const archive = async (project: ProjectMeta) => {
-    if (!confirm(`Move "${project.name}" into the archive folder?`)) return
-    const res = await api.api.project.archive.$post({ json: { path: project.path } })
+  // "Remove from Ground" — unregister the project. The folder is left on disk;
+  // only its card (registry entry + canvas position) goes away.
+  const removeFromCanvas = async (project: ProjectMeta) => {
+    if (!confirm(t('misc.ground.removeConfirm', { name: project.name }))) return
+    const res = await api.api.projects.remove.$post({ json: { path: project.path } })
     if (!res.ok) {
       const e = (await res.json().catch(() => ({}))) as { error?: string }
-      alert(`Archive failed: ${e.error ?? res.statusText}`)
+      alert(t('misc.ground.removeFailed', { error: e.error ?? res.statusText }))
       return
     }
     setSelectedIds([])
@@ -411,14 +517,54 @@ export default function App() {
     })
   }
 
-  const restore = async (project: ProjectMeta) => {
-    const res = await api.api.project.restore.$post({ json: { path: project.path } })
-    if (!res.ok) {
-      const e = (await res.json().catch(() => ({}))) as { error?: string }
-      alert(`Restore failed: ${e.error ?? res.statusText}`)
+  // Import an existing folder: pick it natively, register it, then open + centre
+  // its new card.
+  const importProject = async () => {
+    const pick = await api.api['pick-folder'].$post()
+    const picked = (await pick.json().catch(() => ({}))) as {
+      path?: string
+      cancelled?: boolean
+      error?: string
+    }
+    if (picked.cancelled || !picked.path) {
+      if (picked.error) alert(picked.error)
       return
     }
-    setSelectedIds([])
+    const res = await api.api.projects.import.$post({ json: { path: picked.path } })
+    const data = (await res.json().catch(() => ({}))) as { error?: string; path?: string; id?: string }
+    if (!res.ok) {
+      alert(t('misc.ground.importFailed', { error: data.error ?? res.statusText }))
+      return
+    }
+    const loaded = await load()
+    const created = loaded?.projects.find((p) => p.id === data.id)
+    if (created) {
+      setSelectedIds([created.id])
+      const pos = loaded!.canvas.positions[created.id]
+      if (pos) centerOnCard(pos)
+    }
+  }
+
+  // Re-point a missing project at the folder the user picks, KEEPING its uuid so
+  // its central data (tasks / journal / canvases) reconnects. Distinct from
+  // Import (which mints a new id). Mirrors importProject's pick→call→reload flow.
+  const relocateProject = async (id: string) => {
+    const pick = await api.api['pick-folder'].$post()
+    const picked = (await pick.json().catch(() => ({}))) as {
+      path?: string
+      cancelled?: boolean
+      error?: string
+    }
+    if (picked.cancelled || !picked.path) {
+      if (picked.error) alert(picked.error)
+      return
+    }
+    const res = await api.api.projects.relocate.$post({ json: { id, newPath: picked.path } })
+    const data = (await res.json().catch(() => ({}))) as { error?: string }
+    if (!res.ok) {
+      alert(t('misc.ground.locateFailed', { error: data.error ?? res.statusText }))
+      return
+    }
     await load()
   }
 
@@ -426,9 +572,7 @@ export default function App() {
     return <div className="h-screen w-screen bg-bg" />
   }
 
-  const hasProjectsRoot = !!settings.projectsRoot
-  const showEmpty = !hasProjectsRoot || projects.length === 0
-  const archivedCount = projects.filter((p) => p.archived).length
+  const showEmpty = projects.length === 0
   const selectedProjects = visibleProjects.filter((p) => selectedIds.includes(p.id))
   const singleSelected = selectedProjects.length === 1 ? selectedProjects[0] : null
   const selectedElement =
@@ -439,20 +583,11 @@ export default function App() {
   // derived from canvas geometry, not a hand-typed field.
   const frameLabel = singleSelected ? frameLabelFor(singleSelected.id, canvas) : null
 
-  // Cancel whichever live run is working a given task.
-  const cancelTaskRun = (taskId: string) => {
-    const s = runs.sessions.find(
-      (s) =>
-        !s.finishedAt &&
-        s.entries.some((e) => e.targetedTasks.some((t) => t.id === taskId)),
-    )
-    if (s) runs.cancelRun(s.id)
-  }
-
   return (
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
       <InfiniteCanvas
         projects={visibleProjects}
+        terminalActiveIds={terminalActiveIds}
         canvas={canvas}
         onCanvasChange={onCanvasChange}
         selectedIds={selectedIds}
@@ -462,103 +597,33 @@ export default function App() {
         onEditingIdChange={setEditingId}
         tool={tool}
         onToolChange={setTool}
-        runStatuses={runs.statusByProject}
-        runSummaries={cardSummaries}
       />
       {showEmpty && (
-        <EmptyState configured={hasProjectsRoot} onConfigure={() => setSettingsOpen(true)} />
+        <EmptyState
+          onCreateNew={() => setNewProjectOpen(true)}
+          onImport={importProject}
+        />
       )}
-      {runErrorToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] max-w-[440px] w-[calc(100vw-3rem)]">
-          <div
-            role="alert"
-            className="flex items-start gap-2.5 rounded-[4px] border border-accent/40 bg-bg-card/95 backdrop-blur-sm px-4 py-3 shadow-card-hover"
-          >
-            <AlertTriangle size={15} className="mt-[1px] shrink-0 text-accent" />
-            <div className="min-w-0 flex-1">
-              <p className="text-[12px] text-ink leading-relaxed">{runErrorToast}</p>
-              <button
-                onClick={() => {
-                  setRunErrorToast(null)
-                  setSettingsOpen(true)
-                }}
-                className="mt-1.5 label-cap text-accent hover:text-ink transition-colors"
-              >
-                Open settings
-              </button>
-            </div>
-            <button
-              onClick={() => setRunErrorToast(null)}
-              aria-label="Dismiss"
-              className="shrink-0 -mr-1 -mt-0.5 p-1 text-ink-faint hover:text-ink transition-colors"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-      )}
-      <ToolPalette tool={tool} onToolChange={setTool} />
+      {/* Canvas tools are meaningless with no projects — hide them under the
+          empty-state modal so the first-run screen stays focused. */}
+      {!showEmpty && <ToolPalette tool={tool} onToolChange={setTool} />}
       <Toolbar
-        onRefresh={load}
         onNewProject={() => setNewProjectOpen(true)}
+        onImport={importProject}
         onOpenSettings={() => setSettingsOpen(true)}
         onFeedback={feedbackEnabled ? () => setFeedbackOpen(true) : undefined}
         onAccount={authEnabled ? () => setAccountOpen(true) : undefined}
-        projectsRoot={settings.projectsRoot}
+        unreadFeedback={feedbackUnread}
         projectCount={visibleProjects.length}
-        archivedCount={archivedCount}
-        showArchived={showArchived}
-        onToggleArchived={() => setShowArchived((v) => !v)}
-        refreshing={refreshing}
+        usage={<UsageHud />}
       />
-      {/* Slim, chrome-less usage strip — sits flush to the left of Toolbar's
-       *  right button pill (≈ 92px wide inside p-5). */}
-      <div className="absolute top-[26px] right-[120px] z-20">
-        <UsageHud plan={settings.claudePlan} />
-      </div>
       <ProjectPanel
         project={singleSelected}
+        onRelocate={relocateProject}
         frameLabel={frameLabel}
-        dataVersion={projectDataVersion}
-        taskRuns={runs.taskRuns}
-        allTaskRuns={runs.allTaskRuns}
-        claudePlan={settings.claudePlan}
-        onRunTask={(task, opts) => {
-          if (singleSelected)
-            runs.runTask(
-              {
-                id: singleSelected.id,
-                name: singleSelected.name,
-                path: singleSelected.path,
-              },
-              { id: task.id, title: task.title },
-              opts,
-            )
-        }}
-        onCancelTask={cancelTaskRun}
-        onCancelAllPending={runs.cancelAllPending}
-        canvasAddSignal={runs.canvasAddSignal}
-        canvasErrorSignal={runs.canvasErrorSignal}
-        onEnqueueInstruction={(task, instruction, opts, waitForSessionId) => {
-          if (!singleSelected) return
-          runs.enqueueInstruction({
-            taskId: task.id,
-            project: {
-              id: singleSelected.id,
-              name: singleSelected.name,
-              path: singleSelected.path,
-            },
-            task: { id: task.id, title: task.title },
-            instruction,
-            permissionMode: opts?.permissionMode,
-            skill: opts?.skill,
-            canvasContext: opts?.canvasContext,
-            waitForSessionId,
-          })
-        }}
+        feedbackEnabled={feedbackEnabled}
         onClose={() => setSelectedIds([])}
-        onArchive={archive}
-        onRestore={restore}
+        onRemove={removeFromCanvas}
         onSaved={(path, d) =>
           setProjects((prev) =>
             prev.map((p) =>
@@ -586,11 +651,10 @@ export default function App() {
             path?: string
           }
           if (!res.ok) return { error: json.error ?? 'Rename failed' }
-          // Reload, then re-select by the new path so the panel stays on the
-          // same project (its id has changed because id = sha1(name)).
-          const data = await load()
-          const next = data?.projects.find((p) => p.path === json.path)
-          if (next) setSelectedIds([next.id])
+          // The project id is a stable registry UUID — it survives the rename —
+          // so the panel stays on the same project. Reload to pick up the new
+          // path/name; the selection id is unchanged.
+          await load()
           return undefined
         }}
       />
@@ -650,16 +714,29 @@ export default function App() {
         settings={settings}
         onClose={() => setSettingsOpen(false)}
         onSave={saveSettings}
+        onReload={load}
+        feedbackCanRead={feedbackCanRead}
+        onFeedbackSeen={markFeedbackSeen}
+        onOpenFeedback={
+          feedbackEnabled
+            ? () => {
+                setSettingsOpen(false)
+                setFeedbackOpen(true)
+              }
+            : undefined
+        }
       />
       <NewProjectModal
         open={newProjectOpen}
-        projectsRoot={settings.projectsRoot}
+        defaultWorkspace={settings.defaultWorkspace ?? null}
         onClose={() => setNewProjectOpen(false)}
-        onCreated={async (newPath) => {
+        onCreated={async (newId) => {
           setNewProjectOpen(false)
           const data = await load()
           // Open the new project's panel and centre the canvas on its card.
-          const created = data?.projects.find((p) => p.path === newPath)
+          // Match by stable id — the server canonicalizes the folder path, so a
+          // path compare would miss when the workspace contains a symlink.
+          const created = data?.projects.find((p) => p.id === newId)
           if (created) {
             setSelectedIds([created.id])
             const pos = data!.canvas.positions[created.id]
@@ -669,6 +746,17 @@ export default function App() {
       />
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
       <AccountModal open={accountOpen} onClose={() => setAccountOpen(false)} />
+      <Onboarding
+        open={!onboarded}
+        onComplete={() => {
+          try {
+            localStorage.setItem(ONBOARDED_KEY, '1')
+          } catch {
+            /* storage unavailable — onboarding just won't persist */
+          }
+          setOnboarded(true)
+        }}
+      />
       <ProjectJumpPalette
         open={jumpOpen}
         projects={visibleProjects}

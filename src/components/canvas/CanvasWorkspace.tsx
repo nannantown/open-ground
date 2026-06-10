@@ -1,21 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Layers, Redo2, Undo2 } from 'lucide-react'
+import { useT } from '@/i18n/I18nContext'
 import { InfiniteCanvas } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
-import { CanvasChatSidebar } from './CanvasChatSidebar'
 import { SelectionInspector } from './SelectionInspector'
 import { LayersPanel } from './LayersPanel'
+import { AlignBar } from './AlignBar'
 import { newId } from '@/lib/ids'
 import { removeElements } from '@/lib/canvasIntegrity'
+import {
+  withGroupAncestors,
+  expandSelectionForElement,
+  groupCascadeSets,
+} from '@/lib/canvasGroup'
 import { applyElementPatch } from '@/lib/canvasTextStyle'
+import { reorderLayer } from '@/lib/canvasLayerTree'
+import { alignElements, type AlignOp } from '@/lib/canvasAlign'
+import { elementBounds } from '@/lib/canvasBounds'
 import type {
   CanvasElement,
   CanvasFile,
-  ProjectTask,
-  RunSession,
   Tool,
 } from '@/lib/types'
-import type { RunTaskOpts } from '@/lib/useRuns'
 
 interface Props {
   projectPath: string
@@ -23,10 +29,6 @@ interface Props {
   /** Persist any change to this Canvas. Debounced upstream by ProjectCanvas
    *  so a pan/zoom storm doesn't write on every frame. */
   onChange: (next: CanvasFile) => void
-  taskRuns: Map<string, RunSession>
-  allTaskRuns: Map<string, RunSession[]>
-  onRunTask: (task: ProjectTask, opts?: RunTaskOpts) => void
-  onCancelTask: (taskId: string) => void
 }
 
 // Clone elements for paste / duplicate: fresh ids and a small offset. Run-
@@ -65,11 +67,8 @@ export const CanvasWorkspace = ({
   projectPath,
   canvas,
   onChange,
-  taskRuns,
-  allTaskRuns,
-  onRunTask,
-  onCancelTask,
 }: Props) => {
+  const { t } = useT()
   const [tool, setTool] = useState<Tool>('select')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -169,16 +168,6 @@ export const CanvasWorkspace = ({
     histTimer.current = setTimeout(flushHistory, HIST_IDLE_MS)
   }, [flushHistory])
 
-  // Keep the history baseline aligned after a non-undoable element mutation
-  // (e.g. linking a comment to its chat). Callers flushHistory() BEFORE their
-  // mutating patch so any pending user edit is committed first; this then
-  // adopts the post-mutation array as the baseline so the link itself isn't
-  // attributed to a later edit.
-  const syncHistoryBaseline = useCallback(() => {
-    baselineRef.current = canvasRef.current.elements
-    lastLocalElementsRef.current = canvasRef.current.elements
-  }, [])
-
   // The single entry point for undoable element changes.
   const mutateElements = useCallback(
     (next: CanvasElement[]) => {
@@ -197,6 +186,33 @@ export const CanvasWorkspace = ({
       if (next !== canvasRef.current.elements) mutateElements(next)
     },
     [mutateElements],
+  )
+
+  // Align / distribute the current multi-selection (Figma-parity). Locked
+  // elements (directly or via a locked group) and groups (no box of their own)
+  // are excluded; align needs ≥2 participants, distribute ≥3. One undoable step.
+  const alignSelection = useCallback(
+    (op: AlignOp) => {
+      const els = canvasRef.current.elements
+      const byId = new Map(els.map((e) => [e.id, e]))
+      const { lockedViaGroup } = groupCascadeSets(els)
+      const items = []
+      for (const id of selectedIds) {
+        const el = byId.get(id)
+        if (!el || el.locked || lockedViaGroup.has(id)) continue
+        const b = elementBounds(el)
+        if (b) items.push({ id, x: b.x, y: b.y, w: b.w, h: b.h })
+      }
+      const moves = alignElements(items, op)
+      if (!moves.length) return
+      const moveById = new Map(moves.map((m) => [m.id, m]))
+      const next = els.map((e) => {
+        const m = moveById.get(e.id)
+        return m && (m.x !== e.x || m.y !== e.y) ? { ...e, x: m.x, y: m.y } : e
+      })
+      if (next.some((e, i) => e !== els[i])) mutateElements(next)
+    },
+    [selectedIds, mutateElements],
   )
 
   const undo = useCallback(() => {
@@ -232,151 +248,15 @@ export const CanvasWorkspace = ({
     if (changedElements) recordElementsChange()
   }
 
-  // Build a chat-ready prompt out of a Canvas comment. The pin's text goes
-  // first as the user-authored brief; if the comment is anchored to another
-  // element (a mock especially), append a contextual footer so Claude knows
-  // *which* element the feedback is about — and for mocks include the live
-  // source code so the run has everything it needs in one message.
-  const buildCommentPrompt = useCallback(
-    (comment: CanvasElement): string => {
-      const body = comment.text.trim()
-      const anchor = comment.anchorId
-        ? canvasRef.current.elements.find((e) => e.id === comment.anchorId)
-        : null
-      const lines: string[] = [body]
-      if (anchor) {
-        lines.push('')
-        if (anchor.type === 'mock') {
-          const label =
-            anchor.name || (anchor.framework === 'html' ? 'HTML mock' : 'React mock')
-          const lang = anchor.framework === 'html' ? 'html' : 'jsx'
-          lines.push(
-            `（Canvas のモック「${label}」へのコメントです。下記のソースを参照して修正してください。）`,
-          )
-          lines.push('```' + lang)
-          lines.push(anchor.text)
-          lines.push('```')
-        } else if (anchor.type === 'frame') {
-          const label = anchor.text.trim() || 'Frame'
-          lines.push(`（Canvas のフレーム「${label}」周りへのコメントです。）`)
-        } else if (anchor.type === 'sticky') {
-          const head = anchor.text.trim().split('\n')[0]?.slice(0, 60) ?? ''
-          lines.push(
-            head
-              ? `（Canvas のスティッキー「${head}」へのコメントです。）`
-              : `（Canvas のスティッキーへのコメントです。）`,
-          )
-        } else if (anchor.type === 'text') {
-          const head = anchor.text.trim().slice(0, 60)
-          lines.push(
-            head
-              ? `（Canvas のテキスト「${head}」へのコメントです。）`
-              : `（Canvas のテキストへのコメントです。）`,
-          )
-        }
-      }
-      return lines.join('\n')
-    },
-    [],
-  )
-
-  // Fire a comment pin as a brand-new Canvas chat. Opens the sidebar (so the
-  // user actually sees the run starting), creates a fresh chat thread whose
-  // title is the comment-derived prompt, then kicks the runner. Behaves the
-  // same as the sidebar's createChat path so SSE / status tracking just work.
-  const runComment = useCallback(
-    (comment: CanvasElement) => {
-      const prompt = buildCommentPrompt(comment).trim()
-      if (!prompt) return
-      const task: ProjectTask = {
-        id: newId(),
-        title: prompt,
-        done: false,
-        milestoneId: null,
-        createdAt: new Date().toISOString(),
-      }
-      const current = canvasRef.current
-      // Commit any pending user edit as its own undo step before the (non-
-      // undoable) chat-link write, so a drag done just before Run isn't lost.
-      flushHistory()
-      // Link the pin to the chat it just spawned (don't auto-resolve — Run
-      // asks Claude, Resolve is the user's call after reading the reply). The
-      // pin reads this chatId back to show live status + the latest reply.
-      patch({
-        sidebarOpen: true,
-        chats: [task, ...current.chats],
-        activeChatId: task.id,
-        elements: current.elements.map((el) =>
-          el.id === comment.id ? { ...el, chatId: task.id, resolved: false } : el,
-        ),
-      })
-      syncHistoryBaseline()
-      // Carry the canvas context so the run prompt documents the CANVAS_ADD /
-      // CANVAS_UPDATE marker protocol and the observer routes any markers back
-      // — without it an anchored comment could never patch its element.
-      onRunTask(task, { canvasContext: { canvasId: current.id } })
-    },
-    [buildCommentPrompt, flushHistory, onRunTask, patch, syncHistoryBaseline],
-  )
-
-  // Reconcile comment→chat links whenever the chat list changes: if a chat a
-  // comment pointed at was deleted, drop the dangling chatId so the pin stops
-  // claiming a thread that no longer exists.
-  const handleChatsChange = useCallback(
-    (chats: ProjectTask[]) => {
-      const ids = new Set(chats.map((c) => c.id))
-      const els = canvasRef.current.elements
-      const needsReconcile = els.some(
-        (el) => el.type === 'comment' && el.chatId && !ids.has(el.chatId),
-      )
-      if (!needsReconcile) {
-        patch({ chats })
-        return
-      }
-      // Commit any pending user edit before the (non-undoable) chatId cleanup.
-      flushHistory()
-      patch({
-        chats,
-        elements: els.map((el) => {
-          if (el.type === 'comment' && el.chatId && !ids.has(el.chatId)) {
-            const { chatId: _drop, ...rest } = el
-            return rest
-          }
-          return el
-        }),
-      })
-      syncHistoryBaseline()
-    },
-    [flushHistory, patch, syncHistoryBaseline],
-  )
-
-  // Live run status + latest reply for a comment's linked chat, derived from
-  // the shared taskRuns map (keyed by chat/task id). null when the comment has
-  // no linked chat yet or its run hasn't surfaced.
-  const commentRunInfo = useCallback(
-    (chatId: string): { status: RunSession['entries'][number]['status']; summary: string } | null => {
-      const session = taskRuns.get(chatId) ?? allTaskRuns.get(chatId)?.[0]
-      const entry = session?.entries[0]
-      if (!entry) return null
-      return { status: entry.status, summary: entry.parsedResult?.summary ?? '' }
-    },
-    [taskRuns, allTaskRuns],
-  )
-
-  const openCommentThread = useCallback(
-    (chatId: string) => {
-      patch({ sidebarOpen: true, activeChatId: chatId })
-    },
-    [patch],
-  )
-
   // ── Copy / paste / duplicate of canvas elements ──────────────────────────
   // In-canvas clipboard, kept in a ref so it survives re-renders. Independent
   // of the OS clipboard (which the image-paste path owns).
   const clipboardRef = useRef<CanvasElement[]>([])
 
   const copySelection = useCallback(() => {
-    const ids = new Set(selectedIds)
+    // Pull in any group element owning a selected member so the clone stays
+    // grouped (cloneForPaste remaps the group's id + the members' parentId).
+    const ids = new Set(withGroupAncestors(canvasRef.current.elements, selectedIds))
     const picked = canvasRef.current.elements.filter((el) => ids.has(el.id))
     if (picked.length) clipboardRef.current = picked.map((el) => ({ ...el }))
   }, [selectedIds])
@@ -386,7 +266,10 @@ export const CanvasWorkspace = ({
     if (!clip.length) return
     const copies = cloneForPaste(clip, 24, 24)
     mutateElements([...canvasRef.current.elements, ...copies])
-    setSelectedIds(copies.map((c) => c.id))
+    // Select the pasted members, not the invisible group element(s).
+    const groupCopyIds = new Set(copies.filter((c) => c.type === 'group').map((c) => c.id))
+    const members = copies.filter((c) => !groupCopyIds.has(c.id))
+    setSelectedIds((members.length ? members : copies).map((c) => c.id))
     setEditingId(null)
   }, [mutateElements])
 
@@ -394,7 +277,7 @@ export const CanvasWorkspace = ({
   // it), then delete it through removeElements — the SAME path Delete uses — so
   // the cut can't leave a dangling comment anchor or frame/design parentId.
   const cutSelection = useCallback(() => {
-    const ids = new Set(selectedIds)
+    const ids = new Set(withGroupAncestors(canvasRef.current.elements, selectedIds))
     const picked = canvasRef.current.elements.filter((el) => ids.has(el.id))
     if (!picked.length) return
     clipboardRef.current = picked.map((el) => ({ ...el }))
@@ -405,12 +288,18 @@ export const CanvasWorkspace = ({
   }, [selectedIds, mutateElements])
 
   const duplicateSelection = useCallback(() => {
-    const ids = new Set(selectedIds)
+    const ids = new Set(withGroupAncestors(canvasRef.current.elements, selectedIds))
     const picked = canvasRef.current.elements.filter((el) => ids.has(el.id))
     if (!picked.length) return
     const copies = cloneForPaste(picked, 24, 24)
     mutateElements([...canvasRef.current.elements, ...copies])
-    setSelectedIds(copies.map((c) => c.id))
+    // Re-select only the duplicated MEMBERS (not the invisible group element),
+    // matching how a fresh group selection reads on the canvas.
+    const copiedGroupIds = new Set(
+      copies.filter((c) => c.type === 'group').map((c) => c.id),
+    )
+    const memberCopies = copies.filter((c) => !copiedGroupIds.has(c.id))
+    setSelectedIds((memberCopies.length ? memberCopies : copies).map((c) => c.id))
     setEditingId(null)
   }, [selectedIds, mutateElements])
 
@@ -442,6 +331,37 @@ export const CanvasWorkspace = ({
       patchElement(id, { hidden: !el.hidden })
     },
     [patchElement],
+  )
+
+  const toggleElementLocked = useCallback(
+    (id: string) => {
+      const el = canvasRef.current.elements.find((e) => e.id === id)
+      if (!el) return
+      // Store `undefined` (not false) when unlocking so the field stays clean.
+      patchElement(id, { locked: el.locked ? undefined : true })
+    },
+    [patchElement],
+  )
+
+  // Rename a layer (Layers-panel double-click). An empty name clears the custom
+  // label so the row falls back to its content-derived name. Same undoable patch
+  // path as the inspector.
+  const renameElement = useCallback(
+    (id: string, name: string) => {
+      patchElement(id, { name: name || undefined })
+    },
+    [patchElement],
+  )
+
+  // Drag-reorder a layer (Layers-panel drag). Moves the dragged element + its
+  // subtree to land next to the target in z-order, adopting the target's nesting
+  // level — see reorderLayer. Routed through mutateElements so it undoes/persists.
+  const reorderElement = useCallback(
+    (dragId: string, targetId: string, place: 'above' | 'below') => {
+      const next = reorderLayer(canvasRef.current.elements, dragId, targetId, place)
+      if (next !== canvasRef.current.elements) mutateElements(next)
+    },
+    [mutateElements],
   )
 
   // Image paste / drop. Uploads the file to /api/canvas/asset, then drops a
@@ -519,40 +439,9 @@ export const CanvasWorkspace = ({
     [projectPath, canvas.id, mutateElements],
   )
 
-  // Drop a chat message onto the Canvas as a sticky. Place it in the
-  // top-left of the currently visible region (offset by a small random nudge
-  // so successive pastes don't stack pixel-perfect) — the user can drag it
-  // wherever they want after.
-  const pasteToCanvas = useCallback(
-    (text: string) => {
-      const trimmed = text.trim()
-      if (!trimmed) return
-      const current = canvasRef.current
-      const zoom = current.viewport.zoom || 1
-      const baseX = -current.viewport.x / zoom + 40
-      const baseY = -current.viewport.y / zoom + 60
-      const jitterX = Math.random() * 40
-      const jitterY = Math.random() * 40
-      const sticky: CanvasElement = {
-        id:
-          typeof crypto !== 'undefined' && 'randomUUID' in crypto
-            ? crypto.randomUUID()
-            : `sticky-${Date.now()}`,
-        type: 'sticky',
-        x: Math.round(baseX + jitterX),
-        y: Math.round(baseY + jitterY),
-        width: 208,
-        height: 208,
-        text: trimmed,
-      }
-      mutateElements([...current.elements, sticky])
-    },
-    [mutateElements],
-  )
-
-  // Keyboard map. ⌘-combos (undo/redo/copy/cut/paste/duplicate/sidebar) are
-  // gated when a text field has focus so native editing + the chat composer keep
-  // working; the bare tool keys (V/T/S/F/G/O/C/I) are likewise field-gated.
+  // Keyboard map. ⌘-combos (undo/redo/copy/cut/paste/duplicate) are gated when a
+  // text field has focus so native editing keeps working; the bare tool keys
+  // (V/T/S/F/G/O/C/I) are likewise field-gated.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ae = document.activeElement
@@ -561,10 +450,7 @@ export const CanvasWorkspace = ({
       if (e.metaKey || e.ctrlKey) {
         if (inField || e.altKey) return
         const k = e.key.toLowerCase()
-        if (k === '/') {
-          e.preventDefault()
-          patch({ sidebarOpen: !canvasRef.current.sidebarOpen })
-        } else if (k === 'z') {
+        if (k === 'z') {
           e.preventDefault()
           if (e.shiftKey) redo()
           else undo()
@@ -598,7 +484,6 @@ export const CanvasWorkspace = ({
     return () => window.removeEventListener('keydown', onKey)
   }, [patch, undo, redo, copySelection, cutSelection, pasteClipboard, duplicateSelection])
 
-  const sidebarWidth = canvas.sidebarWidth ?? CanvasChatSidebar.DEFAULT_WIDTH
   // A change made <idle window> ago hasn't been committed to the undo stack
   // yet, so also treat a live divergence from the baseline as undoable.
   const canUndo = undoRef.current.length > 0 || baselineRef.current !== canvas.elements
@@ -614,25 +499,19 @@ export const CanvasWorkspace = ({
   const inspectorElement =
     selectedElement && selectedElement.type !== 'comment' ? selectedElement : null
 
+  // Count of selected ids that still exist as elements — the AlignBar gate uses
+  // this (not raw selectedIds.length) so a stale selection left after a delete
+  // doesn't strand the toolbar over an empty/changed canvas. (Mirrors how the
+  // inspector tolerates a stale id via `.find`.)
+  const liveSelectedCount = (() => {
+    const ids = new Set(selectedIds)
+    let n = 0
+    for (const e of canvas.elements) if (ids.has(e.id)) n++
+    return n
+  })()
+
   return (
     <div className="flex h-full w-full overflow-hidden">
-      <CanvasChatSidebar
-        projectPath={projectPath}
-        canvasId={canvas.id}
-        chats={canvas.chats}
-        activeChatId={canvas.activeChatId}
-        open={canvas.sidebarOpen}
-        width={sidebarWidth}
-        onOpenChange={(open) => patch({ sidebarOpen: open })}
-        onWidthChange={(w) => patch({ sidebarWidth: w })}
-        onChatsChange={handleChatsChange}
-        onActiveChatChange={(id) => patch({ activeChatId: id })}
-        taskRuns={taskRuns}
-        allTaskRuns={allTaskRuns}
-        onRunTask={onRunTask}
-        onCancelTask={onCancelTask}
-        onPasteToCanvas={pasteToCanvas}
-      />
       <div className="relative min-w-0 flex-1 overflow-hidden">
         <InfiniteCanvas
           projects={[]}
@@ -664,9 +543,6 @@ export const CanvasWorkspace = ({
           onEditingIdChange={setEditingId}
           tool={tool}
           onToolChange={setTool}
-          onRunComment={runComment}
-          commentRunInfo={commentRunInfo}
-          onOpenCommentThread={openCommentThread}
           onDuplicate={duplicateSelection}
         />
         <ToolPalette tool={tool} onToolChange={setTool} variant="embedded" />
@@ -677,7 +553,7 @@ export const CanvasWorkspace = ({
           type="button"
           onClick={() => setShowLayers((v) => !v)}
           aria-pressed={showLayers}
-          title={showLayers ? 'レイヤーを隠す' : 'レイヤーを表示'}
+          title={showLayers ? t('canvas.hideLayers') : t('canvas.showLayers')}
           className={[
             'absolute left-3 top-3 z-30 flex h-8 w-8 items-center justify-center rounded-[6px] border shadow-card backdrop-blur transition-colors',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
@@ -692,17 +568,25 @@ export const CanvasWorkspace = ({
           <LayersPanel
             elements={canvas.elements}
             selectedIds={selectedIds}
-            onSelect={(id, additive) =>
+            onSelect={(id, additive) => {
+              // Clicking a GROUP row selects its members (the group element is
+              // invisible — selecting its bare id would show nothing on canvas
+              // and break copy). A member/leaf row selects just itself, so the
+              // panel can still target individual children.
+              const el = canvas.elements.find((e) => e.id === id)
+              const target =
+                el?.type === 'group' ? expandSelectionForElement(canvas.elements, id) : [id]
               setSelectedIds((prev) =>
                 additive
-                  ? prev.includes(id)
-                    ? prev.filter((x) => x !== id)
-                    : [...prev, id]
-                  : [id],
+                  ? Array.from(new Set([...prev, ...target]))
+                  : target,
               )
-            }
+            }}
             onMove={moveElementOne}
             onToggleHidden={toggleElementHidden}
+            onToggleLocked={toggleElementLocked}
+            onRename={renameElement}
+            onReorder={reorderElement}
             onClose={() => setShowLayers(false)}
           />
         )}
@@ -715,13 +599,17 @@ export const CanvasWorkspace = ({
             onPatch={(changes) => patchElement(inspectorElement.id, changes)}
           />
         )}
+        {/* Align / distribute toolbar — only with a live multi-selection. */}
+        {liveSelectedCount >= 2 && (
+          <AlignBar count={liveSelectedCount} onAlign={alignSelection} />
+        )}
         {/* Undo / redo — keeps the ⌘Z history discoverable for mouse users. */}
         <div className="absolute bottom-4 right-4 z-20 flex items-center gap-0.5 rounded-[7px] border border-line bg-bg-card/90 p-1 shadow-card backdrop-blur">
           <button
             type="button"
             onClick={undo}
             disabled={!canUndo}
-            title="元に戻す (⌘Z)"
+            title={t('canvas.undo')}
             className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
           >
             <Undo2 size={14} strokeWidth={2} />
@@ -730,7 +618,7 @@ export const CanvasWorkspace = ({
             type="button"
             onClick={redo}
             disabled={!canRedo}
-            title="やり直す (⌘⇧Z)"
+            title={t('canvas.redo')}
             className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
           >
             <Redo2 size={14} strokeWidth={2} />

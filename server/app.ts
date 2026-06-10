@@ -16,8 +16,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { health } from './routes/health'
 import { projectRoutes } from './routes/project'
-import { goalRoutes } from './routes/goals'
-import { runRoutes } from './routes/run'
+import { shareRoutes } from './routes/share'
 import { canvasRoutes } from './routes/canvas'
 import { miscRoutes } from './routes/misc'
 import { terminalRoutes } from './routes/terminal'
@@ -50,19 +49,15 @@ export const createApp = () => {
   //   import { projectRoutes } from './routes/project'
   //   app.route('/', projectRoutes)
   //
-  //   import { runRoutes } from './routes/run'
-  //   app.route('/', runRoutes)
-  //
   //   import { terminalRoutes } from './routes/terminal'   // dynamic + SSE
   //   app.route('/', terminalRoutes)
   //
   // Keep the empty-prefix convention: routers declare full `/api/...` paths.
-  // REST groups A–F + SSE. Each router declares its own full /api/... paths, so
-  // the mount prefix stays empty ('/'). Hono matches in registration order, but
-  // because every path is fully spelled out there are no prefix collisions
-  // between groups. The SSE router is mounted alongside the REST ones — its
-  // streaming paths (/api/run/events, /api/terminal/:id/stream,
-  // /api/screen/watch) are distinct from any REST path so order is moot.
+  // Each router declares its own full /api/... paths, so the mount prefix
+  // stays empty ('/'). Hono matches in registration order, but because every
+  // path is fully spelled out there are no prefix collisions between groups.
+  // The SSE router is mounted alongside the REST ones — its streaming path
+  // (/api/terminal/:id/stream) is distinct from any REST path so order is moot.
   //
   // `app.route()` returns `this`, so the mounts are CHAINED: this threads each
   // sub-router's (now method-chained) route tree into `typeof app`, which is
@@ -72,13 +67,12 @@ export const createApp = () => {
   // binding above — `new Hono()` alone is typed with an empty schema.
   const routed = app
     .route('/', health)
-    .route('/', projectRoutes)   // A — project / tasks / canvases / task-image
-    .route('/', goalRoutes)      // B — goals + milestones
-    .route('/', runRoutes)       // C — run lifecycle
+    .route('/', projectRoutes)   // A — project / tasks / canvases
+    .route('/', shareRoutes)     // C — git-shared data (status / sync)
     .route('/', canvasRoutes)    // D — canvas / asset / paste
-    .route('/', miscRoutes)      // E — projects / settings / skills / usage / observer
+    .route('/', miscRoutes)      // E — projects / settings / usage
     .route('/', terminalRoutes)  // F — terminal CRUD (dynamic :id)
-    .route('/', sseRoutes)       // SSE — run events / terminal stream
+    .route('/', sseRoutes)       // SSE — terminal stream
     .route('/', feedbackRoutes)  // G — in-app feedback proxy (env-gated)
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)
 

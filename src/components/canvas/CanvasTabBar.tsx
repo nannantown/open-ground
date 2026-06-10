@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Plus, X } from 'lucide-react'
+import { useT } from '@/i18n/I18nContext'
 import type { CanvasSummary } from '@/lib/types'
 
 interface Props {
@@ -29,6 +30,7 @@ export const CanvasTabBar = ({
   onRename,
   onReorder,
 }: Props) => {
+  const { t } = useT()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
@@ -103,7 +105,7 @@ export const CanvasTabBar = ({
                 : 'border-transparent bg-transparent text-ink-muted hover:bg-bg/60 hover:text-ink',
               isDragOver ? 'ring-1 ring-accent' : '',
             ].join(' ')}
-            title={isActive ? c.name : `Switch to ${c.name}`}
+            title={isActive ? c.name : t('canvas.switchToCanvas', { name: c.name })}
           >
             {isEditing ? (
               <input
@@ -134,7 +136,7 @@ export const CanvasTabBar = ({
                 e.stopPropagation()
                 onDelete(c.id)
               }}
-              title="この Canvas を閉じる"
+              title={t('canvas.closeThisCanvas')}
               className={[
                 'flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-opacity hover:bg-bg-inset hover:text-ink',
                 isActive ? 'opacity-70' : 'opacity-0 group-hover:opacity-70',
@@ -148,7 +150,7 @@ export const CanvasTabBar = ({
       <button
         type="button"
         onClick={onCreate}
-        title="新しい Canvas を作成"
+        title={t('canvas.newCanvas')}
         className="ml-1 flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg hover:text-ink"
       >
         <Plus size={13} strokeWidth={2} />

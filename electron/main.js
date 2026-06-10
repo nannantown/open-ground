@@ -260,6 +260,42 @@ function isAllowedOauthUrl(url) {
 // ---------------------------------------------------------------------------
 // Window helpers.
 // ---------------------------------------------------------------------------
+
+// Navigation hardening (Electron security checklist #12 "Disable or limit
+// navigation" / #13 "Disable or limit creation of new windows"). The renderer
+// only ever needs to live on the app's own origin — the Vite dev server in dev,
+// the Hono port in prod. Treat anything else as an external link: route http(s)
+// to the OS browser and refuse to open it inside the app. This stops a stray
+// target=_blank / window.open / errant in-app href from replacing the SPA or
+// spawning a second, preload-backed BrowserWindow. (OAuth still flows through
+// the separate, tightly allow-listed shell:openExternal IPC handler; the auth
+// browser tab runs in the OS browser, never in this window, so will-navigate
+// never sees it.)
+function isAppOrigin(target) {
+  try {
+    const origin = new URL(target).origin
+    return origin === new URL(BASE_URL).origin || origin === new URL(DEV_URL).origin
+  } catch {
+    return false
+  }
+}
+
+function hardenNavigation(contents) {
+  // New windows (window.open, target=_blank): never open inside the app; send
+  // real web links to the OS browser, drop everything else.
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  // Top-level navigations: allow same-origin (the SPA's own routes/reloads),
+  // bounce anything external to the OS browser instead of loading it here.
+  contents.on('will-navigate', (event, url) => {
+    if (isAppOrigin(url)) return
+    event.preventDefault()
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+  })
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -273,6 +309,24 @@ function createWindow() {
       nodeIntegration: false,
       preload: path.join(__dirname, 'preload.js'),
     },
+  })
+
+  hardenNavigation(mainWindow.webContents)
+
+  // Lock zoom to 100%. OPEN GROUND is a fixed-layout canvas app (the canvas has
+  // its own pan/zoom), so accidental *browser* zoom — ⌘+/−/0 or trackpad pinch —
+  // just shifts the chrome around and reads as a layout bug. Cap visual (pinch)
+  // zoom to 1×, reset the zoom level on every load, and swallow the zoom
+  // accelerators before they act.
+  const lockZoom = () => {
+    mainWindow?.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {})
+    mainWindow?.webContents.setZoomLevel(0)
+  }
+  mainWindow.webContents.on('did-finish-load', lockZoom)
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if ((input.control || input.meta) && ['=', '+', '-', '0'].includes(input.key)) {
+      event.preventDefault()
+    }
   })
 
   mainWindow.on('closed', () => {

@@ -99,7 +99,9 @@ describe('save / load round-trip', () => {
   })
 
   it('overwrites a field on a second save', () => {
-    savePersistedView({ panelTab: 'tasks' }, storage)
+    // 'tasks' is a retired tab id — a stale persisted blob may still carry it.
+    // Cast through `any` to mimic that legacy value being overwritten.
+    savePersistedView({ panelTab: 'tasks' as never }, storage)
     savePersistedView({ panelTab: 'canvas' }, storage)
     expect(loadPersistedView(storage)).toEqual({ panelTab: 'canvas' })
   })

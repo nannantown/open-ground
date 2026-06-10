@@ -1,0 +1,38 @@
+// Owned by the Toolbar/Settings translation track (incl. the EN/JA language
+// toggle labels). Add keys as 'toolbar.*'. English is the source of truth.
+export const toolbar = {
+  en: {
+    'toolbar.add': 'Add project',
+    'toolbar.newProject': 'New project',
+    'toolbar.importFolder': 'Import folder',
+    'toolbar.refresh': 'Refresh',
+    'toolbar.sendFeedback': 'Send feedback',
+    'toolbar.feedback': 'Feedback',
+    'toolbar.signIn': 'Sign in',
+    'toolbar.signOut': 'Sign out',
+    'toolbar.account': 'Account',
+    'toolbar.settings': 'Settings',
+    'toolbar.settingsWithUnread': 'Settings ({count} new feedback)',
+    'toolbar.language': 'Language',
+    'toolbar.langEn': 'EN',
+    'toolbar.langJa': 'JA',
+    'toolbar.betaTooltip': 'Beta — breaking changes may still land.',
+  } as Record<string, string>,
+  ja: {
+    'toolbar.add': 'プロジェクトを追加',
+    'toolbar.newProject': '新規プロジェクト',
+    'toolbar.importFolder': 'フォルダをインポート',
+    'toolbar.refresh': '再読み込み',
+    'toolbar.sendFeedback': 'フィードバックを送る',
+    'toolbar.feedback': 'フィードバック',
+    'toolbar.signIn': 'サインイン',
+    'toolbar.signOut': 'サインアウト',
+    'toolbar.account': 'アカウント',
+    'toolbar.settings': '設定',
+    'toolbar.settingsWithUnread': '設定（新着フィードバック {count} 件）',
+    'toolbar.language': '言語',
+    'toolbar.langEn': 'EN',
+    'toolbar.langJa': 'JA',
+    'toolbar.betaTooltip': 'ベータ版です。今後、破壊的な変更が入る可能性があります。',
+  } as Record<string, string>,
+}

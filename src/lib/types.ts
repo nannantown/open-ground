@@ -8,31 +8,61 @@ export interface OpenApp {
   mode?: 'open' | 'cwd'
 }
 
+/** One registered project. The registry (`Settings.projects`) is a
+ *  user-curated allowlist of arbitrary folder paths — projects are added one at
+ *  a time via "Create new" or "Import existing folder", NOT discovered by
+ *  scanning a single root. `id` is a stable UUID assigned at registration so a
+ *  card's identity (and its canvas position) survives rename/move. `path` is
+ *  stored canonicalized (symlinks resolved) so the security-boundary comparison
+ *  in validateProjectPath is symmetric. */
+export interface ProjectEntry {
+  id: string
+  path: string
+  addedAt: string
+  description?: string
+}
+
 export interface Settings {
+  /** The project registry — see {@link ProjectEntry}. Optional for back-compat
+   *  parse of pre-registry settings.json; populated (possibly empty) once
+   *  `ensureProjectsMigrated` has run. */
+  projects?: ProjectEntry[]
+  /** Parent directory new "Create new project" folders are created under.
+   *  Chosen once via the native picker on first create, then remembered. */
+  defaultWorkspace?: string | null
+  /** Sentinel: set once the one-shot migration from the legacy single-root
+   *  model has run. Idempotency keys off THIS (not `projects.length`), so a user
+   *  who later removes every project is never re-scanned from the old root. */
+  projectsMigratedAt?: string
+  /** @deprecated Legacy single-root model. Kept only so back-compat parse +
+   *  the one-shot migration scan can still read it. No longer auto-scanned. */
   projectsRoot: string | null
+  /** @deprecated Archive feature removed; kept for back-compat parse + the
+   *  migration scan's `_archive/*` enumeration. */
   archiveDirName: string
+  /** @deprecated Only the one-shot migration scan still applies these. */
   excludePatterns: string[]
-  runPromptTemplate: string
   /** Apps registered by the user for the project panel's "Open in" menu.
    *  The first item is the default (one-click Open). Stored as objects so a
    *  pure terminal (Alacritty etc., mode: 'cwd') and a folder-accepting GUI
    *  app (mode: 'open') can be launched the right way. Strings from older
    *  saves are normalised on read. */
   openApps?: OpenApp[]
-  /** Browser notification when a task run finishes (and the user isn't watching it). */
-  notifyOnRunComplete?: boolean
-  /** Soft Web Audio "pop" alongside the notification. */
-  notifySound?: boolean
-  /** Claude Code subscription plan — drives the % shown in the usage HUD.
-   *  Unset means the HUD shows raw token counts instead of a percentage. */
-  claudePlan?: 'pro' | 'max5x' | 'max20x' | null
-  /** Bounded same-project parallelism (Approach A, slice 2). Every non-resume
-   *  chat run executes in its own worktree, so same-project chats run
-   *  concurrently; this caps how many run at once per project. Runs beyond the
-   *  cap queue (FIFO) and start as slots free. Resume / in-tree / plan runs are
-   *  unaffected. Unset → DEFAULT_MAX_CONCURRENT_RUNS_PER_PROJECT (3). */
-  maxConcurrentRunsPerProject?: number
+  /** The user's display name, used as the default assignee identity on shared
+   *  boards ("my cards" filter). Default suggestion: `git config user.name`. */
+  displayName?: string
+  /** UI + prompt language. OPEN GROUND is English-first: unset means English.
+   *  'ja' switches the UI strings AND the prompts sent to the spawned Claude
+   *  (so its summaries/replies come back in Japanese). Persisted from the UI
+   *  language toggle so the server can pick the matching prompt language. */
+  language?: 'en' | 'ja'
 }
+
+/** GET /api/settings response: the persisted {@link Settings} plus a
+ *  NON-persisted display-name suggestion (`git config --global user.name`,
+ *  null when git is missing or user.name is unset). The client shows it only
+ *  as the input placeholder — it is never written into settings.json. */
+export type SettingsResponse = Settings & { suggestedDisplayName: string | null }
 
 /** Aggregated usage over the rolling 5-hour rate-limit window, scraped from
  *  ~/.claude/projects/**\/*.jsonl. The window starts at the oldest assistant
@@ -68,20 +98,15 @@ export interface ProjectMeta {
   id: string
   name: string
   path: string
-  relativePath: string
   description: string
   lastModified: string
-  archived: boolean
+  /** The registered folder no longer exists on disk (moved/deleted out of
+   *  band). The card renders in a degraded state and offers "Remove from
+   *  canvas"; Run / Open-in-editor are disabled. */
+  missing?: boolean
   hasGit: boolean
   openTaskCount: number
   totalTaskCount: number
-  /** Phase 5.A: the narrative of this project's most-recently-finished task
-   *  run, derived server-side from the newest `task.latestRun` across the
-   *  project's tasks. Feeds the card hero as a fallback when the live/disk
-   *  run-session list (runSummaryByProject) has no entry for this project —
-   *  so a card still narrates "where this project stands" after the in-memory
-   *  sessions have aged out. Absent when no task has a persisted latestRun. */
-  latestRunSummary?: RunSummaryInfo
 }
 
 export interface CanvasPosition {
@@ -98,7 +123,7 @@ export interface CanvasPosition {
 // current element type. A future phase may refactor this into a proper union.
 export interface CanvasElement {
   id: string
-  type: 'text' | 'sticky' | 'frame' | 'mock' | 'comment' | 'image' | 'screen' | 'shape'
+  type: 'text' | 'sticky' | 'frame' | 'mock' | 'comment' | 'image' | 'screen' | 'shape' | 'group'
   x: number
   y: number
   width?: number // frames, stickies, mocks, images, and screens carry a size
@@ -165,6 +190,35 @@ export interface CanvasElement {
    *  round 4 only adds inspector inputs + proportional Shift-drag for them.) */
   opacity?: number
   cornerRadius?: number
+  // ── Figma-parity layer transforms — ALL OPTIONAL, backward-compatible ──
+  /** Rotation in degrees, clockwise, about the element's centre. Applied as a
+   *  CSS `rotate()` at render time; geometry (x/y/width/height) stays the
+   *  axis-aligned local box, exactly like Figma. Omitted/0 = the legacy look. */
+  rotation?: number
+  /** CSS mix-blend-mode for the element's container (Figma-style blending with
+   *  what's behind it). Omitted/'normal' = the legacy opaque compositing. */
+  blendMode?:
+    | 'normal'
+    | 'multiply'
+    | 'screen'
+    | 'overlay'
+    | 'darken'
+    | 'lighten'
+    | 'color-dodge'
+    | 'color-burn'
+    | 'hard-light'
+    | 'soft-light'
+    | 'difference'
+    | 'exclusion'
+    | 'hue'
+    | 'saturation'
+    | 'color'
+    | 'luminosity'
+  /** Layers panel: the element is LOCKED — still painted, but not selectable,
+   *  draggable, or resizable on the canvas (clicks fall through to whatever is
+   *  behind it). Toggle via the Layers panel / inspector lock icon. Omitted/
+   *  false = unlocked = the legacy behaviour. */
+  locked?: boolean
   /** Layers panel: the user hid this element from the canvas (eye toggle). A
    *  hidden element is not painted and not hit-testable, but stays in the
    *  elements array so it keeps its z-order and can be un-hidden. OPTIONAL and
@@ -190,8 +244,10 @@ export interface CanvasElement {
    *  `parentId` and behave exactly as before (no membership).
    *
    *  Two container kinds (see `canContain` in canvasContainment.ts):
-   *  - a `frame` may own any non-frame child (Slice 1); a frame never sets its
-   *    own `parentId` (no self / nested-frame parenting in this slice);
+   *  - a `frame` may own ANY child, including another `frame` (Figma-style
+   *    nesting); a frame can itself carry a `parentId` pointing at the frame it
+   *    nests inside. Cycles are prevented by excluding a frame's own descendants
+   *    as candidate parents (see `descendantIds`);
    *  - a `mock` / `screen` ("a design") may own a `text` child — an annotation
    *    label placed on top of the rendered design that travels with it. */
   parentId?: string
@@ -262,23 +318,11 @@ export interface CanvasState {
   elements: CanvasElement[]
 }
 
-// Legacy single-Canvas state — kept only so the canvas-migration code in
-// src/lib/server/canvasData.ts can still read .hove/ground.json files from
-// pre-multi-canvas installs (the prior codename) and promote them to the
-// new layout.
-export interface LegacyCanvasState {
-  viewport: {
-    x: number
-    y: number
-    zoom: number
-  }
-  elements: CanvasElement[]
-}
-
 // One self-contained Canvas (the project-detail design tab): its drawing
-// surface, its sidebar chat threads, and the sidebar UI state. Each Canvas
-// is one file on disk at `<project>/.hove/canvases/<id>.json` — Hove's unit
-// of design / brainstorm work, complementary to the Chats tab's code-oriented
+// surface, its sidebar chat threads, and the sidebar UI state. Each Canvas is
+// one file in the project's central data dir at
+// `~/.openground/projects/<uuid>/canvases/<id>.json` — OPEN GROUND's unit of
+// design / brainstorm work, complementary to the Chats tab's code-oriented
 // `tasks.json`.
 export interface CanvasFile {
   id: string
@@ -319,77 +363,26 @@ export interface ProjectsResponse {
   settings: Settings
   projects: ProjectMeta[]
   canvas: CanvasState
-  error?: string
 }
 
-/** A clipboard-pasted reference image attached to a task. */
-export interface TaskImage {
-  /** Unique id; also the on-disk filename stem under .hove/task-images/. */
-  id: string
-  /** Display name — an original filename, or "Pasted image". */
-  name: string
-  /** image/png, image/jpeg, image/gif or image/webp. */
-  mime: string
-  addedAt: string
-}
-
-/** A lightweight, persisted snapshot of a task's most recent run — the
- *  narrative half only. Phase 2: we persist this on the task so the card hero
- *  survives without re-deriving from full run sessions, and never store the
- *  conversation body itself (the claude JSONL transcript is referenced via
- *  `TranscriptRef`, not copied). `kind` mirrors the settled subset of
- *  `RunKind` (runStatus.ts) — the transient `queued/running/merging/conflict`
- *  states never reach a persisted summary. */
-export interface TaskRunSummary {
-  kind: 'done' | 'review' | 'skipped' | 'error' | 'overloaded' | 'cancelled'
-  /** parsedResult.topic — short subject line, if Claude emitted one. */
-  topic?: string
-  summary: string
-  blockers: string
-  /** parsedResult.decisions — the "why / trade-off" layer of the Recap,
-   *  persisted so it survives a reopened chat. */
-  decisions?: string[]
-  followups?: string[]
-  question?: string
-  taskComplete?: boolean
-  /** The Claude Code session id this summary came from. */
-  sessionId: string
-  finishedAt: string
-}
-
-/** A pointer to the on-disk claude JSONL transcript for a run — lets the UI
- *  open the full conversation on demand without OPEN GROUND ever copying the
- *  body into its own store. */
-export interface TranscriptRef {
-  sessionId: string
-  cwd: string
-  jsonlPath: string
-}
-
+/** A task is a Board card — the only task kind that exists. (The old
+ *  'chat'/'assistant' kinds are gone; legacy items of those kinds are silently
+ *  dropped on read — see readProjectData.) */
 export interface ProjectTask {
   id: string
   title: string
+  /** Board plan notes — free text for the card, independent of the chat thread.
+   *  Editable in the Board's in-tab detail drawer. */
+  notes?: string
   done: boolean
-  milestoneId: string | null
   createdAt: string
-  /** Clipboard-pasted reference images, stored under .hove/task-images/. */
-  images?: TaskImage[]
-  /** Canvas-only: the Claude Code skill to apply on the next send. Sticky on
-   *  the chat so the picker's selection survives a reload, but the user can
-   *  flip it before every send to compare designs. Null/undefined = no skill. */
-  activeSkill?: string | null
-  /** Phase 2: persisted snapshot of this task's most recent run narrative.
-   *  Lets the card hero render without re-deriving from full run sessions. */
-  latestRun?: TaskRunSummary
-  /** Phase 2: the Claude Code session id to resume this task in context. */
-  agentSessionId?: string
-  /** Phase 2: pointer to the claude JSONL transcript for the latest run. */
-  transcriptRef?: TranscriptRef
   /** Board tab: which kanban column this task sits in. Undefined = treated as
-   *  'todo' (back-compat for tasks created before the Board existed). The
-   *  board-run loop and the run lifecycle move it doing→done/blocked; the user
-   *  can also drag it anywhere. */
+   *  'todo' (back-compat for tasks created before the Board existed). The user
+   *  moves it by dragging the card. */
   boardColumn?: BoardColumn
+  /** Display name of whoever owns this card (free string; teams pick their own
+   *  names — the default suggestion is `git config user.name`). Shared data. */
+  assignee?: string
   /** Board tab: sort key WITHIN a column (ascending = higher priority / top).
    *  Independent of the tasks[] array order so dragging on the board doesn't
    *  scramble the Chats list. Undefined sorts after ordered cards by createdAt. */
@@ -398,288 +391,110 @@ export interface ProjectTask {
 
 /** Kanban columns for the Board tab. 'todo'=未着手 / 'doing'=実行中 /
  *  'done'=完了 / 'blocked'=ブロック. */
-export type BoardColumn = 'todo' | 'doing' | 'done' | 'blocked'
+/** 'review' is the optional fifth column (PR-waiting) — rendered only when
+ *  the project's config.reviewColumn is on; cards parked there while hidden
+ *  are treated as 'doing' by the UI. */
+export type BoardColumn = 'todo' | 'doing' | 'review' | 'done' | 'blocked'
 
-/** A Claude Code skill discovered on disk — feeds the Canvas chat's
- *  skill picker. Sources: `~/.claude/skills/<name>` (user) and
- *  `<project>/.claude/skills/<name>` (project). */
-export interface SkillInfo {
-  /** Folder name — the unique id used everywhere (prompt injection, picker state). */
-  name: string
-  /** Friendly Japanese display label for the picker. Falls back to `name`
-   *  when missing (e.g. non-curated discovery). */
-  label?: string
-  /** Short Japanese one-liner shown in the picker card. Curated mode
-   *  replaces this with editorial copy; otherwise it's the first non-empty
-   *  line of the skill's frontmatter description. */
-  description: string
-  source: 'user' | 'project'
-}
-
-export interface ProjectMilestone {
-  id: string
-  name: string
-  dueDate: string | null
-  createdAt: string
-  // ---- Phase 6 (Tasks tab) extensions — all optional for backward compat ----
-  /** Parent Goal id. Null/absent for legacy free-floating milestones. */
-  goalId?: string | null
-  /** Free-form expanded description. */
-  description?: string
-  /** Position within the parent Goal (0-based). */
-  order?: number
-  /** Shell commands that determine completion. All must exit 0 to "pass".
-   *  Run via `/bin/sh -c <cmd>` with cwd = project root (or worktree path
-   *  when triggered from a milestone run). */
+/** Shared per-project policy (travels with the board: marker in git-shared
+ *  mode, tasks.json centrally) — both collaborators see the same values. */
+export interface ProjectConfig {
+  /** What a finished task does: merge straight into targetBranch, or open a
+   *  PR with `gh pr create`. Injected into the task launch prompt. */
+  completionFlow?: 'merge' | 'pr'
+  /** Merge/PR base. Empty = the branch checked out at launch time. */
+  targetBranch?: string
+  /** "Definition of done" — commands claude must run and pass before
+   *  declaring a task complete (one per entry, e.g. "npm test"). */
   verifyCommands?: string[]
-  /** Lifecycle state. Driven by run + verify outcomes. */
-  status?:
-    | 'pending'
-    | 'in_progress'
-    | 'verifying'
-    | 'verified'
-    | 'failed'
-    | 'blocked'
-  /** Set when status transitions to 'verified'. */
-  verifiedAt?: string
-  /** Result of the most recent verify pass. */
-  lastVerify?: {
-    passed: boolean
-    commands: string[]
-    /** stdout+stderr tails (≤ 4 KB) per command. Full log lives at
-     *  `.openground/verify-logs/<milestoneId>-<timestamp>.txt`. */
-    outputs: string[]
-    finishedAt: string
-    retryCount: number
-  }
-  /** The Claude session id that last ran this milestone — lets the UI link
-   *  back to the chat round that produced the current state. */
-  lastRunSessionId?: string
+  /** Show the レビュー待ち column (between doing and done). */
+  reviewColumn?: boolean
+  /** Registered member names for the assignee picker — register once in
+   *  project settings instead of retyping names on every card. Shared, so
+   *  the whole team sees the same list. */
+  members?: string[]
 }
 
-/** A user-defined Goal — the container for a set of Milestones that
- *  collectively reach a single observable completion condition.
- *
- *  Goal fields follow an industry-standard composition:
- *    - title              :  short noun phrase, "what" (SMART: Specific)
- *    - description (Why)  :  motivation / context (OKR: Objective rationale)
- *    - outcome            :  the state of the world when achieved (SMART: Relevant)
- *    - completionCriteria :  legacy free-form text (kept for back-compat;
- *                            new Goals should prefer `acceptanceCriteria`)
- *    - acceptanceCriteria :  observable checks, each one independently
- *                            verifiable (INVEST: Testable, agile AC pattern)
- *    - outOfScope         :  things deliberately NOT done — scope-creep guard
- *
- *  Phase 6 (Tasks tab) uses this structure both in the UI (sectioned editor)
- *  and in the milestone plan prompt (Claude reads `acceptanceCriteria` /
- *  `outOfScope` to suggest sharper milestones + verify commands). */
-export interface Goal {
-  id: string
-  title: string
-  /** Legacy "description" — now used as the **Why / Context** section
-   *  (kept named `description` for backward compatibility with existing
-   *  tasks.json files written by 6.A). */
-  description: string
-  /** SMART-style completion narrative — kept for back-compat. Newer Goals
-   *  break this down into `acceptanceCriteria` line items instead. */
-  completionCriteria: string
-  /** What is true about the world when this Goal is done. One or two
-   *  sentences. "ユーザーが email/password でログインでき、画面遷移を跨いで
-   *  ログイン状態が維持される" のように、出来上がった状態を書く。 */
-  outcome?: string
-  /** Observable acceptance criteria — each line is independently testable.
-   *  Encouraged form: "Given <state>, When <action>, Then <observable>".
-   *  The milestone plan prompt asks Claude to map these to concrete
-   *  verifyCommands (shell exit-code checks). */
-  acceptanceCriteria?: string[]
-  /** Explicitly excluded scope. Things that look related but the Goal
-   *  does NOT include — defending against scope creep and giving Claude
-   *  a clearer boundary. */
-  outOfScope?: string[]
-  status: 'draft' | 'planning' | 'running' | 'blocked' | 'done'
-  createdAt: string
-  updatedAt: string
-  /** Server-side sequential run queue for this Goal. Populated when the
-   *  user hits "Run All" — the runner uses it to auto-kick the next
-   *  milestone after each auto-verify, so progress survives dev-server
-   *  restarts and frontend disconnects. Optional: Goals authored before
-   *  Phase 7 don't have it, and Goals that have never been queued won't
-   *  either (we don't fabricate an empty queue at write time). */
-  runQueue?: GoalRunQueue
-}
-
-/** Sequential milestone runner state, persisted on the Goal so the UI can
- *  resume after a crash. `idle` = no queue active; `running` = a milestone
- *  is in flight (or about to be kicked); `paused` = user hit pause or
- *  startup sweep found a stranded queue; `failed` = a verify came back
- *  false and the queue stopped waiting for the user to fix things;
- *  `completed` = every milestone in the list verified. */
-export interface GoalRunQueue {
-  milestoneIds: string[]
-  /** Index into milestoneIds of the *current* milestone — the one being
-   *  worked on (or about to be kicked). When all milestones are done this
-   *  equals milestoneIds.length. */
-  currentIndex: number
-  status: 'idle' | 'running' | 'paused' | 'completed' | 'failed'
-  startedAt?: string
-  lastActivityAt?: string
-  /** Recorded outcome per milestone — populated as each run settles.
-   *  Aligned with milestoneIds by `milestoneId`. `result: 'verified'` is
-   *  the only one that advances currentIndex; the others halt the queue. */
-  sessions?: Array<{
-    milestoneId: string
-    sessionId: string
-    result: 'verified' | 'failed' | 'cancelled'
-    finishedAt: string
-  }>
+/** PERSONAL launch preferences (my trust level / model budget ≠ my
+ *  teammate's) — stored centrally in both modes, never in the repo. */
+export interface ProjectLaunchPrefs {
+  /** Claude permission mode for task launches (default: 'default'). */
+  permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypass'
+  /** Model alias passed to `claude --model` (empty = CLI default). */
+  model?: string
 }
 
 export interface ProjectData {
+  /** Active-language copy, kept for back-compat (legacy data, share marker,
+   *  anything that only knows one string). When the language-specific pair
+   *  below exists, display code prefers it via descriptionForLang(). */
   description: string
+  /** Generated language pair — one claude run produces both, the UI shows the
+   *  one matching the user's language setting. Optional: hand-written or
+   *  legacy descriptions live only in `description`. */
+  descriptionJa?: string
+  descriptionEn?: string
   tasks: ProjectTask[]
-  milestones: ProjectMilestone[]
-  /** Phase 6: user-defined Goals that own Milestones. Optional so legacy
-   *  tasks.json files without this field continue to load. */
-  goals?: Goal[]
+  /** Per-project tab ("Ground") order — the user's drag-to-reorder result,
+   *  left-to-right. A list of ModuleId strings. Optional so legacy files load;
+   *  normalised against the live module registry on read (unknown ids dropped,
+   *  missing enabled modules appended) — see effectiveTabOrder. */
+  tabOrder?: string[]
+  /** Shared project policy — see {@link ProjectConfig}. */
+  config?: ProjectConfig
+  /** Personal launch preferences — see {@link ProjectLaunchPrefs}. Central
+   *  in both modes (composed like tabOrder). */
+  launch?: ProjectLaunchPrefs
   notes: string
   updatedAt: string
 }
 
-export interface ParsedRunResult {
-  completed: string[]
-  skipped: string[]
-  summary: string
-  blockers: string
-  /** Key decisions made this turn and *why* — the "judgment / trade-off" layer
-   *  of the structured Recap that a diff can't convey (e.g. "froze the value via
-   *  a ref, not state, to avoid a re-render race"). One sentence per item; empty
-   *  for trivial turns. Optional — older runs lack it. */
-  decisions?: string[]
-  /** Concrete next-step work the run recommends. Optional — older runs lack it. */
-  followups?: string[]
-  /** Whether the task itself is fully done — drives the auto-continue loop. */
-  taskComplete?: boolean
-  /** Claude wants the user to answer before proceeding. When set, the UI shows
-   *  the question and the auto-loop pauses — the run is "awaiting reply." */
-  question?: string
-  /** Short headline (~15-25 全角 chars, no trailing punctuation) for THIS round
-   *  of the conversation. Used as the chat sidebar row label — the most recent
-   *  run's topic represents what the thread is currently about. */
-  topic?: string
+/** Response of POST /api/project/describe — the auto-generated, NOT-yet-saved
+ *  one-liner. The UI prefills `description` into the editor for review. On
+ *  failure the route returns `{ error }` (500) or `{ error, claudeMissing }`
+ *  (503 when the local `claude` CLI is absent). */
+export interface DescribeProjectResponse {
+  /** Active-language copy (matches the current language setting). */
+  description: string
+  descriptionJa?: string
+  descriptionEn?: string
 }
 
-export interface RunGitInfo {
-  headBefore: string | null
-  headAfter: string | null
-  changedFiles: string[]
-  diffStat: string
-  commits: string[]
+/** GET /api/project/share/status — where a project's Board/Canvas data lives
+ *  and whether the repo copy has unsynced local changes. See
+ *  docs/SHARED_DATA_PLAN.md. */
+export interface ShareStatus {
+  /** `.openground/openground.json` marker present → data lives in the repo. */
+  shared: boolean
+  /** The project folder is inside a git work tree (precondition for enable). */
+  gitRepo: boolean
+  /** `git remote get-url origin`, or null when no remote is configured. */
+  remoteUrl: string | null
+  /** `git status --porcelain -- .openground/` is non-empty (always false when
+   *  not shared). Drives the dot on the Sync button. */
+  dirty: boolean
 }
 
-export interface TargetedTask {
-  id: string
-  title: string
-  milestoneName: string | null
+/** POST /api/project/share/sync — commit (scoped to .openground/ only) →
+ *  pull --rebase --autostash → push. Never touches paths outside
+ *  .openground/ and never disturbs the user's staged code changes. */
+export interface ShareSyncResult {
+  ok: boolean
+  /** A commit was created (there were local .openground/ changes). */
+  committed: boolean
+  pulled: boolean
+  pushed: boolean
+  /** The pull hit a rebase conflict; the rebase was aborted and the user
+   *  should pull/resolve manually. */
+  conflict?: boolean
+  /** Human-readable detail for toasts (push skipped, auth failure, …). */
+  message?: string
 }
 
-/** Which Claude Code permission mode this run used.
+/** Which Claude Code permission mode a spawned `claude` uses.
  *  - `bypass`: --dangerously-skip-permissions (the default — same as before).
  *  - `plan`:   --permission-mode plan; Claude can read but won't edit. */
 export type PermissionMode = 'bypass' | 'plan'
-
-/** Threaded into a Run when the user kicked it off from a Canvas chat
- *  (vs the plain Chats tab). Tells the runner / prompt builder which
- *  Canvas to surface to Claude, and lets the observer route Claude's
- *  `CANVAS_ADD: {...}` markers into that exact Canvas file. Absent for
- *  ordinary Chats-tab runs — that path stays untouched. */
-export interface CanvasContext {
-  /** The Canvas the chat lives in. Maps to .openground/canvases/<id>.json. */
-  canvasId: string
-  /** Optional name (e.g. "Ground", "ハフィング") for the prompt to mention. */
-  canvasName?: string
-}
-
-export interface RunEntry {
-  projectId: string
-  projectName: string
-  projectPath: string
-  status: 'pending' | 'running' | 'done' | 'error' | 'cancelled'
-  exitCode?: number
-  startedAt?: string
-  finishedAt?: string
-  log: string
-  targetedTasks: TargetedTask[]
-  git?: RunGitInfo
-  parsedResult?: ParsedRunResult | null
-  feedback?: string
-  /** The Claude Code session id — resume it to continue this task in context. */
-  agentSessionId?: string
-  /** Auto-continue round (1-based) when this run is part of an auto-loop. */
-  autoRound?: number
-  /** Set when this entry ran in a git worktree for parallel isolation. */
-  worktreePath?: string
-  /** Lifecycle of the post-run worktree merge back to the main branch. */
-  /** Lifecycle of the post-run worktree merge back to the main branch.
-   *  - `merging`     — `git merge` running
-   *  - `merged`      — clean merge, worktree removed
-   *  - `conflict`    — merge stopped on conflicts; resolveConflict / dismissConflict can clear it
-   *  - `failed-fatal`— both `merge` and `merge --abort` failed (e.g. git index lock).
-   *    Manual intervention required: the user opens the worktree in their editor.
-   *    Plan v2.3 §5 / SHOULD #2. */
-  mergeStatus?: 'merging' | 'merged' | 'conflict' | 'failed-fatal'
-  /** Permission mode this run was spawned with — defaults to bypass. */
-  permissionMode?: PermissionMode
-  /** Anthropic API returned 529 Overloaded — surfaces as its own UI state so
-   *  the user can tell this is a server-side congestion issue, not an
-   *  OPEN GROUND or prompt bug. Set in the stderr handler. */
-  overloaded?: boolean
-  /** True when the run was started as `resumeFrom: <id>` but the Claude
-   *  session file wasn't reachable (e.g. it lived in a worktree that's gone),
-   *  so OPEN GROUND silently fell back to a fresh run. UI surfaces this so
-   *  the user sees "the continue didn't actually continue" instead of
-   *  thinking Claude lost context. */
-  resumeFallback?: boolean
-  /** Phase 6: when this run was kicked off to advance a specific Milestone
-   *  (via /api/project/milestones/run), this carries that milestone's id so
-   *  the runner can fire its verify pass on completion and the auto-loop can
-   *  switch to "verify-based" completion judging. */
-  milestoneId?: string
-  /** Phase 6: outcome of the external shell verify pass that runs at the end
-   *  of a milestone-bound entry. When `passed: true`, the auto-loop treats
-   *  the milestone as truly complete regardless of Claude's self-reported
-   *  `taskComplete`. When false, auto-loop retries (up to AUTO_MAX_ROUNDS)
-   *  feeding the failure output back to Claude. */
-  verifiedTaskComplete?: {
-    passed: boolean
-    commands: string[]
-    /** stdout+stderr tails (≤ 4 KB each) per verify command. */
-    outputs: string[]
-    finishedAt: string
-    retryCount: number
-  }
-  /** Claude's narrative stream — assistant text + thinking blocks, oldest
-   *  first. Tool calls, tool results and system lines are NOT included; those
-   *  stay in `log`. Lets the live UI surface what Claude is *thinking* without
-   *  the user having to open the full log. */
-  thoughts?: Array<{ at: string; text: string }>
-  /** Claude's action stream — one entry per tool_use the assistant made,
-   *  oldest first. Lets the live UI surface what Claude is *doing*
-   *  ("Editing src/auth.ts") alongside what it's thinking, so the user
-   *  can follow a run without opening the raw terminal. */
-  actions?: Array<{ at: string; tool: string; detail: string }>
-
-  /** PTY id hosting the interactive `claude` session for this run.
-   *  Populated when the run is launched; lets the UI mount an xterm.js view
-   *  on the same PTY and the cancel path send Ctrl-C to it. */
-  terminalId?: string
-}
-
-export interface RunSession {
-  id: string
-  startedAt: string
-  finishedAt?: string
-  entries: RunEntry[]
-}
 
 // ---- Auth (optional Google/GitHub login via Supabase Auth) ----------------
 // These describe the APP's OWN account — NOT the Claude CLI subscription. The
@@ -716,33 +531,42 @@ export interface AuthConfigResponse {
   enabled: boolean
 }
 
+/** GET /api/feedback/config — gates the in-app feedback surface.
+ *  - `enabled`: anon key configured, so the "Send feedback" entry shows.
+ *  - `canRead`: the server also has a SERVICE-ROLE key, so the owner-only
+ *    "Incoming feedback" inbox in Settings can read submissions. This is
+ *    false on the public build (no service key shipped) — never echoes keys. */
+export interface FeedbackConfigResponse {
+  enabled: boolean
+  canRead: boolean
+  /** Stable, non-secret id (one-way hash of the Supabase url+table) emitted only
+   *  when canRead, so the client can scope its "last seen" marker per data source
+   *  — switching projects/tables won't carry a stale marker. Never the url/key. */
+  sourceId?: string
+}
+
+/** GET /api/feedback/list — owner inbox payload. `truncated` is true when more
+ *  than the returned cap (200) of rows exist, so the UI can say "newest 200". */
+export interface FeedbackListResponse {
+  items: FeedbackItem[]
+  truncated: boolean
+}
+
+/** One row of submitted feedback, read back via the server's service-role key
+ *  (GET /api/feedback/list). Owner-only: the service key never reaches the
+ *  client, and the public build reports canRead:false so this never loads. */
+export interface FeedbackItem {
+  id: string
+  created_at: string
+  message: string
+  email: string | null
+  app_version: string | null
+  os: string | null
+  project_count: number | null
+}
+
 /** GET /api/auth/session — the only auth payload the SPA reads. `user` is null
  *  when signed out (or the env is unconfigured); tokens are never returned. */
 export interface AuthSessionResponse {
   user: AuthUser | null
-}
-
-/** Slim per-project run status, for the canvas card indicators. */
-export interface RunStatusInfo {
-  status: RunEntry['status']
-  startedAt?: string
-  finishedAt?: string
-}
-
-/** The narrative half of a project's most recent finished run — what the card
- *  shows when the user flips the hero from description to run summary. */
-export interface RunSummaryInfo {
-  /** Display classifier — drives colour, glyph and the "done/review/error" label. */
-  kind: 'done' | 'review' | 'skipped' | 'error' | 'overloaded' | 'cancelled'
-  taskTitle: string
-  /** parsedResult.summary — may be empty if the run produced no summary line. */
-  summary: string
-  /** parsedResult.blockers — non-empty means the run hit a wall worth surfacing. */
-  blockers: string
-  /** Follow-up suggestions the run captured. */
-  followups: string[]
-  /** Claude is asking the user to decide before continuing. Non-empty wins
-   *  over blockers/summary on the card hero so the question gets seen. */
-  question?: string
-  finishedAt?: string
 }

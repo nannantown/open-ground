@@ -193,8 +193,8 @@ published tag against the bundled `package.json` version, returning:
 }
 ```
 
-The UI surfaces this as a non-blocking banner: *"OPEN GROUND 0.2.0 が出て
-います — リリースノート →"*.
+The UI surfaces this as a non-blocking banner: *"OPEN GROUND 0.2.0 is out —
+release notes →"*.
 
 **b) electron-updater auto-download (packaged builds only).** On launch (and
 every 4h), the Electron main process calls

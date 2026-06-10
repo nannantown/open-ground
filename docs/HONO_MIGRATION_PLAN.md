@@ -1,156 +1,158 @@
-# OPEN GROUND: Hono 移行 実装プラン
+# OPEN GROUND: Hono migration implementation plan
 
-> `HONO_MIGRATION_RATIONALE.md` (なぜ移行するか) の続編。
-> こちらは **どう実装するか** のフェーズ分解・ゴール状態・期待挙動・
-> route マッピング・検証手順。各実装チーム(workflow agent)の設計図。
+> A sequel to `HONO_MIGRATION_RATIONALE.md` (why we migrate).
+> This one covers **how to implement it** — phase breakdown, goal states,
+> expected behavior, route mapping, and verification steps. The blueprint for
+> each implementation team (workflow agent).
 
-## 0. 確定した前提・調査結果
+## 0. Confirmed assumptions / investigation results
 
-移行前にコードベースを実測した結果(2026-05-29):
+Results of measuring the codebase before the migration (2026-05-29):
 
-| 項目 | 実測値 | 含意 |
+| Item | Measured | Implication |
 |---|---|---|
-| `'use client'` | **46 / 46 ファイル** | フロントは既に全部クライアント = SSR/RSC 未使用 = Vite SPA 化が素直 |
-| `next/image` `next/link` | 0 | 移植コストなし |
-| `next/navigation` | 1 | 軽微 (screen route の params) |
-| `next/font` | 1 (layout のみ) | `@font-face` 化 |
+| `'use client'` | **46 / 46 files** | The front end is already fully client = no SSR/RSC = becoming a Vite SPA is straightforward |
+| `next/image` `next/link` | 0 | No porting cost |
+| `next/navigation` | 1 | Minor (the screen route's params) |
+| `next/font` | 1 (layout only) | Convert to `@font-face` |
 | `next/dynamic` | 1 | `React.lazy` |
-| route handler | 45本 | Hono へ機械的移植 |
-| SSE (`text/event-stream`) | 3本 | `streamSSE` へ |
-| client `fetch('/api...)` | 12箇所 | まず維持、後で `hc` RPC 化 |
-| page.tsx | 2 (`page.tsx` + `screen/[…]/page.tsx`) | SPA エントリ + 動的 screen |
-| layout.tsx | 1 | Vite index.html へ |
+| route handlers | 45 | Mechanical port to Hono |
+| SSE (`text/event-stream`) | 3 | Move to `streamSSE` |
+| client `fetch('/api...)` | 12 sites | Keep at first, later convert to `hc` RPC |
+| page.tsx | 2 (`page.tsx` + `screen/[…]/page.tsx`) | SPA entry + dynamic screen |
+| layout.tsx | 1 | Into the Vite index.html |
 
-**結論**: フロントの Next 依存は極小。移行リスクは RATIONALE の想定より低い。
+**Conclusion**: the front end's Next dependency is minimal. The migration risk
+is lower than the RATIONALE assumed.
 
-## 1. 最終ゴール状態 (全移行完了時に観測できるもの)
+## 1. Final goal state (observable once the whole migration is complete)
 
-- `next` が `package.json` の dependencies から消えている
-- `vite` + `@vitejs/plugin-react` でフロントをビルド・配信
-- `hono` + `@hono/node-server` + `@hono/zod-validator` でバックエンド (port 47776)
-- `server/index.ts` (Hono entry) を Electron が `fork` する (standalone トレーサ不要)
-- `next.config.js` / `scripts/standalone-assets.js` が削除されている
-- `package.json` の `build.asarUnpack` は node-pty のみ (standalone 手当てが消える)
-- `GET /api/health` が `{app:'openground', bootId, port, projectDir, startedAt}` を返す (契約維持)
-- SSE 3本 (run/events, terminal stream, screen watch) が Hono `streamSSE` で動く
-- vitest / playwright が green
-- `npm run dev` = `vite` + Hono を concurrently、HMR 維持
-- `npm run dist` = Electron app に Hono server + Vite 静的成果物を同梱、node-pty 摩擦ゼロ
+- `next` is gone from `package.json` dependencies
+- The front end is built/served with `vite` + `@vitejs/plugin-react`
+- The back end is `hono` + `@hono/node-server` + `@hono/zod-validator` (port 47776)
+- Electron `fork`s `server/index.ts` (the Hono entry) — no standalone tracer needed
+- `next.config.js` / `scripts/standalone-assets.js` are deleted
+- `package.json`'s `build.asarUnpack` is node-pty only (the standalone workarounds are gone)
+- `GET /api/health` returns `{app:'openground', bootId, port, projectDir, startedAt}` (contract preserved)
+- All 3 SSE streams (run/events, terminal stream, screen watch) work via Hono `streamSSE`
+- vitest / playwright are green
+- `npm run dev` = `vite` + Hono via concurrently, HMR preserved
+- `npm run dist` = Electron app bundling the Hono server + Vite static artifacts, with zero node-pty friction
 
-## 2. 最終 期待挙動 (ユーザー視点シナリオ)
+## 2. Final expected behavior (user-perspective scenarios)
 
-- 開発時 `npm run dev` → Vite HMR でフロント即反映、Hono は別プロセスで 47776
-- `electron:prod` / packaged `.app` → Electron が Hono server を fork → 47776 → window が Vite 成果物をロード
-- claude run → Hono route が src/lib/server/runner.ts (node-pty) をそのまま呼ぶ → PTY 動作 (摩擦なし)
-- run ログ / terminal / screen watch → SSE で renderer にストリーム (今と同じ体験)
-- 通常 Chrome で `http://127.0.0.1:47776` を開いて Claude にデバッグさせるワークフロー維持
-- 二度起動 / Cmd+Q / single instance → Electron 標準 (PR A の electron/main.js 流用)
+- During development `npm run dev` → the front end reflects instantly via Vite HMR; Hono runs in a separate process on 47776
+- `electron:prod` / packaged `.app` → Electron forks the Hono server → 47776 → the window loads the Vite artifacts
+- claude run → a Hono route calls src/lib/server/runner.ts (node-pty) as-is → PTY works (no friction)
+- run logs / terminal / screen watch → streamed to the renderer over SSE (same experience as today)
+- The workflow of opening `http://127.0.0.1:47776` in a regular Chrome to have Claude debug it is preserved
+- launch-twice / Cmd+Q / single instance → Electron standard (reuses PR A's electron/main.js)
 
-## 3. 壊してはいけない契約 (RATIONALE §6 を実装制約として再掲)
+## 3. Contracts that must not break (RATIONALE §6 restated as implementation constraints)
 
-実装チームは各フェーズでこれらを verify すること:
+The implementation team must verify these in each phase:
 
-1. **固定ポート 47776 / `127.0.0.1`** (auto-increment 禁止、single instance の前提)
-2. **`GET /api/health`** が `{app:'openground', bootId, port, projectDir, startedAt}` を返す。`bootId` は env `OPENGROUND_BOOT_ID`、`projectDir` は env `OPENGROUND_PROJECT_DIR || cwd`
-3. **`validateProjectPath()`** のセキュリティ境界 — path 受け取り API すべてで維持 (resolved path が projectsRoot 配下)
-4. **二ストア構造** — `~/.openground/` (アプリ) と `<project>/.openground/` (プロジェクト)
-5. **`src/lib/types.ts`** をクライアント/サーバ共通契約として維持
-6. **`OPENGROUND_RESULT:` パーサ** (旧 `HOVE_/PMMAP_` マーカー互換) 維持
-7. **`globalThis.__openground_runner`** の in-memory ランナー状態方式維持
-8. **`src/lib/server/*` は原則そのまま** — route handler は薄いアダプタ。ビジネスロジックを書き換えない
+1. **Fixed port 47776 / `127.0.0.1`** (no auto-increment; a prerequisite for single instance)
+2. **`GET /api/health`** returns `{app:'openground', bootId, port, projectDir, startedAt}`. `bootId` from env `OPENGROUND_BOOT_ID`, `projectDir` from env `OPENGROUND_PROJECT_DIR || cwd`
+3. **`validateProjectPath()`** security boundary — preserved on every path-accepting API (resolved path under projectsRoot)
+4. **The two-store structure** — `~/.openground/` (app) and `<project>/.openground/` (project)
+5. **`src/lib/types.ts`** preserved as the shared client/server contract
+6. **The `OPENGROUND_RESULT:` parser** (compatible with the legacy `HOVE_/PMMAP_` markers) preserved
+7. **The `globalThis.__openground_runner` in-memory runner-state approach** preserved
+8. **`src/lib/server/*` stays as-is in principle** — route handlers are thin adapters. Do not rewrite the business logic
 
-## 4. フェーズ分解
+## 4. Phase breakdown
 
-依存: P0 → {P1, P2 並列} → P3 → P4 → P5 → P6
+Dependencies: P0 → {P1, P2 in parallel} → P3 → P4 → P5 → P6
 
-### Phase 0 — Hono 基盤 (単一 agent、他フェーズの土台)
+### Phase 0 — Hono foundation (single agent; the base for the other phases)
 
-**Goal state**: `server/index.ts` が 47776 で起動し `/api/health` が契約通り応答。`@hono/zod-validator` と共通ミドルウェア(validateProjectPath ヘルパ、エラーハンドラ)が配線済み。
-**Expected behavior**: `node server/index.ts` (or tsx) → `curl /api/health` が 200 + 正しい JSON。
+**Goal state**: `server/index.ts` boots on 47776 and `/api/health` responds per the contract. `@hono/zod-validator` and the shared middleware (validateProjectPath helper, error handler) are wired in.
+**Expected behavior**: `node server/index.ts` (or tsx) → `curl /api/health` returns 200 + the correct JSON.
 **Work**:
-- deps 追加: `hono`, `@hono/node-server`, `@hono/zod-validator`, `tsx` (dev 実行用)
+- Add deps: `hono`, `@hono/node-server`, `@hono/zod-validator`, `tsx` (for dev execution)
 - `server/index.ts`: Hono app + `serve({fetch, port:47776, hostname:'127.0.0.1'})`
-- `server/health.ts`: `/api/health` (env から bootId/projectDir)
-- `server/middleware/projectPath.ts`: `validateProjectPath` を Hono 文脈で使うヘルパ
-- `server/lib/` は使わず、既存 `src/lib/server/*` をそのまま import (パス alias 維持)
-- ビルド形態: server は tsx/esbuild で単一 entry にバンドル (Electron が fork する)
-**Check**: `curl 127.0.0.1:47776/api/health` が `app:'openground'`、bootId env 反映。
+- `server/health.ts`: `/api/health` (bootId/projectDir from env)
+- `server/middleware/projectPath.ts`: a helper to use `validateProjectPath` in the Hono context
+- Don't use a `server/lib/`; import the existing `src/lib/server/*` as-is (keep the path alias)
+- Build form: the server is bundled into a single entry with tsx/esbuild (which Electron forks)
+**Check**: `curl 127.0.0.1:47776/api/health` returns `app:'openground'`, with the bootId env reflected.
 
-### Phase 1 — REST route 42本 移植 (グループ並列)
+### Phase 1 — Port the 42 REST routes (parallel by group)
 
-**Goal state**: 42本の非SSE route が Hono で動き、Next 版と同じ入出力。
-**Expected behavior**: 各 route を curl で叩くと Next 版と同じ status/body。
-**移植単位グループ** (並列):
+**Goal state**: the 42 non-SSE routes run on Hono with the same I/O as the Next version.
+**Expected behavior**: curling each route returns the same status/body as the Next version.
+**Porting-unit groups** (parallel):
 - A: `project/*` (open, open/pick, rename, archive, restore, delete, tasks, task-image, canvases)
 - B: `project/goals*` + `project/milestones*` (goals, goals/plan, goals/run-queue, milestones, milestones/run, milestones/verify)
 - C: `run*` (run, run/cancel, run/dismiss, run/dismiss-conflict, run/list, run/resolve-conflict)
 - D: `canvas*` + `designs/scaffold` + `screen/lock` + `paste-image`
 - E: `projects`, `projects/new`, `settings`, `skills`, `usage`, `update/check`, `folder-info`, `pick-folder`, `observer/*`
-- F: `terminal`, `terminal/[id]`, `terminal/[id]/input`, `terminal/[id]/resize` (動的ルート → `/terminal/:id/...`)
-**Work**: 各 route handler を `app.get/post('/api/...', zValidator(...), (c) => ...)` に。`NextResponse.json(x)` → `c.json(x)`。`Request` → Hono `c.req`。`src/lib/server/*` の呼び出しは不変。
-**Check**: route ごとに curl で Next 版と差分なし。`validateProjectPath` 維持確認。
+- F: `terminal`, `terminal/[id]`, `terminal/[id]/input`, `terminal/[id]/resize` (dynamic route → `/terminal/:id/...`)
+**Work**: turn each route handler into `app.get/post('/api/...', zValidator(...), (c) => ...)`. `NextResponse.json(x)` → `c.json(x)`. `Request` → Hono `c.req`. Calls into `src/lib/server/*` stay unchanged.
+**Check**: per route, curl shows no diff from the Next version. Confirm `validateProjectPath` is preserved.
 
-### Phase 2 — SSE 3本 移植 (Phase 1 と並列可)
+### Phase 2 — Port the 3 SSE streams (can be parallel with Phase 1)
 
-**Goal state**: run/events, terminal/[id]/stream, screen/watch が Hono `streamSSE` で動く。
-**Expected behavior**: EventSource で接続 → イベントがストリームされる。切断/再接続が現行同等。
-**Work**: `import { streamSSE } from 'hono/streaming'`。各 SSE route を `streamSSE(c, async (stream) => {...})` に。`run/events` の replay/再接続コメント挙動を維持。subscribe/emit (globalThis runner) はそのまま。
-**Check**: `curl -N 127.0.0.1:47776/api/run/events?since=0` でストリーム継続。
+**Goal state**: run/events, terminal/[id]/stream, screen/watch work via Hono `streamSSE`.
+**Expected behavior**: connect with EventSource → events stream. Disconnect/reconnect behaves the same as today.
+**Work**: `import { streamSSE } from 'hono/streaming'`. Turn each SSE route into `streamSSE(c, async (stream) => {...})`. Preserve the replay/reconnect comment behavior of `run/events`. subscribe/emit (globalThis runner) stays as-is.
+**Check**: `curl -N 127.0.0.1:47776/api/run/events?since=0` keeps streaming.
 
-### Phase 3 — フロント Vite + React SPA 化
+### Phase 3 — Turn the front end into a Vite + React SPA
 
-**Goal state**: `vite` がフロントをビルド/配信。`src/components/*` は無修正で動く。
-**Expected behavior**: `npm run dev` で Vite HMR、`http://127.0.0.1:47776` (Hono が Vite 成果物を配信) で UI 表示。
+**Goal state**: `vite` builds/serves the front end. `src/components/*` work unmodified.
+**Expected behavior**: Vite HMR via `npm run dev`, UI displayed at `http://127.0.0.1:47776` (Hono serving the Vite artifacts).
 **Work**:
-- `vite.config.ts` + `index.html` (layout.tsx の `<head>` 相当、@font-face 化)
-- `src/main.tsx`: React root mount (page.tsx の中身をエントリに)
-- `src/app/page.tsx` → `src/App.tsx` (ロジック流用、'use client' ディレクティブ削除)
+- `vite.config.ts` + `index.html` (equivalent to layout.tsx's `<head>`, with @font-face)
+- `src/main.tsx`: React root mount (the contents of page.tsx as the entry)
+- `src/app/page.tsx` → `src/App.tsx` (reuse the logic, drop the 'use client' directive)
 - `next/font` (1) → `@font-face` CSS
 - `next/dynamic` (1) → `React.lazy` + `Suspense`
-- `next/navigation` (1) → screen route 用の軽量 client routing (or query param)
-- `src/app/screen/[projectSlug]/[moduleId]/page.tsx` → Vite のルート (`/screen/:slug/:id`) or 同等の動的描画
-- Hono に static 配信: prod は Vite `dist/` を Hono が serve、dev は Vite dev server を Electron が指す
-- `@/*` alias を vite.config に移植
-**Check**: UI が描画、Canvas / Chats / Terminal / Goals タブ動作、screen iframe 描画。
+- `next/navigation` (1) → lightweight client routing for the screen route (or query param)
+- `src/app/screen/[projectSlug]/[moduleId]/page.tsx` → a Vite route (`/screen/:slug/:id`) or equivalent dynamic rendering
+- Static serving on Hono: in prod Hono serves the Vite `dist/`; in dev Electron points at the Vite dev server
+- Port the `@/*` alias into vite.config
+**Check**: the UI renders; the Canvas / Chats / Terminal / Goals tabs work; the screen iframe renders.
 
-### Phase 4 — Electron 配線 + Next 撤去
+### Phase 4 — Wire up Electron + remove Next
 
-**Goal state**: Electron が Hono entry を fork。next.config / standalone 手当てが消える。
-**Expected behavior**: `electron:prod` / packaged `.app` で Hono server fork → window → claude run 動作。
+**Goal state**: Electron forks the Hono entry. next.config / the standalone workarounds are gone.
+**Expected behavior**: with `electron:prod` / packaged `.app`, the Hono server forks → window → claude run works.
 **Work**:
-- `electron/main.js`: fork 先を `.next/standalone/server.js` → `server/dist/index.js` (Hono バンドル) に変更。candidate パス整理。
-- `package.json`: `output:'standalone'` 削除、`scripts/standalone-assets.js` 削除、`build.files`/`extraResources` を Hono server + Vite dist に。`asarUnpack` は node-pty のみ。
-- server バンドル: esbuild で `server/index.ts` → `server/dist/index.js` (node-pty は external)
-- `npm run dev` / `electron:dev` を vite + Hono concurrently に
-**Check**: packaged `.app` を cold run → 47776 → claude run → node-pty 動作 (PR A で詰まった node_modules 問題が存在しないことを確認)。
+- `electron/main.js`: change the fork target from `.next/standalone/server.js` → `server/dist/index.js` (Hono bundle). Tidy the candidate paths.
+- `package.json`: delete `output:'standalone'`, delete `scripts/standalone-assets.js`, point `build.files`/`extraResources` at the Hono server + Vite dist. `asarUnpack` is node-pty only.
+- server bundle: esbuild `server/index.ts` → `server/dist/index.js` (node-pty external)
+- make `npm run dev` / `electron:dev` run vite + Hono via concurrently
+**Check**: cold-run the packaged `.app` → 47776 → claude run → node-pty works (confirm the node_modules problem that stalled PR A no longer exists).
 
-### Phase 5 — hc RPC 型安全化 (オプション、後回し可)
+### Phase 5 — hc RPC type safety (optional, can be deferred)
 
-**Goal state**: client `fetch('/api...)` 12箇所が `hc` 型付き呼び出しに。
-**Work**: `hono/client` の `hc<AppType>` でサーバ型を輸入。`src/lib/types.ts` 契約を活用。
-**Check**: tsc で end-to-end 型エラー検出。
+**Goal state**: the 12 client `fetch('/api...)` sites become typed `hc` calls.
+**Work**: import the server types via `hono/client`'s `hc<AppType>`. Leverage the `src/lib/types.ts` contract.
+**Check**: tsc detects end-to-end type errors.
 
-### Phase 6 — 検証 + クリーンアップ
+### Phase 6 — Verification + cleanup
 
-**Goal state**: Next 痕跡ゼロ、全テスト green。
-**Work**: `next` 依存削除、`next.config.js` / `next-env.d.ts` 削除、eslint-config-next → 汎用、vitest/playwright を Vite 前提に調整。
-**Check**: `npm run lint && npx tsc --noEmit && npm test && npm run test:e2e` 全 green。packaged `.app` 実機 QA。
+**Goal state**: zero Next traces, all tests green.
+**Work**: remove the `next` dependency, delete `next.config.js` / `next-env.d.ts`, swap eslint-config-next → generic, adjust vitest/playwright for the Vite premise.
+**Check**: `npm run lint && npx tsc --noEmit && npm test && npm run test:e2e` all green. Real-device QA of the packaged `.app`.
 
-## 5. リスクと対策
+## 5. Risks and mitigations
 
-| リスク | 対策 |
+| Risk | Mitigation |
 |---|---|
-| SSE 再接続挙動の差異 | Phase 2 で run/events の既存コメント仕様を streamSSE で再現、curl -N で実測 |
-| screen 動的ルートの描画 | Phase 3 で iframe ロード経路を維持、Vite ルートで slug/id を渡す |
-| node-pty が Hono fork で動くか | spike で ELECTRON_RUN_AS_NODE + node-pty 実証済み。Hono entry は「ただの Node」なので fork 単純 |
-| 中間状態でアプリが動かない期間 | feature branch で進め、各 Phase で部分 verify。最後に統合 green |
-| vitest が Next import に依存 | Phase 6 で確認、@ alias を vitest.config に維持 (既に対応済み) |
-| dogfood ループが止まる | 移行中は現行 OPEN GROUND.app (shell launcher + Next) を温存。Hono 版が green になるまで切り替えない |
+| Differences in SSE reconnect behavior | In Phase 2, reproduce run/events' existing comment spec with streamSSE; measure with curl -N |
+| Rendering of the screen dynamic route | In Phase 3, preserve the iframe load path; pass slug/id through the Vite route |
+| Whether node-pty works under a Hono fork | Proven in a spike with ELECTRON_RUN_AS_NODE + node-pty. The Hono entry is "just Node", so forking is simple |
+| A period where the app doesn't work mid-state | Proceed on a feature branch, partial-verify each Phase. Integrate green at the end |
+| vitest depending on Next imports | Confirm in Phase 6; keep the @ alias in vitest.config (already handled) |
+| The dogfood loop stalling | During the migration, keep the current OPEN GROUND.app (shell launcher + Next). Don't switch over until the Hono version is green |
 
-## 6. 実装の進め方 (チーム/workflow)
+## 6. How to proceed with the implementation (teams/workflows)
 
-- **Workflow 1**: Phase 0 → {Phase 1, Phase 2 並列} → route 検証
-- **Workflow 2**: Phase 3 (フロント Vite 化) → Phase 4 (Electron 配線) → 統合検証
-- **Workflow 3**: Phase 5 + 6 (型安全 + クリーンアップ + 最終 QA)
-- 各 workflow 完了で CI green を確認、PR 分割 (P0-2 / P3-4 / P5-6) でレビュー可能に
-- shell launcher (openground-launch.sh) は全移行完了 + dogfood 安定まで温存
+- **Workflow 1**: Phase 0 → {Phase 1, Phase 2 in parallel} → route verification
+- **Workflow 2**: Phase 3 (Vite-ify the front end) → Phase 4 (wire up Electron) → integration verification
+- **Workflow 3**: Phases 5 + 6 (type safety + cleanup + final QA)
+- Confirm CI green at the end of each workflow; split PRs (P0-2 / P3-4 / P5-6) so they're reviewable
+- Keep the shell launcher (openground-launch.sh) until the whole migration is done and dogfooding is stable

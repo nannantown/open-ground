@@ -15,18 +15,12 @@
 // unit-testable under the default `node` (no-`window`) vitest environment.
 
 import { migrateLs } from '@/lib/lsMigrate'
+import { MODULE_IDS, type ModuleId } from '@/lib/modules/ids'
 
-/** The set of panel tabs we persist. Mirrors ProjectPanel's `PanelView`. */
-export type PersistedPanelTab = 'overview' | 'tasks' | 'terminal' | 'canvas' | 'board' | 'goals'
+/** The set of panel tabs we persist — the module registry's ids. */
+export type PersistedPanelTab = ModuleId
 
-const PANEL_TABS: readonly PersistedPanelTab[] = [
-  'overview',
-  'tasks',
-  'terminal',
-  'canvas',
-  'board',
-  'goals',
-]
+const PANEL_TABS: readonly PersistedPanelTab[] = MODULE_IDS
 
 export interface PersistedView {
   /** SHA1 project id of the open project (App's `selectedIds[0]`). */

@@ -1,173 +1,330 @@
+import { useEffect, useRef, useState } from 'react'
 import {
-  RefreshCw,
   Settings,
-  Compass,
   FolderPlus,
+  FolderInput,
   MessageSquare,
+  Plus,
+  LogOut,
   CircleUser,
 } from 'lucide-react'
+import { useT } from '@/i18n/I18nContext'
+import { useAuth } from '@/lib/auth/AuthContext'
+import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
 
 interface Props {
-  onRefresh: () => void
   onNewProject: () => void
+  onImport: () => void
   onOpenSettings: () => void
   /** Provided only when in-app feedback is configured (env-gated server-side);
-   *  when undefined the feedback entry is hidden, so the public build is clean. */
+   *  surfaces a "Feedback" item inside the account menu. */
   onFeedback?: () => void
   /** Provided only when the optional app login is configured (env-gated
-   *  server-side, same Supabase env as feedback); undefined hides the account
-   *  entry so the public build (no env) shows nothing. */
+   *  server-side); undefined hides the account control so the public build
+   *  (no env) shows nothing. */
   onAccount?: () => void
-  projectsRoot: string | null
   projectCount: number
-  archivedCount: number
-  showArchived: boolean
-  onToggleArchived: () => void
-  refreshing?: boolean
+  /** Count of feedback submissions not yet seen (owner build only). >0 shows a
+   *  small dot on the settings gear; the inbox lives inside Settings. */
+  unreadFeedback?: number
+  /** Slim usage strip rendered to the LEFT of the control pill, inside the same
+   *  flex row, so the two never overlap. */
+  usage?: React.ReactNode
 }
 
+// Ground top bar. Kept deliberately minimal: a single "+" (new / import), the
+// account control (avatar + menu when signed in), and Settings. Language lives
+// in Settings now (auto-detected from the OS otherwise), and refresh is ⌘R /
+// auto-on-focus — so neither needs a permanent button here.
 export const Toolbar = ({
-  onRefresh,
   onNewProject,
+  onImport,
   onOpenSettings,
   onFeedback,
   onAccount,
-  projectsRoot,
   projectCount,
-  archivedCount,
-  showArchived,
-  onToggleArchived,
-  refreshing,
+  unreadFeedback = 0,
+  usage,
 }: Props) => {
+  const { t } = useT()
   return (
-    <>
+    <div className="pointer-events-none absolute top-0 left-0 right-0 z-10 flex items-start justify-between gap-3 p-5">
       {/* Top-left wordmark */}
-      <div className="pointer-events-none absolute top-0 left-0 right-0 z-10 flex items-start justify-between gap-3 p-5">
-        <div className="pointer-events-auto flex items-center gap-3.5 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] pl-3 pr-4 py-2 shadow-card">
-          <Compass size={15} strokeWidth={1.5} className="text-accent shrink-0" />
-          <div className="flex items-baseline gap-2">
-            <span
-              className="font-display text-[18px] leading-none text-ink tracking-tight"
-              style={{ fontVariationSettings: "'opsz' 20, 'SOFT' 50" }}
-            >
-              OPEN GROUND
+      <div className="pointer-events-auto flex min-w-0 items-center gap-3.5 overflow-hidden bg-bg-card/95 backdrop-blur border border-line rounded-[3px] pl-3 pr-4 py-2 shadow-card">
+        {/* Mark + wordmark are their own items-center group with a tighter gap so
+            they read as one lockup; the tagline keeps its baseline relationship
+            to the wordmark inside a nested leading-none group (its line-box would
+            otherwise inflate the wrapper and push the wordmark off the mark's
+            centre). The outer gap-3.5 still spaces the · / project count. */}
+        <div className="flex min-w-0 items-center gap-2">
+          <OpenGroundMark size={18} className="shrink-0 select-none" />
+          <img
+            src="/brand/openground-wordmark.svg"
+            alt="OPEN GROUND"
+            className="h-[15px] w-auto shrink-0 select-none"
+            draggable={false}
+          />
+          {/* Beta tag — OPEN GROUND is still beta; breaking changes may land. */}
+          <span
+            // inline-flex + a 1px-top-heavy pad optically centres the all-caps
+            // glyphs (a tight uppercase line-box leaves empty descender space at
+            // the bottom, which otherwise makes the text sit high).
+            className="inline-flex shrink-0 select-none items-center rounded-[3px] border border-accent/40 bg-accent/10 px-1.5 pt-[3px] pb-[2px] text-[9px] font-semibold uppercase leading-none tracking-wide text-accent"
+            title={t('toolbar.betaTooltip')}
+          >
+            Beta
+          </span>
+          <span className="hidden xl:inline truncate label-cap leading-none text-ink-subtle">the shore for your work</span>
+        </div>
+        {projectCount > 0 && (
+          <>
+            <span className="text-line-strong text-[14px] leading-none">·</span>
+            <span className="text-[11px] text-ink-subtle tracking-[0.04em] tabular-nums">
+              {projectCount} {projectCount === 1 ? 'project' : 'projects'}
             </span>
-            <span className="label-cap text-ink-subtle">the shore for your work</span>
-          </div>
-          {projectsRoot && (
-            <>
-              <span className="text-line-strong text-[14px] leading-none">·</span>
-              <div className="flex items-center gap-2 text-[11px]">
-                <span className="font-mono text-ink-muted">{shortenPath(projectsRoot)}</span>
-                <span className="text-ink-faint">·</span>
-                <span className="text-ink-subtle tracking-[0.04em] tabular-nums">
-                  {projectCount} {projectCount === 1 ? 'project' : 'projects'}
-                </span>
-                {archivedCount > 0 && (
-                  <>
-                    <span className="text-ink-faint">·</span>
-                    <button
-                      onClick={onToggleArchived}
-                      title={
-                        showArchived
-                          ? 'Hide archived projects'
-                          : 'Show archived projects'
-                      }
-                      className={[
-                        '-mx-1 rounded-[2px] px-1 tracking-[0.04em] tabular-nums transition-colors',
-                        showArchived
-                          ? 'text-accent'
-                          : 'text-ink-faint hover:text-ink-muted',
-                      ].join(' ')}
-                    >
-                      {archivedCount} archived
-                    </button>
-                  </>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="pointer-events-auto flex items-center gap-2">
-          <div className="flex items-center gap-0 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] p-0.5 shadow-card">
-            <IconButton
-              onClick={onNewProject}
-              title="新規プロジェクト"
-              disabled={!projectsRoot}
-            >
-              <FolderPlus size={13} strokeWidth={1.75} />
-            </IconButton>
-            <span className="h-4 w-px bg-line-soft" />
-            <IconButton onClick={onRefresh} title="再読み込み" spin={refreshing}>
-              <RefreshCw size={13} strokeWidth={1.75} />
-            </IconButton>
-            {onFeedback && (
-              <>
-                <span className="h-4 w-px bg-line-soft" />
-                <IconButton onClick={onFeedback} title="フィードバックを送る">
-                  <MessageSquare size={13} strokeWidth={1.75} />
-                </IconButton>
-              </>
-            )}
-            {onAccount && (
-              <>
-                <span className="h-4 w-px bg-line-soft" />
-                <IconButton onClick={onAccount} title="アカウント">
-                  <CircleUser size={13} strokeWidth={1.75} />
-                </IconButton>
-              </>
-            )}
-            <span className="h-4 w-px bg-line-soft" />
-            <IconButton onClick={onOpenSettings} title="設定">
-              <Settings size={13} strokeWidth={1.75} />
-            </IconButton>
-          </div>
-        </div>
+          </>
+        )}
       </div>
 
-    </>
+      <div className="pointer-events-auto flex shrink-0 items-center gap-3">
+        {usage && <div className="hidden md:flex items-center">{usage}</div>}
+        {/* Standalone, always-visible feedback button. The app is in beta and we
+            want feedback actively, so it's surfaced as its own labelled pill
+            rather than buried in the account menu. */}
+        {onFeedback && (
+          <button
+            type="button"
+            onClick={onFeedback}
+            title={t('toolbar.feedback')}
+            className="flex items-center gap-1.5 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] px-3 py-2 shadow-card text-[12px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <MessageSquare size={13} strokeWidth={1.75} />
+            <span>{t('toolbar.feedback')}</span>
+          </button>
+        )}
+        <div className="flex items-center gap-0 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] p-0.5 shadow-card">
+          <AddMenu onNewProject={onNewProject} onImport={onImport} />
+          {onAccount && (
+            <>
+              <span className="h-4 w-px bg-line-soft" />
+              <AccountControl onAccount={onAccount} />
+            </>
+          )}
+          <span className="h-4 w-px bg-line-soft" />
+          <IconButton
+            onClick={onOpenSettings}
+            title={
+              unreadFeedback > 0
+                ? t('toolbar.settingsWithUnread', { count: unreadFeedback })
+                : t('toolbar.settings')
+            }
+            dot={unreadFeedback > 0}
+          >
+            <Settings size={13} strokeWidth={1.75} />
+          </IconButton>
+        </div>
+      </div>
+    </div>
   )
 }
+
+// "+" → a small popover offering New project / Import folder. Collapses the two
+// former toolbar buttons into one entry so the bar stays uncluttered.
+const AddMenu = ({
+  onNewProject,
+  onImport,
+}: {
+  onNewProject: () => void
+  onImport: () => void
+}) => {
+  const { t } = useT()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+  return (
+    <div ref={ref} className="relative">
+      <IconButton onClick={() => setOpen((o) => !o)} title={t('toolbar.add')} active={open}>
+        <Plus size={14} strokeWidth={2} />
+      </IconButton>
+      {open && (
+        <Menu>
+          <MenuItem
+            icon={<FolderPlus size={13} strokeWidth={1.75} />}
+            label={t('toolbar.newProject')}
+            onClick={() => {
+              setOpen(false)
+              onNewProject()
+            }}
+          />
+          <MenuItem
+            icon={<FolderInput size={13} strokeWidth={1.75} />}
+            label={t('toolbar.importFolder')}
+            onClick={() => {
+              setOpen(false)
+              onImport()
+            }}
+          />
+        </Menu>
+      )}
+    </div>
+  )
+}
+
+// Always-present account entry. Signed out → an icon that opens the sign-in
+// modal. Signed in → the user's avatar, opening a menu with sign out.
+const AccountControl = ({
+  onAccount,
+}: {
+  onAccount: () => void
+}) => {
+  const { t } = useT()
+  const { user, status, signOut } = useAuth()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  if (status !== 'signed-in' || !user) {
+    return (
+      <IconButton onClick={onAccount} title={t('toolbar.signIn')}>
+        <CircleUser size={13} strokeWidth={1.75} />
+      </IconButton>
+    )
+  }
+
+  const initials = (user.name || user.email || '?').trim().charAt(0).toUpperCase()
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title={t('toolbar.account')}
+        aria-label={t('toolbar.account')}
+        aria-pressed={open}
+        className="flex h-7 w-7 items-center justify-center rounded-sm transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      >
+        {user.avatarUrl ? (
+          <img
+            src={user.avatarUrl}
+            alt=""
+            className="h-5 w-5 rounded-full object-cover ring-1 ring-line"
+          />
+        ) : (
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent-soft text-accent text-[10px] font-medium leading-none">
+            {initials}
+          </span>
+        )}
+      </button>
+      {open && (
+        <Menu>
+          <div className="mb-1 border-b border-line-soft px-3 pb-2 pt-1">
+            {user.name && (
+              <div className="truncate text-[12px] font-medium leading-tight text-ink">
+                {user.name}
+              </div>
+            )}
+            {user.email && (
+              <div className="truncate text-[11px] leading-tight text-ink-subtle">
+                {user.email}
+              </div>
+            )}
+          </div>
+          <MenuItem
+            icon={<LogOut size={13} strokeWidth={1.75} />}
+            label={t('toolbar.signOut')}
+            onClick={() => {
+              setOpen(false)
+              void signOut()
+            }}
+          />
+        </Menu>
+      )}
+    </div>
+  )
+}
+
+const Menu = ({ children }: { children: React.ReactNode }) => (
+  <div className="absolute right-0 top-full z-20 mt-1.5 min-w-[190px] rounded-[3px] border border-line bg-bg-card py-1 shadow-card-hover">
+    {children}
+  </div>
+)
+
+const MenuItem = ({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactNode
+  label: string
+  onClick: () => void
+}) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+  >
+    <span className="text-ink-faint">{icon}</span>
+    {label}
+  </button>
+)
 
 const IconButton = ({
   children,
   onClick,
   title,
-  spin,
   active,
   disabled,
+  dot,
 }: {
   children: React.ReactNode
   onClick: () => void
   title: string
-  spin?: boolean
   active?: boolean
   disabled?: boolean
+  /** Small accent dot in the top-right corner — an unread/attention marker. */
+  dot?: boolean
 }) => (
   <button
+    type="button"
     onClick={onClick}
     title={title}
     aria-label={title}
     aria-pressed={active}
     disabled={disabled}
     className={[
-      'flex h-7 w-7 items-center justify-center rounded-sm transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
+      'relative flex h-7 w-7 items-center justify-center rounded-sm transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
+      'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
       active
         ? 'bg-accent-soft text-accent'
         : 'text-ink-muted hover:text-ink hover:bg-bg-inset',
     ].join(' ')}
   >
-    <span className={spin ? 'animate-spin inline-flex' : 'inline-flex'}>{children}</span>
+    {children}
+    {dot && (
+      <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-accent ring-2 ring-bg-card" />
+    )}
   </button>
 )
-
-const shortenPath = (path: string) => {
-  const home = '/Users/'
-  if (path.length <= 36) return path
-  if (path.startsWith(home)) {
-    const parts = path.split('/').filter(Boolean)
-    if (parts.length > 3) return `~/${parts.slice(2).slice(-2).join('/')}`
-  }
-  return `…${path.slice(-32)}`
-}

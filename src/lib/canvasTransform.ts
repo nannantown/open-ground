@@ -130,3 +130,91 @@ export function lockAspectRatio(
   }
   return { width: candidateH * ratio, height: candidateH }
 }
+
+// ── Rotation ──
+/** Normalise a rotation (degrees) to the half-open range [-180, 180), rounded to
+ *  whole degrees (180 and -180 are the same angle → canonicalised to -180). NaN /
+ *  non-finite (e.g. a cleared inspector field) → 0, so a rotation is never
+ *  persisted as NaN — which would poison the resize/rotate trig downstream.
+ *  Shared by the inspector field and the on-canvas rotate drag so the stored
+ *  convention is identical no matter which control last edited it. */
+export function normalizeRotation(deg: number): number {
+  if (!Number.isFinite(deg)) return 0
+  return Math.round((((deg % 360) + 540) % 360) - 180)
+}
+
+// ── Rotation-aware resize ──
+export interface Box {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** Resize a (possibly rotated) box by dragging its BOTTOM-RIGHT corner to a new
+ *  world point, keeping the opposite (top-left) corner anchored in world space —
+ *  matching how Figma resizes a rotated object.
+ *
+ *  An element renders as its axis-aligned box rotated by `deg` about its CENTRE
+ *  (`transform: rotate()` + `transform-origin: center`), so as w/h change the
+ *  box's x/y must shift to keep the anchored corner from drifting. `pointer` is
+ *  the target world position for the dragged corner (the caller subtracts the
+ *  grab offset so there's no jump on grab). `minW`/`minH` floor the result;
+ *  `lockAspect` locks it to the original w:h ratio (Shift-drag). For `deg === 0`
+ *  this reduces to the classic top-left-anchored resize. */
+export function resizeRotatedBR(
+  box: Box,
+  deg: number,
+  pointer: { x: number; y: number },
+  opts: { minW: number; minH: number; lockAspect?: boolean },
+): Box {
+  const r = (deg * Math.PI) / 180
+  const cos = Math.cos(r)
+  const sin = Math.sin(r)
+  const cx = box.x + box.w / 2
+  const cy = box.y + box.h / 2
+  // Anchored (top-left local) corner in world space: C + R(r)·(-w/2, -h/2).
+  const tlx = cx + cos * (-box.w / 2) - sin * (-box.h / 2)
+  const tly = cy + sin * (-box.w / 2) + cos * (-box.h / 2)
+  // Pointer relative to the anchor, rotated back into the box's local frame
+  // (R(-r)) → the new local width/height.
+  const dx = pointer.x - tlx
+  const dy = pointer.y - tly
+  let w = cos * dx + sin * dy
+  let h = -sin * dx + cos * dy
+  if (opts.lockAspect) {
+    // Lock to the original ratio, then enforce the floors PROPORTIONALLY: if
+    // either axis is below its min, scale BOTH up by the same factor so the
+    // ratio is preserved (independent Math.max per axis would distort it).
+    const locked = lockAspectRatio(Math.max(0, w), Math.max(0, h), box.w, box.h)
+    const bump = Math.max(
+      locked.width > 0 ? opts.minW / locked.width : 1,
+      locked.height > 0 ? opts.minH / locked.height : 1,
+      1,
+    )
+    // Final Math.max guards a degenerate (zero) locked axis.
+    w = Math.max(opts.minW, locked.width * bump)
+    h = Math.max(opts.minH, locked.height * bump)
+  } else {
+    w = Math.max(opts.minW, w)
+    h = Math.max(opts.minH, h)
+  }
+  // New centre that keeps the anchored corner fixed: C = TL + R(r)·(w/2, h/2).
+  const ncx = tlx + cos * (w / 2) - sin * (h / 2)
+  const ncy = tly + sin * (w / 2) + cos * (h / 2)
+  return { x: ncx - w / 2, y: ncy - h / 2, w, h }
+}
+
+/** World position of an element's BOTTOM-RIGHT visual corner — where the resize
+ *  handle is drawn — for a box rotated `deg` about its centre. */
+export function rotatedCornerBR(box: Box, deg: number): { x: number; y: number } {
+  const r = (deg * Math.PI) / 180
+  const cos = Math.cos(r)
+  const sin = Math.sin(r)
+  const cx = box.x + box.w / 2
+  const cy = box.y + box.h / 2
+  return {
+    x: cx + cos * (box.w / 2) - sin * (box.h / 2),
+    y: cy + sin * (box.w / 2) + cos * (box.h / 2),
+  }
+}

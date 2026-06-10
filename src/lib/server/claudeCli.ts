@@ -46,7 +46,12 @@ export const probeClaudeCli = async (force = false): Promise<ClaudeProbe> => {
   }
   let probe: ClaudeProbe
   try {
-    const { stdout } = await execFile('claude', ['--version'], { timeout: 5000 })
+    // Same launch-binary seam as buildClaudeArgv (claudeTerminal.ts): the E2E
+    // suite points this at a stub via OPENGROUND_CLAUDE_BIN so the readiness
+    // probe passes without the real CLI / a live subscription. Default is the
+    // bare `claude` on PATH, exactly what a PTY-spawned run resolves.
+    const bin = process.env.OPENGROUND_CLAUDE_BIN || 'claude'
+    const { stdout } = await execFile(bin, ['--version'], { timeout: 5000 })
     const version = stdout.trim() || null
     probe = {
       installed: true,

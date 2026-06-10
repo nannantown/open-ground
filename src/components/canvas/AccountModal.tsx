@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { X, LogIn, LogOut, Loader2 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { useAuth } from '@/lib/auth/AuthContext'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   open: boolean
@@ -21,6 +22,7 @@ interface Props {
 // disables them and swaps in a spinner.
 export const AccountModal = ({ open, onClose }: Props) => {
   const { user, status, signingIn, authError, signIn, signOut } = useAuth()
+  const { t } = useT()
   // Fall back to initials if the provider avatar fails to load (broken/blocked URL).
   const [avatarError, setAvatarError] = useState(false)
 
@@ -55,15 +57,15 @@ export const AccountModal = ({ open, onClose }: Props) => {
       >
         <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
           <div>
-            <p className="label-cap text-accent mb-1.5">アカウント</p>
+            <p className="label-cap text-accent mb-1.5">{t('modals.account.label')}</p>
             <h2
               className="font-display text-[22px] text-ink leading-none tracking-tightest"
               style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
             >
-              {user ? 'アカウント' : 'サインイン'}
+              {user ? t('modals.account.titleSignedIn') : t('modals.account.titleSignedOut')}
             </h2>
           </div>
-          <Btn variant="icon" size="sm" onClick={onClose} aria-label="閉じる">
+          <Btn variant="icon" size="sm" onClick={onClose} aria-label={t('common.close')}>
             <X size={16} />
           </Btn>
         </header>
@@ -98,7 +100,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
                     </p>
                   )}
                   <p className="label-cap text-ink-faint mt-1">
-                    {user.provider} でサインイン中
+                    {t('modals.account.signedInWith', { provider: user.provider })}
                   </p>
                 </div>
               </div>
@@ -106,11 +108,11 @@ export const AccountModal = ({ open, onClose }: Props) => {
 
             <div className="shrink-0 flex items-center justify-end gap-2 border-t border-line bg-bg-elevated px-6 py-3.5">
               <Btn variant="subtle" size="md" onClick={onClose}>
-                閉じる
+                {t('common.close')}
               </Btn>
               <Btn variant="ghost" size="md" onClick={() => signOut()} danger>
                 <LogOut size={13} />
-                サインアウト
+                {t('modals.account.signOut')}
               </Btn>
             </div>
           </>
@@ -119,8 +121,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
           <>
             <div className="px-6 py-5 space-y-3">
               <p className="text-[13px] text-ink-muted leading-relaxed">
-                サインインは任意です。OPEN GROUND はアカウントなしでも全機能を使えます。
-                サインインすると、設定を複数のマシン間で引き継げます。
+                {t('modals.account.intro')}
               </p>
               <div className="space-y-2 pt-1">
                 <Btn
@@ -131,7 +132,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
                   className="w-full justify-center"
                 >
                   {busy ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}
-                  Google で続ける
+                  {t('modals.account.continueWithGoogle')}
                 </Btn>
                 <Btn
                   variant="ghost"
@@ -141,7 +142,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
                   className="w-full justify-center"
                 >
                   {busy ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}
-                  GitHub で続ける
+                  {t('modals.account.continueWithGitHub')}
                 </Btn>
               </div>
               {authError ? (
@@ -150,18 +151,18 @@ export const AccountModal = ({ open, onClose }: Props) => {
                 </p>
               ) : signingIn ? (
                 <p className="text-[11px] text-ink-faint leading-relaxed pt-1">
-                  ブラウザでサインインを完了してください。完了後、この画面に戻ると自動的に反映されます。
+                  {t('modals.account.completeInBrowser')}
                 </p>
               ) : (
                 <p className="text-[11px] text-ink-faint leading-relaxed pt-1">
-                  サインイン用のブラウザウィンドウが開きます。完了したらこの画面に戻ってください。
+                  {t('modals.account.browserWillOpen')}
                 </p>
               )}
             </div>
 
             <div className="shrink-0 flex items-center justify-end gap-2 border-t border-line bg-bg-elevated px-6 py-3.5">
               <Btn variant="subtle" size="md" onClick={onClose}>
-                キャンセル
+                {t('common.cancel')}
               </Btn>
             </div>
           </>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { Code2 } from 'lucide-react'
-import type { CanvasElement, RunEntry } from '@/lib/types'
+import type { CanvasElement } from '@/lib/types'
 import { buildMockSrcdoc, hash32 } from '@/lib/mockSrcdoc'
 import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { resolveStickyFill, DEFAULT_STICKY_FILL } from '@/lib/canvasFillStyle'
@@ -19,16 +19,10 @@ interface Props {
   onEditDone: () => void
   /** Sticky-only: set the note colour from the selected-sticky swatch row. */
   onChangeColor?: (color: string) => void
-  /** Comment-only: fire the pin's text as a Canvas chat message. */
-  onRunComment?: (element: CanvasElement) => void
   /** Comment-only: toggle the resolved flag. */
   onToggleCommentResolved?: (id: string) => void
   /** Comment-only: short label of the element this comment was anchored to. */
   commentAnchorLabel?: string | null
-  /** Comment-only: live run status + reply for the comment's linked chat. */
-  commentRun?: { status: RunEntry['status']; summary: string } | null
-  /** Comment-only: focus the comment's linked chat thread in the sidebar. */
-  onOpenCommentThread?: () => void
   /** Image elements need these to resolve their per-canvas asset URLs. Absent
    *  on the top-level Ground canvas (which doesn't support image elements
    *  yet); the image case falls back to a placeholder there. */
@@ -81,11 +75,8 @@ export const ElementView = ({
   onChangeText,
   onEditDone,
   onChangeColor,
-  onRunComment,
   onToggleCommentResolved,
   commentAnchorLabel,
-  commentRun,
-  onOpenCommentThread,
   projectPath,
   canvasId,
   commentTool,
@@ -111,13 +102,10 @@ export const ElementView = ({
         onPointerDown={onPointerDown}
         onChangeText={onChangeText}
         onEditDone={onEditDone}
-        onRun={onRunComment ? () => onRunComment(element) : undefined}
         onToggleResolved={
           onToggleCommentResolved ? () => onToggleCommentResolved(element.id) : undefined
         }
         anchorLabel={commentAnchorLabel}
-        run={commentRun}
-        onOpenThread={onOpenCommentThread}
       />
     )
   }
@@ -185,7 +173,10 @@ export const ElementView = ({
         {selected && !editing && onChangeColor && (
           <div
             onPointerDown={(e) => e.stopPropagation()}
-            className="absolute -top-9 left-0 z-10 flex items-center gap-1 rounded-[5px] border border-line bg-bg-card px-1.5 py-1 shadow-card"
+            // To the LEFT of the note: the top-centre is owned by the rotation
+            // handle and the bottom-right by the resize handle, so the swatch row
+            // sits to the side, clear of both regardless of the note's size.
+            className="absolute right-full top-1 mr-2 z-10 flex items-center gap-1 rounded-[5px] border border-line bg-bg-card px-1.5 py-1 shadow-card"
           >
             {STICKY_COLORS.map((c) => {
               const active = (element.color ?? DEFAULT_STICKY_COLOR) === c
@@ -198,6 +189,7 @@ export const ElementView = ({
                   style={{ background: c }}
                   className={[
                     'h-4 w-4 rounded-full border transition-transform hover:scale-110',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
                     active ? 'border-ink ring-1 ring-ink' : 'border-black/15',
                   ].join(' ')}
                 />

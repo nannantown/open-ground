@@ -27,6 +27,7 @@ import {
   type ReactNode,
 } from 'react'
 import { api } from '@/lib/api-client'
+import { useT } from '@/i18n/I18nContext'
 import type {
   AuthProvider as OAuthProvider,
   AuthUser,
@@ -93,6 +94,7 @@ const openInBrowser = async (url: string): Promise<boolean> => {
 }
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
+  const { t } = useT()
   const [user, setUser] = useState<AuthUser | null>(null)
   const [status, setStatus] = useState<AuthStatus>('loading')
   const [signingIn, setSigningIn] = useState(false)
@@ -207,20 +209,20 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       }
       try {
         const res = await api.api.auth.start.$get({ query: { provider } })
-        if (!res.ok) return fail('サインインを開始できませんでした。時間をおいて再度お試しください。')
+        if (!res.ok) return fail(t('auth.error.start'))
         const data = (await res.json()) as { url?: string }
-        if (!data.url) return fail('サインインを開始できませんでした。時間をおいて再度お試しください。')
+        if (!data.url) return fail(t('auth.error.start'))
         const opened = await openInBrowser(data.url)
         if (!opened) {
-          return fail('ブラウザを開けませんでした。ポップアップ設定を確認するか、もう一度お試しください。')
+          return fail(t('auth.error.openBrowser'))
         }
         // signingIn stays true; stopPolling (on success / timeout) clears it.
         startPolling()
       } catch {
-        fail('サインインを開始できませんでした。時間をおいて再度お試しください。')
+        fail(t('auth.error.start'))
       }
     },
-    [startPolling],
+    [startPolling, t],
   )
 
   const signOut = useCallback(async () => {

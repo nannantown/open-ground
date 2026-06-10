@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
+import { LayoutGrid } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
+import { useT } from '@/i18n/I18nContext'
 import { resolveFrameStyle } from '@/lib/canvasFillStyle'
 import {
   resolveFrameCornerRadius,
@@ -14,6 +16,10 @@ interface Props {
   onHeaderPointerDown: (e: React.PointerEvent) => void
   onChangeLabel: (text: string) => void
   onEditDone: () => void
+  /** Tidy the cards sitting inside this frame into a neat grid. Provided only
+   *  when the frame actually contains project cards (so empty frames / frames on
+   *  surfaces without cards don't show a dead button). */
+  onTidy?: () => void
 }
 
 // A grouping frame: a labelled rectangle drawn behind the cards. Only its
@@ -26,7 +32,9 @@ export const FrameView = ({
   onHeaderPointerDown,
   onChangeLabel,
   onEditDone,
+  onTidy,
 }: Props) => {
+  const { t } = useT()
   const inp = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (editing && inp.current) {
@@ -104,9 +112,35 @@ export const FrameView = ({
             className="w-full bg-transparent font-display text-[15px] leading-none text-ink focus:outline-none"
           />
         ) : (
-          <span className="select-none truncate font-display text-[15px] leading-none text-ink">
-            {frame.text || <span className="text-ink-faint">Frame</span>}
-          </span>
+          <>
+            <span className="flex-1 select-none truncate font-display text-[15px] leading-none text-ink">
+              {frame.text || <span className="text-ink-faint">Frame</span>}
+            </span>
+            {onTidy && (
+              <button
+                type="button"
+                title={t('canvasEl.frame.tidyTooltip')}
+                aria-label={t('canvasEl.frame.tidyTooltip')}
+                // Don't let the press start a frame drag; the click does the tidy.
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onTidy()
+                }}
+                className={[
+                  'shrink-0 inline-flex h-6 items-center gap-1 rounded-[3px] px-2',
+                  'cursor-pointer text-[11px] font-medium tracking-[0.02em]',
+                  'text-ink-muted transition-colors',
+                  'hover:bg-bg-inset hover:text-ink',
+                  'active:bg-line-soft',
+                  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+                ].join(' ')}
+              >
+                <LayoutGrid size={12} strokeWidth={2} className="shrink-0" />
+                {t('canvasEl.frame.tidy')}
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

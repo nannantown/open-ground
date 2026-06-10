@@ -26,8 +26,28 @@
 // how the CDN + fonts load (cached after first online load, like mocks).
 
 import { hash32 } from './mockSrcdoc'
+import { messages, type Lang } from '@/i18n/messages'
 
 export { hash32 }
+
+// This module builds iframe srcDoc HTML strings — it is a plain module, not a
+// React component, so it can't call useT(). The starter source below is shown
+// to the user, so we resolve the persisted UI language ('og-lang', the same key
+// I18nProvider writes) directly and fall back to English.
+function currentLang(): Lang {
+  try {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('og-lang') : null
+    if (saved === 'ja') return 'ja'
+  } catch {
+    /* storage unavailable (private mode / non-browser) — default to English */
+  }
+  return 'en'
+}
+
+function st(key: string): string {
+  const lang = currentLang()
+  return messages[lang][key] ?? messages.en[key] ?? key
+}
 
 export type ScreenFramework = 'react' | 'html'
 export type ScreenTheme = 'light' | 'dark' | 'auto'
@@ -398,13 +418,10 @@ export const DEFAULT_SCREEN_SOURCE = `export default function Screen() {
     <div className="min-h-full bg-bg p-10 font-body text-ink">
       <p className="label-cap text-ink-muted">Screen</p>
       <h1 className="mt-2 font-display text-[34px] leading-tight text-ink">
-        新しい画面
+        ${st('screen.starter.heading')}
       </h1>
       <p className="mt-3 max-w-[46ch] text-[14px] leading-relaxed text-ink-muted">
-        ダブルクリックでソースを編集、または Canvas チャットで Claude に
-        「この画面を◯◯にして」と頼んでください。Tailwind と project tokens
-        （bg-bg-card / text-ink / accent / moss / azure）、lucide-react が
-        そのまま使えます。
+        ${st('screen.starter.body')}
       </p>
       <div className="mt-8 flex gap-3">
         <button className="rounded-[3px] bg-accent px-4 py-2 text-[13px] font-medium text-bg-card">
@@ -421,9 +438,9 @@ export const DEFAULT_SCREEN_SOURCE = `export default function Screen() {
 
 export const DEFAULT_SCREEN_HTML = `<div class="min-h-full bg-bg p-10 font-body text-ink">
   <p class="label-cap text-ink-muted">Screen</p>
-  <h1 class="mt-2 font-display text-[34px] leading-tight text-ink">新しい画面</h1>
+  <h1 class="mt-2 font-display text-[34px] leading-tight text-ink">${st('screen.starter.heading')}</h1>
   <p class="mt-3 max-w-[46ch] text-[14px] leading-relaxed text-ink-muted">
-    ダブルクリックで HTML を編集できます。
+    ${st('screen.starter.htmlBody')}
   </p>
 </div>
 `

@@ -55,6 +55,9 @@ export async function onRequestPost({ request, env }) {
       return json({ error: 'waitlist not configured' }, 503);
     }
 
+    // Plain insert on purpose: PostgREST's on_conflict/ignore-duplicates path
+    // needs SELECT under RLS, and anon is deliberately insert-only here. A
+    // duplicate email instead surfaces as 409 below, which we treat as success.
     const endpoint = `${url.replace(/\/+$/, '')}/rest/v1/waitlist`;
 
     const res = await fetch(endpoint, {
@@ -68,6 +71,12 @@ export async function onRequestPost({ request, env }) {
       },
       body: JSON.stringify({ email, lang, source: 'landing' }),
     });
+
+    // Already on the list (unique email) — that's a success for the user,
+    // not an error. 409 = PostgREST unique-violation.
+    if (res.status === 409) {
+      return json({ ok: true }, 200);
+    }
 
     if (!res.ok) {
       // Surface Supabase's reason in the Function log (it may carry RLS / schema

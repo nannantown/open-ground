@@ -30,20 +30,20 @@
 //
 // The routers in server/routes/*.ts are now chained (and app.ts chains the
 // mounts), so `AppType` carries the full route tree: `api.api.health.$get`,
-// `api.api.run.list.$get`, etc. all type-check and a renamed/removed route is a
+// `api.api.projects.$get`, etc. all type-check and a renamed/removed route is a
 // tsc error instead of a runtime 404.
 //
 // USAGE NOTES (for the next person converting fetch() → api.*):
 //  - GET: `api.api.usage.$get({}, { init: { cache, signal } })`. Query params go
 //    in the first arg: `api.api.project.$get({ query: { path } })`.
-//  - POST: `api.api.run.cancel.$post({ json: body })`.
-//  - Routes validated with `zValidator('json', schema)` (e.g. /api/run/cancel)
-//    expose a TYPED request body; routes that read `c.req.json()` raw accept the
-//    body loosely. Response `.json()` is typed where the route's `c.json(...)`
-//    shape is inferable, and `unknown` otherwise — cast at the call site to keep
-//    the previous behaviour (the old `fetch().json()` was `any`).
-//  - SSE / EventSource endpoints (/api/run/events, /api/terminal/:id/stream,
-//    /api/screen/watch) are NOT hc targets — keep them on raw fetch/EventSource.
+//  - POST: `api.api.settings.$post({ json: body })`.
+//  - Routes validated with `zValidator('json', schema)` expose a TYPED request
+//    body; routes that read `c.req.json()` raw accept the body loosely.
+//    Response `.json()` is typed where the route's `c.json(...)` shape is
+//    inferable, and `unknown` otherwise — cast at the call site to keep the
+//    previous behaviour (the old `fetch().json()` was `any`).
+//  - SSE / EventSource endpoints (/api/terminal/:id/stream) are NOT hc
+//    targets — keep them on raw fetch/EventSource.
 
 import { hc } from 'hono/client'
 import type { AppType } from '../../server/app'

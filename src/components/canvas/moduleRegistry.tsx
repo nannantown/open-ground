@@ -1,0 +1,40 @@
+import type { ReactNode } from 'react'
+import { Terminal, Palette, Columns3 } from 'lucide-react'
+import type { ModuleId } from '@/lib/modules/ids'
+
+// ─── Module registry ──────────────────────────────────────────────────────
+// SINGLE SOURCE OF TRUTH for the per-project tabs ("Grounds"). Previously the
+// tab set was declared four times (a PanelView union, the Ctrl+Tab order array,
+// the ViewTabs render array, and persistView's PANEL_TABS). They now derive
+// from this one list, so adding a tab is one entry here (+ its render branch in
+// ProjectPanel) — the first step toward tabs as pluggable modules.
+
+export interface ModuleDef {
+  id: ModuleId
+  label: string
+  icon: ReactNode
+}
+
+// Default order = the tab row's initial left-to-right order AND the Ctrl+Tab
+// cycle order for a project with no saved per-project order. Per-project the
+// user can drag tabs to reorder; that order persists in ProjectData.tabOrder
+// and is normalised against this registry (see effectiveTabOrder).
+// NOTE: the old 'tasks' (Chats) tab is intentionally GONE. Per-project work is
+// driven from the Terminal (live `claude` PTY panes); there is no chat-thread
+// tab. Legacy kind:'chat' data is preserved on disk but is no longer surfaced.
+// The 'goals' (Tasks) and 'overview' tabs were removed outright in the
+// terminal-only purge — every module in the registry is always enabled.
+export const MODULES: ModuleDef[] = [
+  { id: 'board', label: 'Board', icon: <Columns3 size={10} strokeWidth={2.25} /> },
+  { id: 'canvas', label: 'Canvas', icon: <Palette size={10} strokeWidth={2.25} /> },
+  { id: 'terminal', label: 'Terminal', icon: <Terminal size={10} strokeWidth={2.25} /> },
+]
+
+// All registered modules ship enabled. The helpers survive as the seam a
+// future per-Ground entitlement check would hook into (design P6).
+export const isModuleEnabled = (_m: ModuleDef): boolean => true
+
+export const enabledModules = (): ModuleDef[] => MODULES.filter(isModuleEnabled)
+
+export const isModuleIdEnabled = (id: ModuleId): boolean =>
+  MODULES.some(x => x.id === id)

@@ -7,20 +7,20 @@ import { app } from '../../app'
 // shapes — not a mock.
 //
 // SCOPE — deliberately NOT exercised here: any route that spawns the `claude`
-// CLI as a side effect (startRun, /api/project/milestones/run,
-// /api/project/goals/plan, /api/project/goals/run-queue start/resume). Those
-// have real process side effects and belong to the e2e / runner-specific
-// suites. Everything below 400/403/404s *before* reaching a spawn, or is a
-// pure read (health / projects / 404 guard), so the suite stays hermetic.
+// CLI as a side effect (the terminal launch routes). Those have real process
+// side effects and belong to the e2e suite. Everything below 400/403/404s
+// *before* reaching a spawn, or is a pure read (health / projects / 404
+// guard), so the suite stays hermetic.
 //
-// STABILITY — validateProjectPath() reads settings.projectsRoot from the real
-// ~/.openground/settings.json. We don't depend on that being set: the security
-// assertions all use `/etc`, which can never sit under a sane projectsRoot, so
-// the boundary returns 403 whether projectsRoot is null (everything 403/false)
-// or a real projects dir (/etc is outside it). The 400 (missing field) and 404
-// (unknown route / unknown id) cases don't touch settings at all.
+// STABILITY — validateProjectPath() checks against the project registry
+// (settings.projects) in the test home. We don't depend on it being populated:
+// the security assertions all use `/etc`, which is never a registered project,
+// so the boundary returns 403 whether the registry is empty (everything
+// 403/false) or holds real projects (/etc is under none of them). The 400
+// (missing field) and 404 (unknown route / unknown id) cases don't touch
+// settings at all.
 
-const ETC = '/etc' // guaranteed to be OUTSIDE any projectsRoot → 403
+const ETC = '/etc' // guaranteed to be registered-by NOBODY → 403
 
 const json = (body: unknown): RequestInit => ({
   method: 'POST',
@@ -46,13 +46,31 @@ describe('Hono routes — existence / contract (GET reads)', () => {
     const res = await app.request('/api/projects')
     expect(res.status).toBe(200)
     const body = await res.json()
-    // The route always responds 200 with a JSON object. We do NOT assert the
-    // absence of an `error` field: in a clean environment (CI, fresh machine)
-    // settings.projectsRoot is unset, so the scan legitimately returns an
-    // error envelope while still 200. The contract under test is "the route
-    // is reachable and returns JSON", not "the machine has projects".
+    // The route always responds 200 with a JSON object. On a fresh machine the
+    // registry is empty, so `projects` is just []. The contract under test is
+    // "the route is reachable and returns JSON", not "the machine has projects".
     expect(body).not.toBeNull()
     expect(typeof body).toBe('object')
+    expect(Array.isArray(body.projects)).toBe(true)
+  })
+
+  it('GET /api/settings → 200 + suggestedDisplayName (string | null, never persisted)', async () => {
+    const res = await app.request('/api/settings')
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    // The display-name suggestion rides the GET response only. Its VALUE is
+    // machine-dependent (`git config --global user.name` — read-only, never
+    // mutated by the route), so the contract is shape, not content: the key
+    // is always present, and it is a non-empty string or null.
+    expect('suggestedDisplayName' in body).toBe(true)
+    const v = body.suggestedDisplayName
+    expect(v === null || (typeof v === 'string' && v.length > 0)).toBe(true)
+    // And it must NOT round-trip into the persisted settings file: the test
+    // home (OPENGROUND_HOME) starts fresh, so a plain getSettings-backed POST
+    // echo would be the only way it could appear — assert the POSTed merge
+    // path is never fed by this GET-only field.
+    const { getSettings } = await import('@/lib/server/store')
+    expect('suggestedDisplayName' in (await getSettings())).toBe(false)
   })
 })
 
@@ -71,8 +89,8 @@ describe('Hono routes — validateProjectPath security boundary', () => {
     expect(body.error).toMatch(/required/i)
   })
 
-  it('POST /api/project/archive {path:/etc} → 403 (boundary on mutation)', async () => {
-    const res = await app.request('/api/project/archive', json({ path: ETC }))
+  it('POST /api/project/delete {path:/etc} → 403 (boundary on mutation, before any Trash side effect)', async () => {
+    const res = await app.request('/api/project/delete', json({ path: ETC }))
     expect(res.status).toBe(403)
     const body = await res.json()
     expect(body.error).toMatch(/not allowed/i)
@@ -80,23 +98,61 @@ describe('Hono routes — validateProjectPath security boundary', () => {
 })
 
 describe('Hono routes — body validation (zod / manual)', () => {
-  it('POST /api/project/goals (op:add, no title) → 400 (zod)', async () => {
-    // Missing required `title` (and using /etc path, but zod runs first):
-    // the discriminated-union schema rejects → 400 BEFORE any side effect.
+  it('POST /api/project/goals → 404 (the goals routes are gone)', async () => {
+    // The Goals/Milestones feature was purged; its routes must now hit the
+    // /api/* 404 guard instead of resolving to anything.
     const res = await app.request(
       '/api/project/goals',
       json({ path: ETC, op: 'add' }),
     )
-    expect(res.status).toBe(400)
-    const body = await res.json()
-    expect(body.error).toBeTruthy()
+    expect(res.status).toBe(404)
   })
 
-  it('POST /api/run/dismiss {} (neither id nor all) → 400', async () => {
-    const res = await app.request('/api/run/dismiss', json({}))
+  it('GET /api/project/journal → 404 (the journal route is gone)', async () => {
+    const res = await app.request(
+      `/api/project/journal?path=${encodeURIComponent(ETC)}`,
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /api/project/doc → 404 (the doc routes are gone)', async () => {
+    const res = await app.request(
+      `/api/project/doc?path=${encodeURIComponent(ETC)}`,
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('POST /api/run → 404 (the batch-run routes are gone)', async () => {
+    const res = await app.request('/api/run', json({}))
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /api/run/events → 404 (the run SSE stream is gone)', async () => {
+    const res = await app.request('/api/run/events')
+    expect(res.status).toBe(404)
+  })
+
+  it('POST /api/paste-file {} (no data) → 400', async () => {
+    const res = await app.request('/api/paste-file', json({ name: 'x.txt' }))
     expect(res.status).toBe(400)
-    const body = await res.json()
-    expect(body.error).toMatch(/id or all/i)
+    expect((await res.json()).error).toMatch(/file data/i)
+  })
+
+  it('POST /api/paste-file saves under the paste dir with a sanitized name', async () => {
+    const res = await app.request(
+      '/api/paste-file',
+      json({
+        name: '../評価 レポート(最終).md',
+        dataBase64: Buffer.from('hello drop').toString('base64'),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const { path } = (await res.json()) as { path: string }
+    // Directory components (incl. the `..`) are stripped entirely; the
+    // readable basename survives with spaces collapsed to underscores.
+    expect(path).toMatch(/__評価_レポート\(最終\)\.md$/)
+    const { readFile } = await import('fs/promises')
+    expect(await readFile(path, 'utf-8')).toBe('hello drop')
   })
 
   it('POST /api/terminal {} (no cwd) → 400', async () => {
@@ -114,9 +170,42 @@ describe('Hono routes — body validation (zod / manual)', () => {
     const body = await res.json()
     expect(body.error).toMatch(/not allowed/i)
   })
+
+  it('POST /api/terminal/claude with an oversized initialPrompt → 400 (no spawn)', async () => {
+    // initialPrompt is written verbatim to a tmpdir file, so an unbounded value
+    // could exhaust /tmp. The cap is checked BEFORE cwd auth and before any
+    // spawn, so /etc never matters and no pty is created — the suite stays
+    // hermetic. Regression guard for the disk-exhaustion finding.
+    const huge = 'x'.repeat(256 * 1024 + 1)
+    const res = await app.request('/api/terminal/claude', json({ cwd: ETC, initialPrompt: huge }))
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toMatch(/initialPrompt too large/i)
+  })
+
+  it('POST /api/terminal/claude with a normal prompt to /etc → 403 (cap passes, cwd rejects)', async () => {
+    // A sub-cap prompt clears the size guard and falls through to the cwd
+    // boundary, which 403s for an unregistered path before any spawn.
+    const res = await app.request('/api/terminal/claude', json({ cwd: ETC, initialPrompt: 'do the thing' }))
+    expect(res.status).toBe(403)
+    const body = await res.json()
+    expect(body.error).toMatch(/not allowed/i)
+  })
 })
 
 describe('Hono routes — dynamic params & 404 guard', () => {
+  it('GET /api/terminal/active → 200 { cwds: [] } (not captured by :id)', async () => {
+    // The static `active` segment must resolve to the live-PTY listing, never
+    // fall into the dynamic /api/terminal/:id route (which would 404 it as an
+    // unknown terminal id). The test home spawns no PTYs, so cwds is [] —
+    // the contract under test is the route's existence + shape.
+    const res = await app.request('/api/terminal/active')
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(Array.isArray(body.cwds)).toBe(true)
+    expect(body.cwds).toEqual([])
+  })
+
   it('GET /api/terminal/:id (unknown id) → 404', async () => {
     const res = await app.request('/api/terminal/does-not-exist-12345')
     expect(res.status).toBe(404)

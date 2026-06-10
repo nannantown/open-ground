@@ -17,10 +17,14 @@ export default defineConfig({
       'src/**/*.test.tsx',
       'server/**/*.test.ts',
     ],
+    // Global default stays `node` for fast startup. Component / hook tests opt
+    // into a DOM per-file with a `// @vitest-environment jsdom` pragma.
     environment: 'node',
-    // Redirect OPENGROUND_HOME to a throwaway tmp dir before any test module
-    // loads, so server code never reads or writes the real ~/.openground.
-    setupFiles: ['./src/test/setup-home.ts'],
+    // setup-home: redirect OPENGROUND_HOME to a throwaway tmp dir before any
+    //   test module loads, so server code never touches the real ~/.openground.
+    // setup-dom: register @testing-library/jest-dom matchers + RTL auto-cleanup
+    //   (a no-op in node-environment tests; see the file's note).
+    setupFiles: ['./src/test/setup-home.ts', './src/test/setup-dom.ts'],
     // Test files share the same `@/*` path alias as the app does
     // (tsconfig.json `paths`). Without this, imports like
     // `from '@/lib/types'` fail in test files.
