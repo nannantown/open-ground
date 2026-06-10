@@ -162,7 +162,15 @@ export const shareStatus = async (projectPath: string): Promise<ShareStatus> => 
   let ahead = 0
   let behind = 0
   if (shared && gitRepo && remoteUrl) {
-    await maybeFetch(projectPath)
+    // Give the (throttled) fetch a short grace window, then answer with the
+    // refs we have: a fast fetch (LAN, warm connection) lands in the counts
+    // immediately, a slow one finishes in the background and the next poll
+    // (90s client-side) reports what it found. The status endpoint must never
+    // stall the UI for the full FETCH_TIMEOUT_MS.
+    await Promise.race([
+      maybeFetch(projectPath),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_500)),
+    ])
     ;[ahead, behind] = await Promise.all([
       sharedCommitCount(projectPath, '@{upstream}..HEAD'),
       sharedCommitCount(projectPath, 'HEAD..@{upstream}'),

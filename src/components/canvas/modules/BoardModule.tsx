@@ -84,38 +84,55 @@ export const BoardModule = ({
   const clampMetaH = (h: number, hostH: number) =>
     // Keep at least ~180px of terminal and ~96px of fields visible.
     Math.min(Math.max(h, 96), Math.max(96, hostH - 180))
+  // One live drag at a time; its window listeners are torn down on pointerup,
+  // pointercancel (trackpad/touch gesture interruptions), AND unmount — a
+  // cancelled drag must never leave a phantom resize listener on window.
+  const dragCleanupRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanupRef.current?.(), [])
+  const beginDrag = (
+    onMove: (ev: PointerEvent) => void,
+    onEnd: (ev: PointerEvent) => void,
+  ) => {
+    dragCleanupRef.current?.()
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      dragCleanupRef.current = null
+    }
+    const onUp = (ev: PointerEvent) => {
+      onEnd(ev)
+      cleanup()
+    }
+    const onCancel = () => cleanup()
+    dragCleanupRef.current = cleanup
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+  }
   const startWidthDrag = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
-    const onMove = (ev: PointerEvent) => setDrawerW(clampW(window.innerWidth - ev.clientX))
-    const onUp = (ev: PointerEvent) => {
-      localStorage.setItem('og.board.drawerW', String(clampW(window.innerWidth - ev.clientX)))
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
+    beginDrag(
+      ev => setDrawerW(clampW(window.innerWidth - ev.clientX)),
+      ev => localStorage.setItem('og.board.drawerW', String(clampW(window.innerWidth - ev.clientX))),
+    )
   }
   const startSplitDrag = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
     const host = splitRef.current
     if (!host) return
-    const onMove = (ev: PointerEvent) => {
-      const r = host.getBoundingClientRect()
-      setMetaH(clampMetaH(ev.clientY - r.top, r.height))
-    }
-    const onUp = (ev: PointerEvent) => {
-      const r = host.getBoundingClientRect()
-      localStorage.setItem(
-        'og.board.drawerMetaH',
-        String(clampMetaH(ev.clientY - r.top, r.height)),
-      )
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
+    beginDrag(
+      ev => {
+        const r = host.getBoundingClientRect()
+        setMetaH(clampMetaH(ev.clientY - r.top, r.height))
+      },
+      ev => {
+        const r = host.getBoundingClientRect()
+        localStorage.setItem('og.board.drawerMetaH', String(clampMetaH(ev.clientY - r.top, r.height)))
+      },
+    )
   }
   const detailTask = detailId ? data.tasks.find(t => t.id === detailId) : null
   const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>
@@ -140,15 +157,20 @@ export const BoardModule = ({
   const closeDrawerRef = useRef(closeDrawer)
   closeDrawerRef.current = closeDrawer
 
-  // Esc with the drawer open: blur a focused field first (cancel the edit),
-  // close the drawer otherwise. Never fires mid-IME composition, and never
-  // reaches here from the assignee input (which stops propagation itself).
+  // Esc with the drawer open: cancel a field edit first (restore the original
+  // value, then blur — onBlur sees no change and persists nothing), close the
+  // drawer otherwise. Never fires mid-IME composition, never reaches here from
+  // the assignee input (which stops propagation itself), and NEVER touches the
+  // claude terminal: Esc is claude CLI's interrupt key, and xterm focuses a
+  // hidden helper textarea — blurring it would silently eat the next keystrokes.
   useEffect(() => {
     if (!detailId) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.isComposing) return
       const el = document.activeElement
+      if (el instanceof HTMLElement && el.closest('.xterm')) return
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        el.value = el.defaultValue // uncontrolled fields: defaultValue = saved value
         el.blur()
         return
       }
@@ -235,7 +257,13 @@ export const BoardModule = ({
           {/* The two kept fields: the task itself (title) + a free memo that
               does NOT affect the run. Both labelled, same styling. The block
               scrolls within its share instead of dictating terminal height. */}
-          <div style={{ height: metaH }} className="shrink-0 space-y-3 overflow-y-auto px-5 py-3">
+          <div
+            // maxHeight re-clamps a metaH saved on a taller window so the
+            // terminal keeps its ~180px floor on any window size (the drag
+            // clamp alone can't promise that across monitor changes).
+            style={{ height: metaH, minHeight: 96, maxHeight: 'calc(100% - 188px)' }}
+            className="shrink-0 space-y-3 overflow-y-auto px-5 py-3"
+          >
             <div>
               <label className="mb-1 block label-cap text-ink-faint">{t('board.detail.titleLabel')}</label>
               <input

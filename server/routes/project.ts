@@ -364,7 +364,19 @@ export const projectRoutes = new Hono()
   for (const pr of body.setPrUrl ?? []) {
     if (!pr || typeof pr.id !== 'string' || typeof pr.url !== 'string') continue
     const url = pr.url.trim()
-    if (!/^https?:\/\//i.test(url) || url.length > 500) continue
+    if (url === '') {
+      // Empty string clears a wrongly-recorded PR link.
+      data.tasks = data.tasks.map((t) =>
+        t.id === pr.id ? { ...t, prUrl: undefined } : t,
+      )
+      continue
+    }
+    try {
+      const parsed = new URL(url)
+      if (!/^https?:$/.test(parsed.protocol) || url.length > 500) continue
+    } catch {
+      continue
+    }
     data.tasks = data.tasks.map((t) => (t.id === pr.id ? { ...t, prUrl: url } : t))
   }
 

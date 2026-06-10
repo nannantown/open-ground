@@ -917,7 +917,11 @@ export const ProjectPanel = ({
     if (!path) return
     const status = await fetchShareStatus(path)
     if (projectPathRef.current !== path) return
-    setShareStatus(status)
+    // A transient fetch failure (null) must not wipe a known status — that
+    // would hide the Sync button and kill the 90s poll until the next focus.
+    // Project switches reset the state to null explicitly, so keeping the
+    // last-known value here never leaks across projects.
+    setShareStatus((prev) => status ?? prev)
   }, [project?.path])
 
   // Re-read ProjectData from disk after an external change (Sync pulled
