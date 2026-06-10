@@ -69,6 +69,7 @@ export const projectPanel = {
     'projectPanel.syncing': 'Syncing…',
     'projectPanel.syncHint': 'Commit .openground/ changes, pull, then push',
     'projectPanel.syncDirtyHint': 'Unsynced local changes — commit, pull, then push',
+    'projectPanel.syncBehindHint': '{count} shared change(s) on the remote — Sync to pull them',
     'projectPanel.syncDone': 'Synced',
     // Post-sync board digest — what the pull changed (boardDiffDigest segments,
     // joined with ' · '). {names} = distinct assignees of the added cards.
@@ -201,6 +202,7 @@ export const projectPanel = {
     'projectPanel.syncing': 'Sync中…',
     'projectPanel.syncHint': '.openground/ の変更をコミットして pull → push します',
     'projectPanel.syncDirtyHint': '未同期のローカル変更があります — コミットして pull → push します',
+    'projectPanel.syncBehindHint': 'リモートに共有データの変更が {count} 件あります — Sync で取り込みます',
     'projectPanel.syncDone': '同期しました',
     'projectPanel.syncDigestAddedOne': 'カード+1',
     'projectPanel.syncDigestAdded': 'カード+{count}',

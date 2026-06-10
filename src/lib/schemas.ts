@@ -34,6 +34,8 @@ export const ProjectTaskSchema = z.object({
   boardColumn: z.enum(['todo', 'doing', 'review', 'done', 'blocked']).optional(),
   assignee: z.string().optional(),
   boardOrder: z.number().optional(),
+  // PR opened for the task (completionFlow 'pr') — set via tasks {setPrUrl}.
+  prUrl: z.string().optional(),
 })
 
 export const ProjectDataSchema = z.object({

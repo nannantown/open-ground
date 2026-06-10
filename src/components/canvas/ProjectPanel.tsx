@@ -1092,6 +1092,19 @@ export const ProjectPanel = ({
     return () => window.removeEventListener('focus', onFocus)
   }, [project?.path, refreshShareStatus, reloadProjectData])
 
+  // Remote awareness while shared: re-check the share status every 90s while
+  // the window is visible, so the Sync button's ↓ badge appears when a
+  // teammate pushes even if the user never refocuses the window. The server
+  // throttles the underlying `git fetch` to one per minute per project, so
+  // this stays cheap; hidden windows skip the tick entirely.
+  useEffect(() => {
+    if (!project?.path || !shareStatus?.shared) return
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshShareStatus()
+    }, 90_000)
+    return () => clearInterval(id)
+  }, [project?.path, shareStatus?.shared, refreshShareStatus])
+
   // Live board: while the panel is open and visible, poll the project data
   // every 5s so cards added from OUTSIDE this window — chiefly a terminal
   // claude calling POST /api/project/tasks — appear without any user action.
@@ -1335,9 +1348,11 @@ export const ProjectPanel = ({
                 onClick={() => void doSync()}
                 disabled={syncing || project.missing}
                 title={
-                  shareStatus.dirty
-                    ? t('projectPanel.syncDirtyHint')
-                    : t('projectPanel.syncHint')
+                  shareStatus.behind > 0
+                    ? t('projectPanel.syncBehindHint', { count: shareStatus.behind })
+                    : shareStatus.dirty || shareStatus.ahead > 0
+                      ? t('projectPanel.syncDirtyHint')
+                      : t('projectPanel.syncHint')
                 }
                 className="flex shrink-0 items-center gap-1.5 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
               >
@@ -1348,6 +1363,19 @@ export const ProjectPanel = ({
                   />
                 )}
                 {syncing ? t('projectPanel.syncing') : t('projectPanel.sync')}
+                {/* Unpushed (↑) / incoming (↓) commit counts, scoped to
+                    .openground/. ↓ is the "a teammate pushed — pull me"
+                    signal, so it reads in accent. */}
+                {!syncing && shareStatus.ahead > 0 && (
+                  <span aria-hidden className="tabular-nums text-[10px] text-ink-faint">
+                    ↑{shareStatus.ahead}
+                  </span>
+                )}
+                {!syncing && shareStatus.behind > 0 && (
+                  <span aria-hidden className="tabular-nums text-[10px] text-accent">
+                    ↓{shareStatus.behind}
+                  </span>
+                )}
               </button>
             </div>
           )}

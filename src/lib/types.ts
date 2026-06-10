@@ -387,6 +387,10 @@ export interface ProjectTask {
    *  Independent of the tasks[] array order so dragging on the board doesn't
    *  scramble the Chats list. Undefined sorts after ordered cards by createdAt. */
   boardOrder?: number
+  /** The pull request opened for this task (completionFlow 'pr'): claude
+   *  records it via POST /api/project/tasks {setPrUrl} when it opens the PR.
+   *  Rendered as a link on the card and in the detail drawer. Shared data. */
+  prUrl?: string
 }
 
 /** Kanban columns for the Board tab. 'todo'=未着手 / 'doing'=実行中 /
@@ -473,6 +477,13 @@ export interface ShareStatus {
   /** `git status --porcelain -- .openground/` is non-empty (always false when
    *  not shared). Drives the dot on the Sync button. */
   dirty: boolean
+  /** Commits touching .openground/ that exist locally but not upstream
+   *  (unpushed syncs). 0 when not shared / no upstream. */
+  ahead: number
+  /** Commits touching .openground/ that exist upstream but not locally —
+   *  a teammate pushed; Sync will pull them. Backed by a throttled
+   *  `git fetch` inside the status call. 0 when not shared / no upstream. */
+  behind: number
 }
 
 /** POST /api/project/share/sync — commit (scoped to .openground/ only) →

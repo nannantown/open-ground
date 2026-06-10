@@ -123,6 +123,8 @@ describe('share routes — contract on a registered git project', () => {
       gitRepo: true,
       remoteUrl: null,
       dirty: true,
+      ahead: 0,
+      behind: 0,
     })
 
     // Sync: commits locally; pull/push have no remote to talk to → soft-skip
@@ -151,6 +153,8 @@ describe('share routes — contract on a registered git project', () => {
       gitRepo: true,
       remoteUrl: null,
       dirty: false,
+      ahead: 0,
+      behind: 0,
     })
   })
 })

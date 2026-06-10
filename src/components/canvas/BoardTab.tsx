@@ -394,11 +394,31 @@ export const BoardTab = ({
                                 {task.notes.trim()}
                               </p>
                             )}
-                            {/* Assignee — small faint text, bottom-right. */}
-                            {!isEditing && task.assignee?.trim() && (
-                              <p className="mt-1 truncate text-right text-[10px] text-ink-faint">
-                                {task.assignee.trim()}
-                              </p>
+                            {/* Footer — PR link (left, when claude opened one)
+                                + assignee (right, small faint text). */}
+                            {!isEditing && (task.prUrl || task.assignee?.trim()) && (
+                              <div className="mt-1 flex items-center justify-between gap-2">
+                                {task.prUrl ? (
+                                  <a
+                                    href={task.prUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    draggable={false}
+                                    onClick={e => e.stopPropagation()}
+                                    title={task.prUrl}
+                                    className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                                  >
+                                    PR ↗
+                                  </a>
+                                ) : (
+                                  <span />
+                                )}
+                                {task.assignee?.trim() && (
+                                  <p className="min-w-0 truncate text-right text-[10px] text-ink-faint">
+                                    {task.assignee.trim()}
+                                  </p>
+                                )}
+                              </div>
                             )}
                           </div>
                         </div>

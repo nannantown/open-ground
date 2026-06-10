@@ -87,15 +87,22 @@ export const buildTaskPrompt = ({ cwd, task, port, worktreesDir, config }: TaskP
     if (isPr && config?.reviewColumn) {
       lines.push(
         '',
-        'Once the PR is open, move the task card to the review column on the app board (the human merges the PR and marks it done):',
-        `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","setColumn":[{"id":"${task.id}","column":"review"}]}'`,
+        'Once the PR is open, record its URL on the task card AND move the card to the review column on the app board (the human merges the PR and marks it done) — substitute the real PR URL:',
+        `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","setPrUrl":[{"id":"${task.id}","url":"<PR-URL>"}],"setColumn":[{"id":"${task.id}","column":"review"}]}'`,
+      )
+    } else if (isPr) {
+      lines.push(
+        '',
+        'Once the PR is open, record its URL on the task card (substitute the real PR URL):',
+        `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","setPrUrl":[{"id":"${task.id}","url":"<PR-URL>"}]}'`,
+      )
+      lines.push(
+        '',
+        `When the task is finished and its PR is open, mark its card done on the app board:`,
+        `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","markDone":["${task.id}"]}'`,
       )
     } else {
-      const when = worktreesDir
-        ? isPr
-          ? ' and its PR is open'
-          : ' and merged'
-        : ''
+      const when = worktreesDir ? ' and merged' : ''
       lines.push(
         '',
         `When the task is finished${when}, mark its card done on the app board:`,

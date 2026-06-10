@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Trash2, X } from 'lucide-react'
 import { BoardTab } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
@@ -63,6 +63,60 @@ export const BoardModule = ({
   // drawer switches cards so a half-typed name never leaks across tasks.
   const [addingAssignee, setAddingAssignee] = useState(false)
   useEffect(() => setAddingAssignee(false), [detailId])
+
+  // ---- Drawer geometry (both user-draggable, both remembered) -------------
+  // The complaint this answers: "the terminal only gets the bottom sliver".
+  // Width: drag the drawer's left edge. Meta/terminal split: drag the divider
+  // between the fields block and the conversation pane — the fields block
+  // scrolls inside its share instead of dictating the terminal's height.
+  const [drawerW, setDrawerW] = useState<number>(() => {
+    const v = Number(localStorage.getItem('og.board.drawerW'))
+    return Number.isFinite(v) && v >= 380 ? v : 560
+  })
+  const [metaH, setMetaH] = useState<number>(() => {
+    // NB: Number(null) is 0 — the >= 96 floor (the drag clamp's own minimum)
+    // doubles as the "nothing stored yet" rejection.
+    const v = Number(localStorage.getItem('og.board.drawerMetaH'))
+    return Number.isFinite(v) && v >= 96 ? v : 224
+  })
+  const splitRef = useRef<HTMLDivElement | null>(null)
+  const clampW = (w: number) => Math.min(Math.max(w, 380), Math.round(window.innerWidth * 0.7))
+  const clampMetaH = (h: number, hostH: number) =>
+    // Keep at least ~180px of terminal and ~96px of fields visible.
+    Math.min(Math.max(h, 96), Math.max(96, hostH - 180))
+  const startWidthDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const onMove = (ev: PointerEvent) => setDrawerW(clampW(window.innerWidth - ev.clientX))
+    const onUp = (ev: PointerEvent) => {
+      localStorage.setItem('og.board.drawerW', String(clampW(window.innerWidth - ev.clientX)))
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+  const startSplitDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const host = splitRef.current
+    if (!host) return
+    const onMove = (ev: PointerEvent) => {
+      const r = host.getBoundingClientRect()
+      setMetaH(clampMetaH(ev.clientY - r.top, r.height))
+    }
+    const onUp = (ev: PointerEvent) => {
+      const r = host.getBoundingClientRect()
+      localStorage.setItem(
+        'og.board.drawerMetaH',
+        String(clampMetaH(ev.clientY - r.top, r.height)),
+      )
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
   const detailTask = detailId ? data.tasks.find(t => t.id === detailId) : null
   const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>
     persist({
@@ -83,6 +137,26 @@ export const BoardModule = ({
       persist({ ...data, tasks: data.tasks.filter(t => t.id !== detailTask.id) })
     onOpenDetail(null)
   }
+  const closeDrawerRef = useRef(closeDrawer)
+  closeDrawerRef.current = closeDrawer
+
+  // Esc with the drawer open: blur a focused field first (cancel the edit),
+  // close the drawer otherwise. Never fires mid-IME composition, and never
+  // reaches here from the assignee input (which stops propagation itself).
+  useEffect(() => {
+    if (!detailId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing) return
+      const el = document.activeElement
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        el.blur()
+        return
+      }
+      closeDrawerRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [detailId])
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -116,7 +190,18 @@ export const BoardModule = ({
         />
       </div>
       {detailTask && (
-        <aside className="flex w-[560px] max-w-[55%] shrink-0 flex-col border-l border-line">
+        <aside
+          className="relative flex shrink-0 flex-col border-l border-line"
+          style={{ width: drawerW, maxWidth: '70%' }}
+        >
+          {/* Left-edge width grip — the whole edge is a 8px hit area. */}
+          <div
+            onPointerDown={startWidthDrag}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('board.detail.resizeWidth')}
+            className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-accent/40 active:bg-accent/50"
+          />
           {/* Header — delete (left) + close (right). The title is a labelled
               field below so it reads the same as the memo. Delete sits here, an
               anchored header action, instead of floating in the conversation
@@ -144,9 +229,13 @@ export const BoardModule = ({
               <X size={15} />
             </button>
           </div>
+          {/* Fields above, conversation below — the split is user-draggable
+              (startSplitDrag) so the terminal is never stuck with a sliver. */}
+          <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
           {/* The two kept fields: the task itself (title) + a free memo that
-              does NOT affect the run. Both labelled, same styling. */}
-          <div className="shrink-0 space-y-3 border-b border-line-soft px-5 py-3">
+              does NOT affect the run. Both labelled, same styling. The block
+              scrolls within its share instead of dictating terminal height. */}
+          <div style={{ height: metaH }} className="shrink-0 space-y-3 overflow-y-auto px-5 py-3">
             <div>
               <label className="mb-1 block label-cap text-ink-faint">{t('board.detail.titleLabel')}</label>
               <input
@@ -182,6 +271,23 @@ export const BoardModule = ({
                 className="w-full resize-y rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
               />
             </div>
+            {/* Pull request — appears once claude records the PR it opened
+                (setPrUrl). Plain link, opens in the browser. */}
+            {detailTask.prUrl && (
+              <div>
+                <label className="mb-1 block label-cap text-ink-faint">
+                  {t('board.detail.prLabel')}
+                </label>
+                <a
+                  href={detailTask.prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-block max-w-full truncate rounded-sm border border-line px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                >
+                  {detailTask.prUrl.replace(/^https?:\/\//, '')} ↗
+                </a>
+              </div>
+            )}
             {/* Assignee — a chip picker, no free-floating input (the old
                 input+chips combo left "what do I do next?" unanswered).
                 Click a chip to assign; click the selected chip to unassign;
@@ -231,6 +337,7 @@ export const BoardModule = ({
                           if (v) persist(withRegisteredAssignee(data, detailTask.id, v))
                           setAddingAssignee(false)
                         } else if (e.key === 'Escape') {
+                          e.stopPropagation() // cancel the add only — keep the drawer open
                           setAddingAssignee(false)
                         }
                       }}
@@ -263,8 +370,27 @@ export const BoardModule = ({
               </div>
             </div>
           </div>
+          {/* Split grip between fields and conversation — 8px hit area
+              centered on the visible divider line. */}
+          <div
+            onPointerDown={startSplitDrag}
+            onDoubleClick={() => {
+              // Toggle: fields at their minimum (terminal maximised) ⇄ default.
+              const next = metaH > 96 ? 96 : 224
+              setMetaH(next)
+              localStorage.setItem('og.board.drawerMetaH', String(next))
+            }}
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label={t('board.detail.resizeSplit')}
+            title={t('board.detail.resizeSplitTitle')}
+            className="group relative z-10 -my-1 h-2 shrink-0 cursor-row-resize"
+          >
+            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-line-soft transition-colors group-hover:h-[3px] group-hover:bg-accent/50 group-active:bg-accent/60" />
+          </div>
           <div className="flex min-h-0 flex-1 flex-col">
             {renderConversation(detailTask, () => onOpenDetail(null))}
+          </div>
           </div>
         </aside>
       )}

@@ -1,0 +1,12 @@
+diff --git a/node_modules/node-pty/binding.gyp b/node_modules/node-pty/binding.gyp
+index 9e8780e..b0c7575 100644
+--- a/node_modules/node-pty/binding.gyp
++++ b/node_modules/node-pty/binding.gyp
+@@ -11,6 +11,7 @@
+         'msvs_settings': {
+           'VCCLCompilerTool': {
+             'AdditionalOptions': [
++              '/std:c++20',
+               '/guard:cf',
+               '/sdl',
+               '/W3',

@@ -110,6 +110,46 @@ const rebaseInProgress = async (projectPath: string): Promise<boolean> => {
   return false
 }
 
+// ── Remote awareness (ahead/behind) ──────────────────────────────────────────
+// "Sync" hides push+pull behind one button, which is right — but without a
+// fetch the user can't KNOW a teammate pushed. shareStatus therefore runs a
+// throttled `git fetch` (at most one per project per FETCH_THROTTLE_MS) and
+// reports commit counts SCOPED TO .openground/ in both directions. Stored on
+// globalThis so tsx-watch reloads don't reset the throttle clock (same idiom
+// as the terminal pool).
+const FETCH_THROTTLE_MS = 60_000
+const FETCH_TIMEOUT_MS = 15_000
+const fetchTimes: Map<string, number> = ((
+  globalThis as unknown as { __openground_share_fetch?: Map<string, number> }
+).__openground_share_fetch ??= new Map())
+
+/** Test-only: forget all fetch timestamps so the next shareStatus re-fetches. */
+export const __resetShareFetchThrottle = (): void => fetchTimes.clear()
+
+const maybeFetch = async (projectPath: string): Promise<void> => {
+  const last = fetchTimes.get(projectPath) ?? 0
+  if (Date.now() - last < FETCH_THROTTLE_MS) return
+  // Stamp BEFORE awaiting so concurrent status calls don't pile up fetches.
+  fetchTimes.set(projectPath, Date.now())
+  try {
+    await git(projectPath, ['fetch', '--quiet'], FETCH_TIMEOUT_MS)
+  } catch {
+    // Offline / no remote / auth — the counts below degrade to 0 on their own.
+  }
+}
+
+/** Commits in `range` that touch `.openground/` — 0 on any error (the
+ *  canonical one: no upstream configured). */
+const sharedCommitCount = async (projectPath: string, range: string): Promise<number> => {
+  try {
+    const { stdout } = await git(projectPath, ['rev-list', '--count', range, '--', SHARED_DIR])
+    const n = Number(stdout.trim())
+    return Number.isFinite(n) ? n : 0
+  } catch {
+    return 0
+  }
+}
+
 /** GET /api/project/share/status — where the project's data lives and whether
  *  the repo copy has unsynced local changes. Every field degrades to its
  *  "no" value on git errors; this endpoint never throws for a valid path. */
@@ -119,7 +159,16 @@ export const shareStatus = async (projectPath: string): Promise<ShareStatus> => 
   const remoteUrl = gitRepo ? await getRemoteUrl(projectPath) : null
   // `dirty` drives the dot on the Sync button — only meaningful when shared.
   const dirty = shared && gitRepo ? await openGroundDirty(projectPath) : false
-  return { shared, gitRepo, remoteUrl, dirty }
+  let ahead = 0
+  let behind = 0
+  if (shared && gitRepo && remoteUrl) {
+    await maybeFetch(projectPath)
+    ;[ahead, behind] = await Promise.all([
+      sharedCommitCount(projectPath, '@{upstream}..HEAD'),
+      sharedCommitCount(projectPath, 'HEAD..@{upstream}'),
+    ])
+  }
+  return { shared, gitRepo, remoteUrl, dirty, ahead, behind }
 }
 
 /** POST /api/project/share/sync — commit (scoped to `.openground/` only) →
@@ -172,6 +221,9 @@ export const shareSync = async (projectPath: string): Promise<ShareSyncResult> =
   try {
     await git(projectPath, ['pull', '--rebase', '--autostash'], NETWORK_TIMEOUT_MS)
     pulled = true
+    // The pull fetched — push the throttle window out so the status call that
+    // follows a Sync doesn't immediately re-fetch.
+    fetchTimes.set(projectPath, Date.now())
   } catch (e) {
     const text = gitErrorText(e)
     if ((await rebaseInProgress(projectPath)) || /conflict/i.test(text)) {

@@ -147,7 +147,9 @@ const normalizeCard = (t: ProjectTask): ProjectTask => ({
   done: t.done,
   createdAt: t.createdAt,
   ...(t.boardColumn !== undefined ? { boardColumn: t.boardColumn } : {}),
+  ...(t.assignee !== undefined ? { assignee: t.assignee } : {}),
   ...(t.boardOrder !== undefined ? { boardOrder: t.boardOrder } : {}),
+  ...(t.prUrl !== undefined ? { prUrl: t.prUrl } : {}),
 })
 
 const serializeCard = (t: ProjectTask): string => JSON.stringify(normalizeCard(t), null, 2)

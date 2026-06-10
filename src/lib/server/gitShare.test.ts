@@ -4,7 +4,7 @@ import { promisify } from 'util'
 import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { shareStatus, shareSync, enablePreconditions } from './gitShare'
+import { shareStatus, shareSync, enablePreconditions, __resetShareFetchThrottle } from './gitShare'
 import {
   writeSharedMarker,
   isShared,
@@ -97,6 +97,8 @@ describe('shareStatus', () => {
       gitRepo: false,
       remoteUrl: null,
       dirty: false,
+      ahead: 0,
+      behind: 0,
     })
   })
 
@@ -107,6 +109,8 @@ describe('shareStatus', () => {
       gitRepo: true,
       remoteUrl: null,
       dirty: false,
+      ahead: 0,
+      behind: 0,
     })
   })
 
@@ -126,12 +130,50 @@ describe('shareStatus', () => {
       gitRepo: true,
       remoteUrl: remote,
       dirty: true, // the marker is uncommitted
+      ahead: 0,
+      behind: 0,
     })
 
     const sync = await shareSync(userA)
     expect(sync.ok).toBe(true)
     expect(sync.committed).toBe(true)
     expect((await shareStatus(userA)).dirty).toBe(false)
+  })
+
+  it('ahead/behind count .openground/ commits in each direction (fetch-backed)', async () => {
+    const { userA, userB } = await makePair()
+    await enableShared(userA)
+    expect((await shareSync(userA)).pushed).toBe(true)
+
+    // B pulls A's share, adds a card, pushes. A also commits a card locally
+    // WITHOUT pushing → A is simultaneously 1 ahead and 1 behind.
+    await git(userB, ['pull'])
+    await mkdir(join(userB, '.openground', 'board', 'cards'), { recursive: true })
+    await writeFile(
+      join(userB, '.openground', 'board', 'cards', 'b1.json'),
+      '{"id":"b1","title":"from B","done":false,"createdAt":""}\n',
+    )
+    expect((await shareSync(userB)).pushed).toBe(true)
+
+    await mkdir(join(userA, '.openground', 'board', 'cards'), { recursive: true })
+    await writeFile(
+      join(userA, '.openground', 'board', 'cards', 'a1.json'),
+      '{"id":"a1","title":"from A","done":false,"createdAt":""}\n',
+    )
+    await git(userA, ['add', '-A', '--', '.openground'])
+    await git(userA, ['commit', '-m', 'openground: local card', '--', '.openground'])
+
+    __resetShareFetchThrottle() // A's earlier sync stamped the throttle window
+    const s = await shareStatus(userA)
+    expect(s.ahead).toBe(1)
+    expect(s.behind).toBe(1)
+
+    // A commit that does NOT touch .openground/ must not count.
+    await writeFile(join(userA, 'code.ts'), 'export {}\n')
+    await git(userA, ['add', 'code.ts'])
+    await git(userA, ['commit', '-m', 'code change'])
+    __resetShareFetchThrottle()
+    expect((await shareStatus(userA)).ahead).toBe(1)
   })
 })
 

@@ -64,6 +64,8 @@ export const fetchShareStatus = async (
       gitRepo: body.gitRepo === true,
       remoteUrl: typeof body.remoteUrl === 'string' ? body.remoteUrl : null,
       dirty: body.dirty === true,
+      ahead: typeof body.ahead === 'number' ? body.ahead : 0,
+      behind: typeof body.behind === 'number' ? body.behind : 0,
     }
   } catch {
     return null

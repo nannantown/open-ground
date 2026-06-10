@@ -104,15 +104,18 @@ describe('buildTaskPrompt', () => {
       config: { completionFlow: 'pr', targetBranch: 'main', reviewColumn: true },
     })
     expect(p).toContain(
-      `curl -s -X POST http://127.0.0.1:47776/api/project/tasks -H 'content-type: application/json' -d '{"path":"/Users/me/projects/app","setColumn":[{"id":"card-1","column":"review"}]}'`,
+      `curl -s -X POST http://127.0.0.1:47776/api/project/tasks -H 'content-type: application/json' -d '{"path":"/Users/me/projects/app","setPrUrl":[{"id":"card-1","url":"<PR-URL>"}],"setColumn":[{"id":"card-1","column":"review"}]}'`,
     )
     expect(p).not.toContain('markDone')
   })
 
-  it('pr flow with reviewColumn off: still markDone (after the PR is open)', () => {
+  it('pr flow with reviewColumn off: records the PR URL, then markDone (after the PR is open)', () => {
     const p = buildTaskPrompt({ ...base, worktreesDir: WT, config: { completionFlow: 'pr' } })
     expect(p).toContain('finished and its PR is open')
     expect(p).toContain('markDone')
+    expect(p).toContain(
+      `curl -s -X POST http://127.0.0.1:47776/api/project/tasks -H 'content-type: application/json' -d '{"path":"/Users/me/projects/app","setPrUrl":[{"id":"card-1","url":"<PR-URL>"}]}'`,
+    )
     expect(p).not.toContain('setColumn')
   })
 

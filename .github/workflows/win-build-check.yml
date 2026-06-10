@@ -1,0 +1,44 @@
+# Windows compile check — proves the node-pty native addon builds on
+# windows-latest WITHOUT publishing anything. Run via workflow_dispatch before
+# tagging a release (the release workflow's Windows leg publishes on success,
+# so a broken native build is better caught here first).
+#
+# Why this exists: node-pty 1.2.0-beta.13 uses std::erase_if (C++20) in
+# conpty.cc, but Electron 31 gyp headers compile with /std:c++17 on MSVC.
+# patches/node-pty+1.2.0-beta.13.patch appends /std:c++20 (last /std: wins);
+# this workflow is the regression net for that patch.
+
+name: win-build-check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/win-build-check"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Python (node-gyp needs distutils)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (postinstall applies node-pty patch + rebuilds)
+        run: npm ci
+
+      - name: Build (web + server)
+        run: npm run build
+
+      - name: Package (no publish)
+        run: npx electron-builder --win --publish never

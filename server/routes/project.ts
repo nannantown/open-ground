@@ -98,6 +98,9 @@ interface TasksBody {
   /** Move cards between board columns (e.g. a task claude finished a PR for
    *  moves to 'review'). Marking 'done' via here also sets done:true. */
   setColumn?: { id: string; column: BoardColumn }[]
+  /** Record the pull request opened for a task — claude calls this when its
+   *  `gh pr create` succeeds. http(s) URLs only; anything else is ignored. */
+  setPrUrl?: { id: string; url: string }[]
 }
 
 const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'review', 'done', 'blocked']
@@ -356,6 +359,13 @@ export const projectRoutes = new Hono()
     data.tasks = data.tasks.map((t) =>
       ids.has(t.id) ? { ...t, done: true, boardColumn: 'done' as BoardColumn } : t,
     )
+  }
+
+  for (const pr of body.setPrUrl ?? []) {
+    if (!pr || typeof pr.id !== 'string' || typeof pr.url !== 'string') continue
+    const url = pr.url.trim()
+    if (!/^https?:\/\//i.test(url) || url.length > 500) continue
+    data.tasks = data.tasks.map((t) => (t.id === pr.id ? { ...t, prUrl: url } : t))
   }
 
   for (const mv of body.setColumn ?? []) {

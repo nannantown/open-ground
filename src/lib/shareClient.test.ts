@@ -85,6 +85,9 @@ describe('fetchShareStatus', () => {
       gitRepo: true,
       remoteUrl: 'git@github.com:o/r.git',
       dirty: true,
+      // ahead/behind absent in the body (older server) → default 0.
+      ahead: 0,
+      behind: 0,
     })
   })
 

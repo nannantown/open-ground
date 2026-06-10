@@ -32,6 +32,10 @@ export const board = {
     'board.detail.assigneeAddConfirm': 'Add',
     'board.detail.assigneeAssign': 'Assign to {name}',
     'board.detail.assigneeUnassign': 'Click to unassign',
+    'board.detail.resizeWidth': 'Drag to resize the panel width',
+    'board.detail.resizeSplit': 'Drag to resize the terminal height',
+    'board.detail.resizeSplitTitle': 'Drag to resize · double-click to maximize the terminal',
+    'board.detail.prLabel': 'Pull request',
     // Task terminal (drawer launch CTA)
     'board.taskTerminal.hint':
       'Launch claude for this task. The title AND the content are passed as the first prompt; in a git project claude works on its own task branch in its own worktree, so several tasks can run in parallel. Respond and approve permission prompts in this terminal. It also appears in the Terminal tab, labelled with the title.',
@@ -67,6 +71,10 @@ export const board = {
     'board.detail.assigneeAddConfirm': '追加',
     'board.detail.assigneeAssign': '{name} に割り当て',
     'board.detail.assigneeUnassign': 'クリックで解除',
+    'board.detail.resizeWidth': 'ドラッグでパネル幅を変更',
+    'board.detail.resizeSplit': 'ドラッグでターミナルの高さを変更',
+    'board.detail.resizeSplitTitle': 'ドラッグでサイズ変更 · ダブルクリックでターミナル最大化',
+    'board.detail.prLabel': 'プルリクエスト',
     // Task terminal (drawer launch CTA)
     'board.taskTerminal.hint':
       'このタスクで claude を起動します。タイトルと内容が最初のプロンプトとして渡され、git プロジェクトでは claude がタスク専用のブランチ＋worktree で作業するため、複数タスクを並列に実行できます。応答や権限確認はこのターミナルで操作します。Terminal タブにもタイトル付きで並びます。',

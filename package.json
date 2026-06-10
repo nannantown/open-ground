@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -18,11 +18,11 @@
     "test:e2e": "playwright test",
     "electron:dev": "concurrently -k \"PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts\" \"vite\" \"wait-on http://127.0.0.1:47776/api/health http://127.0.0.1:5174 && OPENGROUND_ELECTRON_MODE=dev electron electron/main.js\"",
     "electron:prod": "npm run build && OPENGROUND_ELECTRON_MODE=prod electron electron/main.js",
-    "dist": "npm run build && electron-builder --mac --arm64",
+    "dist": "npm run build && electron-builder --mac --arm64 --x64",
     "dist:local": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --config.mac.notarize=false --config.mac.identity=null",
     "dist:win": "npm run build && electron-builder --win",
     "deploy:landing": "rm -rf /tmp/og-landing-deploy && cp -R landing /tmp/og-landing-deploy && cd /tmp/og-landing-deploy && npx wrangler pages deploy . --project-name=open-ground",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "patch-package && electron-builder install-app-deps"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.4",
@@ -59,6 +59,7 @@
     "eslint-plugin-react-hooks": "^5.1.0",
     "fast-check": "^4.8.0",
     "jsdom": "^29.1.1",
+    "patch-package": "^8.0.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "tsx": "^4.22.3",
@@ -91,9 +92,20 @@
       "target": [
         {
           "target": "dmg",
-          "arch": "arm64"
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
       "hardenedRuntime": true,
