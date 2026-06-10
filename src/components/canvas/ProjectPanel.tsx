@@ -1791,7 +1791,7 @@ const ShareConfirm = ({
   const { t } = useT()
   const k = mode === 'enable' ? 'share' : 'unshare'
   return (
-    <div className="absolute inset-0 z-20 flex flex-col justify-center gap-5 bg-bg-card px-6">
+    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col justify-center gap-5 bg-bg-card px-6">
       <div className="mx-auto w-full max-w-[420px]">
         <p className="label-cap text-accent mb-2">
           {t(`projectPanel.${k}DialogLabel`)}
@@ -1900,7 +1900,7 @@ const ProjectSettingsDialog = ({
   ]
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col justify-center gap-5 overflow-y-auto bg-bg-card px-6 py-8">
+    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col justify-center gap-5 overflow-y-auto bg-bg-card px-6 py-8">
       <div className="mx-auto my-auto w-full max-w-[440px]">
         <p className="label-cap text-accent mb-2">
           {t('projectPanel.settingsDialogLabel')}

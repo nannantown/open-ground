@@ -94,6 +94,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
 
   return (
     <div
+      data-esc-overlay
       className="fixed inset-0 z-50 flex items-start justify-center bg-ink/30 backdrop-blur-sm pt-[14vh]"
       onClick={onClose}
     >

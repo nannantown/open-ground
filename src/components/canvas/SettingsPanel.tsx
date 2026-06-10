@@ -117,6 +117,10 @@ export const SettingsPanel = ({
       <div
         aria-hidden={!open}
         onClick={onClose}
+        // Stays mounted (opacity transition) - the esc-overlay tag must only
+        // exist while actually open, or it would permanently swallow the
+        // Board drawer's Escape.
+        {...(open ? { 'data-esc-overlay': '' } : {})}
         className={[
           'fixed inset-0 z-50 bg-ink/30 backdrop-blur-sm transition-opacity duration-200 ease-out',
           open ? 'opacity-100' : 'opacity-0 pointer-events-none',

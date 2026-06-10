@@ -163,21 +163,51 @@ export const BoardModule = ({
   // the assignee input (which stops propagation itself), and NEVER touches the
   // claude terminal: Esc is claude CLI's interrupt key, and xterm focuses a
   // hidden helper textarea — blurring it would silently eat the next keystrokes.
+  // Layered Escape, two scopes:
+  //
+  // (a) Field cancel — a React onKeyDown ON THE DRAWER ITSELF (see the aside's
+  //     handler below): Esc in a drawer field reverts it to its saved value
+  //     and blurs, stopPropagation keeps both this window listener and App's
+  //     out of it. Element-level Escape handlers inside the drawer (the
+  //     assignee add-input) run first in the bubble and stop propagation, so
+  //     they keep their own semantics. xterm is exempt everywhere — Esc is
+  //     claude's interrupt key.
+  //
+  // (b) Drawer close — a window CAPTURE listener for the nothing-focused
+  //     case only. Capture because App.tsx's bubble-phase window Escape
+  //     (clear selection → back to Ground) registered first and would
+  //     otherwise close the whole panel on the same press. It YIELDS to any
+  //     open overlay ([data-esc-overlay]: ⌘K palette, feedback/account
+  //     modals, panel dialogs) — Esc must serve the topmost layer, and a
+  //     focused field belongs to scope (a) / the field's own handler.
+  const onDrawerFieldEscape = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Escape' || e.nativeEvent.isComposing) return
+    const el = e.target
+    if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return
+    if (el.closest('.xterm')) return
+    e.stopPropagation()
+    el.value = el.defaultValue // uncontrolled fields: defaultValue = saved value
+    el.blur()
+  }
   useEffect(() => {
     if (!detailId) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.isComposing) return
       const el = document.activeElement
-      if (el instanceof HTMLElement && el.closest('.xterm')) return
-      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        el.value = el.defaultValue // uncontrolled fields: defaultValue = saved value
-        el.blur()
+      // A focused field/terminal handles its own Escape (scope (a) / xterm).
+      if (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        (el instanceof HTMLElement && el.closest('.xterm'))
+      )
         return
-      }
+      // An open overlay outranks the drawer — let it have the key.
+      if (document.querySelector('[data-esc-overlay]')) return
+      e.stopPropagation()
       closeDrawerRef.current()
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [detailId])
 
   return (
@@ -215,6 +245,7 @@ export const BoardModule = ({
         <aside
           className="relative flex shrink-0 flex-col border-l border-line"
           style={{ width: drawerW, maxWidth: '70%' }}
+          onKeyDown={onDrawerFieldEscape}
         >
           {/* Left-edge width grip — the whole edge is a 8px hit area. */}
           <div

@@ -467,7 +467,15 @@ export const BoardTab = ({
                     <div
                       key={key}
                       style={{ height: Math.max(dragHeight, 36) }}
-                      onDragOver={e => e.preventDefault()}
+                      onDragOver={e => {
+                        e.preventDefault()
+                        // The cursor sitting ON the placeholder means the slot
+                        // is already right — stop the event here, or it bubbles
+                        // to the column handler which re-parks the slot at the
+                        // END of the list (visible as the placeholder jumping
+                        // away from under the cursor).
+                        e.stopPropagation()
+                      }}
                       onDrop={e => {
                         e.preventDefault()
                         e.stopPropagation()

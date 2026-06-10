@@ -61,9 +61,15 @@ repo" rule in CLAUDE.md gets this one user-consented exception.
 ## API contracts (pinned — do not drift)
 
 - `GET /api/project/share/status?path=` → `ShareStatus`
-  `{ shared, gitRepo, remoteUrl: string|null, dirty }`
+  `{ shared, gitRepo, remoteUrl: string|null, dirty, ahead, behind }`
   (`dirty` = `git status --porcelain -- .openground/` non-empty; false when
-  not shared. `gitRepo` via `git rev-parse --is-inside-work-tree`.)
+  not shared. `gitRepo` via `git rev-parse --is-inside-work-tree`.
+  `ahead`/`behind` (added 2026-06-11) = commits touching `.openground/` in
+  `@{upstream}..HEAD` / `HEAD..@{upstream}` — 0 when not shared / no
+  upstream. Backed by a per-project throttled `git fetch` (60s window,
+  globalThis-stamped) that gets a ≤2.5s grace inside the status call; a
+  slower fetch lands in the background and the next poll reads it. UI:
+  ↑n/↓n badges on the Sync button + a 90s visible-window status poll.)
 - `POST /api/project/share/enable` `{path}` → `{ok:true}` | `{error}`
   (412-style errors: not a git repo / already shared / `.openground` is
   git-ignored — checked with `git check-ignore`.)

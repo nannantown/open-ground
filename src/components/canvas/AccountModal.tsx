@@ -48,6 +48,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
 
   return (
     <div
+      data-esc-overlay
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
       onClick={onClose}
     >

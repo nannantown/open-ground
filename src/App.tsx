@@ -434,6 +434,17 @@ export default function App() {
 
       if (k === 'escape') {
         if (typing || editingId) return
+        // An overlay owns this Escape. Two signals, both needed:
+        // - defaultPrevented: the ⌘K palette / feedback / new-project modals
+        //   preventDefault when they close themselves — and they UNMOUNT
+        //   before this bubble listener runs, so a DOM check can't see them.
+        // - [data-esc-overlay] in the DOM: overlays that DON'T self-close on
+        //   Esc (panel dialogs, settings) or close later (AccountModal's own
+        //   window listener registered after this one) are still mounted.
+        // Without these, clearing the selection also closes the project
+        // panel beneath the overlay.
+        if (e.defaultPrevented) return
+        if (document.querySelector('[data-esc-overlay]')) return
         setSelectedIds([])
         return
       }
