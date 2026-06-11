@@ -29,7 +29,12 @@ import { collectClaudeUsage } from '@/lib/server/claudeUsage'
 import { fetchClaudeUsageCli, invalidateUsageCache } from '@/lib/server/claudeUsageCli'
 import { probeClaudeCli } from '@/lib/server/claudeCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
-import type { ProjectsResponse, SettingsResponse } from '@/lib/types'
+import type {
+  ProjectsResponse,
+  ReleaseNote,
+  ReleaseNotesResponse,
+  SettingsResponse,
+} from '@/lib/types'
 import { validateName } from './_shared'
 
 const execFile = promisify(execFileCb)
@@ -79,6 +84,16 @@ interface GhRelease {
   body: string
   draft: boolean
   prerelease: boolean
+}
+
+// --- /api/release-notes cache -------------------------------------------------
+// The releases list changes ~once a day at most; cache it for 10 minutes so
+// reopening Settings never burns the unauthenticated GitHub quota (60/h/IP).
+// globalThis so the cache survives tsx-watch reloads in dev (same pattern as
+// the terminal pool).
+const RELEASE_NOTES_TTL_MS = 10 * 60_000
+const gNotes = globalThis as typeof globalThis & {
+  __openground_release_notes?: { at: number; releases: ReleaseNote[] }
 }
 
 
@@ -325,6 +340,50 @@ export const miscRoutes = new Hono()
       notes,
       ...(err ? { error: err } : {}),
     })
+  })
+  // --- GET /api/release-notes -------------------------------------------------
+  // Published (non-draft) releases of the distribution repo, newest first —
+  // the Settings drawer's "Release notes" section. Bodies are the bilingual
+  // markdown notes written at publish time (docs/DISTRIBUTION.md §0).
+  .get('/api/release-notes', async (c) => {
+    const current = await readCurrentVersion()
+    const cached = gNotes.__openground_release_notes
+    if (cached && Date.now() - cached.at < RELEASE_NOTES_TTL_MS) {
+      const body: ReleaseNotesResponse = { current, releases: cached.releases }
+      return c.json(body)
+    }
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${RELEASES_REPO}/releases?per_page=30`,
+        {
+          headers: { Accept: 'application/vnd.github+json' },
+          signal: AbortSignal.timeout(5000),
+        },
+      )
+      if (!res.ok) throw new Error(`github responded ${res.status}`)
+      const rels = (await res.json()) as GhRelease[]
+      const releases: ReleaseNote[] = rels
+        .filter((r) => !r.draft && !r.prerelease && r.tag_name)
+        .map((r) => ({
+          version: stripV(r.tag_name),
+          url: r.html_url,
+          publishedAt: r.published_at,
+          body: r.body ?? '',
+        }))
+      gNotes.__openground_release_notes = { at: Date.now(), releases }
+      const body: ReleaseNotesResponse = { current, releases }
+      return c.json(body)
+    } catch (e) {
+      // Stale cache beats an empty panel; a true first-fetch failure surfaces
+      // as an error the section renders inline.
+      const releases = cached?.releases ?? []
+      const body: ReleaseNotesResponse = {
+        current,
+        releases,
+        error: e instanceof Error ? e.message : String(e),
+      }
+      return c.json(body)
+    }
   })
   // --- POST /api/pick-folder ------------------------------------------------
   .post('/api/pick-folder', async (c) => {

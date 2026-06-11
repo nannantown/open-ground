@@ -37,6 +37,17 @@ git tag v0.2.0
 git push origin v0.2.0     # pushing the tag is what fires release.yml
 ```
 
+electron-builder creates the Release as a **DRAFT** — nothing is public (and
+neither the landing download redirect nor electron-updater sees it) until you
+publish. Once both CI jobs are green, write the release notes (bilingual,
+`### English` + `### 日本語` sections — the in-app update banner and the
+landing footer's "Release notes" link both surface them) and publish:
+
+```bash
+gh release edit vX.Y.Z --repo nannantown/open-ground \
+  --notes-file notes.md --draft=false --latest
+```
+
 That's it — no local signing, no Wine, no Windows hardware needed to *build*.
 electron-builder's `--publish` uploads each runner's artifact to the Release
 named after the tag. Both `latest-mac.yml` (macOS) and `latest.yml` (Windows)

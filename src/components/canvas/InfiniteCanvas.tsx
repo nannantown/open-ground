@@ -38,13 +38,9 @@ import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   projects: ProjectMeta[]
-  /** Ground-only: ids of projects with at least one live PTY — shows the
-   *  pulsing "Terminal" beacon on their cards. The per-project Canvas tab
-   *  renders no project cards, so it leaves this undefined. */
-  terminalActiveIds?: ReadonlySet<string>
-  /** Ground-only: per-project claude beacon refinement ('working'/'waiting').
-   *  A project with a live PTY but no entry here only hosts plain shells, so
-   *  its card shows the legacy 'Terminal' beacon. */
+  /** Ground-only: per-project claude beacon ('working'/'waiting'). A project
+   *  with no entry shows no beacon (plain shells don't count). The per-project
+   *  Canvas tab renders no project cards, so it leaves this undefined. */
   claudeStatuses?: ReadonlyMap<string, ClaudeBeaconStatus>
   canvas: CanvasState
   onCanvasChange: (c: CanvasState) => void
@@ -227,7 +223,6 @@ type Press =
 // frames, all freely positioned. The active tool decides what a press does.
 export const InfiniteCanvas = ({
   projects,
-  terminalActiveIds,
   claudeStatuses,
   canvas,
   onCanvasChange,
@@ -2110,7 +2105,6 @@ export const InfiniteCanvas = ({
                 project={p}
                 onPointerDown={onCardPointerDown(p)}
                 selected={selectedIds.includes(p.id)}
-                terminalActive={terminalActiveIds?.has(p.id) ?? false}
                 claudeStatus={claudeStatuses?.get(p.id)}
               />
             </div>

@@ -21,6 +21,7 @@ export const board = {
       'Add an "In review" column for PR-waiting cards — shared with everyone on this board.',
     'board.toolbar.reviewColumnHideHint':
       'Hide the review column — cards parked there fold into In progress until it returns.',
+    'board.toolbar.projectSettings': 'Settings',
     // Card
     'board.card.untitled': 'Untitled',
     'board.card.untitledParen': '(Untitled)',
@@ -89,6 +90,7 @@ export const board = {
       'PR レビュー待ちカード用の「レビュー待ち」列を追加します — このボードの全員に共有されます。',
     'board.toolbar.reviewColumnHideHint':
       'レビュー列を隠します — 置かれていたカードは再表示まで「実行中」に畳まれます。',
+    'board.toolbar.projectSettings': '設定',
     // Card
     'board.card.untitled': '無題',
     'board.card.untitledParen': '（無題）',

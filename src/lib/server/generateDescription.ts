@@ -1,38 +1,56 @@
-// generateProjectDescription — auto-write a project's one-liner description by
-// briefly running the user's local `claude` CLI in the project and scraping a
-// final `OPENGROUND_DESC:` marker out of the session transcript.
+// generateProjectDescription — auto-write a project's one-liner description
+// (English + Japanese, one run) by briefly running the user's local `claude`
+// CLI (haiku) in the project and scraping language-tagged marker pairs out of
+// the PTY OUTPUT STREAM. Same pattern as generateTaskTitle.ts — read its top
+// comment for the full rationale.
 //
 // SUBSCRIPTION-ONLY (read claudeTerminal.ts top comment): claude MUST run
 // inside a real PTY so it bills the user's Claude subscription pool, NOT the
-// programmatic credit pool. We therefore reuse launchClaude() (which runs
-// `claude "<prompt>"` interactively in a node-pty, never `claude -p`). Plain
-// `claude -p` / execFile('claude', ...) for generation is FORBIDDEN here.
+// programmatic credit pool. `claude -p` / execFile('claude', ...) is FORBIDDEN
+// here.
 //
-// COMPLETION = the marker, NOT PTY exit. Interactive claude does NOT quit after
-// answering — it sits at the prompt waiting for the next turn, so the launch
-// command's trailing `; exit` never fires on its own (waiting for it just hits
-// the timeout). We therefore POLL the session JSONL for the final
-// `OPENGROUND_DESC:` line and tear the PTY down the moment we have it. This is
-// a one-off side session — it never surfaces in the UI as a terminal.
+// WHY THE PTY STREAM, NOT THE SESSION JSONL: claude ≥2.1.169 no longer writes
+// the per-session transcript for these one-off sessions — the old JSONL-polling
+// version of this module always timed out with "could not extract". Completion
+// = BOTH marker pairs appearing in the raw output:
+//   `OPENGROUND_DESC_EN: <text> ::OG_DESC_END::`
+//   `OPENGROUND_DESC_JA: <text> ::OG_DESC_END::`
+// The end token bounds each description against TUI repaint junk AND lets a
+// PTY line-wrap inside the text be collapsed back to spaces. Candidates
+// containing '<' are rejected so the prompt's own echoed placeholder can never
+// match. The PTY is torn down the moment both pairs land.
+//
+// Model is pinned to haiku: description-writing is light summarization over a
+// quick read-only skim — the cheap model returns in seconds where the default
+// took the better part of a minute.
 
 import { newId } from '@/lib/ids'
 import { launchClaude } from './claudeTerminal'
 import { killTerminal, subscribeTerminal } from './terminal'
-import { readTranscript } from './transcript'
 
-// Language-tagged markers — the description is generated in BOTH languages in
-// one run and stored side by side; the UI then shows the one matching the
-// user's language setting. The legacy single marker is still parsed as a
-// fallback (old transcripts / a model that ignores the dual format).
-export const DESC_MARKER = 'OPENGROUND_DESC:'
 export const DESC_MARKER_EN = 'OPENGROUND_DESC_EN:'
 export const DESC_MARKER_JA = 'OPENGROUND_DESC_JA:'
+export const DESC_END = '::OG_DESC_END::'
+
+// One short sentence by contract (the UI shows it on a single truncating
+// line) — anything longer is a model that ignored the limit; cap it.
+export const MAX_DESC_LEN = 200
+
+// The scrape buffer keeps only the tail — the markers are always near the
+// end, and an unbounded buffer would grow with every TUI repaint.
+const MAX_BUFFER = 64_000
+
+const DEFAULT_TIMEOUT_MS = 120_000
+const POLL_MS = 500
+
+// Cheap + fast for a one-line summary (same deliberate pin as TITLE_MODEL).
+const DESCRIBE_MODEL = 'haiku'
 
 // Read-only exploration prompt. Strict: no edits, no file writes, never touch
 // .openground/, and end with exactly two marker lines (English + Japanese).
 // One universal prompt — both languages are always produced regardless of the
 // UI language, so switching the setting later needs no regeneration.
-export const buildDescribePrompt = async (): Promise<string> =>
+export const buildDescribePrompt = (): string =>
   [
     'Generate a one-line description of what this project is, in BOTH English and Japanese.',
     '',
@@ -43,83 +61,53 @@ export const buildDescribePrompt = async (): Promise<string> =>
     '',
     'Output:',
     '- At the very end, output exactly these two lines (in this order), and nothing after them:',
-    `${DESC_MARKER_EN} <1-2 sentences in English, concisely describing what the project is>`,
-    `${DESC_MARKER_JA} <日本語で1〜2文、プロジェクトが何かを簡潔に>`,
-    '- Put only the description text after each marker; no JSON, no quotes.',
-    '- Keep each description short (at most 2 sentences).',
+    `${DESC_MARKER_EN} <ONE short sentence in English — what the project is> ${DESC_END}`,
+    `${DESC_MARKER_JA} <日本語で短い1文 — プロジェクトが何か> ${DESC_END}`,
+    '- Put only the description text between the marker and the end token; no JSON, no quotes.',
+    '- HARD LIMIT: one sentence, max ~80 characters English / 40字 Japanese. It is',
+    '  shown on a single truncating UI line — front-load the essence.',
   ].join('\n')
 
-// Strip ANSI escape sequences and stray control chars that can leak into a
-// transcript line (the JSONL text is usually clean, but be defensive).
+// Strip ANSI escapes / control chars from the raw PTY stream. The TUI doesn't
+// just style text — it POSITIONS it: word gaps frequently arrive as cursor
+// moves (CSI n C, CUP, …) instead of literal spaces, so deleting every CSI
+// fuses words ("ClaudeCodemissioncontrol", observed live). Split the strip:
+// SGR (style, CSI…m) deletes silently — it can sit mid-word — while every
+// OTHER CSI is a positioning/erase op and becomes a space (the later \s+
+// collapse de-dupes). OSC titles (]0;…BEL) are handled separately.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
+const SGR_RE = /\x1b\[[0-9;]*m/g
+// eslint-disable-next-line no-control-regex
+const CSI_OTHER_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
+// eslint-disable-next-line no-control-regex
+const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
 // eslint-disable-next-line no-control-regex
 const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
-const stripNoise = (s: string): string =>
-  s.replace(ANSI_RE, '').replace(CTRL_RE, '').trim()
 
-const MAX_DESC_LEN = 300
-
-// Marker-only: the LAST `<marker>` line's trailing text, or null. NO fallback —
-// used while polling a still-running session so we never grab claude's
-// mid-exploration prose before it prints the final marker lines. NOTE the
-// language-tagged markers do NOT contain the legacy `OPENGROUND_DESC:` as a
-// substring (underscore vs colon), so each lookup is unambiguous.
-export const extractMarker = (
-  transcript: string,
-  marker: string = DESC_MARKER,
-): string | null => {
-  const lines = transcript.replace(ANSI_RE, '').split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const idx = lines[i].indexOf(marker)
-    if (idx >= 0) {
-      const after = stripNoise(lines[i].slice(idx + marker.length))
-      if (after) return after.slice(0, MAX_DESC_LEN)
+/** The LAST `<marker> … ::OG_DESC_END::` pair in the raw PTY output, cleaned
+ *  and capped, or null. Marker-pair-only — no prose fallback (a wrong
+ *  description is worse than none), and any candidate containing '<' is
+ *  rejected: that's the prompt's own echoed placeholder, not a model answer.
+ *  Exported for unit tests. */
+export const extractDescMarker = (raw: string, marker: string): string | null => {
+  const text = raw.replace(OSC_RE, '').replace(SGR_RE, '').replace(CSI_OTHER_RE, ' ')
+  let from = text.length
+  for (;;) {
+    const start = text.lastIndexOf(marker, from - 1)
+    if (start < 0) return null
+    const end = text.indexOf(DESC_END, start + marker.length)
+    if (end >= 0) {
+      const candidate = text
+        .slice(start + marker.length, end)
+        .replace(CTRL_RE, ' ')
+        // A PTY line wrap can split the sentence — collapse all whitespace
+        // runs (incl. the injected newline) back to one space.
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (candidate && !candidate.includes('<')) return candidate.slice(0, MAX_DESC_LEN)
     }
-  }
-  return null
-}
-
-/** Both language markers (null where absent). */
-export const extractMarkerPair = (
-  transcript: string,
-): { en: string | null; ja: string | null } => ({
-  en: extractMarker(transcript, DESC_MARKER_EN),
-  ja: extractMarker(transcript, DESC_MARKER_JA),
-})
-
-// Pull the description out of a finished transcript. Marker line wins; falls
-// back to the last non-empty assistant line (capped). Returns null when nothing
-// usable is present. Exported for unit testing.
-export const extractDescription = (transcript: string): string | null => {
-  const marker = extractMarker(transcript)
-  if (marker) return marker
-  // Fallback — last non-empty line, skipping any bare/empty marker token.
-  const lines = transcript.replace(ANSI_RE, '').split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].includes(DESC_MARKER)) continue
-    const t = stripNoise(lines[i])
-    if (t) return t.slice(0, MAX_DESC_LEN)
-  }
-  return null
-}
-
-const DEFAULT_TIMEOUT_MS = 120_000
-const POLL_MS = 1_500
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
-
-// Read the session transcript text; '' if it isn't readable yet (the JSONL may
-// not exist on the first poll, or a partial trailing line fails to parse).
-const readTranscriptText = async (cwd: string, sessionId: string): Promise<string> => {
-  try {
-    const page = await readTranscript(cwd, sessionId, 0, 5000)
-    return page.lines
-      .map((l) => l.text ?? '')
-      .filter((t) => t.length > 0)
-      .join('\n')
-  } catch {
-    return ''
+    from = start
+    if (from <= 0) return null
   }
 }
 
@@ -128,35 +116,42 @@ export interface GeneratedDescriptions {
   ja: string | null
 }
 
+/** Both language markers out of the raw PTY buffer (null where absent). */
+export const extractMarkerPair = (raw: string): GeneratedDescriptions => ({
+  en: extractDescMarker(raw, DESC_MARKER_EN),
+  ja: extractDescMarker(raw, DESC_MARKER_JA),
+})
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
 export const generateProjectDescription = async (
   projectPath: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<GeneratedDescriptions> => {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  // Fresh UUID — the resulting JSONL is named after it so we can read the
-  // transcript back deterministically.
-  const agentSessionId = newId()
 
-  // bypass (= --dangerously-skip-permissions): no human is at the TTY to approve
-  // tool use, and the prompt forbids any mutation, so read-only exploration runs
-  // unattended.
+  // bypass (= --dangerously-skip-permissions): no human is at the TTY to
+  // approve tool use, and the prompt forbids any mutation, so the read-only
+  // exploration runs unattended.
   const ref = launchClaude({
     cwd: projectPath,
-    agentSessionId,
-    initialPrompt: await buildDescribePrompt(),
+    agentSessionId: newId(),
+    initialPrompt: buildDescribePrompt(),
     permissionMode: 'bypass',
+    model: DESCRIBE_MODEL,
     name: 'describe',
     // Marker-scraped utility session: keep its system prompt pristine so the
     // OPENGROUND_DESC output contract can't drift toward "add a board card".
     appContext: false,
   })
 
-  // Poll the JSONL for the marker. Stop early if the session exits on its own
-  // (user /quit or a crash), then do a best-effort fallback extraction.
+  let buffer = ''
   let exited = false
   const sub = subscribeTerminal(
     ref.terminalId,
-    () => {},
+    (chunk) => {
+      buffer = (buffer + chunk).slice(-MAX_BUFFER)
+    },
     () => {
       exited = true
     },
@@ -165,23 +160,16 @@ export const generateProjectDescription = async (
   try {
     while (Date.now() < deadline) {
       await sleep(POLL_MS)
-      const pair = extractMarkerPair(await readTranscriptText(projectPath, agentSessionId))
+      const pair = extractMarkerPair(buffer)
       // Complete only when BOTH languages landed — the two lines arrive
       // together at the very end, so a one-sided read is just mid-stream.
       if (pair.en && pair.ja) return pair
       if (exited || sub?.info.finishedAt) break
     }
-    // Timed out, or the session ended early — take whatever DID land: one
-    // language alone, the legacy single marker, or the last non-empty line.
-    const transcript = await readTranscriptText(projectPath, agentSessionId)
-    const pair = extractMarkerPair(transcript)
+    // Timed out, or the session ended early — take whatever DID land (one
+    // language alone is still better than nothing).
+    const pair = extractMarkerPair(buffer)
     if (pair.en || pair.ja) return pair
-    const legacy = extractDescription(transcript)
-    if (legacy) {
-      // Single untagged text — file it under the language it LOOKS like, so a
-      // Japanese fallback never becomes the "English" description.
-      return /[぀-ヿ一-鿿]/.test(legacy) ? { en: null, ja: legacy } : { en: legacy, ja: null }
-    }
     throw new Error('could not extract a description from the claude session')
   } finally {
     sub?.unsubscribe()

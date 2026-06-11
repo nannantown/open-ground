@@ -26,6 +26,7 @@
 // how the CDN + fonts load (cached after first online load, like mocks).
 
 import { hash32 } from './mockSrcdoc'
+import { buildInspectScript } from './canvasInspect'
 import { messages, type Lang } from '@/i18n/messages'
 
 export { hash32 }
@@ -362,6 +363,7 @@ const HTML_TEMPLATE = (code: string, theme: ScreenTheme): string => `<!doctype h
   </head>
   <body>
     <script>${ERR_SCRIPT}</script>
+    <script>${buildInspectScript()}</script>
 ${code}
   </body>
 </html>`
@@ -386,6 +388,7 @@ const REACT_TEMPLATE = (
   <body>
     <div id="root"></div>
     <script>${ERR_SCRIPT}</script>
+    <script>${buildInspectScript()}</script>
     <script>window.__SCREEN_PROPS = ${propsJson};</script>
     <script type="text/plain" id="__opengrnd_src">${preprocessed.replace(/<\/(script)/gi, '<\\/$1')}</script>
     <script>${RUNTIME_SCRIPT}</script>

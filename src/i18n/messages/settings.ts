@@ -29,6 +29,11 @@ export const settings = {
     'settings.cli.checking': 'Checking for the claude CLI…',
     'settings.cli.hint': 'OPEN GROUND runs your local claude CLI — never an Anthropic API key. Install Claude Code and sign in with an active subscription.',
     // Run prompt
+    // Release notes
+    'settings.releaseNotes.heading': 'Release notes',
+    'settings.releaseNotes.loading': 'Loading releases…',
+    'settings.releaseNotes.error': "Couldn't load release notes. Check your connection and try again.",
+    'settings.releaseNotes.current': 'Current',
     // Owner inbox
     'settings.inbox.heading': 'Incoming feedback',
     'settings.inbox.refresh': 'Refresh',
@@ -54,6 +59,10 @@ export const settings = {
     'settings.cli.recheck': '再チェック',
     'settings.cli.checking': 'claude CLI を確認中…',
     'settings.cli.hint': 'OPEN GROUND はお使いのローカル claude CLI を動かします（Anthropic API キーは使いません）。Claude Code をインストールし、有効なサブスクリプションでサインインしてください。',
+    'settings.releaseNotes.heading': 'リリースノート',
+    'settings.releaseNotes.loading': 'リリース情報を読み込み中…',
+    'settings.releaseNotes.error': 'リリースノートを取得できませんでした。接続を確認して再度開いてください。',
+    'settings.releaseNotes.current': '使用中',
     'settings.inbox.heading': '受信したフィードバック',
     'settings.inbox.refresh': '再読み込み',
     'settings.inbox.loading': '送信内容を読み込み中…',

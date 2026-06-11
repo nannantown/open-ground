@@ -144,42 +144,17 @@ describe('buildTaskPrompt', () => {
     expect(p).not.toContain('setColumn')
   })
 
-  it('verifyCommands (git): Definition-of-done section, run in the worktree, commands verbatim', () => {
+  it('verifyCommands is RETIRED: legacy saved values never reach the prompt', () => {
+    // The Settings editor for verifyCommands was removed (2026-06-11); legacy
+    // data may still carry values — they must be ignored, not injected as
+    // hidden prompt-steering.
     const p = buildTaskPrompt({
       ...base,
       worktreesDir: WT,
-      config: { verifyCommands: ['npm test', 'npx tsc --noEmit'] },
-    })
-    expect(p).toContain('## Definition of done (verify commands)')
-    expect(p).toContain('inside the task worktree')
-    expect(p).toContain('- npm test')
-    expect(p).toContain('- npx tsc --noEmit')
-    expect(p).toContain('ALL of them must pass')
-    expect(p).toContain('fix the code and re-run')
-  })
-
-  it('verifyCommands (non-git): section still present, runs in the project dir; flow/branch ignored', () => {
-    const p = buildTaskPrompt({
-      ...base,
-      worktreesDir: null,
-      config: { completionFlow: 'pr', targetBranch: 'main', verifyCommands: ['make check'] },
-    })
-    expect(p).toContain('## Definition of done (verify commands)')
-    expect(p).toContain('in the project directory')
-    expect(p).toContain('- make check')
-    // non-git: completionFlow/targetBranch have no effect
-    expect(p).not.toContain('gh pr create')
-    expect(p).not.toContain('git worktree')
-    expect(p).not.toContain('`main`')
-    expect(p).toContain('markDone')
-  })
-
-  it('verifyCommands of blank strings collapse to no section', () => {
-    const p = buildTaskPrompt({
-      ...base,
-      worktreesDir: null,
-      config: { verifyCommands: ['  ', ''] },
+      config: { verifyCommands: ['npm test', 'rm -rf /'] },
     })
     expect(p).not.toContain('Definition of done')
+    expect(p).not.toContain('npm test')
+    expect(p).not.toContain('rm -rf /')
   })
 })

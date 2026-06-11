@@ -58,11 +58,14 @@ export const buildTitlePrompt = (content: string): string =>
     content.slice(0, MAX_CONTENT_CHARS),
   ].join('\n')
 
-// Strip ANSI escapes / control chars from the raw PTY stream. The CSI strip
-// also covers OSC titles' CSI-ish forms poorly, so OSC (]0;…BEL) is handled
-// separately.
+// Strip ANSI escapes / control chars from the raw PTY stream. Word gaps can
+// arrive as cursor moves instead of literal spaces (see generateDescription's
+// comment) — SGR (CSI…m) deletes, every other CSI becomes a space and the
+// \s+ collapse below de-dupes. OSC (]0;…BEL) is handled separately.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
+const SGR_RE = /\x1b\[[0-9;]*m/g
+// eslint-disable-next-line no-control-regex
+const CSI_OTHER_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
 // eslint-disable-next-line no-control-regex
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
 // eslint-disable-next-line no-control-regex
@@ -74,7 +77,7 @@ const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
  *  candidate containing '<' is rejected: that's the prompt's own echoed
  *  placeholder, not a model answer. Exported for unit tests. */
 export const extractTitle = (raw: string): string | null => {
-  const text = raw.replace(OSC_RE, '').replace(ANSI_RE, '')
+  const text = raw.replace(OSC_RE, '').replace(SGR_RE, '').replace(CSI_OTHER_RE, ' ')
   let from = text.length
   for (;;) {
     const start = text.lastIndexOf(TITLE_MARKER, from - 1)

@@ -7,7 +7,8 @@ import { resolveStickyFill, DEFAULT_STICKY_FILL } from '@/lib/canvasFillStyle'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { CommentPin } from './CommentPin'
 import { ImageView } from './ImageView'
-import { ScreenView } from './ScreenView'
+import { ScreenView, useInspectTweak } from './ScreenView'
+import { useT } from '@/i18n/I18nContext'
 import { ShapeView } from './ShapeView'
 
 interface Props {
@@ -122,6 +123,7 @@ export const ElementView = ({
         onEditDone={onEditDone}
         ring={ring}
         commentTool={commentTool}
+        projectPath={projectPath}
       />
     )
   }
@@ -162,6 +164,7 @@ export const ElementView = ({
         onEditDone={onEditDone}
         ring={ring}
         commentTool={commentTool}
+        projectPath={projectPath}
       />
     )
   }
@@ -312,6 +315,7 @@ const MockView = ({
   onEditDone,
   ring,
   commentTool,
+  projectPath,
 }: {
   element: CanvasElement
   selected: boolean
@@ -321,8 +325,11 @@ const MockView = ({
   onEditDone: () => void
   ring: string
   commentTool?: boolean
+  projectPath?: string
 }) => {
+  const { t } = useT()
   const ta = useRef<HTMLTextAreaElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
   const framework = element.framework ?? 'react'
   const theme = element.theme ?? 'light'
 
@@ -343,6 +350,16 @@ const MockView = ({
     [element.text, framework, theme],
   )
 
+  // Inspect-and-instruct ("tweak") flow — shared with ScreenView, see there.
+  const tweak = useInspectTweak({
+    iframeRef,
+    selected,
+    projectPath,
+    source: element.text,
+    framework,
+    onChangeText,
+  })
+
   const w = element.width ?? MOCK_DEFAULT_W
   const h = element.height ?? MOCK_DEFAULT_H
 
@@ -351,7 +368,7 @@ const MockView = ({
       onPointerDown={onPointerDown}
       style={{ width: w, height: h, opacity: resolveOpacity(element) }}
       className={[
-        'flex flex-col overflow-hidden rounded-[4px] border border-line bg-bg-card shadow-card',
+        'group flex flex-col overflow-hidden rounded-[4px] border border-line bg-bg-card shadow-card',
         editing ? 'cursor-text' : 'cursor-grab active:cursor-grabbing',
         ring,
       ].join(' ')}
@@ -384,6 +401,8 @@ const MockView = ({
           <>
             <iframe
               key={hash32(srcdoc)}
+              ref={iframeRef}
+              onLoad={tweak.onIframeLoad}
               title={element.name || 'mock'}
               srcDoc={srcdoc}
               sandbox="allow-scripts"
@@ -403,8 +422,18 @@ const MockView = ({
                   // wrapper's inherited one over a mock. Inherit instead.
                   commentTool ? 'cursor-[inherit]' : 'cursor-grab active:cursor-grabbing',
                 ].join(' ')}
-              />
+              >
+                {/* Interactivity is real but invisible (select first, then the
+                    iframe is live) — say so on hover, or nobody discovers it. */}
+                {!commentTool && (
+                  <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-[10px] font-medium text-ink-muted opacity-0 shadow-card transition-opacity duration-150 group-hover:opacity-100">
+                    {t('canvasEl.iframe.clickToInteract')}
+                  </span>
+                )}
+              </div>
             )}
+            {tweak.badge}
+            {tweak.panel}
           </>
         )}
       </div>

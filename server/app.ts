@@ -18,6 +18,7 @@ import { health } from './routes/health'
 import { projectRoutes } from './routes/project'
 import { shareRoutes } from './routes/share'
 import { canvasRoutes } from './routes/canvas'
+import { canvasAiRoutes } from './routes/canvasAi'
 import { miscRoutes } from './routes/misc'
 import { terminalRoutes } from './routes/terminal'
 import { sseRoutes } from './routes/sse'
@@ -70,6 +71,7 @@ export const createApp = () => {
     .route('/', projectRoutes)   // A — project / tasks / canvases
     .route('/', shareRoutes)     // C — git-shared data (status / sync)
     .route('/', canvasRoutes)    // D — canvas / asset / paste
+    .route('/', canvasAiRoutes)  // D2 — canvas AI (generate-elements / tweak-screen)
     .route('/', miscRoutes)      // E — projects / settings / usage
     .route('/', terminalRoutes)  // F — terminal CRUD (dynamic :id)
     .route('/', sseRoutes)       // SSE — terminal stream

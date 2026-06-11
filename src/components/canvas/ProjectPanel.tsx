@@ -26,6 +26,7 @@ import type {
   ShareAutoStatus,
   ShareConflict,
   ShareStatus,
+  ProjectBranchesResponse,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import {
@@ -1357,7 +1358,7 @@ export const ProjectPanel = ({
       {/* flex-wrap: when the window is too narrow to fit the title column and
           the controls cluster side by side, the controls drop to their own row
           below instead of crushing the title / overflowing the viewport. */}
-      <header className="rule-double flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-8 pt-5 pb-4">
+      <header className="rule-double flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-8 pt-3 pb-2.5">
         {/* flex-1 so this column has a definite width: the description box caps
             at max-w-[560px] in BOTH read and edit modes. Without it the column
             shrank to its content, so swapping the wide <p> for a <textarea>
@@ -1391,11 +1392,11 @@ export const ProjectPanel = ({
             </button>
           </div>
           {data && (
-            data.description ? (
+            descriptionForLang(data, lang) ? (
               /* ── Filled state: refresh button LEFT, then the generated text.
                     The description is generate-only (no manual editing) — the
                     text swaps in when claude finishes, persisted server-side. ── */
-              <div className="mt-2 flex max-w-[560px] items-start gap-1.5">
+              <div className="mt-1 flex max-w-[560px] items-start gap-1.5">
                 {/* Refresh button — spins while claude works */}
                 <button
                   onClick={regenerateDescription}
@@ -1416,13 +1417,13 @@ export const ProjectPanel = ({
                     <RotateCw size={11} />
                   )}
                 </button>
-                <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-ink-muted">
+                <p className="min-w-0 flex-1 truncate text-[12px] leading-snug text-ink-muted">
                   {descriptionForLang(data, lang)}
                 </p>
               </div>
             ) : (
               /* ── Empty state: a plain text-only generate button (no icon) ── */
-              <div className="mt-2">
+              <div className="mt-1">
                 <button
                   onClick={regenerateDescription}
                   disabled={describing || project.missing || claudeMissing}
@@ -1838,6 +1839,9 @@ export const ProjectPanel = ({
           persist={persist}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
+          // Surface Project Settings right on the Board toolbar (the ⋯ menu
+          // entry stays as a second route).
+          onOpenProjectSettings={() => setProjectSettingsOpen(true)}
           // A card with a launched terminal counts as "touched" — the drawer's
           // close-discards-empty-card check must not drop it.
           hasTerminalSlot={id => id in taskTerminals}
@@ -1895,6 +1899,7 @@ export const ProjectPanel = ({
       {projectSettingsOpen && data && (
         <ProjectSettingsDialog
           projectName={project.name}
+          projectPath={project.path}
           data={data}
           onCancel={() => setProjectSettingsOpen(false)}
           onSave={(config, launch) => {
@@ -2109,13 +2114,22 @@ const ShareConfirm = ({
 const FIELD_INPUT_CSS =
   'w-full rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint transition-colors focus:border-accent focus:outline-none'
 
+// Local response shape for GET /api/project/branches — deliberately NOT in
+// types.ts (another track owns that file); the dialog only needs this much.
+
+// The claude CLI's model aliases offered in the Model select. A saved value
+// outside this list (a pinned full model id, say) is kept as an extra option.
+const MODEL_CHOICES = ['sonnet', 'opus', 'haiku'] as const
+
 const ProjectSettingsDialog = ({
   projectName,
+  projectPath,
   data,
   onCancel,
   onSave,
 }: {
   projectName: string
+  projectPath: string
   data: ProjectData
   onCancel: () => void
   onSave: (config: ProjectConfig, launch: ProjectLaunchPrefs) => void
@@ -2126,13 +2140,13 @@ const ProjectSettingsDialog = ({
     data.config?.completionFlow ?? 'merge',
   )
   const [targetBranch, setTargetBranch] = useState(data.config?.targetBranch ?? '')
-  const [verifyText, setVerifyText] = useState(
-    (data.config?.verifyCommands ?? []).join('\n'),
+  // Dedupe on init: the old textarea path never deduplicated, so legacy /
+  // shared boards can carry exact-duplicate names (which would collide as
+  // React keys and make one ✕ remove all twins).
+  const [members, setMembers] = useState<string[]>(() =>
+    Array.from(new Set(data.config?.members ?? [])),
   )
-  const [reviewCol, setReviewCol] = useState(!!data.config?.reviewColumn)
-  const [membersText, setMembersText] = useState(
-    (data.config?.members ?? []).join('\n'),
-  )
+  const [memberDraft, setMemberDraft] = useState('')
   // Personal drafts
   const [permissionMode, setPermissionMode] = useState<
     NonNullable<ProjectLaunchPrefs['permissionMode']>
@@ -2140,21 +2154,63 @@ const ProjectSettingsDialog = ({
   const [model, setModel] = useState(data.launch?.model ?? '')
   const [autoSync, setAutoSync] = useState(data.launch?.autoSync !== false)
 
+  // The repo's branch list — fetched once when the dialog opens, so Target
+  // branch is a pick-from-list instead of a typo-prone text field. null while
+  // loading; a failed fetch or an empty list (non-git folder) falls back to
+  // the plain text input.
+  const [branches, setBranches] = useState<string[] | null>(null)
+  const [branchesFailed, setBranchesFailed] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/project/branches?path=${encodeURIComponent(projectPath)}`)
+      .then(r => (r.ok ? (r.json() as Promise<ProjectBranchesResponse>) : Promise.reject(new Error(String(r.status)))))
+      .then(body => {
+        if (cancelled) return
+        if (Array.isArray(body.branches) && body.branches.length > 0) {
+          setBranches(body.branches.filter((b): b is string => typeof b === 'string'))
+        } else {
+          setBranchesFailed(true)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setBranchesFailed(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectPath])
+  // A saved target branch that the list doesn't carry (deleted branch, or the
+  // list is still loading) stays selectable so opening+saving never drops it.
+  const savedBranch = (data.config?.targetBranch ?? '').trim()
+  const extraBranch =
+    savedBranch && !(branches ?? []).includes(savedBranch) ? savedBranch : null
+
+  const addMember = () => {
+    const v = memberDraft.trim()
+    if (!v) return
+    setMemberDraft('')
+    setMembers(prev =>
+      prev.some(m => m.toLowerCase() === v.toLowerCase()) ? prev : [...prev, v],
+    )
+  }
+  const removeMember = (name: string) =>
+    setMembers(prev => prev.filter(m => m !== name))
+
+  // A saved model outside the alias list (a pinned full id) stays selectable.
+  const savedModel = (data.launch?.model ?? '').trim()
+  const modelChoices: string[] =
+    savedModel && !(MODEL_CHOICES as readonly string[]).includes(savedModel)
+      ? [savedModel, ...MODEL_CHOICES]
+      : [...MODEL_CHOICES]
+
   const save = () => {
-    const verifyCommands = verifyText
-      .split('\n')
-      .map(l => l.trim())
-      .filter(Boolean)
-    const members = membersText
-      .split('\n')
-      .map(l => l.trim())
-      .filter(Boolean)
     const config: ProjectConfig = {
+      // Spread first: every config key this dialog no longer edits
+      // (verifyCommands, reviewColumn, …) is carried through untouched —
+      // saving must never strip shared board data.
       ...data.config,
       completionFlow: flow,
       targetBranch: targetBranch.trim() || undefined,
-      verifyCommands: verifyCommands.length > 0 ? verifyCommands : undefined,
-      reviewColumn: reviewCol || undefined,
       members: members.length > 0 ? members : undefined,
     }
     const launch: ProjectLaunchPrefs = {
@@ -2182,168 +2238,227 @@ const ProjectSettingsDialog = ({
   ]
 
   return (
-    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col justify-center gap-5 overflow-y-auto bg-bg-card px-6 py-8">
-      <div className="mx-auto my-auto w-full max-w-[440px]">
-        <p className="label-cap text-accent mb-2">
-          {t('projectPanel.settingsDialogLabel')}
-        </p>
-        <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
-          {projectName}
-        </h3>
-
-        {/* ── Shared policy ── */}
-        <div className="mt-5 border-t border-line pt-4">
-          <p className="label-cap text-ink">{t('projectPanel.settingsSharedHeading')}</p>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-            {t('projectPanel.settingsSharedHint')}
+    // Scroll container OUTSIDE, centering INSIDE: `grid place-items-center`
+    // on a min-h-full inner track centers short content but grows with tall
+    // content, so the header can never be clipped above the scroll origin
+    // (the old flex-center + my-auto pattern clipped the top edge).
+    <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
+      <div className="grid min-h-full place-items-center">
+        <div className="mx-auto w-full max-w-[760px] px-8 py-10">
+          <p className="label-cap text-accent mb-2">
+            {t('projectPanel.settingsDialogLabel')}
           </p>
+          <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
+            {projectName}
+          </h3>
 
-          <div className="mt-3 space-y-3.5">
-            <div>
-              <label className="mb-1.5 block label-cap text-ink-muted">
-                {t('projectPanel.settingsCompletionFlow')}
-              </label>
-              <div className="flex items-center gap-4">
-                {(['merge', 'pr'] as const).map(v => (
-                  <label
-                    key={v}
-                    className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent"
-                  >
-                    <input
-                      type="radio"
-                      name="completion-flow"
-                      checked={flow === v}
-                      onChange={() => setFlow(v)}
-                      className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    />
-                    {t(
-                      v === 'merge'
-                        ? 'projectPanel.settingsFlowMerge'
-                        : 'projectPanel.settingsFlowPr',
-                    )}
+          {/* Two columns on md+: shared policy (left) / personal (right);
+              stacks vertically on narrow widths. */}
+          <div className="mt-5 grid grid-cols-1 gap-x-10 md:grid-cols-2">
+            {/* ── Shared policy ── */}
+            <div className="border-t border-line pt-4">
+              <p className="label-cap text-ink">{t('projectPanel.settingsSharedHeading')}</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                {t('projectPanel.settingsSharedHint')}
+              </p>
+
+              <div className="mt-3 space-y-3.5">
+                <div>
+                  <label className="mb-1.5 block label-cap text-ink-muted">
+                    {t('projectPanel.settingsCompletionFlow')}
                   </label>
-                ))}
+                  {/* Two-way segmented toggle — same idiom as the Settings
+                      panel's language switch. */}
+                  <div
+                    role="group"
+                    aria-label={t('projectPanel.settingsCompletionFlow')}
+                    className="inline-flex items-center gap-0 rounded-[3px] border border-line p-0.5"
+                  >
+                    {(['merge', 'pr'] as const).map(v => {
+                      const active = flow === v
+                      return (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setFlow(v)}
+                          aria-pressed={active}
+                          className={[
+                            'h-7 px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                            'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+                            active
+                              ? 'bg-accent text-bg-card border-accent'
+                              : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
+                          ].join(' ')}
+                        >
+                          {t(
+                            v === 'merge'
+                              ? 'projectPanel.settingsFlowMerge'
+                              : 'projectPanel.settingsFlowPr',
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="mb-1 block label-cap text-ink-muted">
+                    {t('projectPanel.settingsTargetBranch')}
+                  </label>
+                  {branchesFailed ? (
+                    // Non-git folder or the fetch failed → plain text input,
+                    // exactly the pre-select behavior.
+                    <input
+                      value={targetBranch}
+                      onChange={e => setTargetBranch(e.target.value)}
+                      placeholder={t('projectPanel.settingsTargetBranchPlaceholder')}
+                      className={FIELD_INPUT_CSS}
+                    />
+                  ) : (
+                    <select
+                      value={targetBranch}
+                      onChange={e => setTargetBranch(e.target.value)}
+                      className={`${FIELD_INPUT_CSS} cursor-pointer`}
+                    >
+                      <option value="">{t('projectPanel.settingsBranchDefault')}</option>
+                      {extraBranch && <option value={extraBranch}>{extraBranch}</option>}
+                      {(branches ?? []).map(b => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                <div>
+                  <label className="mb-1 block label-cap text-ink-muted">
+                    {t('projectPanel.settingsMembers')}
+                  </label>
+                  {members.length > 0 && (
+                    <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                      {members.map(name => (
+                        <span
+                          key={name}
+                          className="flex max-w-full items-center gap-1 rounded-sm border border-line px-2 py-1 text-[11px] text-ink"
+                        >
+                          <span className="min-w-0 truncate">{name}</span>
+                          <button
+                            type="button"
+                            onClick={() => removeMember(name)}
+                            title={t('projectPanel.settingsMemberRemove', { name })}
+                            aria-label={t('projectPanel.settingsMemberRemove', { name })}
+                            className="text-ink-faint transition-colors hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                          >
+                            <X size={11} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      value={memberDraft}
+                      onChange={e => setMemberDraft(e.target.value)}
+                      onKeyDown={e => {
+                        // Never steal the Enter that confirms an IME composition.
+                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                          e.preventDefault()
+                          addMember()
+                        }
+                      }}
+                      placeholder={t('projectPanel.settingsMemberAddPlaceholder')}
+                      className={FIELD_INPUT_CSS}
+                    />
+                    <button
+                      type="button"
+                      onClick={addMember}
+                      disabled={!memberDraft.trim()}
+                      className="shrink-0 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {t('projectPanel.settingsMemberAdd')}
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                    {t('projectPanel.settingsMembersHint')}
+                  </p>
+                </div>
               </div>
             </div>
 
-            <div>
-              <label className="mb-1 block label-cap text-ink-muted">
-                {t('projectPanel.settingsTargetBranch')}
-              </label>
-              <input
-                value={targetBranch}
-                onChange={e => setTargetBranch(e.target.value)}
-                placeholder={t('projectPanel.settingsTargetBranchPlaceholder')}
-                className={FIELD_INPUT_CSS}
-              />
-            </div>
-
-            <div>
-              <label className="mb-1 block label-cap text-ink-muted">
-                {t('projectPanel.settingsVerifyCommands')}
-              </label>
-              <textarea
-                value={verifyText}
-                onChange={e => setVerifyText(e.target.value)}
-                placeholder={t('projectPanel.settingsVerifyPlaceholder')}
-                rows={3}
-                className={`${FIELD_INPUT_CSS} resize-y font-mono leading-relaxed`}
-              />
-            </div>
-
-            <div>
-              <label className="mb-1 block label-cap text-ink-muted">
-                {t('projectPanel.settingsMembers')}
-              </label>
-              <textarea
-                value={membersText}
-                onChange={e => setMembersText(e.target.value)}
-                placeholder={t('projectPanel.settingsMembersPlaceholder')}
-                rows={2}
-                className={`${FIELD_INPUT_CSS} resize-y leading-relaxed`}
-              />
-              <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                {t('projectPanel.settingsMembersHint')}
+            {/* ── Personal ── */}
+            <div className="mt-5 border-t border-line pt-4 md:mt-0">
+              <p className="label-cap text-ink">{t('projectPanel.settingsPersonalHeading')}</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                {t('projectPanel.settingsPersonalHint')}
               </p>
-            </div>
 
-            <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
-              <input
-                type="checkbox"
-                checked={reviewCol}
-                onChange={e => setReviewCol(e.target.checked)}
-                className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              />
-              {t('projectPanel.settingsReviewColumn')}
-            </label>
-          </div>
-        </div>
+              <div className="mt-3 space-y-3.5">
+                <div>
+                  <label className="mb-1 block label-cap text-ink-muted">
+                    {t('projectPanel.settingsPermissionMode')}
+                  </label>
+                  <select
+                    value={permissionMode}
+                    onChange={e =>
+                      setPermissionMode(
+                        e.target.value as NonNullable<ProjectLaunchPrefs['permissionMode']>,
+                      )
+                    }
+                    className={`${FIELD_INPUT_CSS} cursor-pointer`}
+                  >
+                    {permissionOptions.map(o => (
+                      <option key={o.value} value={o.value}>
+                        {t(o.labelKey)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-        {/* ── Personal ── */}
-        <div className="mt-5 border-t border-line pt-4">
-          <p className="label-cap text-ink">{t('projectPanel.settingsPersonalHeading')}</p>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-            {t('projectPanel.settingsPersonalHint')}
-          </p>
+                <div>
+                  <label className="mb-1 block label-cap text-ink-muted">
+                    {t('projectPanel.settingsModel')}
+                  </label>
+                  <select
+                    value={model}
+                    onChange={e => setModel(e.target.value)}
+                    className={`${FIELD_INPUT_CSS} cursor-pointer`}
+                  >
+                    <option value="">{t('projectPanel.settingsModelDefault')}</option>
+                    {modelChoices.map(m => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-          <div className="mt-3 space-y-3.5">
-            <div>
-              <label className="mb-1 block label-cap text-ink-muted">
-                {t('projectPanel.settingsPermissionMode')}
-              </label>
-              <select
-                value={permissionMode}
-                onChange={e =>
-                  setPermissionMode(
-                    e.target.value as NonNullable<ProjectLaunchPrefs['permissionMode']>,
-                  )
-                }
-                className={`${FIELD_INPUT_CSS} cursor-pointer`}
-              >
-                {permissionOptions.map(o => (
-                  <option key={o.value} value={o.value}>
-                    {t(o.labelKey)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="mb-1 block label-cap text-ink-muted">
-                {t('projectPanel.settingsModel')}
-              </label>
-              <input
-                value={model}
-                onChange={e => setModel(e.target.value)}
-                placeholder={t('projectPanel.settingsModelPlaceholder')}
-                className={FIELD_INPUT_CSS}
-              />
-            </div>
-
-            <div>
-              <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
-                <input
-                  type="checkbox"
-                  checked={autoSync}
-                  onChange={e => setAutoSync(e.target.checked)}
-                  className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                />
-                {t('projectPanel.settingsAutoSync')}
-              </label>
-              <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                {t('projectPanel.settingsAutoSyncHint')}
-              </p>
+                <div>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
+                    <input
+                      type="checkbox"
+                      checked={autoSync}
+                      onChange={e => setAutoSync(e.target.checked)}
+                      className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    />
+                    {t('projectPanel.settingsAutoSync')}
+                  </label>
+                  <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                    {t('projectPanel.settingsAutoSyncHint')}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="mt-6 flex items-center justify-end gap-2">
-          <Btn variant="subtle" size="md" onClick={onCancel}>
-            {t('common.cancel')}
-          </Btn>
-          <Btn variant="primary" size="md" onClick={save}>
-            {t('common.save')}
-          </Btn>
+          <div className="mt-6 flex items-center justify-end gap-2">
+            <Btn variant="subtle" size="md" onClick={onCancel}>
+              {t('common.cancel')}
+            </Btn>
+            <Btn variant="primary" size="md" onClick={save}>
+              {t('common.save')}
+            </Btn>
+          </div>
         </div>
       </div>
     </div>

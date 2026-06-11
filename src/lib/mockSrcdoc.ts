@@ -12,6 +12,8 @@
 // can't reach the host page's DOM, cookies, or storage. Network is allowed —
 // that's how the CDN load works in v1.
 
+import { buildInspectScript } from './canvasInspect'
+
 // FNV-1a 32-bit. Stable string hash used by ElementView to key the iframe on
 // the rendered srcdoc *content*, not its length, so equally-sized code edits
 // still trigger a remount instead of silently sticking on the old preview.
@@ -85,6 +87,7 @@ const REACT_TEMPLATE = (code: string, theme: Theme) => `<!doctype html>
   <body>
     <div id="root"></div>
     <script>${ERR_SCRIPT}</script>
+    <script>${buildInspectScript()}</script>
     <script type="text/babel" data-presets="react" data-type="module">
       try {
         ${code}
@@ -115,6 +118,7 @@ const HTML_TEMPLATE = (code: string, theme: Theme) => `<!doctype html>
   </head>
   <body>
     <script>${ERR_SCRIPT}</script>
+    <script>${buildInspectScript()}</script>
 ${code}
   </body>
 </html>`

@@ -2,6 +2,21 @@
 // EditableText/InfiniteCanvas). Add keys as 'canvasEl.*'. English is source of truth.
 export const canvasElements = {
   en: {
+    // Screen/Mock iframe interactivity affordances
+    'canvasEl.iframe.clickToInteract': 'Click to interact',
+    'canvasEl.iframe.interactive': 'Interactive',
+    // Screen/Mock tweak (inspect-and-instruct) flow
+    'canvasEl.tweak.enter': 'Tweak',
+    'canvasEl.tweak.title': 'Pick an element inside the design and tweak it with Claude',
+    'canvasEl.tweak.placeholder': 'e.g. Make this button bigger',
+    'canvasEl.tweak.send': 'Send',
+    'canvasEl.tweak.close': 'Close',
+    'canvasEl.tweak.applied': 'Applied. Click an element to tweak further.',
+    'canvasEl.tweak.unchanged': 'No change was needed.',
+    'canvasEl.tweak.pickHint': 'Click an element in the design',
+    'canvasEl.tweak.error': 'Tweak failed. Try again.',
+    'canvasEl.tweak.claudeMissing':
+      'claude CLI not found — install Claude Code to use this.',
     // ScreenView
     'canvasEl.screen.legacyTitle': 'Legacy Screen format',
     'canvasEl.screen.emptyTitle': 'Empty Screen',
@@ -23,6 +38,20 @@ export const canvasElements = {
     // EditableText
   } as Record<string, string>,
   ja: {
+    'canvasEl.iframe.clickToInteract': 'クリックで操作',
+    'canvasEl.iframe.interactive': '操作モード',
+    // Screen/Mock tweak (inspect-and-instruct) flow
+    'canvasEl.tweak.enter': '調整',
+    'canvasEl.tweak.title': 'デザイン内の要素を選んで Claude に調整を頼む',
+    'canvasEl.tweak.placeholder': '例: このボタンをもっと大きく',
+    'canvasEl.tweak.send': '送信',
+    'canvasEl.tweak.unchanged': '変更は不要でした。',
+    'canvasEl.tweak.pickHint': 'デザイン内の要素をクリック',
+    'canvasEl.tweak.close': '閉じる',
+    'canvasEl.tweak.applied': '適用しました。続けるには要素をクリック。',
+    'canvasEl.tweak.error': '調整に失敗しました。もう一度お試しください。',
+    'canvasEl.tweak.claudeMissing':
+      'claude CLI が見つかりません — Claude Code をインストールしてください。',
     // ScreenView
     'canvasEl.screen.legacyTitle': '旧形式の Screen です',
     'canvasEl.screen.emptyTitle': '空の Screen',

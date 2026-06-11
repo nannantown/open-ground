@@ -92,18 +92,12 @@ export default function App() {
     }
   })
   const [jumpOpen, setJumpOpen] = useState(false)
-  // Project ids that currently have at least one LIVE PTY (plain shell or
-  // claude session) — drives the small pulsing "Terminal" beacon on Ground
-  // cards. Polled from /api/terminal/active; replaces the old run-status edge
-  // bar as the only "something is happening here" signal.
-  const [terminalActiveIds, setTerminalActiveIds] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
-  )
-  // Refinement of the same poll for claude-tagged PTYs: projectId → 'working'
-  // (claude is busy) | 'waiting' (claude sits on the human — its turn signal).
-  // A project absent from the map only hosts plain shells, so its card keeps
-  // the legacy 'Terminal' beacon. Several claude cwds on one project collapse
-  // with working > waiting.
+  // Per-project claude beacon: projectId → 'working' (claude is busy) |
+  // 'waiting' (claude sits on the human — its turn signal). Polled from
+  // /api/terminal/active; the only "something is happening here" signal on
+  // Ground cards. A project absent from the map shows no beacon (plain shells
+  // don't count). Several claude cwds on one project collapse with
+  // working > waiting.
   const [claudeStatusById, setClaudeStatusById] = useState<
     ReadonlyMap<string, ClaudeBeaconStatus>
   >(() => new Map())
@@ -279,11 +273,12 @@ export default function App() {
     [feedbackSourceId],
   )
 
-  // Poll which projects have a live terminal (every 5s, skipped while the tab
-  // is hidden; an immediate re-poll on focus covers the return). Terminals are
-  // always spawned with cwd = the registered project path, so plain equality
-  // matches — "or under" covers the edge case of a subdir cwd. Best-effort: a
-  // failed poll keeps the last known state rather than flashing beacons off.
+  // Poll which projects have a live claude session (every 5s, skipped while
+  // the tab is hidden; an immediate re-poll on focus covers the return).
+  // Terminals are always spawned with cwd = the registered project path, so
+  // plain equality matches — "or under" covers the edge case of a subdir cwd.
+  // Best-effort: a failed poll keeps the last known state rather than
+  // flashing beacons off.
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
@@ -293,19 +288,11 @@ export default function App() {
         if (!res.ok) return
         const data = (await res.json()) as ActiveTerminalsResponse
         if (cancelled) return
-        const { cwds } = data
         // A server predating the refined payload omits `claude` — treat that
-        // as "no claude sessions" so cards fall back to the plain beacon.
+        // as "no claude sessions" so cards show no beacon.
         const claude = data.claude ?? []
-        const next = new Set(
-          projects
-            .filter((p) =>
-              cwds.some((cwd) => cwd === p.path || cwd.startsWith(p.path + '/')),
-            )
-            .map((p) => p.id),
-        )
-        // Same cwd→project rule for claude sessions; working wins when a
-        // project holds both a working and a waiting pane.
+        // cwd→project; working wins when a project holds both a working and
+        // a waiting pane.
         const nextStatus = new Map<string, ClaudeBeaconStatus>()
         for (const p of projects) {
           for (const a of claude) {
@@ -314,14 +301,8 @@ export default function App() {
             if (a.status === 'working') break
           }
         }
-        // Keep the previous Set identity when nothing changed so the canvas
+        // Keep the previous Map identity when nothing changed so the canvas
         // doesn't re-render every 5 seconds.
-        setTerminalActiveIds((prev) =>
-          prev.size === next.size && Array.from(next).every((id) => prev.has(id))
-            ? prev
-            : next,
-        )
-        // Same identity-preserving pattern for the status map.
         setClaudeStatusById((prev) =>
           prev.size === nextStatus.size &&
           Array.from(nextStatus).every(([id, st]) => prev.get(id) === st)
@@ -629,7 +610,6 @@ export default function App() {
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
       <InfiniteCanvas
         projects={visibleProjects}
-        terminalActiveIds={terminalActiveIds}
         claudeStatuses={claudeStatusById}
         canvas={canvas}
         onCanvasChange={onCanvasChange}

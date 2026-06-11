@@ -64,6 +64,58 @@ export interface Settings {
  *  as the input placeholder — it is never written into settings.json. */
 export type SettingsResponse = Settings & { suggestedDisplayName: string | null }
 
+/** One published release of the distribution repo (GET /api/release-notes).
+ *  `body` is the release's markdown notes, written with `### English` /
+ *  `### 日本語` sections — the client shows the section matching the UI
+ *  language (src/lib/releaseNotesLang.ts). */
+export interface ReleaseNote {
+  version: string
+  url: string
+  publishedAt: string
+  body: string
+}
+
+/** GET /api/release-notes response: published (non-draft) releases, newest
+ *  first, plus the running app's own version so the client can mark it. */
+export interface ReleaseNotesResponse {
+  current: string
+  releases: ReleaseNote[]
+  error?: string
+}
+
+/** POST /api/canvas/generate-elements — the "design as elements" path: claude
+ *  authors NATIVE canvas elements (frame/shape/text/sticky), not code, so the
+ *  result is hand-tweakable piece by piece (Figma-lite). Positions in the
+ *  returned elements are relative to (0,0); the client offsets them to the
+ *  current viewport center before inserting. */
+export interface GenerateElementsRequest {
+  path: string
+  prompt: string
+}
+export interface GenerateElementsResponse {
+  elements: CanvasElement[]
+}
+
+/** POST /api/canvas/tweak-screen — patch ONE screen/mock's source per an
+ *  instruction aimed at a picked element inside its rendered iframe (the
+ *  canvasInspect postMessage bridge supplies `element`). Returns the FULL
+ *  rewritten source; the client swaps element.text and the iframe re-renders. */
+export interface TweakScreenRequest {
+  path: string
+  source: string
+  framework: 'react' | 'html'
+  instruction: string
+  /** The picked element, as the bridge reported it. `html` is a truncated
+   *  outerHTML snippet — enough for claude to locate the node in source. */
+  element: { tag: string; classes: string; text: string; html: string }
+}
+export interface TweakScreenResponse {
+  source: string
+  /** True when claude judged the instruction already satisfied — the source
+   *  is returned verbatim and the client shows "no change was needed". */
+  unchanged?: boolean
+}
+
 /** Aggregated usage over the rolling 5-hour rate-limit window, scraped from
  *  ~/.claude/projects/**\/*.jsonl. The window starts at the oldest assistant
  *  message still within 5h of now; nextResetAt = windowStart + 5h. */
@@ -363,6 +415,15 @@ export interface ProjectsResponse {
   settings: Settings
   projects: ProjectMeta[]
   canvas: CanvasState
+}
+
+/** Response of GET /api/project/branches — the project's LOCAL git branches,
+ *  current first then alphabetical. Feeds the Settings "Target branch" select;
+ *  a non-repo (or any git failure) yields { branches: [], current: null }. */
+export interface ProjectBranchesResponse {
+  branches: string[]
+  /** Checked-out branch, or null (detached HEAD / not a git repo). */
+  current: string | null
 }
 
 /** A task is a Board card — the only task kind that exists. (The old

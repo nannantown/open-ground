@@ -9,6 +9,16 @@ export const canvas = {
     'canvas.showLayers': 'Show layers',
     'canvas.undo': 'Undo (⌘Z)',
     'canvas.redo': 'Redo (⌘⇧Z)',
+    // Generate-with-Claude prompt bar (ToolPalette ✦)
+    'canvas.generate.button': 'Generate elements with Claude',
+    'canvas.generate.placeholder': 'Describe what to lay out on the canvas…',
+    'canvas.generate.go': 'Generate',
+    'canvas.generate.close': 'Close',
+    'canvas.generate.hint': 'This can take 30–60 seconds…',
+    'canvas.generate.cancel': 'Cancel generation',
+    'canvas.generate.error': 'Generation failed. Try again.',
+    'canvas.generate.claudeMissing':
+      'claude CLI not found — install Claude Code to use this.',
     // CanvasTabBar
     'canvas.switchToCanvas': 'Switch to {name}',
     'canvas.closeThisCanvas': 'Close this Canvas',
@@ -76,6 +86,16 @@ export const canvas = {
     'canvas.showLayers': 'レイヤーを表示',
     'canvas.undo': '元に戻す (⌘Z)',
     'canvas.redo': 'やり直す (⌘⇧Z)',
+    // Generate-with-Claude prompt bar (ToolPalette ✦)
+    'canvas.generate.button': 'Claude で要素を生成',
+    'canvas.generate.placeholder': 'キャンバスに作りたいものを説明…',
+    'canvas.generate.go': '生成',
+    'canvas.generate.cancel': '生成をキャンセル',
+    'canvas.generate.close': '閉じる',
+    'canvas.generate.hint': '数十秒かかります…',
+    'canvas.generate.error': '生成に失敗しました。もう一度お試しください。',
+    'canvas.generate.claudeMissing':
+      'claude CLI が見つかりません — Claude Code をインストールしてください。',
     'canvas.switchToCanvas': '{name} に切り替え',
     'canvas.closeThisCanvas': 'この Canvas を閉じる',
     'canvas.newCanvas': '新しい Canvas を作成',

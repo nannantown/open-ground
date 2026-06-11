@@ -32,6 +32,7 @@ import {
   setCanvas,
 } from '@/lib/server/store'
 import { normalizeOpenApps } from '@/lib/server/openApps'
+import { listProjectBranches } from '@/lib/server/gitBranches'
 import {
   createCanvas,
   deleteCanvas,
@@ -148,6 +149,14 @@ export const projectRoutes = new Hono()
       }
       throw e
     }
+  })
+  // ── /api/project/branches ────────────────────────────────────────────────
+  // GET ?path= → ProjectBranchesResponse (local git branches, current first).
+  // Data source for the Settings "Target branch" select; non-repo → empty.
+  .get('/api/project/branches', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    return c.json(await listProjectBranches(path))
   })
   // ── /api/project/open ──────────────────────────────────────────────────
   // GET → { apps } ; POST { path, app } → open folder in app ; PUT { apps } → save list

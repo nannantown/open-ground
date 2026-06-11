@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Layers, Redo2, Undo2 } from 'lucide-react'
+import { Layers, Loader2, Redo2, Sparkles, Undo2, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { InfiniteCanvas } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
@@ -20,6 +20,8 @@ import { elementBounds } from '@/lib/canvasBounds'
 import type {
   CanvasElement,
   CanvasFile,
+  GenerateElementsRequest,
+  GenerateElementsResponse,
   Tool,
 } from '@/lib/types'
 
@@ -439,6 +441,135 @@ export const CanvasWorkspace = ({
     [projectPath, canvas.id, mutateElements],
   )
 
+  // ── "Generate with Claude" prompt bar (ToolPalette ✦) ────────────────────
+  // POSTs /api/canvas/generate-elements; the returned NATIVE elements (claude
+  // authors them relative to (0,0)) are re-id'd via cloneForPaste, offset so
+  // their bounding-box centre lands on the current viewport centre, inserted
+  // through mutateElements (normal undo history) and selected as a block so
+  // the user can immediately move/adjust the placement.
+  const surfaceRef = useRef<HTMLDivElement>(null)
+  const [genOpen, setGenOpen] = useState(false)
+  const [genPrompt, setGenPrompt] = useState('')
+  const [genPending, setGenPending] = useState(false)
+  const [genError, setGenError] = useState<string | null>(null)
+
+  // In-flight generation — abortable: closing the bar (✕ / Escape) cancels
+  // the request, and the abort propagates server-side to kill the claude
+  // session instead of letting it burn subscription quota for nobody.
+  const genAbortRef = useRef<AbortController | null>(null)
+  useEffect(
+    () => () => {
+      genAbortRef.current?.abort()
+    },
+    [],
+  )
+
+  const closeGenerate = useCallback(() => {
+    genAbortRef.current?.abort()
+    genAbortRef.current = null
+    setGenPending(false)
+    setGenOpen(false)
+    setGenPrompt('')
+    setGenError(null)
+  }, [])
+
+  const submitGenerate = useCallback(async () => {
+    const prompt = genPrompt.trim()
+    if (!prompt || genPending) return
+    setGenPending(true)
+    setGenError(null)
+    const controller = new AbortController()
+    genAbortRef.current = controller
+    // Generation takes ~a minute — the user may switch Canvas tabs meanwhile.
+    // A late response must land in THIS canvas or nowhere (inserting into
+    // whichever canvas happens to be active would corrupt it).
+    const forCanvasId = canvasRef.current.id
+    try {
+      const body: GenerateElementsRequest = { path: projectPath, prompt }
+      const res = await fetch('/api/canvas/generate-elements', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      const json = (await res.json().catch(() => ({}))) as Partial<GenerateElementsResponse> & {
+        error?: string
+        claudeMissing?: boolean
+      }
+      if (!res.ok || !Array.isArray(json.elements) || json.elements.length === 0) {
+        setGenError(
+          json.claudeMissing
+            ? t('canvas.generate.claudeMissing')
+            : json.error || t('canvas.generate.error'),
+        )
+        return
+      }
+      if (canvasRef.current.id !== forCanvasId) return
+      // Client-side sanity on what the server returns: require finite
+      // coordinates, drop anything else (NaN x would poison every later
+      // arithmetic pass through the canvas file).
+      const generated = (json.elements as CanvasElement[]).filter(
+        (el) =>
+          Number.isFinite(el.x) &&
+          Number.isFinite(el.y) &&
+          (el.width === undefined || Number.isFinite(el.width)) &&
+          (el.height === undefined || Number.isFinite(el.height)),
+      )
+      if (generated.length === 0) {
+        setGenError(t('canvas.generate.error'))
+        return
+      }
+      // Bounding box of the returned batch (positions are relative to ~(0,0)).
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const el of generated) {
+        const b = elementBounds(el)
+        if (!b) continue
+        minX = Math.min(minX, b.x)
+        minY = Math.min(minY, b.y)
+        maxX = Math.max(maxX, b.x + b.w)
+        maxY = Math.max(maxY, b.y + b.h)
+      }
+      if (!Number.isFinite(minX)) {
+        minX = 0
+        minY = 0
+        maxX = 0
+        maxY = 0
+      }
+      // Current viewport centre in world coordinates: screen → world is
+      // (screen - viewport.offset) / zoom (see InfiniteCanvas's transform).
+      const rect = surfaceRef.current?.getBoundingClientRect()
+      const v = canvasRef.current.viewport
+      const cx = ((rect ? rect.width : 800) / 2 - v.x) / v.zoom
+      const cy = ((rect ? rect.height : 600) / 2 - v.y) / v.zoom
+      const dx = Math.round(cx - (minX + maxX) / 2)
+      const dy = Math.round(cy - (minY + maxY) / 2)
+      // cloneForPaste gives fresh ids (claude-authored ids may collide) and
+      // applies the offset while remapping parentId/anchorId within the batch.
+      const copies = cloneForPaste(generated, dx, dy)
+      mutateElements([...canvasRef.current.elements, ...copies])
+      // Select the inserted MEMBERS (not invisible group elements) so the
+      // placement can be adjusted as one block right away.
+      const groupIds = new Set(copies.filter((c) => c.type === 'group').map((c) => c.id))
+      const members = copies.filter((c) => !groupIds.has(c.id))
+      setSelectedIds((members.length ? members : copies).map((c) => c.id))
+      setEditingId(null)
+      setGenOpen(false)
+      setGenPrompt('')
+    } catch (e) {
+      // A user-initiated cancel is not an error.
+      if (!(e instanceof DOMException && e.name === 'AbortError')) {
+        setGenError(t('canvas.generate.error'))
+      }
+    } finally {
+      if (genAbortRef.current === controller) genAbortRef.current = null
+      setGenPending(false)
+    }
+  }, [genPrompt, genPending, projectPath, mutateElements, t])
+
   // Keyboard map. ⌘-combos (undo/redo/copy/cut/paste/duplicate) are gated when a
   // text field has focus so native editing keeps working; the bare tool keys
   // (V/T/S/F/G/O/C/I) are likewise field-gated.
@@ -512,7 +643,7 @@ export const CanvasWorkspace = ({
 
   return (
     <div className="flex h-full w-full overflow-hidden">
-      <div className="relative min-w-0 flex-1 overflow-hidden">
+      <div ref={surfaceRef} className="relative min-w-0 flex-1 overflow-hidden">
         <InfiniteCanvas
           projects={[]}
           canvas={{
@@ -545,7 +676,72 @@ export const CanvasWorkspace = ({
           onToolChange={setTool}
           onDuplicate={duplicateSelection}
         />
-        <ToolPalette tool={tool} onToolChange={setTool} variant="embedded" />
+        <ToolPalette
+          tool={tool}
+          onToolChange={setTool}
+          variant="embedded"
+          onGenerate={() => {
+            setGenOpen(true)
+            setGenError(null)
+          }}
+        />
+        {/* Generate prompt bar — floats bottom-centre while open. Esc / ✕
+            closes (held shut while a generation is in flight so the result
+            isn't orphaned); Enter submits, IME-confirm Enters excluded. */}
+        {genOpen && (
+          <div className="absolute bottom-6 left-1/2 z-30 w-[min(520px,calc(100%-48px))] -translate-x-1/2">
+            <div className="flex items-center gap-2 rounded-full border border-line bg-bg-card/95 py-1.5 pl-4 pr-1.5 shadow-card backdrop-blur transition-colors focus-within:border-accent">
+              <Sparkles size={13} strokeWidth={1.75} className="shrink-0 text-ink-muted" />
+              <input
+                autoFocus
+                value={genPrompt}
+                onChange={(e) => setGenPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation()
+                  // IME guard: don't steal the Enter that confirms a conversion.
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                    e.preventDefault()
+                    void submitGenerate()
+                  } else if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
+                    // While pending this CANCELS the generation — never trap
+                    // the user in a mode they can't leave.
+                    closeGenerate()
+                  }
+                }}
+                disabled={genPending}
+                placeholder={t('canvas.generate.placeholder')}
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              {genPending && (
+                <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-ink-muted">
+                  <Loader2 size={12} strokeWidth={2} className="animate-spin" />
+                  {t('canvas.generate.hint')}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => void submitGenerate()}
+                disabled={genPending || !genPrompt.trim()}
+                className="h-7 shrink-0 rounded-full bg-accent px-3 text-[11.5px] font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
+              >
+                {t('canvas.generate.go')}
+              </button>
+              <button
+                type="button"
+                onClick={closeGenerate}
+                title={genPending ? t('canvas.generate.cancel') : t('canvas.generate.close')}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <X size={13} strokeWidth={2} />
+              </button>
+            </div>
+            {genError && (
+              <p className="mt-1.5 truncate px-4 text-center text-[11px] text-accent">
+                {genError}
+              </p>
+            )}
+          </div>
+        )}
         {/* Layers launcher — top-left, clear of the centre-left ToolPalette and
             the top-right SelectionInspector. Toggles the panel; reflects open
             state so it reads as a pressed control while the list is showing. */}

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef } from 'react'
-import { MonitorSmartphone } from 'lucide-react'
-import type { CanvasElement } from '@/lib/types'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Loader2, MonitorSmartphone, Sparkles, X } from 'lucide-react'
+import type { CanvasElement, TweakScreenRequest, TweakScreenResponse } from '@/lib/types'
 import { buildScreenSrcdoc, hash32 } from '@/lib/screenSrcdoc'
+import type { InspectPick } from '@/lib/canvasInspect'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { useT } from '@/i18n/I18nContext'
 
@@ -16,6 +17,284 @@ interface Props {
   /** True while the Comment tool is active — the overlay drops its grab cursor
    *  so the canvas wrapper's comment-bubble cursor shows over the screen. */
   commentTool?: boolean
+  /** Project path for /api/canvas/tweak-screen — absent on surfaces that
+   *  don't carry one (the tweak button simply hides then). */
+  projectPath?: string
+}
+
+// ── Tweak (inspect-and-instruct) — shared by ScreenView and MockView ─────────
+//
+// Owns the in-tile "tweak" flow: a toggle next to the Interactive badge flips
+// the iframe's inspect bridge on (see src/lib/canvasInspect.ts); clicking an
+// element inside the design reports a pick; a bottom panel takes a natural-
+// language instruction and POSTs /api/canvas/tweak-screen; the rewritten
+// source flows out through the SAME onChangeText path a manual edit uses, so
+// persistence + undo behave identically and the iframe re-renders itself.
+//
+// Returned pieces: `badge` (the Interactive pill + tweak toggle cluster, only
+// while selected), `panel` (the picked-element instruction panel), and
+// `onIframeLoad` (re-arms the bridge after the iframe remounts on a new
+// srcdoc — e.g. right after a tweak applies).
+export function useInspectTweak({
+  iframeRef,
+  selected,
+  projectPath,
+  source,
+  framework,
+  onChangeText,
+}: {
+  iframeRef: React.RefObject<HTMLIFrameElement | null>
+  selected: boolean
+  projectPath?: string
+  source: string
+  framework: 'react' | 'html'
+  onChangeText: (text: string) => void
+}) {
+  const { t } = useT()
+  const [inspecting, setInspecting] = useState(false)
+  const [picked, setPicked] = useState<InspectPick | null>(null)
+  const [instruction, setInstruction] = useState('')
+  const [pending, setPending] = useState(false)
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+
+  const sendInspect = useCallback(
+    (on: boolean) => {
+      iframeRef.current?.contentWindow?.postMessage({ og: 'inspect', on }, '*')
+    },
+    [iframeRef],
+  )
+
+  // Push the mode into the iframe whenever it flips.
+  useEffect(() => {
+    sendInspect(inspecting)
+  }, [inspecting, sendInspect])
+
+  // Deselecting the tile exits tweak mode entirely (panel included).
+  useEffect(() => {
+    if (selected) return
+    setInspecting(false)
+    setPicked(null)
+    setInstruction('')
+    setNotice(null)
+  }, [selected])
+
+  // Receive picks — only from OUR iframe (e.source identifies the tile even
+  // though the sandboxed window is cross-origin-opaque).
+  useEffect(() => {
+    if (!inspecting) return
+    const onMsg = (e: MessageEvent) => {
+      if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return
+      const d = e.data as { og?: string; payload?: InspectPick } | null
+      if (!d || d.og !== 'pick' || !d.payload) return
+      // Re-clamp here: the sandboxed content fully controls its own window,
+      // so the bridge's own truncation is a courtesy, not a boundary.
+      const raw = d.payload as Partial<InspectPick>
+      const clamp = (v: unknown, max: number) =>
+        typeof v === 'string' ? v.slice(0, max) : ''
+      setPicked({
+        tag: clamp(raw.tag, 100) || 'div',
+        classes: clamp(raw.classes, 1000),
+        text: clamp(raw.text, 200),
+        html: clamp(raw.html, 2000),
+        rect: raw.rect && typeof raw.rect === 'object' ? raw.rect : undefined,
+      } as InspectPick)
+      setNotice(null)
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [inspecting, iframeRef])
+
+  // In-flight tweak — abortable: closing the panel cancels the request and
+  // the abort kills the server-side claude session. Without this, ✕ during
+  // pending closed the panel but the response landed later and silently
+  // rewrote the design behind the user's back.
+  const abortRef = useRef<AbortController | null>(null)
+  useEffect(
+    () => () => {
+      abortRef.current?.abort()
+    },
+    [],
+  )
+
+  const close = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setPending(false)
+    setInspecting(false)
+    setPicked(null)
+    setInstruction('')
+    setNotice(null)
+  }, [])
+
+  const submit = useCallback(async () => {
+    if (pending || !picked || !projectPath || !instruction.trim()) return
+    setPending(true)
+    setNotice(null)
+    const controller = new AbortController()
+    abortRef.current = controller
+    try {
+      const body: TweakScreenRequest = {
+        path: projectPath,
+        source,
+        framework,
+        instruction: instruction.trim(),
+        element: {
+          tag: picked.tag,
+          classes: picked.classes,
+          text: picked.text,
+          html: picked.html,
+        },
+      }
+      const res = await fetch('/api/canvas/tweak-screen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      const json = (await res.json().catch(() => ({}))) as Partial<TweakScreenResponse> & {
+        error?: string
+        claudeMissing?: boolean
+      }
+      if (!res.ok || typeof json.source !== 'string') {
+        setNotice({
+          kind: 'err',
+          text: json.claudeMissing
+            ? t('canvasEl.tweak.claudeMissing')
+            : json.error || t('canvasEl.tweak.error'),
+        })
+      } else if (json.unchanged) {
+        // claude judged the instruction already satisfied — informational.
+        setNotice({ kind: 'ok', text: t('canvasEl.tweak.unchanged') })
+      } else {
+        // Same persistence path as a manual code edit — undo/redo included.
+        onChangeText(json.source)
+        setInstruction('')
+        // The pick snapshot describes the PRE-rewrite DOM; against the new
+        // source it would mislead the next tweak. Ask for a fresh pick (the
+        // bridge re-arms on iframe load, so it's one click).
+        setPicked(null)
+        setNotice({ kind: 'ok', text: t('canvasEl.tweak.applied') })
+      }
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === 'AbortError')) {
+        setNotice({ kind: 'err', text: t('canvasEl.tweak.error') })
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null
+      setPending(false)
+    }
+  }, [pending, picked, projectPath, instruction, source, framework, onChangeText, t])
+
+  // A tweak (or any edit) swaps the srcdoc and remounts the iframe — re-arm
+  // the bridge on load so the next pick works without re-toggling.
+  const onIframeLoad = useCallback(() => {
+    if (inspecting) sendInspect(true)
+  }, [inspecting, sendInspect])
+
+  const badge = selected ? (
+    <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
+      {/* The mode flip (selected = live) needs a visible signal — the moss
+          dot mirrors the Ground card's Working beacon register. */}
+      <span className="pointer-events-none flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-[10px] font-medium text-moss shadow-card">
+        <span className="h-[5px] w-[5px] rounded-full bg-moss" />
+        {t('canvasEl.iframe.interactive')}
+      </span>
+      {projectPath && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => setInspecting((v) => !v)}
+          aria-pressed={inspecting}
+          title={t('canvasEl.tweak.title')}
+          className={[
+            'flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-card transition-colors',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+            inspecting
+              ? 'border-accent bg-accent text-bg-card hover:bg-accent-hover'
+              : 'border-line bg-bg-card/95 text-ink-muted hover:bg-bg-inset hover:text-ink',
+          ].join(' ')}
+        >
+          <Sparkles size={10} strokeWidth={2} />
+          {t('canvasEl.tweak.enter')}
+        </button>
+      )}
+    </div>
+  ) : null
+
+  const panel =
+    selected && (picked || (inspecting && notice) || inspecting) ? (
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        className="absolute inset-x-0 bottom-0 z-10 border-t border-line bg-bg-card p-2"
+      >
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted">
+            {picked
+              ? `<${picked.tag}>` +
+                (picked.classes.trim()
+                  ? ' .' + picked.classes.trim().split(/\s+/).join(' .')
+                  : '')
+              : t('canvasEl.tweak.pickHint')}
+          </span>
+          <button
+            type="button"
+            onClick={close}
+            title={t('canvasEl.tweak.close')}
+            className="flex h-5 w-5 items-center justify-center rounded-[3px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            <X size={12} strokeWidth={2} />
+          </button>
+        </div>
+        {picked && (
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <input
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              // IME guard: never steal the Enter that confirms a conversion.
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                void submit()
+              } else if (e.key === 'Escape' && !e.nativeEvent.isComposing && !pending) {
+                close()
+              }
+            }}
+            disabled={pending}
+            autoFocus
+            placeholder={t('canvasEl.tweak.placeholder')}
+            className="h-7 min-w-0 flex-1 rounded-[3px] border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onClick={() => void submit()}
+            disabled={pending || !instruction.trim()}
+            className="flex h-7 shrink-0 items-center gap-1 rounded-[3px] bg-accent px-2.5 text-[11px] font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
+          >
+            {pending ? (
+              <Loader2 size={12} strokeWidth={2} className="animate-spin" />
+            ) : (
+              <Sparkles size={11} strokeWidth={2} />
+            )}
+            {t('canvasEl.tweak.send')}
+          </button>
+        </div>
+        )}
+        {notice && (
+          <p
+            className={[
+              'mt-1 truncate text-[10.5px]',
+              notice.kind === 'ok' ? 'text-moss' : 'text-accent',
+            ].join(' ')}
+          >
+            {notice.text}
+          </p>
+        )}
+      </div>
+    ) : null
+
+  return { badge, panel, onIframeLoad }
 }
 
 const DEFAULT_W = 1280
@@ -76,9 +355,11 @@ export const ScreenView = ({
   onEditDone,
   ring,
   commentTool,
+  projectPath,
 }: Props) => {
   const { t } = useT()
   const ta = useRef<HTMLTextAreaElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
   const chrome = element.chrome ?? 'none'
   const framework = element.framework ?? 'react'
   const theme = element.theme ?? 'light'
@@ -96,12 +377,21 @@ export const ScreenView = ({
     [source, framework, theme, element.props],
   )
 
+  const tweak = useInspectTweak({
+    iframeRef,
+    selected,
+    projectPath,
+    source,
+    framework,
+    onChangeText,
+  })
+
   return (
     <div
       onPointerDown={onPointerDown}
       style={{ width: w, height: h, opacity: resolveOpacity(element) }}
       className={[
-        'relative flex flex-col overflow-hidden rounded-[4px] border border-line bg-bg-card shadow-card',
+        'group relative flex flex-col overflow-hidden rounded-[4px] border border-line bg-bg-card shadow-card',
         editing ? 'cursor-text' : 'cursor-grab active:cursor-grabbing',
         ring,
       ].join(' ')}
@@ -125,6 +415,8 @@ export const ScreenView = ({
           <>
             <iframe
               key={hash32(srcdoc)}
+              ref={iframeRef}
+              onLoad={tweak.onIframeLoad}
               title={label}
               srcDoc={srcdoc}
               sandbox="allow-scripts"
@@ -145,8 +437,18 @@ export const ScreenView = ({
                   // instead of this overlay's own grab cursor (see ElementView).
                   commentTool ? 'cursor-[inherit]' : 'cursor-grab active:cursor-grabbing',
                 ].join(' ')}
-              />
+              >
+                {/* Interactivity is real but invisible (select first, then the
+                    iframe is live) — say so on hover, or nobody discovers it. */}
+                {!commentTool && (
+                  <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-[10px] font-medium text-ink-muted opacity-0 shadow-card transition-opacity duration-150 group-hover:opacity-100">
+                    {t('canvasEl.iframe.clickToInteract')}
+                  </span>
+                )}
+              </div>
             )}
+            {tweak.badge}
+            {tweak.panel}
           </>
         ) : (
           // Empty screen (or a legacy moduleId-only screen pre-migration):

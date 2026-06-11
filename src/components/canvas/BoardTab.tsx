@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { GripVertical } from 'lucide-react'
+import { GripVertical, Settings2 } from 'lucide-react'
 import type { BoardColumn, ProjectData, ProjectTask } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
@@ -128,6 +128,9 @@ interface BoardTabProps {
   /** The card whose detail drawer is open — rendered in a selected state so
    *  the board always shows WHICH card the drawer belongs to. */
   openTaskId?: string | null
+  /** Open the Project Settings dialog. Optional — unset renders no settings
+   *  affordance (back-compat for hosts without the dialog). */
+  onOpenProjectSettings?: () => void
 }
 
 export const BoardTab = ({
@@ -139,6 +142,7 @@ export const BoardTab = ({
   projectId,
   displayName,
   openTaskId,
+  onOpenProjectSettings,
 }: BoardTabProps) => {
   const { t } = useT()
   // The optional review lane is a SHARED per-project policy (config travels
@@ -299,41 +303,59 @@ export const BoardTab = ({
             </button>
           )}
         </div>
-        {/* Review-column toggle — lives in the toolbar (where the column would
-            appear) for discoverability; the settings dialog's checkbox edits
-            the SAME config.reviewColumn. Label + a small switch: the knob
-            position carries the state, so it reads at a glance without copy. */}
-        <button
-          type="button"
-          role="switch"
-          aria-checked={reviewOn}
-          onClick={() => onPersist(withReviewColumnToggled(data))}
-          disabled={projectMissing}
-          title={
-            reviewOn
-              ? t('board.toolbar.reviewColumnHideHint')
-              : t('board.toolbar.reviewColumnShowHint')
-          }
-          className="group flex items-center gap-1.5 rounded-sm px-1 py-1 text-[11px] text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
-        >
-          {t('board.toolbar.reviewColumn')}
-          <span
-            aria-hidden
-            className={[
-              'relative h-[14px] w-[24px] shrink-0 rounded-full border transition-colors',
+        <div className="flex items-center gap-3">
+          {/* Review-column toggle — lives in the toolbar (where the column would
+              appear) for discoverability; this is the ONLY review-column switch
+              (the settings dialog no longer duplicates it). Label + a small
+              switch: the knob position carries the state, so it reads at a
+              glance without copy. */}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={reviewOn}
+            onClick={() => onPersist(withReviewColumnToggled(data))}
+            disabled={projectMissing}
+            title={
               reviewOn
-                ? 'border-accent bg-accent group-hover:bg-accent-hover'
-                : 'border-line bg-bg-inset',
-            ].join(' ')}
+                ? t('board.toolbar.reviewColumnHideHint')
+                : t('board.toolbar.reviewColumnShowHint')
+            }
+            className="group flex items-center gap-1.5 rounded-sm px-1 py-1 text-[11px] text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
           >
+            {t('board.toolbar.reviewColumn')}
             <span
+              aria-hidden
               className={[
-                'absolute top-[2px] h-[8px] w-[8px] rounded-full transition-[left,background-color]',
-                reviewOn ? 'left-[12px] bg-bg-card' : 'left-[2px] bg-ink-faint',
+                'relative h-[14px] w-[24px] shrink-0 rounded-full border transition-colors',
+                reviewOn
+                  ? 'border-accent bg-accent group-hover:bg-accent-hover'
+                  : 'border-line bg-bg-inset',
               ].join(' ')}
-            />
-          </span>
-        </button>
+            >
+              <span
+                className={[
+                  'absolute top-[2px] h-[8px] w-[8px] rounded-full transition-[left,background-color]',
+                  reviewOn ? 'left-[12px] bg-bg-card' : 'left-[2px] bg-ink-faint',
+                ].join(' ')}
+              />
+            </span>
+          </button>
+          {/* Project settings — surfaces the dialog that used to hide behind
+              the ⋯ menu. Quiet text+icon button, same register as the review
+              toggle's label. */}
+          {onOpenProjectSettings && (
+            <button
+              type="button"
+              onClick={onOpenProjectSettings}
+              disabled={projectMissing}
+              title={t('board.toolbar.projectSettings')}
+              className="flex items-center gap-1.5 rounded-sm px-1 py-1 text-[11px] text-ink-muted transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
+            >
+              <Settings2 size={13} className="shrink-0" />
+              {t('board.toolbar.projectSettings')}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Columns — always rendered, even at 0 cards, so the lane structure tasks

@@ -36,6 +36,9 @@ export interface BoardModuleProps {
    *  drawer auto-launches it once the card has a title — the conversation
    *  pane is not rendered until a slot exists. */
   onLaunchTask: (task: ProjectTask) => Promise<boolean>
+  /** Open the Project Settings dialog (owned by ProjectPanel). Optional —
+   *  unset hides the Board toolbar's settings affordance. */
+  onOpenProjectSettings?: () => void
 }
 
 export const BoardModule = ({
@@ -49,6 +52,7 @@ export const BoardModule = ({
   liveTerminalId,
   onDeleteTask,
   onLaunchTask,
+  onOpenProjectSettings,
 }: BoardModuleProps) => {
   const { t } = useT()
   // The user's display name (Settings.displayName) — feeds the drawer's "Me"
@@ -561,6 +565,7 @@ export const BoardModule = ({
           projectMissing={project.missing}
           projectId={project.id}
           displayName={displayName}
+          onOpenProjectSettings={onOpenProjectSettings}
         />
       </div>
       {detailTask && (

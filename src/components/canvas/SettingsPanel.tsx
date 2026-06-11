@@ -12,7 +12,15 @@ import {
   MessageSquare,
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
-import type { Settings, SettingsResponse, FeedbackItem, FeedbackListResponse } from '@/lib/types'
+import { Markdown } from '@/components/canvas/Markdown'
+import { pickReleaseNotesLang } from '@/lib/releaseNotesLang'
+import type {
+  Settings,
+  SettingsResponse,
+  FeedbackItem,
+  FeedbackListResponse,
+  ReleaseNotesResponse,
+} from '@/lib/types'
 import { api } from '@/lib/api-client'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { useT } from '@/i18n/I18nContext'
@@ -219,6 +227,9 @@ export const SettingsPanel = ({
           {/* Owner-only inbox — only when the server can read submissions. */}
           {open && feedbackCanRead && <FeedbackInbox onSeen={onFeedbackSeen} />}
 
+          {/* Release notes — what changed, per published version. */}
+          {open && <ReleaseNotesSection />}
+
           {/* Advanced — working defaults; hidden until needed. */}
           <div className="mt-6 border-t border-line pt-4">
             <button
@@ -327,6 +338,93 @@ const Section = ({
     {hint && <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{hint}</p>}
   </div>
 )
+
+// Collapsed-by-default disclosure listing every published release of the
+// distribution repo, newest first, with its bilingual notes filtered to the
+// active UI language. Fetch is lazy (first expand) — opening Settings costs
+// no GitHub round-trip; the server caches the list for 10 minutes anyway.
+const ReleaseNotesSection = () => {
+  const { t, lang } = useT()
+  const [expanded, setExpanded] = useState(false)
+  const [data, setData] = useState<ReleaseNotesResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!expanded || data) return
+    let cancelled = false
+    setLoading(true)
+    fetch('/api/release-notes')
+      .then((res) => (res.ok ? (res.json() as Promise<ReleaseNotesResponse>) : null))
+      .then((body) => {
+        if (!cancelled && body) setData(body)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [expanded, data])
+
+  return (
+    <div className="mt-6 border-t border-line pt-4">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="inline-flex items-center gap-1.5 label-cap text-ink-muted hover:text-ink transition-colors"
+      >
+        <ChevronRight
+          size={13}
+          className={'transition-transform duration-150 ' + (expanded ? 'rotate-90' : '')}
+        />
+        {t('settings.releaseNotes.heading')}
+      </button>
+
+      {expanded && (
+        <div className="mt-3">
+          {loading && !data && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
+              <Loader2 size={12} className="animate-spin" />
+              {t('settings.releaseNotes.loading')}
+            </span>
+          )}
+          {!loading && data && data.releases.length === 0 && (
+            <div className="inline-flex items-start gap-1 text-[11px] text-accent">
+              <AlertCircle size={12} className="mt-[2px] shrink-0" />
+              <span>{t('settings.releaseNotes.error')}</span>
+            </div>
+          )}
+          {data && data.releases.length > 0 && (
+            <ul className="max-h-[320px] space-y-4 overflow-y-auto -mx-1 px-1">
+              {data.releases.map((r) => (
+                <li key={r.version} className="rounded-[2px] border border-line bg-bg p-3">
+                  <div className="mb-1.5 flex items-baseline gap-2">
+                    <span className="font-mono text-[12px] font-semibold text-ink">v{r.version}</span>
+                    {r.version === data.current && (
+                      <span className="rounded-[2px] border border-accent px-1.5 py-px text-[9px] font-medium uppercase tracking-wide text-accent">
+                        {t('settings.releaseNotes.current')}
+                      </span>
+                    )}
+                    <span className="ml-auto text-[10px] text-ink-subtle">
+                      {r.publishedAt.slice(0, 10)}
+                    </span>
+                  </div>
+                  {r.body ? (
+                    <div className="text-[12px] leading-relaxed">
+                      <Markdown source={pickReleaseNotesLang(r.body, lang)} />
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-ink-subtle">—</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 const FeedbackInbox = ({ onSeen }: { onSeen?: (latestCreatedAt: string | null) => void }) => {
   const { t } = useT()

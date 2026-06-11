@@ -12,8 +12,11 @@
 //  - completionFlow 'pr': instead of merging back, push the branch and open a
 //    PR via `gh pr create`; a HUMAN merges it. With reviewColumn on, the card
 //    moves to the review column instead of done.
-//  - verifyCommands: a "Definition of done" — every command must pass before
-//    the task may be declared complete (applies on non-git projects too).
+//
+// (verifyCommands — the old "Definition of done" section — was retired
+// 2026-06-11 with its Settings editor: hidden prompt-steering state with no
+// UI to inspect or clear it is worse than no feature. Legacy saved values
+// are preserved in project data but no longer injected.)
 //
 // Pure (the route resolves git-ness, the worktrees dir, and the config) so the
 // exact prompt contract is unit-testable.
@@ -29,9 +32,9 @@ export interface TaskPromptInput {
   /** Central worktrees dir for this project, or null when the project is not
    *  a git repo (the branch protocol is omitted entirely then). */
   worktreesDir: string | null
-  /** Shared per-project policy (completion flow / target branch / verify
-   *  commands / review column). Omitted or empty = legacy defaults: merge
-   *  back into the launch-time branch, no Definition-of-done section. */
+  /** Shared per-project policy (completion flow / target branch / review
+   *  column). Omitted or empty = legacy defaults: merge back into the
+   *  launch-time branch. */
   config?: ProjectConfig
 }
 
@@ -48,7 +51,6 @@ export const buildTaskPrompt = ({ cwd, task, port, worktreesDir, config }: TaskP
     : 'the branch that was checked out when you started'
   // completionFlow only means anything on a git project; non-git ignores it.
   const isPr = Boolean(worktreesDir) && config?.completionFlow === 'pr'
-  const verifyCommands = (config?.verifyCommands ?? []).filter((cmd) => cmd.trim().length > 0)
 
   if (worktreesDir) {
     lines.push(
@@ -77,17 +79,6 @@ export const buildTaskPrompt = ({ cwd, task, port, worktreesDir, config }: TaskP
         `4. When the task is complete AND the user confirms: merge the task branch back into ${baseProse}, \`git worktree remove\` the worktree, delete the task branch, and report what was merged.`,
       )
     }
-  }
-
-  if (verifyCommands.length > 0) {
-    lines.push(
-      '',
-      '## Definition of done (verify commands)',
-      worktreesDir
-        ? `Before the task may be declared complete${isPr ? ' or its PR opened' : ' or its branch merged'}, run EVERY command below inside the task worktree. ALL of them must pass (exit 0). If one fails, fix the code and re-run until every command passes:`
-        : 'Before the task may be declared complete, run EVERY command below in the project directory. ALL of them must pass (exit 0). If one fails, fix the code and re-run until every command passes:',
-      ...verifyCommands.map((cmd) => `- ${cmd}`),
-    )
   }
 
   if (task.id) {
