@@ -56,56 +56,6 @@ export interface Settings {
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
    *  language toggle so the server can pick the matching prompt language. */
   language?: 'en' | 'ja'
-  /** Voice dictation (Wispr Flow-style): local whisper.cpp STT + optional
-   *  claude-CLI contextual cleanup. See {@link VoiceSettings}. */
-  voice?: VoiceSettings
-}
-
-/** Voice dictation settings. All optional — absence means the defaults noted
- *  per field. The whisper binary itself is NOT bundled; `whisperPath` overrides
- *  auto-detection (`whisper-cli` on PATH / Homebrew locations). */
-export interface VoiceSettings {
-  /** Master switch. Default false (feature is opt-in). */
-  enabled?: boolean
-  /** Serialized key combo that starts/stops recording, e.g. 'Alt+Space',
-   *  'Ctrl+Shift+V', or a bare key like 'F9'. Default 'Alt+Space'.
-   *  Format: modifiers (Ctrl/Alt/Shift/Meta, in that order) + KeyboardEvent.key
-   *  (single chars upper-cased), joined by '+'. */
-  keybinding?: string
-  /** 'hold' = push-to-talk (record while held), 'toggle' = press to start,
-   *  press again to stop. Default 'hold'. */
-  keyMode?: 'hold' | 'toggle'
-  /** Run the raw whisper transcript through a one-off claude CLI pass for
-   *  contextual cleanup (punctuation, mis-recognition fixes). Default false. */
-  formatWithClaude?: boolean
-  /** Absolute path to the whisper-cli binary. Null/unset = auto-detect. */
-  whisperPath?: string | null
-  /** ggml model size, downloaded on demand to ~/.openground/models/.
-   *  Default 'small'. */
-  model?: 'base' | 'small' | 'medium'
-  /** Spoken language hint passed to whisper. Default 'auto'. */
-  spokenLanguage?: 'auto' | 'ja' | 'en'
-}
-
-/** GET /api/voice/status response. */
-export interface VoiceStatus {
-  /** Resolved whisper-cli binary path, or null when not found. */
-  binaryPath: string | null
-  /** The model selected in settings. */
-  model: 'base' | 'small' | 'medium'
-  /** Whether that model file exists locally. */
-  modelPresent: boolean
-  /** In-flight model download, if any. */
-  download: { model: string; progress: number; error?: string } | null
-}
-
-/** POST /api/voice/transcribe response. `text` is what the client inserts —
- *  the claude-formatted version when formatting ran, otherwise the raw
- *  whisper transcript. `raw` always carries the unformatted transcript. */
-export interface VoiceTranscribeResponse {
-  text: string
-  raw: string
-  formatted: boolean
 }
 
 /** GET /api/settings response: the persisted {@link Settings} plus a

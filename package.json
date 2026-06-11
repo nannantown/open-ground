@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -116,8 +116,7 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "OPEN GROUND raises its own window and coordinates the local Claude Code session.",
-        "NSMicrophoneUsageDescription": "OPEN GROUND uses the microphone for voice dictation. Audio is transcribed locally (whisper.cpp) and never leaves this machine."
+        "NSAppleEventsUsageDescription": "OPEN GROUND raises its own window and coordinates the local Claude Code session."
       }
     },
     "win": {

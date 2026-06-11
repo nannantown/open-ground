@@ -1698,13 +1698,13 @@ export const ProjectPanel = ({
                       : undefined
                   }
                   className={[
-                    'group/term relative flex shrink-0 select-none items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-[11px] transition-colors',
+                    'group/term relative flex shrink-0 select-none items-center gap-1.5 border-b-2 px-2.5 pt-3 pb-2 text-xs font-semibold transition-colors',
                     termDragId === slot.id
                       ? 'z-30 cursor-grabbing opacity-95 shadow-lg'
                       : 'cursor-grab',
                     active
                       ? 'border-b-accent bg-[#2e2e2e] text-white'
-                      : 'border-b-[#272727] bg-[#1c1c1c] text-[#7c7c7c] hover:bg-[#242424] hover:text-[#d4d4d4]',
+                      : 'border-b-[#272727] bg-[#1c1c1c] text-[#9a9a9a] hover:bg-[#242424] hover:text-[#d4d4d4]',
                   ].join(' ')}
                 >
                   <Terminal

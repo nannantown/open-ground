@@ -12,8 +12,7 @@ import {
   MessageSquare,
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
-import { VoiceSettingsSection } from '@/components/canvas/VoiceSettingsSection'
-import type { Settings, SettingsResponse, FeedbackItem, FeedbackListResponse, VoiceSettings } from '@/lib/types'
+import type { Settings, SettingsResponse, FeedbackItem, FeedbackListResponse } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { useT } from '@/i18n/I18nContext'
@@ -53,7 +52,6 @@ export const SettingsPanel = ({
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
   const [displayName, setDisplayName] = useState(settings.displayName ?? '')
-  const [voiceDraft, setVoiceDraft] = useState<VoiceSettings>(settings.voice ?? {})
   // Non-persisted placeholder for the Display name input: the user's global
   // git identity, served by GET /api/settings as `suggestedDisplayName`.
   const [suggestedName, setSuggestedName] = useState<string | null>(null)
@@ -68,7 +66,6 @@ export const SettingsPanel = ({
     if (!open) return
     setDefaultWorkspace(settings.defaultWorkspace ?? '')
     setDisplayName(settings.displayName ?? '')
-    setVoiceDraft(settings.voice ?? {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -112,7 +109,6 @@ export const SettingsPanel = ({
       // '' is saved explicitly (not dropped) so clearing the field clears the
       // setting through the server's merge-on-write.
       displayName: displayName.trim(),
-      voice: voiceDraft,
     })
   }
 
@@ -218,11 +214,6 @@ export const SettingsPanel = ({
               placeholder={suggestedName ?? ''}
               className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
             />
-          </Section>
-
-          {/* Voice dictation — local whisper.cpp STT; opt-in. */}
-          <Section heading={t('settings.voice.heading')} hint={t('settings.voice.hint')}>
-            <VoiceSettingsSection open={open} value={voiceDraft} onChange={setVoiceDraft} />
           </Section>
 
           {/* Owner-only inbox — only when the server can read submissions. */}
