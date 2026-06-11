@@ -1,10 +1,11 @@
 {
   "name": "openground",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts\" \"vite\"",
+    "dev:alt": "node scripts/dev-alt.mjs",
     "dev:server": "PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts",
     "dev:web": "vite",
     "build": "npm run build:web && npm run build:server",

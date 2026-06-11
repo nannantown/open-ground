@@ -7,6 +7,10 @@ import { join } from 'path'
 import { app } from '../../app'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import { writeSharedMarker, SHARED_DATA_VERSION } from '@/lib/server/sharedData'
+import {
+  __resetAutoSyncForTests,
+  __setAutoSyncSchedulingForTests,
+} from '@/lib/server/shareAutoSync'
 
 // Route-level tests for /api/project/share/* (Track C): the security boundary
 // (validateProjectPath — registry as allowlist) plus a happy path against a
@@ -36,6 +40,8 @@ beforeEach(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-share-scratch-')))
   process.env.OPENGROUND_HOME = home
   __resetMigrationCacheForTests()
+  __setAutoSyncSchedulingForTests(false)
+  __resetAutoSyncForTests()
 
   // Keep git away from the machine's real global/system config (identity,
   // gpgsign, …) — same isolation as gitShare.test.ts.
@@ -125,6 +131,14 @@ describe('share routes — contract on a registered git project', () => {
       dirty: true,
       ahead: 0,
       behind: 0,
+      branch: 'main',
+      auto: {
+        enabled: true,
+        mode: 'live',
+        lastSyncAt: null,
+        pendingPush: false,
+        intervalMs: 15000,
+      },
     })
 
     // Sync: commits locally; pull/push have no remote to talk to → soft-skip
@@ -142,6 +156,30 @@ describe('share routes — contract on a registered git project', () => {
     expect((await res.json()).dirty).toBe(false)
   })
 
+  it('resolve: 400 without usable choices; works as a plain sync when nothing conflicts', async () => {
+    const dir = await makeRegisteredRepo('resolve-guards')
+    await mkdir(join(dir, '.openground'), { recursive: true })
+    await writeSharedMarker(dir, { version: SHARED_DATA_VERSION })
+
+    let res = await app.request('/api/project/share/resolve', json({ path: dir }))
+    expect(res.status).toBe(400)
+    res = await app.request(
+      '/api/project/share/resolve',
+      json({ path: dir, choices: { x: 'bogus' } }),
+    )
+    expect(res.status).toBe(400)
+
+    // Valid choices but no conflict → behaves like a sync (commits the marker).
+    res = await app.request(
+      '/api/project/share/resolve',
+      json({ path: dir, choices: { '.openground/board/notes.md': 'mine' } }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.committed).toBe(true)
+  })
+
   it('status on a registered non-shared project: plain falses, no error', async () => {
     const dir = await makeRegisteredRepo('plain-app')
     const res = await app.request(
@@ -155,6 +193,7 @@ describe('share routes — contract on a registered git project', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      branch: 'main',
     })
   })
 })

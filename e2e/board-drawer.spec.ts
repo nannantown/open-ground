@@ -1,14 +1,19 @@
 import { test, expect } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
 
-// Board detail drawer geometry — REAL mouse drags (the placeholder regression
-// taught us synthetic events lie about drag behaviour). Covers:
-//   - the fields/terminal split divider moves with a vertical drag
-//   - the drawer's left-edge grip widens the panel with a horizontal drag
-// Both gestures are the answer to "the terminal only gets the bottom sliver".
+// Board detail drawer — REAL mouse drags (the placeholder regression taught us
+// synthetic events lie about drag behaviour). The drawer is phase-following:
+//   Draft (no terminal slot): fields fill the drawer, Launch bar at the bottom,
+//     no split grip (there is no terminal to split against).
+//   Session (after Launch): the terminal owns the drawer; the chevron header
+//     expands the fields block, whose split divider is drag-resizable.
+// Width (the drawer's left edge) is draggable in BOTH phases.
 
 test.describe('Board detail drawer', () => {
-  test('terminal split and panel width are drag-resizable', async ({ request, page }) => {
+  test('draft fields → launch → session split/width drags, remembered on reload', async ({
+    request,
+    page,
+  }) => {
     const project = await createAndImportProject(request, 'drawer')
     const res = await request.post('/api/project/tasks', {
       data: { path: project.path, add: ['Resize me'] },
@@ -29,28 +34,17 @@ test.describe('Board detail drawer', () => {
     )
     await page.goto('/', { waitUntil: 'domcontentloaded' })
 
-    // Open the card → detail drawer (aside) appears.
+    // Open the card → DRAFT mode: full fields + Launch bar, no split grip yet.
     await page.getByText('Resize me').first().click()
-    const split = page.getByRole('separator', {
-      name: /terminal height|ターミナルの高さ/i,
-    })
-    await expect(split).toBeVisible()
-
-    // ── Vertical: drag the split divider up 80px → divider follows. ──────────
-    const before = await split.boundingBox()
-    expect(before).toBeTruthy()
-    if (!before) return
-    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
-    await page.mouse.down()
-    await page.mouse.move(before.x + before.width / 2, before.y - 80, { steps: 8 })
-    await page.mouse.up()
-    const after = await split.boundingBox()
-    expect(after).toBeTruthy()
-    if (!after) return
-    expect(before.y - after.y).toBeGreaterThan(50)
-
-    // ── Horizontal: drag the left-edge grip 120px left → drawer widens. ──────
     const aside = page.locator('aside')
+    await expect(aside.locator('input[placeholder]').first()).toBeVisible()
+    const launch = aside.getByRole('button', { name: /Launch Claude/i })
+    await expect(launch).toBeVisible()
+    await expect(
+      page.getByRole('separator', { name: /terminal height|ターミナルの高さ/i }),
+    ).toHaveCount(0)
+
+    // ── Width: drag the left-edge grip 120px left → drawer widens (Draft). ───
     const wBefore = (await aside.boundingBox())?.width ?? 0
     const grip = page.getByRole('separator', { name: /panel width|パネル幅/i })
     const gb = await grip.boundingBox()
@@ -63,16 +57,44 @@ test.describe('Board detail drawer', () => {
     const wAfter = (await aside.boundingBox())?.width ?? 0
     expect(wAfter - wBefore).toBeGreaterThan(80)
 
-    // Both choices are remembered across a reload.
+    // ── Launch (fake-claude) → SESSION mode: compact header + terminal. ──────
+    await launch.click()
+    const header = aside.getByRole('button', { name: 'Resize me' })
+    await expect(header).toBeVisible()
+
+    // Chevron expands the fields; the split divider appears and drags.
+    await header.click()
+    const split = page.getByRole('separator', {
+      name: /terminal height|ターミナルの高さ/i,
+    })
+    await expect(split).toBeVisible()
+    const before = await split.boundingBox()
+    expect(before).toBeTruthy()
+    if (!before) return
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(before.x + before.width / 2, before.y + 80, { steps: 8 })
+    await page.mouse.up()
+    const after = await split.boundingBox()
+    expect(after).toBeTruthy()
+    if (!after) return
+    expect(after.y - before.y).toBeGreaterThan(50)
+
+    // ── Both choices survive a reload (slot persists → Session mode). ────────
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.getByText('Resize me').first().click()
+    const wAgain = (await page.locator('aside').boundingBox())?.width ?? 0
+    expect(Math.abs(wAgain - wAfter)).toBeLessThan(8)
+    const headerAgain = page
+      .locator('aside')
+      .getByRole('button', { name: 'Resize me' })
+    await expect(headerAgain).toBeVisible()
+    await headerAgain.click()
     const splitAgain = await page
       .getByRole('separator', { name: /terminal height|ターミナルの高さ/i })
       .boundingBox()
-    const wAgain = (await page.locator('aside').boundingBox())?.width ?? 0
     expect(splitAgain).toBeTruthy()
     if (!splitAgain) return
     expect(Math.abs(splitAgain.y - after.y)).toBeLessThan(8)
-    expect(Math.abs(wAgain - wAfter)).toBeLessThan(8)
   })
 })

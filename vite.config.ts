@@ -16,6 +16,14 @@ import { fileURLToPath, URL } from 'node:url'
 //   `/screen/<slug>/` and 404; absolute `/assets/...` always resolve from root.
 //   The whole app is served from origin root on 47776, so '/' is correct.
 // - build.outDir = 'dist-web' is the contract with the Hono static handler.
+//
+// Port convention: the primary (daily-driver) instance owns the fixed pair
+// 5174/47776. Extra dev instances (worktrees, parallel branches) run
+// `npm run dev:alt`, which picks the first free pair from 5175/47777 upward
+// and passes it in via these env vars — without them nothing changes.
+const webPort = Number(process.env.OPENGROUND_WEB_PORT) || 5174
+const apiPort = Number(process.env.OPENGROUND_API_PORT || process.env.PORT) || 47776
+
 export default defineConfig({
   plugins: [react()],
   base: '/',
@@ -29,12 +37,12 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // Dev only. Electron dev drives its own port; the API lives on 47776.
-    port: 5174,
+    // Dev only. Electron dev drives its own port; the API lives on apiPort.
+    port: webPort,
     strictPort: false,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:47776',
+        target: `http://127.0.0.1:${apiPort}`,
         changeOrigin: true,
       },
     },

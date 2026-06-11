@@ -32,6 +32,25 @@ describe('buildTaskPrompt', () => {
     )
   })
 
+  it('git project with a card id: setBranch curl right after the worktree step', () => {
+    const p = buildTaskPrompt({ ...base, worktreesDir: '/home/.openground/projects/u1/worktrees' })
+    expect(p).toContain(
+      `curl -s -X POST http://127.0.0.1:47776/api/project/tasks -H 'content-type: application/json' -d '{"path":"/Users/me/projects/app","setBranch":[{"id":"card-1","branch":"<branch>"}]}'`,
+    )
+    // It must come before the completion step (4.) — record early, not at wrap-up.
+    expect(p.indexOf('setBranch')).toBeLessThan(p.indexOf('4. When the task is complete'))
+  })
+
+  it('git project without a card id: no setBranch curl', () => {
+    const p = buildTaskPrompt({
+      cwd: '/x',
+      port: 1,
+      task: { title: 'No id' },
+      worktreesDir: '/wt',
+    })
+    expect(p).not.toContain('setBranch')
+  })
+
   it('non-git project: no branch protocol, still title + content + markDone', () => {
     const p = buildTaskPrompt({ ...base, worktreesDir: null })
     expect(p).not.toContain('git worktree')

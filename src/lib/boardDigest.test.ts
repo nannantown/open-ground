@@ -48,13 +48,13 @@ describe('boardDiffDigest', () => {
   it('counts added cards (plural)', () => {
     const before = [task({ id: 'a' })]
     const after = [...before, task({ id: 'b' }), task({ id: 'c' })]
-    expect(boardDiffDigest(before, after, t)).toBe('+2 cards')
+    expect(boardDiffDigest(before, after, t)).toBe('+"task" "task"')
   })
 
   it('uses the singular form for one added card', () => {
     const before: ProjectTask[] = []
     const after = [task({ id: 'a' })]
-    expect(boardDiffDigest(before, after, t)).toBe('+1 card')
+    expect(boardDiffDigest(before, after, t)).toBe('+"task"')
   })
 
   it('lists distinct assignees of ADDED cards only', () => {
@@ -70,13 +70,13 @@ describe('boardDiffDigest', () => {
 
   it('lists the assignee on a single added card', () => {
     expect(boardDiffDigest([], [task({ id: 'a', assignee: 'Yuki' })], t)).toBe(
-      '+1 card (Yuki)',
+      '+"task" (Yuki)',
     )
   })
 
   it('omits the assignee list when added cards have none (or blank)', () => {
     const after = [task({ id: 'a', assignee: '  ' }), task({ id: 'b' })]
-    expect(boardDiffDigest([], after, t)).toBe('+2 cards')
+    expect(boardDiffDigest([], after, t)).toBe('+"task" "task"')
   })
 
   it('counts newly done cards', () => {
@@ -86,7 +86,7 @@ describe('boardDiffDigest', () => {
       task({ id: 'b', done: true }),
     ]
     // A newly-done card is counted once — not also as a column move.
-    expect(boardDiffDigest(before, after, t)).toBe('1 done')
+    expect(boardDiffDigest(before, after, t)).toBe('"task" done')
   })
 
   it('does not count an already-done card again', () => {
@@ -101,7 +101,7 @@ describe('boardDiffDigest', () => {
       task({ id: 'a', boardColumn: 'doing' }),
       task({ id: 'b', boardColumn: 'review' }),
     ]
-    expect(boardDiffDigest(before, after, t)).toBe('2 moved')
+    expect(boardDiffDigest(before, after, t)).toBe('"task" → In progress · "task" → In review')
   })
 
   it('treats an undefined column as todo (a materialised key is not a move)', () => {
@@ -113,7 +113,7 @@ describe('boardDiffDigest', () => {
   it('counts removed cards', () => {
     const before = [task({ id: 'a' }), task({ id: 'b' }), task({ id: 'c' })]
     const after = [task({ id: 'a' })]
-    expect(boardDiffDigest(before, after, t)).toBe('2 removed')
+    expect(boardDiffDigest(before, after, t)).toBe('"task" "task" removed')
   })
 
   it('joins mixed changes in added · done · moved · removed order', () => {
@@ -131,8 +131,34 @@ describe('boardDiffDigest', () => {
       task({ id: 'new2', assignee: 'Yuki' }),
     ]
     expect(boardDiffDigest(before, after, t)).toBe(
-      '+2 cards (Yuki) · 1 done · 1 moved · 1 removed',
+      '+"task" "task" (Yuki) · "task" done · "task" → In progress · "task" removed',
     )
+  })
+
+  it('names a reassignment: "title" → name; counts a cleared one', () => {
+    const before = [task({ id: 'a', title: 'API design', assignee: 'Koki' })]
+    const after = [task({ id: 'a', title: 'API design', assignee: 'Yuki' })]
+    expect(boardDiffDigest(before, after, t)).toBe('"API design" → Yuki')
+
+    const cleared = [task({ id: 'a', title: 'API design' })]
+    expect(boardDiffDigest(before, cleared, t)).toBe('1 reassigned')
+  })
+
+  it('falls back to counts beyond the naming limit', () => {
+    const before = [task({ id: 'a' }), task({ id: 'b' }), task({ id: 'c' })]
+    const after = [
+      task({ id: 'a', boardColumn: 'doing' }),
+      task({ id: 'b', boardColumn: 'doing' }),
+      task({ id: 'c', boardColumn: 'doing' }),
+    ]
+    expect(boardDiffDigest(before, after, t)).toBe('3 moved')
+  })
+
+  it('truncates a long title and quotes an untitled card', () => {
+    const before: ProjectTask[] = []
+    const after = [task({ id: 'a', title: 'A very long card title indeed' })]
+    expect(boardDiffDigest(before, after, t)).toBe('+"A very long ca…"')
+    expect(boardDiffDigest([], [task({ id: 'b', title: '  ' })], t)).toBe('+"(Untitled)"')
   })
 
   it('renders the Japanese catalog too', () => {
@@ -145,7 +171,7 @@ describe('boardDiffDigest', () => {
       task({ id: 'new2' }),
     ]
     expect(boardDiffDigest(before, after, ja)).toBe(
-      'カード+2（Yuki） · 完了1 · 移動1',
+      '+「task」 「task」（Yuki） · 完了: 「task」 · 「task」→ 実行中',
     )
   })
 })

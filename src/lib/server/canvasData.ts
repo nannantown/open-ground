@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto'
 import type { CanvasElement, CanvasFile, CanvasSummary, CanvasesIndex } from '../types'
 import { atomicWriteJson } from './atomicWrite'
 import { projectDataDir } from './projectDataPath'
+import { noteSharedWrite } from './shareAutoSync'
 import {
   SHARED_DATA_VERSION,
   canvasAssetsDir,
@@ -131,6 +132,7 @@ const writeCanvasesIndex = async (projectPath: string, idx: CanvasesIndex) => {
     // Split write: order is shared through the repo; activeId stays central.
     await atomicWriteJson(canvasIndexPath(projectPath), { order: idx.order })
     await writeCentralActiveId(projectPath, idx.activeId)
+    noteSharedWrite(projectPath)
     return
   }
   await atomicWriteJson(await centralIndexPath(projectPath), idx)
@@ -157,6 +159,9 @@ export const writeCanvasFile = async (
   await ensureCanvasesDir(projectPath)
   const next: CanvasFile = { ...canvas, updatedAt: new Date().toISOString() }
   await atomicWriteJson(await canvasFilePath(projectPath,canvas.id), next)
+  // In shared mode the canvas file lives in the repo — wake the auto-sync
+  // engine (debounced; several strokes ride one commit).
+  if (await isShared(projectPath)) noteSharedWrite(projectPath)
   return next
 }
 

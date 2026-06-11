@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import {
   AlertCircle,
   Archive,
   ChevronLeft,
   FolderOpen,
+  GitBranch,
   Loader2,
   MessageSquare,
   MoreHorizontal,
-  Play,
   Plus,
   RotateCw,
   Terminal,
@@ -23,6 +23,8 @@ import type {
   ProjectLaunchPrefs,
   ProjectMeta,
   ProjectTask,
+  ShareAutoStatus,
+  ShareConflict,
   ShareStatus,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
@@ -31,6 +33,7 @@ import {
   enableShare,
   fetchShareStatus,
   remoteShortName,
+  resolveShare,
   syncShare,
 } from '@/lib/shareClient'
 import { boardDiffDigest } from '@/lib/boardDigest'
@@ -42,7 +45,6 @@ import {
   TerminalPane,
   type TerminalInfo,
 } from '@/components/canvas/TerminalPane'
-import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { BoardTaskTerminal } from '@/components/canvas/TaskTerminal'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
@@ -66,20 +68,13 @@ const isMvpVisibleTab = isModuleIdEnabled
 // right). With no saved order a project falls back to this default order.
 const ENABLED_MODULE_IDS: PanelView[] = enabledModules().map(m => m.id)
 
+// A Terminal-tab pane is a plain shell, nothing more. Claude is something the
+// user types (`claude`) — the old slot-level promotion ("▶ Claude" /
+// kind/claudeTerminalId/taskId machinery) is gone, and Board tasks keep their
+// terminals entirely inside the Board drawer (see taskTerminals below).
 interface TerminalSlot {
   id: string
   label: string
-  // A pane starts as a plain shell. The "▶ Claude" button promotes it to a
-  // claude session (OG launches `claude --session-id`). These fields persist
-  // so a reload reattaches.
-  kind?: 'shell' | 'claude'
-  agentSessionId?: string
-  claudeTerminalId?: string
-  // Set when this slot was launched FROM a Board card — the slot IS the single
-  // source of truth for that task's terminal, so the same session shows both in
-  // the Board drawer and as a labelled pane in the Terminal tab (one-way:
-  // board → terminal tab). The label tracks the task title.
-  taskId?: string
 }
 
 const TERMINAL_SLOTS_KEY = (path: string) => `openground.terminal.slots.${path}`
@@ -98,20 +93,24 @@ const loadSlots = (path: string): TerminalSlot[] => {
     const parsed = JSON.parse(raw)
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed
-        .filter((s): s is TerminalSlot => typeof s?.id === 'string')
-        .map(s => ({
-          id: s.id,
-          label: s.label || s.id,
-          // Preserve the claude-session fields so a reload can reattach both
-          // views to the same PTY. (Dropping these silently breaks reattach.)
-          ...(s.kind === 'claude' ? { kind: 'claude' as const } : {}),
-          ...(typeof s.agentSessionId === 'string'
-            ? { agentSessionId: s.agentSessionId }
-            : {}),
-          ...(typeof s.claudeTerminalId === 'string'
-            ? { claudeTerminalId: s.claudeTerminalId }
-            : {}),
-        }))
+        .filter(
+          (s): s is { id: string; label?: unknown; claudeTerminalId?: unknown } =>
+            typeof s?.id === 'string',
+        )
+        .map(s => {
+          // Legacy claude-promoted / board-task panes: that pane type is gone
+          // (the tab is plain shells now), so best-effort kill the old claude
+          // PTY — otherwise it lingers as an idle process nothing renders.
+          if (typeof s.claudeTerminalId === 'string') {
+            fetch(`/api/terminal/${s.claudeTerminalId}`, { method: 'DELETE' }).catch(
+              () => {},
+            )
+          }
+          return {
+            id: s.id,
+            label: typeof s.label === 'string' && s.label ? s.label : s.id,
+          }
+        })
     }
   } catch {}
   return [DEFAULT_SLOT]
@@ -124,30 +123,23 @@ const saveSlots = (path: string, slots: TerminalSlot[]) => {
   } catch {}
 }
 
-// Split-view tuning. Each pane's width is stored as a fraction of the visible
-// terminal area. MIN keeps a pane at least a quarter of the screen, so up to 4
-// tile without scrolling and a 5th+ overflows into a horizontal scroll. MAX caps
-// how many PTYs one project can spawn at once.
-const TERMINAL_WIDTHS_KEY = (path: string) => `openground.terminal.widths.${path}`
-const MIN_TERMINAL_FRACTION = 0.25
-const MAX_TERMINALS = 6
+// Board task terminals: taskId → claude PTY id. Board-scoped — a task's
+// session renders ONLY inside the Board drawer; the Terminal tab never sees
+// it. Persisted per project so reopening the panel reattaches the drawer to a
+// still-running PTY (a dead one just falls back to the launch CTA).
+const TASK_TERMINALS_KEY = (path: string) =>
+  `openground.board.taskTerminals.${path}`
 
-// Per-project pane widths (id → fraction of the visible area). A slot with no
-// stored width falls back to MIN_TERMINAL_FRACTION, so newly added panes need no
-// seeding. Values are clamped to the minimum on read so an old/corrupt store
-// can't produce a sliver pane.
-const loadWidths = (path: string): Record<string, number> => {
+const loadTaskTerminals = (path: string): Record<string, string> => {
   if (typeof window === 'undefined') return {}
   try {
-    const raw = localStorage.getItem(TERMINAL_WIDTHS_KEY(path))
+    const raw = localStorage.getItem(TASK_TERMINALS_KEY(path))
     if (!raw) return {}
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const out: Record<string, number> = {}
+      const out: Record<string, string> = {}
       for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v === 'number' && Number.isFinite(v)) {
-          out[k] = Math.max(MIN_TERMINAL_FRACTION, v)
-        }
+        if (typeof v === 'string') out[k] = v
       }
       return out
     }
@@ -155,12 +147,21 @@ const loadWidths = (path: string): Record<string, number> => {
   return {}
 }
 
-const saveWidths = (path: string, widths: Record<string, number>) => {
+const saveTaskTerminals = (path: string, map: Record<string, string>) => {
   if (typeof window === 'undefined') return
   try {
-    localStorage.setItem(TERMINAL_WIDTHS_KEY(path), JSON.stringify(widths))
+    localStorage.setItem(TASK_TERMINALS_KEY(path), JSON.stringify(map))
   } catch {}
 }
+
+// Split-view tuning. Pane width is purely count-based: up to 4 panes share
+// the row equally (1/N each), a 5th+ keeps the quarter width and overflows
+// into the horizontal scroll. No per-pane resize, nothing persisted — the
+// old drag-to-resize pinning fought the equal-split rule (a stale stored
+// width broke "press New → halves"). MAX caps how many PTYs one project can
+// spawn at once.
+const MAX_TERMINALS = 6
+const paneWidthPct = (count: number) => 100 / Math.min(Math.max(count, 1), 4)
 
 interface Props {
   project: ProjectMeta | null
@@ -454,11 +455,20 @@ export const ProjectPanel = ({
   )
   const activeTerminalSlotRef = useRef(activeTerminalSlot)
   activeTerminalSlotRef.current = activeTerminalSlot
-  // Per-pane width fractions (id → fraction of the visible area). Persisted
-  // per-project alongside the slot list.
-  const [terminalWidths, setTerminalWidths] = useState<Record<string, number>>(
-    () => (project ? loadWidths(project.path) : {}),
+  // Board task terminals (taskId → claude PTY id) — board-scoped, persisted.
+  // See loadTaskTerminals above. Exit state is component-level only: a fresh
+  // load re-probes liveness via the drawer's pane itself.
+  const [taskTerminals, setTaskTerminals] = useState<Record<string, string>>(
+    () => (project ? loadTaskTerminals(project.path) : {}),
   )
+  const [exitedTaskTerminals, setExitedTaskTerminals] = useState<Set<string>>(
+    new Set(),
+  )
+  const markTaskTerminalExited = (taskId: string) =>
+    setExitedTaskTerminals(prev => new Set(prev).add(taskId))
+  // Tasks with an in-flight launch — blocks a double-spawn (a double-click
+  // would POST twice and orphan the first PTY).
+  const launchingTasksRef = useRef<Set<string>>(new Set())
   // Last-known shell info per pane, so switching focus immediately repaints the
   // tab header with that pane's `zsh · cols×rows` instead of waiting for its
   // next info event.
@@ -480,7 +490,8 @@ export const ProjectPanel = ({
       const next = loadSlots(path)
       loadedForPathRef.current = path
       setTerminalSlots(next)
-      setTerminalWidths(loadWidths(path))
+      setTaskTerminals(loadTaskTerminals(path))
+      setExitedTaskTerminals(new Set())
       setActiveTerminalSlot(next[0]?.id ?? 'default')
       return
     }
@@ -488,14 +499,13 @@ export const ProjectPanel = ({
     // user added / removed / switched a slot — persist it.
     saveSlots(path, terminalSlots)
   }, [project?.path, terminalSlots])
-  // Persist pane widths whenever they change (drag-resize / reset / add /
-  // close), but only once we've loaded the real list for this path — same guard
-  // as the slot list so the initial empty map can't clobber a saved layout.
+  // Persist the board task-terminal map under the same loaded-for-path guard,
+  // so the initial empty map can't clobber a saved one before load.
   useEffect(() => {
     const path = project?.path
     if (!path || loadedForPathRef.current !== path) return
-    saveWidths(path, terminalWidths)
-  }, [project?.path, terminalWidths])
+    saveTaskTerminals(path, taskTerminals)
+  }, [project?.path, taskTerminals])
   // When focus moves to another pane, repaint the tab header from that pane's
   // last-known shell info immediately.
   useEffect(() => {
@@ -514,16 +524,9 @@ export const ProjectPanel = ({
   const [renamingTermId, setRenamingTermId] = useState<string | null>(null)
   const [renameTermDraft, setRenameTermDraft] = useState('')
 
-  // A pane with a stored width is "pinned" to that fraction; one without flexes
-  // to share the row equally (floored at the 1/4 minimum). So 1 pane fills the
-  // row, 4 sit at 1/4 each, and a 5th+ overflows into the horizontal scroll.
-  const pinnedWidth = (id: string): number | null => {
-    const v = terminalWidths[id]
-    return typeof v === 'number' ? Math.max(MIN_TERMINAL_FRACTION, v) : null
-  }
-
-  // Add a pane. New panes append at MIN width; labels just count up — "Terminal
-  // N" picks the next free integer. Capped at MAX_TERMINALS.
+  // Add a pane. Widths are count-based (paneWidthPct), so there is nothing to
+  // seed; labels just count up — "Terminal N" picks the next free integer.
+  // Capped at MAX_TERMINALS.
   const addTerminal = () => {
     if (terminalSlots.length >= MAX_TERMINALS) return
     const nextId = `t-${Date.now().toString(36)}-${Math.random()
@@ -542,90 +545,15 @@ export const ProjectPanel = ({
     setActiveTerminalSlot(slot.id)
   }
 
-  // Panes whose claude PTY has exited — show "▶ Claude" (relaunch) instead of
-  // the Terminal/Chat toggle. Component-level (not persisted): a fresh load
-  // re-probes liveness via the panes themselves.
-  const [exitedClaudeSlots, setExitedClaudeSlots] = useState<Set<string>>(new Set())
-  const markClaudeExited = (id: string) =>
-    setExitedClaudeSlots(prev => new Set(prev).add(id))
-  // Slots with an in-flight promoteToClaude — blocks a double-spawn.
-  const promotingSlotsRef = useRef<Set<string>>(new Set())
-
-  // "▶ Claude": launch a claude session for this pane. OG mints the session id
-  // (POST /api/terminal/claude) so it owns the JSONL — both the raw terminal
-  // view and the rendered chat view attach to the returned PTY.
-  const promoteToClaude = async (id: string) => {
-    if (!project) return
-    // In-flight guard: a double-click (or header + body CTA) would otherwise
-    // POST twice, spawn two claude PTYs, and orphan the first (only the second
-    // id is kept on the slot).
-    if (promotingSlotsRef.current.has(id)) return
-    promotingSlotsRef.current.add(id)
-    try {
-      const r = await fetch('/api/terminal/claude', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd: project.path }),
-      })
-      if (!r.ok) return
-      const info = (await r.json()) as TerminalInfo & { agentSessionId?: string }
-      // Promotion replaces the shell PTY with a claude PTY — kill the old shell
-      // so it doesn't orphan.
-      try {
-        const key = `openground.terminal.session.${project.path}.${id}`
-        const cached = localStorage.getItem(key)
-        if (cached) {
-          api.api.terminal[':id'].$delete({ param: { id: cached } }).catch(() => {})
-          localStorage.removeItem(key)
-        }
-      } catch {}
-      setExitedClaudeSlots(prev => {
-        const n = new Set(prev)
-        n.delete(id)
-        return n
-      })
-      setTerminalSlots(prev => {
-        // The pane was closed while the launch was in flight — kill the just-
-        // spawned claude PTY so it doesn't orphan an idle process.
-        if (!prev.some(s => s.id === id)) {
-          api.api.terminal[':id'].$delete({ param: { id: info.id } }).catch(() => {})
-          return prev
-        }
-        return prev.map(s =>
-          s.id === id
-            ? {
-                ...s,
-                kind: 'claude' as const,
-                agentSessionId: info.agentSessionId,
-                claudeTerminalId: info.id,
-              }
-            : s,
-        )
-      })
-      setActiveTerminalSlot(id)
-    } catch {} finally {
-      promotingSlotsRef.current.delete(id)
-    }
-  }
-
-  // Launch (or relaunch) the claude terminal FOR A BOARD TASK. The task's
-  // terminal IS a Terminal-tab slot (single source of truth): we create/refresh
-  // a slot keyed by taskId, labelled with the title, so the same session is
-  // visible both in the Board drawer and as a labelled pane in the Terminal tab.
-  // Built as one atomic add (fetch → fully-formed claude slot) so the slot never
-  // sits in a half-promoted state. The title is the prompt; notes are NOT sent.
+  // Launch (or relaunch) the claude terminal FOR A BOARD TASK — board-scoped:
+  // the PTY id lands in taskTerminals and the session renders only inside the
+  // Board drawer (BoardTaskTerminal). The Terminal tab is not involved. The
+  // title is the prompt; notes are NOT sent.
   const launchTaskTerminal = async (task: ProjectTask) => {
     if (!project) return
-    const existing = terminalSlots.find(s => s.taskId === task.id)
-    if (existing?.claudeTerminalId && !exitedClaudeSlots.has(existing.id)) return
-    // Guard on the slot id when one already exists, so a concurrent
-    // promoteToClaude (the Terminal-tab "▶ Claude" restart targets the slot by
-    // id) on the SAME slot is serialized with this relaunch — keying them
-    // differently let both POST /api/terminal/claude and orphan a PTY. The
-    // create case (no slot yet) keys on the task id.
-    const guard = existing ? existing.id : `task:${task.id}`
-    if (promotingSlotsRef.current.has(guard)) return
-    promotingSlotsRef.current.add(guard)
+    if (taskTerminals[task.id] && !exitedTaskTerminals.has(task.id)) return
+    if (launchingTasksRef.current.has(task.id)) return
+    launchingTasksRef.current.add(task.id)
     try {
       const title = task.title?.trim()
       const r = await fetch('/api/terminal/claude', {
@@ -643,31 +571,40 @@ export const ProjectPanel = ({
         }),
       })
       if (!r.ok) return
-      const info = (await r.json()) as TerminalInfo & { agentSessionId?: string }
-      setExitedClaudeSlots(prev => {
-        if (!existing) return prev
+      const info = (await r.json()) as TerminalInfo
+      setExitedTaskTerminals(prev => {
+        if (!prev.has(task.id)) return prev
         const n = new Set(prev)
-        n.delete(existing.id)
+        n.delete(task.id)
         return n
       })
-      setTerminalSlots(prev => {
-        const idx = prev.findIndex(s => s.taskId === task.id)
-        const filled = {
-          label: title || t('projectPanel.taskSlotFallback'),
-          kind: 'claude' as const,
-          taskId: task.id,
-          agentSessionId: info.agentSessionId,
-          claudeTerminalId: info.id,
-        }
-        if (idx >= 0) return prev.map((s, i) => (i === idx ? { ...s, ...filled } : s))
-        const id = `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-        return [...prev, { id, ...filled }]
-      })
+      setTaskTerminals(prev => ({ ...prev, [task.id]: info.id }))
     } catch {
       /* swallow — the Board card stays on its launch button to retry */
     } finally {
-      promotingSlotsRef.current.delete(guard)
+      launchingTasksRef.current.delete(task.id)
     }
+  }
+
+  // Tear down a task's terminal: kill its PTY (best-effort) and forget the
+  // binding. Used on task delete and by the orphan reconciler below.
+  const closeTaskTerminal = (taskId: string) => {
+    const ptyId = taskTerminals[taskId]
+    if (ptyId) {
+      api.api.terminal[':id'].$delete({ param: { id: ptyId } }).catch(() => {})
+    }
+    setTaskTerminals(prev => {
+      if (!(taskId in prev)) return prev
+      const next = { ...prev }
+      delete next[taskId]
+      return next
+    })
+    setExitedTaskTerminals(prev => {
+      if (!prev.has(taskId)) return prev
+      const n = new Set(prev)
+      n.delete(taskId)
+      return n
+    })
   }
 
   // Close a pane: drop its PTY on the server, prune its cached id + stored
@@ -682,27 +619,7 @@ export const ProjectPanel = ({
         api.api.terminal[':id'].$delete({ param: { id: cached } }).catch(() => {})
         localStorage.removeItem(key)
       }
-      // A claude pane's PTY is tracked on the slot (not the shell-session key),
-      // so kill it explicitly or it would orphan an idle `claude` process.
-      const claudeId = terminalSlots.find(s => s.id === id)?.claudeTerminalId
-      if (claudeId) {
-        api.api.terminal[':id'].$delete({ param: { id: claudeId } }).catch(() => {})
-      }
     } catch {}
-    setTerminalWidths(prev => {
-      if (!(id in prev)) return prev
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
-    // Drop any exited-claude membership so the id (esp. the reusable 'default')
-    // can't carry a stale "exited" flag onto a freshly-seeded pane.
-    setExitedClaudeSlots(prev => {
-      if (!prev.has(id)) return prev
-      const next = new Set(prev)
-      next.delete(id)
-      return next
-    })
     setTerminalSlots(prev => {
       const next = prev.filter(s => s.id !== id)
       return next.length > 0 ? next : [DEFAULT_SLOT]
@@ -714,64 +631,21 @@ export const ProjectPanel = ({
     })
   }
 
-  // Reconcile task-bound terminal slots against live tasks. onDeleteTask closes
-  // a task's slot synchronously, but if the task is deleted WHILE its launch is
-  // still in flight, launchTaskTerminal's setTerminalSlots adds the slot AFTER
-  // that read — so the slot (and its claude PTY) outlives the task. This effect
-  // is the race safety net: any slot whose taskId no longer maps to a live task
-  // gets torn down (PTY killed via closeTerminal). Non-task (shell) slots have
-  // no taskId and are never touched.
+  // Reconcile task terminals against live tasks. onDeleteTask tears the
+  // binding down synchronously, but if the task is deleted WHILE its launch is
+  // still in flight, launchTaskTerminal writes the map entry AFTER that read —
+  // so the PTY outlives the task. This effect is the race safety net: any
+  // entry whose taskId no longer maps to a live task gets its PTY killed and
+  // the binding dropped.
   useEffect(() => {
     if (!data) return
     const taskIds = new Set(data.tasks.map(t => t.id))
-    const orphan = terminalSlots.find(s => s.taskId && !taskIds.has(s.taskId))
-    if (orphan) void closeTerminal(orphan.id)
-    // closeTerminal is a stable per-render closure; re-listing it would re-run
-    // this every render. Reconciliation depends only on tasks + slots.
+    const orphan = Object.keys(taskTerminals).find(id => !taskIds.has(id))
+    if (orphan) closeTaskTerminal(orphan)
+    // closeTaskTerminal is a stable per-render closure; re-listing it would
+    // re-run this every render. Reconciliation depends only on tasks + map.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, terminalSlots])
-
-  // Drag the right edge of a pane to set its width. Mirrors startFsSidebarDrag:
-  // window-level mousemove/up, fraction clamped to the minimum (no upper bound —
-  // overflow is absorbed by the horizontal scroll), persisted on release.
-  const startTerminalDivider = (id: string) => (e: React.MouseEvent) => {
-    e.preventDefault()
-    const containerW = terminalRowRef.current?.clientWidth ?? 0
-    if (containerW <= 0) return
-    const startX = e.clientX
-    // Seed from the pane's *actual* rendered width so a drag that starts on an
-    // unpinned (auto-flexed) pane doesn't jump.
-    const paneEl = (e.currentTarget as HTMLElement).parentElement
-    const startFrac = paneEl
-      ? paneEl.getBoundingClientRect().width / containerW
-      : MIN_TERMINAL_FRACTION
-    const onMove = (ev: MouseEvent) => {
-      const next = Math.max(
-        MIN_TERMINAL_FRACTION,
-        startFrac + (ev.clientX - startX) / containerW,
-      )
-      setTerminalWidths(prev => ({ ...prev, [id]: next }))
-    }
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-  }
-
-  // Double-click a divider → drop the pin and let the pane flex equally again.
-  const resetTerminalWidth = (id: string) =>
-    setTerminalWidths(prev => {
-      if (!(id in prev)) return prev
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
+  }, [data, taskTerminals])
 
   // Reorder panes by dropping one tab onto another. The slot id is the React
   // key, so React moves the existing TerminalPane instance instead of
@@ -901,12 +775,107 @@ export const ProjectPanel = ({
   >(null)
   const shareNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [shareDialog, setShareDialog] = useState<'enable' | 'disable' | null>(null)
+  // Conflict-resolution dialog (S15–S20 phase 3): the structured conflicts of
+  // the last failed Sync, or null. Only offered when EVERY conflicted file is
+  // shared data (.openground/) — the app never auto-resolves the user's code.
+  const [conflictDialog, setConflictDialog] = useState<ShareConflict[] | null>(null)
+  const [resolving, setResolving] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
   const [shareDialogError, setShareDialogError] = useState<string | null>(null)
   // Bumped whenever shared files may have changed on disk (after a successful
   // Sync / enable / disable, and on window focus while shared) — ProjectCanvas
   // re-reads the index + active canvas in place when it changes.
   const [canvasReloadToken, setCanvasReloadToken] = useState(0)
+  // "Last sync" timestamp (S10): per-project, local-machine memory — gives the
+  // assignee/column info on the board a freshness anchor. Shown in the Sync
+  // button's tooltip.
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null)
+  useEffect(() => {
+    if (!project?.path) {
+      setLastSyncAt(null)
+      return
+    }
+    const v = Number(localStorage.getItem(`og.share.lastSync.${project.path}`))
+    setLastSyncAt(Number.isFinite(v) && v > 0 ? v : null)
+  }, [project?.path])
+  const formatSyncTime = (ts: number): string => {
+    const d = new Date(ts)
+    const sameDay = new Date().toDateString() === d.toDateString()
+    return sameDay
+      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  }
+  // ── Auto-sync presentation (ShareStatus.auto) ───────────────────────────
+  // When the engine is on, the Sync button reads as a LIVE indicator; the
+  // click stays a manual force-sync. All modes degrade to the classic manual
+  // button when auto is absent/disabled.
+  const auto = shareStatus?.auto
+  const autoLive = auto?.enabled === true
+  const autoMode: ShareAutoStatus['mode'] | 'manual-syncing' = syncing
+    ? 'manual-syncing'
+    : (auto?.mode ?? 'disabled')
+  const autoLabel =
+    autoMode === 'manual-syncing' || autoMode === 'syncing'
+      ? t('projectPanel.syncing')
+      : autoMode === 'paused-code'
+        ? t('projectPanel.autoPausedCode')
+        : autoMode === 'conflict'
+          ? t('projectPanel.autoConflict')
+          : autoMode === 'offline'
+            ? t('projectPanel.autoOffline')
+            : autoMode === 'blocked'
+              ? t('projectPanel.autoBlocked')
+              : autoMode === 'error'
+                ? t('projectPanel.autoError')
+                : t('projectPanel.autoLive')
+  const autoTitle =
+    autoMode === 'paused-code'
+      ? t('projectPanel.autoPausedCodeHint')
+      : autoMode === 'conflict'
+        ? t('projectPanel.autoConflictHint')
+        : autoMode === 'offline'
+          ? t('projectPanel.syncOffline')
+          : autoMode === 'blocked'
+            ? t('projectPanel.autoBlockedHint')
+            : autoMode === 'error'
+              ? (auto?.message ?? t('projectPanel.autoErrorHint'))
+              : t('projectPanel.autoLiveHint')
+  const effectiveLastSync = auto?.lastSyncAt ?? lastSyncAt
+  // Surface auto-round outcomes the user would otherwise never see (the
+  // engine runs without clicks): a conflict or loud error posts a persistent
+  // notice ON TRANSITION; recovering clears a stale one.
+  const prevAutoModeRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevAutoModeRef.current
+    prevAutoModeRef.current = autoMode
+    if (!autoLive || prev === null || prev === autoMode) return
+    if (autoMode === 'conflict') {
+      setShareNoticeFading({ kind: 'error', text: t('projectPanel.autoConflictHint') })
+    } else if (autoMode === 'error') {
+      const msg = auto?.message ?? ''
+      setShareNoticeFading({
+        kind: 'error',
+        text: /stash/i.test(msg)
+          ? t('projectPanel.syncAutostashConflict')
+          : t('projectPanel.syncFailed', { error: msg || 'auto-sync error' }),
+      })
+    } else if (prev === 'conflict' || prev === 'error') {
+      setShareNoticeFading(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoMode, autoLive])
+  // An auto round just landed new data (lastSyncAt moved): refresh the board
+  // immediately (instead of waiting for the 5s poll) and re-read canvases.
+  const prevAutoSyncAtRef = useRef<number | null>(null)
+  useEffect(() => {
+    const at = auto?.lastSyncAt ?? null
+    const prev = prevAutoSyncAtRef.current
+    prevAutoSyncAtRef.current = at
+    if (at === null || prev === at || prev === null) return
+    void reloadProjectData()
+    setCanvasReloadToken(v => v + 1)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto?.lastSyncAt])
   const remoteName = useMemo(
     () => remoteShortName(shareStatus?.remoteUrl ?? null),
     [shareStatus?.remoteUrl],
@@ -988,19 +957,47 @@ export const ProjectPanel = ({
           text: t('projectPanel.syncFailed', { error: r.error }),
         })
       } else if (r.result.conflict) {
+        // Say WHAT conflicted (card titles / notes / canvas files) — the
+        // server's message is the raw English fallback for the rest.
+        const items = r.result.conflictFiles?.length
+          ? t('projectPanel.syncConflictItems', {
+              items: r.result.conflictFiles.join(', '),
+            })
+          : r.result.message
         setShareNoticeFading({
           kind: 'error',
-          text: [t('projectPanel.syncConflict'), r.result.message]
-            .filter(Boolean)
-            .join(' — '),
+          text: [t('projectPanel.syncConflict'), items].filter(Boolean).join(' — '),
         })
+        // Offer in-app resolution ONLY for pure shared-data conflicts — a
+        // conflicted code file is the user's own rebase to run.
+        const cs = r.result.conflicts
+        if (cs?.length && cs.every(c => c.file.startsWith('.openground/'))) {
+          setConflictDialog(cs)
+        }
       } else if (!r.result.ok) {
+        // Machine-readable reasons get a localized, actionable line; anything
+        // else falls back to the server's raw message. Error notices persist
+        // (no auto-fade) — an autostash conflict must never slip by unseen.
+        const reasonTexts: Record<string, string> = {
+          'rebase-in-progress': t('projectPanel.syncBlockedRebase'),
+          'merge-in-progress': t('projectPanel.syncBlockedMerge'),
+          'detached-head': t('projectPanel.syncBlockedDetached'),
+          'autostash-conflict': t('projectPanel.syncAutostashConflict'),
+          'no-identity': t('projectPanel.syncNoIdentity'),
+        }
+        const reasonText = r.result.reason ? reasonTexts[r.result.reason] : undefined
         setShareNoticeFading({
           kind: 'error',
-          text: t('projectPanel.syncFailed', {
-            error: r.result.message ?? 'sync error',
-          }),
+          text:
+            reasonText ??
+            t('projectPanel.syncFailed', { error: r.result.message ?? 'sync error' }),
         })
+        // An autostash conflict still pulled — show the merged board, not the
+        // pre-sync snapshot.
+        if (r.result.pulled) {
+          await reloadProjectData()
+          setCanvasReloadToken(v => v + 1)
+        }
       } else {
         // ok — pull the freshly-merged data back in first, then say WHAT the
         // pull changed on the board (added/done/moved/removed cards) instead
@@ -1013,11 +1010,32 @@ export const ProjectPanel = ({
           r.result.pulled && beforeTasks && reloaded
             ? boardDiffDigest(beforeTasks, reloaded.tasks ?? [], t)
             : null
-        const parts = [digest, r.result.message].filter((s): s is string => !!s)
-        setShareNoticeFading({
-          kind: 'ok',
-          text: parts.length > 0 ? parts.join(' — ') : t('projectPanel.syncDone'),
-        })
+        // Localized lines for the classified degradations replace the raw
+        // git notes; an unclassified note still shows verbatim as a caveat.
+        const caveat = r.result.offline
+          ? t('projectPanel.syncOffline')
+          : r.result.noRemote
+            ? t('projectPanel.syncNoRemote')
+            : r.result.message
+        // Remember when this machine last synced (the tooltip's freshness line).
+        const now = Date.now()
+        localStorage.setItem(`og.share.lastSync.${path}`, String(now))
+        setLastSyncAt(now)
+        if (r.result.forcedUpdate) {
+          // A rewritten upstream deserves a persistent warning, not a 5s toast.
+          setShareNoticeFading({
+            kind: 'error',
+            text: [t('projectPanel.syncForcedUpdate'), digest]
+              .filter((s): s is string => !!s)
+              .join(' — '),
+          })
+        } else {
+          const parts = [digest, caveat].filter((s): s is string => !!s)
+          setShareNoticeFading({
+            kind: r.result.offline ? 'error' : 'ok',
+            text: parts.length > 0 ? parts.join(' — ') : t('projectPanel.syncDone'),
+          })
+        }
       }
       // Whatever happened, the dirty dot may have changed (commit succeeded
       // even when push didn't, etc.) — re-read the truth.
@@ -1037,6 +1055,81 @@ export const ProjectPanel = ({
 
   // Confirm in the share / unshare dialog → POST enable|disable, then refetch
   // everything (status decides which UI shows; data + canvases changed source).
+  // Confirm in the conflict-resolution dialog → POST resolve with the chosen
+  // side per file. Success closes the dialog and reloads the merged data; a
+  // FRESH conflict set (files changed since the dialog opened) re-populates
+  // the dialog instead of dumping the user back to the manual path.
+  const confirmResolve = useCallback(
+    async (choices: Record<string, 'mine' | 'theirs'>) => {
+      const path = project?.path
+      if (!path || resolving) return
+      setResolving(true)
+      try {
+        const r = await resolveShare(path, choices)
+        if (projectPathRef.current !== path) return
+        if ('error' in r) {
+          setConflictDialog(null)
+          setShareNoticeFading({
+            kind: 'error',
+            text: t('projectPanel.syncFailed', { error: r.error }),
+          })
+          return
+        }
+        if (r.result.conflict) {
+          const cs = r.result.conflicts
+          if (cs?.length && cs.every(c => c.file.startsWith('.openground/'))) {
+            setConflictDialog(cs)
+          } else {
+            setConflictDialog(null)
+            setShareNoticeFading({
+              kind: 'error',
+              text: [t('projectPanel.syncConflict'), r.result.message]
+                .filter(Boolean)
+                .join(' — '),
+            })
+          }
+          return
+        }
+        setConflictDialog(null)
+        if (!r.result.ok) {
+          const reasonTexts: Record<string, string> = {
+            'rebase-in-progress': t('projectPanel.syncBlockedRebase'),
+            'merge-in-progress': t('projectPanel.syncBlockedMerge'),
+            'detached-head': t('projectPanel.syncBlockedDetached'),
+            'autostash-conflict': t('projectPanel.syncAutostashConflict'),
+            'no-identity': t('projectPanel.syncNoIdentity'),
+          }
+          const reasonText = r.result.reason ? reasonTexts[r.result.reason] : undefined
+          setShareNoticeFading({
+            kind: 'error',
+            text:
+              reasonText ?? t('projectPanel.syncFailed', { error: r.result.message ?? 'sync error' }),
+          })
+          if (r.result.pulled) {
+            await reloadProjectData()
+            setCanvasReloadToken(v => v + 1)
+          }
+          return
+        }
+        await reloadProjectData()
+        setCanvasReloadToken(v => v + 1)
+        const now = Date.now()
+        localStorage.setItem(`og.share.lastSync.${path}`, String(now))
+        setLastSyncAt(now)
+        setShareNoticeFading({
+          kind: 'ok',
+          text: [t('projectPanel.syncResolvedDone'), r.result.message]
+            .filter((s): s is string => !!s)
+            .join(' — '),
+        })
+        void refreshShareStatus()
+      } finally {
+        setResolving(false)
+      }
+    },
+    [project?.path, resolving, t, setShareNoticeFading, reloadProjectData, refreshShareStatus],
+  )
+
   const confirmShareDialog = useCallback(async () => {
     const path = project?.path
     const mode = shareDialog
@@ -1054,10 +1147,15 @@ export const ProjectPanel = ({
       await refreshShareStatus()
       await reloadProjectData()
       setCanvasReloadToken(v => v + 1)
+      // Enable migrates the data but deliberately commits nothing — the first
+      // Sync publishes it. Say so, or the user stares at a dirty dot (S1).
+      if (mode === 'enable') {
+        setShareNoticeFading({ kind: 'ok', text: t('projectPanel.shareEnabledNotice') })
+      }
     } finally {
       setShareBusy(false)
     }
-  }, [project?.path, shareDialog, shareBusy, refreshShareStatus, reloadProjectData])
+  }, [project?.path, shareDialog, shareBusy, refreshShareStatus, reloadProjectData, t, setShareNoticeFading])
 
   // Fetch the status when a project opens (and reset all share UI state so
   // nothing leaks across a project switch).
@@ -1066,6 +1164,7 @@ export const ProjectPanel = ({
     setShareNoticeFading(null)
     setShareDialog(null)
     setShareDialogError(null)
+    setConflictDialog(null)
     if (!project?.path) return
     void refreshShareStatus()
     // refreshShareStatus is recreated with project?.path — listing it here
@@ -1103,11 +1202,14 @@ export const ProjectPanel = ({
   // this stays cheap; hidden windows skip the tick entirely.
   useEffect(() => {
     if (!project?.path || !shareStatus?.shared) return
+    // Auto-sync on: the status poll is also the live-indicator heartbeat —
+    // tighter (the server side stays cheap: fetches are engine-throttled).
+    const everyMs = shareStatus.auto?.enabled ? 20_000 : 90_000
     const id = setInterval(() => {
       if (document.visibilityState === 'visible') void refreshShareStatus()
-    }, 90_000)
+    }, everyMs)
     return () => clearInterval(id)
-  }, [project?.path, shareStatus?.shared, refreshShareStatus])
+  }, [project?.path, shareStatus?.shared, shareStatus?.auto?.enabled, refreshShareStatus])
 
   // Live board: while the panel is open and visible, poll the project data
   // every 5s so cards added from OUTSIDE this window — chiefly a terminal
@@ -1236,19 +1338,24 @@ export const ProjectPanel = ({
 
   return (
     <div className="fixed inset-0 z-40 flex flex-col bg-bg-card">
-      <header className="rule-double flex items-start justify-between gap-3 px-8 pt-5 pb-4">
+      {/* flex-wrap: when the window is too narrow to fit the title column and
+          the controls cluster side by side, the controls drop to their own row
+          below instead of crushing the title / overflowing the viewport. */}
+      <header className="rule-double flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-8 pt-5 pb-4">
         {/* flex-1 so this column has a definite width: the description box caps
             at max-w-[560px] in BOTH read and edit modes. Without it the column
             shrank to its content, so swapping the wide <p> for a <textarea>
-            (narrow intrinsic width) collapsed the whole box to ~190px. */}
-        <div className="min-w-0 flex-1">
+            (narrow intrinsic width) collapsed the whole box to ~190px.
+            basis-[280px] is the width the title block defends before the
+            controls cluster wraps below it. */}
+        <div className="min-w-0 flex-1 basis-[280px]">
           <button
             onClick={onClose}
             className="flex items-center gap-1 label-cap text-accent transition-colors hover:text-ink"
           >
             <ChevronLeft size={11} strokeWidth={2.5} /> {t('projectPanel.backToGround')}
           </button>
-          <div className="flex items-center gap-2.5">
+          <div className="flex min-w-0 items-center gap-2.5">
             <EditableTitle
               name={project.name}
               size="fullscreen"
@@ -1321,7 +1428,10 @@ export const ProjectPanel = ({
             )
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-3">
+        {/* ml-auto keeps the cluster right-aligned even when flex-wrap moves
+            it onto its own row; inner flex-wrap lets the share strip / HUD /
+            feedback button flow onto further rows on very narrow windows. */}
+        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
           {/* Git share: a quiet text-only Sync button (dot = unsynced local
               changes) + the remote's short name as faint context. Lives with
               the project-scoped header controls; hidden entirely unless the
@@ -1332,9 +1442,15 @@ export const ProjectPanel = ({
                 <span
                   role="status"
                   className={[
-                    'max-w-[260px] truncate text-[11px] transition-opacity duration-150',
-                    shareNotice.kind === 'error' ? 'text-accent' : 'text-ink-faint',
+                    // Errors carry the actionable detail (conflicted card
+                    // names, recovery steps) — give them room; the full text
+                    // is always on the tooltip either way.
+                    shareNotice.kind === 'error'
+                      ? 'max-w-[480px] text-accent'
+                      : 'max-w-[260px] text-ink-faint',
+                    'truncate text-[11px] transition-opacity duration-150',
                   ].join(' ')}
+                  title={shareNotice.text}
                 >
                   {shareNotice.text}
                 </span>
@@ -1347,29 +1463,68 @@ export const ProjectPanel = ({
                   {remoteName}
                 </span>
               )}
+              {/* Shared data follows the checked-out branch (S27) — name the
+                  branch so a switch explains a suddenly-different board. */}
+              {shareStatus.branch && (
+                <span
+                  title={t('projectPanel.syncBranchHint')}
+                  className="flex max-w-[140px] items-center gap-0.5 font-mono text-[10px] text-ink-faint"
+                >
+                  <GitBranch size={10} className="shrink-0" aria-hidden />
+                  <span className="truncate">{shareStatus.branch}</span>
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => void doSync()}
                 disabled={syncing || project.missing}
-                title={
-                  shareStatus.behind > 0
-                    ? t('projectPanel.syncBehindHint', { count: shareStatus.behind })
-                    : shareStatus.dirty || shareStatus.ahead > 0
-                      ? t('projectPanel.syncDirtyHint')
-                      : t('projectPanel.syncHint')
-                }
+                title={[
+                  autoLive
+                    ? autoTitle
+                    : shareStatus.forcedUpdate
+                      ? t('projectPanel.syncForcedHint')
+                      : shareStatus.behind > 0
+                        ? t('projectPanel.syncBehindHint', { count: shareStatus.behind })
+                        : shareStatus.dirty || shareStatus.ahead > 0
+                          ? t('projectPanel.syncDirtyHint')
+                          : t('projectPanel.syncHint'),
+                  effectiveLastSync
+                    ? t('projectPanel.syncLastAt', { time: formatSyncTime(effectiveLastSync) })
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
                 className="flex shrink-0 items-center gap-1.5 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
               >
-                {shareStatus.dirty && !syncing && (
-                  <span
-                    aria-hidden
-                    className="h-[5px] w-[5px] shrink-0 rounded-full bg-accent"
-                  />
+                {/* Auto-sync on: the button reads as a LIVE indicator (the
+                    click is still a manual force-sync). Auto-sync off: the
+                    classic Sync button. */}
+                {autoLive ? (
+                  <>
+                    <span
+                      aria-hidden
+                      className={[
+                        'h-[5px] w-[5px] shrink-0 rounded-full',
+                        autoMode === 'live' ? 'bg-moss' : 'bg-accent',
+                      ].join(' ')}
+                    />
+                    {autoLabel}
+                  </>
+                ) : (
+                  <>
+                    {shareStatus.dirty && !syncing && (
+                      <span
+                        aria-hidden
+                        className="h-[5px] w-[5px] shrink-0 rounded-full bg-accent"
+                      />
+                    )}
+                    {syncing ? t('projectPanel.syncing') : t('projectPanel.sync')}
+                  </>
                 )}
-                {syncing ? t('projectPanel.syncing') : t('projectPanel.sync')}
                 {/* Unpushed (↑) / incoming (↓) commit counts, scoped to
                     .openground/. ↓ is the "a teammate pushed — pull me"
-                    signal, so it reads in accent. */}
+                    signal, so it reads in accent. Under auto-sync these only
+                    linger in the paused/parked modes — live mode drains them. */}
                 {!syncing && shareStatus.ahead > 0 && (
                   <span aria-hidden className="tabular-nums text-[10px] text-ink-faint">
                     ↑{shareStatus.ahead}
@@ -1378,6 +1533,12 @@ export const ProjectPanel = ({
                 {!syncing && shareStatus.behind > 0 && (
                   <span aria-hidden className="tabular-nums text-[10px] text-accent">
                     ↓{shareStatus.behind}
+                  </span>
+                )}
+                {/* Rewritten upstream (force-push) — warn before the pull. */}
+                {!syncing && shareStatus.forcedUpdate && (
+                  <span aria-hidden className="text-[10px] text-accent">
+                    ⚠
                   </span>
                 )}
               </button>
@@ -1397,7 +1558,8 @@ export const ProjectPanel = ({
               className="flex items-center gap-1.5 rounded-[3px] border border-line px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               <MessageSquare size={13} strokeWidth={1.75} />
-              <span>{t('toolbar.feedback')}</span>
+              {/* Narrow window: icon only (the title attr still carries the label). */}
+              <span className="hidden md:inline">{t('toolbar.feedback')}</span>
             </button>
           )}
           <div className="flex items-center gap-0.5">
@@ -1457,8 +1619,6 @@ export const ProjectPanel = ({
         order={tabOrder}
         onReorder={reorderTabs}
         terminalInfo={terminalInfo}
-        onAddTerminal={addTerminal}
-        canAddTerminal={terminalSlots.length < MAX_TERMINALS}
       />
 
       {/* Content + assistant. The assistant is either the bottom dock (a child
@@ -1467,25 +1627,30 @@ export const ProjectPanel = ({
       <div className="flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
       {view === 'terminal' ? (
-        <div
-          ref={terminalRowRef}
-          className="min-h-0 flex-1 flex overflow-x-auto"
-        >
+        // Dark like the panes themselves: the "+ New" column (and any slack)
+        // must read as terminal surface, not as the app's light background
+        // bleeding through.
+        <div className="min-h-0 flex-1 flex bg-[#1a1a1a]">
+          <div
+            ref={terminalRowRef}
+            className="min-h-0 min-w-0 flex-1 flex overflow-x-auto"
+          >
           {terminalSlots.map(slot => {
             const active = slot.id === activeTerminalSlot
             const canClose = terminalSlots.length > 1
             const isDropTarget = termDragOverId === slot.id && termDragId !== slot.id
-            const pinned = pinnedWidth(slot.id)
             return (
               <div
                 key={slot.id}
                 data-term-slot={slot.id}
                 onMouseDown={() => setActiveTerminalSlot(slot.id)}
-                style={
-                  pinned !== null
-                    ? { width: `${pinned * 100}%`, flexGrow: 0, flexShrink: 0 }
-                    : { flex: '1 1 0%', minWidth: '25%' }
-                }
+                // Count-based tiling: 1 pane fills the row, 2 halve it, 3
+                // third it, 4 quarter it; a 5th+ keeps the quarter width and
+                // slides into the horizontal scroll.
+                style={{
+                  width: `${paneWidthPct(terminalSlots.length)}%`,
+                  flex: '0 0 auto',
+                }}
                 className="relative flex min-w-0 flex-col border-r border-line bg-[#1a1a1a]"
               >
                 {/* Drop-position indicator while reordering tabs. */}
@@ -1544,33 +1709,13 @@ export const ProjectPanel = ({
                         e.stopPropagation()
                         beginRenameTerminal(slot)
                       }}
-                      // Show the full label on hover (board-task panes use the
-                      // task title, which truncates in a narrow pane) + the
-                      // rename affordance.
+                      // Show the full label on hover (it truncates in a narrow
+                      // pane) + the rename affordance.
                       title={`${slot.label}\n(${t('projectPanel.renameTerminal')})`}
                       className="min-w-0 flex-1 truncate"
                     >
                       {slot.label}
                     </span>
-                  )}
-                  {/* Claude controls: a shell (or exited) pane shows "▶ Claude"
-                   *  to promote it; a live claude pane shows no extra control —
-                   *  just its label + close. */}
-                  {slot.kind === 'claude' &&
-                  slot.claudeTerminalId &&
-                  !exitedClaudeSlots.has(slot.id) ? null : (
-                    <button
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={e => {
-                        e.stopPropagation()
-                        void promoteToClaude(slot.id)
-                      }}
-                      title={t('projectPanel.launchClaudeInPane')}
-                      className="flex shrink-0 items-center gap-0.5 rounded-[3px] px-1.5 py-0.5 text-[9px] text-white/55 transition-colors hover:bg-white/10 hover:text-white"
-                    >
-                      <Play size={9} strokeWidth={2.5} />
-                      Claude
-                    </button>
                   )}
                   {canClose && (
                     <button
@@ -1592,56 +1737,36 @@ export const ProjectPanel = ({
                   )}
                 </div>
                 <div className="min-h-0 flex-1">
-                  {slot.kind === 'claude' &&
-                  slot.claudeTerminalId &&
-                  exitedClaudeSlots.has(slot.id) ? (
-                    // The claude session ended (or its PTY is gone) — show an
-                    // in-body relaunch CTA, not a dead transcript with a header
-                    // that says "▶ Claude" elsewhere.
-                    <div className="flex h-full flex-col items-center justify-center gap-3 bg-[#1a1a1a] text-center">
-                      <span className="text-[12px] text-white/50">
-                        {t('projectPanel.claudeSessionEnded')}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void promoteToClaude(slot.id)}
-                        className="flex items-center gap-1.5 rounded-[4px] border border-white/15 px-3 py-1.5 text-[12px] text-white/80 transition-colors hover:border-accent hover:text-white"
-                      >
-                        <Play size={11} strokeWidth={2.5} />
-                        {t('projectPanel.relaunchClaude')}
-                      </button>
-                    </div>
-                  ) : slot.kind === 'claude' && slot.claudeTerminalId ? (
-                    // A live claude pane is the raw PTY terminal (chromeless).
-                    <ClaudeTerminalPane
-                      terminalId={slot.claudeTerminalId}
-                      chrome={false}
-                      onExit={() => markClaudeExited(slot.id)}
-                    />
-                  ) : (
-                    <TerminalPane
-                      key={slot.id}
-                      projectPath={project.path}
-                      slotKey={slot.id}
-                      onInfo={inf => {
-                        terminalInfoMapRef.current[slot.id] = inf
-                        if (activeTerminalSlotRef.current === slot.id)
-                          setTerminalInfo(inf)
-                      }}
-                    />
-                  )}
+                  <TerminalPane
+                    key={slot.id}
+                    projectPath={project.path}
+                    slotKey={slot.id}
+                    onInfo={inf => {
+                      terminalInfoMapRef.current[slot.id] = inf
+                      if (activeTerminalSlotRef.current === slot.id)
+                        setTerminalInfo(inf)
+                    }}
+                  />
                 </div>
-                {/* Drag the right edge to widen/narrow this pane; double-click
-                 *  resets it to the minimum quarter-width. */}
-                <div
-                  onMouseDown={startTerminalDivider(slot.id)}
-                  onDoubleClick={() => resetTerminalWidth(slot.id)}
-                  title={t('projectPanel.resizeHint')}
-                  className="absolute bottom-0 right-0 top-0 z-10 -mr-1 w-2 cursor-col-resize transition-colors hover:bg-accent/40"
-                />
               </div>
             )
           })}
+          </div>
+          {/* "+ New" sits at the strip's right edge OUTSIDE the scroll row
+           *  (like a browser tab bar's trailing +): always reachable without
+           *  scrolling, and the pane percentages split the scroll area into
+           *  exact halves/thirds/quarters. */}
+          <div className="flex shrink-0 flex-col">
+            <button
+              onClick={addTerminal}
+              disabled={terminalSlots.length >= MAX_TERMINALS}
+              title={t('projectPanel.newTerminal')}
+              className="flex shrink-0 select-none items-center gap-1 border-b-2 border-b-[#272727] bg-[#1c1c1c] px-2.5 py-1.5 text-[11px] text-[#7c7c7c] transition-colors hover:bg-[#242424] hover:text-[#d4d4d4] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#1c1c1c] disabled:hover:text-[#7c7c7c]"
+            >
+              <Plus size={11} strokeWidth={2.25} />
+              <span>{t('projectPanel.new')}</span>
+            </button>
+          </div>
         </div>
       ) : view === 'canvas' ? (
         <div className="flex min-h-0 flex-1">
@@ -1671,36 +1796,31 @@ export const ProjectPanel = ({
           persist={persist}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
-          // A card with a live/launched terminal slot counts as "touched" — the
-          // drawer's close-discards-empty-card check must not drop it.
-          hasTerminalSlot={id => terminalSlots.some(s => s.taskId === id)}
+          // A card with a launched terminal counts as "touched" — the drawer's
+          // close-discards-empty-card check must not drop it.
+          hasTerminalSlot={id => id in taskTerminals}
           // Delete lives in the drawer HEADER (next to ×), not floating in the
           // conversation pane.
           onDeleteTask={id => {
-            // The task's terminal IS a Terminal-tab slot (single source of
-            // truth, keyed by taskId). Deleting the task must tear that slot
-            // down too — closeTerminal kills its claude PTY and drops the pane —
-            // else a labelled pane for a now-deleted task lingers in the
-            // Terminal tab and its PTY orphans as an idle process.
-            const slot = terminalSlots.find(s => s.taskId === id)
-            if (slot) void closeTerminal(slot.id)
+            // Tear the task's terminal down with it — else its claude PTY
+            // orphans as an idle process nothing renders.
+            closeTaskTerminal(id)
             if (data) persist({ ...data, tasks: data.tasks.filter(t => t.id !== id) })
           }}
-          // Terminal-only mode: drive each task through a raw PTY terminal
-          // (works on the subscription, no JSONL).
+          // Draft mode's Launch bar — same launch as the card ▶.
+          onLaunchTask={launchTaskTerminal}
+          // The task's session lives ONLY here in the drawer (board-scoped
+          // taskTerminals map) — a raw PTY terminal, works on the
+          // subscription, no JSONL. The Terminal tab is plain shells.
           renderConversation={(task) => {
-            // The task's terminal IS a Terminal-tab slot (single source of
-            // truth), keyed by taskId. Render that slot's live session here.
-            const slot = terminalSlots.find(s => s.taskId === task.id)
+            const ptyId = taskTerminals[task.id]
             const liveId =
-              slot?.claudeTerminalId && !exitedClaudeSlots.has(slot.id)
-                ? slot.claudeTerminalId
-                : null
+              ptyId && !exitedTaskTerminals.has(task.id) ? ptyId : null
             return (
               <BoardTaskTerminal
                 terminalId={liveId}
                 onLaunch={() => launchTaskTerminal(task)}
-                onExit={() => slot && markClaudeExited(slot.id)}
+                onExit={() => markTaskTerminalExited(task.id)}
               />
             )
           }}
@@ -1762,12 +1882,120 @@ export const ProjectPanel = ({
         />
       )}
 
+      {conflictDialog && (
+        <ConflictResolveDialog
+          // Re-key on the file set so a FRESH conflict batch resets choices.
+          key={conflictDialog.map(c => c.file).join('|')}
+          conflicts={conflictDialog}
+          busy={resolving}
+          onCancel={() => setConflictDialog(null)}
+          onConfirm={choices => void confirmResolve(choices)}
+        />
+      )}
+
       {feedbackEnabled && (
         <FeedbackModal
           open={feedbackOpen}
           onClose={() => setFeedbackOpen(false)}
         />
       )}
+    </div>
+  )
+}
+
+// Sync conflict resolution — per conflicted file, keep MY version or take the
+// TEAMMATE's (the losing version stays in git history either way). Same
+// full-panel overlay language as DeleteConfirm/ShareConfirm. Card conflicts
+// show both titles; the delete side of a delete/modify conflict is labelled —
+// choosing it deletes the card.
+const ConflictResolveDialog = ({
+  conflicts,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  conflicts: ShareConflict[]
+  busy: boolean
+  onCancel: () => void
+  onConfirm: (choices: Record<string, 'mine' | 'theirs'>) => void
+}) => {
+  const { t } = useT()
+  // Default to keeping the user's own version — the safe, predictable side.
+  const [choices, setChoices] = useState<Record<string, 'mine' | 'theirs'>>(() =>
+    Object.fromEntries(conflicts.map(c => [c.file, 'mine' as const])),
+  )
+  const sideButton = (
+    c: ShareConflict,
+    side: 'mine' | 'theirs',
+  ): ReactNode => {
+    const info = side === 'mine' ? c.mine : c.theirs
+    const active = choices[c.file] === side
+    const base = side === 'mine' ? t('projectPanel.syncResolveMine') : t('projectPanel.syncResolveTheirs')
+    const detail = !info.exists
+      ? t('projectPanel.syncResolveDeleted')
+      : info.title ?? null
+    return (
+      <button
+        type="button"
+        aria-pressed={active}
+        onClick={() => setChoices(prev => ({ ...prev, [c.file]: side }))}
+        disabled={busy}
+        className={[
+          'min-w-0 flex-1 rounded-[4px] border px-2.5 py-2 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50',
+          active
+            ? 'border-accent bg-accent text-bg-card'
+            : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink',
+        ].join(' ')}
+      >
+        <span className="block text-[11px] font-medium">{base}</span>
+        {detail && (
+          <span
+            className={[
+              'mt-0.5 block truncate text-[11px]',
+              active ? 'text-bg-card/85' : 'text-ink-faint',
+            ].join(' ')}
+          >
+            {detail}
+          </span>
+        )}
+      </button>
+    )
+  }
+  return (
+    <div
+      data-esc-overlay
+      className="absolute inset-0 z-20 flex flex-col justify-center gap-5 overflow-y-auto bg-bg-card px-6 py-8"
+    >
+      <div className="mx-auto w-full max-w-[480px]">
+        <p className="label-cap text-accent mb-2">{t('projectPanel.syncResolveLabel')}</p>
+        <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
+          {t('projectPanel.syncResolveTitle')}
+        </h3>
+        <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
+          {t('projectPanel.syncResolveExplain')}
+        </p>
+        <div className="mt-4 max-h-[45vh] space-y-3 overflow-y-auto pr-1">
+          {conflicts.map(c => (
+            <div key={c.file} className="rounded-[4px] border border-line p-3">
+              <p className="truncate text-[12px] text-ink" title={c.file}>
+                {c.label}
+              </p>
+              <div className="mt-2 flex gap-2">
+                {sideButton(c, 'mine')}
+                {sideButton(c, 'theirs')}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <Btn variant="subtle" size="md" onClick={onCancel} disabled={busy}>
+            {t('common.cancel')}
+          </Btn>
+          <Btn variant="primary" size="md" onClick={() => onConfirm(choices)} disabled={busy}>
+            {busy ? t('projectPanel.syncResolveWorking') : t('projectPanel.syncResolveConfirm')}
+          </Btn>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1859,6 +2087,7 @@ const ProjectSettingsDialog = ({
     NonNullable<ProjectLaunchPrefs['permissionMode']>
   >(data.launch?.permissionMode ?? 'default')
   const [model, setModel] = useState(data.launch?.model ?? '')
+  const [autoSync, setAutoSync] = useState(data.launch?.autoSync !== false)
 
   const save = () => {
     const verifyCommands = verifyText
@@ -1881,6 +2110,8 @@ const ProjectSettingsDialog = ({
       ...data.launch,
       permissionMode: permissionMode === 'default' ? undefined : permissionMode,
       model: model.trim() || undefined,
+      // Default ON — only an explicit opt-out is stored.
+      autoSync: autoSync ? undefined : false,
     }
     onSave(config, launch)
   }
@@ -2037,6 +2268,21 @@ const ProjectSettingsDialog = ({
                 className={FIELD_INPUT_CSS}
               />
             </div>
+
+            <div>
+              <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
+                <input
+                  type="checkbox"
+                  checked={autoSync}
+                  onChange={e => setAutoSync(e.target.checked)}
+                  className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                />
+                {t('projectPanel.settingsAutoSync')}
+              </label>
+              <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                {t('projectPanel.settingsAutoSyncHint')}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -2143,8 +2389,6 @@ const ViewTabs = ({
   order,
   onReorder,
   terminalInfo,
-  onAddTerminal,
-  canAddTerminal,
 }: {
   view: PanelView
   onChange: (v: PanelView) => void
@@ -2154,9 +2398,6 @@ const ViewTabs = ({
   // space, matching moveTab's convention).
   onReorder: (from: number, to: number) => void
   terminalInfo: TerminalInfo | null
-  // Spawn another terminal pane (Terminal tab only). Disabled at the cap.
-  onAddTerminal: () => void
-  canAddTerminal: boolean
 }) => {
   const { t } = useT()
   // Metadata (icon/label) keyed by id; the row is rendered in `order`.
@@ -2260,17 +2501,6 @@ const ViewTabs = ({
           </button>
         )
       })}
-      {view === 'terminal' && (
-        <button
-          onClick={onAddTerminal}
-          disabled={!canAddTerminal}
-          title={t('projectPanel.newTerminal')}
-          className="-mb-px ml-auto flex items-center gap-1 border-b-2 border-transparent px-1 py-2 label-cap text-ink-muted transition-colors hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
-        >
-          <Plus size={10} strokeWidth={2.25} />
-          <span>{t('projectPanel.new')}</span>
-        </button>
-      )}
     </div>
   )
 }
@@ -2412,7 +2642,9 @@ const MoreMenu = ({
 // omitted (e.g. archived projects, until we support rename-within-archive).
 const TITLE_CSS = {
   fullscreen: {
-    text: 'mt-1 font-display text-[26px] leading-[1.05] tracking-tightest text-ink',
+    // min-w-0 + break-words: a long folder name wraps inside the header
+    // column instead of widening it past the viewport.
+    text: 'mt-1 min-w-0 break-words font-display text-[26px] leading-[1.05] tracking-tightest text-ink',
     style: { fontVariationSettings: "'opsz' 30, 'SOFT' 40" } as React.CSSProperties,
     input: 'mt-1 font-display text-[26px] leading-[1.05] tracking-tightest',
   },
@@ -2486,7 +2718,7 @@ const EditableTitle = ({
 
   if (editing) {
     return (
-      <div>
+      <div className="min-w-0 flex-1">
         <input
           ref={inputRef}
           value={draft}

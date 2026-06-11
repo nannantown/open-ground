@@ -15,6 +15,12 @@ export const board = {
     // Toolbar
     'board.toolbar.count': 'Board · {count} cards',
     'board.toolbar.mineOnly': 'Mine only',
+    'board.toolbar.mineOnlyNeedsName': 'Set your display name in Settings to filter by assignee',
+    'board.toolbar.reviewColumn': 'Review',
+    'board.toolbar.reviewColumnShowHint':
+      'Add an "In review" column for PR-waiting cards — shared with everyone on this board.',
+    'board.toolbar.reviewColumnHideHint':
+      'Hide the review column — cards parked there fold into In progress until it returns.',
     // Card
     'board.card.untitled': 'Untitled',
     'board.card.untitledParen': '(Untitled)',
@@ -36,6 +42,18 @@ export const board = {
     'board.detail.resizeSplit': 'Drag to resize the terminal height',
     'board.detail.resizeSplitTitle': 'Drag to resize · double-click to maximize the terminal',
     'board.detail.prLabel': 'Pull request',
+    'board.detail.captureLabel': 'Task',
+    'board.detail.capturePlaceholder':
+      'What should be done?\nThe first line becomes the title — for longer text an AI summary title replaces it automatically (✦).',
+    'board.detail.launchHintShort':
+      'Launches claude with the title + content as the first prompt. Also appears in the Terminal tab.',
+    'board.detail.flowBaseDefault': 'the launch branch',
+    'board.detail.flowPr': 'On finish: PR → {base} (a human merges)',
+    'board.detail.flowMerge': 'On finish: merge → {base}',
+    'board.detail.titleAutoTitle': 'Auto-generated title — editing it makes it yours',
+    'board.detail.regenTitle': 'Regenerate the title from the content (AI)',
+    'board.detail.fieldsToggle': 'Show / hide the task fields',
+    'board.detail.branchTitle': 'Task branch',
     // Task terminal (drawer launch CTA)
     'board.taskTerminal.hint':
       'Launch claude for this task. The title AND the content are passed as the first prompt; in a git project claude works on its own task branch in its own worktree, so several tasks can run in parallel. Respond and approve permission prompts in this terminal. It also appears in the Terminal tab, labelled with the title.',
@@ -54,6 +72,12 @@ export const board = {
     // Toolbar
     'board.toolbar.count': 'ボード · {count} カード',
     'board.toolbar.mineOnly': '自分のみ',
+    'board.toolbar.mineOnlyNeedsName': '設定で表示名を設定すると、担当者で絞り込めます',
+    'board.toolbar.reviewColumn': 'レビュー',
+    'board.toolbar.reviewColumnShowHint':
+      'PR レビュー待ちカード用の「レビュー待ち」列を追加します — このボードの全員に共有されます。',
+    'board.toolbar.reviewColumnHideHint':
+      'レビュー列を隠します — 置かれていたカードは再表示まで「実行中」に畳まれます。',
     // Card
     'board.card.untitled': '無題',
     'board.card.untitledParen': '（無題）',
@@ -75,6 +99,18 @@ export const board = {
     'board.detail.resizeSplit': 'ドラッグでターミナルの高さを変更',
     'board.detail.resizeSplitTitle': 'ドラッグでサイズ変更 · ダブルクリックでターミナル最大化',
     'board.detail.prLabel': 'プルリクエスト',
+    'board.detail.captureLabel': 'タスク',
+    'board.detail.capturePlaceholder':
+      'やることを書いてください\n1行目がタイトルになります — 長い内容は AI が短いタイトルに自動で整えます（✦）',
+    'board.detail.launchHintShort':
+      'タイトルと内容を最初のプロンプトとして claude を起動します。Terminal タブにも並びます。',
+    'board.detail.flowBaseDefault': '起動時のブランチ',
+    'board.detail.flowPr': '完了時: PR → {base}（人間がマージ）',
+    'board.detail.flowMerge': '完了時: {base} へマージ',
+    'board.detail.titleAutoTitle': '自動生成タイトル — 編集すると固定されます',
+    'board.detail.regenTitle': '内容からタイトルを再生成（AI）',
+    'board.detail.fieldsToggle': 'タスク詳細の表示切替',
+    'board.detail.branchTitle': 'タスクブランチ',
     // Task terminal (drawer launch CTA)
     'board.taskTerminal.hint':
       'このタスクで claude を起動します。タイトルと内容が最初のプロンプトとして渡され、git プロジェクトでは claude がタスク専用のブランチ＋worktree で作業するため、複数タスクを並列に実行できます。応答や権限確認はこのターミナルで操作します。Terminal タブにもタイトル付きで並びます。',

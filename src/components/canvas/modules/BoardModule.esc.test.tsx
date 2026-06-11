@@ -43,7 +43,9 @@ const data: ProjectData = {
 
 const project = { id: 'p1', name: 'proj', path: '/tmp/proj' } as ProjectMeta
 
-const renderDrawer = () => {
+// session: true renders the drawer in Session mode (terminal slot exists →
+// the conversation pane mounts); default Draft mode shows the full fields.
+const renderDrawer = (opts: { session?: boolean } = {}) => {
   const onOpenDetail = vi.fn()
   const persist = vi.fn()
   const utils = render(
@@ -58,8 +60,9 @@ const renderDrawer = () => {
           <textarea data-testid="xterm-helper" />
         </div>
       )}
-      hasTerminalSlot={() => false}
+      hasTerminalSlot={() => opts.session ?? false}
       onDeleteTask={vi.fn()}
+      onLaunchTask={vi.fn()}
     />,
   )
   return { ...utils, onOpenDetail, persist }
@@ -82,7 +85,9 @@ afterEach(cleanup)
 
 describe('BoardModule drawer — layered Escape', () => {
   it('1. ignores Esc while an xterm element is focused (no close, no blur, App still sees it)', () => {
-    const { getByTestId, onOpenDetail } = renderDrawer()
+    // Session mode — the conversation pane (and its xterm) only mounts once
+    // the task has a terminal slot.
+    const { getByTestId, onOpenDetail } = renderDrawer({ session: true })
     const helper = getByTestId('xterm-helper')
     helper.focus()
 

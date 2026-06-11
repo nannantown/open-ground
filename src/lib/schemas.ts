@@ -36,6 +36,10 @@ export const ProjectTaskSchema = z.object({
   boardOrder: z.number().optional(),
   // PR opened for the task (completionFlow 'pr') — set via tasks {setPrUrl}.
   prUrl: z.string().optional(),
+  // Task branch claude created — set via tasks {setBranch}.
+  branch: z.string().optional(),
+  // Title is machine-derived (first line / haiku) and untouched by the user.
+  titleAuto: z.boolean().optional(),
 })
 
 export const ProjectDataSchema = z.object({
@@ -58,6 +62,7 @@ export const ProjectDataSchema = z.object({
     .object({
       permissionMode: z.enum(['default', 'acceptEdits', 'plan', 'bypass']).optional(),
       model: z.string().optional(),
+      autoSync: z.boolean().optional(),
     })
     .optional(),
   tasks: z.array(ProjectTaskSchema).default([]),

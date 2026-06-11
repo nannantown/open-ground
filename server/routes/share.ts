@@ -7,8 +7,18 @@
 //
 import { rm } from 'fs/promises'
 import { Hono } from 'hono'
-import { enablePreconditions, shareStatus, shareSync } from '@/lib/server/gitShare'
-import { migrateBoardFromShared, migrateBoardToShared } from '@/lib/server/projectData'
+import { enablePreconditions, shareResolve, shareStatus, shareSync } from '@/lib/server/gitShare'
+import {
+  autoSyncSnapshot,
+  ensureAutoSync,
+  noteManualSync,
+  stopAutoSync,
+} from '@/lib/server/shareAutoSync'
+import {
+  migrateBoardFromShared,
+  migrateBoardToShared,
+  readProjectData,
+} from '@/lib/server/projectData'
 import { migrateCanvasFromShared, migrateCanvasToShared } from '@/lib/server/canvasData'
 import { isShared, sharedDataDir } from '@/lib/server/sharedData'
 import { requireProjectPath } from '../middleware/projectPath'
@@ -29,7 +39,17 @@ export const shareRoutes = new Hono()
   .get('/api/project/share/status', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    return c.json(await shareStatus(path))
+    const status = await shareStatus(path)
+    if (status.shared && status.gitRepo) {
+      // The status poll doubles as the auto-sync heartbeat: it keeps the
+      // engine's personal-pref flag fresh (launch.autoSync, default ON) and
+      // lazily brings the project onto the engine's radar.
+      const data = await readProjectData(path)
+      const enabled = data.launch?.autoSync !== false
+      ensureAutoSync(path, enabled)
+      return c.json({ ...status, auto: autoSyncSnapshot(path) })
+    }
+    return c.json(status)
   })
   // POST /api/project/share/sync {path} → ShareSyncResult
   // commit (.openground/ pathspec only) → pull --rebase --autostash → push.
@@ -38,7 +58,37 @@ export const shareRoutes = new Hono()
   .post('/api/project/share/sync', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    return c.json(await shareSync(path))
+    const result = await shareSync(path)
+    // Keep the auto engine's view consistent with what the user just saw.
+    noteManualSync(path, result)
+    return c.json(result)
+  })
+  // POST /api/project/share/resolve {path, choices} → ShareSyncResult
+  // Re-runs the sync, resolving each conflicted file to the user's chosen
+  // side ('mine' | 'theirs'). Choices are advisory lookups — only files git
+  // actually reports as unmerged are touched, and a conflict without a
+  // choice rolls back and returns the fresh conflict set.
+  .post('/api/project/share/resolve', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    let body: { choices?: unknown }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const raw = body.choices
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return c.json({ error: 'choices required' }, 400)
+    }
+    const choices: Record<string, 'mine' | 'theirs'> = {}
+    for (const [file, side] of Object.entries(raw as Record<string, unknown>)) {
+      if (side === 'mine' || side === 'theirs') choices[file] = side
+    }
+    if (Object.keys(choices).length === 0) return c.json({ error: 'choices required' }, 400)
+    const result = await shareResolve(path, choices)
+    noteManualSync(path, result)
+    return c.json(result)
   })
   // POST /api/project/share/enable {path} → {ok:true} | {error}
   // Creates .openground/ and migrates Board + Canvas data into the repo. The
@@ -81,6 +131,7 @@ export const shareRoutes = new Hono()
       await migrateBoardFromShared(path)
       await migrateCanvasFromShared(path)
       await rm(sharedDataDir(path), { recursive: true, force: true })
+      stopAutoSync(path)
       return c.json({ ok: true })
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : 'disable failed' }, 500)

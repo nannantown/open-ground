@@ -47,6 +47,7 @@ import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
 import { probeClaudeCli } from '@/lib/server/claudeCli'
 import { generateProjectDescription } from '@/lib/server/generateDescription'
+import { generateTaskTitle } from '@/lib/server/generateTaskTitle'
 import { getPromptLang } from '@/lib/server/promptLang'
 
 const execFileAsync = promisify(execFileCb)
@@ -101,7 +102,16 @@ interface TasksBody {
   /** Record the pull request opened for a task — claude calls this when its
    *  `gh pr create` succeeds. http(s) URLs only; anything else is ignored. */
   setPrUrl?: { id: string; url: string }[]
+  /** Record the task branch claude created (right after `git worktree add`).
+   *  Plain branch-name strings only; anything else is ignored. */
+  setBranch?: { id: string; branch: string }[]
 }
+
+// Conservative git branch-name shape: word char first, then word chars, dots,
+// slashes, hyphens. Rejects whitespace/control/shell noise a confused session
+// might post. (Stricter than git itself — a weird-but-legal name is simply not
+// recorded, never a failure.)
+const BRANCH_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/
 
 const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'review', 'done', 'blocked']
 
@@ -380,6 +390,18 @@ export const projectRoutes = new Hono()
     data.tasks = data.tasks.map((t) => (t.id === pr.id ? { ...t, prUrl: url } : t))
   }
 
+  for (const br of body.setBranch ?? []) {
+    if (!br || typeof br.id !== 'string' || typeof br.branch !== 'string') continue
+    const branch = br.branch.trim()
+    if (branch === '') {
+      // Empty string clears a wrongly-recorded branch.
+      data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch: undefined } : t))
+      continue
+    }
+    if (branch.length > 200 || !BRANCH_RE.test(branch)) continue
+    data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch } : t))
+  }
+
   for (const mv of body.setColumn ?? []) {
     if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) continue
     data.tasks = data.tasks.map((t) =>
@@ -482,5 +504,58 @@ export const projectRoutes = new Hono()
       })
     } catch (e: any) {
       return c.json({ error: e?.message ?? 'description generation failed' }, 500)
+    }
+  })
+  // ── /api/project/task-title ───────────────────────────────────────────────
+  // POST { path, id } → summarize the card's content into a short title via a
+  // one-off haiku session (generateTaskTitle — serialized, subscription-only)
+  // and persist it — but ONLY while the card's title is still machine-derived
+  // (titleAuto): the moment the user edits the title by hand, an in-flight
+  // generation must not clobber it. Returns { title } (null = kept as-is).
+  .post('/api/project/task-title', async (c) => {
+    let body: { path?: string; id?: string; force?: boolean }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    if (!body.path || !body.id) return c.json({ error: 'path and id required' }, 400)
+    if (!(await validateProjectPath(body.path))) return c.json({ error: 'path not allowed' }, 403)
+    const force = body.force === true
+    const before = await readProjectData(body.path)
+    const task = before.tasks.find((t) => t.id === body.id)
+    if (!task) return c.json({ error: 'task not found' }, 404)
+    // Hand-titled card: nothing to do (idempotent no-op, not an error — the
+    // client fires this without checking). The explicit "✦ regenerate" button
+    // sends force, which overrides — the user asked for a machine title.
+    if (!task.titleAuto && !force) return c.json({ title: null })
+    const content = [task.title, task.notes ?? ''].filter(Boolean).join('\n').trim()
+    if (!content) return c.json({ title: null })
+    const probe = await probeClaudeCli()
+    if (!probe.installed) {
+      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    }
+    try {
+      const title = await generateTaskTitle(body.path, content)
+      if (!title) return c.json({ title: null })
+      // Re-read AFTER the (seconds-long) generation: the user may have edited
+      // or deleted the card meanwhile — their edit wins, silently (a forced
+      // regeneration only requires the card to still exist).
+      const after = await readProjectData(body.path)
+      const fresh = after.tasks.find((t) => t.id === body.id)
+      if (!fresh) return c.json({ title: null })
+      if (!force && (!fresh.titleAuto || fresh.title !== task.title)) return c.json({ title: null })
+      after.tasks = after.tasks.map((t) =>
+        t.id === body.id ? { ...t, title, titleAuto: true } : t,
+      )
+      await writeProjectData(body.path, after, {
+        expectUpdatedAt: typeof after.updatedAt === 'string' ? after.updatedAt : undefined,
+      })
+      return c.json({ title })
+    } catch (e: any) {
+      // A concurrent user write between our re-read and save: their version
+      // wins, the auto-title is simply dropped.
+      if (e instanceof ProjectDataConflictError) return c.json({ title: null })
+      return c.json({ error: e?.message ?? 'title generation failed' }, 500)
     }
   })

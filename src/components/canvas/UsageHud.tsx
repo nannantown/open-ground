@@ -119,7 +119,9 @@ export const UsageHud = () => {
         </div>
         <span className={`${textTone} font-medium`}>{pct != null ? `${pct}%` : '—'}</span>
         {chipReset && (
-          <span className="inline-flex items-center gap-1 whitespace-nowrap text-ink-subtle">
+          /* Narrow window: drop the reset clock from the chip (still in the
+             tooltip and the popover) so the gauge + % always fit. */
+          <span className="hidden sm:inline-flex items-center gap-1 whitespace-nowrap text-ink-subtle">
             <RotateCcw size={10} strokeWidth={1.75} className="text-ink-faint shrink-0" />
             {chipReset}
           </span>

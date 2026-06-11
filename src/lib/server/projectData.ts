@@ -4,6 +4,7 @@ import type { BoardColumn, ProjectConfig, ProjectData, ProjectTask } from '../ty
 import { atomicWriteJson, atomicWriteText } from './atomicWrite'
 import { isValidProjectPath, projectDataDir, projectDataFile } from './projectDataPath'
 import { ProjectDataSchema, ProjectTaskSchema } from '../schemas'
+import { noteSharedWrite } from './shareAutoSync'
 import {
   SHARED_DATA_VERSION,
   boardCardsDir,
@@ -150,6 +151,8 @@ const normalizeCard = (t: ProjectTask): ProjectTask => ({
   ...(t.assignee !== undefined ? { assignee: t.assignee } : {}),
   ...(t.boardOrder !== undefined ? { boardOrder: t.boardOrder } : {}),
   ...(t.prUrl !== undefined ? { prUrl: t.prUrl } : {}),
+  ...(t.branch !== undefined ? { branch: t.branch } : {}),
+  ...(t.titleAuto !== undefined ? { titleAuto: t.titleAuto } : {}),
 })
 
 const serializeCard = (t: ProjectTask): string => JSON.stringify(normalizeCard(t), null, 2)
@@ -442,6 +445,9 @@ export const writeProjectData = async (
     if (data.launch !== undefined) centralRaw.launch = data.launch
     centralRaw.updatedAt = now
     await atomicWriteJson(join(dir, TASKS_FILE), centralRaw)
+    // Shared data just changed on disk — wake the auto-sync engine (debounced
+    // push + tighter fetch cadence). Fire-and-forget by design.
+    noteSharedWrite(projectPath)
     return { ...data, updatedAt: now }
   })
 }

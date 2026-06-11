@@ -61,29 +61,97 @@ repo" rule in CLAUDE.md gets this one user-consented exception.
 ## API contracts (pinned — do not drift)
 
 - `GET /api/project/share/status?path=` → `ShareStatus`
-  `{ shared, gitRepo, remoteUrl: string|null, dirty, ahead, behind }`
+  `{ shared, gitRepo, remoteUrl: string|null, dirty, ahead, behind,
+  forcedUpdate?, branch? }`
   (`dirty` = `git status --porcelain -- .openground/` non-empty; false when
   not shared. `gitRepo` via `git rev-parse --is-inside-work-tree`.
   `ahead`/`behind` (added 2026-06-11) = commits touching `.openground/` in
   `@{upstream}..HEAD` / `HEAD..@{upstream}` — 0 when not shared / no
   upstream. Backed by a per-project throttled `git fetch` (60s window,
   globalThis-stamped) that gets a ≤2.5s grace inside the status call; a
-  slower fetch lands in the background and the next poll reads it. UI:
-  ↑n/↓n badges on the Sync button + a 90s visible-window status poll.)
+  slower fetch lands in the background and the next poll reads it.
+  `forcedUpdate` (S25): the fetch saw "(forced update)" — sticky until a
+  sync absorbs the rewrite. `branch`: the checked-out branch (absent when
+  detached / not git) — shared data follows the branch, so the UI names it.
+  UI: ↑n/↓n badges + ⚠ + ⎇branch on/next to the Sync button, 90s poll.)
 - `POST /api/project/share/enable` `{path}` → `{ok:true}` | `{error}`
   (412-style errors: not a git repo / already shared / `.openground` is
-  git-ignored — checked with `git check-ignore`.)
+  git-ignored — checked with `git check-ignore`. Enable commits NOTHING; the
+  UI says "press Sync to publish" right after.)
 - `POST /api/project/share/disable` `{path}` → `{ok:true}` | `{error}`
 - `POST /api/project/share/sync` `{path}` → `ShareSyncResult`
-  `{ ok, committed, pulled, pushed, conflict?, message? }`
+  `{ ok, committed, pulled, pushed, conflict?, conflictFiles?, reason?,
+  offline?, noRemote?, forcedUpdate?, message? }`
+  Preflight (2026-06-11): refuses — touching nothing — when a rebase/merge is
+  already in progress (`reason:'rebase-in-progress'|'merge-in-progress'`; the
+  user's own half-resolved operation must never be aborted by us) or on a
+  detached HEAD (`reason:'detached-head'`).
   Sequence: `git add -- .openground` → `git commit -m "openground: sync" --
-  .openground` (pathspec commit leaves the user's staged code intact) →
-  `git pull --rebase --autostash` (on rebase conflict: `git rebase --abort`,
-  return `conflict:true` + message telling the user to pull manually) →
-  `git push` (missing upstream ⇒ `pushed:false` + message). 60s timeouts.
-  All git via `execFile` with `cwd = projectPath`, pathspec-scoped.
+  .openground` (pathspec commit leaves the user's staged code intact;
+  identity-less machines fail with `reason:'no-identity'`) →
+  `git pull --rebase --autostash` (on rebase conflict: capture the unmerged
+  paths, `git rebase --abort`, return `conflict:true` + `conflictFiles`
+  humanized as `card "Title"` / `notes` / relative path; an autostash whose
+  re-apply conflicts — git exits 0! — returns `reason:'autostash-conflict'`
+  with ok:false so it can never pass as a silent success) →
+  `git push` (no upstream + an origin ⇒ auto-publish `push -u origin
+  <branch>`; non-fast-forward ⇒ ONE transparent retry round pull→push;
+  unreachable remote sets `offline:true`, no remote at all `noRemote:true`).
+  A pull that absorbed a rewritten upstream sets `forcedUpdate:true` (the UI
+  shows a persistent warning). 60s network timeouts. All git via `execFile`
+  with `cwd = projectPath`, pathspec-scoped. The client maps `reason` codes
+  to localized, actionable notices; `message` stays the raw English fallback.
+- `POST /api/project/share/resolve` `{path, choices}` → `ShareSyncResult`
+  (2026-06-11). In-app conflict resolution: `choices` maps each conflicted
+  file to `'mine' | 'theirs'` (named from the USER's view; the engine owns
+  the rebase-stage inversion — git's stage 2/"--ours" is the upstream
+  teammate, stage 3/"--theirs" the local commit). Re-runs the sync; on the
+  conflict it resolves each unmerged file via `checkout --ours/--theirs` +
+  `add` (a side that deleted the file → `git rm`), then `rebase --continue`
+  (GIT_EDITOR=true) looping across replayed commits, `--skip`ping a commit
+  the resolution emptied, then pushes. A conflicted file WITHOUT a choice
+  aborts and returns the fresh `conflicts` set — the app never picks a side
+  the user didn't see. The sync/conflict results carry `conflicts:
+  ShareConflict[]` (file, label, kind, mine/theirs {exists, title}) — the
+  dialog's data. The dialog is only offered when EVERY conflicted file is
+  under `.openground/`; code conflicts stay the user's own rebase.
 - Every route validates with `validateProjectPath` (repo subpaths already
   pass the boundary).
+
+## Auto-sync ("Live" — Notion-feel on git bones, 2026-06-11)
+
+`src/lib/server/shareAutoSync.ts` — a per-project background engine; the
+manual Sync button becomes a Live indicator (clicking = force sync now).
+Decided in the 壁打ち of 2026-06-11: B (auto-sync over pure git) over D
+(realtime backend) — no infrastructure, clone-onboarding and offline-safety
+keep working, the "feel" comes from cadence.
+
+- **Adaptive fetch**: `nextInterval` — activity (a fetch that moved refs, a
+  local shared write, a successful sync) snaps the per-project interval to
+  15s; each idle round doubles it up to 120s. Two people editing converge on
+  ~15s "almost live"; an idle project costs one ref-ping every 2 minutes.
+- **Apply only on `behind > 0`** — an idle round never touches the working
+  tree. **Debounced push**: any shared-data write (`writeProjectData`
+  shared branch, `writeCanvasFile`, shared canvas index) calls
+  `noteSharedWrite` → 5s debounce → sync round. A dirty `.openground/` also
+  gets picked up by the next round as a backstop (covers asset writes).
+- **CODE IS SACRED**: `aheadIsSharedOnly` — if ANY commit in
+  `@{upstream}..HEAD` touches a path outside `.openground/`, the engine
+  parks in `paused-code`: no auto commit/rebase/push until the USER pushes
+  their code (manual Sync still available, and it explains itself).
+- Other parked modes: `conflict` (structured set kept for the dialog),
+  `offline` (pending push survives), `blocked` (user mid rebase/merge),
+  `error` (loud — e.g. autostash restore conflict), `disabled` (personal
+  `launch.autoSync:false`; default ON, stored only as an explicit opt-out).
+- **Wiring**: the status route is the heartbeat — it refreshes the pref,
+  `ensureAutoSync`s the project and returns `ShareStatus.auto`
+  (mode/lastSyncAt/pendingPush/intervalMs). Manual sync/resolve report into
+  the engine (`noteManualSync`); disable share stops it. State on
+  globalThis; timers `unref`ed; one in-flight round per project.
+- **UI**: ● Live (moss) / Syncing / Paused / Conflict / Offline / Error on
+  the Sync button, 20s status poll while visible (90s when auto is off),
+  auto-round conflicts/errors post persistent notices on mode TRANSITION,
+  and a fresh `auto.lastSyncAt` reloads board+canvas immediately.
 
 ## Storage adapters (public APIs unchanged)
 

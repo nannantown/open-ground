@@ -3,11 +3,12 @@ import { Play, TerminalSquare } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useT } from '@/i18n/I18nContext'
 
-// The Board card's terminal view. It does NOT own a PTY: the task's terminal is
-// a Terminal-tab SLOT (single source of truth — see ProjectPanel.launchTaskTerminal),
-// so the same claude session shows here in the drawer AND as a labelled pane in
-// the Terminal tab. This component is purely presentational: given the slot's
-// live claude terminal id (or null), render the raw terminal or the launch CTA.
+// The Board card's terminal view. It does NOT own a PTY: the task's terminal
+// is tracked board-side in ProjectPanel's taskTerminals map (taskId → PTY id)
+// and renders ONLY here in the drawer — the Terminal tab is plain shells and
+// knows nothing about tasks. This component is purely presentational: given
+// the task's live claude terminal id (or null), render the raw terminal or
+// the launch CTA.
 
 export const BoardTaskTerminal = ({
   terminalId,

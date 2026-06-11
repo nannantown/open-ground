@@ -137,3 +137,68 @@ describe('POST /api/project/tasks — setPrUrl validation', () => {
     expect(res.status).toBe(200)
   })
 })
+
+describe('POST /api/project/task-title — guards (no claude spawn)', () => {
+  // Only the pre-generation guards: every case below must return BEFORE the
+  // route probes/spawns the claude CLI (a test must never bill a session).
+  it('hand-titled card (no titleAuto) is a null no-op', async () => {
+    const dir = await makeRegisteredDir('title-manual')
+    const task = await addTask(dir, 'Hand written title')
+    const res = await app.request('/api/project/task-title', json({ path: dir, id: task.id }))
+    expect(res.status).toBe(200)
+    expect((await res.json()).title).toBeNull()
+  })
+
+  it('unknown id → 404; missing fields → 400; unregistered path → 403', async () => {
+    const dir = await makeRegisteredDir('title-guards')
+    expect((await app.request('/api/project/task-title', json({ path: dir, id: 'nope' }))).status).toBe(404)
+    expect((await app.request('/api/project/task-title', json({ path: dir }))).status).toBe(400)
+    expect(
+      (await app.request('/api/project/task-title', json({ path: '/etc', id: 'x' }))).status,
+    ).toBe(403)
+  })
+})
+
+describe('POST /api/project/tasks — setBranch validation', () => {
+  it('records a plausible branch name; empty string clears it', async () => {
+    const dir = await makeRegisteredDir('branch')
+    const task = await addTask(dir, 'Branch task')
+
+    await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setBranch: [{ id: task.id, branch: 'task/u2-105-account-settings' }] }),
+    )
+    expect((await getTask(dir, task.id))?.branch).toBe('task/u2-105-account-settings')
+
+    await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setBranch: [{ id: task.id, branch: '' }] }),
+    )
+    expect((await getTask(dir, task.id))?.branch).toBeUndefined()
+  })
+
+  it('rejects whitespace/shell-noise/over-long names without erroring', async () => {
+    const dir = await makeRegisteredDir('branch-bad')
+    const task = await addTask(dir, 'Guarded branch')
+    const good = 'task/fix-login'
+    await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setBranch: [{ id: task.id, branch: good }] }),
+    )
+
+    for (const bad of [
+      'has space',
+      '-leading-dash',
+      'semi;colon',
+      'back`tick`',
+      `task/${'a'.repeat(250)}`, // > 200 chars
+    ]) {
+      const res = await app.request(
+        '/api/project/tasks',
+        json({ path: dir, setBranch: [{ id: task.id, branch: bad }] }),
+      )
+      expect(res.status).toBe(200) // ignored, never a 500
+      expect((await getTask(dir, task.id))?.branch).toBe(good) // unchanged
+    }
+  })
+})

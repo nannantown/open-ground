@@ -10,6 +10,10 @@ The app is a **Vite + React SPA** (front-end) talking to a **Hono** server
 
 ```bash
 npm run dev        # Vite SPA (:5174) + Hono API (:47776) together (concurrently)
+npm run dev:alt    # SECOND dev instance (worktree/parallel branch): auto-picks the
+                   # first free port pair from Web :5175 / API :47777 upward and
+                   # prints the URL. The primary pair 5174/47776 stays untouched.
+                   # (OAuth login works only on the primary — fixed redirect URI.)
 npm run dev:web    # Vite SPA only (:5174, HMR)
 npm run dev:server # Hono API only (:47776, tsx watch)
 npm run build      # vite build → dist-web/  +  esbuild → server/dist/index.cjs

@@ -5,8 +5,9 @@ import {
   columnOf,
   displayColumnOf,
   byColumnOrder,
+  withReviewColumnToggled,
 } from './BoardTab'
-import type { ProjectTask } from '@/lib/types'
+import type { ProjectData, ProjectTask } from '@/lib/types'
 
 const task = (over: Partial<ProjectTask>): ProjectTask => ({
   id: 't',
@@ -71,6 +72,46 @@ describe('assigneeMatches (Mine-only filter compare)', () => {
     expect(assigneeMatches('koki', null)).toBe(false)
     expect(assigneeMatches('', '')).toBe(false)
     expect(assigneeMatches('   ', '   ')).toBe(false)
+  })
+})
+
+describe('withReviewColumnToggled (toolbar toggle → persisted config)', () => {
+  const projectData = (config?: ProjectData['config']): ProjectData => ({
+    description: '',
+    notes: '',
+    updatedAt: '2026-01-01T00:00:00Z',
+    tasks: [task({})],
+    ...(config !== undefined ? { config } : {}),
+  })
+
+  it('off → on stores true', () => {
+    expect(withReviewColumnToggled(projectData()).config?.reviewColumn).toBe(true)
+    expect(
+      withReviewColumnToggled(projectData({ reviewColumn: undefined })).config
+        ?.reviewColumn,
+    ).toBe(true)
+  })
+
+  it('on → off stores undefined, never false (settings-dialog convention)', () => {
+    const next = withReviewColumnToggled(projectData({ reviewColumn: true }))
+    expect(next.config?.reviewColumn).toBeUndefined()
+    expect(next.config?.reviewColumn).not.toBe(false)
+  })
+
+  it('round-trips: two toggles land back on undefined', () => {
+    const once = withReviewColumnToggled(projectData())
+    const twice = withReviewColumnToggled(once)
+    expect(once.config?.reviewColumn).toBe(true)
+    expect(twice.config?.reviewColumn).toBeUndefined()
+  })
+
+  it('preserves the rest of the data and config — only the flag changes', () => {
+    const data = projectData({ completionFlow: 'pr', targetBranch: 'main' })
+    const next = withReviewColumnToggled(data)
+    expect(next.tasks).toBe(data.tasks)
+    expect(next.description).toBe(data.description)
+    expect(next.config?.completionFlow).toBe('pr')
+    expect(next.config?.targetBranch).toBe('main')
   })
 })
 

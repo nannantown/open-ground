@@ -4,6 +4,7 @@ import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
 import { Toolbar } from '@/components/canvas/Toolbar'
 import { ToolPalette } from '@/components/canvas/ToolPalette'
 import { SettingsPanel } from '@/components/canvas/SettingsPanel'
+import { VoiceController } from '@/components/canvas/VoiceController'
 import { NewProjectModal } from '@/components/canvas/NewProjectModal'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import { AccountModal } from '@/components/canvas/AccountModal'
@@ -755,6 +756,7 @@ export default function App() {
           }
         }}
       />
+      <VoiceController voice={settings.voice} projectPath={singleSelected?.path ?? null} />
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
       <AccountModal open={accountOpen} onClose={() => setAccountOpen(false)} />
       <Onboarding

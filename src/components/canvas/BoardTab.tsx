@@ -70,6 +70,14 @@ export const assigneeMatches = (
   return a.length > 0 && a === d
 }
 
+// Flip the shared review-column flag. Off is stored as `undefined` (never
+// `false`) — the same convention the settings dialog uses, so the two entry
+// points can't diverge on what "off" looks like in the persisted config.
+export const withReviewColumnToggled = (data: ProjectData): ProjectData => {
+  const reviewOn = !!data.config?.reviewColumn
+  return { ...data, config: { ...data.config, reviewColumn: !reviewOn || undefined } }
+}
+
 // "Mine only" toggle persistence — per project, like the terminal slot list.
 const MINE_ONLY_KEY = (projectId: string) => `openground.board.mineOnly.${projectId}`
 
@@ -180,7 +188,11 @@ export const BoardTab = ({
     setMineOnly(loadMineOnly(projectId))
   }, [projectId])
   const hasDisplayName = !!displayName?.trim()
-  const filterActive = mineOnly && hasDisplayName
+  // The toggle only means something once at least one card carries an
+  // assignee — with none, "Mine only" can match nothing. Hide the button until
+  // then, and neutralize a stale saved toggle so cards never silently vanish.
+  const hasAssignees = data.tasks.some(task => !!task.assignee?.trim())
+  const filterActive = mineOnly && hasDisplayName && hasAssignees
   const toggleMineOnly = () => {
     setMineOnly(prev => {
       saveMineOnly(projectId, !prev)
@@ -263,24 +275,65 @@ export const BoardTab = ({
           <p className="label-cap text-ink-muted">
             {t('board.toolbar.count', { count: visibleTasks.length })}
           </p>
-          {/* "Mine only" — text-only filter toggle, offered only when the user
-              has a display name to match against. Persisted per project. */}
-          {hasDisplayName && (
+          {/* "Mine only" — text-only filter toggle. Rendered only once some
+              card has an assignee (with none it can match nothing). Needs a
+              display name to match against; without one the toggle shows but
+              disabled, pointing at Settings (S36). */}
+          {hasAssignees && (
             <button
               type="button"
               aria-pressed={mineOnly}
-              onClick={toggleMineOnly}
+              onClick={hasDisplayName ? toggleMineOnly : undefined}
+              disabled={!hasDisplayName}
+              title={hasDisplayName ? undefined : t('board.toolbar.mineOnlyNeedsName')}
               className={[
                 'rounded-sm border px-2.5 py-1 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-                mineOnly
-                  ? 'border-accent bg-accent text-bg-card hover:bg-accent-hover'
-                  : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink',
+                !hasDisplayName
+                  ? 'cursor-not-allowed border-line text-ink-faint opacity-50'
+                  : mineOnly
+                    ? 'border-accent bg-accent text-bg-card hover:bg-accent-hover'
+                    : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink',
               ].join(' ')}
             >
               {t('board.toolbar.mineOnly')}
             </button>
           )}
         </div>
+        {/* Review-column toggle — lives in the toolbar (where the column would
+            appear) for discoverability; the settings dialog's checkbox edits
+            the SAME config.reviewColumn. Label + a small switch: the knob
+            position carries the state, so it reads at a glance without copy. */}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={reviewOn}
+          onClick={() => onPersist(withReviewColumnToggled(data))}
+          disabled={projectMissing}
+          title={
+            reviewOn
+              ? t('board.toolbar.reviewColumnHideHint')
+              : t('board.toolbar.reviewColumnShowHint')
+          }
+          className="group flex items-center gap-1.5 rounded-sm px-1 py-1 text-[11px] text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
+        >
+          {t('board.toolbar.reviewColumn')}
+          <span
+            aria-hidden
+            className={[
+              'relative h-[14px] w-[24px] shrink-0 rounded-full border transition-colors',
+              reviewOn
+                ? 'border-accent bg-accent group-hover:bg-accent-hover'
+                : 'border-line bg-bg-inset',
+            ].join(' ')}
+          >
+            <span
+              className={[
+                'absolute top-[2px] h-[8px] w-[8px] rounded-full transition-[left,background-color]',
+                reviewOn ? 'left-[12px] bg-bg-card' : 'left-[2px] bg-ink-faint',
+              ].join(' ')}
+            />
+          </span>
+        </button>
       </div>
 
       {/* Columns — always rendered, even at 0 cards, so the lane structure tasks

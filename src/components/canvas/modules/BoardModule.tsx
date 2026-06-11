@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Trash2, X } from 'lucide-react'
+import { ChevronRight, GitBranch, Play, Trash2, X } from 'lucide-react'
 import { BoardTab } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
 import { api } from '@/lib/api-client'
+import { deriveCardFields, wantsAutoTitle } from '@/lib/cardTitle'
 import type { BoardColumn, ProjectData, ProjectMeta, ProjectTask, Settings } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
@@ -28,6 +29,10 @@ export interface BoardModuleProps {
   /** Delete a card with full teardown (close its terminal slot, remove from
    *  tasks.json). Rendered in the drawer header, not the conversation pane. */
   onDeleteTask: (id: string) => void
+  /** Launch the task's claude session (creates its Terminal-tab slot). The
+   *  drawer's Draft mode owns the Launch button — the conversation pane is not
+   *  rendered until a slot exists. */
+  onLaunchTask: (task: ProjectTask) => Promise<void> | void
 }
 
 export const BoardModule = ({
@@ -39,6 +44,7 @@ export const BoardModule = ({
   renderConversation,
   hasTerminalSlot,
   onDeleteTask,
+  onLaunchTask,
 }: BoardModuleProps) => {
   const { t } = useT()
   // The user's display name (Settings.displayName) — feeds the drawer's "Me"
@@ -140,6 +146,240 @@ export const BoardModule = ({
       ...data,
       tasks: data.tasks.map(t => (t.id === task.id ? { ...t, ...patch } : t)),
     })
+  // Async continuations (auto-title responses) must patch against the LATEST
+  // data, not the render that started them — persisting a stale snapshot would
+  // roll back edits made while the generation ran.
+  const dataRef = useRef(data)
+  dataRef.current = data
+  const patchTaskFresh = (taskId: string, patch: Partial<ProjectTask>) => {
+    const current = dataRef.current
+    persist({
+      ...current,
+      tasks: current.tasks.map(t => (t.id === taskId ? { ...t, ...patch } : t)),
+    })
+  }
+
+  // ---- Drawer phase state --------------------------------------------------
+  // Draft (no terminal slot): authoring gets the whole drawer. Session (slot
+  // exists): the terminal owns it and the fields collapse behind the header.
+  const [fieldsOpen, setFieldsOpen] = useState(false)
+  useEffect(() => setFieldsOpen(false), [detailId])
+  const [launching, setLaunching] = useState(false)
+  const [regenBusy, setRegenBusy] = useState(false)
+
+  // Single-box capture commit: first line → provisional title, rest → content,
+  // both flagged titleAuto. A multi-line capture then asks the server for a
+  // haiku summary title (one-off PTY, serialized server-side); it lands via
+  // the panel's 5s data poll — and never over a hand-edited title (the server
+  // re-checks titleAuto before writing).
+  const commitCapture = (task: ProjectTask, raw: string) => {
+    const fields = deriveCardFields(raw)
+    if (!fields.title) return
+    patchTask(task, { title: fields.title, notes: fields.notes, titleAuto: true })
+    if (wantsAutoTitle(fields))
+      void api.api.project['task-title']
+        .$post({ json: { path: project.path, id: task.id } })
+        .catch(() => {})
+  }
+
+  // Explicit "✦ regenerate": force overrides the titleAuto guard (the user
+  // asked), and the result is applied immediately rather than waiting for the
+  // poll. The server already persisted it, so the CAS round-trip converges.
+  const regenerateTitle = async (task: ProjectTask) => {
+    setRegenBusy(true)
+    try {
+      const res = await api.api.project['task-title'].$post({
+        json: { path: project.path, id: task.id, force: true },
+      })
+      if (res.ok) {
+        const body = (await res.json()) as { title?: string | null }
+        if (body.title) patchTaskFresh(task.id, { title: body.title, titleAuto: true })
+      }
+    } catch {
+      // keep the current title
+    } finally {
+      setRegenBusy(false)
+    }
+  }
+
+  const launchDetail = async (task: ProjectTask) => {
+    setLaunching(true)
+    try {
+      await onLaunchTask(task)
+    } finally {
+      setLaunching(false)
+    }
+  }
+
+  // One line of "what happens on finish" — answers the where-does-my-code-go
+  // question BEFORE launch (Draft bar) and DURING the session (status strip).
+  const flowText = project.hasGit
+    ? (() => {
+        const base = data.config?.targetBranch?.trim() || t('board.detail.flowBaseDefault')
+        return data.config?.completionFlow === 'pr'
+          ? t('board.detail.flowPr', { base })
+          : t('board.detail.flowMerge', { base })
+      })()
+    : null
+
+  // The task fields, shared by Draft (grow=true: the content textarea fills
+  // the drawer) and the Session header's expandable block (grow=false: fixed
+  // share, scrolls inside). Title edits clear titleAuto on the FIRST keystroke
+  // so an in-flight auto-title can never land over hand-typed text.
+  const fieldsBlock = (task: ProjectTask, grow: boolean) => (
+    <>
+      <div className="shrink-0">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="label-cap text-ink-faint">
+            {t('board.detail.titleLabel')}
+            {task.titleAuto && (
+              <span className="ml-1 text-accent" title={t('board.detail.titleAutoTitle')}>
+                ✦
+              </span>
+            )}
+          </label>
+          {Boolean(task.title.trim() || (task.notes ?? '').trim()) && (
+            <button
+              type="button"
+              onClick={() => void regenerateTitle(task)}
+              disabled={regenBusy}
+              title={t('board.detail.regenTitle')}
+              className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              {regenBusy ? '✦ …' : '✦'}
+            </button>
+          )}
+        </div>
+        <input
+          // Remount when the SAVED title changes (own blur, haiku landing via
+          // the poll) so the uncontrolled field shows the fresh value.
+          key={`${task.id}:${task.title}`}
+          defaultValue={task.title}
+          onChange={() => {
+            if (task.titleAuto) patchTask(task, { titleAuto: undefined })
+          }}
+          onBlur={e => {
+            const v = e.target.value.trim()
+            if (v && v !== task.title) patchTask(task, { title: v, titleAuto: undefined })
+          }}
+          onKeyDown={e => {
+            if (e.key === 'Enter') e.currentTarget.blur()
+          }}
+          placeholder={t('board.detail.titlePlaceholder')}
+          className="w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+        />
+      </div>
+      <div className={grow ? 'flex min-h-0 flex-1 flex-col' : undefined}>
+        <label className="mb-1 block shrink-0 label-cap text-ink-faint">
+          {t('board.detail.notesLabel')}
+        </label>
+        <textarea
+          key={task.id + ':notes'}
+          defaultValue={task.notes ?? ''}
+          onBlur={e => {
+            const v = e.target.value
+            if (v !== (task.notes ?? '')) patchTask(task, { notes: v || undefined })
+          }}
+          placeholder={t('board.detail.notesPlaceholder')}
+          rows={grow ? undefined : 3}
+          className={[
+            'w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none',
+            grow ? 'min-h-[120px] flex-1 resize-none' : 'resize-y',
+          ].join(' ')}
+        />
+      </div>
+      {/* Pull request — appears once claude records the PR it opened
+          (setPrUrl). Plain link, opens in the browser. */}
+      {task.prUrl && (
+        <div className="shrink-0">
+          <label className="mb-1 block label-cap text-ink-faint">
+            {t('board.detail.prLabel')}
+          </label>
+          <a
+            href={task.prUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-block max-w-full truncate rounded-sm border border-line px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            {task.prUrl.replace(/^https?:\/\//, '')} ↗
+          </a>
+        </div>
+      )}
+      {/* Assignee — a chip picker, no free-floating input. Click a chip to
+          assign; click the selected chip to unassign; "+ Add" registers a new
+          name into the shared member list (config.members) AND assigns it. */}
+      <div className="shrink-0">
+        <label className="mb-1 block label-cap text-ink-faint">
+          {t('board.detail.assigneeLabel')}
+        </label>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {assigneeCandidates(data, displayName, task.assignee).map(name => {
+            const active = (task.assignee ?? '').trim().toLowerCase() === name.toLowerCase()
+            return (
+              <button
+                key={name}
+                type="button"
+                onClick={() => patchTask(task, { assignee: active ? undefined : name })}
+                title={active ? t('board.detail.assigneeUnassign') : t('board.detail.assigneeAssign', { name })}
+                aria-pressed={active}
+                className={
+                  active
+                    ? 'shrink-0 rounded-sm border border-accent bg-accent px-2.5 py-1 text-[11px] text-bg-card transition-colors hover:bg-accent/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                    : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                }
+              >
+                {name}
+              </button>
+            )
+          })}
+          {addingAssignee ? (
+            <span className="flex items-center gap-1">
+              <input
+                autoFocus
+                defaultValue=""
+                placeholder={t('board.detail.assigneeAddPlaceholder')}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                    const v = e.currentTarget.value.trim()
+                    // Register into the shared member list AND assign —
+                    // the name is now a chip on EVERY card.
+                    if (v) persist(withRegisteredAssignee(data, task.id, v))
+                    setAddingAssignee(false)
+                  } else if (e.key === 'Escape') {
+                    e.stopPropagation() // cancel the add only — keep the drawer open
+                    setAddingAssignee(false)
+                  }
+                }}
+                className="w-28 rounded-[3px] border border-accent bg-bg px-2 py-1 text-[12px] text-ink placeholder:text-ink-faint focus:outline-none"
+              />
+              <button
+                type="button"
+                onMouseDown={e => {
+                  // commit BEFORE the input's blur (mousedown fires first)
+                  e.preventDefault()
+                  const input = e.currentTarget.previousElementSibling as HTMLInputElement | null
+                  const v = input?.value.trim() ?? ''
+                  if (v) persist(withRegisteredAssignee(data, task.id, v))
+                  setAddingAssignee(false)
+                }}
+                className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {t('board.detail.assigneeAddConfirm')}
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAddingAssignee(true)}
+              className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              {t('board.detail.assigneeAdd')}
+            </button>
+          )}
+        </div>
+      </div>
+    </>
+  )
 
   // A just-created card the user opened but never filled in: no title, no memo,
   // no launched terminal. Closing the drawer on such a card discards it, so
@@ -282,175 +522,133 @@ export const BoardModule = ({
               <X size={15} />
             </button>
           </div>
-          {/* Fields above, conversation below — the split is user-draggable
-              (startSplitDrag) so the terminal is never stuck with a sliver. */}
-          <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
-          {/* The two kept fields: the task itself (title) + a free memo that
-              does NOT affect the run. Both labelled, same styling. The block
-              scrolls within its share instead of dictating terminal height. */}
-          <div
-            // maxHeight re-clamps a metaH saved on a taller window so the
-            // terminal keeps its ~180px floor on any window size (the drag
-            // clamp alone can't promise that across monitor changes).
-            style={{ height: metaH, minHeight: 96, maxHeight: 'calc(100% - 188px)' }}
-            className="shrink-0 space-y-3 overflow-y-auto px-5 py-3"
-          >
-            <div>
-              <label className="mb-1 block label-cap text-ink-faint">{t('board.detail.titleLabel')}</label>
-              <input
-                key={detailTask.id}
-                // Focus the title for a freshly-created (untitled) card so the
-                // user can type immediately — "Add a card" opens here, not on
-                // the cramped card.
-                autoFocus={!detailTask.title.trim()}
-                defaultValue={detailTask.title}
-                onBlur={e => {
-                  const v = e.target.value.trim()
-                  if (v && v !== detailTask.title) patchTask(detailTask, { title: v })
-                }}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') e.currentTarget.blur()
-                }}
-                placeholder={t('board.detail.titlePlaceholder')}
-                className="w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block label-cap text-ink-faint">{t('board.detail.notesLabel')}</label>
-              <textarea
-                key={detailTask.id + ':notes'}
-                defaultValue={detailTask.notes ?? ''}
-                onBlur={e => {
-                  const v = e.target.value
-                  if (v !== (detailTask.notes ?? ''))
-                    patchTask(detailTask, { notes: v || undefined })
-                }}
-                placeholder={t('board.detail.notesPlaceholder')}
-                rows={3}
-                className="w-full resize-y rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
-              />
-            </div>
-            {/* Pull request — appears once claude records the PR it opened
-                (setPrUrl). Plain link, opens in the browser. */}
-            {detailTask.prUrl && (
-              <div>
-                <label className="mb-1 block label-cap text-ink-faint">
-                  {t('board.detail.prLabel')}
-                </label>
-                <a
-                  href={detailTask.prUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-block max-w-full truncate rounded-sm border border-line px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          {!hasTerminalSlot(detailTask.id) ? (
+            /* ── DRAFT — authoring gets the whole drawer; no terminal pane.
+                  A brand-new card starts as a single capture box (first line →
+                  title, rest → content); a card with text shows the full
+                  fields with the content area taking the remaining height. */
+            <>
+              {isUntouchedEmpty(detailTask) ? (
+                <div className="flex min-h-0 flex-1 flex-col px-5 py-3">
+                  <label className="mb-1 block shrink-0 label-cap text-ink-faint">
+                    {t('board.detail.captureLabel')}
+                  </label>
+                  <textarea
+                    key={detailTask.id + ':capture'}
+                    autoFocus
+                    defaultValue=""
+                    onBlur={e => commitCapture(detailTask, e.target.value)}
+                    placeholder={t('board.detail.capturePlaceholder')}
+                    className="min-h-0 w-full flex-1 resize-none rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+                  />
+                </div>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col space-y-3 px-5 py-3">
+                  {fieldsBlock(detailTask, true)}
+                </div>
+              )}
+              {/* Launch bar — anchored at the bottom; the one-line flow note
+                  answers "how does this get merged?" BEFORE anything runs. */}
+              <div className="shrink-0 border-t border-line-soft px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => void launchDetail(detailTask)}
+                  disabled={launching || project.missing}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-[4px] border border-line px-3 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:bg-accent/10 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                 >
-                  {detailTask.prUrl.replace(/^https?:\/\//, '')} ↗
-                </a>
+                  <Play size={12} strokeWidth={2.5} />
+                  {launching ? t('projectPanel.launchingClaude') : t('projectPanel.launchClaude')}
+                </button>
+                <p className="mt-2 text-[11px] leading-relaxed text-ink-faint">
+                  {t('board.detail.launchHintShort')}
+                  {flowText ? ` · ${flowText}` : ''}
+                </p>
               </div>
-            )}
-            {/* Assignee — a chip picker, no free-floating input (the old
-                input+chips combo left "what do I do next?" unanswered).
-                Click a chip to assign; click the selected chip to unassign;
-                "+ Add" opens a small inline input (Enter or the Add button
-                commits, Esc cancels): the name is REGISTERED into the shared
-                member list (config.members — deletable in project settings)
-                and assigned to this card, so every card offers it from now
-                on. */}
-            <div>
-              <label className="mb-1 block label-cap text-ink-faint">
-                {t('board.detail.assigneeLabel')}
-              </label>
-              <div className="flex flex-wrap items-center gap-1.5">
-                {assigneeCandidates(data, displayName, detailTask.assignee).map(name => {
-                  const active =
-                    (detailTask.assignee ?? '').trim().toLowerCase() === name.toLowerCase()
-                  return (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() =>
-                        patchTask(detailTask, { assignee: active ? undefined : name })
-                      }
-                      title={active ? t('board.detail.assigneeUnassign') : t('board.detail.assigneeAssign', { name })}
-                      aria-pressed={active}
-                      className={
-                        active
-                          ? 'shrink-0 rounded-sm border border-accent bg-accent px-2.5 py-1 text-[11px] text-bg-card transition-colors hover:bg-accent/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-                          : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-                      }
-                    >
-                      {name}
-                    </button>
-                  )
-                })}
-                {addingAssignee ? (
-                  <span className="flex items-center gap-1">
-                    <input
-                      autoFocus
-                      defaultValue=""
-                      placeholder={t('board.detail.assigneeAddPlaceholder')}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                          const v = e.currentTarget.value.trim()
-                          // Register into the shared member list AND assign —
-                          // the name is now a chip on EVERY card.
-                          if (v) persist(withRegisteredAssignee(data, detailTask.id, v))
-                          setAddingAssignee(false)
-                        } else if (e.key === 'Escape') {
-                          e.stopPropagation() // cancel the add only — keep the drawer open
-                          setAddingAssignee(false)
-                        }
-                      }}
-                      className="w-28 rounded-[3px] border border-accent bg-bg px-2 py-1 text-[12px] text-ink placeholder:text-ink-faint focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onMouseDown={e => {
-                        // commit BEFORE the input's blur (mousedown fires first)
-                        e.preventDefault()
-                        const input = e.currentTarget.previousElementSibling as HTMLInputElement | null
-                        const v = input?.value.trim() ?? ''
-                        if (v) persist(withRegisteredAssignee(data, detailTask.id, v))
-                        setAddingAssignee(false)
-                      }}
-                      className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    >
-                      {t('board.detail.assigneeAddConfirm')}
-                    </button>
+            </>
+          ) : (
+            /* ── SESSION — the terminal owns the drawer. The task collapses to
+                  a one-line header (chevron expands the fields) + a status
+                  strip narrating where the work lives (branch / flow / PR). */
+            <>
+              <div className="shrink-0 border-b border-line-soft">
+                <button
+                  type="button"
+                  onClick={() => setFieldsOpen(o => !o)}
+                  aria-expanded={fieldsOpen}
+                  title={t('board.detail.fieldsToggle')}
+                  className="flex w-full items-center gap-1.5 px-5 py-2 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                >
+                  <ChevronRight
+                    size={13}
+                    className={`shrink-0 text-ink-faint transition-transform ${fieldsOpen ? 'rotate-90' : ''}`}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                    {detailTask.title.trim() || t('board.card.untitled')}
                   </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setAddingAssignee(true)}
-                    className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                  >
-                    {t('board.detail.assigneeAdd')}
-                  </button>
+                </button>
+                {(detailTask.branch || flowText || detailTask.prUrl) && (
+                  <div className="flex items-center gap-3 px-5 pb-2 text-[11px] text-ink-faint">
+                    {detailTask.branch && (
+                      <span
+                        className="flex min-w-0 items-center gap-1"
+                        title={t('board.detail.branchTitle')}
+                      >
+                        <GitBranch size={11} className="shrink-0" />
+                        <span className="truncate">{detailTask.branch}</span>
+                      </span>
+                    )}
+                    {flowText && <span className="shrink-0">{flowText}</span>}
+                    {detailTask.prUrl && (
+                      <a
+                        href={detailTask.prUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={detailTask.prUrl}
+                        className="shrink-0 text-ink-muted underline decoration-line underline-offset-2 transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      >
+                        PR ↗
+                      </a>
+                    )}
+                  </div>
                 )}
               </div>
-            </div>
-          </div>
-          {/* Split grip between fields and conversation — 8px hit area
-              centered on the visible divider line. */}
-          <div
-            onPointerDown={startSplitDrag}
-            onDoubleClick={() => {
-              // Toggle: fields at their minimum (terminal maximised) ⇄ default.
-              const next = metaH > 96 ? 96 : 224
-              setMetaH(next)
-              localStorage.setItem('og.board.drawerMetaH', String(next))
-            }}
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label={t('board.detail.resizeSplit')}
-            title={t('board.detail.resizeSplitTitle')}
-            className="group relative z-10 -my-1 h-2 shrink-0 cursor-row-resize"
-          >
-            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-line-soft transition-colors group-hover:h-[3px] group-hover:bg-accent/50 group-active:bg-accent/60" />
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col">
-            {renderConversation(detailTask, () => onOpenDetail(null))}
-          </div>
-          </div>
+              <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
+                {fieldsOpen && (
+                  <>
+                    <div
+                      // maxHeight re-clamps a metaH saved on a taller window so
+                      // the terminal keeps its ~180px floor on any window size.
+                      style={{ height: metaH, minHeight: 96, maxHeight: 'calc(100% - 188px)' }}
+                      className="shrink-0 space-y-3 overflow-y-auto px-5 py-3"
+                    >
+                      {fieldsBlock(detailTask, false)}
+                    </div>
+                    {/* Split grip between fields and terminal — 8px hit area
+                        centered on the visible divider line. */}
+                    <div
+                      onPointerDown={startSplitDrag}
+                      onDoubleClick={() => {
+                        // Toggle: fields at their minimum ⇄ default.
+                        const next = metaH > 96 ? 96 : 224
+                        setMetaH(next)
+                        localStorage.setItem('og.board.drawerMetaH', String(next))
+                      }}
+                      role="separator"
+                      aria-orientation="horizontal"
+                      aria-label={t('board.detail.resizeSplit')}
+                      title={t('board.detail.resizeSplitTitle')}
+                      className="group relative z-10 -my-1 h-2 shrink-0 cursor-row-resize"
+                    >
+                      <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-line-soft transition-colors group-hover:h-[3px] group-hover:bg-accent/50 group-active:bg-accent/60" />
+                    </div>
+                  </>
+                )}
+                <div className="flex min-h-0 flex-1 flex-col">
+                  {renderConversation(detailTask, () => onOpenDetail(null))}
+                </div>
+              </div>
+            </>
+          )}
         </aside>
       )}
     </div>

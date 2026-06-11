@@ -20,7 +20,6 @@ export const projectPanel = {
     // Loading
     'projectPanel.loading': 'Loading…',
     // Sidebar resizer
-    'projectPanel.resizeHint': 'Drag to resize / double-click for default width',
     // Chat header
     // Delete confirm
     'projectPanel.deleteProjectLabel': 'Delete project',
@@ -77,11 +76,67 @@ export const projectPanel = {
     'projectPanel.syncDigestAdded': '+{count} cards',
     'projectPanel.syncDigestAddedOneBy': '+1 card ({names})',
     'projectPanel.syncDigestAddedBy': '+{count} cards ({names})',
+    'projectPanel.syncDigestTitle': '"{title}"',
+    'projectPanel.syncDigestAddedTitles': '+{titles}',
+    'projectPanel.syncDigestAddedTitlesBy': '+{titles} ({names})',
+    'projectPanel.syncDigestDoneTitles': '{titles} done',
+    'projectPanel.syncDigestMovedOne': '{title} → {column}',
+    'projectPanel.syncDigestAssigned': '{title} → {name}',
+    'projectPanel.syncDigestAssigneeChanged': '{count} reassigned',
+    'projectPanel.syncDigestRemovedTitles': '{titles} removed',
     'projectPanel.syncDigestDone': '{count} done',
     'projectPanel.syncDigestMoved': '{count} moved',
     'projectPanel.syncDigestRemoved': '{count} removed',
     'projectPanel.syncConflict': 'Sync hit a conflict — pull and resolve it manually.',
+    'projectPanel.syncConflictItems': 'Conflicted: {items}',
+    // Auto-sync (Live) indicator + personal setting
+    'projectPanel.autoLive': 'Live',
+    'projectPanel.autoLiveHint':
+      'Auto-sync is on — your board edits publish themselves and teammate changes arrive automatically. Click to force a sync now.',
+    'projectPanel.autoPausedCode': 'Paused',
+    'projectPanel.autoPausedCodeHint':
+      'Auto-sync is paused: your own code commits are waiting to be pushed. Push them yourself when ready (clicking Sync would push those code commits too).',
+    'projectPanel.autoConflict': 'Conflict',
+    'projectPanel.autoConflictHint': 'A sync conflict needs your decision — click to resolve it.',
+    'projectPanel.autoOffline': 'Offline',
+    'projectPanel.autoBlocked': 'Paused',
+    'projectPanel.autoBlockedHint': 'The repo is mid rebase/merge — auto-sync waits until it finishes.',
+    'projectPanel.autoError': 'Error',
+    'projectPanel.autoErrorHint': 'The last auto-sync failed — click to retry.',
+    'projectPanel.settingsAutoSync': 'Auto-sync shared data (Live)',
+    'projectPanel.settingsAutoSyncHint':
+      'Publishes your board/canvas edits a few seconds after you stop, and pulls teammate changes automatically. Your code is never touched — any code commit of yours pauses auto-sync until YOU push it.',
+    'projectPanel.syncResolveLabel': 'Sync conflict',
+    'projectPanel.syncResolveTitle': 'Choose which version to keep',
+    'projectPanel.syncResolveExplain':
+      'You and a teammate changed the same items. Pick a side for each — the version you don\'t pick still stays in the git history.',
+    'projectPanel.syncResolveMine': 'My version',
+    'projectPanel.syncResolveTheirs': "Teammate's version",
+    'projectPanel.syncResolveDeleted': '(deleted — choosing this removes it)',
+    'projectPanel.syncResolveConfirm': 'Resolve & sync',
+    'projectPanel.syncResolveWorking': 'Resolving…',
+    'projectPanel.syncResolvedDone': 'Conflicts resolved and synced',
     'projectPanel.syncFailed': 'Sync failed: {error}',
+    // Machine-readable ShareSyncResult.reason → actionable notices.
+    'projectPanel.syncBlockedRebase':
+      'Sync paused: a rebase is in progress in this repo. Finish or abort it first (git rebase --continue / --abort), then sync again — nothing was changed.',
+    'projectPanel.syncBlockedMerge':
+      'Sync paused: a merge is in progress in this repo. Finish or abort it first (git merge --continue / --abort), then sync again — nothing was changed.',
+    'projectPanel.syncBlockedDetached':
+      'Sync needs a branch: the repo is on a detached HEAD. Switch back to a branch (git switch <branch>), then sync again.',
+    'projectPanel.syncAutostashConflict':
+      'Board synced, but restoring your uncommitted code changes hit a conflict — they are also saved in git stash. Resolve the conflict markers in your code (or restore from the stash), then continue as usual.',
+    'projectPanel.syncNoIdentity':
+      'Sync failed: git does not know who you are on this machine. Run `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`, then sync again.',
+    'projectPanel.syncOffline':
+      'Could not reach the remote — your changes are committed locally and nothing is lost. Check the connection and press Sync again.',
+    'projectPanel.syncNoRemote':
+      'No git remote is configured — committed locally only. To collaborate, add one: git remote add origin <url>',
+    'projectPanel.syncForcedUpdate':
+      '⚠ The remote history was rewritten (force-push). This sync absorbed it — please review the board.',
+    'projectPanel.syncForcedHint': 'The remote history was rewritten (force-push) — Sync will absorb it',
+    'projectPanel.syncBranchHint': 'Current branch — the shared Board/Canvas data follows the checked-out branch',
+    'projectPanel.syncLastAt': 'Last sync: {time}',
     'projectPanel.shareMenu': 'Share via Git…',
     'projectPanel.shareNeedsGitRepo': 'This folder is not a git repository',
     'projectPanel.unshareMenu': 'Stop sharing…',
@@ -89,6 +144,7 @@ export const projectPanel = {
     'projectPanel.shareDialogTitle': 'Share Board & Canvas through this repo?',
     'projectPanel.shareDialogExplain': 'A .openground/ folder is created inside the repository and the Board + Canvas data moves into it. Anyone who clones the repo gets the same board and canvases; Sync pushes and pulls with your own git remote and credentials — OPEN GROUND never talks to a Git host directly.',
     'projectPanel.shareConfirm': 'Share',
+    'projectPanel.shareEnabledNotice': 'Sharing is on — press Sync to publish the board to the remote.',
     'projectPanel.unshareDialogLabel': 'Stop sharing',
     'projectPanel.unshareDialogTitle': 'Move Board & Canvas data back to local storage?',
     'projectPanel.unshareDialogExplain': 'The data is copied back into OPEN GROUND’s local storage and the .openground/ folder is removed from the working tree. The folder’s deletion still needs a commit — the app does not commit it for you.',
@@ -110,10 +166,6 @@ export const projectPanel = {
     'projectPanel.renameTerminal': 'Double-click to rename',
     'projectPanel.launchClaude': 'Launch Claude',
     'projectPanel.launchingClaude': 'Launching…',
-    'projectPanel.launchClaudeInPane': 'Launch claude in this pane',
-    'projectPanel.claudeSessionEnded': 'The claude session has ended',
-    'projectPanel.relaunchClaude': 'Relaunch Claude',
-    'projectPanel.taskSlotFallback': 'Task',
     // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
     'projectPanel.embTermHint':
       'Launch claude in this project — respond and approve permission prompts right in this terminal.',
@@ -153,7 +205,6 @@ export const projectPanel = {
     // Loading
     'projectPanel.loading': 'Loading…',
     // Sidebar resizer
-    'projectPanel.resizeHint': 'ドラッグで幅を変更 / ダブルクリックで初期幅',
     // Chat header
     // Delete confirm
     'projectPanel.deleteProjectLabel': 'Delete project',
@@ -208,11 +259,67 @@ export const projectPanel = {
     'projectPanel.syncDigestAdded': 'カード+{count}',
     'projectPanel.syncDigestAddedOneBy': 'カード+1（{names}）',
     'projectPanel.syncDigestAddedBy': 'カード+{count}（{names}）',
+    'projectPanel.syncDigestTitle': '「{title}」',
+    'projectPanel.syncDigestAddedTitles': '+{titles}',
+    'projectPanel.syncDigestAddedTitlesBy': '+{titles}（{names}）',
+    'projectPanel.syncDigestDoneTitles': '完了: {titles}',
+    'projectPanel.syncDigestMovedOne': '{title}→ {column}',
+    'projectPanel.syncDigestAssigned': '{title}→ {name}',
+    'projectPanel.syncDigestAssigneeChanged': '担当変更{count}',
+    'projectPanel.syncDigestRemovedTitles': '削除: {titles}',
     'projectPanel.syncDigestDone': '完了{count}',
     'projectPanel.syncDigestMoved': '移動{count}',
     'projectPanel.syncDigestRemoved': '削除{count}',
     'projectPanel.syncConflict': '同期が競合しました。手動で pull して解決してください。',
+    'projectPanel.syncConflictItems': '衝突箇所: {items}',
+    // 自動同期（Live）インジケータ + 個人設定
+    'projectPanel.autoLive': 'Live',
+    'projectPanel.autoLiveHint':
+      '自動同期が有効です — ボードの編集は自動で送信され、同僚の変更も自動で届きます。クリックで今すぐ同期します。',
+    'projectPanel.autoPausedCode': '一時停止',
+    'projectPanel.autoPausedCodeHint':
+      '未pushのコードコミットがあるため自動同期は一時停止中です。コードはご自身のタイミングで push してください（Sync を押すとそのコードコミットも一緒に push されます）。',
+    'projectPanel.autoConflict': '衝突',
+    'projectPanel.autoConflictHint': '同期が競合しています — クリックして解決してください。',
+    'projectPanel.autoOffline': 'オフライン',
+    'projectPanel.autoBlocked': '一時停止',
+    'projectPanel.autoBlockedHint': 'リポジトリが rebase/merge 中のため、終わるまで自動同期は待機します。',
+    'projectPanel.autoError': 'エラー',
+    'projectPanel.autoErrorHint': '前回の自動同期が失敗しました — クリックで再試行します。',
+    'projectPanel.settingsAutoSync': '共有データを自動同期（Live）',
+    'projectPanel.settingsAutoSyncHint':
+      '編集が止まって数秒後に自動で送信し、同僚の変更も自動で取り込みます。コードには一切触れません — あなたのコードコミットがある間は自動同期が一時停止し、あなたが push するまで待ちます。',
+    'projectPanel.syncResolveLabel': '同期の競合',
+    'projectPanel.syncResolveTitle': 'どちらの版を残すか選んでください',
+    'projectPanel.syncResolveExplain':
+      'あなたと同僚が同じ項目を変更しています。それぞれ残す側を選んでください — 選ばなかった版も git の履歴には残ります。',
+    'projectPanel.syncResolveMine': '自分の版',
+    'projectPanel.syncResolveTheirs': '相手の版',
+    'projectPanel.syncResolveDeleted': '（削除 — 選ぶとこのカードは消えます）',
+    'projectPanel.syncResolveConfirm': '解決して同期',
+    'projectPanel.syncResolveWorking': '解決中…',
+    'projectPanel.syncResolvedDone': '競合を解決して同期しました',
     'projectPanel.syncFailed': '同期に失敗しました: {error}',
+    // ShareSyncResult.reason → 行動につながる通知文
+    'projectPanel.syncBlockedRebase':
+      '同期を中止しました: このリポジトリで rebase が進行中です。先に解決または中止してから（git rebase --continue / --abort）もう一度 Sync してください。リポジトリには何も触れていません。',
+    'projectPanel.syncBlockedMerge':
+      '同期を中止しました: このリポジトリで merge が進行中です。先に解決または中止してから（git merge --continue / --abort）もう一度 Sync してください。リポジトリには何も触れていません。',
+    'projectPanel.syncBlockedDetached':
+      'ブランチ上にいないため同期できません（detached HEAD）。ブランチに戻ってから（git switch <ブランチ名>）もう一度 Sync してください。',
+    'projectPanel.syncAutostashConflict':
+      'ボードの同期は完了しましたが、退避していたコード変更の復元が衝突しました。変更は git stash にも保存されています。コード内の競合マーカーを解決するか stash から復元してから、通常どおり作業を続けてください。',
+    'projectPanel.syncNoIdentity':
+      '同期に失敗しました: このマシンの git に名前とメールが設定されていません。`git config --global user.name "名前"` と `git config --global user.email "you@example.com"` を実行してから、もう一度 Sync してください。',
+    'projectPanel.syncOffline':
+      'リモートに接続できませんでした。変更はローカルにコミット済みで失われていません — 接続を確認して、もう一度 Sync してください。',
+    'projectPanel.syncNoRemote':
+      'リモートが未設定のため、ローカルへのコミットのみ行いました。共同作業するには git remote add origin <URL> を設定してください。',
+    'projectPanel.syncForcedUpdate':
+      '⚠ リモートの履歴が書き換えられていました（force-push）。この同期で取り込み済みです — ボードの内容を確認してください。',
+    'projectPanel.syncForcedHint': 'リモート履歴が書き換えられています（force-push）— Sync で取り込みます',
+    'projectPanel.syncBranchHint': '現在のブランチ — 共有データ（Board/Canvas）はチェックアウト中のブランチの内容に従います',
+    'projectPanel.syncLastAt': '最終Sync: {time}',
     'projectPanel.shareMenu': 'Gitで共有…',
     'projectPanel.shareNeedsGitRepo': 'このフォルダは git リポジトリではありません',
     'projectPanel.unshareMenu': '共有を解除…',
@@ -220,6 +327,7 @@ export const projectPanel = {
     'projectPanel.shareDialogTitle': 'Board と Canvas をこのリポジトリで共有しますか？',
     'projectPanel.shareDialogExplain': 'リポジトリ内に .openground/ フォルダを作成し、Board と Canvas のデータをそこへ移します。リポジトリを clone した人は同じボードとキャンバスを共有でき、Sync はあなた自身の git リモートと認証情報で push / pull します — OPEN GROUND が Git ホストに直接アクセスすることはありません。',
     'projectPanel.shareConfirm': '共有する',
+    'projectPanel.shareEnabledNotice': '共有を有効にしました — Sync を押すとリモートに公開されます。',
     'projectPanel.unshareDialogLabel': '共有を解除',
     'projectPanel.unshareDialogTitle': 'Board と Canvas のデータをローカル保存に戻しますか？',
     'projectPanel.unshareDialogExplain': 'データを OPEN GROUND のローカル保存にコピーし直し、作業ツリーから .openground/ フォルダを削除します。フォルダ削除のコミットはアプリでは行いません — ご自身でコミットしてください。',
@@ -241,10 +349,6 @@ export const projectPanel = {
     'projectPanel.renameTerminal': 'Double-click to rename',
     'projectPanel.launchClaude': 'Claude を起動',
     'projectPanel.launchingClaude': '起動中…',
-    'projectPanel.launchClaudeInPane': 'このペインで claude を起動',
-    'projectPanel.claudeSessionEnded': 'claude セッションが終了しました',
-    'projectPanel.relaunchClaude': 'Claude を再起動',
-    'projectPanel.taskSlotFallback': 'タスク',
     // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
     'projectPanel.embTermHint':
       'このプロジェクトで claude を起動します。応答や権限確認はこのターミナルで操作します。',

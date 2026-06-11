@@ -56,6 +56,56 @@ export interface Settings {
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
    *  language toggle so the server can pick the matching prompt language. */
   language?: 'en' | 'ja'
+  /** Voice dictation (Wispr Flow-style): local whisper.cpp STT + optional
+   *  claude-CLI contextual cleanup. See {@link VoiceSettings}. */
+  voice?: VoiceSettings
+}
+
+/** Voice dictation settings. All optional — absence means the defaults noted
+ *  per field. The whisper binary itself is NOT bundled; `whisperPath` overrides
+ *  auto-detection (`whisper-cli` on PATH / Homebrew locations). */
+export interface VoiceSettings {
+  /** Master switch. Default false (feature is opt-in). */
+  enabled?: boolean
+  /** Serialized key combo that starts/stops recording, e.g. 'Alt+Space',
+   *  'Ctrl+Shift+V', or a bare key like 'F9'. Default 'Alt+Space'.
+   *  Format: modifiers (Ctrl/Alt/Shift/Meta, in that order) + KeyboardEvent.key
+   *  (single chars upper-cased), joined by '+'. */
+  keybinding?: string
+  /** 'hold' = push-to-talk (record while held), 'toggle' = press to start,
+   *  press again to stop. Default 'hold'. */
+  keyMode?: 'hold' | 'toggle'
+  /** Run the raw whisper transcript through a one-off claude CLI pass for
+   *  contextual cleanup (punctuation, mis-recognition fixes). Default false. */
+  formatWithClaude?: boolean
+  /** Absolute path to the whisper-cli binary. Null/unset = auto-detect. */
+  whisperPath?: string | null
+  /** ggml model size, downloaded on demand to ~/.openground/models/.
+   *  Default 'small'. */
+  model?: 'base' | 'small' | 'medium'
+  /** Spoken language hint passed to whisper. Default 'auto'. */
+  spokenLanguage?: 'auto' | 'ja' | 'en'
+}
+
+/** GET /api/voice/status response. */
+export interface VoiceStatus {
+  /** Resolved whisper-cli binary path, or null when not found. */
+  binaryPath: string | null
+  /** The model selected in settings. */
+  model: 'base' | 'small' | 'medium'
+  /** Whether that model file exists locally. */
+  modelPresent: boolean
+  /** In-flight model download, if any. */
+  download: { model: string; progress: number; error?: string } | null
+}
+
+/** POST /api/voice/transcribe response. `text` is what the client inserts —
+ *  the claude-formatted version when formatting ran, otherwise the raw
+ *  whisper transcript. `raw` always carries the unformatted transcript. */
+export interface VoiceTranscribeResponse {
+  text: string
+  raw: string
+  formatted: boolean
 }
 
 /** GET /api/settings response: the persisted {@link Settings} plus a
@@ -391,6 +441,14 @@ export interface ProjectTask {
    *  records it via POST /api/project/tasks {setPrUrl} when it opens the PR.
    *  Rendered as a link on the card and in the detail drawer. Shared data. */
   prUrl?: string
+  /** The task branch claude created for this card: recorded via POST
+   *  /api/project/tasks {setBranch} right after `git worktree add`. Shown in
+   *  the drawer's session status strip. Shared data. */
+  branch?: string
+  /** True while the title is machine-derived (first line of the content, then
+   *  the haiku summary) and the user hasn't edited it. A manual title edit
+   *  clears it, which also stops any in-flight auto-title from landing. */
+  titleAuto?: boolean
 }
 
 /** Kanban columns for the Board tab. 'todo'=未着手 / 'doing'=実行中 /
@@ -426,6 +484,10 @@ export interface ProjectLaunchPrefs {
   permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypass'
   /** Model alias passed to `claude --model` (empty = CLI default). */
   model?: string
+  /** Auto-sync the shared Board/Canvas data in the background (adaptive
+   *  fetch + debounced push). Default ON for shared projects; personal —
+   *  one teammate opting out never affects the others. */
+  autoSync?: boolean
 }
 
 export interface ProjectData {
@@ -484,11 +546,71 @@ export interface ShareStatus {
    *  a teammate pushed; Sync will pull them. Backed by a throttled
    *  `git fetch` inside the status call. 0 when not shared / no upstream. */
   behind: number
+  /** The last fetch saw the upstream rewritten ("(forced update)") — someone
+   *  force-pushed. Present only when true; cleared by the next clean fetch. */
+  forcedUpdate?: boolean
+  /** Checked-out branch name (shared data follows the branch — S27). Absent
+   *  when not a git repo or on a detached HEAD. */
+  branch?: string
+  /** Auto-sync engine snapshot (present when the project is shared). The
+   *  status route composes it from shareAutoSync — gitShare stays pure. */
+  auto?: ShareAutoStatus
+}
+
+/** Live state of the per-project auto-sync engine ("Notion-feel on git
+ *  bones"): adaptive background fetch, apply-on-behind, debounced push of
+ *  shared-data edits — with code as sacred ground (any non-.openground
+ *  commit ahead suspends ALL automatic git operations).
+ *  - 'live'         idle and in sync; background fetch is watching
+ *  - 'syncing'      a sync round is running right now
+ *  - 'paused-code'  the user's own code commits are ahead — nothing moves
+ *                   automatically until THEY push (manual Sync still works)
+ *  - 'conflict'     the last auto sync hit a shared-data conflict; waiting
+ *                   for the user to resolve (dialog via the Sync button)
+ *  - 'offline'      the remote is unreachable; retrying on the backoff
+ *  - 'blocked'      repo busy (user's rebase/merge/detached HEAD)
+ *  - 'error'        a loud failure (e.g. autostash restore conflict)
+ *  - 'disabled'     the personal autoSync pref is off */
+export interface ShareAutoStatus {
+  enabled: boolean
+  mode:
+    | 'live'
+    | 'syncing'
+    | 'paused-code'
+    | 'conflict'
+    | 'offline'
+    | 'blocked'
+    | 'error'
+    | 'disabled'
+  /** Last successful auto/manual sync (ms epoch), null before the first. */
+  lastSyncAt: number | null
+  /** A shared-data edit is waiting for the debounced auto push. */
+  pendingPush: boolean
+  /** Current adaptive fetch interval (ms) — surfaced for transparency/tests. */
+  intervalMs: number
+  /** Human detail for error-ish modes (raw English; UI maps known shapes). */
+  message?: string
 }
 
 /** POST /api/project/share/sync — commit (scoped to .openground/ only) →
  *  pull --rebase --autostash → push. Never touches paths outside
  *  .openground/ and never disturbs the user's staged code changes. */
+/** One conflicted file in a Sync rebase, described for the resolution dialog.
+ *  Sides are named from the USER's point of view: `mine` = the local commit
+ *  being replayed, `theirs` = the teammate's upstream version. (Inside a git
+ *  rebase the index stages are inverted — stage 2 "ours" is upstream — the
+ *  engine owns that mapping; this type never exposes it.) */
+export interface ShareConflict {
+  /** Repo-relative path (always under .openground/). */
+  file: string
+  /** Display label: `card "Title"` / `notes` / .openground-relative path. */
+  label: string
+  /** What kind of shared file this is — drives the dialog's wording. */
+  kind: 'card' | 'notes' | 'other'
+  mine: { exists: boolean; title?: string }
+  theirs: { exists: boolean; title?: string }
+}
+
 export interface ShareSyncResult {
   ok: boolean
   /** A commit was created (there were local .openground/ changes). */
@@ -498,6 +620,40 @@ export interface ShareSyncResult {
   /** The pull hit a rebase conflict; the rebase was aborted and the user
    *  should pull/resolve manually. */
   conflict?: boolean
+  /** Human-readable labels of WHAT conflicted (collected before the abort):
+   *  `card "Title"` for board cards, `notes`, else the .openground-relative
+   *  path. Capped — the point is orientation, not a full listing (S15–S20). */
+  conflictFiles?: string[]
+  /** Structured conflict descriptions feeding the in-app resolution dialog
+   *  ("keep mine" / "take theirs" per file). `mine` = the local version,
+   *  `theirs` = the teammate's (upstream) version; `exists:false` marks the
+   *  delete side of a delete/modify conflict. Titles are extracted from the
+   *  card JSON on each side when parseable. Uncapped but bounded by how many
+   *  files one rebase step can conflict. */
+  conflicts?: ShareConflict[]
+  /** Machine-readable cause for ok:false / degraded outcomes — the client
+   *  maps these to localized, actionable notices (the `message` is the raw
+   *  English fallback).
+   *  - 'rebase-in-progress' / 'merge-in-progress': the repo was already mid
+   *    rebase/merge when Sync was pressed; nothing was touched (S29).
+   *  - 'detached-head': not on a branch; a sync commit would float (S26).
+   *  - 'autostash-conflict': the pull succeeded but restoring the user's
+   *    uncommitted CODE changes conflicted — they are also kept in the stash;
+   *    loud, persistent warning instead of a silent "Synced" (S22). */
+  reason?:
+    | 'rebase-in-progress'
+    | 'merge-in-progress'
+    | 'detached-head'
+    | 'autostash-conflict'
+    | 'no-identity'
+  /** The remote could not be reached (DNS / connection / timeout) — the
+   *  commit is safely local; the next sync retries (S23). */
+  offline?: boolean
+  /** No git remote is configured — committed locally only (S3). */
+  noRemote?: boolean
+  /** The pull observed a rewritten upstream ("forced update") — the board
+   *  after this sync deserves a review (S25). */
+  forcedUpdate?: boolean
   /** Human-readable detail for toasts (push skipped, auth failure, …). */
   message?: string
 }
@@ -506,6 +662,34 @@ export interface ShareSyncResult {
  *  - `bypass`: --dangerously-skip-permissions (the default — same as before).
  *  - `plan`:   --permission-mode plan; Claude can read but won't edit. */
 export type PermissionMode = 'bypass' | 'plan'
+
+// ---- Ground card terminal beacon -------------------------------------------
+
+/** Activity of a `claude` PTY, derived server-side per session:
+ *  - `working`: claude is actively emitting output (its TUI repaints
+ *    continuously — a spinner — while it thinks/edits).
+ *  - `waiting`: claude is sitting on a human — either its screen has gone
+ *    silent past the working threshold (response finished, prompt idle) or a
+ *    selection menu (permission prompt etc.) is detected on the settled
+ *    screen. */
+export type ClaudeBeaconStatus = 'working' | 'waiting'
+
+/** One claude-tagged PTY's contribution to the Ground beacon, deduped per
+ *  cwd before it leaves the server: when a project holds several claude
+ *  panes, `working` wins over `waiting`. */
+export interface ClaudeActivity {
+  cwd: string
+  status: ClaudeBeaconStatus
+}
+
+/** Response of GET /api/terminal/active. `cwds` keeps the original "any PTY
+ *  alive here" contract (shell panes included — drives the plain `Terminal`
+ *  beacon); `claude` refines claude-tagged sessions into working/waiting. A
+ *  cwd present in `cwds` but absent from `claude` only hosts free shells. */
+export interface ActiveTerminalsResponse {
+  cwds: string[]
+  claude: ClaudeActivity[]
+}
 
 // ---- Auth (optional Google/GitHub login via Supabase Auth) ----------------
 // These describe the APP's OWN account — NOT the Claude CLI subscription. The

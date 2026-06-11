@@ -59,6 +59,13 @@ export const buildTaskPrompt = ({ cwd, task, port, worktreesDir, config }: TaskP
       `2. Create the worktree OUTSIDE the repo: git worktree add "${worktreesDir}/<branch-name-without-prefix>" -b <branch>`,
       `3. cd into that worktree and do ALL file changes and commits THERE. Never check out branches in the main working tree (${cwd}).`,
     )
+    if (task.id) {
+      // The app's drawer shows the branch in its session status strip — record
+      // it the moment it exists so the user sees where the work lives.
+      lines.push(
+        `Right after creating the worktree, record the branch name on the task card (substitute the real branch name): curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","setBranch":[{"id":"${task.id}","branch":"<branch>"}]}'`,
+      )
+    }
     if (isPr) {
       lines.push(
         `4. When the task is complete AND the user confirms: push the task branch, then open a pull request against ${baseProse}: gh pr create --base ${targetBranch || '<launch-branch>'} --head <branch> (title from the task; body summarizing the work done).${targetBranch ? '' : ' <launch-branch> is the branch that was checked out when you started.'}`,

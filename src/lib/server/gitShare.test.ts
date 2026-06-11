@@ -4,7 +4,13 @@ import { promisify } from 'util'
 import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { shareStatus, shareSync, enablePreconditions, __resetShareFetchThrottle } from './gitShare'
+import {
+  shareStatus,
+  shareSync,
+  shareResolve,
+  enablePreconditions,
+  __resetShareFetchThrottle,
+} from './gitShare'
 import {
   writeSharedMarker,
   isShared,
@@ -111,6 +117,7 @@ describe('shareStatus', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      branch: 'main',
     })
   })
 
@@ -132,6 +139,7 @@ describe('shareStatus', () => {
       dirty: true, // the marker is uncommitted
       ahead: 0,
       behind: 0,
+      branch: 'main',
     })
 
     const sync = await shareSync(userA)
@@ -257,6 +265,226 @@ describe('shareSync', () => {
     expect(again).toMatchObject({ ok: true, committed: false, pulled: true, pushed: true })
   })
 
+  it('S26 detached HEAD: blocked before anything is staged or committed', async () => {
+    const { userA } = await makePair()
+    await enableShared(userA)
+    await shareSync(userA) // publish the marker so later HEADs are clean
+    const head = (await git(userA, ['rev-parse', 'HEAD'])).trim()
+    await git(userA, ['checkout', '--detach'])
+    // New shared change while detached — must NOT be committed into the void.
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(join(boardCardsDir(userA), 'float.json'), '{"id":"float"}\n')
+
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('detached-head')
+    expect(result.committed).toBe(false)
+    // No floating commit was created; the change is still in the working tree.
+    expect((await git(userA, ['rev-parse', 'HEAD'])).trim()).toBe(head)
+    expect(await git(userA, ['status', '--porcelain', '--', '.openground'])).not.toBe('')
+  })
+
+  it("S29 user's own rebase in progress: blocked, their rebase state untouched", async () => {
+    const { userA, userB } = await makePair()
+    // Manufacture a real conflicted rebase OUTSIDE .openground (the user's own
+    // code work): both sides edit README line 1, then A rebases onto B's push.
+    await writeFile(join(userB, 'README.md'), '# theirs\n')
+    await git(userB, ['commit', '-am', 'theirs'])
+    await git(userB, ['push'])
+    await writeFile(join(userA, 'README.md'), '# mine\n')
+    await git(userA, ['commit', '-am', 'mine'])
+    await git(userA, ['fetch'])
+    await expect(git(userA, ['rebase', 'origin/main'])).rejects.toThrow() // stops on conflict
+    await stat(join(userA, '.git', 'rebase-merge')) // mid-rebase, half the user's
+
+    await enableShared(userA)
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('rebase-in-progress')
+    // The user's rebase was NOT aborted out from under them.
+    await stat(join(userA, '.git', 'rebase-merge'))
+    await git(userA, ['rebase', '--abort']) // fixture cleanup
+  })
+
+  it('S22 autostash restore conflict: loud ok:false, code kept in stash, board still synced', async () => {
+    const { userA, userB } = await makePair()
+    await enableShared(userA)
+    expect((await shareSync(userA)).pushed).toBe(true)
+
+    // B pushes a CODE change to README line 1.
+    await git(userB, ['pull'])
+    await writeFile(join(userB, 'README.md'), '# from B\n')
+    await git(userB, ['commit', '-am', 'B code'])
+    await git(userB, ['push'])
+
+    // A has an UNCOMMITTED edit to the same line + a shared change to sync.
+    await writeFile(join(userA, 'README.md'), '# from A, uncommitted\n')
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(join(boardCardsDir(userA), 'a2.json'), '{"id":"a2","title":"A card"}\n')
+
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('autostash-conflict')
+    expect(result.committed).toBe(true)
+    expect(result.pulled).toBe(true)
+    expect(result.pushed).toBe(true) // the board change still made it out
+    // The user's code edit is preserved in the stash.
+    expect(await git(userA, ['stash', 'list'])).toMatch(/autostash/i)
+  })
+
+  it('S4 new branch without upstream: published automatically (push -u origin)', async () => {
+    const { userA } = await makePair()
+    await enableShared(userA)
+    expect((await shareSync(userA)).pushed).toBe(true)
+
+    await git(userA, ['switch', '-c', 'task/feature-x'])
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(join(boardCardsDir(userA), 'fx.json'), '{"id":"fx","title":"on branch"}\n')
+
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(true)
+    expect(result.pushed).toBe(true)
+    expect(result.message).toMatch(/published branch 'task\/feature-x'/)
+    // Upstream tracking is now configured…
+    const upstream = await git(userA, ['rev-parse', '--abbrev-ref', 'task/feature-x@{upstream}'])
+    expect(upstream.trim()).toBe('origin/task/feature-x')
+    // …so the next sync is a plain push/pull with no caveat.
+    expect((await shareSync(userA)).message).toBeUndefined()
+  })
+
+  it('S24 push rejected mid-race: one transparent retry round succeeds', async () => {
+    const { remote, userA } = await makePair()
+    await enableShared(userA)
+    expect((await shareSync(userA)).pushed).toBe(true)
+
+    // A stateful pre-receive hook rejects exactly the FIRST push — simulating
+    // a teammate landing a push between our pull and our push.
+    const flag = join(scratch, 'first-push-rejected')
+    const hook = join(remote, 'hooks', 'pre-receive')
+    await writeFile(
+      hook,
+      `#!/bin/sh\nif [ ! -f "${flag}" ]; then\n  touch "${flag}"\n  echo "simulated race: rejecting first push" >&2\n  exit 1\nfi\nexit 0\n`,
+    )
+    await execFile('chmod', ['+x', hook])
+
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(join(boardCardsDir(userA), 'race.json'), '{"id":"race","title":"raced"}\n')
+
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(true)
+    expect(result.pushed).toBe(true)
+    expect(result.message ?? '').not.toMatch(/push failed/)
+    // The commit really reached the remote on the retry.
+    const remoteLog = await git(remote, ['log', '-1', '--pretty=%s', 'main'])
+    expect(remoteLog.trim()).toBe('openground: sync')
+  })
+
+  it('S15 same card edited by both: conflict labels carry the card TITLE', async () => {
+    const { userA, userB } = await makePair()
+    await enableShared(userA)
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(
+      join(boardCardsDir(userA), 'c1.json'),
+      JSON.stringify({ id: 'c1', title: 'Login flow' }, null, 2) + '\n',
+    )
+    expect((await shareSync(userA)).pushed).toBe(true)
+
+    // B pulls, retitles the card, pushes. A retitles the SAME line differently.
+    await git(userB, ['pull'])
+    await writeFile(
+      join(boardCardsDir(userB), 'c1.json'),
+      JSON.stringify({ id: 'c1', title: 'Login flow (B)' }, null, 2) + '\n',
+    )
+    expect((await shareSync(userB)).pushed).toBe(true)
+    await writeFile(
+      join(boardCardsDir(userA), 'c1.json'),
+      JSON.stringify({ id: 'c1', title: 'Login flow (A)' }, null, 2) + '\n',
+    )
+
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(false)
+    expect(result.conflict).toBe(true)
+    // The label reads back the LOCAL title after the abort restored it.
+    expect(result.conflictFiles).toEqual(['card "Login flow (A)"'])
+    expect(result.message).toContain('card "Login flow (A)"')
+  })
+
+  it('S28 no git identity: ok:false with reason no-identity', async () => {
+    const { userA } = await makePair()
+    await enableShared(userA)
+    // A fresh machine: no configured identity. HOME is emptied AND
+    // auto-detection (os user + hostname) is disabled — without the latter,
+    // git on many machines invents an ident and the commit would succeed.
+    await git(userA, ['config', 'user.useConfigOnly', 'true'])
+    const bareHome = join(scratch, 'barehome')
+    await mkdir(bareHome)
+    const prevHome = process.env.HOME
+    const prevXdg = process.env.XDG_CONFIG_HOME
+    process.env.HOME = bareHome
+    process.env.XDG_CONFIG_HOME = join(bareHome, '.config')
+    try {
+      const result = await shareSync(userA)
+      expect(result.ok).toBe(false)
+      expect(result.reason).toBe('no-identity')
+      expect(result.committed).toBe(false)
+    } finally {
+      process.env.HOME = prevHome
+      process.env.XDG_CONFIG_HOME = prevXdg
+    }
+  })
+
+  it('S23 unreachable remote: offline flag set, commit kept locally, still ok', async () => {
+    const { userA } = await makePair()
+    await enableShared(userA)
+    expect((await shareSync(userA)).pushed).toBe(true)
+    // Point origin at a closed local port — "Connection refused" without DNS.
+    await git(userA, ['remote', 'set-url', 'origin', 'http://127.0.0.1:1/nowhere.git'])
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(join(boardCardsDir(userA), 'off.json'), '{"id":"off"}\n')
+
+    const result = await shareSync(userA)
+    expect(result.ok).toBe(true)
+    expect(result.committed).toBe(true)
+    expect(result.offline).toBe(true)
+    expect(result.pushed).toBe(false)
+    const subject = await git(userA, ['log', '-1', '--pretty=%s'])
+    expect(subject.trim()).toBe('openground: sync')
+  })
+
+  it('S25 force-pushed upstream: status flags forcedUpdate (sticky), sync absorbs and reports it', async () => {
+    const { userA, userB } = await makePair()
+    await enableShared(userA)
+    expect((await shareSync(userA)).pushed).toBe(true)
+
+    // B rewrites the shared history: amend the tip and force-push.
+    await git(userB, ['pull'])
+    await mkdir(boardCardsDir(userB), { recursive: true })
+    await writeFile(join(boardCardsDir(userB), 'b.json'), '{"id":"b"}\n')
+    await git(userB, ['add', '-A'])
+    await git(userB, ['commit', '-m', 'b card'])
+    await git(userB, ['push'])
+    // A fetches the honest state first…
+    __resetShareFetchThrottle()
+    expect((await shareStatus(userA)).forcedUpdate).toBeUndefined()
+    // …then B rewrites it.
+    await git(userB, ['commit', '--amend', '-m', 'b card (rewritten)'])
+    await git(userB, ['push', '--force'])
+
+    __resetShareFetchThrottle()
+    const s1 = await shareStatus(userA)
+    expect(s1.forcedUpdate).toBe(true)
+    // Sticky across further quiet fetches until a sync absorbs it.
+    __resetShareFetchThrottle()
+    expect((await shareStatus(userA)).forcedUpdate).toBe(true)
+
+    const sync = await shareSync(userA)
+    expect(sync.ok).toBe(true)
+    expect(sync.forcedUpdate).toBe(true)
+    // Cleared after the absorbing sync.
+    __resetShareFetchThrottle()
+    expect((await shareStatus(userA)).forcedUpdate).toBeUndefined()
+  })
+
   it('rebase conflict: aborts, returns conflict:true, repo left clean (not rebasing)', async () => {
     const { userA, userB } = await makePair()
 
@@ -277,6 +505,8 @@ describe('shareSync', () => {
     expect(result.pulled).toBe(false)
     expect(result.pushed).toBe(false)
     expect(result.message).toMatch(/resolve|pull/i)
+    // S20: the user is told WHAT conflicted — the notes file, by name.
+    expect(result.conflictFiles).toEqual(['notes'])
 
     // The rebase was aborted: no rebase state dirs, clean working tree, and
     // B's own version of the file is back in place.
@@ -284,6 +514,106 @@ describe('shareSync', () => {
     await expect(stat(join(userB, '.git', 'rebase-apply'))).rejects.toThrow()
     expect((await git(userB, ['status', '--porcelain'])).trim()).toBe('')
     expect(await readFile(boardNotesPath(userB), 'utf-8')).toBe('notes from B\n')
+  })
+})
+
+describe('shareResolve (conflict resolution)', () => {
+  /** Same-card conflict fixture: A pushed title "(A version)", B holds a
+   *  local commit with "(B version)" that conflicts on pull. Returns B's dir
+   *  + the card path. */
+  const makeCardConflict = async (): Promise<{ userB: string; cardRel: string }> => {
+    const { userA, userB } = await makePair()
+    await enableShared(userA)
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    const write = (dir: string, version: string) =>
+      writeFile(
+        join(boardCardsDir(dir), 'c1.json'),
+        JSON.stringify({ id: 'c1', title: `Login flow (${version})` }, null, 2) + '\n',
+      )
+    await write(userA, 'seed')
+    expect((await shareSync(userA)).pushed).toBe(true)
+    await git(userB, ['pull'])
+    await write(userB, 'B version')
+    expect((await shareSync(userB)).pushed).toBe(true)
+    await write(userA, 'A version')
+    expect((await shareSync(userA)).conflict).toBe(true) // A now holds the conflicting commit
+    return { userB: userA, cardRel: '.openground/board/cards/c1.json' }
+  }
+
+  it('structured conflicts carry BOTH titles (mine = local, theirs = upstream)', async () => {
+    const { userB } = await makeCardConflict()
+    const result = await shareSync(userB) // re-sync → same conflict, structured
+    expect(result.conflict).toBe(true)
+    expect(result.conflicts).toHaveLength(1)
+    const c = result.conflicts![0]
+    expect(c.kind).toBe('card')
+    expect(c.mine).toEqual({ exists: true, title: 'Login flow (A version)' })
+    expect(c.theirs).toEqual({ exists: true, title: 'Login flow (B version)' })
+  })
+
+  it("choice 'mine' keeps the local version and pushes it", async () => {
+    const { userB, cardRel } = await makeCardConflict()
+    const result = await shareResolve(userB, { [cardRel]: 'mine' })
+    expect(result).toMatchObject({ ok: true, pulled: true, pushed: true })
+    const card = JSON.parse(await readFile(join(userB, cardRel), 'utf-8'))
+    expect(card.title).toBe('Login flow (A version)')
+    // Repo is clean and out of rebase.
+    expect((await git(userB, ['status', '--porcelain'])).trim()).toBe('')
+    // The remote agrees (a follow-up sync has nothing to do).
+    const again = await shareSync(userB)
+    expect(again).toMatchObject({ ok: true, committed: false, pulled: true, pushed: true })
+  })
+
+  it("choice 'theirs' takes the teammate's version (our emptied commit is skipped)", async () => {
+    const { userB, cardRel } = await makeCardConflict()
+    const result = await shareResolve(userB, { [cardRel]: 'theirs' })
+    expect(result).toMatchObject({ ok: true, pulled: true })
+    const card = JSON.parse(await readFile(join(userB, cardRel), 'utf-8'))
+    expect(card.title).toBe('Login flow (B version)')
+    expect((await git(userB, ['status', '--porcelain'])).trim()).toBe('')
+  })
+
+  it('delete/modify: teammate deleted, I edited — both choices behave', async () => {
+    const { userA, userB } = await makePair()
+    await enableShared(userA)
+    await mkdir(boardCardsDir(userA), { recursive: true })
+    await writeFile(
+      join(boardCardsDir(userA), 'd1.json'),
+      JSON.stringify({ id: 'd1', title: 'Doomed card' }, null, 2) + '\n',
+    )
+    expect((await shareSync(userA)).pushed).toBe(true)
+    // B deletes the card and pushes.
+    await git(userB, ['pull'])
+    await rm(join(boardCardsDir(userB), 'd1.json'))
+    expect((await shareSync(userB)).pushed).toBe(true)
+    // A edits the same card → modify/delete conflict on sync.
+    await writeFile(
+      join(boardCardsDir(userA), 'd1.json'),
+      JSON.stringify({ id: 'd1', title: 'Doomed card (edited)' }, null, 2) + '\n',
+    )
+    const conflicted = await shareSync(userA)
+    expect(conflicted.conflict).toBe(true)
+    const c = conflicted.conflicts![0]
+    expect(c.mine.exists).toBe(true)
+    expect(c.theirs.exists).toBe(false) // teammate deleted it
+
+    // Keep mine → the card survives, with my edit.
+    const keep = await shareResolve(userA, { [c.file]: 'mine' })
+    expect(keep).toMatchObject({ ok: true, pushed: true })
+    expect(JSON.parse(await readFile(join(userA, c.file), 'utf-8')).title).toBe(
+      'Doomed card (edited)',
+    )
+  })
+
+  it('an unmerged file WITHOUT a choice rolls back and returns the fresh conflict', async () => {
+    const { userB, cardRel } = await makeCardConflict()
+    const result = await shareResolve(userB, { '.openground/board/notes.md': 'mine' })
+    expect(result.ok).toBe(false)
+    expect(result.conflict).toBe(true)
+    expect(result.conflicts?.some((c) => c.file === cardRel)).toBe(true)
+    // Rolled back clean — no rebase state left behind.
+    await expect(stat(join(userB, '.git', 'rebase-merge'))).rejects.toThrow()
+    expect((await git(userB, ['status', '--porcelain'])).trim()).toBe('')
   })
 })
 
