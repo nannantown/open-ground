@@ -61,6 +61,7 @@ const renderDrawer = (opts: { session?: boolean } = {}) => {
         </div>
       )}
       hasTerminalSlot={() => opts.session ?? false}
+      liveTerminalId={() => null}
       onDeleteTask={vi.fn()}
       onLaunchTask={vi.fn()}
     />,

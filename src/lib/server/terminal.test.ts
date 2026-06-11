@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
-import { listActiveTerminalCwds, getTerminal } from './terminal'
+import {
+  listActiveTerminalCwds,
+  listActiveTerminals,
+  claudeStatus,
+  getTerminal,
+  WORKING_SILENCE_MS,
+} from './terminal'
 import type { TerminalInfo } from './terminal'
 
 // listActiveTerminalCwds is exercised through the same globalThis seam the
@@ -24,7 +30,12 @@ const state = () =>
 const fakeSession = (
   id: string,
   cwd: string,
-  opts: { finishedAt?: string; tag?: 'shell' | 'claude' } = {},
+  opts: {
+    finishedAt?: string
+    tag?: 'shell' | 'claude'
+    lastOutputAt?: number
+    menuOpen?: boolean
+  } = {},
 ): FakeSessionShape => ({
   info: {
     id,
@@ -34,6 +45,8 @@ const fakeSession = (
     rows: 30,
     startedAt: new Date().toISOString(),
     tag: opts.tag ?? 'shell',
+    ...(opts.lastOutputAt !== undefined ? { lastOutputAt: opts.lastOutputAt } : {}),
+    ...(opts.menuOpen !== undefined ? { menuOpen: opts.menuOpen } : {}),
     ...(opts.finishedAt ? { finishedAt: opts.finishedAt, exitCode: 0 } : {}),
   },
   pty: {},
@@ -89,5 +102,68 @@ describe('listActiveTerminalCwds', () => {
       fakeSession('t', '/tmp/proj-a', { finishedAt: new Date().toISOString() }),
     )
     expect(listActiveTerminalCwds()).toEqual([])
+  })
+})
+
+describe('claudeStatus', () => {
+  // Pure function — `now` is injected (house style: no fake timers).
+  const NOW = 1_750_000_000_000
+
+  const info = (over: Partial<TerminalInfo>): TerminalInfo => ({
+    ...fakeSession('x', '/tmp/proj-a', { tag: 'claude' }).info,
+    ...over,
+  })
+
+  it('menuOpen → waiting, even with fresh output (blocked on a permission prompt)', () => {
+    expect(claudeStatus(info({ menuOpen: true, lastOutputAt: NOW - 100 }), NOW)).toBe('waiting')
+  })
+
+  it('recent output (< WORKING_SILENCE_MS) → working', () => {
+    expect(claudeStatus(info({ lastOutputAt: NOW - (WORKING_SILENCE_MS - 1) }), NOW)).toBe('working')
+  })
+
+  it('silence past the threshold (or no output yet) → waiting', () => {
+    expect(claudeStatus(info({ lastOutputAt: NOW - WORKING_SILENCE_MS }), NOW)).toBe('waiting')
+    expect(claudeStatus(info({}), NOW)).toBe('waiting')
+  })
+})
+
+describe('listActiveTerminals', () => {
+  it('returns the contract shape with empty pool', () => {
+    expect(listActiveTerminals()).toEqual({ cwds: [], claude: [] })
+  })
+
+  it('dedupes claude sessions per cwd — working wins over waiting', () => {
+    const now = Date.now()
+    // waiting first, then working: the working pane must win regardless of order.
+    state().sessions.set('w1', fakeSession('w1', '/tmp/proj-a', { tag: 'claude' }))
+    state().sessions.set(
+      'w2',
+      fakeSession('w2', '/tmp/proj-a', { tag: 'claude', lastOutputAt: now }),
+    )
+    // …and a waiting pane AFTER the working one must not downgrade it back.
+    state().sessions.set('w3', fakeSession('w3', '/tmp/proj-a', { tag: 'claude' }))
+    const res = listActiveTerminals()
+    expect(res.claude).toEqual([{ cwd: '/tmp/proj-a', status: 'working' }])
+    expect(res.cwds).toEqual(['/tmp/proj-a'])
+  })
+
+  it('excludes exited claude sessions lingering for buffer drain', () => {
+    state().sessions.set(
+      'dead',
+      fakeSession('dead', '/tmp/proj-a', {
+        tag: 'claude',
+        lastOutputAt: Date.now(),
+        finishedAt: new Date().toISOString(),
+      }),
+    )
+    expect(listActiveTerminals()).toEqual({ cwds: [], claude: [] })
+  })
+
+  it('shell-tagged PTYs appear in cwds but never in claude', () => {
+    state().sessions.set('s', fakeSession('s', '/tmp/proj-a', { lastOutputAt: Date.now() }))
+    const res = listActiveTerminals()
+    expect(res.cwds).toEqual(['/tmp/proj-a'])
+    expect(res.claude).toEqual([])
   })
 })

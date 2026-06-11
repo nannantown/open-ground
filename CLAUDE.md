@@ -135,8 +135,12 @@ and spawns `claude` as a child process, so it must run locally.
 - **Layer 2 — per-project tabs**: **Terminal / Canvas / Board** (see
   `src/components/canvas/moduleRegistry.tsx` — the single source of truth
   for the tab set). Terminal is tiled `claude` PTY panes; Board is a
-  kanban whose per-card ▶ launches a claude terminal (slot keyed by
-  taskId, shared with the Terminal tab); Canvas is the design /
+  kanban whose card drawer auto-launches a PLAIN claude terminal (slot
+  keyed by taskId) when opened — no prompt is sent; the task's title +
+  content reach the session only when the user clicks "Insert task into
+  input" (`POST /api/terminal/:id/paste-task`), which pastes them UNSENT
+  (bracketed paste, no trailing newline) so the user reviews and presses
+  Enter. (There is no per-card ▶ run button anymore.) Canvas is the design /
   brainstorm surface — multiple Canvases per project (Chrome-style tabs),
   each with sticky / text / frame / mock / comment elements. Mock
   elements render live React (or HTML) in a sandboxed iframe — same
@@ -251,9 +255,13 @@ execution is an **interactive PTY** the user types into:
 - `src/lib/server/claudeTerminal.ts` (`launchClaude`) — `POST
   /api/terminal/claude` spawns `claude --session-id <uuid>` inside a PTY.
   **Subscription-only:** OPEN GROUND only ever drives the user's `claude`
-  CLI — never the Anthropic API key. Board cards' ▶ goes through this; the
-  resulting slot is keyed by taskId and shared between the Board drawer and
-  the Terminal tab (single source of truth).
+  CLI — never the Anthropic API key. The Board drawer's auto-launch goes
+  through this with `taskWorktrees:true` (which only pre-authorizes the
+  central worktrees dir via `--add-dir`; NO prompt is sent — plain claude).
+  The task's title + content are injected later, UNSENT, via `POST
+  /api/terminal/:id/paste-task` (`src/lib/server/pastePrompt.ts` wraps the
+  `buildTaskPrompt` text in bracketed-paste markers, stripping any embedded
+  ESC so the span can't be closed early). The slot is keyed by taskId.
 - Terminal pool state is stored on `globalThis.__openground_terminal` so it
   **survives `tsx watch` server reloads** in dev. Keep this pattern for any
   new in-memory server state.

@@ -31,7 +31,7 @@ export const board = {
     'board.detail.titleLabel': 'Title',
     'board.detail.titlePlaceholder': 'What this task is',
     'board.detail.notesLabel': 'Content',
-    'board.detail.notesPlaceholder': 'What this task should do — passed to claude together with the title at launch',
+    'board.detail.notesPlaceholder': 'What this task should do — "Insert task into input" pastes it into claude together with the title',
     'board.detail.assigneeLabel': 'Assignee',
     'board.detail.assigneeAdd': '+ Add',
     'board.detail.assigneeAddPlaceholder': 'Name',
@@ -45,8 +45,19 @@ export const board = {
     'board.detail.captureLabel': 'Task',
     'board.detail.capturePlaceholder':
       'What should be done?\nThe first line becomes the title — for longer text an AI summary title replaces it automatically (✦).',
-    'board.detail.launchHintShort':
-      'Launches claude with the title + content as the first prompt. Also appears in the Terminal tab.',
+    'board.detail.autoLaunchHint':
+      'claude launches here automatically once the card has a title. Nothing is sent — you stay in control.',
+    'board.detail.autoLaunchDone':
+      'This card is in Done — no session is started. Move it back to launch claude.',
+    'board.detail.autoLaunchMissing':
+      'The project folder is missing — claude can’t start until it’s relocated.',
+    'board.detail.autoLaunchFailed':
+      'Couldn’t start claude. Check that the claude CLI is installed, then retry.',
+    'board.detail.autoLaunchRetry': 'Retry launch',
+    'board.detail.insertTask': 'Insert task into input',
+    'board.detail.insertTaskBusy': 'Inserting…',
+    'board.detail.insertTaskHint': 'Pastes the title + content unsent — press Enter to run.',
+    'board.detail.insertTaskFailed': 'Insert failed — the session may have ended. Try again.',
     'board.detail.flowBaseDefault': 'the launch branch',
     'board.detail.flowPr': 'On finish: PR → {base} (a human merges)',
     'board.detail.flowMerge': 'On finish: merge → {base}',
@@ -54,9 +65,9 @@ export const board = {
     'board.detail.regenTitle': 'Regenerate the title from the content (AI)',
     'board.detail.fieldsToggle': 'Show / hide the task fields',
     'board.detail.branchTitle': 'Task branch',
-    // Task terminal (drawer launch CTA)
+    // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
-      'Launch claude for this task. The title AND the content are passed as the first prompt; in a git project claude works on its own task branch in its own worktree, so several tasks can run in parallel. Respond and approve permission prompts in this terminal. It also appears in the Terminal tab, labelled with the title.',
+      'Launch claude in this project (plain — no prompt is sent). Use "Insert task into input" to paste the title + content into the input box, then press Enter to run. Respond and approve permission prompts in this terminal.',
   } as Record<string, string>,
   ja: {
     // Columns
@@ -88,7 +99,7 @@ export const board = {
     'board.detail.titleLabel': 'タイトル',
     'board.detail.titlePlaceholder': 'このタスクの内容',
     'board.detail.notesLabel': '内容',
-    'board.detail.notesPlaceholder': 'このタスクでやること — 起動時にタイトルと一緒に claude へ渡されます',
+    'board.detail.notesPlaceholder': 'このタスクでやること —「タスク内容を入力欄へ」でタイトルと一緒に claude へ貼り付けられます',
     'board.detail.assigneeLabel': '担当者',
     'board.detail.assigneeAdd': '＋ 追加',
     'board.detail.assigneeAddPlaceholder': '名前',
@@ -102,8 +113,19 @@ export const board = {
     'board.detail.captureLabel': 'タスク',
     'board.detail.capturePlaceholder':
       'やることを書いてください\n1行目がタイトルになります — 長い内容は AI が短いタイトルに自動で整えます（✦）',
-    'board.detail.launchHintShort':
-      'タイトルと内容を最初のプロンプトとして claude を起動します。Terminal タブにも並びます。',
+    'board.detail.autoLaunchHint':
+      'タイトルを付けると claude がここで自動起動します。何も送信されません — 実行はあなたが決めます。',
+    'board.detail.autoLaunchDone':
+      '完了列のカードでは起動しません。起動するには列を戻してください。',
+    'board.detail.autoLaunchMissing':
+      'プロジェクトフォルダが見つかりません。場所を再設定するまで claude は起動できません。',
+    'board.detail.autoLaunchFailed':
+      'claude を起動できませんでした。claude CLI が入っているか確認して再試行してください。',
+    'board.detail.autoLaunchRetry': '再試行',
+    'board.detail.insertTask': 'タスク内容を入力欄へ',
+    'board.detail.insertTaskBusy': '挿入中…',
+    'board.detail.insertTaskHint': 'タイトルと内容を未送信で貼り付け — Enter で実行が始まります。',
+    'board.detail.insertTaskFailed': '挿入に失敗しました — セッションが終了した可能性があります。もう一度お試しください。',
     'board.detail.flowBaseDefault': '起動時のブランチ',
     'board.detail.flowPr': '完了時: PR → {base}（人間がマージ）',
     'board.detail.flowMerge': '完了時: {base} へマージ',
@@ -111,8 +133,8 @@ export const board = {
     'board.detail.regenTitle': '内容からタイトルを再生成（AI）',
     'board.detail.fieldsToggle': 'タスク詳細の表示切替',
     'board.detail.branchTitle': 'タスクブランチ',
-    // Task terminal (drawer launch CTA)
+    // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
-      'このタスクで claude を起動します。タイトルと内容が最初のプロンプトとして渡され、git プロジェクトでは claude がタスク専用のブランチ＋worktree で作業するため、複数タスクを並列に実行できます。応答や権限確認はこのターミナルで操作します。Terminal タブにもタイトル付きで並びます。',
+      'このプロジェクトで claude を起動します（プレーン起動 — プロンプトは送信されません）。「タスク内容を入力欄へ」でタイトルと内容を入力欄に貼り付け、Enter で実行します。応答や権限確認はこのターミナルで操作します。',
   } as Record<string, string>,
 }

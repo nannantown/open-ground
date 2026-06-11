@@ -28,16 +28,19 @@ import {
   createTerminal,
   getTerminal,
   killTerminal,
-  listActiveTerminalCwds,
+  listActiveTerminals,
   resizeTerminal,
   writeInput,
 } from '@/lib/server/terminal'
 import { launchClaude, launchOptsFromPrefs } from '@/lib/server/claudeTerminal'
 
+import { bracketedPaste } from '@/lib/server/pastePrompt'
+
 // Cap on the claude launch `initialPrompt`. It's written verbatim to a tmpdir
 // file (claudeTerminal.launchClaude), so an unbounded value lets a caller
 // exhaust /tmp. Real seeds (a task title, a short instruction) are well under a
-// KB; 256 KiB is a generous ceiling that still keeps disk use trivial.
+// KB; 256 KiB is a generous ceiling that still keeps disk use trivial. The
+// same cap bounds the paste-task injection string (one PTY write).
 const MAX_INITIAL_PROMPT = 256 * 1024
 
 export const terminalRoutes = new Hono()
@@ -109,51 +112,29 @@ export const terminalRoutes = new Hono()
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     const model = typeof body?.model === 'string' && body.model ? body.model : undefined
-    let initialPrompt =
+    const initialPrompt =
       typeof body?.initialPrompt === 'string' && body.initialPrompt
         ? body.initialPrompt
         : undefined
-    // Project data feeds two launch-time inputs (the path already passed
+    // Project data feeds the launch (the path already passed
     // validateProjectPath, so this read cannot escape the registry):
-    //  - config (SHARED policy): completion flow / target branch / verify
-    //    commands — folded into the task prompt below.
     //  - launch (PERSONAL prefs): permission mode + model — applied to EVERY
     //    claude launched in this project through this route (task launches
     //    and plain dock launches alike).
     const projectData = await readProjectData(cwd)
-    // Board-card launch: the client sends the structured task instead of a raw
-    // prompt; the server composes title+content plus — on a git project — the
-    // task-branch/worktree protocol (claude names the branch itself), and
-    // grants --add-dir on the central worktrees dir so file edits inside the
-    // worktree don't trip path prompts.
+    // Board-card launch (taskWorktrees): the client starts a PLAIN claude
+    // session — the task prompt is injected LATER via paste-task, never
+    // auto-sent — but on a git project the session must already hold
+    // --add-dir on the central worktrees dir, so file edits inside the task
+    // worktree don't trip path prompts. (The old structured `task` body param
+    // — server-composed initialPrompt that auto-started the task — is gone.)
     let addDir: string | undefined
-    const task = body?.task
-    if (
-      task &&
-      typeof task === 'object' &&
-      typeof task.title === 'string' &&
-      task.title.trim()
-    ) {
+    if (body?.taskWorktrees === true) {
       const isGit = await stat(join(cwd, '.git')).then(() => true).catch(() => false)
-      let worktreesDir: string | null = null
       if (isGit) {
-        worktreesDir = centralWorktreesDir(await projectUUIDFromPath(cwd))
+        const worktreesDir = centralWorktreesDir(await projectUUIDFromPath(cwd))
         await mkdir(worktreesDir, { recursive: true })
         addDir = worktreesDir
-      }
-      initialPrompt = buildTaskPrompt({
-        cwd,
-        task: {
-          id: typeof task.id === 'string' ? task.id : undefined,
-          title: task.title,
-          notes: typeof task.notes === 'string' ? task.notes : undefined,
-        },
-        port: Number(process.env.PORT) || 47776,
-        worktreesDir,
-        config: projectData.config,
-      })
-      if (initialPrompt.length > MAX_INITIAL_PROMPT) {
-        return c.json({ error: 'task content too large' }, 400)
       }
     }
     try {
@@ -178,14 +159,15 @@ export const terminalRoutes = new Hono()
       return c.json({ error: `failed to start claude: ${e?.message ?? e}` }, 500)
     }
   })
-  // --- GET /api/terminal/active — cwds of live PTYs ------------------------
-  // Feeds the Ground's per-card "terminal active" indicator. Read-only and
+  // --- GET /api/terminal/active — live PTY cwds + claude working/waiting ---
+  // Feeds the Ground's per-card "terminal active" indicator (cwds) and the
+  // claude beacon refinement (ActiveTerminalsResponse). Read-only and
   // deliberately unvalidated: it returns ONLY the cwds of terminals this app
   // itself spawned (each cwd already passed validateProjectPath at create
   // time), never anything derived from the request. Declared BEFORE the
   // dynamic /api/terminal/:id route so the static `active` segment is never
   // captured as an id.
-  .get('/api/terminal/active', (c) => c.json({ cwds: listActiveTerminalCwds() }))
+  .get('/api/terminal/active', (c) => c.json(listActiveTerminals()))
   // --- GET /api/terminal/:id — fetch terminal info ---
   .get('/api/terminal/:id', (c) => {
     const info = getTerminal(c.req.param('id'))
@@ -208,6 +190,60 @@ export const terminalRoutes = new Hono()
     }
     const data = typeof body?.data === 'string' ? body.data : ''
     const ok = writeInput(c.req.param('id'), data)
+    if (!ok) return c.json({ error: 'not found or finished' }, 404)
+    return c.json({ ok: true })
+  })
+  // --- POST /api/terminal/:id/paste-task — inject a Board task prompt -------
+  // Into a LIVE claude PTY's input box, via bracketed paste, WITHOUT sending
+  // it: the server re-reads the task from tasks.json (the card may have been
+  // edited since launch), composes the full task prompt (branch/worktree
+  // protocol + shared config), and writes ESC[200~ <prompt> ESC[201~ with NO
+  // trailing newline — the user reviews and hits Enter themselves. This is the
+  // post-split companion of the plain `taskWorktrees` launch above.
+  .post('/api/terminal/:id/paste-task', async (c) => {
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    const taskId = typeof body?.taskId === 'string' ? body.taskId : ''
+    if (!taskId) return c.json({ error: 'taskId is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    // Read project config (the path passed validateProjectPath, so this read
+    // cannot escape the registry). The TASK fields prefer the live values the
+    // client sends — its drawer edits are debounced (~350ms) before they reach
+    // tasks.json, and a just-created card may not be on disk at all, so reading
+    // only the disk copy would paste stale or missing content. Fall back to the
+    // persisted task when the client doesn't override (and require at least one
+    // source of a title).
+    const projectData = await readProjectData(path)
+    const stored = projectData.tasks.find((t) => t.id === taskId)
+    const liveTitle = typeof body?.title === 'string' ? body.title : undefined
+    const liveNotes = typeof body?.notes === 'string' ? body.notes : undefined
+    const title = (liveTitle ?? stored?.title ?? '').trim()
+    if (!title) return c.json({ error: 'task not found' }, 404)
+    const notes = liveNotes ?? stored?.notes
+    const isGit = await stat(join(path, '.git')).then(() => true).catch(() => false)
+    let worktreesDir: string | null = null
+    if (isGit) {
+      worktreesDir = centralWorktreesDir(await projectUUIDFromPath(path))
+      await mkdir(worktreesDir, { recursive: true })
+    }
+    const prompt = buildTaskPrompt({
+      cwd: path,
+      task: { id: taskId, title, notes },
+      port: Number(process.env.PORT) || 47776,
+      worktreesDir,
+      config: projectData.config,
+    })
+    if (prompt.length > MAX_INITIAL_PROMPT) {
+      return c.json({ error: 'task content too large' }, 400)
+    }
+    // Bracketed paste, no trailing newline: insert, never auto-send.
+    const ok = writeInput(c.req.param('id'), bracketedPaste(prompt))
     if (!ok) return c.json({ error: 'not found or finished' }, 404)
     return c.json({ ok: true })
   })

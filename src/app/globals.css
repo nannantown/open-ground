@@ -6,6 +6,10 @@
 
 :root {
   --paper-tint: #F2EDDE;
+  /* Ground card "Waiting" beacon label — claude is sitting on the human.
+     Amber, darkened from the ochre token (#9A6E20, only ~4:1) so the 10px
+     label clears WCAG AA (4.5:1) on the card bg #F8F4E8 (≈5.3:1 here). */
+  --beacon-waiting: #855E17;
 }
 
 /* Assistant brand mark: a calm continuous rotation while the assistant is

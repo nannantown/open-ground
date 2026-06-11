@@ -1,4 +1,7 @@
 import { randomUUID } from 'crypto'
+import { Terminal as HeadlessTerminal } from '@xterm/headless'
+import { detectMenu } from '@/lib/claudeMenu'
+import type { ActiveTerminalsResponse, ClaudeBeaconStatus } from '@/lib/types'
 // node-pty is a native module — require it lazily so a missing/broken build
 // doesn't crash the whole route layer on import (it'll surface on first use).
 type IPty = any
@@ -7,6 +10,15 @@ const loadPty = () => {
   if (!ptyMod) ptyMod = require('node-pty')
   return ptyMod
 }
+
+// Debounce (ms) after the last PTY write before we read the headless screen for
+// a menu — long enough that we test a SETTLED frame (claude repaints constantly
+// while working, but the screen is stable while waiting on a prompt).
+const MENU_DETECT_DEBOUNCE_MS = 350
+
+// A claude PTY that hasn't emitted output for this long is considered to be
+// waiting on the human (its TUI spinner repaints continuously while working).
+export const WORKING_SILENCE_MS = 3000
 
 export interface TerminalInfo {
   id: string
@@ -26,6 +38,14 @@ export interface TerminalInfo {
   // and render its transcript. Persisted on the PTY so a page reload can
   // reattach both the raw and the rendered view to the same session.
   agentSessionId?: string
+  // Epoch ms of the last PTY output chunk — feeds the working/waiting beacon
+  // (claude repaints continuously while thinking/editing, goes silent when
+  // waiting on the human).
+  lastOutputAt?: number
+  // For tag:'claude' PTYs — true while an interactive TUI menu (permission
+  // prompt etc.) is detected on the settled headless screen. A menu means
+  // claude is blocked on the human even if it just painted output.
+  menuOpen?: boolean
 }
 
 type Listener = (chunk: string) => void
@@ -38,6 +58,36 @@ interface PtySession {
   buffer: string
   listeners: Set<Listener>
   exitListeners: Set<(info: TerminalInfo) => void>
+  // For tag:'claude' sessions: a headless xterm that reconstructs the screen so
+  // we can detect interactive TUI menus (permission prompts etc.) the output
+  // stream alone can't reveal (it's cursor-addressed repaints). null for plain
+  // shells. Absent (undefined) on fake test sessions — treat as null.
+  headless?: HeadlessTerminal | null
+  menuTimer?: ReturnType<typeof setTimeout> | null
+}
+
+// Read the headless terminal's visible screen as plain text rows.
+const readScreen = (term: HeadlessTerminal): string => {
+  const buf = term.buffer.active
+  const rows: string[] = []
+  for (let y = 0; y < term.rows; y++) {
+    const line = buf.getLine(buf.baseY + y)
+    rows.push(line ? line.translateToString(true) : '')
+  }
+  return rows.join('\n')
+}
+
+// Debounced menu detection: runs MENU_DETECT_DEBOUNCE_MS after the last write,
+// so we read a settled frame, and stamps the result on info.menuOpen.
+const scheduleMenuDetect = (s: PtySession): void => {
+  if (!s.headless) return
+  if (s.menuTimer) clearTimeout(s.menuTimer)
+  s.menuTimer = setTimeout(() => {
+    s.menuTimer = null
+    try {
+      s.info.menuOpen = detectMenu(readScreen(s.headless!)) !== null
+    } catch {}
+  }, MENU_DETECT_DEBOUNCE_MS)
 }
 
 interface TerminalState {
@@ -113,17 +163,35 @@ export const createTerminal = (opts: {
     ...(opts.agentSessionId ? { agentSessionId: opts.agentSessionId } : {}),
   }
 
+  // Claude panes get a headless screen model for menu detection; plain shells
+  // don't need it. Never let a headless-init failure break the PTY.
+  let headless: HeadlessTerminal | null = null
+  if ((opts.tag ?? 'shell') === 'claude') {
+    try {
+      headless = new HeadlessTerminal({ cols, rows, allowProposedApi: true, scrollback: 0 })
+    } catch {
+      headless = null
+    }
+  }
+
   const session: PtySession = {
     info,
     pty: proc,
     buffer: '',
     listeners: new Set(),
     exitListeners: new Set(),
+    headless,
+    menuTimer: null,
   }
   sessions.set(id, session)
 
   proc.onData((chunk: string) => {
     appendBuffer(session, chunk)
+    info.lastOutputAt = Date.now()
+    if (session.headless) {
+      try { session.headless.write(chunk) } catch {}
+      scheduleMenuDetect(session)
+    }
     for (const l of Array.from(session.listeners)) {
       try { l(chunk) } catch {}
     }
@@ -131,6 +199,12 @@ export const createTerminal = (opts: {
   proc.onExit(({ exitCode }: { exitCode: number }) => {
     info.exitCode = exitCode ?? 0
     info.finishedAt = new Date().toISOString()
+    if (session.menuTimer) { clearTimeout(session.menuTimer); session.menuTimer = null }
+    info.menuOpen = false
+    if (session.headless) {
+      try { session.headless.dispose() } catch {}
+      session.headless = null
+    }
     for (const l of Array.from(session.exitListeners)) {
       try { l(info) } catch {}
     }
@@ -158,6 +232,38 @@ export const listActiveTerminalCwds = (): string[] => {
   return Array.from(out)
 }
 
+/** Working/waiting judgement for a claude PTY. Pure — `now` is injected so
+ *  tests don't need fake timers (house style; see shareAutoSync.test.ts).
+ *  - An open TUI menu (permission prompt etc.) means claude is blocked on the
+ *    human, regardless of how recently it painted — `waiting`.
+ *  - Otherwise recent output (< WORKING_SILENCE_MS) means its spinner is
+ *    repainting — `working`.
+ *  - Silence (or no output yet) — `waiting`. */
+export const claudeStatus = (info: TerminalInfo, now: number): ClaudeBeaconStatus => {
+  if (info.menuOpen) return 'waiting'
+  if (info.lastOutputAt !== undefined && now - info.lastOutputAt < WORKING_SILENCE_MS) {
+    return 'working'
+  }
+  return 'waiting'
+}
+
+/** Full payload of GET /api/terminal/active: the legacy `cwds` list (any live
+ *  PTY — shells included) plus per-cwd claude activity, deduped so that when a
+ *  project holds several claude panes `working` wins over `waiting`. */
+export const listActiveTerminals = (): ActiveTerminalsResponse => {
+  const now = Date.now()
+  const byCwd = new Map<string, ClaudeBeaconStatus>()
+  sessions.forEach((s) => {
+    if (s.info.finishedAt || s.info.tag !== 'claude') return
+    const status = claudeStatus(s.info, now)
+    if (status === 'working' || !byCwd.has(s.info.cwd)) byCwd.set(s.info.cwd, status)
+  })
+  return {
+    cwds: listActiveTerminalCwds(),
+    claude: Array.from(byCwd, ([cwd, status]) => ({ cwd, status })),
+  }
+}
+
 export const writeInput = (id: string, data: string): boolean => {
   const s = sessions.get(id)
   if (!s || s.info.finishedAt) return false
@@ -174,6 +280,9 @@ export const resizeTerminal = (id: string, cols: number, rows: number): boolean 
     s.pty.resize(c, r)
     s.info.cols = c
     s.info.rows = r
+    // Keep the headless screen model the same size or the bottom-row menu scan
+    // misreads (wrapping shifts).
+    try { s.headless?.resize(c, r) } catch {}
     return true
   } catch {
     return false

@@ -2,7 +2,7 @@ import {
   GitBranch,
   FolderClosed,
 } from 'lucide-react'
-import type { ProjectMeta } from '@/lib/types'
+import type { ClaudeBeaconStatus, ProjectMeta } from '@/lib/types'
 
 interface Props {
   project: ProjectMeta
@@ -12,6 +12,10 @@ interface Props {
   /** True while the project has at least one live PTY (plain shell or claude
    *  session) — shows the pulsing "Terminal" beacon in the card header. */
   terminalActive?: boolean
+  /** Refines the beacon when the live PTYs include a claude session:
+   *  'working' → moss "Working", 'waiting' → amber "Waiting" (claude is
+   *  sitting on you). Undefined = plain shells only → legacy "Terminal". */
+  claudeStatus?: ClaudeBeaconStatus
 }
 
 const coordFromId = (id: string) => {
@@ -29,6 +33,7 @@ export const ProjectCard = ({
   selected,
   active,
   terminalActive,
+  claudeStatus,
 }: Props) => {
   return (
     <div
@@ -73,14 +78,28 @@ export const ProjectCard = ({
           >
             {project.name}
           </div>
-          {terminalActive && (
-            // Non-interactive status beacon — moss (the theme's green) keeps
-            // the label ≥4.5:1 on the paper card; the dot pulses while live.
-            <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-moss">
-              <span className="term-pulse h-[5px] w-[5px] rounded-full bg-moss" />
-              Terminal
-            </span>
-          )}
+          {terminalActive &&
+            (claudeStatus === 'waiting' ? (
+              // claude is sitting on the human — "your turn". Amber for
+              // attention: dot in the ochre token (3:1 graphics contrast is
+              // met), label in the darkened amber var (≥4.5:1 on the card —
+              // raw ochre is only ~4:1 at this 10px size). Steady, no pulse:
+              // term-pulse breathing means "activity", and a full-opacity dot
+              // stays visible at a glance instead of fading half the time.
+              <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-[var(--beacon-waiting)]">
+                <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
+                Waiting
+              </span>
+            ) : (
+              // Non-interactive status beacon — moss (the theme's green) keeps
+              // the label ≥4.5:1 on the paper card; the dot pulses while live.
+              // 'Working' while a claude session is busy; plain 'Terminal'
+              // when the live PTYs are free shells only (legacy beacon).
+              <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-moss">
+                <span className="term-pulse h-[5px] w-[5px] rounded-full bg-moss" />
+                {claudeStatus === 'working' ? 'Working' : 'Terminal'}
+              </span>
+            ))}
           {project.openTaskCount > 0 && (
             <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-accent">
               <span className="h-1 w-1 rounded-full bg-accent" />

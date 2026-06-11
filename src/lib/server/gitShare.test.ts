@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, stat } from 'fs/promises'
@@ -25,6 +25,11 @@ import {
 // kept out of the picture by pointing HOME (where git finds ~/.gitconfig) at a
 // scratch dir with a known identity, so a globally-configured commit.gpgsign
 // or pull strategy can't bend these assertions.
+
+// Each test shells out to dozens of real `git` subprocesses; the 5s default
+// flakes under machine load. Generous per-file ceiling — passing tests still
+// finish in ~1-3s each.
+vi.setConfig({ testTimeout: 30_000 })
 
 const execFile = promisify(execFileCb)
 

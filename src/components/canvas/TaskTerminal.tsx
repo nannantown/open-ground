@@ -8,7 +8,8 @@ import { useT } from '@/i18n/I18nContext'
 // and renders ONLY here in the drawer — the Terminal tab is plain shells and
 // knows nothing about tasks. This component is purely presentational: given
 // the task's live claude terminal id (or null), render the raw terminal or
-// the launch CTA.
+// the (re)launch CTA — a PLAIN claude launch: no prompt is sent; the task's
+// content reaches the input via the drawer's "Insert task into input" button.
 
 export const BoardTaskTerminal = ({
   terminalId,

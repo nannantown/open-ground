@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronRight, GitBranch, Play, Trash2, X } from 'lucide-react'
-import { BoardTab } from '@/components/canvas/BoardTab'
+import { ChevronRight, GitBranch, Trash2, X } from 'lucide-react'
+import { BoardTab, columnOf } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
 import { api } from '@/lib/api-client'
 import { deriveCardFields, wantsAutoTitle } from '@/lib/cardTitle'
@@ -26,13 +26,16 @@ export interface BoardModuleProps {
   /** True when the task already has a Terminal-tab slot (a launched claude
    *  session) — such a card is "touched" and must survive drawer close. */
   hasTerminalSlot: (taskId: string) => boolean
+  /** The task's LIVE claude PTY id (launched and not exited) — the target of
+   *  the "Insert task into input" button; null disables it. */
+  liveTerminalId: (taskId: string) => string | null
   /** Delete a card with full teardown (close its terminal slot, remove from
    *  tasks.json). Rendered in the drawer header, not the conversation pane. */
   onDeleteTask: (id: string) => void
-  /** Launch the task's claude session (creates its Terminal-tab slot). The
-   *  drawer's Draft mode owns the Launch button — the conversation pane is not
-   *  rendered until a slot exists. */
-  onLaunchTask: (task: ProjectTask) => Promise<void> | void
+  /** Launch the task's claude session (plain claude, no prompt sent). The
+   *  drawer auto-launches it once the card has a title — the conversation
+   *  pane is not rendered until a slot exists. */
+  onLaunchTask: (task: ProjectTask) => Promise<boolean>
 }
 
 export const BoardModule = ({
@@ -43,6 +46,7 @@ export const BoardModule = ({
   onOpenDetail,
   renderConversation,
   hasTerminalSlot,
+  liveTerminalId,
   onDeleteTask,
   onLaunchTask,
 }: BoardModuleProps) => {
@@ -202,12 +206,90 @@ export const BoardModule = ({
     }
   }
 
-  const launchDetail = async (task: ProjectTask) => {
+  const launchDetail = async (task: ProjectTask): Promise<boolean> => {
     setLaunching(true)
     try {
-      await onLaunchTask(task)
+      return await onLaunchTask(task)
     } finally {
       setLaunching(false)
+    }
+  }
+
+  // Auto-launch: opening a card's drawer starts its claude session by itself —
+  // PLAIN (no prompt sent), so there is no "Launch" button anymore. Fires once
+  // per task (ref guard) when the drawer is open, the card has a title (a
+  // just-created untitled card waits until capture commits one), it is not in
+  // the done column, the project folder exists, and no slot exists yet.
+  // ProjectPanel's launchingTasksRef is the real multi-launch guard; the local
+  // `launching` state keeps the UI from double-firing within this module. No
+  // dep array on purpose: the guards make it idempotent, and prop closures
+  // (hasTerminalSlot) change identity every render anyway.
+  const autoLaunchedRef = useRef<Set<string>>(new Set())
+  // Tasks whose auto-launch FAILED — surfaced as a manual retry CTA. Kept in
+  // state (not the ref) so the failure renders; the effect skips these so it
+  // never hot-loops retrying a spawn that keeps failing.
+  const [launchFailed, setLaunchFailed] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    const task = detailTask
+    if (!task) return
+    if (!task.title.trim()) return
+    if (columnOf(task) === 'done') return
+    if (project.missing) return
+    if (hasTerminalSlot(task.id)) return
+    if (launching) return
+    if (launchFailed.has(task.id)) return
+    if (autoLaunchedRef.current.has(task.id)) return
+    autoLaunchedRef.current.add(task.id)
+    void launchDetail(task).then(ok => {
+      if (!ok) {
+        // Let the user retry: drop the once-guard and flag the failure.
+        autoLaunchedRef.current.delete(task.id)
+        setLaunchFailed(prev => new Set(prev).add(task.id))
+      }
+    })
+  })
+
+  // Manual retry after a failed auto-launch: clear the failure flag so the
+  // effect fires again on the next render.
+  const retryLaunch = (task: ProjectTask) => {
+    setLaunchFailed(prev => {
+      if (!prev.has(task.id)) return prev
+      const n = new Set(prev)
+      n.delete(task.id)
+      return n
+    })
+  }
+
+  // "Insert task into input" — paste the task's title + content into the live
+  // claude PTY UNSENT (bracketed paste, no trailing newline): the user reviews
+  // the prompt in the input box and presses Enter to run it. Raw fetch, same
+  // style as ProjectPanel's launchTaskTerminal.
+  const [inserting, setInserting] = useState(false)
+  const [insertError, setInsertError] = useState<string | null>(null)
+  const insertTask = async (task: ProjectTask) => {
+    const ptyId = liveTerminalId(task.id)
+    if (!ptyId) return
+    setInserting(true)
+    setInsertError(null)
+    try {
+      // Send the LIVE title/notes (drawer edits are debounced before they hit
+      // tasks.json, and a brand-new card may not be persisted yet) so the
+      // server pastes exactly what's on screen, not a stale disk copy.
+      const res = await fetch(`/api/terminal/${encodeURIComponent(ptyId)}/paste-task`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          path: project.path,
+          taskId: task.id,
+          title: task.title,
+          notes: task.notes ?? '',
+        }),
+      })
+      if (!res.ok) setInsertError(t('board.detail.insertTaskFailed'))
+    } catch {
+      setInsertError(t('board.detail.insertTaskFailed'))
+    } finally {
+      setInserting(false)
     }
   }
 
@@ -547,22 +629,41 @@ export const BoardModule = ({
                   {fieldsBlock(detailTask, true)}
                 </div>
               )}
-              {/* Launch bar — anchored at the bottom; the one-line flow note
-                  answers "how does this get merged?" BEFORE anything runs. */}
+              {/* Auto-launch note — no Launch button anymore: claude starts
+                  by itself (plain) once the card has a title. The message is
+                  state-accurate: it never promises a launch that the effect's
+                  own guards (done column / missing folder) will skip, and a
+                  failed spawn gets a real retry CTA instead of a dead end. */}
               <div className="shrink-0 border-t border-line-soft px-5 py-3">
-                <button
-                  type="button"
-                  onClick={() => void launchDetail(detailTask)}
-                  disabled={launching || project.missing}
-                  className="flex w-full items-center justify-center gap-1.5 rounded-[4px] border border-line px-3 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:bg-accent/10 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                >
-                  <Play size={12} strokeWidth={2.5} />
-                  {launching ? t('projectPanel.launchingClaude') : t('projectPanel.launchClaude')}
-                </button>
-                <p className="mt-2 text-[11px] leading-relaxed text-ink-faint">
-                  {t('board.detail.launchHintShort')}
-                  {flowText ? ` · ${flowText}` : ''}
-                </p>
+                {project.missing ? (
+                  <p className="text-[11px] leading-relaxed text-ink-faint">
+                    {t('board.detail.autoLaunchMissing')}
+                  </p>
+                ) : columnOf(detailTask) === 'done' ? (
+                  <p className="text-[11px] leading-relaxed text-ink-faint">
+                    {t('board.detail.autoLaunchDone')}
+                  </p>
+                ) : launchFailed.has(detailTask.id) ? (
+                  <div className="flex items-baseline gap-2">
+                    <button
+                      type="button"
+                      onClick={() => retryLaunch(detailTask)}
+                      className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {t('board.detail.autoLaunchRetry')}
+                    </button>
+                    <span className="min-w-0 text-[11px] leading-relaxed text-ink-faint">
+                      {t('board.detail.autoLaunchFailed')}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-[11px] leading-relaxed text-ink-faint">
+                    {launching
+                      ? t('projectPanel.launchingClaude')
+                      : t('board.detail.autoLaunchHint')}
+                    {flowText ? ` · ${flowText}` : ''}
+                  </p>
+                )}
               </div>
             </>
           ) : (
@@ -611,6 +712,27 @@ export const BoardModule = ({
                     )}
                   </div>
                 )}
+                {/* Insert task into input — pastes title + content into the
+                    claude input UNSENT; the user presses Enter to run. Sits
+                    right under the status strip so the flow note (merge/PR
+                    target) reads as "what happens after Enter". */}
+                <div className="flex items-baseline gap-2 px-5 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => void insertTask(detailTask)}
+                    disabled={inserting || !liveTerminalId(detailTask.id)}
+                    className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    {inserting
+                      ? t('board.detail.insertTaskBusy')
+                      : t('board.detail.insertTask')}
+                  </button>
+                  <span
+                    className={`min-w-0 truncate text-[11px] ${insertError ? 'text-accent' : 'text-ink-faint'}`}
+                  >
+                    {insertError ?? t('board.detail.insertTaskHint')}
+                  </span>
+                </div>
               </div>
               <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
                 {fieldsOpen && (

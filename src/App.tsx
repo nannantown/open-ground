@@ -23,7 +23,9 @@ import { api } from '@/lib/api-client'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
 import type {
+  ActiveTerminalsResponse,
   CanvasState,
+  ClaudeBeaconStatus,
   ProjectMeta,
   Settings,
   ProjectsResponse,
@@ -98,6 +100,14 @@ export default function App() {
   const [terminalActiveIds, setTerminalActiveIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   )
+  // Refinement of the same poll for claude-tagged PTYs: projectId → 'working'
+  // (claude is busy) | 'waiting' (claude sits on the human — its turn signal).
+  // A project absent from the map only hosts plain shells, so its card keeps
+  // the legacy 'Terminal' beacon. Several claude cwds on one project collapse
+  // with working > waiting.
+  const [claudeStatusById, setClaudeStatusById] = useState<
+    ReadonlyMap<string, ClaudeBeaconStatus>
+  >(() => new Map())
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('select')
@@ -282,8 +292,12 @@ export default function App() {
       try {
         const res = await api.api.terminal.active.$get()
         if (!res.ok) return
-        const { cwds } = (await res.json()) as { cwds: string[] }
+        const data = (await res.json()) as ActiveTerminalsResponse
         if (cancelled) return
+        const { cwds } = data
+        // A server predating the refined payload omits `claude` — treat that
+        // as "no claude sessions" so cards fall back to the plain beacon.
+        const claude = data.claude ?? []
         const next = new Set(
           projects
             .filter((p) =>
@@ -291,12 +305,29 @@ export default function App() {
             )
             .map((p) => p.id),
         )
+        // Same cwd→project rule for claude sessions; working wins when a
+        // project holds both a working and a waiting pane.
+        const nextStatus = new Map<string, ClaudeBeaconStatus>()
+        for (const p of projects) {
+          for (const a of claude) {
+            if (a.cwd !== p.path && !a.cwd.startsWith(p.path + '/')) continue
+            nextStatus.set(p.id, a.status)
+            if (a.status === 'working') break
+          }
+        }
         // Keep the previous Set identity when nothing changed so the canvas
         // doesn't re-render every 5 seconds.
         setTerminalActiveIds((prev) =>
           prev.size === next.size && Array.from(next).every((id) => prev.has(id))
             ? prev
             : next,
+        )
+        // Same identity-preserving pattern for the status map.
+        setClaudeStatusById((prev) =>
+          prev.size === nextStatus.size &&
+          Array.from(nextStatus).every(([id, st]) => prev.get(id) === st)
+            ? prev
+            : nextStatus,
         )
       } catch {
         /* server restarting / offline — keep the last known state */
@@ -600,6 +631,7 @@ export default function App() {
       <InfiniteCanvas
         projects={visibleProjects}
         terminalActiveIds={terminalActiveIds}
+        claudeStatuses={claudeStatusById}
         canvas={canvas}
         onCanvasChange={onCanvasChange}
         selectedIds={selectedIds}

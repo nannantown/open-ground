@@ -194,16 +194,19 @@ describe('Hono routes — body validation (zod / manual)', () => {
 })
 
 describe('Hono routes — dynamic params & 404 guard', () => {
-  it('GET /api/terminal/active → 200 { cwds: [] } (not captured by :id)', async () => {
+  it('GET /api/terminal/active → 200 { cwds: [], claude: [] } (not captured by :id)', async () => {
     // The static `active` segment must resolve to the live-PTY listing, never
     // fall into the dynamic /api/terminal/:id route (which would 404 it as an
-    // unknown terminal id). The test home spawns no PTYs, so cwds is [] —
-    // the contract under test is the route's existence + shape.
+    // unknown terminal id). The test home spawns no PTYs, so both arrays are
+    // empty — the contract under test is the route's existence + the
+    // ActiveTerminalsResponse shape (cwds + claude working/waiting refinement).
     const res = await app.request('/api/terminal/active')
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(Array.isArray(body.cwds)).toBe(true)
     expect(body.cwds).toEqual([])
+    expect(Array.isArray(body.claude)).toBe(true)
+    expect(body.claude).toEqual([])
   })
 
   it('GET /api/terminal/:id (unknown id) → 404', async () => {

@@ -85,4 +85,17 @@ esc=$(printf '%s' "$result" | sed 's/\\/\\\\/g; s/"/\\"/g')
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$esc"
 } >> "$jsonl"
 
+# --- stay interactive like the real claude TUI ------------------------------
+# Board sessions launch PLAIN and get the task content injected later
+# (paste-task → PTY stdin, unsent), so the live-session UI (insert button
+# enabled, no "exited" state) needs this process to keep reading stdin exactly
+# like real claude waiting at its input box. The PTY's canonical echo renders
+# whatever is pasted, which the e2e asserts on. EOF (terminal killed / PTY
+# closed) ends us; OPENGROUND_FAKE_EXIT=immediate restores the old
+# fire-and-quit behaviour for any spec that wants a finished session.
+if [ "${OPENGROUND_FAKE_EXIT:-stay}" = "immediate" ]; then
+  exit 0
+fi
+cat > /dev/null
+
 exit 0

@@ -6,6 +6,7 @@ import { FrameView } from './FrameView'
 import type {
   CanvasElement,
   CanvasState,
+  ClaudeBeaconStatus,
   ProjectMeta,
   Tool,
 } from '@/lib/types'
@@ -41,6 +42,10 @@ interface Props {
    *  pulsing "Terminal" beacon on their cards. The per-project Canvas tab
    *  renders no project cards, so it leaves this undefined. */
   terminalActiveIds?: ReadonlySet<string>
+  /** Ground-only: per-project claude beacon refinement ('working'/'waiting').
+   *  A project with a live PTY but no entry here only hosts plain shells, so
+   *  its card shows the legacy 'Terminal' beacon. */
+  claudeStatuses?: ReadonlyMap<string, ClaudeBeaconStatus>
   canvas: CanvasState
   onCanvasChange: (c: CanvasState) => void
   selectedIds: string[]
@@ -223,6 +228,7 @@ type Press =
 export const InfiniteCanvas = ({
   projects,
   terminalActiveIds,
+  claudeStatuses,
   canvas,
   onCanvasChange,
   selectedIds,
@@ -2105,6 +2111,7 @@ export const InfiniteCanvas = ({
                 onPointerDown={onCardPointerDown(p)}
                 selected={selectedIds.includes(p.id)}
                 terminalActive={terminalActiveIds?.has(p.id) ?? false}
+                claudeStatus={claudeStatuses?.get(p.id)}
               />
             </div>
           )

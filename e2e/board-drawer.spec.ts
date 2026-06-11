@@ -2,15 +2,17 @@ import { test, expect } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
 
 // Board detail drawer — REAL mouse drags (the placeholder regression taught us
-// synthetic events lie about drag behaviour). The drawer is phase-following:
-//   Draft (no terminal slot): fields fill the drawer, Launch bar at the bottom,
-//     no split grip (there is no terminal to split against).
-//   Session (after Launch): the terminal owns the drawer; the chevron header
-//     expands the fields block, whose split divider is drag-resizable.
-// Width (the drawer's left edge) is draggable in BOTH phases.
+// synthetic events lie about drag behaviour). Opening a TITLED card's drawer
+// auto-launches a plain claude session (no prompt is sent — the task content
+// is injected unsent via the "Insert task into input" button), so the drawer
+// lands straight in Session mode:
+//   Session: the terminal owns the drawer; the chevron header expands the
+//     fields block, whose split divider is drag-resizable; the insert button
+//     sits under the status strip.
+// Width (the drawer's left edge) is draggable too.
 
 test.describe('Board detail drawer', () => {
-  test('draft fields → launch → session split/width drags, remembered on reload', async ({
+  test('open auto-launches session; insert button present; split/width drags remembered on reload', async ({
     request,
     page,
   }) => {
@@ -34,17 +36,30 @@ test.describe('Board detail drawer', () => {
     )
     await page.goto('/', { waitUntil: 'domcontentloaded' })
 
-    // Open the card → DRAFT mode: full fields + Launch bar, no split grip yet.
+    // Open the card → the titled task AUTO-LAUNCHES (fake-claude) → SESSION
+    // mode: compact header, no Launch button anywhere, insert button present.
     await page.getByText('Resize me').first().click()
     const aside = page.locator('aside')
-    await expect(aside.locator('input[placeholder]').first()).toBeVisible()
-    const launch = aside.getByRole('button', { name: /Launch Claude/i })
-    await expect(launch).toBeVisible()
+    const header = aside.getByRole('button', { name: 'Resize me' })
+    await expect(header).toBeVisible()
     await expect(
-      page.getByRole('separator', { name: /terminal height|ターミナルの高さ/i }),
+      aside.getByRole('button', { name: /Launch Claude/i }),
     ).toHaveCount(0)
+    const insert = aside.getByRole('button', {
+      name: /Insert task into input|タスク内容を入力欄へ/i,
+    })
+    await expect(insert).toBeVisible()
+    await expect(insert).toBeEnabled()
 
-    // ── Width: drag the left-edge grip 120px left → drawer widens (Draft). ───
+    // Click insert → the composed task prompt lands UNSENT in the PTY; the
+    // fake claude just reads stdin, so the PTY's canonical echo renders it —
+    // the task title showing up inside the terminal proves the paste arrived.
+    await insert.click()
+    await expect(
+      aside.locator('.xterm-screen').getByText(/Resize me/).first(),
+    ).toBeVisible()
+
+    // ── Width: drag the left-edge grip 120px left → drawer widens. ───────────
     const wBefore = (await aside.boundingBox())?.width ?? 0
     const grip = page.getByRole('separator', { name: /panel width|パネル幅/i })
     const gb = await grip.boundingBox()
@@ -56,11 +71,6 @@ test.describe('Board detail drawer', () => {
     await page.mouse.up()
     const wAfter = (await aside.boundingBox())?.width ?? 0
     expect(wAfter - wBefore).toBeGreaterThan(80)
-
-    // ── Launch (fake-claude) → SESSION mode: compact header + terminal. ──────
-    await launch.click()
-    const header = aside.getByRole('button', { name: 'Resize me' })
-    await expect(header).toBeVisible()
 
     // Chevron expands the fields; the split divider appears and drags.
     await header.click()
@@ -78,7 +88,10 @@ test.describe('Board detail drawer', () => {
     const after = await split.boundingBox()
     expect(after).toBeTruthy()
     if (!after) return
-    expect(after.y - before.y).toBeGreaterThan(50)
+    // The insert-task block under the status strip shrinks the drag range, so
+    // an 80px drag may clamp around ~40px — assert meaningful movement, not
+    // the full distance.
+    expect(after.y - before.y).toBeGreaterThan(25)
 
     // ── Both choices survive a reload (slot persists → Session mode). ────────
     await page.reload({ waitUntil: 'domcontentloaded' })

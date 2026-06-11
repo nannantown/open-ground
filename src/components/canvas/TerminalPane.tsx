@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { migrateLs } from '@/lib/lsMigrate'
 import { api } from '@/lib/api-client'
+import { sanitizePaneTitle } from '@/lib/paneTitle'
 import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
 export interface TerminalPaneHandle {
   /** Kill the current PTY and start a fresh shell session. */
@@ -32,6 +33,15 @@ interface Props {
   /** Fired whenever the attached session's info changes (shell, size, exit).
    *  ProjectPanel uses this to render `zsh 163×44` inside the Terminal tab. */
   onInfo?: (info: TerminalInfo | null) => void
+  /** Fired when the PTY emits an OSC title escape (xterm's onTitleChange) —
+   *  Claude Code sets a live topic summary this way. Already sanitized;
+   *  empty/whitespace titles are dropped. ProjectPanel shows it in the pane
+   *  header. `null` means "drop the shown title" — fired when the session
+   *  exits and when a fresh session (re)connects, so a stale title from a
+   *  dead session never lingers over a new shell. A live session's title is
+   *  restored best-effort by SSE replay (the replay buffer is bounded, so a
+   *  title that scrolled far past the cap is lost on reload). */
+  onTitle?: (title: string | null) => void
 }
 
 export interface TerminalInfo {
@@ -62,7 +72,7 @@ const legacyNsPreSlotSessionKey = (projectPath: string) =>
   `hove.terminal.session.${projectPath}`
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { projectPath, slotKey = 'default', onInfo, mode = 'project' },
+  { projectPath, slotKey = 'default', onInfo, onTitle, mode = 'project' },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -81,6 +91,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   useEffect(() => {
     onInfoRef.current?.(exited ?? info)
   }, [info, exited])
+  // Same ref trick for the OSC-title callback.
+  const onTitleRef = useRef(onTitle)
+  onTitleRef.current = onTitle
   // Bumped to force a fresh session (after kill / exit / restart click).
   const [reloadKey, setReloadKey] = useState(0)
 
@@ -203,6 +216,18 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       termRef.current = term
       fitRef.current = fit
 
+      // Fresh terminal for this (re)connect — drop any title left over from a
+      // previous session in this slot (restart, exit-then-remount). A live
+      // session's own title comes right back via the SSE replay below.
+      onTitleRef.current?.(null)
+
+      // OSC title escapes (ESC ]0;...BEL etc.) — xterm parses them; Claude
+      // Code emits a live topic summary this way. Disposed with the terminal.
+      term.onTitleChange((raw: string) => {
+        const title = sanitizePaneTitle(raw)
+        if (title) onTitleRef.current?.(title)
+      })
+
       let session: TerminalInfo
       try {
         const result = await ensureSession()
@@ -253,6 +278,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
           setExited(inf)
         } catch {}
         try { es?.close() } catch {}
+        // The session is dead — the header must not keep advertising what WAS
+        // running, so drop its title.
+        onTitleRef.current?.(null)
         // Wipe the cached id so the next mount opens a fresh shell.
         try { localStorage.removeItem(sessionKey(projectPath, slotKey)) } catch {}
       })

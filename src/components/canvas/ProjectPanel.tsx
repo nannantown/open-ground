@@ -40,6 +40,7 @@ import { boardDiffDigest } from '@/lib/boardDigest'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { migrateLs } from '@/lib/lsMigrate'
 import { loadPersistedView, savePersistedView } from '@/lib/persistView'
+import { paneHeaderTitle, paneTooltip } from '@/lib/paneTitle'
 import { descriptionForLang } from '@/lib/descriptionLang'
 import {
   TerminalPane,
@@ -473,6 +474,16 @@ export const ProjectPanel = ({
   // tab header with that pane's `zsh · cols×rows` instead of waiting for its
   // next info event.
   const terminalInfoMapRef = useRef<Record<string, TerminalInfo | null>>({})
+  // Live OSC title per pane (slot id → title) — what's running in the pane,
+  // straight from the PTY stream (Claude Code emits a topic summary as an OSC
+  // title escape; xterm parses it). NOT persisted: the SSE replay buffer
+  // re-emits the escape on reload — best-effort only (the buffer is bounded,
+  // so a title that scrolled >200KB behind is lost and the header falls back
+  // to the slot label until the next title emit). TerminalPane reports null
+  // when a session exits or a fresh one (re)connects; we drop the entry then.
+  const [terminalOscTitles, setTerminalOscTitles] = useState<
+    Record<string, string>
+  >({})
   // Tracks which project path's slot list is currently in state. Used to
   // gate persistence: we must not save until we've loaded for this path,
   // otherwise the initial-render default slot would clobber a saved
@@ -493,6 +504,7 @@ export const ProjectPanel = ({
       setTaskTerminals(loadTaskTerminals(path))
       setExitedTaskTerminals(new Set())
       setActiveTerminalSlot(next[0]?.id ?? 'default')
+      setTerminalOscTitles({})
       return
     }
     // Subsequent runs for the same path: terminalSlots changed because the
@@ -547,30 +559,28 @@ export const ProjectPanel = ({
 
   // Launch (or relaunch) the claude terminal FOR A BOARD TASK — board-scoped:
   // the PTY id lands in taskTerminals and the session renders only inside the
-  // Board drawer (BoardTaskTerminal). The Terminal tab is not involved. The
-  // title is the prompt; notes are NOT sent.
-  const launchTaskTerminal = async (task: ProjectTask) => {
-    if (!project) return
-    if (taskTerminals[task.id] && !exitedTaskTerminals.has(task.id)) return
-    if (launchingTasksRef.current.has(task.id)) return
+  // Board drawer (BoardTaskTerminal). The Terminal tab is not involved.
+  // claude starts PLAIN — no prompt is sent. The task's title + content reach
+  // the session only via the drawer's "Insert task into input" button
+  // (POST /api/terminal/:id/paste-task), which pastes them UNSENT so the user
+  // reviews and presses Enter. taskWorktrees just pre-authorizes the central
+  // worktrees dir (--add-dir) on git projects for the task-branch protocol.
+  // Returns true on success so the caller (BoardModule's auto-launch) can show
+  // a manual retry affordance instead of silently dead-ending when the spawn
+  // fails (claude not on PATH, 5xx, offline). An already-live slot counts as
+  // success (nothing to do).
+  const launchTaskTerminal = async (task: ProjectTask): Promise<boolean> => {
+    if (!project) return false
+    if (taskTerminals[task.id] && !exitedTaskTerminals.has(task.id)) return true
+    if (launchingTasksRef.current.has(task.id)) return true
     launchingTasksRef.current.add(task.id)
     try {
-      const title = task.title?.trim()
       const r = await fetch('/api/terminal/claude', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        // Structured task launch: the server composes the first prompt from
-        // title + content, and on a git project adds the task-branch/worktree
-        // protocol (claude names its own branch; parallel cards never share a
-        // checkout). Falls back to a bare session when the card is untitled.
-        body: JSON.stringify({
-          cwd: project.path,
-          ...(title
-            ? { task: { id: task.id, title, notes: task.notes ?? '' } }
-            : {}),
-        }),
+        body: JSON.stringify({ cwd: project.path, taskWorktrees: true }),
       })
-      if (!r.ok) return
+      if (!r.ok) return false
       const info = (await r.json()) as TerminalInfo
       setExitedTaskTerminals(prev => {
         if (!prev.has(task.id)) return prev
@@ -579,8 +589,9 @@ export const ProjectPanel = ({
         return n
       })
       setTaskTerminals(prev => ({ ...prev, [task.id]: info.id }))
+      return true
     } catch {
-      /* swallow — the Board card stays on its launch button to retry */
+      return false
     } finally {
       launchingTasksRef.current.delete(task.id)
     }
@@ -623,6 +634,11 @@ export const ProjectPanel = ({
     setTerminalSlots(prev => {
       const next = prev.filter(s => s.id !== id)
       return next.length > 0 ? next : [DEFAULT_SLOT]
+    })
+    setTerminalOscTitles(prev => {
+      if (!(id in prev)) return prev
+      const { [id]: _, ...rest } = prev
+      return rest
     })
     setActiveTerminalSlot(prev => {
       if (prev !== id) return prev
@@ -1639,6 +1655,17 @@ export const ProjectPanel = ({
             const active = slot.id === activeTerminalSlot
             const canClose = terminalSlots.length > 1
             const isDropTarget = termDragOverId === slot.id && termDragId !== slot.id
+            // Live OSC title (what's running) wins over an auto-generated
+            // "Terminal N" label; an explicit user rename always wins (see
+            // paneHeaderTitle). Gated on loadedForPathRef so the first frame
+            // after a project switch can't flash the previous project's title
+            // (slot ids like 'default' are shared across projects and the
+            // reset effect runs only after that first paint).
+            const oscTitle =
+              loadedForPathRef.current === project.path
+                ? terminalOscTitles[slot.id]
+                : undefined
+            const headerTitle = paneHeaderTitle(oscTitle, slot.label)
             return (
               <div
                 key={slot.id}
@@ -1709,12 +1736,13 @@ export const ProjectPanel = ({
                         e.stopPropagation()
                         beginRenameTerminal(slot)
                       }}
-                      // Show the full label on hover (it truncates in a narrow
-                      // pane) + the rename affordance.
-                      title={`${slot.label}\n(${t('projectPanel.renameTerminal')})`}
+                      // Show the full title on hover (it truncates in a narrow
+                      // pane) — both the live OSC title and the slot label when
+                      // they differ — + the rename affordance.
+                      title={`${paneTooltip(oscTitle, slot.label)}\n(${t('projectPanel.renameTerminal')})`}
                       className="min-w-0 flex-1 truncate"
                     >
-                      {slot.label}
+                      {headerTitle}
                     </span>
                   )}
                   {canClose && (
@@ -1746,6 +1774,20 @@ export const ProjectPanel = ({
                       if (activeTerminalSlotRef.current === slot.id)
                         setTerminalInfo(inf)
                     }}
+                    onTitle={title =>
+                      setTerminalOscTitles(prev => {
+                        if (title === null) {
+                          // Session ended / fresh session connecting — drop
+                          // the dead session's title.
+                          if (!(slot.id in prev)) return prev
+                          const { [slot.id]: _, ...rest } = prev
+                          return rest
+                        }
+                        return prev[slot.id] === title
+                          ? prev
+                          : { ...prev, [slot.id]: title }
+                      })
+                    }
                   />
                 </div>
               </div>
@@ -1799,6 +1841,12 @@ export const ProjectPanel = ({
           // A card with a launched terminal counts as "touched" — the drawer's
           // close-discards-empty-card check must not drop it.
           hasTerminalSlot={id => id in taskTerminals}
+          // The task's LIVE claude PTY id (launched and not exited) — feeds
+          // the drawer's "Insert task into input" button (paste-task route).
+          liveTerminalId={id => {
+            const ptyId = taskTerminals[id]
+            return ptyId && !exitedTaskTerminals.has(id) ? ptyId : null
+          }}
           // Delete lives in the drawer HEADER (next to ×), not floating in the
           // conversation pane.
           onDeleteTask={id => {
@@ -1807,7 +1855,8 @@ export const ProjectPanel = ({
             closeTaskTerminal(id)
             if (data) persist({ ...data, tasks: data.tasks.filter(t => t.id !== id) })
           }}
-          // Draft mode's Launch bar — same launch as the card ▶.
+          // Auto-launched by the drawer once the card has a title (plain
+          // claude, no prompt sent) — same launch as the card ▶.
           onLaunchTask={launchTaskTerminal}
           // The task's session lives ONLY here in the drawer (board-scoped
           // taskTerminals map) — a raw PTY terminal, works on the
@@ -1819,7 +1868,9 @@ export const ProjectPanel = ({
             return (
               <BoardTaskTerminal
                 terminalId={liveId}
-                onLaunch={() => launchTaskTerminal(task)}
+                onLaunch={async () => {
+                  await launchTaskTerminal(task)
+                }}
                 onExit={() => markTaskTerminalExited(task.id)}
               />
             )
