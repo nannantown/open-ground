@@ -19,6 +19,15 @@
     com.apple.security.inherit                       — child processes
                                                        inherit the same
                                                        entitlement set
+    com.apple.security.device.audio-input            — voice dictation:
+                                                       getUserMedia in the
+                                                       renderer needs the mic
+                                                       under hardened runtime
+                                                       (pairs with the
+                                                       NSMicrophoneUsage-
+                                                       Description Info.plist
+                                                       key in package.json
+                                                       build.mac.extendInfo)
 
   Sandboxing is intentionally OFF — the whole point of OPEN GROUND is
   to read the user's project tree and spawn shell commands in it. A
@@ -35,6 +44,8 @@
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
   <key>com.apple.security.inherit</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
   <true/>
 </dict>
 </plist>

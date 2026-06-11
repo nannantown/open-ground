@@ -39,6 +39,34 @@ describe('comboFromEvent', () => {
       expect(comboFromEvent(ev(key, { ctrlKey: key === 'Control' }))).toBeNull()
     }
   })
+
+  // macOS mutates e.key while Option is held — the physical chord must still
+  // serialize/match canonically via e.code.
+  it('recovers the physical key from e.code when macOS Option mutates e.key', () => {
+    // Option+Space → key is the no-break space
+    expect(comboFromEvent(ev(' ', { altKey: true, code: 'Space' }))).toBe('Alt+Space')
+    // Option+V → '√'
+    expect(comboFromEvent(ev('√', { altKey: true, code: 'KeyV' }))).toBe('Alt+V')
+    // Option+E → dead accent key
+    expect(comboFromEvent(ev('Dead', { altKey: true, code: 'KeyE' }))).toBe('Alt+E')
+    // Option+5 → '∞'
+    expect(comboFromEvent(ev('∞', { altKey: true, code: 'Digit5' }))).toBe('Alt+5')
+  })
+
+  it("maps a bare no-break-space key to 'Space' even without code", () => {
+    expect(comboFromEvent(ev(' ', { altKey: true }))).toBe('Alt+Space')
+  })
+
+  it('leaves layout-dependent codes alone (e.key stays authoritative)', () => {
+    // JIS 英数 — code Lang2 is not a "simple" code; the key name is kept.
+    expect(comboFromEvent(ev('Eisu', { ctrlKey: true, code: 'Lang2' }))).toBe('Ctrl+Eisu')
+    // Punctuation moves between layouts — don't translate via code.
+    expect(comboFromEvent(ev(';', { ctrlKey: true, code: 'Semicolon' }))).toBe('Ctrl+;')
+  })
+
+  it('without Ctrl/Alt/Meta the typed key wins over code (Shift+A is A)', () => {
+    expect(comboFromEvent(ev('A', { shiftKey: true, code: 'KeyA' }))).toBe('Shift+A')
+  })
 })
 
 describe('matchesCombo', () => {
@@ -67,6 +95,10 @@ describe('matchesCombo', () => {
 
   it('a modifier-only press never matches anything', () => {
     expect(matchesCombo(ev('Control', { ctrlKey: true }), 'Ctrl+V')).toBe(false)
+  })
+
+  it("the default 'Alt+Space' matches a real macOS Option+Space event", () => {
+    expect(matchesCombo(ev(' ', { altKey: true, code: 'Space' }), 'Alt+Space')).toBe(true)
   })
 })
 

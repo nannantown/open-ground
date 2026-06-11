@@ -5,9 +5,11 @@
 // VoiceController component wires them to real keyboard events.
 
 /** The subset of KeyboardEvent these helpers read (duck-typed so tests can
- *  pass plain objects without a DOM). */
+ *  pass plain objects without a DOM). `code` is optional: when present it
+ *  rescues the combos macOS mutates (see comboFromEvent). */
 export interface ComboKeyEvent {
   key: string
+  code?: string
   ctrlKey: boolean
   altKey: boolean
   shiftKey: boolean
@@ -28,14 +30,35 @@ const MAC_SYMBOLS: Record<string, string> = {
 }
 
 /** Canonicalize a KeyboardEvent.key for serialization: single characters are
- *  upper-cased and the space character becomes the word 'Space'. */
+ *  upper-cased, the space character (and macOS Option+Space's no-break space)
+ *  becomes the word 'Space'. */
 function normalizeKey(key: string): string {
-  if (key === ' ') return 'Space'
+  if (key === ' ' || key === ' ') return 'Space'
   return key.length === 1 ? key.toUpperCase() : key
 }
 
+// e.code values whose physical meaning is unambiguous across layouts, mapped
+// to the canonical key they name. Used to recover the main key when macOS
+// mutates e.key under Option (Alt+Space → U+00A0, Alt+V → '√', Alt+E →
+// 'Dead'): a stored 'Alt+V' must keep matching the physical Alt+V press.
+// Deliberately ONLY letters / digits / Space — punctuation codes move between
+// layouts (JIS vs ANSI), so for those e.key stays authoritative.
+function keyFromSimpleCode(code: string | undefined): string | null {
+  if (!code) return null
+  let m = /^Key([A-Z])$/.exec(code)
+  if (m) return m[1]
+  m = /^Digit([0-9])$/.exec(code)
+  if (m) return m[1]
+  if (code === 'Space') return 'Space'
+  return null
+}
+
 /** Serialize a key event to the canonical combo string ('Alt+Space',
- *  'Ctrl+Shift+V', 'F9', …). Returns null for a modifier-only press. */
+ *  'Ctrl+Shift+V', 'F9', …). Returns null for a modifier-only press.
+ *  With Ctrl/Alt/Meta held, the main key is derived from e.code when the
+ *  code is a plain letter/digit/Space — those modifiers change e.key on
+ *  macOS, and a shortcut chord is about the physical key, not the character
+ *  it would type. */
 export function comboFromEvent(e: ComboKeyEvent): string | null {
   if (MODIFIER_KEY_VALUES.has(e.key)) return null
   const parts: string[] = []
@@ -43,7 +66,8 @@ export function comboFromEvent(e: ComboKeyEvent): string | null {
   if (e.altKey) parts.push('Alt')
   if (e.shiftKey) parts.push('Shift')
   if (e.metaKey) parts.push('Meta')
-  parts.push(normalizeKey(e.key))
+  const physical = e.ctrlKey || e.altKey || e.metaKey ? keyFromSimpleCode(e.code) : null
+  parts.push(physical ?? normalizeKey(e.key))
   return parts.join('+')
 }
 

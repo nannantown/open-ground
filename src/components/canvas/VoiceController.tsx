@@ -51,6 +51,8 @@ export const VoiceController = ({ voice, projectPath }: Props) => {
   // values captured when the effect ran.
   const phaseRef = useRef<Phase>('idle')
   const recorderRef = useRef<VoiceRecorder | null>(null)
+  // When the current recording began — guards keydown-while-recording below.
+  const startedAtRef = useRef(0)
   const projectPathRef = useRef(projectPath)
   projectPathRef.current = projectPath
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -73,6 +75,7 @@ export const VoiceController = ({ voice, projectPath }: Props) => {
       if (phaseRef.current !== 'idle') return
       const rec = new VoiceRecorder()
       recorderRef.current = rec
+      startedAtRef.current = Date.now()
       toPhase('recording')
       setNotice(null)
       try {
@@ -171,11 +174,20 @@ export const VoiceController = ({ voice, projectPath }: Props) => {
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return
-      if (keyMode === 'hold') {
-        if (phaseRef.current === 'idle') void begin()
-      } else if (phaseRef.current === 'idle') {
+      if (phaseRef.current === 'idle') {
         void begin()
-      } else if (phaseRef.current === 'recording') {
+        return
+      }
+      // A matching keydown DURING a recording stops it — in toggle mode
+      // that's the contract; in hold mode it recovers a recording whose
+      // keyup got lost (window blur, the macOS permission prompt stealing
+      // focus). The age guard filters the phantom second keydown JIS
+      // Lang keys (英数/かな) fire per physical press on macOS — without it
+      // toggle mode would stop the recording it just started.
+      if (
+        phaseRef.current === 'recording' &&
+        Date.now() - startedAtRef.current > 500
+      ) {
         void finish()
       }
     }
@@ -188,13 +200,24 @@ export const VoiceController = ({ voice, projectPath }: Props) => {
       void finish()
     }
 
+    // Push-to-talk across a focus loss is meaningless — the keyup will land
+    // somewhere else (app switch, the permission prompt). Close the capture
+    // with whatever was said; finish() itself discards sub-300ms takes.
+    const onBlur = () => {
+      if (keyMode !== 'hold') return
+      if (phaseRef.current !== 'recording') return
+      void finish()
+    }
+
     // Capture phase so the chord never leaks into xterm (which would type a
     // literal character into the PTY) or other app-level key handlers.
     window.addEventListener('keydown', onKeyDown, true)
     window.addEventListener('keyup', onKeyUp, true)
+    window.addEventListener('blur', onBlur)
     return () => {
       window.removeEventListener('keydown', onKeyDown, true)
       window.removeEventListener('keyup', onKeyUp, true)
+      window.removeEventListener('blur', onBlur)
       // Settings flipped mid-capture (disable / combo change): drop the take.
       const rec = recorderRef.current
       recorderRef.current = null
