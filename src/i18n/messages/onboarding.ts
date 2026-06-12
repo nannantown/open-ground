@@ -58,6 +58,7 @@ export const onboarding = {
     'onboarding.setup.signinHint':
       'A browser window opens — log in with a paid Claude plan (Pro, Max, Team, or Enterprise). When done, continue.',
     'onboarding.setup.continue': 'Continue to OPEN GROUND',
+    'onboarding.setup.skipAnyway': 'claude runs in the terminal but isn\u2019t detected? Continue anyway',
     'onboarding.setup.terminal': 'Terminal',
     'onboarding.setup.manualHint': 'You can also type any command directly in the terminal.',
 
@@ -113,6 +114,7 @@ export const onboarding = {
     'onboarding.setup.signinHint':
       'ブラウザが開きます — 有料プラン（Pro・Max・Team・Enterprise）でログインしてください。完了したら次へ。',
     'onboarding.setup.continue': 'OPEN GROUND へ進む',
+    'onboarding.setup.skipAnyway': 'ターミナルで claude が動くのに検出されない場合は、このまま続行',
     'onboarding.setup.terminal': 'ターミナル',
     'onboarding.setup.manualHint': 'ターミナルに直接コマンドを入力してもかまいません。',
 

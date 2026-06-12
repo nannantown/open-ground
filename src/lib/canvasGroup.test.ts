@@ -9,6 +9,7 @@ import {
   hasGroupAncestorFlag,
   withGroupAncestors,
   groupCascadeSets,
+  dissolveFrames,
 } from './canvasGroup'
 
 const el = (
@@ -237,5 +238,50 @@ describe('withGroupAncestors', () => {
   it('does not add frame ancestors', () => {
     const els = [el('f', 'frame'), el('a', 'sticky', 'f')]
     expect(withGroupAncestors(els, ['a'])).toEqual(['a'])
+  })
+})
+
+describe('dissolveFrames (⌘⇧G on frames)', () => {
+  const f = (id: string, over: Partial<CanvasElement> = {}): CanvasElement => ({
+    id,
+    type: 'frame',
+    x: 0,
+    y: 0,
+    text: '',
+    ...over,
+  })
+  const s = (id: string, over: Partial<CanvasElement> = {}): CanvasElement => ({
+    id,
+    type: 'sticky',
+    x: 0,
+    y: 0,
+    text: '',
+    ...over,
+  })
+
+  it('removes the selected frame and rehomes its children to the frame parent', () => {
+    const els = [f('outer'), f('inner', { parentId: 'outer', layout: { mode: 'row', gap: 1, padding: 2, align: 'start' } }), s('a', { parentId: 'inner' })]
+    const res = dissolveFrames(els, ['inner'])!
+    expect(res.elements.find((e) => e.id === 'inner')).toBeUndefined()
+    expect(res.elements.find((e) => e.id === 'a')!.parentId).toBe('outer')
+    expect(res.freedIds).toEqual(['a'])
+  })
+
+  it('a top-level frame frees its children to top level (parentId dropped)', () => {
+    const res = dissolveFrames([f('fr'), s('a', { parentId: 'fr' })], ['fr'])!
+    expect(res.elements.find((e) => e.id === 'a')!.parentId).toBeUndefined()
+  })
+
+  it('dissolving nested frames together skips the also-dissolved ancestor', () => {
+    const els = [f('outer'), f('inner', { parentId: 'outer' }), s('a', { parentId: 'inner' })]
+    const res = dissolveFrames(els, ['outer', 'inner'])!
+    expect(res.elements).toHaveLength(1)
+    expect(res.elements[0].parentId).toBeUndefined()
+  })
+
+  it('a selected non-frame never dissolves its frame; no frame → null', () => {
+    const els = [f('fr'), s('a', { parentId: 'fr' })]
+    expect(dissolveFrames(els, ['a'])).toBeNull()
+    expect(dissolveFrames(els, [])).toBeNull()
   })
 })

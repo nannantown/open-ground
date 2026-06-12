@@ -18,10 +18,12 @@ import {
   migrateBoardFromShared,
   migrateBoardToShared,
   readProjectData,
+  writeProjectData,
 } from '@/lib/server/projectData'
 import { migrateCanvasFromShared, migrateCanvasToShared } from '@/lib/server/canvasData'
 import { isShared, sharedDataDir } from '@/lib/server/sharedData'
 import { requireProjectPath } from '../middleware/projectPath'
+import type { ShareEnableConfig } from '@/lib/types'
 
 // Human-readable enable failures. Shown raw by the share dialog — kept short
 // and actionable (the 'ignored' one is the case users actually hit).
@@ -30,6 +32,43 @@ const ENABLE_ERRORS: Record<'not-git' | 'already-shared' | 'ignored', string> = 
   'already-shared': 'This project is already shared via git.',
   ignored:
     "This repo's .gitignore would ignore .openground/ — remove that rule first, otherwise the shared data could never be committed.",
+}
+
+// Strict parse of the enable body's optional `config` (ShareEnableConfig):
+// exactly the three whitelisted ProjectConfig keys, each type-checked. An
+// unknown key or wrong type is a 400 — the seeded policy syncs to the whole
+// team via the marker, so a malformed write must never slip through silently.
+// `undefined` (no config in the body) = the legacy enable, fully unchanged.
+const parseEnableConfig = (
+  raw: unknown,
+): { ok: true; config?: ShareEnableConfig } | { ok: false } => {
+  if (raw === undefined) return { ok: true }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false }
+  const obj = raw as Record<string, unknown>
+  const config: ShareEnableConfig = {}
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined) continue
+    if (key === 'completionFlow') {
+      if (value !== 'merge' && value !== 'pr') return { ok: false }
+      config.completionFlow = value
+    } else if (key === 'targetBranch') {
+      if (typeof value !== 'string') return { ok: false }
+      // Kept even when '' (after trim): an empty string is the dialog's
+      // explicit "clear the saved target branch" — the enable handler drops
+      // the key from the merged config. Absent key = leave it untouched.
+      config.targetBranch = value.trim()
+    } else if (key === 'members') {
+      if (!Array.isArray(value) || value.some((m) => typeof m !== 'string'))
+        return { ok: false }
+      const members = Array.from(
+        new Set(value.map((m) => (m as string).trim()).filter(Boolean)),
+      )
+      if (members.length > 0) config.members = members
+    } else {
+      return { ok: false }
+    }
+  }
+  return { ok: true, ...(Object.keys(config).length > 0 ? { config } : {}) }
 }
 
 export const shareRoutes = new Hono()
@@ -90,17 +129,35 @@ export const shareRoutes = new Hono()
     noteManualSync(path, result)
     return c.json(result)
   })
-  // POST /api/project/share/enable {path} → {ok:true} | {error}
+  // POST /api/project/share/enable {path, config?} → {ok:true} | {error}
   // Creates .openground/ and migrates Board + Canvas data into the repo. The
   // ONLY code path that ever creates the folder — detection elsewhere is
   // passive (marker presence). Nothing is committed here; the first Sync (or
   // the user's own git flow) publishes it.
+  // `config` (ShareEnableConfig, optional — docs/SHARE_UX_FLOWS.md §2c): the
+  // ShareStartDialog's confirmed policy. Merged into the CENTRAL config
+  // BEFORE the board migration, so the existing central→marker carry-over
+  // (S049) publishes it — no separate marker write path.
   .post('/api/project/share/enable', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
+    // Hono caches c.req.json(), so re-reading after requireProjectPath is safe.
+    const body = (await c.req.json().catch(() => ({}))) as { config?: unknown }
+    const parsed = parseEnableConfig(body.config)
+    if (!parsed.ok) return c.json({ error: 'invalid config' }, 400)
     const pre = await enablePreconditions(path)
     if (!pre.ok) return c.json({ error: ENABLE_ERRORS[pre.reason], reason: pre.reason }, 412)
     try {
+      if (parsed.config) {
+        // Still unshared here → this writes the central tasks.json, which
+        // migrateBoardToShared then reads and carries into the marker.
+        const data = await readProjectData(path)
+        const merged = { ...data.config, ...parsed.config }
+        // targetBranch:'' is the explicit clear ("branch at launch") — drop
+        // the key entirely so the marker never publishes an empty branch.
+        if (merged.targetBranch === '') delete merged.targetBranch
+        await writeProjectData(path, { ...data, config: merged })
+      }
       // Board first: it creates the marker (with the shared description);
       // canvas migration then merge-preserves it. Both are idempotent, so a
       // crash between the two is healed by re-running enable… except the

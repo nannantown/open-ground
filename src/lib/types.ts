@@ -166,6 +166,22 @@ export interface CanvasPosition {
   y: number
 }
 
+/** Frame auto layout settings (Figma-style). Lives on a `frame` element's
+ *  optional `layout` field; the actual stacking is computed by the pure engine
+ *  in `src/lib/canvasAutoLayout.ts`.
+ *  - `mode`    — main axis: 'row' stacks the children left→right, 'column'
+ *    top→bottom.
+ *  - `gap`     — px between consecutive children along the main axis.
+ *  - `padding` — px inset from the frame's edges (all four sides).
+ *  - `align`   — cross-axis placement of each child inside the padded box
+ *    ('start' | 'center' | 'end'). */
+export interface FrameLayout {
+  mode: 'row' | 'column'
+  gap: number
+  padding: number
+  align: 'start' | 'center' | 'end'
+}
+
 // Free-form items placed on the canvas (annotations and grouping frames),
 // distinct from the project cards which are backed by real folders.
 //
@@ -303,6 +319,11 @@ export interface CanvasElement {
    *  - a `mock` / `screen` ("a design") may own a `text` child — an annotation
    *    label placed on top of the rendered design that travels with it. */
   parentId?: string
+  /** Frame-only: auto layout (Figma-style). When set, the frame's direct
+   *  children (parentId === this frame's id) are stacked automatically by
+   *  src/lib/canvasAutoLayout.ts — manual child positions are overridden on
+   *  every elements mutation. Absent = free-form frame (default). */
+  layout?: FrameLayout
   /** Comment-only: id of the canvas element this comment was dropped on top
    *  of. Used so the Run prompt can tell Claude exactly which element the
    *  comment refers to (e.g. a specific mockup). */
@@ -426,6 +447,76 @@ export interface ProjectBranchesResponse {
   current: string | null
 }
 
+/** Verdict of POST /api/project/merged-branches for one branch (B018/F065):
+ *  - 'merged'  — the branch tip is an ancestor of the target branch.
+ *  - 'open'    — the tip exists but is NOT merged into the target yet.
+ *  - 'unknown' — no judgment possible (tip/target ref not found, invalid
+ *    name, not a git repo) — the UI shows nothing rather than guessing. */
+export type MergedBranchStatus = 'merged' | 'open' | 'unknown'
+
+/** POST /api/project/merged-branches request. `branches` is capped at 50 per
+ *  call (a Review column never legitimately holds more). `targetBranch`
+ *  (the project's shared config) overrides the origin/HEAD → 'main' default. */
+export interface MergedBranchesRequest {
+  path: string
+  branches: string[]
+  targetBranch?: string
+}
+
+/** POST /api/project/merged-branches response: a verdict per REQUESTED branch
+ *  name (every input key is present; unjudgeable ones are 'unknown'). */
+export type MergedBranchesResponse = Record<string, MergedBranchStatus>
+
+/** GitHub PR lifecycle state as `gh pr view --json state` reports it. */
+export type PrState = 'OPEN' | 'MERGED' | 'CLOSED'
+
+/** POST /api/project/pr-info { path, prUrl } → PR state + diff stats for the
+ *  drawer's status strip (B023, F058/F085). `available: false` covers EVERY
+ *  failure mode — gh missing/unauthenticated, malformed prUrl, network, 404 —
+ *  so a gh-less environment shows nothing instead of an error. */
+export type PrInfoResponse =
+  | { available: false }
+  | {
+      available: true
+      state: PrState
+      title: string
+      additions: number
+      deletions: number
+      isDraft: boolean
+    }
+
+/** One worktree under the project's CENTRAL worktrees dir
+ *  (~/.openground/projects/<uuid>/worktrees/) — task/* and review-* checkouts.
+ *  GET /api/project/worktrees → { worktrees: ProjectWorktreeInfo[] }. */
+export interface ProjectWorktreeInfo {
+  /** Canonical absolute path of the worktree dir. */
+  dir: string
+  /** Short branch name, or null (detached HEAD). */
+  branch: string | null
+  /** Uncommitted changes present (staged/unstaged/untracked) — never removed
+   *  by the cleaner. */
+  dirty: boolean
+}
+
+/** POST /api/project/worktrees/clean — which central worktrees were removed
+ *  and which were kept because they hold uncommitted work. */
+export interface CleanWorktreesResult {
+  removed: string[]
+  skippedDirty: string[]
+}
+
+/** An image attached to a Board card (B022 — bug screenshots etc). No path is
+ *  stored: `id` is the content-addressed file name (`<sha1>.<ext>`) inside the
+ *  project's task-asset store (central task-assets/ or, git-shared,
+ *  .openground/board/assets/) — see src/lib/server/taskAssets.ts. */
+export interface TaskAttachment {
+  /** Asset id = file name: 40 hex sha1 of the bytes + image extension. */
+  id: string
+  /** Original file name, display-only (tooltip); never used as a path. */
+  name: string
+  mime: string
+}
+
 /** A task is a Board card — the only task kind that exists. (The old
  *  'chat'/'assistant' kinds are gone; legacy items of those kinds are silently
  *  dropped on read — see readProjectData.) */
@@ -456,10 +547,54 @@ export interface ProjectTask {
    *  /api/project/tasks {setBranch} right after `git worktree add`. Shown in
    *  the drawer's session status strip. Shared data. */
   branch?: string
+  /** Display name of the teammate who marked this card reviewed (review
+   *  column). Cleared automatically when the card moves back to an active
+   *  column (todo/doing/blocked) — a rework round invalidates the stamp.
+   *  Shared data. */
+  reviewedBy?: string
   /** True while the title is machine-derived (first line of the content, then
    *  the haiku summary) and the user hasn't edited it. A manual title edit
    *  clears it, which also stops any in-flight auto-title from landing. */
   titleAuto?: boolean
+  /** Image attachments (screenshots) — see {@link TaskAttachment}. Shared
+   *  data: the ids travel with the card, the bytes via the asset store. */
+  attachments?: TaskAttachment[]
+  /** Ids of cards that should land before this one (B025). Pure information —
+   *  nothing blocks on it. Ids pointing at deleted cards are skipped at
+   *  render time but kept in the data. Shared data. */
+  dependsOn?: string[]
+  /** Soft deadline, 'YYYY-MM-DD' in the user's local time (B026). Rendered as
+   *  a small chip on the card — today or earlier shows in the accent color.
+   *  No sorting, no notifications. Shared data. */
+  dueDate?: string
+  /** Per-card run settings — see {@link TaskRunSettings}. Every key is an
+   *  optional override of the board's defaults; an absent key inherits live
+   *  (resolved at 実行 time, not frozen at edit time). Shared data. */
+  run?: TaskRunSettings
+}
+
+/** Claude CLI effort levels (`claude --effort <level>`). */
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export const CLAUDE_EFFORTS: readonly ClaudeEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]
+
+/** Per-card overrides for the drawer's 実行 button. Each key falls back to
+ *  the board defaults when absent: flow → config.completionFlow,
+ *  model/effort → launch.model/effort. Travels with the card (shared data)
+ *  so a teammate sees how a card is meant to run. */
+export interface TaskRunSettings {
+  /** Completion flow override for THIS card ('merge' | 'pr'). */
+  flow?: 'merge' | 'pr'
+  /** Model alias override for THIS card (e.g. 'fable', 'opus'). */
+  model?: string
+  /** Effort override for THIS card. */
+  effort?: ClaudeEffort
 }
 
 /** Kanban columns for the Board tab. 'todo'=未着手 / 'doing'=実行中 /
@@ -495,6 +630,8 @@ export interface ProjectLaunchPrefs {
   permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypass'
   /** Model alias passed to `claude --model` (empty = CLI default). */
   model?: string
+  /** Effort level passed to `claude --effort` (empty = CLI default). */
+  effort?: ClaudeEffort
   /** Auto-sync the shared Board/Canvas data in the background (adaptive
    *  fetch + debounced push). Default ON for shared projects; personal —
    *  one teammate opting out never affects the others. */
@@ -537,6 +674,19 @@ export interface DescribeProjectResponse {
   descriptionEn?: string
 }
 
+/** Optional body extension of POST /api/project/share/enable: seeds the
+ *  shared policy (a subset of {@link ProjectConfig}) before the migration
+ *  carries it into the marker — the ShareStartDialog sends the user-confirmed
+ *  workflow + members with the enable itself. Server-validated: exactly these
+ *  keys, 400 on anything else. Omitted body.config = legacy behaviour. */
+export interface ShareEnableConfig {
+  completionFlow?: 'merge' | 'pr'
+  /** Empty string = explicitly clear any saved target branch (the route
+   *  drops the key from the merged config); absent = leave it untouched. */
+  targetBranch?: string
+  members?: string[]
+}
+
 /** GET /api/project/share/status — where a project's Board/Canvas data lives
  *  and whether the repo copy has unsynced local changes. See
  *  docs/SHARED_DATA_PLAN.md. */
@@ -557,6 +707,11 @@ export interface ShareStatus {
    *  a teammate pushed; Sync will pull them. Backed by a throttled
    *  `git fetch` inside the status call. 0 when not shared / no upstream. */
   behind: number
+  /** An upstream tracking branch is configured for the checked-out branch.
+   *  False until the first successful publish (`push -u`): without it the
+   *  ahead/behind counts degrade to 0, so "published" decisions must check
+   *  this flag, never just `ahead === 0`. */
+  upstream: boolean
   /** The last fetch saw the upstream rewritten ("(forced update)") — someone
    *  force-pushed. Present only when true; cleared by the next clean fetch. */
   forcedUpdate?: boolean
@@ -685,10 +840,14 @@ export type PermissionMode = 'bypass' | 'plan'
  *    screen. */
 export type ClaudeBeaconStatus = 'working' | 'waiting'
 
-/** One claude-tagged PTY's contribution to the Ground beacon, deduped per
- *  cwd before it leaves the server: when a project holds several claude
- *  panes, `working` wins over `waiting`. */
+/** One live claude-tagged PTY: its pool id, cwd and working/waiting verdict.
+ *  NOT deduped — every live claude pane is listed, so per-task UIs (Board
+ *  cards keyed by their slot's PTY id) can read their own pane's status.
+ *  Per-project consumers (the Ground beacon) aggregate client-side with
+ *  `working` winning over `waiting`. */
 export interface ClaudeActivity {
+  /** Terminal pool id (TerminalInfo.id) — the key Board task slots hold. */
+  id: string
   cwd: string
   status: ClaudeBeaconStatus
 }
@@ -775,4 +934,64 @@ export interface FeedbackItem {
  *  when signed out (or the env is unconfigured); tokens are never returned. */
 export interface AuthSessionResponse {
   user: AuthUser | null
+}
+
+// ─── Custom modules (user-built tabs) ────────────────────────────────────────
+// Contract for the custom-tab feature (docs/CUSTOM_TABS_PLAN.md): modules live
+// globally under ~/.openground/custom-modules/ and surface as `custom:<id>`
+// tabs in every project. Role gating is decided SERVER-side from the stored
+// app-login session; the client only mirrors it.
+
+export type CustomModuleFramework = 'react' | 'html'
+
+/** Where a local module came from: authored here vs installed from the
+ *  marketplace. Deletion rights differ (testers may remove `installed` only). */
+export type CustomModuleOrigin = 'local' | 'installed'
+
+export type CustomTabRole = 'owner' | 'tester' | 'none'
+
+/** One entry of ~/.openground/custom-modules/index.json. The component source
+ *  itself stays in the module dir (source.tsx / source.html) so the sidebar
+ *  claude session can edit it as a plain file. */
+export interface CustomModuleDef {
+  id: string
+  label: string
+  description: string
+  framework: CustomModuleFramework
+  origin: CustomModuleOrigin
+  createdAt: string
+  updatedAt: string
+  /** Marketplace row id — set after first publish (local) or on install. */
+  remoteId?: string
+  publishedAt?: string
+  /** Published version counter (bumped on each re-publish). */
+  version?: number
+}
+
+/** GET /api/custom-modules */
+export interface CustomModulesResponse {
+  role: CustomTabRole
+  modules: CustomModuleDef[]
+}
+
+/** GET /api/custom-modules/:id/source — feeds the sandboxed iframe and the
+ *  hot-reload poll (re-render when mtimeMs changes). */
+export interface CustomModuleSourceResponse {
+  source: string
+  mtimeMs: number
+}
+
+/** One published row as listed by GET /api/marketplace (anon read). */
+export interface MarketplaceModule {
+  remoteId: string
+  name: string
+  description: string
+  framework: CustomModuleFramework
+  version: number
+  publishedAt: string
+}
+
+/** GET /api/marketplace */
+export interface MarketplaceListResponse {
+  items: MarketplaceModule[]
 }

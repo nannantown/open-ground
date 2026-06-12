@@ -3,16 +3,17 @@ import { createAndImportProject } from './fixtures/helpers'
 
 // Board detail drawer — REAL mouse drags (the placeholder regression taught us
 // synthetic events lie about drag behaviour). Opening a TITLED card's drawer
-// auto-launches a plain claude session (no prompt is sent — the task content
-// is injected unsent via the "Insert task into input" button), so the drawer
-// lands straight in Session mode:
+// lands in DRAFT mode (nothing launches by itself — the 2026-06-12 redesign
+// removed the auto-launch): per-card run settings (flow/model/effort) + an
+// explicit 実行/Run button. Clicking Run launches claude WITH the composed
+// task prompt auto-sent, flipping the drawer to Session mode:
 //   Session: the terminal owns the drawer; the chevron header expands the
 //     fields block, whose split divider is drag-resizable; the insert button
 //     sits under the status strip.
 // Width (the drawer's left edge) is draggable too.
 
 test.describe('Board detail drawer', () => {
-  test('open auto-launches session; insert button present; split/width drags remembered on reload', async ({
+  test('Run launches the task session; insert still pastes; split/width drags remembered on reload', async ({
     request,
     page,
   }) => {
@@ -36,28 +37,80 @@ test.describe('Board detail drawer', () => {
     )
     await page.goto('/', { waitUntil: 'domcontentloaded' })
 
-    // Open the card → the titled task AUTO-LAUNCHES (fake-claude) → SESSION
-    // mode: compact header, no Launch button anywhere, insert button present.
+    // Open the card → DRAFT mode: full fields, run settings, the explicit
+    // Run button — and NO terminal yet (nothing auto-launches, F031 for all).
     await page.getByText('Resize me').first().click()
     const aside = page.locator('aside')
+    const runBtn = aside.getByRole('button', { name: /実行|^Run$/ })
+    await expect(runBtn).toBeVisible()
+    await expect(runBtn).toBeEnabled()
+    await expect(aside.locator('.xterm-screen')).toHaveCount(0)
+    // The per-card run settings selects render (model + effort at minimum;
+    // the flow select needs git, which this scratch project doesn't have).
+    expect(await aside.locator('select').count()).toBeGreaterThanOrEqual(2)
+
+    // Run → POST /api/terminal/claude carries the task payload; the server
+    // composes the prompt and auto-starts it. The drawer flips to Session.
+    const [launchRes] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes('/api/terminal/claude') && r.request().method() === 'POST',
+      ),
+      runBtn.click(),
+    ])
+    expect(launchRes.status()).toBe(200)
+    const launchBody = launchRes.request().postDataJSON() as {
+      task?: { id?: string; title?: string }
+    }
+    expect(launchBody.task?.title).toBe('Resize me')
+    const terminalId = ((await launchRes.json()) as { id: string }).id
+    expect(terminalId).toBeTruthy()
+
+    // Session mode: compact header + live terminal; the insert button is the
+    // follow-up path (unsent paste) and must be enabled.
     const header = aside.getByRole('button', { name: 'Resize me' })
     await expect(header).toBeVisible()
-    await expect(
-      aside.getByRole('button', { name: /Launch Claude/i }),
-    ).toHaveCount(0)
+    await expect(aside.locator('.xterm-screen')).toBeVisible()
     const insert = aside.getByRole('button', {
       name: /Insert task into input|タスク内容を入力欄へ/i,
     })
     await expect(insert).toBeVisible()
     await expect(insert).toBeEnabled()
 
-    // Click insert → the composed task prompt lands UNSENT in the PTY; the
-    // fake claude just reads stdin, so the PTY's canonical echo renders it —
-    // the task title showing up inside the terminal proves the paste arrived.
-    await insert.click()
-    await expect(
-      aside.locator('.xterm-screen').getByText(/Resize me/).first(),
-    ).toBeVisible()
+    // The auto-sent prompt reached the session: fake-claude prints a "# Task:"
+    // positional prompt to the PTY, so the SERVER-SIDE replay buffer carries
+    // the title. (With the WebGL renderer, glyphs are canvas pixels —
+    // .xterm-screen holds no DOM text — so a DOM getByText can never see it.)
+    // Each probe opens a fresh EventSource (the endpoint's first event is
+    // `init` with the full replay) and closes it immediately; errors soften
+    // to '' so the poll retries.
+    const readReplay = () =>
+      page
+        .evaluate(
+          (id) =>
+            new Promise<string>((resolve, reject) => {
+              const es = new EventSource(`/api/terminal/${id}/stream`)
+              const timer = setTimeout(() => {
+                es.close()
+                reject(new Error('terminal stream init timeout'))
+              }, 5000)
+              es.addEventListener('init', (ev) => {
+                clearTimeout(timer)
+                es.close()
+                resolve(JSON.parse((ev as MessageEvent).data).replay ?? '')
+              })
+            }),
+          terminalId,
+        )
+        .catch(() => '')
+    await expect.poll(readReplay, { timeout: 10_000 }).toContain('Resize me')
+
+    // Insert (unsent paste) still works on the live session — paste-task 200
+    // means the bytes hit the PTY master.
+    const [pasteRes] = await Promise.all([
+      page.waitForResponse((r) => r.url().includes('/paste-task')),
+      insert.click(),
+    ])
+    expect(pasteRes.status()).toBe(200)
 
     // ── Width: drag the left-edge grip 120px left → drawer widens. ───────────
     const wBefore = (await aside.boundingBox())?.width ?? 0

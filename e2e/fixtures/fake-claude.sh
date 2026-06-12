@@ -67,6 +67,19 @@ if [ -n "${OPENGROUND_FAKE_SLEEP_MS:-}" ]; then
   [ "$secs" -gt 0 ] && sleep "$secs"
 fi
 
+# --- render a positional task prompt, like the real TUI shows the message ---
+# The drawer's 実行 launch passes the composed task prompt as the LAST argv
+# (buildClaudeArgv contract: positional prompt last, via "$(cat <file>)").
+# Real claude renders it in its TUI; print it to the PTY so the e2e can assert
+# the task content reached the session via the SSE replay buffer. Recognized
+# by the composed header instead of re-implementing argv flag parsing
+# (--add-dir is variadic — a generic "last non-flag" scan would misfire).
+last=""
+for a in "$@"; do last="$a"; done
+case "$last" in
+  *"# Task:"*) printf '%s\n' "$last" ;;
+esac
+
 # --- build the OPENGROUND_RESULT payload -----------------------------------
 summary=${OPENGROUND_FAKE_SUMMARY:-"Fake run complete."}
 topic=${OPENGROUND_FAKE_TOPIC:-"E2E"}
@@ -86,10 +99,11 @@ esc=$(printf '%s' "$result" | sed 's/\\/\\\\/g; s/"/\\"/g')
 } >> "$jsonl"
 
 # --- stay interactive like the real claude TUI ------------------------------
-# Board sessions launch PLAIN and get the task content injected later
-# (paste-task → PTY stdin, unsent), so the live-session UI (insert button
-# enabled, no "exited" state) needs this process to keep reading stdin exactly
-# like real claude waiting at its input box. The PTY's canonical echo renders
+# Board sessions stay live after launch (the 実行 path auto-starts the task;
+# follow-ups arrive via paste-task → PTY stdin, unsent), so the live-session
+# UI (insert button enabled, no "exited" state) needs this process to keep
+# reading stdin exactly like real claude waiting at its input box. The PTY's
+# canonical echo renders
 # whatever is pasted, which the e2e asserts on. EOF (terminal killed / PTY
 # closed) ends us; OPENGROUND_FAKE_EXIT=immediate restores the old
 # fire-and-quit behaviour for any spec that wants a finished session.

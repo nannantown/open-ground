@@ -71,6 +71,12 @@ const preSlotSessionKey = (projectPath: string) =>
 const legacyNsPreSlotSessionKey = (projectPath: string) =>
   `hove.terminal.session.${projectPath}`
 
+// Flow-control ACK threshold: once xterm has parsed this many UTF-16 code
+// units (the same .length the server counts in trackFlowSent), report the
+// progress via POST /api/terminal/:id/ack so the server can pause/resume the
+// PTY on the un-acked backlog instead of buffering unboundedly.
+const ACK_THRESHOLD = 65536
+
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
   { projectPath, slotKey = 'default', onInfo, onTitle, mode = 'project' },
   ref,
@@ -186,9 +192,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
 
     ;(async () => {
       // Dynamic import so server-side bundling never reaches into xterm.
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
+      const [{ Terminal }, { FitAddon }, webglMod] = await Promise.all([
         import('@xterm/xterm'),
         import('@xterm/addon-fit'),
+        // The WebGL addon is an optional accelerator — keep it optional at
+        // load time too: a failed chunk fetch (stale SPA after a redeploy)
+        // must not take the whole terminal down with it.
+        import('@xterm/addon-webgl').catch(() => null),
       ])
       if (cancelled || !hostRef.current) return
 
@@ -212,6 +222,17 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       fit = new FitAddon()
       term.loadAddon(fit)
       term.open(hostRef.current)
+      try {
+        if (webglMod) {
+          const webgl = new webglMod.WebglAddon()
+          // Dispose on context loss so xterm falls back to the DOM renderer
+          // instead of rendering into a dead canvas.
+          webgl.onContextLoss(() => { try { webgl.dispose() } catch {} })
+          term.loadAddon(webgl)
+        }
+      } catch {
+        // WebGL2 unavailable (old GPU, software rendering, jsdom) — DOM renderer remains.
+      }
       try { fit.fit() } catch {}
       termRef.current = term
       fitRef.current = fit
@@ -258,18 +279,61 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       pushResize()
 
       // Subscribe to output.
+      // Flow-control identity for THIS stream: the server's init names the
+      // flow (streamId) our ACKs credit. An older server sends none — then we
+      // never ACK and it treats the flow as uncontrolled (no back-pressure),
+      // exactly the pre-flow-control behavior.
+      let streamId: string | null = null
+      let ackPending = 0
       es = new EventSource(`/api/terminal/${session.id}/stream`)
       esRef.current = es
       es.addEventListener('init', (ev: MessageEvent) => {
         try {
-          const { replay } = JSON.parse(ev.data)
+          const { replay, streamId: sid } = JSON.parse(ev.data)
+          streamId = typeof sid === 'string' ? sid : null
+          // Fresh flow, fresh accounting: parse progress still pending from a
+          // previous connection belongs to the dead flow, never this one.
+          ackPending = 0
+          // Init is a FULL repaint, never an append (the server-side contract
+          // in sse.ts): a reconnect — flow-control stall drop or EventSource
+          // auto-retry — re-delivers the whole ring buffer, so writing it
+          // onto the existing screen would double-paint everything. The reset
+          // must ride the DATA path: ESC c (RIS) is the same full reset as
+          // term.reset() (InputHandler.fullReset → core reset) but parses in
+          // WriteBuffer order, AFTER any chunks of the previous connection
+          // still queued unparsed — a stall drop guarantees such a queue —
+          // whereas term.reset() applies immediately and would let those
+          // stale chunks repaint on top of the fresh replay.
+          term.write('\x1bc')
           if (replay) term.write(replay)
         } catch {}
       })
       es.addEventListener('data', (ev: MessageEvent) => {
         try {
           const { chunk } = JSON.parse(ev.data)
-          if (chunk) term.write(chunk)
+          if (chunk) {
+            // Pin the chunk to the flow it arrived on: xterm's write callback
+            // can run AFTER a reconnect swapped streamId (the chunk sat in
+            // the WriteBuffer across a stall drop), and crediting the new
+            // flow with the old flow's progress would bank phantom credit —
+            // the server would under-count the new backlog and pause late.
+            const sid = streamId
+            // ACK from xterm's write callback — progress is reported only
+            // once the chunk is actually parsed, so a renderer that falls
+            // behind slows its ACKs and the server pauses the PTY for it.
+            term.write(chunk, () => {
+              if (!sid || sid !== streamId) return
+              ackPending += chunk.length
+              if (ackPending < ACK_THRESHOLD) return
+              const bytes = ackPending
+              ackPending = 0
+              fetch(`/api/terminal/${sessionIdRef.current ?? session.id}/ack`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ streamId: sid, bytes }),
+              }).catch(() => {})
+            })
+          }
         } catch {}
       })
       es.addEventListener('exit', (ev: MessageEvent) => {

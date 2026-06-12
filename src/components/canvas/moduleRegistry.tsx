@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { Terminal, Palette, Columns3 } from 'lucide-react'
-import type { ModuleId } from '@/lib/modules/ids'
+import { Terminal, Palette, Columns3, Puzzle } from 'lucide-react'
+import { customTabId, type ModuleId } from '@/lib/modules/ids'
 
 // ─── Module registry ──────────────────────────────────────────────────────
 // SINGLE SOURCE OF TRUTH for the per-project tabs ("Grounds"). Previously the
@@ -9,11 +9,26 @@ import type { ModuleId } from '@/lib/modules/ids'
 // from this one list, so adding a tab is one entry here (+ its render branch in
 // ProjectPanel) — the first step toward tabs as pluggable modules.
 
-export interface ModuleDef {
-  id: ModuleId
+// One tab-row entry. Built-in modules (ModuleDef) and user-built custom tabs
+// (`custom:<uuid>`, docs/CUSTOM_TABS_PLAN.md) share this shape — ViewTabs
+// renders TabDefs without caring which kind it holds.
+export interface TabDef {
+  id: string
   label: string
   icon: ReactNode
 }
+
+export interface ModuleDef extends TabDef {
+  id: ModuleId
+}
+
+// Tab-row metadata for a custom module: label from the fetched def, fixed
+// Puzzle icon (custom tabs don't carry their own iconography — yet).
+export const customModuleTabDef = (m: { id: string; label: string }): TabDef => ({
+  id: customTabId(m.id),
+  label: m.label,
+  icon: <Puzzle size={10} strokeWidth={2.25} />,
+})
 
 // Default order = the tab row's initial left-to-right order AND the Ctrl+Tab
 // cycle order for a project with no saved per-project order. Per-project the
@@ -36,5 +51,8 @@ export const isModuleEnabled = (_m: ModuleDef): boolean => true
 
 export const enabledModules = (): ModuleDef[] => MODULES.filter(isModuleEnabled)
 
-export const isModuleIdEnabled = (id: ModuleId): boolean =>
+// Takes any string (not just ModuleId): callers validate persisted /
+// drag-saved ids whose static type is already `string` in the custom-tabs
+// world. A `custom:<uuid>` id is by construction never a built-in.
+export const isModuleIdEnabled = (id: string): boolean =>
   MODULES.some(x => x.id === id)

@@ -132,3 +132,22 @@ a:focus-visible {
   animation: term-pulse 2s ease-in-out infinite;
 }
 
+/* Ground card — claude-status edge bar: a light band sweeping along the 3px
+   top edge while claude is busy (the surveyor's scan from the runner era). */
+@keyframes survey-scan {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(360%); }
+}
+.run-scan {
+  animation: survey-scan 1.7s linear infinite;
+}
+
+/* Ground card — the beacon dot pulsing on a running card's stamp */
+@keyframes survey-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.28; transform: scale(0.62); }
+}
+.run-pulse {
+  animation: survey-pulse 1.35s ease-in-out infinite;
+}
+

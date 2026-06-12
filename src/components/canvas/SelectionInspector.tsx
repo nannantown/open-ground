@@ -1,5 +1,23 @@
-import { Type, AlignLeft, AlignCenter, AlignRight, Bold, Lock, Unlock } from 'lucide-react'
-import type { CanvasElement } from '@/lib/types'
+import {
+  Type,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  Bold,
+  Lock,
+  Unlock,
+  Minus,
+  ArrowDown,
+  ArrowRight,
+  AlignStartHorizontal,
+  AlignCenterHorizontal,
+  AlignEndHorizontal,
+  AlignStartVertical,
+  AlignCenterVertical,
+  AlignEndVertical,
+} from 'lucide-react'
+import type { CanvasElement, FrameLayout } from '@/lib/types'
+import { AUTO_LAYOUT_DEFAULTS } from '@/lib/canvasAutoLayout'
 import { useT } from '@/i18n/I18nContext'
 import {
   FONT_OPTIONS,
@@ -354,8 +372,151 @@ const FrameProperties = ({ element, onPatch }: Props) => {
           />
         </Field>
       </div>
+      <LayoutProperties element={element} onPatch={onPatch} />
       <OpacityField element={element} onPatch={onPatch} />
     </div>
+  )
+}
+
+const MAX_LAYOUT_PX = 400
+const clampLayoutPx = (n: number) =>
+  Number.isFinite(n) ? Math.max(0, Math.min(MAX_LAYOUT_PX, Math.round(n))) : 0
+
+// Frame auto layout (Figma-style): none / vertical stack / horizontal stack,
+// plus gap / padding / cross-axis align once enabled. Patches the frame's
+// `layout` field; the actual re-flow runs through applyAutoLayout on every
+// mutateElements (see CanvasWorkspace), so children snap as soon as a value
+// changes. Cross-axis icons follow the mode: a row aligns its children
+// top/middle/bottom, a column left/center/right.
+const LayoutProperties = ({ element, onPatch }: Props) => {
+  const { t } = useT()
+  const layout = element.layout
+  const setMode = (mode: FrameLayout['mode'] | null) => {
+    if (!mode) {
+      onPatch({ layout: undefined })
+      return
+    }
+    onPatch({
+      layout: {
+        mode,
+        gap: layout?.gap ?? AUTO_LAYOUT_DEFAULTS.gap,
+        padding: layout?.padding ?? AUTO_LAYOUT_DEFAULTS.padding,
+        align: layout?.align ?? AUTO_LAYOUT_DEFAULTS.align,
+      },
+    })
+  }
+  const modeBtns: {
+    key: string
+    active: boolean
+    title: string
+    icon: typeof Minus
+    onClick: () => void
+  }[] = [
+    {
+      key: 'none',
+      active: !layout,
+      title: t('canvas.insp.layoutNone'),
+      icon: Minus,
+      onClick: () => setMode(null),
+    },
+    {
+      key: 'column',
+      active: layout?.mode === 'column',
+      title: t('canvas.insp.layoutColumn'),
+      icon: ArrowDown,
+      onClick: () => setMode('column'),
+    },
+    {
+      key: 'row',
+      active: layout?.mode === 'row',
+      title: t('canvas.insp.layoutRow'),
+      icon: ArrowRight,
+      onClick: () => setMode('row'),
+    },
+  ]
+  const alignIcons =
+    layout?.mode === 'row'
+      ? ([AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal] as const)
+      : ([AlignStartVertical, AlignCenterVertical, AlignEndVertical] as const)
+  const alignOpts = [
+    { value: 'start', title: t('canvas.insp.layoutAlignStart'), Icon: alignIcons[0] },
+    { value: 'center', title: t('canvas.insp.layoutAlignCenter'), Icon: alignIcons[1] },
+    { value: 'end', title: t('canvas.insp.layoutAlignEnd'), Icon: alignIcons[2] },
+  ] as const
+  return (
+    <>
+      <Field label={t('canvas.insp.layout')}>
+        <div className="flex items-stretch gap-1">
+          {modeBtns.map(({ key, active, title, icon: Icon, onClick }) => (
+            <button
+              key={key}
+              type="button"
+              aria-pressed={active}
+              title={title}
+              onClick={onClick}
+              className={[
+                'flex h-7 flex-1 items-center justify-center rounded-[4px] border',
+                'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
+                active
+                  ? 'border-accent bg-accent text-bg-card hover:bg-accent/90'
+                  : 'border-line bg-bg text-ink-muted hover:border-line-strong hover:bg-bg-elevated hover:text-ink',
+              ].join(' ')}
+            >
+              <Icon size={14} strokeWidth={2.25} />
+            </button>
+          ))}
+        </div>
+      </Field>
+      {layout && (
+        <>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label={t('canvas.insp.gap')}>
+              <NumberInput
+                min={0}
+                max={MAX_LAYOUT_PX}
+                value={layout.gap}
+                onChange={(n) => onPatch({ layout: { ...layout, gap: clampLayoutPx(n) } })}
+              />
+            </Field>
+            <Field label={t('canvas.insp.padding')}>
+              <NumberInput
+                min={0}
+                max={MAX_LAYOUT_PX}
+                value={layout.padding}
+                onChange={(n) =>
+                  onPatch({ layout: { ...layout, padding: clampLayoutPx(n) } })
+                }
+              />
+            </Field>
+          </div>
+          <Field label={t('canvas.insp.layoutAlign')}>
+            <div className="flex items-stretch gap-1">
+              {alignOpts.map(({ value, title, Icon }) => {
+                const active = layout.align === value
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={active}
+                    title={title}
+                    onClick={() => onPatch({ layout: { ...layout, align: value } })}
+                    className={[
+                      'flex h-7 flex-1 items-center justify-center rounded-[4px] border',
+                      'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
+                      active
+                        ? 'border-accent bg-accent text-bg-card hover:bg-accent/90'
+                        : 'border-line bg-bg text-ink-muted hover:border-line-strong hover:bg-bg-elevated hover:text-ink',
+                    ].join(' ')}
+                  >
+                    <Icon size={14} strokeWidth={2.25} />
+                  </button>
+                )
+              })}
+            </div>
+          </Field>
+        </>
+      )}
+    </>
   )
 }
 
@@ -567,6 +728,9 @@ const TextProperties = ({ element, onPatch }: Props) => {
 
 // A bare number input matching the panel's other fields. Reports the parsed
 // value (NaN when cleared) up to `onChange`, which clamps before patching.
+// ↑/↓ step by 1 (or the field's `step`); holding Shift steps by 10 — the
+// Figma habit, mirroring the canvas's Shift-nudge. Handled here (with
+// preventDefault) so the native spinner can't double-step.
 const NumberInput = ({
   min,
   max,
@@ -587,6 +751,13 @@ const NumberInput = ({
     step={step}
     value={value}
     onChange={(e) => onChange(e.target.valueAsNumber)}
+    onKeyDown={(e) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+      e.preventDefault()
+      const dir = e.key === 'ArrowUp' ? 1 : -1
+      const by = e.shiftKey ? 10 : (step ?? 1)
+      onChange((Number.isFinite(value) ? value : 0) + dir * by)
+    }}
     className={[
       'h-7 w-full rounded-[4px] border border-line bg-bg px-2 text-[12px] text-ink',
       'transition-colors hover:border-line-strong',

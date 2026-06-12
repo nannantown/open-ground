@@ -131,6 +131,7 @@ describe('share routes — contract on a registered git project', () => {
       dirty: true,
       ahead: 0,
       behind: 0,
+      upstream: false,
       branch: 'main',
       auto: {
         enabled: true,
@@ -193,6 +194,7 @@ describe('share routes — contract on a registered git project', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      upstream: false,
       branch: 'main',
     })
   })
@@ -280,6 +282,121 @@ describe('share routes — enable / disable (integration)', () => {
     const back = await res.json()
     expect(back.tasks[0]).toMatchObject(CARD)
     expect(back.notes).toBe('shared notes')
+  })
+
+  it('enable with config seeds the shared policy: central config merged, marker carries it', async () => {
+    const dir = await makeRegisteredRepo('to-share-config')
+    await seedProject(dir)
+    // Pre-existing config key that the enable payload does NOT carry — must
+    // survive the merge (spread, not replace).
+    let res = await app.request(`/api/project?path=${encodeURIComponent(dir)}`)
+    const before = await res.json()
+    res = await app.request(`/api/project?path=${encodeURIComponent(dir)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...before, config: { reviewColumn: true } }),
+    })
+    expect(res.status).toBe(200)
+
+    res = await app.request(
+      '/api/project/share/enable',
+      json({
+        path: dir,
+        config: {
+          completionFlow: 'pr',
+          targetBranch: 'main',
+          members: ['Alice', 'Bob', 'Alice', '  '],
+        },
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
+
+    // The live read (now repo-backed) carries the merged config: the seeded
+    // keys + the pre-existing one, members trimmed + deduped.
+    res = await app.request(`/api/project?path=${encodeURIComponent(dir)}`)
+    const data = await res.json()
+    expect(data.config).toMatchObject({
+      completionFlow: 'pr',
+      targetBranch: 'main',
+      members: ['Alice', 'Bob'],
+      reviewColumn: true,
+    })
+
+    // And the marker itself (what teammates' clones read) holds it too.
+    const { readFile } = await import('fs/promises')
+    const marker = JSON.parse(
+      await readFile(join(dir, '.openground', 'openground.json'), 'utf-8'),
+    )
+    expect(marker.config).toMatchObject({
+      completionFlow: 'pr',
+      targetBranch: 'main',
+      members: ['Alice', 'Bob'],
+    })
+  })
+
+  it('enable with targetBranch:"" explicitly CLEARS a previously saved branch', async () => {
+    const dir = await makeRegisteredRepo('clear-branch')
+    await seedProject(dir)
+    // Pre-existing saved branch that the dialog's '' must remove.
+    let res = await app.request(`/api/project?path=${encodeURIComponent(dir)}`)
+    const before = await res.json()
+    res = await app.request(`/api/project?path=${encodeURIComponent(dir)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...before, config: { targetBranch: 'dev' } }),
+    })
+    expect(res.status).toBe(200)
+
+    res = await app.request(
+      '/api/project/share/enable',
+      json({ path: dir, config: { completionFlow: 'merge', targetBranch: '' } }),
+    )
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
+
+    // The merged config carries the flow but the branch key is GONE — not
+    // 'dev' (stale) and not '' (empty-string published to the marker).
+    res = await app.request(`/api/project?path=${encodeURIComponent(dir)}`)
+    const data = await res.json()
+    expect(data.config.completionFlow).toBe('merge')
+    expect(data.config).not.toHaveProperty('targetBranch')
+    const { readFile } = await import('fs/promises')
+    const marker = JSON.parse(
+      await readFile(join(dir, '.openground', 'openground.json'), 'utf-8'),
+    )
+    expect(marker.config ?? {}).not.toHaveProperty('targetBranch')
+  })
+
+  it('enable with a malformed config → 400, nothing migrated', async () => {
+    const dir = await makeRegisteredRepo('bad-config')
+    const cases: unknown[] = [
+      { completionFlow: 'rebase' }, // not merge|pr
+      { members: 'Alice' }, // not an array
+      { members: [1, 2] }, // non-string entries
+      { targetBranch: 42 }, // non-string
+      { unknownKey: true }, // unknown key
+      ['merge'], // array body
+      'merge', // primitive
+    ]
+    for (const config of cases) {
+      const res = await app.request(
+        '/api/project/share/enable',
+        json({ path: dir, config }),
+      )
+      expect(res.status).toBe(400)
+      expect((await res.json()).error).toMatch(/invalid config/i)
+    }
+    // The 400s happened BEFORE preconditions/migration — still unshared.
+    const { stat } = await import('fs/promises')
+    await expect(stat(join(dir, '.openground'))).rejects.toThrow()
+  })
+
+  it('enable without config stays the legacy shape (back-compat)', async () => {
+    const dir = await makeRegisteredRepo('legacy-enable')
+    const res = await app.request('/api/project/share/enable', json({ path: dir }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
   })
 
   it('enable on a non-git registered folder → 412 not-git', async () => {

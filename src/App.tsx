@@ -151,27 +151,9 @@ export default function App() {
     savePersistedView({ projectId: selectedIds.length === 1 ? selectedIds[0] : undefined })
   }, [selectedIds])
 
-  // Keyboard shortcuts for tools (ignored while typing).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return
-      const ae = document.activeElement
-      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
-      const k = e.key.toLowerCase()
-      if (k === 'v') setTool('select')
-      else if (k === 't') setTool('text')
-      else if (k === 's') setTool('sticky')
-      else if (k === 'f') setTool('frame')
-      else if (k === 'n') {
-        // ⌘N is reserved by Chrome for "new window" — single-key `n` opens the
-        // new-project modal instead (same flavour as v/t/s/f tool keys).
-        e.preventDefault()
-        setNewProjectOpen(true)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  // (Tool keys — V/T/S/F… — live in InfiniteCanvas, the single owner for both
+  // the Ground and the embedded project canvas; `n` for the new-project modal
+  // sits in the global handler below, behind its panel-open gate.)
 
   // Refresh the project scan without a permanent toolbar button: ⌘R / Ctrl+R
   // does a fast in-app reload (preserving canvas state, unlike a full page
@@ -403,10 +385,28 @@ export default function App() {
   // deselect, enter-to-edit and arrow-key nudging.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Another surface already claimed this key (BoardModule's capture-phase
+      // ⌘Z/⌘Y handler preventDefaults before this bubble listener runs; the
+      // ⌘K palette / modals do the same) — one keypress must never drive two
+      // undo stacks (Board + Ground canvas) at once.
+      if (e.defaultPrevented) return
       const ae = document.activeElement
       const typing = !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')
       const mod = e.metaKey || e.ctrlKey
       const k = e.key.toLowerCase()
+
+      // A single selected project card means the ProjectPanel overlay is open
+      // and the Ground beneath it is inert: leave every key to the panel's
+      // own surfaces (its canvas / board / terminals have their own maps).
+      // Two stay global: ⌘K (the jump palette overlays anything) and Escape —
+      // clearing the selection IS the panel's close path; the panel's canvas
+      // preventDefaults the Escapes it consumes before this bubble listener.
+      if (
+        visibleProjects.filter((p) => selectedIds.includes(p.id)).length === 1 &&
+        !(mod && k === 'k') &&
+        k !== 'escape'
+      )
+        return
 
       if (mod && k === 'z') {
         if (typing) return
@@ -444,6 +444,14 @@ export default function App() {
       }
       if (mod) return // leave every other ⌘ combo to the browser
 
+      if (k === 'n' && !mod && !e.altKey) {
+        if (typing || editingId) return
+        // ⌘N is reserved by Chrome for "new window" — single-key `n` opens the
+        // new-project modal instead (same flavour as the V/T/S/F tool keys).
+        e.preventDefault()
+        setNewProjectOpen(true)
+        return
+      }
       if (k === 'escape') {
         if (typing || editingId) return
         // An overlay owns this Escape. Two signals, both needed:
@@ -500,9 +508,10 @@ export default function App() {
     mutateCanvas,
   ])
 
+  // Persist settings WITHOUT closing the panel — SettingsPanel autosaves
+  // (debounced) while open; closing is only the X button / overlay click.
   const saveSettings = async (s: Settings) => {
     await api.api.settings.$post({ json: s })
-    setSettingsOpen(false)
     await load()
   }
 
@@ -620,6 +629,10 @@ export default function App() {
         onEditingIdChange={setEditingId}
         tool={tool}
         onToolChange={setTool}
+        // The Ground goes keyboard-inert while a project panel covers it —
+        // otherwise V/F/Delete/⌘A typed into the panel's canvas would also
+        // drive this invisible surface.
+        suspendKeys={!!singleSelected}
       />
       {showEmpty && (
         <EmptyState

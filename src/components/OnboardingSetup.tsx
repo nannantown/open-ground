@@ -195,21 +195,37 @@ export function OnboardingSetup({
         </div>
 
         {/* footer nav */}
-        <div className="mt-auto flex items-center gap-2.5 pt-8">
-          <button type="button" className={ghostBtn} onClick={onBack}>
-            {t('onboarding.nav.back')}
-          </button>
-          <button type="button" className={primaryBtn} disabled={!installed} onClick={onDone}>
-            {t('onboarding.setup.continue')}
-          </button>
-          <a
-            href={DOCS_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="ml-auto label-cap text-ink-faint underline-offset-2 transition-colors duration-150 hover:text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            {t('onboarding.setup.docs')}
-          </a>
+        <div className="mt-auto flex flex-col gap-2.5 pt-8">
+          <div className="flex items-center gap-2.5">
+            <button type="button" className={ghostBtn} onClick={onBack}>
+              {t('onboarding.nav.back')}
+            </button>
+            <button type="button" className={primaryBtn} disabled={!installed} onClick={onDone}>
+              {t('onboarding.setup.continue')}
+            </button>
+            <a
+              href={DOCS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto label-cap text-ink-faint underline-offset-2 transition-colors duration-150 hover:text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              {t('onboarding.setup.docs')}
+            </a>
+          </div>
+          {/* Escape hatch: detection can lag reality (PATH added by the
+              installer is invisible to the server until relaunch on some
+              setups). The probe now re-resolves via a login shell, but a
+              user must NEVER be trapped on this screen — if claude runs in
+              the pane on the right, let them through. */}
+          {!installed && (
+            <button
+              type="button"
+              onClick={onDone}
+              className="self-start text-[11px] text-ink-faint underline-offset-2 transition-colors duration-150 hover:text-ink hover:underline active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              {t('onboarding.setup.skipAnyway')}
+            </button>
+          )}
         </div>
       </div>
 

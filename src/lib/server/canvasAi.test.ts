@@ -122,6 +122,63 @@ describe('parseGeneratedElements', () => {
     ).toThrow(/no valid/)
     expect(() => parseGeneratedElements('[]')).toThrow(/no valid/)
   })
+
+  // ── parent inference (frame containment) ───────────────────────────────────
+
+  it('infers nested parentIds: text → inner frame → outer frame', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 800, height: 600, text: 'Outer' },
+        { type: 'frame', x: 100, y: 100, width: 300, height: 200, text: 'Card' },
+        { type: 'text', x: 120, y: 120, width: 100, height: 30, text: 'inside the card' },
+      ]),
+    )
+    const [outer, inner, text] = out
+    // The SMALLEST containing frame wins — the text nests under the card, not
+    // the outer frame, and the card frame nests under the outer frame.
+    expect(text.parentId).toBe(inner.id)
+    expect(inner.parentId).toBe(outer.id)
+    expect(outer.parentId).toBeUndefined()
+  })
+
+  it('leaves elements outside every frame without a parentId', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 200, height: 200, text: 'F' },
+        { type: 'sticky', x: 500, y: 500, width: 100, height: 100, text: 'free' },
+        // Overlapping but not FULLY contained — still no parent.
+        { type: 'shape', x: 150, y: 150, width: 100, height: 100, text: '', shapeKind: 'rect' },
+      ]),
+    )
+    expect(out[1].parentId).toBeUndefined()
+    expect(out[2].parentId).toBeUndefined()
+  })
+
+  it('treats an un-sized text as a point: inside the frame ⇒ child', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 200, height: 200, text: 'F' },
+        { type: 'text', x: 50, y: 50, text: 'point inside' },
+        { type: 'text', x: 300, y: 50, text: 'point outside' },
+      ]),
+    )
+    expect(out[1].parentId).toBe(out[0].id)
+    expect(out[2].parentId).toBeUndefined()
+  })
+
+  it('never cycles on two frames with identical rects (degenerate twins)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 400, height: 300, text: 'A' },
+        { type: 'frame', x: 0, y: 0, width: 400, height: 300, text: 'B' },
+      ]),
+    )
+    const [a, b] = out
+    // Mutual containment is broken by array order: the earlier twin stays the
+    // root, the later one may nest under it — never A→B AND B→A.
+    expect(a.parentId).toBeUndefined()
+    expect(b.parentId).toBe(a.id)
+  })
 })
 
 // ── prompt builders ──────────────────────────────────────────────────────────

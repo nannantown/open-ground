@@ -57,7 +57,7 @@ export const buildTaskPrompt = ({ cwd, task, port, worktreesDir, config }: TaskP
       '',
       '## How to work on this task (git project, managed by OPEN GROUND)',
       'Implement this task on its OWN branch in its OWN git worktree, so other task sessions can run in parallel without sharing a checkout:',
-      '1. Derive a short kebab-case branch name from the task and prefix it with `task/` (e.g. `task/u2-153-assign-location`). Tell the user the name before you start.',
+      '1. Derive a short kebab-case branch name from the task and prefix it with `task/` (e.g. `task/u2-153-assign-location`). If that branch already exists, append a numeric suffix (`-2`, `-3`, …) instead of reusing it. Tell the user the name before you start.',
       `2. Create the worktree OUTSIDE the repo: git worktree add "${worktreesDir}/<branch-name-without-prefix>" -b <branch>`,
       `3. cd into that worktree and do ALL file changes and commits THERE. Never check out branches in the main working tree (${cwd}).`,
     )

@@ -8,7 +8,13 @@
 // Once the routes are merged and chained on the Hono app these can be
 // converted to `api.api.project.share.*` like every other call site.
 
-import type { ShareAutoStatus, ShareConflict, ShareStatus, ShareSyncResult } from '@/lib/types'
+import type {
+  ShareAutoStatus,
+  ShareConflict,
+  ShareEnableConfig,
+  ShareStatus,
+  ShareSyncResult,
+} from '@/lib/types'
 
 /** `owner/repo` from a git remote URL, for the faint label next to Sync.
  *
@@ -66,6 +72,7 @@ export const fetchShareStatus = async (
       dirty: body.dirty === true,
       ahead: typeof body.ahead === 'number' ? body.ahead : 0,
       behind: typeof body.behind === 'number' ? body.behind : 0,
+      upstream: body.upstream === true,
       ...(body.forcedUpdate === true ? { forcedUpdate: true } : {}),
       ...(typeof body.branch === 'string' && body.branch ? { branch: body.branch } : {}),
       ...(normalizeAuto(body.auto) ? { auto: normalizeAuto(body.auto)! } : {}),
@@ -110,12 +117,13 @@ export type ShareToggleResult = { ok: true } | { ok: false; error: string }
 const postShareToggle = async (
   action: 'enable' | 'disable',
   path: string,
+  config?: ShareEnableConfig,
 ): Promise<ShareToggleResult> => {
   try {
     const res = await fetch(`/api/project/share/${action}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, ...(config ? { config } : {}) }),
     })
     const body = (await res.json().catch(() => null)) as
       | { ok?: boolean; error?: string }
@@ -130,8 +138,12 @@ const postShareToggle = async (
   }
 }
 
-/** POST /api/project/share/enable — create .openground/ + migrate data in. */
-export const enableShare = (path: string) => postShareToggle('enable', path)
+/** POST /api/project/share/enable — create .openground/ + migrate data in.
+ *  `config` (optional) seeds the shared policy (completionFlow /
+ *  targetBranch / members) in the same call — the ShareStartDialog's
+ *  "confirm the team's rules before sharing" step. Omitted = legacy shape. */
+export const enableShare = (path: string, config?: ShareEnableConfig) =>
+  postShareToggle('enable', path, config)
 /** POST /api/project/share/disable — migrate data back + delete the folder. */
 export const disableShare = (path: string) => postShareToggle('disable', path)
 

@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, unlink } from 'fs/promises'
+import { cp, mkdir, readFile, readdir, rm, stat, unlink } from 'fs/promises'
 import { join } from 'path'
 import type { BoardColumn, ProjectConfig, ProjectData, ProjectTask } from '../types'
 import { atomicWriteJson, atomicWriteText } from './atomicWrite'
@@ -7,12 +7,14 @@ import { ProjectDataSchema, ProjectTaskSchema } from '../schemas'
 import { noteSharedWrite } from './shareAutoSync'
 import {
   SHARED_DATA_VERSION,
+  boardAssetsDir,
   boardCardsDir,
   boardNotesPath,
   isShared,
   readSharedMarker,
   writeSharedMarker,
 } from './sharedData'
+import { TASK_ASSETS_SUBDIR } from './taskAssets'
 
 const TASKS_FILE = 'tasks.json'
 
@@ -152,7 +154,14 @@ const normalizeCard = (t: ProjectTask): ProjectTask => ({
   ...(t.boardOrder !== undefined ? { boardOrder: t.boardOrder } : {}),
   ...(t.prUrl !== undefined ? { prUrl: t.prUrl } : {}),
   ...(t.branch !== undefined ? { branch: t.branch } : {}),
+  ...(t.reviewedBy !== undefined ? { reviewedBy: t.reviewedBy } : {}),
   ...(t.titleAuto !== undefined ? { titleAuto: t.titleAuto } : {}),
+  ...(t.attachments !== undefined ? { attachments: t.attachments } : {}),
+  // Dedupe defensively — a hand-edited shared card (or a racy double-add)
+  // could repeat an id; the on-disk shape stays canonical.
+  ...(t.dependsOn !== undefined ? { dependsOn: Array.from(new Set(t.dependsOn)) } : {}),
+  ...(t.dueDate !== undefined ? { dueDate: t.dueDate } : {}),
+  ...(t.run !== undefined ? { run: t.run } : {}),
 })
 
 const serializeCard = (t: ProjectTask): string => JSON.stringify(normalizeCard(t), null, 2)
@@ -454,6 +463,22 @@ export const writeProjectData = async (
 
 // ── Share migrations (called by the enable/disable routes) ──────────────────
 
+// Attachment BYTES ride the migrations too — the canvas precedent
+// (migrateCanvasToShared/FromShared copy the per-canvas asset dirs both ways):
+// enable copies central task-assets/ → .openground/board/assets/, disable
+// copies them back BEFORE the route rm-rf's .openground/. Overwrite semantics
+// on the destination (canvas style) so a re-run / re-enable converges; a
+// missing source dir simply means no assets. The source side is left in place
+// as a stale backup — the marker decides the live store (taskAssetsDir).
+const copyTaskAssetsDir = async (src: string, dest: string): Promise<void> => {
+  let hasSrc = false
+  try {
+    hasSrc = (await stat(src)).isDirectory()
+  } catch {}
+  await rm(dest, { recursive: true, force: true })
+  if (hasSrc) await cp(src, dest, { recursive: true })
+}
+
 // central → repo: split tasks.json into one card file per task + notes.md, and
 // carry the description into the marker. Creates the marker (version
 // SHARED_DATA_VERSION) if absent, PRESERVES an existing one's version — the
@@ -464,6 +489,10 @@ export const migrateBoardToShared = (projectPath: string): Promise<void> =>
   withBoardLock(projectPath, async () => {
     const central = await readCentralProjectData(projectPath)
     await writeSharedBoard(projectPath, central, { ensureMarker: true, ensureNotesFile: true })
+    await copyTaskAssetsDir(
+      join(await projectDataDir(projectPath), TASK_ASSETS_SUBDIR),
+      boardAssetsDir(projectPath),
+    )
   })
 
 // repo → central: fold the shared files back into the central tasks.json
@@ -490,6 +519,7 @@ export const migrateBoardFromShared = (projectPath: string): Promise<ProjectData
     const dir = await projectDataDir(projectPath)
     await mkdir(dir, { recursive: true })
     await atomicWriteJson(join(dir, TASKS_FILE), next)
+    await copyTaskAssetsDir(boardAssetsDir(projectPath), join(dir, TASK_ASSETS_SUBDIR))
     return next
   })
 

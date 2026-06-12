@@ -68,6 +68,48 @@ export const SettingsPanel = ({
   const [claudeNonce, setClaudeNonce] = useState(0)
   const claudeProbe = useClaudeProbe(open && showAdvanced, claudeNonce)
 
+  // --- Autosave plumbing ------------------------------------------------
+  // The panel saves as you type (debounced) instead of via a Save button.
+  // Local input state is the source of truth while editing: the persist step
+  // reads the *latest* values from refs and normalizes (trim / '' → null)
+  // only at write time, never touching the in-progress input value (IME-safe
+  // — a composition is never interrupted by a round-tripped server value).
+  const latest = useRef({ defaultWorkspace, displayName })
+  latest.current = { defaultWorkspace, displayName }
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const onSaveRef = useRef(onSave)
+  onSaveRef.current = onSave
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Persist now (if anything actually changed). Stable identity so effects
+  // can depend on it without re-running.
+  const flush = useCallback(() => {
+    if (persistTimer.current) {
+      clearTimeout(persistTimer.current)
+      persistTimer.current = null
+    }
+    const s = settingsRef.current
+    const nextWorkspace = latest.current.defaultWorkspace.trim() || null
+    // '' is saved explicitly (not dropped) so clearing the field clears the
+    // setting through the server's merge-on-write.
+    const nextName = latest.current.displayName.trim()
+    if (nextWorkspace === (s.defaultWorkspace ?? null) && nextName === (s.displayName ?? '')) return
+    onSaveRef.current({ ...s, defaultWorkspace: nextWorkspace, displayName: nextName })
+  }, [])
+
+  const schedulePersist = useCallback(() => {
+    if (persistTimer.current) clearTimeout(persistTimer.current)
+    persistTimer.current = setTimeout(flush, 500)
+  }, [flush])
+
+  // Flush on close (the open→false transition) and on unmount, so a pending
+  // debounce is never lost.
+  useEffect(() => {
+    if (!open) flush()
+  }, [open, flush])
+  useEffect(() => () => flush(), [flush])
+
   // Re-seed from live settings only on the open→true transition (see the long
   // note kept below) so an in-session load() can't wipe unsaved edits.
   useEffect(() => {
@@ -103,21 +145,17 @@ export const SettingsPanel = ({
     try {
       const res = await api.api['pick-folder'].$post()
       const data = (await res.json()) as { path?: string }
-      if (data.path) setDefaultWorkspace(data.path)
+      if (data.path) {
+        setDefaultWorkspace(data.path)
+        // Discrete action — persist right away (the state set above hasn't
+        // rendered yet, so go through the ref directly).
+        latest.current = { ...latest.current, defaultWorkspace: data.path }
+        flush()
+      }
     } catch {
       /* user can still type the path manually */
     }
     setPicking(false)
-  }
-
-  const save = () => {
-    onSave({
-      ...settings,
-      defaultWorkspace: defaultWorkspace.trim() || null,
-      // '' is saved explicitly (not dropped) so clearing the field clears the
-      // setting through the server's merge-on-write.
-      displayName: displayName.trim(),
-    })
   }
 
   return (
@@ -218,7 +256,11 @@ export const SettingsPanel = ({
             <input
               type="text"
               value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
+              onChange={(e) => {
+                setDisplayName(e.target.value)
+                schedulePersist()
+              }}
+              onBlur={flush}
               placeholder={suggestedName ?? ''}
               className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
             />
@@ -251,7 +293,11 @@ export const SettingsPanel = ({
                     <input
                       type="text"
                       value={defaultWorkspace}
-                      onChange={(e) => setDefaultWorkspace(e.target.value)}
+                      onChange={(e) => {
+                        setDefaultWorkspace(e.target.value)
+                        schedulePersist()
+                      }}
+                      onBlur={flush}
                       placeholder="/Users/you/projects"
                       className="flex-1 min-w-0 rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
                     />
@@ -303,11 +349,6 @@ export const SettingsPanel = ({
               </div>
             )}
           </div>
-        </div>
-
-        <div className="shrink-0 flex items-center justify-end gap-2 border-t border-line bg-bg-elevated px-6 py-3.5">
-          <Btn variant="subtle" size="md" onClick={onClose}>{t('common.cancel')}</Btn>
-          <Btn variant="primary" size="md" onClick={save}>{t('common.save')}</Btn>
         </div>
       </div>
     </>

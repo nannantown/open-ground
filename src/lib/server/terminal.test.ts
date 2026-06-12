@@ -1,10 +1,18 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest'
 import {
   listActiveTerminalCwds,
   listActiveTerminals,
   claudeStatus,
   getTerminal,
+  killTerminalsByCwd,
+  registerFlowStream,
+  trackFlowSent,
+  ackFlowStream,
+  unregisterFlowStream,
   WORKING_SILENCE_MS,
+  FLOW_HIGH_WATERMARK,
+  FLOW_LOW_WATERMARK,
+  FLOW_PAUSE_CAP_MS,
 } from './terminal'
 import type { TerminalInfo } from './terminal'
 
@@ -21,6 +29,10 @@ interface FakeSessionShape {
   buffer: string
   listeners: Set<unknown>
   exitListeners: Set<unknown>
+  // Optional like on the real PtySession — most fixtures here stay bare, which
+  // is itself part of the contract (flow readers must tolerate undefined).
+  flows?: Map<string, { sent: number; acked: number; controlled: boolean }>
+  paused?: boolean
 }
 
 const state = () =>
@@ -133,18 +145,22 @@ describe('listActiveTerminals', () => {
     expect(listActiveTerminals()).toEqual({ cwds: [], claude: [] })
   })
 
-  it('dedupes claude sessions per cwd — working wins over waiting', () => {
+  it('lists every live claude pane with its PTY id — no per-cwd dedup', () => {
     const now = Date.now()
-    // waiting first, then working: the working pane must win regardless of order.
+    // Board cards key their slot by PTY id, so each pane must be reported
+    // individually; the Ground beacon aggregates per project client-side.
     state().sessions.set('w1', fakeSession('w1', '/tmp/proj-a', { tag: 'claude' }))
     state().sessions.set(
       'w2',
       fakeSession('w2', '/tmp/proj-a', { tag: 'claude', lastOutputAt: now }),
     )
-    // …and a waiting pane AFTER the working one must not downgrade it back.
     state().sessions.set('w3', fakeSession('w3', '/tmp/proj-a', { tag: 'claude' }))
     const res = listActiveTerminals()
-    expect(res.claude).toEqual([{ cwd: '/tmp/proj-a', status: 'working' }])
+    expect(res.claude).toEqual([
+      { id: 'w1', cwd: '/tmp/proj-a', status: 'waiting' },
+      { id: 'w2', cwd: '/tmp/proj-a', status: 'working' },
+      { id: 'w3', cwd: '/tmp/proj-a', status: 'waiting' },
+    ])
     expect(res.cwds).toEqual(['/tmp/proj-a'])
   })
 
@@ -165,5 +181,307 @@ describe('listActiveTerminals', () => {
     const res = listActiveTerminals()
     expect(res.cwds).toEqual(['/tmp/proj-a'])
     expect(res.claude).toEqual([])
+  })
+})
+
+describe('killTerminalsByCwd', () => {
+  // Custom-module delete kills the sidebar claude session living in the
+  // module dir before rm -rf'ing it — otherwise the PTY would outlive every
+  // UI surface that could reach it.
+  const killable = (
+    id: string,
+    cwd: string,
+    kills: string[],
+    opts: { finishedAt?: string } = {},
+  ): FakeSessionShape => {
+    const s = fakeSession(id, cwd, { tag: 'claude', ...opts })
+    s.pty = { kill: () => kills.push(id) }
+    return s
+  }
+
+  it('kills every live session in the cwd and reports the count', () => {
+    const kills: string[] = []
+    state().sessions.set('a', killable('a', '/tmp/mod-dir', kills))
+    state().sessions.set('b', killable('b', '/tmp/mod-dir', kills))
+    state().sessions.set('other', killable('other', '/tmp/elsewhere', kills))
+    expect(killTerminalsByCwd('/tmp/mod-dir')).toBe(2)
+    expect(kills.sort()).toEqual(['a', 'b'])
+  })
+
+  it('skips exited sessions lingering for buffer drain', () => {
+    const kills: string[] = []
+    state().sessions.set(
+      'dead',
+      killable('dead', '/tmp/mod-dir', kills, { finishedAt: new Date().toISOString() }),
+    )
+    expect(killTerminalsByCwd('/tmp/mod-dir')).toBe(0)
+    expect(kills).toEqual([])
+  })
+
+  it('returns 0 on a cwd with no sessions', () => {
+    expect(killTerminalsByCwd('/tmp/nowhere')).toBe(0)
+  })
+})
+
+describe('flow control (ACK-based PTY pause/resume)', () => {
+  // pause/resume are the only pty surface evaluateFlow touches — spy on them.
+  const flowPty = (): { calls: string[]; pty: unknown } => {
+    const calls: string[] = []
+    return {
+      calls,
+      pty: { pause: () => calls.push('pause'), resume: () => calls.push('resume') },
+    }
+  }
+
+  const sessionWithSpy = (id: string): { s: FakeSessionShape; calls: string[] } => {
+    const s = fakeSession(id, '/tmp/proj-a', { tag: 'claude' })
+    const { calls, pty } = flowPty()
+    s.pty = pty
+    state().sessions.set(id, s)
+    return { s, calls }
+  }
+
+  // A flow only participates in pause decisions after its first ACK — mark it
+  // controlled the way a real subscriber would. The 1-unit ACK credits
+  // NOTHING (acked clamps to sent=0); it only flips `controlled`.
+  const controlledFlow = (termId: string, streamId: string): void => {
+    registerFlowStream(termId, streamId)
+    ackFlowStream(termId, streamId, 1)
+  }
+
+  it('pauses when the un-acked backlog of a controlled flow exceeds HIGH', () => {
+    const { s, calls } = sessionWithSpy('t')
+    controlledFlow('t', 'st')
+    // acked=0 (clamped), so HIGH+1 sent is exactly one past the strict
+    // `> HIGH` pause threshold.
+    trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 1)
+    expect(calls).toEqual(['pause'])
+    expect(s.paused).toBe(true)
+  })
+
+  it('holds the pause between the watermarks, resumes below LOW (hysteresis)', () => {
+    const { s, calls } = sessionWithSpy('t')
+    controlledFlow('t', 'st')
+    trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 2)
+    expect(calls).toEqual(['pause'])
+    // Drain to backlog === LOW: `< LOW` is strict, so still paused.
+    ackFlowStream('t', 'st', FLOW_HIGH_WATERMARK + 2 - FLOW_LOW_WATERMARK)
+    expect(calls).toEqual(['pause'])
+    expect(s.paused).toBe(true)
+    // One more unit tips below LOW — resume.
+    ackFlowStream('t', 'st', 1)
+    expect(calls).toEqual(['pause', 'resume'])
+    expect(s.paused).toBe(false)
+  })
+
+  it('clamps ACK credit to what was sent (over-ACK cannot bank negative backlog)', () => {
+    const { s, calls } = sessionWithSpy('t')
+    registerFlowStream('t', 'st')
+    trackFlowSent('t', 'st', 10)
+    // Two duplicate oversized ACKs: each clamps to `sent`, crediting 10 total…
+    ackFlowStream('t', 'st', 10_000)
+    ackFlowStream('t', 'st', 10_000)
+    // …so the next surge still pauses (un-clamped, the banked 20 000 credit
+    // would swallow it and flow control would be silently off).
+    trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 1)
+    expect(calls).toEqual(['pause'])
+    expect(s.paused).toBe(true)
+  })
+
+  it('never pauses for a flow that has not ACKed (legacy-client compatibility)', () => {
+    const { s, calls } = sessionWithSpy('t')
+    registerFlowStream('t', 'st')
+    // A pre-flow-control subscriber never ACKs; no matter how far its `sent`
+    // runs ahead it must not freeze the PTY for everyone.
+    trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK * 3)
+    expect(calls).toEqual([])
+    expect(s.paused).toBeFalsy()
+  })
+
+  it('unregistering the jammed stream resumes (tab closed mid-backlog)', () => {
+    const { s, calls } = sessionWithSpy('t')
+    controlledFlow('t', 'st')
+    trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 2)
+    expect(calls).toEqual(['pause'])
+    unregisterFlowStream('t', 'st')
+    expect(calls).toEqual(['pause', 'resume'])
+    expect(s.paused).toBe(false)
+  })
+
+  it('a healthy sibling prevents the pause — the jammed flow is stall-dropped at HIGH instead', () => {
+    const { s, calls } = sessionWithSpy('t')
+    const stalls: string[] = []
+    registerFlowStream('t', 'fast')
+    registerFlowStream('t', 'slow', () => stalls.push('slow'))
+    ackFlowStream('t', 'fast', 1)
+    ackFlowStream('t', 'slow', 1)
+    // The fast subscriber keeps up (backlog 0 after acking its 10)…
+    trackFlowSent('t', 'fast', 10)
+    ackFlowStream('t', 'fast', 10)
+    expect(calls).toEqual([])
+    // …so when the slow one (a background-throttled tab) jams past HIGH the
+    // PTY must NOT pause — that would freeze the healthy viewer's live output
+    // for up to FLOW_PAUSE_CAP_MS. The jammed flow alone is dropped (onStall
+    // ends its stream; the client reconnects and repaints) and the sibling
+    // never misses a frame.
+    trackFlowSent('t', 'slow', FLOW_HIGH_WATERMARK + 1)
+    expect(calls).toEqual([])
+    expect(s.paused).toBeFalsy()
+    expect(stalls).toEqual(['slow'])
+    expect(s.flows?.has('slow')).toBe(false)
+    expect(s.flows?.has('fast')).toBe(true)
+  })
+
+  it('pauses only when EVERY controlled flow is jammed (the minimum backlog governs)', () => {
+    const { s, calls } = sessionWithSpy('t')
+    const stalls: string[] = []
+    registerFlowStream('t', 'a', () => stalls.push('a'))
+    registerFlowStream('t', 'b', () => stalls.push('b'))
+    ackFlowStream('t', 'a', 1)
+    ackFlowStream('t', 'b', 1)
+    // b leaves the healthy band first (at exactly LOW it is no longer a
+    // `< LOW` sibling), THEN a jams past HIGH: no healthy sibling justifies
+    // an immediate drop, but b is not jammed either — so no pause yet and a
+    // is kept.
+    trackFlowSent('t', 'b', FLOW_LOW_WATERMARK)
+    trackFlowSent('t', 'a', FLOW_HIGH_WATERMARK + 1)
+    expect(calls).toEqual([])
+    expect(s.paused).toBeFalsy()
+    expect(s.flows?.has('a')).toBe(true)
+    // b jams too — now every watcher is stuck and pausing is the only option.
+    trackFlowSent('t', 'b', FLOW_HIGH_WATERMARK + 1 - FLOW_LOW_WATERMARK)
+    expect(calls).toEqual(['pause'])
+    expect(s.paused).toBe(true)
+    // a drains below LOW: the PTY resumes for it, and b — still jammed past
+    // HIGH, now with a healthy sibling present — is dropped on the same pass.
+    ackFlowStream('t', 'a', FLOW_HIGH_WATERMARK + 1)
+    expect(calls).toEqual(['pause', 'resume'])
+    expect(s.paused).toBe(false)
+    expect(stalls).toEqual(['b'])
+    expect(s.flows?.has('b')).toBe(false)
+    expect(s.flows?.has('a')).toBe(true)
+  })
+
+  it('does nothing on a finished session (no pause/resume at a dead PTY)', () => {
+    const s = fakeSession('t', '/tmp/proj-a', {
+      tag: 'claude',
+      finishedAt: new Date().toISOString(),
+    })
+    const { calls, pty } = flowPty()
+    s.pty = pty
+    state().sessions.set('t', s)
+    controlledFlow('t', 'st')
+    trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK * 2)
+    expect(calls).toEqual([])
+  })
+
+  it('tolerates unknown ids and bare sessions without flows (no throw)', () => {
+    // Bare fixture — flows undefined, exactly what every legacy test injects.
+    state().sessions.set('bare', fakeSession('bare', '/tmp/proj-a'))
+    expect(() => {
+      trackFlowSent('bare', 'nope', 5)
+      ackFlowStream('bare', 'nope', 5)
+      unregisterFlowStream('bare', 'nope')
+      registerFlowStream('ghost', 'nope')
+      trackFlowSent('ghost', 'nope', 5)
+      ackFlowStream('ghost', 'nope', 5)
+      unregisterFlowStream('ghost', 'nope')
+    }).not.toThrow()
+  })
+
+  describe('pause duration cap (FLOW_PAUSE_CAP_MS)', () => {
+    // A background-throttled renderer stops draining xterm, so its ACKs stop
+    // for minutes — without the cap that would hold the PTY paused until
+    // claude hard-blocks on a full kernel buffer. Unlike claudeStatus there is
+    // no injectable `now` seam: the cap firing with NO further flow events at
+    // all IS the contract, so this block runs on vitest's fake clock.
+    beforeEach(() => vi.useFakeTimers())
+    afterEach(() => vi.useRealTimers())
+
+    it('drops the jammed flow at the cap: onStall fires, the PTY resumes', () => {
+      const { s, calls } = sessionWithSpy('t')
+      const stalls: string[] = []
+      registerFlowStream('t', 'st', () => stalls.push('st'))
+      ackFlowStream('t', 'st', 1)
+      trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 2)
+      expect(calls).toEqual(['pause'])
+      // Not a millisecond early…
+      vi.advanceTimersByTime(FLOW_PAUSE_CAP_MS - 1)
+      expect(stalls).toEqual([])
+      expect(s.paused).toBe(true)
+      // …then at the cap: flow dropped, its stream told to end, PTY resumed.
+      vi.advanceTimersByTime(1)
+      expect(stalls).toEqual(['st'])
+      expect(calls).toEqual(['pause', 'resume'])
+      expect(s.paused).toBe(false)
+      expect(s.flows?.has('st')).toBe(false)
+    })
+
+    it('a drain below LOW before the cap disarms it — no stall, flow kept', () => {
+      const { s, calls } = sessionWithSpy('t')
+      const stalls: string[] = []
+      registerFlowStream('t', 'st', () => stalls.push('st'))
+      ackFlowStream('t', 'st', 1)
+      trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 2)
+      expect(calls).toEqual(['pause'])
+      // Healthy client catches up in time — resume disarms the timer.
+      ackFlowStream('t', 'st', FLOW_HIGH_WATERMARK + 2)
+      expect(calls).toEqual(['pause', 'resume'])
+      vi.advanceTimersByTime(FLOW_PAUSE_CAP_MS * 2)
+      expect(stalls).toEqual([])
+      expect(s.flows?.has('st')).toBe(true)
+    })
+
+    it('drops EVERY controlled flow still ≥ LOW at the cap (a kept one would pin the pause, timer spent), spares uncontrolled ones', () => {
+      const { s, calls } = sessionWithSpy('t')
+      const stalls: string[] = []
+      registerFlowStream('t', 'jam', () => stalls.push('jam'))
+      registerFlowStream('t', 'mid', () => stalls.push('mid'))
+      registerFlowStream('t', 'legacy', () => stalls.push('legacy'))
+      ackFlowStream('t', 'jam', 1)
+      ackFlowStream('t', 'mid', 1)
+      // legacy never ACKs — uncontrolled, exempt from decisions and drops alike.
+      trackFlowSent('t', 'legacy', FLOW_HIGH_WATERMARK * 3)
+      // March both controlled flows out of the healthy band together, then
+      // past HIGH (one jamming while the other was still < LOW would be
+      // immediate-dropped before any pause — see the sibling tests above).
+      trackFlowSent('t', 'jam', FLOW_LOW_WATERMARK)
+      trackFlowSent('t', 'mid', FLOW_LOW_WATERMARK)
+      trackFlowSent('t', 'jam', FLOW_HIGH_WATERMARK + 2 - FLOW_LOW_WATERMARK)
+      expect(calls).toEqual([])
+      trackFlowSent('t', 'mid', FLOW_HIGH_WATERMARK + 1 - FLOW_LOW_WATERMARK)
+      expect(calls).toEqual(['pause'])
+      // mid claws back into the hysteresis band (backlog EXACTLY LOW) — not
+      // enough: resume needs `< LOW`, so the pause and its cap timer stand.
+      ackFlowStream('t', 'mid', FLOW_HIGH_WATERMARK + 1 - FLOW_LOW_WATERMARK)
+      expect(calls).toEqual(['pause'])
+      vi.advanceTimersByTime(FLOW_PAUSE_CAP_MS)
+      // Both controlled flows were still ≥ LOW — both dropped (keeping mid
+      // would hold the pause forever: the cap timer is spent and mid alone
+      // can never satisfy `< LOW` without draining)…
+      expect(stalls).toEqual(['jam', 'mid'])
+      expect(calls).toEqual(['pause', 'resume'])
+      // …while the uncontrolled legacy flow rides on, exempt as ever.
+      expect(s.flows?.has('legacy')).toBe(true)
+      expect(s.flows?.has('jam')).toBe(false)
+      expect(s.flows?.has('mid')).toBe(false)
+    })
+
+    it('a cap firing after exit does nothing (no resume at a dead PTY, no stall)', () => {
+      const { s, calls } = sessionWithSpy('t')
+      const stalls: string[] = []
+      registerFlowStream('t', 'st', () => stalls.push('st'))
+      ackFlowStream('t', 'st', 1)
+      trackFlowSent('t', 'st', FLOW_HIGH_WATERMARK + 2)
+      expect(calls).toEqual(['pause'])
+      // Mimic onExit landing between pause and cap: finishedAt + flows
+      // dropped. (The real handler also clears the timer — the guard must
+      // hold even if a stale callback still fires.)
+      s.info.finishedAt = new Date().toISOString()
+      s.flows?.clear()
+      vi.advanceTimersByTime(FLOW_PAUSE_CAP_MS)
+      expect(stalls).toEqual([])
+      expect(calls).toEqual(['pause'])
+    })
   })
 })

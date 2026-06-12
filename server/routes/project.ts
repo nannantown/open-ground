@@ -33,6 +33,13 @@ import {
 } from '@/lib/server/store'
 import { normalizeOpenApps } from '@/lib/server/openApps'
 import { listProjectBranches } from '@/lib/server/gitBranches'
+import { checkMergedBranches } from '@/lib/server/mergedBranches'
+import { fetchPrInfo } from '@/lib/server/prInfo'
+import { ensureReviewWorktree, ReviewWorktreeError } from '@/lib/server/reviewWorktree'
+import {
+  listProjectWorktrees,
+  cleanProjectWorktrees,
+} from '@/lib/server/worktreeCleanup'
 import {
   createCanvas,
   deleteCanvas,
@@ -44,6 +51,14 @@ import {
   writeCanvasFile,
 } from '@/lib/server/canvasData'
 import type { BoardColumn, ProjectData, ProjectTask, CanvasFile } from '@/lib/types'
+import {
+  MAX_TASK_ASSET_BYTES,
+  deleteTaskAsset,
+  isValidTaskAssetId,
+  readTaskAsset,
+  writeTaskAsset,
+} from '@/lib/server/taskAssets'
+import { extForMime } from '@/lib/server/canvasImages'
 import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
 import { probeClaudeCli } from '@/lib/server/claudeCli'
@@ -158,6 +173,45 @@ export const projectRoutes = new Hono()
     if (path instanceof Response) return path
     return c.json(await listProjectBranches(path))
   })
+  // ── /api/project/merged-branches ─────────────────────────────────────────
+  // POST { path, branches (≤50), targetBranch? } → MergedBranchesResponse —
+  // which of these task branches already landed in the target branch (pure
+  // git ancestry check, no gh; B018/F065). Feeds the Review column's
+  // "Merged → Done" chip. Never throws: unjudgeable branches come back
+  // 'unknown'.
+  .post('/api/project/merged-branches', async (c) => {
+    let body: { path?: string; branches?: unknown; targetBranch?: unknown }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    const branches = body.branches
+    if (!Array.isArray(branches) || branches.some((b) => typeof b !== 'string')) {
+      return c.json({ error: 'branches must be an array of strings' }, 400)
+    }
+    if (branches.length > 50) return c.json({ error: 'too many branches (max 50)' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const targetBranch =
+      typeof body.targetBranch === 'string' && body.targetBranch.trim()
+        ? body.targetBranch
+        : undefined
+    return c.json(await checkMergedBranches(path, branches as string[], targetBranch))
+  })
+  // ── /api/project/pr-info ─────────────────────────────────────────────────
+  // POST { path, prUrl } → PrInfoResponse — PR state + diff stats for the
+  // drawer's status strip (B023, F058/F085). Every failure mode (gh missing,
+  // bad URL, network) is { available: false }, never an error status.
+  .post('/api/project/pr-info', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    // Hono caches c.req.json() per request — safe to read again after the guard.
+    const body = (await c.req.json().catch(() => ({}))) as { prUrl?: unknown }
+    const prUrl = typeof body.prUrl === 'string' ? body.prUrl : ''
+    return c.json(await fetchPrInfo(path, prUrl))
+  })
   // ── /api/project/open ──────────────────────────────────────────────────
   // GET → { apps } ; POST { path, app } → open folder in app ; PUT { apps } → save list
   .get('/api/project/open', async (c) => {
@@ -213,6 +267,61 @@ export const projectRoutes = new Hono()
   // macOS: `open`, Windows: `explorer`, Linux/other: `xdg-open`.
   // `explorer` exits non-zero even on success, so we fire-and-forget via spawn
   // and never inspect the exit code.
+  // ── /api/project/review-worktree ──────────────────────────────────────────
+  // POST { path, branch } → ensure a local checkout of the task branch under
+  // the central worktrees dir and return its absolute path (Board flow F061:
+  // the reviewer's one-click "try this branch"). The dir passes
+  // validateProjectPath, so the client can follow up with /api/project/reveal.
+  .post('/api/project/review-worktree', async (c) => {
+    let body: { path?: string; branch?: string }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body.path === 'string' ? body.path : ''
+    const branch = typeof body.branch === 'string' ? body.branch : ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    if (!branch) return c.json({ error: 'branch required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    try {
+      const result = await ensureReviewWorktree(path, branch)
+      return c.json(result)
+    } catch (e) {
+      // Machine-readable `code` so the client can show localized copy per
+      // failure category instead of echoing this English message verbatim.
+      const code = e instanceof ReviewWorktreeError ? e.code : 'git-failed'
+      return c.json({ error: e instanceof Error ? e.message : 'checkout failed', code }, 500)
+    }
+  })
+  // ── /api/project/worktrees ────────────────────────────────────────────────
+  // GET  ?path=        → { worktrees: ProjectWorktreeInfo[] } — the task/* and
+  //                      review-* checkouts under the CENTRAL worktrees dir
+  //                      (~/.openground/projects/<uuid>/worktrees/) only; the
+  //                      main working tree is never listed (B012 / F082).
+  // POST /clean {path} → { removed, skippedDirty } — removes the CLEAN ones
+  //                      (dirty = uncommitted changes → always skipped), then
+  //                      `git worktree prune`.
+  .get('/api/project/worktrees', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    try {
+      return c.json({ worktrees: await listProjectWorktrees(path) })
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'failed to list worktrees' }, 500)
+    }
+  })
+  .post('/api/project/worktrees/clean', async (c) => {
+    const body = await c.req.json().catch(() => ({}))
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    try {
+      return c.json(await cleanProjectWorktrees(path))
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'failed to clean worktrees' }, 500)
+    }
+  })
   .post('/api/project/reveal', async (c) => {
   const { path } = (await c.req.json()) as { path?: string }
   if (!path) return c.json({ error: 'path required' }, 400)
@@ -423,6 +532,89 @@ export const projectRoutes = new Hono()
   })
   return c.json(saved)
 })
+  // ── /api/project/task-asset ───────────────────────────────────────────────
+  // Board-card image attachments (B022). POST uploads base64 JSON (the same
+  // body shape as /api/paste-image); the returned id is the content-hash file
+  // name the card stores in `attachments` — no path ever crosses the wire.
+  // GET serves the bytes (?path=&id=); DELETE unlinks ONLY when no card still
+  // references the id (content-addressing dedupes the same screenshot across
+  // cards, so a blind unlink would break the other card's thumbnail).
+  .post('/api/project/task-asset', async (c) => {
+    let body: { path?: unknown; name?: unknown; mime?: unknown; dataBase64?: unknown }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    const mime = typeof body.mime === 'string' ? body.mime : ''
+    const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : ''
+    if (!mime.startsWith('image/') || !extForMime(mime)) {
+      return c.json({ error: `unsupported mime: ${mime || '(none)'}` }, 400)
+    }
+    if (!dataBase64) return c.json({ error: 'missing image data' }, 400)
+    // Reject by encoded length BEFORE decoding (base64 is 4/3 the byte size) —
+    // an oversized body must never cost a full Buffer allocation first.
+    if (dataBase64.length > Math.ceil((MAX_TASK_ASSET_BYTES * 4) / 3) + 4) {
+      return c.json({ error: 'image too large (max 5MB)' }, 413)
+    }
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const data = Buffer.from(dataBase64, 'base64')
+    if (data.length === 0) return c.json({ error: 'empty image' }, 400)
+    if (data.length > MAX_TASK_ASSET_BYTES) {
+      return c.json({ error: 'image too large (max 5MB)' }, 413)
+    }
+    try {
+      const id = await writeTaskAsset(path, mime, data)
+      // Display name: basename only, conservatively sanitized, never a path.
+      const rawName = typeof body.name === 'string' ? body.name : ''
+      const name =
+        rawName
+          .split(/[/\\]/)
+          .pop()!
+          .replace(/[\u0000-\u001f\u007f]/g, '')
+          .slice(0, 120) || 'image'
+      return c.json({ id, name, mime })
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : 'write failed' }, 500)
+    }
+  })
+  .get('/api/project/task-asset', async (c) => {
+    const path = c.req.query('path') ?? ''
+    const id = c.req.query('id') ?? ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    // Strict id shape (40-hex sha1 + whitelisted ext) — the traversal guard.
+    if (!isValidTaskAssetId(id)) return c.json({ error: 'bad id' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const out = await readTaskAsset(path, id)
+    if (!out) return c.json({ error: 'not found' }, 404)
+    return c.body(out.data as unknown as ArrayBuffer, 200, {
+      'content-type': out.mime,
+      // Content-addressed: the bytes behind an id never change — cache hard.
+      'cache-control': 'private, max-age=31536000, immutable',
+    })
+  })
+  .delete('/api/project/task-asset', async (c) => {
+    const path = c.req.query('path') ?? ''
+    const id = c.req.query('id') ?? ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    if (!isValidTaskAssetId(id)) return c.json({ error: 'bad id' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    // Only reap unreferenced bytes. A still-referenced id (another card, or a
+    // not-yet-persisted drawer state) is skipped — leak-not-loss by design.
+    // `taskId` names the card the client just removed the attachment FROM: its
+    // SAVED reference is excluded from the count, because the drawer's persist
+    // is debounced and the stale disk copy would otherwise always say
+    // "referenced" and leak the bytes. Other cards' references still protect.
+    const taskId = c.req.query('taskId') ?? ''
+    const data = await readProjectData(path)
+    const referenced = data.tasks.some(
+      (t) => t.id !== taskId && (t.attachments ?? []).some((a) => a.id === id),
+    )
+    if (!referenced) await deleteTaskAsset(path, id)
+    return c.json({ ok: true, deleted: !referenced })
+  })
   // ── /api/project/canvases ─────────────────────────────────────────────────
   // GET ?path[&id] → list | full CanvasFile
   // POST ?action=create|delete|rename|reorder|active (default: save) — body.path required

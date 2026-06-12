@@ -31,7 +31,7 @@ const TOOLS: { id: Tool; label: string; icon: React.ReactNode }[] = [
   { id: 'text', label: 'Text (T)', icon: <Type size={15} strokeWidth={1.75} /> },
   { id: 'sticky', label: 'Sticky note (S)', icon: <StickyNote size={15} strokeWidth={1.75} /> },
   { id: 'frame', label: 'Frame — drag to draw (F)', icon: <Frame size={15} strokeWidth={1.75} /> },
-  { id: 'rect', label: 'Rectangle — drag to draw (G)', icon: <Square size={15} strokeWidth={1.75} /> },
+  { id: 'rect', label: 'Rectangle — drag to draw (R)', icon: <Square size={15} strokeWidth={1.75} /> },
   { id: 'ellipse', label: 'Ellipse — drag to draw (O)', icon: <Circle size={15} strokeWidth={1.75} /> },
   {
     id: 'comment',

@@ -127,3 +127,43 @@ describe('no-storage (SSR / locked-down) safety', () => {
     expect(() => savePersistedView({ projectId: 'x' }, null)).not.toThrow()
   })
 })
+
+// ─── Custom tabs (docs/CUSTOM_TABS_PLAN.md) ─────────────────────────────────
+// A `custom:<uuid>` panel tab persists like a built-in. Only the SHAPE is
+// validated here — existence against the live module list is ProjectPanel's
+// job once the fetch lands (a vanished module falls back to the first tab).
+
+describe('persistView with custom tab ids', () => {
+  const CUSTOM = 'custom:aaaaaaaa-0000-4000-8000-000000000001'
+
+  it('parses a custom panelTab', () => {
+    expect(parsePersistedView(`{"panelTab":"${CUSTOM}"}`)).toEqual({
+      panelTab: CUSTOM,
+    })
+  })
+
+  it('drops the bare prefix (no module id)', () => {
+    expect(parsePersistedView('{"panelTab":"custom:"}')).toEqual({})
+  })
+
+  it('round-trips a custom panelTab through save/load', () => {
+    const storage = (() => {
+      const map = new Map<string, string>()
+      return {
+        get length() {
+          return map.size
+        },
+        clear: () => map.clear(),
+        getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
+        key: (i: number) => Array.from(map.keys())[i] ?? null,
+        removeItem: (k: string) => void map.delete(k),
+        setItem: (k: string, v: string) => void map.set(k, String(v)),
+      } as Storage
+    })()
+    savePersistedView({ projectId: 'proj-1', panelTab: CUSTOM as PersistedView['panelTab'] }, storage)
+    expect(loadPersistedView(storage)).toEqual({
+      projectId: 'proj-1',
+      panelTab: CUSTOM,
+    })
+  })
+})

@@ -50,6 +50,18 @@ export interface TerminalInfo {
 
 type Listener = (chunk: string) => void
 
+// Per-SSE-subscriber flow accounting. `controlled` flips true on the first
+// ACK — only flows whose subscriber actually ACKs participate in pause
+// decisions (see evaluateFlow for why). `onStall` is the stream owner's
+// drop-this-connection hook, fired when the flow has held the PTY paused past
+// FLOW_PAUSE_CAP_MS (see firePauseCap).
+interface FlowState {
+  sent: number
+  acked: number
+  controlled: boolean
+  onStall?: () => void
+}
+
 interface PtySession {
   info: TerminalInfo
   pty: IPty
@@ -64,6 +76,17 @@ interface PtySession {
   // shells. Absent (undefined) on fake test sessions — treat as null.
   headless?: HeadlessTerminal | null
   menuTimer?: ReturnType<typeof setTimeout> | null
+  // streamId → flow counters for ACK-based back-pressure on the PTY → SSE
+  // path. Optional (like headless) because tests inject bare session objects
+  // through the globalThis seam — every reader must tolerate undefined.
+  flows?: Map<string, FlowState>
+  // True while the PTY is pause()d because a controlled flow backed up past
+  // FLOW_HIGH_WATERMARK.
+  paused?: boolean
+  // Armed when the pause starts, cleared on resume/exit: if it fires, the
+  // flows still jamming the PTY are dropped (firePauseCap) so a stalled
+  // renderer can never hold claude blocked indefinitely.
+  pauseTimer?: ReturnType<typeof setTimeout> | null
 }
 
 // Read the headless terminal's visible screen as plain text rows.
@@ -110,6 +133,35 @@ const { sessions } = state
 // shell — give them 10x the headroom.
 const MAX_BUFFER_BYTES_SHELL = 200_000
 const MAX_BUFFER_BYTES_CLAUDE = 2_000_000
+
+// ACK-based flow control for the PTY → SSE → xterm path. Without it, a client
+// whose rendering can't keep up lets xterm's write buffer grow without bound
+// (the exact configuration xterm's flow-control guide warns about). The unit
+// is UTF-16 code units (string.length): the server counts the chunk strings it
+// emits and the client ACKs the same strings' .length after writing them to
+// xterm, so both sides measure identically with no byte-encoding math. Above
+// HIGH the PTY is pause()d; once the un-acked backlog drains below LOW it
+// resume()s (the gap gives hysteresis so we don't flap per chunk). With
+// several watchers on one PTY the LEAST backed-up controlled flow governs the
+// pause — see evaluateFlow.
+export const FLOW_HIGH_WATERMARK = 1_000_000
+export const FLOW_LOW_WATERMARK = 256_000
+
+// Cap on how long a jammed flow may keep the PTY pause()d. A paused PTY stops
+// being read, the ~64KB kernel buffer fills, and claude's stdout writes (a
+// TTY — blocking in node) hard-block the whole process. ACKs can legitimately
+// stop for MINUTES through no fault of the session: a minimized Electron
+// window or hidden browser tab gets Chromium timer throttling, which clamps
+// the chained-setTimeout drain loop inside xterm's WriteBuffer — the very
+// callbacks the client ACKs from. Letting the renderer hold claude hostage
+// would break the product's core promise (multiplexed sessions keep working
+// while you look elsewhere), so once a pause has lasted this long the jammed
+// streams are dropped instead: onStall ends the SSE connection, EventSource
+// auto-reconnects, and the client repaints from the replay ring buffer. 10s
+// is orders of magnitude above a healthy drain (a renderer that keeps up
+// clears the whole HIGH→LOW span well under a second), so only genuinely
+// stalled subscribers are ever dropped.
+export const FLOW_PAUSE_CAP_MS = 10_000
 
 const appendBuffer = (s: PtySession, chunk: string) => {
   s.buffer += chunk
@@ -182,6 +234,9 @@ export const createTerminal = (opts: {
     exitListeners: new Set(),
     headless,
     menuTimer: null,
+    flows: new Map(),
+    paused: false,
+    pauseTimer: null,
   }
   sessions.set(id, session)
 
@@ -201,6 +256,11 @@ export const createTerminal = (opts: {
     info.finishedAt = new Date().toISOString()
     if (session.menuTimer) { clearTimeout(session.menuTimer); session.menuTimer = null }
     info.menuOpen = false
+    // Drop flow accounting with the PTY — evaluateFlow guards on finishedAt,
+    // so a late ACK/unregister never fires resume() at a dead process. The
+    // pause-cap timer goes with it (nothing left to resume or drop).
+    if (session.pauseTimer) { clearTimeout(session.pauseTimer); session.pauseTimer = null }
+    session.flows?.clear()
     if (session.headless) {
       try { session.headless.dispose() } catch {}
       session.headless = null
@@ -248,20 +308,17 @@ export const claudeStatus = (info: TerminalInfo, now: number): ClaudeBeaconStatu
 }
 
 /** Full payload of GET /api/terminal/active: the legacy `cwds` list (any live
- *  PTY — shells included) plus per-cwd claude activity, deduped so that when a
- *  project holds several claude panes `working` wins over `waiting`. */
+ *  PTY — shells included) plus every live claude pane's id + cwd + verdict.
+ *  No dedup here — Board cards need their own pane's status by PTY id; the
+ *  Ground's per-project beacon aggregates client-side (working wins). */
 export const listActiveTerminals = (): ActiveTerminalsResponse => {
   const now = Date.now()
-  const byCwd = new Map<string, ClaudeBeaconStatus>()
+  const claude: ActiveTerminalsResponse['claude'] = []
   sessions.forEach((s) => {
     if (s.info.finishedAt || s.info.tag !== 'claude') return
-    const status = claudeStatus(s.info, now)
-    if (status === 'working' || !byCwd.has(s.info.cwd)) byCwd.set(s.info.cwd, status)
+    claude.push({ id: s.info.id, cwd: s.info.cwd, status: claudeStatus(s.info, now) })
   })
-  return {
-    cwds: listActiveTerminalCwds(),
-    claude: Array.from(byCwd, ([cwd, status]) => ({ cwd, status })),
-  }
+  return { cwds: listActiveTerminalCwds(), claude }
 }
 
 export const writeInput = (id: string, data: string): boolean => {
@@ -296,6 +353,21 @@ export const killTerminal = (id: string): boolean => {
   return true
 }
 
+/** Kill every live PTY whose cwd is exactly `cwd`. Used when the directory
+ *  itself is about to be removed (custom-module delete rm -rf's the module
+ *  dir): a session left running there would outlive every UI surface that
+ *  could reach it — the tab is gone — yet keep showing in
+ *  GET /api/terminal/active until app quit. Returns the number killed. */
+export const killTerminalsByCwd = (cwd: string): number => {
+  let killed = 0
+  sessions.forEach((s) => {
+    if (s.info.finishedAt || s.info.cwd !== cwd) return
+    try { s.pty.kill() } catch {}
+    killed++
+  })
+  return killed
+}
+
 export const subscribeTerminal = (
   id: string,
   onData: Listener,
@@ -313,4 +385,137 @@ export const subscribeTerminal = (
       s.exitListeners.delete(onExit)
     },
   }
+}
+
+// The pause cap fired: the PTY has now been paused for FLOW_PAUSE_CAP_MS
+// straight (any ACK/unregister that left some flow below LOW in the meantime
+// would have resumed and cleared the timer). Holding on would block claude's
+// writes, so drop every controlled flow still at or above LOW: resume needs
+// SOME flow under LOW (evaluateFlow's minimum rule) and none of these reached
+// it within the cap — keeping one would pin the pause with no timer left
+// armed. Each drop fires the stream's onStall (the SSE route ends that
+// connection; the client reconnects and repaints from the replay buffer) and
+// the final re-evaluate resumes the PTY for everybody else.
+const firePauseCap = (s: PtySession): void => {
+  s.pauseTimer = null
+  if (!s.paused || s.info.finishedAt || !s.flows) return
+  const stalled: FlowState[] = []
+  for (const [streamId, f] of Array.from(s.flows)) {
+    if (f.controlled && f.sent - f.acked >= FLOW_LOW_WATERMARK) {
+      // Delete BEFORE onStall: the stream's teardown calls unregisterFlowStream
+      // → evaluateFlow, which must already see the jam gone.
+      s.flows.delete(streamId)
+      stalled.push(f)
+    }
+  }
+  for (const f of stalled) {
+    try { f.onStall?.() } catch {}
+  }
+  evaluateFlow(s)
+}
+
+// Pause/resume the PTY on the un-acked backlog of CONTROLLED flows — and only
+// when EVERY one of them is jammed: the MINIMUM backlog drives the decision,
+// because pausing on the worst flow would let one stalled subscriber (a
+// background-throttled browser tab whose ACKs stopped) freeze live output for
+// a healthy sibling watching the same PTY — Electron window + leftover
+// browser tab is a routine dev setup. A flow that jams past HIGH while a
+// healthy controlled sibling (backlog < LOW) exists is instead stall-dropped
+// HERE, immediately, via its onStall — the same drop → reconnect → repaint
+// recovery firePauseCap runs, minus the collective freeze. With no healthy
+// sibling (the single-viewer case included) the pause + cap path below is
+// unchanged. Uncontrolled flows (subscribers that never ACKed — e.g. a
+// pre-update SPA tab still open across a dev server reload) are excluded from
+// all of it: their `sent` grows forever by definition, and letting it count
+// would freeze claude permanently the moment one legacy client connects. They
+// simply get no back-pressure, which is exactly the pre-flow-control
+// behavior. With no controlled flows at all (nobody watching) the backlog is
+// 0, so an unwatched claude keeps running and only fills the ring buffer —
+// same as before. Every pause arms the cap timer (firePauseCap) so a stalled
+// subscriber bounds how long claude can be held.
+const evaluateFlow = (s: PtySession): void => {
+  if (s.info.finishedAt) return
+  let minBacklog = Infinity
+  let healthy = false
+  const jammed: Array<[string, FlowState]> = []
+  s.flows?.forEach((f, streamId) => {
+    if (!f.controlled) return
+    const b = f.sent - f.acked
+    minBacklog = Math.min(minBacklog, b)
+    if (b < FLOW_LOW_WATERMARK) healthy = true
+    if (b > FLOW_HIGH_WATERMARK) jammed.push([streamId, f])
+  })
+  if (healthy && jammed.length > 0) {
+    // Delete BEFORE onStall — same discipline as firePauseCap: the stream's
+    // teardown calls unregisterFlowStream → evaluateFlow, which must already
+    // see the jam gone.
+    for (const [streamId] of jammed) s.flows?.delete(streamId)
+    for (const [, f] of jammed) {
+      try { f.onStall?.() } catch {}
+    }
+    // Re-survey the survivors (mirrors firePauseCap's closing re-evaluate) so
+    // the pause/resume decision below runs on the post-drop set — e.g. a
+    // post-pause drain that turned one flow healthy must now resume the PTY,
+    // not leave it paused on the dropped sibling's stale backlog. Bounded:
+    // the recursive pass can't find another jammed flow.
+    evaluateFlow(s)
+    return
+  }
+  const backlog = minBacklog === Infinity ? 0 : minBacklog
+  if (backlog > FLOW_HIGH_WATERMARK && !s.paused) {
+    try { s.pty.pause() } catch {}
+    s.paused = true
+    if (s.pauseTimer) clearTimeout(s.pauseTimer)
+    s.pauseTimer = setTimeout(() => firePauseCap(s), FLOW_PAUSE_CAP_MS)
+  } else if (backlog < FLOW_LOW_WATERMARK && s.paused) {
+    try { s.pty.resume() } catch {}
+    s.paused = false
+    if (s.pauseTimer) { clearTimeout(s.pauseTimer); s.pauseTimer = null }
+  }
+}
+
+export const registerFlowStream = (
+  termId: string,
+  streamId: string,
+  // Invoked (at most once) when this flow is stall-dropped: it jammed past
+  // HIGH while a healthy sibling was watching the same PTY (evaluateFlow), or
+  // it held the PTY paused past FLOW_PAUSE_CAP_MS (firePauseCap). The owner
+  // must end its SSE connection so the client reconnects and repaints from
+  // the replay buffer. The flow is already unregistered when it fires, so the
+  // teardown's own unregisterFlowStream is a harmless no-op.
+  onStall?: () => void,
+): void => {
+  const s = sessions.get(termId)
+  if (!s) return
+  // ??= keeps this safe on sessions created before flows existed (and on the
+  // bare objects tests inject through the globalThis seam).
+  ;(s.flows ??= new Map()).set(streamId, { sent: 0, acked: 0, controlled: false, onStall })
+}
+
+export const trackFlowSent = (termId: string, streamId: string, count: number): void => {
+  const s = sessions.get(termId)
+  const f = s?.flows?.get(streamId)
+  if (!s || !f) return
+  f.sent += count
+  evaluateFlow(s)
+}
+
+export const ackFlowStream = (termId: string, streamId: string, count: number): void => {
+  const s = sessions.get(termId)
+  const f = s?.flows?.get(streamId)
+  if (!s || !f) return
+  // Clamp to `sent`: a duplicate/over-ACK must not drive the backlog negative,
+  // which would bank credit and effectively disable flow control for this stream.
+  f.acked = Math.min(f.acked + count, f.sent)
+  f.controlled = true
+  evaluateFlow(s)
+}
+
+export const unregisterFlowStream = (termId: string, streamId: string): void => {
+  const s = sessions.get(termId)
+  if (!s) return
+  // Dropping the flow re-evaluates: if the closed stream was the jammed one,
+  // the PTY resumes for everybody else.
+  s.flows?.delete(streamId)
+  evaluateFlow(s)
 }

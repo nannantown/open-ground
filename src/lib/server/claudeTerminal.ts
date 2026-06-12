@@ -8,7 +8,7 @@ import {
   type TerminalInfo,
 } from './terminal'
 import { ensureClaudeFolderTrusted } from './claudeTrust'
-import type { ProjectLaunchPrefs } from '../types'
+import { CLAUDE_EFFORTS, type ClaudeEffort, type ProjectLaunchPrefs } from '../types'
 
 // Launches `claude` interactively inside a PTY hosted by OPEN GROUND.
 // This is the post-2026-06-15 replacement for spawning `claude -p` directly:
@@ -42,13 +42,17 @@ export interface LaunchClaudeOpts {
   // Optional override of model alias / full name (e.g. 'sonnet', 'opus',
   // 'claude-sonnet-4-6'). Falls through to the CLI default if omitted.
   model?: string
+  // Optional effort level (`--effort`). Falls through to the CLI default if
+  // omitted. Callers validate against CLAUDE_EFFORTS — this layer just quotes.
+  effort?: string
   // Optional display name shown in claude's prompt box / /resume picker.
   name?: string
-  // Absolute extra directory to grant the spawned claude read access to via
-  // `--add-dir` — the project's CENTRAL data dir. Per-project attachments and
-  // screenshots now live outside the repo (~/.openground/projects/<uuid>/), so a
+  // Absolute extra directory (or directories — the flag is variadic) to grant
+  // the spawned claude read access to via `--add-dir` — the project's CENTRAL
+  // data dirs (worktrees, task-assets). Per-project attachments and
+  // screenshots live outside the repo (~/.openground/projects/<uuid>/), so a
   // non-bypass (plan) run, whose cwd is the repo, needs this to Read them.
-  addDir?: string
+  addDir?: string | string[]
   // App-context system prompt (default ON): teach the spawned claude that this
   // cwd is an OPEN GROUND project and how to talk to the app (board API etc.)
   // via --append-system-prompt. Set false for utility sessions whose output is
@@ -86,15 +90,20 @@ export const buildAppContextPrompt = (cwd: string, port: number): string => {
 //    maps 1:1 ('bypass' → --dangerously-skip-permissions via buildClaudeArgv);
 //    anything missing/unknown falls back to the interactive 'default'.
 //  - model: passed through trimmed; empty means "CLI default" (omitted).
+//  - effort: only a value the CLI actually accepts (CLAUDE_EFFORTS) passes —
+//    legacy/hand-edited junk degrades to "CLI default", never a broken argv.
 export const launchOptsFromPrefs = (
   prefs?: ProjectLaunchPrefs | null,
-): { permissionMode: ClaudePermissionMode; model?: string } => {
+): { permissionMode: ClaudePermissionMode; model?: string; effort?: ClaudeEffort } => {
   const pm = prefs?.permissionMode
   const permissionMode: ClaudePermissionMode =
     pm === 'acceptEdits' || pm === 'plan' || pm === 'bypass' ? pm : 'default'
   const model =
     typeof prefs?.model === 'string' && prefs.model.trim() ? prefs.model.trim() : undefined
-  return { permissionMode, ...(model ? { model } : {}) }
+  const effort = CLAUDE_EFFORTS.includes(prefs?.effort as ClaudeEffort)
+    ? (prefs?.effort as ClaudeEffort)
+    : undefined
+  return { permissionMode, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }
 }
 
 export interface ClaudeTerminalRef {
@@ -142,7 +151,7 @@ const sq = (s: string): string => shellQuoteArg(s, process.platform)
 export const buildClaudeArgv = (
   opts: Pick<
     LaunchClaudeOpts,
-    'addDir' | 'resume' | 'agentSessionId' | 'permissionMode' | 'model' | 'name'
+    'addDir' | 'resume' | 'agentSessionId' | 'permissionMode' | 'model' | 'effort' | 'name'
   >,
   promptFilePath: string | null,
   contextFilePath: string | null = null,
@@ -155,7 +164,10 @@ export const buildClaudeArgv = (
   // `…/OPEN GROUND`) survives intact in the PTY command line.
   const claudeBin = process.env.OPENGROUND_CLAUDE_BIN
   const args: string[] = [claudeBin ? sq(claudeBin) : 'claude']
-  if (opts.addDir) args.push('--add-dir', sq(opts.addDir))
+  // `--add-dir` is variadic, so multiple dirs ride ONE flag (still bounded by
+  // the `--session-id`/`--resume` flag that always follows — see rule 1 above).
+  const addDirs = typeof opts.addDir === 'string' ? [opts.addDir] : opts.addDir ?? []
+  if (addDirs.length) args.push('--add-dir', ...addDirs.map(sq))
   if (opts.resume) {
     args.push('--resume', opts.agentSessionId)
   } else {
@@ -172,6 +184,7 @@ export const buildClaudeArgv = (
     args.push('--permission-mode', opts.permissionMode)
   }
   if (opts.model) args.push('--model', sq(opts.model))
+  if (opts.effort) args.push('--effort', sq(opts.effort))
   if (opts.name) args.push('--name', sq(opts.name))
   // App-context system prompt — same cat-a-file trick as the positional
   // prompt (an inline multi-line value would blow the PTY's canonical-mode

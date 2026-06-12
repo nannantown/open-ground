@@ -301,6 +301,23 @@ const maybeFetch = async (projectPath: string): Promise<void> => {
   }
 }
 
+/** Is an upstream tracking branch configured for HEAD? Without one the
+ *  ahead/behind counts read 0 even though nothing was ever pushed — status
+ *  carries this so the UI can tell "published" from "never published". */
+const hasUpstream = async (projectPath: string): Promise<boolean> => {
+  try {
+    await git(projectPath, [
+      'rev-parse',
+      '--abbrev-ref',
+      '--symbolic-full-name',
+      '@{upstream}',
+    ])
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Commits in `range` that touch `.openground/` — 0 on any error (the
  *  canonical one: no upstream configured). */
 const sharedCommitCount = async (projectPath: string, range: string): Promise<number> => {
@@ -412,6 +429,7 @@ export const shareStatus = async (projectPath: string): Promise<ShareStatus> => 
     ])
   }
   const branch = gitRepo ? await currentBranch(projectPath) : null
+  const upstream = gitRepo ? await hasUpstream(projectPath) : false
   return {
     shared,
     gitRepo,
@@ -419,6 +437,7 @@ export const shareStatus = async (projectPath: string): Promise<ShareStatus> => 
     dirty,
     ahead,
     behind,
+    upstream,
     ...(forcedUpdates.get(projectPath) ? { forcedUpdate: true } : {}),
     ...(branch ? { branch } : {}),
   }

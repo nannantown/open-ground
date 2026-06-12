@@ -46,6 +46,22 @@ describe('buildClaudeArgv (launch argv order/quoting contract)', () => {
     expect(argv[addIdx + 2]).toBe('--session-id')
   })
 
+  it('accepts MULTIPLE add-dirs on ONE variadic --add-dir, still bounded by --session-id', () => {
+    const argv = buildClaudeArgv(
+      { ...base, addDir: ['/data/worktrees', '/data/task-assets'] },
+      '/tmp/p.txt',
+    )
+    const addIdx = argv.indexOf('--add-dir')
+    expect(argv.slice(addIdx, addIdx + 3)).toEqual([
+      '--add-dir',
+      "'/data/worktrees'",
+      "'/data/task-assets'",
+    ])
+    expect(argv[addIdx + 3]).toBe('--session-id')
+    // an empty list emits no flag at all
+    expect(buildClaudeArgv({ ...base, addDir: [] }, null)).not.toContain('--add-dir')
+  })
+
   it('passes the prompt via "$(cat <file>)" as the LAST arg, never inline', () => {
     const argv = buildClaudeArgv(base, '/tmp/prompt.txt')
     expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/prompt.txt')"`)
@@ -111,15 +127,32 @@ describe('launchOptsFromPrefs (personal launch prefs → LaunchClaudeOpts)', () 
     expect(launchOptsFromPrefs({ model: '' }).model).toBeUndefined()
   })
 
-  it('mapped prefs reach the launch argv: --permission-mode / --model / bypass flag', () => {
-    // acceptEdits + model → explicit flags on the claude command line
-    const opts = launchOptsFromPrefs({ permissionMode: 'acceptEdits', model: 'opus' })
+  it('passes only a CLI-accepted effort; junk/blank means CLI default (omitted)', () => {
+    expect(launchOptsFromPrefs({ effort: 'xhigh' }).effort).toBe('xhigh')
+    expect(launchOptsFromPrefs({ effort: 'max' }).effort).toBe('max')
+    expect(launchOptsFromPrefs({ effort: 'turbo' as never }).effort).toBeUndefined()
+    expect(launchOptsFromPrefs({}).effort).toBeUndefined()
+  })
+
+  it('mapped prefs reach the launch argv: --permission-mode / --model / --effort / bypass flag', () => {
+    // acceptEdits + model + effort → explicit flags on the claude command line
+    const opts = launchOptsFromPrefs({
+      permissionMode: 'acceptEdits',
+      model: 'opus',
+      effort: 'high',
+    })
     const argv = buildClaudeArgv({ agentSessionId: 'SID', ...opts }, null)
     const pmIdx = argv.indexOf('--permission-mode')
     expect(pmIdx).toBeGreaterThanOrEqual(0)
     expect(argv[pmIdx + 1]).toBe('acceptEdits')
     const mIdx = argv.indexOf('--model')
     expect(argv[mIdx + 1]).toBe("'opus'")
+    const eIdx = argv.indexOf('--effort')
+    expect(argv[eIdx + 1]).toBe("'high'")
+    // No effort → no flag at all (the CLI default must stay untouched).
+    expect(
+      buildClaudeArgv({ agentSessionId: 'SID', ...launchOptsFromPrefs({}) }, null),
+    ).not.toContain('--effort')
     // bypass → the dangerously-skip flag, not --permission-mode
     const bypass = buildClaudeArgv(
       { agentSessionId: 'SID', ...launchOptsFromPrefs({ permissionMode: 'bypass' }) },

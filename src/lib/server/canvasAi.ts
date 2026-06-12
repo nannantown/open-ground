@@ -29,6 +29,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { z } from 'zod'
+import { rectInside, type Rect } from '@/lib/canvasContainment'
 import { newId } from '@/lib/ids'
 import type { CanvasElement, TweakScreenRequest } from '@/lib/types'
 import { launchClaude } from './claudeTerminal'
@@ -253,10 +254,58 @@ const GeneratedElementSchema = z.object({
   rotation: clamped(-360, 360).optional(),
 })
 
+/** Infer frame parent/child links for a freshly generated batch.
+ *
+ *  The schema strips `parentId` (a model-supplied one could point anywhere),
+ *  so a generated "card inside a frame" would have no logical parent and the
+ *  frame would drag away without its contents (InfiniteCanvas moves children
+ *  via the persisted parentId chain). Geometry recovers the intent: an element
+ *  fully inside a frame's rect (rectInside — same predicate the live canvas
+ *  uses on drop) becomes that frame's child, and among nested frames the
+ *  SMALLEST containing frame wins so the most specific container takes it
+ *  (card frame → outer frame nesting included). Un-sized elements (a text
+ *  without width/height) are treated as a point — inside the frame ⇒ child.
+ *
+ *  Only `frame` can parent here: `canContain` lets a frame own anything, and
+ *  mock/screen (which may only own text) aren't generatable types at all.
+ *  Mutates `els` in place — they're this batch's fresh objects. */
+const inferGeneratedParents = (els: CanvasElement[]): void => {
+  for (let i = 0; i < els.length; i++) {
+    const self = els[i]
+    const rect: Rect = { x: self.x, y: self.y, w: self.width ?? 0, h: self.height ?? 0 }
+    let best: { id: string; area: number } | undefined
+    for (let j = 0; j < els.length; j++) {
+      if (j === i) continue
+      const frame = els[j]
+      if (frame.type !== 'frame') continue
+      const frameRect: Rect = {
+        x: frame.x,
+        y: frame.y,
+        w: frame.width ?? 0,
+        h: frame.height ?? 0,
+      }
+      if (!rectInside(rect, frameRect)) continue
+      // Degenerate case: two frames with IDENTICAL rects contain each other
+      // (rectInside lets edges touch), which would link A→B AND B→A — a
+      // containment cycle. Break it deterministically: when a frame and its
+      // candidate parent mutually contain each other, only an EARLIER element
+      // in the array may act as parent, so the first of the twins stays the
+      // root. (Strict nesting can't cycle — areas strictly shrink inward —
+      // and only frame-frame mutuals matter: a non-frame can never be chosen
+      // as a parent, so it forms no cycle.)
+      if (self.type === 'frame' && rectInside(frameRect, rect) && j > i) continue
+      const area = frameRect.w * frameRect.h
+      if (!best || area < best.area) best = { id: frame.id, area }
+    }
+    if (best) self.parentId = best.id
+  }
+}
+
 /** Parse + validate the JSON claude wrote. Per-element: unknown fields strip,
- *  unknown types drop the element, numbers clamp, ids are reassigned. Throws
- *  when nothing valid came back (a wrong canvas is worse than an error).
- *  Exported for unit tests. */
+ *  unknown types drop the element, numbers clamp, ids are reassigned, and
+ *  frame parent/child links are inferred from rect containment (see
+ *  inferGeneratedParents). Throws when nothing valid came back (a wrong
+ *  canvas is worse than an error). Exported for unit tests. */
 export const parseGeneratedElements = (jsonText: string): CanvasElement[] => {
   let parsed: unknown
   try {
@@ -281,6 +330,8 @@ export const parseGeneratedElements = (jsonText: string): CanvasElement[] => {
     out.push({ ...r.data, id: newId() })
   }
   if (out.length === 0) throw new Error('no valid canvas elements were generated')
+  // AFTER id assignment — the inferred parentId must reference the fresh ids.
+  inferGeneratedParents(out)
   return out
 }
 
@@ -299,7 +350,7 @@ export const buildGenerateElementsPrompt = (file: string, userPrompt: string): s
     '- width, height: numbers (px). Give every frame / shape / sticky an explicit size; optional for text.',
     '- text: string — frame label / text content / sticky body. Use "" when none.',
     '- shape: shapeKind "rect" | "ellipse"; fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px, rect only); opacity (0..1).',
-    '- frame: fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px); a frame is a labeled container — place related elements visually inside its rect.',
+    '- frame: fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px); a frame is a labeled container — place related elements visually inside its rect. Give every frame a short, meaningful name in `text` (e.g. "Pricing — Pro card", "Hero"); never leave it empty or literally "Frame". The name renders OUTSIDE the rect (Figma-style), so the full frame area is design content. Any element that belongs to a frame must sit FULLY inside that frame\'s rect coordinates — parent/child nesting is inferred from geometric containment.',
     '- sticky: color (CSS color — the sticky background).',
     '- text: fontSize (px); fontFamily (CSS font stack); textColor (CSS color); fontWeight (100–900); textAlign "left" | "center" | "right"; lineHeight (unitless multiplier).',
     '- Do NOT include "id" fields — the app assigns ids.',

@@ -31,7 +31,13 @@ import {
   clearSession,
   type StoredSession,
 } from '@/lib/server/authStore'
-import type { AuthProvider, AuthUser, AuthSessionResponse } from '@/lib/types'
+import {
+  readAuthConfig,
+  postToken,
+  toAuthUser,
+  expiryFrom,
+} from '@/lib/server/supabaseAuth'
+import type { AuthProvider, AuthSessionResponse } from '@/lib/types'
 
 // The OAuth redirect URI — the same loopback Hono origin in dev and prod. This
 // MUST be registered in the Supabase dashboard's URL Configuration (see
@@ -39,21 +45,8 @@ import type { AuthProvider, AuthUser, AuthSessionResponse } from '@/lib/types'
 // request host, so it can't drift between environments.
 const REDIRECT_URI = 'http://127.0.0.1:47776/api/auth/callback'
 
-// --- Env-driven configuration (read lazily, per request) -------------------
-// Same vars the feedback proxy uses — NO new secret. Read per request (not at
-// module load) so the operator can set the env + restart without a code change,
-// and so tests can flip them with vi.stubEnv between cases.
-interface AuthConfig {
-  url: string
-  anonKey: string
-}
-
-const readAuthConfig = (): AuthConfig | null => {
-  const url = process.env.SUPABASE_URL?.trim()
-  const anonKey = process.env.SUPABASE_ANON_KEY?.trim()
-  if (!url || !anonKey) return null
-  return { url: url.replace(/\/+$/, ''), anonKey }
-}
+// Env-driven configuration + token/user helpers live in
+// src/lib/server/supabaseAuth.ts (shared with the custom-tab role resolver).
 
 // --- PKCE helpers -----------------------------------------------------------
 // base64url-encode raw bytes (no padding) — the form OAuth/PKCE expects.
@@ -99,86 +92,6 @@ const takePending = (): PendingAuth | null => {
   pendingRef.current = null
   if (!p || p.ts < Date.now() - PENDING_TTL_MS) return null
   return p
-}
-
-// --- Supabase token-endpoint helpers ---------------------------------------
-// Shapes are loose — we read only the fields we persist and tolerate the rest.
-interface TokenResponse {
-  access_token?: string
-  refresh_token?: string
-  expires_in?: number
-  expires_at?: number
-  user?: SupabaseUser
-}
-
-interface SupabaseUser {
-  id?: string
-  email?: string
-  app_metadata?: { provider?: string }
-  user_metadata?: {
-    full_name?: string
-    name?: string
-    user_name?: string
-    avatar_url?: string
-    picture?: string
-  }
-}
-
-// Map a Supabase user object to our public, client-safe AuthUser. Providers
-// label the same concepts differently (Google: full_name/picture; GitHub:
-// user_name/avatar_url), so we coalesce. `provider` falls back to the verifier's
-// provider when Supabase doesn't echo app_metadata.provider.
-const toAuthUser = (u: SupabaseUser, fallbackProvider: AuthProvider): AuthUser => {
-  const meta = u.user_metadata ?? {}
-  const provider = (u.app_metadata?.provider as AuthProvider) || fallbackProvider
-  return {
-    id: u.id ?? '',
-    email: u.email,
-    name: meta.full_name || meta.name || meta.user_name,
-    avatarUrl: meta.avatar_url || meta.picture,
-    provider,
-  }
-}
-
-// Compute an epoch-ms expiry from whichever field Supabase returned. expires_at
-// is epoch SECONDS; expires_in is a relative seconds count. Default to a short
-// window so a missing value triggers a refresh rather than trusting forever.
-const expiryFrom = (t: TokenResponse): number => {
-  if (typeof t.expires_at === 'number') return t.expires_at * 1000
-  if (typeof t.expires_in === 'number') return Date.now() + t.expires_in * 1000
-  return Date.now() + 60 * 60 * 1000
-}
-
-// POST a token-endpoint grant. Returns the parsed body on 2xx, else null (the
-// caller decides the user-facing outcome). Never throws into the route.
-const postToken = async (
-  config: AuthConfig,
-  grantType: 'pkce' | 'refresh_token',
-  body: Record<string, string>,
-): Promise<TokenResponse | null> => {
-  try {
-    const res = await fetch(
-      `${config.url}/auth/v1/token?grant_type=${grantType}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', apikey: config.anonKey },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
-      },
-    )
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '')
-      console.error(`[openground:auth] token ${grantType} ${res.status}: ${detail}`)
-      return null
-    }
-    return (await res.json()) as TokenResponse
-  } catch (e) {
-    console.error(
-      '[openground:auth] token request failed',
-      e instanceof Error ? e.message : e,
-    )
-    return null
-  }
 }
 
 // Tiny self-contained HTML for the callback window. No external assets (the

@@ -32,6 +32,12 @@ export const boardCardsDir = (projectPath: string): string =>
 export const boardNotesPath = (projectPath: string): string =>
   join(sharedDataDir(projectPath), 'board', 'notes.md')
 
+/** Board-card image attachments (one flat dir, content-hash file names) —
+ *  shared mode mirrors canvas assets: the bytes ride the repo so a teammate's
+ *  clone renders the same card thumbnails with zero setup. */
+export const boardAssetsDir = (projectPath: string): string =>
+  join(sharedDataDir(projectPath), 'board', 'assets')
+
 /** Existing CanvasFile format, one file per canvas. */
 export const canvasFilesDir = (projectPath: string): string =>
   join(sharedDataDir(projectPath), 'canvas', 'canvases')

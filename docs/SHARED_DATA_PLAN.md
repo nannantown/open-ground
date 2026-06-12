@@ -74,10 +74,18 @@ repo" rule in CLAUDE.md gets this one user-consented exception.
   sync absorbs the rewrite. `branch`: the checked-out branch (absent when
   detached / not git) — shared data follows the branch, so the UI names it.
   UI: ↑n/↓n badges + ⚠ + ⎇branch on/next to the Sync button, 90s poll.)
-- `POST /api/project/share/enable` `{path}` → `{ok:true}` | `{error}`
+- `POST /api/project/share/enable` `{path, config?}` → `{ok:true}` | `{error}`
   (412-style errors: not a git repo / already shared / `.openground` is
   git-ignored — checked with `git check-ignore`. Enable commits NOTHING; the
-  UI says "press Sync to publish" right after.)
+  invite panel right after offers "Publish now (Sync)".
+  `config` (added 2026-06-12, share-UX redesign — docs/SHARE_UX_FLOWS.md):
+  optional `ShareEnableConfig` `{completionFlow?: 'merge'|'pr',
+  targetBranch?: string, members?: string[]}` — the ShareStartDialog's
+  confirmed policy. Strictly validated (exactly those keys/types, members
+  trimmed+deduped; anything else → 400 BEFORE preconditions). When present
+  it is merged into the CENTRAL config before `migrateBoardToShared`, which
+  carries it into the marker via the existing central→marker path. Omitted
+  config = the legacy enable, byte-identical behaviour.)
 - `POST /api/project/share/disable` `{path}` → `{ok:true}` | `{error}`
 - `POST /api/project/share/sync` `{path}` → `ShareSyncResult`
   `{ ok, committed, pulled, pushed, conflict?, conflictFiles?, reason?,
@@ -176,13 +184,31 @@ keep working, the "feel" comes from cadence.
 
 ## UI (user taste: text-only, minimal, no decorative icons)
 
-- Not shared: ⋯ menu item 「Gitで共有…」 (disabled + tooltip when not a git
-  repo / missing). Confirm dialog explains the folder, what moves, and that
-  push/pull uses the user's own git auth.
-- Shared: header gets a quiet text button 「Sync」 with a small dot when
-  `dirty`; while syncing the label swaps to 「Sync中…」. Result via the
-  existing toast/error language. ⋯ menu gains 「共有を解除…」 (dialog notes
-  the user commits the deletion). Remote short name shown next to Sync.
+Redesigned 2026-06-12 — full rationale + flow audit in
+**docs/SHARE_UX_FLOWS.md** (the canonical UX spec for this section).
+
+- Not shared (git repo): TWO entry points, neither in the ⋯ menu — a quiet
+  header text button 「Share…」 occupying the same slot Sync/Live takes
+  after sharing, and a CTA at the bottom of Project settings. Both open the
+  **ShareStartDialog** (`src/components/canvas/ShareStartDialog.tsx`): one
+  vertical screen confirming display name (required; saved to the global
+  settings BEFORE enable), members, completionFlow + targetBranch (sent as
+  the enable `config`), the remote (no-remote warning, non-blocking) and the
+  shared-data-follows-the-branch note. On success the dialog swaps in place
+  to the **InvitePanel**: publish state + "Publish now (Sync)", the
+  teammate's 3 steps, and a copyable invite message with the remote URL
+  (re-openable anytime from settings 「招待方法を表示…」).
+- Non-git project: NO share affordance anywhere; Project settings shows the
+  Personal section only (no workflow/worktrees either).
+- Shared: header keeps the Sync/Live cluster (dot when `dirty`, ↑/↓ counts,
+  ⚠ forced-update, ⎇branch, remote short name). Project settings gains a
+  共有 section: status line, inline display-name editing (global setting),
+  members, Auto-sync (personal — device-only note), 「招待方法を表示…」 and
+  「共有を解除…」 (the unshare confirm also warns that teammates' boards
+  will look empty once the removal is pushed). The workflow section's hint
+  switches to "applies to the whole team".
+- Section visibility is a pure function: `settingsSections` /
+  `showHeaderShare` in `src/lib/shareUx.ts` (unit-tested).
 - After successful sync (and on window focus while shared): refetch project
   data + canvases.
 - All five interactive states; i18n en+ja.

@@ -9,6 +9,7 @@ import {
   clearDanglingParents,
   descendantIds,
   containmentDepth,
+  isNestedFrame,
   type Rect,
   type Container,
 } from './canvasContainment'
@@ -347,5 +348,66 @@ describe('containmentDepth', () => {
     ]
     const byId = new Map(els.map((e) => [e.id, e]))
     expect(() => containmentDepth(byId, 'a')).not.toThrow()
+  })
+})
+
+describe('isNestedFrame', () => {
+  it('true via parentId pointing at a live frame', () => {
+    const els = [
+      el({ id: 'outer', type: 'frame', width: 1000, height: 1000 }),
+      // Sits geometrically OUTSIDE the parent — parentId alone decides.
+      el({ id: 'inner', type: 'frame', parentId: 'outer', x: 5000, y: 5000, width: 200, height: 200 }),
+    ]
+    expect(isNestedFrame(els[1], els)).toBe(true)
+  })
+
+  it('true via the geometric fallback when parentId is absent (legacy AI data)', () => {
+    const els = [
+      el({ id: 'outer', type: 'frame', x: 0, y: 0, width: 1000, height: 1000 }),
+      el({ id: 'inner', type: 'frame', x: 50, y: 50, width: 200, height: 200 }),
+    ]
+    expect(isNestedFrame(els[1], els)).toBe(true)
+  })
+
+  it('uses the 400×280 default dims for un-sized frames', () => {
+    const els = [
+      el({ id: 'outer', type: 'frame', x: 0, y: 0, width: 1000, height: 1000 }),
+      // No width/height — defaults to 400×280, which fits inside outer.
+      el({ id: 'inner', type: 'frame', x: 50, y: 50 }),
+    ]
+    expect(isNestedFrame(els[1], els)).toBe(true)
+  })
+
+  it('false for a top-level frame (no parentId, contained by nothing)', () => {
+    const els = [
+      el({ id: 'a', type: 'frame', x: 0, y: 0, width: 300, height: 300 }),
+      el({ id: 'b', type: 'frame', x: 1000, y: 1000, width: 300, height: 300 }),
+    ]
+    expect(isNestedFrame(els[0], els)).toBe(false)
+    expect(isNestedFrame(els[1], els)).toBe(false)
+  })
+
+  it('never counts the frame as its own container', () => {
+    const els = [el({ id: 'solo', type: 'frame', x: 0, y: 0, width: 400, height: 280 })]
+    expect(isNestedFrame(els[0], els)).toBe(false)
+  })
+
+  it('a parentId at a non-frame element falls through to the geometric check', () => {
+    const sticky = el({ id: 'note', type: 'sticky', x: 0, y: 0 })
+    // parentId points at a sticky → not a frame parent; geometry says nested.
+    const geometricallyNested = el({
+      id: 'f1', type: 'frame', parentId: 'note', x: 50, y: 50, width: 100, height: 100,
+    })
+    const outer = el({ id: 'outer', type: 'frame', x: 0, y: 0, width: 1000, height: 1000 })
+    expect(isNestedFrame(geometricallyNested, [sticky, geometricallyNested, outer])).toBe(true)
+    // …and with no containing frame either, it is top-level despite the parentId.
+    expect(isNestedFrame(geometricallyNested, [sticky, geometricallyNested])).toBe(false)
+  })
+
+  it('a dangling parentId (deleted parent) also falls through to geometry', () => {
+    const orphan = el({
+      id: 'f1', type: 'frame', parentId: 'gone', x: 5000, y: 5000, width: 100, height: 100,
+    })
+    expect(isNestedFrame(orphan, [orphan])).toBe(false)
   })
 })

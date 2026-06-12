@@ -38,8 +38,45 @@ export const ProjectTaskSchema = z.object({
   prUrl: z.string().optional(),
   // Task branch claude created — set via tasks {setBranch}.
   branch: z.string().optional(),
+  // Teammate who marked the card reviewed (review column); cleared on rework.
+  reviewedBy: z.string().optional(),
   // Title is machine-derived (first line / haiku) and untouched by the user.
   titleAuto: z.boolean().optional(),
+  // Image attachments — id is the content-hash file name in the task-asset
+  // store; name/mime are display metadata. (3点セット: types.ts /
+  // normalizeCard / here — a field missing from any of the three is silently
+  // dropped on the shared-board round-trip.)
+  attachments: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string(),
+        mime: z.string(),
+      }),
+    )
+    .optional(),
+  // Ids of cards that should land before this one (B025) — informational.
+  dependsOn: z.array(z.string()).optional(),
+  // Soft deadline 'YYYY-MM-DD' (B026) — informational chip only. Strict shape
+  // with .catch: a malformed value (a hand-edited shared card file) falls back
+  // to undefined — the FIELD is dropped, never the whole card (rejecting the
+  // card would make it vanish from the board over a typo'd date).
+  dueDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .catch(undefined),
+  // Per-card run settings (実行 overrides: flow / model / effort). Same
+  // drop-the-field-never-the-card resilience as dueDate — a hand-edited
+  // shared card with junk here just loses the overrides.
+  run: z
+    .object({
+      flow: z.enum(['merge', 'pr']).optional(),
+      model: z.string().optional(),
+      effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    })
+    .optional()
+    .catch(undefined),
 })
 
 export const ProjectDataSchema = z.object({
@@ -62,6 +99,10 @@ export const ProjectDataSchema = z.object({
     .object({
       permissionMode: z.enum(['default', 'acceptEdits', 'plan', 'bypass']).optional(),
       model: z.string().optional(),
+      effort: z
+        .enum(['low', 'medium', 'high', 'xhigh', 'max'])
+        .optional()
+        .catch(undefined),
       autoSync: z.boolean().optional(),
     })
     .optional(),

@@ -307,6 +307,11 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // Keep timers un-clamped while minimized: xterm's write callbacks drive
+      // the terminal flow-control ACKs, so a throttled background window would
+      // push live claude output into the 10s pause/drop cycle (VS Code ships
+      // the same setting for its flow-controlled terminal).
+      backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.js'),
     },
   })

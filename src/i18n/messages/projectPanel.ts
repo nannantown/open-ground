@@ -4,15 +4,15 @@ export const projectPanel = {
   en: {
     // Header
     'projectPanel.backToGround': 'Back to Ground',
-    'projectPanel.claudeNotFound': 'claude CLI not found',
+    'projectPanel.claudeNotFound': 'claude CLI not found — install Claude Code, then restart OPEN GROUND',
     'projectPanel.generating': 'Generating…',
     'projectPanel.regenerateDescription': 'Refresh description',
     'projectPanel.generateDescription': 'Generate description',
     // Open in… / pick app
-    'projectPanel.pickFailed': 'Pick failed: {error}',
+    'projectPanel.pickFailed': "Couldn't add the app: {error} — pick the application again.",
     'projectPanel.folderGone': "That folder no longer exists on disk — remove the card from the canvas, or re-import the folder if you moved it.",
-    'projectPanel.openFailed': 'Open failed: {error}',
-    'projectPanel.networkError': 'network error',
+    'projectPanel.openFailed': "Couldn't open the project in that app: {error} — check the app is still installed, then try again.",
+    'projectPanel.networkError': 'network error (server unreachable)',
     // Missing-folder banner
     'projectPanel.missingBanner': 'This folder no longer exists on disk. Runs and “Open in…” are disabled. Locate the folder if you moved it, or use Remove from Ground to take the card off.',
     'projectPanel.locateFolder': 'Locate folder…',
@@ -27,7 +27,7 @@ export const projectPanel = {
     'projectPanel.deleteExplain': 'The entire project folder is moved to the macOS Trash and removed from OPEN GROUND — but you can still restore it from the Trash in Finder. (To just take it off the Ground without touching the folder, use “Remove from Ground” instead.)',
     'projectPanel.typeToConfirmBefore': 'Type',
     'projectPanel.typeToConfirmAfter': 'to confirm',
-    'projectPanel.deleteFailed': 'Delete failed: {error}',
+    'projectPanel.deleteFailed': 'Delete failed: {error} — the folder was not removed. Try again, or move it to the Trash in Finder yourself.',
     'projectPanel.deleting': 'Deleting…',
     // Tabs
     'projectPanel.dragToReorder': 'Drag to reorder · Alt+←/→ to move',
@@ -41,28 +41,54 @@ export const projectPanel = {
     // Project settings dialog (shared policy + personal launch prefs)
     'projectPanel.projectSettingsMenu': 'Project settings…',
     'projectPanel.settingsDialogLabel': 'Project settings',
-    'projectPanel.settingsSharedHeading': 'Shared policy',
-    'projectPanel.settingsSharedHint': 'Applies to everyone on this board (synced via git when the project is shared).',
+    'projectPanel.settingsBack': 'Back',
+    // Section headings adapt to the share/git state (docs/SHARE_UX_FLOWS.md):
+    // solo users see "Task workflow" with zero share vocabulary; the team
+    // section appears only while the project is actually shared.
+    'projectPanel.settingsWorkflowHeading': 'Task workflow',
+    'projectPanel.settingsWorkflowHint': 'What claude does when a task in this project is finished.',
+    'projectPanel.settingsWorkflowSharedHint': 'Applies to everyone on the team — synced via git.',
+    'projectPanel.settingsTeamHeading': 'Shared with your team',
+    'projectPanel.settingsTeamHint': 'This project’s Board & Canvas sync through the repository.',
+    'projectPanel.settingsDisplayName': 'Your display name',
+    'projectPanel.settingsDisplayNameHint': 'Used as your name on cards — a global setting, shared across all projects.',
+    'projectPanel.settingsDisplayNameSaveFailed': 'Couldn’t save your display name: {error} — edit the field again to retry.',
+    'projectPanel.settingsMembersSyncHint': 'Synced to the whole team — names appear as one-click assignee choices on every card.',
+    'projectPanel.settingsAutoSyncDeviceNote': 'Personal — affects this device only.',
+    'projectPanel.settingsInviteLink': 'Show how to invite…',
+    'projectPanel.settingsShareCtaText': 'Share the Board & Canvas with your team through this repository.',
+    'projectPanel.settingsShareCta': 'Share this project…',
     'projectPanel.settingsPersonalHeading': 'Personal',
     'projectPanel.settingsPersonalHint': 'Stored only on this machine — never synced.',
     'projectPanel.settingsCompletionFlow': 'Completion flow',
     'projectPanel.settingsFlowMerge': 'Merge directly',
     'projectPanel.settingsFlowPr': 'Open a PR',
+    'projectPanel.reviewWaitingTitle': 'Cards waiting in Review',
+    'projectPanel.settingsGhMissing': 'GitHub CLI (gh) not found — PR creation will fail. Install it (brew install gh), then run gh auth login.',
+    'projectPanel.settingsGhUnauthenticated': 'gh is installed but not signed in — run gh auth login before finishing a task with a PR.',
+    'projectPanel.settingsFlowMergeHint':
+      'Claude merges the finished task branch straight into the target branch.',
+    'projectPanel.settingsFlowPrHint':
+      'Claude pushes the branch and opens a PR — a human reviews and merges. With the Review column on, the card moves there automatically.',
     'projectPanel.settingsTargetBranch': 'Target branch',
     'projectPanel.settingsTargetBranchPlaceholder': 'branch at launch',
     'projectPanel.settingsBranchDefault': 'Branch at launch (default)',
     'projectPanel.settingsMembers': 'Members',
+    // Unshared git projects: the same list, share-free vocabulary (solo
+    // users assign cards too — docs/SHARE_UX_FLOWS.md S033/S034).
+    'projectPanel.settingsAssigneeNames': 'Assignee names',
+    'projectPanel.settingsAssigneeNamesHint': 'Names offered as one-click assignee choices on this board’s cards.',
     'projectPanel.settingsMemberAddPlaceholder': 'Add a member…',
     'projectPanel.settingsMemberAdd': 'Add',
     'projectPanel.settingsMemberRemove': 'Remove {name}',
-    'projectPanel.settingsMembersHint': 'Registered names appear as one-click assignee choices on every card.',
-    'projectPanel.settingsPermissionMode': 'Permission mode',
+    // Permission-mode labels — used by the Board's run-defaults strip (the
+    // dialog's own profile rows moved there, 2026-06-12).
     'projectPanel.settingsPermDefault': 'Default (confirm each action)',
     'projectPanel.settingsPermAcceptEdits': 'Accept edits automatically',
     'projectPanel.settingsPermPlan': 'Plan mode',
     'projectPanel.settingsPermBypass': 'Bypass — fully automatic, no confirmations',
-    'projectPanel.settingsModel': 'Model',
-    'projectPanel.settingsModelDefault': 'CLI default',
+    'projectPanel.settingsLaunchMovedHint':
+      'The launch profile (model · effort · permissions · completion flow) now lives in the “Run defaults” strip above the board.',
     // Git share (.openground/ in the repo — docs/SHARED_DATA_PLAN.md)
     'projectPanel.sync': 'Sync',
     'projectPanel.syncing': 'Syncing…',
@@ -87,8 +113,14 @@ export const projectPanel = {
     'projectPanel.syncDigestDone': '{count} done',
     'projectPanel.syncDigestMoved': '{count} moved',
     'projectPanel.syncDigestRemoved': '{count} removed',
-    'projectPanel.syncConflict': 'Sync hit a conflict — pull and resolve it manually.',
+    'projectPanel.syncConflict': 'Sync hit a conflict — pick which version to keep in the resolve dialog. (Conflicted code files are yours to resolve in git.)',
     'projectPanel.syncConflictItems': 'Conflicted: {items}',
+    // Shared-board welcome strip — shown on the Board tab of a freshly
+    // imported shared clone until dismissed (F002/F090). The Name suffix is
+    // appended only while Settings.displayName is unset.
+    'projectPanel.sharedWelcome': 'This board is shared via git — edits sync with your teammates.',
+    'projectPanel.sharedWelcomeName': 'Set your display name to claim cards.',
+    'projectPanel.sharedWelcomeDismiss': 'Dismiss',
     // Auto-sync (Live) indicator + personal setting
     'projectPanel.autoLive': 'Live',
     'projectPanel.autoLiveHint':
@@ -106,6 +138,18 @@ export const projectPanel = {
     'projectPanel.settingsAutoSync': 'Auto-sync shared data (Live)',
     'projectPanel.settingsAutoSyncHint':
       'Publishes your board/canvas edits a few seconds after you stop, and pulls teammate changes automatically. Your code is never touched — any code commit of yours pauses auto-sync until YOU push it.',
+    // Worktrees cleanup (B012/F082)
+    'projectPanel.settingsWorktrees': 'Worktrees',
+    'projectPanel.settingsWorktreesLoading': 'Checking…',
+    'projectPanel.settingsWorktreesNone': 'None',
+    'projectPanel.settingsWorktreesCount': '{count} active · {dirty} with uncommitted changes',
+    'projectPanel.settingsWorktreesUnavailable': 'Could not check worktrees.',
+    'projectPanel.settingsWorktreesClean': 'Clean unused worktrees',
+    'projectPanel.settingsWorktreesCleaning': 'Cleaning…',
+    'projectPanel.settingsWorktreesResult': 'Removed {removed} · skipped {skipped} (uncommitted changes)',
+    'projectPanel.settingsWorktreesFailed': "Couldn't clean worktrees: {error}",
+    'projectPanel.settingsWorktreesHint':
+      'Task and review checkouts that piled up under ~/.openground. Cleaning removes only the ones with no uncommitted changes — anything in progress is kept.',
     'projectPanel.syncResolveLabel': 'Sync conflict',
     'projectPanel.syncResolveTitle': 'Choose which version to keep',
     'projectPanel.syncResolveExplain':
@@ -137,20 +181,49 @@ export const projectPanel = {
     'projectPanel.syncForcedHint': 'The remote history was rewritten (force-push) — Sync will absorb it',
     'projectPanel.syncBranchHint': 'Current branch — the shared Board/Canvas data follows the checked-out branch',
     'projectPanel.syncLastAt': 'Last sync: {time}',
-    'projectPanel.shareMenu': 'Share via Git…',
-    'projectPanel.shareNeedsGitRepo': 'This folder is not a git repository',
+    // Header "Share…" (the pre-share occupant of the Sync/Live slot)
+    'projectPanel.shareButton': 'Share…',
+    'projectPanel.shareButtonHint': 'Share this project’s Board & Canvas with your team through this git repository',
     'projectPanel.unshareMenu': 'Stop sharing…',
     'projectPanel.shareDialogLabel': 'Share via Git',
-    'projectPanel.shareDialogTitle': 'Share Board & Canvas through this repo?',
     'projectPanel.shareDialogExplain': 'A .openground/ folder is created inside the repository and the Board + Canvas data moves into it. Anyone who clones the repo gets the same board and canvases; Sync pushes and pulls with your own git remote and credentials — OPEN GROUND never talks to a Git host directly.',
-    'projectPanel.shareConfirm': 'Share',
-    'projectPanel.shareEnabledNotice': 'Sharing is on — press Sync to publish the board to the remote.',
+    // Share-start dialog (ShareStartDialog)
+    'projectPanel.shareStartTitle': 'Share “{name}” with your team',
+    'projectPanel.shareStartBranchNote': 'Shared data follows the checked-out branch (current: {branch}).',
+    'projectPanel.shareStartRemoteLabel': 'Remote',
+    'projectPanel.shareStartNoRemote': 'No git remote is configured — the shared data would only be committed locally. We recommend adding a remote (GitHub etc.) first, but you can also add one later and press Sync.',
+    'projectPanel.shareStartDisplayName': 'Your display name',
+    'projectPanel.shareStartDisplayNameHint': 'Shown as the assignee on cards — your teammates will see this name.',
+    'projectPanel.shareStartNameRequired': 'Enter your display name to start sharing',
+    'projectPanel.shareStartNameLoading': 'Loading your saved name…',
+    'projectPanel.shareStartMembersHint': 'Your display name is included automatically. You can add more members anytime.',
+    'projectPanel.shareStartConfirm': 'Start sharing',
+    'projectPanel.shareStartWorking': 'Preparing to share…',
+    // Invite panel (after enable + settings "Show how to invite…")
+    'projectPanel.inviteLabel': 'Invite your team',
+    'projectPanel.inviteTitle': 'Sharing is on',
+    'projectPanel.inviteUnpublished': 'Not published to the remote yet.',
+    'projectPanel.invitePublishNow': 'Publish now (Sync)',
+    'projectPanel.invitePublishNoRemote': 'Add a git remote first — there is nowhere to publish yet.',
+    'projectPanel.invitePublished': 'Published — teammates can join anytime.',
+    'projectPanel.inviteStep1': 'Give your teammate access to the repository (push permission) — on GitHub or your git host.',
+    'projectPanel.inviteStep2': 'They clone the repository.',
+    // Quotes the toolbar.importFolder label VERBATIM — keep in sync with it.
+    'projectPanel.inviteStep3': 'In OPEN GROUND they use “Import folder” — the same Board and Canvas appear immediately, no setup needed.',
+    'projectPanel.inviteTextLabel': 'Invite message',
+    // Quotes the toolbar.importFolder label VERBATIM — keep in sync with it.
+    'projectPanel.inviteText': 'Clone the repo (git clone {url}), then open that folder with OPEN GROUND’s “Import folder”. The Board and Canvas connect automatically.',
+    'projectPanel.inviteTextNoRemote': 'Add a git remote and the invite message will appear here.',
+    'projectPanel.inviteCopy': 'Copy',
+    'projectPanel.inviteCopied': 'Copied',
+    'projectPanel.inviteDone': 'Done',
     'projectPanel.unshareDialogLabel': 'Stop sharing',
     'projectPanel.unshareDialogTitle': 'Move Board & Canvas data back to local storage?',
     'projectPanel.unshareDialogExplain': 'The data is copied back into OPEN GROUND’s local storage and the .openground/ folder is removed from the working tree. The folder’s deletion still needs a commit — the app does not commit it for you.',
+    'projectPanel.unshareTeammateNote': 'Heads-up: once you commit and push the removal, your teammates’ boards will look empty on their side — let them know beforehand.',
     'projectPanel.unshareConfirm': 'Stop sharing',
     'projectPanel.shareWorking': 'Working…',
-    'projectPanel.shareFailed': 'Failed: {error}',
+    'projectPanel.shareFailed': "Couldn't change sharing: {error} — check the repo state (git status), then try again.",
     // Copy button
     // Conflict resolution
     // RoundView labels
@@ -189,35 +262,35 @@ export const projectPanel = {
   ja: {
     // Header
     'projectPanel.backToGround': 'Ground に戻る',
-    'projectPanel.claudeNotFound': 'claude CLI が見つかりません',
+    'projectPanel.claudeNotFound': 'claude CLI が見つかりません — Claude Code をインストールして OPEN GROUND を再起動してください',
     'projectPanel.generating': '生成中…',
     'projectPanel.regenerateDescription': '説明を更新',
     'projectPanel.generateDescription': '説明を生成',
     // Open in… / pick app
-    'projectPanel.pickFailed': 'Pick failed: {error}',
+    'projectPanel.pickFailed': 'アプリを追加できませんでした: {error} — もう一度アプリを選び直してください。',
     'projectPanel.folderGone': 'そのフォルダはディスク上に存在しません。カードを Ground から外すか、移動した場合はフォルダを再インポートしてください。',
-    'projectPanel.openFailed': 'Open failed: {error}',
-    'projectPanel.networkError': 'network error',
+    'projectPanel.openFailed': 'アプリでプロジェクトを開けませんでした: {error} — アプリがインストールされているか確認して、もう一度お試しください。',
+    'projectPanel.networkError': 'ネットワークエラー（サーバーに接続できません）',
     // Missing-folder banner
     'projectPanel.missingBanner': 'このフォルダはディスク上に存在しません。実行と「Open in…」は無効です。移動した場合は「場所を選ぶ」で指定し直すか、カードを外すには「Ground から外す」を使ってください。',
     'projectPanel.locateFolder': '場所を選ぶ…',
     'projectPanel.locateFolderHint': 'このカードをフォルダの新しい場所に指し直します。タスク・ノート・Canvas が再接続されます。',
     // Loading
-    'projectPanel.loading': 'Loading…',
+    'projectPanel.loading': '読み込み中…',
     // Sidebar resizer
     // Chat header
     // Delete confirm
-    'projectPanel.deleteProjectLabel': 'Delete project',
+    'projectPanel.deleteProjectLabel': 'プロジェクトを削除',
     'projectPanel.moveToTrashQuestion': '「{name}」をゴミ箱に移動しますか？',
     'projectPanel.deleteExplain': 'プロジェクトフォルダ全体が macOS のゴミ箱に移動し、OPEN GROUND から削除されます。ただし Finder のゴミ箱から復元できます。（フォルダはそのままに Ground から外すだけなら「Ground から外す」を使ってください。）',
     'projectPanel.typeToConfirmBefore': '確認のため',
     'projectPanel.typeToConfirmAfter': 'と入力してください',
-    'projectPanel.deleteFailed': 'Delete failed: {error}',
-    'projectPanel.deleting': 'Deleting…',
+    'projectPanel.deleteFailed': '削除に失敗しました: {error} — フォルダは残っています。もう一度試すか、Finder でゴミ箱に移動してください。',
+    'projectPanel.deleting': '削除中…',
     // Tabs
-    'projectPanel.dragToReorder': 'Drag to reorder · Alt+←/→ to move',
+    'projectPanel.dragToReorder': 'ドラッグで並べ替え · Alt+←/→ で移動',
     // More menu
-    'projectPanel.moreActions': 'More actions',
+    'projectPanel.moreActions': 'その他の操作',
     'projectPanel.revealInFinder': 'Finderで開く',
     'projectPanel.revealInExplorer': 'エクスプローラーで表示',
     'projectPanel.revealFolder': 'フォルダを開く',
@@ -226,28 +299,52 @@ export const projectPanel = {
     // Project settings dialog (shared policy + personal launch prefs)
     'projectPanel.projectSettingsMenu': 'プロジェクト設定…',
     'projectPanel.settingsDialogLabel': 'プロジェクト設定',
-    'projectPanel.settingsSharedHeading': '共有ポリシー',
-    'projectPanel.settingsSharedHint': 'このボードを使う全員に適用されます（プロジェクト共有時は git で同期）。',
+    'projectPanel.settingsBack': '戻る',
+    // セクション構成は共有/git 状態で変わる（docs/SHARE_UX_FLOWS.md）:
+    // ソロ利用者には共有の語彙を一切見せない。
+    'projectPanel.settingsWorkflowHeading': 'タスクのワークフロー',
+    'projectPanel.settingsWorkflowHint': 'このプロジェクトのタスク完了時に claude が何をするかの設定です。',
+    'projectPanel.settingsWorkflowSharedHint': 'チーム全員に適用され、git で同期されます。',
+    'projectPanel.settingsTeamHeading': 'チームと共有中',
+    'projectPanel.settingsTeamHint': 'このプロジェクトの Board と Canvas はリポジトリ経由で同期されています。',
+    'projectPanel.settingsDisplayName': 'あなたの表示名',
+    'projectPanel.settingsDisplayNameHint': 'カードの担当者名として使われます — 全プロジェクト共通のグローバル設定です。',
+    'projectPanel.settingsDisplayNameSaveFailed': '表示名を保存できませんでした: {error} — もう一度入力すると再試行されます。',
+    'projectPanel.settingsMembersSyncHint': 'チーム全員に同期されます。登録した名前は各カードの担当者欄でワンクリック選択できます。',
+    'projectPanel.settingsAutoSyncDeviceNote': '個人設定 — この端末にだけ効きます。',
+    'projectPanel.settingsInviteLink': '招待方法を表示…',
+    'projectPanel.settingsShareCtaText': 'Board と Canvas をこのリポジトリ経由でチームと共有できます。',
+    'projectPanel.settingsShareCta': 'このプロジェクトを共有する…',
     'projectPanel.settingsPersonalHeading': '自分だけの設定',
     'projectPanel.settingsPersonalHint': 'この端末にだけ保存され、同期されません。',
     'projectPanel.settingsCompletionFlow': '完了フロー',
     'projectPanel.settingsFlowMerge': '直接マージ',
     'projectPanel.settingsFlowPr': 'PRを作成',
+    'projectPanel.reviewWaitingTitle': 'レビュー待ちのカード',
+    'projectPanel.settingsGhMissing': 'GitHub CLI (gh) が見つかりません — PR 作成は失敗します。インストール（brew install gh）して gh auth login を実行してください。',
+    'projectPanel.settingsGhUnauthenticated': 'gh は未サインインです — PR で完了する前に gh auth login を実行してください。',
+    'projectPanel.settingsFlowMergeHint':
+      '完了したタスクブランチを claude がターゲットブランチへ直接マージします。',
+    'projectPanel.settingsFlowPrHint':
+      'claude がブランチを push して PR を作成 — 人間がレビューしてマージします。レビュー列が有効ならカードは自動でレビュー列へ移動します。',
     'projectPanel.settingsTargetBranch': 'ターゲットブランチ',
     'projectPanel.settingsTargetBranchPlaceholder': '起動時のブランチ',
     'projectPanel.settingsBranchDefault': '起動時のブランチ（既定）',
     'projectPanel.settingsMembers': 'メンバー',
+    // 非共有 git プロジェクト用 — 共有語彙を使わない同じ名簿（S033/S034）。
+    'projectPanel.settingsAssigneeNames': '担当者の名簿',
+    'projectPanel.settingsAssigneeNamesHint': 'カードの担当者としてワンクリックで選べる名前の一覧です。',
     'projectPanel.settingsMemberAddPlaceholder': '名前を追加…',
     'projectPanel.settingsMemberAdd': '追加',
     'projectPanel.settingsMemberRemove': '{name} を削除',
-    'projectPanel.settingsMembersHint': '登録した名前は、各カードの担当者欄でワンクリック選択できます。',
-    'projectPanel.settingsPermissionMode': '権限モード',
+    // 権限モードのラベル — ボードの「実行デフォルト」ストリップが使用
+    // （ダイアログ側のプロファイル行は 2026-06-12 にそちらへ移設）。
     'projectPanel.settingsPermDefault': '標準（操作ごとに確認）',
     'projectPanel.settingsPermAcceptEdits': '編集を自動で許可',
     'projectPanel.settingsPermPlan': 'プランモード',
     'projectPanel.settingsPermBypass': 'Bypass — 全自動・確認なし',
-    'projectPanel.settingsModel': 'モデル',
-    'projectPanel.settingsModelDefault': 'CLIの既定',
+    'projectPanel.settingsLaunchMovedHint':
+      '起動プロファイル（モデル · effort · 権限 · 完了フロー）はボード上部の「実行デフォルト」で編集できます。',
     // Git share (.openground/ in the repo — docs/SHARED_DATA_PLAN.md)
     'projectPanel.sync': 'Sync',
     'projectPanel.syncing': 'Sync中…',
@@ -270,8 +367,13 @@ export const projectPanel = {
     'projectPanel.syncDigestDone': '完了{count}',
     'projectPanel.syncDigestMoved': '移動{count}',
     'projectPanel.syncDigestRemoved': '削除{count}',
-    'projectPanel.syncConflict': '同期が競合しました。手動で pull して解決してください。',
+    'projectPanel.syncConflict': '同期が競合しました — 競合解決ダイアログでどちらを残すか選んでください。（コードファイルの競合はご自身で git で解決します。）',
     'projectPanel.syncConflictItems': '衝突箇所: {items}',
+    // 共有ボードの歓迎ストリップ（F002/F090）— 共有クローンを import した直後の
+    // Board タブに、閉じるまで表示。後半は displayName 未設定のときだけ付ける。
+    'projectPanel.sharedWelcome': 'このボードは git で共有されています — 編集はチームに同期されます。',
+    'projectPanel.sharedWelcomeName': '表示名を設定するとカードを担当できます。',
+    'projectPanel.sharedWelcomeDismiss': '閉じる',
     // 自動同期（Live）インジケータ + 個人設定
     'projectPanel.autoLive': 'Live',
     'projectPanel.autoLiveHint':
@@ -289,6 +391,18 @@ export const projectPanel = {
     'projectPanel.settingsAutoSync': '共有データを自動同期（Live）',
     'projectPanel.settingsAutoSyncHint':
       '編集が止まって数秒後に自動で送信し、同僚の変更も自動で取り込みます。コードには一切触れません — あなたのコードコミットがある間は自動同期が一時停止し、あなたが push するまで待ちます。',
+    // Worktrees cleanup (B012/F082)
+    'projectPanel.settingsWorktrees': 'Worktree',
+    'projectPanel.settingsWorktreesLoading': '確認中…',
+    'projectPanel.settingsWorktreesNone': 'なし',
+    'projectPanel.settingsWorktreesCount': '{count} 件 · うち未コミットの変更あり {dirty} 件',
+    'projectPanel.settingsWorktreesUnavailable': 'worktree を確認できませんでした。',
+    'projectPanel.settingsWorktreesClean': '使われていない worktree を掃除',
+    'projectPanel.settingsWorktreesCleaning': '掃除中…',
+    'projectPanel.settingsWorktreesResult': '削除 {removed} 件 · スキップ {skipped} 件（未コミットの変更あり）',
+    'projectPanel.settingsWorktreesFailed': 'worktree の掃除に失敗しました: {error}',
+    'projectPanel.settingsWorktreesHint':
+      '~/.openground 配下に溜まったタスク／レビュー用チェックアウトです。掃除で消えるのは未コミットの変更がないものだけ — 作業中のものは残ります。',
     'projectPanel.syncResolveLabel': '同期の競合',
     'projectPanel.syncResolveTitle': 'どちらの版を残すか選んでください',
     'projectPanel.syncResolveExplain':
@@ -320,33 +434,62 @@ export const projectPanel = {
     'projectPanel.syncForcedHint': 'リモート履歴が書き換えられています（force-push）— Sync で取り込みます',
     'projectPanel.syncBranchHint': '現在のブランチ — 共有データ（Board/Canvas）はチェックアウト中のブランチの内容に従います',
     'projectPanel.syncLastAt': '最終Sync: {time}',
-    'projectPanel.shareMenu': 'Gitで共有…',
-    'projectPanel.shareNeedsGitRepo': 'このフォルダは git リポジトリではありません',
+    // ヘッダーの「共有…」（共有後に Sync/Live が現れるのと同じスロット）
+    'projectPanel.shareButton': '共有…',
+    'projectPanel.shareButtonHint': 'このプロジェクトの Board と Canvas を、この git リポジトリ経由でチームと共有します',
     'projectPanel.unshareMenu': '共有を解除…',
     'projectPanel.shareDialogLabel': 'Gitで共有',
-    'projectPanel.shareDialogTitle': 'Board と Canvas をこのリポジトリで共有しますか？',
     'projectPanel.shareDialogExplain': 'リポジトリ内に .openground/ フォルダを作成し、Board と Canvas のデータをそこへ移します。リポジトリを clone した人は同じボードとキャンバスを共有でき、Sync はあなた自身の git リモートと認証情報で push / pull します — OPEN GROUND が Git ホストに直接アクセスすることはありません。',
-    'projectPanel.shareConfirm': '共有する',
-    'projectPanel.shareEnabledNotice': '共有を有効にしました — Sync を押すとリモートに公開されます。',
+    // 共有開始ダイアログ（ShareStartDialog）
+    'projectPanel.shareStartTitle': '「{name}」をチームと共有',
+    'projectPanel.shareStartBranchNote': '共有データはチェックアウト中のブランチに従います（現在: {branch}）。',
+    'projectPanel.shareStartRemoteLabel': 'リモート',
+    'projectPanel.shareStartNoRemote': 'リモートが設定されていません。共有データはローカルにしかコミットされません — GitHub 等に remote を追加してから始めることをおすすめします（あとから追加して Sync しても公開できます）。',
+    'projectPanel.shareStartDisplayName': 'あなたの表示名',
+    'projectPanel.shareStartDisplayNameHint': 'カードの担当者として表示されます — 同僚にもこの名前が見えます。',
+    'projectPanel.shareStartNameRequired': '表示名を入力すると共有を開始できます',
+    'projectPanel.shareStartNameLoading': '保存済みの名前を取得中…',
+    'projectPanel.shareStartMembersHint': '自分の表示名は自動で含まれます。メンバーはあとからでも追加できます。',
+    'projectPanel.shareStartConfirm': '共有を開始',
+    'projectPanel.shareStartWorking': '共有を準備中…',
+    // 招待パネル（enable 成功直後 + 設定「招待方法を表示…」）
+    'projectPanel.inviteLabel': 'チームを招待',
+    'projectPanel.inviteTitle': '共有中です',
+    'projectPanel.inviteUnpublished': 'まだリモートに公開されていません。',
+    'projectPanel.invitePublishNow': '今すぐ公開 (Sync)',
+    'projectPanel.invitePublishNoRemote': 'まだ公開先がありません — 先に git remote を追加してください。',
+    'projectPanel.invitePublished': '公開済み — 相手はいつでも参加できます。',
+    'projectPanel.inviteStep1': '相手にリポジトリのアクセス権（push 権限）を渡します — GitHub 等のホスト側で。',
+    'projectPanel.inviteStep2': '相手がリポジトリを clone します。',
+    // toolbar.importFolder の実ラベルをそのまま引用 — 変更時は揃えること。
+    'projectPanel.inviteStep3': 'OPEN GROUND の「フォルダをインポート」でそのフォルダを開くと、同じ Board と Canvas がすぐに表示されます（設定不要）。',
+    'projectPanel.inviteTextLabel': '招待メッセージ',
+    // toolbar.importFolder の実ラベルをそのまま引用 — 変更時は揃えること。
+    'projectPanel.inviteText': 'git clone {url} したら、OPEN GROUND の「フォルダをインポート」でそのフォルダを開いてください。Board と Canvas が自動でつながります。',
+    'projectPanel.inviteTextNoRemote': 'remote を追加すると招待文がここに表示されます。',
+    'projectPanel.inviteCopy': 'コピー',
+    'projectPanel.inviteCopied': 'コピーしました',
+    'projectPanel.inviteDone': '完了',
     'projectPanel.unshareDialogLabel': '共有を解除',
     'projectPanel.unshareDialogTitle': 'Board と Canvas のデータをローカル保存に戻しますか？',
     'projectPanel.unshareDialogExplain': 'データを OPEN GROUND のローカル保存にコピーし直し、作業ツリーから .openground/ フォルダを削除します。フォルダ削除のコミットはアプリでは行いません — ご自身でコミットしてください。',
+    'projectPanel.unshareTeammateNote': '同僚側では、あなたが解除をコミット・push した後にボードが空に見えます — 事前に伝えてください。',
     'projectPanel.unshareConfirm': '共有を解除',
     'projectPanel.shareWorking': '処理中…',
-    'projectPanel.shareFailed': 'Failed: {error}',
+    'projectPanel.shareFailed': '共有設定を変更できませんでした: {error} — リポジトリの状態（git status）を確認して、もう一度お試しください。',
     // Copy button
     // Conflict resolution
     // RoundView labels
     // PastRunFallback
     // TaskThread composer
-    'projectPanel.deleteTask': 'Delete task',
+    'projectPanel.deleteTask': 'タスクを削除',
     // TaskThread inline
     // TasksSection
     // Terminal split view
-    'projectPanel.closeTerminal': 'Close terminal',
-    'projectPanel.newTerminal': 'New terminal',
-    'projectPanel.new': 'New',
-    'projectPanel.renameTerminal': 'Double-click to rename',
+    'projectPanel.closeTerminal': 'ターミナルを閉じる',
+    'projectPanel.newTerminal': '新しいターミナル',
+    'projectPanel.new': '新規',
+    'projectPanel.renameTerminal': 'ダブルクリックで名前を変更',
     'projectPanel.launchClaude': 'Claude を起動',
     'projectPanel.launchingClaude': '起動中…',
     // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
@@ -366,7 +509,7 @@ export const projectPanel = {
     // NewTaskComposer
     // EditableTaskTitle
     // EditableTitle
-    'projectPanel.doubleClickToRename': 'Double-click to rename',
+    'projectPanel.doubleClickToRename': 'ダブルクリックで名前を変更',
     // Running roster — live claude lanes for the project.
   } as Record<string, string>,
 }

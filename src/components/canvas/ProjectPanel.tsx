@@ -26,21 +26,37 @@ import type {
   ShareAutoStatus,
   ShareConflict,
   ShareStatus,
-  ProjectBranchesResponse,
+  SettingsResponse,
+  ProjectWorktreeInfo,
+  CleanWorktreesResult,
+  CustomModuleDef,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import {
   disableShare,
-  enableShare,
   fetchShareStatus,
   remoteShortName,
   resolveShare,
   syncShare,
 } from '@/lib/shareClient'
+import { settingsSections, showHeaderShare } from '@/lib/shareUx'
+import {
+  FIELD_INPUT_CSS,
+  MembersField,
+  ShareStartDialog,
+  TargetBranchField,
+  useProjectBranches,
+  type SyncOutcome,
+} from '@/components/canvas/ShareStartDialog'
 import { boardDiffDigest } from '@/lib/boardDigest'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { migrateLs } from '@/lib/lsMigrate'
-import { loadPersistedView, savePersistedView } from '@/lib/persistView'
+import {
+  loadPersistedView,
+  savePersistedView,
+  type PersistedPanelTab,
+  type PersistedView,
+} from '@/lib/persistView'
 import { paneHeaderTitle, paneTooltip } from '@/lib/paneTitle'
 import { descriptionForLang } from '@/lib/descriptionLang'
 import {
@@ -52,15 +68,32 @@ import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
-import { BoardModule } from '@/components/canvas/modules/BoardModule'
-import { enabledModules, isModuleIdEnabled, type ModuleDef } from '@/components/canvas/moduleRegistry'
-import type { ModuleId } from '@/lib/modules/ids'
-import { effectiveTabOrder, moveTab } from '@/lib/modules/tabOrder'
+import {
+  BoardModule,
+  type TaskLaunchResult,
+  type TaskRunPayload,
+} from '@/components/canvas/modules/BoardModule'
+import {
+  customModuleTabDef,
+  enabledModules,
+  isModuleIdEnabled,
+  type TabDef,
+} from '@/components/canvas/moduleRegistry'
+import { customTabId, customModuleIdFromTab, isCustomTabId } from '@/lib/modules/ids'
+import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
+import { useCustomModules } from '@/lib/modules/useCustomModules'
+import { CustomModuleView } from '@/components/canvas/modules/CustomModuleView'
+import { customModuleStorageId } from '@/components/canvas/modules/CustomModuleView'
+import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTerminal'
+import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
+import { MarketplaceDialog } from '@/components/canvas/modules/MarketplaceDialog'
 
-// The per-project tabs are now declared once in the module registry
-// (moduleRegistry.tsx). PanelView is just its id type; visibility, the tab row,
-// the Ctrl+Tab order and persistView's allowlist all derive from MODULES.
-type PanelView = ModuleId
+// The per-project tabs are declared once in the module registry
+// (moduleRegistry.tsx) — plus the user's custom tabs (`custom:<uuid>`,
+// docs/CUSTOM_TABS_PLAN.md) fetched at runtime, so PanelView is a plain
+// string: a built-in ModuleId or a custom tab id. The tab row, the Ctrl+Tab
+// order and persistView's allowlist all derive from the merged id list.
+type PanelView = string
 const isMvpVisibleTab = isModuleIdEnabled
 
 // The enabled module ids in registry (default) order. Per project this is
@@ -212,6 +245,13 @@ export const ProjectPanel = ({
   // re-defaulting the tab on a same-project save/refetch (e.g. dragging a tab
   // persists tabOrder → data changes → must NOT yank the view back to tab 1).
   const defaultViewedPathRef = useRef<string | null>(null)
+  // The view persisted before this mount, captured once (lazy ref — a useRef
+  // initializer expression would re-read localStorage every render). The
+  // first-tab-default effect consumes it to tell a RELOAD RESTORE (App reopens
+  // the same project; keep the user's restored tab) apart from an explicit
+  // project open (apply the project's first-tab launch profile).
+  const restoredViewRef = useRef<PersistedView | null | undefined>(undefined)
+  if (restoredViewRef.current === undefined) restoredViewRef.current = loadPersistedView()
   const [loading, setLoading] = useState(false)
   // The Project settings dialog (shared policy + personal launch prefs) —
   // opened from the ⋯ menu; drafts live inside the dialog, Save persists.
@@ -402,41 +442,159 @@ export const ProjectPanel = ({
   const [view, setView] = useState<PanelView>(() => {
     const saved = loadPersistedView().panelTab
     // 'board' is the new default leftmost tab now that Chats is gone (a stale
-    // persisted 'tasks' fails isMvpVisibleTab and falls back here).
-    return saved && isMvpVisibleTab(saved) ? saved : 'board'
+    // persisted 'tasks' fails isMvpVisibleTab and falls back here). A saved
+    // `custom:<uuid>` id is adopted tentatively — whether the module still
+    // exists is verified once the custom list arrives (effect below).
+    return saved && (isMvpVisibleTab(saved) || isCustomTabId(saved))
+      ? saved
+      : 'board'
   })
   // Persist the active tab on every change (covers tab clicks and Ctrl+Tab).
+  // The cast narrows the plain-string PanelView back to the persisted TabId
+  // union — `view` only ever holds a registry id or a `custom:*` id (both
+  // validated above / by the tab row).
   useEffect(() => {
-    savePersistedView({ panelTab: view })
+    savePersistedView({ panelTab: view as PersistedPanelTab })
   }, [view])
-  // The per-project, normalised tab order: the user's saved drag order
-  // (ProjectData.tabOrder) reconciled against the live registry, falling back to
-  // the registry default order when a project has none. Drives the tab row, the
-  // Ctrl+Tab cycle, and the first-tab default below.
-  const tabOrder = useMemo(
-    () => effectiveTabOrder(data?.tabOrder, ENABLED_MODULE_IDS),
-    [data?.tabOrder],
+  // ── Custom tabs (docs/CUSTOM_TABS_PLAN.md) ───────────────────────────────
+  // The global custom-module list + the caller's role, fetched once and
+  // refreshed after create/install/publish/delete. Custom tabs surface as
+  // `custom:<uuid>` ids appended after the built-ins.
+  const {
+    role: customRole,
+    modules: customModules,
+    loaded: customModulesLoaded,
+    refresh: refreshCustomModules,
+  } = useCustomModules()
+  // Every id that can appear in the tab row: built-ins in registry order,
+  // then the custom tabs in list order. effectiveTabOrder reconciles a saved
+  // per-project order against this set.
+  const allTabIds = useMemo<PanelView[]>(
+    () => [...ENABLED_MODULE_IDS, ...customModules.map(m => customTabId(m.id))],
+    [customModules],
   )
+  // The per-project, normalised tab order: the user's saved drag order
+  // (ProjectData.tabOrder) reconciled against the live registry + custom set,
+  // falling back to the default order when a project has none. Drives the tab
+  // row, the Ctrl+Tab cycle, and the first-tab default below.
+  const tabOrder = useMemo(
+    () => effectiveTabOrder<PanelView>(data?.tabOrder, allTabIds),
+    [data?.tabOrder, allTabIds],
+  )
+  // A persisted / lingering custom tab whose module no longer exists (deleted
+  // elsewhere, or a stale localStorage value) falls back to the first
+  // built-in. Only judged once the list has actually loaded — before that,
+  // "not in the list" just means "haven't heard from the server yet".
+  useEffect(() => {
+    if (!customModulesLoaded || !isCustomTabId(view)) return
+    if (customModules.some(m => customTabId(m.id) === view)) return
+    setView(tabOrder.find(id => !isCustomTabId(id)) ?? 'board')
+  }, [customModulesLoaded, customModules, view, tabOrder])
   // "The leftmost tab opens by default." When a project's data first loads
   // (opening it, or switching to it — guarded so a same-project save/refetch
-  // doesn't yank the view), land on that project's first tab.
+  // doesn't yank the view), land on that project's first tab. When the saved
+  // first tab is a custom one, wait for the custom list so a slow fetch can't
+  // misroute the default to a built-in.
   useEffect(() => {
     const path = project?.path
     if (!path || !data || loadedDataPathRef.current !== path) return
     if (defaultViewedPathRef.current === path) return
+    // One-shot: only the first project-open after mount can be a reload
+    // restore. When it is (App reopened the very project the mount-time view
+    // state was initialised from), honour the restored tab instead of yanking
+    // to the project's first tab — otherwise a reload on Canvas/Terminal lands
+    // back on the leftmost tab every time. (A restored custom tab whose module
+    // vanished still falls back via the effect above once the list loads.)
+    const restored = restoredViewRef.current
+    restoredViewRef.current = null
+    if (restored?.panelTab && project.id === restored.projectId) {
+      defaultViewedPathRef.current = path
+      return
+    }
+    const savedFirst = data.tabOrder?.[0]
+    if (savedFirst && isCustomTabId(savedFirst) && !customModulesLoaded) return
     defaultViewedPathRef.current = path
-    const first = effectiveTabOrder(data.tabOrder, ENABLED_MODULE_IDS)[0] ?? 'board'
+    const first = effectiveTabOrder<PanelView>(data.tabOrder, allTabIds)[0] ?? 'board'
     setView(first)
-  }, [project?.path, data])
+  }, [project?.path, project?.id, data, customModulesLoaded, allTabIds])
+  // Custom-tab management UI: the "+" create dialog (owner), the marketplace
+  // (owner|tester), and the one-shot post-create setup — the freshly created
+  // module's id, which makes its CustomModuleView auto-open the sidebar,
+  // launch claude and paste the brush-up prompt (unsent). Consumed once.
+  const [customCreateOpen, setCustomCreateOpen] = useState(false)
+  const [marketOpen, setMarketOpen] = useState(false)
+  const [customSetupId, setCustomSetupId] = useState<string | null>(null)
+  const onCustomTabCreated = useCallback(
+    async (def: CustomModuleDef) => {
+      setCustomCreateOpen(false)
+      await refreshCustomModules()
+      setCustomSetupId(def.id)
+      setView(customTabId(def.id))
+    },
+    [refreshCustomModules],
+  )
+  // The custom module rendered by the active tab (null on built-ins / a
+  // just-deleted module whose fallback effect hasn't run yet).
+  const activeCustomModule = useMemo(
+    () =>
+      isCustomTabId(view)
+        ? customModules.find(m => customTabId(m.id) === view) ?? null
+        : null,
+    [view, customModules],
+  )
+  // Tab-row right-click removal. What the menu offers per tab (cosmetic — the
+  // server enforces the role): owner deletes any custom module, tester
+  // uninstalls marketplace-installed ones, everyone else gets no menu.
+  const customTabRemoveKind = useCallback(
+    (tabId: string): 'delete' | 'uninstall' | null => {
+      if (!isCustomTabId(tabId)) return null
+      const mod = customModules.find(m => customTabId(m.id) === tabId)
+      if (!mod) return null
+      if (customRole === 'owner') return 'delete'
+      if (customRole === 'tester' && mod.origin === 'installed') return 'uninstall'
+      return null
+    },
+    [customModules, customRole],
+  )
+  const removeCustomTab = useCallback(
+    async (tabId: string) => {
+      if (!isCustomTabId(tabId)) return
+      const moduleId = customModuleIdFromTab(tabId as `custom:${string}`)
+      try {
+        const r = await fetch(`/api/custom-modules/${moduleId}`, { method: 'DELETE' })
+        if (!r.ok) {
+          console.error('[customTabs] remove failed', r.status)
+          return
+        }
+        // Server killed any PTY cwd'd in the module dir; drop the cached
+        // dock bindings too — nothing could ever reclaim them post-delete.
+        killEmbeddedTerminals(customModuleStorageId(moduleId))
+      } finally {
+        // Refresh drops the tab from the row; the dangling-view fallback
+        // effect then moves the view off the dead id.
+        void refreshCustomModules()
+      }
+    },
+    [refreshCustomModules],
+  )
   // Persist a drag-reordered tab row to this project's ProjectData.tabOrder.
+  // Until the custom-module list has loaded, the rendered row — and thus
+  // moveTab's result — holds only the built-ins; persisting that verbatim
+  // would drop every saved `custom:*` id and reset those tabs' dragged
+  // positions. preserveCustomTabs re-inserts them next to their saved
+  // neighbours during that window (once loaded, the row is authoritative and
+  // a stale custom id is correctly scrubbed, like any retired builtin).
   const reorderTabs = useCallback(
     (from: number, to: number) => {
       if (!data) return
       const next = moveTab(tabOrder, from, to)
       if (next.every((id, i) => id === tabOrder[i])) return
-      persist({ ...data, tabOrder: next })
+      persist({
+        ...data,
+        tabOrder: customModulesLoaded ? next : preserveCustomTabs(data.tabOrder, next),
+      })
     },
-    [data, tabOrder, persist],
+    [data, tabOrder, persist, customModulesLoaded],
   )
   // Mirrored up from TerminalPane so the Terminal tab can show `zsh · 163×44`
   // and a Restart button next to its label — the tab thus reads as the header
@@ -466,8 +624,64 @@ export const ProjectPanel = ({
   const [exitedTaskTerminals, setExitedTaskTerminals] = useState<Set<string>>(
     new Set(),
   )
+  // Live mirrors of the two states above. BoardModule keeps long-lived async
+  // closures over the liveTerminalId prop (the "Review with claude" flow polls
+  // it while another launch is in flight) — reading through refs makes any
+  // captured copy see the CURRENT map instead of the render-time snapshot.
+  const taskTerminalsRef = useRef(taskTerminals)
+  taskTerminalsRef.current = taskTerminals
+  const exitedTaskTerminalsRef = useRef(exitedTaskTerminals)
+  exitedTaskTerminalsRef.current = exitedTaskTerminals
   const markTaskTerminalExited = (taskId: string) =>
     setExitedTaskTerminals(prev => new Set(prev).add(taskId))
+  // Verify the persisted task-PTY bindings on project load. localStorage
+  // happily claims a session is live across a server restart — the card dot
+  // and "Insert task into input" would lie until the user opens the drawer.
+  // Probe each saved PTY id with GET /api/terminal/:id (the same validation
+  // TerminalPane.ensureSession runs before re-attaching): 404 or finishedAt
+  // means the PTY is gone → mark the task exited. A network failure marks
+  // nothing (don't flip a possibly-live dot off on a transient error), and a
+  // task relaunched onto a NEW PTY while the probe was in flight is skipped
+  // (the binding no longer points at the probed id).
+  useEffect(() => {
+    const path = project?.path
+    if (!path) return
+    const probed = loadTaskTerminals(path)
+    const entries = Object.entries(probed)
+    if (entries.length === 0) return
+    let cancelled = false
+    void Promise.all(
+      entries.map(async ([taskId, ptyId]): Promise<string | null> => {
+        try {
+          const r = await api.api.terminal[':id'].$get({ param: { id: ptyId } })
+          if (r.ok) {
+            const inf = (await r.json()) as TerminalInfo
+            if (!inf.finishedAt) return null // alive — leave it
+          }
+          return taskId // 404 / finished → dead
+        } catch {
+          return null
+        }
+      }),
+    ).then(ids => {
+      if (cancelled) return
+      const dead = ids.filter(
+        (taskId): taskId is string =>
+          !!taskId &&
+          // Still bound to the PTY we probed? A concurrent relaunch wins.
+          taskTerminalsRef.current[taskId] === probed[taskId],
+      )
+      if (dead.length === 0) return
+      setExitedTaskTerminals(prev => {
+        const n = new Set(prev)
+        for (const id of dead) n.add(id)
+        return n
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [project?.path])
   // Tasks with an in-flight launch — blocks a double-spawn (a double-click
   // would POST twice and orphan the first PTY).
   const launchingTasksRef = useRef<Set<string>>(new Set())
@@ -561,27 +775,57 @@ export const ProjectPanel = ({
   // Launch (or relaunch) the claude terminal FOR A BOARD TASK — board-scoped:
   // the PTY id lands in taskTerminals and the session renders only inside the
   // Board drawer (BoardTaskTerminal). The Terminal tab is not involved.
-  // claude starts PLAIN — no prompt is sent. The task's title + content reach
-  // the session only via the drawer's "Insert task into input" button
-  // (POST /api/terminal/:id/paste-task), which pastes them UNSENT so the user
-  // reviews and presses Enter. taskWorktrees just pre-authorizes the central
-  // worktrees dir (--add-dir) on git projects for the task-branch protocol.
-  // Returns true on success so the caller (BoardModule's auto-launch) can show
-  // a manual retry affordance instead of silently dead-ending when the spawn
-  // fails (claude not on PATH, 5xx, offline). An already-live slot counts as
-  // success (nothing to do).
-  const launchTaskTerminal = async (task: ProjectTask): Promise<boolean> => {
-    if (!project) return false
-    if (taskTerminals[task.id] && !exitedTaskTerminals.has(task.id)) return true
-    if (launchingTasksRef.current.has(task.id)) return true
+  // Two shapes (opts.run):
+  //   - WITHOUT run: claude starts PLAIN — no prompt is sent (restart /
+  //     "Review with claude"). Content can still reach the input box UNSENT
+  //     via the drawer's "Insert task into input" (paste-task).
+  //   - WITH run (the drawer's 実行 button): the card's LIVE fields + per-card
+  //     overrides ride the request as body.task; the SERVER composes the task
+  //     prompt and passes it as the initialPrompt, so claude starts working
+  //     immediately — no Enter required.
+  // taskWorktrees pre-authorizes the central worktrees dir (--add-dir) on git
+  // projects for the task-branch protocol.
+  // Returns { ok } so the caller (BoardModule's Run button) can show a manual
+  // retry affordance instead of silently dead-ending when the spawn fails. On
+  // failure, `reason` distinguishes a missing claude CLI (the server's 503
+  // { claudeMissing: true } pre-flight) from everything else (5xx, offline) —
+  // BoardModule picks the failure copy from it. An already-live slot counts as
+  // success (nothing to do). On success `terminalId` carries the slot's PTY id
+  // so a caller can act on the session in the same tick (the Board drawer's
+  // "Review with claude" pastes into it right after launch — the taskTerminals
+  // state write hasn't re-rendered yet).
+  //
+  // opts.cwd overrides the spawn directory (still subject to the server's
+  // validateProjectPath — the review worktree under the central worktrees dir
+  // passes). An override launches PLAIN claude without taskWorktrees: the
+  // session already sits inside the worktree, nothing else to pre-authorize.
+  const launchTaskTerminal = async (
+    task: ProjectTask,
+    opts?: { cwd?: string; run?: TaskRunPayload },
+  ): Promise<TaskLaunchResult> => {
+    if (!project) return { ok: false, reason: 'other' }
+    if (taskTerminals[task.id] && !exitedTaskTerminals.has(task.id))
+      return { ok: true, terminalId: taskTerminals[task.id] }
+    if (launchingTasksRef.current.has(task.id)) return { ok: true }
     launchingTasksRef.current.add(task.id)
     try {
       const r = await fetch('/api/terminal/claude', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd: project.path, taskWorktrees: true }),
+        body: JSON.stringify(
+          opts?.cwd
+            ? { cwd: opts.cwd }
+            : {
+                cwd: project.path,
+                taskWorktrees: true,
+                ...(opts?.run ? { task: { id: task.id, ...opts.run } } : {}),
+              },
+        ),
       })
-      if (!r.ok) return false
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { claudeMissing?: boolean }
+        return { ok: false, reason: body.claudeMissing ? 'claudeMissing' : 'other' }
+      }
       const info = (await r.json()) as TerminalInfo
       setExitedTaskTerminals(prev => {
         if (!prev.has(task.id)) return prev
@@ -590,9 +834,9 @@ export const ProjectPanel = ({
         return n
       })
       setTaskTerminals(prev => ({ ...prev, [task.id]: info.id }))
-      return true
+      return { ok: true, terminalId: info.id }
     } catch {
-      return false
+      return { ok: false, reason: 'other' }
     } finally {
       launchingTasksRef.current.delete(task.id)
     }
@@ -791,7 +1035,12 @@ export const ProjectPanel = ({
     { kind: 'ok' | 'error'; text: string } | null
   >(null)
   const shareNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [shareDialog, setShareDialog] = useState<'enable' | 'disable' | null>(null)
+  // The unshare confirmation (the only ShareConfirm left — enabling goes
+  // through ShareStartDialog below).
+  const [shareDialog, setShareDialog] = useState<'disable' | null>(null)
+  // Share-start dialog / invite panel ('start' = the full enable form,
+  // 'invite' = re-show the invite instructions for an already-shared project).
+  const [shareStart, setShareStart] = useState<'start' | 'invite' | null>(null)
   // Conflict-resolution dialog (S15–S20 phase 3): the structured conflicts of
   // the last failed Sync, or null. Only offered when EVERY conflicted file is
   // shared data (.openground/) — the app never auto-resolves the user's code.
@@ -930,8 +1179,17 @@ export const ProjectPanel = ({
         return null
       if (dataRef.current && JSON.stringify(dataRef.current) !== lastSavedJson.current)
         return null
+      // Content unchanged since the last save/load (lastSavedJson is the JSON
+      // of whatever setData last adopted) → DON'T setData: swapping in a fresh
+      // object with identical content would still replace the tasks ARRAY
+      // IDENTITY, which BoardModule's external-update detection reads as a
+      // remote change and answers by dropping the undo/redo stacks — the 5s
+      // poll would wipe ⌘Z history every tick. Returning d (not null) is
+      // correct for doSync's digest: the reload succeeded, the diff is empty.
+      const body = JSON.stringify(d)
+      if (body === lastSavedJson.current) return d
       setData(d)
-      lastSavedJson.current = JSON.stringify(d)
+      lastSavedJson.current = body
       // Keep the Ground card's mirror (description / task counts) fresh too.
       onSaved?.(path, d)
       return d
@@ -956,23 +1214,30 @@ export const ProjectPanel = ({
   )
 
   // One click: commit (scoped to .openground/) → pull --rebase → push, then
-  // pull the freshly-merged data back into the UI.
-  const doSync = useCallback(async () => {
+  // pull the freshly-merged data back into the UI. Resolves with what
+  // happened (SyncOutcome) so callers covering the header notice — the
+  // InvitePanel's "Publish now" — can show the failure INLINE; the outcome's
+  // error is the exact localized text this function posts to shareNotice.
+  const doSync = useCallback(async (): Promise<SyncOutcome> => {
     const path = project?.path
-    if (!path || syncingPath || project?.missing) return
+    // Guarded no-op (already syncing / missing project): nothing failed,
+    // nothing to report — callers' buttons are disabled in these states.
+    if (!path || syncingPath || project?.missing) return { ok: true }
     setSyncingPath(path)
     setShareNoticeFading(null)
     // Snapshot the board BEFORE the sync so a successful pull can be diffed
     // into a "what changed" digest (boardDiffDigest) for the notice line.
     const beforeTasks = dataRef.current?.tasks ?? null
+    let outcome: SyncOutcome = { ok: true }
     try {
       const r = await syncShare(path)
-      if (projectPathRef.current !== path) return
+      // Stale return (project switched mid-sync): the dialog that asked is
+      // gone — report a no-op, never touch the new project's notices.
+      if (projectPathRef.current !== path) return { ok: true }
       if ('error' in r) {
-        setShareNoticeFading({
-          kind: 'error',
-          text: t('projectPanel.syncFailed', { error: r.error }),
-        })
+        const text = t('projectPanel.syncFailed', { error: r.error })
+        outcome = { ok: false, error: text }
+        setShareNoticeFading({ kind: 'error', text })
       } else if (r.result.conflict) {
         // Say WHAT conflicted (card titles / notes / canvas files) — the
         // server's message is the raw English fallback for the rest.
@@ -981,10 +1246,11 @@ export const ProjectPanel = ({
               items: r.result.conflictFiles.join(', '),
             })
           : r.result.message
-        setShareNoticeFading({
-          kind: 'error',
-          text: [t('projectPanel.syncConflict'), items].filter(Boolean).join(' — '),
-        })
+        const text = [t('projectPanel.syncConflict'), items]
+          .filter(Boolean)
+          .join(' — ')
+        outcome = { ok: false, error: text }
+        setShareNoticeFading({ kind: 'error', text })
         // Offer in-app resolution ONLY for pure shared-data conflicts — a
         // conflicted code file is the user's own rebase to run.
         const cs = r.result.conflicts
@@ -1003,12 +1269,11 @@ export const ProjectPanel = ({
           'no-identity': t('projectPanel.syncNoIdentity'),
         }
         const reasonText = r.result.reason ? reasonTexts[r.result.reason] : undefined
-        setShareNoticeFading({
-          kind: 'error',
-          text:
-            reasonText ??
-            t('projectPanel.syncFailed', { error: r.result.message ?? 'sync error' }),
-        })
+        const text =
+          reasonText ??
+          t('projectPanel.syncFailed', { error: r.result.message ?? 'sync error' })
+        outcome = { ok: false, error: text }
+        setShareNoticeFading({ kind: 'error', text })
         // An autostash conflict still pulled — show the merged board, not the
         // pre-sync snapshot.
         if (r.result.pulled) {
@@ -1053,10 +1318,21 @@ export const ProjectPanel = ({
             text: parts.length > 0 ? parts.join(' — ') : t('projectPanel.syncDone'),
           })
         }
+        // ok-but-nothing-pushed (offline / no remote): the local sync is fine
+        // but a caller asking "did this publish?" must hear NO with the why.
+        if (r.result.offline || r.result.noRemote) {
+          outcome = {
+            ok: false,
+            error: r.result.offline
+              ? t('projectPanel.syncOffline')
+              : t('projectPanel.syncNoRemote'),
+          }
+        }
       }
       // Whatever happened, the dirty dot may have changed (commit succeeded
       // even when push didn't, etc.) — re-read the truth.
       void refreshShareStatus()
+      return outcome
     } finally {
       setSyncingPath(p => (p === path ? null : p))
     }
@@ -1147,14 +1423,16 @@ export const ProjectPanel = ({
     [project?.path, resolving, t, setShareNoticeFading, reloadProjectData, refreshShareStatus],
   )
 
+  // Confirm in the unshare dialog → POST disable, then refetch everything
+  // (status decides which UI shows; data + canvases changed source). The
+  // ENABLE side lives in ShareStartDialog (display name + policy + invite).
   const confirmShareDialog = useCallback(async () => {
     const path = project?.path
-    const mode = shareDialog
-    if (!path || !mode || shareBusy) return
+    if (!path || !shareDialog || shareBusy) return
     setShareBusy(true)
     setShareDialogError(null)
     try {
-      const r = mode === 'enable' ? await enableShare(path) : await disableShare(path)
+      const r = await disableShare(path)
       if (projectPathRef.current !== path) return
       if (!r.ok) {
         setShareDialogError(r.error)
@@ -1164,15 +1442,18 @@ export const ProjectPanel = ({
       await refreshShareStatus()
       await reloadProjectData()
       setCanvasReloadToken(v => v + 1)
-      // Enable migrates the data but deliberately commits nothing — the first
-      // Sync publishes it. Say so, or the user stares at a dirty dot (S1).
-      if (mode === 'enable') {
-        setShareNoticeFading({ kind: 'ok', text: t('projectPanel.shareEnabledNotice') })
-      }
     } finally {
       setShareBusy(false)
     }
-  }, [project?.path, shareDialog, shareBusy, refreshShareStatus, reloadProjectData, t, setShareNoticeFading])
+  }, [project?.path, shareDialog, shareBusy, refreshShareStatus, reloadProjectData])
+
+  // After a successful enable inside ShareStartDialog: pull the new truth in
+  // (the dialog itself stays open, switching to the invite panel).
+  const onShareEnabled = useCallback(async () => {
+    await refreshShareStatus()
+    await reloadProjectData()
+    setCanvasReloadToken(v => v + 1)
+  }, [refreshShareStatus, reloadProjectData])
 
   // Fetch the status when a project opens (and reset all share UI state so
   // nothing leaks across a project switch).
@@ -1180,6 +1461,7 @@ export const ProjectPanel = ({
     setShareStatus(null)
     setShareNoticeFading(null)
     setShareDialog(null)
+    setShareStart(null)
     setShareDialogError(null)
     setConflictDialog(null)
     if (!project?.path) return
@@ -1453,6 +1735,20 @@ export const ProjectPanel = ({
               changes) + the remote's short name as faint context. Lives with
               the project-scoped header controls; hidden entirely unless the
               project is actually shared. */}
+          {/* Pre-share occupant of the same slot: a quiet text "Share…"
+              button for an unshared git repo — after sharing this exact spot
+              becomes the Sync/Live cluster, so the location only has to be
+              learned once. Non-git projects show nothing here. */}
+          {showHeaderShare(shareStatus, !!project.missing) && (
+            <button
+              type="button"
+              onClick={() => setShareStart('start')}
+              title={t('projectPanel.shareButtonHint')}
+              className="shrink-0 rounded-sm px-1 py-1 text-[11px] text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              {t('projectPanel.shareButton')}
+            </button>
+          )}
           {shareStatus?.shared && (
             <div className="flex min-w-0 items-center gap-2">
               {shareNotice && (
@@ -1585,22 +1881,6 @@ export const ProjectPanel = ({
               projectSettingsDisabled={!data}
               onRemove={() => onRemove(project)}
               onDelete={() => setConfirmingDelete(true)}
-              share={
-                shareStatus
-                  ? {
-                      status: shareStatus,
-                      missing: !!project.missing,
-                      onShare: () => {
-                        setShareDialogError(null)
-                        setShareDialog('enable')
-                      },
-                      onUnshare: () => {
-                        setShareDialogError(null)
-                        setShareDialog('disable')
-                      },
-                    }
-                  : null
-              }
             />
             <IconButton title={t('common.close')} onClick={onClose}>
               <X size={15} strokeWidth={1.75} />
@@ -1636,6 +1916,23 @@ export const ProjectPanel = ({
         order={tabOrder}
         onReorder={reorderTabs}
         terminalInfo={terminalInfo}
+        // Custom tabs (label from the fetched def, fixed Puzzle icon) — the
+        // row renders them wherever `order` puts them.
+        customTabs={customModules.map(customModuleTabDef)}
+        // Management affordances are role-gated COSMETICALLY (server is the
+        // source of truth): "+" creates (owner), Market browses (owner|tester).
+        onAddTab={customRole === 'owner' ? () => setCustomCreateOpen(true) : undefined}
+        onOpenMarket={customRole !== 'none' ? () => setMarketOpen(true) : undefined}
+        // Right-click menu on custom tabs (delete / uninstall).
+        customTabMenu={{ kindFor: customTabRemoveKind, onRemove: removeCustomTab }}
+        // Cards waiting in Review — the reviewer's pull signal (F066). Only
+        // counted when the review column is enabled for this board.
+        badges={{
+          board:
+            data?.config?.reviewColumn
+              ? data.tasks.filter(t => !t.done && t.boardColumn === 'review').length
+              : 0,
+        }}
       />
 
       {/* Content + assistant. The assistant is either the bottom dock (a child
@@ -1828,6 +2125,26 @@ export const ProjectPanel = ({
             hint={t('projectPanel.canvasDockHint')}
           />
         </div>
+      ) : isCustomTabId(view) ? (
+        // Custom tab: the module's component in a sandboxed iframe, plus the
+        // owner's claude sidebar. Keyed by module id so switching between two
+        // custom tabs remounts cleanly (fresh poll, fresh sidebar state).
+        activeCustomModule ? (
+          <CustomModuleView
+            key={activeCustomModule.id}
+            module={activeCustomModule}
+            role={customRole}
+            setup={customSetupId === activeCustomModule.id}
+            onSetupConsumed={() => setCustomSetupId(null)}
+            onChanged={refreshCustomModules}
+          />
+        ) : (
+          // List still loading (or the module vanished — the fallback effect
+          // is about to move the view).
+          <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">
+            {t('projectPanel.loading')}
+          </div>
+        )
       ) : loading || !data ? (
         <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">{t('projectPanel.loading')}</div>
       ) : view === 'board' ? (
@@ -1837,6 +2154,9 @@ export const ProjectPanel = ({
           data={data}
           project={project}
           persist={persist}
+          // Git-shared board (marker detected) — drives the one-line welcome
+          // strip a freshly imported shared clone shows above the board.
+          shared={shareStatus?.shared ?? false}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
           // Surface Project Settings right on the Board toolbar (the ⋯ menu
@@ -1847,9 +2167,13 @@ export const ProjectPanel = ({
           hasTerminalSlot={id => id in taskTerminals}
           // The task's LIVE claude PTY id (launched and not exited) — feeds
           // the drawer's "Insert task into input" button (paste-task route).
+          // Read through the refs, not the render-time state: BoardModule's
+          // "Review with claude" flow POLLS a captured copy of this callback
+          // while a concurrent launch resolves, and a state closure would
+          // never see the id land.
           liveTerminalId={id => {
-            const ptyId = taskTerminals[id]
-            return ptyId && !exitedTaskTerminals.has(id) ? ptyId : null
+            const ptyId = taskTerminalsRef.current[id]
+            return ptyId && !exitedTaskTerminalsRef.current.has(id) ? ptyId : null
           }}
           // Delete lives in the drawer HEADER (next to ×), not floating in the
           // conversation pane.
@@ -1901,10 +2225,27 @@ export const ProjectPanel = ({
           projectName={project.name}
           projectPath={project.path}
           data={data}
-          onCancel={() => setProjectSettingsOpen(false)}
-          onSave={(config, launch) => {
-            persist({ ...data, config, launch })
+          shareStatus={shareStatus}
+          projectMissing={!!project.missing}
+          onStartShare={() => {
             setProjectSettingsOpen(false)
+            setShareStart('start')
+          }}
+          onShowInvite={() => {
+            setProjectSettingsOpen(false)
+            setShareStart('invite')
+          }}
+          onStopShare={() => {
+            setProjectSettingsOpen(false)
+            setShareDialogError(null)
+            setShareDialog('disable')
+          }}
+          onClose={() => setProjectSettingsOpen(false)}
+          onChange={(config, launch) => {
+            // Autosave: every committed change in the dialog persists right
+            // away through the debounced PUT. Closing is separate — only the
+            // Back button / ESC dismisses the dialog.
+            persist({ ...data, config, launch })
           }}
         />
       )}
@@ -1926,8 +2267,7 @@ export const ProjectPanel = ({
       )}
 
       {shareDialog && (
-        <ShareConfirm
-          mode={shareDialog}
+        <UnshareConfirm
           busy={shareBusy}
           error={shareDialogError}
           onCancel={() => {
@@ -1935,6 +2275,20 @@ export const ProjectPanel = ({
             setShareDialogError(null)
           }}
           onConfirm={() => void confirmShareDialog()}
+        />
+      )}
+
+      {shareStart && (
+        <ShareStartDialog
+          projectName={project.name}
+          projectPath={project.path}
+          mode={shareStart}
+          shareStatus={shareStatus}
+          initialConfig={data?.config}
+          syncing={syncing}
+          onSync={doSync}
+          onEnabled={onShareEnabled}
+          onClose={() => setShareStart(null)}
         />
       )}
 
@@ -1946,6 +2300,27 @@ export const ProjectPanel = ({
           busy={resolving}
           onCancel={() => setConflictDialog(null)}
           onConfirm={choices => void confirmResolve(choices)}
+        />
+      )}
+
+      {customCreateOpen && (
+        <CustomTabCreateDialog
+          onCreated={def => void onCustomTabCreated(def)}
+          onClose={() => setCustomCreateOpen(false)}
+        />
+      )}
+
+      {marketOpen && (
+        <MarketplaceDialog
+          installedRemoteIds={
+            new Set(
+              customModules
+                .map(m => m.remoteId)
+                .filter((id): id is string => !!id),
+            )
+          }
+          onInstalled={refreshCustomModules}
+          onClose={() => setMarketOpen(false)}
         />
       )}
 
@@ -2056,35 +2431,38 @@ const ConflictResolveDialog = ({
   )
 }
 
-// Share / unshare confirmation. Same modal language as DeleteConfirm (the
-// panel's established pattern): full-panel overlay, label-cap heading, one
-// short explanation paragraph, inline error, subtle-cancel + primary-confirm.
-const ShareConfirm = ({
-  mode,
+// Unshare confirmation. Same modal language as DeleteConfirm (the panel's
+// established pattern): full-panel overlay, label-cap heading, one short
+// explanation paragraph, inline error, subtle-cancel + primary-confirm.
+// (Enabling has its own ShareStartDialog — this side stays a confirm.)
+const UnshareConfirm = ({
   busy,
   error,
   onCancel,
   onConfirm,
 }: {
-  mode: 'enable' | 'disable'
   busy: boolean
   error: string | null
   onCancel: () => void
   onConfirm: () => void
 }) => {
   const { t } = useT()
-  const k = mode === 'enable' ? 'share' : 'unshare'
   return (
     <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col justify-center gap-5 bg-bg-card px-6">
       <div className="mx-auto w-full max-w-[420px]">
         <p className="label-cap text-accent mb-2">
-          {t(`projectPanel.${k}DialogLabel`)}
+          {t('projectPanel.unshareDialogLabel')}
         </p>
         <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
-          {t(`projectPanel.${k}DialogTitle`)}
+          {t('projectPanel.unshareDialogTitle')}
         </h3>
         <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
-          {t(`projectPanel.${k}DialogExplain`)}
+          {t('projectPanel.unshareDialogExplain')}
+        </p>
+        {/* S036: the teammates' clones fall back to their (empty) central
+            data once the removal lands — warn the owner to tell them. */}
+        <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
+          {t('projectPanel.unshareTeammateNote')}
         </p>
         {error && (
           <p className="mt-3 text-[11px] leading-relaxed text-accent">
@@ -2098,7 +2476,7 @@ const ShareConfirm = ({
           <Btn variant="primary" size="md" onClick={onConfirm} disabled={busy}>
             {busy
               ? t('projectPanel.shareWorking')
-              : t(`projectPanel.${k}Confirm`)}
+              : t('projectPanel.unshareConfirm')}
           </Btn>
         </div>
       </div>
@@ -2106,136 +2484,260 @@ const ShareConfirm = ({
   )
 }
 
-// Project settings — edits BOTH per-project layers in one dialog, clearly
-// separated: the SHARED policy (ProjectData.config — travels with the board,
-// both collaborators see it) and the PERSONAL launch prefs (ProjectData.launch
-// — stored centrally, never synced). Same full-panel overlay language as
-// DeleteConfirm/ShareConfirm; drafts are local, Save persists, Cancel discards.
-const FIELD_INPUT_CSS =
-  'w-full rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint transition-colors focus:border-accent focus:outline-none'
-
-// Local response shape for GET /api/project/branches — deliberately NOT in
-// types.ts (another track owns that file); the dialog only needs this much.
-
-// The claude CLI's model aliases offered in the Model select. A saved value
-// outside this list (a pinned full model id, say) is kept as an extra option.
-const MODEL_CHOICES = ['sonnet', 'opus', 'haiku'] as const
+// Project settings — section layout adapts to the project's share/git state
+// (settingsSections in src/lib/shareUx.ts — docs/SHARE_UX_FLOWS.md §2a):
+//   - shared:           共有 (team) + タスクのワークフロー + Personal
+//   - unshared git:     タスクのワークフロー + Personal + "share…" CTA
+//                       (NO share vocabulary anywhere — S033/S034)
+//   - non-git:          Personal only (S047)
+// AUTOSAVE dialog: every committed change persists the moment it's made (the
+// parent debounces the PUT); a single Back button / ESC just dismisses. The
+// display name is a GLOBAL setting (settings.displayName) edited inline while
+// shared and saved to /api/settings on its own debounced path — separate from
+// the per-project config.
 
 const ProjectSettingsDialog = ({
   projectName,
   projectPath,
   data,
-  onCancel,
-  onSave,
+  shareStatus,
+  projectMissing,
+  onStartShare,
+  onShowInvite,
+  onStopShare,
+  onClose,
+  onChange,
 }: {
   projectName: string
   projectPath: string
   data: ProjectData
-  onCancel: () => void
-  onSave: (config: ProjectConfig, launch: ProjectLaunchPrefs) => void
+  /** null = unknown (share routes unreachable) → conservative layout. */
+  shareStatus: ShareStatus | null
+  projectMissing: boolean
+  /** Open the ShareStartDialog (the bottom CTA, unshared git repos only). */
+  onStartShare: () => void
+  /** Re-show the invite panel (shared projects). */
+  onShowInvite: () => void
+  /** Open the unshare confirmation (shared projects). */
+  onStopShare: () => void
+  onClose: () => void
+  onChange: (config: ProjectConfig, launch: ProjectLaunchPrefs) => void
 }) => {
   const { t } = useT()
-  // Shared policy drafts
-  const [flow, setFlow] = useState<'merge' | 'pr'>(
-    data.config?.completionFlow ?? 'merge',
-  )
+  const sections = useMemo(() => settingsSections(shareStatus), [shareStatus])
+
+  // ESC dismisses the dialog (same as the Back button). Skips an Escape that
+  // cancels an IME composition or one another handler already consumed, and
+  // preventDefault keeps App's global Escape handler (clear selection / close
+  // panel / JumpPalette) from also acting on it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return
+      e.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Workflow drafts. (completionFlow and the launch profile — permission
+  // mode / model / effort — are edited on the Board's run-defaults strip
+  // since 2026-06-12; this dialog no longer duplicates them.)
   const [targetBranch, setTargetBranch] = useState(data.config?.targetBranch ?? '')
-  // Dedupe on init: the old textarea path never deduplicated, so legacy /
-  // shared boards can carry exact-duplicate names (which would collide as
-  // React keys and make one ✕ remove all twins).
+  // Dedupe on init: legacy / shared boards can carry exact-duplicate names
+  // (which would collide as React keys and make one ✕ remove all twins).
   const [members, setMembers] = useState<string[]>(() =>
     Array.from(new Set(data.config?.members ?? [])),
   )
-  const [memberDraft, setMemberDraft] = useState('')
   // Personal drafts
-  const [permissionMode, setPermissionMode] = useState<
-    NonNullable<ProjectLaunchPrefs['permissionMode']>
-  >(data.launch?.permissionMode ?? 'default')
-  const [model, setModel] = useState(data.launch?.model ?? '')
   const [autoSync, setAutoSync] = useState(data.launch?.autoSync !== false)
 
-  // The repo's branch list — fetched once when the dialog opens, so Target
-  // branch is a pick-from-list instead of a typo-prone text field. null while
-  // loading; a failed fetch or an empty list (non-git folder) falls back to
-  // the plain text input.
-  const [branches, setBranches] = useState<string[] | null>(null)
-  const [branchesFailed, setBranchesFailed] = useState(false)
+  // Display name (GLOBAL settings) — read on open while the team section is
+  // visible; null = still loading (input disabled, never clobbered by a slow
+  // fetch). Saved back via POST /api/settings only when actually changed.
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const initialDisplayNameRef = useRef<string>('')
   useEffect(() => {
+    if (!sections.team) return
     let cancelled = false
-    fetch(`/api/project/branches?path=${encodeURIComponent(projectPath)}`)
-      .then(r => (r.ok ? (r.json() as Promise<ProjectBranchesResponse>) : Promise.reject(new Error(String(r.status)))))
+    fetch('/api/settings', { cache: 'no-store' })
+      .then(r => (r.ok ? (r.json() as Promise<SettingsResponse>) : null))
       .then(body => {
         if (cancelled) return
-        if (Array.isArray(body.branches) && body.branches.length > 0) {
-          setBranches(body.branches.filter((b): b is string => typeof b === 'string'))
-        } else {
-          setBranchesFailed(true)
-        }
+        initialDisplayNameRef.current = body?.displayName ?? ''
+        setDisplayName(prev => (prev !== null ? prev : (body?.displayName ?? '')))
       })
       .catch(() => {
-        if (!cancelled) setBranchesFailed(true)
+        if (!cancelled) setDisplayName(prev => (prev !== null ? prev : ''))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sections.team])
+  // Display name autosave — its own debounced write to /api/settings (the
+  // POST merges partial bodies), since it is GLOBAL, not part of ProjectData.
+  // Local state stays the source of truth (nothing re-reads the server after
+  // the initial fetch), so an in-flight IME composition is never rolled back.
+  // Blur — and unmount, for a Back/ESC right after typing — flushes the
+  // pending write. A FAILED post is never swallowed (assignees/mineOnly
+  // depend on the name): the error shows inline under the field, and
+  // lastPosted rolls back so the next change/blur retries naturally.
+  const displayNameRef = useRef<string | null>(null)
+  displayNameRef.current = displayName
+  const displayNameTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastPostedDisplayName = useRef<string | null>(null)
+  const [displayNameError, setDisplayNameError] = useState<string | null>(null)
+  const postDisplayName = useCallback(() => {
+    const raw = displayNameRef.current
+    if (raw === null) return
+    const v = raw.trim()
+    const prev = lastPostedDisplayName.current ?? initialDisplayNameRef.current
+    if (v === prev) return
+    lastPostedDisplayName.current = v
+    void fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: v }),
+    })
+      .catch(() => null)
+      .then(res => {
+        if (res && res.ok) {
+          setDisplayNameError(null)
+          return
+        }
+        // Roll back ONLY if no newer post superseded this one, so the next
+        // edit / blur diffs against the last value the server confirmed.
+        if (lastPostedDisplayName.current === v) {
+          lastPostedDisplayName.current = prev
+        }
+        setDisplayNameError(
+          t('projectPanel.settingsDisplayNameSaveFailed', {
+            error: res ? `HTTP ${res.status}` : t('projectPanel.networkError'),
+          }),
+        )
+      })
+  }, [t])
+  const flushDisplayName = useCallback(() => {
+    if (displayNameTimer.current) {
+      clearTimeout(displayNameTimer.current)
+      displayNameTimer.current = null
+    }
+    postDisplayName()
+  }, [postDisplayName])
+  const scheduleDisplayNameSave = useCallback(() => {
+    if (displayNameTimer.current) clearTimeout(displayNameTimer.current)
+    displayNameTimer.current = setTimeout(() => {
+      displayNameTimer.current = null
+      postDisplayName()
+    }, 350)
+  }, [postDisplayName])
+  useEffect(() => flushDisplayName, [flushDisplayName])
+
+  // The repo's branch list (shared hook with ShareStartDialog) — a failed
+  // fetch / non-git folder falls back to the plain text input.
+  const { branches, failed: branchesFailed } = useProjectBranches(projectPath)
+  // Central worktrees (B012 / F082) — fetched once when the dialog opens so
+  // the Personal column can show "n active · m dirty" and offer a one-click
+  // sweep of the CLEAN ones. null = loading; a failed fetch hides the section's
+  // numbers (it shows the error instead of fake zeros).
+  const [worktrees, setWorktrees] = useState<ProjectWorktreeInfo[] | null>(null)
+  const [worktreesFailed, setWorktreesFailed] = useState(false)
+  const [wtCleaning, setWtCleaning] = useState(false)
+  const [wtResult, setWtResult] = useState<CleanWorktreesResult | null>(null)
+  const [wtError, setWtError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/project/worktrees?path=${encodeURIComponent(projectPath)}`)
+      .then(r =>
+        r.ok
+          ? (r.json() as Promise<{ worktrees: ProjectWorktreeInfo[] }>)
+          : Promise.reject(new Error(String(r.status))),
+      )
+      .then(body => {
+        if (!cancelled) setWorktrees(Array.isArray(body.worktrees) ? body.worktrees : [])
+      })
+      .catch(() => {
+        if (!cancelled) setWorktreesFailed(true)
       })
     return () => {
       cancelled = true
     }
   }, [projectPath])
-  // A saved target branch that the list doesn't carry (deleted branch, or the
-  // list is still loading) stays selectable so opening+saving never drops it.
-  const savedBranch = (data.config?.targetBranch ?? '').trim()
-  const extraBranch =
-    savedBranch && !(branches ?? []).includes(savedBranch) ? savedBranch : null
 
-  const addMember = () => {
-    const v = memberDraft.trim()
-    if (!v) return
-    setMemberDraft('')
-    setMembers(prev =>
-      prev.some(m => m.toLowerCase() === v.toLowerCase()) ? prev : [...prev, v],
-    )
-  }
-  const removeMember = (name: string) =>
-    setMembers(prev => prev.filter(m => m !== name))
-
-  // A saved model outside the alias list (a pinned full id) stays selectable.
-  const savedModel = (data.launch?.model ?? '').trim()
-  const modelChoices: string[] =
-    savedModel && !(MODEL_CHOICES as readonly string[]).includes(savedModel)
-      ? [savedModel, ...MODEL_CHOICES]
-      : [...MODEL_CHOICES]
-
-  const save = () => {
-    const config: ProjectConfig = {
-      // Spread first: every config key this dialog no longer edits
-      // (verifyCommands, reviewColumn, …) is carried through untouched —
-      // saving must never strip shared board data.
-      ...data.config,
-      completionFlow: flow,
-      targetBranch: targetBranch.trim() || undefined,
-      members: members.length > 0 ? members : undefined,
+  const cleanWorktrees = async () => {
+    setWtCleaning(true)
+    setWtError(null)
+    try {
+      const res = await fetch('/api/project/worktrees/clean', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: projectPath }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body?.error || String(res.status))
+      setWtResult({
+        removed: Array.isArray(body.removed) ? body.removed : [],
+        skippedDirty: Array.isArray(body.skippedDirty) ? body.skippedDirty : [],
+      })
+      // Refresh the count so the line above the button agrees with the sweep.
+      const after = await fetch(
+        `/api/project/worktrees?path=${encodeURIComponent(projectPath)}`,
+      )
+      if (after.ok) {
+        const fresh = (await after.json()) as { worktrees: ProjectWorktreeInfo[] }
+        setWorktrees(Array.isArray(fresh.worktrees) ? fresh.worktrees : [])
+      }
+    } catch (e) {
+      setWtError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setWtCleaning(false)
     }
-    const launch: ProjectLaunchPrefs = {
-      ...data.launch,
-      permissionMode: permissionMode === 'default' ? undefined : permissionMode,
-      model: model.trim() || undefined,
-      // Default ON — only an explicit opt-out is stored.
-      autoSync: autoSync ? undefined : false,
-    }
-    onSave(config, launch)
   }
 
-  const permissionOptions: {
-    value: NonNullable<ProjectLaunchPrefs['permissionMode']>
-    labelKey:
-      | 'projectPanel.settingsPermDefault'
-      | 'projectPanel.settingsPermAcceptEdits'
-      | 'projectPanel.settingsPermPlan'
-      | 'projectPanel.settingsPermBypass'
-  }[] = [
-    { value: 'default', labelKey: 'projectPanel.settingsPermDefault' },
-    { value: 'acceptEdits', labelKey: 'projectPanel.settingsPermAcceptEdits' },
-    { value: 'plan', labelKey: 'projectPanel.settingsPermPlan' },
-    { value: 'bypass', labelKey: 'projectPanel.settingsPermBypass' },
-  ]
+  // A saved target branch outside the offered list (deleted branch, …) stays
+  // selectable. Captured ONCE at mount — with autosave the `data` prop
+  // refreshes after every change, and deriving from the live prop would drop
+  // the extra option the moment the user switches away (no way back without
+  // reopening the dialog).
+  const [savedBranch] = useState(() => (data.config?.targetBranch ?? '').trim())
+
+  // Autosave: each committed change persists immediately (the parent debounces
+  // the PUT). Local state stays the source of truth for every edited field —
+  // the refreshed `data` prop is only spread for the keys this dialog does NOT
+  // edit (completionFlow, the launch profile — both live on the Board's
+  // run-defaults strip now), so an in-flight edit (or an IME composition) is
+  // never rolled back by a save round-trip. setState is async, so each change
+  // site passes its new value as an override.
+  const dataRef = useRef(data)
+  dataRef.current = data
+  const persistChange = (over: {
+    targetBranch?: string
+    members?: string[]
+    autoSync?: boolean
+  }) => {
+    const d = dataRef.current
+    // Spread first: every config key this dialog doesn't currently SHOW
+    // (completionFlow, verifyCommands, reviewColumn — and the
+    // workflow/members fields when their sections are hidden) is carried
+    // through untouched — saving must never strip data the user couldn't see.
+    const config: ProjectConfig = { ...d.config }
+    if (sections.workflow) {
+      config.targetBranch = (over.targetBranch ?? targetBranch).trim() || undefined
+      // The members list is editable in BOTH layouts: as the team roster
+      // while shared, and as the plain assignee-name roster (workflow
+      // section) on an unshared git project.
+      const nextMembers = over.members ?? members
+      config.members = nextMembers.length > 0 ? nextMembers : undefined
+    }
+    const launch: ProjectLaunchPrefs = { ...d.launch }
+    if (sections.team) {
+      // Default ON — only an explicit opt-out is stored. Only editable while
+      // shared (the checkbox lives in the team section); otherwise the spread
+      // above preserves whatever was saved.
+      launch.autoSync = (over.autoSync ?? autoSync) ? undefined : false
+    }
+    onChange(config, launch)
+  }
 
   return (
     // Scroll container OUTSIDE, centering INSIDE: `grid place-items-center`
@@ -2252,211 +2754,280 @@ const ProjectSettingsDialog = ({
             {projectName}
           </h3>
 
-          {/* Two columns on md+: shared policy (left) / personal (right);
-              stacks vertically on narrow widths. */}
-          <div className="mt-5 grid grid-cols-1 gap-x-10 md:grid-cols-2">
-            {/* ── Shared policy ── */}
-            <div className="border-t border-line pt-4">
-              <p className="label-cap text-ink">{t('projectPanel.settingsSharedHeading')}</p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-                {t('projectPanel.settingsSharedHint')}
-              </p>
-
-              <div className="mt-3 space-y-3.5">
-                <div>
-                  <label className="mb-1.5 block label-cap text-ink-muted">
-                    {t('projectPanel.settingsCompletionFlow')}
-                  </label>
-                  {/* Two-way segmented toggle — same idiom as the Settings
-                      panel's language switch. */}
-                  <div
-                    role="group"
-                    aria-label={t('projectPanel.settingsCompletionFlow')}
-                    className="inline-flex items-center gap-0 rounded-[3px] border border-line p-0.5"
-                  >
-                    {(['merge', 'pr'] as const).map(v => {
-                      const active = flow === v
-                      return (
-                        <button
-                          key={v}
-                          type="button"
-                          onClick={() => setFlow(v)}
-                          aria-pressed={active}
-                          className={[
-                            'h-7 px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
-                            'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-                            active
-                              ? 'bg-accent text-bg-card border-accent'
-                              : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
-                          ].join(' ')}
-                        >
-                          {t(
-                            v === 'merge'
-                              ? 'projectPanel.settingsFlowMerge'
-                              : 'projectPanel.settingsFlowPr',
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="mb-1 block label-cap text-ink-muted">
-                    {t('projectPanel.settingsTargetBranch')}
-                  </label>
-                  {branchesFailed ? (
-                    // Non-git folder or the fetch failed → plain text input,
-                    // exactly the pre-select behavior.
-                    <input
-                      value={targetBranch}
-                      onChange={e => setTargetBranch(e.target.value)}
-                      placeholder={t('projectPanel.settingsTargetBranchPlaceholder')}
-                      className={FIELD_INPUT_CSS}
-                    />
-                  ) : (
-                    <select
-                      value={targetBranch}
-                      onChange={e => setTargetBranch(e.target.value)}
-                      className={`${FIELD_INPUT_CSS} cursor-pointer`}
-                    >
-                      <option value="">{t('projectPanel.settingsBranchDefault')}</option>
-                      {extraBranch && <option value={extraBranch}>{extraBranch}</option>}
-                      {(branches ?? []).map(b => (
-                        <option key={b} value={b}>
-                          {b}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-
-                <div>
-                  <label className="mb-1 block label-cap text-ink-muted">
-                    {t('projectPanel.settingsMembers')}
-                  </label>
-                  {members.length > 0 && (
-                    <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                      {members.map(name => (
-                        <span
-                          key={name}
-                          className="flex max-w-full items-center gap-1 rounded-sm border border-line px-2 py-1 text-[11px] text-ink"
-                        >
-                          <span className="min-w-0 truncate">{name}</span>
-                          <button
-                            type="button"
-                            onClick={() => removeMember(name)}
-                            title={t('projectPanel.settingsMemberRemove', { name })}
-                            aria-label={t('projectPanel.settingsMemberRemove', { name })}
-                            className="text-ink-faint transition-colors hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+          {/* Two columns on md+ when the project has more than Personal to
+              show: 共有(team) + workflow stack on the left, Personal on the
+              right; stacks vertically on narrow widths. A non-git project
+              collapses to the Personal column alone. */}
+          <div
+            className={[
+              'mt-5 grid grid-cols-1 gap-x-10',
+              sections.team || sections.workflow ? 'md:grid-cols-2' : '',
+            ].join(' ')}
+          >
+            {(sections.team || sections.workflow) && (
+              <div>
+                {/* ── 共有 — only while actually shared (S033/S034) ── */}
+                {sections.team && (
+                  <div className="border-t border-line pt-4">
+                    <p className="label-cap text-ink">{t('projectPanel.settingsTeamHeading')}</p>
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                      {t('projectPanel.settingsTeamHint')}
+                    </p>
+                    {/* Status one-liner: where it syncs (remote · branch). */}
+                    {(remoteShortName(shareStatus?.remoteUrl ?? null) || shareStatus?.branch) && (
+                      <p className="mt-2 flex items-center gap-2 font-mono text-[10px] text-ink-faint">
+                        {remoteShortName(shareStatus?.remoteUrl ?? null) && (
+                          <span
+                            title={shareStatus?.remoteUrl ?? undefined}
+                            className="max-w-[180px] truncate"
                           >
-                            <X size={11} />
-                          </button>
-                        </span>
-                      ))}
+                            {remoteShortName(shareStatus?.remoteUrl ?? null)}
+                          </span>
+                        )}
+                        {shareStatus?.branch && (
+                          <span className="flex items-center gap-0.5">
+                            <GitBranch size={10} className="shrink-0" aria-hidden />
+                            <span className="truncate">{shareStatus.branch}</span>
+                          </span>
+                        )}
+                      </p>
+                    )}
+
+                    <div className="mt-3 space-y-3.5">
+                      {/* Your display name — the GLOBAL setting, editable in
+                          the share context where it matters (S009/S018). */}
+                      <div>
+                        <label className="mb-1 block label-cap text-ink-muted">
+                          {t('projectPanel.settingsDisplayName')}
+                        </label>
+                        <input
+                          value={displayName ?? ''}
+                          onChange={e => {
+                            setDisplayName(e.target.value)
+                            scheduleDisplayNameSave()
+                          }}
+                          onBlur={flushDisplayName}
+                          disabled={displayName === null}
+                          placeholder={t('projectPanel.settingsDisplayName')}
+                          className={FIELD_INPUT_CSS}
+                        />
+                        {displayNameError && (
+                          <p className="mt-1 text-[11px] leading-relaxed text-accent">
+                            {displayNameError}
+                          </p>
+                        )}
+                        <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                          {t('projectPanel.settingsDisplayNameHint')}
+                        </p>
+                      </div>
+
+                      {/* MembersField keeps its typing draft internal — only
+                          an Add-confirmed name (or a ✕ removal) reaches
+                          onChange, so unconfirmed text is never persisted. */}
+                      <MembersField
+                        members={members}
+                        onChange={next => {
+                          setMembers(next)
+                          persistChange({ members: next })
+                        }}
+                        hint={t('projectPanel.settingsMembersSyncHint')}
+                      />
+
+                      <div>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
+                          <input
+                            type="checkbox"
+                            checked={autoSync}
+                            onChange={e => {
+                              setAutoSync(e.target.checked)
+                              persistChange({ autoSync: e.target.checked })
+                            }}
+                            className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                          />
+                          {t('projectPanel.settingsAutoSync')}
+                        </label>
+                        {/* Sits in the share context but is PERSONAL — say so. */}
+                        <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                          {t('projectPanel.settingsAutoSyncDeviceNote')}{' '}
+                          {t('projectPanel.settingsAutoSyncHint')}
+                        </p>
+                      </div>
+
+                      {/* Text links: re-show the invite instructions (S015's
+                          standing entry) / stop sharing (moved here from ⋯). */}
+                      <div className="flex flex-col items-start gap-1.5">
+                        <button
+                          type="button"
+                          onClick={onShowInvite}
+                          className="text-[12px] text-ink-muted underline-offset-2 transition-colors hover:text-ink hover:underline active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        >
+                          {t('projectPanel.settingsInviteLink')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={onStopShare}
+                          className="text-[12px] text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        >
+                          {t('projectPanel.unshareMenu')}
+                        </button>
+                      </div>
                     </div>
-                  )}
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      value={memberDraft}
-                      onChange={e => setMemberDraft(e.target.value)}
-                      onKeyDown={e => {
-                        // Never steal the Enter that confirms an IME composition.
-                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                          e.preventDefault()
-                          addMember()
-                        }
-                      }}
-                      placeholder={t('projectPanel.settingsMemberAddPlaceholder')}
-                      className={FIELD_INPUT_CSS}
-                    />
-                    <button
-                      type="button"
-                      onClick={addMember}
-                      disabled={!memberDraft.trim()}
-                      className="shrink-0 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    >
-                      {t('projectPanel.settingsMemberAdd')}
-                    </button>
                   </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                    {t('projectPanel.settingsMembersHint')}
-                  </p>
-                </div>
+                )}
+
+                {/* ── タスクのワークフロー — git projects (no share words) ── */}
+                {sections.workflow && (
+                  <div
+                    className={[
+                      'border-t border-line pt-4',
+                      sections.team ? 'mt-5' : '',
+                    ].join(' ')}
+                  >
+                    <p className="label-cap text-ink">{t('projectPanel.settingsWorkflowHeading')}</p>
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                      {t(
+                        sections.team
+                          ? 'projectPanel.settingsWorkflowSharedHint'
+                          : 'projectPanel.settingsWorkflowHint',
+                      )}
+                    </p>
+                    <div className="mt-3 space-y-3.5">
+                      {/* The completion-flow choice (merge/PR) moved to the
+                          Board's run-defaults strip (2026-06-12) — one editor,
+                          right where tasks run. This section keeps the fields
+                          with no second home: base branch + roster. */}
+                      <TargetBranchField
+                        value={targetBranch}
+                        onChange={v => {
+                          setTargetBranch(v)
+                          persistChange({ targetBranch: v })
+                        }}
+                        branches={branches}
+                        branchesFailed={branchesFailed}
+                        savedBranch={savedBranch}
+                      />
+                      {/* Assignee-name roster for UNSHARED git projects —
+                          deliberately share-free vocabulary ("assignee
+                          names", not "members"/"team"): solo users assign
+                          cards too. While shared the same list lives in the
+                          共有 section above as the team roster. */}
+                      {!sections.team && (
+                        <MembersField
+                          members={members}
+                          onChange={next => {
+                            setMembers(next)
+                            persistChange({ members: next })
+                          }}
+                          label={t('projectPanel.settingsAssigneeNames')}
+                          hint={t('projectPanel.settingsAssigneeNamesHint')}
+                        />
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+            )}
 
             {/* ── Personal ── */}
-            <div className="mt-5 border-t border-line pt-4 md:mt-0">
+            <div
+              className={[
+                'border-t border-line pt-4',
+                sections.team || sections.workflow ? 'mt-5 md:mt-0' : '',
+              ].join(' ')}
+            >
               <p className="label-cap text-ink">{t('projectPanel.settingsPersonalHeading')}</p>
               <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
                 {t('projectPanel.settingsPersonalHint')}
               </p>
 
               <div className="mt-3 space-y-3.5">
+                {/* The launch profile (model / effort / permission mode) moved
+                    to the Board's run-defaults strip (2026-06-12) — visible
+                    and editable right where tasks run, overridable per card.
+                    One quiet pointer so dialog visitors aren't stranded. */}
+                <p className="text-[11px] leading-relaxed text-ink-faint">
+                  {t('projectPanel.settingsLaunchMovedHint')}
+                </p>
+
+                {/* ── Worktrees (B012/F082) — sweep the task/review checkouts
+                    that pile up under ~/.openground/…/worktrees/. Only CLEAN
+                    ones are removed; dirty ones are reported, never touched.
+                    A git concept — hidden for known non-git folders (S047). */}
+                {sections.worktrees && (
                 <div>
                   <label className="mb-1 block label-cap text-ink-muted">
-                    {t('projectPanel.settingsPermissionMode')}
+                    {t('projectPanel.settingsWorktrees')}
                   </label>
-                  <select
-                    value={permissionMode}
-                    onChange={e =>
-                      setPermissionMode(
-                        e.target.value as NonNullable<ProjectLaunchPrefs['permissionMode']>,
-                      )
-                    }
-                    className={`${FIELD_INPUT_CSS} cursor-pointer`}
-                  >
-                    {permissionOptions.map(o => (
-                      <option key={o.value} value={o.value}>
-                        {t(o.labelKey)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="mb-1 block label-cap text-ink-muted">
-                    {t('projectPanel.settingsModel')}
-                  </label>
-                  <select
-                    value={model}
-                    onChange={e => setModel(e.target.value)}
-                    className={`${FIELD_INPUT_CSS} cursor-pointer`}
-                  >
-                    <option value="">{t('projectPanel.settingsModelDefault')}</option>
-                    {modelChoices.map(m => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
-                    <input
-                      type="checkbox"
-                      checked={autoSync}
-                      onChange={e => setAutoSync(e.target.checked)}
-                      className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    />
-                    {t('projectPanel.settingsAutoSync')}
-                  </label>
+                  <p className="text-[12px] text-ink">
+                    {worktreesFailed
+                      ? t('projectPanel.settingsWorktreesUnavailable')
+                      : worktrees === null
+                        ? t('projectPanel.settingsWorktreesLoading')
+                        : worktrees.length === 0
+                          ? t('projectPanel.settingsWorktreesNone')
+                          : t('projectPanel.settingsWorktreesCount', {
+                              count: String(worktrees.length),
+                              dirty: String(worktrees.filter(w => w.dirty).length),
+                            })}
+                  </p>
+                  {worktrees !== null && worktrees.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={cleanWorktrees}
+                      disabled={wtCleaning}
+                      className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {wtCleaning
+                        ? t('projectPanel.settingsWorktreesCleaning')
+                        : t('projectPanel.settingsWorktreesClean')}
+                    </button>
+                  )}
+                  {wtResult && !wtCleaning && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                      {t('projectPanel.settingsWorktreesResult', {
+                        removed: String(wtResult.removed.length),
+                        skipped: String(wtResult.skippedDirty.length),
+                      })}
+                    </p>
+                  )}
+                  {wtError && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-accent">
+                      {t('projectPanel.settingsWorktreesFailed', { error: wtError })}
+                    </p>
+                  )}
                   <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                    {t('projectPanel.settingsAutoSyncHint')}
+                    {t('projectPanel.settingsWorktreesHint')}
                   </p>
                 </div>
+                )}
               </div>
             </div>
           </div>
 
-          <div className="mt-6 flex items-center justify-end gap-2">
-            <Btn variant="subtle" size="md" onClick={onCancel}>
-              {t('common.cancel')}
-            </Btn>
-            <Btn variant="primary" size="md" onClick={save}>
-              {t('common.save')}
+          {/* ── Share CTA — only for a positively-known unshared git repo
+              (the second entry point besides the header Share… button). ── */}
+          {sections.shareCta && (
+            <div className="mt-6 border-t border-line pt-4">
+              <p className="text-[11px] leading-relaxed text-ink-faint">
+                {t('projectPanel.settingsShareCtaText')}
+              </p>
+              <button
+                type="button"
+                onClick={onStartShare}
+                disabled={projectMissing}
+                title={projectMissing ? t('projectPanel.folderGone') : undefined}
+                className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {t('projectPanel.settingsShareCta')}
+              </button>
+            </div>
+          )}
+
+          {/* Autosave dialog — no Save/Cancel pair; Back just dismisses
+              (every change is already persisted the moment it's made). */}
+          <div className="mt-6 flex items-center justify-end">
+            <Btn variant="subtle" size="md" onClick={onClose}>
+              {t('projectPanel.settingsBack')}
             </Btn>
           </div>
         </div>
@@ -2555,6 +3126,11 @@ const ViewTabs = ({
   order,
   onReorder,
   terminalInfo,
+  customTabs,
+  onAddTab,
+  onOpenMarket,
+  customTabMenu,
+  badges,
 }: {
   view: PanelView
   onChange: (v: PanelView) => void
@@ -2564,15 +3140,52 @@ const ViewTabs = ({
   // space, matching moveTab's convention).
   onReorder: (from: number, to: number) => void
   terminalInfo: TerminalInfo | null
+  /** Custom-tab row metadata (`custom:<uuid>` ids — docs/CUSTOM_TABS_PLAN.md).
+   *  Ids in `order` with no entry here (a module deleted elsewhere) just
+   *  don't render. */
+  customTabs?: TabDef[]
+  /** Owner-only "+" (create a custom tab); undefined hides it. */
+  onAddTab?: () => void
+  /** Owner|tester marketplace entry point; undefined hides it. */
+  onOpenMarket?: () => void
+  /** Right-click menu on custom tabs. `kindFor` decides what (if anything)
+   *  the menu offers for a tab id; `onRemove` fires after the in-menu
+   *  confirm step. Undefined disables the menu entirely. */
+  customTabMenu?: {
+    kindFor: (id: string) => 'delete' | 'uninstall' | null
+    onRemove: (id: string) => void | Promise<void>
+  }
+  /** Optional per-tab count chip (e.g. board → cards waiting in Review).
+   *  0/undefined renders nothing — the row stays quiet by default. */
+  badges?: Partial<Record<PanelView, number>>
 }) => {
   const { t } = useT()
   // Metadata (icon/label) keyed by id; the row is rendered in `order`.
   const byId = useMemo(() => {
-    const m = new Map<PanelView, ModuleDef>()
+    const m = new Map<PanelView, TabDef>()
     for (const def of enabledModules()) m.set(def.id, def)
+    for (const def of customTabs ?? []) m.set(def.id, def)
     return m
-  }, [])
-  const tabs = order.map(id => byId.get(id)).filter((m): m is ModuleDef => !!m)
+  }, [customTabs])
+  const tabs = order.map(id => byId.get(id)).filter((m): m is TabDef => !!m)
+
+  // Right-click menu on a custom tab (delete / uninstall, two-step confirm
+  // inside the menu itself). Fixed-positioned at the cursor; dismissed by the
+  // backdrop, Escape, or completing the action.
+  const [tabMenu, setTabMenu] = useState<{
+    id: PanelView
+    x: number
+    y: number
+    confirming: boolean
+  } | null>(null)
+  useEffect(() => {
+    if (!tabMenu) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTabMenu(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [tabMenu])
 
   // Drag-to-reorder state. `dragFrom` = the tab being dragged; `dropAt` = the
   // insertion slot it would land in (0..tabs.length). Mirrors the task-list
@@ -2641,6 +3254,12 @@ const ViewTabs = ({
             }}
             onDragEnd={endDrag}
             onClick={() => onChange(m.id)}
+            onContextMenu={e => {
+              // Custom tabs only, and only when the role offers an action.
+              if (!customTabMenu?.kindFor(m.id)) return
+              e.preventDefault()
+              setTabMenu({ id: m.id, x: e.clientX, y: e.clientY, confirming: false })
+            }}
             onKeyDown={e => onTabKeyDown(e, i)}
             title={t('projectPanel.dragToReorder')}
             // -mb-px lets the active border-b sit directly on top of the
@@ -2661,12 +3280,97 @@ const ViewTabs = ({
             )}
             {m.icon}
             <span>{m.label}</span>
+            {(badges?.[m.id] ?? 0) > 0 && (
+              <span
+                title={t('projectPanel.reviewWaitingTitle')}
+                className="rounded-full border border-ochre/60 px-1.5 text-[9px] font-medium leading-[14px] text-[var(--beacon-waiting)]"
+              >
+                {badges![m.id]}
+              </span>
+            )}
             {barAfter && (
               <span className="pointer-events-none absolute -right-2 top-1 bottom-1 w-0.5 bg-accent" />
             )}
           </button>
         )
       })}
+      {/* Custom-tab management (docs/CUSTOM_TABS_PLAN.md): a quiet trailing
+          "+" (owner: create) and a text "Market" entry (owner|tester) — both
+          invisible to everyone else. Text-first, no extra decoration. */}
+      {onAddTab && (
+        <button
+          type="button"
+          onClick={onAddTab}
+          title={t('customTabs.addTabHint')}
+          aria-label={t('customTabs.addTab')}
+          className="mb-1 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          <Plus size={12} strokeWidth={2.25} />
+        </button>
+      )}
+      {onOpenMarket && (
+        <button
+          type="button"
+          onClick={onOpenMarket}
+          title={t('customTabs.marketHint')}
+          className="-mb-px border-b-2 border-transparent px-1 py-2 label-cap text-ink-faint transition-colors hover:text-accent active:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          {t('customTabs.market')}
+        </button>
+      )}
+      {tabMenu &&
+        customTabMenu &&
+        (() => {
+          const kind = customTabMenu.kindFor(tabMenu.id)
+          if (!kind) return null
+          const label = tabMenu.confirming
+            ? t(kind === 'delete' ? 'customTabs.deleteConfirmYes' : 'customTabs.uninstallConfirmYes')
+            : t(kind === 'delete' ? 'customTabs.delete' : 'customTabs.uninstall')
+          return (
+            <>
+              {/* Invisible backdrop: any click outside the menu dismisses it
+                  (a right-click outside dismisses too, without opening the
+                  browser menu over our UI). */}
+              <div
+                className="fixed inset-0 z-40"
+                onMouseDown={() => setTabMenu(null)}
+                onContextMenu={e => {
+                  e.preventDefault()
+                  setTabMenu(null)
+                }}
+              />
+              <div
+                role="menu"
+                className="fixed z-50 min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
+                style={{ left: tabMenu.x, top: tabMenu.y }}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    // Two-step confirm inside the menu: first click arms it,
+                    // the second fires the removal.
+                    if (!tabMenu.confirming) {
+                      setTabMenu({ ...tabMenu, confirming: true })
+                      return
+                    }
+                    void customTabMenu.onRemove(tabMenu.id)
+                    setTabMenu(null)
+                  }}
+                  className={[
+                    'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+                    tabMenu.confirming
+                      ? 'bg-accent-soft text-accent hover:bg-accent hover:text-bg-card active:bg-accent active:text-bg-card'
+                      : 'text-accent hover:bg-accent hover:text-bg-card active:bg-accent active:text-bg-card',
+                  ].join(' ')}
+                >
+                  <Trash2 size={13} strokeWidth={2} className="shrink-0" />
+                  <span className="flex-1">{label}</span>
+                </button>
+              </div>
+            </>
+          )
+        })()}
     </div>
   )
 }
@@ -2683,28 +3387,21 @@ const revealLabelKey = (): 'projectPanel.revealInFinder' | 'projectPanel.revealI
   return 'projectPanel.revealFolder'
 }
 
+// The share entry points moved out of this menu (docs/SHARE_UX_FLOWS.md §2b):
+// enabling lives on the header "Share…" button + the settings CTA, and
+// stopping lives in the settings dialog's 共有 section.
 const MoreMenu = ({
   onProjectSettings,
   projectSettingsDisabled,
   onRemove,
   onDelete,
-  share,
 }: {
-  /** Open the Project settings dialog (shared policy + personal launch
+  /** Open the Project settings dialog (workflow/team + personal launch
    *  prefs). Disabled until the project's data has loaded. */
   onProjectSettings: () => void
   projectSettingsDisabled?: boolean
   onRemove: () => void
   onDelete: () => void
-  /** Git-share section. null = status unknown (share routes absent / fetch
-   *  failed) → the section is hidden entirely, per the graceful-degrade rule. */
-  share: {
-    status: ShareStatus
-    /** project.missing — the folder is gone, so enable can't run. */
-    missing: boolean
-    onShare: () => void
-    onUnshare: () => void
-  } | null
 }) => {
   const { t } = useT()
   const [open, setOpen] = useState(false)
@@ -2747,41 +3444,6 @@ const MoreMenu = ({
             <Archive size={12} strokeWidth={1.75} />
             {t('projectPanel.removeFromCanvas')}
           </button>
-          {/* Git share (text-only items — the share UI carries no icons). */}
-          {share && (
-            <>
-              <div className="my-1 border-t border-line-soft" />
-              {share.status.shared ? (
-                <button
-                  onClick={() => {
-                    setOpen(false)
-                    share.onUnshare()
-                  }}
-                  className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-                >
-                  {t('projectPanel.unshareMenu')}
-                </button>
-              ) : (
-                <button
-                  disabled={!share.status.gitRepo || share.missing}
-                  title={
-                    !share.status.gitRepo
-                      ? t('projectPanel.shareNeedsGitRepo')
-                      : share.missing
-                        ? t('projectPanel.folderGone')
-                        : undefined
-                  }
-                  onClick={() => {
-                    setOpen(false)
-                    share.onShare()
-                  }}
-                  className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-                >
-                  {t('projectPanel.shareMenu')}
-                </button>
-              )}
-            </>
-          )}
           <div className="my-1 border-t border-line-soft" />
           <button
             onClick={() => {

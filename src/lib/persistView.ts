@@ -15,12 +15,15 @@
 // unit-testable under the default `node` (no-`window`) vitest environment.
 
 import { migrateLs } from '@/lib/lsMigrate'
-import { MODULE_IDS, type ModuleId } from '@/lib/modules/ids'
+import { MODULE_IDS, isCustomTabId, type TabId } from '@/lib/modules/ids'
 
-/** The set of panel tabs we persist — the module registry's ids. */
-export type PersistedPanelTab = ModuleId
+/** The set of panel tabs we persist — the module registry's ids, plus
+ *  `custom:<uuid>` custom-tab ids (docs/CUSTOM_TABS_PLAN.md). A custom id is
+ *  only shape-validated here; whether the module still EXISTS is checked by
+ *  ProjectPanel once the live list arrives (a vanished one falls back). */
+export type PersistedPanelTab = TabId
 
-const PANEL_TABS: readonly PersistedPanelTab[] = MODULE_IDS
+const PANEL_TABS: readonly string[] = MODULE_IDS
 
 export interface PersistedView {
   /** SHA1 project id of the open project (App's `selectedIds[0]`). */
@@ -63,7 +66,7 @@ export function parsePersistedView(raw: string | null | undefined): PersistedVie
   }
   if (
     typeof obj.panelTab === 'string' &&
-    (PANEL_TABS as readonly string[]).includes(obj.panelTab)
+    (PANEL_TABS.includes(obj.panelTab) || isCustomTabId(obj.panelTab))
   ) {
     out.panelTab = obj.panelTab as PersistedPanelTab
   }

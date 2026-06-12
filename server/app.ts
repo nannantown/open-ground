@@ -24,6 +24,7 @@ import { terminalRoutes } from './routes/terminal'
 import { sseRoutes } from './routes/sse'
 import { feedbackRoutes } from './routes/feedback'
 import { authRoutes } from './routes/auth'
+import { customModulesRoutes } from './routes/customModules'
 
 export const createApp = () => {
   const app = new Hono()
@@ -77,6 +78,7 @@ export const createApp = () => {
     .route('/', sseRoutes)       // SSE — terminal stream
     .route('/', feedbackRoutes)  // G — in-app feedback proxy (env-gated)
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)
+    .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall
   // through to the SPA static handler below (which would return index.html

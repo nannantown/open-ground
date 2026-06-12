@@ -28,6 +28,7 @@ import {
 import { collectClaudeUsage } from '@/lib/server/claudeUsage'
 import { fetchClaudeUsageCli, invalidateUsageCache } from '@/lib/server/claudeUsageCli'
 import { probeClaudeCli } from '@/lib/server/claudeCli'
+import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
 import type {
   ProjectsResponse,
@@ -283,6 +284,14 @@ export const miscRoutes = new Hono()
         200,
       )
     }
+  })
+  // --- GET /api/gh-status ------------------------------------------------
+  // Presence/auth probe for the GitHub CLI — Project settings pre-checks it
+  // when the PR completion flow is selected (gh pr create runs in claude's
+  // task session; failing there is too late). ?force=1 bypasses the cache.
+  .get('/api/gh-status', async (c) => {
+    const force = c.req.query('force') === '1'
+    return c.json(await probeGhCli(force))
   })
   // --- GET /api/claude-probe ------------------------------------------------
   // Lightweight readiness check for the local `claude` CLI. Used by Settings

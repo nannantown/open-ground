@@ -25,3 +25,33 @@ const ESC_BYTES = /\x1b/g
 
 export const bracketedPaste = (text: string): string =>
   BRACKETED_PASTE_START + text.replace(ESC_BYTES, '') + BRACKETED_PASTE_END
+
+// The brush-up prompt POST /api/terminal/:id/paste-custom-module injects
+// (UNSENT, via bracketedPaste above) into the custom-tab sidebar's claude
+// session, whose cwd is the module dir. Pure + exported so the text contract is
+// unit-testable; the route wraps it in the same ESC-stripped bracketed paste as
+// paste-task. See docs/CUSTOM_TABS_PLAN.md (Terminal seam).
+export const buildCustomModulePrompt = (def: {
+  label: string
+  description: string
+  framework: 'react' | 'html'
+}): string => {
+  const sourceFile = def.framework === 'html' ? 'source.html' : 'source.tsx'
+  const renderNote =
+    def.framework === 'html'
+      ? 'It is rendered as a standalone HTML document inside a sandboxed iframe.'
+      : 'It is rendered as a React default-export component inside a sandboxed ' +
+        "iframe with Tailwind classes, the app's design tokens and `lucide-react` " +
+        'available; no other imports.'
+  return [
+    `# Custom tab: ${def.label}`,
+    '',
+    '## Description',
+    def.description || '(none)',
+    '',
+    '## Instructions',
+    `Edit \`${sourceFile}\` in the current directory to build this tab's UI. ` +
+      renderNote +
+      ' The preview hot-reloads on every save.',
+  ].join('\n')
+}

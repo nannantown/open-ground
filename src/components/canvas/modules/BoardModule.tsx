@@ -1,12 +1,53 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ChevronRight, GitBranch, Trash2, X } from 'lucide-react'
 import { BoardTab, columnOf } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
 import { api } from '@/lib/api-client'
 import { deriveCardFields, wantsAutoTitle } from '@/lib/cardTitle'
-import type { BoardColumn, ProjectData, ProjectMeta, ProjectTask, Settings } from '@/lib/types'
+import { buildReviewPrompt } from '@/lib/reviewPrompt'
+import {
+  CLAUDE_EFFORTS,
+  type ActiveTerminalsResponse,
+  type BoardColumn,
+  type ClaudeBeaconStatus,
+  type ClaudeEffort,
+  type PrInfoResponse,
+  type ProjectData,
+  type ProjectMeta,
+  type ProjectTask,
+  type Settings,
+  type TaskAttachment,
+  type TaskRunSettings,
+} from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
+import { dependencyCandidates } from '@/lib/boardDeps'
+import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
+
+/** Result of a task-terminal launch attempt (ProjectPanel.launchTaskTerminal).
+ *  `reason` is set only on failure: 'claudeMissing' = the server pre-flight
+ *  said the `claude` CLI isn't installed (503 { claudeMissing: true });
+ *  'other' = anything else (5xx, offline, …). On success `terminalId` carries
+ *  the slot's PTY id so a caller can act on the fresh session before the
+ *  panel's state write re-renders (the "Review with claude" paste). */
+export type TaskLaunchResult = {
+  ok: boolean
+  reason?: 'claudeMissing' | 'other'
+  terminalId?: string
+}
+
+/** The drawer's 実行 payload — the card's LIVE field values (drawer edits are
+ *  debounced before they hit tasks.json) plus its per-card run overrides. The
+ *  server composes the task prompt from these and passes it as the launch's
+ *  initialPrompt, so claude starts working immediately. */
+export type TaskRunPayload = {
+  title: string
+  notes: string
+  attachmentIds: string[]
+  flow?: 'merge' | 'pr'
+  model?: string
+  effort?: ClaudeEffort
+}
 
 // The Board tab as a self-contained module (Phase D — render extraction).
 // Owns: the kanban (BoardTab), board-native card creation, and the in-tab
@@ -32,13 +73,26 @@ export interface BoardModuleProps {
   /** Delete a card with full teardown (close its terminal slot, remove from
    *  tasks.json). Rendered in the drawer header, not the conversation pane. */
   onDeleteTask: (id: string) => void
-  /** Launch the task's claude session (plain claude, no prompt sent). The
-   *  drawer auto-launches it once the card has a title — the conversation
-   *  pane is not rendered until a slot exists. */
-  onLaunchTask: (task: ProjectTask) => Promise<boolean>
+  /** Launch the task's claude session. WITHOUT `opts.run` claude starts plain
+   *  (no prompt sent — restart / review flows). WITH `opts.run` (the drawer's
+   *  実行 button) the server composes the task prompt from the payload and
+   *  claude starts working on it immediately. On failure, `reason`
+   *  distinguishes a missing `claude` CLI from everything else so the retry
+   *  footer can say "install claude" instead of a generic failure.
+   *  `opts.cwd` overrides the spawn directory — the "Review with claude" flow
+   *  launches the session inside the review worktree instead of the repo. */
+  onLaunchTask: (
+    task: ProjectTask,
+    opts?: { cwd?: string; run?: TaskRunPayload },
+  ) => Promise<TaskLaunchResult>
   /** Open the Project Settings dialog (owned by ProjectPanel). Optional —
    *  unset hides the Board toolbar's settings affordance. */
   onOpenProjectSettings?: () => void
+  /** True when the project's Board/Canvas data is git-shared
+   *  (ShareStatus.shared — the `.openground/openground.json` marker).
+   *  Drives the one-line welcome strip a freshly imported shared clone
+   *  shows above the board (F002/F090). */
+  shared?: boolean
 }
 
 export const BoardModule = ({
@@ -53,6 +107,7 @@ export const BoardModule = ({
   onDeleteTask,
   onLaunchTask,
   onOpenProjectSettings,
+  shared,
 }: BoardModuleProps) => {
   const { t } = useT()
   // The user's display name (Settings.displayName) — feeds the drawer's "Me"
@@ -60,23 +115,95 @@ export const BoardModule = ({
   // Settings from the panel, so fetch it lazily once per mount (cheap local
   // GET); unset/failed just hides both affordances.
   const [displayName, setDisplayName] = useState<string | null>(null)
+  // True once the settings fetch has RESOLVED — the welcome strip's "is my
+  // name registered?" check must wait for the real displayName, or it would
+  // flash for every member during the initial null.
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
   useEffect(() => {
     let cancelled = false
     api.api.settings
       .$get()
       .then(r => r.json() as Promise<Settings>)
       .then(s => {
-        if (!cancelled) setDisplayName(s.displayName?.trim() || null)
+        if (!cancelled) {
+          setDisplayName(s.displayName?.trim() || null)
+          setSettingsLoaded(true)
+        }
       })
       .catch(() => {})
     return () => {
       cancelled = true
     }
   }, [])
+
+  // Claude pane status by PTY id (working/waiting) — feeds each card's status
+  // band + stamp. Same power etiquette as the Ground beacon poll (App.tsx):
+  // every 5s, a hidden document skips the round (focus re-polls immediately),
+  // and a failed poll keeps the last known state rather than flashing off.
+  const [claudeStatusByPty, setClaudeStatusByPty] = useState<
+    ReadonlyMap<string, ClaudeBeaconStatus>
+  >(new Map())
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      if (document.hidden) return
+      try {
+        const res = await api.api.terminal.active.$get()
+        if (!res.ok) return
+        const payload = (await res.json()) as ActiveTerminalsResponse
+        if (cancelled) return
+        const next = new Map<string, ClaudeBeaconStatus>()
+        for (const a of payload.claude ?? []) next.set(a.id, a.status)
+        // Keep the previous Map identity when nothing changed so the board
+        // doesn't re-render every 5 seconds.
+        setClaudeStatusByPty(prev =>
+          prev.size === next.size &&
+          Array.from(next).every(([id, st]) => prev.get(id) === st)
+            ? prev
+            : next,
+        )
+      } catch {
+        /* server restarting / offline — keep the last known state */
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 5_000)
+    const onFocus = () => void poll()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [])
+
+  // ---- Shared-board welcome strip (F002/F090) ------------------------------
+  // A teammate who imports a shared clone gets connected to the team board
+  // silently — this one line says so the first time. Shown while the project
+  // is git-shared AND the user's displayName isn't in the shared member list
+  // (the "I just arrived" heuristic); ✕ dismisses it permanently per project
+  // (localStorage, og.board.sharedWelcome.<projectId>).
+  const welcomeKey = `og.board.sharedWelcome.${project.id}`
+  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean>(
+    () => localStorage.getItem(welcomeKey) === '1',
+  )
+  const isRegisteredMember =
+    !!displayName &&
+    (data.config?.members ?? []).some(
+      m => m.trim().toLowerCase() === displayName.toLowerCase(),
+    )
+  const showWelcome = !!shared && settingsLoaded && !welcomeDismissed && !isRegisteredMember
+  const dismissWelcome = () => {
+    localStorage.setItem(welcomeKey, '1')
+    setWelcomeDismissed(true)
+  }
   // "+ Add" inline input for a brand-new assignee name; closed whenever the
   // drawer switches cards so a half-typed name never leaks across tasks.
   const [addingAssignee, setAddingAssignee] = useState(false)
   useEffect(() => setAddingAssignee(false), [detailId])
+  // "+ Add" picker for a new dependency (B025); same per-card reset.
+  const [addingDep, setAddingDep] = useState(false)
+  useEffect(() => setAddingDep(false), [detailId])
 
   // ---- Drawer geometry (both user-draggable, both remembered) -------------
   // The complaint this answers: "the terminal only gets the bottom sliver".
@@ -149,19 +276,199 @@ export const BoardModule = ({
     )
   }
   const detailTask = detailId ? data.tasks.find(t => t.id === detailId) : null
-  const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>
-    persist({
-      ...data,
-      tasks: data.tasks.map(t => (t.id === task.id ? { ...t, ...patch } : t)),
-    })
+
+  // ---- PR state / diff stats (B023 — F058/F085) ----------------------------
+  // When the open card carries a prUrl, ask the server once per drawer open
+  // (`gh pr view`, 60s server-side cache). available:false — gh missing, bad
+  // URL, network — renders NOTHING: a gh-less environment stays silent. No
+  // busy state either; the chip simply appears when the answer arrives.
+  const [prInfo, setPrInfo] = useState<PrInfoResponse | null>(null)
+  const detailPrUrl = detailTask?.prUrl
+  useEffect(() => {
+    setPrInfo(null)
+    if (!detailPrUrl) return
+    let cancelled = false
+    api.api.project['pr-info']
+      .$post({ json: { path: project.path, prUrl: detailPrUrl } })
+      .then(r => r.json() as Promise<PrInfoResponse>)
+      .then(info => {
+        // Unmount/card-switch guard — never setState on a dead effect.
+        if (!cancelled && info.available) setPrInfo(info)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [detailId, detailPrUrl, project.path])
+
   // Async continuations (auto-title responses) must patch against the LATEST
   // data, not the render that started them — persisting a stale snapshot would
   // roll back edits made while the generation ran.
   const dataRef = useRef(data)
   dataRef.current = data
+
+  // ---- Undo / redo history (B013 / F087) -----------------------------------
+  // Snapshot history of the tasks array, transplanted from CanvasWorkspace's
+  // snapshot + idle-coalescing pattern: every LOCAL persist that changes
+  // `tasks` is committed to the undo stack after a short idle, so a drag /
+  // typing / multi-patch burst collapses into ONE ⌘Z step. EXTERNAL updates
+  // (shared auto-sync pulls, the panel's reload, a 409 adoption, project
+  // switch) are never undoable: they reset the baseline and drop both stacks —
+  // undoing a teammate's change from here would silently revert work this
+  // client never made (the CanvasWorkspace lastLocal pattern). The one
+  // exception is the drawer's delete, which routes through ProjectPanel
+  // (onDeleteTask persists the removal itself) and announces itself via
+  // adoptNextExternalRef so the deletion lands in history like a local edit.
+  // An undo/redo result is persisted normally — on a shared board it syncs to
+  // everyone, which is correct (the undo is itself an edit).
+  const undoRef = useRef<ProjectTask[][]>([])
+  const redoRef = useRef<ProjectTask[][]>([])
+  const baselineRef = useRef<ProjectTask[]>(data.tasks)
+  // The tasks array WE last emitted via persist — distinguishes the echo of
+  // our own write (ProjectPanel's setData keeps the array identity) from an
+  // external replacement.
+  const lastLocalTasksRef = useRef<ProjectTask[]>(data.tasks)
+  const histTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const adoptNextExternalRef = useRef(false)
+  // Bumps to re-render the toolbar's undo/redo affordances when the stacks
+  // change (they live in refs, invisible to React otherwise).
+  const [, setHistVer] = useState(0)
+  const HIST_IDLE_MS = 350
+  const HIST_MAX = 80
+
+  // Commit the pending coalesced change: push the last committed baseline onto
+  // the undo stack and adopt the latest locally-emitted tasks as the baseline.
+  const flushHistory = useCallback(() => {
+    if (histTimer.current) {
+      clearTimeout(histTimer.current)
+      histTimer.current = null
+    }
+    const latest = lastLocalTasksRef.current
+    if (baselineRef.current === latest) return
+    undoRef.current.push(baselineRef.current)
+    if (undoRef.current.length > HIST_MAX) undoRef.current.shift()
+    redoRef.current = []
+    baselineRef.current = latest
+    setHistVer(v => v + 1)
+  }, [])
+
+  // The single local-persist entry point: every board mutation in this module
+  // (and everything BoardTab persists — drag, inline edit, clear Done,
+  // duplicate, reviewed stamp, …) goes through here so it lands in history.
+  const persistTracked = useCallback(
+    (next: ProjectData) => {
+      lastLocalTasksRef.current = next.tasks
+      persist(next)
+      // Coalesce on idle. Harmless for config-only persists (the flush no-ops
+      // when the tasks identity didn't move off the baseline).
+      if (histTimer.current) clearTimeout(histTimer.current)
+      histTimer.current = setTimeout(flushHistory, HIST_IDLE_MS)
+    },
+    [persist, flushHistory],
+  )
+
+  // A pending coalescing timer must never outlive the module (it would call
+  // setState on an unmounted component after a tab switch).
+  useEffect(
+    () => () => {
+      if (histTimer.current) clearTimeout(histTimer.current)
+    },
+    [],
+  )
+
+  // External tasks replacements arrive as a data prop whose tasks array is NOT
+  // the one we last emitted. Adopt as the new baseline; drop the stacks unless
+  // the change was a flagged local continuation (drawer delete).
+  useEffect(() => {
+    if (data.tasks === lastLocalTasksRef.current) return
+    const adopt = adoptNextExternalRef.current
+    adoptNextExternalRef.current = false
+    if (adopt) {
+      // Commit any pending local edit first, then record the pre-delete state
+      // as one undoable step.
+      flushHistory()
+      undoRef.current.push(baselineRef.current)
+      if (undoRef.current.length > HIST_MAX) undoRef.current.shift()
+      redoRef.current = []
+    } else {
+      if (histTimer.current) {
+        clearTimeout(histTimer.current)
+        histTimer.current = null
+      }
+      undoRef.current = []
+      redoRef.current = []
+    }
+    baselineRef.current = data.tasks
+    lastLocalTasksRef.current = data.tasks
+    setHistVer(v => v + 1)
+  }, [data.tasks, flushHistory])
+
+  const undo = useCallback(() => {
+    flushHistory()
+    if (!undoRef.current.length) return
+    const prev = undoRef.current.pop()!
+    redoRef.current.push(baselineRef.current)
+    baselineRef.current = prev
+    lastLocalTasksRef.current = prev
+    persist({ ...dataRef.current, tasks: prev })
+    setHistVer(v => v + 1)
+  }, [flushHistory, persist])
+
+  const redo = useCallback(() => {
+    // Commit any pending coalesced edit first (mirrors undo). flushHistory
+    // clears redo when it commits, so a fresh-edit-then-redo correctly becomes
+    // a no-op that preserves the edit instead of dropping it.
+    flushHistory()
+    if (!redoRef.current.length) return
+    const next = redoRef.current.pop()!
+    undoRef.current.push(baselineRef.current)
+    baselineRef.current = next
+    lastLocalTasksRef.current = next
+    persist({ ...dataRef.current, tasks: next })
+    setHistVer(v => v + 1)
+  }, [flushHistory, persist])
+
+  // ⌘Z / ⇧⌘Z (and ⌘Y) — active only while the Board tab is mounted (this
+  // module unmounts on tab switch). Never steals the combo from a focused
+  // text field (CanvasWorkspace's field guard; xterm's hidden helper is a
+  // textarea, so the terminal is covered too).
+  // CAPTURE phase: App.tsx's Ground-canvas undo is a bubble listener on the
+  // same window — capture guarantees this handler runs FIRST regardless of
+  // registration order, so its preventDefault() is visible to App's
+  // `e.defaultPrevented` guard and one ⌘Z can never fire BOTH the board undo
+  // and the Ground-canvas undo.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const ae = document.activeElement
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      const k = e.key.toLowerCase()
+      if (k === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if (k === 'y') {
+        e.preventDefault()
+        redo()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [undo, redo])
+
+  // A change made <idle window> ago hasn't been committed to the undo stack
+  // yet — treat a live divergence from the baseline as undoable too.
+  const canUndo = undoRef.current.length > 0 || baselineRef.current !== data.tasks
+  const canRedo = redoRef.current.length > 0
+
+  const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>
+    persistTracked({
+      ...data,
+      tasks: data.tasks.map(t => (t.id === task.id ? { ...t, ...patch } : t)),
+    })
   const patchTaskFresh = (taskId: string, patch: Partial<ProjectTask>) => {
     const current = dataRef.current
-    persist({
+    persistTracked({
       ...current,
       tasks: current.tasks.map(t => (t.id === taskId ? { ...t, ...patch } : t)),
     })
@@ -210,57 +517,72 @@ export const BoardModule = ({
     }
   }
 
-  const launchDetail = async (task: ProjectTask): Promise<boolean> => {
+  const launchDetail = async (
+    task: ProjectTask,
+    opts?: { run?: TaskRunPayload },
+  ): Promise<TaskLaunchResult> => {
     setLaunching(true)
     try {
-      return await onLaunchTask(task)
+      return await onLaunchTask(task, opts)
     } finally {
       setLaunching(false)
     }
   }
 
-  // Auto-launch: opening a card's drawer starts its claude session by itself —
-  // PLAIN (no prompt sent), so there is no "Launch" button anymore. Fires once
-  // per task (ref guard) when the drawer is open, the card has a title (a
-  // just-created untitled card waits until capture commits one), it is not in
-  // the done column, the project folder exists, and no slot exists yet.
-  // ProjectPanel's launchingTasksRef is the real multi-launch guard; the local
-  // `launching` state keeps the UI from double-firing within this module. No
-  // dep array on purpose: the guards make it idempotent, and prop closures
-  // (hasTerminalSlot) change identity every render anyway.
-  const autoLaunchedRef = useRef<Set<string>>(new Set())
-  // Tasks whose auto-launch FAILED — surfaced as a manual retry CTA. Kept in
-  // state (not the ref) so the failure renders; the effect skips these so it
-  // never hot-loops retrying a spawn that keeps failing.
-  const [launchFailed, setLaunchFailed] = useState<Set<string>>(new Set())
-  useEffect(() => {
-    const task = detailTask
-    if (!task) return
-    if (!task.title.trim()) return
-    if (columnOf(task) === 'done') return
-    if (project.missing) return
-    if (hasTerminalSlot(task.id)) return
-    if (launching) return
-    if (launchFailed.has(task.id)) return
-    if (autoLaunchedRef.current.has(task.id)) return
-    autoLaunchedRef.current.add(task.id)
-    void launchDetail(task).then(ok => {
-      if (!ok) {
-        // Let the user retry: drop the once-guard and flag the failure.
-        autoLaunchedRef.current.delete(task.id)
-        setLaunchFailed(prev => new Set(prev).add(task.id))
-      }
-    })
-  })
+  // Launches that FAILED, keyed to the failure reason — rendered as
+  // reason-specific copy next to the 実行 / restart button (a missing claude
+  // CLI gets "install claude" guidance, not a generic failure). Pressing the
+  // button again IS the retry — nothing relaunches by itself. (The drawer
+  // auto-launch died 2026-06-12: opening a card no longer spawns anything;
+  // the explicit 実行 button below is the only way a task session starts.)
+  const [launchFailed, setLaunchFailed] = useState<Map<string, 'claudeMissing' | 'other'>>(
+    new Map(),
+  )
 
-  // Manual retry after a failed auto-launch: clear the failure flag so the
-  // effect fires again on the next render.
-  const retryLaunch = (task: ProjectTask) => {
+  // 実行 — launch the task's claude session WITH the composed task prompt
+  // auto-sent (the server builds it from the LIVE fields + this card's run
+  // overrides; claude starts working immediately). Per-card settings are
+  // already persisted on the task (patchTask autosaves), but the payload
+  // carries the live values so a just-edited card runs exactly as shown.
+  const runTask = (task: ProjectTask) => {
     setLaunchFailed(prev => {
       if (!prev.has(task.id)) return prev
-      const n = new Set(prev)
+      const n = new Map(prev)
       n.delete(task.id)
       return n
+    })
+    void launchDetail(task, {
+      run: {
+        title: task.title,
+        notes: task.notes ?? '',
+        attachmentIds: (task.attachments ?? []).map(a => a.id),
+        flow: task.run?.flow,
+        model: task.run?.model,
+        effort: task.run?.effort,
+      },
+    }).then(res => {
+      if (!res?.ok) {
+        setLaunchFailed(prev => new Map(prev).set(task.id, res?.reason ?? 'other'))
+      }
+    })
+  }
+
+  // Restart a DEAD task session (F081): the slot still exists
+  // (hasTerminalSlot) but its PTY exited (liveTerminalId === null). Relaunches
+  // PLAIN (no prompt is sent — the session is for follow-ups; "Insert task
+  // into input" can re-inject the content unsent). A failed restart re-flags
+  // launchFailed so the reason-specific copy renders next to the button.
+  const restartSession = (task: ProjectTask) => {
+    setLaunchFailed(prev => {
+      if (!prev.has(task.id)) return prev
+      const n = new Map(prev)
+      n.delete(task.id)
+      return n
+    })
+    void launchDetail(task).then(res => {
+      if (!res?.ok) {
+        setLaunchFailed(prev => new Map(prev).set(task.id, res?.reason ?? 'other'))
+      }
     })
   }
 
@@ -268,6 +590,215 @@ export const BoardModule = ({
   // claude PTY UNSENT (bracketed paste, no trailing newline): the user reviews
   // the prompt in the input box and presses Enter to run it. Raw fetch, same
   // style as ProjectPanel's launchTaskTerminal.
+  // "Try this branch" — ensure a local worktree checkout of the task branch
+  // and reveal it in the file manager (reviewer flow F061). One click, no
+  // terminal gymnastics; errors land inline next to the button.
+  const [checkoutBusy, setCheckoutBusy] = useState(false)
+  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null)
+  const openBranchLocally = async (task: ProjectTask) => {
+    if (!task.branch) return
+    setCheckoutBusy(true)
+    setCheckoutNotice(null)
+    try {
+      const res = await fetch('/api/project/review-worktree', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, branch: task.branch }),
+      })
+      const json = (await res.json().catch(() => ({}))) as {
+        dir?: string
+        error?: string
+        code?: string
+      }
+      if (!res.ok || !json.dir) {
+        // Localize by the machine-readable code (ReviewWorktreeErrorCode) —
+        // never echo the server's English git message verbatim.
+        setCheckoutNotice(
+          t(
+            json.code === 'invalid-branch'
+              ? 'board.detail.tryBranchInvalid'
+              : json.code === 'git-failed'
+                ? 'board.detail.tryBranchGitFailed'
+                : 'board.detail.tryBranchFailed', // 'not-pushed' + anything unknown
+          ),
+        )
+        return
+      }
+      await fetch('/api/project/reveal', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: json.dir }),
+      }).catch(() => {})
+    } catch {
+      setCheckoutNotice(t('board.detail.tryBranchFailed'))
+    } finally {
+      setCheckoutBusy(false)
+    }
+  }
+
+  // "Review with claude" (F064) — one click for the reviewer: ensure the task
+  // branch's review worktree, make sure the card has a LIVE claude session
+  // (reuse it if alive; launch INSIDE the worktree if not), then paste a
+  // diff-review instruction into the input box UNSENT (generic
+  // /api/terminal/:id/paste — bracketed paste, no trailing newline). Nothing
+  // runs until the user presses Enter — same philosophy as "Insert task into
+  // input". Errors land inline, tryBranch-style.
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null)
+  const reviewWithClaude = async (task: ProjectTask) => {
+    if (!task.branch) return
+    setReviewBusy(true)
+    setReviewNotice(null)
+    try {
+      const res = await fetch('/api/project/review-worktree', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, branch: task.branch }),
+      })
+      const json = (await res.json().catch(() => ({}))) as {
+        dir?: string
+        error?: string
+        code?: string
+      }
+      if (!res.ok || !json.dir) {
+        // Same code → copy mapping as "Open locally" — never echo raw git.
+        setReviewNotice(
+          t(
+            json.code === 'invalid-branch'
+              ? 'board.detail.tryBranchInvalid'
+              : json.code === 'git-failed'
+                ? 'board.detail.tryBranchGitFailed'
+                : 'board.detail.tryBranchFailed', // 'not-pushed' + anything unknown
+          ),
+        )
+        return
+      }
+      // Reuse the card's live session if there is one (claude can read any
+      // path — the prompt names the worktree dir explicitly, no cd needed);
+      // otherwise launch a fresh claude INSIDE the worktree and bind it to
+      // this card's slot (onLaunchTask = ProjectPanel.launchTaskTerminal).
+      let ptyId = liveTerminalId(task.id)
+      if (!ptyId) {
+        const launched = await onLaunchTask(task, { cwd: json.dir })
+        if (!launched.ok) {
+          setReviewNotice(t('board.detail.reviewWithClaudeFailed'))
+          return
+        }
+        if (launched.terminalId) {
+          ptyId = launched.terminalId
+          // Give the freshly spawned claude a beat to bring its TUI up before
+          // the paste bytes arrive — bracketed-paste markers written while the
+          // shell is still exec-ing claude would land as raw keystrokes. Best-
+          // effort (the paste is unsent either way, so worst case the user
+          // sees it garbled and re-clicks).
+          await new Promise(r => setTimeout(r, 1500))
+        } else {
+          // { ok: true } WITHOUT a terminalId = another launch for this task
+          // was already in flight (launchTaskTerminal's double-spawn guard) —
+          // not a failure. The PTY id lands in the panel's taskTerminals map
+          // when that launch resolves; poll liveTerminalId for it (the prop
+          // reads live refs, so a captured copy sees the update).
+          for (let i = 0; i < 10 && !ptyId; i++) {
+            await new Promise(r => setTimeout(r, 500))
+            ptyId = liveTerminalId(task.id)
+          }
+          if (!ptyId) {
+            setReviewNotice(t('board.detail.reviewWithClaudeFailed'))
+            return
+          }
+        }
+      }
+      const text = buildReviewPrompt({
+        branch: task.branch,
+        dir: json.dir,
+        base: data.config?.targetBranch,
+      })
+      const pasteRes = await fetch(`/api/terminal/${encodeURIComponent(ptyId)}/paste`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, text }),
+      })
+      if (!pasteRes.ok) setReviewNotice(t('board.detail.reviewWithClaudeFailed'))
+    } catch {
+      setReviewNotice(t('board.detail.reviewWithClaudeFailed'))
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
+  // ---- Image attachments (B022) --------------------------------------------
+  // Screenshots pasted/dropped on the content field (or picked via the file
+  // input) upload to /api/project/task-asset and land on the card as
+  // { id, name, mime } — the id is a content-hash file name, never a path.
+  // "Insert task into input" then sends the live id list so the server appends
+  // the absolute paths claude can Read.
+  const MAX_ATTACH_BYTES = 5 * 1024 * 1024
+  // Counter, not a boolean — parallel uploads (multi-file drop/pick) each
+  // increment/decrement, so the busy state only clears when the LAST one lands.
+  const [attachBusy, setAttachBusy] = useState(0)
+  const [attachError, setAttachError] = useState<string | null>(null)
+  useEffect(() => setAttachError(null), [detailId])
+  const attachInputRef = useRef<HTMLInputElement | null>(null)
+  const attachmentUrl = (a: TaskAttachment) =>
+    `/api/project/task-asset?path=${encodeURIComponent(project.path)}&id=${encodeURIComponent(a.id)}`
+  const uploadAttachment = async (task: ProjectTask, file: File) => {
+    if (!file.type.startsWith('image/')) return
+    if (file.size > MAX_ATTACH_BYTES) {
+      setAttachError(t('board.detail.attachTooLarge'))
+      return
+    }
+    setAttachBusy(n => n + 1)
+    setAttachError(null)
+    try {
+      const dataBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      const res = await fetch('/api/project/task-asset', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, name: file.name, mime: file.type, dataBase64 }),
+      })
+      if (!res.ok) {
+        setAttachError(
+          t(res.status === 413 ? 'board.detail.attachTooLarge' : 'board.detail.attachFailed'),
+        )
+        return
+      }
+      const saved = (await res.json()) as TaskAttachment
+      // Append against the FRESH card (the upload round-trip may have raced a
+      // notes edit); content-addressing makes a re-paste a no-op.
+      const current = dataRef.current.tasks.find(x => x.id === task.id)
+      const list = current?.attachments ?? []
+      if (!list.some(a => a.id === saved.id)) {
+        patchTaskFresh(task.id, { attachments: [...list, saved] })
+      }
+    } catch {
+      setAttachError(t('board.detail.attachFailed'))
+    } finally {
+      setAttachBusy(n => n - 1)
+    }
+  }
+  const uploadAttachments = (task: ProjectTask, files: Iterable<File>) => {
+    for (const f of Array.from(files).filter(f => f.type.startsWith('image/'))) {
+      void uploadAttachment(task, f)
+    }
+  }
+  const removeAttachment = (task: ProjectTask, id: string) => {
+    const current = dataRef.current.tasks.find(x => x.id === task.id)
+    const rest = (current?.attachments ?? []).filter(a => a.id !== id)
+    patchTaskFresh(task.id, { attachments: rest.length ? rest : undefined })
+    // Best-effort byte cleanup — the server skips the unlink while any OTHER
+    // card still references it. taskId names THIS card so its stale saved
+    // reference (the persist above is debounced) doesn't block the reap.
+    void fetch(
+      `/api/project/task-asset?path=${encodeURIComponent(project.path)}&id=${encodeURIComponent(id)}&taskId=${encodeURIComponent(task.id)}`,
+      { method: 'DELETE' },
+    ).catch(() => {})
+  }
+
   const [inserting, setInserting] = useState(false)
   const [insertError, setInsertError] = useState<string | null>(null)
   const insertTask = async (task: ProjectTask) => {
@@ -287,11 +818,27 @@ export const BoardModule = ({
           taskId: task.id,
           title: task.title,
           notes: task.notes ?? '',
+          // Live attachment ids (same freshness rationale as title/notes) —
+          // the server resolves them to absolute paths claude can Read.
+          attachmentIds: (task.attachments ?? []).map(a => a.id),
         }),
       })
-      if (!res.ok) setInsertError(t('board.detail.insertTaskFailed'))
+      // Distinct copy per failure: 400 = the composed prompt blew the server's
+      // size cap ("task content too large") — splitting the task is the fix,
+      // relaunching won't help; 404 = the PTY is gone (not-found-or-finished)
+      // — relaunch is the fix; anything else gets the generic copy; the catch
+      // means the request never reached the server at all.
+      if (!res.ok) {
+        setInsertError(
+          t(
+            res.status === 400
+              ? 'board.detail.insertTaskTooLarge'
+              : 'board.detail.insertTaskFailed',
+          ),
+        )
+      }
     } catch {
-      setInsertError(t('board.detail.insertTaskFailed'))
+      setInsertError(t('board.detail.insertTaskFailedNetwork'))
     } finally {
       setInserting(false)
     }
@@ -299,14 +846,136 @@ export const BoardModule = ({
 
   // One line of "what happens on finish" — answers the where-does-my-code-go
   // question BEFORE launch (Draft bar) and DURING the session (status strip).
-  const flowText = project.hasGit
-    ? (() => {
-        const base = data.config?.targetBranch?.trim() || t('board.detail.flowBaseDefault')
-        return data.config?.completionFlow === 'pr'
-          ? t('board.detail.flowPr', { base })
-          : t('board.detail.flowMerge', { base })
-      })()
-    : null
+  // Per-card: the card's run.flow override wins over the board default.
+  const flowTextFor = (task: ProjectTask): string | null => {
+    if (!project.hasGit) return null
+    const base = data.config?.targetBranch?.trim() || t('board.detail.flowBaseDefault')
+    const flow = task.run?.flow ?? data.config?.completionFlow
+    if (flow === 'pr') {
+      // With the review column on, the card MOVES on PR-open — say so up
+      // front, or the auto-move reads as "the board did something behind
+      // my back" (F049/F050).
+      return data.config?.reviewColumn
+        ? t('board.detail.flowPrReview', { base })
+        : t('board.detail.flowPr', { base })
+    }
+    return t('board.detail.flowMerge', { base })
+  }
+
+  // One quiet line for HOW the work is isolated (git: own task/ branch in its
+  // own worktree) + WHICH profile the session launches with (board defaults,
+  // overridden by this card's run settings). Answers "what exactly starts
+  // when I run this" (F026–F028).
+  const isolationText = project.hasGit ? t('board.detail.isolationNote') : null
+  const profileTextFor = (task: ProjectTask): string => {
+    const mode = data.launch?.permissionMode ?? 'default'
+    const model =
+      task.run?.model?.trim() ||
+      data.launch?.model?.trim() ||
+      t('board.detail.profileModelDefault')
+    const effort = task.run?.effort ?? data.launch?.effort
+    const base = t('board.detail.profileNote', { mode, model })
+    return effort ? `${base} · ${effort}` : base
+  }
+
+  // Persist one key of the card's per-card run settings (autosaved like every
+  // other drawer field). All-default collapses to `run: undefined` so a card
+  // that never diverges carries no extra data.
+  const patchRunSetting = (task: ProjectTask, patch: Partial<TaskRunSettings>) => {
+    const next: TaskRunSettings = { ...task.run, ...patch }
+    if (!next.flow) delete next.flow
+    if (!next.model) delete next.model
+    if (!next.effort) delete next.effort
+    patchTask(task, { run: Object.keys(next).length ? next : undefined })
+  }
+
+  // The per-card run settings row (PR/merge · model · effort) + the 実行
+  // button. Each select's first option is "default" = inherit the board's
+  // visible defaults strip; the resolved default is spelled out in the option
+  // label so "what will actually happen" never requires a settings dive.
+  const runSettingsRow = (task: ProjectTask) => {
+    const selectCls =
+      'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+    const defaultModel = data.launch?.model?.trim() || t('board.run.modelCliDefault')
+    const defaultEffort = data.launch?.effort ?? t('board.run.effortCliDefault')
+    const modelChoices = TASK_MODEL_CHOICES.includes(task.run?.model ?? '')
+      ? TASK_MODEL_CHOICES
+      : task.run?.model
+        ? [task.run.model, ...TASK_MODEL_CHOICES]
+        : TASK_MODEL_CHOICES
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        {project.hasGit && (
+          <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+            {t('board.run.flowLabel')}
+            <select
+              value={task.run?.flow ?? ''}
+              onChange={e =>
+                patchRunSetting(task, {
+                  flow: e.target.value === 'merge' || e.target.value === 'pr'
+                    ? e.target.value
+                    : undefined,
+                })
+              }
+              className={selectCls}
+            >
+              <option value="">
+                {t('board.run.inheritDefault', {
+                  value: t(
+                    (data.config?.completionFlow ?? 'merge') === 'pr'
+                      ? 'board.run.flowPr'
+                      : 'board.run.flowMerge',
+                  ),
+                })}
+              </option>
+              <option value="merge">{t('board.run.flowMerge')}</option>
+              <option value="pr">{t('board.run.flowPr')}</option>
+            </select>
+          </label>
+        )}
+        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+          {t('board.run.modelLabel')}
+          <select
+            value={task.run?.model ?? ''}
+            onChange={e => patchRunSetting(task, { model: e.target.value || undefined })}
+            className={selectCls}
+          >
+            <option value="">
+              {t('board.run.inheritDefault', { value: defaultModel })}
+            </option>
+            {modelChoices.map(m => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+          {t('board.run.effortLabel')}
+          <select
+            value={task.run?.effort ?? ''}
+            onChange={e =>
+              patchRunSetting(task, {
+                effort: CLAUDE_EFFORTS.includes(e.target.value as ClaudeEffort)
+                  ? (e.target.value as ClaudeEffort)
+                  : undefined,
+              })
+            }
+            className={selectCls}
+          >
+            <option value="">
+              {t('board.run.inheritDefault', { value: defaultEffort })}
+            </option>
+            {CLAUDE_EFFORTS.map(lv => (
+              <option key={lv} value={lv}>
+                {lv}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    )
+  }
 
   // The task fields, shared by Draft (grow=true: the content textarea fills
   // the drawer) and the Session header's expandable block (grow=false: fixed
@@ -366,6 +1035,30 @@ export const BoardModule = ({
             const v = e.target.value
             if (v !== (task.notes ?? '')) patchTask(task, { notes: v || undefined })
           }}
+          // Screenshot in the clipboard → attach instead of dumping bytes into
+          // the text. A mixed clipboard (text + image) keeps the default text
+          // insert AND attaches the image.
+          onPaste={e => {
+            const files = Array.from(e.clipboardData?.files ?? []).filter(f =>
+              f.type.startsWith('image/'),
+            )
+            if (!files.length) return
+            if (!e.clipboardData.getData('text/plain')) e.preventDefault()
+            uploadAttachments(task, files)
+          }}
+          onDragOver={e => {
+            if (e.dataTransfer.types.includes('Files')) e.preventDefault()
+          }}
+          onDrop={e => {
+            // ANY file drop is consumed — a non-image (PDF etc.) must not fall
+            // through to the browser default (navigating the page away).
+            if (!e.dataTransfer?.types.includes('Files')) return
+            e.preventDefault()
+            const files = Array.from(e.dataTransfer.files).filter(f =>
+              f.type.startsWith('image/'),
+            )
+            if (files.length) uploadAttachments(task, files)
+          }}
           placeholder={t('board.detail.notesPlaceholder')}
           rows={grow ? undefined : 3}
           className={[
@@ -373,6 +1066,67 @@ export const BoardModule = ({
             grow ? 'min-h-[120px] flex-1 resize-none' : 'resize-y',
           ].join(' ')}
         />
+      </div>
+      {/* Image attachments (B022) — thumbnails + remove, plus an explicit "add
+          image" picker. Click a thumbnail to open the original in a new tab.
+          Paste/drop on the content field above also lands here. */}
+      <div className="shrink-0">
+        <label className="mb-1 block label-cap text-ink-faint">
+          {t('board.detail.attachmentsLabel')}
+        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          {(task.attachments ?? []).map(a => (
+            <span key={a.id} className="relative inline-flex">
+              <a
+                href={attachmentUrl(a)}
+                target="_blank"
+                rel="noreferrer"
+                title={a.name}
+                className="block rounded-[3px] border border-line transition-colors hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                <img
+                  src={attachmentUrl(a)}
+                  alt={a.name}
+                  className="h-14 w-14 rounded-[2px] object-cover"
+                />
+              </a>
+              <button
+                type="button"
+                onClick={() => removeAttachment(task, a.id)}
+                title={t('board.detail.attachRemove')}
+                aria-label={t('board.detail.attachRemove')}
+                className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-line bg-bg-card text-ink-faint transition-colors hover:border-accent hover:text-accent active:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+          <button
+            type="button"
+            onClick={() => attachInputRef.current?.click()}
+            disabled={attachBusy > 0}
+            title={t('board.detail.attachAddTitle')}
+            className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            {attachBusy > 0 ? t('board.detail.attachBusy') : t('board.detail.attachAdd')}
+          </button>
+          <input
+            ref={attachInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={e => {
+              if (e.target.files) uploadAttachments(task, e.target.files)
+              e.target.value = '' // allow re-picking the same file
+            }}
+          />
+        </div>
+        {attachError && (
+          <p className="mt-1 text-[10px] text-accent" title={attachError}>
+            {attachError}
+          </p>
+        )}
       </div>
       {/* Pull request — appears once claude records the PR it opened
           (setPrUrl). Plain link, opens in the browser. */}
@@ -429,7 +1183,7 @@ export const BoardModule = ({
                     const v = e.currentTarget.value.trim()
                     // Register into the shared member list AND assign —
                     // the name is now a chip on EVERY card.
-                    if (v) persist(withRegisteredAssignee(data, task.id, v))
+                    if (v) persistTracked(withRegisteredAssignee(data, task.id, v))
                     setAddingAssignee(false)
                   } else if (e.key === 'Escape') {
                     e.stopPropagation() // cancel the add only — keep the drawer open
@@ -445,7 +1199,7 @@ export const BoardModule = ({
                   e.preventDefault()
                   const input = e.currentTarget.previousElementSibling as HTMLInputElement | null
                   const v = input?.value.trim() ?? ''
-                  if (v) persist(withRegisteredAssignee(data, task.id, v))
+                  if (v) persistTracked(withRegisteredAssignee(data, task.id, v))
                   setAddingAssignee(false)
                 }}
                 className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
@@ -464,6 +1218,114 @@ export const BoardModule = ({
           )}
         </div>
       </div>
+      {/* Depends on (B025) — informational only: chips name the cards that
+          should land first; nothing blocks on them. The "+ Add" select offers
+          other cards on this board, minus self, existing deps and cards that
+          already depend on THIS one (one-level cycle check). Ids of deleted
+          cards are skipped at render but kept in the data. */}
+      <div className="shrink-0">
+        <label className="mb-1 block label-cap text-ink-faint">
+          {t('board.detail.dependsLabel')}
+        </label>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(task.dependsOn ?? []).map(depId => {
+            const dep = data.tasks.find(x => x.id === depId)
+            if (!dep) return null
+            const depTitle = dep.title.trim() || t('board.card.untitledParen')
+            return (
+              <span
+                key={depId}
+                className="flex max-w-[180px] shrink-0 items-center gap-1 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted"
+              >
+                <span className="min-w-0 truncate" title={depTitle}>
+                  {depTitle}
+                </span>
+                <button
+                  type="button"
+                  aria-label={t('board.detail.dependsRemove', { title: depTitle })}
+                  title={t('board.detail.dependsRemove', { title: depTitle })}
+                  onClick={() => {
+                    const next = (task.dependsOn ?? []).filter(id => id !== depId)
+                    patchTask(task, { dependsOn: next.length ? next : undefined })
+                  }}
+                  className="shrink-0 rounded-sm px-0.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                >
+                  ✕
+                </button>
+              </span>
+            )
+          })}
+          {(() => {
+            const candidates = dependencyCandidates(task, data.tasks)
+            if (addingDep)
+              return (
+                <select
+                  autoFocus
+                  value=""
+                  onChange={e => {
+                    const id = e.target.value
+                    if (id) patchTask(task, { dependsOn: [...(task.dependsOn ?? []), id] })
+                    setAddingDep(false)
+                  }}
+                  onBlur={() => setAddingDep(false)}
+                  onKeyDown={e => {
+                    if (e.key === 'Escape') {
+                      e.stopPropagation() // cancel the add only — keep the drawer open
+                      setAddingDep(false)
+                    }
+                  }}
+                  className="max-w-[200px] rounded-[3px] border border-accent bg-bg px-2 py-1 text-[12px] text-ink focus:outline-none"
+                >
+                  <option value="" disabled>
+                    {t('board.detail.dependsPick')}
+                  </option>
+                  {candidates.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.title.trim() || t('board.card.untitledParen')}
+                    </option>
+                  ))}
+                </select>
+              )
+            return (
+              <button
+                type="button"
+                onClick={() => setAddingDep(true)}
+                disabled={candidates.length === 0}
+                title={candidates.length === 0 ? t('board.detail.dependsNone') : undefined}
+                className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {t('board.detail.dependsAdd')}
+              </button>
+            )
+          })()}
+        </div>
+      </div>
+      {/* Due date (B026) — a soft deadline chip, no sorting / no alerts. The
+          native date input has no IME path, so a controlled value is safe. */}
+      <div className="shrink-0">
+        <label className="mb-1 block label-cap text-ink-faint">
+          {t('board.detail.dueLabel')}
+        </label>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="date"
+            value={task.dueDate ?? ''}
+            onChange={e => patchTask(task, { dueDate: e.target.value || undefined })}
+            className="rounded-[3px] border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors hover:border-ink-faint focus:border-accent focus:outline-none"
+          />
+          {task.dueDate && (
+            <button
+              type="button"
+              aria-label={t('board.detail.dueClear')}
+              title={t('board.detail.dueClear')}
+              onClick={() => patchTask(task, { dueDate: undefined })}
+              className="shrink-0 rounded-sm px-1.5 py-1 text-[11px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
     </>
   )
 
@@ -477,7 +1339,7 @@ export const BoardModule = ({
     !hasTerminalSlot(task.id)
   const closeDrawer = () => {
     if (detailTask && isUntouchedEmpty(detailTask))
-      persist({ ...data, tasks: data.tasks.filter(t => t.id !== detailTask.id) })
+      persistTracked({ ...data, tasks: data.tasks.filter(t => t.id !== detailTask.id) })
     onOpenDetail(null)
   }
   const closeDrawerRef = useRef(closeDrawer)
@@ -524,6 +1386,10 @@ export const BoardModule = ({
       if (
         el instanceof HTMLInputElement ||
         el instanceof HTMLTextAreaElement ||
+        // The depends-on <select> handles its own Escape (cancel the add, keep
+        // the drawer) — this CAPTURE listener fires before its React handler,
+        // so without the exemption Esc would close the whole drawer.
+        el instanceof HTMLSelectElement ||
         (el instanceof HTMLElement && el.closest('.xterm'))
       )
         return
@@ -538,35 +1404,67 @@ export const BoardModule = ({
 
   return (
     <div className="flex min-h-0 flex-1">
-      <div className="min-h-0 min-w-0 flex-1">
-        <BoardTab
-          data={data}
-          onPersist={persist}
-          openTaskId={detailId}
-          // Board self-contained (P1): open the card's conversation in an
-          // in-tab drawer.
-          onOpenTask={id => onOpenDetail(id)}
-          // Board self-contained (Phase A): author plan cards right here.
-          // "Add a card" creates the card immediately with an EMPTY title and
-          // returns its id; the Board then OPENS ITS DETAIL DRAWER so the user
-          // types the title in a roomy field (an untouched card is discarded on
-          // close — see isUntouchedEmpty).
-          onCreateTask={(column: BoardColumn) => {
-            const task: ProjectTask = {
-              id: newId(),
-              title: '',
-              done: false,
-              createdAt: new Date().toISOString(),
-              boardColumn: column,
-            }
-            persist({ ...data, tasks: [...data.tasks, task] })
-            return task.id
-          }}
-          projectMissing={project.missing}
-          projectId={project.id}
-          displayName={displayName}
-          onOpenProjectSettings={onOpenProjectSettings}
-        />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {showWelcome && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-4 py-1.5">
+            <p className="min-w-0 flex-1 truncate text-[11px] leading-relaxed text-ink-muted">
+              {t('projectPanel.sharedWelcome')}
+              {!displayName && <> {t('projectPanel.sharedWelcomeName')}</>}
+            </p>
+            <button
+              type="button"
+              onClick={dismissWelcome}
+              title={t('projectPanel.sharedWelcomeDismiss')}
+              aria-label={t('projectPanel.sharedWelcomeDismiss')}
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
+        <div className="min-h-0 min-w-0 flex-1">
+          <BoardTab
+            data={data}
+            onPersist={persistTracked}
+            // Undo/redo (B013) — history lives HERE (the layer owning data +
+            // persist); BoardTab only renders the toolbar affordance.
+            undoState={{ canUndo, canRedo, onUndo: undo, onRedo: redo }}
+            openTaskId={detailId}
+            // Board self-contained (P1): open the card's conversation in an
+            // in-tab drawer.
+            onOpenTask={id => onOpenDetail(id)}
+            // Board self-contained (Phase A): author plan cards right here.
+            // "Add a card" creates the card immediately with an EMPTY title and
+            // returns its id; the Board then OPENS ITS DETAIL DRAWER so the user
+            // types the title in a roomy field (an untouched card is discarded on
+            // close — see isUntouchedEmpty).
+            onCreateTask={(column: BoardColumn) => {
+              const task: ProjectTask = {
+                id: newId(),
+                title: '',
+                done: false,
+                createdAt: new Date().toISOString(),
+                boardColumn: column,
+              }
+              persistTracked({ ...data, tasks: [...data.tasks, task] })
+              return task.id
+            }}
+            projectMissing={project.missing}
+            hasGit={project.hasGit}
+            projectId={project.id}
+            // Merged-branch detection (B018): the poll needs the project path.
+            projectPath={project.path}
+            displayName={displayName}
+            sessionStatus={taskId => {
+              const ptyId = liveTerminalId(taskId)
+              if (!ptyId) return null
+              // A just-launched pane the poll hasn't seen yet is painting its
+              // banner right now — 'working' is the truthful default.
+              return claudeStatusByPty.get(ptyId) ?? 'working'
+            }}
+            onOpenProjectSettings={onOpenProjectSettings}
+          />
+        </div>
       </div>
       {detailTask && (
         <aside
@@ -590,6 +1488,11 @@ export const BoardModule = ({
             <button
               type="button"
               onClick={() => {
+                // The delete persists via ProjectPanel (terminal teardown +
+                // task removal) — flag it so the resulting external tasks
+                // change is ADOPTED into undo history instead of wiping it
+                // (誤削除 must be ⌘Z-recoverable).
+                adoptNextExternalRef.current = true
                 onDeleteTask(detailTask.id)
                 onOpenDetail(null)
               }}
@@ -630,44 +1533,87 @@ export const BoardModule = ({
                   />
                 </div>
               ) : (
-                <div className="flex min-h-0 flex-1 flex-col space-y-3 px-5 py-3">
+                <div className="flex min-h-0 flex-1 flex-col space-y-3 overflow-y-auto px-5 py-3">
                   {fieldsBlock(detailTask, true)}
                 </div>
               )}
-              {/* Auto-launch note — no Launch button anymore: claude starts
-                  by itself (plain) once the card has a title. The message is
-                  state-accurate: it never promises a launch that the effect's
-                  own guards (done column / missing folder) will skip, and a
-                  failed spawn gets a real retry CTA instead of a dead end. */}
-              <div className="shrink-0 border-t border-line-soft px-5 py-3">
+              {/* Run footer — nothing launches by itself anymore: the card's
+                  per-card run settings (PR/merge · model · effort, autosaved
+                  on the task) sit above an explicit 実行 button that launches
+                  claude WITH the task prompt auto-sent. A review/blocked card
+                  carrying a branch additionally offers "Review with claude"
+                  (worktree + unsent diff prompt — a different action). */}
+              <div className="shrink-0 space-y-2 border-t border-line-soft px-5 py-3">
                 {project.missing ? (
                   <p className="text-[11px] leading-relaxed text-ink-faint">
-                    {t('board.detail.autoLaunchMissing')}
+                    {t('board.run.missingFolder')}
                   </p>
-                ) : columnOf(detailTask) === 'done' ? (
-                  <p className="text-[11px] leading-relaxed text-ink-faint">
-                    {t('board.detail.autoLaunchDone')}
-                  </p>
-                ) : launchFailed.has(detailTask.id) ? (
-                  <div className="flex items-baseline gap-2">
-                    <button
-                      type="button"
-                      onClick={() => retryLaunch(detailTask)}
-                      className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    >
-                      {t('board.detail.autoLaunchRetry')}
-                    </button>
-                    <span className="min-w-0 text-[11px] leading-relaxed text-ink-faint">
-                      {t('board.detail.autoLaunchFailed')}
-                    </span>
-                  </div>
                 ) : (
-                  <p className="text-[11px] leading-relaxed text-ink-faint">
-                    {launching
-                      ? t('projectPanel.launchingClaude')
-                      : t('board.detail.autoLaunchHint')}
-                    {flowText ? ` · ${flowText}` : ''}
-                  </p>
+                  <>
+                    {runSettingsRow(detailTask)}
+                    <div className="flex flex-wrap items-baseline gap-2">
+                      <button
+                        type="button"
+                        onClick={() => runTask(detailTask)}
+                        // reviewBusy too: "Review with claude" may be mid-launch
+                        // on this same card — a concurrent 実行 would hit the
+                        // double-spawn guard and lie ("起動中…" with nothing
+                        // launching). Mirror of the review button's `launching`.
+                        disabled={launching || reviewBusy || !detailTask.title.trim()}
+                        title={
+                          detailTask.title.trim()
+                            ? t('board.run.buttonTitle')
+                            : t('board.run.needsTitle')
+                        }
+                        className="shrink-0 rounded-sm border border-accent bg-accent px-3.5 py-1.5 text-[12px] font-medium text-bg-card transition-colors hover:bg-accent/85 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      >
+                        {launching ? t('board.run.buttonBusy') : t('board.run.button')}
+                      </button>
+                      {(columnOf(detailTask) === 'review' ||
+                        columnOf(detailTask) === 'blocked') &&
+                        detailTask.branch && (
+                          <button
+                            type="button"
+                            disabled={reviewBusy || launching}
+                            onClick={() => void reviewWithClaude(detailTask)}
+                            title={t('board.detail.reviewWithClaudeTitle')}
+                            className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                          >
+                            {reviewBusy
+                              ? t('board.detail.reviewWithClaudeBusy')
+                              : t('board.detail.reviewWithClaude')}
+                          </button>
+                        )}
+                      {reviewNotice && (
+                        <span
+                          className="min-w-0 truncate text-[10px] text-accent"
+                          title={reviewNotice}
+                        >
+                          {reviewNotice}
+                        </span>
+                      )}
+                      {launchFailed.has(detailTask.id) && (
+                        <span className="min-w-0 text-[11px] leading-relaxed text-accent">
+                          {t(
+                            launchFailed.get(detailTask.id) === 'claudeMissing'
+                              ? 'board.run.failedClaudeMissing'
+                              : 'board.run.failed',
+                          )}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-ink-faint">
+                      {!detailTask.title.trim()
+                        ? t('board.run.needsTitle')
+                        : t('board.run.hint')}
+                      {isolationText ? ` · ${isolationText}` : ''}
+                      {flowTextFor(detailTask) ? ` · ${flowTextFor(detailTask)}` : ''}
+                      <span className="text-ink-faint/80" title={t('board.detail.profileTitle')}>
+                        {' · '}
+                        {profileTextFor(detailTask)}
+                      </span>
+                    </p>
+                  </>
                 )}
               </div>
             </>
@@ -692,18 +1638,102 @@ export const BoardModule = ({
                     {detailTask.title.trim() || t('board.card.untitled')}
                   </span>
                 </button>
-                {(detailTask.branch || flowText || detailTask.prUrl) && (
-                  <div className="flex items-center gap-3 px-5 pb-2 text-[11px] text-ink-faint">
+                {(detailTask.branch || flowTextFor(detailTask) || detailTask.prUrl) && (
+                  /* flex-wrap: a long branch name / flow note / profile chip
+                     must wrap to the next line, never push the row past the
+                     drawer edge (long-text robustness, F098). */
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 pb-2 text-[11px] text-ink-faint">
                     {detailTask.branch && (
                       <span
                         className="flex min-w-0 items-center gap-1"
-                        title={t('board.detail.branchTitle')}
+                        // The visible name truncates — put the FULL branch in
+                        // the tooltip, not just the generic label.
+                        title={`${t('board.detail.branchTitle')}: ${detailTask.branch}`}
                       >
                         <GitBranch size={11} className="shrink-0" />
                         <span className="truncate">{detailTask.branch}</span>
                       </span>
                     )}
-                    {flowText && <span className="shrink-0">{flowText}</span>}
+                    {detailTask.branch && (
+                      <button
+                        type="button"
+                        // Also disabled while the project folder is gone — the
+                        // worktree checkout needs the repo on disk.
+                        disabled={checkoutBusy || project.missing}
+                        onClick={() => void openBranchLocally(detailTask)}
+                        title={t('board.detail.tryBranchTitle')}
+                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                      >
+                        {checkoutBusy ? t('board.detail.tryBranchBusy') : t('board.detail.tryBranch')}
+                      </button>
+                    )}
+                    {checkoutNotice && (
+                      <span
+                        className="min-w-0 truncate text-[10px] text-accent"
+                        title={checkoutNotice}
+                      >
+                        {checkoutNotice}
+                      </span>
+                    )}
+                    {/* Review with claude (F064) — reviewer's one-click: shown
+                        once the card is review-shaped (in the Review column or
+                        carrying a PR). Ensures the review worktree, then puts
+                        a diff-review instruction in the claude input UNSENT. */}
+                    {detailTask.branch &&
+                      (columnOf(detailTask) === 'review' || detailTask.prUrl) && (
+                        <button
+                          type="button"
+                          disabled={reviewBusy || project.missing}
+                          onClick={() => void reviewWithClaude(detailTask)}
+                          title={t('board.detail.reviewWithClaudeTitle')}
+                          className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                        >
+                          {reviewBusy
+                            ? t('board.detail.reviewWithClaudeBusy')
+                            : t('board.detail.reviewWithClaude')}
+                        </button>
+                      )}
+                    {reviewNotice && (
+                      <span
+                        className="min-w-0 truncate text-[10px] text-accent"
+                        title={reviewNotice}
+                      >
+                        {reviewNotice}
+                      </span>
+                    )}
+                    {flowTextFor(detailTask) && (
+                      <span
+                        className="min-w-0 max-w-full truncate"
+                        title={flowTextFor(detailTask) ?? undefined}
+                      >
+                        {flowTextFor(detailTask)}
+                      </span>
+                    )}
+                    <span
+                      className="ml-auto min-w-0 max-w-full truncate text-ink-faint/80"
+                      title={`${t('board.detail.profileTitle')} — ${profileTextFor(detailTask)}`}
+                    >
+                      {profileTextFor(detailTask)}
+                    </span>
+                    {/* Salvage for a finished-but-not-marked run (F052): the
+                        markDone curl is best-effort claude behavior — give the
+                        human a one-click fallback right where they notice. */}
+                    {columnOf(detailTask) !== 'done' && (
+                      <button
+                        type="button"
+                        // Persisting needs the project on disk — same guard as
+                        // every other board mutation.
+                        disabled={project.missing}
+                        onClick={() => {
+                          patchTaskFresh(detailTask.id, { boardColumn: 'done', done: true })
+                          onOpenDetail(null)
+                        }}
+                        title={t('board.detail.markDoneTitle')}
+                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                      >
+                        {t('board.detail.markDone')}
+                      </button>
+                    )}
                     {detailTask.prUrl && (
                       <a
                         href={detailTask.prUrl}
@@ -715,6 +1745,64 @@ export const BoardModule = ({
                         PR ↗
                       </a>
                     )}
+                    {/* PR state + diff stats (B023 — F058/F085): quiet chip
+                        next to the link once /api/project/pr-info answers.
+                        available:false (no gh, bad URL) renders nothing. */}
+                    {detailTask.prUrl && prInfo?.available && (
+                      <span
+                        className={`shrink-0 text-[10px] ${
+                          prInfo.state === 'MERGED'
+                            ? 'text-moss'
+                            : prInfo.state === 'CLOSED'
+                              ? 'text-accent'
+                              : 'text-ink-muted'
+                        }`}
+                        title={`${t('board.detail.prStateTitle')}: ${prInfo.title}`}
+                      >
+                        {prInfo.isDraft && prInfo.state === 'OPEN' ? 'DRAFT' : prInfo.state}
+                        {prInfo.state === 'OPEN' &&
+                          ` +${prInfo.additions} −${prInfo.deletions}`}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {/* Restart session (F081) — the slot exists but its PTY has
+                    exited: the auto-launch effect skips slotted tasks, so a
+                    dead session needs this explicit relaunch. Same launch
+                    path as auto-launch (onLaunchTask rebinds the slot). */}
+                {!liveTerminalId(detailTask.id) && (
+                  <div className="flex items-baseline gap-2 px-5 pb-2">
+                    <button
+                      type="button"
+                      onClick={() => restartSession(detailTask)}
+                      // No restart into a missing cwd — the spawn would fail.
+                      disabled={launching || project.missing}
+                      className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {launching
+                        ? t('projectPanel.launchingClaude')
+                        : t('board.detail.restartSession')}
+                    </button>
+                    <span
+                      className={`min-w-0 truncate text-[11px] ${launchFailed.has(detailTask.id) ? 'text-accent' : 'text-ink-faint'}`}
+                      title={
+                        launchFailed.has(detailTask.id)
+                          ? t(
+                              launchFailed.get(detailTask.id) === 'claudeMissing'
+                                ? 'board.run.failedClaudeMissing'
+                                : 'board.run.failed',
+                            )
+                          : t('board.detail.restartSessionHint')
+                      }
+                    >
+                      {launchFailed.has(detailTask.id)
+                        ? t(
+                            launchFailed.get(detailTask.id) === 'claudeMissing'
+                              ? 'board.run.failedClaudeMissing'
+                              : 'board.run.failed',
+                          )
+                        : t('board.detail.restartSessionHint')}
+                    </span>
                   </div>
                 )}
                 {/* Insert task into input — pastes title + content into the
@@ -734,6 +1822,7 @@ export const BoardModule = ({
                   </button>
                   <span
                     className={`min-w-0 truncate text-[11px] ${insertError ? 'text-accent' : 'text-ink-faint'}`}
+                    title={insertError ?? t('board.detail.insertTaskHint')}
                   >
                     {insertError ?? t('board.detail.insertTaskHint')}
                   </span>

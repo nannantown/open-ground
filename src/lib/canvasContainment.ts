@@ -114,6 +114,45 @@ export const rectInside = (child: Rect, parent: Rect): boolean => {
   )
 }
 
+/** True when `frame` is a NESTED frame — one that lives inside another frame.
+ *  Drives Figma parity in the project Canvas: only top-level frames show their
+ *  floating name label; nested frames stay unlabeled so an AI-generated design
+ *  (one nested frame per card) doesn't read as a wall of "Frame" tags.
+ *
+ *  Two ways to qualify:
+ *   (a) `parentId` points at a live `frame` element — the persisted membership
+ *       written by drag-into-frame;
+ *   (b) geometric fallback: even WITHOUT a parentId, the frame's rect sits
+ *       fully inside some other frame's rect. Older AI-generated canvases
+ *       were written before `parentId` existed, so containment-by-geometry is
+ *       the only signal they carry. Default dims mirror DesignFrameView's
+ *       un-sized fallback (400×280). The frame itself is excluded so it can
+ *       never count as its own container. */
+export const isNestedFrame = (
+  frame: CanvasElement,
+  elements: CanvasElement[],
+): boolean => {
+  // (a) explicit membership — but only when the parent really is a frame; a
+  // parentId pointing at a deleted/non-frame element falls through to (b).
+  if (frame.parentId) {
+    const parent = elements.find((e) => e.id === frame.parentId)
+    if (parent && parent.type === 'frame') return true
+  }
+  // (b) geometric fallback for parentId-less legacy data.
+  const rect: Rect = {
+    x: frame.x,
+    y: frame.y,
+    w: frame.width ?? 400,
+    h: frame.height ?? 280,
+  }
+  return elements.some(
+    (e) =>
+      e.type === 'frame' &&
+      e.id !== frame.id &&
+      rectInside(rect, { x: e.x, y: e.y, w: e.width ?? 400, h: e.height ?? 280 }),
+  )
+}
+
 /** The id of the frame that should own `rect`, or `undefined` when no frame
  *  fully contains it. When several frames contain the rect (nested frames),
  *  the smallest-area frame wins so the most specific container takes the child

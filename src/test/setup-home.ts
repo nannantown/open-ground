@@ -38,6 +38,13 @@ for (const key of [
   'SUPABASE_SERVICE_ROLE_KEY',
   'SUPABASE_FEEDBACK_TABLE',
   'FEEDBACK_ADMIN_EMAILS',
+  // Custom-tab modules (server/routes/customModules.ts) read these the same
+  // lazy way — clear them so the owner's live shell can't flip role/market
+  // gating cases.
+  'SUPABASE_MODULES_TABLE',
+  'SUPABASE_ROLES_TABLE',
+  'OPENGROUND_OWNER_EMAILS',
+  'OPENGROUND_TESTER_EMAILS',
 ]) {
   delete process.env[key]
 }

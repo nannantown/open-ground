@@ -138,6 +138,11 @@ describe('buildTaskPrompt', () => {
     expect(p).not.toContain('setColumn')
   })
 
+  it('branch protocol tells claude to suffix on a name collision (F083)', () => {
+    const p = buildTaskPrompt({ ...base, worktreesDir: WT })
+    expect(p).toContain('already exists, append a numeric suffix')
+  })
+
   it('reviewColumn without pr flow: merge protocol keeps the plain markDone', () => {
     const p = buildTaskPrompt({ ...base, worktreesDir: WT, config: { reviewColumn: true } })
     expect(p).toContain('markDone')

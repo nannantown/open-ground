@@ -238,6 +238,57 @@ describe('POST /api/terminal/:id/paste-task — the paste write', () => {
     expect(writes[0]).toContain('# Task: Unsaved card')
   })
 
+  it('appends "## Attached images" with absolute asset paths (existing files only, ids validated)', async () => {
+    const dir = await makeRegisteredDir('attachments')
+    const task = await addTask(dir, 'Bug with screenshot')
+    // Upload a real asset through the route so the bytes exist on disk.
+    const pngB64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+    const up = await app.request(
+      '/api/project/task-asset',
+      json({ path: dir, name: 'shot.png', mime: 'image/png', dataBase64: pngB64 }),
+    )
+    expect(up.status).toBe(200)
+    const { id } = (await up.json()) as { id: string }
+    const writes: string[] = []
+    fakePty('pty-att', dir, writes)
+
+    const res = await app.request(
+      '/api/terminal/pty-att/paste-task',
+      json({
+        path: dir,
+        taskId: task.id,
+        attachmentIds: [
+          id,
+          `${'0'.repeat(40)}.png`, // valid shape but no file → excluded
+          '../../etc/passwd', // invalid shape → filtered before any fs touch
+        ],
+      }),
+    )
+    expect(res.status).toBe(200)
+    const written = writes[0]
+    expect(written).toContain('## Attached images')
+    // Absolute path ending in the content-hash file name, listed once.
+    const line = written.split('\n').find((l) => l.includes(id))
+    expect(line).toBeTruthy()
+    expect(line!.startsWith('- /')).toBe(true)
+    expect(written).not.toContain('0'.repeat(40))
+    expect(written).not.toContain('passwd')
+  })
+
+  it('no attachments → no "## Attached images" section', async () => {
+    const dir = await makeRegisteredDir('no-attachments')
+    const task = await addTask(dir, 'Plain card')
+    const writes: string[] = []
+    fakePty('pty-noatt', dir, writes)
+    const res = await app.request(
+      '/api/terminal/pty-noatt/paste-task',
+      json({ path: dir, taskId: task.id }),
+    )
+    expect(res.status).toBe(200)
+    expect(writes[0]).not.toContain('Attached images')
+  })
+
   it('strips an embedded paste-END marker so the bracketed span stays intact (injection guard)', async () => {
     const dir = await makeRegisteredDir('esc-inject')
     const writes: string[] = []

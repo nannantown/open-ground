@@ -88,6 +88,8 @@ describe('fetchShareStatus', () => {
       // ahead/behind absent in the body (older server) → default 0.
       ahead: 0,
       behind: 0,
+      // upstream absent (older server) → default false (never published).
+      upstream: false,
     })
   })
 

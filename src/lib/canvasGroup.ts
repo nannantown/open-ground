@@ -145,6 +145,50 @@ export const ungroupElements = (
   return { elements, freedIds }
 }
 
+/** Figma ⌘⇧G on frames: dissolve every DIRECTLY-selected frame — its children
+ *  are handed to the frame's own parent (so a frame inside a frame survives)
+ *  and the frame element is removed, its auto layout dying with it. This is
+ *  the unwrap counterpart to ⇧A's wrap, mirroring Figma where ungroup also
+ *  dissolves an auto-layout frame. Unlike {@link ungroupElements}, a selected
+ *  MEMBER does not dissolve its frame — frames are first-class design objects,
+ *  not invisible selection units. Returns null when no selected id is a
+ *  frame. */
+export const dissolveFrames = (
+  els: CanvasElement[],
+  selectedIds: string[],
+): UngroupResult | null => {
+  const byId = new Map(els.map((e) => [e.id, e]))
+  const frameIds = new Set(
+    selectedIds.filter((id) => byId.get(id)?.type === 'frame'),
+  )
+  if (!frameIds.size) return null
+
+  const freedIds: string[] = []
+  const elements = els
+    .filter((e) => !frameIds.has(e.id))
+    .map((e) => {
+      if (e.parentId && frameIds.has(e.parentId)) {
+        freedIds.push(e.id)
+        // Rehome to the nearest ancestor that survives the dissolve — same
+        // walk as ungroupElements (an outer frame dissolved in the same press
+        // can't adopt). Cycle-safe via the seen guard.
+        let gp = byId.get(e.parentId)?.parentId
+        const seen = new Set<string>([e.id, e.parentId])
+        while (gp && frameIds.has(gp) && !seen.has(gp)) {
+          seen.add(gp)
+          gp = byId.get(gp)?.parentId
+        }
+        if (gp === undefined || frameIds.has(gp)) {
+          const { parentId: _drop, ...rest } = e
+          return rest as CanvasElement
+        }
+        return { ...e, parentId: gp }
+      }
+      return e
+    })
+  return { elements, freedIds }
+}
+
 /** True when `id` has a GROUP ancestor (along the parentId chain) whose `flag`
  *  is set — used to cascade a group's `hidden` / `locked` to its members (a
  *  group is invisible, so the toggle must take effect through its children).

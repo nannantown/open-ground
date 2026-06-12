@@ -7,10 +7,12 @@ import type { ProjectData, ProjectMeta, ProjectTask } from '@/lib/types'
 //   Draft (no terminal slot)
 //     - empty card → ONE capture textarea; blur derives title (first line,
 //       titleAuto) + notes, and fires the auto-title request for multi-line text
-//     - card with text → full fields (content grows); claude AUTO-LAUNCHES
-//       (plain, no prompt sent) — there is no Launch button anymore
-//     - an untitled card / a done-column card / a missing project never
-//       auto-launches
+//     - card with text → full fields (content grows) + the run footer: the
+//       per-card run settings (flow / model / effort, autosaved on the task)
+//       and an explicit 実行 button. NOTHING launches by itself (the drawer
+//       auto-launch died 2026-06-12) — 実行 calls onLaunchTask with the run
+//       payload (live fields + overrides) and the server auto-starts the task
+//     - an untitled card disables 実行; a missing project hides the footer
 //     - the conversation pane is NOT mounted at all
 //   Session (slot exists)
 //     - terminal pane mounts; fields collapse behind the one-line header
@@ -30,12 +32,20 @@ vi.mock('@/lib/api-client', () => ({
   api: {
     api: {
       settings: { $get: () => Promise.resolve({ json: () => Promise.resolve({}) }) },
-      project: { 'task-title': { $post: (a: unknown) => taskTitlePost(a) } },
+      project: {
+        'task-title': { $post: (a: unknown) => taskTitlePost(a) },
+        // PR-state chip (B023): the drawer asks once per open; answering
+        // available:false keeps the strip exactly as these tests expect.
+        'pr-info': {
+          $post: () =>
+            Promise.resolve({ json: () => Promise.resolve({ available: false }) }),
+        },
+      },
     },
   },
 }))
 
-import { BoardModule } from './BoardModule'
+import { BoardModule, type TaskLaunchResult } from './BoardModule'
 
 const makeTask = (over: Partial<ProjectTask> = {}): ProjectTask => ({
   id: 't1',
@@ -63,10 +73,14 @@ const renderDrawer = (
 ) => {
   const onOpenDetail = vi.fn()
   const persist = vi.fn()
-  // Resolves true = launch succeeded (the real ProjectPanel contract). A bare
-  // vi.fn() returns undefined, which the auto-launch effect would read as a
-  // FAILED launch and flip the footer to the retry CTA.
-  const onLaunchTask = vi.fn(async (_t: ProjectTask) => true)
+  // Resolves { ok: true } = launch succeeded (the real ProjectPanel contract).
+  // A bare vi.fn() returns undefined, which runTask would read as a FAILED
+  // launch and flip the footer to the failure copy.
+  const onLaunchTask = vi.fn(
+    async (_t: ProjectTask, _opts?: { cwd?: string; run?: Record<string, unknown> }) => ({
+      ok: true,
+    }),
+  )
   const project = opts.missing ? ({ ...baseProject, missing: true } as ProjectMeta) : baseProject
   const utils = render(
     <BoardModule
@@ -105,20 +119,20 @@ afterEach(() => {
 })
 
 describe('BoardModule drawer — Draft mode', () => {
-  it('empty card: single capture box, no conversation pane, no Launch button, NO auto-launch', async () => {
-    const { container, queryByTestId, onLaunchTask } = renderDrawer(
+  it('empty card: single capture box, no conversation pane, 実行 disabled, NO launch', async () => {
+    const { container, queryByTestId, onLaunchTask, getByText } = renderDrawer(
       makeData(makeTask({ title: '' })),
     )
     await flush()
     expect(
       container.querySelector('textarea[placeholder="board.detail.capturePlaceholder"]'),
     ).toBeTruthy()
-    // No title/content fields yet, no terminal, no launch affordance.
+    // No title/content fields yet, no terminal.
     expect(container.querySelector('input[placeholder="board.detail.titlePlaceholder"]')).toBeNull()
     expect(queryByTestId('conversation')).toBeNull()
-    expect(container.textContent).not.toContain('projectPanel.launchClaude')
-    // A just-created untitled card must NOT auto-launch — claude starts only
-    // once a title exists.
+    // The run footer is there but inert: an untitled card can't run, and
+    // nothing ever launches without the explicit click.
+    expect((getByText('board.run.button') as HTMLButtonElement).disabled).toBe(true)
     expect(onLaunchTask).not.toHaveBeenCalled()
   })
 
@@ -154,50 +168,84 @@ describe('BoardModule drawer — Draft mode', () => {
     expect(taskTitlePost).not.toHaveBeenCalled()
   })
 
-  it('titled card: full fields visible, no Launch button, claude AUTO-LAUNCHES once', async () => {
-    const { container, queryByTestId, onLaunchTask } = renderDrawer(makeData(makeTask()))
+  it('titled card: full fields + run footer; NOTHING launches without the click', async () => {
+    const { container, queryByTestId, onLaunchTask, getByText } = renderDrawer(
+      makeData(makeTask()),
+    )
     await flush()
     expect(
       container.querySelector('input[placeholder="board.detail.titlePlaceholder"]'),
     ).toBeTruthy()
     expect(queryByTestId('conversation')).toBeNull()
-    expect(container.textContent).not.toContain('projectPanel.launchClaude')
-    // Auto-launch fired exactly once for the titled card.
-    expect(onLaunchTask).toHaveBeenCalledTimes(1)
-    expect((onLaunchTask.mock.calls[0][0] as ProjectTask).id).toBe('t1')
-    await flush()
-    expect(onLaunchTask).toHaveBeenCalledTimes(1)
+    // The old auto-launch is gone: opening the drawer spawns nothing.
+    expect(onLaunchTask).not.toHaveBeenCalled()
+    expect((getByText('board.run.button') as HTMLButtonElement).disabled).toBe(false)
+    expect(getByText(/board\.run\.hint/)).toBeTruthy()
   })
 
-  it('done-column card never auto-launches and shows the done note (not a launch promise)', async () => {
-    const { onLaunchTask, getByText, container } = renderDrawer(
+  it('実行 launches with the run payload (live fields + per-card overrides)', async () => {
+    const task = makeTask({
+      notes: 'Do the thing',
+      run: { flow: 'pr', model: 'fable', effort: 'xhigh' },
+    })
+    const { getByText, onLaunchTask } = renderDrawer(makeData(task))
+    await flush()
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    expect(onLaunchTask).toHaveBeenCalledTimes(1)
+    const [calledTask, opts] = onLaunchTask.mock.calls[0]
+    expect(calledTask.id).toBe('t1')
+    expect(opts?.run).toEqual({
+      title: 'Saved title',
+      notes: 'Do the thing',
+      attachmentIds: [],
+      flow: 'pr',
+      model: 'fable',
+      effort: 'xhigh',
+    })
+  })
+
+  it('changing a run setting persists it on the task (autosave)', async () => {
+    const { container, persist } = renderDrawer(makeData(makeTask()))
+    await flush()
+    // Scope to the drawer — the board's own defaults strip has selects too.
+    const selects = Array.from(container.querySelector('aside')!.querySelectorAll('select'))
+    // git project → [flow, model, effort]; pick the effort select (last).
+    const effort = selects[selects.length - 1] as HTMLSelectElement
+    fireEvent.change(effort, { target: { value: 'max' } })
+    expect(persist).toHaveBeenCalledTimes(1)
+    const saved = persist.mock.calls[0][0] as ProjectData
+    expect(saved.tasks[0].run).toEqual({ effort: 'max' })
+  })
+
+  it('done-column card: the run footer still renders (running again is explicit)', async () => {
+    const { onLaunchTask, getByText } = renderDrawer(
       makeData(makeTask({ boardColumn: 'done', done: true })),
     )
     await flush()
     expect(onLaunchTask).not.toHaveBeenCalled()
-    expect(getByText(/board\.detail\.autoLaunchDone/)).toBeTruthy()
-    expect(container.textContent).not.toContain('board.detail.autoLaunchHint')
+    expect((getByText('board.run.button') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('missing project never auto-launches and shows the missing note', async () => {
+  it('missing project: no run button, the missing note explains why', async () => {
     const { onLaunchTask, getByText, container } = renderDrawer(
       makeData(makeTask()),
       { missing: true },
     )
     await flush()
     expect(onLaunchTask).not.toHaveBeenCalled()
-    expect(getByText(/board\.detail\.autoLaunchMissing/)).toBeTruthy()
-    expect(container.textContent).not.toContain('board.detail.autoLaunchHint')
+    expect(getByText(/board\.run\.missingFolder/)).toBeTruthy()
+    expect(container.textContent).not.toContain('board.run.button')
   })
 
-  it('a failed auto-launch shows a retry CTA, and retry re-invokes the launch', async () => {
+  it('a failed run shows the failure copy, and 実行 again retries', async () => {
     const onOpenDetail = vi.fn()
     const persist = vi.fn()
-    // First launch fails (resolves false), retry succeeds.
+    // First launch fails (resolves { ok: false }), retry succeeds.
     const onLaunchTask = vi
-      .fn(async (_t: ProjectTask) => true)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true)
+      .fn(async (_t: ProjectTask): Promise<TaskLaunchResult> => ({ ok: true }))
+      .mockResolvedValueOnce({ ok: false, reason: 'claudeMissing' })
+      .mockResolvedValueOnce({ ok: true })
     const { getByText, queryByText } = render(
       <BoardModule
         data={makeData(makeTask())}
@@ -213,13 +261,40 @@ describe('BoardModule drawer — Draft mode', () => {
       />,
     )
     await flush()
+    expect(onLaunchTask).not.toHaveBeenCalled()
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
     expect(onLaunchTask).toHaveBeenCalledTimes(1)
-    // Failure surfaces a retry CTA, not the "will auto-launch" promise.
-    const retry = getByText('board.detail.autoLaunchRetry')
-    expect(queryByText(/board\.detail\.autoLaunchHint/)).toBeNull()
-    fireEvent.click(retry)
+    // Reason-specific copy (claudeMissing → install guidance).
+    expect(getByText(/board\.run\.failedClaudeMissing/)).toBeTruthy()
+    fireEvent.click(getByText('board.run.button'))
     await flush()
     expect(onLaunchTask).toHaveBeenCalledTimes(2)
+    // A successful retry clears the failure copy.
+    expect(queryByText(/board\.run\.failedClaudeMissing/)).toBeNull()
+  })
+
+  it('review card: no silent spawn — 実行 is the deliberate start (F031 holds)', async () => {
+    const { getByText, onLaunchTask } = renderDrawer(
+      makeData(makeTask({ boardColumn: 'review' })),
+    )
+    await flush()
+    // Opening a review card is READING — never a silent spawn (F031).
+    expect(onLaunchTask).not.toHaveBeenCalled()
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    expect(onLaunchTask).toHaveBeenCalledTimes(1)
+    expect((onLaunchTask.mock.calls[0][0] as ProjectTask).id).toBe('t1')
+  })
+
+  it('blocked card with a branch: the footer ALSO offers "Review with claude"', async () => {
+    const { getByText, onLaunchTask } = renderDrawer(
+      makeData(makeTask({ boardColumn: 'blocked', branch: 'task/x' })),
+    )
+    await flush()
+    expect(onLaunchTask).not.toHaveBeenCalled()
+    expect(getByText('board.detail.reviewWithClaude')).toBeTruthy()
+    expect(getByText('board.run.button')).toBeTruthy()
   })
 
   it('first keystroke in the title field clears titleAuto', async () => {
@@ -298,9 +373,43 @@ describe('BoardModule drawer — Session mode', () => {
         taskId: 't1',
         title: 'Saved title',
         notes: '',
+        // Live attachment ids ride along (B022) — empty card, empty list.
+        attachmentIds: [],
       }),
     })
     await flush()
+  })
+
+  it('restart failure (dead session) shows the run failure copy — never a raw i18n key', async () => {
+    const onLaunchTask = vi
+      .fn(
+        async (
+          _t: ProjectTask,
+          _opts?: { cwd?: string; run?: Record<string, unknown> },
+        ): Promise<TaskLaunchResult> => ({ ok: true }),
+      )
+      .mockResolvedValueOnce({ ok: false, reason: 'claudeMissing' })
+    const { getByText, container } = render(
+      <BoardModule
+        data={makeData(makeTask())}
+        project={baseProject}
+        persist={vi.fn()}
+        detailId="t1"
+        onOpenDetail={vi.fn()}
+        renderConversation={() => <div data-testid="conversation" />}
+        hasTerminalSlot={() => true}
+        liveTerminalId={() => null}
+        onDeleteTask={vi.fn()}
+        onLaunchTask={onLaunchTask}
+      />,
+    )
+    await flush()
+    fireEvent.click(getByText('board.detail.restartSession'))
+    await flush()
+    // The failure hint maps to the NEW board.run.* keys (the old
+    // board.detail.autoLaunch* keys were deleted with the auto-launch).
+    expect(getByText(/board\.run\.failedClaudeMissing/)).toBeTruthy()
+    expect(container.textContent).not.toContain('board.detail.autoLaunch')
   })
 
   it('"Insert task into input" is disabled without a live PTY (exited session)', async () => {
@@ -315,10 +424,154 @@ describe('BoardModule drawer — Session mode', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('Draft auto-launch note shows the flow text too (merge flow on a git project)', async () => {
+  it('Draft run hint shows the flow text too (merge flow on a git project)', async () => {
     const { getByText } = renderDrawer(makeData(makeTask(), { targetBranch: 'develop' }))
     await flush()
-    expect(getByText(/board\.detail\.autoLaunchHint/)).toBeTruthy()
+    expect(getByText(/board\.run\.hint/)).toBeTruthy()
     expect(getByText(/board\.detail\.flowMerge/)).toBeTruthy()
+  })
+
+  it("a card's run.flow override drives the flow text (PR wins over the merge default)", async () => {
+    const { getByText } = renderDrawer(
+      makeData(makeTask({ run: { flow: 'pr' } }), { targetBranch: 'main' }),
+    )
+    await flush()
+    expect(getByText(/board\.detail\.flowPr/)).toBeTruthy()
+  })
+})
+
+// ─── Undo / redo (B013) ──────────────────────────────────────────────────────
+// History lives in BoardModule (the data+persist layer): local persists are
+// coalesced snapshots, ⌘Z restores the previous tasks array THROUGH persist
+// (so the undo itself syncs), Shift+⌘Z redoes, focused text fields keep the
+// combo, and external tasks replacements reset the history (lastLocal
+// pattern) — except the drawer delete, which is adopted as an undoable step.
+
+const makeMultiData = (tasks: ProjectTask[]): ProjectData =>
+  ({ description: '', tasks, notes: '', updatedAt: '' }) as ProjectData
+
+const renderBoard = (data: ProjectData, detailId: string | null = null) => {
+  const persist = vi.fn()
+  const onDeleteTask = vi.fn()
+  const props = (d: ProjectData, openId: string | null) => ({
+    data: d,
+    project: baseProject,
+    persist,
+    detailId: openId,
+    onOpenDetail: vi.fn(),
+    renderConversation: () => <div data-testid="conversation" />,
+    hasTerminalSlot: () => false,
+    liveTerminalId: () => null,
+    onDeleteTask,
+    onLaunchTask: vi.fn(async (_t: ProjectTask): Promise<TaskLaunchResult> => ({ ok: true })),
+  })
+  const utils = render(<BoardModule {...props(data, detailId)} />)
+  return {
+    ...utils,
+    persist,
+    onDeleteTask,
+    rerenderWith: (d: ProjectData, openId: string | null = null) =>
+      utils.rerender(<BoardModule {...props(d, openId)} />),
+  }
+}
+
+describe('BoardModule — board undo/redo (B013)', () => {
+  it('clear Done → ⌘Z restores the cleared cards (undo persists), ⇧⌘Z re-clears', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'todo' })
+    const b = makeTask({ id: 'b', title: 'B', boardColumn: 'done', done: true })
+    const { persist, getByText, getByTitle } = renderBoard(makeMultiData([a, b]))
+    await flush()
+    // Nothing to undo yet — the toolbar affordance starts disabled.
+    expect((getByTitle('board.toolbar.undo') as HTMLButtonElement).disabled).toBe(true)
+    expect((getByTitle('board.toolbar.redo') as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.click(getByText('board.toolbar.clearDone'))
+    expect(persist).toHaveBeenCalledTimes(1)
+    expect((persist.mock.calls[0][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
+
+    // ⌘Z — flushes the pending coalesced step and persists the pre-clear tasks.
+    fireEvent.keyDown(window, { key: 'z', metaKey: true })
+    expect(persist).toHaveBeenCalledTimes(2)
+    expect((persist.mock.calls[1][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a', 'b'])
+
+    // Redo is now live — via the toolbar button this time.
+    const redoBtn = getByTitle('board.toolbar.redo') as HTMLButtonElement
+    expect(redoBtn.disabled).toBe(false)
+    fireEvent.click(redoBtn)
+    expect(persist).toHaveBeenCalledTimes(3)
+    expect((persist.mock.calls[2][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
+  })
+
+  it('⌘Z is left to a focused text field (the search input keeps native undo)', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'done', done: true })
+    const { persist, getByText, container } = renderBoard(makeMultiData([a]))
+    await flush()
+    fireEvent.click(getByText('board.toolbar.clearDone'))
+    expect(persist).toHaveBeenCalledTimes(1)
+    const search = container.querySelector<HTMLInputElement>(
+      'input[placeholder="board.toolbar.searchPlaceholder"]',
+    )!
+    search.focus()
+    fireEvent.keyDown(search, { key: 'z', metaKey: true })
+    expect(persist).toHaveBeenCalledTimes(1) // untouched — the field owns ⌘Z
+  })
+
+  it('drawer delete is adopted into history — ⌘Z restores the deleted card', async () => {
+    const before = makeData(makeTask()) // id t1, titled, todo
+    const { persist, onDeleteTask, getByTitle, rerenderWith } = renderBoard(before, 't1')
+    await flush()
+    fireEvent.click(getByTitle('projectPanel.deleteTask'))
+    expect(onDeleteTask).toHaveBeenCalledWith('t1')
+    // ProjectPanel persisted the removal itself — the data prop comes back
+    // without the task (an EXTERNAL change from this module's viewpoint).
+    rerenderWith({ ...before, tasks: [] }, null)
+    await flush()
+    fireEvent.keyDown(window, { key: 'z', metaKey: true })
+    const last = persist.mock.calls.at(-1)![0] as ProjectData
+    expect(last.tasks.map(t => t.id)).toEqual(['t1'])
+  })
+
+  it('a re-render that KEEPS the tasks array identity preserves the history (poll no-op contract)', async () => {
+    // ProjectPanel's 5s reloadProjectData now skips setData when the fetched
+    // JSON equals lastSavedJson — the data prop re-arrives with the SAME tasks
+    // identity. That must read as "nothing happened", not as an external
+    // replacement that wipes the stacks.
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'done', done: true })
+    const data = makeMultiData([a])
+    const { persist, getByText, rerenderWith } = renderBoard(data)
+    await flush()
+    fireEvent.click(getByText('board.toolbar.clearDone'))
+    expect(persist).toHaveBeenCalledTimes(1)
+    // ProjectPanel adopts our own write (setData(next)) — the echo render
+    // carries the tasks array WE emitted…
+    const cleared = persist.mock.calls[0][0] as ProjectData
+    rerenderWith(cleared)
+    await flush()
+    // …and the poll tick re-renders with the SAME object (the skip path keeps
+    // identity instead of swapping in a content-equal fresh fetch).
+    rerenderWith(cleared)
+    await flush()
+    // ⌘Z still restores the cleared card — the stacks survived the tick.
+    fireEvent.keyDown(window, { key: 'z', metaKey: true })
+    expect(persist).toHaveBeenCalledTimes(2)
+    expect((persist.mock.calls[1][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
+  })
+
+  it('an UNFLAGGED external tasks replacement (remote sync) resets the history', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'done', done: true })
+    const { persist, getByText, rerenderWith } = renderBoard(makeMultiData([a]))
+    await flush()
+    fireEvent.click(getByText('board.toolbar.clearDone'))
+    expect(persist).toHaveBeenCalledTimes(1)
+    // A wholesale replacement arrives (teammate's sync) — stacks drop.
+    const remote = makeMultiData([makeTask({ id: 'remote', title: 'R' })])
+    rerenderWith(remote)
+    await flush()
+    fireEvent.keyDown(window, { key: 'z', metaKey: true })
+    expect(persist).toHaveBeenCalledTimes(1) // no undo across the reset
   })
 })

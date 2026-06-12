@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   bracketedPaste,
+  buildCustomModulePrompt,
   BRACKETED_PASTE_START,
   BRACKETED_PASTE_END,
 } from './pastePrompt'
@@ -65,5 +66,28 @@ describe('bracketedPaste', () => {
     expect(out.endsWith('\x1b[201~')).toBe(true)
     expect(out.endsWith('\n')).toBe(false)
     expect(out).toBe('\x1b[200~' + prompt + '\x1b[201~')
+  })
+})
+
+describe('buildCustomModulePrompt', () => {
+  it('carries the label, description and react editing instructions', () => {
+    const out = buildCustomModulePrompt({
+      label: 'My Tab',
+      description: 'shows a chart',
+      framework: 'react',
+    })
+    expect(out).toContain('My Tab')
+    expect(out).toContain('shows a chart')
+    expect(out).toContain('source.tsx')
+    expect(out).toContain('lucide-react')
+    expect(out).toContain('hot-reloads')
+  })
+
+  it('points at source.html for the html framework', () => {
+    const out = buildCustomModulePrompt({ label: 'H', description: '', framework: 'html' })
+    expect(out).toContain('source.html')
+    expect(out).not.toContain('source.tsx')
+    // Empty description is rendered as an explicit placeholder, not blank.
+    expect(out).toContain('(none)')
   })
 })

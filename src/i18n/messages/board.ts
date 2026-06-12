@@ -22,9 +22,34 @@ export const board = {
     'board.toolbar.reviewColumnHideHint':
       'Hide the review column — cards parked there fold into In progress until it returns.',
     'board.toolbar.projectSettings': 'Settings',
+    'board.toolbar.clearDone': 'Clear',
+    'board.toolbar.clearDoneTitle': 'Delete every card in Done',
+    'board.toolbar.clearDoneConfirm':
+      'Delete {count} cards in Done. On a shared board the deletion applies to everyone. (⌘Z right after brings them back.)',
+    'board.toolbar.searchPlaceholder': 'Search cards',
+    'board.toolbar.searchClear': 'Clear search',
+    'board.toolbar.undo': 'Undo (⌘Z)',
+    'board.toolbar.redo': 'Redo (⇧⌘Z)',
     // Card
     'board.card.untitled': 'Untitled',
+    'board.empty.guide': 'Write a task in “+ Add a card” → check its run settings (PR / model / effort) → Run → the terminal opens and the task starts by itself → on finish the work merges (or opens a PR).',
+    'board.card.sessionWorking': 'Claude is working on this card',
+    'board.card.sessionWaiting': 'Claude is waiting for your input on this card',
+    'board.detail.markDone': '✓ Done',
+    'board.detail.markDoneTitle': 'Move this card to Done now (use when the run finished but the card didn\'t move)',
+    'board.card.markReviewed': 'Mark reviewed',
+    'board.card.markReviewedTitle': 'Stamp this card as reviewed by you (visible to the whole board)',
+    'board.card.reviewedBy': 'Reviewed by {name}',
+    'board.card.reviewedClear': 'Click to clear the reviewed stamp',
+    'board.card.merged': 'Merged',
+    'board.card.mergedTitle': "This card's branch is already merged into the target branch",
+    'board.card.mergedToDone': '→ Done',
+    'board.card.mergedToDoneTitle':
+      'Move this card to Done — the branch has landed (nothing moves without this click)',
     'board.card.untitledParen': '(Untitled)',
+    'board.card.duplicate': 'Duplicate card',
+    'board.card.duplicateTitle':
+      'Duplicate this card right below — content and assignee are copied; branch, PR and review state are not',
     'board.card.ariaLabel': '{title} — {column}. Press Enter to open',
     // Composer
     'board.composer.placeholder': '＋ Add a card',
@@ -33,39 +58,104 @@ export const board = {
     'board.detail.titlePlaceholder': 'What this task is',
     'board.detail.notesLabel': 'Content',
     'board.detail.notesPlaceholder': 'What this task should do — "Insert task into input" pastes it into claude together with the title',
+    // Image attachments (B022)
+    'board.detail.attachmentsLabel': 'Images',
+    'board.detail.attachAdd': '+ Add image',
+    'board.detail.attachAddTitle':
+      'Attach a screenshot — you can also paste or drop an image on the content field. "Insert task into input" hands the file paths to claude.',
+    'board.detail.attachBusy': 'Attaching…',
+    'board.detail.attachRemove': 'Remove image',
+    'board.detail.attachTooLarge': 'Image is too large (max 5MB)',
+    'board.detail.attachFailed': 'Could not attach the image — please try again',
     'board.detail.assigneeLabel': 'Assignee',
     'board.detail.assigneeAdd': '+ Add',
     'board.detail.assigneeAddPlaceholder': 'Name',
     'board.detail.assigneeAddConfirm': 'Add',
     'board.detail.assigneeAssign': 'Assign to {name}',
     'board.detail.assigneeUnassign': 'Click to unassign',
+    'board.detail.dependsLabel': 'Depends on',
+    'board.detail.dependsAdd': '+ Add',
+    'board.detail.dependsPick': 'Pick a card…',
+    'board.detail.dependsNone': 'No cards left to depend on',
+    'board.detail.dependsRemove': 'Remove the dependency on "{title}"',
+    'board.detail.dueLabel': 'Due',
+    'board.detail.dueClear': 'Clear the due date',
+    'board.card.depsTitle': 'Waiting on: {titles}',
+    'board.card.dueTitle': 'Due {date}',
     'board.detail.resizeWidth': 'Drag to resize the panel width',
     'board.detail.resizeSplit': 'Drag to resize the terminal height',
     'board.detail.resizeSplitTitle': 'Drag to resize · double-click to maximize the terminal',
     'board.detail.prLabel': 'Pull request',
     'board.detail.captureLabel': 'Task',
     'board.detail.capturePlaceholder':
-      'What should be done?\nThe first line becomes the title — for longer text an AI summary title replaces it automatically (✦).',
-    'board.detail.autoLaunchHint':
-      'claude launches here automatically once the card has a title. Nothing is sent — you stay in control.',
-    'board.detail.autoLaunchDone':
-      'This card is in Done — no session is started. Move it back to launch claude.',
-    'board.detail.autoLaunchMissing':
+      'What should be done?\nThe first line becomes the title — long text gets an AI summary title (✦).\nFor a smooth run, say: what to change, why, and what "done" looks like.',
+    'board.run.button': 'Run',
+    'board.run.buttonBusy': 'Starting…',
+    'board.run.buttonTitle':
+      'Launch a claude session and start this task right away (the prompt is sent for you)',
+    'board.run.needsTitle': 'Add a title to run this task.',
+    'board.run.hint': 'Run opens the terminal and starts this task automatically.',
+    'board.run.missingFolder':
       'The project folder is missing — claude can’t start until it’s relocated.',
-    'board.detail.autoLaunchFailed':
-      'Couldn’t start claude. Check that the claude CLI is installed, then retry.',
-    'board.detail.autoLaunchRetry': 'Retry launch',
+    'board.run.failed':
+      'Couldn’t start claude. Make sure the claude CLI is installed and on your PATH (run `claude` in a terminal to check), then run again.',
+    'board.run.failedClaudeMissing':
+      'The claude CLI was not found on this machine — install Claude Code and sign in, then restart OPEN GROUND and run again.',
+    'board.run.flowLabel': 'On finish',
+    'board.run.flowMerge': 'Merge',
+    'board.run.flowPr': 'Open a PR',
+    'board.run.modelLabel': 'Model',
+    'board.run.effortLabel': 'Effort',
+    'board.run.inheritDefault': 'Default ({value})',
+    'board.run.modelCliDefault': 'CLI model',
+    'board.run.effortCliDefault': 'CLI effort',
+    'board.defaults.label': 'Run defaults',
+    'board.defaults.title':
+      'Defaults for every task run on this board — each card can override them in its drawer. Completion flow is shared with the team; model / effort / permissions are personal.',
+    'board.defaults.cliDefault': 'CLI default',
+    'board.defaults.permLabel': 'Permissions',
+    'board.detail.restartSession': 'Restart session',
+    'board.detail.restartSessionHint':
+      'The claude session has ended — restart it to keep working on this task.',
     'board.detail.insertTask': 'Insert task into input',
     'board.detail.insertTaskBusy': 'Inserting…',
     'board.detail.insertTaskHint': 'Pastes the title + content unsent — press Enter to run.',
-    'board.detail.insertTaskFailed': 'Insert failed — the session may have ended. Try again.',
+    'board.detail.insertTaskFailed':
+      'Couldn’t insert — the claude session has probably ended. Relaunch it with "Launch Claude", then insert again.',
+    'board.detail.insertTaskFailedNetwork':
+      'Couldn’t reach the server — check that OPEN GROUND is still running, then insert again.',
+    'board.detail.insertTaskTooLarge':
+      'The task content is too large to paste — split it into smaller tasks, then insert again.',
     'board.detail.flowBaseDefault': 'the launch branch',
     'board.detail.flowPr': 'On finish: PR → {base} (a human merges)',
+    'board.detail.flowPrReview': 'On finish: PR → {base}, card moves to Review (a human merges)',
+    'board.detail.isolationNote': 'Works on its own task/ branch in an isolated worktree',
+    'board.detail.profileNote': '{mode} · {model}',
+    'board.detail.profileModelDefault': 'CLI default model',
+    'board.detail.profileTitle':
+      'Launch profile for this run — board defaults (the strip above the board) overridden by this card’s run settings',
     'board.detail.flowMerge': 'On finish: merge → {base}',
     'board.detail.titleAutoTitle': 'Auto-generated title — editing it makes it yours',
     'board.detail.regenTitle': 'Regenerate the title from the content (AI)',
     'board.detail.fieldsToggle': 'Show / hide the task fields',
     'board.detail.branchTitle': 'Task branch',
+    'board.detail.prStateTitle': 'Pull request',
+    'board.detail.tryBranch': 'Open locally',
+    'board.detail.tryBranchBusy': 'Checking out…',
+    'board.detail.tryBranchTitle': 'Check this branch out into its own worktree and open the folder — review the actual code without touching your working tree',
+    'board.detail.tryBranchFailed':
+      "Couldn't check out the branch — it may not be pushed yet. Push it from the task's session (or run git push), then retry.",
+    'board.detail.tryBranchInvalid':
+      "This branch name can't be checked out — check the task's branch name.",
+    'board.detail.tryBranchGitFailed':
+      "Git couldn't check out the branch — check the repository state (git status), then retry.",
+    // Review with claude (F064 — reviewer flow)
+    'board.detail.reviewWithClaude': 'Review with claude',
+    'board.detail.reviewWithClaudeBusy': 'Preparing review…',
+    'board.detail.reviewWithClaudeTitle':
+      "Check the branch out into its own worktree and put a diff-review instruction into this card's claude input — nothing is sent until you press Enter",
+    'board.detail.reviewWithClaudeFailed':
+      "Couldn't prepare the review session — restart the session and retry.",
     // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
       'Launch claude in this project (plain — no prompt is sent). Use "Insert task into input" to paste the title + content into the input box, then press Enter to run. Respond and approve permission prompts in this terminal.',
@@ -91,9 +181,34 @@ export const board = {
     'board.toolbar.reviewColumnHideHint':
       'レビュー列を隠します — 置かれていたカードは再表示まで「実行中」に畳まれます。',
     'board.toolbar.projectSettings': '設定',
+    'board.toolbar.clearDone': 'クリア',
+    'board.toolbar.clearDoneTitle': '完了列のカードをすべて削除',
+    'board.toolbar.clearDoneConfirm':
+      'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。（直後なら ⌘Z で戻せます）',
+    'board.toolbar.searchPlaceholder': 'カードを検索',
+    'board.toolbar.searchClear': '検索をクリア',
+    'board.toolbar.undo': '元に戻す (⌘Z)',
+    'board.toolbar.redo': 'やり直す (⇧⌘Z)',
     // Card
     'board.card.untitled': '無題',
+    'board.empty.guide': '「＋ カードを追加」にやることを書く → 設定（PR/モデル/effort）を確認 → 実行 → ターミナルでタスクが自動で走る → 完了でマージ（または PR）。',
+    'board.card.sessionWorking': 'このカードで claude が作業中です',
+    'board.card.sessionWaiting': 'このカードで claude があなたの入力を待っています',
+    'board.detail.markDone': '✓ 完了にする',
+    'board.detail.markDoneTitle': 'このカードを今すぐ Done へ（ランは終わったのにカードが動かなかった時に）',
+    'board.card.markReviewed': 'レビュー済みにする',
+    'board.card.markReviewedTitle': 'このカードをあなたがレビュー済みにします（ボード全員に見えます）',
+    'board.card.reviewedBy': '{name} がレビュー済み',
+    'board.card.reviewedClear': 'クリックでレビュー済みを解除',
+    'board.card.merged': 'マージ済み',
+    'board.card.mergedTitle': 'このカードのブランチはターゲットブランチへマージ済みです',
+    'board.card.mergedToDone': '→ 完了',
+    'board.card.mergedToDoneTitle':
+      'このカードを完了列へ移動します — ブランチはマージ済み（クリックするまで動きません）',
     'board.card.untitledParen': '（無題）',
+    'board.card.duplicate': 'カードを複製',
+    'board.card.duplicateTitle':
+      'このカードをすぐ下に複製します — 内容と担当者はコピー、ブランチ・PR・レビュー状態は引き継ぎません',
     'board.card.ariaLabel': '{title} — {column}。Enter で開く',
     // Composer
     'board.composer.placeholder': '＋ カードを追加',
@@ -102,39 +217,104 @@ export const board = {
     'board.detail.titlePlaceholder': 'このタスクの内容',
     'board.detail.notesLabel': '内容',
     'board.detail.notesPlaceholder': 'このタスクでやること —「タスク内容を入力欄へ」でタイトルと一緒に claude へ貼り付けられます',
+    // Image attachments (B022)
+    'board.detail.attachmentsLabel': '画像',
+    'board.detail.attachAdd': '＋ 画像を追加',
+    'board.detail.attachAddTitle':
+      'スクリーンショットを添付します — 内容欄への貼り付けやドロップでも添付できます。「タスク内容を入力欄へ」でファイルパスが claude に渡ります。',
+    'board.detail.attachBusy': '添付中…',
+    'board.detail.attachRemove': '画像を削除',
+    'board.detail.attachTooLarge': '画像が大きすぎます（最大5MB）',
+    'board.detail.attachFailed': '画像を添付できませんでした — もう一度お試しください',
     'board.detail.assigneeLabel': '担当者',
     'board.detail.assigneeAdd': '＋ 追加',
     'board.detail.assigneeAddPlaceholder': '名前',
     'board.detail.assigneeAddConfirm': '追加',
     'board.detail.assigneeAssign': '{name} に割り当て',
     'board.detail.assigneeUnassign': 'クリックで解除',
+    'board.detail.dependsLabel': '依存',
+    'board.detail.dependsAdd': '＋ 追加',
+    'board.detail.dependsPick': 'カードを選ぶ…',
+    'board.detail.dependsNone': '依存に追加できるカードがありません',
+    'board.detail.dependsRemove': '「{title}」への依存を外す',
+    'board.detail.dueLabel': '期限',
+    'board.detail.dueClear': '期限をクリア',
+    'board.card.depsTitle': '先行タスク: {titles}',
+    'board.card.dueTitle': '期限 {date}',
     'board.detail.resizeWidth': 'ドラッグでパネル幅を変更',
     'board.detail.resizeSplit': 'ドラッグでターミナルの高さを変更',
     'board.detail.resizeSplitTitle': 'ドラッグでサイズ変更 · ダブルクリックでターミナル最大化',
     'board.detail.prLabel': 'プルリクエスト',
     'board.detail.captureLabel': 'タスク',
     'board.detail.capturePlaceholder':
-      'やることを書いてください\n1行目がタイトルになります — 長い内容は AI が短いタイトルに自動で整えます（✦）',
-    'board.detail.autoLaunchHint':
-      'タイトルを付けると claude がここで自動起動します。何も送信されません — 実行はあなたが決めます。',
-    'board.detail.autoLaunchDone':
-      '完了列のカードでは起動しません。起動するには列を戻してください。',
-    'board.detail.autoLaunchMissing':
+      'やることを書いてください\n1行目がタイトル — 長文は AI が短いタイトルに整えます（✦）\nスムーズに走らせるコツ: 何を・なぜ・どうなったら完了か',
+    'board.run.button': '実行',
+    'board.run.buttonBusy': '起動中…',
+    'board.run.buttonTitle':
+      'claude セッションを起動して、このタスクをすぐに開始します（プロンプトは自動送信されます）',
+    'board.run.needsTitle': 'タイトルを付けると実行できます。',
+    'board.run.hint': '実行するとターミナルが開き、このタスクが自動で始まります。',
+    'board.run.missingFolder':
       'プロジェクトフォルダが見つかりません。場所を再設定するまで claude は起動できません。',
-    'board.detail.autoLaunchFailed':
-      'claude を起動できませんでした。claude CLI が入っているか確認して再試行してください。',
-    'board.detail.autoLaunchRetry': '再試行',
+    'board.run.failed':
+      'claude を起動できませんでした。claude CLI がインストールされ PATH が通っているか（ターミナルで `claude` が動くか）確認して、もう一度実行してください。',
+    'board.run.failedClaudeMissing':
+      'claude CLI が見つかりません — Claude Code をインストールしてサインインし、OPEN GROUND を再起動してから、もう一度実行してください。',
+    'board.run.flowLabel': '完了時',
+    'board.run.flowMerge': 'マージ',
+    'board.run.flowPr': 'PR を作成',
+    'board.run.modelLabel': 'モデル',
+    'board.run.effortLabel': 'effort',
+    'board.run.inheritDefault': 'デフォルト（{value}）',
+    'board.run.modelCliDefault': 'CLI 既定',
+    'board.run.effortCliDefault': 'CLI 既定',
+    'board.defaults.label': '実行デフォルト',
+    'board.defaults.title':
+      'このボードのタスク実行のデフォルト — 各カードのドロワーで個別に上書きできます。完了フローはチーム共有、モデル / effort / 権限は個人設定です。',
+    'board.defaults.cliDefault': 'CLI 既定',
+    'board.defaults.permLabel': '権限',
+    'board.detail.restartSession': 'セッションを再起動',
+    'board.detail.restartSessionHint':
+      'claude セッションは終了しています — 再起動するとこのタスクの作業を続けられます。',
     'board.detail.insertTask': 'タスク内容を入力欄へ',
     'board.detail.insertTaskBusy': '挿入中…',
     'board.detail.insertTaskHint': 'タイトルと内容を未送信で貼り付け — Enter で実行が始まります。',
-    'board.detail.insertTaskFailed': '挿入に失敗しました — セッションが終了した可能性があります。もう一度お試しください。',
+    'board.detail.insertTaskFailed':
+      '挿入できませんでした — claude セッションが終了している可能性があります。「Claude を起動」で再起動してから、もう一度挿入してください。',
+    'board.detail.insertTaskFailedNetwork':
+      'サーバーに接続できませんでした — OPEN GROUND が起動しているか確認して、もう一度挿入してください。',
+    'board.detail.insertTaskTooLarge':
+      'タスク内容が大きすぎて貼り付けられません — 内容を小さなタスクに分割してから、もう一度挿入してください。',
     'board.detail.flowBaseDefault': '起動時のブランチ',
     'board.detail.flowPr': '完了時: PR → {base}（人間がマージ）',
+    'board.detail.flowPrReview': '完了時: PR → {base}、カードはレビュー列へ（人間がマージ）',
+    'board.detail.isolationNote': '専用の task/ ブランチ + worktree に隔離して作業',
+    'board.detail.profileNote': '{mode} · {model}',
+    'board.detail.profileModelDefault': 'CLI 既定モデル',
+    'board.detail.profileTitle':
+      'この実行の起動プロファイル — ボード上部のデフォルトを、このカードの実行設定が上書きします',
     'board.detail.flowMerge': '完了時: {base} へマージ',
     'board.detail.titleAutoTitle': '自動生成タイトル — 編集すると固定されます',
     'board.detail.regenTitle': '内容からタイトルを再生成（AI）',
     'board.detail.fieldsToggle': 'タスク詳細の表示切替',
     'board.detail.branchTitle': 'タスクブランチ',
+    'board.detail.prStateTitle': 'プルリクエスト',
+    'board.detail.tryBranch': '手元で開く',
+    'board.detail.tryBranchBusy': 'チェックアウト中…',
+    'board.detail.tryBranchTitle': 'このブランチを専用 worktree にチェックアウトしてフォルダを開きます — 作業ツリーを汚さずに実コードを確認できます',
+    'board.detail.tryBranchFailed':
+      'ブランチをチェックアウトできませんでした — まだ push されていない可能性があります。タスクのセッション（または git push）で push してから、もう一度お試しください。',
+    'board.detail.tryBranchInvalid':
+      'このブランチ名はチェックアウトできません — タスクのブランチ名を確認してください。',
+    'board.detail.tryBranchGitFailed':
+      'git のチェックアウトに失敗しました — リポジトリの状態（git status）を確認して、もう一度お試しください。',
+    // Review with claude (F064 — reviewer flow)
+    'board.detail.reviewWithClaude': 'claude とレビュー',
+    'board.detail.reviewWithClaudeBusy': 'レビュー準備中…',
+    'board.detail.reviewWithClaudeTitle':
+      'ブランチを専用 worktree にチェックアウトし、diff レビューの指示をこのカードの claude 入力欄に未送信で挿入します — Enter を押すまで送信されません',
+    'board.detail.reviewWithClaudeFailed':
+      'レビューセッションを準備できませんでした — セッションを再起動してもう一度お試しください。',
     // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
       'このプロジェクトで claude を起動します（プレーン起動 — プロンプトは送信されません）。「タスク内容を入力欄へ」でタイトルと内容を入力欄に貼り付け、Enter で実行します。応答や権限確認はこのターミナルで操作します。',

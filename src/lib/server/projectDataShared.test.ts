@@ -12,12 +12,14 @@ import {
 import { projectDataDir } from './projectDataPath'
 import {
   SHARED_DATA_VERSION,
+  boardAssetsDir,
   boardCardsDir,
   boardNotesPath,
   readSharedMarker,
   writeSharedMarker,
   sharedDataDir,
 } from './sharedData'
+import { TASK_ASSETS_SUBDIR, readTaskAsset, writeTaskAsset } from './taskAssets'
 import type { SharedMarker } from './sharedData'
 import { registerTestProject } from '../../test/registerProject'
 
@@ -71,8 +73,16 @@ describe('projectData — git-shared mode', () => {
     const written = await writeProjectData(dir, data({
       description: 'a board shared via git',
       tasks: [
-        card('aaa', { boardColumn: 'doing', boardOrder: 0, notes: 'plan' }),
-        card('bbb', { boardColumn: 'todo', boardOrder: 1 }),
+        // Every shared card field must survive the per-file round-trip — a
+        // field missing from normalizeCard silently vanishes (the 3点セット
+        // lesson: types.ts / schemas.ts / normalizeCard).
+        card('aaa', {
+          boardColumn: 'doing',
+          boardOrder: 0,
+          notes: 'plan',
+          attachments: [{ id: `${'b'.repeat(40)}.png`, name: 'shot.png', mime: 'image/png' }],
+        }),
+        card('bbb', { boardColumn: 'todo', boardOrder: 1, dependsOn: ['aaa'], dueDate: '2026-06-15' }),
       ],
       notes: '# shared notes\n',
       tabOrder: ['board', 'terminal'],
@@ -102,6 +112,11 @@ describe('projectData — git-shared mode', () => {
     // Deterministic order: column (todo < doing) then boardOrder then id.
     expect(read.tasks.map(t => t.id)).toEqual(['bbb', 'aaa'])
     expect(read.tasks.find(t => t.id === 'aaa')?.notes).toBe('plan')
+    expect(read.tasks.find(t => t.id === 'aaa')?.attachments).toEqual([
+      { id: `${'b'.repeat(40)}.png`, name: 'shot.png', mime: 'image/png' },
+    ])
+    expect(read.tasks.find(t => t.id === 'bbb')?.dependsOn).toEqual(['aaa'])
+    expect(read.tasks.find(t => t.id === 'bbb')?.dueDate).toBe('2026-06-15')
   })
 
   it('orders cards deterministically: column, then boardOrder, then createdAt, then id', async () => {
@@ -299,6 +314,34 @@ describe('projectData — share migrations', () => {
     expect(read.tabOrder).toEqual(original.tabOrder)
     expect(read.tasks.map(t => t.id).sort()).toEqual(['a', 'b'])
     expect(read.tasks.find(t => t.id === 'a')).toMatchObject({ title: 'Task a', notes: 'memo', boardOrder: 0 })
+  })
+
+  it('enable→disable round-trip carries attachment BYTES (central → repo → central)', async () => {
+    // Canvas precedent parity: the board migrations copy the task-assets dir
+    // both ways, so an attached image survives Share → Stop sharing.
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+    await writeProjectData(dir, data({ tasks: [card('t1')] }))
+    const id = await writeTaskAsset(dir, 'image/png', png)
+    const centralAssets = join(await projectDataDir(dir), TASK_ASSETS_SUBDIR)
+    expect(await readdir(centralAssets)).toEqual([id])
+
+    // Enable: bytes follow the cards into the repo (.openground/board/assets/).
+    await migrateBoardToShared(dir)
+    expect(await readdir(boardAssetsDir(dir))).toEqual([id])
+    // The live read now serves the repo copy (marker decides the store).
+    expect((await readTaskAsset(dir, id))?.data.equals(png)).toBe(true)
+
+    // A second image lands while shared (e.g. a teammate's upload via git).
+    const png2 = Buffer.from('89504e470d0a1a0adeadbeef', 'hex')
+    const id2 = await writeTaskAsset(dir, 'image/png', png2)
+    expect((await readdir(boardAssetsDir(dir))).sort()).toEqual([id, id2].sort())
+
+    // Disable: bytes ride back BEFORE the route rm-rf's .openground/.
+    await migrateBoardFromShared(dir)
+    await rm(sharedDataDir(dir), { recursive: true, force: true })
+    expect((await readdir(centralAssets)).sort()).toEqual([id, id2].sort())
+    expect((await readTaskAsset(dir, id))?.data.equals(png)).toBe(true)
+    expect((await readTaskAsset(dir, id2))?.data.equals(png2)).toBe(true)
   })
 })
 

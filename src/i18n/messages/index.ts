@@ -13,10 +13,11 @@ import { auth } from './auth'
 import { screen } from './screen'
 import { onboarding } from './onboarding'
 import { settings } from './settings'
+import { customTabs } from './customTabs'
 
 export type Lang = 'en' | 'ja'
 
-const groups = [common, projectPanel, board, modals, canvas, canvasElements, misc, toolbar, auth, screen, onboarding, settings]
+const groups = [common, projectPanel, board, modals, canvas, canvasElements, misc, toolbar, auth, screen, onboarding, settings, customTabs]
 
 export const messages: Record<Lang, Record<string, string>> = {
   en: Object.assign({}, ...groups.map(g => g.en)),

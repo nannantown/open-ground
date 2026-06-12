@@ -15,7 +15,9 @@ import {
 } from '@/lib/canvasGroup'
 import { applyElementPatch } from '@/lib/canvasTextStyle'
 import { reorderLayer } from '@/lib/canvasLayerTree'
-import { alignElements, type AlignOp } from '@/lib/canvasAlign'
+import { alignElements, alignElementsToBox, type AlignOp } from '@/lib/canvasAlign'
+import { applyAutoLayout } from '@/lib/canvasAutoLayout'
+import { pickStyle, applyStyle, type CopiedStyle } from '@/lib/canvasStyleClipboard'
 import { elementBounds } from '@/lib/canvasBounds'
 import type {
   CanvasElement,
@@ -170,10 +172,14 @@ export const CanvasWorkspace = ({
     histTimer.current = setTimeout(flushHistory, HIST_IDLE_MS)
   }, [flushHistory])
 
-  // The single entry point for undoable element changes.
+  // The single entry point for undoable element changes. Every change is
+  // normalized through applyAutoLayout so a layout frame's children re-flow on
+  // any edit that funnels here (inspector patches, paste, AI insert, delete,
+  // align) — gesture-final commits inside InfiniteCanvas run the same pass at
+  // pointer-up. No-op (same reference) for canvases without layout frames.
   const mutateElements = useCallback(
     (next: CanvasElement[]) => {
-      patch({ elements: next })
+      patch({ elements: applyAutoLayout(next) })
       recordElementsChange()
     },
     [patch, recordElementsChange],
@@ -190,9 +196,12 @@ export const CanvasWorkspace = ({
     [mutateElements],
   )
 
-  // Align / distribute the current multi-selection (Figma-parity). Locked
-  // elements (directly or via a locked group) and groups (no box of their own)
-  // are excluded; align needs ≥2 participants, distribute ≥3. One undoable step.
+  // Align / distribute the current selection (Figma-parity). Locked elements
+  // (directly or via a locked group) and groups (no box of their own) are
+  // excluded. Two reference modes, like Figma: ≥2 participants align RELATIVE
+  // to each other (alignElements); a SINGLE element that lives inside a frame
+  // aligns against that frame's box (alignElementsToBox — "center in frame").
+  // One undoable step either way.
   const alignSelection = useCallback(
     (op: AlignOp) => {
       const els = canvasRef.current.elements
@@ -205,7 +214,12 @@ export const CanvasWorkspace = ({
         const b = elementBounds(el)
         if (b) items.push({ id, x: b.x, y: b.y, w: b.w, h: b.h })
       }
-      const moves = alignElements(items, op)
+      let moves = alignElements(items, op)
+      if (items.length === 1) {
+        const parent = byId.get(byId.get(items[0].id)?.parentId ?? '')
+        const box = parent?.type === 'frame' ? elementBounds(parent) : null
+        if (box) moves = alignElementsToBox(items, box, op)
+      }
       if (!moves.length) return
       const moveById = new Map(moves.map((m) => [m.id, m]))
       const next = els.map((e) => {
@@ -254,6 +268,8 @@ export const CanvasWorkspace = ({
   // In-canvas clipboard, kept in a ref so it survives re-renders. Independent
   // of the OS clipboard (which the image-paste path owns).
   const clipboardRef = useRef<CanvasElement[]>([])
+  // Style clipboard for ⌥⌘C / ⌥⌘V — same lifetime rules as clipboardRef.
+  const styleClipRef = useRef<CopiedStyle | null>(null)
 
   const copySelection = useCallback(() => {
     // Pull in any group element owning a selected member so the clone stays
@@ -570,50 +586,68 @@ export const CanvasWorkspace = ({
     }
   }, [genPrompt, genPending, projectPath, mutateElements, t])
 
-  // Keyboard map. ⌘-combos (undo/redo/copy/cut/paste/duplicate) are gated when a
-  // text field has focus so native editing keeps working; the bare tool keys
-  // (V/T/S/F/G/O/C/I) are likewise field-gated.
+  // Keyboard map: the workspace owns the ⌘-combos that touch ITS state —
+  // undo/redo stacks and the in-canvas clipboards (elements AND style).
+  // Everything surface-level (bare tool keys, zoom, ⌘A, Esc, lock/hide)
+  // lives in InfiniteCanvas, the single owner for both surfaces.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return // another surface claimed it (Board ⌘Z…)
       const ae = document.activeElement
       const inField =
         !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')
-      if (e.metaKey || e.ctrlKey) {
-        if (inField || e.altKey) return
-        const k = e.key.toLowerCase()
-        if (k === 'z') {
-          e.preventDefault()
-          if (e.shiftKey) redo()
-          else undo()
-        } else if (k === 'y') {
-          e.preventDefault()
-          redo()
-        } else if (k === 'c') {
-          copySelection()
-        } else if (k === 'x') {
-          cutSelection()
-        } else if (k === 'v') {
-          pasteClipboard()
-        } else if (k === 'd') {
-          e.preventDefault()
-          duplicateSelection()
+      if (!(e.metaKey || e.ctrlKey)) return
+      if (inField) return
+      // ⌥⌘C / ⌥⌘V — copy / paste STYLE only (Figma). Matched on e.code:
+      // Option remaps e.key ('ç' / '√'). Copy reads the single selected
+      // element; paste stamps every selected element through the type-aware
+      // field filter in canvasStyleClipboard.
+      if (e.altKey) {
+        if (e.code === 'KeyC') {
+          const els = canvasRef.current.elements
+          const sel = selectedIds.length === 1 ? els.find((el) => el.id === selectedIds[0]) : null
+          const style = sel ? pickStyle(sel) : null
+          if (style) {
+            e.preventDefault()
+            styleClipRef.current = style
+          }
+        } else if (e.code === 'KeyV') {
+          const style = styleClipRef.current
+          if (!style || !selectedIds.length) return
+          const selSet = new Set(selectedIds)
+          const els = canvasRef.current.elements
+          const next = els.map((el) =>
+            selSet.has(el.id) && !el.locked ? applyStyle(el, style) : el,
+          )
+          if (next.some((el, i) => el !== els[i])) {
+            e.preventDefault()
+            mutateElements(next)
+          }
         }
         return
       }
-      if (e.altKey || inField) return
       const k = e.key.toLowerCase()
-      if (k === 'v') setTool('select')
-      else if (k === 't') setTool('text')
-      else if (k === 's') setTool('sticky')
-      else if (k === 'f') setTool('frame')
-      else if (k === 'g') setTool('rect')
-      else if (k === 'o') setTool('ellipse')
-      else if (k === 'c') setTool('comment')
-      else if (k === 'i') setTool('image')
+      if (k === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if (k === 'y') {
+        e.preventDefault()
+        redo()
+      } else if (k === 'c') {
+        copySelection()
+      } else if (k === 'x') {
+        cutSelection()
+      } else if (k === 'v') {
+        pasteClipboard()
+      } else if (k === 'd') {
+        e.preventDefault()
+        duplicateSelection()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [patch, undo, redo, copySelection, cutSelection, pasteClipboard, duplicateSelection])
+  }, [patch, undo, redo, copySelection, cutSelection, pasteClipboard, duplicateSelection, selectedIds, mutateElements])
 
   // A change made <idle window> ago hasn't been committed to the undo stack
   // yet, so also treat a live divergence from the baseline as undoable.
@@ -640,6 +674,17 @@ export const CanvasWorkspace = ({
     for (const e of canvas.elements) if (ids.has(e.id)) n++
     return n
   })()
+  // A single selected element that lives inside a frame can still align — to
+  // its parent frame's box (see alignSelection's single-item mode), so the
+  // AlignBar shows for it too. Locked elements can't move, so they don't gate
+  // the bar open.
+  const singleAlignsToFrame = (() => {
+    if (liveSelectedCount !== 1) return false
+    const el = canvas.elements.find((e) => e.id === selectedIds[0])
+    if (!el || el.locked || !el.parentId) return false
+    const parent = canvas.elements.find((e) => e.id === el.parentId)
+    return parent?.type === 'frame'
+  })()
 
   return (
     <div className="flex h-full w-full overflow-hidden">
@@ -655,6 +700,7 @@ export const CanvasWorkspace = ({
           projectPath={projectPath}
           canvasId={canvas.id}
           onImagePaste={handleImagePaste}
+          frameVariant="design"
           selectedIds={selectedIds}
           onSelect={(id, additive) => {
             if (id == null) {
@@ -795,8 +841,9 @@ export const CanvasWorkspace = ({
             onPatch={(changes) => patchElement(inspectorElement.id, changes)}
           />
         )}
-        {/* Align / distribute toolbar — only with a live multi-selection. */}
-        {liveSelectedCount >= 2 && (
+        {/* Align / distribute toolbar — with a live multi-selection, or a
+            single frame-child (which aligns against its parent frame). */}
+        {(liveSelectedCount >= 2 || singleAlignsToFrame) && (
           <AlignBar count={liveSelectedCount} onAlign={alignSelection} />
         )}
         {/* Undo / redo — keeps the ⌘Z history discoverable for mouse users. */}

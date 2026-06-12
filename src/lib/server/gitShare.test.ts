@@ -110,6 +110,7 @@ describe('shareStatus', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      upstream: false,
     })
   })
 
@@ -122,6 +123,7 @@ describe('shareStatus', () => {
       dirty: false,
       ahead: 0,
       behind: 0,
+      upstream: false,
       branch: 'main',
     })
   })
@@ -144,6 +146,7 @@ describe('shareStatus', () => {
       dirty: true, // the marker is uncommitted
       ahead: 0,
       behind: 0,
+      upstream: true, // a clone tracks origin/main from birth
       branch: 'main',
     })
 

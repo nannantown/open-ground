@@ -22,6 +22,22 @@ export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 export const runsArchiveDir = () => join(openGroundHome(), 'runs-archive')
 export const pasteDir = () => join(openGroundHome(), 'paste')
 
+// ─── Custom modules (user-built tabs) ────────────────────────────────────────
+// Global (app-home) store for custom tab modules — one dir per module uuid,
+// meta in a single index.json. See docs/CUSTOM_TABS_PLAN.md. Callers MUST
+// validate the id (uuid regex + presence in the index) before building a path
+// from it — these are pure joiners, not the security boundary.
+export const customModulesRootDir = () => join(openGroundHome(), 'custom-modules')
+export const customModulesIndexFile = () => join(customModulesRootDir(), 'index.json')
+export const customModuleDir = (id: string) => join(customModulesRootDir(), id)
+export const customModuleSourceFile = (id: string, framework: 'react' | 'html' = 'react') =>
+  join(customModuleDir(id), framework === 'html' ? 'source.html' : 'source.tsx')
+
+export const ensureCustomModulesDir = async () => {
+  await ensureOpenGroundHome()
+  await mkdir(customModulesRootDir(), { recursive: true })
+}
+
 // ─── Per-project central data store ─────────────────────────────────────────
 // Each registered project's OPEN GROUND data (tasks, journal, doc, canvases,
 // images, attachments, verify-logs, worktrees) lives centrally under

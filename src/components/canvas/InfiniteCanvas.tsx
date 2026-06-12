@@ -3,6 +3,10 @@ import { BringToFront, Copy, Group, SendToBack, Trash2, Ungroup } from 'lucide-r
 import { ProjectCard } from './ProjectCard'
 import { ElementView } from './ElementView'
 import { FrameView } from './FrameView'
+import { DesignFrameView } from './DesignFrameView'
+import { applyAutoLayout, addAutoLayout, removeAutoLayout } from '@/lib/canvasAutoLayout'
+import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
+import { cloneSubset } from '@/lib/canvasClone'
 import type {
   CanvasElement,
   CanvasState,
@@ -18,12 +22,15 @@ import {
   descendantIds,
   containmentDepth,
   rectInside,
+  isNestedFrame,
+  frameIdContaining,
   type Container,
   type Rect,
 } from '@/lib/canvasContainment'
 import {
   groupElements,
   ungroupElements,
+  dissolveFrames,
   expandSelectionForElement,
   topGroupId,
   groupLeafIds,
@@ -63,6 +70,16 @@ interface Props {
    *  coordinates. CanvasWorkspace wires this to the /api/canvas/asset
    *  upload path and inserts a fresh ImageElement on success. */
   onImagePaste?: (file: File, worldX: number, worldY: number) => void
+  /** How frames render. 'ground' (default) is the grouping box with an
+   *  in-body header bar — the Ground's project-clustering frame. 'design'
+   *  is the Figma-style design frame (project Canvas): the rect is pure
+   *  content and the name floats outside, above the top-left corner. */
+  frameVariant?: 'ground' | 'design'
+  /** True while this canvas sits INERT beneath another surface (the Ground
+   *  under an open project panel). Every window-level keyboard handler in
+   *  here goes quiet — otherwise a V/F/Delete typed into the panel's canvas
+   *  would ALSO drive the invisible Ground beneath it. */
+  suspendKeys?: boolean
 }
 
 const CLICK_THRESHOLD_PX = 5
@@ -237,6 +254,8 @@ export const InfiniteCanvas = ({
   projectPath,
   canvasId,
   onImagePaste,
+  frameVariant = 'ground',
+  suspendKeys = false,
 }: Props) => {
   const { t } = useT()
   // editingId is owned by the page (so the toolbar / shortcuts can drive it);
@@ -248,6 +267,11 @@ export const InfiniteCanvas = ({
   // where on the canvas to drop the resulting image element.
   const imageInputRef = useRef<HTMLInputElement>(null)
   const imageDropPointRef = useRef<{ x: number; y: number } | null>(null)
+  // Live mirror of suspendKeys for the window-level key handlers — they gate
+  // per keypress off the ref, so the listeners don't re-subscribe (and can't
+  // race) when the panel above opens/closes.
+  const suspendKeysRef = useRef(suspendKeys)
+  suspendKeysRef.current = suspendKeys
   const canvasRef = useRef(canvas)
   canvasRef.current = canvas
   // Wheel events from a trackpad pinch fire faster than React can commit, so a
@@ -271,6 +295,11 @@ export const InfiniteCanvas = ({
     snapGuidesRef.current = g
     setSnapGuides(g)
   }
+  // ⌥-hover measure (Figma): while Alt is held with a selection, hovering
+  // ANOTHER element shows the gap between the selection's bbox (a) and the
+  // hovered element's (b) as accent distance lines. Cleared on Alt-up, on
+  // press, and when the hover leaves every measurable target.
+  const [measure, setMeasure] = useState<{ a: Rect; b: Rect } | null>(null)
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(
     null,
   )
@@ -315,6 +344,39 @@ export const InfiniteCanvas = ({
     .sort(
       (a, b) => containmentDepth(frameById, a.id) - containmentDepth(frameById, b.id),
     )
+  // Figma parity (design variant only): NESTED frames hide their floating name
+  // label — only top-level frames are titled, so an AI-generated design (one
+  // nested frame per card) doesn't read as a wall of "Frame" tags. Two escape
+  // hatches keep nested frames reachable from the canvas (the label is a
+  // frame's only interactive surface): a SELECTED/EDITING nested frame shows
+  // its label (DesignFrameView), and — like Figma — so does every nested frame
+  // whose PARENT frame is currently selected, so selecting the outer frame
+  // reveals the handles of the frames inside it. Containment is checked
+  // against VISIBLE elements only (a hidden parent must not eat its visible
+  // child's label). Frames are few, so recomputing per render is fine.
+  const nestedFrameIds = (() => {
+    if (frameVariant !== 'design') return new Set<string>()
+    const sel = new Set(selectedIds)
+    // Defaults mirror isNestedFrame / DesignFrameView (400×280) so the
+    // geometric parent resolved here is the same one that hid the label.
+    const frameRects = frames.map((f) => ({
+      id: f.id,
+      rect: { x: f.x, y: f.y, w: f.width ?? 400, h: f.height ?? 280 },
+    }))
+    const out = new Set<string>()
+    for (const f of frames) {
+      if (!isNestedFrame(f, visible)) continue
+      const parentId =
+        (f.parentId && frameById.has(f.parentId) ? f.parentId : undefined) ??
+        frameIdContaining(
+          { x: f.x, y: f.y, w: f.width ?? 400, h: f.height ?? 280 },
+          frameRects.filter((r) => r.id !== f.id),
+        )
+      if (parentId && sel.has(parentId)) continue
+      out.add(f.id)
+    }
+    return out
+  })()
   // Render order: non-comment notes first, then comments. Comment popups
   // need to layer above sibling stickies / mocks so a pin dropped on a
   // mockup can still open its editor cleanly.
@@ -410,6 +472,51 @@ export const InfiniteCanvas = ({
   }
 
   const worldFromEvent = (e: React.PointerEvent) => worldFromClientXY(e.clientX, e.clientY)
+
+  // ── Keyboard zoom (Figma-style) ────────────────────────────────────────────
+  // Set an absolute zoom, keeping the viewport-centre point fixed (the wheel
+  // handler does the same math around the cursor instead).
+  const setViewportZoom = (zoom: number) => {
+    const rect = viewportRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const c = canvasRef.current
+    const v = c.viewport
+    const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom))
+    if (z === v.zoom) return
+    const px = rect.width / 2
+    const py = rect.height / 2
+    const wx = (px - v.x) / v.zoom
+    const wy = (py - v.y) / v.zoom
+    onCanvasChange({ ...c, viewport: { zoom: z, x: px - wx * z, y: py - wy * z } })
+  }
+
+  // Fit a set of world boxes into the viewport (Shift+1 fit-all / Shift+2 fit-
+  // selection), padded so the content doesn't kiss the edges; zoom clamps to
+  // the canvas range so a single sticky can't blow up past ZOOM_MAX.
+  const fitViewportTo = (boxes: { x: number; y: number; w: number; h: number }[]) => {
+    const rect = viewportRef.current?.getBoundingClientRect()
+    if (!rect || !boxes.length) return
+    const x1 = Math.min(...boxes.map((b) => b.x))
+    const y1 = Math.min(...boxes.map((b) => b.y))
+    const x2 = Math.max(...boxes.map((b) => b.x + b.w))
+    const y2 = Math.max(...boxes.map((b) => b.y + b.h))
+    const w = Math.max(x2 - x1, 1)
+    const h = Math.max(y2 - y1, 1)
+    const PAD = 64
+    const z = Math.min(
+      ZOOM_MAX,
+      Math.max(ZOOM_MIN, Math.min((rect.width - PAD * 2) / w, (rect.height - PAD * 2) / h)),
+    )
+    const c = canvasRef.current
+    onCanvasChange({
+      ...c,
+      viewport: {
+        zoom: z,
+        x: rect.width / 2 - (x1 + w / 2) * z,
+        y: rect.height / 2 - (y1 + h / 2) * z,
+      },
+    })
+  }
 
   const onWheel = useCallback(
     (e: WheelEvent) => {
@@ -524,6 +631,7 @@ export const InfiniteCanvas = ({
   // cards; deleting a frame leaves its contents in place).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (suspendKeysRef.current) return
       if (e.key !== 'Delete' && e.key !== 'Backspace') return
       if (editingId) return
       const ae = document.activeElement
@@ -540,7 +648,8 @@ export const InfiniteCanvas = ({
       )
       if (next === c.elements) return
       e.preventDefault()
-      onCanvasChange({ ...c, elements: next })
+      // Deleting a layout-frame child re-packs its siblings (no hole left).
+      onCanvasChange({ ...c, elements: applyAutoLayout(next) })
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -551,13 +660,32 @@ export const InfiniteCanvas = ({
   // refs, so re-subscribe only when the change sinks change.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (suspendKeysRef.current) return
       if ((e.key !== 'g' && e.key !== 'G') || !(e.metaKey || e.ctrlKey)) return
       if (editingId) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
       e.preventDefault()
-      if (e.shiftKey) ungroupSelection()
-      else groupSelection()
+      if (e.shiftKey) {
+        // ⌘⇧G dissolves SELECTED FRAMES too (Figma — also how an auto-layout
+        // wrapper is unwrapped). Frames win the press when both kinds are in
+        // the selection: both paths commit through onCanvasChange, and the
+        // second would read a canvasRef the first already made stale — so run
+        // exactly one per press; press again for the other kind.
+        const c = canvasRef.current
+        const locked = lockedIds(c.elements)
+        const res = dissolveFrames(
+          c.elements,
+          selectedRef.current.filter((id) => !locked.has(id)),
+        )
+        if (res) {
+          // Children released into an outer layout frame re-pack right away.
+          onCanvasChange({ ...c, elements: applyAutoLayout(res.elements) })
+          onSelectIds(res.freedIds)
+          return
+        }
+        ungroupSelection()
+      } else groupSelection()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -589,6 +717,7 @@ export const InfiniteCanvas = ({
   // send it to back. Gated on no editor / no field focus so typing is safe.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (suspendKeysRef.current) return
       if (editingId || e.metaKey || e.ctrlKey || e.altKey) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
@@ -619,10 +748,290 @@ export const InfiniteCanvas = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingId, onCanvasChange])
 
+  // Figma-parity keyboard shortcuts, three families:
+  //  - tools: V/T/S/F/O — plus R (Figma) or G (legacy tooltip) for rectangle,
+  //    and C/I on the project Canvas (the keys the ToolPalette tooltips
+  //    advertise). Plain letters only, so Shift/Alt combos stay free.
+  //  - zoom: ⌘+ / ⌘- / ⌘0 (overriding the browser's page zoom), plus Figma's
+  //    plain +/-, ⇧0 = 100%, ⇧1 = fit everything, ⇧2 = fit the selection.
+  //    Digits read e.code (Digit0…) because Shift turns e.key into layout-
+  //    specific symbols (')', '!', '"'…).
+  //  - selection: ⌘A select all (marquee eligibility: no frames / groups /
+  //    hidden / locked — unlike Figma, a frame here drags its children, so
+  //    select-all including frames would double-move), Esc → back to the
+  //    Select tool, then clear the selection; ⌘⇧L lock / ⌘⇧H hide toggles;
+  //    ⇧A auto layout (enable on a plain frame / wrap anything else) and
+  //    ⌥⇧A to strip it — design variant only.
+  // All gated off while an editor / form field owns the keyboard and during
+  // IME composition, so Japanese input can never flip a tool mid-conversion.
+  // CAPTURE phase: the embedded canvas mounts AFTER App, so as a bubble
+  // listener it would run after App's global handler — whose Escape clears
+  // the Ground selection and thereby CLOSES the project panel before the
+  // canvas could consume that Escape for its own tool/selection. Capture
+  // runs first regardless of mount order; consumed keys preventDefault and
+  // every later handler (App's, the workspace's) honours defaultPrevented.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (suspendKeysRef.current) return
+      // Another surface already claimed this key (the Board drawer's capture
+      // Esc, a modal…) — house rule, same as App's global handler.
+      if (e.isComposing || e.defaultPrevented) return
+      if (editingId || menu) return
+      const ae = document.activeElement
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      const mod = e.metaKey || e.ctrlKey
+      const key = e.key.toLowerCase()
+
+      if (mod) {
+        if (e.altKey) return
+        if (key === 'a' && !e.shiftKey) {
+          e.preventDefault()
+          const c = canvasRef.current
+          const { hiddenViaGroup, lockedViaGroup } = groupCascadeSets(c.elements)
+          const ids: string[] = []
+          for (const proj of projects) if (c.positions[proj.id]) ids.push(proj.id)
+          for (const el of c.elements) {
+            if (el.type === 'frame' || el.type === 'group') continue
+            if (el.hidden || hiddenViaGroup.has(el.id)) continue
+            if (el.locked || lockedViaGroup.has(el.id)) continue
+            ids.push(el.id)
+          }
+          if (ids.length) onSelectIds(ids)
+          return
+        }
+        if (e.shiftKey && (key === 'l' || key === 'h')) {
+          const sel = new Set(selectedRef.current)
+          if (!sel.size) return
+          e.preventDefault()
+          const c = canvasRef.current
+          const targets = c.elements.filter((el) => sel.has(el.id))
+          if (!targets.length) return
+          // Toggle as a set, Figma-style: if ANY member is still unlocked /
+          // visible, the press locks / hides them all; only a uniformly
+          // locked / hidden selection unlocks / reveals. `undefined` (not
+          // false) clears the flag so it drops from the persisted JSON.
+          if (key === 'l') {
+            const lock = targets.some((el) => !el.locked) || undefined
+            onCanvasChange({
+              ...c,
+              elements: c.elements.map((el) =>
+                sel.has(el.id) ? { ...el, locked: lock } : el,
+              ),
+            })
+          } else {
+            const hide = targets.some((el) => !el.hidden) || undefined
+            onCanvasChange({
+              ...c,
+              elements: c.elements.map((el) =>
+                sel.has(el.id) ? { ...el, hidden: hide } : el,
+              ),
+            })
+          }
+          return
+        }
+        if (e.shiftKey) return
+        if (key === '=' || key === '+') {
+          e.preventDefault()
+          setViewportZoom(canvasRef.current.viewport.zoom * 1.25)
+        } else if (key === '-') {
+          e.preventDefault()
+          setViewportZoom(canvasRef.current.viewport.zoom / 1.25)
+        } else if (e.code === 'Digit0') {
+          e.preventDefault()
+          setViewportZoom(1)
+        }
+        return
+      }
+
+      // Enter / ⇧Enter / Tab / ⇧Tab — selection navigation (Figma): drill into
+      // the first child / step out to the parent / cycle siblings. Enter on a
+      // childless element falls back to editing its text (Figma's Enter-on-a-
+      // leaf). Single-selection only — navigation has no meaning for a multi.
+      // (Sits BEFORE the Shift handling below so ⇧Tab / ⇧Enter reach it.)
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        const cur = selectedRef.current
+        if (cur.length !== 1) return
+        const els = canvasRef.current.elements
+        if (!els.some((el) => el.id === cur[0])) return // a card, not an element
+        e.preventDefault()
+        if (e.key === 'Tab') {
+          const next = siblingId(els, cur[0], e.shiftKey ? -1 : 1)
+          if (next) onSelect(next)
+          return
+        }
+        if (e.shiftKey) {
+          const parent = navParentId(els, cur[0])
+          if (parent) onSelect(parent)
+          return
+        }
+        const child = firstChildId(els, cur[0])
+        if (child) {
+          onSelect(child)
+          return
+        }
+        const el = els.find((x) => x.id === cur[0])!
+        // Leaf: Enter opens the text editor for the types that carry text.
+        if ((el.type === 'text' || el.type === 'sticky' || el.type === 'frame') && !el.locked)
+          setEditingId(el.id)
+        return
+      }
+
+      if (e.shiftKey && !e.altKey) {
+        if (e.code === 'KeyA' && frameVariant === 'design') {
+          // ⇧A — Figma's auto layout: a single plain frame gains layout in
+          // place; any other selection wraps in a fresh auto-layout frame.
+          // addAutoLayout decides which; applyAutoLayout does the stacking.
+          const c = canvasRef.current
+          const locked = lockedIds(c.elements)
+          const ids = selectedRef.current.filter((id) => !locked.has(id))
+          const res = ids.length ? addAutoLayout(c.elements, ids, newId) : null
+          if (res) {
+            e.preventDefault()
+            onCanvasChange({ ...c, elements: applyAutoLayout(res.elements) })
+            onSelect(res.selectId)
+          }
+          return
+        }
+        if (e.code === 'Digit0') {
+          e.preventDefault()
+          setViewportZoom(1)
+        } else if (e.code === 'Digit1') {
+          e.preventDefault()
+          const c = canvasRef.current
+          fitViewportTo([
+            ...projects
+              .map((proj) => c.positions[proj.id])
+              .filter((pos): pos is { x: number; y: number } => !!pos)
+              .map((pos) => ({ x: pos.x, y: pos.y, w: CARD_W, h: CARD_H })),
+            ...c.elements
+              .filter((el) => !el.hidden && el.type !== 'group')
+              .map(fullBounds),
+          ])
+        } else if (e.code === 'Digit2') {
+          e.preventDefault()
+          const c = canvasRef.current
+          const sel = new Set(selectedRef.current)
+          fitViewportTo([
+            ...projects
+              .filter((proj) => sel.has(proj.id))
+              .map((proj) => c.positions[proj.id])
+              .filter((pos): pos is { x: number; y: number } => !!pos)
+              .map((pos) => ({ x: pos.x, y: pos.y, w: CARD_W, h: CARD_H })),
+            ...c.elements
+              .filter((el) => sel.has(el.id) && el.type !== 'group')
+              .map(fullBounds),
+          ])
+        }
+        return
+      }
+      // ⌥⇧A strips auto layout from the selected frames (children keep their
+      // laid-out spots). Matched on e.code — Option turns e.key into 'Å'.
+      if (e.shiftKey && e.altKey && e.code === 'KeyA' && frameVariant === 'design') {
+        const c = canvasRef.current
+        const locked = lockedIds(c.elements)
+        const ids = selectedRef.current.filter((id) => !locked.has(id))
+        const res = ids.length ? removeAutoLayout(c.elements, ids) : null
+        if (res) {
+          e.preventDefault()
+          onCanvasChange({ ...c, elements: res })
+        }
+        return
+      }
+      if (e.shiftKey || e.altKey) return
+
+      if (key === '=' || key === '+') {
+        e.preventDefault()
+        setViewportZoom(canvasRef.current.viewport.zoom * 1.25)
+        return
+      }
+      if (key === '-') {
+        e.preventDefault()
+        setViewportZoom(canvasRef.current.viewport.zoom / 1.25)
+        return
+      }
+      if (e.key === 'Escape') {
+        // Layered escape, Figma-style: 1st Esc leaves the active tool, 2nd
+        // clears the selection — each consumed press preventDefaults so App's
+        // global Esc (which clears the GROUND selection = closes the project
+        // panel) only fires once there's nothing left to escape here.
+        if (tool !== 'select') {
+          e.preventDefault()
+          onToolChange('select')
+        } else if (selectedRef.current.length) {
+          e.preventDefault()
+          onSelect(null)
+        }
+        return
+      }
+
+      // 1–9 / 0 set the selection's opacity to 10–90% / 100% (Figma). Cards in
+      // a mixed selection are untouched (they have no opacity).
+      if (/^[0-9]$/.test(key) && selectedRef.current.length) {
+        const c = canvasRef.current
+        const sel = new Set(selectedRef.current)
+        const op = key === '0' ? 1 : Number(key) / 10
+        let hit = false
+        const nextEls = c.elements.map((el) => {
+          if (!sel.has(el.id) || el.locked) return el
+          hit = true
+          // 100% drops the field entirely — resolveOpacity treats absent as 1
+          // and the persisted JSON stays clean.
+          return { ...el, opacity: op === 1 ? undefined : op }
+        })
+        if (hit) {
+          e.preventDefault()
+          onCanvasChange({ ...c, elements: nextEls })
+        }
+        return
+      }
+
+      const TOOL_KEYS: Record<string, Tool> = {
+        v: 'select',
+        t: 'text',
+        s: 'sticky',
+        f: 'frame',
+        r: 'rect',
+        g: 'rect',
+        o: 'ellipse',
+        c: 'comment',
+        i: 'image',
+      }
+      const next = TOOL_KEYS[key]
+      if (!next) return
+      // Project-Canvas-only tools (mirrors ToolPalette's EMBEDDED_ONLY): the
+      // Ground portal has no shapes / comments / images to draw.
+      if (
+        (next === 'rect' || next === 'ellipse' || next === 'comment') &&
+        frameVariant !== 'design'
+      )
+        return
+      if (next === 'image' && !onImagePaste) return
+      e.preventDefault()
+      onToolChange(next)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+    // setViewportZoom / fitViewportTo / fullBounds read live refs; re-subscribe
+    // only when the gates or the stable callbacks change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    editingId,
+    menu,
+    tool,
+    projects,
+    frameVariant,
+    onImagePaste,
+    onToolChange,
+    onSelect,
+    onSelectIds,
+    onCanvasChange,
+  ])
+
   // Holding Space turns any drag into a pan (Figma-style), so an empty-canvas
   // drag stays free for marquee selection.
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (suspendKeysRef.current) return
       if (e.code !== 'Space' || e.repeat) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
@@ -663,6 +1072,8 @@ export const InfiniteCanvas = ({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Shift' && e.key !== 'Alt') return
+      // Releasing Alt also dismisses the ⌥-hover measure guides.
+      if (e.type === 'keyup' && e.key === 'Alt') setMeasure(null)
       recomputeDraw(e.shiftKey, e.altKey)
     }
     window.addEventListener('keydown', onKey)
@@ -684,7 +1095,9 @@ export const InfiniteCanvas = ({
     const el = c.elements.find((e) => e.id === prev)
     if (el && el.type === 'text' && !el.text.trim()) {
       const remaining = c.elements.filter((e) => e.id !== prev)
-      onCanvasChange({ ...c, elements: clearDanglingAnchors(remaining) })
+      // applyAutoLayout: an empty text auto-deleted out of a layout frame
+      // re-packs its siblings, same as an explicit delete.
+      onCanvasChange({ ...c, elements: applyAutoLayout(clearDanglingAnchors(remaining)) })
     }
   }, [editingId, onCanvasChange])
 
@@ -802,7 +1215,9 @@ export const InfiniteCanvas = ({
       }
     }
     const c = canvasRef.current
-    onCanvasChange({ ...c, elements: [...c.elements, el] })
+    // applyAutoLayout: a text dropped inside a layout frame (parentId resolved
+    // just above) snaps into the stack immediately.
+    onCanvasChange({ ...c, elements: applyAutoLayout([...c.elements, el]) })
     setEditingId(el.id)
     onSelect(el.id)
     onToolChange('select')
@@ -969,6 +1384,17 @@ export const InfiniteCanvas = ({
     capture(e)
   }
 
+  // ⌥-drag duplicate: clone `ids` in place (z-top, like paste) and return the
+  // id remap so the caller rebuilds its press/selection against the CLONES —
+  // the originals stay put and the drag moves the copies (Figma).
+  const cloneForAltDrag = (ids: string[]): Map<string, string> | null => {
+    const c = canvasRef.current
+    const res = cloneSubset(c.elements, new Set(ids), newId)
+    if (!res) return null
+    onCanvasChange({ ...c, elements: [...c.elements, ...res.clones] })
+    return res.idMap
+  }
+
   const onElementPointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
@@ -985,17 +1411,35 @@ export const InfiniteCanvas = ({
             .map((c) => ({ id: c.id, ox: c.x, oy: c.y }))
         : undefined
     const group = dragMoveItems(canvasRef.current, el.id)
+    // ⌥-drag duplicates the whole would-be-dragged set. A multi-drag that
+    // includes a project card stays a plain move — cards aren't duplicable.
+    let pressId = el.id
+    let pressChildren = children
+    let pressGroup = group
+    if (e.altKey && !group?.some((it) => it.isCard)) {
+      const ids = group
+        ? group.map((it) => it.id)
+        : [el.id, ...(children?.map((ch) => ch.id) ?? [])]
+      const map = cloneForAltDrag(ids)
+      if (map) {
+        pressId = map.get(el.id)!
+        pressChildren = children?.map((ch) => ({ ...ch, id: map.get(ch.id)! }))
+        pressGroup = group?.map((it) => ({ ...it, id: map.get(it.id)! }))
+        if (pressGroup) onSelectIds(pressGroup.map((it) => it.id))
+        else onSelect(pressId)
+      }
+    }
     press.current = {
       kind: 'element',
-      id: el.id,
+      id: pressId,
       sx: e.clientX,
       sy: e.clientY,
       ox: el.x,
       oy: el.y,
       moved: false,
       shift: e.shiftKey,
-      ...(children && children.length ? { children } : {}),
-      ...(group ? { group } : {}),
+      ...(pressChildren && pressChildren.length ? { children: pressChildren } : {}),
+      ...(pressGroup ? { group: pressGroup } : {}),
     }
     setPanning(true)
     capture(e)
@@ -1060,14 +1504,27 @@ export const InfiniteCanvas = ({
       const pos = c.positions[id]
       if (pos) items.push({ id, isCard: true, ox: pos.x, oy: pos.y })
     }
+    // ⌥-drag duplicates the frame + its whole subtree (clones dragged, the
+    // original cluster stays). Skipped when geometric CARDS ride along —
+    // cards aren't duplicable, and splitting the cluster would be worse.
+    let pressId = frame.id
+    let pressItems = items
+    if (e.altKey && !items.some((it) => it.isCard)) {
+      const map = cloneForAltDrag(items.map((it) => it.id))
+      if (map) {
+        pressId = map.get(frame.id)!
+        pressItems = items.map((it) => ({ ...it, id: map.get(it.id)! }))
+        onSelect(pressId)
+      }
+    }
     press.current = {
       kind: 'frame',
-      id: frame.id,
+      id: pressId,
       sx: e.clientX,
       sy: e.clientY,
       moved: false,
       shift: e.shiftKey,
-      items,
+      items: pressItems,
     }
     setPanning(true)
     capture(e)
@@ -1199,7 +1656,38 @@ export const InfiniteCanvas = ({
   const onViewportPointerMove = (e: React.PointerEvent) => {
     if (isForeignPointer(e)) return // a 2nd pointer must not drive the gesture
     const p = press.current
-    if (!p) return
+    if (!p) {
+      // ⌥-hover measure: no gesture running — with Alt + a selection, hovering
+      // a non-selected element measures selection-bbox ↔ hovered-bbox.
+      if (e.altKey && tool === 'select' && selectedRef.current.length) {
+        const w = worldFromEvent(e)
+        const hit = topElementAt(w.x, w.y)
+        const selSet = new Set(selectedRef.current)
+        if (hit && !selSet.has(hit)) {
+          const c = canvasRef.current
+          let x1 = Infinity
+          let y1 = Infinity
+          let x2 = -Infinity
+          let y2 = -Infinity
+          for (const el of c.elements) {
+            if (!selSet.has(el.id) || el.type === 'group') continue
+            const b = fullBounds(el)
+            x1 = Math.min(x1, b.x)
+            y1 = Math.min(y1, b.y)
+            x2 = Math.max(x2, b.x + b.w)
+            y2 = Math.max(y2, b.y + b.h)
+          }
+          const target = c.elements.find((el) => el.id === hit)
+          setMeasure(
+            x1 < Infinity && target
+              ? { a: { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }, b: fullBounds(target) }
+              : null,
+          )
+        } else setMeasure(null)
+      } else if (measure) setMeasure(null)
+      return
+    }
+    if (measure) setMeasure(null) // a gesture started — drop the hover guides
     const c = canvasRef.current
     if (p.kind === 'resize') {
       // Map the pointer (minus the grab offset) onto the box's local axes,
@@ -1207,12 +1695,28 @@ export const InfiniteCanvas = ({
       // identical to the legacy top-left-anchored resize when rot === 0. Shift
       // locks the aspect ratio (read live so it can toggle mid-drag).
       const pw = worldFromEvent(e)
-      const next = resizeRotatedBR(
+      let next = resizeRotatedBR(
         p.box,
         p.rot,
         { x: pw.x - p.gx, y: pw.y - p.gy },
         { minW: RESIZE_MIN_W, minH: RESIZE_MIN_H, lockAspect: e.shiftKey },
       )
+      // Alt scales about the CENTRE (Figma), composing with Shift's aspect
+      // lock. Implemented as a BR-resize of the half-box anchored at the
+      // centre — its BR corner is the same handle the user grabbed — then
+      // mirrored to the full box, so the dragged corner tracks the pointer
+      // while the opposite corner mirrors it.
+      if (e.altKey) {
+        const cx = p.box.x + p.box.w / 2
+        const cy = p.box.y + p.box.h / 2
+        const half = resizeRotatedBR(
+          { x: cx, y: cy, w: p.box.w / 2, h: p.box.h / 2 },
+          p.rot,
+          { x: pw.x - p.gx, y: pw.y - p.gy },
+          { minW: RESIZE_MIN_W / 2, minH: RESIZE_MIN_H / 2, lockAspect: e.shiftKey },
+        )
+        next = { x: cx - half.w, y: cy - half.h, w: half.w * 2, h: half.h * 2 }
+      }
       onCanvasChange({
         ...c,
         elements: c.elements.map((el) =>
@@ -1293,8 +1797,15 @@ export const InfiniteCanvas = ({
       p.moved = true
     }
     if (!p.moved) return
-    const dx = (e.clientX - p.sx) / c.viewport.zoom
-    const dy = (e.clientY - p.sy) / c.viewport.zoom
+    let dx = (e.clientX - p.sx) / c.viewport.zoom
+    let dy = (e.clientY - p.sy) / c.viewport.zoom
+    // Shift constrains the move to the dominant axis (Figma's horizontal /
+    // vertical lock). Read live so it can engage / release mid-drag; applies
+    // to every move kind below (single, multi-group, card, frame).
+    if (e.shiftKey) {
+      if (Math.abs(dx) >= Math.abs(dy)) dy = 0
+      else dx = 0
+    }
     // Multi-select drag: move every captured item (cards + elements + frames)
     // by the same delta so the whole selection travels together.
     if ((p.kind === 'card' || p.kind === 'element') && p.group) {
@@ -1407,8 +1918,14 @@ export const InfiniteCanvas = ({
               // (re)parent — a text just dropped on a mock/screen must sit above
               // the iframe, not behind it.
               const ordered = raiseDesignAnnotations(reparented)
-              if (ordered !== cur.elements) {
-                onCanvasChange({ ...cur, elements: ordered })
+              // Auto layout settles on RELEASE, never mid-drag (the live drag
+              // commits free-form positions so a child moves smoothly): a child
+              // dropped into / dragged within a layout frame re-flows here —
+              // Figma's drag-to-reorder falls out of the main-axis re-sort.
+              // No-op (same reference) when no layout frame is involved.
+              const laid = applyAutoLayout(ordered)
+              if (laid !== cur.elements) {
+                onCanvasChange({ ...cur, elements: laid })
               }
             }
           }
@@ -1450,7 +1967,10 @@ export const InfiniteCanvas = ({
         const cur = canvasRef.current
         const reparented = reparentMoved(cur.elements, new Set([p.id]))
         const ordered = raiseDesignAnnotations(reparented)
-        if (ordered !== cur.elements) onCanvasChange({ ...cur, elements: ordered })
+        // A resized child (or layout frame) re-flows its auto layout on release
+        // — same settle point as a drag-drop above.
+        const laid = applyAutoLayout(ordered)
+        if (laid !== cur.elements) onCanvasChange({ ...cur, elements: laid })
       }
       if (p.kind === 'marquee') {
         const rect = viewportRef.current!.getBoundingClientRect()
@@ -1564,7 +2084,9 @@ export const InfiniteCanvas = ({
           // its id makes reparentMoved set both directions in one pass.
           moved.add(id)
           const adopted = reparentMoved(withFrame, moved)
-          onCanvasChange({ ...c, elements: adopted })
+          // A frame drawn inside a layout frame (or adopting children into its
+          // own fresh layout — none yet, but parents may re-pack) settles here.
+          onCanvasChange({ ...c, elements: applyAutoLayout(adopted) })
           // A fresh frame jumps straight into its label editor.
           setEditingId(id)
         } else {
@@ -1647,10 +2169,15 @@ export const InfiniteCanvas = ({
     const locked = lockedIds(c.elements)
     const sel = new Set(selectedRef.current.filter((id) => !locked.has(id)))
     if (!sel.size) return
+    // applyAutoLayout: a nudged layout-frame child snaps back into its stack
+    // (an arrow-key nudge is a committed edit, not a live drag) — same
+    // normalization as the pointer-up / delete paths.
     onCanvasChange({
       ...c,
-      elements: c.elements.map((el) =>
-        sel.has(el.id) ? { ...el, x: el.x + dx, y: el.y + dy } : el,
+      elements: applyAutoLayout(
+        c.elements.map((el) =>
+          sel.has(el.id) ? { ...el, x: el.x + dx, y: el.y + dy } : el,
+        ),
       ),
     })
   }
@@ -1664,7 +2191,9 @@ export const InfiniteCanvas = ({
       c.elements,
       selectedRef.current.filter((id) => !locked.has(id)),
     )
-    if (next !== c.elements) onCanvasChange({ ...c, elements: next })
+    // applyAutoLayout mirrors the keyboard Delete path: removing a layout-frame
+    // child re-packs its siblings.
+    if (next !== c.elements) onCanvasChange({ ...c, elements: applyAutoLayout(next) })
   }
 
   // Full bounding box for hit-testing any element type (anchorAt/elementBounds
@@ -1998,6 +2527,33 @@ export const InfiniteCanvas = ({
           : 'cursor-grab'
         : 'cursor-default'
 
+  // ⌥-hover measure lines: per axis, the gap between the two boxes' nearest
+  // edges (only when they don't overlap on that axis). The line sits at the
+  // midpoint of the boxes' shared span on the other axis when they overlap
+  // there, else at the selection bbox's centre — close to where Figma draws.
+  const measureLines = (() => {
+    if (!measure) return []
+    const { a, b } = measure
+    const out: { x: number; y: number; w: number; h: number; label: number }[] = []
+    const hx1 = a.x + a.w <= b.x ? a.x + a.w : b.x + b.w <= a.x ? b.x + b.w : null
+    const hx2 = a.x + a.w <= b.x ? b.x : b.x + b.w <= a.x ? a.x : null
+    if (hx1 !== null && hx2 !== null && hx2 - hx1 >= 1) {
+      const oy1 = Math.max(a.y, b.y)
+      const oy2 = Math.min(a.y + a.h, b.y + b.h)
+      const y = oy2 > oy1 ? (oy1 + oy2) / 2 : a.y + a.h / 2
+      out.push({ x: hx1, y, w: hx2 - hx1, h: 0, label: Math.round(hx2 - hx1) })
+    }
+    const vy1 = a.y + a.h <= b.y ? a.y + a.h : b.y + b.h <= a.y ? b.y + b.h : null
+    const vy2 = a.y + a.h <= b.y ? b.y : b.y + b.h <= a.y ? a.y : null
+    if (vy1 !== null && vy2 !== null && vy2 - vy1 >= 1) {
+      const ox1 = Math.max(a.x, b.x)
+      const ox2 = Math.min(a.x + a.w, b.x + b.w)
+      const x = ox2 > ox1 ? (ox1 + ox2) / 2 : a.x + a.w / 2
+      out.push({ x, y: vy1, w: 0, h: vy2 - vy1, label: Math.round(vy2 - vy1) })
+    }
+    return out
+  })()
+
   const wrapperStyle = commentCursor
     ? { ...gridStyle, cursor: COMMENT_CURSOR }
     : gridStyle
@@ -2062,19 +2618,32 @@ export const InfiniteCanvas = ({
                 : {}),
             }}
           >
-            <FrameView
-              frame={frame}
-              selected={selectedIds.includes(frame.id)}
-              editing={editingId === frame.id}
-              onHeaderPointerDown={onFramePointerDown(frame)}
-              onChangeLabel={(t) => changeText(frame.id, t)}
-              onEditDone={() => setEditingId(null)}
-              onTidy={
-                cardsInFrame(frame, { directOnly: true }).length > 0
-                  ? () => tidyFrame(frame)
-                  : undefined
-              }
-            />
+            {frameVariant === 'design' ? (
+              <DesignFrameView
+                frame={frame}
+                selected={selectedIds.includes(frame.id)}
+                editing={editingId === frame.id}
+                zoom={viewport.zoom}
+                labelHidden={nestedFrameIds.has(frame.id)}
+                onLabelPointerDown={onFramePointerDown(frame)}
+                onChangeLabel={(t) => changeText(frame.id, t)}
+                onEditDone={() => setEditingId(null)}
+              />
+            ) : (
+              <FrameView
+                frame={frame}
+                selected={selectedIds.includes(frame.id)}
+                editing={editingId === frame.id}
+                onHeaderPointerDown={onFramePointerDown(frame)}
+                onChangeLabel={(t) => changeText(frame.id, t)}
+                onEditDone={() => setEditingId(null)}
+                onTidy={
+                  cardsInFrame(frame, { directOnly: true }).length > 0
+                    ? () => tidyFrame(frame)
+                    : undefined
+                }
+              />
+            )}
           </div>
         ))}
 
@@ -2229,6 +2798,33 @@ export const InfiniteCanvas = ({
               onToggleCommentResolved={toggleCommentResolved}
               commentAnchorLabel={anchorLabelFor(el.anchorId)}
             />
+          </div>
+        ))}
+
+        {/* ⌥-hover measure — gap lines + px labels between the selection and
+            the hovered element (Figma's red measurements). Lines stay 1px and
+            labels constant-size on screen via the 1/zoom counter-scale. */}
+        {measureLines.map((m, i) => (
+          <div key={`measure-${i}`} className="pointer-events-none absolute" style={{ left: m.x, top: m.y }}>
+            <div
+              className="absolute bg-accent"
+              style={
+                m.w > 0
+                  ? { width: m.w, height: Math.max(1, 1.5 / viewport.zoom) }
+                  : { width: Math.max(1, 1.5 / viewport.zoom), height: m.h }
+              }
+            />
+            <div
+              className="absolute rounded-[3px] bg-accent px-1 py-0.5 text-[10px] font-semibold leading-none text-bg-card"
+              style={{
+                left: m.w / 2,
+                top: m.h / 2,
+                transform: `translate(-50%, ${m.w > 0 ? '4px' : '-50%'}) scale(${1 / viewport.zoom})`,
+                transformOrigin: m.w > 0 ? 'top center' : 'center left',
+              }}
+            >
+              {m.label}
+            </div>
           </div>
         ))}
 

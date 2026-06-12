@@ -13,3 +13,28 @@ export const MODULE_IDS: readonly ModuleId[] = [
   'canvas',
   'board',
 ]
+
+// ─── Custom tabs (user-built modules) ───────────────────────────────────────
+// A custom module stored under ~/.openground/custom-modules/<uuid>/ surfaces
+// in the tab row under the id `custom:<uuid>` so it can never collide with a
+// built-in ModuleId. The tab system (order persistence, Ctrl+Tab cycling,
+// persistView) treats tab ids as plain strings; these helpers are the single
+// place that encodes/decodes the prefix. See docs/CUSTOM_TABS_PLAN.md.
+
+export type CustomTabId = `custom:${string}`
+
+/** Any id that can appear in the per-project tab row. */
+export type TabId = ModuleId | CustomTabId
+
+const CUSTOM_PREFIX = 'custom:'
+
+export const isCustomTabId = (id: string): id is CustomTabId =>
+  id.startsWith(CUSTOM_PREFIX) && id.length > CUSTOM_PREFIX.length
+
+/** Tab id for a stored custom module id (the bare uuid). */
+export const customTabId = (moduleId: string): CustomTabId =>
+  `${CUSTOM_PREFIX}${moduleId}`
+
+/** Bare custom-module uuid from a `custom:<uuid>` tab id. */
+export const customModuleIdFromTab = (id: CustomTabId): string =>
+  id.slice(CUSTOM_PREFIX.length)
