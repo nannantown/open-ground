@@ -111,6 +111,9 @@ export const ProjectDataSchema = z.object({
   // live module registry on use (see effectiveTabOrder). Optional so legacy
   // tasks.json files load unchanged.
   tabOrder: z.array(z.string()).optional(),
+  // Custom tabs ATTACHED to this project (bare module uuids — the user-level
+  // library lives in ~/.openground/custom-modules/). Personal, like tabOrder.
+  customTabs: z.array(z.string()).optional(),
   notes: z.string().default(''),
   updatedAt: z.string().default(''),
 })

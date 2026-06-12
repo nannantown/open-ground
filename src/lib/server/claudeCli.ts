@@ -25,6 +25,7 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
+import { loginShellResolveArgv, pathFromShellOutput } from './cliResolve'
 
 const execFile = promisify(execFileCb)
 
@@ -48,15 +49,11 @@ const MISSING_MESSAGE =
   'key), so install Claude Code and sign in with an active Claude subscription ' +
   'before running a project.'
 
-// argv for "resolve claude through a fresh login shell". zsh gets -i too so
-// PATH lines a user (or an installer) appended to .zshrc — not just .zprofile
-// — are honoured; bash/other POSIX shells read their profile with -l alone
-// (interactive bash can block on rc prompts, so no -i there). Exported for
-// unit tests.
-export const loginShellArgv = (shell: string): [string, string[]] => {
-  const args = shell.endsWith('zsh') ? ['-lic'] : ['-lc']
-  return [shell, [...args, 'command -v claude']]
-}
+// argv for "resolve claude through a fresh login shell" — the claude-fixed
+// face of the shared cliResolve helper (editorCli.ts reuses the same engine
+// for editor binaries). Exported for unit tests.
+export const loginShellArgv = (shell: string): [string, string[]] =>
+  loginShellResolveArgv(shell, ['claude'])
 
 // Well-known install targets, tried last (no shell involved): the official
 // install.sh (~/.local/bin), claude's migrate-installer location, Homebrew on
@@ -71,17 +68,8 @@ export const knownClaudeLocations = (): string[] => [
 
 // `command -v` output can ride along profile noise (echoes, motd) — the
 // binary path is the last non-empty line that looks like an absolute path.
-// Exported for unit tests.
-export const pathFromShellOutput = (stdout: string): string | null => {
-  const lines = stdout
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].startsWith('/')) return lines[i]
-  }
-  return null
-}
+// Lives in cliResolve.ts now; re-exported so existing imports/tests hold.
+export { pathFromShellOutput } from './cliResolve'
 
 const versionOf = async (bin: string): Promise<string | null> => {
   const { stdout } = await execFile(bin, ['--version'], { timeout: 5000 })

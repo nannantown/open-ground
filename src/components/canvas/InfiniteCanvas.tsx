@@ -4,7 +4,19 @@ import { ProjectCard } from './ProjectCard'
 import { ElementView } from './ElementView'
 import { FrameView } from './FrameView'
 import { DesignFrameView } from './DesignFrameView'
-import { applyAutoLayout, addAutoLayout, removeAutoLayout } from '@/lib/canvasAutoLayout'
+import {
+  applyAutoLayout,
+  applyAutoLayoutDuringResize,
+  addAutoLayout,
+  removeAutoLayout,
+  layoutInsertionIndex,
+  layoutFrameAt,
+  layoutDropSlot,
+  layoutDropPreview,
+  insertIntoLayoutAtPoint,
+  type LayoutDropPreview,
+} from '@/lib/canvasAutoLayout'
+import { textFootprintPatch, isLayoutManagedText } from '@/lib/canvasTextMeasure'
 import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
 import { cloneSubset } from '@/lib/canvasClone'
 import type {
@@ -37,11 +49,32 @@ import {
   groupCascadeSets,
   withGroupAncestors,
 } from '@/lib/canvasGroup'
-import { resizeRotatedBR, rotatedCornerBR, normalizeRotation } from '@/lib/canvasTransform'
+import {
+  normalizeRotation,
+  handlePoints,
+  hitHandle,
+  hitRotateZone,
+  pointInRotatedBox,
+  resizeFromHandle,
+  resizeAnchor,
+  cursorForHandle,
+  CORNER_HANDLES,
+  type ResizeHandle,
+} from '@/lib/canvasTransform'
+import { rotateCursor } from '@/lib/canvasCursors'
 import { computeSnap, type SnapBox, type SnapGuide } from '@/lib/canvasSnap'
 import { resizeGroup, unionBounds, type GResizeItem } from '@/lib/canvasGroupResize'
 import { SHAPE_DEFAULT_W, SHAPE_DEFAULT_H, drawRectFromDrag } from '@/lib/canvasShape'
 import { useT } from '@/i18n/I18nContext'
+
+/** Imperative zoom handle the shell's zoom pill drives — same code paths as
+ *  the ⌘± / ⇧0 / ⇧1 keyboard zooms. */
+export interface CanvasZoomApi {
+  zoomIn: () => void
+  zoomOut: () => void
+  zoomTo: (zoom: number) => void
+  fitAll: () => void
+}
 
 interface Props {
   projects: ProjectMeta[]
@@ -61,6 +94,29 @@ interface Props {
   /** Project-Canvas-only: duplicate the current selection (⌘D / context menu).
    *  Owned by CanvasWorkspace so it shares the clipboard + history wiring. */
   onDuplicate?: () => void
+  /** Project-Canvas-only: host undo-history hooks for Esc-cancel. A gesture
+   *  snapshot records historyDepth() at press; cancelling restores the
+   *  elements AND calls onCancelRestore(depth) so the host can roll its undo
+   *  stack back — without these a pause mid-drag leaves the cancelled state
+   *  reachable via ⌘Z. The Ground canvas leaves them undefined. */
+  historyDepth?: () => number
+  onCancelRestore?: (depth: number) => void
+  /** Monotonic counter the host bumps whenever it adopts an EXTERNAL elements
+   *  replacement (git-shared auto-sync, observer re-fetch). Gesture snapshots
+   *  record it; Esc-cancel refuses to restore across an epoch change. */
+  adoptionEpoch?: () => number
+  /** DERIVED element writes (measured text footprints) — persisted without
+   *  minting their own undo step. Falls back to onCanvasChange when absent. */
+  onImplicitElementsChange?: (elements: CanvasElement[]) => void
+  /** Hover sync with the Layers panel: `highlightedId` paints a light accent
+   *  outline on that element (skipped while it's selected); `onHoverElement`
+   *  reports the element under the idle pointer (null on leave / gesture
+   *  start). Both optional — the Ground canvas leaves them undefined. */
+  highlightedId?: string | null
+  onHoverElement?: (id: string | null) => void
+  /** The shell's zoom pill registers through this imperative handle — the
+   *  same code paths as the ⌘± / ⇧0 / ⇧1 keyboard zooms. */
+  zoomApiRef?: React.MutableRefObject<CanvasZoomApi | null>
   /** Project-Canvas-only: when set, image elements resolve their per-canvas
    *  assets through these values. The top-level Ground canvas leaves them
    *  undefined; the image case in ElementView falls back to a placeholder. */
@@ -151,6 +207,25 @@ const COMMENT_CURSOR_SVG =
   '</svg>'
 const COMMENT_CURSOR = `url("data:image/svg+xml;utf8,${encodeURIComponent(COMMENT_CURSOR_SVG)}") 4 26, crosshair`
 
+// The rotate annulus may claim only the bare canvas (no element owns it).
+const EMPTY_IDS: ReadonlySet<string> = new Set()
+
+// Snapshot taken when a cancellable gesture starts: Esc mid-drag restores
+// exactly this (the canvas refs are immutable-update objects, so holding the
+// references is free). Captured BEFORE any ⌥-drag clone commit, so Esc also
+// removes the clones a cancelled duplicate-drag left behind.
+interface PressRestore {
+  positions: CanvasState['positions']
+  elements: CanvasElement[]
+  selection: string[]
+  /** Host undo depth at press time — Esc-cancel rolls the history back to it
+   *  so the cancelled mid-drag state can't surface as a ⌘Z step. */
+  histDepth?: number
+  /** Host adoption epoch at press time — when an external elements
+   *  replacement was adopted mid-gesture (epoch moved), this snapshot is
+   *  STALE and must not be restored over the adopted state. */
+  epoch?: number
+}
 
 interface DragPress {
   id: string
@@ -160,6 +235,7 @@ interface DragPress {
   oy: number
   moved: boolean
   shift: boolean
+  restore: PressRestore
   /** element-only: child elements (e.g. a design's text annotations) carried
    *  rigidly with this element while it drags, captured at press time with
    *  their own origins. Empty for a plain element with no children. */
@@ -184,6 +260,7 @@ type Press =
       moved: boolean
       shift: boolean
       items: { id: string; isCard: boolean; ox: number; oy: number }[]
+      restore: PressRestore
     }
   // draw: a click-drag that sizes a new frame OR shape. `what` records which —
   // 'frame' keeps the legacy frame path; 'rect' / 'ellipse' drop a shape
@@ -208,30 +285,44 @@ type Press =
       lastP: { x: number; y: number }
       repos: { x: number; y: number } | null
     }
-  // resize: box is the pre-drag rect, rot its rotation; gx/gy is the grab offset
-  // (pointer-world minus the handle corner at press) so the drag doesn't jump.
-  // Shift-to-lock reads e.shiftKey live in the move handler.
+  // resize: box is the pre-drag rect, rot its rotation, handle which of the 8
+  // grips was grabbed; gx/gy is the grab offset (pointer-world minus the handle
+  // point at press) so the drag doesn't jump. Shift (aspect) / Alt (from
+  // centre) read live off the event in the move handler.
   | {
       kind: 'resize'
       id: string
       box: { x: number; y: number; w: number; h: number }
       rot: number
+      handle: ResizeHandle
       gx: number
       gy: number
+      restore: PressRestore
     }
   // rotate: cx/cy are the element centre in world space; startAngle is the
   // pointer's angle from that centre at press time, startRot the element's
   // rotation then — so the drag applies a RELATIVE turn (no jump on grab).
-  | { kind: 'rotate'; id: string; cx: number; cy: number; startAngle: number; startRot: number }
-  // groupresize: scale a whole multi-selection from the bbox top-left anchor.
-  // box is the pre-drag union bbox; items are each selected element's pre-drag
-  // box + sizable flag; gx/gy is the grab offset from the bottom-right corner.
+  | {
+      kind: 'rotate'
+      id: string
+      cx: number
+      cy: number
+      startAngle: number
+      startRot: number
+      restore: PressRestore
+    }
+  // groupresize: scale a whole multi-selection from the bbox side/corner
+  // OPPOSITE the grabbed handle. box is the pre-drag union bbox; items are
+  // each selected element's pre-drag box + sizable flag; gx/gy is the grab
+  // offset from the grabbed handle's point.
   | {
       kind: 'groupresize'
       box: { x: number; y: number; w: number; h: number }
       items: import('@/lib/canvasGroupResize').GResizeItem[]
+      handle: ResizeHandle
       gx: number
       gy: number
+      restore: PressRestore
     }
   // marquee: sx/sy are viewport-relative screen coordinates
   | { kind: 'marquee'; sx: number; sy: number; shift: boolean }
@@ -251,6 +342,13 @@ export const InfiniteCanvas = ({
   tool,
   onToolChange,
   onDuplicate,
+  historyDepth,
+  onCancelRestore,
+  adoptionEpoch,
+  onImplicitElementsChange,
+  highlightedId,
+  onHoverElement,
+  zoomApiRef,
   projectPath,
   canvasId,
   onImagePaste,
@@ -295,6 +393,17 @@ export const InfiniteCanvas = ({
     snapGuidesRef.current = g
     setSnapGuides(g)
   }
+  // Live auto-layout drop preview while a SINGLE element drags over a layout
+  // frame: the accent insertion bar + the siblings' dodge translations.
+  // Purely visual — element data stays untouched until the existing release
+  // path commits. The ref mirrors the state so the pointer-move handler can
+  // compare the current slot without a stale-closure read.
+  const [dropPreview, setDropPreview] = useState<LayoutDropPreview | null>(null)
+  const dropPreviewRef = useRef<LayoutDropPreview | null>(null)
+  const setDropPreviewBoth = (p: LayoutDropPreview | null) => {
+    dropPreviewRef.current = p
+    setDropPreview(p)
+  }
   // ⌥-hover measure (Figma): while Alt is held with a selection, hovering
   // ANOTHER element shows the gap between the selection's bbox (a) and the
   // hovered element's (b) as accent distance lines. Cleared on Alt-up, on
@@ -303,6 +412,17 @@ export const InfiniteCanvas = ({
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(
     null,
   )
+  // Live selection-chrome drag, for the badge overlays: 'resize' shows the
+  // W × H pill under the box, 'rotate' the N° pill near the pointer (x/y are
+  // the pointer's world position, refreshed per move).
+  const [chromeDrag, setChromeDrag] = useState<
+    { kind: 'resize' } | { kind: 'rotate'; x: number; y: number } | null
+  >(null)
+  // Cursor for the hovered selection chrome ('' = none) — folded into the
+  // wrapper's style declaratively (an imperative style.cursor write would
+  // fight React's own style prop, e.g. the Comment tool's bubble cursor).
+  // setState bails on the unchanged string, so hover moves stay cheap.
+  const [chromeCursor, setChromeCursor] = useState('')
   // Right-click context menu position (viewport-relative px), or null when closed.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -321,6 +441,8 @@ export const InfiniteCanvas = ({
   const prevEditing = useRef<string | null>(null)
   // Last click that landed on a card/element/frame — used to pair double-clicks.
   const lastClick = useRef<{ id: string; t: number } | null>(null)
+  // Last hover id reported to onHoverElement — report only on change.
+  const lastHoverRef = useRef<string | null>(null)
 
   const { viewport, positions, elements } = canvas
   // Layers-panel visibility: a `hidden` element is dropped from EVERY render
@@ -516,6 +638,31 @@ export const InfiniteCanvas = ({
         y: rect.height / 2 - (y1 + h / 2) * z,
       },
     })
+  }
+
+  // Everything visible — cards (Ground) + non-group elements — framed with the
+  // standard padding. Shared by the ⇧1 shortcut and the shell's zoom pill.
+  const fitAllContent = () => {
+    const c = canvasRef.current
+    fitViewportTo([
+      ...projects
+        .map((proj) => c.positions[proj.id])
+        .filter((pos): pos is { x: number; y: number } => !!pos)
+        .map((pos) => ({ x: pos.x, y: pos.y, w: CARD_W, h: CARD_H })),
+      ...c.elements
+        .filter((el) => !el.hidden && el.type !== 'group')
+        .map(fullBounds),
+    ])
+  }
+
+  // Register the imperative zoom handle every render so closures stay fresh.
+  if (zoomApiRef) {
+    zoomApiRef.current = {
+      zoomIn: () => setViewportZoom(canvasRef.current.viewport.zoom * 1.25),
+      zoomOut: () => setViewportZoom(canvasRef.current.viewport.zoom / 1.25),
+      zoomTo: (z: number) => setViewportZoom(z),
+      fitAll: fitAllContent,
+    }
   }
 
   const onWheel = useCallback(
@@ -777,6 +924,53 @@ export const InfiniteCanvas = ({
       // Esc, a modal…) — house rule, same as App's global handler.
       if (e.isComposing || e.defaultPrevented) return
       if (editingId || menu) return
+      // Esc DURING a move/resize/rotate drag cancels it — checked BEFORE the
+      // form-field gate (an in-flight pointer gesture means the user is
+      // manifestly on the canvas, even if a sidebar input still holds focus)
+      // and BEFORE the modifier dispatch (the cancel must also fire while ⇧
+      // aspect / ⌥ centre is held mid-resize). Restores the canvas (and
+      // selection) snapshotted at press time and ends the gesture: the
+      // pointer keeps capture until release, but with the press cleared the
+      // remaining moves/up are inert. The Esc tool/selection layering further
+      // down applies only when no such drag is in flight.
+      if (e.key === 'Escape') {
+        const p = press.current
+        if (
+          p &&
+          (p.kind === 'card' ||
+            p.kind === 'element' ||
+            p.kind === 'frame' ||
+            p.kind === 'resize' ||
+            p.kind === 'rotate' ||
+            p.kind === 'groupresize')
+        ) {
+          e.preventDefault()
+          // A press-time snapshot is only valid for the elements lineage it
+          // was taken from. When an EXTERNAL replacement was adopted mid-drag
+          // (git-shared auto-sync / observer re-fetch), restoring it would
+          // silently revert — and then persist over — the adopted edits, so
+          // the cancel degrades to just ending the gesture in place.
+          const stale =
+            p.restore.epoch !== undefined && adoptionEpoch?.() !== p.restore.epoch
+          if (!stale) {
+            const c = canvasRef.current
+            onCanvasChange({ ...c, positions: p.restore.positions, elements: p.restore.elements })
+            onSelectIds(p.restore.selection)
+            // Roll the host's undo history back to its press-time depth — a
+            // pause mid-drag may have flushed the pre-drag snapshot as a step,
+            // and the restore above must not become a redoable change either.
+            if (p.restore.histDepth !== undefined) onCancelRestore?.(p.restore.histDepth)
+          }
+          press.current = null
+          activePointerId.current = null
+          lastClick.current = null
+          setChromeDrag(null)
+          setGuides([])
+          setDropPreviewBoth(null)
+          setPanning(false)
+          return
+        }
+      }
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
       const mod = e.metaKey || e.ctrlKey
@@ -897,16 +1091,7 @@ export const InfiniteCanvas = ({
           setViewportZoom(1)
         } else if (e.code === 'Digit1') {
           e.preventDefault()
-          const c = canvasRef.current
-          fitViewportTo([
-            ...projects
-              .map((proj) => c.positions[proj.id])
-              .filter((pos): pos is { x: number; y: number } => !!pos)
-              .map((pos) => ({ x: pos.x, y: pos.y, w: CARD_W, h: CARD_H })),
-            ...c.elements
-              .filter((el) => !el.hidden && el.type !== 'group')
-              .map(fullBounds),
-          ])
+          fitAllContent()
         } else if (e.code === 'Digit2') {
           e.preventDefault()
           const c = canvasRef.current
@@ -953,7 +1138,8 @@ export const InfiniteCanvas = ({
         // Layered escape, Figma-style: 1st Esc leaves the active tool, 2nd
         // clears the selection — each consumed press preventDefaults so App's
         // global Esc (which clears the GROUND selection = closes the project
-        // panel) only fires once there's nothing left to escape here.
+        // panel) only fires once there's nothing left to escape here. (A drag
+        // cancel was already handled above, before the modifier dispatch.)
         if (tool !== 'select') {
           e.preventDefault()
           onToolChange('select')
@@ -1215,9 +1401,12 @@ export const InfiniteCanvas = ({
       }
     }
     const c = canvasRef.current
-    // applyAutoLayout: a text dropped inside a layout frame (parentId resolved
-    // just above) snaps into the stack immediately.
-    onCanvasChange({ ...c, elements: applyAutoLayout([...c.elements, el]) })
+    // A note created ON a layout frame joins its flow at the slot under the
+    // click (insertIntoLayoutAtPoint parents + splices; comments are excluded
+    // inside the helper). Elsewhere it's a plain append — with the container
+    // parentId resolved above — and applyAutoLayout settles the stack.
+    const ins = insertIntoLayoutAtPoint(c.elements, el, { x: w.x, y: w.y })
+    onCanvasChange({ ...c, elements: applyAutoLayout(ins.elements) })
     setEditingId(el.id)
     onSelect(el.id)
     onToolChange('select')
@@ -1249,6 +1438,11 @@ export const InfiniteCanvas = ({
   const onViewportPointerDown = (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (menu) setMenu(null)
+    // A starting gesture ends the hover-sync highlight until the next idle move.
+    if (lastHoverRef.current !== null) {
+      lastHoverRef.current = null
+      onHoverElement?.(null)
+    }
     // Space+drag pans, regardless of tool or what is under the cursor.
     if (spaceDown.current) {
       startPan(e)
@@ -1360,6 +1554,19 @@ export const InfiniteCanvas = ({
     return items.length > 1 ? items : undefined
   }
 
+  // Esc-cancel snapshot for a gesture about to start — call BEFORE any press
+  // side-effect (notably the ⌥-drag clone commit) so cancel rolls all of it back.
+  const snapshotForRestore = (): PressRestore => {
+    const c = canvasRef.current
+    return {
+      positions: c.positions,
+      elements: c.elements,
+      selection: selectedRef.current,
+      histDepth: historyDepth?.(),
+      epoch: adoptionEpoch?.(),
+    }
+  }
+
   const onCardPointerDown = (project: ProjectMeta) => (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
@@ -1378,6 +1585,7 @@ export const InfiniteCanvas = ({
       oy: pos.y,
       moved: false,
       shift: e.shiftKey,
+      restore: snapshotForRestore(),
       ...(group ? { group } : {}),
     }
     setPanning(true)
@@ -1401,6 +1609,7 @@ export const InfiniteCanvas = ({
     e.stopPropagation()
     if (editingId === el.id) return
     setEditingId(null)
+    const restore = snapshotForRestore()
     // A design (mock/screen) drags its text annotations rigidly with it, so a
     // label placed on top of the rendered design stays put on the design. Frames
     // have their own header-drag path; here we only need design → text children.
@@ -1429,6 +1638,16 @@ export const InfiniteCanvas = ({
         else onSelect(pressId)
       }
     }
+    // Figma selects on pointer-DOWN: pressing an unselected element selects it
+    // (whole group) right away, so the drag that may follow moves a SELECTED
+    // element and arrow keys work immediately after. Shift keeps its
+    // pointer-up toggle; pressing into an existing multi-selection leaves it
+    // intact for the multi-drag. (⌥-drag clones above already re-selected.)
+    if (!e.altKey && !e.shiftKey && !selectedRef.current.includes(el.id)) {
+      const groupSel = expandSelectionForElement(canvasRef.current.elements, el.id)
+      if (groupSel.length > 1) onSelectIds(groupSel)
+      else onSelect(el.id, false)
+    }
     press.current = {
       kind: 'element',
       id: pressId,
@@ -1438,6 +1657,7 @@ export const InfiniteCanvas = ({
       oy: el.y,
       moved: false,
       shift: e.shiftKey,
+      restore,
       ...(pressChildren && pressChildren.length ? { children: pressChildren } : {}),
       ...(pressGroup ? { group: pressGroup } : {}),
     }
@@ -1452,6 +1672,7 @@ export const InfiniteCanvas = ({
     if (editingId === frame.id) return
     setEditingId(null)
     const c = canvasRef.current
+    const restore = snapshotForRestore()
     // A frame that's been grouped (⌘G) drags as part of its group — the group is
     // the selection unit, so route through the multi-item element drag.
     if (topGroupId(c.elements, frame.id)) {
@@ -1466,6 +1687,7 @@ export const InfiniteCanvas = ({
           oy: frame.y,
           moved: false,
           shift: e.shiftKey,
+          restore,
           group,
         }
         setPanning(true)
@@ -1517,6 +1739,11 @@ export const InfiniteCanvas = ({
         onSelect(pressId)
       }
     }
+    // Figma selects on pointer-DOWN (see onElementPointerDown) — same rule for
+    // a frame grabbed by its label.
+    if (!e.altKey && !e.shiftKey && !selectedRef.current.includes(frame.id)) {
+      onSelect(frame.id, false)
+    }
     press.current = {
       kind: 'frame',
       id: pressId,
@@ -1525,75 +1752,175 @@ export const InfiniteCanvas = ({
       moved: false,
       shift: e.shiftKey,
       items: pressItems,
+      restore,
     }
     setPanning(true)
     capture(e)
   }
 
-  // Drag the bottom-right handle of the selected sticky/frame to resize it.
-  // Captures the full pre-drag box + rotation so a rotated element resizes along
-  // its own axes (the corner is rotated about the centre), plus the grab offset
-  // so the corner doesn't jump to the pointer on press.
-  const onResizePointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
+  // The chrome's invisible hit zones must not steal presses from interactive
+  // surfaces: a card, ANOTHER element's body, or a control (the frame header's
+  // 整理 button, an editor field). The SELECTED element's own surface may be
+  // claimed only INSIDE its rect — the design frame's floating name label
+  // hangs OUTSIDE the rect (it is that frame's only drag surface) and must
+  // keep winning its press. The painted corner squares and the bare canvas
+  // carry no element wrapper, so they always pass — and so does a press whose
+  // target is an element WRAPPER itself: a frame's body is pointer-events-none
+  // (only its header/label is interactive), so such a press is falling through
+  // inert space and the chrome may have it.
+  const chromeAllowsTarget = (
+    e: React.PointerEvent,
+    box: { x: number; y: number; w: number; h: number },
+    rot: number,
+    ownIds: ReadonlySet<string>,
+    point: { x: number; y: number },
+  ): boolean => {
+    const t = e.target
+    if (!(t instanceof Element)) return true
+    if (t.closest('button, input, textarea, select')) return false
+    if (t.closest('[data-card-id]')) return false
+    const wrapper = t.closest('[data-element-id]')
+    if (!wrapper || wrapper === t) return true
+    const id = wrapper.getAttribute('data-element-id')
+    if (!id || !ownIds.has(id)) return false
+    return pointInRotatedBox(box, rot, point)
+  }
+
+  // Selection-chrome pointer-down, run in the CAPTURE phase on the viewport so
+  // it wins over an element's own pointerdown wherever the chrome overlaps a
+  // body (the 8 resize handles straddle the border). All hit-testing is the
+  // pure geometry in canvasTransform — the rendered corner squares are visuals
+  // only, the edge bands and rotate annuli render nothing at all. A hit stops
+  // propagation, so the bubble handlers (element drag / marquee) never see the
+  // press; a miss falls through untouched — a body press still moves the
+  // element.
+  const onChromePointerDown = (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
-    if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
-    e.stopPropagation()
-    const b = fullBounds(el)
-    const rot = normalizeRotation(el.rotation ?? 0) // NaN-safe (guards bad JSON)
-    const corner = rotatedCornerBR(b, rot)
+    if (tool !== 'select' || spaceDown.current || editingId || menu) return
+    if (e.button !== 0) return // right-click → context menu path
+    const zoom = canvasRef.current.viewport.zoom
     const w = worldFromEvent(e)
-    press.current = {
-      kind: 'resize',
-      id: el.id,
-      box: b,
-      rot,
-      gx: w.x - corner.x,
-      gy: w.y - corner.y,
-    }
-    setPanning(true)
-    capture(e)
-  }
-
-  // Drag the bottom-right handle of a MULTI-selection's bounding box to scale the
-  // whole selection from its top-left anchor (Shift = proportional).
-  const onGroupResizePointerDown =
-    (box: { x: number; y: number; w: number; h: number }, items: GResizeItem[]) =>
-    (e: React.PointerEvent) => {
-      if (press.current) return
-      if (tool !== 'select' || spaceDown.current) return
-      e.stopPropagation()
-      const w = worldFromEvent(e)
+    // Multi-selection bbox handles (axis-aligned, rotation 0) take the press
+    // first; a multi-selection has no single-element chrome.
+    if (groupBox) {
+      const gb = { x: groupBox.x, y: groupBox.y, w: groupBox.w, h: groupBox.h }
+      const handle = hitHandle(gb, 0, w, zoom)
+      if (!handle) return
+      const ownIds = new Set(groupResizeItems.map((it) => it.id))
+      if (!chromeAllowsTarget(e, gb, 0, ownIds, w)) return
+      const hp = handlePoints(gb, 0)[handle]
       press.current = {
         kind: 'groupresize',
-        box,
-        items,
-        gx: w.x - (box.x + box.w),
-        gy: w.y - (box.y + box.h),
+        box: gb,
+        items: groupResizeItems,
+        handle,
+        gx: w.x - hp.x,
+        gy: w.y - hp.y,
+        restore: snapshotForRestore(),
       }
+      e.stopPropagation()
       setPanning(true)
       capture(e)
+      return
     }
-
-  // Drag the handle above the selected element to rotate it about its centre.
-  const onRotatePointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
-    if (press.current) return // a gesture is already active (ignore 2nd pointer)
-    if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
-    e.stopPropagation()
-    const b = fullBounds(el)
-    const cx = b.x + b.w / 2
-    const cy = b.y + b.h / 2
-    const w = worldFromEvent(e)
-    press.current = {
-      kind: 'rotate',
-      id: el.id,
-      cx,
-      cy,
-      startAngle: Math.atan2(w.y - cy, w.x - cx),
-      startRot: normalizeRotation(el.rotation ?? 0), // NaN-safe (guards bad JSON)
+    const target = resizeTarget ?? rotateTarget
+    if (!target) return
+    const b = fullBounds(target)
+    const rot = normalizeRotation(target.rotation ?? 0) // NaN-safe (guards bad JSON)
+    if (resizeTarget) {
+      const handle = hitHandle(b, rot, w, zoom)
+      if (handle && chromeAllowsTarget(e, b, rot, new Set([resizeTarget.id]), w)) {
+        const hp = handlePoints(b, rot)[handle]
+        press.current = {
+          kind: 'resize',
+          id: resizeTarget.id,
+          box: b,
+          rot,
+          handle,
+          gx: w.x - hp.x,
+          gy: w.y - hp.y,
+          restore: snapshotForRestore(),
+        }
+        e.stopPropagation()
+        setChromeDrag({ kind: 'resize' })
+        setPanning(true)
+        capture(e)
+        return
+      }
     }
-    setPanning(true)
-    capture(e)
+    if (rotateTarget) {
+      // The rotate annulus lives fully outside the rect, so it may claim only
+      // the bare canvas — anything interactive out there (another element, the
+      // frame label) keeps its own press.
+      const zone = hitRotateZone(b, rot, w, zoom)
+      if (zone && chromeAllowsTarget(e, b, rot, EMPTY_IDS, w)) {
+        const cx = b.x + b.w / 2
+        const cy = b.y + b.h / 2
+        press.current = {
+          kind: 'rotate',
+          id: rotateTarget.id,
+          cx,
+          cy,
+          startAngle: Math.atan2(w.y - cy, w.x - cx),
+          startRot: rot,
+          restore: snapshotForRestore(),
+        }
+        e.stopPropagation()
+        setChromeDrag({ kind: 'rotate', x: w.x, y: w.y })
+        setPanning(true)
+        capture(e)
+      }
+    }
   }
+
+  // No-gesture hover: drive the cursor for the same chrome geometry — resize
+  // handles get the rotation-aware double arrow, the outside-corner annulus the
+  // curved rotate arrow — into chromeCursor ('' hands the cursor back to the
+  // tool/pan classes everywhere else).
+  const updateChromeCursor = (e: React.PointerEvent) => {
+    let next = ''
+    if (tool === 'select' && !spaceDown.current && !editingId && !menu) {
+      const zoom = canvasRef.current.viewport.zoom
+      const w = worldFromEvent(e)
+      if (groupBox) {
+        const gb = { x: groupBox.x, y: groupBox.y, w: groupBox.w, h: groupBox.h }
+        const handle = hitHandle(gb, 0, w, zoom)
+        if (
+          handle &&
+          chromeAllowsTarget(e, gb, 0, new Set(groupResizeItems.map((it) => it.id)), w)
+        )
+          next = cursorForHandle(handle, 0)
+      } else {
+        const target = resizeTarget ?? rotateTarget
+        if (target) {
+          const b = fullBounds(target)
+          const rot = normalizeRotation(target.rotation ?? 0)
+          const handle = resizeTarget ? hitHandle(b, rot, w, zoom) : null
+          if (handle && chromeAllowsTarget(e, b, rot, new Set([target.id]), w)) {
+            next = cursorForHandle(handle, rot)
+          } else if (rotateTarget) {
+            const zone = hitRotateZone(b, rot, w, zoom)
+            if (zone && chromeAllowsTarget(e, b, rot, EMPTY_IDS, w)) {
+              // Heading = centre → corner direction; the rotated corner point
+              // already folds the element rotation in.
+              const pt = handlePoints(b, rot)[zone]
+              const cx = b.x + b.w / 2
+              const cy = b.y + b.h / 2
+              next = rotateCursor((Math.atan2(pt.y - cy, pt.x - cx) * 180) / Math.PI)
+            }
+          }
+        }
+      }
+    }
+    setChromeCursor(next)
+  }
+
+  // Drop the chrome cursor the moment the chrome itself goes away (selection
+  // change, tool switch, edit start) — the next mousemove would fix it, but a
+  // stationary pointer must not keep a stale resize arrow.
+  useEffect(() => {
+    setChromeCursor('')
+  }, [selectedIds, tool, editingId])
 
   // Resolve the in-progress draw box for the current pointer + live modifiers,
   // and fold in the Space-to-reposition bookkeeping. Mutates the press's
@@ -1657,6 +1984,19 @@ export const InfiniteCanvas = ({
     if (isForeignPointer(e)) return // a 2nd pointer must not drive the gesture
     const p = press.current
     if (!p) {
+      // Selection-chrome hover cursor (resize arrows / rotate arrow) first —
+      // it owns the viewport's inline cursor while over the chrome.
+      updateChromeCursor(e)
+      // Hover sync with the Layers panel — report only on change so an idle
+      // sweep doesn't storm the parent with renders.
+      if (onHoverElement && tool === 'select') {
+        const w = worldFromEvent(e)
+        const hit = topElementAt(w.x, w.y) ?? null
+        if (hit !== lastHoverRef.current) {
+          lastHoverRef.current = hit
+          onHoverElement(hit)
+        }
+      }
       // ⌥-hover measure: no gesture running — with Alt + a selection, hovering
       // a non-selected element measures selection-bbox ↔ hovered-bbox.
       if (e.altKey && tool === 'select' && selectedRef.current.length) {
@@ -1691,39 +2031,29 @@ export const InfiniteCanvas = ({
     const c = canvasRef.current
     if (p.kind === 'resize') {
       // Map the pointer (minus the grab offset) onto the box's local axes,
-      // keeping the opposite corner anchored — correct for a rotated element and
-      // identical to the legacy top-left-anchored resize when rot === 0. Shift
-      // locks the aspect ratio (read live so it can toggle mid-drag).
+      // keeping the side/corner opposite the grabbed handle anchored — correct
+      // for a rotated element on any of the 8 handles. Shift (aspect lock) and
+      // Alt (scale about the centre) read live so they can toggle mid-drag.
       const pw = worldFromEvent(e)
-      let next = resizeRotatedBR(
-        p.box,
-        p.rot,
-        { x: pw.x - p.gx, y: pw.y - p.gy },
-        { minW: RESIZE_MIN_W, minH: RESIZE_MIN_H, lockAspect: e.shiftKey },
+      const next = resizeFromHandle(p.box, p.rot, p.handle, pw, {
+        minW: RESIZE_MIN_W,
+        minH: RESIZE_MIN_H,
+        aspect: e.shiftKey,
+        fromCenter: e.altKey,
+        grabOffset: { x: p.gx, y: p.gy },
+      })
+      const resized = c.elements.map((el) =>
+        el.id === p.id
+          ? { ...el, x: next.x, y: next.y, width: next.width, height: next.height }
+          : el,
       )
-      // Alt scales about the CENTRE (Figma), composing with Shift's aspect
-      // lock. Implemented as a BR-resize of the half-box anchored at the
-      // centre — its BR corner is the same handle the user grabbed — then
-      // mirrored to the full box, so the dragged corner tracks the pointer
-      // while the opposite corner mirrors it.
-      if (e.altKey) {
-        const cx = p.box.x + p.box.w / 2
-        const cy = p.box.y + p.box.h / 2
-        const half = resizeRotatedBR(
-          { x: cx, y: cy, w: p.box.w / 2, h: p.box.h / 2 },
-          p.rot,
-          { x: pw.x - p.gx, y: pw.y - p.gy },
-          { minW: RESIZE_MIN_W / 2, minH: RESIZE_MIN_H / 2, lockAspect: e.shiftKey },
-        )
-        next = { x: cx - half.w, y: cy - half.h, w: half.w * 2, h: half.h * 2 }
-      }
+      // Auto layout re-packs LIVE while the box moves (Figma: shrink an
+      // align-center frame and its children follow every frame) — a reference
+      // no-op for non-layout targets. Hug flags are virtually released for
+      // the engine input only; the release path still owns the real flip.
       onCanvasChange({
         ...c,
-        elements: c.elements.map((el) =>
-          el.id === p.id
-            ? { ...el, x: next.x, y: next.y, width: next.w, height: next.h }
-            : el,
-        ),
+        elements: applyAutoLayoutDuringResize(resized, p.id, p.box),
       })
       return
     }
@@ -1741,23 +2071,26 @@ export const InfiniteCanvas = ({
           el.id === p.id ? { ...el, rotation: deg === 0 ? undefined : deg } : el,
         ),
       })
+      // Keep the N° badge riding next to the pointer.
+      setChromeDrag({ kind: 'rotate', x: w.x, y: w.y })
       return
     }
     if (p.kind === 'groupresize') {
+      // Same pure resize math as the single element (rotation 0): the new bbox
+      // gives the per-axis scale, resizeGroup spreads it across the items about
+      // the anchor resizeFromHandle kept fixed (opposite side / centre with ⌥).
       const w = worldFromEvent(e)
-      let newW = Math.max(GROUP_RESIZE_MIN, w.x - p.gx - p.box.x)
-      let newH = Math.max(GROUP_RESIZE_MIN, w.y - p.gy - p.box.y)
-      if (e.shiftKey && p.box.w > 0 && p.box.h > 0) {
-        // Proportional: one uniform scale (the dominant axis drives it).
-        const s = Math.max(newW / p.box.w, newH / p.box.h)
-        newW = Math.max(GROUP_RESIZE_MIN, p.box.w * s)
-        newH = Math.max(GROUP_RESIZE_MIN, p.box.h * s)
-      }
-      const sx = newW / p.box.w
-      const sy = newH / p.box.h
-      const updates = new Map(
-        resizeGroup(p.items, { x: p.box.x, y: p.box.y }, sx, sy).map((u) => [u.id, u]),
-      )
+      const res = resizeFromHandle(p.box, 0, p.handle, w, {
+        minW: GROUP_RESIZE_MIN,
+        minH: GROUP_RESIZE_MIN,
+        aspect: e.shiftKey,
+        fromCenter: e.altKey,
+        grabOffset: { x: p.gx, y: p.gy },
+      })
+      const sx = res.width / p.box.w
+      const sy = res.height / p.box.h
+      const anchor = resizeAnchor(p.box, p.handle, e.altKey)
+      const updates = new Map(resizeGroup(p.items, anchor, sx, sy).map((u) => [u.id, u]))
       onCanvasChange({
         ...c,
         elements: c.elements.map((el) => {
@@ -1864,6 +2197,51 @@ export const InfiniteCanvas = ({
         }),
       })
       setGuides(guides)
+      // Live drop preview — insertion bar + dodging siblings while the
+      // pointer rides over a layout frame; cleared the moment it leaves
+      // (drag-out preview). Slot detection runs every move (cheap, pure);
+      // the engine-pass preview rebuilds only when the slot actually moves.
+      // Siblings keep their committed positions mid-drag, so the slot math
+      // reads the same data the release path will.
+      if (!moved || moved.type === 'comment' || moved.locked) {
+        // The dragged element can vanish mid-drag (external adoption removed
+        // it) — a frozen bar/dodge must not outlive it.
+        if (dropPreviewRef.current) setDropPreviewBoth(null)
+      } else {
+        const wpt = worldFromEvent(e)
+        const at = layoutDropSlot(c.elements, p.id, wpt)
+        const prev = dropPreviewRef.current
+        if (!at) {
+          // ⇧ axis-lock can take the POINTER outside the frame while the
+          // element stays put inside it — the release keeps membership then
+          // (full-rect containment), so the preview must keep saying "still
+          // in the flow" instead of pretending a drag-out.
+          const frame = moved.parentId
+            ? c.elements.find(
+                (f) => f.id === moved.parentId && f.type === 'frame' && f.layout,
+              )
+            : undefined
+          const fb = frame && elementBounds(frame)
+          const mb = elementBounds(moved)
+          if (frame && fb && mb && rectInside(fb, mb)) {
+            const own = layoutDropSlot(c.elements, p.id, {
+              x: mb.x + mb.w / 2,
+              y: mb.y + mb.h / 2,
+            })
+            if (own && (!prev || prev.frameId !== own.frameId || prev.slot !== own.slot)) {
+              setDropPreviewBoth(
+                layoutDropPreview(c.elements, p.id, { x: mb.x + mb.w / 2, y: mb.y + mb.h / 2 }),
+              )
+            } else if (!own && prev) {
+              setDropPreviewBoth(null)
+            }
+          } else if (prev) {
+            setDropPreviewBoth(null)
+          }
+        } else if (!prev || prev.frameId !== at.frameId || prev.slot !== at.slot) {
+          setDropPreviewBoth(layoutDropPreview(c.elements, p.id, wpt))
+        }
+      }
     } else {
       // frame: move the frame and everything captured inside it
       const nextPositions = { ...c.positions }
@@ -1913,17 +2291,45 @@ export const InfiniteCanvas = ({
                     : null
             if (movedIds) {
               const cur = canvasRef.current
-              const reparented = reparentMoved(cur.elements, movedIds)
+              // Single-element drags get Figma's pointer-based layout-frame
+              // membership: over a layout frame → (re)join it at the slot
+              // under the pointer, even if the rect overhangs the frame;
+              // outside every layout frame → the geometric full-containment
+              // rule decides as before (drag-out / plain-frame nesting).
+              const draggedId = movedIds.size === 1 ? Array.from(movedIds)[0] : null
+              const dragged = draggedId
+                ? cur.elements.find((el) => el.id === draggedId)
+                : null
+              const wpt = worldFromEvent(e)
+              const target =
+                dragged && dragged.type !== 'comment' && !dragged.locked
+                  ? layoutFrameAt(cur.elements, wpt, dragged.id, dragged.type)
+                  : null
+              let reparented: CanvasElement[]
+              if (dragged && target) {
+                reparented =
+                  dragged.parentId === target.id
+                    ? cur.elements
+                    : cur.elements.map((el) =>
+                        el.id === dragged.id ? { ...el, parentId: target.id } : el,
+                      )
+              } else {
+                reparented = reparentMoved(cur.elements, movedIds)
+              }
               // Keep design annotations painting on top of their design after a
               // (re)parent — a text just dropped on a mock/screen must sit above
               // the iframe, not behind it.
               const ordered = raiseDesignAnnotations(reparented)
               // Auto layout settles on RELEASE, never mid-drag (the live drag
-              // commits free-form positions so a child moves smoothly): a child
-              // dropped into / dragged within a layout frame re-flows here —
-              // Figma's drag-to-reorder falls out of the main-axis re-sort.
+              // commits free-form positions so a child moves smoothly). Flow
+              // order is ARRAY order (engine v2), so a single dragged child is
+              // spliced to the slot under the pointer — that is the
+              // drag-to-reorder gesture; multi-drags keep their relative order.
               // No-op (same reference) when no layout frame is involved.
-              const laid = applyAutoLayout(ordered)
+              const arranged = draggedId
+                ? reorderLayoutChild(ordered, draggedId, wpt)
+                : ordered
+              const laid = applyAutoLayout(arranged)
               if (laid !== cur.elements) {
                 onCanvasChange({ ...cur, elements: laid })
               }
@@ -1965,7 +2371,44 @@ export const InfiniteCanvas = ({
         // that element, like a drag-drop. (It does not pull stationary elements
         // in.) Rotation leaves x/y/w/h unchanged, so it needs no reparent.
         const cur = canvasRef.current
-        const reparented = reparentMoved(cur.elements, new Set([p.id]))
+        // Manually resizing a hug axis flips that axis to fixed (Figma) —
+        // otherwise the engine snaps the frame straight back to its hug size.
+        // Sizes round to whole px on commit (the live drag is fractional).
+        const released = cur.elements.map((el) => {
+          if (el.id !== p.id) return el
+          let next = el
+          if (!Number.isInteger(next.x) || !Number.isInteger(next.y))
+            next = { ...next, x: Math.round(next.x), y: Math.round(next.y) }
+          if (next.width !== undefined && !Number.isInteger(next.width))
+            next = { ...next, width: Math.round(next.width) }
+          if (next.height !== undefined && !Number.isInteger(next.height))
+            next = { ...next, height: Math.round(next.height) }
+          if (next.type !== 'frame' || !next.layout) return next
+          const row = next.layout.mode === 'row'
+          const wChanged = (next.width ?? p.box.w) !== p.box.w
+          const hChanged = (next.height ?? p.box.h) !== p.box.h
+          const dropPrimary =
+            next.layout.primarySizing === 'hug' && (row ? wChanged : hChanged)
+          const dropCounter =
+            next.layout.counterSizing === 'hug' && (row ? hChanged : wChanged)
+          if (!dropPrimary && !dropCounter) return next
+          const layout = { ...next.layout }
+          if (dropPrimary) delete layout.primarySizing
+          if (dropCounter) delete layout.counterSizing
+          return { ...next, layout }
+        })
+        // A LAYOUT child never leaves its frame by being resized — the frame
+        // re-flows around the new size instead (Figma; only a drag-out
+        // reparents). Geometric reparenting still applies everywhere else.
+        const resized = released.find((el) => el.id === p.id)
+        const parentIsLayoutFrame =
+          !!resized?.parentId &&
+          released.some(
+            (f) => f.id === resized.parentId && f.type === 'frame' && f.layout,
+          )
+        const reparented = parentIsLayoutFrame
+          ? released
+          : reparentMoved(released, new Set([p.id]))
         const ordered = raiseDesignAnnotations(reparented)
         // A resized child (or layout frame) re-flows its auto layout on release
         // — same settle point as a drag-drop above.
@@ -2063,48 +2506,61 @@ export const InfiniteCanvas = ({
             height: fh,
             text: '',
           }
-          const withFrame = [...c.elements, newFrame]
-          // Figma-style: a frame drawn around existing content ADOPTS what it
-          // fully encloses — including other frames (nesting). reparentMoved
-          // picks the innermost frame and excludes a frame's own descendants, so
-          // already-nested elements keep their tighter parent and no cycle forms.
-          // (Project cards are geometric, not parentId-based, so they need no
-          // adoption — they're already "in" any frame whose box covers them.)
-          const frameBox = fullBounds(newFrame) as Rect
-          const moved = new Set<string>(
-            withFrame
-              .filter(
-                (el) =>
-                  el.id !== id && rectInside(fullBounds(el) as Rect, frameBox),
-              )
-              .map((el) => el.id),
-          )
-          // Also resolve the NEW frame's own parent: drawn INSIDE an existing
-          // frame, it nests into it (parentId = the enclosing frame). Including
-          // its id makes reparentMoved set both directions in one pass.
-          moved.add(id)
-          const adopted = reparentMoved(withFrame, moved)
-          // A frame drawn inside a layout frame (or adopting children into its
-          // own fresh layout — none yet, but parents may re-pack) settles here.
-          onCanvasChange({ ...c, elements: applyAutoLayout(adopted) })
+          // Drawn ON a layout frame (and not wrapping it — the helper's
+          // contains-guard) → the fresh frame nests into that flow at the
+          // slot under the box centre, Figma-style. The enclosure adoption
+          // below stays the free-form drawing rule.
+          const ins = insertIntoLayoutAtPoint(c.elements, newFrame, {
+            x: x + fw / 2,
+            y: y + fh / 2,
+          })
+          if (ins.frameId) {
+            onCanvasChange({ ...c, elements: applyAutoLayout(ins.elements) })
+          } else {
+            const withFrame = ins.elements
+            // Figma-style: a frame drawn around existing content ADOPTS what it
+            // fully encloses — including other frames (nesting). reparentMoved
+            // picks the innermost frame and excludes a frame's own descendants, so
+            // already-nested elements keep their tighter parent and no cycle forms.
+            // (Project cards are geometric, not parentId-based, so they need no
+            // adoption — they're already "in" any frame whose box covers them.)
+            const frameBox = fullBounds(newFrame) as Rect
+            const moved = new Set<string>(
+              withFrame
+                .filter(
+                  (el) =>
+                    el.id !== id && rectInside(fullBounds(el) as Rect, frameBox),
+                )
+                .map((el) => el.id),
+            )
+            // Also resolve the NEW frame's own parent: drawn INSIDE an existing
+            // frame, it nests into it (parentId = the enclosing frame). Including
+            // its id makes reparentMoved set both directions in one pass.
+            moved.add(id)
+            const adopted = reparentMoved(withFrame, moved)
+            // A frame drawn inside a layout frame (or adopting children into its
+            // own fresh layout — none yet, but parents may re-pack) settles here.
+            onCanvasChange({ ...c, elements: applyAutoLayout(adopted) })
+          }
           // A fresh frame jumps straight into its label editor.
           setEditingId(id)
         } else {
           // Shape (rect / ellipse): a real drag sizes it; a tiny drag / plain
           // click drops a default box. Shapes have no editable label, so we
-          // never enter the editor — just select the new shape.
+          // never enter the editor — just select the new shape. Drawn ON a
+          // layout frame, the shape joins its flow at the slot under the box
+          // centre (same rule as createNote / paste).
           const sized = box.w >= SHAPE_MIN_DRAG && box.h >= SHAPE_MIN_DRAG
           const sw = sized ? box.w : SHAPE_DEFAULT_W
           const sh = sized ? box.h : SHAPE_DEFAULT_H
           const x = sized ? box.x : anchorX
           const y = sized ? box.y : anchorY
-          onCanvasChange({
-            ...c,
-            elements: [
-              ...c.elements,
-              { id, type: 'shape', shapeKind: p.what, x, y, width: sw, height: sh, text: '' },
-            ],
-          })
+          const ins = insertIntoLayoutAtPoint(
+            c.elements,
+            { id, type: 'shape', shapeKind: p.what, x, y, width: sw, height: sh, text: '' },
+            { x: x + sw / 2, y: y + sh / 2 },
+          )
+          onCanvasChange({ ...c, elements: applyAutoLayout(ins.elements) })
         }
         onSelect(id)
         onToolChange('select')
@@ -2114,6 +2570,8 @@ export const InfiniteCanvas = ({
     press.current = null
     activePointerId.current = null
     if (snapGuidesRef.current.length) setGuides([]) // clear alignment guides on release
+    if (dropPreviewRef.current) setDropPreviewBoth(null) // bar + dodge end with the drag
+    setChromeDrag(null) // drop the W × H / N° badge (no-op re-render when already null)
     setPanning(false)
     try {
       ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
@@ -2169,6 +2627,42 @@ export const InfiniteCanvas = ({
     const locked = lockedIds(c.elements)
     const sel = new Set(selectedRef.current.filter((id) => !locked.has(id)))
     if (!sel.size) return
+    // Flow order = array order (engine v2): a lone layout child nudged along
+    // its frame's MAIN axis swaps with the adjacent sibling instead of moving
+    // by pixels (Figma's arrow-key reorder — a positional nudge would just
+    // snap back into its slot). Cross-axis / multi-select nudges stay
+    // positional and settle through applyAutoLayout below.
+    if (sel.size === 1) {
+      const id = Array.from(sel)[0]
+      const el = c.elements.find((e) => e.id === id)
+      const frame = el?.parentId
+        ? c.elements.find((e) => e.id === el.parentId)
+        : undefined
+      if (
+        el &&
+        !el.hidden &&
+        el.type !== 'comment' &&
+        frame?.type === 'frame' &&
+        frame.layout
+      ) {
+        const row = frame.layout.mode === 'row'
+        const main = row ? dx : dy
+        if (main !== 0) {
+          const visible = c.elements.filter(
+            (e) => e.parentId === frame.id && !e.hidden && e.type !== 'comment',
+          )
+          const at = visible.findIndex((e) => e.id === id)
+          const to = at + (main > 0 ? 1 : -1)
+          if (to < 0 || to >= visible.length) return // already at the edge
+          const a = c.elements.indexOf(visible[at])
+          const b = c.elements.indexOf(visible[to])
+          const swapped = [...c.elements]
+          ;[swapped[a], swapped[b]] = [swapped[b], swapped[a]]
+          onCanvasChange({ ...c, elements: applyAutoLayout(swapped) })
+          return
+        }
+      }
+    }
     // applyAutoLayout: a nudged layout-frame child snaps back into its stack
     // (an arrow-key nudge is a committed edit, not a live drag) — same
     // normalization as the pointer-up / delete paths.
@@ -2307,6 +2801,42 @@ export const InfiniteCanvas = ({
     })
     return changed ? next : els
   }
+
+  // Flow order = ARRAY order (engine v2): a single element dropped in / moved
+  // within a layout frame is spliced to the slot under the POINTER — the
+  // drag-to-reorder gesture. The slot comes from layoutInsertionIndex over the
+  // frame's OTHER visible children; index n (past the last midpoint) appends at
+  // the array end, which is equivalent for flow and keeps the element frontmost.
+  const reorderLayoutChild = (
+    els: CanvasElement[],
+    id: string,
+    point: { x: number; y: number },
+  ): CanvasElement[] => {
+    const el = els.find((e) => e.id === id)
+    if (!el || !el.parentId || el.hidden || el.type === 'comment') return els
+    const frame = els.find((e) => e.id === el.parentId)
+    if (!frame || frame.type !== 'frame' || !frame.layout) return els
+    const without = els.filter((e) => e.id !== id)
+    const slot = layoutInsertionIndex(without, frame.id, point)
+    const visible = without.filter(
+      (e) => e.parentId === frame.id && !e.hidden && e.type !== 'comment',
+    )
+    const next = [...without]
+    const anchor = slot < visible.length ? next.indexOf(visible[slot]) : -1
+    if (anchor === -1) next.push(el)
+    else next.splice(anchor, 0, el)
+    // Same slot as before → identical array → keep the input reference so the
+    // release path's no-op detection still works.
+    return next.every((e, i) => e === els[i]) ? els : next
+  }
+
+  // Layout-frame membership is decided by the POINTER, like Figma: while the
+  // pointer is over a layout frame the dragged element belongs to it (and
+  // reorders by slot) even if its rect overhangs; it leaves only when the
+  // pointer exits. Full-rect containment (resolveContainerId) stays the rule
+  // for plain frames. The shared hit-test lives in canvasAutoLayout
+  // (layoutFrameAt) so the release path, the live drop preview, and the
+  // create/paste insertion all agree on the target frame.
 
   // A text annotation must paint ABOVE the design it's anchored to (a mock /
   // screen renders an iframe; array order is paint order). Pull every text whose
@@ -2495,6 +3025,71 @@ export const InfiniteCanvas = ({
       : []
   const groupBox = groupResizeItems.length >= 2 ? unionBounds(groupResizeItems) : null
 
+  // Drop-preview dodge: compose the transient translation (siblings making
+  // room for the dragged element) with the element's own rotation — translate
+  // first, so the rotation still spins about the element's centre. Element
+  // data is untouched; the translation lives only in this style.
+  const wrapperTransform = (el: CanvasElement): string | undefined => {
+    const s = dropPreview?.shifts.get(el.id)
+    const parts: string[] = []
+    if (s) parts.push(`translate(${s.dx}px, ${s.dy}px)`)
+    if (el.rotation) parts.push(`rotate(${el.rotation}deg)`)
+    return parts.length ? parts.join(' ') : undefined
+  }
+
+  // Texts managed by a layout frame persist their MEASURED render box (the
+  // ResizeObserver in ElementView → onTextMeasured below) so the flow's
+  // footprint tracks the real text instead of the 300×44 default — growing
+  // text pushes its flow siblings. Free texts never write a size.
+  const measuredTextIds = (() => {
+    const out = new Set<string>()
+    const byIdAll = new Map(elements.map((e) => [e.id, e]))
+    for (const el of elements) {
+      if (el.type !== 'text' || !el.parentId || el.hidden || el.locked) continue
+      const parent = byIdAll.get(el.parentId)
+      if (parent?.type === 'frame' && parent.layout) out.add(el.id)
+    }
+    return out
+  })()
+
+  // Persist a layout text's measured box. textFootprintPatch writes only on a
+  // ≥1px change (and never on a 0-size readout), so the observer can't
+  // ping-pong with the engine; the parent gate is re-checked at flush because
+  // the observation can race a reparent. The browser delivers ALL ResizeObserver
+  // callbacks of a rendering step back-to-back while canvasRef only refreshes
+  // on render — so a burst (several texts measured on mount) is collected and
+  // flushed as ONE onCanvasChange, or the later write would clobber the
+  // earlier one. The host's coalescing history then absorbs it as one step.
+  const pendingMeasuresRef = useRef<Map<string, { w: number; h: number }> | null>(null)
+  const onTextMeasured = (id: string, w: number, h: number) => {
+    let pending = pendingMeasuresRef.current
+    if (!pending) {
+      pending = new Map()
+      pendingMeasuresRef.current = pending
+      const batch = pending
+      queueMicrotask(() => {
+        pendingMeasuresRef.current = null
+        const c = canvasRef.current
+        let next = c.elements
+        batch.forEach((m, tid) => {
+          if (!isLayoutManagedText(next, tid)) return
+          const el = next.find((x) => x.id === tid)!
+          const patch = textFootprintPatch(el, m.w, m.h)
+          if (!patch) return
+          next = next.map((x) => (x.id === tid ? { ...x, ...patch } : x))
+        })
+        if (next !== c.elements) {
+          const laid = applyAutoLayout(next)
+          // Derived write — no undo step of its own (host folds it into the
+          // baseline from a clean state).
+          if (onImplicitElementsChange) onImplicitElementsChange(laid)
+          else onCanvasChange({ ...c, elements: laid })
+        }
+      })
+    }
+    pending.set(id, { w, h })
+  }
+
   const contentStyle = useMemo<React.CSSProperties>(
     () => ({
       transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
@@ -2554,13 +3149,20 @@ export const InfiniteCanvas = ({
     return out
   })()
 
+  // Cursor precedence on the wrapper: the Comment tool's bubble glyph, then a
+  // hovered selection-chrome cursor, then the plain grid (the tool/pan cursor
+  // classes apply). chromeCursor is only ever set in the select tool, so the
+  // two style cursors never actually compete.
   const wrapperStyle = commentCursor
     ? { ...gridStyle, cursor: COMMENT_CURSOR }
-    : gridStyle
+    : chromeCursor
+      ? { ...gridStyle, cursor: chromeCursor }
+      : gridStyle
 
   return (
     <div
       ref={viewportRef}
+      onPointerDownCapture={onChromePointerDown}
       onPointerDown={onViewportPointerDown}
       onPointerMove={onViewportPointerMove}
       onPointerUp={onViewportPointerUp}
@@ -2568,6 +3170,12 @@ export const InfiniteCanvas = ({
       // Defensive: if the OS yanks pointer capture without a pointercancel
       // (rare), still run the up-path so a press can't get stuck.
       onLostPointerCapture={onViewportPointerUp}
+      onPointerLeave={() => {
+        if (lastHoverRef.current !== null) {
+          lastHoverRef.current = null
+          onHoverElement?.(null)
+        }
+      }}
       onContextMenu={onContextMenu}
       onMouseDown={(e) => {
         // The canvas is not focusable, so a press on it would pull focus to
@@ -2584,6 +3192,10 @@ export const InfiniteCanvas = ({
         // frame would flip the cursor back to grab via that element's own
         // class, hiding the speech-bubble glyph the user just enabled.
         commentCursor ? 'canvas-comment-cursor' : '',
+        // Same trick while a selection-chrome cursor (resize / rotate zone) is
+        // showing: the inner half of an edge band and the rotate annulus often
+        // sit over an element whose own cursor-grab class would win otherwise.
+        !commentCursor && chromeCursor ? 'canvas-chrome-cursor' : '',
       ].join(' ')}
       style={wrapperStyle}
     >
@@ -2605,11 +3217,12 @@ export const InfiniteCanvas = ({
         {frames.map((frame) => (
           <div
             key={frame.id}
+            data-element-id={frame.id}
             className="absolute"
             style={{
               left: frame.x,
               top: frame.y,
-              transform: frame.rotation ? `rotate(${frame.rotation}deg)` : undefined,
+              transform: wrapperTransform(frame),
               transformOrigin: 'center',
               mixBlendMode:
                 frame.blendMode && frame.blendMode !== 'normal' ? frame.blendMode : undefined,
@@ -2683,6 +3296,7 @@ export const InfiniteCanvas = ({
         {notes.map((el) => (
           <div
             key={el.id}
+            data-element-id={el.id}
             className="absolute"
             style={{
               left: el.x,
@@ -2690,8 +3304,9 @@ export const InfiniteCanvas = ({
               // Figma-parity transforms applied at the positioning wrapper so
               // they cover every element type uniformly: rotate() about centre,
               // mix-blend-mode, and pointer-events:none for a locked element
-              // (clicks fall through; unlock from the Layers panel).
-              transform: el.rotation ? `rotate(${el.rotation}deg)` : undefined,
+              // (clicks fall through; unlock from the Layers panel). The
+              // drop-preview dodge translation composes in front of the rotate.
+              transform: wrapperTransform(el),
               transformOrigin: 'center',
               mixBlendMode:
                 el.blendMode && el.blendMode !== 'normal' ? el.blendMode : undefined,
@@ -2711,6 +3326,11 @@ export const InfiniteCanvas = ({
               projectPath={projectPath}
               canvasId={canvasId}
               commentTool={commentCursor}
+              onMeasure={
+                measuredTextIds.has(el.id)
+                  ? (w, h) => onTextMeasured(el.id, w, h)
+                  : undefined
+              }
             />
           </div>
         ))}
@@ -2779,10 +3399,15 @@ export const InfiniteCanvas = ({
         {comments.map((el) => (
           <div
             key={el.id}
+            data-element-id={el.id}
             className="absolute"
             style={{
               left: el.x,
               top: el.y,
+              // A pin riding a dodging subtree (its parent making room for a
+              // drop) translates with it — comments never take a slot
+              // themselves, but they travel with their frame.
+              transform: wrapperTransform(el),
               // The selected comment sits above its peers so an overlapping
               // pin doesn't catch clicks meant for the open popup.
               zIndex: selectedIds.includes(el.id) || editingId === el.id ? 30 : 10,
@@ -2841,69 +3466,178 @@ export const InfiniteCanvas = ({
           />
         ))}
 
-        {/* Multi-selection bounding box + corner handle (group resize). */}
-        {groupBox && (
-          <>
-            <div
-              className="pointer-events-none absolute rounded-[2px]"
-              style={{
-                left: groupBox.x,
-                top: groupBox.y,
-                width: groupBox.w,
-                height: groupBox.h,
-                border: `${1 / viewport.zoom}px dashed rgba(178,58,44,0.6)`,
-              }}
-            />
-            <div
-              onPointerDown={onGroupResizePointerDown(groupBox, groupResizeItems)}
-              className="absolute h-3.5 w-3.5 rounded-[2px] border-2 border-accent bg-bg-card shadow-card"
-              style={{ left: groupBox.x + groupBox.w - 7, top: groupBox.y + groupBox.h - 7, cursor: 'nwse-resize' }}
-            />
-          </>
-        )}
-
-        {resizeTarget &&
+        {/* Auto-layout drop preview — the accent insertion bar marking the
+            slot the release will splice into (the dodging siblings translate
+            via their wrappers above). 2 screen-px thick, centred on the slot,
+            spanning the frame's padded interior on the cross axis. */}
+        {dropPreview &&
           (() => {
-            // Sit the handle on the element's ROTATED bottom-right corner so it
-            // tracks a turned element (matches the rotation handle).
-            const corner = rotatedCornerBR(
-              fullBounds(resizeTarget),
-              normalizeRotation(resizeTarget.rotation ?? 0),
+            const { bar, frameBox } = dropPreview
+            const th = 2 / viewport.zoom
+            return (
+              <>
+                {/* When the drop grows the frame (hug axis absorbing the
+                    newcomer), a dashed outline previews the grown box — so a
+                    bar past the CURRENT edge reads as "the frame grows here",
+                    not as an insertion into empty canvas. */}
+                {frameBox && (
+                  <div
+                    className="pointer-events-none absolute rounded-[2px]"
+                    style={{
+                      left: frameBox.x,
+                      top: frameBox.y,
+                      width: frameBox.w,
+                      height: frameBox.h,
+                      border: `${1 / viewport.zoom}px dashed rgba(178,58,44,0.5)`,
+                    }}
+                  />
+                )}
+                <div
+                  className="pointer-events-none absolute rounded-full bg-accent"
+                  style={
+                    bar.axis === 'x'
+                      ? {
+                          left: bar.pos - th / 2,
+                          top: bar.from,
+                          width: th,
+                          height: Math.max(0, bar.to - bar.from),
+                        }
+                      : {
+                          left: bar.from,
+                          top: bar.pos - th / 2,
+                          width: Math.max(0, bar.to - bar.from),
+                          height: th,
+                        }
+                  }
+                />
+              </>
             )
+          })()}
+
+        {/* Hover-sync highlight (Layers panel ⇄ canvas): a light accent
+            outline on the hovered element — skipped while it's selected (the
+            selection ring already marks it). */}
+        {highlightedId &&
+          !selectedIds.includes(highlightedId) &&
+          (() => {
+            const el = canvas.elements.find(
+              (x) => x.id === highlightedId && !x.hidden && x.type !== 'group',
+            )
+            if (!el) return null
+            const b = fullBounds(el)
             return (
               <div
-                onPointerDown={onResizePointerDown(resizeTarget)}
-                className="absolute h-3.5 w-3.5 rounded-[2px] border-2 border-accent bg-bg-card shadow-card"
+                className="pointer-events-none absolute rounded-[2px]"
                 style={{
-                  left: corner.x - 7,
-                  top: corner.y - 7,
-                  cursor: 'nwse-resize',
+                  left: b.x,
+                  top: b.y,
+                  width: b.w,
+                  height: b.h,
+                  border: `${1.5 / viewport.zoom}px solid rgba(178,58,44,0.55)`,
+                  transform: el.rotation
+                    ? `rotate(${normalizeRotation(el.rotation)}deg)`
+                    : undefined,
                 }}
               />
             )
           })()}
 
-        {/* Rotation handle — a round grip above the element's (visual) top edge.
-            Its position is rotated about the centre so it tracks a turned
-            element; the drag itself sets el.rotation. */}
-        {rotateTarget &&
+        {/* Multi-selection bounding box (group resize gets the same 4-corner
+            chrome below; the dashed outline marks the bbox itself). */}
+        {groupBox && (
+          <div
+            className="pointer-events-none absolute rounded-[2px]"
+            style={{
+              left: groupBox.x,
+              top: groupBox.y,
+              width: groupBox.w,
+              height: groupBox.h,
+              border: `${1 / viewport.zoom}px dashed rgba(178,58,44,0.6)`,
+            }}
+          />
+        )}
+
+        {/* Selection chrome — 4 corner squares (8px screen-fixed) on the lone
+            selection's rotated box, or on the multi-selection bbox. Visuals
+            only: presses route through onChromePointerDown (capture) and the
+            hover cursor through updateChromeCursor, both against the same pure
+            geometry — the EDGE bands and the outside-corner rotate zones render
+            nothing at all. */}
+        {(() => {
+          const chrome = groupBox
+            ? { box: groupBox, rot: 0 }
+            : resizeTarget
+              ? {
+                  box: fullBounds(resizeTarget),
+                  rot: normalizeRotation(resizeTarget.rotation ?? 0),
+                }
+              : null
+          if (!chrome) return null
+          const pts = handlePoints(
+            { x: chrome.box.x, y: chrome.box.y, w: chrome.box.w, h: chrome.box.h },
+            chrome.rot,
+          )
+          const size = 8 / viewport.zoom
+          return CORNER_HANDLES.map((h) => (
+            <div
+              key={`chrome-${h}`}
+              data-handle={h}
+              className="absolute border-accent bg-bg-card"
+              style={{
+                left: pts[h].x - size / 2,
+                top: pts[h].y - size / 2,
+                width: size,
+                height: size,
+                borderWidth: 1 / viewport.zoom,
+                // The square stays axis-aligned with the ELEMENT, not the screen.
+                transform: chrome.rot ? `rotate(${chrome.rot}deg)` : undefined,
+                cursor: cursorForHandle(h, chrome.rot),
+              }}
+            />
+          ))
+        })()}
+
+        {/* W × H badge — live size pill under the box's (rotated) bottom edge
+            while a single-element resize drags. Constant screen size via the
+            1/zoom counter-scale (same pattern as the measure labels). */}
+        {chromeDrag?.kind === 'resize' &&
+          resizeTarget &&
           (() => {
-            const b = fullBounds(rotateTarget)
-            const cx = b.x + b.w / 2
-            const cy = b.y + b.h / 2
-            const rot = (normalizeRotation(rotateTarget.rotation ?? 0) * Math.PI) / 180
-            const d = b.h / 2 + 22
-            const hx = cx + d * Math.sin(rot)
-            const hy = cy - d * Math.cos(rot)
+            const b = fullBounds(resizeTarget)
+            const rot = normalizeRotation(resizeTarget.rotation ?? 0)
+            const mid = handlePoints(b, rot).b
+            const r = (rot * Math.PI) / 180
+            const off = 14 / viewport.zoom
             return (
               <div
-                onPointerDown={onRotatePointerDown(rotateTarget)}
-                title="Drag to rotate (Shift = 15°)"
-                className="absolute h-3.5 w-3.5 rounded-full border-2 border-accent bg-bg-card shadow-card"
-                style={{ left: hx - 7, top: hy - 7, cursor: 'grab' }}
-              />
+                className="pointer-events-none absolute whitespace-nowrap rounded-[4px] border border-line bg-bg-card px-1.5 py-0.5 font-mono text-[10px] leading-none text-ink"
+                style={{
+                  left: mid.x - Math.sin(r) * off,
+                  top: mid.y + Math.cos(r) * off,
+                  transform: `translate(-50%, 0) scale(${1 / viewport.zoom})`,
+                  transformOrigin: 'top center',
+                }}
+              >
+                {Math.round(b.w)} × {Math.round(b.h)}
+              </div>
             )
           })()}
+
+        {/* N° badge — the element's current angle, riding near the pointer
+            while a rotate drags. */}
+        {chromeDrag?.kind === 'rotate' && rotateTarget && (
+          <div
+            className="pointer-events-none absolute whitespace-nowrap rounded-[4px] border border-line bg-bg-card px-1.5 py-0.5 font-mono text-[10px] leading-none text-ink"
+            style={{
+              left: chromeDrag.x + 16 / viewport.zoom,
+              top: chromeDrag.y + 16 / viewport.zoom,
+              transform: `scale(${1 / viewport.zoom})`,
+              transformOrigin: 'top left',
+            }}
+          >
+            {normalizeRotation(rotateTarget.rotation ?? 0)}°
+          </div>
+        )}
       </div>
 
       {/* Marquee rectangle — drawn in screen space, above the content */}

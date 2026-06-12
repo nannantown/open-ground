@@ -32,6 +32,12 @@ import {
   setCanvas,
 } from '@/lib/server/store'
 import { normalizeOpenApps } from '@/lib/server/openApps'
+import { EditorNotFoundError, openInEditor } from '@/lib/server/editorCli'
+import {
+  getBranchChanges,
+  getFileDiff,
+  isSafeRepoRelFile,
+} from '@/lib/server/branchChanges'
 import { listProjectBranches } from '@/lib/server/gitBranches'
 import { checkMergedBranches } from '@/lib/server/mergedBranches'
 import { fetchPrInfo } from '@/lib/server/prInfo'
@@ -341,6 +347,56 @@ export const projectRoutes = new Hono()
     return c.json({ error: e?.message ?? 'failed to reveal' }, 500)
   }
 })
+  // ── /api/project/open-editor ──────────────────────────────────────────────
+  // POST { path } → open the project folder in the user's code editor.
+  // Resolution (editorCli.ts): OPENGROUND_EDITOR_CMD env → cursor/code/
+  // windsurf/zed CLIs (process PATH → fresh login shell → known install
+  // paths) → macOS `open -a`. Nothing found → 503 with a human message.
+  .post('/api/project/open-editor', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    try {
+      await openInEditor(path)
+      return c.json({ ok: true })
+    } catch (e: any) {
+      if (e instanceof EditorNotFoundError) return c.json({ error: e.message }, 503)
+      return c.json({ error: e?.message ?? 'failed to open editor' }, 500)
+    }
+  })
+  // ── /api/project/branch-changes ───────────────────────────────────────────
+  // GET ?path= → BranchChangesResponse (header chip + "Branch changes" modal).
+  // Thin adapter: config.targetBranch comes from the project's stored data,
+  // the git work lives in src/lib/server/branchChanges.ts.
+  .get('/api/project/branch-changes', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    try {
+      const data = await readProjectData(path).catch(() => null)
+      return c.json(await getBranchChanges(path, data?.config?.targetBranch))
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'failed to read branch changes' }, 500)
+    }
+  })
+  // ── /api/project/file-diff ────────────────────────────────────────────────
+  // GET ?path=&file=&scope=working|branch → { diff, truncated }. `file` is a
+  // repo-RELATIVE path: absolute paths and `..` segments are rejected before
+  // anything reaches git (and git only ever sees it after `--`).
+  .get('/api/project/file-diff', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const file = c.req.query('file') ?? ''
+    const scope = c.req.query('scope')
+    if (!isSafeRepoRelFile(file)) return c.json({ error: 'invalid file path' }, 400)
+    if (scope !== 'working' && scope !== 'branch') {
+      return c.json({ error: 'scope must be "working" or "branch"' }, 400)
+    }
+    try {
+      const data = await readProjectData(path).catch(() => null)
+      return c.json(await getFileDiff(path, file, scope, data?.config?.targetBranch))
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'failed to read diff' }, 500)
+    }
+  })
   // ── /api/project/open/pick ────────────────────────────────────────────────
   // POST → Finder file picker for a .app, returns { name, path, mode } | { cancelled }
   .post('/api/project/open/pick', async (c) => {

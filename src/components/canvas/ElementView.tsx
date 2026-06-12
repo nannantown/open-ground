@@ -35,6 +35,12 @@ interface Props {
    *  the bubble glyph vanishes over a design. When set, the overlay drops its
    *  grab cursor and inherits the wrapper's comment cursor instead. */
   commentTool?: boolean
+  /** Text-only, wired ONLY for a text managed by an auto-layout frame: report
+   *  the rendered box (offset px — integers, pre-transform so the canvas zoom
+   *  never feeds in) whenever it changes, so the canvas can persist the text's
+   *  real footprint and re-flow its siblings. Free texts leave it undefined
+   *  and never observe. */
+  onMeasure?: (w: number, h: number) => void
 }
 
 const STICKY = 208
@@ -81,6 +87,7 @@ export const ElementView = ({
   projectPath,
   canvasId,
   commentTool,
+  onMeasure,
 }: Props) => {
   const ta = useRef<HTMLTextAreaElement>(null)
 
@@ -90,6 +97,28 @@ export const ElementView = ({
       ta.current.select()
     }
   }, [editing])
+
+  // Measured-text reflow (text case only — the ref is set nowhere else, so
+  // this hook is inert for every other type). Observes whichever root the
+  // text branch rendered — the idle div or the editing wrapper — and reports
+  // offsetWidth/Height: layout px, unaffected by the canvas's scale transform.
+  // The callback rides a ref so the parent's per-render closures don't churn
+  // the observer; jsdom has no ResizeObserver, so tests stub it (or skip).
+  const measureRef = useRef<HTMLDivElement | null>(null)
+  const onMeasureRef = useRef(onMeasure)
+  onMeasureRef.current = onMeasure
+  const measuring = !!onMeasure
+  useEffect(() => {
+    if (!measuring || typeof ResizeObserver === 'undefined') return
+    const node = measureRef.current
+    if (!node) return
+    // Fires once on observe() with the initial size, then on every change.
+    const ro = new ResizeObserver(() => {
+      onMeasureRef.current?.(node.offsetWidth, node.offsetHeight)
+    })
+    ro.observe(node)
+    return () => ro.disconnect()
+  }, [measuring, editing])
 
   const ring = selected ? 'ring-2 ring-accent ring-offset-1 ring-offset-bg' : ''
 
@@ -254,6 +283,7 @@ export const ElementView = ({
   if (!editing) {
     return (
       <div
+        ref={measureRef}
         onPointerDown={onPointerDown}
         style={{ ...textStyle, opacity }}
         className={[
@@ -269,6 +299,7 @@ export const ElementView = ({
 
   return (
     <div
+      ref={measureRef}
       onPointerDown={onPointerDown}
       style={{ opacity }}
       className={['relative inline-block cursor-text rounded-[2px]', ring].join(' ')}

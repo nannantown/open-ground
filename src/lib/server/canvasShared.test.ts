@@ -324,6 +324,51 @@ describe('migration shared → central (round-trip)', () => {
   })
 })
 
+describe('read-time layout-order normalization', () => {
+  // applyAutoLayout v2 flows layout children in ARRAY order; files saved by
+  // the old engine guaranteed only POSITION order. readCanvasFile — the one
+  // seam both central and git-shared reads pass through — converges them via
+  // normalizeLayoutOrder so the picture doesn't change on load. The write
+  // path stores elements as-is.
+  const positionSortedEls = (): CanvasElement[] => [
+    {
+      id: 'f',
+      type: 'frame',
+      x: 0,
+      y: 0,
+      width: 500,
+      height: 300,
+      text: '',
+      layout: { mode: 'row', gap: 10, padding: 20, align: 'start' },
+    },
+    { id: 'b', type: 'sticky', parentId: 'f', x: 300, y: 20, width: 60, height: 60, text: '' },
+    { id: 'a', type: 'sticky', parentId: 'f', x: 100, y: 20, width: 60, height: 60, text: '' },
+  ]
+
+  it('central mode: readCanvasFile returns layout children in main-axis order', async () => {
+    const { canvas } = await createCanvas(dir, 'A')
+    await writeCanvasFile(dir, { ...canvas, elements: positionSortedEls() })
+    const read = await readCanvasFile(dir, canvas.id)
+    expect(read?.elements.map((e) => e.id)).toEqual(['f', 'a', 'b'])
+  })
+
+  it('git-shared mode: the same normalization applies through the repo layout', async () => {
+    await enableSharedMarker(dir)
+    const { canvas } = await createCanvas(dir, 'A')
+    await writeCanvasFile(dir, { ...canvas, elements: positionSortedEls() })
+    const read = await readCanvasFile(dir, canvas.id)
+    expect(read?.elements.map((e) => e.id)).toEqual(['f', 'a', 'b'])
+  })
+
+  it('canvases without layout frames come back in saved order', async () => {
+    const { canvas } = await createCanvas(dir, 'A')
+    const els = positionSortedEls().map(({ layout: _layout, ...rest }) => rest as CanvasElement)
+    await writeCanvasFile(dir, { ...canvas, elements: els })
+    const read = await readCanvasFile(dir, canvas.id)
+    expect(read?.elements.map((e) => e.id)).toEqual(['f', 'b', 'a'])
+  })
+})
+
 describe('non-shared regression (no marker)', () => {
   it('full CRUD + assets stay central and never create .openground in the repo', async () => {
     const a = await createCanvas(dir, 'A')

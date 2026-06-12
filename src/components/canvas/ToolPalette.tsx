@@ -15,10 +15,10 @@ const EMBEDDED_ONLY: ReadonlySet<Tool> = new Set<Tool>([
 interface Props {
   tool: Tool
   onToolChange: (t: Tool) => void
-  /** 'page' for the top-level canvas (fixed to the viewport),
-   *  'embedded' when sitting inside another scroll container — e.g. the
-   *  project-level Canvas tab. Embedded mode positions the palette
-   *  absolutely within its nearest positioned ancestor. */
+  /** 'page' for the top-level Ground canvas: a vertical strip fixed to the
+   *  viewport's left edge. 'embedded' for the project-level Canvas tab: a
+   *  Figma-UI3-style horizontal pill, absolutely positioned bottom-centre
+   *  within its nearest positioned ancestor. */
   variant?: 'page' | 'embedded'
   /** Project-Canvas-only: opens the "generate with Claude" prompt bar. A
    *  press action, not a tool — the button never reads as selected. Absent
@@ -47,16 +47,23 @@ const TOOLS: { id: Tool; label: string; icon: React.ReactNode }[] = [
 
 export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }: Props) => {
   const { t: tr } = useT()
+  const horizontal = variant === 'embedded'
+  const buttonShape = horizontal ? 'rounded-full' : 'rounded-[2px]'
   return (
     <div
       className={[
-        'pointer-events-none z-20 -translate-y-1/2 p-4',
-        variant === 'embedded'
-          ? 'absolute left-0 top-1/2'
-          : 'fixed left-0 top-1/2',
+        'pointer-events-none z-20',
+        horizontal
+          ? 'absolute inset-x-0 bottom-0 flex justify-center p-4'
+          : 'fixed left-0 top-1/2 -translate-y-1/2 p-4',
       ].join(' ')}
     >
-      <div className="pointer-events-auto flex flex-col gap-0.5 rounded-[3px] border border-line bg-bg-card/95 p-1 shadow-card backdrop-blur">
+      <div
+        className={[
+          'pointer-events-auto flex gap-0.5 border border-line bg-bg-card/95 p-1 shadow-card backdrop-blur',
+          horizontal ? 'flex-row items-center rounded-full' : 'flex-col rounded-[3px]',
+        ].join(' ')}
+      >
         {TOOLS.filter(
           // Project-Canvas-only tools (see EMBEDDED_ONLY) surface only on the
           // embedded variant; the top-level Ground portal is for project cards /
@@ -68,10 +75,12 @@ export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }
             onClick={() => onToolChange(t.id)}
             title={t.label}
             className={[
-              'flex h-9 w-9 items-center justify-center rounded-[2px] transition-colors',
+              'flex h-9 w-9 items-center justify-center transition-colors',
+              buttonShape,
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
               tool === t.id
                 ? 'bg-accent text-bg-card'
-                : 'text-ink-muted hover:bg-bg-inset hover:text-ink',
+                : 'text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-elevated',
             ].join(' ')}
           >
             {t.icon}
@@ -79,11 +88,20 @@ export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }
         ))}
         {onGenerate && (
           <>
-            <div className="mx-1 my-0.5 border-t border-line" />
+            <div
+              className={
+                horizontal
+                  ? 'mx-0.5 h-5 w-px self-center bg-line'
+                  : 'mx-1 my-0.5 border-t border-line'
+              }
+            />
             <button
               onClick={onGenerate}
               title={tr('canvas.generate.button')}
-              className="flex h-9 w-9 items-center justify-center rounded-[2px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={[
+                'flex h-9 w-9 items-center justify-center text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                buttonShape,
+              ].join(' ')}
             >
               <Sparkles size={15} strokeWidth={1.75} />
             </button>

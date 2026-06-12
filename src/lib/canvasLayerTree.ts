@@ -21,6 +21,11 @@ export interface LayerRow {
   hasChildren: boolean
 }
 
+/** Where a dragged layer lands relative to the target row: next to it
+ *  ('above' = more toward front / 'below' = more toward back) or INSIDE it
+ *  ('into' — the target becomes the parent). */
+export type LayerDropPlace = 'above' | 'below' | 'into'
+
 /** True when `el` is a real, present child: it carries a `parentId` that points
  *  at an element which (a) exists and (b) is a container type allowed to own it.
  *  A dangling / illegal parentId makes the element a top-level row instead. */
@@ -92,19 +97,21 @@ export const buildLayerRows = (
 }
 
 /** Move `dragId` (and its whole subtree) so that in the panel it lands directly
- *  `place` ('above' = more toward front / 'below' = more toward back) the
- *  `targetId` row, adopting the target's level (parentId).
+ *  `place` the `targetId` row: 'above' (more toward front) / 'below' (more
+ *  toward back) adopt the target's level (parentId); 'into' makes the target
+ *  itself the parent, inserting at the head of its child list (= front-most).
  *
  *  Returns a new element array, or the original reference unchanged for any
- *  no-op (same element, target inside the dragged subtree, or nothing moved).
- *  Reparenting is gated by {@link canContain}: if the target's container can't
+ *  no-op (same element, target inside the dragged subtree, an 'into' drop the
+ *  target may not legally own, or nothing moved). For 'above'/'below',
+ *  reparenting is gated by {@link canContain}: if the target's container can't
  *  legally own the dragged element, it drops to the top level instead, still
  *  positioned next to the target in z-order. */
 export const reorderLayer = (
   els: CanvasElement[],
   dragId: string,
   targetId: string,
-  place: 'above' | 'below',
+  place: LayerDropPlace,
 ): CanvasElement[] => {
   if (dragId === targetId) return els
   const byId = new Map(els.map((e) => [e.id, e]))
@@ -120,6 +127,26 @@ export const reorderLayer = (
   // in their existing relative z-order.
   const block = els.filter((e) => e.id === dragId || subtree.has(e.id))
   const blockIds = new Set(block.map((e) => e.id))
+
+  if (place === 'into') {
+    // Only a container that may legally own the dragged type accepts an INTO
+    // drop (the panel never offers an illegal one — this is the pure guard).
+    if (!canContain(target.type, drag.type)) return els
+    const reparented = block.map((e) =>
+      e.id === dragId ? withParent(e, targetId) : e,
+    )
+    const rest = els.filter((e) => !blockIds.has(e.id))
+    // Insert after the container's whole remaining subtree so the dropped
+    // element renders in front of everything already inside — i.e. it becomes
+    // the FRONT-MOST child = the head of the panel's child list.
+    const targetSubtree = descendantIds(els, targetId)
+    let end = -1
+    rest.forEach((e, i) => {
+      if (e.id === targetId || targetSubtree.has(e.id)) end = i
+    })
+    if (end < 0) return els
+    return [...rest.slice(0, end + 1), ...reparented, ...rest.slice(end + 1)]
+  }
 
   // Decide the dragged element's new parent: the target's level, but only if
   // that container may legally own it; otherwise the dragged element goes to the
@@ -150,4 +177,148 @@ const withParent = (el: CanvasElement, parentId: string | undefined): CanvasElem
     return rest as CanvasElement
   }
   return { ...el, parentId }
+}
+
+export interface LayerFilterResult {
+  /** The surviving rows, in their original order: every match plus every
+   *  ancestor a match needs to stay visually rooted. */
+  rows: LayerRow[]
+  /** Containers that must render expanded because a DESCENDANT matched —
+   *  the panel's twisty/aria state while a query is active. */
+  expandedIds: Set<string>
+}
+
+/** Match text when the caller doesn't inject the app's display-label fn:
+ *  custom layer name, else first non-empty content line. (The type always
+ *  matches separately, so an unnamed empty element is still findable.) */
+const defaultLayerText = (el: CanvasElement): string => {
+  if (el.name?.trim()) return el.name
+  const line = el.text
+    ?.split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0)
+  return line ?? ''
+}
+
+/** Filter the Layers list by a search query (name OR element type,
+ *  case-insensitive substring). A matching row keeps its whole ancestor chain
+ *  so the tree context stays readable; children of a matching container that
+ *  don't themselves match are dropped (Figma behaviour).
+ *
+ *  `rows` must be built FULLY EXPANDED (`buildLayerRows(els, () => true)`) so
+ *  matches inside collapsed containers are found — the returned `expandedIds`
+ *  is the expansion state the panel renders during the query. An empty /
+ *  whitespace query returns `rows` unchanged. */
+export const filterLayerRows = (
+  rows: LayerRow[],
+  query: string,
+  labelOf: (el: CanvasElement) => string = defaultLayerText,
+): LayerFilterResult => {
+  const q = query.trim().toLowerCase()
+  if (!q) return { rows, expandedIds: new Set() }
+  const matches = (row: LayerRow) =>
+    labelOf(row.el).toLowerCase().includes(q) ||
+    row.el.type.toLowerCase().includes(q)
+  const keep = new Set<string>()
+  const expandedIds = new Set<string>()
+  // Rows are DFS order, so the live ancestor chain is the depth-ascending
+  // stack of rows above the current one.
+  const ancestors: LayerRow[] = []
+  for (const row of rows) {
+    while (ancestors.length && ancestors[ancestors.length - 1].depth >= row.depth) {
+      ancestors.pop()
+    }
+    if (matches(row)) {
+      keep.add(row.el.id)
+      for (const anc of ancestors) {
+        keep.add(anc.el.id)
+        expandedIds.add(anc.el.id)
+      }
+    }
+    ancestors.push(row)
+  }
+  return { rows: rows.filter((r) => keep.has(r.el.id)), expandedIds }
+}
+
+/** The array-ordered (back→front) sibling list `id` belongs to — its live
+ *  parent's children, or the top-level roots — exactly the grouping
+ *  buildLayerRows nests by. Null when `id` isn't in `els`. */
+const siblingScope = (
+  els: CanvasElement[],
+  id: string,
+): { siblings: CanvasElement[]; index: number } | null => {
+  const byId = new Map(els.map((e) => [e.id, e]))
+  const el = byId.get(id)
+  if (!el) return null
+  const live = isLiveChild(el, byId)
+  const siblings = els.filter((e) =>
+    isLiveChild(e, byId) ? live && e.parentId === el.parentId : !live,
+  )
+  const index = siblings.findIndex((e) => e.id === id)
+  return index < 0 ? null : { siblings, index }
+}
+
+/** True when `id` can take a one-step z-nudge `dir` ('up' = toward front)
+ *  WITHIN ITS OWN SIBLING GROUP. This is the panel's enabled/disabled
+ *  predicate — judged on the array + parent scope, never on visible-row
+ *  indexes (a nested child's row index says nothing about its z headroom). */
+export const canMoveLayer = (
+  els: CanvasElement[],
+  id: string,
+  dir: 'up' | 'down',
+): boolean => {
+  const scope = siblingScope(els, id)
+  if (!scope) return false
+  return dir === 'up' ? scope.index < scope.siblings.length - 1 : scope.index > 0
+}
+
+/** Move `id` (with its whole subtree) one sibling step in z-order: 'up' =
+ *  toward front, 'down' = toward back, never leaving its parent scope. The
+ *  block lands on the far side of the neighbouring sibling's WHOLE subtree, so
+ *  stepping over a container means stepping over its children too. Returns the
+ *  original reference unchanged when the move is impossible. */
+export const moveLayerOne = (
+  els: CanvasElement[],
+  id: string,
+  dir: 'up' | 'down',
+): CanvasElement[] => {
+  const scope = siblingScope(els, id)
+  if (!scope) return els
+  const neighbor = scope.siblings[dir === 'up' ? scope.index + 1 : scope.index - 1]
+  if (!neighbor) return els
+  const subtree = descendantIds(els, id)
+  const blockIds = new Set(subtree)
+  blockIds.add(id)
+  const block = els.filter((e) => blockIds.has(e.id))
+  const rest = els.filter((e) => !blockIds.has(e.id))
+  const neighborSubtree = descendantIds(els, neighbor.id)
+  let lo = -1
+  let hi = -1
+  rest.forEach((e, i) => {
+    if (e.id === neighbor.id || neighborSubtree.has(e.id)) {
+      if (lo < 0) lo = i
+      hi = i
+    }
+  })
+  if (hi < 0) return els
+  const insertAt = dir === 'up' ? hi + 1 : lo
+  return [...rest.slice(0, insertAt), ...block, ...rest.slice(insertAt)]
+}
+
+/** Nearest-first chain of LIVE ancestor containers above `id` — the rows the
+ *  panel must expand to reveal it. A dangling/illegal parentId ends the chain
+ *  (such an element is a top-level row). Cycle-safe. */
+export const layerAncestors = (els: CanvasElement[], id: string): string[] => {
+  const byId = new Map(els.map((e) => [e.id, e]))
+  const out: string[] = []
+  const seen = new Set<string>([id])
+  let cur = byId.get(id)
+  while (cur && isLiveChild(cur, byId)) {
+    const parent = byId.get(cur.parentId!)!
+    if (seen.has(parent.id)) break
+    out.push(parent.id)
+    seen.add(parent.id)
+    cur = parent
+  }
+  return out
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CanvasTabBar } from './CanvasTabBar'
+import { useT } from '@/i18n/I18nContext'
+import { PagesSection } from './PagesSection'
 import { CanvasWorkspace } from './CanvasWorkspace'
 import type {
   CanvasFile,
@@ -25,18 +26,69 @@ interface Props {
 // doesn't drop the last edit.
 const SAVE_DEBOUNCE_MS = 400
 
-// Top-level orchestrator for the Canvas tab. Renders the Chrome-style tab
-// strip on top and one CanvasWorkspace below it for the active Canvas. Owns
+// ⌘\ focus-mode choice survives reloads. '0' = hidden; anything else visible.
+const SIDEBARS_KEY = 'openground.canvas.sidebars'
+
+// Top-level orchestrator for the Canvas tab — the Figma-style docked 3-pane
+// shell. Left sidebar: Pages (Canvas list) over a Layers slot; centre: the
+// active CanvasWorkspace; right sidebar: the inspector slot. The slots are
+// plain host divs that CanvasWorkspace fills via portals (its selection /
+// element state stays where it lives, while the sidebar frames stay mounted
+// across Canvas switches so the shell never flashes). Owns
 //  • the list of Canvases + the active id (sourced from .openground/canvases-index.json
 //    via /api/project/canvases)
 //  • the full file for the active Canvas (the only one fetched at a time —
 //    inactive Canvases stay on disk so heavy drawings don't all live in memory)
 //  • debounced persistence + flush-on-unmount
+//  • the ⌘\ both-sidebars toggle (focus mode), persisted to localStorage
 export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
+  const { t } = useT()
   const [canvases, setCanvases] = useState<CanvasSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [active, setActive] = useState<CanvasFile | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [sidebarsVisible, setSidebarsVisible] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBARS_KEY) !== '0'
+    } catch {
+      return true
+    }
+  })
+  // Sidebar slot elements — state (not refs) so CanvasWorkspace re-renders its
+  // portals when a slot mounts/unmounts (⌘\ toggle).
+  const [layersHost, setLayersHost] = useState<HTMLDivElement | null>(null)
+  const [inspectorHost, setInspectorHost] = useState<HTMLDivElement | null>(null)
+
+  // ⌘\ toggles both sidebars (Figma focus mode). Inert while the user is
+  // typing — focused input/textarea/contenteditable or mid-IME-composition.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
+      // 'IntlYen' is the JIS keyboard's backslash position (¥) — same physical
+      // shortcut as ⌘\ on ANSI/ISO layouts.
+      if (e.key !== '\\' && e.code !== 'Backslash' && e.code !== 'IntlYen') return
+      if (e.isComposing) return
+      const ae = document.activeElement as HTMLElement | null
+      if (
+        ae &&
+        (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)
+      )
+        return
+      e.preventDefault()
+      setSidebarsVisible((v) => {
+        const next = !v
+        try {
+          localStorage.setItem(SIDEBARS_KEY, next ? '1' : '0')
+        } catch {
+          /* storage unavailable — toggle still works in-session */
+        }
+        return next
+      })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingRef = useRef<CanvasFile | null>(null)
@@ -293,23 +345,35 @@ export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
   }
 
   return (
-    <div className="relative flex h-full w-full flex-col overflow-hidden bg-bg">
-      <CanvasTabBar
-        canvases={canvases}
-        activeId={activeId}
-        onSelect={switchTo}
-        onCreate={createCanvas}
-        onDelete={deleteCanvas}
-        onRename={renameCanvas}
-        onReorder={reorderCanvases}
-      />
-      <div className="min-h-0 flex-1">
+    <div className="relative flex h-full w-full overflow-hidden bg-bg">
+      {sidebarsVisible && (
+        <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-bg-card">
+          <PagesSection
+            canvases={canvases}
+            activeId={activeId}
+            onSelect={switchTo}
+            onCreate={createCanvas}
+            onDelete={deleteCanvas}
+            onRename={renameCanvas}
+            onReorder={reorderCanvases}
+          />
+          <section className="flex min-h-0 flex-1 flex-col border-t border-line">
+            <div className="label-cap shrink-0 px-3 py-2 text-ink-muted">
+              {t('canvas.layers')}
+            </div>
+            <div ref={setLayersHost} className="min-h-0 flex-1" />
+          </section>
+        </aside>
+      )}
+      <div className="min-h-0 min-w-0 flex-1">
         {active ? (
           <CanvasWorkspace
             key={active.id}
             projectPath={projectPath}
             canvas={active}
             onChange={handleActiveChange}
+            layersHost={layersHost}
+            inspectorHost={inspectorHost}
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-[12px] text-ink-subtle">
@@ -317,6 +381,11 @@ export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
           </div>
         )}
       </div>
+      {sidebarsVisible && (
+        <aside className="flex w-60 shrink-0 flex-col border-l border-line bg-bg-card">
+          <div ref={setInspectorHost} className="min-h-0 flex-1" />
+        </aside>
+      )}
     </div>
   )
 }

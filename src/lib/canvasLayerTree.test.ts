@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import type { CanvasElement } from './types'
-import { buildLayerRows, reorderLayer } from './canvasLayerTree'
+import {
+  buildLayerRows,
+  filterLayerRows,
+  reorderLayer,
+  canMoveLayer,
+  moveLayerOne,
+  layerAncestors,
+} from './canvasLayerTree'
 
 // Minimal element factory — only the fields the tree logic reads.
 const el = (
@@ -112,5 +119,184 @@ describe('reorderLayer', () => {
   it('is a no-op on self-drop', () => {
     const els = [el('a', 'sticky'), el('b', 'sticky')]
     expect(reorderLayer(els, 'a', 'a', 'above')).toBe(els)
+  })
+})
+
+describe('reorderLayer — into', () => {
+  it('drops into a container as its FRONT-MOST child (after the whole subtree)', () => {
+    const els = [el('x', 'sticky'), el('f', 'frame'), el('c1', 'sticky', 'f')]
+    const next = reorderLayer(els, 'x', 'f', 'into')
+    expect(next.map((e) => e.id)).toEqual(['f', 'c1', 'x'])
+    expect(next.find((e) => e.id === 'x')!.parentId).toBe('f')
+  })
+
+  it('drops into an EMPTY container', () => {
+    const els = [el('x', 'sticky'), el('f', 'frame')]
+    const next = reorderLayer(els, 'x', 'f', 'into')
+    expect(next.map((e) => e.id)).toEqual(['f', 'x'])
+    expect(next.find((e) => e.id === 'x')!.parentId).toBe('f')
+  })
+
+  it('moves a container WITH its subtree into another container', () => {
+    const els = [el('g', 'frame'), el('c', 'sticky', 'g'), el('f', 'frame')]
+    const next = reorderLayer(els, 'g', 'f', 'into')
+    expect(next.map((e) => e.id)).toEqual(['f', 'g', 'c'])
+    expect(next.find((e) => e.id === 'g')!.parentId).toBe('f')
+    expect(next.find((e) => e.id === 'c')!.parentId).toBe('g') // child travels
+  })
+
+  it('re-dropping an existing child into its parent moves it to the front', () => {
+    const els = [el('f', 'frame'), el('a', 'sticky', 'f'), el('b', 'sticky', 'f')]
+    const next = reorderLayer(els, 'a', 'f', 'into')
+    expect(next.map((e) => e.id)).toEqual(['f', 'b', 'a'])
+    expect(next.find((e) => e.id === 'a')!.parentId).toBe('f')
+  })
+
+  it('is a no-op when the target cannot own the dragged type', () => {
+    // a mock owns only text — dropping a sticky INTO it must change nothing.
+    const els = [el('s', 'sticky'), el('m', 'mock')]
+    expect(reorderLayer(els, 's', 'm', 'into')).toBe(els)
+  })
+
+  it('refuses to drop a container into its own descendant', () => {
+    const els = [el('f', 'frame'), el('g', 'frame', 'f')]
+    expect(reorderLayer(els, 'f', 'g', 'into')).toBe(els)
+  })
+})
+
+describe('filterLayerRows', () => {
+  const tree = (): CanvasElement[] => [
+    { ...el('note', 'sticky'), name: 'Note' } as CanvasElement,
+    { ...el('f', 'frame'), name: 'Hero' } as CanvasElement,
+    { ...el('a', 'sticky', 'f'), name: 'Alpha' } as CanvasElement,
+    { ...el('b', 'sticky', 'f'), name: 'Beta' } as CanvasElement,
+  ]
+  const fullRows = () => buildLayerRows(tree(), () => true)
+
+  it('keeps matches AND their ancestor chain, reporting the ancestors as expanded', () => {
+    const { rows, expandedIds } = filterLayerRows(fullRows(), 'alpha', (e) => e.name ?? '')
+    expect(ids(rows)).toEqual(['f', 'a'])
+    expect(expandedIds.has('f')).toBe(true)
+    expect(expandedIds.has('a')).toBe(false)
+  })
+
+  it('matches the element TYPE as well as the label', () => {
+    const { rows } = filterLayerRows(fullRows(), 'frame', (e) => e.name ?? '')
+    expect(ids(rows)).toEqual(['f'])
+  })
+
+  it('a matching container does not drag its non-matching children along', () => {
+    const { rows, expandedIds } = filterLayerRows(fullRows(), 'hero', (e) => e.name ?? '')
+    expect(ids(rows)).toEqual(['f'])
+    expect(expandedIds.size).toBe(0)
+  })
+
+  it('is case-insensitive and trims the query', () => {
+    const { rows } = filterLayerRows(fullRows(), '  BETA ', (e) => e.name ?? '')
+    expect(ids(rows)).toEqual(['f', 'b'])
+  })
+
+  it('an empty query returns the rows unchanged', () => {
+    const rows = fullRows()
+    const out = filterLayerRows(rows, '   ')
+    expect(out.rows).toBe(rows)
+    expect(out.expandedIds.size).toBe(0)
+  })
+
+  it('no match → no rows', () => {
+    const { rows } = filterLayerRows(fullRows(), 'zzz', (e) => e.name ?? '')
+    expect(rows).toEqual([])
+  })
+
+  it('default matcher falls back to the custom name, then the first content line', () => {
+    const els = [
+      { ...el('n', 'sticky'), text: 'hello\nworld' } as CanvasElement,
+      { ...el('m', 'sticky'), name: 'Tagged', text: '' } as CanvasElement,
+    ]
+    const rows = buildLayerRows(els, () => true)
+    expect(ids(filterLayerRows(rows, 'hello').rows)).toEqual(['n'])
+    expect(ids(filterLayerRows(rows, 'tagged').rows)).toEqual(['m'])
+  })
+})
+
+describe('canMoveLayer / moveLayerOne', () => {
+  // [f(c1,c2), x] — roots f,x; children c1,c2. Panel: x, f, c2, c1.
+  const nested = (): CanvasElement[] => [
+    el('f', 'frame'),
+    el('c1', 'sticky', 'f'),
+    el('c2', 'sticky', 'f'),
+    el('x', 'sticky'),
+  ]
+
+  it('judges headroom inside the SIBLING group, not by visible-row index', () => {
+    const els = nested()
+    // c2 is the front-most CHILD even though its row index isn't 0.
+    expect(canMoveLayer(els, 'c2', 'up')).toBe(false)
+    expect(canMoveLayer(els, 'c2', 'down')).toBe(true)
+    expect(canMoveLayer(els, 'c1', 'up')).toBe(true)
+    expect(canMoveLayer(els, 'c1', 'down')).toBe(false)
+    // x is the front-most ROOT (array end).
+    expect(canMoveLayer(els, 'x', 'up')).toBe(false)
+    expect(canMoveLayer(els, 'x', 'down')).toBe(true)
+    expect(canMoveLayer(els, 'f', 'up')).toBe(true)
+    expect(canMoveLayer(els, 'f', 'down')).toBe(false)
+  })
+
+  it('moves one sibling step within a container', () => {
+    const next = moveLayerOne(nested(), 'c1', 'up')
+    expect(next.map((e) => e.id)).toEqual(['f', 'c2', 'c1', 'x'])
+  })
+
+  it('steps a root over a container\'s WHOLE subtree (the old swap bug)', () => {
+    // The buggy adjacent swap would interleave x with f's children instead.
+    const next = moveLayerOne(nested(), 'x', 'down')
+    expect(next.map((e) => e.id)).toEqual(['x', 'f', 'c1', 'c2'])
+  })
+
+  it('moves a container with its subtree as one block', () => {
+    const next = moveLayerOne(nested(), 'f', 'up')
+    expect(next.map((e) => e.id)).toEqual(['x', 'f', 'c1', 'c2'])
+    // children keep their membership
+    expect(next.find((e) => e.id === 'c1')!.parentId).toBe('f')
+  })
+
+  it('never crosses the parent boundary (no-op at the scope edge)', () => {
+    const els = nested()
+    expect(moveLayerOne(els, 'c2', 'up')).toBe(els)
+    expect(moveLayerOne(els, 'c1', 'down')).toBe(els)
+    expect(moveLayerOne(els, 'x', 'up')).toBe(els)
+  })
+
+  it('treats a dangling parentId as a top-level sibling', () => {
+    const els = [el('a', 'sticky'), el('d', 'sticky', 'ghost')]
+    expect(canMoveLayer(els, 'd', 'down')).toBe(true)
+    expect(moveLayerOne(els, 'd', 'down').map((e) => e.id)).toEqual(['d', 'a'])
+  })
+
+  it('unknown id → false / no-op', () => {
+    const els = nested()
+    expect(canMoveLayer(els, 'nope', 'up')).toBe(false)
+    expect(moveLayerOne(els, 'nope', 'up')).toBe(els)
+  })
+})
+
+describe('layerAncestors', () => {
+  it('returns the live ancestor chain nearest-first', () => {
+    const els = [el('f', 'frame'), el('g', 'frame', 'f'), el('c', 'sticky', 'g')]
+    expect(layerAncestors(els, 'c')).toEqual(['g', 'f'])
+    expect(layerAncestors(els, 'f')).toEqual([])
+  })
+
+  it('a dangling / illegal parentId ends the chain', () => {
+    expect(layerAncestors([el('c', 'sticky', 'ghost')], 'c')).toEqual([])
+    // a sticky can't live in a mock → not a live child → no ancestors
+    const illegal = [el('m', 'mock'), el('s', 'sticky', 'm')]
+    expect(layerAncestors(illegal, 's')).toEqual([])
+  })
+
+  it('is cycle-safe', () => {
+    const a = el('a', 'frame', 'b')
+    const b = el('b', 'frame', 'a')
+    expect(() => layerAncestors([a, b], 'a')).not.toThrow()
   })
 })

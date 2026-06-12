@@ -60,7 +60,7 @@ const dropLegacyNonBoardTasks = (parsed: unknown): unknown => {
 
 // Read the CENTRAL tasks.json (~/.openground/projects/<uuid>/tasks.json).
 // This is the whole story in normal mode; in git-shared mode it still holds
-// the PERSONAL fields (tabOrder, updatedAt) plus a stale backup of the shared
+// the PERSONAL fields (tabOrder, customTabs, updatedAt) plus a stale backup of the shared
 // ones (the marker decides the live source — see readProjectData).
 const readCentralProjectData = async (projectPath: string): Promise<ProjectData> => {
   // Resolve the central file path OUTSIDE the try: an unregistered path throws
@@ -123,6 +123,9 @@ const readCentralProjectData = async (projectPath: string): Promise<ProjectData>
     tabOrder: Array.isArray(obj.tabOrder)
       ? obj.tabOrder.filter((x): x is string => typeof x === 'string')
       : undefined,
+    customTabs: Array.isArray(obj.customTabs)
+      ? obj.customTabs.filter((x): x is string => typeof x === 'string')
+      : undefined,
     notes: typeof obj.notes === 'string' ? obj.notes : '',
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
   }
@@ -131,7 +134,8 @@ const readCentralProjectData = async (projectPath: string): Promise<ProjectData>
 // ── Git-shared mode (".openground/" inside the repo) ─────────────────────────
 // When the repo carries a parseable .openground/openground.json marker, the
 // SHARED fields live in the repo (one card file per task + notes.md + the
-// marker's description) and only the PERSONAL fields (tabOrder, updatedAt)
+// marker's description) and only the PERSONAL fields (tabOrder, customTabs,
+// updatedAt)
 // stay in the central tasks.json. The public readProjectData/writeProjectData
 // API is unchanged — callers never know which mode a project is in. See
 // docs/SHARED_DATA_PLAN.md.
@@ -242,6 +246,7 @@ export const readProjectData = async (projectPath: string): Promise<ProjectData>
     ...(marker?.descriptionEn ? { descriptionEn: marker.descriptionEn } : {}),
     tasks,
     ...(central.tabOrder !== undefined ? { tabOrder: central.tabOrder } : {}),
+    ...(central.customTabs !== undefined ? { customTabs: central.customTabs } : {}),
     // Shared policy rides the marker; personal launch prefs stay central.
     ...(marker?.config ? { config: parseSharedConfig(marker.config) } : {}),
     ...(central.launch !== undefined ? { launch: central.launch } : {}),
@@ -440,7 +445,7 @@ export const writeProjectData = async (
     await writeSharedBoard(projectPath, data)
     // Personal fields stay central. Keep whatever shared-fields backup the
     // central file holds from the enable migration (the marker decides the
-    // live source); only tabOrder/updatedAt move.
+    // live source); only tabOrder/customTabs/updatedAt move.
     let centralRaw: Record<string, unknown>
     try {
       const parsed: unknown = JSON.parse(await readFile(join(dir, TASKS_FILE), 'utf8'))
@@ -450,6 +455,8 @@ export const writeProjectData = async (
     }
     delete centralRaw.tabOrder
     if (data.tabOrder !== undefined) centralRaw.tabOrder = data.tabOrder
+    delete centralRaw.customTabs
+    if (data.customTabs !== undefined) centralRaw.customTabs = data.customTabs
     delete centralRaw.launch
     if (data.launch !== undefined) centralRaw.launch = data.launch
     centralRaw.updatedAt = now
@@ -513,6 +520,7 @@ export const migrateBoardFromShared = (projectPath: string): Promise<ProjectData
       description: marker.description ?? '',
       tasks,
       ...(central.tabOrder !== undefined ? { tabOrder: central.tabOrder } : {}),
+      ...(central.customTabs !== undefined ? { customTabs: central.customTabs } : {}),
       notes,
       updatedAt: new Date().toISOString(),
     }

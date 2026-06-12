@@ -4,10 +4,17 @@
 export const customTabs = {
   en: {
     // Tab bar affordances
-    'customTabs.addTab': 'New tab',
-    'customTabs.addTabHint': 'Create a custom tab (rendered from your own component)',
+    'customTabs.addTab': 'Add tab',
+    'customTabs.addTabHint': 'Add a custom tab to this project (pick from your library or create one)',
     'customTabs.market': 'Market',
     'customTabs.marketHint': 'Browse and install published custom tabs',
+    // "+" picker dialog (per-project attachment)
+    'customTabs.pickerLabel': 'Custom tabs',
+    'customTabs.pickerTitle': 'Add a tab to this project',
+    'customTabs.pickerExplain': 'Your library. Attaching is per project — a tab appears in this project’s tab row only after you add it here.',
+    'customTabs.pickerEmpty': 'No tabs yet.',
+    'customTabs.pickerAttached': 'Added',
+    'customTabs.pickerCreateNew': 'Create a new tab',
     // Create dialog
     'customTabs.createLabel': 'New custom tab',
     'customTabs.createTitle': 'Create a custom tab',
@@ -27,7 +34,9 @@ export const customTabs = {
     'customTabs.publishFailed': 'Publish failed: {error}',
     'customTabs.publishUnavailable': 'Publishing isn’t configured on this machine (missing Supabase env).',
     'customTabs.publishedBadge': 'v{version}',
-    // Tab-row right-click menu (two-step confirm inside the menu)
+    // Tab-row right-click menu (non-destructive detach) + the picker's
+    // library-level destruction (two-step confirm inside the picker)
+    'customTabs.detach': 'Remove from tab row',
     'customTabs.delete': 'Delete',
     'customTabs.deleteConfirmYes': 'Delete tab',
     'customTabs.uninstall': 'Uninstall',
@@ -41,7 +50,7 @@ export const customTabs = {
     // Marketplace dialog
     'customTabs.marketLabel': 'Marketplace',
     'customTabs.marketTitle': 'Published custom tabs',
-    'customTabs.marketExplain': 'Install a published tab — it appears in every project’s tab bar.',
+    'customTabs.marketExplain': 'Install a published tab — it’s added to this project’s tab row. Add it to other projects from the “+” picker.',
     'customTabs.marketLoading': 'Loading…',
     'customTabs.marketEmpty': 'Nothing published yet.',
     'customTabs.marketUnavailable': 'The marketplace isn’t configured on this machine (missing Supabase env).',
@@ -54,10 +63,17 @@ export const customTabs = {
   },
   ja: {
     // Tab bar affordances
-    'customTabs.addTab': '新しいタブ',
-    'customTabs.addTabHint': 'カスタムタブを作成（自作コンポーネントを表示）',
+    'customTabs.addTab': 'タブを追加',
+    'customTabs.addTabHint': 'このプロジェクトにカスタムタブを追加（ライブラリから選ぶ・新規作成）',
     'customTabs.market': 'マーケット',
     'customTabs.marketHint': '公開されたカスタムタブを見る・インストールする',
+    // "+" picker dialog (per-project attachment)
+    'customTabs.pickerLabel': 'カスタムタブ',
+    'customTabs.pickerTitle': 'このプロジェクトにタブを追加',
+    'customTabs.pickerExplain': 'あなたのライブラリです。タブはプロジェクトごとに追加します — ここで追加したタブだけが、このプロジェクトのタブ列に表示されます。',
+    'customTabs.pickerEmpty': 'まだタブがありません。',
+    'customTabs.pickerAttached': '追加済み',
+    'customTabs.pickerCreateNew': '新規タブを作成',
     // Create dialog
     'customTabs.createLabel': '新しいカスタムタブ',
     'customTabs.createTitle': 'カスタムタブを作成',
@@ -77,7 +93,9 @@ export const customTabs = {
     'customTabs.publishFailed': '公開に失敗しました: {error}',
     'customTabs.publishUnavailable': 'このマシンでは公開が設定されていません（Supabase の環境変数がありません）。',
     'customTabs.publishedBadge': 'v{version}',
-    // Tab-row right-click menu (two-step confirm inside the menu)
+    // Tab-row right-click menu (non-destructive detach) + the picker's
+    // library-level destruction (two-step confirm inside the picker)
+    'customTabs.detach': 'タブの列から外す',
     'customTabs.delete': '削除',
     'customTabs.deleteConfirmYes': '本当に削除する',
     'customTabs.uninstall': 'アンインストール',
@@ -91,7 +109,7 @@ export const customTabs = {
     // Marketplace dialog
     'customTabs.marketLabel': 'マーケットプレイス',
     'customTabs.marketTitle': '公開されたカスタムタブ',
-    'customTabs.marketExplain': '公開されたタブをインストールすると、すべてのプロジェクトのタブバーに表示されます。',
+    'customTabs.marketExplain': '公開されたタブをインストールすると、このプロジェクトのタブ列に追加されます。他のプロジェクトへは「+」ピッカーから追加できます。',
     'customTabs.marketLoading': '読み込み中…',
     'customTabs.marketEmpty': 'まだ何も公開されていません。',
     'customTabs.marketUnavailable': 'このマシンではマーケットプレイスが設定されていません（Supabase の環境変数がありません）。',

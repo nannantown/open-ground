@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Layers, Loader2, Redo2, Sparkles, Undo2, X } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Loader2, Minus, Plus, Redo2, Sparkles, Undo2, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
-import { InfiniteCanvas } from './InfiniteCanvas'
+import { InfiniteCanvas, type CanvasZoomApi } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
 import { SelectionInspector } from './SelectionInspector'
 import { LayersPanel } from './LayersPanel'
-import { AlignBar } from './AlignBar'
 import { newId } from '@/lib/ids'
 import { removeElements } from '@/lib/canvasIntegrity'
 import {
@@ -14,9 +14,9 @@ import {
   groupCascadeSets,
 } from '@/lib/canvasGroup'
 import { applyElementPatch } from '@/lib/canvasTextStyle'
-import { reorderLayer } from '@/lib/canvasLayerTree'
+import { reorderLayer, moveLayerOne, type LayerDropPlace } from '@/lib/canvasLayerTree'
 import { alignElements, alignElementsToBox, type AlignOp } from '@/lib/canvasAlign'
-import { applyAutoLayout } from '@/lib/canvasAutoLayout'
+import { applyAutoLayout, addAutoLayout, insertIntoLayoutAtPoint } from '@/lib/canvasAutoLayout'
 import { pickStyle, applyStyle, type CopiedStyle } from '@/lib/canvasStyleClipboard'
 import { elementBounds } from '@/lib/canvasBounds'
 import type {
@@ -33,6 +33,12 @@ interface Props {
   /** Persist any change to this Canvas. Debounced upstream by ProjectCanvas
    *  so a pan/zoom storm doesn't write on every frame. */
   onChange: (next: CanvasFile) => void
+  /** Dock slots in ProjectCanvas's sidebars. The Layers tree and the
+   *  inspector need this workspace's selection/element state, so the
+   *  workspace portals them into the shell-owned hosts; null (sidebar hidden
+   *  via ⌘\, or shell absent) skips the portal. */
+  layersHost?: HTMLElement | null
+  inspectorHost?: HTMLElement | null
 }
 
 // Clone elements for paste / duplicate: fresh ids and a small offset. Run-
@@ -71,12 +77,18 @@ export const CanvasWorkspace = ({
   projectPath,
   canvas,
   onChange,
+  layersHost,
+  inspectorHost,
 }: Props) => {
   const { t } = useT()
   const [tool, setTool] = useState<Tool>('select')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [showLayers, setShowLayers] = useState(false)
+  // Hover sync between the Layers panel and the canvas (both directions feed
+  // the same id; InfiniteCanvas outlines it, the panel highlights its row).
+  const [hoveredElementId, setHoveredElementId] = useState<string | null>(null)
+  // Imperative zoom handle the canvas registers; drives the zoom pill.
+  const zoomApi = useRef<CanvasZoomApi | null>(null)
   // Bumps to re-render undo/redo affordances when the history stacks change.
   const [, setHistVer] = useState(0)
 
@@ -148,6 +160,10 @@ export const CanvasWorkspace = ({
     lastLocalElementsRef.current = canvas.elements
     undoRef.current = []
     redoRef.current = []
+    // In-flight gesture snapshots predate this adoption — bumping the epoch
+    // invalidates them so an Esc-cancel can't restore a stale canvas over the
+    // adopted state (and then persist + auto-sync the revert).
+    adoptionEpochRef.current++
     setHistVer((v) => v + 1)
   }, [canvas.elements])
 
@@ -172,6 +188,34 @@ export const CanvasWorkspace = ({
     histTimer.current = setTimeout(flushHistory, HIST_IDLE_MS)
   }, [flushHistory])
 
+  // Esc-cancel support: the canvas snapshots the undo depth at press time and
+  // hands it back when a gesture is cancelled. Rolling back here (instead of
+  // letting the restore flow through as a normal change) keeps the cancelled
+  // mid-drag state out of ⌘Z — Figma's Esc leaves no history step.
+  // historyDepth FLUSHES the pending coalesced edit first: an edit made
+  // <350ms before the press would otherwise lose its undo boundary when the
+  // cancel re-baselines (⌘Z would then jump two edits at once).
+  const historyDepth = useCallback(() => {
+    flushHistory()
+    return undoRef.current.length
+  }, [flushHistory])
+  const cancelRestoreToDepth = useCallback((depth: number) => {
+    if (histTimer.current) {
+      clearTimeout(histTimer.current)
+      histTimer.current = null
+    }
+    // Redo survives a no-op cancel: it only dies when a mid-drag pause really
+    // flushed a step (flushHistory cleared it then; the truncation just
+    // removes that step again).
+    if (undoRef.current.length > depth) undoRef.current.length = depth
+    baselineRef.current = canvasRef.current.elements
+    setHistVer((v) => v + 1)
+  }, [])
+  // Bumped whenever an external elements replacement is adopted (effect
+  // above); gesture snapshots record it so a stale Esc-restore is refused.
+  const adoptionEpochRef = useRef(0)
+  const adoptionEpoch = useCallback(() => adoptionEpochRef.current, [])
+
   // The single entry point for undoable element changes. Every change is
   // normalized through applyAutoLayout so a layout frame's children re-flow on
   // any edit that funnels here (inspector patches, paste, AI insert, delete,
@@ -188,9 +232,37 @@ export const CanvasWorkspace = ({
   // Selection Inspector: apply a partial patch to one element by id, routed
   // through mutateElements so the edit undoes/redoes and persists exactly like
   // a drag or a retype. No-op patches (no matching id) skip the write.
+  // Typing W/H on a hug-axis layout frame flips that axis to fixed (Figma) —
+  // without this the engine snaps the size straight back. Explicit layout
+  // writes (the sizing dropdowns) pass `changes.layout` and are left alone.
+  // Shared by the single-element AND the multi-select patch paths.
+  const withHugReleased = (
+    els: CanvasElement[],
+    id: string,
+    changes: Partial<CanvasElement>,
+  ): Partial<CanvasElement> => {
+    if ('layout' in changes || (changes.width === undefined && changes.height === undefined))
+      return changes
+    const el = els.find((e) => e.id === id)
+    if (el?.type !== 'frame' || !el.layout) return changes
+    const row = el.layout.mode === 'row'
+    const dropPrimary =
+      el.layout.primarySizing === 'hug' &&
+      (row ? changes.width !== undefined : changes.height !== undefined)
+    const dropCounter =
+      el.layout.counterSizing === 'hug' &&
+      (row ? changes.height !== undefined : changes.width !== undefined)
+    if (!dropPrimary && !dropCounter) return changes
+    const layout = { ...el.layout }
+    if (dropPrimary) delete layout.primarySizing
+    if (dropCounter) delete layout.counterSizing
+    return { ...changes, layout }
+  }
+
   const patchElement = useCallback(
     (id: string, changes: Partial<CanvasElement>) => {
-      const next = applyElementPatch(canvasRef.current.elements, id, changes)
+      const effective = withHugReleased(canvasRef.current.elements, id, changes)
+      const next = applyElementPatch(canvasRef.current.elements, id, effective)
       if (next !== canvasRef.current.elements) mutateElements(next)
     },
     [mutateElements],
@@ -264,6 +336,22 @@ export const CanvasWorkspace = ({
     if (changedElements) recordElementsChange()
   }
 
+  // DERIVED element writes (measured text footprints): persisted, but not an
+  // undo step of their own — undoing the text edit re-measures and re-derives
+  // the size. Folding into the baseline only happens from a CLEAN state; when
+  // real edits are pending the write rides the normal coalesced history so
+  // their boundary survives.
+  const handleImplicitElementsChange = useCallback(
+    (next: CanvasElement[]) => {
+      const clean =
+        baselineRef.current === canvasRef.current.elements && !histTimer.current
+      patch({ elements: next })
+      if (clean) baselineRef.current = next
+      else recordElementsChange()
+    },
+    [patch, recordElementsChange],
+  )
+
   // ── Copy / paste / duplicate of canvas elements ──────────────────────────
   // In-canvas clipboard, kept in a ref so it survives re-renders. Independent
   // of the OS clipboard (which the image-paste path owns).
@@ -283,7 +371,18 @@ export const CanvasWorkspace = ({
     const clip = clipboardRef.current
     if (!clip.length) return
     const copies = cloneForPaste(clip, 24, 24)
-    mutateElements([...canvasRef.current.elements, ...copies])
+    // A LONE pasted element whose landing point sits on a layout frame joins
+    // that frame's flow at the slot under it (Figma); comments and off-frame
+    // pastes fall through to the plain append inside the helper. Multi-element
+    // pastes keep the append — their internal arrangement IS the payload.
+    if (copies.length === 1) {
+      const el = copies[0]
+      const b = elementBounds(el)
+      const point = b ? { x: b.x + b.w / 2, y: b.y + b.h / 2 } : { x: el.x, y: el.y }
+      mutateElements(insertIntoLayoutAtPoint(canvasRef.current.elements, el, point).elements)
+    } else {
+      mutateElements([...canvasRef.current.elements, ...copies])
+    }
     // Select the pasted members, not the invisible group element(s).
     const groupCopyIds = new Set(copies.filter((c) => c.type === 'group').map((c) => c.id))
     const members = copies.filter((c) => !groupCopyIds.has(c.id))
@@ -322,20 +421,14 @@ export const CanvasWorkspace = ({
   }, [selectedIds, mutateElements])
 
   // ── Layers panel actions ─────────────────────────────────────────────────
-  // Move ONE element a single step in z-order. Array order IS z-order (front =
-  // end), so "up" (toward front) swaps with the next element and "down" swaps
-  // with the previous. Routed through mutateElements so it undoes / persists
-  // like every other element change. No-op at the array edge.
+  // Move ONE element a single step in z-order among its SIBLINGS (same parent),
+  // carrying its whole subtree across the neighbour's subtree — the pure logic
+  // (and the panel's matching disabled state) lives in canvasLayerTree. Routed
+  // through mutateElements so it undoes / persists like every other change.
   const moveElementOne = useCallback(
     (id: string, dir: 'up' | 'down') => {
-      const els = canvasRef.current.elements
-      const idx = els.findIndex((el) => el.id === id)
-      if (idx < 0) return
-      const swapWith = dir === 'up' ? idx + 1 : idx - 1
-      if (swapWith < 0 || swapWith >= els.length) return
-      const next = els.slice()
-      ;[next[idx], next[swapWith]] = [next[swapWith], next[idx]]
-      mutateElements(next)
+      const next = moveLayerOne(canvasRef.current.elements, id, dir)
+      if (next !== canvasRef.current.elements) mutateElements(next)
     },
     [mutateElements],
   )
@@ -372,10 +465,12 @@ export const CanvasWorkspace = ({
   )
 
   // Drag-reorder a layer (Layers-panel drag). Moves the dragged element + its
-  // subtree to land next to the target in z-order, adopting the target's nesting
-  // level — see reorderLayer. Routed through mutateElements so it undoes/persists.
+  // subtree to land next to the target in z-order — or, with place 'into',
+  // INSIDE the target container as its frontmost child — adopting the target's
+  // nesting level; see reorderLayer. Routed through mutateElements so it
+  // undoes/persists.
   const reorderElement = useCallback(
-    (dragId: string, targetId: string, place: 'above' | 'below') => {
+    (dragId: string, targetId: string, place: LayerDropPlace) => {
       const next = reorderLayer(canvasRef.current.elements, dragId, targetId, place)
       if (next !== canvasRef.current.elements) mutateElements(next)
     },
@@ -452,7 +547,14 @@ export const CanvasWorkspace = ({
         ...(naturalW ? { naturalWidth: naturalW } : {}),
         ...(naturalH ? { naturalHeight: naturalH } : {}),
       }
-      mutateElements([...canvasRef.current.elements, el])
+      // Dropped ON a layout frame, the image joins its flow at the slot under
+      // the drop point (plain append elsewhere — the helper decides).
+      mutateElements(
+        insertIntoLayoutAtPoint(canvasRef.current.elements, el, {
+          x: worldX,
+          y: worldY,
+        }).elements,
+      )
     },
     [projectPath, canvas.id, mutateElements],
   )
@@ -654,15 +756,23 @@ export const CanvasWorkspace = ({
   const canUndo = undoRef.current.length > 0 || baselineRef.current !== canvas.elements
   const canRedo = redoRef.current.length > 0
 
-  // The Selection Inspector shows only when exactly one element is selected and
-  // we're not mid-text-edit (the editor owns the surface then). Comments live in
-  // their own pin popover, so they're excluded from the panel.
-  const selectedElement =
-    selectedIds.length === 1 && !editingId
-      ? canvas.elements.find((e) => e.id === selectedIds[0]) ?? null
-      : null
-  const inspectorElement =
-    selectedElement && selectedElement.type !== 'comment' ? selectedElement : null
+  // The Selection Inspector shows for any non-empty selection (multi mode
+  // edits the common fields, Figma-style) unless we're mid-text-edit (the
+  // editor owns the surface then). Comments live in their own pin popover, so
+  // they're excluded from the panel.
+  const inspectorElements = editingId
+    ? []
+    : canvas.elements.filter(
+        (e) => selectedIds.includes(e.id) && e.type !== 'comment',
+      )
+  const inspectorElement = inspectorElements.length === 1 ? inspectorElements[0] : null
+  // Layout-child context for the inspector: Figma hides the free-align row for
+  // a child managed by auto layout and offers Fixed/Fill sizing instead.
+  const inspectorParentLayout = (() => {
+    if (!inspectorElement?.parentId) return null
+    const parent = canvas.elements.find((e) => e.id === inspectorElement.parentId)
+    return parent?.type === 'frame' ? parent.layout ?? null : null
+  })()
 
   // Count of selected ids that still exist as elements — the AlignBar gate uses
   // this (not raw selectedIds.length) so a stale selection left after a delete
@@ -721,7 +831,42 @@ export const CanvasWorkspace = ({
           tool={tool}
           onToolChange={setTool}
           onDuplicate={duplicateSelection}
+          historyDepth={historyDepth}
+          onCancelRestore={cancelRestoreToDepth}
+          adoptionEpoch={adoptionEpoch}
+          onImplicitElementsChange={handleImplicitElementsChange}
+          highlightedId={hoveredElementId}
+          onHoverElement={setHoveredElementId}
+          zoomApiRef={zoomApi}
         />
+        {/* Zoom pill — top-right of the canvas column (Figma's zoom control).
+            The % button fits all content; −/+ step like ⌘−/⌘+. */}
+        <div className="absolute right-3 top-3 z-20 flex items-center rounded-[7px] border border-line bg-bg-card/90 p-0.5 shadow-card backdrop-blur">
+          <button
+            type="button"
+            onClick={() => zoomApi.current?.zoomOut()}
+            title={t('canvas.zoom.out')}
+            className="flex h-6 w-6 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            <Minus size={12} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomApi.current?.fitAll()}
+            title={t('canvas.zoom.fit')}
+            className="h-6 min-w-[44px] rounded-[4px] px-1 text-center text-[11px] tabular-nums text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            {Math.round(canvas.viewport.zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomApi.current?.zoomIn()}
+            title={t('canvas.zoom.in')}
+            className="flex h-6 w-6 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            <Plus size={12} strokeWidth={2} />
+          </button>
+        </div>
         <ToolPalette
           tool={tool}
           onToolChange={setTool}
@@ -731,11 +876,12 @@ export const CanvasWorkspace = ({
             setGenError(null)
           }}
         />
-        {/* Generate prompt bar — floats bottom-centre while open. Esc / ✕
-            closes (held shut while a generation is in flight so the result
-            isn't orphaned); Enter submits, IME-confirm Enters excluded. */}
+        {/* Generate prompt bar — floats bottom-centre while open, just above
+            the ToolPalette pill. Esc / ✕ closes (held shut while a generation
+            is in flight so the result isn't orphaned); Enter submits,
+            IME-confirm Enters excluded. */}
         {genOpen && (
-          <div className="absolute bottom-6 left-1/2 z-30 w-[min(520px,calc(100%-48px))] -translate-x-1/2">
+          <div className="absolute bottom-20 left-1/2 z-30 w-[min(520px,calc(100%-48px))] -translate-x-1/2">
             <div className="flex items-center gap-2 rounded-full border border-line bg-bg-card/95 py-1.5 pl-4 pr-1.5 shadow-card backdrop-blur transition-colors focus-within:border-accent">
               <Sparkles size={13} strokeWidth={1.75} className="shrink-0 text-ink-muted" />
               <input
@@ -788,64 +934,109 @@ export const CanvasWorkspace = ({
             )}
           </div>
         )}
-        {/* Layers launcher — top-left, clear of the centre-left ToolPalette and
-            the top-right SelectionInspector. Toggles the panel; reflects open
-            state so it reads as a pressed control while the list is showing. */}
-        <button
-          type="button"
-          onClick={() => setShowLayers((v) => !v)}
-          aria-pressed={showLayers}
-          title={showLayers ? t('canvas.hideLayers') : t('canvas.showLayers')}
-          className={[
-            'absolute left-3 top-3 z-30 flex h-8 w-8 items-center justify-center rounded-[6px] border shadow-card backdrop-blur transition-colors',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
-            showLayers
-              ? 'border-accent bg-accent text-bg-card hover:bg-accent/90'
-              : 'border-line bg-bg-card/90 text-ink-muted hover:bg-bg-inset hover:text-ink',
-          ].join(' ')}
-        >
-          <Layers size={15} strokeWidth={1.75} />
-        </button>
-        {showLayers && (
-          <LayersPanel
-            elements={canvas.elements}
-            selectedIds={selectedIds}
-            onSelect={(id, additive) => {
-              // Clicking a GROUP row selects its members (the group element is
-              // invisible — selecting its bare id would show nothing on canvas
-              // and break copy). A member/leaf row selects just itself, so the
-              // panel can still target individual children.
-              const el = canvas.elements.find((e) => e.id === id)
-              const target =
-                el?.type === 'group' ? expandSelectionForElement(canvas.elements, id) : [id]
-              setSelectedIds((prev) =>
-                additive
-                  ? Array.from(new Set([...prev, ...target]))
-                  : target,
-              )
-            }}
-            onMove={moveElementOne}
-            onToggleHidden={toggleElementHidden}
-            onToggleLocked={toggleElementLocked}
-            onRename={renameElement}
-            onReorder={reorderElement}
-            onClose={() => setShowLayers(false)}
-          />
-        )}
-        {inspectorElement && (
-          <SelectionInspector
-            // Re-mount per element so uncontrolled-feel inputs reset cleanly
-            // when the selection jumps from one element to another.
-            key={inspectorElement.id}
-            element={inspectorElement}
-            onPatch={(changes) => patchElement(inspectorElement.id, changes)}
-          />
-        )}
-        {/* Align / distribute toolbar — with a live multi-selection, or a
-            single frame-child (which aligns against its parent frame). */}
-        {(liveSelectedCount >= 2 || singleAlignsToFrame) && (
-          <AlignBar count={liveSelectedCount} onAlign={alignSelection} />
-        )}
+        {/* Layers tree — docked into the shell's left-sidebar slot, always
+            mounted while the slot exists (⌘\ hides the whole sidebar). */}
+        {layersHost &&
+          createPortal(
+            <div className="relative h-full">
+              <LayersPanel
+                elements={canvas.elements}
+                selectedIds={selectedIds}
+                onSelect={(id, additive) => {
+                  // Clicking a GROUP row selects its members (the group element is
+                  // invisible — selecting its bare id would show nothing on canvas
+                  // and break copy). A member/leaf row selects just itself, so the
+                  // panel can still target individual children.
+                  const el = canvas.elements.find((e) => e.id === id)
+                  const target =
+                    el?.type === 'group' ? expandSelectionForElement(canvas.elements, id) : [id]
+                  setSelectedIds((prev) =>
+                    additive
+                      ? Array.from(new Set([...prev, ...target]))
+                      : target,
+                  )
+                }}
+                onSelectIds={(ids) => {
+                  // Range / toggle selections arrive as raw row ids — expand any
+                  // group rows to their members, same contract as onSelect above.
+                  const expanded = ids.flatMap((id) => {
+                    const el = canvas.elements.find((e) => e.id === id)
+                    return el?.type === 'group'
+                      ? expandSelectionForElement(canvas.elements, id)
+                      : [id]
+                  })
+                  setSelectedIds(Array.from(new Set(expanded)))
+                }}
+                onMove={moveElementOne}
+                onToggleHidden={toggleElementHidden}
+                onToggleLocked={toggleElementLocked}
+                onRename={renameElement}
+                onReorder={reorderElement}
+                onHoverElement={setHoveredElementId}
+                hoveredElementId={hoveredElementId}
+              />
+            </div>,
+            layersHost,
+          )}
+        {/* Right sidebar — the inspector for any selection (single or multi),
+            else a mini canvas summary so the panel never blanks out (Figma's
+            Design panel is permanent too). The align row lives at the top of
+            the inspector (the old floating AlignBar is absorbed). */}
+        {inspectorHost &&
+          createPortal(
+            inspectorElements.length > 0 ? (
+              <div className="relative h-full">
+                <SelectionInspector
+                  // Re-mount per selection so uncontrolled-feel inputs reset
+                  // cleanly when it jumps between elements / selection sets.
+                  key={
+                    inspectorElement
+                      ? inspectorElement.id
+                      : `multi:${inspectorElements.map((e) => e.id).join(',')}`
+                  }
+                  element={inspectorElement ?? inspectorElements[0]}
+                  elements={
+                    inspectorElements.length > 1 ? inspectorElements : undefined
+                  }
+                  onPatch={(changes) =>
+                    patchElement((inspectorElement ?? inspectorElements[0]).id, changes)
+                  }
+                  onPatchMany={(ids, changes) => {
+                    // One mutateElements call = one undo step for the bulk
+                    // edit. Each id gets the same hug→fixed treatment as the
+                    // single-element path so W/H edits stick on hug frames.
+                    let next = canvasRef.current.elements
+                    for (const pid of ids)
+                      next = applyElementPatch(next, pid, withHugReleased(next, pid, changes))
+                    if (next !== canvasRef.current.elements) mutateElements(next)
+                  }}
+                  onAlign={alignSelection}
+                  alignEnabled={liveSelectedCount >= 2 || singleAlignsToFrame}
+                  isLayoutChild={!!inspectorParentLayout}
+                  parentLayout={inspectorParentLayout}
+                  onAddAutoLayout={() => {
+                    // Same path as ⇧A so the direction heuristic applies.
+                    const res = addAutoLayout(
+                      canvasRef.current.elements,
+                      selectedIds,
+                      () => crypto.randomUUID(),
+                    )
+                    if (!res) return
+                    mutateElements(res.elements)
+                    setSelectedIds([res.selectId])
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1 px-3 py-2.5">
+                <div className="truncate text-[12px] text-ink-muted">{canvas.name}</div>
+                <div className="text-[11px] text-ink-faint">
+                  {t('canvas.side.elementCount', { count: canvas.elements.length })}
+                </div>
+              </div>
+            ),
+            inspectorHost,
+          )}
         {/* Undo / redo — keeps the ⌘Z history discoverable for mouse users. */}
         <div className="absolute bottom-4 right-4 z-20 flex items-center gap-0.5 rounded-[7px] border border-line bg-bg-card/90 p-1 shadow-card backdrop-blur">
           <button

@@ -1,7 +1,8 @@
 import { cp, mkdir, readFile, readdir, rm, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import type { CanvasElement, CanvasFile, CanvasSummary, CanvasesIndex } from '../types'
+import type { CanvasFile, CanvasSummary, CanvasesIndex } from '../types'
+import { normalizeLayoutOrder } from '../canvasAutoLayout'
 import { atomicWriteJson } from './atomicWrite'
 import { projectDataDir } from './projectDataPath'
 import { noteSharedWrite } from './shareAutoSync'
@@ -146,7 +147,12 @@ export const readCanvasFile = async (
   try {
     const raw = await readFile(await canvasFilePath(projectPath,id), 'utf8')
     const parsed = JSON.parse(raw) as CanvasFile
-    return { ...emptyCanvas(id, parsed.name ?? 'Canvas'), ...parsed }
+    const canvas = { ...emptyCanvas(id, parsed.name ?? 'Canvas'), ...parsed }
+    // The single read seam both central and git-shared files pass through
+    // (canvasFilePath branches on the marker): converge files saved by the old
+    // position-sorting auto-layout engine to the v2 array-order contract, so
+    // the picture doesn't change on load. No-op (same array) on v2 files.
+    return { ...canvas, elements: normalizeLayoutOrder(canvas.elements ?? []) }
   } catch {
     return null
   }

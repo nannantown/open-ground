@@ -86,6 +86,7 @@ describe('projectData — git-shared mode', () => {
       ],
       notes: '# shared notes\n',
       tabOrder: ['board', 'terminal'],
+      customTabs: ['aaaaaaaa-0000-4000-8000-000000000001'],
     }))
 
     // Repo layout: one card file per task + notes.md + marker description.
@@ -97,17 +98,20 @@ describe('projectData — git-shared mode', () => {
     const rawCard = await readFile(join(boardCardsDir(dir), 'aaa.json'), 'utf8')
     expect(rawCard.startsWith('{\n  "id": "aaa"')).toBe(true)
 
-    // Central tasks.json holds ONLY the personal fields live (tabOrder).
+    // Central tasks.json holds ONLY the personal fields live (tabOrder,
+    // customTabs — the per-project tab attachments never enter the repo).
     const centralRaw = JSON.parse(
       await readFile(join(await projectDataDir(dir), 'tasks.json'), 'utf8'),
     ) as Record<string, unknown>
     expect(centralRaw.tabOrder).toEqual(['board', 'terminal'])
+    expect(centralRaw.customTabs).toEqual(['aaaaaaaa-0000-4000-8000-000000000001'])
 
     // Read composes both sources back into one ProjectData.
     const read = await readProjectData(dir)
     expect(read.description).toBe('a board shared via git')
     expect(read.notes).toBe('# shared notes\n')
     expect(read.tabOrder).toEqual(['board', 'terminal'])
+    expect(read.customTabs).toEqual(['aaaaaaaa-0000-4000-8000-000000000001'])
     expect(read.updatedAt).toBe(written.updatedAt)
     // Deterministic order: column (todo < doing) then boardOrder then id.
     expect(read.tasks.map(t => t.id)).toEqual(['bbb', 'aaa'])

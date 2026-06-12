@@ -65,6 +65,19 @@ body::before {
   cursor: text !important;
 }
 
+/* Same inherit trick while a selection-chrome cursor (resize handle band /
+   rotate zone) is active: those zones overlap element bodies whose own
+   cursor-grab class would otherwise win on hover. The wrapper sets the
+   resize/rotate cursor inline; descendants must not override it. */
+.canvas-chrome-cursor,
+.canvas-chrome-cursor * {
+  cursor: inherit !important;
+}
+.canvas-chrome-cursor textarea,
+.canvas-chrome-cursor input {
+  cursor: text !important;
+}
+
 /* Fine cartographic grid for the canvas surface */
 .canvas-grid {
   background-color: var(--paper-tint);

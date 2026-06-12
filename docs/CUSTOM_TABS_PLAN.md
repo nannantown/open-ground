@@ -242,3 +242,32 @@ New files under `src/components/canvas/modules/` + `src/lib/modules/`:
 
 Payments, ratings, module updates/uninstall sync, non-owner publishing,
 public marketplace browsing for `none` users, packaging env for end users.
+
+## Per-project attachment & the "+" picker (2026-06-12 dogfood revision)
+
+The library/attachment split. Modules themselves stay USER-level
+(~/.openground/custom-modules/); which tabs appear in a given project's tab
+row is now a PER-PROJECT choice:
+
+- `ProjectData.customTabs?: string[]` — bare module uuids attached to this
+  project. PERSONAL state exactly like `tabOrder` (stays central in
+  git-shared mode; sanitised on read like tabOrder; unknown/deleted ids
+  ignored). A module appears in a project's row ONLY when listed here —
+  creating or installing a module no longer surfaces it anywhere by itself.
+- **"+" → picker dialog** (replaces "+ → create dialog" directly): lists MY
+  library (label + description preview + origin/version badge + 追加済み
+  state). Click an unattached item → append its id to `customTabs`, persist,
+  switch the view to that tab. Contains a **「新規タブを作成」command** →
+  the existing create dialog; on create the new module is auto-attached to
+  the CURRENT project (then the dock/auto-paste setup flow runs unchanged).
+  Also the place for LIBRARY-LEVEL destruction: per-item delete (owner,
+  two-step confirm; tester sees uninstall on `installed` only) — removes the
+  module everywhere (server DELETE, existing route).
+- **Tab right-click menu** = 「タブの列から外す」(detach) ONLY: removes the
+  id from THIS project's `customTabs` (and its `tabOrder` entry), persists —
+  non-destructive, the module stays in the library. The old destructive
+  delete/uninstall moves into the picker.
+- **Marketplace install** (from inside a project) auto-attaches the
+  installed module to the current project.
+- Existing data migration: none — `customTabs` starts undefined (= no custom
+  tabs attached anywhere). The owner re-attaches via the picker.

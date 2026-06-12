@@ -171,15 +171,38 @@ export interface CanvasPosition {
  *  in `src/lib/canvasAutoLayout.ts`.
  *  - `mode`    — main axis: 'row' stacks the children left→right, 'column'
  *    top→bottom.
- *  - `gap`     — px between consecutive children along the main axis.
- *  - `padding` — px inset from the frame's edges (all four sides).
+ *  - `gap`     — px between consecutive children along the main axis. Ignored
+ *    by the engine while `justify === 'space-between'` (the leftover space IS
+ *    the gap then).
+ *  - `padding` — px inset from the frame's edges — the legacy all-four-sides
+ *    value, used as the fallback for any per-side field left unset.
  *  - `align`   — cross-axis placement of each child inside the padded box
- *    ('start' | 'center' | 'end'). */
+ *    ('start' | 'center' | 'end').
+ *  All v2 fields below are OPTIONAL and backward-compatible: older saved
+ *  canvases omit them and the engine falls back to the legacy behaviour
+ *  (justify 'start', uniform `padding`, both axes 'fixed').
+ *  - `justify`      — main-axis distribution of the children. Omitted =
+ *    'start'. 'space-between' spreads the leftover space evenly between
+ *    consecutive children (a single child centres).
+ *  - `paddingTop` / `paddingRight` / `paddingBottom` / `paddingLeft` —
+ *    per-side padding px; each side omitted falls back to `padding`.
+ *  - `primarySizing` — the frame's own MAIN-axis sizing: 'hug' shrinks/grows
+ *    the frame to its content (children + gaps + padding), 'fixed' keeps the
+ *    stored width/height. Omitted = 'fixed'.
+ *  - `counterSizing` — same for the frame's CROSS axis (max child + padding).
+ *    Omitted = 'fixed'. */
 export interface FrameLayout {
   mode: 'row' | 'column'
   gap: number
   padding: number
   align: 'start' | 'center' | 'end'
+  justify?: 'start' | 'center' | 'end' | 'space-between'
+  paddingTop?: number
+  paddingRight?: number
+  paddingBottom?: number
+  paddingLeft?: number
+  primarySizing?: 'fixed' | 'hug'
+  counterSizing?: 'fixed' | 'hug'
 }
 
 // Free-form items placed on the canvas (annotations and grouping frames),
@@ -324,6 +347,18 @@ export interface CanvasElement {
    *  src/lib/canvasAutoLayout.ts — manual child positions are overridden on
    *  every elements mutation. Absent = free-form frame (default). */
   layout?: FrameLayout
+  /** Layout-child only (Figma "Fill container", main axis): meaningful only
+   *  while this element is a direct child of a layout frame. When the frame's
+   *  MAIN axis is 'fixed', the engine stretches this child to an equal share
+   *  of the leftover main-axis space (writing its width/height); while the
+   *  frame hugs that axis the child keeps its natural size (Figma does the
+   *  same). OPTIONAL and backward-compatible: omitted = natural size. */
+  fillMain?: boolean
+  /** Layout-child only (Figma "Fill container", cross axis): as `fillMain`,
+   *  but stretching to the frame's padded CROSS-axis interior when the frame's
+   *  cross axis is 'fixed'. OPTIONAL and backward-compatible: omitted =
+   *  natural size. */
+  fillCross?: boolean
   /** Comment-only: id of the canvas element this comment was dropped on top
    *  of. Used so the Run prompt can tell Claude exactly which element the
    *  comment refers to (e.g. a specific mockup). */
@@ -466,6 +501,55 @@ export interface MergedBranchesRequest {
 /** POST /api/project/merged-branches response: a verdict per REQUESTED branch
  *  name (every input key is present; unjudgeable ones are 'unknown'). */
 export type MergedBranchesResponse = Record<string, MergedBranchStatus>
+
+/** One uncommitted entry from `git status --porcelain` for the branch-changes
+ *  view: `status` is the two-letter XY code trimmed ('M', 'A', 'D', '??', …);
+ *  renames render as "old → new" in `path`. */
+export interface BranchWorkingChange {
+  status: string
+  path: string
+}
+
+/** One committed-on-this-branch file from `git diff --numstat target...HEAD`.
+ *  Binary files (numstat '-') report 0/0. */
+export interface BranchCommittedChange {
+  path: string
+  additions: number
+  deletions: number
+}
+
+/** GET /api/project/branch-changes?path= — the ProjectPanel header chip +
+ *  "Branch changes" modal payload. Non-repo dirs answer { isGit: false } (the
+ *  chip simply doesn't render). `target` resolves config.targetBranch first,
+ *  then main / master; null = nothing to compare against (committed list
+ *  empty). `sameBranch` = HEAD is the target itself — committed/ahead/behind
+ *  are intentionally zeroed rather than self-compared. */
+export type BranchChangesResponse =
+  | { isGit: false }
+  | {
+      isGit: true
+      /** Checked-out branch, or null (detached HEAD). */
+      branch: string | null
+      target: string | null
+      sameBranch: boolean
+      /** Commits on HEAD that target doesn't have. */
+      ahead: number
+      /** Commits on target that HEAD doesn't have. */
+      behind: number
+      working: BranchWorkingChange[]
+      committed: BranchCommittedChange[]
+    }
+
+/** Which diff GET /api/project/file-diff returns: 'working' = uncommitted
+ *  changes vs HEAD (untracked → full content), 'branch' = target...HEAD. */
+export type FileDiffScope = 'working' | 'branch'
+
+/** GET /api/project/file-diff?path=&file=&scope= — unified diff text, cut at
+ *  ~200KB on a line boundary (`truncated` says so). */
+export interface FileDiffResponse {
+  diff: string
+  truncated: boolean
+}
 
 /** GitHub PR lifecycle state as `gh pr view --json state` reports it. */
 export type PrState = 'OPEN' | 'MERGED' | 'CLOSED'
@@ -654,6 +738,12 @@ export interface ProjectData {
    *  normalised against the live module registry on read (unknown ids dropped,
    *  missing enabled modules appended) — see effectiveTabOrder. */
   tabOrder?: string[]
+  /** Custom tabs ATTACHED to this project — bare custom-module uuids. The
+   *  module library (~/.openground/custom-modules/) is user-level; a module
+   *  surfaces in a project's tab row only when its id is listed here (chosen
+   *  via the "+" picker). PERSONAL state like tabOrder: stays central in
+   *  git-shared mode. Unknown/deleted ids are ignored on read. */
+  customTabs?: string[]
   /** Shared project policy — see {@link ProjectConfig}. */
   config?: ProjectConfig
   /** Personal launch preferences — see {@link ProjectLaunchPrefs}. Central

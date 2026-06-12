@@ -7,9 +7,11 @@ import {
   GitBranch,
   Loader2,
   MessageSquare,
+  Minus,
   MoreHorizontal,
   Plus,
   RotateCw,
+  SquareCode,
   Terminal,
   Trash2,
   X,
@@ -17,6 +19,7 @@ import {
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import type {
+  BranchChangesResponse,
   OpenApp,
   ProjectConfig,
   ProjectData,
@@ -66,6 +69,7 @@ import {
 import { BoardTaskTerminal } from '@/components/canvas/TaskTerminal'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
+import { BranchChangesModal } from '@/components/canvas/BranchChangesModal'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import {
@@ -81,11 +85,13 @@ import {
 } from '@/components/canvas/moduleRegistry'
 import { customTabId, customModuleIdFromTab, isCustomTabId } from '@/lib/modules/ids'
 import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
+import { attachCustomTab, detachCustomTab } from '@/lib/modules/customTabAttach'
 import { useCustomModules } from '@/lib/modules/useCustomModules'
 import { CustomModuleView } from '@/components/canvas/modules/CustomModuleView'
 import { customModuleStorageId } from '@/components/canvas/modules/CustomModuleView'
 import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
+import { CustomTabPickerDialog } from '@/components/canvas/modules/CustomTabPickerDialog'
 import { MarketplaceDialog } from '@/components/canvas/modules/MarketplaceDialog'
 
 // The per-project tabs are declared once in the module registry
@@ -293,6 +299,55 @@ export const ProjectPanel = ({
     }).catch(() => {})
   }, [project])
 
+  // Open the project folder in the user's code editor (cursor/code/windsurf/
+  // zed, or OPENGROUND_EDITOR_CMD). Unlike reveal this CAN meaningfully fail
+  // (no editor installed → 503 with a human message), so failures surface via
+  // the same alert pattern "Open in…" uses.
+  const openInEditor = useCallback(async () => {
+    if (!project || project.missing) return
+    try {
+      const res = await fetch('/api/project/open-editor', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      })
+      if (!res.ok) {
+        const e = (await res.json().catch(() => ({}))) as { error?: string }
+        alert(t('projectPanel.editorOpenFailed', { error: e.error ?? res.statusText }))
+      }
+    } catch (e: any) {
+      alert(
+        t('projectPanel.editorOpenFailed', {
+          error: e?.message ?? t('projectPanel.networkError'),
+        }),
+      )
+    }
+  }, [project, t])
+
+  // Header branch chip: branch name + a dot when the working tree is dirty.
+  // Fetched once per project open (good enough — the modal re-fetches fresh
+  // data on open and pushes it back here, so the chip never drifts far).
+  const [branchInfo, setBranchInfo] = useState<BranchChangesResponse | null>(null)
+  const [branchModalOpen, setBranchModalOpen] = useState(false)
+  useEffect(() => {
+    setBranchInfo(null)
+    setBranchModalOpen(false)
+    if (!project || project.missing) return
+    let cancelled = false
+    fetch(`/api/project/branch-changes?path=${encodeURIComponent(project.path)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => {
+        if (!cancelled && body && typeof (body as BranchChangesResponse).isGit === 'boolean') {
+          setBranchInfo(body as BranchChangesResponse)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.path, project?.missing])
+
   const regenerateDescription = useCallback(async () => {
     if (!project || project.missing || describing || claudeMissing) return
     // claude can take ~2 min to answer; this panel is reused across project
@@ -466,12 +521,20 @@ export const ProjectPanel = ({
     loaded: customModulesLoaded,
     refresh: refreshCustomModules,
   } = useCustomModules()
+  // ATTACHMENT IS CANONICAL (docs/CUSTOM_TABS_PLAN.md — per-project
+  // attachment): a module surfaces in THIS project's row only when its id is
+  // listed in ProjectData.customTabs AND it still exists in the library.
+  // Creating/installing a module alone surfaces nothing.
+  const attachedModuleIds = useMemo<string[]>(() => {
+    const lib = new Set(customModules.map(m => m.id))
+    return (data?.customTabs ?? []).filter(id => lib.has(id))
+  }, [data?.customTabs, customModules])
   // Every id that can appear in the tab row: built-ins in registry order,
-  // then the custom tabs in list order. effectiveTabOrder reconciles a saved
-  // per-project order against this set.
+  // then the ATTACHED custom tabs in attachment order. effectiveTabOrder
+  // reconciles a saved per-project order against this set.
   const allTabIds = useMemo<PanelView[]>(
-    () => [...ENABLED_MODULE_IDS, ...customModules.map(m => customTabId(m.id))],
-    [customModules],
+    () => [...ENABLED_MODULE_IDS, ...attachedModuleIds.map(customTabId)],
+    [attachedModuleIds],
   )
   // The per-project, normalised tab order: the user's saved drag order
   // (ProjectData.tabOrder) reconciled against the live registry + custom set,
@@ -481,15 +544,17 @@ export const ProjectPanel = ({
     () => effectiveTabOrder<PanelView>(data?.tabOrder, allTabIds),
     [data?.tabOrder, allTabIds],
   )
-  // A persisted / lingering custom tab whose module no longer exists (deleted
-  // elsewhere, or a stale localStorage value) falls back to the first
-  // built-in. Only judged once the list has actually loaded — before that,
-  // "not in the list" just means "haven't heard from the server yet".
+  // A persisted / lingering custom tab that is no longer in this project's
+  // row — NOT attached here (detached, or never was on this project), or its
+  // module vanished from the library (deleted elsewhere, a stale localStorage
+  // value) — falls back to the first built-in. Only judged once BOTH sources
+  // are in (the library list AND this project's data) — before that, "not in
+  // the row" just means "haven't heard from the server yet".
   useEffect(() => {
-    if (!customModulesLoaded || !isCustomTabId(view)) return
-    if (customModules.some(m => customTabId(m.id) === view)) return
+    if (!customModulesLoaded || !data || !isCustomTabId(view)) return
+    if (allTabIds.includes(view)) return
     setView(tabOrder.find(id => !isCustomTabId(id)) ?? 'board')
-  }, [customModulesLoaded, customModules, view, tabOrder])
+  }, [customModulesLoaded, data, view, allTabIds, tabOrder])
   // "The leftmost tab opens by default." When a project's data first loads
   // (opening it, or switching to it — guarded so a same-project save/refetch
   // doesn't yank the view), land on that project's first tab. When the saved
@@ -517,21 +582,38 @@ export const ProjectPanel = ({
     const first = effectiveTabOrder<PanelView>(data.tabOrder, allTabIds)[0] ?? 'board'
     setView(first)
   }, [project?.path, project?.id, data, customModulesLoaded, allTabIds])
-  // Custom-tab management UI: the "+" create dialog (owner), the marketplace
-  // (owner|tester), and the one-shot post-create setup — the freshly created
-  // module's id, which makes its CustomModuleView auto-open the sidebar,
-  // launch claude and paste the brush-up prompt (unsent). Consumed once.
+  // Custom-tab management UI: the "+" picker (owner|tester — attach from the
+  // library, jump to create), the create dialog it hands off to (owner), the
+  // marketplace (owner|tester), and the one-shot post-create setup — the
+  // freshly created module's id, which makes its CustomModuleView auto-open
+  // the sidebar, launch claude and paste the brush-up prompt (unsent).
+  // Consumed once.
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [customCreateOpen, setCustomCreateOpen] = useState(false)
   const [marketOpen, setMarketOpen] = useState(false)
   const [customSetupId, setCustomSetupId] = useState<string | null>(null)
+  // Attach a library module to THIS project (ProjectData.customTabs — the
+  // same persist path tabOrder rides) and land on its tab. Reads through
+  // dataRef so the async create/install flows can't persist a stale draft.
+  const attachTabToProject = useCallback(
+    (moduleId: string) => {
+      const base = dataRef.current
+      if (!base) return
+      persist({ ...base, customTabs: attachCustomTab(base.customTabs, moduleId) })
+      setView(customTabId(moduleId))
+    },
+    [persist],
+  )
   const onCustomTabCreated = useCallback(
     async (def: CustomModuleDef) => {
       setCustomCreateOpen(false)
       await refreshCustomModules()
+      // Auto-attach to the CURRENT project — creation alone surfaces nothing
+      // (per-project attachment), and the setup flow needs the tab visible.
+      attachTabToProject(def.id)
       setCustomSetupId(def.id)
-      setView(customTabId(def.id))
     },
-    [refreshCustomModules],
+    [refreshCustomModules, attachTabToProject],
   )
   // The custom module rendered by the active tab (null on built-ins / a
   // just-deleted module whose fallback effect hasn't run yet).
@@ -542,24 +624,32 @@ export const ProjectPanel = ({
         : null,
     [view, customModules],
   )
-  // Tab-row right-click removal. What the menu offers per tab (cosmetic — the
-  // server enforces the role): owner deletes any custom module, tester
-  // uninstalls marketplace-installed ones, everyone else gets no menu.
-  const customTabRemoveKind = useCallback(
-    (tabId: string): 'delete' | 'uninstall' | null => {
-      if (!isCustomTabId(tabId)) return null
-      const mod = customModules.find(m => customTabId(m.id) === tabId)
-      if (!mod) return null
-      if (customRole === 'owner') return 'delete'
-      if (customRole === 'tester' && mod.origin === 'installed') return 'uninstall'
-      return null
-    },
-    [customModules, customRole],
+  // Tab-row right-click = DETACH only (non-destructive, no confirm): drop the
+  // module id from THIS project's customTabs and scrub its custom:<id> entry
+  // from tabOrder, persisted together. The module stays in the library — the
+  // picker can re-attach it. Offered to anyone who manages custom tabs
+  // (cosmetic — attachment is personal per-project state, no server role
+  // gate applies to it).
+  const canDetachTab = useCallback(
+    (tabId: string): boolean => customRole !== 'none' && isCustomTabId(tabId),
+    [customRole],
   )
-  const removeCustomTab = useCallback(
-    async (tabId: string) => {
+  const detachTabFromProject = useCallback(
+    (tabId: string) => {
       if (!isCustomTabId(tabId)) return
+      const base = dataRef.current
+      if (!base) return
       const moduleId = customModuleIdFromTab(tabId as `custom:${string}`)
+      persist({ ...base, ...detachCustomTab(base, moduleId) })
+      // The dangling-view fallback effect moves the view off the detached id.
+    },
+    [persist],
+  )
+  // LIBRARY-level destruction (now lives in the "+" picker, not the tab row):
+  // server DELETE, then PTY/dock teardown, then a list refresh. The picker
+  // owns the two-step confirm; the server enforces the role.
+  const deleteCustomModule = useCallback(
+    async (moduleId: string) => {
       try {
         const r = await fetch(`/api/custom-modules/${moduleId}`, { method: 'DELETE' })
         if (!r.ok) {
@@ -570,8 +660,9 @@ export const ProjectPanel = ({
         // dock bindings too — nothing could ever reclaim them post-delete.
         killEmbeddedTerminals(customModuleStorageId(moduleId))
       } finally {
-        // Refresh drops the tab from the row; the dangling-view fallback
-        // effect then moves the view off the dead id.
+        // Refresh drops the module from the library (and thus from every
+        // project's row); the dangling-view fallback effect then moves the
+        // view off the dead id.
         void refreshCustomModules()
       }
     },
@@ -1672,6 +1763,39 @@ export const ProjectPanel = ({
             >
               <FolderOpen size={16} strokeWidth={1.75} />
             </button>
+            {/* Open the folder in the user's code editor — same family as the
+                reveal button, one click from the title. */}
+            <button
+              onClick={openInEditor}
+              disabled={project.missing}
+              title={t('projectPanel.openInEditor')}
+              aria-label={t('projectPanel.openInEditor')}
+              className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+            >
+              <SquareCode size={16} strokeWidth={1.75} />
+            </button>
+            {/* Branch chip — only for git projects: current branch, a dot when
+                the working tree is dirty; opens the Branch changes modal. */}
+            {branchInfo?.isGit && (
+              <button
+                onClick={() => setBranchModalOpen(true)}
+                disabled={project.missing}
+                title={t('projectPanel.branchChipTitle')}
+                aria-label={t('projectPanel.branchChipTitle')}
+                className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-line px-2.5 py-0.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+              >
+                <GitBranch size={11} strokeWidth={2} className="shrink-0" />
+                <span className="max-w-[180px] truncate font-mono">
+                  {branchInfo.branch ?? 'HEAD'}
+                </span>
+                {branchInfo.working.length > 0 && (
+                  <span
+                    aria-hidden
+                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
+                  />
+                )}
+              </button>
+            )}
           </div>
           {data && (
             descriptionForLang(data, lang) ? (
@@ -1917,14 +2041,17 @@ export const ProjectPanel = ({
         onReorder={reorderTabs}
         terminalInfo={terminalInfo}
         // Custom tabs (label from the fetched def, fixed Puzzle icon) — the
-        // row renders them wherever `order` puts them.
+        // row renders them wherever `order` puts them; `order` only ever
+        // contains tabs ATTACHED to this project (allTabIds above).
         customTabs={customModules.map(customModuleTabDef)}
         // Management affordances are role-gated COSMETICALLY (server is the
-        // source of truth): "+" creates (owner), Market browses (owner|tester).
-        onAddTab={customRole === 'owner' ? () => setCustomCreateOpen(true) : undefined}
+        // source of truth): "+" opens the attach picker (owner|tester),
+        // Market browses (owner|tester).
+        onAddTab={customRole !== 'none' ? () => setPickerOpen(true) : undefined}
         onOpenMarket={customRole !== 'none' ? () => setMarketOpen(true) : undefined}
-        // Right-click menu on custom tabs (delete / uninstall).
-        customTabMenu={{ kindFor: customTabRemoveKind, onRemove: removeCustomTab }}
+        // Right-click menu on custom tabs: detach from this project's row
+        // (non-destructive — library delete lives in the picker).
+        customTabMenu={{ canDetach: canDetachTab, onDetach: detachTabFromProject }}
         // Cards waiting in Review — the reviewer's pull signal (F066). Only
         // counted when the review column is enabled for this board.
         badges={{
@@ -2303,6 +2430,30 @@ export const ProjectPanel = ({
         />
       )}
 
+      {pickerOpen && (
+        <CustomTabPickerDialog
+          modules={customModules}
+          role={customRole}
+          attachedIds={new Set(attachedModuleIds)}
+          onAttach={moduleId => {
+            attachTabToProject(moduleId)
+            setPickerOpen(false)
+          }}
+          // Create is owner-only (the server re-checks); the picker closes
+          // and hands off to the create dialog.
+          onCreateNew={
+            customRole === 'owner'
+              ? () => {
+                  setPickerOpen(false)
+                  setCustomCreateOpen(true)
+                }
+              : undefined
+          }
+          onDelete={deleteCustomModule}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
+
       {customCreateOpen && (
         <CustomTabCreateDialog
           onCreated={def => void onCustomTabCreated(def)}
@@ -2319,7 +2470,15 @@ export const ProjectPanel = ({
                 .filter((id): id is string => !!id),
             )
           }
-          onInstalled={refreshCustomModules}
+          onInstalled={async def => {
+            // The library list first (so the new module exists everywhere the
+            // row derives from), then auto-attach to the CURRENT project.
+            await refreshCustomModules()
+            const base = dataRef.current
+            if (base) {
+              persist({ ...base, customTabs: attachCustomTab(base.customTabs, def.id) })
+            }
+          }}
           onClose={() => setMarketOpen(false)}
         />
       )}
@@ -2330,6 +2489,13 @@ export const ProjectPanel = ({
           onClose={() => setFeedbackOpen(false)}
         />
       )}
+
+      <BranchChangesModal
+        open={branchModalOpen}
+        path={project.path}
+        onClose={() => setBranchModalOpen(false)}
+        onData={setBranchInfo}
+      />
     </div>
   )
 }
@@ -3144,16 +3310,17 @@ const ViewTabs = ({
    *  Ids in `order` with no entry here (a module deleted elsewhere) just
    *  don't render. */
   customTabs?: TabDef[]
-  /** Owner-only "+" (create a custom tab); undefined hides it. */
+  /** Owner|tester "+" (open the per-project attach picker); undefined hides it. */
   onAddTab?: () => void
   /** Owner|tester marketplace entry point; undefined hides it. */
   onOpenMarket?: () => void
-  /** Right-click menu on custom tabs. `kindFor` decides what (if anything)
-   *  the menu offers for a tab id; `onRemove` fires after the in-menu
-   *  confirm step. Undefined disables the menu entirely. */
+  /** Right-click menu on custom tabs — DETACH from this project's row only
+   *  (non-destructive, no confirm; library delete lives in the "+" picker).
+   *  `canDetach` decides whether a tab id gets the menu at all. Undefined
+   *  disables the menu entirely. */
   customTabMenu?: {
-    kindFor: (id: string) => 'delete' | 'uninstall' | null
-    onRemove: (id: string) => void | Promise<void>
+    canDetach: (id: string) => boolean
+    onDetach: (id: string) => void | Promise<void>
   }
   /** Optional per-tab count chip (e.g. board → cards waiting in Review).
    *  0/undefined renders nothing — the row stays quiet by default. */
@@ -3169,14 +3336,13 @@ const ViewTabs = ({
   }, [customTabs])
   const tabs = order.map(id => byId.get(id)).filter((m): m is TabDef => !!m)
 
-  // Right-click menu on a custom tab (delete / uninstall, two-step confirm
-  // inside the menu itself). Fixed-positioned at the cursor; dismissed by the
-  // backdrop, Escape, or completing the action.
+  // Right-click menu on a custom tab (detach from this project's row —
+  // non-destructive, single click, no confirm). Fixed-positioned at the
+  // cursor; dismissed by the backdrop, Escape, or completing the action.
   const [tabMenu, setTabMenu] = useState<{
     id: PanelView
     x: number
     y: number
-    confirming: boolean
   } | null>(null)
   useEffect(() => {
     if (!tabMenu) return
@@ -3256,9 +3422,9 @@ const ViewTabs = ({
             onClick={() => onChange(m.id)}
             onContextMenu={e => {
               // Custom tabs only, and only when the role offers an action.
-              if (!customTabMenu?.kindFor(m.id)) return
+              if (!customTabMenu?.canDetach(m.id)) return
               e.preventDefault()
-              setTabMenu({ id: m.id, x: e.clientX, y: e.clientY, confirming: false })
+              setTabMenu({ id: m.id, x: e.clientX, y: e.clientY })
             }}
             onKeyDown={e => onTabKeyDown(e, i)}
             title={t('projectPanel.dragToReorder')}
@@ -3320,57 +3486,42 @@ const ViewTabs = ({
       )}
       {tabMenu &&
         customTabMenu &&
-        (() => {
-          const kind = customTabMenu.kindFor(tabMenu.id)
-          if (!kind) return null
-          const label = tabMenu.confirming
-            ? t(kind === 'delete' ? 'customTabs.deleteConfirmYes' : 'customTabs.uninstallConfirmYes')
-            : t(kind === 'delete' ? 'customTabs.delete' : 'customTabs.uninstall')
-          return (
-            <>
-              {/* Invisible backdrop: any click outside the menu dismisses it
-                  (a right-click outside dismisses too, without opening the
-                  browser menu over our UI). */}
-              <div
-                className="fixed inset-0 z-40"
-                onMouseDown={() => setTabMenu(null)}
-                onContextMenu={e => {
-                  e.preventDefault()
+        customTabMenu.canDetach(tabMenu.id) && (
+          <>
+            {/* Invisible backdrop: any click outside the menu dismisses it
+                (a right-click outside dismisses too, without opening the
+                browser menu over our UI). */}
+            <div
+              className="fixed inset-0 z-40"
+              onMouseDown={() => setTabMenu(null)}
+              onContextMenu={e => {
+                e.preventDefault()
+                setTabMenu(null)
+              }}
+            />
+            <div
+              role="menu"
+              className="fixed z-50 min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
+              style={{ left: tabMenu.x, top: tabMenu.y }}
+            >
+              {/* Detach is non-destructive (the module stays in the library),
+                  so it fires on the first click — no confirm, no danger
+                  styling, a Minus rather than a trash can. */}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  void customTabMenu.onDetach(tabMenu.id)
                   setTabMenu(null)
                 }}
-              />
-              <div
-                role="menu"
-                className="fixed z-50 min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
-                style={{ left: tabMenu.x, top: tabMenu.y }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-bg-inset active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
               >
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    // Two-step confirm inside the menu: first click arms it,
-                    // the second fires the removal.
-                    if (!tabMenu.confirming) {
-                      setTabMenu({ ...tabMenu, confirming: true })
-                      return
-                    }
-                    void customTabMenu.onRemove(tabMenu.id)
-                    setTabMenu(null)
-                  }}
-                  className={[
-                    'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-                    tabMenu.confirming
-                      ? 'bg-accent-soft text-accent hover:bg-accent hover:text-bg-card active:bg-accent active:text-bg-card'
-                      : 'text-accent hover:bg-accent hover:text-bg-card active:bg-accent active:text-bg-card',
-                  ].join(' ')}
-                >
-                  <Trash2 size={13} strokeWidth={2} className="shrink-0" />
-                  <span className="flex-1">{label}</span>
-                </button>
-              </div>
-            </>
-          )
-        })()}
+                <Minus size={13} strokeWidth={2} className="shrink-0" />
+                <span className="flex-1">{t('customTabs.detach')}</span>
+              </button>
+            </div>
+          </>
+        )}
     </div>
   )
 }

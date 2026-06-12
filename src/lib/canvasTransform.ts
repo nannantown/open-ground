@@ -151,58 +151,298 @@ export interface Box {
   h: number
 }
 
-/** Resize a (possibly rotated) box by dragging its BOTTOM-RIGHT corner to a new
- *  world point, keeping the opposite (top-left) corner anchored in world space —
- *  matching how Figma resizes a rotated object.
+// ── 8-handle selection chrome ──
+// Figma-style selection: 4 corner + 4 edge-midpoint resize handles, plus an
+// invisible rotate zone OUTSIDE each corner. All hit-testing is pure geometry
+// (the canvas renders only the 4 corner squares), so the same functions drive
+// the hover cursor, the pointer-down routing, and the drag math.
+export type ResizeHandle = 'tl' | 'tr' | 'br' | 'bl' | 't' | 'r' | 'b' | 'l'
+
+export const RESIZE_HANDLES: readonly ResizeHandle[] = [
+  'tl',
+  'tr',
+  'br',
+  'bl',
+  't',
+  'r',
+  'b',
+  'l',
+]
+export const CORNER_HANDLES: readonly ('tl' | 'tr' | 'br' | 'bl')[] = ['tl', 'tr', 'br', 'bl']
+
+// Hit thresholds in SCREEN px (callers pass zoom; the functions divide so the
+// grab feel is constant at any zoom): corner grab radius, edge band half-width,
+// and the outer radius of the per-corner rotate annulus.
+export const HANDLE_CORNER_PX = 7
+export const HANDLE_EDGE_PX = 5
+export const ROTATE_ZONE_PX = 26
+
+// Which box sides a handle moves: sx/sy ∈ {-1, 0, +1} (left/none/right,
+// top/none/bottom). The opposite side is the resize anchor.
+const HANDLE_SIGNS: Record<ResizeHandle, { sx: -1 | 0 | 1; sy: -1 | 0 | 1 }> = {
+  tl: { sx: -1, sy: -1 },
+  t: { sx: 0, sy: -1 },
+  tr: { sx: 1, sy: -1 },
+  l: { sx: -1, sy: 0 },
+  r: { sx: 1, sy: 0 },
+  bl: { sx: -1, sy: 1 },
+  b: { sx: 0, sy: 1 },
+  br: { sx: 1, sy: 1 },
+}
+
+/** Map a world point into the box's LOCAL frame (origin = box centre, axes =
+ *  the box's own, i.e. rotated back by -deg). */
+function toLocal(box: Box, deg: number, p: { x: number; y: number }) {
+  const r = (deg * Math.PI) / 180
+  const cos = Math.cos(r)
+  const sin = Math.sin(r)
+  const dx = p.x - (box.x + box.w / 2)
+  const dy = p.y - (box.y + box.h / 2)
+  return { x: cos * dx + sin * dy, y: -sin * dx + cos * dy }
+}
+
+/** World positions of all 8 resize handles (4 corners + 4 edge midpoints) for
+ *  a box rotated `rotationDeg` about its centre. */
+export function handlePoints(
+  box: Box,
+  rotationDeg: number,
+): Record<ResizeHandle, { x: number; y: number }> {
+  const r = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(r)
+  const sin = Math.sin(r)
+  const cx = box.x + box.w / 2
+  const cy = box.y + box.h / 2
+  const out = {} as Record<ResizeHandle, { x: number; y: number }>
+  for (const h of RESIZE_HANDLES) {
+    const { sx, sy } = HANDLE_SIGNS[h]
+    const lx = (sx * box.w) / 2
+    const ly = (sy * box.h) / 2
+    out[h] = { x: cx + cos * lx - sin * ly, y: cy + sin * lx + cos * ly }
+  }
+  return out
+}
+
+/** Effective hit thresholds, capped so the zones never swallow a small
+ *  ON-SCREEN box: at far zoom-out the screen-fixed bands would otherwise cover
+ *  the whole body and make body-drag impossible (every press resizes). The cap
+ *  keeps at least the middle half of the smaller side band-free — Figma
+ *  degrades the same way. */
+const handleThresholds = (box: Box, zoom: number) => {
+  const minSidePx = Math.min(box.w, box.h) * zoom
+  return {
+    cornerR: Math.min(HANDLE_CORNER_PX, minSidePx / 4) / zoom,
+    band: Math.min(HANDLE_EDGE_PX, minSidePx / 4) / zoom,
+  }
+}
+
+/** Hit-test the 8 resize handles at a world `point`. Corners hit within a
+ *  HANDLE_CORNER_PX/zoom radius and WIN over edges; edges hit within a
+ *  ±HANDLE_EDGE_PX/zoom band along the (rotated) edge, bounded to the edge's
+ *  span. Both thresholds cap to a quarter of the box's on-screen smaller side
+ *  (see handleThresholds). Returns null when nothing is grabbed. */
+export function hitHandle(
+  box: Box,
+  rotationDeg: number,
+  point: { x: number; y: number },
+  zoom: number,
+): ResizeHandle | null {
+  const { cornerR, band } = handleThresholds(box, zoom)
+  const pts = handlePoints(box, rotationDeg)
+  let best: ResizeHandle | null = null
+  let bestD = Infinity
+  for (const h of CORNER_HANDLES) {
+    const d = Math.hypot(point.x - pts[h].x, point.y - pts[h].y)
+    if (d <= cornerR && d < bestD) {
+      best = h
+      bestD = d
+    }
+  }
+  if (best) return best
+  const l = toLocal(box, rotationDeg, point)
+  const hw = box.w / 2
+  const hh = box.h / 2
+  // Fixed order keeps the (tiny-box) band-overlap case deterministic.
+  if (Math.abs(l.y + hh) <= band && Math.abs(l.x) <= hw) return 't'
+  if (Math.abs(l.x - hw) <= band && Math.abs(l.y) <= hh) return 'r'
+  if (Math.abs(l.y - hh) <= band && Math.abs(l.x) <= hw) return 'b'
+  if (Math.abs(l.x + hw) <= band && Math.abs(l.y) <= hh) return 'l'
+  return null
+}
+
+/** True when a world point lies inside (or on the border of) the rotated box. */
+export function pointInRotatedBox(
+  box: Box,
+  rotationDeg: number,
+  point: { x: number; y: number },
+): boolean {
+  const l = toLocal(box, rotationDeg, point)
+  return Math.abs(l.x) <= box.w / 2 && Math.abs(l.y) <= box.h / 2
+}
+
+/** Hit-test the rotate zone: the annulus OUTSIDE each corner — corner distance
+ *  in screen px within (HANDLE_CORNER_PX, ROTATE_ZONE_PX], no resize handle
+ *  hit, and the point outside the rotated rect (so a body press still moves).
+ *  Returns the nearest qualifying corner, or null. */
+export function hitRotateZone(
+  box: Box,
+  rotationDeg: number,
+  point: { x: number; y: number },
+  zoom: number,
+): 'tl' | 'tr' | 'br' | 'bl' | null {
+  if (hitHandle(box, rotationDeg, point, zoom)) return null
+  if (pointInRotatedBox(box, rotationDeg, point)) return null
+  // Inner bound follows the (possibly capped) corner radius so the annulus
+  // starts where the handle ends, whatever the box's on-screen size.
+  const inner = handleThresholds(box, zoom).cornerR
+  const outer = ROTATE_ZONE_PX / zoom
+  const pts = handlePoints(box, rotationDeg)
+  let best: 'tl' | 'tr' | 'br' | 'bl' | null = null
+  let bestD = Infinity
+  for (const h of CORNER_HANDLES) {
+    const d = Math.hypot(point.x - pts[h].x, point.y - pts[h].y)
+    if (d > inner && d <= outer && d < bestD) {
+      best = h
+      bestD = d
+    }
+  }
+  return best
+}
+
+export interface ResizeFromHandleOpts {
+  minW: number
+  minH: number
+  /** ⇧ — lock to the original w:h ratio (corner: dominant axis drives; edge:
+   *  the dragged axis drives, the other follows, centred on its own axis). */
+  aspect?: boolean
+  /** ⌥ — anchor at the box CENTRE instead of the opposite side/corner. */
+  fromCenter?: boolean
+  /** Pointer-minus-handle offset captured at press, so the grab doesn't jump. */
+  grabOffset?: { x: number; y: number }
+}
+
+/** Resize a (possibly rotated) box by dragging any of its 8 handles to a world
+ *  point, keeping the opposite side/corner (or, with `fromCenter`, the centre)
+ *  anchored in world space — matching how Figma resizes a rotated object.
  *
- *  An element renders as its axis-aligned box rotated by `deg` about its CENTRE
- *  (`transform: rotate()` + `transform-origin: center`), so as w/h change the
- *  box's x/y must shift to keep the anchored corner from drifting. `pointer` is
- *  the target world position for the dragged corner (the caller subtracts the
- *  grab offset so there's no jump on grab). `minW`/`minH` floor the result;
- *  `lockAspect` locks it to the original w:h ratio (Shift-drag). For `deg === 0`
- *  this reduces to the classic top-left-anchored resize. */
+ *  An element renders as its axis-aligned box rotated about its CENTRE, so the
+ *  math runs in the box's local frame: the pointer maps to new local extents
+ *  for the dragged side(s), the anchored side(s) stay put, and the new centre
+ *  is rotated back out. Floors clamp each axis (no flip past the anchor); with
+ *  `aspect` the floors bump BOTH axes proportionally so the ratio holds. */
+export function resizeFromHandle(
+  box: Box,
+  rotationDeg: number,
+  handle: ResizeHandle,
+  pointerWorld: { x: number; y: number },
+  opts: ResizeFromHandleOpts,
+): { x: number; y: number; width: number; height: number } {
+  const { sx, sy } = HANDLE_SIGNS[handle]
+  const fromCenter = !!opts.fromCenter
+  const r = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(r)
+  const sin = Math.sin(r)
+  const cx = box.x + box.w / 2
+  const cy = box.y + box.h / 2
+  const l = toLocal(box, rotationDeg, {
+    x: pointerWorld.x - (opts.grabOffset?.x ?? 0),
+    y: pointerWorld.y - (opts.grabOffset?.y ?? 0),
+  })
+  // Raw size each dragged axis would take (may be negative — floored below).
+  // Anchored at the opposite side: size = pointer minus that side; from the
+  // centre: the half-extent under the pointer doubles.
+  let candW = sx === 0 ? box.w : fromCenter ? 2 * sx * l.x : sx * l.x + box.w / 2
+  let candH = sy === 0 ? box.h : fromCenter ? 2 * sy * l.y : sy * l.y + box.h / 2
+  let w: number
+  let h: number
+  if (opts.aspect && box.w > 0 && box.h > 0) {
+    if (sx !== 0 && sy !== 0) {
+      // Corner: the proportionally-dominant axis drives (same as lockAspectRatio).
+      const locked = lockAspectRatio(Math.max(0, candW), Math.max(0, candH), box.w, box.h)
+      candW = locked.width
+      candH = locked.height
+    } else if (sx !== 0) {
+      candW = Math.max(0, candW)
+      candH = (candW * box.h) / box.w
+    } else {
+      candH = Math.max(0, candH)
+      candW = (candH * box.w) / box.h
+    }
+    // Enforce the floors PROPORTIONALLY: scale BOTH axes by the same factor so
+    // the locked ratio survives (independent Math.max would distort it).
+    const bump = Math.max(
+      candW > 0 ? opts.minW / candW : 1,
+      candH > 0 ? opts.minH / candH : 1,
+      1,
+    )
+    // Final Math.max guards a degenerate (zero) locked axis.
+    w = Math.max(opts.minW, candW * bump)
+    h = Math.max(opts.minH, candH * bump)
+  } else {
+    w = Math.max(opts.minW, candW)
+    h = Math.max(opts.minH, candH)
+  }
+  // New centre in the ORIGINAL local frame: an anchored axis keeps its fixed
+  // side, an undragged or centre-anchored axis stays centred — then rotate out.
+  const mx = fromCenter || sx === 0 ? 0 : sx > 0 ? w / 2 - box.w / 2 : box.w / 2 - w / 2
+  const my = fromCenter || sy === 0 ? 0 : sy > 0 ? h / 2 - box.h / 2 : box.h / 2 - h / 2
+  const ncx = cx + cos * mx - sin * my
+  const ncy = cy + sin * mx + cos * my
+  return { x: ncx - w / 2, y: ncy - h / 2, width: w, height: h }
+}
+
+/** The world point `resizeFromHandle` keeps fixed for a given handle — the
+ *  opposite corner / edge-centre (per axis: an undragged axis is centred), or
+ *  the box centre with `fromCenter`. For an UNROTATED box only (the group-bbox
+ *  scale path); a rotated single element anchors inside resizeFromHandle. */
+export function resizeAnchor(
+  box: Box,
+  handle: ResizeHandle,
+  fromCenter?: boolean,
+): { x: number; y: number } {
+  const { sx, sy } = HANDLE_SIGNS[handle]
+  return {
+    x: fromCenter || sx === 0 ? box.x + box.w / 2 : sx > 0 ? box.x : box.x + box.w,
+    y: fromCenter || sy === 0 ? box.y + box.h / 2 : sy > 0 ? box.y : box.y + box.h,
+  }
+}
+
+/** CSS resize cursor for a handle on an element rotated `rotationDeg`: the
+ *  handle's outward direction plus the rotation, snapped to the nearest 45°
+ *  bucket (ew / nwse / ns / nesw — the four double-arrow cursors). */
+export function cursorForHandle(handle: ResizeHandle, rotationDeg: number): string {
+  // Outward direction of each handle in screen degrees (0 = east, clockwise
+  // positive — screen y points down).
+  const base: Record<ResizeHandle, number> = {
+    r: 0,
+    br: 45,
+    b: 90,
+    bl: 135,
+    l: 180,
+    tl: 225,
+    t: 270,
+    tr: 315,
+  }
+  const a = (((base[handle] + rotationDeg) % 360) + 360) % 360
+  const bucket = Math.round(a / 45) % 4
+  return (['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'] as const)[bucket]
+}
+
+/** Resize a (possibly rotated) box by dragging its BOTTOM-RIGHT corner —
+ *  the legacy single-handle entry point, now a thin delegation to
+ *  `resizeFromHandle('br')` (identical math: opposite corner anchored,
+ *  `lockAspect` = the proportional Shift-drag). */
 export function resizeRotatedBR(
   box: Box,
   deg: number,
   pointer: { x: number; y: number },
   opts: { minW: number; minH: number; lockAspect?: boolean },
 ): Box {
-  const r = (deg * Math.PI) / 180
-  const cos = Math.cos(r)
-  const sin = Math.sin(r)
-  const cx = box.x + box.w / 2
-  const cy = box.y + box.h / 2
-  // Anchored (top-left local) corner in world space: C + R(r)·(-w/2, -h/2).
-  const tlx = cx + cos * (-box.w / 2) - sin * (-box.h / 2)
-  const tly = cy + sin * (-box.w / 2) + cos * (-box.h / 2)
-  // Pointer relative to the anchor, rotated back into the box's local frame
-  // (R(-r)) → the new local width/height.
-  const dx = pointer.x - tlx
-  const dy = pointer.y - tly
-  let w = cos * dx + sin * dy
-  let h = -sin * dx + cos * dy
-  if (opts.lockAspect) {
-    // Lock to the original ratio, then enforce the floors PROPORTIONALLY: if
-    // either axis is below its min, scale BOTH up by the same factor so the
-    // ratio is preserved (independent Math.max per axis would distort it).
-    const locked = lockAspectRatio(Math.max(0, w), Math.max(0, h), box.w, box.h)
-    const bump = Math.max(
-      locked.width > 0 ? opts.minW / locked.width : 1,
-      locked.height > 0 ? opts.minH / locked.height : 1,
-      1,
-    )
-    // Final Math.max guards a degenerate (zero) locked axis.
-    w = Math.max(opts.minW, locked.width * bump)
-    h = Math.max(opts.minH, locked.height * bump)
-  } else {
-    w = Math.max(opts.minW, w)
-    h = Math.max(opts.minH, h)
-  }
-  // New centre that keeps the anchored corner fixed: C = TL + R(r)·(w/2, h/2).
-  const ncx = tlx + cos * (w / 2) - sin * (h / 2)
-  const ncy = tly + sin * (w / 2) + cos * (h / 2)
-  return { x: ncx - w / 2, y: ncy - h / 2, w, h }
+  const r = resizeFromHandle(box, deg, 'br', pointer, {
+    minW: opts.minW,
+    minH: opts.minH,
+    aspect: opts.lockAspect,
+  })
+  return { x: r.x, y: r.y, w: r.width, h: r.height }
 }
 
 /** World position of an element's BOTTOM-RIGHT visual corner — where the resize

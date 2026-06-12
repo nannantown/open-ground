@@ -1,12 +1,18 @@
 import { useEffect, useState } from 'react'
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
-import type { MarketplaceListResponse, MarketplaceModule } from '@/lib/types'
+import type {
+  CustomModuleDef,
+  MarketplaceListResponse,
+  MarketplaceModule,
+} from '@/lib/types'
 
 // Marketplace browser (owner|tester only — the entry point is role-gated in
 // the tab bar and the server re-checks every call). Lists the published
 // modules (GET /api/marketplace, anon-key read server-side) and installs one
-// locally (POST /api/marketplace/install) so its tab appears everywhere.
+// locally (POST /api/marketplace/install); the parent auto-attaches the
+// installed module to the CURRENT project (docs/CUSTOM_TABS_PLAN.md —
+// per-project attachment), so the response def is handed up.
 // An already-installed row (matched by remoteId via the parent's module list)
 // shows a disabled "Installed" button: module updates are out of scope this
 // round (docs/CUSTOM_TABS_PLAN.md), so re-install — which the server would
@@ -20,8 +26,9 @@ export const MarketplaceDialog = ({
   /** remoteIds already present locally (def.remoteId of installed/published
    *  modules) — marks rows as Installed. */
   installedRemoteIds: ReadonlySet<string>
-  /** A module was installed — the parent re-fetches the module list. */
-  onInstalled: () => Promise<void> | void
+  /** A module was installed — the parent re-fetches the module list and
+   *  attaches the def to the current project. */
+  onInstalled: (def: CustomModuleDef) => Promise<void> | void
   onClose: () => void
 }) => {
   const { t } = useT()
@@ -72,7 +79,7 @@ export const MarketplaceDialog = ({
         )
         return
       }
-      await onInstalled()
+      await onInstalled((await r.json()) as CustomModuleDef)
     } catch {
       setInstallError(
         t('customTabs.installFailed', { error: t('projectPanel.networkError') }),
