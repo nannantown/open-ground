@@ -134,6 +134,35 @@ describe('feedback — configured (env set, Supabase forward mocked)', () => {
     expect(sent).toHaveProperty('project_count')
   })
 
+  it('POST /api/feedback forwards inline images in the insert body', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
+    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-test-key')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const images = [{ mime: 'image/webp', data: 'AAAA' }]
+    const res = await app.request('/api/feedback', json({ message: 'see shot', images }))
+    expect(res.status).toBe(200)
+
+    // The images array must reach the row build — regression guard on the "row"
+    // edge of the 3点セット (types / zod / row).
+    const [, init] = fetchMock.mock.calls[0]
+    const sent = JSON.parse(init.body)
+    expect(sent.images).toEqual(images)
+  })
+
+  it('POST /api/feedback defaults images to [] when omitted', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
+    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-test-key')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await app.request('/api/feedback', json({ message: 'no pics' }))
+    const [, init] = fetchMock.mock.calls[0]
+    const sent = JSON.parse(init.body)
+    expect(sent.images).toEqual([])
+  })
+
   it('GET /api/feedback/config → canRead reflects the service-role key', async () => {
     vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
     vi.stubEnv('SUPABASE_ANON_KEY', 'anon-test-key')
@@ -192,6 +221,9 @@ describe('feedback — owner inbox (GET /api/feedback/list)', () => {
         app_version: '1.2.3',
         os: 'darwin 25.2.0',
         project_count: 4,
+        // DB rows carry the images column; sanitizeFeedbackImages([]) === [] so
+        // a clean row round-trips unchanged.
+        images: [],
       },
     ]
     const fetchMock = vi
@@ -220,6 +252,36 @@ describe('feedback — owner inbox (GET /api/feedback/list)', () => {
     expect(url).toContain('limit=201') // fetch one past the cap to detect truncation
     expect(init.headers.apikey).toBe('service-role-key')
     expect(init.headers.Authorization).toBe('Bearer service-role-key')
+  })
+
+  it('sanitizes per-row images: keeps valid, drops malformed/oversized', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
+    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'service-role-key')
+    // anon can write arbitrary JSON to images (RLS with_check=true), so the list
+    // route re-validates each row — a non-array or bogus mime becomes [] and can
+    // never crash the inbox (f.images.map) or smuggle a non-image data: URL.
+    const base = {
+      created_at: 't',
+      email: null,
+      app_version: null,
+      os: null,
+      project_count: null,
+    }
+    const rows = [
+      { ...base, id: '1', message: 'm1', images: [{ mime: 'image/webp', data: 'AAAA' }] },
+      { ...base, id: '2', message: 'm2', images: 'not-an-array' },
+      { ...base, id: '3', message: 'm3', images: [{ mime: 'image/svg+xml', data: 'AAAA' }] },
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(rows), { status: 200 })),
+    )
+
+    const body = await (await app.request('/api/feedback/list')).json()
+    expect(body.items[0].images).toEqual([{ mime: 'image/webp', data: 'AAAA' }]) // valid kept
+    expect(body.items[1].images).toEqual([]) // non-array → []
+    expect(body.items[2].images).toEqual([]) // unsupported mime → []
+    expect(body.items[1].message).toBe('m2') // other fields preserved
   })
 
   it('flags truncated:true and slices to 200 when 201 rows come back', async () => {

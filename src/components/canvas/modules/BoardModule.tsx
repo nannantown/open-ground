@@ -3,7 +3,7 @@ import { ChevronRight, GitBranch, Trash2, X } from 'lucide-react'
 import { BoardTab, columnOf } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
 import { api } from '@/lib/api-client'
-import { deriveCardFields, wantsAutoTitle } from '@/lib/cardTitle'
+import { deriveCardFields, wantsAutoTitle, provisionalTitle } from '@/lib/cardTitle'
 import { buildReviewPrompt } from '@/lib/reviewPrompt'
 import {
   CLAUDE_EFFORTS,
@@ -479,23 +479,21 @@ export const BoardModule = ({
   // exists): the terminal owns it and the fields collapse behind the header.
   const [fieldsOpen, setFieldsOpen] = useState(false)
   useEffect(() => setFieldsOpen(false), [detailId])
+  // The "options" disclosure (assignee · depends · due) inside the fields —
+  // collapsed by default so the content-first drawer stays uncluttered; the
+  // user expands it only when a task needs an owner / dependency / deadline.
+  // Reset on card switch like fieldsOpen.
+  const [optionsOpen, setOptionsOpen] = useState(false)
+  useEffect(() => setOptionsOpen(false), [detailId])
+  // The "run settings" disclosure (on-finish · model · effort) inside the run
+  // footer — collapsed by default because the board's global defaults strip
+  // already carries them; a card overrides them only when it must diverge. The
+  // resolved values stay visible in the hint line below even while collapsed,
+  // so folding this never hides "what will actually happen".
+  const [runSettingsOpen, setRunSettingsOpen] = useState(false)
+  useEffect(() => setRunSettingsOpen(false), [detailId])
   const [launching, setLaunching] = useState(false)
   const [regenBusy, setRegenBusy] = useState(false)
-
-  // Single-box capture commit: first line → provisional title, rest → content,
-  // both flagged titleAuto. A multi-line capture then asks the server for a
-  // haiku summary title (one-off PTY, serialized server-side); it lands via
-  // the panel's 5s data poll — and never over a hand-edited title (the server
-  // re-checks titleAuto before writing).
-  const commitCapture = (task: ProjectTask, raw: string) => {
-    const fields = deriveCardFields(raw)
-    if (!fields.title) return
-    patchTask(task, { title: fields.title, notes: fields.notes, titleAuto: true })
-    if (wantsAutoTitle(fields))
-      void api.api.project['task-title']
-        .$post({ json: { path: project.path, id: task.id } })
-        .catch(() => {})
-  }
 
   // Explicit "✦ regenerate": force overrides the titleAuto guard (the user
   // asked), and the result is applied immediately rather than waiting for the
@@ -551,10 +549,29 @@ export const BoardModule = ({
       n.delete(task.id)
       return n
     })
+    // Content-first: the title field is gone, so the card may have no title
+    // yet. The server's prompt contract still requires one (composeTaskPrompt →
+    // `# Task: <title>`), so derive a provisional title from the content's
+    // first line HERE — synchronously, fed straight into the payload (a state
+    // round-trip could race the launch and send an empty title → 404). It is
+    // also persisted with titleAuto so the post-launch haiku pass can refine
+    // it (multi-line / clipped content only); a hand-typed title is untouched.
+    const content = task.notes ?? ''
+    let runTitle = task.title.trim()
+    if (!runTitle) {
+      runTitle = provisionalTitle(content)
+      if (runTitle) {
+        patchTask(task, { title: runTitle, titleAuto: true })
+        if (wantsAutoTitle(deriveCardFields(content)))
+          void api.api.project['task-title']
+            .$post({ json: { path: project.path, id: task.id } })
+            .catch(() => {})
+      }
+    }
     void launchDetail(task, {
       run: {
-        title: task.title,
-        notes: task.notes ?? '',
+        title: runTitle,
+        notes: content,
         attachmentIds: (task.attachments ?? []).map(a => a.id),
         flow: task.run?.flow,
         model: task.run?.model,
@@ -738,7 +755,6 @@ export const BoardModule = ({
   const [attachBusy, setAttachBusy] = useState(0)
   const [attachError, setAttachError] = useState<string | null>(null)
   useEffect(() => setAttachError(null), [detailId])
-  const attachInputRef = useRef<HTMLInputElement | null>(null)
   const attachmentUrl = (a: TaskAttachment) =>
     `/api/project/task-asset?path=${encodeURIComponent(project.path)}&id=${encodeURIComponent(a.id)}`
   const uploadAttachment = async (task: ProjectTask, file: File) => {
@@ -894,8 +910,13 @@ export const BoardModule = ({
   // visible defaults strip; the resolved default is spelled out in the option
   // label so "what will actually happen" never requires a settings dive.
   const runSettingsRow = (task: ProjectTask) => {
+    // Roomy, full-width controls — each setting gets its own line: a fixed-width
+    // small-caps label on the left, the select fills the remaining width. This
+    // reads cleanly and "uses the width" instead of the old cramped inline wrap.
     const selectCls =
-      'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+      'min-w-0 flex-1 rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+    const rowCls = 'flex items-center gap-3'
+    const capCls = 'w-20 shrink-0 label-cap text-ink-faint'
     const defaultModel = data.launch?.model?.trim() || t('board.run.modelCliDefault')
     const defaultEffort = data.launch?.effort ?? t('board.run.effortCliDefault')
     const modelChoices = TASK_MODEL_CHOICES.includes(task.run?.model ?? '')
@@ -904,10 +925,10 @@ export const BoardModule = ({
         ? [task.run.model, ...TASK_MODEL_CHOICES]
         : TASK_MODEL_CHOICES
     return (
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <div className="space-y-2.5">
         {project.hasGit && (
-          <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-            {t('board.run.flowLabel')}
+          <label className={rowCls}>
+            <span className={capCls}>{t('board.run.flowLabel')}</span>
             <select
               value={task.run?.flow ?? ''}
               onChange={e =>
@@ -933,8 +954,8 @@ export const BoardModule = ({
             </select>
           </label>
         )}
-        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-          {t('board.run.modelLabel')}
+        <label className={rowCls}>
+          <span className={capCls}>{t('board.run.modelLabel')}</span>
           <select
             value={task.run?.model ?? ''}
             onChange={e => patchRunSetting(task, { model: e.target.value || undefined })}
@@ -950,8 +971,8 @@ export const BoardModule = ({
             ))}
           </select>
         </label>
-        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-          {t('board.run.effortLabel')}
+        <label className={rowCls}>
+          <span className={capCls}>{t('board.run.effortLabel')}</span>
           <select
             value={task.run?.effort ?? ''}
             onChange={e =>
@@ -977,59 +998,32 @@ export const BoardModule = ({
     )
   }
 
-  // The task fields, shared by Draft (grow=true: the content textarea fills
-  // the drawer) and the Session header's expandable block (grow=false: fixed
-  // share, scrolls inside). Title edits clear titleAuto on the FIRST keystroke
-  // so an in-flight auto-title can never land over hand-typed text.
-  const fieldsBlock = (task: ProjectTask, grow: boolean) => (
+  // The task fields, shared by Draft (grow=true: the content textarea fills the
+  // drawer, autoFocusContent puts the cursor there on open) and the Session
+  // header's expandable block (grow=false: fixed share, scrolls inside). There
+  // is NO title input — the title is auto-generated on Run (see runTask) and
+  // shown on the card / Session header. Images dropped or pasted onto the
+  // content attach to the card and appear as a thumbnail strip right below it;
+  // there is no separate image picker. Assignee / depends / due are optional —
+  // tucked behind a disclosure when collapsibleOptions (the compose drawer),
+  // inline otherwise (the Session header, already behind its own chevron).
+  const fieldsBlock = (
+    task: ProjectTask,
+    {
+      grow,
+      autoFocusContent = false,
+      collapsibleOptions = false,
+    }: { grow: boolean; autoFocusContent?: boolean; collapsibleOptions?: boolean },
+  ) => (
     <>
-      <div className="shrink-0">
-        <div className="mb-1 flex items-center justify-between gap-2">
-          <label className="label-cap text-ink-faint">
-            {t('board.detail.titleLabel')}
-            {task.titleAuto && (
-              <span className="ml-1 text-accent" title={t('board.detail.titleAutoTitle')}>
-                ✦
-              </span>
-            )}
-          </label>
-          {Boolean(task.title.trim() || (task.notes ?? '').trim()) && (
-            <button
-              type="button"
-              onClick={() => void regenerateTitle(task)}
-              disabled={regenBusy}
-              title={t('board.detail.regenTitle')}
-              className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            >
-              {regenBusy ? '✦ …' : '✦'}
-            </button>
-          )}
-        </div>
-        <input
-          // Remount when the SAVED title changes (own blur, haiku landing via
-          // the poll) so the uncontrolled field shows the fresh value.
-          key={`${task.id}:${task.title}`}
-          defaultValue={task.title}
-          onChange={() => {
-            if (task.titleAuto) patchTask(task, { titleAuto: undefined })
-          }}
-          onBlur={e => {
-            const v = e.target.value.trim()
-            if (v && v !== task.title) patchTask(task, { title: v, titleAuto: undefined })
-          }}
-          onKeyDown={e => {
-            if (e.key === 'Enter') e.currentTarget.blur()
-          }}
-          placeholder={t('board.detail.titlePlaceholder')}
-          className="w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
-        />
-      </div>
-      <div className={grow ? 'flex min-h-0 flex-1 flex-col' : undefined}>
+      <div>
         <label className="mb-1 block shrink-0 label-cap text-ink-faint">
           {t('board.detail.notesLabel')}
         </label>
         <textarea
           key={task.id + ':notes'}
+          // Cursor lands here when the compose drawer opens — content first.
+          {...(autoFocusContent ? { autoFocus: true } : {})}
           defaultValue={task.notes ?? ''}
           onBlur={e => {
             const v = e.target.value
@@ -1061,71 +1055,57 @@ export const BoardModule = ({
           }}
           placeholder={t('board.detail.notesPlaceholder')}
           rows={grow ? undefined : 3}
+          // Content-first but height-capped: a comfortable ~200px default that
+          // no longer eats the whole drawer, vertically resizable from the
+          // native bottom-right grip when a task needs more room.
           className={[
             'w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none',
-            grow ? 'min-h-[120px] flex-1 resize-none' : 'resize-y',
+            grow ? 'min-h-[200px] resize-y' : 'resize-y',
           ].join(' ')}
         />
-      </div>
-      {/* Image attachments (B022) — thumbnails + remove, plus an explicit "add
-          image" picker. Click a thumbnail to open the original in a new tab.
-          Paste/drop on the content field above also lands here. */}
-      <div className="shrink-0">
-        <label className="mb-1 block label-cap text-ink-faint">
-          {t('board.detail.attachmentsLabel')}
-        </label>
-        <div className="flex flex-wrap items-center gap-2">
-          {(task.attachments ?? []).map(a => (
-            <span key={a.id} className="relative inline-flex">
-              <a
-                href={attachmentUrl(a)}
-                target="_blank"
-                rel="noreferrer"
-                title={a.name}
-                className="block rounded-[3px] border border-line transition-colors hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              >
-                <img
-                  src={attachmentUrl(a)}
-                  alt={a.name}
-                  className="h-14 w-14 rounded-[2px] object-cover"
-                />
-              </a>
-              <button
-                type="button"
-                onClick={() => removeAttachment(task, a.id)}
-                title={t('board.detail.attachRemove')}
-                aria-label={t('board.detail.attachRemove')}
-                className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-line bg-bg-card text-ink-faint transition-colors hover:border-accent hover:text-accent active:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-              >
-                <X size={10} />
-              </button>
-            </span>
-          ))}
-          <button
-            type="button"
-            onClick={() => attachInputRef.current?.click()}
-            disabled={attachBusy > 0}
-            title={t('board.detail.attachAddTitle')}
-            className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            {attachBusy > 0 ? t('board.detail.attachBusy') : t('board.detail.attachAdd')}
-          </button>
-          <input
-            ref={attachInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={e => {
-              if (e.target.files) uploadAttachments(task, e.target.files)
-              e.target.value = '' // allow re-picking the same file
-            }}
-          />
-        </div>
-        {attachError && (
-          <p className="mt-1 text-[10px] text-accent" title={attachError}>
-            {attachError}
-          </p>
+        {/* Attached images — paste/drop onto the content above lands them
+            here, directly under it (they ARE part of the content); click a
+            thumbnail to open the original, × removes. No add-image button:
+            paste / drag-drop is the only way in. */}
+        {((task.attachments ?? []).length > 0 || attachBusy > 0 || attachError) && (
+          <div className="mt-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2">
+              {(task.attachments ?? []).map(a => (
+                <span key={a.id} className="relative inline-flex">
+                  <a
+                    href={attachmentUrl(a)}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={a.name}
+                    className="block rounded-[3px] border border-line transition-colors hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    <img
+                      src={attachmentUrl(a)}
+                      alt={a.name}
+                      className="h-12 w-12 rounded-[2px] object-cover"
+                    />
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(task, a.id)}
+                    title={t('board.detail.attachRemove')}
+                    aria-label={t('board.detail.attachRemove')}
+                    className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-line bg-bg-card text-ink-faint transition-colors hover:border-accent hover:text-accent active:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                  >
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+              {attachBusy > 0 && (
+                <span className="label-cap text-ink-faint">{t('board.detail.attachBusy')}</span>
+              )}
+            </div>
+            {attachError && (
+              <p className="mt-1 text-[10px] text-accent" title={attachError}>
+                {attachError}
+              </p>
+            )}
+          </div>
         )}
       </div>
       {/* Pull request — appears once claude records the PR it opened
@@ -1145,6 +1125,29 @@ export const BoardModule = ({
           </a>
         </div>
       )}
+      {/* Options — assignee · depends · due. Collapsed by default in the
+          compose drawer (the user opens it only when needed); inline in the
+          Session header (already behind its own chevron). */}
+      {collapsibleOptions && (
+        <button
+          type="button"
+          onClick={() => setOptionsOpen(o => !o)}
+          aria-expanded={optionsOpen}
+          className="-mx-1 flex shrink-0 items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        >
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-ink-faint transition-transform ${optionsOpen ? 'rotate-90' : ''}`}
+          />
+          <span className="label-cap text-ink-faint">{t('board.detail.optionsLabel')}</span>
+        </button>
+      )}
+      {(!collapsibleOptions || optionsOpen) && (
+        // Assignee · depends · due laid out side-by-side, filling the width:
+        // an auto-fit grid keys off the DRAWER width (not the viewport), so a
+        // wide drawer shows three columns and a narrow one folds them down —
+        // no big empty gutter on the right.
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] items-start gap-x-8 gap-y-4">
       {/* Assignee — a chip picker, no free-floating input. Click a chip to
           assign; click the selected chip to unassign; "+ Add" registers a new
           name into the shared member list (config.members) AND assigns it. */}
@@ -1326,6 +1329,8 @@ export const BoardModule = ({
           )}
         </div>
       </div>
+        </div>
+      )}
     </>
   )
 
@@ -1514,61 +1519,85 @@ export const BoardModule = ({
           </div>
           {!hasTerminalSlot(detailTask.id) ? (
             /* ── DRAFT — authoring gets the whole drawer; no terminal pane.
-                  A brand-new card starts as a single capture box (first line →
-                  title, rest → content); a card with text shows the full
-                  fields with the content area taking the remaining height. */
+                  Content-first: one content textarea (autofocused) fills the
+                  height, images paste/drop into it, and assignee/depends/due
+                  hide behind an Options disclosure. No title field — Run
+                  auto-generates the title (see runTask). */
             <>
-              {isUntouchedEmpty(detailTask) ? (
-                <div className="flex min-h-0 flex-1 flex-col px-5 py-3">
-                  <label className="mb-1 block shrink-0 label-cap text-ink-faint">
-                    {t('board.detail.captureLabel')}
-                  </label>
-                  <textarea
-                    key={detailTask.id + ':capture'}
-                    autoFocus
-                    defaultValue=""
-                    onBlur={e => commitCapture(detailTask, e.target.value)}
-                    placeholder={t('board.detail.capturePlaceholder')}
-                    className="min-h-0 w-full flex-1 resize-none rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
-                  />
-                </div>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col space-y-3 overflow-y-auto px-5 py-3">
-                  {fieldsBlock(detailTask, true)}
-                </div>
-              )}
+              <div className="flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto px-5 py-3">
+                {fieldsBlock(detailTask, {
+                  grow: true,
+                  autoFocusContent: true,
+                  collapsibleOptions: true,
+                })}
+              </div>
               {/* Run footer — nothing launches by itself anymore: the card's
                   per-card run settings (PR/merge · model · effort, autosaved
                   on the task) sit above an explicit 実行 button that launches
                   claude WITH the task prompt auto-sent. A review/blocked card
                   carrying a branch additionally offers "Review with claude"
                   (worktree + unsent diff prompt — a different action). */}
-              <div className="shrink-0 space-y-2 border-t border-line-soft px-5 py-3">
+              <div className="shrink-0 space-y-2.5 border-t border-line-soft px-5 py-3">
                 {project.missing ? (
                   <p className="text-[11px] leading-relaxed text-ink-faint">
                     {t('board.run.missingFolder')}
                   </p>
                 ) : (
                   <>
-                    {runSettingsRow(detailTask)}
-                    <div className="flex flex-wrap items-baseline gap-2">
-                      <button
-                        type="button"
-                        onClick={() => runTask(detailTask)}
-                        // reviewBusy too: "Review with claude" may be mid-launch
-                        // on this same card — a concurrent 実行 would hit the
-                        // double-spawn guard and lie ("起動中…" with nothing
-                        // launching). Mirror of the review button's `launching`.
-                        disabled={launching || reviewBusy || !detailTask.title.trim()}
-                        title={
-                          detailTask.title.trim()
-                            ? t('board.run.buttonTitle')
-                            : t('board.run.needsTitle')
-                        }
-                        className="shrink-0 rounded-sm border border-accent bg-accent px-3.5 py-1.5 text-[12px] font-medium text-bg-card transition-colors hover:bg-accent/85 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                      >
-                        {launching ? t('board.run.buttonBusy') : t('board.run.button')}
-                      </button>
+                    {/* Run settings — collapsed by default: the board's global
+                        defaults strip already carries on-finish / model / effort,
+                        so a card surfaces them only when it must diverge. Even
+                        folded, the hint line below still spells out the resolved
+                        flow + launch profile, so "what will happen" stays visible. */}
+                    <button
+                      type="button"
+                      onClick={() => setRunSettingsOpen(o => !o)}
+                      aria-expanded={runSettingsOpen}
+                      className="-mx-1 flex items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                    >
+                      <ChevronRight
+                        size={12}
+                        className={`shrink-0 text-ink-faint transition-transform ${runSettingsOpen ? 'rotate-90' : ''}`}
+                      />
+                      <span className="label-cap text-ink-faint">
+                        {t('board.run.settingsLabel')}
+                      </span>
+                    </button>
+                    {runSettingsOpen && (
+                      <div className="pb-1 pt-0.5">{runSettingsRow(detailTask)}</div>
+                    )}
+                    <p className="text-[11px] leading-relaxed text-ink-faint">
+                      {!(detailTask.notes ?? '').trim()
+                        ? t('board.run.needsContent')
+                        : t('board.run.hint')}
+                      {isolationText ? ` · ${isolationText}` : ''}
+                      {flowTextFor(detailTask) ? ` · ${flowTextFor(detailTask)}` : ''}
+                      <span className="text-ink-faint/80" title={t('board.detail.profileTitle')}>
+                        {' · '}
+                        {profileTextFor(detailTask)}
+                      </span>
+                    </p>
+                    {launchFailed.has(detailTask.id) && (
+                      <p className="text-[11px] leading-relaxed text-accent">
+                        {t(
+                          launchFailed.get(detailTask.id) === 'claudeMissing'
+                            ? 'board.run.failedClaudeMissing'
+                            : 'board.run.failed',
+                        )}
+                      </p>
+                    )}
+                    {/* Action bar — 実行 anchors the bottom-right; Review (only on
+                        review/blocked cards with a branch) sits to its left; a
+                        review notice fills the remaining width on the left. */}
+                    <div className="flex items-center justify-end gap-2">
+                      {reviewNotice && (
+                        <span
+                          className="mr-auto min-w-0 truncate text-[10px] text-accent"
+                          title={reviewNotice}
+                        >
+                          {reviewNotice}
+                        </span>
+                      )}
                       {(columnOf(detailTask) === 'review' ||
                         columnOf(detailTask) === 'blocked') &&
                         detailTask.branch && (
@@ -1584,35 +1613,26 @@ export const BoardModule = ({
                               : t('board.detail.reviewWithClaude')}
                           </button>
                         )}
-                      {reviewNotice && (
-                        <span
-                          className="min-w-0 truncate text-[10px] text-accent"
-                          title={reviewNotice}
-                        >
-                          {reviewNotice}
-                        </span>
-                      )}
-                      {launchFailed.has(detailTask.id) && (
-                        <span className="min-w-0 text-[11px] leading-relaxed text-accent">
-                          {t(
-                            launchFailed.get(detailTask.id) === 'claudeMissing'
-                              ? 'board.run.failedClaudeMissing'
-                              : 'board.run.failed',
-                          )}
-                        </span>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => runTask(detailTask)}
+                        // reviewBusy too: "Review with claude" may be mid-launch
+                        // on this same card — a concurrent 実行 would hit the
+                        // double-spawn guard and lie ("起動中…" with nothing
+                        // launching). Mirror of the review button's `launching`.
+                        // Content-first gate: Run needs CONTENT (the title is
+                        // derived from it on launch), not a hand-typed title.
+                        disabled={launching || reviewBusy || !(detailTask.notes ?? '').trim()}
+                        title={
+                          (detailTask.notes ?? '').trim()
+                            ? t('board.run.buttonTitle')
+                            : t('board.run.needsContent')
+                        }
+                        className="shrink-0 rounded-sm border border-accent bg-accent px-4 py-1.5 text-[12px] font-medium text-bg-card transition-colors hover:bg-accent/85 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      >
+                        {launching ? t('board.run.buttonBusy') : t('board.run.button')}
+                      </button>
                     </div>
-                    <p className="text-[11px] leading-relaxed text-ink-faint">
-                      {!detailTask.title.trim()
-                        ? t('board.run.needsTitle')
-                        : t('board.run.hint')}
-                      {isolationText ? ` · ${isolationText}` : ''}
-                      {flowTextFor(detailTask) ? ` · ${flowTextFor(detailTask)}` : ''}
-                      <span className="text-ink-faint/80" title={t('board.detail.profileTitle')}>
-                        {' · '}
-                        {profileTextFor(detailTask)}
-                      </span>
-                    </p>
                   </>
                 )}
               </div>
@@ -1623,21 +1643,45 @@ export const BoardModule = ({
                   strip narrating where the work lives (branch / flow / PR). */
             <>
               <div className="shrink-0 border-b border-line-soft">
-                <button
-                  type="button"
-                  onClick={() => setFieldsOpen(o => !o)}
-                  aria-expanded={fieldsOpen}
-                  title={t('board.detail.fieldsToggle')}
-                  className="flex w-full items-center gap-1.5 px-5 py-2 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-                >
-                  <ChevronRight
-                    size={13}
-                    className={`shrink-0 text-ink-faint transition-transform ${fieldsOpen ? 'rotate-90' : ''}`}
-                  />
-                  <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
-                    {detailTask.title.trim() || t('board.card.untitled')}
-                  </span>
-                </button>
+                {/* Title row — the title is auto (no input); the chevron
+                    expands the fields, the ✦ regenerates the auto-title from
+                    the content (the one place manual regenerate lives now). */}
+                <div className="flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => setFieldsOpen(o => !o)}
+                    aria-expanded={fieldsOpen}
+                    title={t('board.detail.fieldsToggle')}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 px-5 py-2 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                  >
+                    <ChevronRight
+                      size={13}
+                      className={`shrink-0 text-ink-faint transition-transform ${fieldsOpen ? 'rotate-90' : ''}`}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                      {detailTask.title.trim() || t('board.card.untitled')}
+                    </span>
+                    {detailTask.titleAuto && (
+                      <span
+                        className="shrink-0 text-accent"
+                        title={t('board.detail.titleAutoTitle')}
+                      >
+                        ✦
+                      </span>
+                    )}
+                  </button>
+                  {Boolean(detailTask.title.trim() || (detailTask.notes ?? '').trim()) && (
+                    <button
+                      type="button"
+                      onClick={() => void regenerateTitle(detailTask)}
+                      disabled={regenBusy}
+                      title={t('board.detail.regenTitle')}
+                      className="mr-3 shrink-0 rounded-sm px-1.5 py-0.5 text-[12px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {regenBusy ? '✦ …' : '✦'}
+                    </button>
+                  )}
+                </div>
                 {(detailTask.branch || flowTextFor(detailTask) || detailTask.prUrl) && (
                   /* flex-wrap: a long branch name / flow note / profile chip
                      must wrap to the next line, never push the row past the
@@ -1837,7 +1881,7 @@ export const BoardModule = ({
                       style={{ height: metaH, minHeight: 96, maxHeight: 'calc(100% - 188px)' }}
                       className="shrink-0 space-y-3 overflow-y-auto px-5 py-3"
                     >
-                      {fieldsBlock(detailTask, false)}
+                      {fieldsBlock(detailTask, { grow: false })}
                     </div>
                     {/* Split grip between fields and terminal — 8px hit area
                         centered on the visible divider line. */}

@@ -14,6 +14,7 @@ import { BulkActionBar } from '@/components/canvas/BulkActionBar'
 import { ElementBar } from '@/components/canvas/ElementBar'
 import { EmptyState } from '@/components/canvas/EmptyState'
 import { UsageHud } from '@/components/canvas/UsageHud'
+import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
 import { autoLayout, frameLabelFor } from '@/lib/layout'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
@@ -92,6 +93,8 @@ export default function App() {
     }
   })
   const [jumpOpen, setJumpOpen] = useState(false)
+  // Full-screen in-app manual (the "?" toolbar entry + first-run link).
+  const [manualOpen, setManualOpen] = useState(false)
   // Per-project claude beacon: projectId → 'working' (claude is busy) |
   // 'waiting' (claude sits on the human — its turn signal). Polled from
   // /api/terminal/active; the only "something is happening here" signal on
@@ -638,6 +641,7 @@ export default function App() {
         <EmptyState
           onCreateNew={() => setNewProjectOpen(true)}
           onImport={importProject}
+          onOpenManual={() => setManualOpen(true)}
         />
       )}
       {/* Canvas tools are meaningless with no projects — hide them under the
@@ -647,6 +651,7 @@ export default function App() {
         onNewProject={() => setNewProjectOpen(true)}
         onImport={importProject}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenManual={() => setManualOpen(true)}
         onFeedback={feedbackEnabled ? () => setFeedbackOpen(true) : undefined}
         onAccount={authEnabled ? () => setAccountOpen(true) : undefined}
         unreadFeedback={feedbackUnread}
@@ -793,6 +798,7 @@ export default function App() {
           setOnboarded(true)
         }}
       />
+      <ManualPanel open={manualOpen} onClose={() => setManualOpen(false)} />
       <ProjectJumpPalette
         open={jumpOpen}
         projects={visibleProjects}

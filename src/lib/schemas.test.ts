@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ProjectDataSchema, ProjectTaskSchema } from './schemas'
+import { ProjectDataSchema, ProjectTaskSchema, FeedbackApiBodySchema } from './schemas'
 
 describe('ProjectDataSchema (loose recovery shape)', () => {
   it('accepts an empty default object', () => {
@@ -100,5 +100,71 @@ describe('ProjectTaskSchema (legacy field stripping)', () => {
       expect(r.data.boardOrder).toBe(2)
       expect(r.data.notes).toBe('memo')
     }
+  })
+})
+
+describe('FeedbackApiBodySchema (inline image attachments)', () => {
+  it('accepts a message with no images (images defaults to [])', () => {
+    const r = FeedbackApiBodySchema.safeParse({ message: 'hi' })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.images).toEqual([])
+  })
+
+  it('accepts valid inline images', () => {
+    const r = FeedbackApiBodySchema.safeParse({
+      message: 'see screenshot',
+      images: [
+        { mime: 'image/webp', data: 'AAAA' },
+        { name: 'shot.png', mime: 'image/png', data: 'Zm9v' },
+      ],
+    })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.images).toHaveLength(2)
+  })
+
+  it('rejects an unsupported image mime', () => {
+    const r = FeedbackApiBodySchema.safeParse({
+      message: 'x',
+      images: [{ mime: 'image/svg+xml', data: 'AAAA' }],
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects a data-URL prefix in the base64 (bare base64 only)', () => {
+    const r = FeedbackApiBodySchema.safeParse({
+      message: 'x',
+      images: [{ mime: 'image/webp', data: 'data:image/webp;base64,AAAA' }],
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects more than the per-submission image cap (6)', () => {
+    const r = FeedbackApiBodySchema.safeParse({
+      message: 'x',
+      images: Array.from({ length: 7 }, () => ({ mime: 'image/webp', data: 'AAAA' })),
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects a single image over the per-image size cap', () => {
+    const tooBig = 'A'.repeat(3_600_000) // > 3.5MB base64 per-image cap
+    const r = FeedbackApiBodySchema.safeParse({
+      message: 'x',
+      images: [{ mime: 'image/webp', data: tooBig }],
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects images whose combined size exceeds the total cap', () => {
+    const big = 'A'.repeat(3_000_000) // 3MB each (under per-image cap)
+    const r = FeedbackApiBodySchema.safeParse({
+      message: 'x',
+      images: [
+        { mime: 'image/webp', data: big },
+        { mime: 'image/webp', data: big },
+        { mime: 'image/webp', data: big },
+      ], // 9MB combined > 8MB total cap
+    })
+    expect(r.success).toBe(false)
   })
 })

@@ -26,7 +26,7 @@ import { release } from 'os'
 import { createHash } from 'crypto'
 import { getSettings } from '@/lib/server/store'
 import { readSession } from '@/lib/server/authStore'
-import { FeedbackApiBodySchema } from '@/lib/schemas'
+import { FeedbackApiBodySchema, sanitizeFeedbackImages } from '@/lib/schemas'
 
 // --- Env-driven configuration ----------------------------------------------
 // Read lazily (per request) rather than frozen at module load so the operator
@@ -200,7 +200,20 @@ export const feedbackRoutes = new Hono()
       const body = (await res.json()) as unknown
       const rows = Array.isArray(body) ? body : []
       const truncated = rows.length > 200
-      return c.json({ items: truncated ? rows.slice(0, 200) : rows, truncated })
+      const page = truncated ? rows.slice(0, 200) : rows
+      // Re-validate each row's images before handing them to the client: `anon`
+      // can write arbitrary JSON to the images column (RLS with_check=true), so
+      // a crafted row must not crash the inbox (f.images.map on a non-array) or
+      // bloat the payload. See sanitizeFeedbackImages.
+      const items = page.map((row) =>
+        row && typeof row === 'object'
+          ? {
+              ...(row as Record<string, unknown>),
+              images: sanitizeFeedbackImages((row as { images?: unknown }).images),
+            }
+          : row,
+      )
+      return c.json({ items, truncated })
     } catch (e) {
       return unreachable(c, 'list', e)
     }
@@ -260,7 +273,7 @@ export const feedbackRoutes = new Hono()
       return c.json({ error: 'feedback not configured' }, 503)
     }
 
-    const { message, email, context } = c.req.valid('json')
+    const { message, email, context, images } = c.req.valid('json')
 
     const [appVersion, projectCount] = await Promise.all([
       readAppVersion(),
@@ -281,6 +294,10 @@ export const feedbackRoutes = new Hono()
       app_version: appVersion,
       os: osString(),
       project_count: projectCount,
+      // Inline base64 image attachments (zod-defaulted to []). Goes into the
+      // `images` jsonb column added for this feature; sent explicitly rather
+      // than leaning on the DB default so the contract is visible here.
+      images,
     }
 
     try {

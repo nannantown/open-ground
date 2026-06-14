@@ -29,6 +29,7 @@ import { BoardModule } from './BoardModule'
 const task: ProjectTask = {
   id: 't1',
   title: 'Saved title',
+  notes: 'Saved content',
   done: false,
   createdAt: '2026-01-01T00:00:00.000Z',
   boardColumn: 'todo',
@@ -100,17 +101,18 @@ describe('BoardModule drawer — layered Escape', () => {
 
   it('2. reverts + blurs a drawer field, drawer stays open, App suppressed', () => {
     const { container, onOpenDetail, persist } = renderDrawer()
-    const title = container.querySelector<HTMLInputElement>(
-      'input[placeholder="board.detail.titlePlaceholder"]',
+    // The content textarea is the drawer's field now (the title input is gone).
+    const content = container.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="board.detail.notesPlaceholder"]',
     )
-    expect(title).toBeTruthy()
-    if (!title) return
-    title.focus()
-    title.value = 'half-typed junk'
+    expect(content).toBeTruthy()
+    if (!content) return
+    content.focus()
+    content.value = 'half-typed junk'
 
-    const { appSawIt } = pressEscape(title)
-    expect(title.value).toBe('Saved title')
-    expect(document.activeElement).not.toBe(title)
+    const { appSawIt } = pressEscape(content)
+    expect(content.value).toBe('Saved content')
+    expect(document.activeElement).not.toBe(content)
     expect(onOpenDetail).not.toHaveBeenCalled()
     expect(persist).not.toHaveBeenCalled()
     expect(appSawIt).toBe(false) // aside onKeyDown stopPropagation
@@ -118,6 +120,8 @@ describe('BoardModule drawer — layered Escape', () => {
 
   it("3. assignee add-input keeps its OWN Escape (cancel add, input unmounts, drawer open)", () => {
     const { container, getByPlaceholderText, getByText, onOpenDetail } = renderDrawer()
+    // Assignee lives behind the Options disclosure now — open it first.
+    fireEvent.click(getByText('board.detail.optionsLabel'))
     fireEvent.click(getByText('board.detail.assigneeAdd'))
     const input = getByPlaceholderText('board.detail.assigneeAddPlaceholder') as HTMLInputElement
     input.focus()

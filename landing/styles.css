@@ -99,9 +99,12 @@ html[lang="en"] a[data-lang="en"] { display: inline; }
 html[lang="ja"] span[data-lang="ja"],
 html[lang="ja"] a[data-lang="ja"] { display: inline; }
 html[lang="ja"] { word-break: normal; overflow-wrap: anywhere; line-break: strict; }
-/* JA headings: never break mid-word, and give the display sizes more room */
+/* JA headings: wrap naturally between characters (correct Japanese typesetting —
+   kinsoku is handled by line-break: strict). Latin runs (claude/Canvas/Board…)
+   still break only at spaces, never mid-word. Using keep-all here forced whole
+   headings to stay one unbreakable unit and overflowed narrow phones. */
 html[lang="ja"] h1, html[lang="ja"] h2, html[lang="ja"] h3 {
-  word-break: keep-all; overflow-wrap: normal;
+  word-break: normal; overflow-wrap: normal;
 }
 html[lang="ja"] .hero-title {
   font-size: clamp(34px, 5.4vw, 62px);
@@ -157,10 +160,13 @@ html[lang="ja"] .cta-title { font-size: clamp(26px, 3.8vw, 40px); line-height: 1
 .brand-mark { flex: none; display: block; }
 .brand-word { display: block; }
 
-.site-nav { display: flex; gap: 4px; margin-left: auto; }
+/* Desktop: nav + actions sit as one right-aligned cluster. On ≤980 the same
+   .header-menu collapses into a slide-down panel (see the responsive section). */
+.header-menu { display: flex; align-items: center; gap: 20px; margin-left: auto; }
+.site-nav { display: flex; gap: 4px; }
 .site-nav a {
   font-size: 14px; font-weight: 500; text-decoration: none;
-  color: var(--ink-muted);
+  color: var(--ink-muted); white-space: nowrap;
   padding: 7px 12px; border-radius: 999px;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
@@ -168,8 +174,50 @@ html[lang="ja"] .cta-title { font-size: clamp(26px, 3.8vw, 40px); line-height: 1
 .site-nav a:active { background: rgba(42,31,26,0.10); color: var(--ink); }
 .site-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.header-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
-.site-nav + .header-actions { margin-left: 0; }
+.header-actions { display: flex; align-items: center; gap: 12px; }
+
+/* Hamburger — hidden on desktop, shown ≤980 via the responsive block */
+.nav-toggle {
+  display: none;
+  align-items: center; justify-content: center;
+  width: 42px; height: 42px; padding: 0;
+  background: var(--card); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 999px;
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+              box-shadow 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.nav-toggle:hover {
+  background: var(--paper-elev); border-color: var(--line-strong);
+  box-shadow: var(--shadow-hover); transform: translateY(-1px);
+}
+.nav-toggle:active { background: var(--inset); box-shadow: var(--shadow-card); transform: translateY(0); }
+.nav-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the bars adopt the terracotta accent when the menu is open */
+body.menu-open .nav-toggle { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
+.nav-toggle-box { position: relative; width: 18px; height: 13px; }
+.nav-toggle-bar {
+  position: absolute; left: 0; right: 0; height: 2px; border-radius: 2px;
+  background: currentColor;
+  transition: transform 0.22s var(--ease), opacity 0.18s var(--ease), top 0.22s var(--ease);
+}
+.nav-toggle-bar:nth-child(1) { top: 0; }
+.nav-toggle-bar:nth-child(2) { top: 5.5px; }
+.nav-toggle-bar:nth-child(3) { top: 11px; }
+body.menu-open .nav-toggle-bar:nth-child(1) { top: 5.5px; transform: rotate(45deg); }
+body.menu-open .nav-toggle-bar:nth-child(2) { opacity: 0; }
+body.menu-open .nav-toggle-bar:nth-child(3) { top: 5.5px; transform: rotate(-45deg); }
+
+/* Scrim behind the open mobile menu (only ever visible ≤980, where the
+   hamburger exists). Sits below the header (z 50) but above page content. */
+.menu-scrim {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(42, 31, 26, 0.28);
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 0.2s var(--ease), visibility 0.2s;
+}
+body.menu-open .menu-scrim { opacity: 1; visibility: visible; pointer-events: auto; }
 
 .lang-toggle {
   display: inline-flex; align-items: center; gap: 5px;
@@ -307,6 +355,67 @@ html[lang="ja"] .cta-title { font-size: clamp(26px, 3.8vw, 40px); line-height: 1
 }
 .hero-note strong { color: var(--ink-muted); }
 
+/* ---------- platform visibility (OS-aware download CTA) ---------- */
+/* JS adds body.is-win after sniffing the platform; default (no class) is the
+   macOS view. .os-mac / .os-win swap the download label in place; .win-note is
+   a line shown only to Windows visitors. These spans carry no data-lang, so the
+   i18n rules never touch them — language and platform compose independently. */
+.os-win { display: none; }
+body.is-win .os-mac { display: none; }
+body.is-win .os-win { display: inline; }
+.win-note { display: none; }
+body.is-win .win-note { display: block; }
+
+/* ---------- hero download row ----------
+   The primary CTA already serves the Apple Silicon build, so we don't repeat
+   it. The other builds are paper chips (matching the eyebrow / lang pill),
+   never bare browser-blue links. */
+.hero-dl {
+  display: flex; flex-direction: column; align-items: center; gap: 11px;
+}
+.hero-dl-other {
+  display: inline-flex; align-items: center; flex-wrap: wrap;
+  justify-content: center; gap: 8px;
+}
+.hero-dl-label {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.dl-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 12px; font-weight: 500;
+  color: var(--ink-muted); text-decoration: none;
+  background: var(--card);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 13px;
+  box-shadow: var(--shadow-card);
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+              color 0.15s ease, box-shadow 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.dl-chip:hover {
+  background: var(--paper-elev); border-color: var(--line-strong);
+  color: var(--ink); transform: translateY(-1px); box-shadow: var(--shadow-hover);
+}
+.dl-chip:active { background: var(--inset); transform: translateY(0); box-shadow: var(--shadow-card); }
+.dl-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* "in dev" tag — ochre, signalling a work-in-progress build */
+.dl-chip-tag {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ochre);
+  background: var(--ochre-soft);
+  border: 1px solid color-mix(in srgb, var(--ochre) 26%, transparent);
+  border-radius: 999px; padding: 1px 6px;
+}
+/* Platform-aware chips: the build the primary CTA already serves is dropped
+   (mac → Apple Silicon is the button; win → Windows is the button). Compound
+   selectors so the chip keeps inline-flex, not the generic .os-* inline. */
+.dl-chip.os-mac { display: inline-flex; }
+.dl-chip.os-win { display: none; }
+body.is-win .dl-chip.os-mac { display: none; }
+body.is-win .dl-chip.os-win { display: inline-flex; }
+.hero-dl-caveat { max-width: 460px; margin-left: auto; margin-right: auto; }
+
 @keyframes rise {
   from { opacity: 0; transform: translateY(16px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -405,7 +514,7 @@ html[lang="ja"] .cta-title { font-size: clamp(26px, 3.8vw, 40px); line-height: 1
 .pcard-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .pcard-name {
   font-family: var(--mono); font-size: 12.5px; font-weight: 700;
-  letter-spacing: 0.02em; color: var(--ink);
+  letter-spacing: 0.02em; color: var(--ink); white-space: nowrap;
 }
 .beacon {
   display: inline-flex; align-items: center; gap: 5px;
@@ -511,7 +620,7 @@ html[lang="ja"] .cta-title { font-size: clamp(26px, 3.8vw, 40px); line-height: 1
 /* ==========================================================================
    Sections — shared scaffolding
    ========================================================================== */
-.section { padding: 104px 0 0; }
+.section { padding: 104px 0 0; scroll-margin-top: 84px; }
 .section--cta { padding-bottom: 104px; }
 
 .kicker {
@@ -689,7 +798,7 @@ html[lang="ja"] .kicker [data-lang="en"] { display: none; }
   display: flex; flex-direction: column; gap: 7px;
 }
 .mini-card--live { border-color: color-mix(in srgb, var(--moss) 45%, var(--line)); }
-.mini-name { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--ink); }
+.mini-name { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--ink); white-space: nowrap; }
 .mini-beacon {
   display: inline-flex; align-items: center; gap: 5px; align-self: flex-start;
   font-family: var(--mono); font-size: 8.5px; font-weight: 500;
@@ -736,6 +845,163 @@ html[lang="ja"] .kicker [data-lang="en"] { display: none; }
 .cb-mock-body {
   flex: 1; display: grid; place-items: center;
   font-family: var(--mono); font-size: 11px; color: var(--azure);
+}
+
+/* ==========================================================================
+   The Canvas — design studio (layers · canvas · inspector)
+   ========================================================================== */
+.studio-mock { width: min(960px, 100%); margin: 48px auto 0; }
+.studio-mock .mock-window { transform: none; }
+
+.studio-zoom {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 500;
+  color: var(--ink-muted);
+  background: var(--inset); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 11px;
+}
+
+.studio-panes {
+  display: grid;
+  grid-template-columns: 172px 1fr 188px;
+  min-height: 326px;
+}
+
+/* left — pages + layers tree */
+.sp-left {
+  background: var(--card);
+  border-right: 1px solid var(--line-soft);
+  padding: 13px 11px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.sp-search {
+  font-family: var(--mono); font-size: 10px; color: var(--ink-subtle);
+  background: var(--paper); border: 1px solid var(--line-soft);
+  border-radius: 7px; padding: 6px 9px; margin-bottom: 9px;
+}
+.sp-row {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 11px; color: var(--ink-muted);
+  padding: 5px 8px; border-radius: 6px;
+}
+.sp-row--frame { font-weight: 700; color: var(--ink); }
+.sp-row--frame::before { content: '▸'; color: var(--ink-subtle); font-size: 8.5px; }
+.sp-row--child { padding-left: 20px; }
+.sp-row--child::before { content: '▢'; color: var(--ink-faint); font-size: 9px; }
+.sp-row--sel { background: var(--accent-soft); color: var(--accent-deep); font-weight: 600; }
+.sp-row--sel::before { color: var(--accent); }
+
+/* center — stage with a selected auto-layout frame */
+.sp-stage {
+  position: relative;
+  display: grid; place-items: center;
+  padding: 26px;
+  background-image:
+    linear-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size: 30px 30px;
+}
+.sp-frame {
+  position: relative;
+  width: 214px;
+  background: var(--paper-elev);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 17px 16px;
+  display: flex; flex-direction: column; gap: 13px;
+}
+.sp-frame-tag {
+  position: absolute; top: -9px; left: 13px;
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.04em;
+  color: var(--moss);
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--moss) 32%, var(--line));
+  border-radius: 999px; padding: 1.5px 8px;
+}
+.sp-node { height: 30px; border-radius: 6px; background: var(--inset); border: 1px solid var(--line); }
+.sp-node--sm { height: 18px; width: 66%; }
+.sp-node--cta { height: 26px; width: 50%; background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.sp-node--sel { position: relative; background: var(--card); border-color: var(--azure); box-shadow: 0 0 0 1.5px var(--azure); }
+.sp-badge {
+  position: absolute; left: 50%; bottom: -23px; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 9px; color: var(--ink-inverse);
+  background: var(--azure);
+  border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+}
+.sp-h { position: absolute; width: 7px; height: 7px; background: var(--card); border: 1.5px solid var(--azure); border-radius: 2px; }
+.sp-h--tl { top: -4px; left: -4px; }
+.sp-h--tr { top: -4px; right: -4px; }
+.sp-h--bl { bottom: -4px; left: -4px; }
+.sp-h--br { bottom: -4px; right: -4px; }
+
+/* right — design inspector */
+.sp-right {
+  background: var(--card);
+  border-left: 1px solid var(--line-soft);
+  padding: 13px 12px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.sp-grp { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.sp-field {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 10px;
+  background: var(--paper); border: 1px solid var(--line-soft);
+  border-radius: 6px; padding: 5px 8px;
+}
+.sp-field label { color: var(--ink-subtle); }
+.sp-field b { color: var(--ink); font-weight: 600; margin-left: auto; }
+.sp-align {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+  background: var(--paper); border: 1px solid var(--line-soft);
+  border-radius: 7px; padding: 7px;
+}
+.sp-align i { height: 7px; border-radius: 2px; background: var(--inset); }
+.sp-align i:nth-child(5) { background: var(--azure); }
+.sp-lab {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--ink-subtle); margin-top: 3px;
+}
+
+/* feature bento */
+.studio-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 40px; }
+.studio-card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 16px; padding: 24px 22px;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.studio-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-hover); }
+.studio-icon {
+  width: 42px; height: 42px;
+  display: grid; place-items: center;
+  background: var(--inset); border: 1px solid var(--line);
+  border-radius: 11px; margin-bottom: 16px;
+}
+.studio-icon svg { width: 21px; height: 21px; color: var(--accent); }
+.studio-card h3 { font-family: var(--serif); font-size: 18px; font-weight: 550; margin: 0 0 8px; }
+.studio-card p { font-size: 13.5px; line-height: 1.55; color: var(--ink-muted); margin: 0; }
+
+.studio-foot { text-align: center; font-size: 14px; color: var(--ink-subtle); max-width: 640px; margin: 30px auto 0; }
+
+@media (max-width: 980px) {
+  .studio-grid { grid-template-columns: 1fr 1fr; }
+  .studio-panes { grid-template-columns: 132px 1fr 150px; min-height: 300px; }
+}
+@media (max-width: 720px) {
+  .studio-grid { grid-template-columns: 1fr; }
+  .studio-panes { grid-template-columns: 1fr; min-height: 0; }
+  /* Drop only the layers tree; reflow the inspector into a strip beneath the
+     canvas so the "canvas + Design inspector" story still reads on phones. */
+  .sp-left { display: none; }
+  .sp-stage { padding: 34px 20px; border-bottom: 1px solid var(--line-soft); }
+  .sp-right {
+    border-left: 0; border-top: 0;
+    flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px;
+    padding: 12px 14px;
+  }
+  .sp-right .sp-grp { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 100%; }
+  .sp-right .sp-field { flex: 1 1 62px; }
+  .sp-right .sp-align, .sp-right .sp-lab { display: none; }
 }
 
 /* ==========================================================================
@@ -977,13 +1243,39 @@ html.js-reveal .pain-card.reveal:nth-child(4) { transition-delay: 0.24s; }
    Responsive
    ========================================================================== */
 @media (max-width: 980px) {
-  .site-nav { display: none; }
   .pain-grid { grid-template-columns: 1fr 1fr; }
   .term-layout { grid-template-columns: 1fr; gap: 44px; }
   .term-visual { min-height: 340px; max-width: 520px; margin: 0 auto; width: 100%; }
   .mode-grid { grid-template-columns: 1fr; }
   .mock-canvas { grid-template-columns: 1fr; }
   .mock-term { min-height: 220px; }
+}
+
+/* ≤980 the 5 inline nav links (which need ~970px to sit on one line with
+   nowrap labels) fold into a hamburger dropdown. lang + Download STAY in the
+   bar, pinned right — logo left, actions right — so the CTA never hides. */
+@media (max-width: 980px) {
+  .header-actions { margin-left: auto; }
+  .nav-toggle { display: inline-flex; }
+  .header-menu {
+    position: absolute; top: 100%; left: 0; right: 0;
+    margin-left: 0;
+    flex-direction: column; align-items: stretch; gap: 0;
+    background: var(--paper);
+    border-bottom: 1px solid var(--line);
+    box-shadow: var(--shadow-hover);
+    padding: 8px 0 12px;
+    max-height: calc(100dvh - 64px); overflow-y: auto;
+    opacity: 0; visibility: hidden; transform: translateY(-8px);
+    pointer-events: none;
+    transition: opacity 0.2s var(--ease), transform 0.2s var(--ease), visibility 0.2s;
+  }
+  body.menu-open .header-menu {
+    opacity: 1; visibility: visible; transform: none; pointer-events: auto;
+  }
+  body.menu-open { overflow: hidden; }
+  .header-menu .site-nav { flex-direction: column; gap: 2px; padding: 8px 14px; }
+  .header-menu .site-nav a { padding: 12px 14px; font-size: 16px; border-radius: 10px; }
 }
 
 @media (max-width: 720px) {
@@ -1011,4 +1303,48 @@ html.js-reveal .pain-card.reveal:nth-child(4) { transition-delay: 0.24s; }
   .tv-pane { width: 84%; }
   .tv-pane--3 { display: none; }
   .term-visual { min-height: 240px; }
+}
+
+@media (max-width: 560px) {
+  /* small phones: drop the wordmark to the ring mark so lang + Download + the
+     menu button fit on the right without crowding the bar */
+  .brand-word { display: none; }
+  .header-inner { gap: 16px; }
+  .header-actions { gap: 8px; }
+  .lang-toggle { padding: 6px 10px; }
+  .btn--sm { padding: 8px 14px; }
+}
+
+@media (max-width: 480px) {
+  .container { padding: 0 18px; }
+
+  /* keep the eyebrow pill a single line — drop the decorative tail */
+  .eyebrow-tail { display: none; }
+
+  .hero { padding-top: 40px; }
+  .coord { font-size: 9.5px; }
+  .coord--tl { left: 18px; }
+  .coord--tr { right: 18px; }
+  .hero-mock { margin-top: 44px; }
+  /* stack the two hero CTAs full-width so neither is cramped */
+  .hero-cta { width: 100%; }
+  .hero-cta .btn { flex: 1 1 100%; }
+
+  .section { padding-top: 60px; }
+  .section--terminal { padding: 52px 0; margin-top: 60px; }
+  .section--cta { padding-bottom: 60px; }
+
+  .pain-card { padding: 20px 18px; }
+  .feature-body { padding: 24px 22px 26px; }
+  .feature h3 { font-size: 19.5px; }
+  .studio-card { padding: 20px 18px; }
+  .mode-card { padding: 24px 22px 28px; }
+  .step { padding: 24px 20px; }
+  .who-card { padding: 24px 20px; }
+
+  .ritual-item { font-size: 12px; }
+  .ritual-track { gap: 36px; }
+
+  .cta-card { padding: 48px 22px 44px; border-radius: 18px; }
+  .footer-nav { gap: 32px; }
 }

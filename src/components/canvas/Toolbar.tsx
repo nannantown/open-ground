@@ -7,6 +7,7 @@ import {
   Plus,
   LogOut,
   CircleUser,
+  HelpCircle,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { useAuth } from '@/lib/auth/AuthContext'
@@ -16,6 +17,8 @@ interface Props {
   onNewProject: () => void
   onImport: () => void
   onOpenSettings: () => void
+  /** Opens the full-screen in-app manual (the "?" entry). Always available. */
+  onOpenManual: () => void
   /** Provided only when in-app feedback is configured (env-gated server-side);
    *  surfaces a "Feedback" item inside the account menu. */
   onFeedback?: () => void
@@ -40,6 +43,7 @@ export const Toolbar = ({
   onNewProject,
   onImport,
   onOpenSettings,
+  onOpenManual,
   onFeedback,
   onAccount,
   projectCount,
@@ -110,6 +114,10 @@ export const Toolbar = ({
               <AccountControl onAccount={onAccount} />
             </>
           )}
+          <span className="h-4 w-px bg-line-soft" />
+          <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
+            <HelpCircle size={14} strokeWidth={1.75} />
+          </IconButton>
           <span className="h-4 w-px bg-line-soft" />
           <IconButton
             onClick={onOpenSettings}

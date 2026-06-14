@@ -52,6 +52,15 @@ import {
 } from '@/lib/canvasFillStyle'
 import { resolveShapeStyle, resolveShapeKind } from '@/lib/canvasShape'
 import {
+  TEXT_SIZING_MODES,
+  textSizingOf,
+  textVAlignOf,
+  textBox,
+  convertSizing,
+  type TextSizing,
+  type TextVAlign,
+} from '@/lib/canvasTextSizing'
+import {
   resolveOpacity,
   opacityFromPercent,
   resolveFrameCornerRadius,
@@ -80,6 +89,15 @@ const ALIGN_ICON: Record<TextAlign, typeof AlignLeft> = {
   left: AlignLeft,
   center: AlignCenter,
   right: AlignRight,
+}
+
+// Vertical-align options for a fixed-size text box (top / middle / bottom). The
+// horizontal-bar align icons read as "glyphs pinned to top / middle / bottom".
+const VALIGN_OPTIONS: readonly TextVAlign[] = ['top', 'middle', 'bottom']
+const VALIGN_ICON: Record<TextVAlign, typeof AlignStartHorizontal> = {
+  top: AlignStartHorizontal,
+  middle: AlignCenterHorizontal,
+  bottom: AlignEndHorizontal,
 }
 
 // Type → i18n key for the Position section heading (resolved with t() at render).
@@ -950,9 +968,71 @@ const TextProperties = ({
   const textAlign = element.textAlign ?? DEFAULT_TEXT_ALIGN
   const lineHeight = element.lineHeight ?? DEFAULT_LINE_HEIGHT
   const isBold = fontWeight >= BOLD_FONT_WEIGHT
+  const sizing = textSizingOf(element)
+  const vAlign = textVAlignOf(element)
 
   return (
     <>
+      {/* Resize mode — Figma's textAutoResize. Switching keeps the box visually
+          put (convertSizing seeds width/height from the current rendered box);
+          the next ElementView measurement then re-derives the measured axes. */}
+      <Field label={t('canvas.insp.textSizing')}>
+        <Segmented
+          value={sizing}
+          options={TEXT_SIZING_MODES.map((m) => ({
+            value: m,
+            label:
+              m === 'auto-width'
+                ? t('canvas.insp.sizingAutoW')
+                : m === 'auto-height'
+                  ? t('canvas.insp.sizingAutoH')
+                  : t('canvas.insp.sizingTextFixed'),
+          }))}
+          onChange={(v) => {
+            const to = v as TextSizing
+            if (to === sizing) return
+            onPatch(convertSizing(element, to, textBox(element)))
+          }}
+        />
+      </Field>
+
+      {/* Vertical alignment — only meaningful for a fixed-height box (the two
+          auto modes always hug their content height). */}
+      {sizing === 'fixed' && (
+        <Field label={t('canvas.insp.verticalAlign')}>
+          <div className="flex items-stretch gap-1">
+            {VALIGN_OPTIONS.map((a) => {
+              const Icon = VALIGN_ICON[a]
+              const active = vAlign === a
+              const title =
+                a === 'top'
+                  ? t('canvas.insp.alignTop')
+                  : a === 'middle'
+                    ? t('canvas.insp.alignMiddle')
+                    : t('canvas.insp.alignBottom')
+              return (
+                <button
+                  key={a}
+                  type="button"
+                  aria-pressed={active}
+                  title={title}
+                  onClick={() => onPatch({ textVerticalAlign: a })}
+                  className={[
+                    'flex h-7 flex-1 items-center justify-center rounded-[4px] border',
+                    'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
+                    active
+                      ? 'border-accent bg-accent text-bg-card hover:bg-accent/90'
+                      : 'border-line bg-bg text-ink-muted hover:border-line-strong hover:bg-bg-elevated hover:text-ink',
+                  ].join(' ')}
+                >
+                  <Icon size={14} strokeWidth={2.25} />
+                </button>
+              )
+            })}
+          </div>
+        </Field>
+      )}
+
       <Field label={t('canvas.insp.fontSize')}>
         <NumberInput
           min={MIN_TEXT_FONT_SIZE}
@@ -1242,6 +1322,42 @@ const Select = ({
       </option>
     ))}
   </select>
+)
+
+// A labelled segmented control — N equal pills, the active one filled accent.
+// Matches the typography section's other segmented buttons (alignment, weight):
+// 5-state styling (default / hover / selected / selected+hover / focus-visible).
+const Segmented = ({
+  value,
+  options,
+  onChange,
+}: {
+  value: string
+  options: { value: string; label: string }[]
+  onChange: (value: string) => void
+}) => (
+  <div className="flex items-stretch gap-1">
+    {options.map((o) => {
+      const active = o.value === value
+      return (
+        <button
+          key={o.value}
+          type="button"
+          aria-pressed={active}
+          onClick={() => onChange(o.value)}
+          className={[
+            'flex h-7 min-w-0 flex-1 items-center justify-center rounded-[4px] border px-1 text-[11px]',
+            'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
+            active
+              ? 'border-accent bg-accent text-bg-card hover:bg-accent/90'
+              : 'border-line bg-bg text-ink-muted hover:border-line-strong hover:bg-bg-elevated hover:text-ink',
+          ].join(' ')}
+        >
+          <span className="truncate">{o.label}</span>
+        </button>
+      )
+    })}
+  </div>
 )
 
 const ToggleButton = ({

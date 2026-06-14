@@ -39,7 +39,15 @@ export default defineConfig({
   server: {
     // Dev only. Electron dev drives its own port; the API lives on apiPort.
     port: webPort,
-    strictPort: false,
+    // strictPort: FAIL LOUDLY if 5174 is already taken instead of silently
+    // drifting to 5175/5176. The convention is ONE primary on 5174/47776 and
+    // every extra instance via `npm run dev:alt` (which pre-claims a free pair
+    // with firstFree(), so it never collides here). A silent web-port drift is
+    // how a second `npm run dev` used to vacate the canonical pair and strand
+    // the daily-driver tab — pinned to :5174 — on a dead API (endless
+    // "Loading…"). With strict, a duplicate `dev` errors out immediately and
+    // concurrently -k tears the rest down, so the mistake is obvious.
+    strictPort: true,
     proxy: {
       '/api': {
         target: `http://127.0.0.1:${apiPort}`,

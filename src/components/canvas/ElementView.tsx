@@ -3,6 +3,7 @@ import { Code2 } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { buildMockSrcdoc, hash32 } from '@/lib/mockSrcdoc'
 import { resolveTextStyle } from '@/lib/canvasTextStyle'
+import { textSizingOf, textVAlignOf, textBox } from '@/lib/canvasTextSizing'
 import { resolveStickyFill, DEFAULT_STICKY_FILL } from '@/lib/canvasFillStyle'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { CommentPin } from './CommentPin'
@@ -35,11 +36,12 @@ interface Props {
    *  the bubble glyph vanishes over a design. When set, the overlay drops its
    *  grab cursor and inherits the wrapper's comment cursor instead. */
   commentTool?: boolean
-  /** Text-only, wired ONLY for a text managed by an auto-layout frame: report
+  /** Text-only, wired for EVERY non-hidden/locked text by the canvas: report
    *  the rendered box (offset px — integers, pre-transform so the canvas zoom
    *  never feeds in) whenever it changes, so the canvas can persist the text's
-   *  real footprint and re-flow its siblings. Free texts leave it undefined
-   *  and never observe. */
+   *  real footprint (per its sizing mode — see textMeasurePatch) and re-flow a
+   *  layout-frame text's siblings. The reported box is whatever the mode's
+   *  render produced; the parent decides which axes the measurement may keep. */
   onMeasure?: (w: number, h: number) => void
 }
 
@@ -70,10 +72,13 @@ function editorKeyDown(e: React.KeyboardEvent, done: () => void) {
   }
 }
 
-// Renders one free-form canvas element. A text note is auto-width (Figma
-// style): the box hugs its longest line and grows as you type — no wrapping,
-// new lines only via Enter. A sticky note is a fixed-size, resizable box.
-// Editing is driven by the `editing` prop; the canvas owns double-click.
+// Renders one free-form canvas element. A text note has three Figma-parity
+// sizing modes (see canvasTextSizing.ts + docs/CANVAS_TEXT_SIZING_PLAN.md):
+// auto-width hugs its longest line and grows as you type (no wrap, newlines
+// only via Enter); auto-height pins the width and wraps, growing downward;
+// fixed pins both axes, wraps, clips overflow, and vertically aligns the
+// glyphs. A sticky note is a fixed-size, resizable box. Editing is driven by
+// the `editing` prop; the canvas owns double-click.
 export const ElementView = ({
   element,
   selected,
@@ -263,12 +268,12 @@ export const ElementView = ({
     )
   }
 
-  // ---- text note: auto-width, hugs the longest line ----
+  // ---- text note: three Figma-parity sizing modes ----
   // One resolved style object (size / family / colour / weight / align /
   // line-height) shared by the idle render, the editing textarea, and the
-  // invisible sizer so the auto-width box stays exact when any typography field
-  // changes from the inspector. All six properties must be identical across the
-  // three paths or the box mis-sizes (round 1's flagged invariant).
+  // invisible sizer so the box stays exact when any typography field changes
+  // from the inspector. All six properties must be identical across the three
+  // paths or the box mis-sizes (round 1's flagged invariant).
   const typo = resolveTextStyle(element)
   const textStyle: React.CSSProperties = {
     fontSize: typo.fontSize,
@@ -279,15 +284,89 @@ export const ElementView = ({
     lineHeight: typo.lineHeight,
   }
   const opacity = resolveOpacity(element)
+  // The mode picks the box's footprint contract (see canvasTextSizing.ts):
+  //   auto-width  — hugs content on both axes; no wrap (whitespace: pre).
+  //   auto-height — width is authoritative; text wraps; height hugs content.
+  //   fixed       — both axes authoritative; text wraps; overflow clipped; the
+  //                 glyphs are vertically aligned within the box.
+  // `textBox` resolves the authoritative width/height with the legacy 300×44 as
+  // the only pre-first-measure fallback (a fresh auto-height text before Track
+  // B has seeded its drag width).
+  const sizing = textSizingOf(element)
+  const { w: boxW, h: boxH } = textBox(element)
+  // The wrapping autos / fixed share `pre-wrap`; only auto-width keeps `pre`
+  // (one long line, widened by typing). Same token drives the idle render, the
+  // sizer, and (via wrap=) the textarea, so the box never jumps on edit enter.
+  const wraps = sizing !== 'auto-width'
+  const wrapClass = wraps ? 'whitespace-pre-wrap' : 'whitespace-pre'
+  // `wrap="soft"` lets the textarea reflow at its own width (the autos / fixed);
+  // `wrap="off"` keeps it a single scrolling line (auto-width).
+  const taWrap = wraps ? 'soft' : 'off'
+
+  // ---- fixed: authoritative box, clipped, vertically aligned ----
+  if (sizing === 'fixed') {
+    const vAlign = textVAlignOf(element)
+    // The box is a flex column; `justify-content` positions the single child
+    // (the text content while idle) along the vertical axis. The padding lives
+    // on the box, so the textarea child only needs to fill the content area.
+    const justify =
+      vAlign === 'middle' ? 'center' : vAlign === 'bottom' ? 'flex-end' : 'flex-start'
+    return (
+      <div
+        ref={measureRef}
+        onPointerDown={onPointerDown}
+        style={{ ...textStyle, width: boxW, height: boxH, justifyContent: justify, opacity }}
+        className={[
+          'flex flex-col overflow-hidden rounded-[2px]',
+          editing ? 'cursor-text' : 'cursor-grab select-none active:cursor-grabbing',
+          wrapClass,
+          TEXT_PAD,
+          ring,
+        ].join(' ')}
+      >
+        {editing ? (
+          // The textarea fills the content area (top-anchored while editing,
+          // like Figma's fixed-text editor — the vertical align applies to the
+          // idle render). Wrap + metrics match the idle render so nothing jumps.
+          <textarea
+            ref={ta}
+            value={element.text}
+            onChange={(e) => onChangeText(e.target.value)}
+            onBlur={onEditDone}
+            onKeyDown={(e) => editorKeyDown(e, onEditDone)}
+            onPointerDown={(e) => e.stopPropagation()}
+            wrap={taWrap}
+            spellCheck={false}
+            style={textStyle}
+            className="h-full w-full resize-none overflow-hidden whitespace-pre-wrap bg-transparent focus:outline-none"
+          />
+        ) : (
+          element.text || <span className="text-ink-faint">Text…</span>
+        )}
+      </div>
+    )
+  }
+
+  // ---- auto-width / auto-height: the box hugs content (auto-width on both
+  // axes, auto-height on height only — its width is authoritative). The editing
+  // path uses an invisible sizer to size the box exactly to the content, with
+  // the textarea overlaid; idle renders the text directly. The two share the
+  // same wrap/width so the box doesn't jump when entering/leaving edit. ----
+  // auto-width hugs horizontally (inline-block, no explicit width); auto-height
+  // pins the width and wraps within it.
+  const boxWidth = sizing === 'auto-height' ? boxW : undefined
+  const layoutClass = sizing === 'auto-height' ? 'block' : 'inline-block'
 
   if (!editing) {
     return (
       <div
         ref={measureRef}
         onPointerDown={onPointerDown}
-        style={{ ...textStyle, opacity }}
+        style={{ ...textStyle, width: boxWidth, opacity }}
         className={[
-          'inline-block cursor-grab select-none whitespace-pre rounded-[2px] active:cursor-grabbing',
+          layoutClass,
+          'cursor-grab select-none rounded-[2px] active:cursor-grabbing',
+          wrapClass,
           TEXT_PAD,
           ring,
         ].join(' ')}
@@ -301,16 +380,17 @@ export const ElementView = ({
     <div
       ref={measureRef}
       onPointerDown={onPointerDown}
-      style={{ opacity }}
-      className={['relative inline-block cursor-text rounded-[2px]', ring].join(' ')}
+      style={{ width: boxWidth, opacity }}
+      className={['relative cursor-text rounded-[2px]', layoutClass, ring].join(' ')}
     >
-      {/* Invisible sizer: CSS sizes the box to the longest line + line count.
-          The trailing space leaves room for the caret. Same font metrics as the
-          textarea below (textStyle) or the box would mis-size. */}
+      {/* Invisible sizer: CSS sizes the box to the content (longest line +
+          line count for auto-width; the wrapped height at the pinned width for
+          auto-height). The trailing space leaves room for the caret. Same font
+          metrics + wrap as the textarea below or the box would mis-size. */}
       <div
         aria-hidden
         style={textStyle}
-        className={['invisible min-w-[2ch] whitespace-pre', TEXT_PAD].join(' ')}
+        className={['invisible min-w-[2ch]', wrapClass, TEXT_PAD].join(' ')}
       >
         {element.text + ' '}
       </div>
@@ -321,7 +401,7 @@ export const ElementView = ({
         onBlur={onEditDone}
         onKeyDown={(e) => editorKeyDown(e, onEditDone)}
         onPointerDown={(e) => e.stopPropagation()}
-        wrap="off"
+        wrap={taWrap}
         spellCheck={false}
         style={textStyle}
         className={[

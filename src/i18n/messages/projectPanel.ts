@@ -19,6 +19,8 @@ export const projectPanel = {
     'projectPanel.locateFolderHint': 'Point this card at the folder’s new location — your tasks, notes and canvases reconnect.',
     // Loading
     'projectPanel.loading': 'Loading…',
+    'projectPanel.loadFailed': "Couldn't load the project — the server is unreachable. Check that the dev server is running, then retry.",
+    'projectPanel.retry': 'Retry',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -293,6 +295,8 @@ export const projectPanel = {
     'projectPanel.locateFolderHint': 'このカードをフォルダの新しい場所に指し直します。タスク・ノート・Canvas が再接続されます。',
     // Loading
     'projectPanel.loading': '読み込み中…',
+    'projectPanel.loadFailed': 'プロジェクトを読み込めませんでした — サーバーに接続できません。dev サーバーが起動しているか確認して、再試行してください。',
+    'projectPanel.retry': '再試行',
     // Sidebar resizer
     // Chat header
     // Delete confirm

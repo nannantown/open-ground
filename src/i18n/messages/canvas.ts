@@ -93,6 +93,15 @@ export const canvas = {
     'canvas.insp.lineHeight': 'Line height',
     'canvas.insp.textColor': 'Text color',
     'canvas.insp.pickColour': 'Pick a colour',
+    // Text resize mode (Figma textAutoResize) + fixed-box vertical align
+    'canvas.insp.textSizing': 'Resizing',
+    'canvas.insp.sizingAutoW': 'Auto width',
+    'canvas.insp.sizingAutoH': 'Auto height',
+    'canvas.insp.sizingTextFixed': 'Fixed',
+    'canvas.insp.verticalAlign': 'Vertical align',
+    'canvas.insp.alignTop': 'Align top',
+    'canvas.insp.alignMiddle': 'Align middle',
+    'canvas.insp.alignBottom': 'Align bottom',
     // SelectionInspector — docked Design panel (Figma-parity round)
     'canvas.insp.selectedCount': '{n} selected',
     'canvas.insp.mixed': 'Mixed',
@@ -214,6 +223,15 @@ export const canvas = {
     'canvas.insp.lineHeight': '行間',
     'canvas.insp.textColor': '文字色',
     'canvas.insp.pickColour': '色を選択',
+    // Text resize mode (Figma textAutoResize) + fixed-box vertical align
+    'canvas.insp.textSizing': 'サイズ調整',
+    'canvas.insp.sizingAutoW': '幅自動',
+    'canvas.insp.sizingAutoH': '高さ自動',
+    'canvas.insp.sizingTextFixed': '固定',
+    'canvas.insp.verticalAlign': '縦揃え',
+    'canvas.insp.alignTop': '上揃え',
+    'canvas.insp.alignMiddle': '中央揃え',
+    'canvas.insp.alignBottom': '下揃え',
     // SelectionInspector — docked Design panel (Figma-parity round)
     'canvas.insp.selectedCount': '{n}個を選択中',
     'canvas.insp.mixed': '混在',

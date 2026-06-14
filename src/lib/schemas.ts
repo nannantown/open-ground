@@ -127,21 +127,87 @@ export const ProjectDataSchema = z.object({
 // over-long body is rejected at the door with a clear 400 rather than bouncing
 // off Postgres. email is loosely validated (presence of '@') — it's an
 // optional contact hint, not an auth identity.
-export const FeedbackApiBodySchema = z.object({
-  message: z.string().trim().min(1, 'message is required').max(5000, 'message must be 5000 characters or fewer'),
-  email: z
+// Inline feedback image attachments. The client downscales + re-encodes to
+// WebP, so real payloads are far below these caps — they're the SERVER-side
+// backstop that mirrors the DB constraints (jsonb_array_length(images) <= 6 and
+// pg_column_size(images) <= 12MB) so an oversized/malformed POST is rejected at
+// the door with a clear 400 rather than bouncing off Postgres. 3点セット:
+// FeedbackImage (types.ts) / this schema / the row build in routes/feedback.ts.
+export const MAX_FEEDBACK_IMAGES = 6
+// base64 chars: ~2.6MB decoded per image, ~6MB decoded across all of them.
+export const MAX_FEEDBACK_IMAGE_B64 = 3_500_000
+export const MAX_FEEDBACK_IMAGES_TOTAL_B64 = 8_000_000
+
+// Accepted MIME types. A plain string + refine (not z.enum) keeps the inferred
+// request type as `mime: string`, matching FeedbackImage in types.ts — with
+// z.enum the client's FeedbackImage[] wouldn't assign to the typed $post body.
+const FEEDBACK_IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+
+export const FeedbackImageApiSchema = z.object({
+  // Display-only file name (tooltip / download). Never used as a path server-side.
+  name: z.string().max(200).optional(),
+  mime: z.string().refine((m) => FEEDBACK_IMAGE_MIMES.includes(m), 'unsupported image type'),
+  // Standard base64 only (no data-URL prefix, no whitespace) so a malformed
+  // client can't smuggle arbitrary text into the jsonb column.
+  data: z
     .string()
-    .trim()
-    .max(320)
-    .email('invalid email')
-    .optional()
-    .or(z.literal('')),
-  // Optional UI-context tag (e.g. the per-project tab the feedback is about).
-  // The server prefixes the stored message with "[ctx:<context>] " rather than
-  // assuming a new DB column, so this stays non-breaking with the existing
-  // feedback table. Capped short — it's a source/label hint, not free text.
-  context: z.string().max(120).optional(),
+    .min(1, 'empty image')
+    .max(MAX_FEEDBACK_IMAGE_B64, 'image too large')
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'invalid image encoding'),
 })
+
+export const FeedbackApiBodySchema = z
+  .object({
+    message: z.string().trim().min(1, 'message is required').max(5000, 'message must be 5000 characters or fewer'),
+    email: z
+      .string()
+      .trim()
+      .max(320)
+      .email('invalid email')
+      .optional()
+      .or(z.literal('')),
+    // Optional UI-context tag (e.g. the per-project tab the feedback is about).
+    // The server prefixes the stored message with "[ctx:<context>] " rather than
+    // assuming a new DB column, so this stays non-breaking with the existing
+    // feedback table. Capped short — it's a source/label hint, not free text.
+    context: z.string().max(120).optional(),
+    // Inline image attachments (base64). Optional + defaulted so clients that
+    // send none keep working unchanged.
+    images: z
+      .array(FeedbackImageApiSchema)
+      .max(MAX_FEEDBACK_IMAGES, `at most ${MAX_FEEDBACK_IMAGES} images`)
+      .optional()
+      .default([]),
+  })
+  .superRefine((val, ctx) => {
+    const total = (val.images ?? []).reduce((n, im) => n + im.data.length, 0)
+    if (total > MAX_FEEDBACK_IMAGES_TOTAL_B64) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'images too large',
+        path: ['images'],
+      })
+    }
+  })
+
+// Read-side guard for the owner inbox. GET /api/feedback/list returns Supabase
+// rows VERBATIM, but `anon` can INSERT arbitrary JSON into the `images` column
+// (RLS with_check is `true`), bypassing the write-side validation above — a
+// non-array, a bogus mime, oversized/garbage data, anything. Re-validate each
+// row's images HERE so the owner inbox only ever renders well-formed,
+// size-bounded attachments: a crafted row can't crash the React tree
+// (f.images.map on a non-array) or smuggle a non-image data: URL, and an
+// oversized row is dropped wholesale rather than ballooning the inbox payload.
+// A row that fails validation simply shows no images.
+export const sanitizeFeedbackImages = (
+  images: unknown,
+): z.infer<typeof FeedbackImageApiSchema>[] => {
+  const r = z.array(FeedbackImageApiSchema).max(MAX_FEEDBACK_IMAGES).safeParse(images)
+  if (!r.success) return []
+  const total = r.data.reduce((n, im) => n + im.data.length, 0)
+  if (total > MAX_FEEDBACK_IMAGES_TOTAL_B64) return []
+  return r.data
+}
 
 // ---- Helpers --------------------------------------------------------------
 

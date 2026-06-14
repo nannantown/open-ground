@@ -29,6 +29,17 @@ export const modals = {
     'modals.feedback.emailOptional': '(optional — only if you need a reply)',
     'modals.feedback.about': 'About: {label}',
     'modals.feedback.aboutTab': 'Feedback about this tab',
+    'modals.feedback.attachLabel': 'Images',
+    'modals.feedback.attachOptional': '(optional)',
+    'modals.feedback.attachAdd': 'Add images',
+    'modals.feedback.attachHint': 'Paste or drag images here',
+    'modals.feedback.attachDrop': 'Drop to attach',
+    'modals.feedback.attachRemove': 'Remove image',
+    'modals.feedback.attachBusy': 'Processing images…',
+    'modals.feedback.attachTooMany': 'Up to {max} images',
+    'modals.feedback.attachFailed': 'Some images could not be added',
+    'modals.feedback.attachTooLarge':
+      'Images are too large — remove one and try again',
 
     // NewProjectModal
     'modals.newProject.label': 'Create',
@@ -73,6 +84,17 @@ export const modals = {
     'modals.feedback.emailOptional': '（任意 — 返信が必要な場合のみ）',
     'modals.feedback.about': '対象: {label}',
     'modals.feedback.aboutTab': 'このタブについてのフィードバック',
+    'modals.feedback.attachLabel': '画像',
+    'modals.feedback.attachOptional': '（任意）',
+    'modals.feedback.attachAdd': '画像を追加',
+    'modals.feedback.attachHint': 'ここに画像を貼り付け / ドラッグ',
+    'modals.feedback.attachDrop': 'ドロップして添付',
+    'modals.feedback.attachRemove': '画像を削除',
+    'modals.feedback.attachBusy': '画像を処理中…',
+    'modals.feedback.attachTooMany': '画像は最大 {max} 枚です',
+    'modals.feedback.attachFailed': '一部の画像を追加できませんでした',
+    'modals.feedback.attachTooLarge':
+      '画像の合計サイズが大きすぎます — 1枚減らして再試行してください',
 
     // NewProjectModal
     'modals.newProject.label': '作成',

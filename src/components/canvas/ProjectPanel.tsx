@@ -12,6 +12,7 @@ import {
   Plus,
   RotateCw,
   SquareCode,
+  Store,
   Terminal,
   Trash2,
   X,
@@ -259,6 +260,15 @@ export const ProjectPanel = ({
   const restoredViewRef = useRef<PersistedView | null | undefined>(undefined)
   if (restoredViewRef.current === undefined) restoredViewRef.current = loadPersistedView()
   const [loading, setLoading] = useState(false)
+  // Initial project-data load failed (server unreachable / non-JSON response).
+  // Tracked apart from `loading` so the panel shows a retryable error instead
+  // of sitting on "Loading…" forever: a REJECTED initial fetch leaves `data`
+  // null with loading back to false, and the body's `loading || !data` branch
+  // would otherwise render the spinner indefinitely. The 5s poll can't self-heal
+  // this case (reloadProjectData's loadedDataPathRef guard never armed), so an
+  // explicit Retry — bumping reloadNonce to re-run the load effect — recovers.
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
   // The Project settings dialog (shared policy + personal launch prefs) —
   // opened from the ⋯ menu; drafts live inside the dialog, Save persists.
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
@@ -411,18 +421,34 @@ export const ProjectPanel = ({
       setData(null)
       return
     }
+    let cancelled = false
+    const requestedPath = project.path
     setLoading(true)
+    setLoadError(null)
     api.api.project
-      .$get({ query: { path: project.path } }, { init: { cache: 'no-store' } })
+      .$get({ query: { path: requestedPath } }, { init: { cache: 'no-store' } })
       .then(r => r.json() as Promise<ProjectData>)
       .then((d: ProjectData) => {
+        if (cancelled) return
         setData(d)
-        loadedDataPathRef.current = project.path
+        loadedDataPathRef.current = requestedPath
         lastSavedJson.current = JSON.stringify(d)
       })
-      .finally(() => setLoading(false))
+      .catch((e: unknown) => {
+        // Server unreachable / bad payload. Leave `data` null and surface a
+        // retryable error rather than an endless spinner. Guarded so a reject
+        // from a project we've since switched away from can't flip the error on.
+        if (cancelled) return
+        setLoadError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.path])
+  }, [project?.path, reloadNonce])
 
   // Serialize saves: a fire while a PUT is in flight re-schedules, so the next
   // body always carries the CAS token adopted from the previous response (a
@@ -2045,10 +2071,9 @@ export const ProjectPanel = ({
         // contains tabs ATTACHED to this project (allTabIds above).
         customTabs={customModules.map(customModuleTabDef)}
         // Management affordances are role-gated COSMETICALLY (server is the
-        // source of truth): "+" opens the attach picker (owner|tester),
-        // Market browses (owner|tester).
+        // source of truth): "+" opens the attach picker (owner|tester), which
+        // now also carries the marketplace entry.
         onAddTab={customRole !== 'none' ? () => setPickerOpen(true) : undefined}
-        onOpenMarket={customRole !== 'none' ? () => setMarketOpen(true) : undefined}
         // Right-click menu on custom tabs: detach from this project's row
         // (non-destructive — library delete lives in the picker).
         customTabMenu={{ canDetach: canDetachTab, onDetach: detachTabFromProject }}
@@ -2272,6 +2297,19 @@ export const ProjectPanel = ({
             {t('projectPanel.loading')}
           </div>
         )
+      ) : loadError && !data ? (
+        // Initial load failed (e.g. the API server isn't running) — an explicit,
+        // retryable message beats an endless "Loading…". Retry re-runs the load.
+        <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">
+          {t('projectPanel.loadFailed')}{' '}
+          <button
+            type="button"
+            onClick={() => setReloadNonce(n => n + 1)}
+            className="text-ink-faint underline-offset-2 transition-colors duration-150 hover:text-ink hover:underline active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            {t('projectPanel.retry')}
+          </button>
+        </div>
       ) : loading || !data ? (
         <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">{t('projectPanel.loading')}</div>
       ) : view === 'board' ? (
@@ -2367,6 +2405,14 @@ export const ProjectPanel = ({
             setShareDialogError(null)
             setShareDialog('disable')
           }}
+          onBrowseMarket={
+            customRole !== 'none'
+              ? () => {
+                  setProjectSettingsOpen(false)
+                  setMarketOpen(true)
+                }
+              : undefined
+          }
           onClose={() => setProjectSettingsOpen(false)}
           onChange={(config, launch) => {
             // Autosave: every committed change in the dialog persists right
@@ -2446,6 +2492,14 @@ export const ProjectPanel = ({
               ? () => {
                   setPickerOpen(false)
                   setCustomCreateOpen(true)
+                }
+              : undefined
+          }
+          onBrowseMarket={
+            customRole !== 'none'
+              ? () => {
+                  setPickerOpen(false)
+                  setMarketOpen(true)
                 }
               : undefined
           }
@@ -2671,6 +2725,7 @@ const ProjectSettingsDialog = ({
   onStartShare,
   onShowInvite,
   onStopShare,
+  onBrowseMarket,
   onClose,
   onChange,
 }: {
@@ -2686,6 +2741,9 @@ const ProjectSettingsDialog = ({
   onShowInvite: () => void
   /** Open the unshare confirmation (shared projects). */
   onStopShare: () => void
+  /** Owner|tester: open the marketplace dialog (the parent closes settings
+   *  first). undefined hides the settings-side marketplace entry. */
+  onBrowseMarket?: () => void
   onClose: () => void
   onChange: (config: ProjectConfig, launch: ProjectLaunchPrefs) => void
 }) => {
@@ -3115,6 +3173,28 @@ const ProjectSettingsDialog = ({
                   {t('projectPanel.settingsLaunchMovedHint')}
                 </p>
 
+                {/* Marketplace — the tab row no longer carries a bare "Market"
+                    text entry; this is the settings-side way in (the "+" picker
+                    carries the other). owner|tester only. */}
+                {onBrowseMarket && (
+                  <div>
+                    <label className="mb-1 block label-cap text-ink-muted">
+                      {t('customTabs.market')}
+                    </label>
+                    <p className="text-[12px] leading-relaxed text-ink-faint">
+                      {t('customTabs.marketHint')}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={onBrowseMarket}
+                      className="mt-1.5 inline-flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      <Store size={13} strokeWidth={2} className="shrink-0" />
+                      {t('customTabs.marketBrowse')}
+                    </button>
+                  </div>
+                )}
+
                 {/* ── Worktrees (B012/F082) — sweep the task/review checkouts
                     that pile up under ~/.openground/…/worktrees/. Only CLEAN
                     ones are removed; dirty ones are reported, never touched.
@@ -3294,7 +3374,6 @@ const ViewTabs = ({
   terminalInfo,
   customTabs,
   onAddTab,
-  onOpenMarket,
   customTabMenu,
   badges,
 }: {
@@ -3312,8 +3391,6 @@ const ViewTabs = ({
   customTabs?: TabDef[]
   /** Owner|tester "+" (open the per-project attach picker); undefined hides it. */
   onAddTab?: () => void
-  /** Owner|tester marketplace entry point; undefined hides it. */
-  onOpenMarket?: () => void
   /** Right-click menu on custom tabs — DETACH from this project's row only
    *  (non-destructive, no confirm; library delete lives in the "+" picker).
    *  `canDetach` decides whether a tab id gets the menu at all. Undefined
@@ -3474,16 +3551,9 @@ const ViewTabs = ({
           <Plus size={12} strokeWidth={2.25} />
         </button>
       )}
-      {onOpenMarket && (
-        <button
-          type="button"
-          onClick={onOpenMarket}
-          title={t('customTabs.marketHint')}
-          className="-mb-px border-b-2 border-transparent px-1 py-2 label-cap text-ink-faint transition-colors hover:text-accent active:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          {t('customTabs.market')}
-        </button>
-      )}
+      {/* The marketplace no longer sits as a bare text entry in the tab row.
+          It moved into the "+" picker (「マーケットで探す」) and Project settings,
+          so the tab row stays tabs-only (docs/CUSTOM_TABS_PLAN.md). */}
       {tabMenu &&
         customTabMenu &&
         customTabMenu.canDetach(tabMenu.id) && (

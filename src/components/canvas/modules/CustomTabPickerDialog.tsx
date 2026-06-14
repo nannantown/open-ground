@@ -1,19 +1,27 @@
 import { useEffect, useState } from 'react'
-import { Plus } from 'lucide-react'
-import { Btn } from '@/components/ui/Btn'
+import { Plus, Store, Trash2, Check, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import type { CustomModuleDef, CustomTabRole } from '@/lib/types'
 
 // "+" → the per-project tab picker (docs/CUSTOM_TABS_PLAN.md — "Per-project
-// attachment & the '+' picker"). Lists MY library: clicking an unattached
-// module attaches it to the CURRENT project (the parent persists
-// ProjectData.customTabs and switches the view); already-attached rows are
-// inert and marked. The picker is also the only place for LIBRARY-LEVEL
-// destruction (owner: delete any module; tester: uninstall installed ones) —
-// two-step confirm inline, then the parent runs the server DELETE + PTY
-// teardown and refreshes the list (this dialog stays open, the row vanishes
-// via props). The 「新規タブを作成」 command hands off to the existing create
-// dialog. Escape and a backdrop click both dismiss.
+// attachment & the '+' picker"). Lists MY library as a cartographic *register*
+// (variant-A redesign): tabs are horizontal-rule-separated ledger rows with a
+// mono serial number (T·01…) in a faintly-ruled gutter — no boxes. Clicking an
+// unattached row attaches that module to the CURRENT project (the parent
+// persists ProjectData.customTabs and switches the view); already-attached rows
+// are inert, dimmed, and marked with a moss check. The picker is also the only
+// place for LIBRARY-LEVEL destruction (owner: delete any module; tester:
+// uninstall installed ones) — the trash affordance only fades in on row hover
+// (never a permanently-floating button), and arms a two-step confirm inline
+// (accent「本当に削除する」+ ✓/✕) before the parent runs the server DELETE + PTY
+// teardown and refreshes the list. The 「新規タブを作成」 command sits in the
+// footer (accent text, not in the ruling). Escape and a backdrop click dismiss.
+//
+// Why the row is a <div role="button"> and not a <button>: the row body is
+// clickable (attach) AND contains its own <button> children (trash / confirm).
+// A <button> inside a <button> is invalid HTML — the parser lifts the inner
+// button out, breaking hover/click. A div with role+tabindex keeps the whole
+// row activ:able while legally nesting the action buttons.
 
 /** What library-level destruction (if any) the role offers for a module —
  *  cosmetic only, the server re-checks the role on DELETE. */
@@ -32,6 +40,7 @@ export const CustomTabPickerDialog = ({
   attachedIds,
   onAttach,
   onCreateNew,
+  onBrowseMarket,
   onDelete,
   onClose,
 }: {
@@ -45,6 +54,9 @@ export const CustomTabPickerDialog = ({
   onAttach: (moduleId: string) => void
   /** Open the create dialog (owner only; the parent closes the picker). */
   onCreateNew?: () => void
+  /** Browse the marketplace (owner|tester; the parent closes the picker and
+   *  opens the marketplace dialog). undefined hides the command. */
+  onBrowseMarket?: () => void
   /** Library-level delete/uninstall, AFTER the in-dialog confirm: server
    *  DELETE + killEmbeddedTerminals + list refresh live in the parent. */
   onDelete: (moduleId: string) => Promise<void> | void
@@ -80,17 +92,34 @@ export const CustomTabPickerDialog = ({
     }
   }
 
-  // The 「新規タブを作成」 command row (owner only) — rendered both in the
-  // populated list (as the trailing row) and as the sole action of the empty
-  // state.
-  const createRow = onCreateNew && (
+  // The 「新規タブを作成」 command (owner only) — accent text + plus, sitting in
+  // the footer outside the ruling (not a dashed box).
+  const createButton = onCreateNew && (
     <button
       type="button"
       onClick={onCreateNew}
-      className="flex w-full items-center gap-2 rounded-[4px] border border-dashed border-line px-3 py-2.5 text-left text-[12px] text-ink-muted transition-colors hover:border-line hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      className="group/create inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-[12px] font-medium text-accent transition-colors hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     >
-      <Plus size={13} strokeWidth={2} className="shrink-0" />
-      {t('customTabs.pickerCreateNew')}
+      <Plus size={14} strokeWidth={1.75} className="shrink-0" />
+      <span className="underline-offset-2 group-hover/create:underline">
+        {t('customTabs.pickerCreateNew')}
+      </span>
+    </button>
+  )
+
+  // 「マーケットで探す」 — owner|tester. Sits beside create in the footer; same
+  // shape with a storefront glyph, muted so create stays the accent. The tab
+  // row no longer carries a bare "Market" text entry, so this is its home.
+  const marketButton = onBrowseMarket && (
+    <button
+      type="button"
+      onClick={onBrowseMarket}
+      className="group/market inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-[12px] font-medium text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+    >
+      <Store size={14} strokeWidth={1.75} className="shrink-0" />
+      <span className="underline-offset-2 group-hover/market:underline">
+        {t('customTabs.marketBrowse')}
+      </span>
     </button>
   )
 
@@ -99,112 +128,246 @@ export const CustomTabPickerDialog = ({
     // dismisses (mousedown, so a drag that starts inside doesn't close).
     <div
       data-esc-overlay
-      className="absolute inset-0 z-20 flex items-center justify-center bg-bg-card/70 px-6"
+      className="absolute inset-0 z-20 flex items-center justify-center overflow-y-auto bg-bg-card/70 px-6 py-8"
       onMouseDown={onClose}
     >
-      <div
+      <section
         role="dialog"
         aria-label={t('customTabs.pickerTitle')}
-        className="w-full max-w-[480px] rounded-[4px] border border-line bg-bg-card p-5 shadow-card-hover"
         onMouseDown={e => e.stopPropagation()}
+        className="relative w-full max-w-[512px] overflow-hidden rounded-[8px] border border-line bg-bg-card shadow-card-hover"
       >
-        <p className="label-cap text-accent mb-2">{t('customTabs.pickerLabel')}</p>
-        <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
-          {t('customTabs.pickerTitle')}
-        </h3>
-        <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
-          {t('customTabs.pickerExplain')}
-        </p>
-        <div className="mt-4 max-h-[50vh] space-y-2 overflow-y-auto pr-1">
-          {modules.length === 0 ? (
-            <p className="py-1 text-[12px] text-ink-subtle">
+        {/* Header — kicker → Fraunces title → muted desc, with a faint corner
+            registration tick like a map-sheet corner. */}
+        <header className="relative px-[30px] pb-[18px] pt-[26px]">
+          <span
+            aria-hidden
+            className="pointer-events-none absolute right-4 top-[14px] h-[14px] w-[14px] border-r border-t border-line-strong opacity-70"
+          />
+          <p className="label-cap mb-3 text-accent">{t('customTabs.pickerLabel')}</p>
+          <h2 className="font-display text-[23px] font-medium leading-[1.12] tracking-tightest text-ink">
+            {t('customTabs.pickerTitle')}
+          </h2>
+          <p className="mt-[9px] max-w-[42ch] text-[12px] leading-[1.55] text-ink-muted">
+            {t('customTabs.pickerExplain')}
+          </p>
+        </header>
+
+        <div className="rule-double" aria-hidden />
+
+        {modules.length === 0 ? (
+          // Empty state — a single ledger line with the T·— serial.
+          <div className="flex items-baseline gap-3 px-[30px] py-7">
+            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-line-strong">
+              T·—
+            </span>
+            <span className="font-display text-[12.5px] italic text-ink-muted">
               {t('customTabs.pickerEmpty')}
-            </p>
-          ) : (
-            modules.map(m => {
-              const attached = attachedIds.has(m.id)
-              const kind = moduleRemoveKind(role, m)
-              const confirming = confirmingId === m.id
-              const deleting = deletingId === m.id
-              return (
-                <div key={m.id} className="flex items-stretch gap-2">
-                  {/* Attach (the row body). Attached rows are inert — the
-                      「追加済み」 mark explains the disabled state. */}
-                  <button
-                    type="button"
-                    disabled={attached || deleting}
-                    onClick={() => onAttach(m.id)}
-                    className={[
-                      'min-w-0 flex-1 rounded-[4px] border border-line p-3 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-                      attached
-                        ? 'cursor-default opacity-60'
-                        : 'cursor-pointer hover:border-accent hover:bg-bg-inset active:bg-bg-inset',
-                      deleting ? 'cursor-not-allowed opacity-40' : '',
-                    ].join(' ')}
+            </span>
+          </div>
+        ) : (
+          <>
+            {/* Column legend — the ledger's quiet column heads. */}
+            <div
+              aria-hidden
+              className="flex items-baseline justify-between px-[30px] pb-[7px] pt-3 text-ink-faint"
+            >
+              <span className="coord-label tracking-[0.16em]">
+                {t('customTabs.pickerLegendIndex')}
+              </span>
+              <span className="coord-label tracking-[0.12em] opacity-85">
+                {t('customTabs.pickerLegendState')}
+              </span>
+            </div>
+
+            <ul className="m-0 list-none p-0">
+              {modules.map((m, i) => {
+                const attached = attachedIds.has(m.id)
+                const kind = moduleRemoveKind(role, m)
+                const confirming = confirmingId === m.id
+                const deleting = deletingId === m.id
+                const serial = `T·${String(i + 1).padStart(2, '0')}`
+                return (
+                  <li
+                    key={m.id}
+                    className="group relative border-t border-line-soft first:border-t-0"
                   >
-                    <p className="flex items-baseline gap-1.5 text-[12px] text-ink">
-                      <span className="truncate">{m.label}</span>
-                      {typeof m.version === 'number' && (
-                        <span className="shrink-0 font-mono text-[10px] text-ink-faint">
-                          {t('customTabs.publishedBadge', { version: String(m.version) })}
-                        </span>
-                      )}
-                      {m.origin === 'installed' && (
-                        <span className="shrink-0 rounded-sm border border-line px-1 text-[9px] uppercase tracking-wide text-ink-faint">
-                          {t('customTabs.installed')}
-                        </span>
-                      )}
-                      {attached && (
-                        <span className="ml-auto shrink-0 text-[10px] text-ink-faint">
-                          {t('customTabs.pickerAttached')}
-                        </span>
-                      )}
-                    </p>
-                    {m.description && (
-                      <p
-                        className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-ink-muted"
-                        title={m.description}
-                      >
-                        {m.description}
-                      </p>
-                    )}
-                  </button>
-                  {/* Library-level destruction (two-step: arm → confirm). */}
-                  {kind && (
-                    <button
-                      type="button"
-                      disabled={deleting}
+                    <div
+                      role="button"
+                      tabIndex={attached ? -1 : 0}
+                      aria-disabled={attached || deleting}
+                      aria-label={
+                        attached
+                          ? `${m.label}（${t('customTabs.pickerAttached')}）`
+                          : t('customTabs.addTab') + ' — ' + m.label
+                      }
                       onClick={() => {
-                        if (!confirming) {
-                          setConfirmingId(m.id)
-                          return
+                        if (!attached && !deleting && !confirming) onAttach(m.id)
+                      }}
+                      onKeyDown={e => {
+                        if (
+                          (e.key === 'Enter' || e.key === ' ') &&
+                          !attached &&
+                          !deleting &&
+                          !confirming
+                        ) {
+                          e.preventDefault()
+                          onAttach(m.id)
                         }
-                        void remove(m.id)
                       }}
                       className={[
-                        'shrink-0 self-center rounded-sm border px-2 py-1 text-[10.5px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40',
-                        confirming
-                          ? 'border-accent bg-accent-soft text-accent hover:bg-accent hover:text-bg-card active:bg-accent active:text-bg-card'
-                          : 'border-line text-ink-faint hover:border-accent hover:text-accent active:text-accent',
+                        'relative grid grid-cols-[44px_1fr_auto] items-center gap-x-4 px-[30px] py-[14px] transition-colors',
+                        // serial gutter rule (30px pad + 44px serial col = 74px)
+                        'before:absolute before:inset-y-0 before:left-[74px] before:w-px before:bg-line-soft/70',
+                        attached
+                          ? 'cursor-default opacity-60'
+                          : 'cursor-pointer hover:bg-bg-inset active:bg-bg-elevated',
+                        confirming ? 'bg-accent-soft before:bg-accent/20' : '',
+                        deleting ? 'opacity-40' : '',
+                        'focus-visible:outline focus-visible:outline-[1.5px] focus-visible:-outline-offset-2 focus-visible:outline-accent',
                       ].join(' ')}
                     >
-                      {confirming
-                        ? t(kind === 'delete' ? 'customTabs.deleteConfirmYes' : 'customTabs.uninstallConfirmYes')
-                        : t(kind === 'delete' ? 'customTabs.delete' : 'customTabs.uninstall')}
-                    </button>
-                  )}
-                </div>
-              )
-            })
-          )}
-          {createRow}
-        </div>
-        <div className="mt-5 flex items-center justify-end">
-          <Btn variant="subtle" size="md" onClick={onClose}>
+                      {/* serial — mono, tabular, firms up on hover */}
+                      <span className="font-mono text-[10px] uppercase tracking-[0.06em] tabular-nums text-ink-faint group-hover:text-ink-subtle">
+                        {serial}
+                      </span>
+
+                      {/* main text column */}
+                      <div className="min-w-0">
+                        <div
+                          className={[
+                            'truncate text-[13px] font-medium leading-[1.3]',
+                            attached ? 'text-ink-muted' : 'text-ink',
+                          ].join(' ')}
+                        >
+                          {m.label}
+                        </div>
+                        {m.description && (
+                          <div
+                            className="mt-0.5 truncate text-[11px] leading-[1.4] text-ink-muted"
+                            title={m.description}
+                          >
+                            {m.description}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* right cluster: meta + action affordance */}
+                      <div className="flex items-center justify-end gap-3">
+                        {confirming ? (
+                          <span className="inline-flex items-center gap-2 text-accent-deeper">
+                            <span className="whitespace-nowrap text-[11px] font-semibold">
+                              {t(
+                                kind === 'delete'
+                                  ? 'customTabs.deleteConfirmYes'
+                                  : 'customTabs.uninstallConfirmYes',
+                              )}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={deleting}
+                              onClick={e => {
+                                e.stopPropagation()
+                                void remove(m.id)
+                              }}
+                              aria-label={t(
+                                kind === 'delete'
+                                  ? 'customTabs.deleteConfirmYes'
+                                  : 'customTabs.uninstallConfirmYes',
+                              )}
+                              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded text-accent transition-colors hover:bg-accent/15 hover:text-accent-hover disabled:opacity-40 focus-visible:outline focus-visible:outline-[1.5px] focus-visible:outline-offset-1 focus-visible:outline-accent"
+                            >
+                              <Check size={14} strokeWidth={2} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation()
+                                setConfirmingId(null)
+                              }}
+                              aria-label={t('common.cancel')}
+                              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded text-ink-muted transition-colors hover:bg-ink/[0.07] hover:text-ink focus-visible:outline focus-visible:outline-[1.5px] focus-visible:outline-offset-1 focus-visible:outline-accent"
+                            >
+                              <X size={14} strokeWidth={2} />
+                            </button>
+                          </span>
+                        ) : (
+                          <>
+                            {typeof m.version === 'number' && (
+                              <span className="font-mono text-[11px] tabular-nums text-ink-faint">
+                                {t('customTabs.publishedBadge', {
+                                  version: String(m.version),
+                                })}
+                              </span>
+                            )}
+                            {m.origin === 'installed' && (
+                              <span className="whitespace-nowrap rounded-[3px] border border-line-strong px-[5px] py-0.5 text-[8.5px] font-medium uppercase leading-none tracking-[0.16em] text-ink-faint">
+                                {t('customTabs.installed')}
+                              </span>
+                            )}
+                            {attached && (
+                              <span className="inline-flex items-center gap-1.5 text-[9px] font-medium uppercase tracking-[0.16em] text-moss">
+                                <Check size={13} strokeWidth={2} />
+                                {t('customTabs.pickerAttached')}
+                              </span>
+                            )}
+                            {/* add affordance — only when there's no trash to
+                                show; the whole row is the real add target. */}
+                            {!attached && !kind && (
+                              <span
+                                aria-hidden
+                                className="inline-flex h-5 w-5 items-center justify-center text-ink-faint opacity-0 transition-opacity group-hover:opacity-100"
+                              >
+                                <Plus size={15} strokeWidth={1.75} />
+                              </span>
+                            )}
+                            {/* library-level destruction — fades in on row
+                                hover only (arms the two-step confirm). */}
+                            {kind && (
+                              <button
+                                type="button"
+                                disabled={deleting}
+                                onClick={e => {
+                                  e.stopPropagation()
+                                  setConfirmingId(m.id)
+                                }}
+                                aria-label={t(
+                                  kind === 'delete'
+                                    ? 'customTabs.delete'
+                                    : 'customTabs.uninstall',
+                                )}
+                                className="-mr-1 inline-flex h-6 w-6 items-center justify-center rounded text-ink-faint opacity-0 transition-all hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-[1.5px] focus-visible:outline-offset-1 focus-visible:outline-accent"
+                              >
+                                <Trash2 size={14} strokeWidth={1.75} />
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </>
+        )}
+
+        <div className="rule-double" aria-hidden />
+
+        <footer className="flex items-center justify-between gap-4 px-[30px] pb-[17px] pt-[15px]">
+          <div className="flex items-center gap-5">
+            {createButton}
+            {marketButton}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
             {t('common.close')}
-          </Btn>
-        </div>
-      </div>
+          </button>
+        </footer>
+      </section>
     </div>
   )
 }

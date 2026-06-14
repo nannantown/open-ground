@@ -22,6 +22,7 @@ import type {
   ReleaseNotesResponse,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
+import { feedbackImageDataUrl } from '@/lib/feedbackImages'
 import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
@@ -549,6 +550,27 @@ const FeedbackInbox = ({ onSeen }: { onSeen?: (latestCreatedAt: string | null) =
           {items.map((f) => (
             <li key={f.id} className="rounded-[2px] border border-line bg-bg p-3 leading-relaxed">
               <p className="text-[12px] text-ink whitespace-pre-wrap break-words">{f.message}</p>
+              {f.images && f.images.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {f.images.map((img, i) => (
+                    <a
+                      key={i}
+                      href={feedbackImageDataUrl(img)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={img.name || t('settings.inbox.imageAlt')}
+                      className="block overflow-hidden rounded-[2px] border border-line transition-colors hover:border-ink-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    >
+                      <img
+                        src={feedbackImageDataUrl(img)}
+                        alt={img.name || t('settings.inbox.imageAlt')}
+                        loading="lazy"
+                        className="h-16 w-16 object-cover"
+                      />
+                    </a>
+                  ))}
+                </div>
+              )}
               <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-ink-subtle">
                 <span>{formatFeedbackDate(f.created_at)}</span>
                 {f.email && (

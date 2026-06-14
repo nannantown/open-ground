@@ -106,7 +106,7 @@ describe('CustomTabPickerDialog', () => {
 
   it('owner delete is two-step: arm, then fire', () => {
     const onDelete = vi.fn().mockResolvedValue(undefined)
-    const { getByText } = render(
+    const { getByLabelText } = render(
       <CustomTabPickerDialog
         modules={[mod(A)]}
         role="owner"
@@ -116,16 +116,18 @@ describe('CustomTabPickerDialog', () => {
         onClose={noop}
       />,
     )
-    // First click only arms the confirm — nothing deleted yet.
-    fireEvent.click(getByText('customTabs.delete'))
+    // First click only arms the confirm — nothing deleted yet. In the register
+    // redesign the trash is an icon button (aria-label, no visible text), so
+    // find it by its accessible label.
+    fireEvent.click(getByLabelText('customTabs.delete'))
     expect(onDelete).not.toHaveBeenCalled()
-    // The armed button now reads the confirm label; the second click fires.
-    fireEvent.click(getByText('customTabs.deleteConfirmYes'))
+    // The armed confirm exposes a ✓ button labelled with the confirm copy.
+    fireEvent.click(getByLabelText('customTabs.deleteConfirmYes'))
     expect(onDelete).toHaveBeenCalledWith(A)
   })
 
   it('tester sees uninstall on installed modules only', () => {
-    const { getByText, queryByText } = render(
+    const { getByLabelText, queryByLabelText } = render(
       <CustomTabPickerDialog
         modules={[mod(A), mod(B, { origin: 'installed' })]}
         role="tester"
@@ -135,8 +137,8 @@ describe('CustomTabPickerDialog', () => {
         onClose={noop}
       />,
     )
-    expect(queryByText('customTabs.delete')).toBeNull()
-    expect(getByText('customTabs.uninstall')).toBeTruthy()
+    expect(queryByLabelText('customTabs.delete')).toBeNull()
+    expect(getByLabelText('customTabs.uninstall')).toBeTruthy()
   })
 
   it('Escape and a backdrop click both close', () => {

@@ -1,8 +1,11 @@
-// First-line title derivation for the Board's single-box card capture: the
-// user writes WHAT THE TASK IS in one textarea; the first line becomes the
-// provisional title (commit-message convention) and the rest the content. A
-// haiku auto-title may later replace the provisional title server-side — both
-// carry titleAuto until the user edits the title by hand.
+// First-line title derivation for the Board's content-first card drawer: the
+// user writes WHAT THE TASK IS in the content textarea (there is no title
+// field). On Run, `provisionalTitle` takes the first line as a stopgap title
+// WITHOUT consuming the content, satisfying the server's title-required prompt
+// contract; a haiku auto-title then refines it server-side. `deriveCardFields`
+// (first line → title, rest → notes) survives only as the `wantsAutoTitle`
+// input — does the content warrant that haiku pass. Both stay titleAuto until
+// the user edits the title by hand.
 
 export const MAX_DERIVED_TITLE = 60
 
@@ -31,3 +34,19 @@ export const deriveCardFields = (raw: string): DerivedCardFields => {
  *  or a clipped first line — a short single line IS already its own title. */
 export const wantsAutoTitle = (fields: DerivedCardFields): boolean =>
   fields.notes !== undefined
+
+/** A provisional title from free content WITHOUT consuming it — the content
+ *  stays whole (unlike {@link deriveCardFields}, which splits the first line
+ *  off into the title and keeps only the rest as notes). The content-first
+ *  drawer has no title field, so Run derives this stopgap heading from the
+ *  first non-empty line (clipped to {@link MAX_DERIVED_TITLE}) to satisfy the
+ *  server's title-required prompt contract; the haiku pass refines it after
+ *  launch (both stay `titleAuto` until the user edits by hand). Empty content
+ *  yields an empty string (the caller blocks the launch / skips persisting). */
+export const provisionalTitle = (content: string): string => {
+  const text = content.replace(/\r\n/g, '\n').trim()
+  if (!text) return ''
+  const nl = text.indexOf('\n')
+  const first = (nl === -1 ? text : text.slice(0, nl)).trim()
+  return first.length <= MAX_DERIVED_TITLE ? first : first.slice(0, MAX_DERIVED_TITLE)
+}

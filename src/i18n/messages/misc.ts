@@ -24,6 +24,7 @@ export const misc = {
     'misc.empty.cliMissing':
       "The claude CLI wasn't found. OPEN GROUND runs your local Claude Code CLI — install it and sign in with an active Claude subscription before a run.",
     'misc.empty.cliNote': 'Needs the local claude CLI, signed in with a Claude subscription.',
+    'misc.empty.manual': 'New here? Read the manual',
     // ProjectCard
     // ProjectCanvas
     // Ground-level project actions (App.tsx confirm/alert dialogs)
@@ -55,6 +56,7 @@ export const misc = {
     'misc.empty.cliMissing':
       'claude CLI が見つかりませんでした。OPEN GROUND はお使いのローカル Claude Code CLI を動かします。実行前にインストールし、有効な Claude サブスクリプションでサインインしてください。',
     'misc.empty.cliNote': 'ローカルの claude CLI（Claude サブスクでサインイン済み）が必要です。',
+    'misc.empty.manual': 'はじめて？ マニュアルを読む',
     // ProjectCard
     // ProjectCanvas
     // Ground-level project actions (App.tsx confirm/alert dialogs)

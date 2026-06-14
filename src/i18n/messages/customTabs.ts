@@ -8,6 +8,7 @@ export const customTabs = {
     'customTabs.addTabHint': 'Add a custom tab to this project (pick from your library or create one)',
     'customTabs.market': 'Market',
     'customTabs.marketHint': 'Browse and install published custom tabs',
+    'customTabs.marketBrowse': 'Browse the marketplace',
     // "+" picker dialog (per-project attachment)
     'customTabs.pickerLabel': 'Custom tabs',
     'customTabs.pickerTitle': 'Add a tab to this project',
@@ -67,6 +68,7 @@ export const customTabs = {
     'customTabs.addTabHint': 'このプロジェクトにカスタムタブを追加（ライブラリから選ぶ・新規作成）',
     'customTabs.market': 'マーケット',
     'customTabs.marketHint': '公開されたカスタムタブを見る・インストールする',
+    'customTabs.marketBrowse': 'マーケットで探す',
     // "+" picker dialog (per-project attachment)
     'customTabs.pickerLabel': 'カスタムタブ',
     'customTabs.pickerTitle': 'このプロジェクトにタブを追加',

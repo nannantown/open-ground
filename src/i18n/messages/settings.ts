@@ -41,6 +41,7 @@ export const settings = {
     'settings.inbox.empty': 'No feedback yet. Submissions show up here, newest first.',
     'settings.inbox.error': "Couldn't load feedback. Is Supabase reachable?",
     'settings.inbox.truncated': 'Showing the newest 200. Older feedback lives in the Supabase table editor.',
+    'settings.inbox.imageAlt': 'Attached image',
   } as Record<string, string>,
   ja: {
     'settings.eyebrow': '環境設定',
@@ -69,5 +70,6 @@ export const settings = {
     'settings.inbox.empty': 'まだフィードバックはありません。届くと新しい順にここに表示されます。',
     'settings.inbox.error': 'フィードバックを読み込めませんでした。Supabase に到達できますか？',
     'settings.inbox.truncated': '新しい順に200件まで表示しています。それ以前は Supabase のテーブルエディタで確認できます。',
+    'settings.inbox.imageAlt': '添付画像',
   } as Record<string, string>,
 }

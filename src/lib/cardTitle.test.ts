@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { deriveCardFields, wantsAutoTitle, MAX_DERIVED_TITLE } from './cardTitle'
+import {
+  deriveCardFields,
+  wantsAutoTitle,
+  provisionalTitle,
+  MAX_DERIVED_TITLE,
+} from './cardTitle'
 
 describe('deriveCardFields', () => {
   it('single short line: title only, no notes', () => {
@@ -37,5 +42,33 @@ describe('wantsAutoTitle', () => {
     expect(wantsAutoTitle(deriveCardFields('Just one line'))).toBe(false)
     expect(wantsAutoTitle(deriveCardFields('Line one\nline two'))).toBe(true)
     expect(wantsAutoTitle(deriveCardFields('y'.repeat(100)))).toBe(true)
+  })
+})
+
+describe('provisionalTitle', () => {
+  it('takes the first non-empty line WITHOUT consuming the content', () => {
+    // Unlike deriveCardFields, the body is not returned — the caller keeps the
+    // whole content as notes; this only yields a stopgap heading.
+    expect(provisionalTitle('Add the login button\nand wire it to /auth')).toBe(
+      'Add the login button',
+    )
+  })
+
+  it('single line', () => {
+    expect(provisionalTitle('Just one line')).toBe('Just one line')
+  })
+
+  it('clips an over-long first line to MAX_DERIVED_TITLE', () => {
+    const long = 'z'.repeat(100)
+    expect(provisionalTitle(long)).toBe('z'.repeat(MAX_DERIVED_TITLE))
+  })
+
+  it('normalizes CRLF and trims leading blank lines', () => {
+    expect(provisionalTitle('\r\n  First\r\nsecond')).toBe('First')
+  })
+
+  it('empty / blank content yields an empty string', () => {
+    expect(provisionalTitle('')).toBe('')
+    expect(provisionalTitle('   \n  ')).toBe('')
   })
 })

@@ -16,7 +16,15 @@ import {
   insertIntoLayoutAtPoint,
   type LayoutDropPreview,
 } from '@/lib/canvasAutoLayout'
-import { textFootprintPatch, isLayoutManagedText } from '@/lib/canvasTextMeasure'
+import {
+  textBox,
+  textMeasurePatch,
+  textSizingOf,
+  convertSizing,
+  resizeOutcome,
+  type TextSizing,
+} from '@/lib/canvasTextSizing'
+import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
 import { cloneSubset } from '@/lib/canvasClone'
 import type {
@@ -59,6 +67,7 @@ import {
   resizeAnchor,
   cursorForHandle,
   CORNER_HANDLES,
+  RESIZE_HANDLES,
   type ResizeHandle,
 } from '@/lib/canvasTransform'
 import { rotateCursor } from '@/lib/canvasCursors'
@@ -158,6 +167,10 @@ const FRAME_DEFAULT_H = 260
 const SHAPE_MIN_DRAG = 12
 const RESIZE_MIN_W = 130
 const RESIZE_MIN_H = 96
+// Text resizes to a far smaller floor than the box types above (a one-word
+// label is happily narrow): width never below TEXT_MIN_DRAG, height never below
+// a single line (computed per element from its font metrics, see textResizeMin).
+const TEXT_MIN_DRAG = 24
 const STICKY_DEFAULT = 208
 const MOCK_DEFAULT_W = 420
 const MOCK_DEFAULT_H = 320
@@ -209,6 +222,57 @@ const COMMENT_CURSOR = `url("data:image/svg+xml;utf8,${encodeURIComponent(COMMEN
 
 // The rotate annulus may claim only the bare canvas (no element owns it).
 const EMPTY_IDS: ReadonlySet<string> = new Set()
+
+// Which resize handles a TEXT element shows, per sizing mode (Figma parity):
+//   auto-width  → side L/R only (the iconic two-handle auto-width text);
+//   auto-height → side L/R + the 4 corners (re-width, or grab a corner → fixed);
+//   fixed       → all 8 (corners + edges), a plain resizable box.
+// The renderer draws a square at each of these, and the press/cursor hit-tests
+// filter `hitHandle`'s result to this set so a hidden handle never grabs.
+// Exported so the creation/resize wiring can be unit-tested without the React
+// component (the heavy mode math itself lives in canvasTextSizing).
+export const TEXT_HANDLES: Record<TextSizing, ReadonlySet<ResizeHandle>> = {
+  'auto-width': new Set<ResizeHandle>(['l', 'r']),
+  'auto-height': new Set<ResizeHandle>(['l', 'r', 'tl', 'tr', 'br', 'bl']),
+  fixed: new Set<ResizeHandle>(['l', 'r', 't', 'b', 'tl', 'tr', 'br', 'bl']),
+}
+
+// A resize handle maps to the mode-transition class `resizeOutcome` consumes:
+// a side L/R drag is horizontal (re-width), top/bottom is vertical, anything
+// diagonal is a corner. Both vertical and corner promote a text to `fixed`.
+export const handleKind = (h: ResizeHandle): 'horizontal' | 'vertical' | 'corner' =>
+  h === 'l' || h === 'r'
+    ? 'horizontal'
+    : h === 't' || h === 'b'
+      ? 'vertical'
+      : 'corner'
+
+// The smallest box a text resize may produce: width floors at TEXT_MIN_DRAG, and
+// height at one rendered line (so a fixed box can't clip its own first line).
+// Reads the element's resolved font metrics so the floor scales with font size.
+export const textResizeMin = (el: CanvasElement): { w: number; h: number } => {
+  const { fontSize, lineHeight } = resolveTextStyle(el)
+  return { w: TEXT_MIN_DRAG, h: Math.max(TEXT_MIN_DRAG, Math.ceil(fontSize * lineHeight)) }
+}
+
+// Collapse a text one step toward auto on a resize-handle double-click (Figma):
+// fixed → auto-height (keep the authoritative width, height re-measures);
+// auto-height → auto-width (both axes re-measure). auto-width has nowhere left
+// to go, so it returns null (no-op).
+export const collapseSizingTarget = (mode: TextSizing): TextSizing | null =>
+  mode === 'fixed' ? 'auto-height' : mode === 'auto-height' ? 'auto-width' : null
+
+// The text-tool creation gesture's shaping decision: a box-drag ≥ TEXT_MIN_DRAG
+// wide creates an auto-height text that wide (width authoritative, clamped to
+// the floor and rounded); a smaller drag / plain click (`dragWidth === null`)
+// creates an auto-width text that hugs its content (no explicit width, sizing
+// left undefined = auto-width). The component applies this to the new element.
+export const textCreateSpec = (
+  dragWidth: number | null,
+): { textSizing?: TextSizing; width?: number } =>
+  dragWidth !== null && dragWidth >= TEXT_MIN_DRAG
+    ? { textSizing: 'auto-height', width: Math.max(TEXT_MIN_DRAG, Math.round(dragWidth)) }
+    : {}
 
 // Snapshot taken when a cancellable gesture starts: Esc mid-drag restores
 // exactly this (the canvas refs are immutable-update objects, so holding the
@@ -278,7 +342,7 @@ type Press =
   //             accumulate `offset`; null when not currently repositioning.
   | {
       kind: 'draw'
-      what: 'frame' | 'rect' | 'ellipse'
+      what: 'frame' | 'rect' | 'ellipse' | 'text'
       sx: number
       sy: number
       offset: { x: number; y: number }
@@ -441,6 +505,10 @@ export const InfiniteCanvas = ({
   const prevEditing = useRef<string | null>(null)
   // Last click that landed on a card/element/frame — used to pair double-clicks.
   const lastClick = useRef<{ id: string; t: number } | null>(null)
+  // Last press that landed on a TEXT element's resize handle — pairs a
+  // double-click on the same handle, which collapses the text one step toward
+  // auto (fixed → auto-height → auto-width) via convertSizing.
+  const lastHandleClick = useRef<{ id: string; handle: ResizeHandle; t: number } | null>(null)
   // Last hover id reported to onHoverElement — report only on change.
   const lastHoverRef = useRef<string | null>(null)
 
@@ -556,15 +624,15 @@ export const InfiniteCanvas = ({
   // handles are separate overlays that would otherwise defeat the lock.
   const isManipulable = (el: CanvasElement) => !el.locked && !lockedViaGroup.has(el.id)
 
-  // The lone selected sticky/frame/mock gets a corner resize handle. Text
-  // elements size themselves from their content; comments are fixed-size
-  // pins by design (resizing a pin makes no UX sense).
+  // The lone selected sticky/frame/mock/text gets resize handles. Text shows a
+  // per-mode subset (see TEXT_HANDLES) — dragging promotes its sizing mode the
+  // Figma way; comments are fixed-size pins by design (resizing a pin makes no
+  // UX sense), so they stay excluded.
   const resizeTarget =
     tool === 'select' && selectedIds.length === 1 && !editingId
       ? elements.find(
           (el) =>
             el.id === selectedIds[0] &&
-            el.type !== 'text' &&
             el.type !== 'comment' &&
             isManipulable(el),
         ) ?? null
@@ -1319,7 +1387,8 @@ export const InfiniteCanvas = ({
       return { x: el.x, y: el.y, w: el.width ?? 0, h: el.height ?? 0 }
     }
     if (el.type === 'text') {
-      return { x: el.x, y: el.y, w: TEXT_W, h: TEXT_H }
+      const { w, h } = textBox(el)
+      return { x: el.x, y: el.y, w, h }
     }
     return null
   }
@@ -1356,7 +1425,25 @@ export const InfiniteCanvas = ({
     return best?.id
   }
 
-  const createNote = (type: 'text' | 'sticky' | 'comment', e: React.PointerEvent) => {
+  // Insert a freshly-built note/text element, settle auto layout, then select +
+  // edit it and drop back to the Select tool — the shared tail of createNote /
+  // createText. `point` is where the flow-slot membership is resolved (the
+  // click / box top-left). `edit` skips the editor for elements with no inline
+  // text (none today — both callers edit).
+  const placeNewElement = (el: CanvasElement, point: { x: number; y: number }) => {
+    const c = canvasRef.current
+    // A note created ON a layout frame joins its flow at the slot under the
+    // point (insertIntoLayoutAtPoint parents + splices; comments are excluded
+    // inside the helper). Elsewhere it's a plain append — with any container
+    // parentId already resolved on `el` — and applyAutoLayout settles the stack.
+    const ins = insertIntoLayoutAtPoint(c.elements, el, point)
+    onCanvasChange({ ...c, elements: applyAutoLayout(ins.elements) })
+    setEditingId(el.id)
+    onSelect(el.id)
+    onToolChange('select')
+  }
+
+  const createNote = (type: 'sticky' | 'comment', e: React.PointerEvent) => {
     const w = worldFromEvent(e)
     let el: CanvasElement
     if (type === 'sticky') {
@@ -1369,7 +1456,7 @@ export const InfiniteCanvas = ({
         height: STICKY_DEFAULT,
         text: '',
       }
-    } else if (type === 'comment') {
+    } else {
       // The pin's bottom-left "tip" should land exactly on the click point,
       // so shift the element up by its full height. Anchor binds to whatever
       // commentable element is under the click — Claude will reference it
@@ -1385,31 +1472,42 @@ export const InfiniteCanvas = ({
         text: '',
         ...(anchorId ? { anchorId } : {}),
       }
-    } else {
-      el = { id: newId(), type, x: w.x, y: w.y, text: '' }
-      // A text dropped on top of a design (mock/screen) — or inside a frame —
-      // anchors to it straight away, so "type text on top of a generated design"
-      // works without first nudging the label. Same containment rule as a drag.
-      if (type === 'text') {
-        const parentId = resolveContainerId(
-          el.id,
-          'text',
-          { x: w.x, y: w.y, w: TEXT_W, h: TEXT_H },
-          containerList(canvasRef.current.elements),
-        )
-        if (parentId) el.parentId = parentId
-      }
     }
-    const c = canvasRef.current
-    // A note created ON a layout frame joins its flow at the slot under the
-    // click (insertIntoLayoutAtPoint parents + splices; comments are excluded
-    // inside the helper). Elsewhere it's a plain append — with the container
-    // parentId resolved above — and applyAutoLayout settles the stack.
-    const ins = insertIntoLayoutAtPoint(c.elements, el, { x: w.x, y: w.y })
-    onCanvasChange({ ...c, elements: applyAutoLayout(ins.elements) })
-    setEditingId(el.id)
-    onSelect(el.id)
-    onToolChange('select')
+    placeNewElement(el, { x: w.x, y: w.y })
+  }
+
+  // Text-tool creation (gesture in onViewportPointerUp's draw branch):
+  //   - `dragWidth === null` (a click) → an auto-width text at `point` that
+  //     hugs its content as the user types (textSizing left undefined);
+  //   - `dragWidth` set (a box-drag) → an auto-height text `dragWidth` wide at
+  //     the box's top-left, which wraps and grows downward (Figma's drag-create).
+  // Both anchor into a design/frame under the point and open the editor.
+  const createText = (point: { x: number; y: number }, dragWidth: number | null) => {
+    const id = newId()
+    // textCreateSpec turns the drag width into the sizing fields: a wide-enough
+    // drag → auto-height + authoritative width; a click / tiny drag → auto-width
+    // (no width, sizing undefined). Position is decided by the caller (box
+    // top-left for a drag, the click anchor otherwise).
+    const el: CanvasElement = {
+      id,
+      type: 'text',
+      x: point.x,
+      y: point.y,
+      text: '',
+      ...textCreateSpec(dragWidth),
+    }
+    // A text dropped on top of a design (mock/screen) — or inside a frame —
+    // anchors to it straight away, so "type text on top of a generated design"
+    // works without first nudging the label. Probe with the box it will occupy:
+    // the drag width when sized, else the legacy pre-measure default.
+    const parentId = resolveContainerId(
+      id,
+      'text',
+      { x: point.x, y: point.y, w: dragWidth ?? TEXT_W, h: TEXT_H },
+      containerList(canvasRef.current.elements),
+    )
+    if (parentId) el.parentId = parentId
+    placeNewElement(el, point)
   }
 
   // Backs the Image tool's hidden file picker: drop each chosen image at the
@@ -1448,7 +1546,10 @@ export const InfiniteCanvas = ({
       startPan(e)
       return
     }
-    if (tool === 'text' || tool === 'sticky' || tool === 'comment') {
+    // Sticky / comment drop on click. Text instead starts a click-drag gesture
+    // (handled by the draw branch below): a plain click → auto-width text, a
+    // box-drag → auto-height text the drag's width wide. Figma's text tool.
+    if (tool === 'sticky' || tool === 'comment') {
       createNote(tool, e)
       return
     }
@@ -1469,9 +1570,10 @@ export const InfiniteCanvas = ({
       }
       return
     }
-    // Frame + shape tools share one click-drag-to-size gesture (the frame tool
-    // is the precedent). `what` carries which the drag will create on pointer-up.
-    if (tool === 'frame' || tool === 'rect' || tool === 'ellipse') {
+    // Frame + shape + text tools share one click-drag-to-size gesture (the
+    // frame tool is the precedent). `what` carries which the drag will create
+    // on pointer-up; for text a too-small drag collapses to a click (auto-width).
+    if (tool === 'frame' || tool === 'rect' || tool === 'ellipse' || tool === 'text') {
       const w = worldFromEvent(e)
       press.current = {
         kind: 'draw',
@@ -1828,8 +1930,38 @@ export const InfiniteCanvas = ({
     const b = fullBounds(target)
     const rot = normalizeRotation(target.rotation ?? 0) // NaN-safe (guards bad JSON)
     if (resizeTarget) {
-      const handle = hitHandle(b, rot, w, zoom)
+      let handle = hitHandle(b, rot, w, zoom)
+      // Text shows only its mode's handle subset (TEXT_HANDLES) — a grab on any
+      // other handle position is ignored so a hidden grip can't resize.
+      if (handle && resizeTarget.type === 'text') {
+        if (!TEXT_HANDLES[textSizingOf(resizeTarget)].has(handle)) handle = null
+      }
       if (handle && chromeAllowsTarget(e, b, rot, new Set([resizeTarget.id]), w)) {
+        // Double-click on a text resize handle collapses the sizing one step
+        // toward auto (fixed → auto-height → auto-width), keeping the box put
+        // via convertSizing — Figma's "double-click to hug". Consumes the press
+        // (no resize starts).
+        if (resizeTarget.type === 'text') {
+          const now = Date.now()
+          const lh = lastHandleClick.current
+          if (lh && lh.id === resizeTarget.id && lh.handle === handle && now - lh.t < DOUBLE_CLICK_MS) {
+            lastHandleClick.current = null
+            const to = collapseSizingTarget(textSizingOf(resizeTarget))
+            if (to) {
+              e.stopPropagation()
+              const c = canvasRef.current
+              const patch = convertSizing(resizeTarget, to, textBox(resizeTarget))
+              onCanvasChange({
+                ...c,
+                elements: c.elements.map((el) =>
+                  el.id === resizeTarget.id ? { ...el, ...patch } : el,
+                ),
+              })
+              return
+            }
+          }
+          lastHandleClick.current = { id: resizeTarget.id, handle, t: now }
+        }
         const hp = handlePoints(b, rot)[handle]
         press.current = {
           kind: 'resize',
@@ -1895,7 +2027,12 @@ export const InfiniteCanvas = ({
         if (target) {
           const b = fullBounds(target)
           const rot = normalizeRotation(target.rotation ?? 0)
-          const handle = resizeTarget ? hitHandle(b, rot, w, zoom) : null
+          let handle = resizeTarget ? hitHandle(b, rot, w, zoom) : null
+          // Text only exposes its mode's handle subset — keep the cursor in
+          // sync so a hidden grip position shows no resize arrow.
+          if (handle && resizeTarget?.type === 'text') {
+            if (!TEXT_HANDLES[textSizingOf(resizeTarget)].has(handle)) handle = null
+          }
           if (handle && chromeAllowsTarget(e, b, rot, new Set([target.id]), w)) {
             next = cursorForHandle(handle, rot)
           } else if (rotateTarget) {
@@ -2035,9 +2172,16 @@ export const InfiniteCanvas = ({
       // for a rotated element on any of the 8 handles. Shift (aspect lock) and
       // Alt (scale about the centre) read live so they can toggle mid-drag.
       const pw = worldFromEvent(e)
+      // Text resizes to a much smaller floor than the box types (a one-word
+      // label is happily narrow); everything else uses the shared box floors.
+      const resizing = c.elements.find((el) => el.id === p.id)
+      const mins =
+        resizing?.type === 'text'
+          ? textResizeMin(resizing)
+          : { w: RESIZE_MIN_W, h: RESIZE_MIN_H }
       const next = resizeFromHandle(p.box, p.rot, p.handle, pw, {
-        minW: RESIZE_MIN_W,
-        minH: RESIZE_MIN_H,
+        minW: mins.w,
+        minH: mins.h,
         aspect: e.shiftKey,
         fromCenter: e.altKey,
         grabOffset: { x: p.gx, y: p.gy },
@@ -2383,6 +2527,26 @@ export const InfiniteCanvas = ({
             next = { ...next, width: Math.round(next.width) }
           if (next.height !== undefined && !Number.isInteger(next.height))
             next = { ...next, height: Math.round(next.height) }
+          // Text: the drag promotes the sizing mode the Figma way — a side
+          // (horizontal) drag makes the width authoritative (→ auto-height), a
+          // vertical / corner drag fixes both axes (→ fixed). resizeOutcome owns
+          // that mapping; apply it only when the box actually moved (a pure
+          // click on a handle must not silently flip the mode). The next
+          // ResizeObserver pass corrects whichever axes the new mode measures.
+          if (next.type === 'text') {
+            const w = next.width ?? p.box.w
+            const h = next.height ?? p.box.h
+            if (w !== p.box.w || h !== p.box.h) {
+              const out = resizeOutcome(textSizingOf(next), handleKind(p.handle), w, h)
+              next = {
+                ...next,
+                textSizing: out.textSizing,
+                width: out.width,
+                ...(out.height !== undefined ? { height: out.height } : {}),
+              }
+            }
+            return next
+          }
           if (next.type !== 'frame' || !next.layout) return next
           const row = next.layout.mode === 'row'
           const wChanged = (next.width ?? p.box.w) !== p.box.w
@@ -2448,6 +2612,9 @@ export const InfiniteCanvas = ({
               lockedForMarquee.has(el.id)
             )
               continue
+            // Text reads its persisted measured/authoritative box (textBox);
+            // every other type falls back to its per-type default size.
+            const tb = el.type === 'text' ? textBox(el) : null
             const ew =
               el.type === 'sticky' || el.type === 'mock'
                 ? el.width ?? (el.type === 'mock' ? MOCK_DEFAULT_W : STICKY_DEFAULT)
@@ -2455,7 +2622,7 @@ export const InfiniteCanvas = ({
                   ? el.width ?? SHAPE_DEFAULT_W
                   : el.type === 'comment'
                     ? COMMENT_W
-                    : TEXT_W
+                    : tb?.w ?? TEXT_W
             const eh =
               el.type === 'sticky' || el.type === 'mock'
                 ? el.height ?? (el.type === 'mock' ? MOCK_DEFAULT_H : STICKY_DEFAULT)
@@ -2463,7 +2630,7 @@ export const InfiniteCanvas = ({
                   ? el.height ?? SHAPE_DEFAULT_H
                   : el.type === 'comment'
                     ? COMMENT_H
-                    : TEXT_H
+                    : tb?.h ?? TEXT_H
             if (overlaps(el.x, el.y, ew, eh)) hit.push(el.id)
           }
           // A marquee that grazes any group member pulls in the whole group, so
@@ -2490,7 +2657,16 @@ export const InfiniteCanvas = ({
         const anchorY = p.sy + p.offset.y
         const id = newId()
         const c = canvasRef.current
-        if (p.what === 'frame') {
+        if (p.what === 'text') {
+          // Text: a real box-drag (≥ TEXT_MIN_DRAG wide) creates an auto-height
+          // text the drag's width wide at the box's top-left; a tiny drag /
+          // plain click collapses to an auto-width text at the anchor. createText
+          // owns the selection + editor + tool reset (the trailing onSelect /
+          // onToolChange below is skipped for text — its id is `id` above but the
+          // real element id is minted inside createText).
+          if (box.w >= TEXT_MIN_DRAG) createText({ x: box.x, y: box.y }, box.w)
+          else createText({ x: anchorX, y: anchorY }, null)
+        } else if (p.what === 'frame') {
           // A real drag sizes the frame; a plain click drops a default frame.
           const sized = box.w >= FRAME_MIN_W && box.h >= FRAME_MIN_H
           const fw = sized ? box.w : FRAME_DEFAULT_W
@@ -2562,8 +2738,12 @@ export const InfiniteCanvas = ({
           )
           onCanvasChange({ ...c, elements: applyAutoLayout(ins.elements) })
         }
-        onSelect(id)
-        onToolChange('select')
+        // Frame / shape select the box they just created and drop back to
+        // Select; text already did both inside createText (its `id` differs).
+        if (p.what !== 'text') {
+          onSelect(id)
+          onToolChange('select')
+        }
         setDraw(null)
       }
     }
@@ -2693,7 +2873,10 @@ export const InfiniteCanvas = ({
   // Full bounding box for hit-testing any element type (anchorAt/elementBounds
   // intentionally cover only commentable types).
   const fullBounds = (el: CanvasElement) => {
-    if (el.type === 'text') return { x: el.x, y: el.y, w: TEXT_W, h: TEXT_H }
+    if (el.type === 'text') {
+      const { w, h } = textBox(el)
+      return { x: el.x, y: el.y, w, h }
+    }
     if (el.type === 'comment') return { x: el.x, y: el.y, w: COMMENT_W, h: COMMENT_H }
     // A shape is a plain axis-aligned rect (an ellipse uses its bounding box for
     // hit-testing), so its width/height are its bounds directly.
@@ -3037,25 +3220,19 @@ export const InfiniteCanvas = ({
     return parts.length ? parts.join(' ') : undefined
   }
 
-  // Texts managed by a layout frame persist their MEASURED render box (the
-  // ResizeObserver in ElementView → onTextMeasured below) so the flow's
-  // footprint tracks the real text instead of the 300×44 default — growing
-  // text pushes its flow siblings. Free texts never write a size.
-  const measuredTextIds = (() => {
-    const out = new Set<string>()
-    const byIdAll = new Map(elements.map((e) => [e.id, e]))
-    for (const el of elements) {
-      if (el.type !== 'text' || !el.parentId || el.hidden || el.locked) continue
-      const parent = byIdAll.get(el.parentId)
-      if (parent?.type === 'frame' && parent.layout) out.add(el.id)
-    }
-    return out
-  })()
+  // EVERY text persists its measured footprint (the ResizeObserver in
+  // ElementView → onTextMeasured below), so the bounds consumers (textBox)
+  // read the real glyph box instead of the 300×44 default — a selection hugs
+  // the text, and a growing layout-frame text pushes its flow siblings.
+  // `textMeasurePatch` writes only the axes the element's mode MEASURES
+  // (auto-width: both; auto-height: height; fixed: none), so a measurement can
+  // never clobber a user-set width/height.
+  const onMeasureEligible = (el: CanvasElement): boolean =>
+    el.type === 'text' && !el.hidden && !el.locked
 
-  // Persist a layout text's measured box. textFootprintPatch writes only on a
-  // ≥1px change (and never on a 0-size readout), so the observer can't
-  // ping-pong with the engine; the parent gate is re-checked at flush because
-  // the observation can race a reparent. The browser delivers ALL ResizeObserver
+  // Persist a text's measured box. textMeasurePatch quantises to 2px and writes
+  // only on a real change (never a 0-size readout), so the observer can't
+  // ping-pong with the engine. The browser delivers ALL ResizeObserver
   // callbacks of a rendering step back-to-back while canvasRef only refreshes
   // on render — so a burst (several texts measured on mount) is collected and
   // flushed as ONE onCanvasChange, or the later write would clobber the
@@ -3070,11 +3247,21 @@ export const InfiniteCanvas = ({
       queueMicrotask(() => {
         pendingMeasuresRef.current = null
         const c = canvasRef.current
+        // A resize drag in flight OWNS the box it's dragging: an auto-width
+        // text whose side handle is being widened keeps reporting its content
+        // width to the observer, which would otherwise fight the drag by
+        // writing the width straight back. Skip the dragged id until release —
+        // the mode flip on release then re-admits the measured axes.
+        const p = press.current
+        const draggingId = p && p.kind === 'resize' ? p.id : null
         let next = c.elements
         batch.forEach((m, tid) => {
-          if (!isLayoutManagedText(next, tid)) return
-          const el = next.find((x) => x.id === tid)!
-          const patch = textFootprintPatch(el, m.w, m.h)
+          if (tid === draggingId) return
+          const el = next.find((x) => x.id === tid)
+          // Re-check at flush: the observation can race a delete / lock / type
+          // change. textMeasurePatch returns only the mode's measured axes.
+          if (!el || el.type !== 'text' || el.hidden || el.locked) return
+          const patch = textMeasurePatch(el, m.w, m.h)
           if (!patch) return
           next = next.map((x) => (x.id === tid ? { ...x, ...patch } : x))
         })
@@ -3327,7 +3514,7 @@ export const InfiniteCanvas = ({
               canvasId={canvasId}
               commentTool={commentCursor}
               onMeasure={
-                measuredTextIds.has(el.id)
+                onMeasureEligible(el)
                   ? (w, h) => onTextMeasured(el.id, w, h)
                   : undefined
               }
@@ -3557,12 +3744,14 @@ export const InfiniteCanvas = ({
           />
         )}
 
-        {/* Selection chrome — 4 corner squares (8px screen-fixed) on the lone
-            selection's rotated box, or on the multi-selection bbox. Visuals
-            only: presses route through onChromePointerDown (capture) and the
-            hover cursor through updateChromeCursor, both against the same pure
-            geometry — the EDGE bands and the outside-corner rotate zones render
-            nothing at all. */}
+        {/* Selection chrome — corner squares (8px screen-fixed) on the lone
+            selection's rotated box, or on the multi-selection bbox. A lone TEXT
+            additionally shows its mode's SIDE handles (TEXT_HANDLES) so the
+            iconic two-handle auto-width grip / wrapping handles are visible.
+            Visuals only: presses route through onChromePointerDown (capture) and
+            the hover cursor through updateChromeCursor, both against the same
+            pure geometry — non-rendered handle positions still resize where the
+            mode allows. */}
         {(() => {
           const chrome = groupBox
             ? { box: groupBox, rot: 0 }
@@ -3578,7 +3767,13 @@ export const InfiniteCanvas = ({
             chrome.rot,
           )
           const size = 8 / viewport.zoom
-          return CORNER_HANDLES.map((h) => (
+          // Text draws exactly the handles its mode exposes; everything else
+          // keeps the 4-corner chrome (edges resize but render no square).
+          const handles =
+            !groupBox && resizeTarget?.type === 'text'
+              ? RESIZE_HANDLES.filter((h) => TEXT_HANDLES[textSizingOf(resizeTarget)].has(h))
+              : CORNER_HANDLES
+          return handles.map((h) => (
             <div
               key={`chrome-${h}`}
               data-handle={h}

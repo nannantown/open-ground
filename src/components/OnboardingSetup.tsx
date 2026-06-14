@@ -22,7 +22,6 @@ const INSTALL = {
   brew: 'brew install --cask claude-code',
   npm: 'npm install -g @anthropic-ai/claude-code',
 } as const
-const SIGNIN_CMD = 'claude'
 const DOCS_URL = 'https://code.claude.com/docs/en/setup'
 type Method = keyof typeof INSTALL
 const METHODS: Method[] = ['installer', 'brew', 'npm']
@@ -77,7 +76,6 @@ export function OnboardingSetup({
     termRef.current?.sendText(INSTALL[method] + '\r')
     setInstallRan(true)
   }
-  const runSignin = () => termRef.current?.sendText(SIGNIN_CMD + '\r')
   const copyCmd = () => {
     void navigator.clipboard?.writeText(INSTALL[method])
     setCopied(true)
@@ -185,12 +183,11 @@ export function OnboardingSetup({
             ) : null}
           </Step>
 
-          {/* 3 — sign in */}
+          {/* 3 — sign in: claude owns its own login. We do NOT drive it from the
+              app — the CLI prompts on first use (in a Board/Terminal session) and
+              persists the result itself. Onboarding only sets expectations. */}
           <Step n={3} title={t('onboarding.setup.step.signin')} dim={!installed}>
-            <button type="button" className={ghostBtn} onClick={runSignin} disabled={!installed}>
-              {t('onboarding.setup.runSignin')}
-            </button>
-            <p className="mt-2 text-[12px] leading-relaxed text-ink-subtle">{t('onboarding.setup.signinHint')}</p>
+            <p className="text-[12px] leading-relaxed text-ink-subtle">{t('onboarding.setup.signinHint')}</p>
           </Step>
         </div>
 

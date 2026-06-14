@@ -3,7 +3,7 @@
 # Triggered by pushing a tag like `v1.2.3` (or run manually via workflow_dispatch).
 # Two platforms build in parallel and publish to the SAME GitHub Release:
 #   - macOS (macos-14, arm64): .dmg, code-signed + notarized
-#   - Windows (windows-latest): .exe (NSIS), UNSIGNED (no Windows code-signing cert)
+#   - Windows (windows-2022): .exe (NSIS), UNSIGNED (no Windows code-signing cert)
 #
 # Required repo Secrets (Settings → Secrets and variables → Actions):
 #   CSC_LINK                      base64 of the Developer ID .p12 certificate
@@ -40,7 +40,11 @@ jobs:
         include:
           - os: macos-14
             platform: mac
-          - os: windows-latest
+          # Pinned: `windows-latest` now redirects to the VS2026 image, which
+          # node-gyp/node-pty's native rebuild can't find/use ("Could not find
+          # any Visual Studio installation"). windows-2022 ships VS2022 C++ —
+          # the known-good toolchain (what shipped v0.6.0–v0.8.0).
+          - os: windows-2022
             platform: win
     runs-on: ${{ matrix.os }}
     steps:

@@ -53,16 +53,13 @@ export const board = {
     'board.card.ariaLabel': '{title} — {column}. Press Enter to open',
     // Composer
     'board.composer.placeholder': '＋ Add a card',
-    // Detail drawer
-    'board.detail.titleLabel': 'Title',
+    // Detail drawer. titlePlaceholder is kept — BoardTab's inline card editor
+    // still uses it (the drawer's own title field is gone; the title is auto).
     'board.detail.titlePlaceholder': 'What this task is',
     'board.detail.notesLabel': 'Content',
-    'board.detail.notesPlaceholder': 'What this task should do — "Insert task into input" pastes it into claude together with the title',
-    // Image attachments (B022)
-    'board.detail.attachmentsLabel': 'Images',
-    'board.detail.attachAdd': '+ Add image',
-    'board.detail.attachAddTitle':
-      'Attach a screenshot — you can also paste or drop an image on the content field. "Insert task into input" hands the file paths to claude.',
+    'board.detail.notesPlaceholder':
+      'What should this task do?\nDrop or paste an image to attach it. The title is generated for you when you run.',
+    // Image attachments (B022) — paste/drop only now (no picker button).
     'board.detail.attachBusy': 'Attaching…',
     'board.detail.attachRemove': 'Remove image',
     'board.detail.attachTooLarge': 'Image is too large (max 5MB)',
@@ -86,14 +83,12 @@ export const board = {
     'board.detail.resizeSplit': 'Drag to resize the terminal height',
     'board.detail.resizeSplitTitle': 'Drag to resize · double-click to maximize the terminal',
     'board.detail.prLabel': 'Pull request',
-    'board.detail.captureLabel': 'Task',
-    'board.detail.capturePlaceholder':
-      'What should be done?\nThe first line becomes the title — long text gets an AI summary title (✦).\nFor a smooth run, say: what to change, why, and what "done" looks like.',
+    'board.detail.optionsLabel': 'Options',
     'board.run.button': 'Run',
     'board.run.buttonBusy': 'Starting…',
     'board.run.buttonTitle':
       'Launch a claude session and start this task right away (the prompt is sent for you)',
-    'board.run.needsTitle': 'Add a title to run this task.',
+    'board.run.needsContent': 'Write what to do to run this task.',
     'board.run.hint': 'Run opens the terminal and starts this task automatically.',
     'board.run.missingFolder':
       'The project folder is missing — claude can’t start until it’s relocated.',
@@ -101,6 +96,7 @@ export const board = {
       'Couldn’t start claude. Make sure the claude CLI is installed and on your PATH (run `claude` in a terminal to check), then run again.',
     'board.run.failedClaudeMissing':
       'The claude CLI was not found on this machine — install Claude Code and sign in, then restart OPEN GROUND and run again.',
+    'board.run.settingsLabel': 'Run settings',
     'board.run.flowLabel': 'On finish',
     'board.run.flowMerge': 'Merge',
     'board.run.flowPr': 'Open a PR',
@@ -212,16 +208,13 @@ export const board = {
     'board.card.ariaLabel': '{title} — {column}。Enter で開く',
     // Composer
     'board.composer.placeholder': '＋ カードを追加',
-    // Detail drawer
-    'board.detail.titleLabel': 'タイトル',
+    // Detail drawer. titlePlaceholder は BoardTab のインライン編集が今も使う
+    // ため残す（ドロワー自体のタイトル欄は廃止＝タイトルは自動生成）。
     'board.detail.titlePlaceholder': 'このタスクの内容',
     'board.detail.notesLabel': '内容',
-    'board.detail.notesPlaceholder': 'このタスクでやること —「タスク内容を入力欄へ」でタイトルと一緒に claude へ貼り付けられます',
-    // Image attachments (B022)
-    'board.detail.attachmentsLabel': '画像',
-    'board.detail.attachAdd': '＋ 画像を追加',
-    'board.detail.attachAddTitle':
-      'スクリーンショットを添付します — 内容欄への貼り付けやドロップでも添付できます。「タスク内容を入力欄へ」でファイルパスが claude に渡ります。',
+    'board.detail.notesPlaceholder':
+      'このタスクでやることは？\n画像はドロップ／貼り付けで添付できます。タイトルは実行時に自動生成されます。',
+    // Image attachments (B022) — 貼り付け／ドロップのみ（追加ボタンは廃止）。
     'board.detail.attachBusy': '添付中…',
     'board.detail.attachRemove': '画像を削除',
     'board.detail.attachTooLarge': '画像が大きすぎます（最大5MB）',
@@ -245,14 +238,12 @@ export const board = {
     'board.detail.resizeSplit': 'ドラッグでターミナルの高さを変更',
     'board.detail.resizeSplitTitle': 'ドラッグでサイズ変更 · ダブルクリックでターミナル最大化',
     'board.detail.prLabel': 'プルリクエスト',
-    'board.detail.captureLabel': 'タスク',
-    'board.detail.capturePlaceholder':
-      'やることを書いてください\n1行目がタイトル — 長文は AI が短いタイトルに整えます（✦）\nスムーズに走らせるコツ: 何を・なぜ・どうなったら完了か',
+    'board.detail.optionsLabel': 'オプション',
     'board.run.button': '実行',
     'board.run.buttonBusy': '起動中…',
     'board.run.buttonTitle':
       'claude セッションを起動して、このタスクをすぐに開始します（プロンプトは自動送信されます）',
-    'board.run.needsTitle': 'タイトルを付けると実行できます。',
+    'board.run.needsContent': '内容を書くと実行できます。',
     'board.run.hint': '実行するとターミナルが開き、このタスクが自動で始まります。',
     'board.run.missingFolder':
       'プロジェクトフォルダが見つかりません。場所を再設定するまで claude は起動できません。',
@@ -260,6 +251,7 @@ export const board = {
       'claude を起動できませんでした。claude CLI がインストールされ PATH が通っているか（ターミナルで `claude` が動くか）確認して、もう一度実行してください。',
     'board.run.failedClaudeMissing':
       'claude CLI が見つかりません — Claude Code をインストールしてサインインし、OPEN GROUND を再起動してから、もう一度実行してください。',
+    'board.run.settingsLabel': '実行設定',
     'board.run.flowLabel': '完了時',
     'board.run.flowMerge': 'マージ',
     'board.run.flowPr': 'PR を作成',

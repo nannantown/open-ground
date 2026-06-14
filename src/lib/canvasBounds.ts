@@ -37,7 +37,13 @@ export function elementSize(el: CanvasElement): { w: number; h: number } | null 
     case 'group':
       return null
     case 'text':
-      return { w: TEXT_W, h: TEXT_H }
+      // A text's box is its MEASURED footprint (ElementView's ResizeObserver
+      // persists width/height for every text — see canvasTextSizing.ts). The
+      // 300×44 default is only the pre-measure fallback for a brand-new text
+      // before its first ResizeObserver tick; without it a fresh text's
+      // selection box / hit area was a hardcoded 300×44 detached from the
+      // rendered glyphs (the "weird wide box" bug).
+      return { w: el.width ?? TEXT_W, h: el.height ?? TEXT_H }
     case 'comment':
       return { w: COMMENT_W, h: COMMENT_H }
     case 'sticky':

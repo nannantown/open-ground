@@ -12,9 +12,12 @@ const MARK = '/brand/openground-mark.svg'
 export const EmptyState = ({
   onCreateNew,
   onImport,
+  onOpenManual,
 }: {
   onCreateNew: () => void
   onImport: () => void
+  /** Opens the in-app manual — the first surface a lost new user can reach. */
+  onOpenManual?: () => void
 }) => {
   const { t } = useT()
   // Probe the local `claude` CLI — this is the right place to tell a new user
@@ -89,6 +92,15 @@ export const EmptyState = ({
             <Terminal size={11} className="shrink-0" />
             {t('misc.empty.cliNote')}
           </p>
+        )}
+        {onOpenManual && (
+          <button
+            type="button"
+            onClick={onOpenManual}
+            className="mx-auto mt-6 block text-[12px] text-ink-faint underline-offset-4 transition-colors hover:text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            {t('misc.empty.manual')}
+          </button>
         )}
       </div>
     </div>

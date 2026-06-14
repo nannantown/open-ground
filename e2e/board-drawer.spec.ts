@@ -37,12 +37,20 @@ test.describe('Board detail drawer', () => {
     )
     await page.goto('/', { waitUntil: 'domcontentloaded' })
 
-    // Open the card → DRAFT mode: full fields, run settings, the explicit
-    // Run button — and NO terminal yet (nothing auto-launches, F031 for all).
+    // Open the card → DRAFT mode: content-first (the title is auto, so there
+    // is no title field) + run settings + the explicit Run button. NO terminal
+    // yet (nothing auto-launches, F031 for all).
     await page.getByText('Resize me').first().click()
     const aside = page.locator('aside')
     const runBtn = aside.getByRole('button', { name: /実行|^Run$/ })
     await expect(runBtn).toBeVisible()
+    // Run needs content now (not a title). Type into the content textarea —
+    // the only field; the card keeps its 'Resize me' title, so the launch
+    // payload title stays that.
+    const content = aside.locator('textarea').first()
+    await content.click()
+    await content.fill('Resize me — make the drawer resizable')
+    await content.blur()
     await expect(runBtn).toBeEnabled()
     await expect(aside.locator('.xterm-screen')).toHaveCount(0)
     // The per-card run settings selects render (model + effort at minimum;

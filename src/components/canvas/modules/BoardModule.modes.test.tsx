@@ -3,26 +3,27 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, act } from '@testing-library/react'
 import type { ProjectData, ProjectMeta, ProjectTask } from '@/lib/types'
 
-// Phase-following drawer contract (BoardModule):
+// Phase-following drawer contract (BoardModule) — CONTENT-FIRST (2026-06-13):
 //   Draft (no terminal slot)
-//     - empty card → ONE capture textarea; blur derives title (first line,
-//       titleAuto) + notes, and fires the auto-title request for multi-line text
-//     - card with text → full fields (content grows) + the run footer: the
-//       per-card run settings (flow / model / effort, autosaved on the task)
-//       and an explicit 実行 button. NOTHING launches by itself (the drawer
-//       auto-launch died 2026-06-12) — 実行 calls onLaunchTask with the run
-//       payload (live fields + overrides) and the server auto-starts the task
-//     - an untitled card disables 実行; a missing project hides the footer
+//     - one content textarea (autofocused) is the hero field; there is NO
+//       title input (the title is auto-generated on Run). Images paste/drop
+//       into the content; assignee/depends/due hide behind an Options
+//       disclosure. The run footer holds the per-card run settings (flow /
+//       model / effort, autosaved) + an explicit 実行 button. NOTHING launches
+//       by itself — 実行 calls onLaunchTask with the run payload.
+//     - a card with NO content disables 実行; a missing project hides the footer
+//     - 実行 on a title-less card derives a provisional title from the first
+//       line of content (kept whole), persists it titleAuto, and asks for a
+//       haiku title for multi-line content — the title lands on the card later
 //     - the conversation pane is NOT mounted at all
 //   Session (slot exists)
 //     - terminal pane mounts; fields collapse behind the one-line header
+//     - the header shows the title + a ✦ regenerate button (the one place
+//       manual title regeneration lives now); no title input
 //     - status strip narrates branch / completion flow / PR
 //     - "Insert task into input" pastes the task into the live PTY unsent
 //       (POST /api/terminal/:id/paste-task); disabled without a live PTY
-//     - chevron header expands the fields block
-//   Title ownership
-//     - first keystroke in the title field clears titleAuto (persisted), so an
-//       in-flight auto-title can never land over hand-typed text
+//     - chevron header expands the fields block (content textarea, no title)
 
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
 const taskTitlePost = vi.fn((_a?: unknown) =>
@@ -47,9 +48,13 @@ vi.mock('@/lib/api-client', () => ({
 
 import { BoardModule, type TaskLaunchResult } from './BoardModule'
 
+// A "normal" card now carries CONTENT (the primary field) — without it the
+// content-first Run gate would disable 実行. Tests that need a truly empty
+// card override notes: undefined.
 const makeTask = (over: Partial<ProjectTask> = {}): ProjectTask => ({
   id: 't1',
   title: 'Saved title',
+  notes: 'Do the work',
   done: false,
   createdAt: '2026-01-01T00:00:00.000Z',
   boardColumn: 'todo',
@@ -119,63 +124,69 @@ afterEach(() => {
 })
 
 describe('BoardModule drawer — Draft mode', () => {
-  it('empty card: single capture box, no conversation pane, 実行 disabled, NO launch', async () => {
+  it('empty card: content textarea (no title input), no conversation, 実行 disabled, NO launch', async () => {
     const { container, queryByTestId, onLaunchTask, getByText } = renderDrawer(
-      makeData(makeTask({ title: '' })),
+      makeData(makeTask({ title: '', notes: undefined })),
     )
     await flush()
-    expect(
-      container.querySelector('textarea[placeholder="board.detail.capturePlaceholder"]'),
-    ).toBeTruthy()
-    // No title/content fields yet, no terminal.
+    // The content textarea is the hero field, autofocused.
+    const content = container.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="board.detail.notesPlaceholder"]',
+    )
+    expect(content).toBeTruthy()
+    // No title input anywhere in the content-first drawer.
     expect(container.querySelector('input[placeholder="board.detail.titlePlaceholder"]')).toBeNull()
     expect(queryByTestId('conversation')).toBeNull()
-    // The run footer is there but inert: an untitled card can't run, and
+    // The run footer is there but inert: a content-less card can't run, and
     // nothing ever launches without the explicit click.
     expect((getByText('board.run.button') as HTMLButtonElement).disabled).toBe(true)
     expect(onLaunchTask).not.toHaveBeenCalled()
   })
 
-  it('capture blur derives first-line title + notes (titleAuto) and requests an auto-title', async () => {
-    const { container, persist } = renderDrawer(makeData(makeTask({ title: '' })))
+  it('実行 on a title-less card derives a provisional title from the first line + asks for a haiku', async () => {
+    const { getByText, onLaunchTask, persist } = renderDrawer(
+      makeData(makeTask({ title: '', notes: 'Account settings page\nUse the modal.\nAdd email.' })),
+    )
     await flush()
-    const box = container.querySelector<HTMLTextAreaElement>(
-      'textarea[placeholder="board.detail.capturePlaceholder"]',
-    )!
-    fireEvent.change(box, { target: { value: 'Account settings page\nUse the modal.\nAdd email.' } })
-    fireEvent.blur(box)
-    expect(persist).toHaveBeenCalledTimes(1)
-    const saved = persist.mock.calls[0][0] as ProjectData
-    expect(saved.tasks[0]).toMatchObject({
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    // The launch payload carries the provisional title (first line) — the
+    // server prompt contract still needs one; the content stays whole.
+    const [, opts] = onLaunchTask.mock.calls[0]
+    expect(opts?.run).toMatchObject({
       title: 'Account settings page',
-      notes: 'Use the modal.\nAdd email.',
-      titleAuto: true,
+      notes: 'Account settings page\nUse the modal.\nAdd email.',
     })
+    // It is persisted titleAuto so the haiku pass can refine it, and the
+    // multi-line content triggers that pass.
+    const saved = persist.mock.calls.find(
+      c => (c[0] as ProjectData).tasks[0].title === 'Account settings page',
+    )?.[0] as ProjectData
+    expect(saved.tasks[0]).toMatchObject({ title: 'Account settings page', titleAuto: true })
     expect(taskTitlePost).toHaveBeenCalledWith({ json: { path: '/tmp/proj', id: 't1' } })
   })
 
-  it('single short line: title only, NO auto-title request (it already is the title)', async () => {
-    const { container, persist } = renderDrawer(makeData(makeTask({ title: '' })))
+  it('実行 on a single-short-line card: that line IS the title, NO haiku request', async () => {
+    const { getByText, onLaunchTask } = renderDrawer(
+      makeData(makeTask({ title: '', notes: 'Fix the login flow' })),
+    )
     await flush()
-    const box = container.querySelector<HTMLTextAreaElement>(
-      'textarea[placeholder="board.detail.capturePlaceholder"]',
-    )!
-    fireEvent.change(box, { target: { value: 'Fix the login flow' } })
-    fireEvent.blur(box)
-    const saved = persist.mock.calls[0][0] as ProjectData
-    expect(saved.tasks[0]).toMatchObject({ title: 'Fix the login flow', titleAuto: true })
-    expect(saved.tasks[0].notes).toBeUndefined()
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    const [, opts] = onLaunchTask.mock.calls[0]
+    expect((opts?.run as { title: string }).title).toBe('Fix the login flow')
     expect(taskTitlePost).not.toHaveBeenCalled()
   })
 
-  it('titled card: full fields + run footer; NOTHING launches without the click', async () => {
+  it('card with content: content field shown, no title input, 実行 enabled, NO launch', async () => {
     const { container, queryByTestId, onLaunchTask, getByText } = renderDrawer(
       makeData(makeTask()),
     )
     await flush()
     expect(
-      container.querySelector('input[placeholder="board.detail.titlePlaceholder"]'),
+      container.querySelector('textarea[placeholder="board.detail.notesPlaceholder"]'),
     ).toBeTruthy()
+    expect(container.querySelector('input[placeholder="board.detail.titlePlaceholder"]')).toBeNull()
     expect(queryByTestId('conversation')).toBeNull()
     // The old auto-launch is gone: opening the drawer spawns nothing.
     expect(onLaunchTask).not.toHaveBeenCalled()
@@ -206,8 +217,10 @@ describe('BoardModule drawer — Draft mode', () => {
   })
 
   it('changing a run setting persists it on the task (autosave)', async () => {
-    const { container, persist } = renderDrawer(makeData(makeTask()))
+    const { container, persist, getByText } = renderDrawer(makeData(makeTask()))
     await flush()
+    // Run settings are collapsed by default now — open the disclosure first.
+    fireEvent.click(getByText('board.run.settingsLabel'))
     // Scope to the drawer — the board's own defaults strip has selects too.
     const selects = Array.from(container.querySelector('aside')!.querySelectorAll('select'))
     // git project → [flow, model, effort]; pick the effort select (last).
@@ -297,17 +310,16 @@ describe('BoardModule drawer — Draft mode', () => {
     expect(getByText('board.run.button')).toBeTruthy()
   })
 
-  it('first keystroke in the title field clears titleAuto', async () => {
-    const { container, persist } = renderDrawer(makeData(makeTask({ titleAuto: true })))
+  it('Options disclosure: assignee/depends/due hide until expanded', async () => {
+    const { getByText, queryByText } = renderDrawer(makeData(makeTask()))
     await flush()
-    const title = container.querySelector<HTMLInputElement>(
-      'input[placeholder="board.detail.titlePlaceholder"]',
-    )!
-    fireEvent.change(title, { target: { value: 'Saved titleX' } })
-    expect(persist).toHaveBeenCalledTimes(1)
-    const saved = persist.mock.calls[0][0] as ProjectData
-    expect(saved.tasks[0].titleAuto).toBeUndefined()
-    expect(saved.tasks[0].title).toBe('Saved title') // title itself commits on blur
+    // Collapsed by default — the assignee add chip is not in the DOM yet.
+    expect(queryByText('board.detail.assigneeAdd')).toBeNull()
+    fireEvent.click(getByText('board.detail.optionsLabel'))
+    // Expanded — the option fields are now reachable.
+    expect(getByText('board.detail.assigneeLabel')).toBeTruthy()
+    expect(getByText('board.detail.dependsLabel')).toBeTruthy()
+    expect(getByText('board.detail.dueLabel')).toBeTruthy()
   })
 })
 
@@ -326,16 +338,27 @@ describe('BoardModule drawer — Session mode', () => {
     expect(container.textContent).not.toContain('projectPanel.launchClaude')
   })
 
-  it('chevron header expands the fields block (and the split grip appears)', async () => {
+  it('chevron header expands the fields block — content textarea, no title input', async () => {
     const { container, getByTitle } = renderDrawer(makeData(makeTask()), { session: true })
     await flush()
     fireEvent.click(getByTitle('board.detail.fieldsToggle'))
     expect(
-      container.querySelector('input[placeholder="board.detail.titlePlaceholder"]'),
+      container.querySelector('textarea[placeholder="board.detail.notesPlaceholder"]'),
     ).toBeTruthy()
+    expect(container.querySelector('input[placeholder="board.detail.titlePlaceholder"]')).toBeNull()
     expect(
       container.querySelector('[aria-label="board.detail.resizeSplit"]'),
     ).toBeTruthy()
+  })
+
+  it('header ✦ regenerates the title (force) — the one manual regenerate left', async () => {
+    const { getByTitle } = renderDrawer(makeData(makeTask()), { session: true })
+    await flush()
+    fireEvent.click(getByTitle('board.detail.regenTitle'))
+    await flush()
+    expect(taskTitlePost).toHaveBeenCalledWith({
+      json: { path: '/tmp/proj', id: 't1', force: true },
+    })
   })
 
   it('status strip narrates branch, completion flow and PR', async () => {
@@ -372,7 +395,7 @@ describe('BoardModule drawer — Session mode', () => {
         path: '/tmp/proj',
         taskId: 't1',
         title: 'Saved title',
-        notes: '',
+        notes: 'Do the work',
         // Live attachment ids ride along (B022) — empty card, empty list.
         attachmentIds: [],
       }),

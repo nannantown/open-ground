@@ -241,6 +241,20 @@ export interface CanvasElement {
   fontWeight?: number
   textAlign?: 'left' | 'center' | 'right'
   lineHeight?: number
+  /** Text resize mode (Figma parity — see `canvasTextSizing.ts` + docs/
+   *  CANVAS_TEXT_SIZING_PLAN.md). Applies to `text` only. Undefined = the
+   *  default `'auto-width'`, so every previously-saved text loads unchanged.
+   *  - `'auto-width'` — the box hugs its content on BOTH axes; no wrapping;
+   *    typing widens it, an explicit newline adds height. `width`/`height` are
+   *    the MEASURED footprint (persisted, quantised), never authoritative.
+   *  - `'auto-height'` — `width` is AUTHORITATIVE (user-dragged); the text
+   *    wraps within it; `height` is the measured wrapped height.
+   *  - `'fixed'` — `width` AND `height` are authoritative; the text wraps and
+   *    overflow is clipped; `textVerticalAlign` positions it in the box. */
+  textSizing?: 'auto-width' | 'auto-height' | 'fixed'
+  /** Vertical alignment inside a `'fixed'`-size text box. Undefined = `'top'`.
+   *  Ignored by the two auto modes (their height always hugs the content). */
+  textVerticalAlign?: 'top' | 'middle' | 'bottom'
   /** Fill + stroke for NON-text elements (Selection Inspector, round 3). All
    *  OPTIONAL and backward-compatible: older saved canvases omit them and the
    *  views fall back to the built-in defaults (see `canvasFillStyle.ts`), so
@@ -1007,6 +1021,23 @@ export interface FeedbackListResponse {
   truncated: boolean
 }
 
+/** An image attached to a feedback submission, stored INLINE (base64, no
+ *  data-URL prefix) in the feedback row's `images` jsonb column. The client
+ *  downscales + re-encodes to WebP before upload (see src/lib/feedbackImages.ts)
+ *  so a multi-MB screenshot becomes a few hundred KB. Inline blob chosen over
+ *  Supabase Storage deliberately: feedback is low-volume + owner-only, so this
+ *  avoids a bucket + signed-URL round-trip. Render via `data:${mime};base64,…`.
+ *  3点セット: this type / FeedbackImageApiSchema (schemas.ts) / the row build in
+ *  server/routes/feedback.ts — a field missing from one is dropped silently. */
+export interface FeedbackImage {
+  /** Original file name, display-only (tooltip / download); never used as a path. */
+  name?: string
+  /** MIME of the stored bytes — the re-encoded type (image/webp). */
+  mime: string
+  /** Base64 of the compressed bytes, WITHOUT the "data:<mime>;base64," prefix. */
+  data: string
+}
+
 /** One row of submitted feedback, read back via the server's service-role key
  *  (GET /api/feedback/list). Owner-only: the service key never reaches the
  *  client, and the public build reports canRead:false so this never loads. */
@@ -1018,6 +1049,9 @@ export interface FeedbackItem {
   app_version: string | null
   os: string | null
   project_count: number | null
+  /** Inline image attachments (base64). Absent on rows created before this
+   *  feature shipped, and `[]` when the submitter attached none. */
+  images?: FeedbackImage[]
 }
 
 /** GET /api/auth/session — the only auth payload the SPA reads. `user` is null

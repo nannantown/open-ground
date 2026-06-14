@@ -250,10 +250,10 @@ properly notarized — re-run step 2 above.
 
 Windows is now a **real build target**: the CI release pipeline (§0) builds
 the Windows NSIS `.exe` on a **native Windows runner** and publishes it to
-the same GitHub Release as the macOS `.dmg`. Several Windows-specific code
-bugs have been fixed (see below). What is **not** yet done is end-to-end
-validation on real Windows hardware — so treat Windows as *shipping but
-provisional*, not *fully verified*.
+the same GitHub Release as the macOS `.dmg`. The interactive-terminal code
+paths carry Windows-specific branches (see below). What is **not** yet done is
+end-to-end validation on real Windows hardware — so treat Windows as *shipping
+but provisional*, not *fully verified*.
 
 ### How it's built
 
@@ -286,19 +286,16 @@ protected your PC"* dialog. To proceed, the user:
 This is a one-time bypass per download. Document it for end users (the README
 covers it) so the warning doesn't look like the app is broken or malicious.
 
-### Platform bugs fixed for Windows
+### Obsolete: the batch-runner-era Windows fixes
 
-- **Claude session-dir naming** (`observer.ts` / `runner.ts` `toDirName`):
-  now also normalizes the `\` separator and the `C:` drive-colon, so the
-  observer can locate Claude's JSONL on Windows paths (chat observation /
-  resume / worktree-session relocation).
-- **Path-separator splits**: spots that split a path on `/` to take the last
-  segment now handle `\` as well, so mixed-separator Windows paths don't
-  surprise the worktree / git logic.
-- **Claude Code hooks** (`hooksInstall.ts`): Windows has no shebang/exec-bit,
-  so the installed hook is now invoked **via `node`** (`node
-  <path>/openground-hook.js <arg>`) instead of relying on a shebang — so
-  run-state markers fire on Windows.
+An earlier version of this section listed Windows fixes to the **batch runner /
+observer / verifier** — Claude-session-dir `\`/drive-colon normalization for
+locating JSONL (`observer.ts` / `runner.ts` `toDirName`), path-separator splits
+in the worktree/git logic, and `cmd.exe` milestone verification
+(`verifier.ts`). **Those subsystems were deleted in the terminal-only purge**
+(2026-06), so the fixes are moot: there is no batch runner, no JSONL observer,
+and no milestone verifier left to make Windows-safe. The only execution path
+now is the interactive PTY, whose Windows handling is the guards below.
 
 ### Platform guards already in place
 
@@ -313,9 +310,11 @@ covers it) so the warning doesn't look like the app is broken or malicious.
 - **`src/lib/server/claudeTerminal.ts`** — the `claude` launch command is
   PowerShell-shaped on Windows (`$env:OPENGROUND_OWNED='1'; claude … ; exit`
   vs the POSIX `VAR=1 claude … ; exit`), with PowerShell single-quote
-  escaping for the prompt argument.
-- **`src/lib/server/verifier.ts`** — milestone verify commands run via
-  `cmd.exe /d /s /c` on Windows instead of `/bin/sh -c`.
+  escaping for the prompt argument (covered by `claudeTerminal.test.ts`).
+- **`src/lib/server/hooksInstall.ts`** — the Claude Code hook is invoked via
+  `node "<path>/openground-hook.js" <arg>` rather than a unix shebang (Windows
+  has no shebang/exec-bit), and command quoting switches to double quotes for
+  `cmd.exe` / PowerShell on win32.
 
 ### MUST-validate-on-real-Windows caveats (genuinely unverified)
 
@@ -325,7 +324,7 @@ until someone runs them:
 
 - **node-pty / ConPTY runtime**: PTY spawn of `powershell.exe` + interactive
   `claude` under ConPTY is untested. PTY exit signalling, resize, and Ctrl-C
-  (`\x03`) behaviour may differ from the macOS path the runner was built
+  (`\x03`) behaviour may differ from the macOS path it was developed
   against.
 - **`claude` CLI on Windows**: assumes `claude` (or `claude.cmd`) is on the
   user's PATH and runs interactively under ConPTY. Unverified that the
