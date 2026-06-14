@@ -8,10 +8,16 @@ import {
   LogOut,
   CircleUser,
   HelpCircle,
+  Terminal,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { useAuth } from '@/lib/auth/AuthContext'
+import { useClaudeConnection } from '@/lib/useClaudeConnection'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
+
+// Install docs for the local `claude` CLI — the not-connected indicator links
+// here so a user can fix their setup without leaving the Ground.
+const CLAUDE_DOCS_URL = 'https://code.claude.com/docs/en/setup'
 
 interface Props {
   onNewProject: () => void
@@ -115,6 +121,8 @@ export const Toolbar = ({
             </>
           )}
           <span className="h-4 w-px bg-line-soft" />
+          <ClaudeConnectionIndicator />
+          <span className="h-4 w-px bg-line-soft" />
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />
           </IconButton>
@@ -133,6 +141,59 @@ export const Toolbar = ({
         </div>
       </div>
     </div>
+  )
+}
+
+// Passive "Claude connection" indicator. OPEN GROUND is subscription-only — it
+// drives the user's local `claude` CLI — so this REFLECTS whether that CLI is
+// installed + signed in (GET /api/claude-connection runs `claude auth status`).
+// It NEVER gates or blocks anything: it's purely informational.
+//   - connected   → a quiet, low-key terminal glyph (no attention drawn).
+//   - not connected (missing OR signed out) → an attention dot + a tooltip with
+//     the connection message, linking to the install docs.
+//   - unknown (status still loading / server unreachable) → quiet, no dot.
+const ClaudeConnectionIndicator = () => {
+  const { t } = useT()
+  const conn = useClaudeConnection(true)
+  const connected = conn?.installed === true && conn.loggedIn === true
+  // Only raise an attention dot once we KNOW it's not connected — never while
+  // the status is still unknown (null), so we don't cry wolf on a slow check.
+  const notConnected = conn !== null && !connected
+
+  const title = notConnected
+    ? conn?.message || t('toolbar.claudeNotConnected')
+    : t('toolbar.claudeConnected')
+
+  const cls = [
+    'relative flex h-7 w-7 items-center justify-center rounded-sm transition-colors',
+    'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+    notConnected
+      ? 'text-ink-muted hover:text-ink hover:bg-bg-inset'
+      : 'text-ink-faint',
+  ].join(' ')
+
+  // Not connected → a real link to setup help (with the attention dot).
+  if (notConnected) {
+    return (
+      <a
+        href={CLAUDE_DOCS_URL}
+        target="_blank"
+        rel="noreferrer"
+        title={title}
+        aria-label={title}
+        className={cls}
+      >
+        <Terminal size={13} strokeWidth={1.75} />
+        <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-accent ring-2 ring-bg-card" />
+      </a>
+    )
+  }
+
+  // Connected / unknown → a quiet, non-interactive marker.
+  return (
+    <span title={title} aria-label={title} className={cls}>
+      <Terminal size={13} strokeWidth={1.75} />
+    </span>
   )
 }
 

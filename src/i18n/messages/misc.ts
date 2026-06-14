@@ -21,9 +21,6 @@ export const misc = {
     'misc.empty.title': 'Begin your atlas.',
     'misc.empty.body':
       'Add your first project — start a fresh folder, or import one you already have. Each becomes a card on the canvas: chat with it, run Claude Code, see where it stands.',
-    'misc.empty.cliMissing':
-      "The claude CLI wasn't found. OPEN GROUND runs your local Claude Code CLI — install it and sign in with an active Claude subscription before a run.",
-    'misc.empty.cliNote': 'Needs the local claude CLI, signed in with a Claude subscription.',
     'misc.empty.manual': 'New here? Read the manual',
     // ProjectCard
     // ProjectCanvas
@@ -53,9 +50,6 @@ export const misc = {
     'misc.empty.title': 'ここから地図を広げる。',
     'misc.empty.body':
       '最初のプロジェクトを追加しましょう — 新しいフォルダを作るか、既存のフォルダをインポート。それぞれがキャンバス上のカードになり、チャット・Claude Code の実行・現在地の確認ができます。',
-    'misc.empty.cliMissing':
-      'claude CLI が見つかりませんでした。OPEN GROUND はお使いのローカル Claude Code CLI を動かします。実行前にインストールし、有効な Claude サブスクリプションでサインインしてください。',
-    'misc.empty.cliNote': 'ローカルの claude CLI（Claude サブスクでサインイン済み）が必要です。',
     'misc.empty.manual': 'はじめて？ マニュアルを読む',
     // ProjectCard
     // ProjectCanvas

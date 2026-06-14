@@ -53,7 +53,6 @@ import {
   type SyncOutcome,
 } from '@/components/canvas/ShareStartDialog'
 import { boardDiffDigest } from '@/lib/boardDigest'
-import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { migrateLs } from '@/lib/lsMigrate'
 import {
   loadPersistedView,
@@ -293,10 +292,6 @@ export const ProjectPanel = ({
   // new project's state.
   const [describingPath, setDescribingPath] = useState<string | null>(null)
   const describing = !!project && describingPath === project.path
-  // Probe the local `claude` CLI while a project is open so we can disable the
-  // regenerate affordance (and not fire a doomed request) when it's missing.
-  const claudeProbe = useClaudeProbe(!!project)
-  const claudeMissing = claudeProbe?.installed === false
 
   // Open the project folder in the host OS file manager (Finder / Explorer /
   // xdg-open) — fire-and-forget; the server picks the right command per platform.
@@ -359,7 +354,7 @@ export const ProjectPanel = ({
   }, [project?.path, project?.missing])
 
   const regenerateDescription = useCallback(async () => {
-    if (!project || project.missing || describing || claudeMissing) return
+    if (!project || project.missing || describing) return
     // claude can take ~2 min to answer; this panel is reused across project
     // switches (no key), so the user may open a different project meanwhile.
     // Pin the path we asked for and, on return, only apply the result if that
@@ -409,7 +404,7 @@ export const ProjectPanel = ({
       // must not reset another project's (possibly in-flight) state.
       setDescribingPath((p) => (p === requestedPath ? null : p))
     }
-  }, [project, describing, claudeMissing, onSaved])
+  }, [project, describing, onSaved])
 
   useEffect(() => {
     setProjectSettingsOpen(false)
@@ -1832,13 +1827,11 @@ export const ProjectPanel = ({
                 {/* Refresh button — spins while claude works */}
                 <button
                   onClick={regenerateDescription}
-                  disabled={describing || project.missing || claudeMissing}
+                  disabled={describing || project.missing}
                   title={
-                    claudeMissing
-                      ? t('projectPanel.claudeNotFound')
-                      : describing
-                        ? t('projectPanel.generating')
-                        : t('projectPanel.regenerateDescription')
+                    describing
+                      ? t('projectPanel.generating')
+                      : t('projectPanel.regenerateDescription')
                   }
                   aria-label={t('projectPanel.regenerateDescription')}
                   className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
@@ -1858,13 +1851,11 @@ export const ProjectPanel = ({
               <div className="mt-1">
                 <button
                   onClick={regenerateDescription}
-                  disabled={describing || project.missing || claudeMissing}
+                  disabled={describing || project.missing}
                   title={
-                    claudeMissing
-                      ? t('projectPanel.claudeNotFound')
-                      : describing
-                        ? t('projectPanel.generating')
-                        : t('projectPanel.generateDescription')
+                    describing
+                      ? t('projectPanel.generating')
+                      : t('projectPanel.generateDescription')
                   }
                   aria-label={t('projectPanel.generateDescription')}
                   className="rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"

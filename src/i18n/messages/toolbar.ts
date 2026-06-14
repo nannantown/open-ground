@@ -18,6 +18,8 @@ export const toolbar = {
     'toolbar.langEn': 'EN',
     'toolbar.langJa': 'JA',
     'toolbar.betaTooltip': 'Beta — breaking changes may still land.',
+    'toolbar.claudeConnected': 'Claude connected',
+    'toolbar.claudeNotConnected': 'Claude not connected — click for setup help.',
   } as Record<string, string>,
   ja: {
     'toolbar.add': 'プロジェクトを追加',
@@ -36,5 +38,7 @@ export const toolbar = {
     'toolbar.langEn': 'EN',
     'toolbar.langJa': 'JA',
     'toolbar.betaTooltip': 'ベータ版です。今後、破壊的な変更が入る可能性があります。',
+    'toolbar.claudeConnected': 'Claude に接続済み',
+    'toolbar.claudeNotConnected': 'Claude に未接続 — クリックでセットアップ方法を表示。',
   } as Record<string, string>,
 }

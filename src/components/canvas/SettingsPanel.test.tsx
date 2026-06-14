@@ -18,7 +18,7 @@ vi.mock('@/lib/api-client', () => ({
     },
   },
 }))
-vi.mock('@/lib/useClaudeProbe', () => ({ useClaudeProbe: () => null }))
+vi.mock('@/lib/useClaudeConnection', () => ({ useClaudeConnection: () => null }))
 
 import { SettingsPanel } from './SettingsPanel'
 import type { Settings } from '@/lib/types'

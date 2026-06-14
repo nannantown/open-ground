@@ -15,7 +15,6 @@
 //
 // Mounted by the Integration phase: app.route('/', terminalRoutes) in server/app.ts.
 
-import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { mkdir, stat } from 'fs/promises'
 import { join, sep } from 'path'
@@ -39,7 +38,7 @@ import {
 import { launchClaude, launchOptsFromPrefs } from '@/lib/server/claudeTerminal'
 import { CLAUDE_EFFORTS, type ClaudeEffort } from '@/lib/types'
 import { TASK_ASSETS_SUBDIR } from '@/lib/server/taskAssets'
-import { probeClaudeCli } from '@/lib/server/claudeCli'
+import { claudeConnection } from '@/lib/server/claudeConnection'
 
 import { bracketedPaste, buildCustomModulePrompt } from '@/lib/server/pastePrompt'
 
@@ -71,31 +70,6 @@ export const terminalRoutes = new Hono()
       return c.json({ error: `failed to start terminal: ${e?.message ?? e}` }, 500)
     }
   })
-  // --- POST /api/setup-terminal — a shell for first-run onboarding ----------
-  // The onboarding install guide (Onboarding → OnboardingSetup) embeds a real
-  // terminal so the user can install + sign in to the `claude` CLI before any
-  // project exists. There is therefore NO project to validate the cwd against,
-  // so this deliberately opens a plain login shell in the user's HOME instead
-  // of going through validateProjectPath. Scope: a local single-user tool where
-  // the user can already open a terminal in any project — a home-cwd shell at
-  // first run widens nothing they couldn't already do. The id-based
-  // stream/input/resize/delete routes are unchanged (they never took a path).
-  .post('/api/setup-terminal', async (c) => {
-    let body: any = {}
-    try {
-      body = await c.req.json()
-    } catch {
-      /* size is optional — fall back to defaults */
-    }
-    const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
-    const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
-    try {
-      const info = createTerminal({ cwd: homedir(), cols, rows })
-      return c.json(info)
-    } catch (e: any) {
-      return c.json({ error: `failed to start terminal: ${e?.message ?? e}` }, 500)
-    }
-  })
   // --- POST /api/terminal/claude — launch an interactive `claude` session in a
   // project dir. OPEN GROUND mints the session id (so it owns the JSONL path)
   // and launches `claude --session-id <uuid>` inside a PTY the user types into.
@@ -120,10 +94,11 @@ export const terminalRoutes = new Hono()
     // just print "command not found" and exit). Answer 503 with the
     // machine-readable flag — same contract as /api/project/describe and the
     // canvas AI routes — so the client can show "install claude" copy instead
-    // of a generic launch failure. (probeClaudeCli caches for ~10s.)
-    const probe = await probeClaudeCli()
-    if (!probe.installed) {
-      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    // of a generic launch failure. Gate on `.installed` only (claude prompts
+    // for login itself at runtime). (claudeConnection caches for ~10s.)
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
     }
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
@@ -239,8 +214,8 @@ export const terminalRoutes = new Hono()
   })
   // --- POST /api/terminal/custom-module — claude in a custom module dir ------
   // The custom-tab sidebar's "Edit with Claude" session (docs/CUSTOM_TABS_PLAN.md).
-  // The module dir is NOT a registered project, so — like /api/setup-terminal —
-  // this deliberately does not go through validateProjectPath. The boundary is
+  // The module dir is NOT a registered project, so this deliberately does not go
+  // through validateProjectPath. The boundary is
   // narrower instead: owner-only, the request carries ONLY a moduleId (never a
   // raw cwd), the id is uuid-validated + must exist in index.json, and the cwd
   // is resolved SERVER-side via customModuleDir(). Plain claude, no prompt —
@@ -260,9 +235,9 @@ export const terminalRoutes = new Hono()
     if (!def) return c.json({ error: 'module not found' }, 404)
     // Same pre-flight as /api/terminal/claude: a missing CLI is a doomed spawn,
     // answer the machine-readable 503 instead.
-    const probe = await probeClaudeCli()
-    if (!probe.installed) {
-      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
     }
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined

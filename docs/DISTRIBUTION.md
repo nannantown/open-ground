@@ -30,12 +30,32 @@ artifacts on your own laptop. Two GitHub Actions workflows live in
   - a **Windows** job on a native `windows` runner produces an **NSIS
     `.exe`** (+ `latest.yml`). Windows is **unsigned** (see §6).
 
+> ⚠️ **The release tag goes to `open-ground`, NOT `origin` (PMmap).** The
+> signing secrets and the working `release.yml` live in **open-ground**; PMmap
+> has no secrets, so `git push origin <tag>` fires a CI run that fails at the
+> macOS signing + Windows build steps. `open-ground/main` is a **squashed clean
+> history with no shared ancestry** to PMmap — each release is ONE snapshot
+> commit `OPEN GROUND X.Y.Z` whose tree equals PMmap's tree. So you snapshot
+> PMmap's tree onto open-ground with `commit-tree` (a plain `git push openground
+> main` is impossible — unrelated histories).
+
 ```bash
-# 1. Bump the version in package.json (semver), commit, tag, push the tag.
-git commit -am "release: 0.2.0"
-git tag v0.2.0
-git push origin v0.2.0     # pushing the tag is what fires release.yml
+# 1. Land code + bump package.json version on PMmap main (origin), as usual.
+git add package.json && git commit -m "release: X.Y.Z"
+git push origin <feature-branch>:main      # or however main is updated
+
+# 2. Snapshot PMmap's tree onto open-ground's clean history, then tag THERE.
+git fetch openground
+SNAP=$(git commit-tree "main^{tree}" -p openground/main -m "OPEN GROUND X.Y.Z")
+git push openground "$SNAP":main           # fast-forward on open-ground/main
+git tag vX.Y.Z "$SNAP"
+git push openground vX.Y.Z                  # pushing the tag to OPEN-GROUND fires release.yml
 ```
+
+> Runners: `release.yml` pins **windows-2022**. The floating `windows-latest`
+> moved to a VS2026 image where node-gyp can't find a usable Visual Studio,
+> breaking node-pty's native rebuild — windows-2022 (VS2022 C++) is the
+> known-good toolchain.
 
 electron-builder creates the Release as a **DRAFT** — nothing is public (and
 neither the landing download redirect nor electron-updater sees it) until you

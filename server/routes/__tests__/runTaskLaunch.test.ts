@@ -30,9 +30,15 @@ vi.mock('@/lib/server/claudeTerminal', async (importOriginal) => {
   return { ...actual, launchClaude: (opts: Record<string, unknown>) => launchClaude(opts) }
 })
 
-// The pre-flight probe must pass without a real `claude` binary on CI.
-vi.mock('@/lib/server/claudeCli', () => ({
-  probeClaudeCli: async () => ({ installed: true, message: 'ok' }),
+// The pre-flight connection check must pass without a real `claude` binary on CI.
+vi.mock('@/lib/server/claudeConnection', () => ({
+  claudeConnection: async () => ({
+    installed: true,
+    loggedIn: true,
+    plan: null,
+    email: null,
+    message: 'ok',
+  }),
 }))
 
 import { app } from '../../app'

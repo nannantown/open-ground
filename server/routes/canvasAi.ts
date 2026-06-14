@@ -10,13 +10,14 @@
 //                                       instruction, element }    → { source }
 //
 // Both spawn a one-off claude session (subscription-only, PTY via
-// launchClaude), so each pre-flights probeClaudeCli and answers 503
+// launchClaude), so each pre-flights claudeConnection and answers 503
 // { claudeMissing: true } when the CLI is absent — same shape as
-// /api/project/describe so the UI can disable the affordance.
+// /api/project/describe so the UI can disable the affordance. We gate on
+// `.installed` only (claude prompts for login itself at runtime).
 
 import { Hono } from 'hono'
 import { requireProjectPath } from '../middleware/projectPath'
-import { probeClaudeCli } from '@/lib/server/claudeCli'
+import { claudeConnection } from '@/lib/server/claudeConnection'
 import { generateCanvasElements, tweakScreenSource } from '@/lib/server/canvasAi'
 import type { TweakScreenRequest } from '@/lib/types'
 
@@ -50,9 +51,9 @@ export const canvasAiRoutes = new Hono()
     const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
     if (!prompt) return c.json({ error: 'prompt is required' }, 400)
     if (prompt.length > MAX_PROMPT_LEN) return c.json({ error: 'prompt too long' }, 400)
-    const probe = await probeClaudeCli()
-    if (!probe.installed) {
-      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
     }
     try {
       // The request's abort signal flows through: a hung-up client never
@@ -108,9 +109,9 @@ export const canvasAiRoutes = new Hono()
         html: str(body.element.html, MAX_ELEMENT_HTML),
       },
     }
-    const probe = await probeClaudeCli()
-    if (!probe.installed) {
-      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
     }
     try {
       const result = await tweakScreenSource(req, { signal: c.req.raw.signal })

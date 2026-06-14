@@ -38,6 +38,15 @@ export default defineConfig({
   },
   server: {
     // Dev only. Electron dev drives its own port; the API lives on apiPort.
+    //
+    // host: pin the IPv4 loopback explicitly. Every other loopback consumer in
+    // the app is fixed to 127.0.0.1 — electron/main.js (HOST / DEV_URL), the
+    // `wait-on http://127.0.0.1:5174` readiness gate in the electron:dev script,
+    // and this file's /api proxy target. Vite's default host is `localhost`,
+    // which on Node 17+ can resolve to IPv6 `::1` ONLY; then the IPv4 wait-on
+    // gate never passes and the Electron window never opens (and a 127.0.0.1
+    // window load would be blank). Binding IPv4 makes every consumer agree.
+    host: '127.0.0.1',
     port: webPort,
     // strictPort: FAIL LOUDLY if 5174 is already taken instead of silently
     // drifting to 5175/5176. The convention is ONE primary on 5174/47776 and

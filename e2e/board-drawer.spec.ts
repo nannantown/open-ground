@@ -53,8 +53,11 @@ test.describe('Board detail drawer', () => {
     await content.blur()
     await expect(runBtn).toBeEnabled()
     await expect(aside.locator('.xterm-screen')).toHaveCount(0)
-    // The per-card run settings selects render (model + effort at minimum;
-    // the flow select needs git, which this scratch project doesn't have).
+    // Run settings are collapsed by default in the content-first drawer, so
+    // expand the disclosure before asserting the model + effort selects mount
+    // (the flow select needs git, which this scratch project doesn't have).
+    await aside.getByRole('button', { name: /Run settings|実行設定/ }).click()
+    await expect(aside.locator('select').nth(1)).toBeVisible()
     expect(await aside.locator('select').count()).toBeGreaterThanOrEqual(2)
 
     // Run → POST /api/terminal/claude carries the task payload; the server

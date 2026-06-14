@@ -26,9 +26,14 @@
 
 set -u
 
-# --- readiness probe: claudeCli.ts runs `<bin> --version` up front ----------
-# probeClaudeCli() gates every run on this; answer it so the run route doesn't
-# 503 ("claude CLI not found") before we ever get a --session-id.
+# --- readiness probe: claudeConnection.ts runs `<bin> auth status` up front --
+# The run route's 503 gate ("claude CLI not found") reads this before we ever
+# get a --session-id, so answer with a signed-in JSON status. (--version is
+# kept below as a harmless fallback for any other caller.)
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"e2e@example.com","subscriptionType":"max"}'
+  exit 0
+fi
 case "${1:-}" in
   --version|-v)
     echo "fake-claude 0.0.0 (e2e stub)"

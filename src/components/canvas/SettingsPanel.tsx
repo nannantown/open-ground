@@ -23,7 +23,7 @@ import type {
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import { feedbackImageDataUrl } from '@/lib/feedbackImages'
-import { useClaudeProbe } from '@/lib/useClaudeProbe'
+import { useClaudeConnection } from '@/lib/useClaudeConnection'
 import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
 
@@ -67,7 +67,7 @@ export const SettingsPanel = ({
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [picking, setPicking] = useState(false)
   const [claudeNonce, setClaudeNonce] = useState(0)
-  const claudeProbe = useClaudeProbe(open && showAdvanced, claudeNonce)
+  const claudeConn = useClaudeConnection(open && showAdvanced, claudeNonce)
 
   // --- Autosave plumbing ------------------------------------------------
   // The panel saves as you type (debounced) instead of via a Save button.
@@ -313,39 +313,54 @@ export const SettingsPanel = ({
                   </div>
                 </Section>
 
-                {/* Claude Code CLI status (troubleshooting; the requirement itself
-                    is taught in onboarding) */}
+                {/* Claude connection status — passive reflection of the local
+                    `claude` CLI (installed + signed in via `claude auth status`).
+                    Informational only: OPEN GROUND never gates anything on it. */}
                 <Section flush heading={
-                  <span className="inline-flex items-center gap-1.5"><Terminal size={12} />{t('settings.cli.heading')}</span>
+                  <span className="inline-flex items-center gap-1.5"><Terminal size={12} />{t('settings.connection.heading')}</span>
                 } action={
                   <button
                     onClick={() => setClaudeNonce((n) => n + 1)}
                     className="label-cap text-ink-subtle hover:text-ink transition-colors"
                   >
-                    {t('settings.cli.recheck')}
+                    {t('settings.connection.recheck')}
                   </button>
                 }>
                   <div className="text-[11px] leading-relaxed">
-                    {claudeProbe === null && (
+                    {claudeConn === null && (
                       <span className="inline-flex items-center gap-1 text-ink-subtle">
                         <Loader2 size={12} className="animate-spin" />
-                        {t('settings.cli.checking')}
+                        {t('settings.connection.checking')}
                       </span>
                     )}
-                    {claudeProbe?.installed && (
+                    {claudeConn?.installed && claudeConn.loggedIn && (
                       <span className="inline-flex items-center gap-1 text-moss">
                         <Check size={12} strokeWidth={2.5} />
-                        {claudeProbe.message}
+                        {t('settings.connection.connected')}
+                        {claudeConn.plan && (
+                          <span className="text-ink-subtle">
+                            {' · '}{t('settings.connection.plan', { plan: claudeConn.plan })}
+                          </span>
+                        )}
+                        {claudeConn.email && (
+                          <span className="font-mono text-ink-subtle">{' · '}{claudeConn.email}</span>
+                        )}
                       </span>
                     )}
-                    {claudeProbe && !claudeProbe.installed && (
+                    {claudeConn && !claudeConn.installed && (
                       <div className="inline-flex items-start gap-1 text-accent">
                         <AlertCircle size={12} className="mt-[2px] shrink-0" />
-                        <span>{claudeProbe.message}</span>
+                        <span>{t('settings.connection.notInstalled')}</span>
+                      </div>
+                    )}
+                    {claudeConn?.installed && !claudeConn.loggedIn && (
+                      <div className="inline-flex items-start gap-1 text-accent">
+                        <AlertCircle size={12} className="mt-[2px] shrink-0" />
+                        <span>{t('settings.connection.notSignedIn')}</span>
                       </div>
                     )}
                   </div>
-                  <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{t('settings.cli.hint')}</p>
+                  <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{t('settings.connection.hint')}</p>
                 </Section>
               </div>
             )}

@@ -13,18 +13,13 @@ import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
 export interface TerminalPaneHandle {
   /** Kill the current PTY and start a fresh shell session. */
   restart: () => void
-  /** Write raw bytes to the PTY stdin (caller appends '\r' to run a command).
-   *  Used by the onboarding install guide to drive the shell step-by-step. */
+  /** Write raw bytes to the PTY stdin (caller appends '\r' to run a command). */
   sendText: (text: string) => void
 }
 
 interface Props {
-  /** Project directory the shell launches in (ignored when mode='setup'). */
+  /** Project directory the shell launches in. */
   projectPath: string
-  /** 'project' (default) opens a shell in projectPath via /api/terminal.
-   *  'setup' opens a login shell in the user's HOME via /api/setup-terminal —
-   *  for first-run onboarding, where no project exists yet. */
-  mode?: 'project' | 'setup'
   /** Identifier for which terminal "slot" within the project this pane drives,
    *  so multiple terminals on the same project keep their own PTY sessions.
    *  Defaults to 'default' for legacy single-terminal callers; that slot also
@@ -78,7 +73,7 @@ const legacyNsPreSlotSessionKey = (projectPath: string) =>
 const ACK_THRESHOLD = 65536
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { projectPath, slotKey = 'default', onInfo, onTitle, mode = 'project' },
+  { projectPath, slotKey = 'default', onInfo, onTitle },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -107,38 +102,6 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   // 1. Try the cached session id — if the server still has it, reattach.
   // 2. Otherwise POST a new one with the current host element size.
   const ensureSession = useCallback(async (): Promise<TerminalInfo | null> => {
-    // Setup mode: a HOME-cwd shell for first-run onboarding. Reattach to a
-    // cached session if the server still has it, else POST /api/setup-terminal
-    // (no cwd / no project gate). Kept separate from the project path below.
-    if (mode === 'setup') {
-      const setupKey = 'openground.terminal.session.__setup__'
-      const host = hostRef.current
-      const cols = host ? Math.max(40, Math.floor(host.clientWidth / 9)) : 100
-      const rows = host ? Math.max(10, Math.floor(host.clientHeight / 18)) : 30
-      const cachedSetup = localStorage.getItem(setupKey)
-      if (cachedSetup) {
-        try {
-          const r = await api.api.terminal[':id'].$get({ param: { id: cachedSetup } })
-          if (r.ok) {
-            const inf = (await r.json()) as TerminalInfo
-            if (!inf.finishedAt) return inf
-          }
-        } catch {}
-        localStorage.removeItem(setupKey)
-      }
-      const r = await fetch('/api/setup-terminal', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cols, rows }),
-      })
-      if (!r.ok) {
-        const e = (await r.json().catch(() => ({}))) as { error?: string }
-        throw new Error(e.error ?? r.statusText)
-      }
-      const inf = (await r.json()) as TerminalInfo
-      localStorage.setItem(setupKey, inf.id)
-      return inf
-    }
     const key = sessionKey(projectPath, slotKey)
     // Walk both legacy paths forward: prior namespace (hove.*) per-slot and
     // both namespaces' pre-slot single-terminal keys. Idempotent — runs on
@@ -179,7 +142,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const inf = (await r.json()) as TerminalInfo
     localStorage.setItem(key, inf.id)
     return inf
-  }, [projectPath, slotKey, mode])
+  }, [projectPath, slotKey])
 
   // Mount xterm.js + open SSE. Re-runs only when projectPath or reloadKey changes.
   useEffect(() => {

@@ -27,7 +27,7 @@ import {
 } from '@/lib/server/registry'
 import { collectClaudeUsage } from '@/lib/server/claudeUsage'
 import { fetchClaudeUsageCli, invalidateUsageCache } from '@/lib/server/claudeUsageCli'
-import { probeClaudeCli } from '@/lib/server/claudeCli'
+import { claudeConnection } from '@/lib/server/claudeConnection'
 import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
 import type {
@@ -293,15 +293,16 @@ export const miscRoutes = new Hono()
     const force = c.req.query('force') === '1'
     return c.json(await probeGhCli(force))
   })
-  // --- GET /api/claude-probe ------------------------------------------------
-  // Lightweight readiness check for the local `claude` CLI. Used by Settings
-  // and the empty-state to warn the user that runs will fail until the CLI is
-  // installed + authenticated (subscription-only — no API key). Presence-only;
-  // does not verify auth (interactive) and is intentionally not a wizard.
-  .get('/api/claude-probe', async (c) => {
-    // `?force=1` bypasses the 10s cache (used by Settings' "Re-check" button).
+  // --- GET /api/claude-connection -------------------------------------------
+  // Passive, cross-platform "is the user's Claude connected?" status. Runs
+  // `claude auth status` (shell on Windows, login-shell/known-paths fallback on
+  // POSIX) and reports installed + loggedIn + plan + email + a human message.
+  // Used by the toolbar indicator and Settings — PURELY informational; OPEN
+  // GROUND never gates onboarding or runs on it. `?force=1` bypasses the 10s
+  // cache (Settings' "Re-check" button).
+  .get('/api/claude-connection', async (c) => {
     const force = c.req.query('force') === '1'
-    return c.json(await probeClaudeCli(force))
+    return c.json(await claudeConnection(force))
   })
   // --- GET /api/update/check ------------------------------------------------
   .get('/api/update/check', async (c) => {

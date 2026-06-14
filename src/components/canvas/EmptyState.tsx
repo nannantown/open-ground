@@ -1,6 +1,5 @@
-import { AlertCircle, Terminal, FolderPlus, FolderInput } from 'lucide-react'
+import { FolderPlus, FolderInput } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
-import { useClaudeProbe } from '@/lib/useClaudeProbe'
 import { useT } from '@/i18n/I18nContext'
 
 const MARK = '/brand/openground-mark.svg'
@@ -20,10 +19,6 @@ export const EmptyState = ({
   onOpenManual?: () => void
 }) => {
   const { t } = useT()
-  // Probe the local `claude` CLI — this is the right place to tell a new user
-  // OPEN GROUND drives the local CLI (subscription-only) and needs it installed.
-  const claude = useClaudeProbe(true)
-  const claudeMissing = claude !== null && !claude.installed
 
   return (
     <div className="fixed inset-0 z-[8] flex items-center justify-center overflow-hidden">
@@ -81,18 +76,6 @@ export const EmptyState = ({
           </Btn>
         </div>
 
-        {/* Readiness note for the local claude CLI (subscription-only). */}
-        {claudeMissing ? (
-          <div className="mx-auto mt-8 flex max-w-[380px] items-start gap-2 rounded-[3px] border border-accent/40 bg-accent/5 px-3.5 py-3 text-left">
-            <AlertCircle size={14} className="mt-[1px] shrink-0 text-accent" />
-            <p className="text-[11.5px] leading-relaxed text-ink-muted">{t('misc.empty.cliMissing')}</p>
-          </div>
-        ) : (
-          <p className="mx-auto mt-8 inline-flex max-w-[360px] items-center gap-1.5 text-[11px] leading-relaxed text-ink-faint">
-            <Terminal size={11} className="shrink-0" />
-            {t('misc.empty.cliNote')}
-          </p>
-        )}
         {onOpenManual && (
           <button
             type="button"

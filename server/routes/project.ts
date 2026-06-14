@@ -67,7 +67,7 @@ import {
 import { extForMime } from '@/lib/server/canvasImages'
 import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
-import { probeClaudeCli } from '@/lib/server/claudeCli'
+import { claudeConnection } from '@/lib/server/claudeConnection'
 import { generateProjectDescription } from '@/lib/server/generateDescription'
 import { generateTaskTitle } from '@/lib/server/generateTaskTitle'
 import { getPromptLang } from '@/lib/server/promptLang'
@@ -743,10 +743,11 @@ export const projectRoutes = new Hono()
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
     // Pre-flight: a missing CLI means a doomed run. Surface it as a 503 with a
-    // machine-readable flag so the UI can disable the affordance.
-    const probe = await probeClaudeCli()
-    if (!probe.installed) {
-      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    // machine-readable flag so the UI can disable the affordance. Gate on
+    // `.installed` only — claude prompts for login itself at runtime.
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
     }
     try {
       const pair = await generateProjectDescription(path)
@@ -788,9 +789,9 @@ export const projectRoutes = new Hono()
     if (!task.titleAuto && !force) return c.json({ title: null })
     const content = [task.title, task.notes ?? ''].filter(Boolean).join('\n').trim()
     if (!content) return c.json({ title: null })
-    const probe = await probeClaudeCli()
-    if (!probe.installed) {
-      return c.json({ error: probe.message, claudeMissing: true }, 503)
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
     }
     try {
       const title = await generateTaskTitle(body.path, content)
