@@ -6,6 +6,7 @@ import { ToolPalette } from '@/components/canvas/ToolPalette'
 import { SettingsPanel } from '@/components/canvas/SettingsPanel'
 import { NewProjectModal } from '@/components/canvas/NewProjectModal'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
+import { GlobalSkillsPanel } from '@/components/canvas/GlobalSkillsPanel'
 import { AccountModal } from '@/components/canvas/AccountModal'
 import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
@@ -31,6 +32,7 @@ import type {
   ProjectsResponse,
   Tool,
   FeedbackConfigResponse,
+  ModuleSubmissionsConfigResponse,
 } from '@/lib/types'
 
 // localStorage key holding the newest feedback created_at the owner has seen in
@@ -45,6 +47,13 @@ const FEEDBACK_SEEN_KEY = 'openground:feedbackSeenAt'
 const ONBOARDED_KEY = 'openground:onboarded'
 const feedbackSeenKey = (sourceId: string | null) =>
   sourceId ? `${FEEDBACK_SEEN_KEY}:${sourceId}` : FEEDBACK_SEEN_KEY
+
+// Same "last seen" scheme for the owner's module-submission review queue
+// (docs/CUSTOM_TABS_PLAN.md) — scoped per Supabase source so it never carries a
+// stale marker across projects/tables.
+const MODULE_SUBMISSION_SEEN_KEY = 'openground:moduleSubmissionSeenAt'
+const moduleSubmissionSeenKey = (sourceId: string | null) =>
+  sourceId ? `${MODULE_SUBMISSION_SEEN_KEY}:${sourceId}` : MODULE_SUBMISSION_SEEN_KEY
 
 // Arrow-key nudge vectors for the canvas keyboard shortcuts. Static, so it
 // lives outside the component (and outside the effect's dependency list).
@@ -76,6 +85,13 @@ export default function App() {
   // Stable id of the Supabase data source (from /config) used to scope the
   // localStorage "seen" marker. Null until the config probe resolves.
   const [feedbackSourceId, setFeedbackSourceId] = useState<string | null>(null)
+  // Module submission review queue (docs/CUSTOM_TABS_PLAN.md) — same shape as the
+  // feedback inbox. canReview (owner build: service-role key + admin allowlist)
+  // gates the "Tab submissions" inbox in Settings and the gear dot; sourceId
+  // scopes the "seen" marker. Public build → canReview false, nothing shows.
+  const [moduleReviewCanReview, setModuleReviewCanReview] = useState(false)
+  const [moduleSubmissionUnread, setModuleSubmissionUnread] = useState(0)
+  const [moduleSubmissionSourceId, setModuleSubmissionSourceId] = useState<string | null>(null)
   // Current signed-in app user. `canRead` (owner inbox) can depend on identity
   // when an admin allowlist is set, so we re-probe feedback config when it changes.
   const { user: authUser } = useAuth()
@@ -95,6 +111,7 @@ export default function App() {
   const [jumpOpen, setJumpOpen] = useState(false)
   // Full-screen in-app manual (the "?" toolbar entry + first-run link).
   const [manualOpen, setManualOpen] = useState(false)
+  const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
   // Per-project claude beacon: projectId → 'working' (claude is busy) |
   // 'waiting' (claude sits on the human — its turn signal). Polled from
   // /api/terminal/active; the only "something is happening here" signal on
@@ -202,6 +219,17 @@ export default function App() {
         }
       })
       .catch(() => {})
+    // Module submission review config (same identity-dependent canReview gate as
+    // feedback — re-probed on login/logout via the effect's authUser dependency).
+    fetch('/api/module-submissions/config')
+      .then((res) => res.json() as Promise<Partial<ModuleSubmissionsConfigResponse>>)
+      .then((data) => {
+        if (!cancelled) {
+          setModuleReviewCanReview(!!data.canReview)
+          setModuleSubmissionSourceId(data.sourceId ?? null)
+        }
+      })
+      .catch(() => {})
     return () => {
       cancelled = true
     }
@@ -256,6 +284,48 @@ export default function App() {
       setFeedbackUnread(0)
     },
     [feedbackSourceId],
+  )
+
+  // The module-submission unread poll — same cadence + Settings-open pause as the
+  // feedback poll above (the inbox marks everything seen the moment it loads, so a
+  // stale poll must not resurrect the dot while Settings is open).
+  useEffect(() => {
+    if (!moduleReviewCanReview || settingsOpen) return
+    let cancelled = false
+    let lastPoll = 0
+    const poll = () => {
+      lastPoll = Date.now()
+      const since = localStorage.getItem(moduleSubmissionSeenKey(moduleSubmissionSourceId)) ?? ''
+      const q = since ? `?since=${encodeURIComponent(since)}` : ''
+      fetch(`/api/module-submissions/unread${q}`)
+        .then((res) => (res.ok ? (res.json() as Promise<{ count?: number }>) : null))
+        .then((data) => {
+          if (!cancelled && data) setModuleSubmissionUnread(data.count ?? 0)
+        })
+        .catch(() => {})
+    }
+    const onFocus = () => {
+      if (Date.now() - lastPoll >= 60_000) poll()
+    }
+    poll()
+    const id = window.setInterval(poll, 300_000)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [moduleReviewCanReview, settingsOpen, moduleSubmissionSourceId])
+
+  // Called by the review inbox once it loads: record the newest timestamp as
+  // "seen" (scoped per data source) and clear the gear dot.
+  const markModuleSubmissionSeen = useCallback(
+    (latestCreatedAt: string | null) => {
+      if (latestCreatedAt)
+        localStorage.setItem(moduleSubmissionSeenKey(moduleSubmissionSourceId), latestCreatedAt)
+      setModuleSubmissionUnread(0)
+    },
+    [moduleSubmissionSourceId],
   )
 
   // Poll which projects have a live claude session (every 5s, skipped while
@@ -652,9 +722,13 @@ export default function App() {
         onImport={importProject}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenManual={() => setManualOpen(true)}
+        onOpenSkills={() => setSkillsPanelOpen(true)}
         onFeedback={feedbackEnabled ? () => setFeedbackOpen(true) : undefined}
         onAccount={authEnabled ? () => setAccountOpen(true) : undefined}
-        unreadFeedback={feedbackUnread}
+        // The settings-gear dot covers BOTH owner inboxes (feedback + tab
+        // submissions); either having unread lights it, opening Settings (which
+        // loads both inboxes and marks them seen) clears it.
+        unreadFeedback={feedbackUnread + moduleSubmissionUnread}
         projectCount={visibleProjects.length}
         usage={<UsageHud />}
       />
@@ -758,6 +832,8 @@ export default function App() {
         onReload={load}
         feedbackCanRead={feedbackCanRead}
         onFeedbackSeen={markFeedbackSeen}
+        moduleReviewCanReview={moduleReviewCanReview}
+        onModuleSubmissionSeen={markModuleSubmissionSeen}
         onOpenFeedback={
           feedbackEnabled
             ? () => {
@@ -799,6 +875,7 @@ export default function App() {
         }}
       />
       <ManualPanel open={manualOpen} onClose={() => setManualOpen(false)} />
+      <GlobalSkillsPanel open={skillsPanelOpen} onClose={() => setSkillsPanelOpen(false)} />
       <ProjectJumpPalette
         open={jumpOpen}
         projects={visibleProjects}

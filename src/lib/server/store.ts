@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS: Settings = {
   archiveDirName: '_archive',
   excludePatterns: ['node_modules', '.next', 'dist', 'build', '.cache', '_archive'],
   openApps: [],
+  defaultEditor: null,
 }
 
 const DEFAULT_CANVAS: CanvasState = {

@@ -26,8 +26,6 @@ export const board = {
     'board.toolbar.clearDoneTitle': 'Delete every card in Done',
     'board.toolbar.clearDoneConfirm':
       'Delete {count} cards in Done. On a shared board the deletion applies to everyone. (⌘Z right after brings them back.)',
-    'board.toolbar.searchPlaceholder': 'Search cards',
-    'board.toolbar.searchClear': 'Clear search',
     'board.toolbar.undo': 'Undo (⌘Z)',
     'board.toolbar.redo': 'Redo (⇧⌘Z)',
     // Card
@@ -181,8 +179,6 @@ export const board = {
     'board.toolbar.clearDoneTitle': '完了列のカードをすべて削除',
     'board.toolbar.clearDoneConfirm':
       'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。（直後なら ⌘Z で戻せます）',
-    'board.toolbar.searchPlaceholder': 'カードを検索',
-    'board.toolbar.searchClear': '検索をクリア',
     'board.toolbar.undo': '元に戻す (⌘Z)',
     'board.toolbar.redo': 'やり直す (⇧⌘Z)',
     // Card

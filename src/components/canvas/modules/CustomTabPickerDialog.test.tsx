@@ -141,6 +141,88 @@ describe('CustomTabPickerDialog', () => {
     expect(getByLabelText('customTabs.uninstall')).toBeTruthy()
   })
 
+  it('renders the Built-in section with each module’s show/hide state', () => {
+    const { getByText } = render(
+      <CustomTabPickerDialog
+        modules={[]}
+        role="none"
+        attachedIds={new Set()}
+        natives={[
+          { id: 'board', label: 'Board', enabled: true },
+          { id: 'canvas', label: 'Canvas', enabled: false },
+        ]}
+        canDisableNative
+        onToggleNative={noop}
+        onAttach={noop}
+        onDelete={noop}
+        onClose={noop}
+      />,
+    )
+    expect(getByText('Board')).toBeTruthy()
+    expect(getByText('Canvas')).toBeTruthy()
+    expect(getByText('customTabs.shown')).toBeTruthy()
+    expect(getByText('customTabs.hidden')).toBeTruthy()
+  })
+
+  it('clicking an enabled built-in hides it; a disabled one shows it', () => {
+    const onToggleNative = vi.fn()
+    const { getByText } = render(
+      <CustomTabPickerDialog
+        modules={[]}
+        role="none"
+        attachedIds={new Set()}
+        natives={[
+          { id: 'board', label: 'Board', enabled: true },
+          { id: 'canvas', label: 'Canvas', enabled: false },
+        ]}
+        canDisableNative
+        onToggleNative={onToggleNative}
+        onAttach={noop}
+        onDelete={noop}
+        onClose={noop}
+      />,
+    )
+    fireEvent.click(getByText('Board'))
+    expect(onToggleNative).toHaveBeenCalledWith('board', false)
+    fireEvent.click(getByText('Canvas'))
+    expect(onToggleNative).toHaveBeenCalledWith('canvas', true)
+  })
+
+  it('the last visible built-in is locked — a click cannot hide it', () => {
+    const onToggleNative = vi.fn()
+    const { getByText } = render(
+      <CustomTabPickerDialog
+        modules={[]}
+        role="none"
+        attachedIds={new Set()}
+        natives={[{ id: 'terminal', label: 'Terminal', enabled: true }]}
+        canDisableNative={false}
+        onToggleNative={onToggleNative}
+        onAttach={noop}
+        onDelete={noop}
+        onClose={noop}
+      />,
+    )
+    fireEvent.click(getByText('Terminal'))
+    expect(onToggleNative).not.toHaveBeenCalled()
+  })
+
+  it('omitting onToggleNative hides the Built-in section entirely', () => {
+    const { queryByText } = render(
+      <CustomTabPickerDialog
+        modules={[mod(A)]}
+        role="owner"
+        attachedIds={new Set()}
+        natives={[{ id: 'board', label: 'Board', enabled: true }]}
+        onAttach={noop}
+        onDelete={noop}
+        onClose={noop}
+      />,
+    )
+    expect(queryByText('customTabs.builtinSection')).toBeNull()
+    expect(queryByText('Board')).toBeNull()
+  })
+
   it('Escape and a backdrop click both close', () => {
     const onClose = vi.fn()
     const { getByText } = render(

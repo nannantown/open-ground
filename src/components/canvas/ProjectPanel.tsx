@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import {
   AlertCircle,
   Archive,
-  ChevronLeft,
+  ChevronDown,
+  EyeOff,
   FolderOpen,
   GitBranch,
   Loader2,
@@ -11,13 +12,16 @@ import {
   MoreHorizontal,
   Plus,
   RotateCw,
+  Sparkles,
   SquareCode,
+  Star,
   Store,
   Terminal,
   Trash2,
   X,
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { BackLink } from '@/components/ui/BackLink'
 import { useT } from '@/i18n/I18nContext'
 import type {
   BranchChangesResponse,
@@ -70,6 +74,7 @@ import { BoardTaskTerminal } from '@/components/canvas/TaskTerminal'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
 import { BranchChangesModal } from '@/components/canvas/BranchChangesModal'
+import { SkillsModal } from '@/components/canvas/SkillsModal'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import {
@@ -81,11 +86,13 @@ import {
   customModuleTabDef,
   enabledModules,
   isModuleIdEnabled,
+  nativeDescriptors,
   type TabDef,
 } from '@/components/canvas/moduleRegistry'
-import { customTabId, customModuleIdFromTab, isCustomTabId } from '@/lib/modules/ids'
+import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
 import { attachCustomTab, detachCustomTab } from '@/lib/modules/customTabAttach'
+import { disableNativeModule, enableNativeModule } from '@/lib/modules/nativeEnable'
 import { useCustomModules } from '@/lib/modules/useCustomModules'
 import { CustomModuleView } from '@/components/canvas/modules/CustomModuleView'
 import { customModuleStorageId } from '@/components/canvas/modules/CustomModuleView'
@@ -101,6 +108,12 @@ import { MarketplaceDialog } from '@/components/canvas/modules/MarketplaceDialog
 // order and persistView's allowlist all derive from the merged id list.
 type PanelView = string
 const isMvpVisibleTab = isModuleIdEnabled
+
+// The single right-click action a tab in the row offers: 'detach' a custom tab
+// (non-destructive, the module stays in the library) or 'disable' a built-in
+// (hide it from this project via disabledModules). The row's menu derives its
+// label/icon from `kind`; null from the resolver means no menu for that tab.
+type TabRowAction = { kind: 'detach' | 'disable'; run: () => void | Promise<void> }
 
 // The enabled module ids in registry (default) order. Per project this is
 // reordered by the user (drag-to-reorder, persisted in ProjectData.tabOrder)
@@ -304,36 +317,131 @@ export const ProjectPanel = ({
     }).catch(() => {})
   }, [project])
 
-  // Open the project folder in the user's code editor (cursor/code/windsurf/
-  // zed, or OPENGROUND_EDITOR_CMD). Unlike reveal this CAN meaningfully fail
-  // (no editor installed → 503 with a human message), so failures surface via
-  // the same alert pattern "Open in…" uses.
-  const openInEditor = useCallback(async () => {
-    if (!project || project.missing) return
-    try {
-      const res = await fetch('/api/project/open-editor', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: project.path }),
-      })
-      if (!res.ok) {
-        const e = (await res.json().catch(() => ({}))) as { error?: string }
-        alert(t('projectPanel.editorOpenFailed', { error: e.error ?? res.statusText }))
-      }
-    } catch (e: any) {
-      alert(
-        t('projectPanel.editorOpenFailed', {
-          error: e?.message ?? t('projectPanel.networkError'),
-        }),
+  // ── "Open in editor" (`<>`) — a chooser, not an auto-pick ──────────────────
+  // The editors actually installed on this machine (macOS Applications scan)
+  // plus a remembered one-click default. Clicking the button opens the default
+  // in one click; with no default it drops the menu so the user picks one (and
+  // can star it as the default). Replaces the old "always auto-pick cursor".
+  const [editorMenuOpen, setEditorMenuOpen] = useState(false)
+  const [installedEditors, setInstalledEditors] = useState<OpenApp[]>([])
+  const [defaultEditor, setDefaultEditor] = useState<OpenApp | null>(null)
+  const [canPickEditor, setCanPickEditor] = useState(false)
+  useEffect(() => {
+    fetch('/api/project/editors')
+      .then(
+        (r) =>
+          r.json() as Promise<{
+            editors?: OpenApp[]
+            default?: OpenApp | null
+            canPick?: boolean
+          }>,
       )
+      .then((d) => {
+        setInstalledEditors(d.editors ?? [])
+        setDefaultEditor(d.default ?? null)
+        setCanPickEditor(!!d.canPick)
+      })
+      .catch(() => {})
+  }, [])
+  // Outside-click closes the menu. The menu's own container stops mousedown
+  // propagation (see the JSX), so clicks inside it never reach this listener.
+  useEffect(() => {
+    if (!editorMenuOpen) return
+    const close = () => setEditorMenuOpen(false)
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [editorMenuOpen])
+
+  // Open the folder in an editor. `editor` undefined → the server uses the
+  // saved default, else CLI auto-detection. Unlike reveal this CAN meaningfully
+  // fail (no editor → 503), so failures surface via alert.
+  const openInEditorWith = useCallback(
+    async (editor?: OpenApp) => {
+      if (!project || project.missing) return
+      setEditorMenuOpen(false)
+      try {
+        const res = await fetch('/api/project/open-editor', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(editor ? { path: project.path, editor } : { path: project.path }),
+        })
+        if (!res.ok) {
+          const e = (await res.json().catch(() => ({}))) as { error?: string }
+          alert(t('projectPanel.editorOpenFailed', { error: e.error ?? res.statusText }))
+        }
+      } catch (e: any) {
+        alert(
+          t('projectPanel.editorOpenFailed', {
+            error: e?.message ?? t('projectPanel.networkError'),
+          }),
+        )
+      }
+    },
+    [project, t],
+  )
+
+  // Can we offer the chooser at all? Yes if editors were detected, or if the
+  // native Finder picker is available (macOS). Otherwise — e.g. Windows/Linux
+  // with nothing detected — the button falls back to CLI auto-detection.
+  const canChooseEditor = installedEditors.length > 0 || canPickEditor
+  // The `<>` button itself: a default opens in one click; else drop the chooser;
+  // and when there's nothing to choose from, fall back to the server's CLI
+  // auto-detection so the button still works on Windows/Linux.
+  const handleEditorButton = useCallback(() => {
+    if (!project || project.missing) return
+    if (defaultEditor) void openInEditorWith(defaultEditor)
+    else if (canChooseEditor) setEditorMenuOpen((v) => !v)
+    else void openInEditorWith()
+  }, [project, defaultEditor, canChooseEditor, openInEditorWith])
+
+  // Remember / clear the one-click default (persisted server-side).
+  const saveDefaultEditor = useCallback(async (editor: OpenApp | null) => {
+    setDefaultEditor(editor)
+    try {
+      await fetch('/api/project/default-editor', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ editor }),
+      })
+    } catch {
+      /* best-effort; the in-memory default still updates */
     }
-  }, [project, t])
+  }, [])
+
+  // "Choose another app…" — the native Finder .app picker (shared with the
+  // generic Open-in flow). A pick becomes the new default and opens at once.
+  const pickEditor = useCallback(async () => {
+    setEditorMenuOpen(false)
+    try {
+      const res = await fetch('/api/project/open/pick', { method: 'POST' })
+      const d = (await res.json()) as {
+        name?: string
+        path?: string
+        cancelled?: boolean
+        error?: string
+      }
+      if (d.cancelled || !d.name) return
+      if (d.error) {
+        alert(t('projectPanel.pickFailed', { error: d.error }))
+        return
+      }
+      const picked: OpenApp = { name: d.name, path: d.path, mode: 'open' }
+      setInstalledEditors((prev) =>
+        prev.some((e) => e.name === picked.name) ? prev : [...prev, picked],
+      )
+      await saveDefaultEditor(picked)
+      void openInEditorWith(picked)
+    } catch (e: any) {
+      alert(t('projectPanel.pickFailed', { error: e?.message ?? t('projectPanel.networkError') }))
+    }
+  }, [t, saveDefaultEditor, openInEditorWith])
 
   // Header branch chip: branch name + a dot when the working tree is dirty.
   // Fetched once per project open (good enough — the modal re-fetches fresh
   // data on open and pushes it back here, so the chip never drifts far).
   const [branchInfo, setBranchInfo] = useState<BranchChangesResponse | null>(null)
   const [branchModalOpen, setBranchModalOpen] = useState(false)
+  const [skillsOpen, setSkillsOpen] = useState(false)
   useEffect(() => {
     setBranchInfo(null)
     setBranchModalOpen(false)
@@ -550,12 +658,20 @@ export const ProjectPanel = ({
     const lib = new Set(customModules.map(m => m.id))
     return (data?.customTabs ?? []).filter(id => lib.has(id))
   }, [data?.customTabs, customModules])
-  // Every id that can appear in the tab row: built-ins in registry order,
-  // then the ATTACHED custom tabs in attachment order. effectiveTabOrder
+  // Built-in modules this project has HIDDEN (ProjectData.disabledModules —
+  // personal per-project state like tabOrder). A native ships pre-installed and
+  // can't be uninstalled, but a project may drop it from its row. Empty for
+  // every project until the user hides one, so the default row is unchanged.
+  const enabledNativeIds = useMemo<PanelView[]>(() => {
+    const hidden = new Set(data?.disabledModules ?? [])
+    return ENABLED_MODULE_IDS.filter(id => !hidden.has(id))
+  }, [data?.disabledModules])
+  // Every id that can appear in the tab row: enabled built-ins in registry
+  // order, then the ATTACHED custom tabs in attachment order. effectiveTabOrder
   // reconciles a saved per-project order against this set.
   const allTabIds = useMemo<PanelView[]>(
-    () => [...ENABLED_MODULE_IDS, ...attachedModuleIds.map(customTabId)],
-    [attachedModuleIds],
+    () => [...enabledNativeIds, ...attachedModuleIds.map(customTabId)],
+    [enabledNativeIds, attachedModuleIds],
   )
   // The per-project, normalised tab order: the user's saved drag order
   // (ProjectData.tabOrder) reconciled against the live registry + custom set,
@@ -565,16 +681,15 @@ export const ProjectPanel = ({
     () => effectiveTabOrder<PanelView>(data?.tabOrder, allTabIds),
     [data?.tabOrder, allTabIds],
   )
-  // A persisted / lingering custom tab that is no longer in this project's
-  // row — NOT attached here (detached, or never was on this project), or its
-  // module vanished from the library (deleted elsewhere, a stale localStorage
-  // value) — falls back to the first built-in. Only judged once BOTH sources
-  // are in (the library list AND this project's data) — before that, "not in
-  // the row" just means "haven't heard from the server yet".
+  // The active tab is no longer in this project's row — a custom tab detached
+  // here / deleted from the library (a stale localStorage value), OR a built-in
+  // now hidden via disabledModules. Land on the first remaining tab. Only judged
+  // once BOTH sources are in (the library list AND this project's data) — before
+  // that, "not in the row" just means "haven't heard from the server yet".
   useEffect(() => {
-    if (!customModulesLoaded || !data || !isCustomTabId(view)) return
+    if (!customModulesLoaded || !data) return
     if (allTabIds.includes(view)) return
-    setView(tabOrder.find(id => !isCustomTabId(id)) ?? 'board')
+    setView(tabOrder[0] ?? 'board')
   }, [customModulesLoaded, data, view, allTabIds, tabOrder])
   // "The leftmost tab opens by default." When a project's data first loads
   // (opening it, or switching to it — guarded so a same-project save/refetch
@@ -645,16 +760,13 @@ export const ProjectPanel = ({
         : null,
     [view, customModules],
   )
-  // Tab-row right-click = DETACH only (non-destructive, no confirm): drop the
-  // module id from THIS project's customTabs and scrub its custom:<id> entry
-  // from tabOrder, persisted together. The module stays in the library — the
-  // picker can re-attach it. Offered to anyone who manages custom tabs
-  // (cosmetic — attachment is personal per-project state, no server role
-  // gate applies to it).
-  const canDetachTab = useCallback(
-    (tabId: string): boolean => customRole !== 'none' && isCustomTabId(tabId),
-    [customRole],
-  )
+  // Tab-row right-click offers ONE action per tab (no confirm — both are
+  // reversible from the "+" picker): DETACH a custom tab (drop it from this
+  // project's customTabs + scrub its custom:<id> from tabOrder; the module stays
+  // in the library) or DISABLE a built-in (hide it via disabledModules). Both
+  // are personal per-project state, so no server role gate applies — detach is
+  // offered to anyone who manages custom tabs (customRole !== 'none'); hiding a
+  // native is everyone's right (it's just their own layout).
   const detachTabFromProject = useCallback(
     (tabId: string) => {
       if (!isCustomTabId(tabId)) return
@@ -665,6 +777,45 @@ export const ProjectPanel = ({
       // The dangling-view fallback effect moves the view off the detached id.
     },
     [persist],
+  )
+  // Show/hide a built-in module in THIS project's row (disabledModules). Hiding
+  // the LAST remaining tab is blocked by the callers (picker + tab menu); the
+  // dangling-view fallback effect moves the view off a now-hidden native.
+  const toggleNativeTab = useCallback(
+    (moduleId: string, enabled: boolean) => {
+      const base = dataRef.current
+      if (!base) return
+      const disabledModules = enabled
+        ? enableNativeModule(base.disabledModules, moduleId as ModuleId)
+        : disableNativeModule(base.disabledModules, moduleId as ModuleId)
+      persist({ ...base, disabledModules })
+    },
+    [persist],
+  )
+  // The built-in modules + their per-project enabled state, for the picker's
+  // "Built-in" section (enabled = not hidden via disabledModules).
+  const nativePickerItems = useMemo(() => {
+    const hidden = new Set(data?.disabledModules ?? [])
+    return nativeDescriptors().map(d => ({
+      id: d.id,
+      label: d.label,
+      enabled: !hidden.has(d.id),
+    }))
+  }, [data?.disabledModules])
+  // The single right-click action for a tab in the row (see TabRowAction).
+  // null = no menu: the role can't manage it, or it's the last remaining tab
+  // (the floor invariant — never strand a project with zero visible tabs).
+  const tabRowAction = useCallback(
+    (tabId: string): TabRowAction | null => {
+      if (tabOrder.length <= 1) return null
+      if (isCustomTabId(tabId)) {
+        if (customRole === 'none') return null
+        return { kind: 'detach', run: () => detachTabFromProject(tabId) }
+      }
+      if (!isModuleIdEnabled(tabId)) return null
+      return { kind: 'disable', run: () => toggleNativeTab(tabId, false) }
+    },
+    [tabOrder.length, customRole, detachTabFromProject, toggleNativeTab],
   )
   // LIBRARY-level destruction (now lives in the "+" picker, not the tab row):
   // server DELETE, then PTY/dock teardown, then a list refresh. The picker
@@ -1760,12 +1911,7 @@ export const ProjectPanel = ({
             basis-[280px] is the width the title block defends before the
             controls cluster wraps below it. */}
         <div className="min-w-0 flex-1 basis-[280px]">
-          <button
-            onClick={onClose}
-            className="flex items-center gap-1 label-cap text-accent transition-colors hover:text-ink"
-          >
-            <ChevronLeft size={11} strokeWidth={2.5} /> {t('projectPanel.backToGround')}
-          </button>
+          <BackLink label={t('projectPanel.backToGround')} onClick={onClose} />
           <div className="flex min-w-0 items-center gap-2.5">
             <EditableTitle
               name={project.name}
@@ -1784,17 +1930,123 @@ export const ProjectPanel = ({
             >
               <FolderOpen size={16} strokeWidth={1.75} />
             </button>
-            {/* Open the folder in the user's code editor — same family as the
-                reveal button, one click from the title. */}
-            <button
-              onClick={openInEditor}
-              disabled={project.missing}
-              title={t('projectPanel.openInEditor')}
-              aria-label={t('projectPanel.openInEditor')}
-              className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+            {/* Open the folder in an editor. The `<>` half opens the default
+                (or, with none yet, drops the chooser); the ▼ half always drops
+                the chooser of editors installed on this machine — open any, or
+                star one as the new default. mousedown stops at the container so
+                the outside-click closer only fires for clicks truly outside. */}
+            <div
+              className="relative flex shrink-0 items-center"
+              onMouseDown={(e) => e.stopPropagation()}
             >
-              <SquareCode size={16} strokeWidth={1.75} />
-            </button>
+              <button
+                onClick={handleEditorButton}
+                disabled={project.missing}
+                title={
+                  defaultEditor
+                    ? t('projectPanel.openInEditorWith', { name: defaultEditor.name })
+                    : t('projectPanel.openInEditor')
+                }
+                aria-label={
+                  defaultEditor
+                    ? t('projectPanel.openInEditorWith', { name: defaultEditor.name })
+                    : t('projectPanel.openInEditor')
+                }
+                className={`rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
+                  canChooseEditor ? 'rounded-r-none' : ''
+                }`}
+              >
+                <SquareCode size={16} strokeWidth={1.75} />
+              </button>
+              {canChooseEditor && (
+                <button
+                  onClick={() => setEditorMenuOpen((v) => !v)}
+                  disabled={project.missing}
+                  title={t('projectPanel.chooseEditor')}
+                  aria-label={t('projectPanel.chooseEditor')}
+                  aria-haspopup="menu"
+                  aria-expanded={editorMenuOpen}
+                  className={`-ml-px rounded-sm rounded-l-none p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
+                    editorMenuOpen
+                      ? 'bg-bg-inset text-ink-muted'
+                      : 'text-ink-faint hover:bg-bg-inset hover:text-ink-muted'
+                  }`}
+                >
+                  <ChevronDown size={12} strokeWidth={2} />
+                </button>
+              )}
+              {editorMenuOpen && (
+                <div
+                  role="menu"
+                  className="absolute left-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                >
+                  <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
+                    {t('projectPanel.openInEditor')}
+                  </div>
+                  {installedEditors.length === 0 && (
+                    <div className="px-3 py-1.5 text-[12px] text-ink-faint">
+                      {t('projectPanel.editorNoneFound')}
+                    </div>
+                  )}
+                  {installedEditors.map((ed) => {
+                    const isDefault = defaultEditor?.name === ed.name
+                    return (
+                      <div key={ed.name} className="group flex items-center gap-1 px-1">
+                        <button
+                          role="menuitem"
+                          onClick={() => void openInEditorWith(ed)}
+                          className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                        >
+                          {ed.name}
+                        </button>
+                        <button
+                          onClick={() => void saveDefaultEditor(isDefault ? null : ed)}
+                          title={
+                            isDefault
+                              ? t('projectPanel.editorClearDefault')
+                              : t('projectPanel.editorSetDefault')
+                          }
+                          aria-label={
+                            isDefault
+                              ? t('projectPanel.editorClearDefault')
+                              : t('projectPanel.editorSetDefault')
+                          }
+                          aria-pressed={isDefault}
+                          className={`shrink-0 rounded-sm p-1.5 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${
+                            isDefault
+                              ? 'text-accent'
+                              : 'text-ink-faint opacity-0 hover:text-ink-muted focus-visible:opacity-100 group-hover:opacity-100'
+                          }`}
+                        >
+                          <Star size={14} strokeWidth={2} className={isDefault ? 'fill-current' : ''} />
+                        </button>
+                      </div>
+                    )
+                  })}
+                  {(canPickEditor || defaultEditor) && (
+                    <div className="my-1 border-t border-line" />
+                  )}
+                  {canPickEditor && (
+                    <button
+                      role="menuitem"
+                      onClick={() => void pickEditor()}
+                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                    >
+                      {t('projectPanel.editorPickOther')}
+                    </button>
+                  )}
+                  {defaultEditor && (
+                    <button
+                      role="menuitem"
+                      onClick={() => void saveDefaultEditor(null)}
+                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
+                    >
+                      {t('projectPanel.editorClearDefault')}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             {/* Branch chip — only for git projects: current branch, a dot when
                 the working tree is dirty; opens the Branch changes modal. */}
             {branchInfo?.isGit && (
@@ -1872,6 +2124,20 @@ export const ProjectPanel = ({
             it onto its own row; inner flex-wrap lets the share strip / HUD /
             feedback button flow onto further rows on very narrow windows. */}
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
+          {/* Skills: lists the Claude skills defined inside this project
+              (.claude/skills/). A quiet text+icon button — always present (not
+              git/share-gated), disabled only for a vanished folder. */}
+          <button
+            type="button"
+            onClick={() => setSkillsOpen(true)}
+            disabled={project.missing}
+            title={t('projectPanel.skillsButtonHint')}
+            aria-label={t('projectPanel.skillsButton')}
+            className="flex shrink-0 items-center gap-1 rounded-sm px-1 py-1 text-[11px] text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
+          >
+            <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
+            {t('projectPanel.skillsButton')}
+          </button>
           {/* Git share: a quiet text-only Sync button (dot = unsynced local
               changes) + the remote's short name as faint context. Lives with
               the project-scoped header controls; hidden entirely unless the
@@ -2061,13 +2327,15 @@ export const ProjectPanel = ({
         // row renders them wherever `order` puts them; `order` only ever
         // contains tabs ATTACHED to this project (allTabIds above).
         customTabs={customModules.map(customModuleTabDef)}
-        // Management affordances are role-gated COSMETICALLY (server is the
-        // source of truth): "+" opens the attach picker (owner|tester), which
-        // now also carries the marketplace entry.
-        onAddTab={customRole !== 'none' ? () => setPickerOpen(true) : undefined}
-        // Right-click menu on custom tabs: detach from this project's row
-        // (non-destructive — library delete lives in the picker).
-        customTabMenu={{ canDetach: canDetachTab, onDetach: detachTabFromProject }}
+        // "+" opens the per-project picker — attach custom tabs AND show/hide
+        // built-ins. Both are personal per-project layout (no server role gate),
+        // so the picker is available to everyone, including role 'none'; the
+        // owner-only create + owner|tester marketplace entries inside it stay
+        // role-gated cosmetically (the server re-checks).
+        onAddTab={() => setPickerOpen(true)}
+        // Right-click menu on a tab: detach a custom (non-destructive — library
+        // delete lives in the picker) or hide a built-in from this project.
+        rowMenu={{ actionFor: tabRowAction }}
         // Cards waiting in Review — the reviewer's pull signal (F066). Only
         // counted when the review column is enabled for this board.
         badges={{
@@ -2472,6 +2740,11 @@ export const ProjectPanel = ({
           modules={customModules}
           role={customRole}
           attachedIds={new Set(attachedModuleIds)}
+          // Built-in modules + show/hide controls (personal per-project layout,
+          // available to every role). The last visible tab can't be hidden.
+          natives={nativePickerItems}
+          canDisableNative={tabOrder.length > 1}
+          onToggleNative={toggleNativeTab}
           onAttach={moduleId => {
             attachTabToProject(moduleId)
             setPickerOpen(false)
@@ -2540,6 +2813,13 @@ export const ProjectPanel = ({
         path={project.path}
         onClose={() => setBranchModalOpen(false)}
         onData={setBranchInfo}
+      />
+
+      <SkillsModal
+        open={skillsOpen}
+        path={project.path}
+        projectName={project.name}
+        onClose={() => setSkillsOpen(false)}
       />
     </div>
   )
@@ -2962,6 +3242,11 @@ const ProjectSettingsDialog = ({
     <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
       <div className="grid min-h-full place-items-center">
         <div className="mx-auto w-full max-w-[760px] px-8 py-10">
+          <BackLink
+            label={t('projectPanel.settingsBack')}
+            onClick={onClose}
+            className="mb-5"
+          />
           <p className="label-cap text-accent mb-2">
             {t('projectPanel.settingsDialogLabel')}
           </p>
@@ -3259,14 +3544,6 @@ const ProjectSettingsDialog = ({
               </button>
             </div>
           )}
-
-          {/* Autosave dialog — no Save/Cancel pair; Back just dismisses
-              (every change is already persisted the moment it's made). */}
-          <div className="mt-6 flex items-center justify-end">
-            <Btn variant="subtle" size="md" onClick={onClose}>
-              {t('projectPanel.settingsBack')}
-            </Btn>
-          </div>
         </div>
       </div>
     </div>
@@ -3365,7 +3642,7 @@ const ViewTabs = ({
   terminalInfo,
   customTabs,
   onAddTab,
-  customTabMenu,
+  rowMenu,
   badges,
 }: {
   view: PanelView
@@ -3380,15 +3657,15 @@ const ViewTabs = ({
    *  Ids in `order` with no entry here (a module deleted elsewhere) just
    *  don't render. */
   customTabs?: TabDef[]
-  /** Owner|tester "+" (open the per-project attach picker); undefined hides it. */
+  /** "+" opens the per-project picker (attach customs + show/hide built-ins);
+   *  undefined hides it. */
   onAddTab?: () => void
-  /** Right-click menu on custom tabs — DETACH from this project's row only
-   *  (non-destructive, no confirm; library delete lives in the "+" picker).
-   *  `canDetach` decides whether a tab id gets the menu at all. Undefined
+  /** Right-click menu on a tab — `actionFor(id)` returns the single action that
+   *  tab offers (detach a custom / hide a built-in) or null for no menu (library
+   *  delete lives in the "+" picker; the last visible tab is locked). Undefined
    *  disables the menu entirely. */
-  customTabMenu?: {
-    canDetach: (id: string) => boolean
-    onDetach: (id: string) => void | Promise<void>
+  rowMenu?: {
+    actionFor: (id: string) => TabRowAction | null
   }
   /** Optional per-tab count chip (e.g. board → cards waiting in Review).
    *  0/undefined renders nothing — the row stays quiet by default. */
@@ -3447,6 +3724,11 @@ const ViewTabs = ({
     }
   }
 
+  // The action for the currently-open right-click menu, recomputed each render
+  // so a state change that revokes it (e.g. the tab became the last one) closes
+  // the menu rather than leaving a stale item.
+  const menuAction = tabMenu ? rowMenu?.actionFor(tabMenu.id) ?? null : null
+
   return (
     <div className="flex shrink-0 items-end gap-4 border-b border-line px-8">
       {tabs.map((m, i) => {
@@ -3489,8 +3771,9 @@ const ViewTabs = ({
             onDragEnd={endDrag}
             onClick={() => onChange(m.id)}
             onContextMenu={e => {
-              // Custom tabs only, and only when the role offers an action.
-              if (!customTabMenu?.canDetach(m.id)) return
+              // Only when this tab offers an action (detach a custom / hide a
+              // built-in); the resolver returns null otherwise (last tab, etc.).
+              if (!rowMenu?.actionFor(m.id)) return
               e.preventDefault()
               setTabMenu({ id: m.id, x: e.clientX, y: e.clientY })
             }}
@@ -3545,44 +3828,49 @@ const ViewTabs = ({
       {/* The marketplace no longer sits as a bare text entry in the tab row.
           It moved into the "+" picker (「マーケットで探す」) and Project settings,
           so the tab row stays tabs-only (docs/CUSTOM_TABS_PLAN.md). */}
-      {tabMenu &&
-        customTabMenu &&
-        customTabMenu.canDetach(tabMenu.id) && (
-          <>
-            {/* Invisible backdrop: any click outside the menu dismisses it
-                (a right-click outside dismisses too, without opening the
-                browser menu over our UI). */}
-            <div
-              className="fixed inset-0 z-40"
-              onMouseDown={() => setTabMenu(null)}
-              onContextMenu={e => {
-                e.preventDefault()
+      {tabMenu && menuAction && (
+        <>
+          {/* Invisible backdrop: any click outside the menu dismisses it
+              (a right-click outside dismisses too, without opening the
+              browser menu over our UI). */}
+          <div
+            className="fixed inset-0 z-40"
+            onMouseDown={() => setTabMenu(null)}
+            onContextMenu={e => {
+              e.preventDefault()
+              setTabMenu(null)
+            }}
+          />
+          <div
+            role="menu"
+            className="fixed z-50 min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
+            style={{ left: tabMenu.x, top: tabMenu.y }}
+          >
+            {/* One action, fired on the first click — both detach and hide are
+                non-destructive (reversible from the "+" picker), so no confirm
+                and no danger styling: a Minus to detach a custom, an EyeOff to
+                hide a built-in. */}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                void menuAction.run()
                 setTabMenu(null)
               }}
-            />
-            <div
-              role="menu"
-              className="fixed z-50 min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
-              style={{ left: tabMenu.x, top: tabMenu.y }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-bg-inset active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
             >
-              {/* Detach is non-destructive (the module stays in the library),
-                  so it fires on the first click — no confirm, no danger
-                  styling, a Minus rather than a trash can. */}
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  void customTabMenu.onDetach(tabMenu.id)
-                  setTabMenu(null)
-                }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-bg-inset active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-              >
+              {menuAction.kind === 'detach' ? (
                 <Minus size={13} strokeWidth={2} className="shrink-0" />
-                <span className="flex-1">{t('customTabs.detach')}</span>
-              </button>
-            </div>
-          </>
-        )}
+              ) : (
+                <EyeOff size={13} strokeWidth={2} className="shrink-0" />
+              )}
+              <span className="flex-1">
+                {t(menuAction.kind === 'detach' ? 'customTabs.detach' : 'customTabs.disableModule')}
+              </span>
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }

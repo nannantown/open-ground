@@ -62,12 +62,19 @@ anywhere in the code. The shipped default resolves every account to `'none'`.
 - Capability matrix:
   | capability | owner | tester | none |
   |---|---|---|---|
-  | see/create/edit/delete local modules | ✓ | – | – |
-  | sidebar claude terminal + paste | ✓ | – | – |
+  | see/create/edit local modules | ✓ | ✓ | – |
+  | delete a *local* module | ✓ | – | – |
+  | sidebar claude terminal + paste | ✓ | ✓ | – |
   | publish | ✓ | – | – |
   | marketplace list + install | ✓ | ✓ | – |
   | delete an *installed* module | ✓ | ✓ | – |
   | render existing on-disk custom tabs | ✓ | ✓ | ✓ |
+
+  A tester now authors tabs locally (build → submit to the owner for review),
+  so they may create/edit and drive the sidebar claude terminal — but **editing
+  is restricted to `origin:'local'` modules they authored, never an
+  `installed` one** (someone else's published artifact). Publishing stays
+  owner authority.
 
 ## Data layout (global scope, app home)
 
@@ -271,3 +278,67 @@ row is now a PER-PROJECT choice:
   installed module to the current project.
 - Existing data migration: none — `customTabs` starts undefined (= no custom
   tabs attached anywhere). The owner re-attaches via the picker.
+
+## "Everything is a module" + the submission pipeline (2026-06 round)
+
+This round graduates custom tabs from an owner-only internal tool toward an
+ecosystem: built-ins are modelled as modules, testers author + submit, and the
+owner reviews + publishes. The capability matrix above already reflects it.
+
+### Everything is a module (unified registry + per-project disable)
+
+- A tab is a `ModuleDescriptor` (`src/lib/modules/descriptor.ts`) of one of two
+  **kinds**: `native` (Terminal / Canvas / Board — compiled React shipped in the
+  binary, the pre-installed default set) or `sandboxed` (`custom:<uuid>` — user
+  source in a sandboxed iframe). The registry (`moduleRegistry.tsx`) tags each
+  built-in `kind:'native', default:true` and exposes `nativeDescriptors()`; the
+  tab row, Ctrl+Tab, drag-order and persistView treat both kinds uniformly. The
+  PERSISTENCE layer stays split on purpose — a native has no `CustomModuleDef`
+  and never publishes — so `validateProjectPath`, the iframe sandbox and the
+  Supabase glue are untouched.
+- A native is **disabled, never uninstalled**: `ProjectData.disabledModules?:
+  string[]` (personal per-project state like `tabOrder` / `customTabs`) hides a
+  built-in from THIS project's row. The "+" picker's **Built-in** section and the
+  tab right-click menu toggle it (everyone's right — it's personal layout). The
+  **last visible tab can't be hidden** (the floor invariant). Pure helpers:
+  `src/lib/modules/nativeEnable.ts`.
+
+### Tester authoring (server gate change)
+
+Authoring opened to testers: `POST /api/custom-modules`, `PUT` (their
+`origin:'local'` modules only), and the sidebar-claude terminal routes are now
+`owner|tester`. **Publishing official modules stays owner-only.**
+
+### Submission → review → publish
+
+A tester builds a tab, then **submits its source** to the owner, who reviews and
+approves (→ published to the marketplace) or rejects. Mirrors the feedback proxy.
+Setup + table SQL + env: **`docs/MODULE_SUBMISSIONS_SETUP.md`**.
+
+- Table `og_module_submissions` — RLS **anon INSERT pending-only, no anon
+  SELECT** (a private queue, vs `og_custom_modules`' public `anon SELECT`). The
+  owner reads/moderates with the service-role key.
+- Glue `src/lib/server/customModulesSubmissions.ts`; routes
+  `server/routes/moduleSubmissions.ts` (group J): `config` / `POST` submit
+  (owner|tester) / `GET` list + `:id` (with source) + `unread` / `approve` /
+  `reject`. Review routes gated by service-role + `MODULE_ADMIN_EMAILS` (falls
+  back to `FEEDBACK_ADMIN_EMAILS`). **approve** copies the source through the
+  existing `publishModule` (INSERT) — the only writer of the public table.
+- Client: the custom-tab header shows **"Submit to owner"** for testers
+  (`CustomModuleView`); the owner inbox is **Settings → Tab submissions**
+  (`ModuleReviewInbox`, modelled on `FeedbackInbox`) with a sandboxed-iframe
+  preview + raw source + approve/reject, and a settings-gear unread dot
+  (`App.tsx`, the feedback-unread wiring).
+- 3-point set: `SubmitModuleRequest` / `ModuleSubmissionItem` / `*Response`
+  (types.ts) + `SubmitModuleBodySchema` + `sanitizeModuleSubmission` (schemas.ts,
+  the read-side guard) + the row build in the glue.
+
+### Defaults the implementation chose (easy to revisit)
+
+- Submit INSERT is **anon-proxied** (feedback-faithful); `submitter_email` is
+  display-only. Trustworthy attribution / read-own-status would mean a JWT +
+  per-user RLS upgrade.
+- **approve always INSERTs** a fresh marketplace row (no version continuity —
+  consistent with "module updates" being out of scope).
+- `none` can see the "+" picker (native layout is personal); library
+  destruction / create / submit stay role-gated.

@@ -330,6 +330,13 @@ export const parseGeneratedElements = (jsonText: string): CanvasElement[] => {
     out.push({ ...r.data, id: newId() })
   }
   if (out.length === 0) throw new Error('no valid canvas elements were generated')
+  // A frame the model didn't paint a fill on defaults to WHITE — the same
+  // default a frame DRAWN with the frame tool gets, so an AI design's
+  // artboards read as solid white instead of the near-invisible paper wash the
+  // absent-fill fallback would otherwise give (consistency with the editor).
+  for (const el of out) {
+    if (el.type === 'frame' && el.fill === undefined) el.fill = '#FFFFFF'
+  }
   // AFTER id assignment — the inferred parentId must reference the fresh ids.
   inferGeneratedParents(out)
   return out
@@ -350,7 +357,7 @@ export const buildGenerateElementsPrompt = (file: string, userPrompt: string): s
     '- width, height: numbers (px). Give every frame / shape / sticky an explicit size; optional for text.',
     '- text: string — frame label / text content / sticky body. Use "" when none.',
     '- shape: shapeKind "rect" | "ellipse"; fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px, rect only); opacity (0..1).',
-    '- frame: fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px); a frame is a labeled container — place related elements visually inside its rect. Give every frame a short, meaningful name in `text` (e.g. "Pricing — Pro card", "Hero"); never leave it empty or literally "Frame". The name renders OUTSIDE the rect (Figma-style), so the full frame area is design content. Any element that belongs to a frame must sit FULLY inside that frame\'s rect coordinates — parent/child nesting is inferred from geometric containment.',
+    '- frame: fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px); a frame is a labeled container — place related elements visually inside its rect. A frame defaults to a solid WHITE fill (an artboard); set `fill` only to override it. Give every frame a short, meaningful name in `text` (e.g. "Pricing — Pro card", "Hero"); never leave it empty or literally "Frame". The name renders OUTSIDE the rect (Figma-style), so the full frame area is design content. Any element that belongs to a frame must sit FULLY inside that frame\'s rect coordinates — parent/child nesting is inferred from geometric containment.',
     '- sticky: color (CSS color — the sticky background).',
     '- text: fontSize (px); fontFamily (CSS font stack); textColor (CSS color); fontWeight (100–900); textAlign "left" | "center" | "right"; lineHeight (unitless multiplier).',
     '- Do NOT include "id" fields — the app assigns ids.',

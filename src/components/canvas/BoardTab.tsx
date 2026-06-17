@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Copy, GripVertical, Redo2, Settings2, Undo2 } from 'lucide-react'
+import { ChevronRight, Copy, GripVertical, Redo2, Settings2, Undo2 } from 'lucide-react'
 import {
   CLAUDE_EFFORTS,
   type BoardColumn,
@@ -86,17 +86,6 @@ export const assigneeMatches = (
   const a = (assignee ?? '').trim().toLowerCase()
   const d = (displayName ?? '').trim().toLowerCase()
   return a.length > 0 && a === d
-}
-
-// Card text search (F075): case-insensitive substring match over title +
-// notes. An empty/whitespace query matches everything (the filter is off).
-export const taskMatchesQuery = (task: ProjectTask, query: string): boolean => {
-  const q = query.trim().toLowerCase()
-  if (!q) return true
-  return (
-    (task.title || '').toLowerCase().includes(q) ||
-    (task.notes || '').toLowerCase().includes(q)
-  )
 }
 
 // Bulk-clear the Done column (F073): drop every task that DISPLAYS in 完了 —
@@ -189,6 +178,27 @@ const saveMineOnly = (projectId: string | undefined, on: boolean) => {
   if (!projectId || typeof window === 'undefined') return
   try {
     localStorage.setItem(MINE_ONLY_KEY(projectId), on ? '1' : '0')
+  } catch {}
+}
+
+// Run-defaults strip disclosure — collapsed by default so the board opens clean
+// (these launch prefs are set-once, not per-glance). Persisted per project, like
+// "Mine only": once a user expands it, it stays expanded for that board.
+const DEFAULTS_OPEN_KEY = (projectId: string) => `openground.board.defaultsOpen.${projectId}`
+
+const loadDefaultsOpen = (projectId: string | undefined): boolean => {
+  if (!projectId || typeof window === 'undefined') return false
+  try {
+    return localStorage.getItem(DEFAULTS_OPEN_KEY(projectId)) === '1'
+  } catch {
+    return false
+  }
+}
+
+const saveDefaultsOpen = (projectId: string | undefined, on: boolean) => {
+  if (!projectId || typeof window === 'undefined') return
+  try {
+    localStorage.setItem(DEFAULTS_OPEN_KEY(projectId), on ? '1' : '0')
   } catch {}
 }
 
@@ -373,6 +383,19 @@ export const BoardTab = ({
     })
   }
 
+  // Run-defaults strip: collapsed by default, expand to reveal the pickers.
+  // Persisted per project (same lifecycle as "Mine only" above).
+  const [defaultsOpen, setDefaultsOpen] = useState(() => loadDefaultsOpen(projectId))
+  useEffect(() => {
+    setDefaultsOpen(loadDefaultsOpen(projectId))
+  }, [projectId])
+  const toggleDefaultsOpen = () => {
+    setDefaultsOpen(prev => {
+      saveDefaultsOpen(projectId, !prev)
+      return !prev
+    })
+  }
+
   // Merged-branch detection (B018 / F065): while the review column holds
   // branch-carrying cards, ask the server (mount + every 60s) which of those
   // branches already landed in the target branch. Same power etiquette as the
@@ -423,12 +446,6 @@ export const BoardTab = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectPath, projectMissing, reviewBranchesKey, targetBranch])
 
-  // Card text search (F075) — local, never persisted. ANDs with "Mine only".
-  // Filtering narrows what RENDERS only; drag re-ordering over the filtered
-  // list goes through the same byColumn path "Mine only" already exercises
-  // (hidden cards keep their boardOrder gaps — order is relative).
-  const [query, setQuery] = useState('')
-  const queryActive = query.trim().length > 0
 
   // Group tasks by column, sorted by priority within each. Every task IS a
   // Board card now (legacy chat/assistant items are dropped on read). With the
@@ -439,11 +456,9 @@ export const BoardTab = ({
   const visibleTasks = useMemo(
     () =>
       boardTasks.filter(
-        task =>
-          (!filterActive || assigneeMatches(task.assignee, displayName)) &&
-          (!queryActive || taskMatchesQuery(task, query)),
+        task => !filterActive || assigneeMatches(task.assignee, displayName),
       ),
-    [boardTasks, filterActive, displayName, queryActive, query],
+    [boardTasks, filterActive, displayName],
   )
   const byColumn = useMemo(() => {
     const groups: Record<BoardColumn, ProjectTask[]> = {
@@ -526,37 +541,6 @@ export const BoardTab = ({
               {t('board.toolbar.mineOnly')}
             </button>
           )}
-          {/* Card text search (F075) — minimal inline input; filters title +
-              notes as you type, ANDed with "Mine only". Esc / ✕ clears. Local
-              state only — never persisted. */}
-          <div className="relative">
-            <input
-              type="text"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              onKeyDown={e => {
-                // Don't steal Esc from an in-flight IME composition.
-                if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
-                  e.preventDefault()
-                  setQuery('')
-                }
-              }}
-              placeholder={t('board.toolbar.searchPlaceholder')}
-              aria-label={t('board.toolbar.searchPlaceholder')}
-              className="w-[160px] rounded-sm border border-line bg-transparent py-1 pl-2 pr-6 text-[11px] text-ink transition-colors placeholder:text-ink-faint hover:border-line-strong focus:border-accent focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-            />
-            {queryActive && (
-              <button
-                type="button"
-                onClick={() => setQuery('')}
-                aria-label={t('board.toolbar.searchClear')}
-                title={t('board.toolbar.searchClear')}
-                className="absolute right-0.5 top-1/2 -translate-y-1/2 rounded-sm px-1 py-0.5 text-[11px] leading-none text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-              >
-                ✕
-              </button>
-            )}
-          </div>
         </div>
         <div className="flex items-center gap-3">
           {/* Undo / redo (B013) — unlike Canvas, the Board gives ⌘Z no visual
@@ -640,112 +624,129 @@ export const BoardTab = ({
         </div>
       </div>
 
-      {/* Run-defaults strip — the board-wide launch profile, visible right
-          where tasks run (the drawer's per-card settings inherit these; the
-          dedicated Personal rows left the settings dialog for this strip,
-          2026-06-12). Every select autosaves: completion flow is SHARED
-          policy (config), model / effort / permission mode are PERSONAL
-          launch prefs (central, never in the repo). */}
+      {/* Run-defaults strip — the board-wide launch profile (the drawer's
+          per-card settings inherit these; the dedicated Personal rows left the
+          settings dialog for this strip, 2026-06-12). COLLAPSED by default —
+          these are set-once prefs, so the label is a disclosure toggle and the
+          pickers only render when expanded (state persisted per project). Every
+          select autosaves: completion flow is SHARED policy (config), model /
+          effort / permission mode are PERSONAL launch prefs (central, never in
+          the repo). */}
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1.5 px-8 pb-2">
-        <span className="label-cap text-ink-faint" title={t('board.defaults.title')}>
+        <button
+          type="button"
+          onClick={toggleDefaultsOpen}
+          aria-expanded={defaultsOpen}
+          title={t('board.defaults.title')}
+          className="label-cap flex items-center gap-1 rounded-sm text-ink-faint transition-colors hover:text-ink-muted active:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          <ChevronRight
+            size={11}
+            aria-hidden
+            className={['shrink-0 transition-transform', defaultsOpen ? 'rotate-90' : ''].join(' ')}
+          />
           {t('board.defaults.label')}
-        </span>
-        {hasGit && (
-          <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-            {t('board.run.flowLabel')}
-            <select
-              value={data.config?.completionFlow ?? 'merge'}
-              disabled={projectMissing}
-              onChange={e =>
-                onPersist({
-                  ...data,
-                  config: {
-                    ...data.config,
-                    completionFlow: e.target.value === 'pr' ? 'pr' : 'merge',
-                  },
-                })
-              }
-              className={DEFAULTS_SELECT_CLS}
-            >
-              <option value="merge">{t('board.run.flowMerge')}</option>
-              <option value="pr">{t('board.run.flowPr')}</option>
-            </select>
-          </label>
+        </button>
+        {defaultsOpen && (
+          <>
+            {hasGit && (
+              <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+                {t('board.run.flowLabel')}
+                <select
+                  value={data.config?.completionFlow ?? 'merge'}
+                  disabled={projectMissing}
+                  onChange={e =>
+                    onPersist({
+                      ...data,
+                      config: {
+                        ...data.config,
+                        completionFlow: e.target.value === 'pr' ? 'pr' : 'merge',
+                      },
+                    })
+                  }
+                  className={DEFAULTS_SELECT_CLS}
+                >
+                  <option value="merge">{t('board.run.flowMerge')}</option>
+                  <option value="pr">{t('board.run.flowPr')}</option>
+                </select>
+              </label>
+            )}
+            <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+              {t('board.run.modelLabel')}
+              <select
+                value={data.launch?.model ?? ''}
+                disabled={projectMissing}
+                onChange={e =>
+                  onPersist({
+                    ...data,
+                    launch: { ...data.launch, model: e.target.value || undefined },
+                  })
+                }
+                className={DEFAULTS_SELECT_CLS}
+              >
+                <option value="">{t('board.defaults.cliDefault')}</option>
+                {(data.launch?.model && !TASK_MODEL_CHOICES.includes(data.launch.model)
+                  ? [data.launch.model, ...TASK_MODEL_CHOICES]
+                  : TASK_MODEL_CHOICES
+                ).map(m => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+              {t('board.run.effortLabel')}
+              <select
+                value={data.launch?.effort ?? ''}
+                disabled={projectMissing}
+                onChange={e =>
+                  onPersist({
+                    ...data,
+                    launch: {
+                      ...data.launch,
+                      effort: CLAUDE_EFFORTS.includes(e.target.value as ClaudeEffort)
+                        ? (e.target.value as ClaudeEffort)
+                        : undefined,
+                    },
+                  })
+                }
+                className={DEFAULTS_SELECT_CLS}
+              >
+                <option value="">{t('board.defaults.cliDefault')}</option>
+                {CLAUDE_EFFORTS.map(lv => (
+                  <option key={lv} value={lv}>
+                    {lv}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+              {t('board.defaults.permLabel')}
+              <select
+                value={data.launch?.permissionMode ?? 'default'}
+                disabled={projectMissing}
+                onChange={e => {
+                  const v = e.target.value
+                  onPersist({
+                    ...data,
+                    launch: {
+                      ...data.launch,
+                      permissionMode:
+                        v === 'acceptEdits' || v === 'plan' || v === 'bypass' ? v : undefined,
+                    },
+                  })
+                }}
+                className={DEFAULTS_SELECT_CLS}
+              >
+                <option value="default">{t('projectPanel.settingsPermDefault')}</option>
+                <option value="acceptEdits">{t('projectPanel.settingsPermAcceptEdits')}</option>
+                <option value="plan">{t('projectPanel.settingsPermPlan')}</option>
+                <option value="bypass">{t('projectPanel.settingsPermBypass')}</option>
+              </select>
+            </label>
+          </>
         )}
-        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-          {t('board.run.modelLabel')}
-          <select
-            value={data.launch?.model ?? ''}
-            disabled={projectMissing}
-            onChange={e =>
-              onPersist({
-                ...data,
-                launch: { ...data.launch, model: e.target.value || undefined },
-              })
-            }
-            className={DEFAULTS_SELECT_CLS}
-          >
-            <option value="">{t('board.defaults.cliDefault')}</option>
-            {(data.launch?.model && !TASK_MODEL_CHOICES.includes(data.launch.model)
-              ? [data.launch.model, ...TASK_MODEL_CHOICES]
-              : TASK_MODEL_CHOICES
-            ).map(m => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-          {t('board.run.effortLabel')}
-          <select
-            value={data.launch?.effort ?? ''}
-            disabled={projectMissing}
-            onChange={e =>
-              onPersist({
-                ...data,
-                launch: {
-                  ...data.launch,
-                  effort: CLAUDE_EFFORTS.includes(e.target.value as ClaudeEffort)
-                    ? (e.target.value as ClaudeEffort)
-                    : undefined,
-                },
-              })
-            }
-            className={DEFAULTS_SELECT_CLS}
-          >
-            <option value="">{t('board.defaults.cliDefault')}</option>
-            {CLAUDE_EFFORTS.map(lv => (
-              <option key={lv} value={lv}>
-                {lv}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex items-center gap-1 text-[10px] text-ink-faint">
-          {t('board.defaults.permLabel')}
-          <select
-            value={data.launch?.permissionMode ?? 'default'}
-            disabled={projectMissing}
-            onChange={e => {
-              const v = e.target.value
-              onPersist({
-                ...data,
-                launch: {
-                  ...data.launch,
-                  permissionMode:
-                    v === 'acceptEdits' || v === 'plan' || v === 'bypass' ? v : undefined,
-                },
-              })
-            }}
-            className={DEFAULTS_SELECT_CLS}
-          >
-            <option value="default">{t('projectPanel.settingsPermDefault')}</option>
-            <option value="acceptEdits">{t('projectPanel.settingsPermAcceptEdits')}</option>
-            <option value="plan">{t('projectPanel.settingsPermPlan')}</option>
-            <option value="bypass">{t('projectPanel.settingsPermBypass')}</option>
-          </select>
-        </label>
       </div>
 
       {/* Columns — always rendered, even at 0 cards, so the lane structure tasks

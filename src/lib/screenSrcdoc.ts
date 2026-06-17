@@ -227,7 +227,11 @@ const RUNTIME_SCRIPT = `(function () {
   try {
     var src = document.getElementById('__opengrnd_src').textContent;
     var out = Babel.transform(src, {
-      presets: [['typescript', { isTSX: true, allExtensions: true, onlyRemoveTypeImports: true }], 'react'],
+      // Babel 8 removed isTSX/allExtensions; preset-react auto-detects .tsx.
+      // runtime:'classic' keeps JSX compiling to React.createElement — the
+      // default 'automatic' emits an import from react/jsx-runtime, a syntax
+      // error inside the new Function() body below.
+      presets: [['typescript', { onlyRemoveTypeImports: true }], ['react', { runtime: 'classic' }]],
       filename: 'screen.tsx',
     }).code;
     // Run the transpiled module body with React / ReactDOM / require in scope,
@@ -378,7 +382,7 @@ const REACT_TEMPLATE = (
     <meta charset="utf-8" />
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@8/babel.min.js"></script>
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>tailwind.config = ${JSON.stringify(TAILWIND_CONFIG)};</script>

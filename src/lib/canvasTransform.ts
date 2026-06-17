@@ -83,6 +83,78 @@ export function clampRadiusToBox(radius: number, w: number, h: number): number {
   return Math.min(radius, cap)
 }
 
+// ── Per-corner radius (Figma's independent corners) ──
+/** The four corner radii (TL, TR, BR, BL) for a frame / rect, each folding in
+ *  its per-corner override → the uniform `cornerRadius` → the default, then
+ *  clamped to the sane band. A frame/rect with no per-corner fields resolves to
+ *  four equal radii (the uniform legacy look). */
+export interface CornerRadii {
+  tl: number
+  tr: number
+  br: number
+  bl: number
+}
+export function resolveCornerRadii(el: CanvasElement): CornerRadii {
+  const base = el.cornerRadius ?? DEFAULT_FRAME_CORNER_RADIUS
+  return {
+    tl: clampCornerRadius(el.cornerRadiusTopLeft ?? base),
+    tr: clampCornerRadius(el.cornerRadiusTopRight ?? base),
+    br: clampCornerRadius(el.cornerRadiusBottomRight ?? base),
+    bl: clampCornerRadius(el.cornerRadiusBottomLeft ?? base),
+  }
+}
+
+/** True when all four corners are equal — the uniform case, where the inspector
+ *  shows one radius field rather than the 2×2 per-corner grid. */
+export function cornerRadiiAreUniform(r: CornerRadii): boolean {
+  return r.tl === r.tr && r.tr === r.br && r.br === r.bl
+}
+
+/** CSS `border-radius` for the four corners, each capped to half the smaller
+ *  side (so a big radius degrades to a pill rather than overflowing the box). */
+export function cornerRadiusCss(el: CanvasElement, w: number, h: number): string {
+  const r = resolveCornerRadii(el)
+  const c = (n: number) => clampRadiusToBox(n, w, h)
+  return `${c(r.tl)}px ${c(r.tr)}px ${c(r.br)}px ${c(r.bl)}px`
+}
+
+// ── Stroke-alignment overlay geometry ──
+// center / outside strokes can't be a plain border (a border is always inside a
+// border-box element), so they're painted by an absolutely-positioned overlay
+// div grown OUTWARD from the body — half a stroke-width for center, a full width
+// for outside — with the stroke as its border. The corner radii grow by the
+// same amount so the overlay stays concentric with the body. Returns null for
+// 'inside' (no overlay — the body's own border is used) or a non-positive width.
+export interface StrokeOverlayBox {
+  left: number
+  top: number
+  width: number
+  height: number
+  borderRadius: string
+}
+export function strokeOverlayBox(
+  el: CanvasElement,
+  w: number,
+  h: number,
+  strokeWidth: number,
+  align: 'inside' | 'center' | 'outside',
+): StrokeOverlayBox | null {
+  if (align === 'inside' || strokeWidth <= 0) return null
+  const grow = align === 'center' ? strokeWidth / 2 : strokeWidth
+  const ow = w + grow * 2
+  const oh = h + grow * 2
+  const r = resolveCornerRadii(el)
+  // Each corner grows by `grow` to stay concentric, then caps to the overlay box.
+  const c = (n: number) => clampRadiusToBox(n + grow, ow, oh)
+  return {
+    left: -grow,
+    top: -grow,
+    width: ow,
+    height: oh,
+    borderRadius: `${c(r.tl)}px ${c(r.tr)}px ${c(r.br)}px ${c(r.bl)}px`,
+  }
+}
+
 // ── Size (per-object resize) ──
 // Floors keep a resized element from collapsing to an unusable sliver. Kept in
 // sync with the on-canvas handle's RESIZE_MIN_W / RESIZE_MIN_H so the inspector

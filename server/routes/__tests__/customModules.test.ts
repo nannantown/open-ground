@@ -118,17 +118,20 @@ describe('GET /api/custom-modules — role + list for any caller', () => {
   })
 })
 
-describe('POST /api/custom-modules — owner-only create', () => {
+describe('POST /api/custom-modules — owner|tester create (none forbidden)', () => {
   it('403 forbidden when signed out', async () => {
     const res = await app.request('/api/custom-modules', json('POST', { label: 'X' }))
     expect(res.status).toBe(403)
     expect((await res.json()).error).toBe('forbidden')
   })
 
-  it('403 forbidden for a tester', async () => {
+  it('a tester MAY create a local module (authoring is open to testers)', async () => {
     await signInAs(TESTER)
-    const res = await app.request('/api/custom-modules', json('POST', { label: 'X' }))
-    expect(res.status).toBe(403)
+    const res = await app.request('/api/custom-modules', json('POST', { label: 'Tester Tab' }))
+    expect(res.status).toBe(200)
+    const def: CustomModuleDef = await res.json()
+    expect(def.origin).toBe('local')
+    expect(def.label).toBe('Tester Tab')
   })
 
   it('validates label (required, ≤60) and description (≤4000)', async () => {
@@ -182,17 +185,60 @@ describe('GET /api/custom-modules/:id/source', () => {
   })
 })
 
-describe('PUT /api/custom-modules/:id — owner-only update', () => {
-  it('403 for tester / signed out', async () => {
+describe('PUT /api/custom-modules/:id — owner any; tester local-only', () => {
+  it('403 when signed out', async () => {
     const def = await createAsOwner()
-    await signInAs(TESTER)
-    expect(
-      (await app.request(`/api/custom-modules/${def.id}`, json('PUT', { label: 'N' }))).status,
-    ).toBe(403)
     await clearSession()
     expect(
       (await app.request(`/api/custom-modules/${def.id}`, json('PUT', { label: 'N' }))).status,
     ).toBe(403)
+  })
+
+  it('a tester MAY edit a local module (their own authored tab)', async () => {
+    // A tester-authored local module: the create gate is open to testers.
+    await signInAs(TESTER)
+    const def: CustomModuleDef = await (
+      await app.request('/api/custom-modules', json('POST', { label: 'Mine' }))
+    ).json()
+    const res = await app.request(
+      `/api/custom-modules/${def.id}`,
+      json('PUT', { label: 'Renamed', source: 'export default () => null\n' }),
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json()).label).toBe('Renamed')
+    const src = await (await app.request(`/api/custom-modules/${def.id}/source`)).json()
+    expect(src.source).toBe('export default () => null\n')
+  })
+
+  it('a tester may NOT edit an installed module (someone else’s artifact)', async () => {
+    // Install a marketplace row (origin 'installed') the same way the DELETE
+    // tests do — anon fetch mocked, never a real Supabase.
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
+    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
+    const row = {
+      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      name: 'M',
+      description: '',
+      framework: 'react',
+      source: 'export default () => null\n',
+      version: 1,
+      published_at: '2026-06-12T00:00:00Z',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify([row]), { status: 200 })),
+    )
+    await signInAs(TESTER)
+    const installed: CustomModuleDef = await (
+      await app.request('/api/marketplace/install', json('POST', { remoteId: row.id }))
+    ).json()
+    expect(installed.origin).toBe('installed')
+
+    const res = await app.request(
+      `/api/custom-modules/${installed.id}`,
+      json('PUT', { label: 'Hijack' }),
+    )
+    expect(res.status).toBe(403)
   })
 
   it('owner patches meta + source', async () => {
@@ -297,6 +343,18 @@ describe('POST /api/custom-modules/:id/publish', () => {
       '/api/custom-modules/123e4567-e89b-42d3-a456-426614174000/publish',
       { method: 'POST' },
     )
+    expect(res.status).toBe(403)
+  })
+
+  it('a tester may NOT publish even their OWN local module (publish stays owner-only)', async () => {
+    // Authoring opened to testers, but publishing official modules did not: a
+    // tester who created a local tab still gets 403 on publish (role gate fires
+    // before the env/module checks, so no Supabase env is needed here).
+    await signInAs(TESTER)
+    const def: CustomModuleDef = await (
+      await app.request('/api/custom-modules', json('POST', { label: 'Mine' }))
+    ).json()
+    const res = await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
     expect(res.status).toBe(403)
   })
 

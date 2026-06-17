@@ -133,11 +133,13 @@ describe('custom tab TerminalDock (StrictMode)', () => {
     expect(pastes()).toHaveLength(0)
   })
 
-  it('non-owner: no dock at all', async () => {
+  it('role "none": no dock at all — no spawn', async () => {
+    // Authoring opened to testers (P4), but 'none' still only renders the tab
+    // read-only: no dock, no spawn.
     await act(async () => {
       render(
         <StrictMode>
-          <CustomModuleView module={MODULE} role="tester" setup onChanged={() => {}} />
+          <CustomModuleView module={MODULE} role="none" setup onChanged={() => {}} />
         </StrictMode>,
       )
     })
@@ -145,6 +147,23 @@ describe('custom tab TerminalDock (StrictMode)', () => {
       vi.advanceTimersByTime(PASTE_DELAY_MS * 2)
     })
     expect(spawns()).toHaveLength(0)
+  })
+
+  it('tester: authoring is open — dock opens, ONE spawn + ONE paste (like owner)', async () => {
+    // A tester builds a tab locally before submitting it for review, so the
+    // sidebar claude dock + brush-up paste fire exactly as for an owner.
+    await act(async () => {
+      render(
+        <StrictMode>
+          <CustomModuleView module={MODULE} role="tester" setup onChanged={() => {}} />
+        </StrictMode>,
+      )
+    })
+    expect(spawns()).toHaveLength(1)
+    await act(async () => {
+      vi.advanceTimersByTime(PASTE_DELAY_MS)
+    })
+    expect(pastes()).toHaveLength(1)
   })
 })
 

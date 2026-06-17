@@ -526,21 +526,6 @@ describe('BoardModule — board undo/redo (B013)', () => {
     expect((persist.mock.calls[2][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
   })
 
-  it('⌘Z is left to a focused text field (the search input keeps native undo)', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
-    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'done', done: true })
-    const { persist, getByText, container } = renderBoard(makeMultiData([a]))
-    await flush()
-    fireEvent.click(getByText('board.toolbar.clearDone'))
-    expect(persist).toHaveBeenCalledTimes(1)
-    const search = container.querySelector<HTMLInputElement>(
-      'input[placeholder="board.toolbar.searchPlaceholder"]',
-    )!
-    search.focus()
-    fireEvent.keyDown(search, { key: 'z', metaKey: true })
-    expect(persist).toHaveBeenCalledTimes(1) // untouched — the field owns ⌘Z
-  })
-
   it('drawer delete is adopted into history — ⌘Z restores the deleted card', async () => {
     const before = makeData(makeTask()) // id t1, titled, todo
     const { persist, onDeleteTask, getByTitle, rerenderWith } = renderBoard(before, 't1')
@@ -596,5 +581,39 @@ describe('BoardModule — board undo/redo (B013)', () => {
     await flush()
     fireEvent.keyDown(window, { key: 'z', metaKey: true })
     expect(persist).toHaveBeenCalledTimes(1) // no undo across the reset
+  })
+})
+
+// The run-defaults strip (board-wide launch profile) is set-once chrome, so it
+// opens COLLAPSED — the label is a disclosure toggle, the pickers render only
+// when expanded, and the choice persists per project. The permission select is
+// unique to this strip (the drawer's per-card run settings have no permission
+// picker), so its 'default' option is a clean probe for "are the pickers shown".
+describe('BoardModule — run-defaults strip disclosure', () => {
+  it('collapsed by default: the label toggle shows but the pickers stay hidden', () => {
+    const { getByText, queryByText } = renderBoard(makeMultiData([makeTask()]))
+    const toggle = getByText('board.defaults.label')
+    expect(toggle).toBeTruthy()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(queryByText('projectPanel.settingsPermDefault')).toBeNull()
+  })
+
+  it('expands on click to reveal the pickers, and the choice persists per project', () => {
+    const { getByText, queryByText } = renderBoard(makeMultiData([makeTask()]))
+    fireEvent.click(getByText('board.defaults.label'))
+    expect(queryByText('projectPanel.settingsPermDefault')).toBeTruthy()
+    expect(getByText('board.defaults.label').getAttribute('aria-expanded')).toBe('true')
+    // Persisted so the board reopens expanded for THIS project (id 'p1').
+    expect(localStorage.getItem('openground.board.defaultsOpen.p1')).toBe('1')
+    // Toggling again collapses and clears the flag.
+    fireEvent.click(getByText('board.defaults.label'))
+    expect(queryByText('projectPanel.settingsPermDefault')).toBeNull()
+    expect(localStorage.getItem('openground.board.defaultsOpen.p1')).toBe('0')
+  })
+
+  it('honors a persisted expanded state on mount', () => {
+    localStorage.setItem('openground.board.defaultsOpen.p1', '1')
+    const { queryByText } = renderBoard(makeMultiData([makeTask()]))
+    expect(queryByText('projectPanel.settingsPermDefault')).toBeTruthy()
   })
 })

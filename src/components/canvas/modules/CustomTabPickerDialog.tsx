@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Plus, Store, Trash2, Check, X } from 'lucide-react'
+import { Plus, Store, Trash2, Check, X, Eye, EyeOff } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import type { CustomModuleDef, CustomTabRole } from '@/lib/types'
+
+/** A built-in module + its per-project visibility, for the picker's "Built-in"
+ *  section. `enabled` = NOT hidden via ProjectData.disabledModules. */
+export interface NativePickerItem {
+  id: string
+  label: string
+  enabled: boolean
+}
 
 // "+" → the per-project tab picker (docs/CUSTOM_TABS_PLAN.md — "Per-project
 // attachment & the '+' picker"). Lists MY library as a cartographic *register*
@@ -38,6 +46,9 @@ export const CustomTabPickerDialog = ({
   modules,
   role,
   attachedIds,
+  natives = [],
+  canDisableNative = false,
+  onToggleNative,
   onAttach,
   onCreateNew,
   onBrowseMarket,
@@ -49,6 +60,15 @@ export const CustomTabPickerDialog = ({
   role: CustomTabRole
   /** Module ids already attached to the current project. */
   attachedIds: ReadonlySet<string>
+  /** Built-in modules + their per-project visibility (the "Built-in" section).
+   *  Personal layout, so shown for every role. Omit `onToggleNative` to hide
+   *  the section entirely (e.g. in isolated tests). */
+  natives?: NativePickerItem[]
+  /** Whether an enabled built-in may currently be hidden — false when only one
+   *  visible tab remains (the floor: a project must keep at least one). */
+  canDisableNative?: boolean
+  /** Show/hide a built-in in this project (`enabled` = the desired next state). */
+  onToggleNative?: (moduleId: string, enabled: boolean) => void
   /** Attach to the current project — the parent persists, switches the view
    *  to the new tab and closes the picker. */
   onAttach: (moduleId: string) => void
@@ -154,6 +174,100 @@ export const CustomTabPickerDialog = ({
         </header>
 
         <div className="rule-double" aria-hidden />
+
+        {/* Built-in section — the pre-installed default set (Terminal / Canvas /
+            Board). Each row toggles that module's visibility in THIS project
+            (personal layout, every role). The last visible tab can't be hidden.
+            Rendered only when the parent wires the toggle. */}
+        {onToggleNative && natives.length > 0 && (
+          <>
+            <div
+              aria-hidden
+              className="flex items-baseline justify-between px-[30px] pb-[7px] pt-3 text-ink-faint"
+            >
+              <span className="coord-label tracking-[0.16em]">
+                {t('customTabs.builtinSection')}
+              </span>
+              <span className="coord-label tracking-[0.12em] opacity-85">
+                {t('customTabs.pickerLegendState')}
+              </span>
+            </div>
+            <ul className="m-0 list-none p-0">
+              {natives.map((n, i) => {
+                const serial = `B·${String(i + 1).padStart(2, '0')}`
+                // The last visible tab can't be hidden — a project must keep one.
+                const locked = n.enabled && !canDisableNative
+                return (
+                  <li
+                    key={n.id}
+                    className="group relative border-t border-line-soft first:border-t-0"
+                  >
+                    <div
+                      role="button"
+                      tabIndex={locked ? -1 : 0}
+                      aria-disabled={locked}
+                      aria-pressed={n.enabled}
+                      title={locked ? t('customTabs.lastModuleHint') : undefined}
+                      aria-label={
+                        (n.enabled
+                          ? t('customTabs.hideModule')
+                          : t('customTabs.showModule')) +
+                        ' — ' +
+                        n.label
+                      }
+                      onClick={() => {
+                        if (!locked) onToggleNative(n.id, !n.enabled)
+                      }}
+                      onKeyDown={e => {
+                        if ((e.key === 'Enter' || e.key === ' ') && !locked) {
+                          e.preventDefault()
+                          onToggleNative(n.id, !n.enabled)
+                        }
+                      }}
+                      className={[
+                        'relative grid grid-cols-[44px_1fr_auto] items-center gap-x-4 px-[30px] py-[14px] transition-colors',
+                        'before:absolute before:inset-y-0 before:left-[74px] before:w-px before:bg-line-soft/70',
+                        locked
+                          ? 'cursor-not-allowed'
+                          : 'cursor-pointer hover:bg-bg-inset active:bg-bg-elevated',
+                        n.enabled ? '' : 'opacity-60',
+                        'focus-visible:outline focus-visible:outline-[1.5px] focus-visible:-outline-offset-2 focus-visible:outline-accent',
+                      ].join(' ')}
+                    >
+                      <span className="font-mono text-[10px] uppercase tracking-[0.06em] tabular-nums text-ink-faint group-hover:text-ink-subtle">
+                        {serial}
+                      </span>
+                      <div className="min-w-0">
+                        <div
+                          className={[
+                            'truncate text-[13px] font-medium leading-[1.3]',
+                            n.enabled ? 'text-ink' : 'text-ink-muted',
+                          ].join(' ')}
+                        >
+                          {n.label}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-end gap-2.5">
+                        {n.enabled ? (
+                          <span className="inline-flex items-center gap-1.5 text-[9px] font-medium uppercase tracking-[0.16em] text-moss">
+                            <Eye size={13} strokeWidth={2} />
+                            {t('customTabs.shown')}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-[9px] font-medium uppercase tracking-[0.16em] text-ink-faint">
+                            <EyeOff size={13} strokeWidth={2} />
+                            {t('customTabs.hidden')}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+            <div className="rule-double" aria-hidden />
+          </>
+        )}
 
         {modules.length === 0 ? (
           // Empty state — a single ledger line with the T·— serial.

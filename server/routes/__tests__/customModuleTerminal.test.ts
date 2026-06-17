@@ -2,20 +2,57 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+
+// Route-level contract for the custom-tab terminal seam
+// (server/routes/terminal.ts: POST /api/terminal/custom-module and
+// POST /api/terminal/:id/paste-custom-module). The module dir is NOT a
+// registered project, so the boundary is role (owner OR tester — only 'none'
+// forbidden) + server-resolved cwd — validateProjectPath is never involved.
+// The PTY is faked via the same globalThis seam as pasteTask.test.ts, so the
+// paste assertions capture the exact bytes the route emits; launchClaude is
+// mocked (runTaskLaunch.test.ts pattern) so the happy-path launch never spawns
+// a real node-pty, and claudeConnection is mocked so the pre-flight probe
+// passes without a real `claude` binary (the 503 case drives a miss through
+// the mock).
+
+const launchClaude = vi.fn((opts: Record<string, unknown>) => ({
+  terminalId: 'pty-cm',
+  agentSessionId: String(opts.agentSessionId ?? 'sid'),
+  info: {
+    id: 'pty-cm',
+    cwd: String(opts.cwd ?? ''),
+    shell: '/bin/zsh',
+    cols: 100,
+    rows: 30,
+    startedAt: new Date().toISOString(),
+    tag: 'claude',
+  },
+}))
+
+vi.mock('@/lib/server/claudeTerminal', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/server/claudeTerminal')>()
+  return { ...actual, launchClaude: (opts: Record<string, unknown>) => launchClaude(opts) }
+})
+
+// Pre-flight connection probe: installed by default (no real `claude` needed);
+// the 503 test flips it to a miss via mockResolvedValueOnce.
+const claudeConnection = vi.fn(async () => ({
+  installed: true,
+  loggedIn: true,
+  plan: null,
+  email: null,
+  message: 'ok',
+}))
+
+vi.mock('@/lib/server/claudeConnection', () => ({
+  claudeConnection: () => claudeConnection(),
+}))
+
 import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { customModuleDir } from '@/lib/server/paths'
 import type { TerminalInfo } from '@/lib/server/terminal'
 import type { CustomModuleDef } from '@/lib/types'
-
-// Route-level contract for the custom-tab terminal seam
-// (server/routes/terminal.ts: POST /api/terminal/custom-module and
-// POST /api/terminal/:id/paste-custom-module). The module dir is NOT a
-// registered project, so the boundary is owner-role + server-resolved cwd —
-// validateProjectPath is never involved. The PTY is faked via the same
-// globalThis seam as pasteTask.test.ts, so the paste assertions capture the
-// exact bytes the route emits; the launch route's happy path (a real node-pty
-// spawn) is deliberately NOT exercised here.
 
 const OWNER = 'owner@example.com'
 const TESTER = 'tester@example.com'
@@ -88,6 +125,8 @@ beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'og-custom-term-'))
   process.env.OPENGROUND_HOME = home
   state().sessions.clear()
+  launchClaude.mockClear()
+  claudeConnection.mockClear()
 })
 
 afterEach(async () => {
@@ -98,16 +137,33 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
-describe('POST /api/terminal/custom-module — owner gate + id validation', () => {
-  it('403 forbidden when signed out / tester', async () => {
+describe('POST /api/terminal/custom-module — role gate (owner|tester) + id validation', () => {
+  it('403 forbidden when signed out (role none)', async () => {
     const res = await app.request('/api/terminal/custom-module', json({ moduleId: 'x' }))
     expect(res.status).toBe(403)
     expect((await res.json()).error).toBe('forbidden')
+  })
 
+  it('owner MAY launch a sidebar claude session in the module dir', async () => {
+    const def = await createModuleAsOwner()
+    const res = await app.request('/api/terminal/custom-module', json({ moduleId: def.id }))
+    expect(res.status).toBe(200)
+    // launchClaude got the SERVER-resolved module dir (never a client cwd) and
+    // appContext:false (the board/canvas usage card is meaningless here).
+    expect(launchClaude).toHaveBeenCalledTimes(1)
+    const opts = launchClaude.mock.calls.at(-1)![0]
+    expect(opts.cwd).toBe(customModuleDir(def.id))
+    expect(opts.appContext).toBe(false)
+  })
+
+  it('a tester MAY launch one too (authoring is open to testers)', async () => {
+    // Create as owner (deterministic), then act as the tester.
+    const def = await createModuleAsOwner()
     await signInAs(TESTER)
-    expect(
-      (await app.request('/api/terminal/custom-module', json({ moduleId: 'x' }))).status,
-    ).toBe(403)
+    const res = await app.request('/api/terminal/custom-module', json({ moduleId: def.id }))
+    expect(res.status).toBe(200)
+    expect(launchClaude).toHaveBeenCalledTimes(1)
+    expect(launchClaude.mock.calls.at(-1)![0].cwd).toBe(customModuleDir(def.id))
   })
 
   it('400 when moduleId is missing', async () => {
@@ -135,21 +191,27 @@ describe('POST /api/terminal/custom-module — owner gate + id validation', () =
   })
 
   it('503 claudeMissing when the claude CLI cannot be found', async () => {
-    // Point the launch-binary seam at a nonexistent path so the (cached)
-    // probe reports a miss. This is the LAST probe-reaching case in this
-    // file, so the 10s probe cache cannot poison other tests.
-    vi.stubEnv('OPENGROUND_CLAUDE_BIN', join(home, 'no-such-claude'))
+    // Drive the miss through the mocked probe (the real probe + its 10s cache
+    // are bypassed file-wide here). launchClaude must NOT be reached.
+    claudeConnection.mockResolvedValueOnce({
+      installed: false,
+      loggedIn: false,
+      plan: null,
+      email: null,
+      message: 'claude not found',
+    })
     const def = await createModuleAsOwner()
     const res = await app.request('/api/terminal/custom-module', json({ moduleId: def.id }))
     expect(res.status).toBe(503)
     expect((await res.json()).claudeMissing).toBe(true)
+    expect(launchClaude).not.toHaveBeenCalled()
   })
 })
 
 describe('POST /api/terminal/:id/paste-custom-module', () => {
-  it('403 forbidden for non-owner', async () => {
+  it('403 forbidden when signed out (role none)', async () => {
     const def = await createModuleAsOwner()
-    await signInAs(TESTER)
+    await clearSession()
     const res = await app.request(
       '/api/terminal/t1/paste-custom-module',
       json({ moduleId: def.id }),
@@ -210,5 +272,20 @@ describe('POST /api/terminal/:id/paste-custom-module', () => {
     expect(out).toContain('paste me')
     expect(out).toContain('source.tsx')
     expect(out).toContain('hot-reloads')
+  })
+
+  it('a tester MAY paste into a session in the module dir', async () => {
+    const def = await createModuleAsOwner('Tester Paste', 'paste me')
+    await signInAs(TESTER)
+    const writes: string[] = []
+    fakePty('t-module', customModuleDir(def.id), writes)
+
+    const res = await app.request(
+      '/api/terminal/t-module/paste-custom-module',
+      json({ moduleId: def.id }),
+    )
+    expect(res.status).toBe(200)
+    expect(writes).toHaveLength(1)
+    expect(writes[0].startsWith('\x1b[200~')).toBe(true)
   })
 })

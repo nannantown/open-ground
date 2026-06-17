@@ -45,6 +45,10 @@ for (const key of [
   'SUPABASE_ROLES_TABLE',
   'OPENGROUND_OWNER_EMAILS',
   'OPENGROUND_TESTER_EMAILS',
+  // Module submission queue (server/routes/moduleSubmissions.ts) — same lazy
+  // reads, so clear them too (incl. the admin allowlist) for a hermetic baseline.
+  'SUPABASE_SUBMISSIONS_TABLE',
+  'MODULE_ADMIN_EMAILS',
 ]) {
   delete process.env[key]
 }

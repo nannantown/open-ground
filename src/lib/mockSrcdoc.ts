@@ -78,7 +78,7 @@ const REACT_TEMPLATE = (code: string, theme: Theme) => `<!doctype html>
     <meta charset="utf-8" />
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@8/babel.min.js"></script>
     <style>
       ${bodyCSS(theme)}
       ${ERR_CSS}
@@ -88,7 +88,12 @@ const REACT_TEMPLATE = (code: string, theme: Theme) => `<!doctype html>
     <div id="root"></div>
     <script>${ERR_SCRIPT}</script>
     <script>${buildInspectScript()}</script>
-    <script type="text/babel" data-presets="react" data-type="module">
+    <!-- Babel 8's preset-react defaults to the automatic JSX runtime, which
+         emits an import from react/jsx-runtime — unresolvable here (only the
+         React UMD global is loaded). Register a classic-runtime react preset
+         so JSX compiles to React.createElement instead. -->
+    <script>Babel.registerPreset('react-classic', { presets: [[Babel.availablePresets.react, { runtime: 'classic' }]] });</script>
+    <script type="text/babel" data-presets="react-classic" data-type="module">
       try {
         ${code}
         const __root = ReactDOM.createRoot(document.getElementById('root'));

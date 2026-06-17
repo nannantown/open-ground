@@ -6,7 +6,6 @@ import {
   displayColumnOf,
   byColumnOrder,
   withReviewColumnToggled,
-  taskMatchesQuery,
   withDoneCleared,
   withCardDuplicated,
   withCardMoved,
@@ -120,31 +119,6 @@ describe('withReviewColumnToggled (toolbar toggle → persisted config)', () => 
   })
 })
 
-describe('taskMatchesQuery (card text search)', () => {
-  it('matches everything on an empty or whitespace query (filter off)', () => {
-    expect(taskMatchesQuery(task({ title: 'anything' }), '')).toBe(true)
-    expect(taskMatchesQuery(task({ title: 'anything' }), '   ')).toBe(true)
-  })
-  it('matches a case-insensitive substring of the title', () => {
-    expect(taskMatchesQuery(task({ title: 'Fix Login Bug' }), 'login')).toBe(true)
-    expect(taskMatchesQuery(task({ title: 'fix login bug' }), 'LOGIN')).toBe(true)
-    expect(taskMatchesQuery(task({ title: 'Fix Login Bug' }), 'logout')).toBe(false)
-  })
-  it('matches against notes too', () => {
-    expect(taskMatchesQuery(task({ title: 'x', notes: 'see OAuth flow' }), 'oauth')).toBe(
-      true,
-    )
-    expect(taskMatchesQuery(task({ title: 'x', notes: 'see OAuth flow' }), 'saml')).toBe(
-      false,
-    )
-  })
-  it('trims the query before matching', () => {
-    expect(taskMatchesQuery(task({ title: 'Fix Login Bug' }), '  login  ')).toBe(true)
-  })
-  it('never throws on a task without notes', () => {
-    expect(taskMatchesQuery(task({ title: 'x', notes: undefined }), 'q')).toBe(false)
-  })
-})
 
 describe('withDoneCleared (Done-column bulk clear)', () => {
   const projectData = (tasks: ProjectTask[]): ProjectData => ({

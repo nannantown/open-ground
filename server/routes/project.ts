@@ -32,7 +32,8 @@ import {
   setCanvas,
 } from '@/lib/server/store'
 import { normalizeOpenApps } from '@/lib/server/openApps'
-import { EditorNotFoundError, openInEditor } from '@/lib/server/editorCli'
+import { EditorNotFoundError, openInEditor, openWithApp } from '@/lib/server/editorCli'
+import { detectInstalledEditors, resolveAllowedEditorBundle } from '@/lib/server/editorDetect'
 import {
   getBranchChanges,
   getFileDiff,
@@ -56,7 +57,21 @@ import {
   setActiveCanvas,
   writeCanvasFile,
 } from '@/lib/server/canvasData'
-import type { BoardColumn, ProjectData, ProjectTask, CanvasFile } from '@/lib/types'
+import type {
+  BoardColumn,
+  ProjectData,
+  ProjectTask,
+  CanvasFile,
+  ProjectSkillsResponse,
+  CreateSkillResponse,
+  OpenApp,
+} from '@/lib/types'
+import { listProjectSkills, listGlobalSkills } from '@/lib/server/projectSkills'
+import {
+  createGlobalSkill,
+  MAX_REQUEST_LEN,
+  SkillCreationBusyError,
+} from '@/lib/server/generateSkill'
 import {
   MAX_TASK_ASSET_BYTES,
   deleteTaskAsset,
@@ -102,6 +117,29 @@ const detectLaunchMode = async (appPath: string): Promise<'open' | 'cwd'> => {
   } catch {
     return 'open'
   }
+}
+
+/** Validate an editor choice from the client before we `open -a` it. Allowlist:
+ *  a real `.app` bundle path (a detected editor or a Finder-picked app), OR a
+ *  bare name that matches a currently-detected editor. Anything else → null.
+ *  Returns a clean {name, path, mode:'open'} OpenApp. */
+const isLaunchableEditor = async (raw: unknown): Promise<OpenApp | null> => {
+  if (!raw || typeof raw !== 'object') return null
+  const e = raw as { name?: unknown; path?: unknown }
+  const name = typeof e.name === 'string' ? e.name.trim() : ''
+  if (!name || name.length > 80) return null
+  const path = typeof e.path === 'string' ? e.path.trim() : ''
+  if (path) {
+    // SECURITY: open -a runs the bundle's embedded binary, so confine a
+    // client-supplied path to a real .app inside the scanned Applications dirs
+    // (resolveAllowedEditorBundle realpath's it so symlinks can't escape).
+    // Persist the resolved canonical path.
+    const real = await resolveAllowedEditorBundle(path)
+    return real ? { name, path: real, mode: 'open' } : null
+  }
+  const detected = await detectInstalledEditors()
+  const hit = detected.find((d) => d.name === name)
+  return hit ? { name: hit.name, path: hit.path, mode: 'open' } : null
 }
 
 // POST /api/project/delete moves the folder to the macOS Trash via JXA /
@@ -348,20 +386,66 @@ export const projectRoutes = new Hono()
   }
 })
   // ── /api/project/open-editor ──────────────────────────────────────────────
-  // POST { path } → open the project folder in the user's code editor.
-  // Resolution (editorCli.ts): OPENGROUND_EDITOR_CMD env → cursor/code/
-  // windsurf/zed CLIs (process PATH → fresh login shell → known install
-  // paths) → macOS `open -a`. Nothing found → 503 with a human message.
+  // POST { path, editor? } → open the project folder in an editor.
+  //   editor present (a choice from the picker) → validate it, then `open -a`.
+  //   editor absent → the saved defaultEditor (if any) → else CLI auto-detect
+  //   (editorCli: OPENGROUND_EDITOR_CMD env → cursor/code/windsurf/zed → macOS
+  //   `open -a`). Nothing found → 503 with a human message.
   .post('/api/project/open-editor', async (c) => {
-    const path = await requireProjectPath(c)
-    if (path instanceof Response) return path
+    const body = (await c.req.json().catch(() => ({}))) as { path?: unknown; editor?: unknown }
+    const path = typeof body.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    let chosen: OpenApp | null = null
+    if (body.editor !== undefined && body.editor !== null) {
+      chosen = await isLaunchableEditor(body.editor)
+      if (!chosen) return c.json({ error: 'editor not launchable' }, 400)
+    } else {
+      const s = await getSettings()
+      if (s.defaultEditor) chosen = await isLaunchableEditor(s.defaultEditor)
+    }
     try {
-      await openInEditor(path)
+      if (chosen) await openWithApp(path, chosen)
+      else await openInEditor(path)
       return c.json({ ok: true })
     } catch (e: any) {
       if (e instanceof EditorNotFoundError) return c.json({ error: e.message }, 503)
       return c.json({ error: e?.message ?? 'failed to open editor' }, 500)
     }
+  })
+  // ── /api/project/editors ──────────────────────────────────────────────────
+  // GET → { editors, default } : code editors detected on this machine (macOS
+  // Applications scan; [] elsewhere) + the saved default, so the `<>` button
+  // can offer a choice instead of auto-picking one.
+  .get('/api/project/editors', async (c) => {
+    const [editors, s] = await Promise.all([detectInstalledEditors(), getSettings()])
+    // Drop a dead default (its editor was uninstalled) so the one-click button
+    // doesn't silently 400 — the UI falls back to showing the chooser.
+    let def = s.defaultEditor ?? null
+    if (def) {
+      const d = def
+      const alive = d.path
+        ? (await resolveAllowedEditorBundle(d.path)) !== null
+        : editors.some((ed) => ed.name === d.name)
+      if (!alive) def = null
+    }
+    // canPick: the Finder .app picker (osascript) is macOS-only. The client uses
+    // it to decide whether to offer the chooser on a machine with no detected
+    // editors (else it falls back to CLI auto-detection).
+    return c.json({ editors, default: def, canPick: process.platform === 'darwin' })
+  })
+  // ── /api/project/default-editor ────────────────────────────────────────────
+  // PUT { editor: OpenApp | null } → remember (or clear) the one-click default.
+  .put('/api/project/default-editor', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { editor?: unknown }
+    if (body.editor === null) {
+      await setSettings({ defaultEditor: null })
+      return c.json({ default: null })
+    }
+    const editor = await isLaunchableEditor(body.editor)
+    if (!editor) return c.json({ error: 'editor not launchable' }, 400)
+    await setSettings({ defaultEditor: editor })
+    return c.json({ default: editor })
   })
   // ── /api/project/branch-changes ───────────────────────────────────────────
   // GET ?path= → BranchChangesResponse (header chip + "Branch changes" modal).
@@ -395,6 +479,63 @@ export const projectRoutes = new Hono()
       return c.json(await getFileDiff(path, file, scope, data?.config?.targetBranch))
     } catch (e: any) {
       return c.json({ error: e?.message ?? 'failed to read diff' }, 500)
+    }
+  })
+  // ── /api/project/skills ───────────────────────────────────────────────────
+  // GET ?path= → ProjectSkillsResponse: the Claude Code skills defined inside
+  // the project (.claude/skills/<name>/SKILL.md). Read-only; the scan +
+  // frontmatter parse live in src/lib/server/projectSkills.ts. A project with no
+  // .claude/skills returns { skills: [] } (200), not an error.
+  .get('/api/project/skills', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    try {
+      const skills = await listProjectSkills(path)
+      return c.json<ProjectSkillsResponse>({ skills })
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'failed to read skills' }, 500)
+    }
+  })
+  // ── /api/skills/global ────────────────────────────────────────────────────
+  // GET → ProjectSkillsResponse: the OG user's OWN global skills
+  // (~/.claude/skills/<name>/SKILL.md), available to them in every project. No
+  // project path / no validateProjectPath — it reads a FIXED location (the
+  // server's own home), so there is no caller-supplied path to guard.
+  .get('/api/skills/global', async (c) => {
+    try {
+      const skills = await listGlobalSkills()
+      return c.json<ProjectSkillsResponse>({ skills })
+    } catch (e: any) {
+      return c.json({ error: e?.message ?? 'failed to read global skills' }, 500)
+    }
+  })
+  // ── /api/skills/global/create ─────────────────────────────────────────────
+  // POST { request } → author a NEW global skill (~/.claude/skills/<name>/) by
+  // running a one-off `claude` PTY (SUBSCRIPTION-ONLY — never `claude -p`), same
+  // pattern as the card auto-description. Blocking (up to ~4min); the client
+  // shows a spinner. Returns the created skill. No project path involved.
+  //   400 empty request · 503 claude CLI missing · 500 creation failed
+  .post('/api/skills/global/create', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { request?: unknown }
+    const request = typeof body.request === 'string' ? body.request.trim() : ''
+    if (!request) return c.json({ error: 'a skill request is required' }, 400)
+    if (request.length > MAX_REQUEST_LEN) {
+      return c.json({ error: `request is too long (max ${MAX_REQUEST_LEN} chars)` }, 400)
+    }
+    // Pre-flight: a missing CLI means a doomed run — surface it as a 503 with a
+    // machine-readable flag so the UI can explain (mirrors the describe route).
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
+    }
+    try {
+      const skill = await createGlobalSkill(request)
+      return c.json<CreateSkillResponse>({ skill })
+    } catch (e: any) {
+      if (e instanceof SkillCreationBusyError) {
+        return c.json({ error: e.message, busy: true }, 409)
+      }
+      return c.json({ error: e?.message ?? 'skill creation failed' }, 500)
     }
   })
   // ── /api/project/open/pick ────────────────────────────────────────────────

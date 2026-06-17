@@ -123,6 +123,31 @@ describe('parseGeneratedElements', () => {
     expect(() => parseGeneratedElements('[]')).toThrow(/no valid/)
   })
 
+  // ── frame default fill ──────────────────────────────────────────────────────
+
+  it('defaults a fill-less frame to white (artboard), like a drawn frame', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'frame', x: 0, y: 0, width: 400, height: 300, text: 'Hero' }]),
+    )
+    expect(out[0].fill).toBe('#FFFFFF')
+  })
+
+  it('keeps an explicit frame fill (override wins over the white default)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 400, height: 300, text: 'Dark', fill: '#101010' },
+      ]),
+    )
+    expect(out[0].fill).toBe('#101010')
+  })
+
+  it('does NOT inject a fill onto non-frame elements', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'text', x: 0, y: 0, text: 'hi' }]),
+    )
+    expect(out[0].fill).toBeUndefined()
+  })
+
   // ── parent inference (frame containment) ───────────────────────────────────
 
   it('infers nested parentIds: text → inner frame → outer frame', () => {

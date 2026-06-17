@@ -215,11 +215,12 @@ export const terminalRoutes = new Hono()
   // --- POST /api/terminal/custom-module — claude in a custom module dir ------
   // The custom-tab sidebar's "Edit with Claude" session (docs/CUSTOM_TABS_PLAN.md).
   // The module dir is NOT a registered project, so this deliberately does not go
-  // through validateProjectPath. The boundary is
-  // narrower instead: owner-only, the request carries ONLY a moduleId (never a
-  // raw cwd), the id is uuid-validated + must exist in index.json, and the cwd
-  // is resolved SERVER-side via customModuleDir(). Plain claude, no prompt —
-  // the brush-up text is injected UNSENT later via paste-custom-module below.
+  // through validateProjectPath. The boundary is narrower instead: owner OR
+  // tester (a tester now authors tabs locally too — only role 'none' is
+  // forbidden), the request carries ONLY a moduleId (never a raw cwd), the id is
+  // uuid-validated + must exist in index.json, and the cwd is resolved
+  // SERVER-side via customModuleDir(). Plain claude, no prompt — the brush-up
+  // text is injected UNSENT later via paste-custom-module below.
   .post('/api/terminal/custom-module', async (c) => {
     let body: any
     try {
@@ -227,7 +228,7 @@ export const terminalRoutes = new Hono()
     } catch {
       return c.json({ error: 'invalid body' }, 400)
     }
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if ((await getCustomTabRole()) === 'none') return c.json({ error: 'forbidden' }, 403)
     const moduleId = typeof body?.moduleId === 'string' ? body.moduleId : ''
     if (!moduleId) return c.json({ error: 'moduleId is required' }, 400)
     // getModule regex-validates the id BEFORE any path is built from it.
@@ -342,8 +343,9 @@ export const terminalRoutes = new Hono()
   // Inject the custom module's label/description + editing instructions into
   // the sidebar claude session's input box, UNSENT (same bracketed-paste / no
   // trailing newline contract as paste-task — the user reviews and hits Enter).
-  // Owner-only, and the target PTY must actually be the one running in this
-  // module's dir, so a moduleId can never write into an unrelated terminal.
+  // owner OR tester (testers author tabs too — only 'none' is forbidden), and
+  // the target PTY must actually be the one running in this module's dir, so a
+  // moduleId can never write into an unrelated terminal.
   .post('/api/terminal/:id/paste-custom-module', async (c) => {
     let body: any
     try {
@@ -351,7 +353,7 @@ export const terminalRoutes = new Hono()
     } catch {
       return c.json({ error: 'invalid body' }, 400)
     }
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if ((await getCustomTabRole()) === 'none') return c.json({ error: 'forbidden' }, 403)
     const moduleId = typeof body?.moduleId === 'string' ? body.moduleId : ''
     if (!moduleId) return c.json({ error: 'moduleId is required' }, 400)
     const def = await getModule(moduleId)

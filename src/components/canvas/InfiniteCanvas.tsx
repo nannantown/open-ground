@@ -1588,6 +1588,27 @@ export const InfiniteCanvas = ({
       capture(e)
       return
     }
+    // Select tool: a press that reached the bare viewport (no card / element /
+    // control caught it) may still be ON a frame — the frame body is
+    // pointer-events:none so children + cards on top win, but an empty interior
+    // or the thin border line falls through to here. Geometrically hit-test
+    // frames (same bounds test as the hover highlight) and select the top-most
+    // one, routing through the frame press path so the click ALSO arms a
+    // move-drag — exactly like grabbing the frame by its name label. Without
+    // this a frame is selectable only by its label. Design variant only: the
+    // Ground portfolio's frames are grouping boxes with their own header drag,
+    // and a body-click there would steal marquee starts over a frame.
+    if (tool === 'select' && frameVariant === 'design') {
+      const wf = worldFromEvent(e)
+      const fid = topFrameAt(wf.x, wf.y)
+      if (fid) {
+        const frame = canvasRef.current.elements.find((el) => el.id === fid)
+        if (frame) {
+          onFramePointerDown(frame)(e)
+          return
+        }
+      }
+    }
     // Select tool on empty canvas → marquee selection.
     setEditingId(null)
     const rect = viewportRef.current!.getBoundingClientRect()
@@ -2681,6 +2702,13 @@ export const InfiniteCanvas = ({
             width: fw,
             height: fh,
             text: '',
+            // Figma parity: a frame DRAWN with the frame tool ships with an
+            // explicit white fill so it reads as a real artboard against the
+            // paper canvas (the legacy fallback for an absent fill is the
+            // near-invisible paper wash). A wrap-in-auto-layout frame stays
+            // transparent instead — that's a grouping container, not an
+            // artboard (see addAutoLayout in canvasAutoLayout.ts).
+            fill: '#FFFFFF',
           }
           // Drawn ON a layout frame (and not wrapping it — the helper's
           // contains-guard) → the fresh frame nests into that flow at the
@@ -2905,6 +2933,28 @@ export const InfiniteCanvas = ({
       if (el.hidden || el.type === 'group') continue
       const b = fullBounds(el)
       if (wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) return el.id
+    }
+    return undefined
+  }
+
+  // The geometric fall-back the Select tool uses to pick a frame the user
+  // clicked inside (or on the border line of). A frame's body renders
+  // pointer-events:none so children + cards layered on top win their own press;
+  // a press that reaches the bare viewport therefore has nothing interactive on
+  // top, and here we hit-test frame bounds. We walk the SAME depth-sorted,
+  // visibility-filtered `frames` list the canvas paints (shallowest-first) but
+  // DEEPEST-first, so a click resolves to the top-most PAINTED frame under the
+  // cursor — deterministic and matching what the user sees, not raw array order.
+  // `frames` already excludes hidden / group-hidden frames; we additionally skip
+  // locked (and group-locked) frames so a body-click can't grab — or drag — a
+  // frame the lock contract says is immovable (hover highlight may still show it,
+  // but selection must not).
+  const topFrameAt = (wx: number, wy: number): string | undefined => {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const f = frames[i]
+      if (f.locked || lockedViaGroup.has(f.id)) continue
+      const b = fullBounds(f)
+      if (wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) return f.id
     }
     return undefined
   }

@@ -96,6 +96,19 @@ describe('buildScreenSrcdoc', () => {
     expect(doc).toContain('id="__opengrnd_src"')
   })
 
+  it('uses a Babel 8-compatible preset config (classic runtime; no removed opts)', () => {
+    const doc = buildScreenSrcdoc(`export default function A(){ return null }`, 'react')
+    // Babel 8 removed isTSX/allExtensions — passing them throws at transform
+    // time, so the option form must never reappear in the preset config.
+    expect(doc).not.toContain('isTSX: true')
+    expect(doc).not.toContain('allExtensions: true')
+    // classic runtime so compiled JSX is React.createElement, not an `import`
+    // from react/jsx-runtime (a syntax error inside the new Function() body).
+    expect(doc).toContain("runtime: 'classic'")
+    // pinned major so a future Babel 9 can't silently break the preview again.
+    expect(doc).toContain('@babel/standalone@8')
+  })
+
   it('injects props as JSON', () => {
     const doc = buildScreenSrcdoc(DEFAULT_SCREEN_SOURCE, 'react', 'light', {
       title: 'Hello',

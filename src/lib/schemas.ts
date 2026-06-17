@@ -114,6 +114,9 @@ export const ProjectDataSchema = z.object({
   // Custom tabs ATTACHED to this project (bare module uuids — the user-level
   // library lives in ~/.openground/custom-modules/). Personal, like tabOrder.
   customTabs: z.array(z.string()).optional(),
+  // Built-in (native) modules HIDDEN from this project's row (bare ModuleId
+  // strings). Personal, like tabOrder. See ProjectData.disabledModules.
+  disabledModules: z.array(z.string()).optional(),
   notes: z.string().default(''),
   updatedAt: z.string().default(''),
 })
@@ -207,6 +210,47 @@ export const sanitizeFeedbackImages = (
   const total = r.data.reduce((n, im) => n + im.data.length, 0)
   if (total > MAX_FEEDBACK_IMAGES_TOTAL_B64) return []
   return r.data
+}
+
+// /api/module-submissions — a tester's submission of a built custom tab for the
+// owner to review (docs/CUSTOM_TABS_PLAN.md). The 200KB source cap mirrors the
+// og_module_submissions DB check so an oversized body is rejected at the door
+// with a clear 400 rather than bouncing off Postgres. 3点セット: SubmitModuleRequest
+// (types.ts) / this schema / the row build in src/lib/server/customModulesSubmissions.ts.
+export const MAX_SUBMISSION_SOURCE = 200_000
+
+export const SubmitModuleBodySchema = z.object({
+  name: z.string().trim().min(1, 'name is required').max(60, 'name must be 60 characters or fewer'),
+  description: z.string().max(4000, 'description must be 4000 characters or fewer').default(''),
+  framework: z.enum(['react', 'html']).default('react'),
+  source: z.string().min(1, 'source is required').max(MAX_SUBMISSION_SOURCE, 'source too large'),
+})
+
+// Read-side guard for the owner review inbox. GET /api/module-submissions reads
+// rows that `anon` INSERTed under RLS — the DB checks bound sizes + the
+// status/framework enums, but re-validate HERE (the sanitizeFeedbackImages
+// posture) so a crafted or legacy row can't crash the inbox (e.g. a non-string
+// field) or balloon the payload. A row that fails validation is dropped wholesale.
+const ModuleSubmissionRowSchema = z.object({
+  id: z.string(),
+  created_at: z.string(),
+  // Display-only; bounded + null-safe so a garbage value never reaches the inbox.
+  submitter_email: z.string().max(320).nullable().catch(null),
+  name: z.string().max(200).catch(''),
+  description: z.string().max(8000).catch(''),
+  framework: z.enum(['react', 'html']).catch('react'),
+  status: z.enum(['pending', 'approved', 'rejected']).catch('pending'),
+  published_remote_id: z.string().nullable().catch(null),
+  // Present only on the single-row fetch (the review preview); capped at the
+  // write cap so an over-cap legacy row is dropped, not rendered.
+  source: z.string().max(MAX_SUBMISSION_SOURCE).optional(),
+})
+
+export const sanitizeModuleSubmission = (
+  row: unknown,
+): z.infer<typeof ModuleSubmissionRowSchema> | null => {
+  const r = ModuleSubmissionRowSchema.safeParse(row)
+  return r.success ? r.data : null
 }
 
 // ---- Helpers --------------------------------------------------------------

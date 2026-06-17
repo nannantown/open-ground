@@ -579,6 +579,27 @@ describe('addAutoLayout (⇧A)', () => {
     expect(byId(res.elements, 'b').parentId).toBe(frame.id)
   })
 
+  it('the wrap frame is TRANSPARENT + borderless — a grouping container, not a drawn artboard (Figma)', () => {
+    const els = [
+      el({ id: 'a', x: 100, y: 100, width: 100, height: 100 }),
+      el({ id: 'b', x: 100, y: 300, width: 100, height: 100 }),
+    ]
+    const res = addAutoLayout(els, ['a', 'b'], mkId)!
+    const frame = byId(res.elements, res.selectId)
+    expect(frame.fill).toBe('transparent')
+    expect(frame.strokeWidth).toBe(0)
+  })
+
+  it('enabling auto-layout IN PLACE leaves an existing frame fill untouched', () => {
+    const els = [
+      el({ id: 'f', type: 'frame', x: 0, y: 0, width: 600, height: 200, fill: '#ffffff' }),
+      el({ id: 'a', x: 20, y: 20, width: 100, height: 100, parentId: 'f' }),
+    ]
+    const res = addAutoLayout(els, ['f'], mkId)!
+    expect(res.selectId).toBe('f')
+    expect(byId(res.elements, 'f').fill).toBe('#ffffff') // not cleared / overwritten
+  })
+
   it('normalises the wrapped members into visual order (flow = array order)', () => {
     // b precedes a in the array but a sits left of b — Figma's ⇧A keeps the
     // picture, so the array must come out a-then-b.

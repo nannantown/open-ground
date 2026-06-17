@@ -55,11 +55,16 @@ export const CustomModuleView = ({
 }) => {
   const { t } = useT()
   const isOwner = role === 'owner'
+  // Authoring — the sidebar claude session AND the header actions — is open to
+  // testers too: a tester builds a tab locally, then SUBMITS it to the owner for
+  // review (docs/CUSTOM_TABS_PLAN.md). Only role 'none' renders read-only.
+  const canAuthor = role !== 'none'
   const [src, setSrc] = useState<CustomModuleSourceResponse | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
-  // Publish progress + inline notice (the panel has no toast system; inline
-  // text next to the buttons is the established pattern).
+  // Publish/submit progress + inline notice (the panel has no toast system;
+  // inline text next to the buttons is the established pattern).
   const [publishing, setPublishing] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const onSetupConsumedRef = useRef(onSetupConsumed)
   onSetupConsumedRef.current = onSetupConsumed
@@ -69,7 +74,7 @@ export const CustomModuleView = ({
   // The create flow's one-shot brush-up paste: armed while `setup`, fired by
   // the dock's first ACTUAL spawn, then never again (a ref so StrictMode's
   // doubled effects and re-renders can't re-arm it).
-  const pastePendingRef = useRef(isOwner && !!setup)
+  const pastePendingRef = useRef(canAuthor && !!setup)
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Tell the parent the one-shot setup flag was adopted, so a later remount
   // of this tab opens plain.
@@ -214,13 +219,53 @@ export const CustomModuleView = ({
     }
   }
 
+  // Tester action: submit the CURRENT source to the owner for review
+  // (docs/CUSTOM_TABS_PLAN.md). The owner approves → it's published to the
+  // marketplace. Reuses the inline-notice pattern; disabled until source loads.
+  const submit = async () => {
+    if (submitting || !src) return
+    setSubmitting(true)
+    setNotice(null)
+    try {
+      const r = await fetch('/api/module-submissions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: module.label,
+          description: module.description,
+          framework: module.framework,
+          source: src.source,
+        }),
+      })
+      const body = (await r.json().catch(() => ({}))) as { error?: string }
+      if (!r.ok) {
+        setNotice({
+          kind: 'error',
+          text:
+            r.status === 503
+              ? t('customTabs.submitUnavailable')
+              : t('customTabs.submitFailed', { error: body.error ?? `HTTP ${r.status}` }),
+        })
+        return
+      }
+      setNotice({ kind: 'ok', text: t('customTabs.submitted') })
+    } catch {
+      setNotice({
+        kind: 'error',
+        text: t('customTabs.submitFailed', { error: t('projectPanel.networkError') }),
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const headerBtn =
     'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {isOwner && (
+        {canAuthor && (
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-8 py-2">
             <span
               className="min-w-0 flex-1 truncate text-[12px] text-ink-muted"
@@ -245,17 +290,29 @@ export const CustomModuleView = ({
                 {notice.text}
               </span>
             )}
-            <button
-              type="button"
-              onClick={() => void publish()}
-              disabled={publishing}
-              className={headerBtn}
-            >
-              {publishing && (
-                <Loader2 size={10} className="mr-1 inline animate-spin" />
-              )}
-              {publishing ? t('customTabs.publishing') : t('customTabs.publish')}
-            </button>
+            {/* owner publishes official modules; a tester submits the current
+                source to the owner for review (then approve publishes it). */}
+            {isOwner ? (
+              <button
+                type="button"
+                onClick={() => void publish()}
+                disabled={publishing}
+                className={headerBtn}
+              >
+                {publishing && <Loader2 size={10} className="mr-1 inline animate-spin" />}
+                {publishing ? t('customTabs.publishing') : t('customTabs.publish')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={submitting || !src}
+                className={headerBtn}
+              >
+                {submitting && <Loader2 size={10} className="mr-1 inline animate-spin" />}
+                {submitting ? t('customTabs.submitting') : t('customTabs.submit')}
+              </button>
+            )}
           </div>
         )}
         <div className="min-h-0 flex-1 bg-bg-deep">
@@ -277,7 +334,7 @@ export const CustomModuleView = ({
           )}
         </div>
       </div>
-      {isOwner && (
+      {canAuthor && (
         <TerminalDock
           key={`dock-custom-${module.id}`}
           projectPath=""

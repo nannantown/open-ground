@@ -715,6 +715,14 @@ export function addAutoLayout(
     width: Math.round(x2 - x1 + pad * 2),
     height: Math.round(y2 - y1 + pad * 2),
     text: '',
+    // Figma parity: a wrap-in-auto-layout frame is a GROUPING container, not a
+    // drawn artboard, so it ships TRANSPARENT + borderless — the wrapped content
+    // shows through and the wrapper only reads as a selection/hover outline.
+    // (A frame DRAWN with the frame tool gets an explicit white fill instead;
+    // see InfiniteCanvas's draw-commit handler.) Explicit values, because the
+    // render fallback for an absent `fill` is the legacy paper wash.
+    fill: 'transparent',
+    strokeWidth: 0,
     layout: { mode: inferLayoutMode(boxes), ...AUTO_LAYOUT_DEFAULTS },
     ...(commonParent ? { parentId: commonParent } : {}),
   }

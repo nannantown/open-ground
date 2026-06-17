@@ -48,6 +48,12 @@ export interface Settings {
    *  app (mode: 'open') can be launched the right way. Strings from older
    *  saves are normalised on read. */
   openApps?: OpenApp[]
+  /** The editor the project panel's "Open in editor" (`<>`) button launches in
+   *  one click. null/undefined → no default yet, so clicking the button opens
+   *  the editor picker instead of auto-launching one. Set by choosing an editor
+   *  (and starring it) in that menu, or by Finder-picking a .app. Stored as an
+   *  {name, path, mode:'open'} OpenApp and launched with `open -a`. */
+  defaultEditor?: OpenApp | null
   /** The user's display name, used as the default assignee identity on shared
    *  boards ("my cards" filter). Default suggestion: `git config user.name`. */
   displayName?: string
@@ -161,6 +167,33 @@ export interface ProjectMeta {
   totalTaskCount: number
 }
 
+/** One Claude Code skill — either defined INSIDE a project
+ *  (`<project>/.claude/skills/<id>/SKILL.md`, GET /api/project/skills) or one of
+ *  the user's OWN global skills (`~/.claude/skills/<id>/SKILL.md`,
+ *  GET /api/skills/global). Parsed from the file's YAML frontmatter. Display-only
+ *  — OPEN GROUND never executes a skill; the user's own `claude` CLI does. */
+export interface ProjectSkill {
+  /** The skill's directory name under `.claude/skills/` (filesystem-stable). */
+  id: string
+  /** Display name: frontmatter `name`, falling back to the directory name. */
+  name: string
+  /** Frontmatter `description` ('' when absent). */
+  description: string
+  /** Path to the SKILL.md for display: project-relative (`.claude/skills/…`) or
+   *  `~/.claude/skills/…` for a global skill. */
+  file: string
+}
+
+export interface ProjectSkillsResponse {
+  skills: ProjectSkill[]
+}
+
+/** POST /api/skills/global/create response: the skill the one-off `claude`
+ *  session authored under ~/.claude/skills (re-read from disk). */
+export interface CreateSkillResponse {
+  skill: ProjectSkill
+}
+
 export interface CanvasPosition {
   x: number
   y: number
@@ -203,6 +236,17 @@ export interface FrameLayout {
   paddingLeft?: number
   primarySizing?: 'fixed' | 'hug'
   counterSizing?: 'fixed' | 'hug'
+}
+
+// A single shadow effect (Figma drop / inner shadow), rendered as one CSS
+// box-shadow layer. `type:'inner'` becomes an `inset` shadow.
+export interface CanvasShadow {
+  type: 'drop' | 'inner'
+  x: number
+  y: number
+  blur: number
+  spread: number
+  color: string
 }
 
 // Free-form items placed on the canvas (annotations and grouping frames),
@@ -270,6 +314,25 @@ export interface CanvasElement {
   fill?: string
   strokeColor?: string
   strokeWidth?: number
+  /** Stroke line style (Figma: solid / dashed / dotted). OPTIONAL +
+   *  backward-compatible: omitted = 'solid' (the legacy hard-coded border). */
+  strokeStyle?: 'solid' | 'dashed' | 'dotted'
+  /** Stroke alignment relative to the geometry rect (Figma: inside / center /
+   *  outside). OPTIONAL + backward-compatible: omitted = 'inside', which is the
+   *  legacy `box-sizing:border-box` border (drawn inside the rect) — so existing
+   *  frames/shapes render byte-identically. center / outside are painted by a
+   *  stroke overlay grown half / a full stroke-width outward. */
+  strokeAlign?: 'inside' | 'center' | 'outside'
+  /** Shadow effects (Figma's drop / inner shadow), rendered as a CSS box-shadow.
+   *  OPTIONAL + backward-compatible: omitted / empty = no shadow (the legacy
+   *  look). Multiple stack, painted in order. Frame + shape only. */
+  shadows?: CanvasShadow[]
+  /** Image FILL (Figma's image paint): a per-canvas asset id painted as the
+   *  frame/shape background. When set it WINS over the colour/gradient `fill`.
+   *  `fillImageMode` is the CSS sizing (default 'cover'). OPTIONAL — omitted =
+   *  no image fill. (Distinct from an `image` ELEMENT, which uses `assetId`.) */
+  fillImageId?: string
+  fillImageMode?: 'cover' | 'contain' | 'fill' | 'tile'
   /** Shape-only: which primitive a `shape` element draws (round 5). A shape is
    *  a plain axis-aligned rectangle or ellipse that CONSUMES the same optional
    *  `fill` / `strokeColor` / `strokeWidth` fields above, plus `cornerRadius`
@@ -295,6 +358,15 @@ export interface CanvasElement {
    *  round 4 only adds inspector inputs + proportional Shift-drag for them.) */
   opacity?: number
   cornerRadius?: number
+  /** Per-corner radius overrides (Figma's independent corners). Each OPTIONAL +
+   *  backward-compatible: an unset corner falls back to `cornerRadius`, then the
+   *  default — so a frame/rect with none set stays uniform exactly as before.
+   *  Order mirrors CSS border-radius (TL, TR, BR, BL); rect/frame only (an
+   *  ellipse ignores them). */
+  cornerRadiusTopLeft?: number
+  cornerRadiusTopRight?: number
+  cornerRadiusBottomRight?: number
+  cornerRadiusBottomLeft?: number
   // ── Figma-parity layer transforms — ALL OPTIONAL, backward-compatible ──
   /** Rotation in degrees, clockwise, about the element's centre. Applied as a
    *  CSS `rotate()` at render time; geometry (x/y/width/height) stays the
@@ -758,6 +830,13 @@ export interface ProjectData {
    *  via the "+" picker). PERSONAL state like tabOrder: stays central in
    *  git-shared mode. Unknown/deleted ids are ignored on read. */
   customTabs?: string[]
+  /** Built-in (native) modules HIDDEN from this project's tab row — bare
+   *  ModuleId strings. The defaults (Terminal / Canvas / Board) ship
+   *  pre-installed and can't be uninstalled, but a project may drop one from
+   *  its row. PERSONAL state like tabOrder / customTabs: central in git-shared
+   *  mode, unknown ids ignored on read. The last remaining tab can't be hidden
+   *  (enforced in the UI). */
+  disabledModules?: string[]
   /** Shared project policy — see {@link ProjectConfig}. */
   config?: ProjectConfig
   /** Personal launch preferences — see {@link ProjectLaunchPrefs}. Central
@@ -1118,4 +1197,63 @@ export interface MarketplaceModule {
 /** GET /api/marketplace */
 export interface MarketplaceListResponse {
   items: MarketplaceModule[]
+}
+
+// ─── Module submissions (tester → owner review queue) ────────────────────────
+// docs/CUSTOM_TABS_PLAN.md (submit → review → publish). A tester builds a custom
+// tab locally and SUBMITS its source to the owner; the owner reads this PRIVATE
+// queue (service-role) and approve copies the source into og_custom_modules (the
+// PUBLIC marketplace) or reject drops it. Mirrors the feedback inbox: anon may
+// INSERT a pending row only, the owner reads with the service-role key.
+
+/** POST /api/module-submissions — a tester's submission of a built tab. */
+export interface SubmitModuleRequest {
+  name: string
+  description: string
+  framework: CustomModuleFramework
+  source: string
+}
+
+/** GET /api/module-submissions/config — gates the submit + review surfaces.
+ *  - `enabled`: anon key configured, so a tester can submit.
+ *  - `canReview`: the server also has a SERVICE-ROLE key AND the signed-in
+ *    account is an admin (MODULE_ADMIN_EMAILS, falling back to
+ *    FEEDBACK_ADMIN_EMAILS) — the owner review inbox shows. False on the public
+ *    build (no service key shipped); never echoes keys. */
+export interface ModuleSubmissionsConfigResponse {
+  enabled: boolean
+  canReview: boolean
+  /** Stable, non-secret id (hash of the Supabase url+table), emitted only when
+   *  canReview, so the client scopes its "last seen" unread marker per source. */
+  sourceId?: string
+}
+
+/** One row of the review queue, read back via the service-role key (owner only,
+ *  GET /api/module-submissions). `source` is present on the single-row fetch
+ *  (the review preview/diff) and omitted from the list payload to keep it light. */
+export interface ModuleSubmissionItem {
+  id: string
+  created_at: string
+  /** Display-only (client-supplied at submit, like feedback.email); not trusted. */
+  submitter_email: string | null
+  name: string
+  description: string
+  framework: CustomModuleFramework
+  status: 'pending' | 'approved' | 'rejected'
+  /** The published og_custom_modules row id, set when approved. */
+  published_remote_id: string | null
+  /** The submitted component source — included only on the single-row fetch. */
+  source?: string
+}
+
+/** GET /api/module-submissions — owner inbox payload (newest first). `truncated`
+ *  is true when more than the cap (200) of rows exist. */
+export interface ModuleSubmissionsResponse {
+  items: ModuleSubmissionItem[]
+  truncated: boolean
+}
+
+/** POST /api/module-submissions/:id/approve — the new published marketplace id. */
+export interface ApproveSubmissionResponse {
+  remoteId: string
 }

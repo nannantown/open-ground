@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { Markdown } from '@/components/canvas/Markdown'
+import { ModuleReviewInbox } from '@/components/canvas/modules/ModuleReviewInbox'
 import { pickReleaseNotesLang } from '@/lib/releaseNotesLang'
 import type {
   Settings,
@@ -42,6 +43,11 @@ interface Props {
   /** When provided, renders a clear "Send feedback" button that opens the
    *  composer. Omit to hide the entry entirely. */
   onOpenFeedback?: () => void
+  /** When true the server can read the module submission queue (owner build), so
+   *  the "Tab submissions" review inbox shows. False on the public build. */
+  moduleReviewCanReview?: boolean
+  /** Called once the review inbox loads, with the newest submission's created_at. */
+  onModuleSubmissionSeen?: (latestCreatedAt: string | null) => void
 }
 
 // Settings drawer. Deliberately minimal: only real preferences are visible
@@ -57,6 +63,8 @@ export const SettingsPanel = ({
   feedbackCanRead = false,
   onFeedbackSeen,
   onOpenFeedback,
+  moduleReviewCanReview = false,
+  onModuleSubmissionSeen,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
@@ -267,8 +275,11 @@ export const SettingsPanel = ({
             />
           </Section>
 
-          {/* Owner-only inbox — only when the server can read submissions. */}
+          {/* Owner-only inboxes — only when the server can read submissions. */}
           {open && feedbackCanRead && <FeedbackInbox onSeen={onFeedbackSeen} />}
+          {open && moduleReviewCanReview && (
+            <ModuleReviewInbox onSeen={onModuleSubmissionSeen} />
+          )}
 
           {/* Release notes — what changed, per published version. */}
           {open && <ReleaseNotesSection />}

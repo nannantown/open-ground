@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
   EDITOR_CANDIDATES,
   __resetEditorCacheForTests,
+  editorLaunchTarget,
   knownEditorLocations,
   parseEditorCmd,
   resolveEditorArgv,
@@ -108,5 +109,20 @@ describe('cliResolve shared helpers', () => {
   it('pathFromShellOutput (claudeCli compat) still answers the LAST absolute line', () => {
     expect(pathFromShellOutput('noise\n/a/bin/claude\n')).toBe('/a/bin/claude')
     expect(pathFromShellOutput('')).toBeNull()
+  })
+})
+
+describe('editorLaunchTarget (the `open -a` target for a chosen editor)', () => {
+  it('prefers the explicit bundle path over the display name', () => {
+    expect(
+      editorLaunchTarget({ name: 'Cursor', path: '/Applications/Cursor.app', mode: 'open' }),
+    ).toBe('/Applications/Cursor.app')
+  })
+
+  it('falls back to the display name when the path is missing or blank', () => {
+    expect(editorLaunchTarget({ name: 'Visual Studio Code', mode: 'open' })).toBe(
+      'Visual Studio Code',
+    )
+    expect(editorLaunchTarget({ name: 'Zed', path: '   ', mode: 'open' })).toBe('Zed')
   })
 })

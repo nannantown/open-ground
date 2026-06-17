@@ -6,6 +6,8 @@ import { InfiniteCanvas, type CanvasZoomApi } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
 import { SelectionInspector } from './SelectionInspector'
 import { LayersPanel } from './LayersPanel'
+import { CanvasAssetProvider } from './CanvasAssetContext'
+import { uploadCanvasAsset } from '@/lib/canvasAssets'
 import { newId } from '@/lib/ids'
 import { removeElements } from '@/lib/canvasIntegrity'
 import {
@@ -517,23 +519,9 @@ export const CanvasWorkspace = ({
         h = Math.max(40, Math.round(naturalH * scale))
       }
 
-      const form = new FormData()
-      form.append('file', file)
-      let res: Response
-      try {
-        res = await fetch(
-          `/api/canvas/asset?path=${encodeURIComponent(projectPath)}` +
-            `&canvasId=${encodeURIComponent(canvas.id)}`,
-          { method: 'POST', body: form },
-        )
-      } catch {
-        return
-      }
-      if (!res.ok) return
-      const { assetId, filename } = (await res.json()) as {
-        assetId: string
-        filename: string
-      }
+      const uploaded = await uploadCanvasAsset(projectPath, canvas.id, file)
+      if (!uploaded) return
+      const { assetId, filename } = uploaded
       const el: CanvasElement = {
         id: newId(),
         type: 'image',
@@ -797,6 +785,7 @@ export const CanvasWorkspace = ({
   })()
 
   return (
+    <CanvasAssetProvider value={{ projectPath, canvasId: canvas.id }}>
     <div className="flex h-full w-full overflow-hidden">
       <div ref={surfaceRef} className="relative min-w-0 flex-1 overflow-hidden">
         <InfiniteCanvas
@@ -1060,5 +1049,6 @@ export const CanvasWorkspace = ({
         </div>
       </div>
     </div>
+    </CanvasAssetProvider>
   )
 }

@@ -7,6 +7,10 @@ import {
   clampCornerRadius,
   resolveFrameCornerRadius,
   clampRadiusToBox,
+  resolveCornerRadii,
+  cornerRadiiAreUniform,
+  cornerRadiusCss,
+  strokeOverlayBox,
   clampWidth,
   clampHeight,
   lockAspectRatio,
@@ -129,6 +133,74 @@ describe('clampRadiusToBox', () => {
   })
   it('never goes negative for a degenerate box', () => {
     expect(clampRadiusToBox(10, 0, 0)).toBe(0)
+  })
+})
+
+describe('resolveCornerRadii', () => {
+  it('is uniform from cornerRadius when no per-corner override is set', () => {
+    expect(resolveCornerRadii(frame({ cornerRadius: 12 }))).toEqual({ tl: 12, tr: 12, br: 12, bl: 12 })
+  })
+  it('falls back to the default for every corner when nothing is set', () => {
+    const d = DEFAULT_FRAME_CORNER_RADIUS
+    expect(resolveCornerRadii(frame())).toEqual({ tl: d, tr: d, br: d, bl: d })
+  })
+  it('lets a per-corner override beat the uniform value; unset corners keep it', () => {
+    expect(resolveCornerRadii(frame({ cornerRadius: 8, cornerRadiusTopLeft: 24 }))).toEqual({
+      tl: 24,
+      tr: 8,
+      br: 8,
+      bl: 8,
+    })
+  })
+  it('clamps each corner to the band independently', () => {
+    const r = resolveCornerRadii(frame({ cornerRadiusTopLeft: 99999, cornerRadiusBottomRight: -5 }))
+    expect(r.tl).toBe(MAX_CORNER_RADIUS)
+    expect(r.br).toBe(MIN_CORNER_RADIUS)
+  })
+})
+
+describe('cornerRadiiAreUniform', () => {
+  it('is true only when all four corners are equal', () => {
+    expect(cornerRadiiAreUniform({ tl: 6, tr: 6, br: 6, bl: 6 })).toBe(true)
+    expect(cornerRadiiAreUniform({ tl: 6, tr: 6, br: 6, bl: 7 })).toBe(false)
+  })
+})
+
+describe('cornerRadiusCss', () => {
+  it('emits the four corners in CSS order (TL TR BR BL)', () => {
+    expect(cornerRadiusCss(frame({ cornerRadius: 10 }), 400, 280)).toBe('10px 10px 10px 10px')
+  })
+  it('caps each corner at half the smaller side', () => {
+    // min(200,80)/2 = 40; the untouched corners fall back to the 4px default.
+    expect(cornerRadiusCss(frame({ cornerRadiusTopLeft: 100 }), 200, 80)).toBe('40px 4px 4px 4px')
+  })
+})
+
+describe('strokeOverlayBox', () => {
+  it('returns null for inside alignment (the body border is used)', () => {
+    expect(strokeOverlayBox(frame({ cornerRadius: 0 }), 100, 80, 4, 'inside')).toBeNull()
+  })
+  it('returns null for a non-positive stroke width', () => {
+    expect(strokeOverlayBox(frame(), 100, 80, 0, 'outside')).toBeNull()
+  })
+  it('grows by half the width for center, centred on the body', () => {
+    const b = strokeOverlayBox(frame({ cornerRadius: 0 }), 100, 80, 8, 'center')!
+    expect(b).toMatchObject({ left: -4, top: -4, width: 108, height: 88 })
+  })
+  it('grows by a full width for outside', () => {
+    const b = strokeOverlayBox(frame({ cornerRadius: 0 }), 100, 80, 8, 'outside')!
+    expect(b).toMatchObject({ left: -8, top: -8, width: 116, height: 96 })
+  })
+  it('grows the corner radii to stay concentric with the body', () => {
+    // body radius 10, outside grow 6 → overlay radius 16 on each corner.
+    const b = strokeOverlayBox(frame({ cornerRadius: 10 }), 200, 200, 6, 'outside')!
+    expect(b.borderRadius).toBe('16px 16px 16px 16px')
+  })
+  it('caps grown radii to half the overlay box', () => {
+    // tiny box: overlay 20×20 (10+grow5 each side → 10+? ) — radius caps at half.
+    const b = strokeOverlayBox(frame({ cornerRadius: 100 }), 10, 10, 10, 'center')!
+    // overlay = 10 + 5*2 = 20 wide; cap = floor(20/2)=10
+    expect(b.borderRadius).toBe('10px 10px 10px 10px')
   })
 })
 

@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react'
 import type { CanvasElement } from '@/lib/types'
 import { resolveFrameStyle } from '@/lib/canvasFillStyle'
-import {
-  resolveFrameCornerRadius,
-  clampRadiusToBox,
-  resolveOpacity,
-} from '@/lib/canvasTransform'
+import { cornerRadiusCss, resolveOpacity } from '@/lib/canvasTransform'
+import { shadowsCss } from '@/lib/canvasShadow'
+import { imageFillStyle } from '@/lib/canvasImageFill'
+import { canvasAssetUrl } from '@/lib/canvasAssets'
+import { bodyBorder, StrokeOverlay } from './StrokeOverlay'
+import { useCanvasAsset } from './CanvasAssetContext'
 
 interface Props {
   frame: CanvasElement
@@ -53,21 +54,41 @@ export const DesignFrameView = ({
   const fillStyle = resolveFrameStyle(frame)
   const w = frame.width ?? 400
   const h = frame.height ?? 280
-  const radius = clampRadiusToBox(resolveFrameCornerRadius(frame), w, h)
+  const radius = cornerRadiusCss(frame, w, h)
+  const sb = bodyBorder(frame, fillStyle.strokeColor, fillStyle.strokeWidth, selected)
+  // Image fill (Figma image paint) wins over the colour/gradient fill when set.
+  const asset = useCanvasAsset()
+  const imgFill =
+    frame.fillImageId && asset
+      ? imageFillStyle(frame, canvasAssetUrl(asset.projectPath, asset.canvasId, frame.fillImageId))
+      : null
   return (
     <div
       style={{
+        // position:relative so a center/outside StrokeOverlay's negative offsets
+        // grow the stroke outward relative to this body (the label, also
+        // absolute over an equal-size box, is unaffected).
+        position: 'relative',
         width: w,
         height: h,
         background: fillStyle.fill,
-        borderStyle: 'solid',
-        borderWidth: selected ? Math.max(fillStyle.strokeWidth, 1) : fillStyle.strokeWidth,
-        borderColor: selected ? undefined : fillStyle.strokeColor,
+        ...(imgFill ?? {}),
+        borderStyle: sb.borderStyle,
+        borderWidth: sb.borderWidth,
+        borderColor: sb.borderColor,
         borderRadius: radius,
+        boxShadow: shadowsCss(frame),
         opacity: resolveOpacity(frame),
       }}
       className={['pointer-events-none', selected ? 'border-accent' : ''].join(' ')}
     >
+      <StrokeOverlay
+        element={frame}
+        w={w}
+        h={h}
+        strokeColor={fillStyle.strokeColor}
+        strokeWidth={fillStyle.strokeWidth}
+      />
       {/* Floating name, Figma-style: anchored to the frame's top-left, sitting
           fully above the rect, counter-scaled to a constant screen size. The
           1/zoom scale (origin bottom-left) keeps the anchor point glued to the

@@ -5,10 +5,10 @@
 // app-wide toggle (useT), with its own EN/JA switch in the header for quick
 // flipping while reading.
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { X, CornerDownRight } from 'lucide-react'
+import { CornerDownRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
-import { Btn } from '@/components/ui/Btn'
+import { BackLink } from '@/components/ui/BackLink'
 import { MANUAL_SECTIONS, type Bi, type Block, type Section } from './manualContent'
 
 // Fraunces optical-size axis for large display headings (matches EmptyState).
@@ -194,13 +194,20 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
     <div data-esc-overlay className="fixed inset-0 z-[60] flex flex-col bg-bg font-body">
       {/* Header */}
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-bg-card/95 px-5 py-3 shadow-card backdrop-blur">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <OpenGroundMark size={20} className="shrink-0 select-none" />
-          <div className="flex min-w-0 flex-col leading-none">
-            <span className="label-cap text-ink-faint">OPEN GROUND</span>
-            <span className="mt-0.5 font-display text-[15px] tracking-tight text-ink" style={DISPLAY}>
-              {lang === 'ja' ? 'マニュアル' : 'Manual'}
-            </span>
+        <div className="flex min-w-0 items-center gap-3.5">
+          <BackLink
+            label={lang === 'ja' ? '戻る' : 'Back'}
+            onClick={onClose}
+            className="shrink-0"
+          />
+          <div className="flex min-w-0 items-center gap-2.5">
+            <OpenGroundMark size={20} className="shrink-0 select-none" />
+            <div className="flex min-w-0 flex-col leading-none">
+              <span className="label-cap text-ink-faint">OPEN GROUND</span>
+              <span className="mt-0.5 font-display text-[15px] tracking-tight text-ink" style={DISPLAY}>
+                {lang === 'ja' ? 'マニュアル' : 'Manual'}
+              </span>
+            </div>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
@@ -221,9 +228,6 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
               </button>
             ))}
           </div>
-          <Btn variant="icon" size="md" onClick={onClose} title={lang === 'ja' ? '閉じる' : 'Close'} aria-label="Close">
-            <X size={16} strokeWidth={1.75} />
-          </Btn>
         </div>
       </header>
 

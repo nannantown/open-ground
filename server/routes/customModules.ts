@@ -64,9 +64,12 @@ export const customModulesRoutes = new Hono()
     const [role, modules] = await Promise.all([getCustomTabRole(), listModules()])
     return c.json({ role, modules })
   })
-  // --- POST /api/custom-modules — create a local module (owner) --------------
+  // --- POST /api/custom-modules — create a local module (owner | tester) -----
+  // Authoring is open to testers (they build a tab locally, then submit it to
+  // the owner for review); only role 'none' is forbidden. Publishing official
+  // modules stays owner-only (see the publish route below).
   .post('/api/custom-modules', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return forbidden(c)
+    if ((await getCustomTabRole()) === 'none') return forbidden(c)
     let body: any
     try {
       body = await c.req.json()
@@ -93,9 +96,17 @@ export const customModulesRoutes = new Hono()
     if (!src) return notFound(c)
     return c.json(src)
   })
-  // --- PUT /api/custom-modules/:id — patch meta and/or source (owner) --------
+  // --- PUT /api/custom-modules/:id — patch meta and/or source ----------------
+  // owner: any module. tester: their OWN authored modules only (origin
+  // 'local') — never an 'installed' one, which is someone else's published
+  // artifact (the inverse of the DELETE handler's installed-only tester rule).
+  // none: forbidden.
   .put('/api/custom-modules/:id', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return forbidden(c)
+    const role = await getCustomTabRole()
+    if (role === 'none') return forbidden(c)
+    const def = await getModule(c.req.param('id'))
+    if (!def) return notFound(c)
+    if (role === 'tester' && def.origin !== 'local') return forbidden(c)
     let body: any
     try {
       body = await c.req.json()
@@ -120,9 +131,11 @@ export const customModulesRoutes = new Hono()
       if (typeof body.source !== 'string') return c.json({ error: 'source must be a string' }, 400)
       patch.source = body.source
     }
-    const def = await updateModule(c.req.param('id'), patch)
-    if (!def) return notFound(c)
-    return c.json(def)
+    // Re-check existence inside the single-flight chain (the def read above is
+    // for the role gate; a concurrent delete between then and now still 404s).
+    const updated = await updateModule(c.req.param('id'), patch)
+    if (!updated) return notFound(c)
+    return c.json(updated)
   })
   // --- DELETE /api/custom-modules/:id — owner; tester for installed only -----
   .delete('/api/custom-modules/:id', async (c) => {

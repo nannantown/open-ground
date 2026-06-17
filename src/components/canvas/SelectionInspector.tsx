@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   AlignLeft,
   AlignCenter,
@@ -9,6 +9,7 @@ import {
   Eye,
   EyeOff,
   Minus,
+  Pipette,
   ArrowDown,
   ArrowRight,
   Expand,
@@ -21,7 +22,7 @@ import {
   AlignHorizontalDistributeCenter,
   AlignVerticalDistributeCenter,
 } from 'lucide-react'
-import type { CanvasElement, FrameLayout } from '@/lib/types'
+import type { CanvasElement, CanvasShadow, FrameLayout } from '@/lib/types'
 import type { AlignOp } from '@/lib/canvasAlign'
 import { AUTO_LAYOUT_DEFAULTS } from '@/lib/canvasAutoLayout'
 import { useT } from '@/i18n/I18nContext'
@@ -49,8 +50,32 @@ import {
   MIN_STROKE_WIDTH,
   MAX_STROKE_WIDTH,
   clampStrokeWidth,
+  NO_FILL,
+  isNoFill,
+  resolveStrokeStyle,
+  STROKE_STYLES,
+  type StrokeStyle,
+  resolveStrokeAlign,
+  STROKE_ALIGNS,
+  type StrokeAlign,
 } from '@/lib/canvasFillStyle'
 import { resolveShapeStyle, resolveShapeKind } from '@/lib/canvasShape'
+import { alphaOf, withAlpha, hasParsableColor, parseColor, formatColor } from '@/lib/canvasColor'
+import { getRecentColors, pushRecentColor } from '@/lib/recentColors'
+import { clampShadow, DEFAULT_SHADOW, MAX_SHADOW_BLUR } from '@/lib/canvasShadow'
+import {
+  resolveImageFillMode,
+  IMAGE_FILL_MODES,
+  type ImageFillMode,
+} from '@/lib/canvasImageFill'
+import { uploadCanvasAsset, canvasAssetUrl } from '@/lib/canvasAssets'
+import { useCanvasAsset } from './CanvasAssetContext'
+import {
+  parseGradient,
+  formatGradient,
+  defaultGradient,
+  type Gradient,
+} from '@/lib/canvasGradient'
 import {
   TEXT_SIZING_MODES,
   textSizingOf,
@@ -63,7 +88,8 @@ import {
 import {
   resolveOpacity,
   opacityFromPercent,
-  resolveFrameCornerRadius,
+  resolveCornerRadii,
+  cornerRadiiAreUniform,
   MIN_CORNER_RADIUS,
   MAX_CORNER_RADIUS,
   clampCornerRadius,
@@ -384,17 +410,11 @@ const PositionProperties = ({
             onCommit={(n) => onPatch({ rotation: normRotation(n) })}
           />
         </Field>
-        {showRadius && (
-          <Field label={t('canvas.insp.cornerRadius')}>
-            <NumberInput
-              min={MIN_CORNER_RADIUS}
-              max={MAX_CORNER_RADIUS}
-              value={resolveFrameCornerRadius(element)}
-              onCommit={(n) => onPatch({ cornerRadius: clampCornerRadius(n) })}
-            />
-          </Field>
-        )}
       </div>
+      {/* key by element id so the per-corner expand/collapse state is PER element
+          — without it the local `expanded` useState leaks onto the next
+          selection (a uniform frame would inherit the previous one's open grid). */}
+      {showRadius && <CornerRadiusField key={element.id} element={element} onPatch={onPatch} />}
       {/* Fill only for types whose width/height actually drive their render —
           a text element renders at natural width, so a Fill-written size would
           slot siblings around a phantom box (and outlive the toggle). */}
@@ -923,13 +943,19 @@ const FillStrokeSections = ({
   const { t } = useT()
   const { fill, strokeColor, strokeWidth } =
     element.type === 'frame' ? resolveFrameStyle(element) : resolveShapeStyle(element)
+  // Recent colours (shared across fill + stroke). State so a freshly-remembered
+  // colour shows up in the strip without waiting for the next external render.
+  const [recents, setRecents] = useState(getRecentColors)
+  const remember = (c: string) => setRecents(pushRecentColor(c))
   return (
     <>
       <Section title={t('canvas.insp.fill')}>
-        <ColorField
-          srLabel={t('canvas.insp.fill')}
-          value={fill}
-          onChange={(color) => onPatch({ fill: color })}
+        <FillControl
+          element={element}
+          fill={fill}
+          onPatch={onPatch}
+          remember={remember}
+          recents={recents}
         />
       </Section>
       <Section title={t('canvas.insp.stroke')}>
@@ -937,17 +963,226 @@ const FillStrokeSections = ({
           srLabel={t('canvas.insp.stroke')}
           value={strokeColor}
           onChange={(color) => onPatch({ strokeColor: color })}
+          allowNoFill
+          onCommitColor={remember}
         />
-        <Field label={t('canvas.insp.strokeWidth')}>
-          <NumberInput
-            min={MIN_STROKE_WIDTH}
-            max={MAX_STROKE_WIDTH}
-            value={strokeWidth}
-            onCommit={(n) => onPatch({ strokeWidth: clampStrokeWidth(n) })}
+        <div className="grid grid-cols-2 gap-2">
+          <Field label={t('canvas.insp.strokeWidth')}>
+            <NumberInput
+              min={MIN_STROKE_WIDTH}
+              max={MAX_STROKE_WIDTH}
+              value={strokeWidth}
+              onCommit={(n) => onPatch({ strokeWidth: clampStrokeWidth(n) })}
+            />
+          </Field>
+          <Field label={t('canvas.insp.strokeStyle')}>
+            <StrokeStylePicker
+              value={resolveStrokeStyle(element)}
+              onChange={(s) => onPatch({ strokeStyle: s })}
+            />
+          </Field>
+        </div>
+        <Field label={t('canvas.insp.strokeAlign')}>
+          <StrokeAlignPicker
+            value={resolveStrokeAlign(element)}
+            onChange={(a) => onPatch({ strokeAlign: a })}
           />
         </Field>
       </Section>
+      <EffectsSection element={element} onPatch={onPatch} />
     </>
+  )
+}
+
+// Effects (Figma drop / inner shadow): an editable list of shadow layers. Each
+// shadow → X / Y / blur / spread / colour + a drop|inner toggle. Empty = no
+// Effects (just an add button), so a legacy element is untouched.
+const EffectsSection = ({
+  element,
+  onPatch,
+}: {
+  element: CanvasElement
+  onPatch: (patch: Partial<CanvasElement>) => void
+}) => {
+  const { t } = useT()
+  const shadows = element.shadows ?? []
+  const setShadow = (i: number, patch: Partial<CanvasShadow>) =>
+    onPatch({ shadows: shadows.map((s, j) => (j === i ? clampShadow({ ...s, ...patch }) : s)) })
+  const addShadow = () => onPatch({ shadows: [...shadows, DEFAULT_SHADOW] })
+  const removeShadow = (i: number) => onPatch({ shadows: shadows.filter((_, j) => j !== i) })
+  return (
+    <Section title={t('canvas.insp.effects')}>
+      <div className="flex flex-col gap-2">
+        {shadows.map((s, i) => (
+          <div key={i} className="flex flex-col gap-1.5 rounded-[4px] border border-line p-1.5">
+            <div className="flex items-center gap-1.5">
+              {/* drop / inner toggle */}
+              <div className="flex h-6 flex-1 items-stretch overflow-hidden rounded-[4px] border border-line">
+                {(['drop', 'inner'] as const).map((ty, k) => {
+                  const active = (s.type === 'inner' ? 'inner' : 'drop') === ty
+                  return (
+                    <button
+                      key={ty}
+                      type="button"
+                      onClick={() => setShadow(i, { type: ty })}
+                      aria-pressed={active}
+                      className={[
+                        'flex-1 text-[10px] font-medium transition-colors',
+                        k > 0 ? 'border-l border-line' : '',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                        active ? 'bg-accent/10 text-accent' : 'text-ink-faint hover:bg-bg-elevated hover:text-ink',
+                      ].join(' ')}
+                    >
+                      {t(ty === 'drop' ? 'canvas.insp.shadowDrop' : 'canvas.insp.shadowInner')}
+                    </button>
+                  )
+                })}
+              </div>
+              <button
+                type="button"
+                onClick={() => removeShadow(i)}
+                title={t('canvas.insp.removeEffect')}
+                aria-label={t('canvas.insp.removeEffect')}
+                className="grid h-6 w-6 shrink-0 place-items-center rounded-[4px] border border-line text-ink-faint transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Minus size={13} />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <Field label={t('canvas.insp.shadowX')}>
+                <NumberInput value={s.x} onCommit={(n) => setShadow(i, { x: n })} />
+              </Field>
+              <Field label={t('canvas.insp.shadowY')}>
+                <NumberInput value={s.y} onCommit={(n) => setShadow(i, { y: n })} />
+              </Field>
+              <Field label={t('canvas.insp.shadowBlur')}>
+                <NumberInput min={0} max={MAX_SHADOW_BLUR} value={s.blur} onCommit={(n) => setShadow(i, { blur: n })} />
+              </Field>
+              <Field label={t('canvas.insp.shadowSpread')}>
+                <NumberInput value={s.spread} onCommit={(n) => setShadow(i, { spread: n })} />
+              </Field>
+            </div>
+            <ColorField
+              srLabel={t('canvas.insp.shadowColour')}
+              value={s.color}
+              onChange={(color) => setShadow(i, { color })}
+            />
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={addShadow}
+          className="self-start rounded-[4px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          + {t('canvas.insp.addEffect')}
+        </button>
+      </div>
+    </Section>
+  )
+}
+
+// Solid / dashed / dotted segmented control — each button previews the line
+// style as an SVG so it reads regardless of locale. Mirrors the active-state
+// styling used elsewhere on the panel (accent fill when selected).
+const STROKE_STYLE_LABEL: Record<StrokeStyle, string> = {
+  solid: 'canvas.insp.strokeSolid',
+  dashed: 'canvas.insp.strokeDashed',
+  dotted: 'canvas.insp.strokeDotted',
+}
+const StrokeStylePicker = ({
+  value,
+  onChange,
+}: {
+  value: StrokeStyle
+  onChange: (s: StrokeStyle) => void
+}) => {
+  const { t } = useT()
+  return (
+    <div className="flex h-7 items-stretch overflow-hidden rounded-[4px] border border-line">
+      {STROKE_STYLES.map((s, i) => {
+        const active = value === s
+        return (
+          <button
+            key={s}
+            type="button"
+            onClick={() => onChange(s)}
+            title={t(STROKE_STYLE_LABEL[s])}
+            aria-label={t(STROKE_STYLE_LABEL[s])}
+            aria-pressed={active}
+            className={[
+              'grid flex-1 place-items-center transition-colors',
+              i > 0 ? 'border-l border-line' : '',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+              active
+                ? 'bg-accent/10 text-accent'
+                : 'text-ink-faint hover:bg-bg-elevated hover:text-ink',
+            ].join(' ')}
+          >
+            <svg width="20" height="8" viewBox="0 0 20 8" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              <line
+                x1="1"
+                y1="4"
+                x2="19"
+                y2="4"
+                strokeLinecap="round"
+                strokeDasharray={s === 'dashed' ? '4 3' : s === 'dotted' ? '0.1 3' : undefined}
+              />
+            </svg>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// Inside / center / outside segmented control — each button shows where the
+// stroke (heavy line) sits relative to the shape edge (thin line).
+const STROKE_ALIGN_LABEL: Record<StrokeAlign, string> = {
+  inside: 'canvas.insp.strokeInside',
+  center: 'canvas.insp.strokeCenter',
+  outside: 'canvas.insp.strokeOutside',
+}
+const StrokeAlignPicker = ({
+  value,
+  onChange,
+}: {
+  value: StrokeAlign
+  onChange: (a: StrokeAlign) => void
+}) => {
+  const { t } = useT()
+  return (
+    <div className="flex h-7 items-stretch overflow-hidden rounded-[4px] border border-line">
+      {STROKE_ALIGNS.map((a, i) => {
+        const active = value === a
+        // Heavy stroke line offset from the edge line by the alignment.
+        const edgeY = 6.5 // the shape edge
+        const strokeY = a === 'inside' ? 4.5 : a === 'center' ? 6.5 : 8.5
+        return (
+          <button
+            key={a}
+            type="button"
+            onClick={() => onChange(a)}
+            title={t(STROKE_ALIGN_LABEL[a])}
+            aria-label={t(STROKE_ALIGN_LABEL[a])}
+            aria-pressed={active}
+            className={[
+              'grid flex-1 place-items-center transition-colors',
+              i > 0 ? 'border-l border-line' : '',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+              active
+                ? 'bg-accent/10 text-accent'
+                : 'text-ink-faint hover:bg-bg-elevated hover:text-ink',
+            ].join(' ')}
+          >
+            <svg width="20" height="13" viewBox="0 0 20 13" fill="none" aria-hidden>
+              {/* shape edge (thin) + stroke (heavy) at the aligned offset */}
+              <line x1="2" y1={edgeY} x2="18" y2={edgeY} stroke="currentColor" strokeWidth="1" opacity="0.45" />
+              <line x1="2" y1={strokeY} x2="18" y2={strokeY} stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
@@ -1285,6 +1520,7 @@ const MultiSelection = ({
             value={fillValue}
             placeholder={fillValue === null ? mixed : undefined}
             onChange={patchFill}
+            allowNoFill={fillKind === 'box'}
           />
         </Section>
       )}
@@ -1463,25 +1699,32 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
 )
 
 // The native <input type="color"> only accepts a 6-digit hex. A fill can be any
-// CSS colour (e.g. the frame default is an rgba() with alpha), so we (a) always
-// render the *real* value in the swatch background + the editable hex field,
-// and (b) feed the picker a parsed #rrggbb so it opens on a sensible colour
-// instead of snapping to black. Picking from the swatch writes a clean hex;
-// typing in the text field lets power users keep rgba/named colours.
-const HEX6 = /^#[0-9a-fA-F]{6}$/
+// CSS colour (hex incl. #rrggbbaa, rgb()/rgba() in either syntax, …), so we
+// render the *real* value in the swatch + the editable hex field, and feed the
+// picker a parsed #rrggbb — alpha dropped, the native control can't show it — so
+// it opens on a sensible colour instead of snapping to black. parseColor covers
+// every form we store, INCLUDING the 8-digit hex the opacity control now writes
+// (the old regex only matched #rrggbb, so a partial-opacity fill snapped to
+// black on reopen). Unparseable (named / hsl / gradient) → black, as before.
 function toPickerHex(value: string): string {
-  if (HEX6.test(value)) return value.toLowerCase()
-  // #rgb shorthand → #rrggbb so the picker accepts it.
-  const short = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(value)
-  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`.toLowerCase()
-  // rgb()/rgba() → drop alpha, hex the channels (the picker can't show alpha).
-  const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(value)
-  if (rgb) {
-    const h = (n: number) => Math.min(255, Math.max(0, n)).toString(16).padStart(2, '0')
-    return `#${h(+rgb[1])}${h(+rgb[2])}${h(+rgb[3])}`
-  }
-  return '#000000'
+  const c = parseColor(value)
+  return c ? formatColor({ ...c, a: 1 }) : '#000000'
 }
+
+// The classic "transparent" indicator — a small grey/white checkerboard — shown
+// in the swatch when a fill is set to no-fill, so an empty paint reads as
+// deliberate rather than broken (Figma does the same).
+const CHECKERBOARD: React.CSSProperties = {
+  backgroundColor: '#ffffff',
+  backgroundImage:
+    'linear-gradient(45deg, #c8c8c8 25%, transparent 25%), linear-gradient(-45deg, #c8c8c8 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #c8c8c8 75%), linear-gradient(-45deg, transparent 75%, #c8c8c8 75%)',
+  backgroundSize: '8px 8px',
+  backgroundPosition: '0 0, 0 4px, 4px -4px, -4px 0',
+}
+
+// The native EyeDropper API (Chromium → available in the Electron / Chrome shell
+// OPEN GROUND runs in; absent in the jsdom test env, so the button self-hides).
+const supportsEyeDropper = typeof window !== 'undefined' && 'EyeDropper' in window
 
 // A swatch + hex field pair, used for every colour control on the panel (fill,
 // stroke, and — via the same shape — text colour). Edits flow up through
@@ -1489,31 +1732,89 @@ function toPickerHex(value: string): string {
 // it renders as a labelled Field; without, the bare row (inside a titled
 // Section) with `srLabel` keeping the hex input accessible. `value: null` is
 // the multi-select Mixed state.
+// `allowNoFill` (frame/shape fill + stroke) adds a Figma-style eye toggle that
+// flips the paint between a real colour and `transparent`, and paints the swatch
+// as a checkerboard while cleared. Off for text / sticky, where a transparent
+// paint would just make content vanish with no visual cue.
 const ColorField = ({
   label,
   srLabel,
   value,
   placeholder,
   onChange,
+  allowNoFill = false,
+  onCommitColor,
+  recentColors,
+  onPickRecent,
 }: {
   label?: string
   srLabel?: string
   value: string | null
   placeholder?: string
   onChange: (value: string) => void
+  allowNoFill?: boolean
+  /** Called when a colour is DELIBERATELY committed (picker closed, hex blurred,
+   *  eyedropper picked) — drives the recent-colours history. Not called on the
+   *  live drag stream. */
+  onCommitColor?: (value: string) => void
+  /** When provided, a row of recent-colour swatches renders under the control;
+   *  clicking one calls onPickRecent. */
+  recentColors?: string[]
+  onPickRecent?: (value: string) => void
 }) => {
   const { t } = useT()
+  const noFill = allowNoFill && isNoFill(value)
+  // Commit the current value to history on a deliberate close/blur (never on the
+  // live onChange stream, which would flood recents while dragging the picker).
+  const commit = () => {
+    if (value) onCommitColor?.(value)
+  }
+  // Remember the last REAL colour so toggling the fill back on restores it
+  // instead of snapping to an arbitrary default. Derived during render (a plain
+  // assignment from the current value — idempotent, no effect needed).
+  const lastReal = useRef('#FFFFFF')
+  if (value && !isNoFill(value)) lastReal.current = value
+  // Per-fill opacity (Figma's fill row has a % next to the swatch): the alpha is
+  // folded into the colour string as #rrggbbaa. Only shown for fill/stroke
+  // (allowNoFill) on a parseable colour that isn't cleared — a named colour /
+  // gradient can't carry alpha here, and a cleared fill uses the eye toggle.
+  const showOpacity = allowNoFill && !noFill && hasParsableColor(value)
+  const opacityPct = showOpacity ? Math.round(alphaOf(value) * 100) : null
+  // Eyedropper (Figma's `I`): sample any on-screen pixel, keeping the current
+  // alpha — unless the fill was cleared, where a pick re-enables it opaque.
+  const pickFromScreen = () => {
+    const W = window as unknown as {
+      EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> }
+    }
+    if (!W.EyeDropper) return
+    new W.EyeDropper()
+      .open()
+      .then((r) => {
+        const next = noFill ? r.sRGBHex : withAlpha(r.sRGBHex, alphaOf(value))
+        onChange(next)
+        onCommitColor?.(next)
+      })
+      .catch(() => {}) // user pressed Esc — ignore
+  }
   const row = (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1.5">
       <label
         className="relative h-7 w-7 shrink-0 cursor-pointer overflow-hidden rounded-[4px] border border-line transition-colors hover:border-line-strong focus-within:ring-2 focus-within:ring-accent/40"
-        style={{ background: value ?? undefined }}
+        style={CHECKERBOARD}
         title={t('canvas.insp.pickColour')}
       >
+        {/* Colour layer over a checkerboard, so ANY alpha < 1 — a partial fill OR
+            a fully-cleared one — reads as transparency, Figma-style. */}
+        <span aria-hidden className="absolute inset-0" style={{ background: value ?? undefined }} />
         <input
           type="color"
-          value={toPickerHex(value ?? '')}
-          onChange={(e) => onChange(e.target.value)}
+          value={toPickerHex(noFill ? lastReal.current : (value ?? ''))}
+          // Picking a hue keeps the current alpha (Figma); picking while cleared
+          // re-enables the fill opaque.
+          onChange={(e) =>
+            onChange(noFill ? e.target.value : withAlpha(e.target.value, alphaOf(value)))
+          }
+          onBlur={commit} // picker closed → remember the chosen colour
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
         />
       </label>
@@ -1523,6 +1824,7 @@ const ColorField = ({
         placeholder={placeholder}
         aria-label={label ? undefined : srLabel}
         onChange={(e) => onChange(e.target.value)}
+        onBlur={commit} // hex edited → remember on blur
         spellCheck={false}
         className={[
           'h-7 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 font-mono text-[11px] text-ink',
@@ -1530,7 +1832,516 @@ const ColorField = ({
           'focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
         ].join(' ')}
       />
+      {supportsEyeDropper && (
+        <button
+          type="button"
+          onClick={pickFromScreen}
+          title={t('canvas.insp.eyedropper')}
+          aria-label={t('canvas.insp.eyedropper')}
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-line text-ink-faint transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <Pipette size={14} />
+        </button>
+      )}
+      {allowNoFill && (
+        <button
+          type="button"
+          onClick={() => onChange(noFill ? lastReal.current : NO_FILL)}
+          title={noFill ? t('canvas.insp.addFill') : t('canvas.insp.noFill')}
+          aria-label={noFill ? t('canvas.insp.addFill') : t('canvas.insp.noFill')}
+          aria-pressed={noFill}
+          className={[
+            'grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border transition-colors',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+            noFill
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-line text-ink-faint hover:border-line-strong hover:text-ink',
+          ].join(' ')}
+        >
+          {noFill ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+      )}
     </div>
   )
-  return label ? <Field label={label}>{row}</Field> : row
+  // Per-fill opacity on its OWN labelled row: Figma keeps it inline, but at this
+  // panel width that squeezes the hex field to ~6 chars — and a labelled row also
+  // tells the FILL opacity apart from the LAYER opacity in the section above.
+  const content = (
+    <div className="flex flex-col gap-1.5">
+      {row}
+      {showOpacity && (
+        <div className="flex items-center gap-2">
+          <span className="label-cap shrink-0 text-ink-faint">{t('canvas.insp.opacity')}</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={opacityPct ?? 100}
+            aria-label={t('canvas.insp.fillOpacity')}
+            onChange={(e) => onChange(withAlpha(value, e.target.valueAsNumber / 100))}
+            className="h-7 min-w-0 flex-1 cursor-pointer rounded accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+          />
+          <div className="w-12 shrink-0">
+            <NumberInput
+              min={0}
+              max={100}
+              value={opacityPct}
+              ariaLabel={t('canvas.insp.fillOpacity')}
+              onCommit={(n) => {
+                if (Number.isFinite(n)) onChange(withAlpha(value, Math.min(100, Math.max(0, n)) / 100))
+              }}
+            />
+          </div>
+        </div>
+      )}
+      {recentColors && recentColors.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1" role="group" aria-label={t('canvas.insp.recentColors')}>
+          {recentColors.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => onPickRecent?.(c)}
+              title={c}
+              aria-label={c}
+              className="relative h-4 w-4 shrink-0 overflow-hidden rounded-[3px] border border-line transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              style={CHECKERBOARD}
+            >
+              <span aria-hidden className="absolute inset-0" style={{ background: c }} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+  return label ? <Field label={label}>{content}</Field> : content
+}
+
+// The frame/shape FILL control: a Solid / Linear / Radial type switch above the
+// editor. Solid → the rich ColorField (opacity / eyedropper / no-fill / recents).
+// Linear / Radial → the gradient editor. The `fill` field holds either a solid
+// CSS colour or a gradient string; the views render both via `background`.
+type FillMode = 'solid' | 'linear' | 'radial' | 'image'
+const FILL_MODE_LABEL: Record<FillMode, string> = {
+  solid: 'canvas.insp.fillSolid',
+  linear: 'canvas.insp.fillLinear',
+  radial: 'canvas.insp.fillRadial',
+  image: 'canvas.insp.fillImage',
+}
+const FillControl = ({
+  element,
+  fill,
+  onPatch,
+  remember,
+  recents,
+}: {
+  element: CanvasElement
+  fill: string
+  onPatch: (patch: Partial<CanvasElement>) => void
+  remember: (c: string) => void
+  recents: string[]
+}) => {
+  const { t } = useT()
+  const asset = useCanvasAsset()
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
+  const onChange = (f: string) => onPatch({ fill: f })
+  const grad = parseGradient(fill)
+  const hasImage = !!element.fillImageId
+  const mode: FillMode = hasImage ? 'image' : grad ? grad.type : 'solid'
+  // Image mode requires the canvas asset context (upload target). Hide it on
+  // surfaces without one rather than offering an upload that can't work.
+  const modes: FillMode[] = asset ? ['solid', 'linear', 'radial', 'image'] : ['solid', 'linear', 'radial']
+
+  const pickImage = () => fileRef.current?.click()
+  const onFile = async (file: File | undefined) => {
+    if (!file || !asset) return
+    setUploading(true)
+    const up = await uploadCanvasAsset(asset.projectPath, asset.canvasId, file)
+    setUploading(false)
+    if (up) onPatch({ fillImageId: up.assetId })
+  }
+  // Switching mode. Leaving image clears `fillImageId`; entering it opens the
+  // file picker (the fill only becomes an image once a file uploads). solid ↔
+  // gradient converts losslessly, seeding from the current colour.
+  const switchMode = (next: FillMode) => {
+    if (next === mode) return
+    if (next === 'image') {
+      pickImage()
+      return
+    }
+    const patch: Partial<CanvasElement> = hasImage ? { fillImageId: undefined } : {}
+    if (next === 'solid') patch.fill = grad ? grad.stops[0].color : fill
+    else if (grad) patch.fill = formatGradient({ ...grad, type: next })
+    else patch.fill = formatGradient(defaultGradient(isNoFill(fill) ? '#cccccc' : fill, next))
+    onPatch(patch)
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          void onFile(e.target.files?.[0])
+          e.target.value = '' // allow re-picking the same file
+        }}
+      />
+      <div className="flex h-7 items-stretch overflow-hidden rounded-[4px] border border-line">
+        {modes.map((m, i) => {
+          const active = mode === m
+          return (
+            <button
+              key={m}
+              type="button"
+              onClick={() => switchMode(m)}
+              aria-pressed={active}
+              className={[
+                'flex-1 text-[10px] font-medium uppercase tracking-wide transition-colors',
+                i > 0 ? 'border-l border-line' : '',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                active ? 'bg-accent/10 text-accent' : 'text-ink-faint hover:bg-bg-elevated hover:text-ink',
+              ].join(' ')}
+            >
+              {t(FILL_MODE_LABEL[m])}
+            </button>
+          )
+        })}
+      </div>
+      {mode === 'image' && asset ? (
+        <ImageFillField
+          element={element}
+          assetUrl={
+            element.fillImageId
+              ? canvasAssetUrl(asset.projectPath, asset.canvasId, element.fillImageId)
+              : ''
+          }
+          uploading={uploading}
+          onReplace={pickImage}
+          onSetMode={(m) => onPatch({ fillImageMode: m })}
+        />
+      ) : grad ? (
+        <GradientField gradient={grad} onChange={(g) => onChange(formatGradient(g))} remember={remember} />
+      ) : (
+        <ColorField
+          srLabel={t('canvas.insp.fill')}
+          value={fill}
+          onChange={onChange}
+          allowNoFill
+          onCommitColor={remember}
+          recentColors={recents}
+          onPickRecent={(c) => {
+            onChange(c)
+            remember(c)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// The image-fill editor: a preview, a size-mode select (cover/contain/fill/tile),
+// and a replace button. (Remove = switch back to Solid via the mode bar.)
+const ImageFillField = ({
+  element,
+  assetUrl,
+  uploading,
+  onReplace,
+  onSetMode,
+}: {
+  element: CanvasElement
+  assetUrl: string
+  uploading: boolean
+  onReplace: () => void
+  onSetMode: (m: ImageFillMode) => void
+}) => {
+  const { t } = useT()
+  const mode = resolveImageFillMode(element)
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div
+        className="h-16 w-full rounded-[4px] border border-line bg-bg-inset"
+        style={
+          assetUrl
+            ? { backgroundImage: `url("${assetUrl.replace(/["\\]/g, '\\$&')}")`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' }
+            : undefined
+        }
+        aria-label={t('canvas.insp.fillImage')}
+      />
+      <div className="flex items-center gap-1.5">
+        <select
+          value={mode}
+          aria-label={t('canvas.insp.imageFit')}
+          onChange={(e) => onSetMode(e.target.value as ImageFillMode)}
+          className="h-7 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 text-[11px] text-ink transition-colors hover:border-line-strong focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+        >
+          {IMAGE_FILL_MODES.map((m) => (
+            <option key={m} value={m}>
+              {t(`canvas.insp.imageFit.${m}`)}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={onReplace}
+          disabled={uploading}
+          className="shrink-0 rounded-[4px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          {uploading ? t('canvas.insp.imageUploading') : t('canvas.insp.imageReplace')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// One gradient colour stop row. The hex text field BUFFERS its edit in a local
+// draft and only commits a PARSEABLE colour (on blur / Enter) — a partial hex
+// mid-keystroke (e.g. "#0000f") must never round-trip into the `fill` string,
+// or it would momentarily not parse as a gradient and collapse the whole editor
+// to solid mode. The swatch picker + position commit complete values already.
+const GradientStopRow = ({
+  stop,
+  canRemove,
+  onChange,
+  onRemove,
+  remember,
+}: {
+  stop: { color: string; pos: number }
+  canRemove: boolean
+  onChange: (patch: Partial<{ color: string; pos: number }>) => void
+  onRemove: () => void
+  remember: (c: string) => void
+}) => {
+  const { t } = useT()
+  const [draft, setDraft] = useState<string | null>(null)
+  const commitHex = () => {
+    if (draft === null) return
+    if (hasParsableColor(draft)) {
+      onChange({ color: draft })
+      remember(draft)
+    }
+    setDraft(null) // either way, drop the draft → field re-syncs to the real value
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <label
+        className="relative h-6 w-6 shrink-0 cursor-pointer overflow-hidden rounded-[4px] border border-line"
+        style={CHECKERBOARD}
+        title={t('canvas.insp.pickColour')}
+      >
+        <span aria-hidden className="absolute inset-0" style={{ background: stop.color }} />
+        <input
+          type="color"
+          value={toPickerHex(stop.color)}
+          onChange={(e) => onChange({ color: withAlpha(e.target.value, alphaOf(stop.color)) })}
+          onBlur={() => remember(stop.color)}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        />
+      </label>
+      <input
+        type="text"
+        value={draft ?? stop.color}
+        aria-label={t('canvas.insp.stopColour')}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commitHex}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          else if (e.key === 'Escape') setDraft(null)
+        }}
+        spellCheck={false}
+        className="h-6 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 font-mono text-[11px] text-ink transition-colors hover:border-line-strong focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+      />
+      <div className="w-11 shrink-0">
+        <NumberInput
+          min={0}
+          max={100}
+          value={Math.round(stop.pos * 100)}
+          ariaLabel={t('canvas.insp.stopPosition')}
+          onCommit={(n) => {
+            if (Number.isFinite(n)) onChange({ pos: Math.min(100, Math.max(0, n)) / 100 })
+          }}
+        />
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={!canRemove}
+        title={t('canvas.insp.removeStop')}
+        aria-label={t('canvas.insp.removeStop')}
+        className="grid h-6 w-6 shrink-0 place-items-center rounded-[4px] border border-line text-ink-faint transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      >
+        <Minus size={13} />
+      </button>
+    </div>
+  )
+}
+
+// The gradient editor: a live preview bar, an angle field (linear only), and an
+// editable colour-stop list (swatch + position, add / remove, min 2 stops).
+const GradientField = ({
+  gradient,
+  onChange,
+  remember,
+}: {
+  gradient: Gradient
+  onChange: (g: Gradient) => void
+  remember: (c: string) => void
+}) => {
+  const { t } = useT()
+  const stops = gradient.stops
+  const setStop = (i: number, patch: Partial<{ color: string; pos: number }>) => {
+    const next = stops.map((s, j) => (j === i ? { ...s, ...patch } : s))
+    onChange({ ...gradient, stops: next })
+  }
+  const addStop = () => {
+    // Insert a stop at the midpoint of the widest gap, colour = that midpoint.
+    const sorted = [...stops].sort((a, b) => a.pos - b.pos)
+    let gapStart = sorted[0]
+    let gapEnd = sorted[sorted.length - 1]
+    let widest = -1
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const g = sorted[i + 1].pos - sorted[i].pos
+      if (g > widest) {
+        widest = g
+        gapStart = sorted[i]
+        gapEnd = sorted[i + 1]
+      }
+    }
+    const pos = sorted.length < 2 ? 1 : (gapStart.pos + gapEnd.pos) / 2
+    onChange({ ...gradient, stops: [...stops, { color: gapStart.color, pos }] })
+  }
+  const removeStop = (i: number) => {
+    if (stops.length <= 2) return // a gradient needs ≥2 stops
+    onChange({ ...gradient, stops: stops.filter((_, j) => j !== i) })
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      {/* live preview */}
+      <div
+        className="h-6 w-full rounded-[4px] border border-line"
+        style={{ background: formatGradient(gradient) }}
+        aria-hidden
+      />
+      {gradient.type === 'linear' && (
+        <Field label={t('canvas.insp.gradientAngle')}>
+          <NumberInput
+            min={0}
+            max={360}
+            value={Math.round(gradient.angle)}
+            onCommit={(n) => {
+              if (Number.isFinite(n)) onChange({ ...gradient, angle: ((Math.round(n) % 360) + 360) % 360 })
+            }}
+          />
+        </Field>
+      )}
+      <div className="flex flex-col gap-1">
+        {stops.map((s, i) => (
+          <GradientStopRow
+            key={i}
+            stop={s}
+            canRemove={stops.length > 2}
+            onChange={(patch) => setStop(i, patch)}
+            onRemove={() => removeStop(i)}
+            remember={remember}
+          />
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={addStop}
+        className="self-start rounded-[4px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      >
+        + {t('canvas.insp.addStop')}
+      </button>
+    </div>
+  )
+}
+
+// Corner radius: one uniform field + a toggle that reveals the 2×2 per-corner
+// grid (Figma's "independent corners"). A non-uniform element auto-expands;
+// toggling OFF unifies back to a single value. Frame + rect only.
+const CornerRadiusField = ({
+  element,
+  onPatch,
+}: {
+  element: CanvasElement
+  onPatch: (patch: Partial<CanvasElement>) => void
+}) => {
+  const { t } = useT()
+  const radii = resolveCornerRadii(element)
+  const uniform = cornerRadiiAreUniform(radii)
+  const [expanded, setExpanded] = useState(false)
+  const showCorners = expanded || !uniform
+  // Unify: write one radius and clear all per-corner overrides in a single patch.
+  const unify = (n: number) =>
+    onPatch({
+      cornerRadius: clampCornerRadius(n),
+      cornerRadiusTopLeft: undefined,
+      cornerRadiusTopRight: undefined,
+      cornerRadiusBottomRight: undefined,
+      cornerRadiusBottomLeft: undefined,
+    })
+  const cornerField = (
+    aria: string,
+    v: number,
+    key: 'cornerRadiusTopLeft' | 'cornerRadiusTopRight' | 'cornerRadiusBottomLeft' | 'cornerRadiusBottomRight',
+  ) => (
+    <NumberInput
+      min={MIN_CORNER_RADIUS}
+      max={MAX_CORNER_RADIUS}
+      value={v}
+      ariaLabel={aria}
+      onCommit={(n) => onPatch({ [key]: clampCornerRadius(n) })}
+    />
+  )
+  return (
+    <Field label={t('canvas.insp.cornerRadius')}>
+      <div className="flex items-center gap-1.5">
+        <div className="min-w-0 flex-1">
+          <NumberInput
+            min={MIN_CORNER_RADIUS}
+            max={MAX_CORNER_RADIUS}
+            value={uniform ? radii.tl : null}
+            placeholder={uniform ? undefined : t('canvas.insp.mixed')}
+            ariaLabel={t('canvas.insp.cornerRadius')}
+            onCommit={(n) => {
+              if (Number.isFinite(n)) unify(n)
+            }}
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            if (showCorners) {
+              unify(radii.tl) // collapse → unify to one value (Figma)
+              setExpanded(false)
+            } else setExpanded(true)
+          }}
+          title={t('canvas.insp.independentCorners')}
+          aria-label={t('canvas.insp.independentCorners')}
+          aria-pressed={showCorners}
+          className={[
+            'grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border transition-colors',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+            showCorners
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-line text-ink-faint hover:border-line-strong hover:text-ink',
+          ].join(' ')}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+            <path d="M2 12V6a4 4 0 0 1 4-4h6" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+      {showCorners && (
+        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+          {cornerField(t('canvas.insp.cornerTopLeft'), radii.tl, 'cornerRadiusTopLeft')}
+          {cornerField(t('canvas.insp.cornerTopRight'), radii.tr, 'cornerRadiusTopRight')}
+          {cornerField(t('canvas.insp.cornerBottomLeft'), radii.bl, 'cornerRadiusBottomLeft')}
+          {cornerField(t('canvas.insp.cornerBottomRight'), radii.br, 'cornerRadiusBottomRight')}
+        </div>
+      )}
+    </Field>
+  )
 }

@@ -49,6 +49,84 @@ export function clampStrokeWidth(n: number): number {
   return Math.min(MAX_STROKE_WIDTH, Math.max(MIN_STROKE_WIDTH, Math.round(n)))
 }
 
+// ── Stroke style (Figma: solid / dashed / dotted) ──
+// Optional + backward-compatible: an element with no `strokeStyle` resolves to
+// 'solid' (the legacy CSS `borderStyle:'solid'` every view hard-coded before).
+export type StrokeStyle = 'solid' | 'dashed' | 'dotted'
+export const STROKE_STYLES: StrokeStyle[] = ['solid', 'dashed', 'dotted']
+export const DEFAULT_STROKE_STYLE: StrokeStyle = 'solid'
+
+/** Resolve a stroke style, snapping any unknown value (or none) to 'solid' so a
+ *  stray field can't ask CSS for an unhandled border-style. */
+export function resolveStrokeStyle(el: CanvasElement): StrokeStyle {
+  return el.strokeStyle && STROKE_STYLES.includes(el.strokeStyle) ? el.strokeStyle : DEFAULT_STROKE_STYLE
+}
+
+// ── Stroke alignment (Figma: inside / center / outside) ──
+// 'inside' is the legacy look (a border-box border, drawn inside the rect), so
+// it stays the default and existing elements are untouched.
+export type StrokeAlign = 'inside' | 'center' | 'outside'
+export const STROKE_ALIGNS: StrokeAlign[] = ['inside', 'center', 'outside']
+export const DEFAULT_STROKE_ALIGN: StrokeAlign = 'inside'
+
+/** Resolve stroke alignment, snapping unknown/none to 'inside' (the legacy
+ *  border render). */
+export function resolveStrokeAlign(el: CanvasElement): StrokeAlign {
+  return el.strokeAlign && STROKE_ALIGNS.includes(el.strokeAlign) ? el.strokeAlign : DEFAULT_STROKE_ALIGN
+}
+
+/** The border width a view should paint, given the stroke colour, the resolved
+ *  width, and whether the element is selected. A no-fill (transparent) stroke
+ *  collapses to 0 px so a "removed" border occupies no box space (Figma's true
+ *  no-stroke) — but a SELECTED element keeps ≥1 px as the selection affordance
+ *  (the accent ring is painted over whatever stroke the user set). */
+export function renderStrokeWidth(strokeColor: string, strokeWidth: number, selected: boolean): number {
+  if (selected) return Math.max(strokeWidth, 1)
+  return isNoFill(strokeColor) ? 0 : strokeWidth
+}
+
+// ── No-fill / transparent ──
+// Figma lets any fill (or stroke) be removed → "no fill". Our fill model is a
+// single CSS-colour string, so "no fill" is the explicit sentinel below rather
+// than an absent field: an ABSENT `fill` resolves to the DEFAULT_* colour via
+// the `?? ` in resolveFrameStyle/resolveShapeStyle, NOT to transparent. The
+// sentinel is plain CSS `transparent`, so the element views paint it as no fill
+// with zero render changes, and the `?? DEFAULT` resolvers pass it through
+// untouched (it isn't nullish). Persisted verbatim — canvasData does no schema
+// coercion — so it survives save / load.
+export const NO_FILL = 'transparent'
+
+/** True when a colour string represents "no fill": the explicit sentinel, CSS
+ *  `none`, or any rgb()/rgba()/hsl()/hsla()/#rrggbbaa with a fully-zero alpha.
+ *  Drives the inspector's checkerboard swatch + the fill on/off toggle state. A
+ *  null / empty value (multi-select "Mixed" / unset) is NOT treated as no-fill.
+ *  Handles BOTH the legacy comma syntax (`rgba(0,0,0,0)`) AND modern space /
+ *  slash syntax with optional `%` alpha (`rgb(0 0 0 / 0)`, `rgba(0,0,0,0%)`),
+ *  since the AI canvas generator and hand-typed values can use either. */
+export function isNoFill(value: string | null | undefined): boolean {
+  if (!value) return false
+  const v = value.trim().toLowerCase()
+  if (v === 'transparent' || v === 'none') return true
+  const fn = /^(?:rgba?|hsla?)\((.*)\)$/.exec(v)
+  if (fn) {
+    const body = fn[1]
+    // Modern syntax puts alpha after a `/`; legacy syntax makes it the 4th
+    // comma arg. A 3-arg (rgb/hsl, no alpha) value is opaque → a fill.
+    let alpha: string | undefined
+    if (body.includes('/')) alpha = body.slice(body.indexOf('/') + 1)
+    else {
+      const parts = body.split(',')
+      alpha = parts.length >= 4 ? parts[parts.length - 1] : undefined
+    }
+    // Zero alpha: 0, 0.0, .0, 0% (any number of leading/trailing zeros).
+    return alpha !== undefined && /^0*\.?0+%?$/.test(alpha.trim())
+  }
+  // #rrggbbaa / #rgba with a zero alpha byte.
+  if (/^#[0-9a-f]{6}00$/.test(v)) return true
+  if (/^#[0-9a-f]{3}0$/.test(v)) return true
+  return false
+}
+
 /** Resolve the effective fill for a STICKY element. Reuses the existing `color`
  *  field (never a new field) so the inspector and the swatch row drive the same
  *  value. Legacy stickies with no `color` get the built-in default. */

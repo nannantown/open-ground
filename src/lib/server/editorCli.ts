@@ -23,6 +23,7 @@ import { constants } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveViaLoginShell } from './cliResolve'
+import type { OpenApp } from '../types'
 
 const execFile = promisify(execFileCb)
 
@@ -169,4 +170,18 @@ export const openInEditor = async (projectPath: string): Promise<void> => {
     }
   }
   throw new EditorNotFoundError()
+}
+
+/** Open `projectPath` in a SPECIFIC editor the user chose — a detected bundle
+ *  (editorDetect.ts) or a Finder-picked `.app`. Launches via macOS
+ *  `open -a <target>`. NOTE: `open -a` DOES run the chosen bundle's embedded
+ *  binary, so the route MUST validate `editor` through resolveAllowedEditorBundle
+ *  (confined to the Applications dirs) before calling this — never pass an
+ *  unvalidated client path here. Prefers the explicit bundle path (robust when
+ *  two apps share a display name) and falls back to the display name. */
+export const editorLaunchTarget = (editor: OpenApp): string =>
+  editor.path && editor.path.trim() ? editor.path : editor.name
+
+export const openWithApp = async (projectPath: string, editor: OpenApp): Promise<void> => {
+  await execFile('open', ['-a', editorLaunchTarget(editor), projectPath], { timeout: 8000 })
 }

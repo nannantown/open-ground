@@ -5,7 +5,12 @@ import {
   SHAPE_DEFAULT_W,
   SHAPE_DEFAULT_H,
 } from '@/lib/canvasShape'
-import { resolveFrameCornerRadius, clampRadiusToBox, resolveOpacity } from '@/lib/canvasTransform'
+import { cornerRadiusCss, resolveOpacity } from '@/lib/canvasTransform'
+import { shadowsCss } from '@/lib/canvasShadow'
+import { imageFillStyle } from '@/lib/canvasImageFill'
+import { canvasAssetUrl } from '@/lib/canvasAssets'
+import { bodyBorder, StrokeOverlay } from './StrokeOverlay'
+import { useCanvasAsset } from './CanvasAssetContext'
 
 interface Props {
   element: CanvasElement
@@ -30,30 +35,43 @@ export const ShapeView = ({ element, selected, onPointerDown }: Props) => {
   // Ellipse → 50% (a true ellipse at any size). Rect → the element's corner
   // radius (legacy 4px frame default via the shared resolver), capped at half
   // the smaller side so it never exceeds a pill.
-  const radius =
-    kind === 'ellipse'
-      ? '50%'
-      : clampRadiusToBox(resolveFrameCornerRadius(element), w, h)
+  const radius = kind === 'ellipse' ? '50%' : cornerRadiusCss(element, w, h)
+  const sb = bodyBorder(element, strokeColor, strokeWidth, selected)
+  const asset = useCanvasAsset()
+  const imgFill =
+    element.fillImageId && asset
+      ? imageFillStyle(element, canvasAssetUrl(asset.projectPath, asset.canvasId, element.fillImageId))
+      : null
 
   return (
     <div
       onPointerDown={onPointerDown}
       style={{
+        position: 'relative', // anchor a center/outside StrokeOverlay
         width: w,
         height: h,
         background: fill,
-        borderStyle: 'solid',
-        // Keep the selection affordance visible even if the user zeroed the
-        // stroke (≥1px while selected); otherwise honour the resolved width.
-        borderWidth: selected ? Math.max(strokeWidth, 1) : strokeWidth,
-        borderColor: selected ? undefined : strokeColor,
+        ...(imgFill ?? {}),
+        borderStyle: sb.borderStyle,
+        borderWidth: sb.borderWidth,
+        borderColor: sb.borderColor,
         borderRadius: radius,
+        boxShadow: shadowsCss(element),
         opacity: resolveOpacity(element),
       }}
       className={[
         'cursor-grab active:cursor-grabbing',
         selected ? 'border-accent' : '',
       ].join(' ')}
-    />
+    >
+      <StrokeOverlay
+        element={element}
+        w={w}
+        h={h}
+        strokeColor={strokeColor}
+        strokeWidth={strokeWidth}
+        radius={kind === 'ellipse' ? '50%' : undefined}
+      />
+    </div>
   )
 }

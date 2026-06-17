@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { BackLink } from '@/components/ui/BackLink'
 import { useT } from '@/i18n/I18nContext'
 import type {
   ProjectBranchesResponse,
@@ -529,6 +530,12 @@ export const ShareStartDialog = ({
             />
           ) : (
             <div className="mx-auto w-full max-w-[480px]">
+              <BackLink
+                label={t('common.cancel')}
+                onClick={onClose}
+                disabled={busy}
+                className="mb-5"
+              />
               <p className="label-cap text-accent mb-2">
                 {t('projectPanel.shareDialogLabel')}
               </p>
@@ -617,10 +624,7 @@ export const ShareStartDialog = ({
                 </p>
               )}
 
-              <div className="mt-5 flex items-center justify-end gap-2">
-                <Btn variant="subtle" size="md" onClick={onClose} disabled={busy}>
-                  {t('common.cancel')}
-                </Btn>
+              <div className="mt-5 flex items-center justify-end">
                 <Btn
                   variant="primary"
                   size="md"

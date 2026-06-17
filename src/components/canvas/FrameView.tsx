@@ -2,12 +2,13 @@ import { useEffect, useRef } from 'react'
 import { LayoutGrid } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
-import { resolveFrameStyle } from '@/lib/canvasFillStyle'
+import { resolveFrameStyle, resolveStrokeStyle, renderStrokeWidth } from '@/lib/canvasFillStyle'
 import {
   resolveFrameCornerRadius,
   clampRadiusToBox,
   resolveOpacity,
 } from '@/lib/canvasTransform'
+import { shadowsCss } from '@/lib/canvasShadow'
 
 interface Props {
   frame: CanvasElement
@@ -54,6 +55,9 @@ export const FrameView = ({
   // exceeds a pill. Opacity from the optional `opacity` field (legacy = 1).
   const w = frame.width ?? 400
   const h = frame.height ?? 280
+  // The Ground portfolio's grouping frame stays a single uniform radius (its
+  // header's top corners track it arithmetically); per-corner radii are a
+  // design-canvas feature (DesignFrameView / shapes), not a portfolio one.
   const radius = clampRadiusToBox(resolveFrameCornerRadius(frame), w, h)
   return (
     <div
@@ -61,12 +65,15 @@ export const FrameView = ({
         width: w,
         height: h,
         background: fillStyle.fill,
-        borderStyle: 'solid',
-        // When selected, keep the affordance visible even if the user zeroed the
-        // stroke (≥1px); otherwise honour the resolved width exactly.
-        borderWidth: selected ? Math.max(fillStyle.strokeWidth, 1) : fillStyle.strokeWidth,
+        // Selected → a SOLID accent outline (Figma's selection ring is always
+        // solid); otherwise honour the element's own dashed/dotted style.
+        borderStyle: selected ? 'solid' : resolveStrokeStyle(frame),
+        // renderStrokeWidth keeps the selection affordance (≥1px) and collapses a
+        // no-fill stroke to 0 so a removed border occupies no box space.
+        borderWidth: renderStrokeWidth(fillStyle.strokeColor, fillStyle.strokeWidth, selected),
         borderColor: selected ? undefined : fillStyle.strokeColor,
         borderRadius: radius,
+        boxShadow: shadowsCss(frame),
         opacity: resolveOpacity(frame),
       }}
       className={[
