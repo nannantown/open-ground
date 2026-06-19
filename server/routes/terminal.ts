@@ -39,6 +39,7 @@ import { launchClaude, launchOptsFromPrefs } from '@/lib/server/claudeTerminal'
 import { CLAUDE_EFFORTS, type ClaudeEffort } from '@/lib/types'
 import { TASK_ASSETS_SUBDIR } from '@/lib/server/taskAssets'
 import { claudeConnection } from '@/lib/server/claudeConnection'
+import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 
 import { bracketedPaste, buildCustomModulePrompt } from '@/lib/server/pastePrompt'
 
@@ -90,16 +91,16 @@ export const terminalRoutes = new Hono()
     const cwd = typeof body?.cwd === 'string' ? body.cwd : ''
     if (!cwd) return c.json({ error: 'cwd is required' }, 400)
     if (!(await validateProjectPath(cwd))) return c.json({ error: 'cwd not allowed' }, 403)
-    // Pre-flight: a missing `claude` CLI means a doomed spawn (the PTY would
-    // just print "command not found" and exit). Answer 503 with the
-    // machine-readable flag — same contract as /api/project/describe and the
-    // canvas AI routes — so the client can show "install claude" copy instead
-    // of a generic launch failure. Gate on `.installed` only (claude prompts
-    // for login itself at runtime). (claudeConnection caches for ~10s.)
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    // Pre-flight: refuse a doomed/unwanted spawn before launchClaude. The
+    // shared gate requires the `claude` CLI to be BOTH installed AND signed in
+    // (claudeRunPreflight) — a signed-out claude opens its own OAuth browser on
+    // spawn, and one 実行 fans out to task + auto-title, so gating here is what
+    // stops the "approval screen opens in a loop" on distributed builds. The
+    // 503 carries claudeMissing | claudeLoggedOut so the client shows a SINGLE
+    // sign-in affordance (→ /api/terminal/claude-login) instead of a browser
+    // storm. (claudeConnection caches for ~10s.)
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     const model = typeof body?.model === 'string' && body.model ? body.model : undefined
@@ -212,6 +213,54 @@ export const terminalRoutes = new Hono()
       return c.json({ error: `failed to start claude: ${e?.message ?? e}` }, 500)
     }
   })
+  // --- POST /api/terminal/claude-login — the ONE sign-in terminal ------------
+  // A signed-out `claude` opens its own OAuth browser on spawn, so every RUN
+  // route gates on installed && loggedIn (claudeRunPreflight) and refuses to
+  // spawn while signed out — that's what stops the browser storm on distributed
+  // builds. This route is the deliberate exception: it gates on `.installed`
+  // ONLY and launches a PLAIN claude (no prompt, no app context) in a validated
+  // project dir, giving the user ONE interactive terminal to complete sign-in.
+  // claude opens its OAuth once; once signed in, the gated run routes pass and
+  // launches go through quietly. Still subscription-only — claude owns its auth,
+  // we only spawn the terminal it logs in through. (Declared in the static
+  // route group, before the dynamic /api/terminal/:id, so 'claude-login' is
+  // never captured as an id.)
+  .post('/api/terminal/claude-login', async (c) => {
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const cwd = typeof body?.cwd === 'string' ? body.cwd : ''
+    if (!cwd) return c.json({ error: 'cwd is required' }, 400)
+    if (!(await validateProjectPath(cwd))) return c.json({ error: 'cwd not allowed' }, 403)
+    // Installed-only gate (NOT claudeRunPreflight): the whole point is to let a
+    // signed-out user spawn the terminal they sign in through. A missing CLI is
+    // still a doomed spawn — answer the same machine-readable 503.
+    const conn = await claudeConnection()
+    if (!conn.installed) {
+      return c.json({ error: conn.message, claudeMissing: true }, 503)
+    }
+    const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
+    const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
+    try {
+      const ref = launchClaude({
+        cwd,
+        agentSessionId: randomUUID(),
+        cols,
+        rows,
+        // No initialPrompt (claude waits at its sign-in / input prompt — the
+        // `; exit` only fires after claude itself quits, so the terminal stays
+        // open through the OAuth round-trip) and appContext:false (no board/
+        // canvas usage card — this is a bare claude the user authenticates).
+        appContext: false,
+      })
+      return c.json(ref.info)
+    } catch (e: any) {
+      return c.json({ error: `failed to start claude: ${e?.message ?? e}` }, 500)
+    }
+  })
   // --- POST /api/terminal/custom-module — claude in a custom module dir ------
   // The custom-tab sidebar's "Edit with Claude" session (docs/CUSTOM_TABS_PLAN.md).
   // The module dir is NOT a registered project, so this deliberately does not go
@@ -234,12 +283,11 @@ export const terminalRoutes = new Hono()
     // getModule regex-validates the id BEFORE any path is built from it.
     const def = await getModule(moduleId)
     if (!def) return c.json({ error: 'module not found' }, 404)
-    // Same pre-flight as /api/terminal/claude: a missing CLI is a doomed spawn,
-    // answer the machine-readable 503 instead.
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    // Same shared gate as /api/terminal/claude: installed && loggedIn, else a
+    // 503 with claudeMissing | claudeLoggedOut. A signed-out spawn would open
+    // claude's OAuth browser; sign-in goes through /api/terminal/claude-login.
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     const cwd = customModuleDir(def.id)

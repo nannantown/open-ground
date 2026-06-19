@@ -204,6 +204,29 @@ describe('buildClaudeArgv launch-binary seam (OPENGROUND_CLAUDE_BIN)', () => {
       "'/Users/x/OPEN GROUND/e2e/fixtures/fake-claude.sh'",
     )
   })
+
+  // PATH-drift fix (distributed builds): launchClaude passes the absolute path
+  // claudeConnection just validated as the 4th arg, so the PTY runs the EXACT
+  // claude even when its non-interactive login shell (`zsh -l`, no `.zshrc`)
+  // can't resolve a bare `claude` the way the probe (`zsh -lic`) did.
+  it('uses the resolved absolute bin (4th arg) as argv[0] when the env var is unset', () => {
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', undefined)
+    expect(buildClaudeArgv(base, null, null, '/Users/x/.local/bin/claude')[0]).toBe(
+      "'/Users/x/.local/bin/claude'",
+    )
+  })
+
+  it('OPENGROUND_CLAUDE_BIN (operator/E2E override) beats the resolved bin', () => {
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', '/tmp/override-claude')
+    expect(buildClaudeArgv(base, null, null, '/Users/x/.local/bin/claude')[0]).toBe(
+      "'/tmp/override-claude'",
+    )
+  })
+
+  it('falls back to bare `claude` when neither the env var nor a resolved bin is set', () => {
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', undefined)
+    expect(buildClaudeArgv(base, null, null, null)[0]).toBe('claude')
+  })
 })
 
 describe('shellQuoteArg (PowerShell / POSIX prompt quoting)', () => {

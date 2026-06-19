@@ -279,6 +279,14 @@ export const projectPanel = {
     'projectPanel.renameTerminal': 'Double-click to rename',
     'projectPanel.launchClaude': 'Launch Claude',
     'projectPanel.launchingClaude': 'Launching…',
+    // The single "sign in to Claude" terminal (opened from a run that hit
+    // claudeLoggedOut). One claude PTY the user authenticates in — claude opens
+    // its OAuth once; after signing in, runs go through normally.
+    'projectPanel.claudeLogin.title': 'Sign in to Claude',
+    'projectPanel.claudeLogin.hint':
+      'Complete sign-in in this terminal (your browser opens once). Then close this and run again.',
+    'projectPanel.claudeLogin.starting': 'Opening a Claude terminal to sign in…',
+    'projectPanel.claudeLogin.retry': 'Try again',
     // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
     'projectPanel.embTermHint':
       'Launch claude in this project — respond and approve permission prompts right in this terminal.',
@@ -572,6 +580,13 @@ export const projectPanel = {
     'projectPanel.renameTerminal': 'ダブルクリックで名前を変更',
     'projectPanel.launchClaude': 'Claude を起動',
     'projectPanel.launchingClaude': '起動中…',
+    // The single "sign in to Claude" terminal (opened from a run that hit
+    // claudeLoggedOut). One claude PTY the user authenticates in.
+    'projectPanel.claudeLogin.title': 'Claude にサインイン',
+    'projectPanel.claudeLogin.hint':
+      'このターミナルでサインインを完了してください（ブラウザが 1 回開きます）。完了したら閉じて、もう一度実行してください。',
+    'projectPanel.claudeLogin.starting': 'サインイン用の Claude ターミナルを開いています…',
+    'projectPanel.claudeLogin.retry': 'もう一度試す',
     // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
     'projectPanel.embTermHint':
       'このプロジェクトで claude を起動します。応答や権限確認はこのターミナルで操作します。',

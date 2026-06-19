@@ -94,6 +94,9 @@ export const board = {
       'Couldn’t start claude. Make sure the claude CLI is installed and on your PATH (run `claude` in a terminal to check), then run again.',
     'board.run.failedClaudeMissing':
       'The claude CLI was not found on this machine — install Claude Code and sign in, then restart OPEN GROUND and run again.',
+    'board.run.failedClaudeLoggedOut':
+      'Claude is installed but not signed in. Sign in once below — a single Claude terminal opens; finish signing in there, then run again.',
+    'board.run.signIn': 'Sign in to Claude',
     'board.run.settingsLabel': 'Run settings',
     'board.run.flowLabel': 'On finish',
     'board.run.flowMerge': 'Merge',
@@ -247,6 +250,9 @@ export const board = {
       'claude を起動できませんでした。claude CLI がインストールされ PATH が通っているか（ターミナルで `claude` が動くか）確認して、もう一度実行してください。',
     'board.run.failedClaudeMissing':
       'claude CLI が見つかりません — Claude Code をインストールしてサインインし、OPEN GROUND を再起動してから、もう一度実行してください。',
+    'board.run.failedClaudeLoggedOut':
+      'Claude にサインインしていません。下のボタンから一度だけサインインしてください（Claude のターミナルが 1 つ開きます。そこでサインインを済ませて、もう一度実行してください）。',
+    'board.run.signIn': 'Claude にサインイン',
     'board.run.settingsLabel': '実行設定',
     'board.run.flowLabel': '完了時',
     'board.run.flowMerge': 'マージ',

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { claudeConnection, knownClaudeLocations } from './claudeConnection'
+import { claudeConnection, knownClaudeLocations, resolvedClaudeBin } from './claudeConnection'
 
 // Unit coverage for the connection probe — replaces the coverage the deleted
 // claudeCli.test.ts gave the old presence probe. We drive `claudeConnection`
@@ -66,6 +66,21 @@ describe('claudeConnection', () => {
     process.env.OPENGROUND_CLAUDE_BIN = authStub('not json at all')
     const c = await claudeConnection(true)
     expect(c.installed).toBe(false)
+  })
+
+  it('resolvedClaudeBin returns the absolute binary the probe just validated', async () => {
+    // An absolute override that answers `auth status` IS the validated binary —
+    // launchClaude spawns exactly this, so the PTY never re-resolves a bare name.
+    const bin = authStub('{"loggedIn":true,"subscriptionType":"pro"}')
+    process.env.OPENGROUND_CLAUDE_BIN = bin
+    await claudeConnection(true)
+    expect(resolvedClaudeBin()).toBe(bin)
+  })
+
+  it('resolvedClaudeBin is null when claude is not runnable (keeps the bare name)', async () => {
+    process.env.OPENGROUND_CLAUDE_BIN = join(tmpdir(), 'definitely-not-a-real-claude-bin')
+    await claudeConnection(true)
+    expect(resolvedClaudeBin()).toBeNull()
   })
 
   it('knownClaudeLocations lists absolute candidates (incl. ~/.local/bin on POSIX)', () => {

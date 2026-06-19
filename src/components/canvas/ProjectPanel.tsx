@@ -72,6 +72,8 @@ import {
 } from '@/components/canvas/TerminalPane'
 import { BoardTaskTerminal } from '@/components/canvas/TaskTerminal'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
+import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
+import { useClaudeConnection } from '@/lib/useClaudeConnection'
 import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
 import { BranchChangesModal } from '@/components/canvas/BranchChangesModal'
 import { SkillsModal } from '@/components/canvas/SkillsModal'
@@ -948,6 +950,67 @@ export const ProjectPanel = ({
   // Tasks with an in-flight launch — blocks a double-spawn (a double-click
   // would POST twice and orphan the first PTY).
   const launchingTasksRef = useRef<Set<string>>(new Set())
+
+  // ── Claude CLI sign-in (the run gate) ──────────────────────────────────────
+  // useClaudeConnection REFLECTS `claude auth status`; claudeNonce re-checks it
+  // (bumped when the sign-in terminal closes, so a fresh sign-in clears the gate
+  // with no app restart). Enabled only while a real (non-missing) project is
+  // open. claudeConn drives BoardModule's claudeLoggedIn prop (skip the
+  // fire-and-forget auto-title spawn while signed out).
+  const [claudeNonce, setClaudeNonce] = useState(0)
+  const claudeConn = useClaudeConnection(!!project && !project.missing, claudeNonce)
+  // The ONE sign-in terminal: POST /api/terminal/claude-login spawns a plain
+  // claude PTY the user authenticates in (claude opens its OAuth once). The run
+  // routes refuse to spawn while signed out (503 claudeLoggedOut), so this is
+  // the single deliberate place a signed-out claude starts — never N OAuth tabs.
+  const [claudeLoginOpen, setClaudeLoginOpen] = useState(false)
+  const [claudeLoginPty, setClaudeLoginPty] = useState<string | null>(null)
+  const [claudeLoginBusy, setClaudeLoginBusy] = useState(false)
+  const [claudeLoginError, setClaudeLoginError] = useState<string | null>(null)
+  const claudeLoginInFlight = useRef(false)
+  // Open (or re-focus) the single sign-in terminal. Single-flight + single
+  // instance: a second card's sign-in CTA re-focuses the open terminal instead
+  // of spawning a twin, so "at most one sign-in flow" holds across cards.
+  const openClaudeLogin = useCallback(async () => {
+    if (!project || project.missing) return
+    setClaudeLoginOpen(true)
+    if (claudeLoginPty || claudeLoginInFlight.current) return
+    claudeLoginInFlight.current = true
+    setClaudeLoginBusy(true)
+    setClaudeLoginError(null)
+    try {
+      const r = await fetch('/api/terminal/claude-login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: project.path }),
+      })
+      if (!r.ok) {
+        const b = (await r.json().catch(() => ({}))) as { error?: string }
+        setClaudeLoginError(b.error || `HTTP ${r.status}`)
+        return
+      }
+      const info = (await r.json()) as TerminalInfo
+      setClaudeLoginPty(info.id)
+    } catch (e) {
+      setClaudeLoginError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setClaudeLoginBusy(false)
+      claudeLoginInFlight.current = false
+    }
+  }, [project, claudeLoginPty])
+  // Close the sign-in terminal: kill its PTY (sign-in persists to claude's own
+  // credential store, so tearing the terminal down afterwards is safe) and
+  // re-check the connection so a completed sign-in clears the run gate at once.
+  const closeClaudeLogin = useCallback(() => {
+    setClaudeLoginOpen(false)
+    setClaudeLoginPty(prev => {
+      if (prev) api.api.terminal[':id'].$delete({ param: { id: prev } }).catch(() => {})
+      return null
+    })
+    setClaudeLoginError(null)
+    setClaudeNonce(n => n + 1)
+  }, [])
+
   // Last-known shell info per pane, so switching focus immediately repaints the
   // tab header with that pane's `zsh · cols×rows` instead of waiting for its
   // next info event.
@@ -1086,8 +1149,18 @@ export const ProjectPanel = ({
         ),
       })
       if (!r.ok) {
-        const body = (await r.json().catch(() => ({}))) as { claudeMissing?: boolean }
-        return { ok: false, reason: body.claudeMissing ? 'claudeMissing' : 'other' }
+        const body = (await r.json().catch(() => ({}))) as {
+          claudeMissing?: boolean
+          claudeLoggedOut?: boolean
+        }
+        return {
+          ok: false,
+          reason: body.claudeMissing
+            ? 'claudeMissing'
+            : body.claudeLoggedOut
+              ? 'claudeLoggedOut'
+              : 'other',
+        }
       }
       const info = (await r.json()) as TerminalInfo
       setExitedTaskTerminals(prev => {
@@ -2610,6 +2683,11 @@ export const ProjectPanel = ({
           // Auto-launched by the drawer once the card has a title (plain
           // claude, no prompt sent) — same launch as the card ▶.
           onLaunchTask={launchTaskTerminal}
+          // Run gate: skip the fire-and-forget auto-title spawn while signed
+          // out, and surface the single sign-in terminal when a run returns
+          // claudeLoggedOut (instead of opening claude's OAuth browser N times).
+          claudeLoggedIn={claudeConn ? claudeConn.loggedIn : undefined}
+          onClaudeLogin={openClaudeLogin}
           // The task's session lives ONLY here in the drawer (board-scoped
           // taskTerminals map) — a raw PTY terminal, works on the
           // subscription, no JSONL. The Terminal tab is plain shells.
@@ -2821,6 +2899,70 @@ export const ProjectPanel = ({
         projectName={project.name}
         onClose={() => setSkillsOpen(false)}
       />
+
+      {/* The single "sign in to Claude" terminal. A run while the CLI is signed
+          out returns claudeLoggedOut (no spawn → no OAuth storm); its CTA opens
+          THIS one terminal, where the user completes claude's OAuth once. After
+          sign-in, closing it re-checks the connection and runs go through. */}
+      {claudeLoginOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('projectPanel.claudeLogin.title')}
+        >
+          <div className="flex h-[70vh] max-h-[640px] w-full max-w-[780px] flex-col overflow-hidden rounded-lg border border-line bg-bg-card shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-[13px] font-medium text-ink">
+                  {t('projectPanel.claudeLogin.title')}
+                </p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                  {t('projectPanel.claudeLogin.hint')}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeClaudeLogin}
+                aria-label={t('common.close')}
+                className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:scale-[0.97] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col bg-bg">
+              {claudeLoginPty ? (
+                <ClaudeTerminalPane
+                  terminalId={claudeLoginPty}
+                  chrome={false}
+                  onExit={closeClaudeLogin}
+                />
+              ) : (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+                  {claudeLoginError ? (
+                    <>
+                      <p className="max-w-[90%] text-[12px] leading-relaxed text-accent">
+                        {claudeLoginError}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void openClaudeLogin()}
+                        className="rounded-sm border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      >
+                        {t('projectPanel.claudeLogin.retry')}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="text-[12px] text-ink-faint">
+                      {t('projectPanel.claudeLogin.starting')}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

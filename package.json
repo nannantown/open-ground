@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -8,7 +8,8 @@
     "dev:alt": "node scripts/dev-alt.mjs",
     "dev:server": "PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts",
     "dev:web": "vite",
-    "build": "npm run build:web && npm run build:server",
+    "build": "npm run build:config && npm run build:web && npm run build:server",
+    "build:config": "node scripts/write-runtime-config.js",
     "build:web": "vite build",
     "build:server": "node scripts/build-server.js",
     "start": "PORT=47776 node server/dist/index.cjs",

@@ -10,14 +10,15 @@
 //                                       instruction, element }    → { source }
 //
 // Both spawn a one-off claude session (subscription-only, PTY via
-// launchClaude), so each pre-flights claudeConnection and answers 503
-// { claudeMissing: true } when the CLI is absent — same shape as
-// /api/project/describe so the UI can disable the affordance. We gate on
-// `.installed` only (claude prompts for login itself at runtime).
+// launchClaude), so each pre-flights the shared run gate (claudeRunPreflight)
+// and answers 503 with claudeMissing (CLI absent) | claudeLoggedOut (installed
+// but signed out) — same shape as /api/project/describe so the UI can disable
+// the affordance. We require installed && loggedIn: a signed-out claude opens
+// its own OAuth browser, and sign-in goes through /api/terminal/claude-login.
 
 import { Hono } from 'hono'
 import { requireProjectPath } from '../middleware/projectPath'
-import { claudeConnection } from '@/lib/server/claudeConnection'
+import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { generateCanvasElements, tweakScreenSource } from '@/lib/server/canvasAi'
 import type { TweakScreenRequest } from '@/lib/types'
 
@@ -51,10 +52,8 @@ export const canvasAiRoutes = new Hono()
     const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
     if (!prompt) return c.json({ error: 'prompt is required' }, 400)
     if (prompt.length > MAX_PROMPT_LEN) return c.json({ error: 'prompt too long' }, 400)
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     try {
       // The request's abort signal flows through: a hung-up client never
       // burns (or keeps burning) a queued claude session.
@@ -109,10 +108,8 @@ export const canvasAiRoutes = new Hono()
         html: str(body.element.html, MAX_ELEMENT_HTML),
       },
     }
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     try {
       const result = await tweakScreenSource(req, { signal: c.req.raw.signal })
       return c.json(result)

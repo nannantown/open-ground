@@ -30,6 +30,7 @@ const path = require('path')
 const http = require('http')
 const { fork, execFileSync } = require('child_process')
 const crypto = require('crypto')
+const { readBakedAuthEnv } = require('./runtimeConfig')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -432,11 +433,26 @@ async function spawnServerChild() {
   // ~560ms `zsh -lic` probe never blocked window creation earlier in startup.
   const enrichedPath = await resolveEnrichedPath()
 
+  // PUBLIC app-login config (SUPABASE_URL / SUPABASE_ANON_KEY), baked at build
+  // time into electron/runtime-config.json (see electron/runtimeConfig.js). A
+  // Finder/Dock-launched .app inherits a stripped env with these NOWHERE, so
+  // without this the forked server reports `/api/auth/config → { enabled:false }`
+  // and the toolbar hides "Sign in" — the exact bug this fixes. We spread it
+  // BEFORE ...process.env so an explicit env var (an operator override) still
+  // wins; in the normal packaged case process.env has neither key, so the baked
+  // value fills in. An absent/empty file yields {} → login stays disabled
+  // (graceful degrade). The SERVICE_ROLE key is NEVER baked (see REPORT.md).
+  const bakedAuthEnv = readBakedAuthEnv()
+  console.log(
+    `[openground] app login: ${bakedAuthEnv.SUPABASE_URL ? 'enabled (baked config present)' : 'disabled (no baked config)'}`
+  )
+
   const child = fork(serverPath, [], {
     cwd: appRoot,
     detached: false, // tied to our lifetime; dies with the parent tree.
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     env: {
+      ...bakedAuthEnv,
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       PORT: String(FIXED_PORT),

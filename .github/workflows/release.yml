@@ -71,6 +71,16 @@ jobs:
 
       - name: Build (web + server)
         run: npm run build
+        # Bakes the PUBLIC app-login config (SUPABASE_URL + anon key) into the
+        # packaged app via scripts/write-runtime-config.js → electron/runtime-config.json,
+        # so the toolbar's "Sign in" appears for end users. The anon key is a
+        # PUBLIC key — safe to ship; Row Level Security is the real boundary (see
+        # docs/AUTH_SETUP.md §6 + REPORT.md). NEVER add SUPABASE_SERVICE_ROLE_KEY
+        # here. Set both in open-ground → Settings → Secrets and variables →
+        # Actions. If absent, the script writes {} and login stays disabled.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
       - name: Build & publish (macOS, signed + notarized)
         if: matrix.platform == 'mac'

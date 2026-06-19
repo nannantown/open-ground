@@ -2,6 +2,7 @@ import { spawn as ptySpawn } from 'node-pty'
 import { existsSync, watch as fsWatch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { join, resolve as pathResolve } from 'path'
+import { claudeConnection } from './claudeConnection'
 
 // The Claude Code interactive `/usage` view is the canonical source for the
 // numbers OPEN GROUND's HUD wants to show — it matches what the user sees on
@@ -233,6 +234,14 @@ export const fetchClaudeUsageCli = async (): Promise<CliUsage | null> => {
   if (state.inflight) return state.inflight
 
   state.inflight = (async () => {
+    // Never spawn a signed-out interactive `claude`: with no args it drops to
+    // claude's own sign-in screen and opens an OAuth browser — the exact loop
+    // the run-route gate (claudeRunPreflight) was added to stop, and this 60s
+    // HUD poll would re-trigger it. Usage is optional, so signed-out simply
+    // falls back to the local-jsonl estimate. (claudeConnection caches ~10s;
+    // loggedIn implies installed.)
+    const conn = await claudeConnection()
+    if (!conn.loggedIn) return null
     const claudeBin = findClaudeBinary()
     if (!claudeBin) return null
     const cwd = await pickCwd()

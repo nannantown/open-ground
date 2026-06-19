@@ -82,7 +82,7 @@ import {
 import { extForMime } from '@/lib/server/canvasImages'
 import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
-import { claudeConnection } from '@/lib/server/claudeConnection'
+import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { generateProjectDescription } from '@/lib/server/generateDescription'
 import { generateTaskTitle } from '@/lib/server/generateTaskTitle'
 import { getPromptLang } from '@/lib/server/promptLang'
@@ -522,12 +522,12 @@ export const projectRoutes = new Hono()
     if (request.length > MAX_REQUEST_LEN) {
       return c.json({ error: `request is too long (max ${MAX_REQUEST_LEN} chars)` }, 400)
     }
-    // Pre-flight: a missing CLI means a doomed run — surface it as a 503 with a
-    // machine-readable flag so the UI can explain (mirrors the describe route).
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    // Pre-flight: refuse the spawn unless claude is installed AND signed in
+    // (shared run gate). A signed-out claude opens its own OAuth browser, so we
+    // stop here and let the UI point at the single sign-in terminal; the 503
+    // flag (claudeMissing | claudeLoggedOut) drives the copy.
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     try {
       const skill = await createGlobalSkill(request)
       return c.json<CreateSkillResponse>({ skill })
@@ -883,13 +883,12 @@ export const projectRoutes = new Hono()
   .post('/api/project/describe', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    // Pre-flight: a missing CLI means a doomed run. Surface it as a 503 with a
-    // machine-readable flag so the UI can disable the affordance. Gate on
-    // `.installed` only — claude prompts for login itself at runtime.
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    // Pre-flight: refuse the spawn unless claude is installed AND signed in
+    // (shared run gate). describe auto-runs a one-off claude; a signed-out one
+    // would open OAuth, so gate it and let the 503 flag (claudeMissing |
+    // claudeLoggedOut) drive the UI.
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     try {
       const pair = await generateProjectDescription(path)
       const lang = await getPromptLang()
@@ -930,10 +929,12 @@ export const projectRoutes = new Hono()
     if (!task.titleAuto && !force) return c.json({ title: null })
     const content = [task.title, task.notes ?? ''].filter(Boolean).join('\n').trim()
     if (!content) return c.json({ title: null })
-    const conn = await claudeConnection()
-    if (!conn.installed) {
-      return c.json({ error: conn.message, claudeMissing: true }, 503)
-    }
+    // Shared run gate: installed && loggedIn. This is the fire-and-forget
+    // auto-title spawn — the second OAuth tab a logged-out 実行 used to open —
+    // so refusing it here is half of killing the browser loop (the client also
+    // skips firing it while signed out).
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
     try {
       const title = await generateTaskTitle(body.path, content)
       if (!title) return c.json({ title: null })

@@ -36,6 +36,12 @@ yarn-error.log*
 # local env files
 .env*.local
 
+# build-time-baked PUBLIC app-login config — electron/runtimeConfig.js writes it
+# from CI Secrets/Vars during `npm run build` and ships it inside the .app. It
+# holds only the public anon key (never the service-role key), but is generated
+# per build, so it is never committed. See docs/AUTH_SETUP.md §6.
+/electron/runtime-config.json
+
 # vercel
 .vercel
 

@@ -85,6 +85,46 @@ Restart the dev server (or relaunch the app). The toolbar will now show the
 
 ---
 
+## 6. Distributed builds — shipping login to every user
+
+The dev setup above only enables login on **your** machine (the server reads
+`.env.local`). A user who installs the packaged `.app`/`.exe` has no `.env.local`
+and a Finder-launched app inherits a stripped env, so the forked server would see
+no `SUPABASE_*` and report `{ enabled: false }` — the toolbar hides "Sign in" and
+**nobody can log in**. The shipped build closes this gap by **baking the public
+config in at build time**:
+
+1. **`scripts/write-runtime-config.js`** (runs inside `npm run build` as
+   `build:config`) reads `SUPABASE_URL` / `SUPABASE_ANON_KEY` from the build env
+   and writes them to **`electron/runtime-config.json`** (gitignored; shipped via
+   electron-builder `files: ["electron/**"]`).
+2. **`electron/main.js`** reads that file (`electron/runtimeConfig.js`) and
+   injects the two values into the forked server's env, so `readAuthConfig()`
+   succeeds and `/api/auth/config` reports `{ enabled: true }`.
+
+The values come from the **open-ground** repo's Actions Secrets — see
+[DISTRIBUTION.md](./DISTRIBUTION.md#app-login-secrets). They are **never
+hard-coded** and `runtime-config.json` is **never committed**.
+
+> **Only the PUBLIC anon key ships.** The anon key is public by design; the real
+> security boundary is **Row Level Security** in Supabase (every relevant table
+> enforces owner/member/self at the DB — audited; see `REPORT.md`). The
+> **`SUPABASE_SERVICE_ROLE_KEY` is server-secret and is NEVER bundled** — the
+> allowlist in `electron/runtimeConfig.js` refuses to bake any secret-named key.
+
+> ⚠️ **Redirect-URL allow-list is a hard precondition.** Because every user's app
+> uses the **same fixed loopback callback** `http://127.0.0.1:47776/api/auth/callback`,
+> that exact URL (and the `localhost` alias) **must be allow-listed in the
+> PRODUCTION Supabase project's** Authentication → URL Configuration → Redirect
+> URLs (step 4 above), and the Google/GitHub providers must be enabled there
+> (step 3). If they are not, the toolbar entry appears but every sign-in is
+> rejected by Supabase with `redirect_to is not allowed`.
+
+A build with **no** `SUPABASE_*` in its env (the default public CI, a plain local
+`npm run build`) writes `{}` and behaves exactly as before — login stays hidden.
+
+---
+
 ## How to verify
 
 1. `npm run dev` (or `npm run electron:dev`), open <http://127.0.0.1:5174>.

@@ -96,6 +96,41 @@ add for publishing the Release.
 > notarization`) instead of failing the whole release. Add the secrets above
 > to get a Gatekeeper-clean build.
 
+<a id="app-login-secrets"></a>
+### App-login secrets (optional — enables "Sign in" for all users)
+
+To ship the optional Google/GitHub login (see [AUTH_SETUP.md](./AUTH_SETUP.md))
+so it works on **every user's** install, add two more repo Secrets in
+**open-ground** → *Settings → Secrets and variables → Actions*. `release.yml`'s
+**Build (web + server)** step reads them and bakes them into the packaged app
+(`scripts/write-runtime-config.js` → `electron/runtime-config.json`).
+
+| Secret | What it is |
+| ------ | ---------- |
+| `SUPABASE_URL` | your project URL, e.g. `https://<ref>.supabase.co`. **Public.** |
+| `SUPABASE_ANON_KEY` | the project's **anon / public** key. Public by design — safe to ship in the binary; the security boundary is Supabase **Row Level Security** (audited — see `REPORT.md`). |
+
+> 🔒 **Never add `SUPABASE_SERVICE_ROLE_KEY` (or any other server-secret) to this
+> build.** It is the admin key (full DB bypass) and must stay server-only. The
+> bake allowlist in `electron/runtimeConfig.js` only ever ships the two public
+> values above; anything secret-named is refused.
+
+> ⚠️ **Prod Supabase precondition.** The loopback callback
+> `http://127.0.0.1:47776/api/auth/callback` (+ the `localhost` alias) must be
+> in the **production** project's Authentication → URL Configuration → Redirect
+> URLs, and the Google/GitHub providers must be enabled there — otherwise
+> sign-in is rejected even though the button shows. See
+> [AUTH_SETUP.md §6](./AUTH_SETUP.md).
+
+If these two Secrets are **absent**, the build writes an empty config and login
+stays hidden — a clean graceful degrade, no failure.
+
+> **Local `dist` note:** `build:config` reads the **shell** env, not `.env.local`
+> (unlike `npm run dev`). To bake login into a local `npm run dist` / `dist:local`
+> build, `export SUPABASE_URL=… SUPABASE_ANON_KEY=…` in the shell first — values
+> that live only in `.env.local` are picked up in dev but **not** in a packaged
+> build.
+
 The CI path is the supported way to publish. The local `npm run dist`
 (§2) / `npm run dist:win` (§6) commands remain documented as a **manual /
 local fallback** — e.g. for a dry run, or publishing from a machine that

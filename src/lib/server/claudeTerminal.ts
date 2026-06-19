@@ -8,6 +8,7 @@ import {
   type TerminalInfo,
 } from './terminal'
 import { ensureClaudeFolderTrusted } from './claudeTrust'
+import { resolvedClaudeBin } from './claudeConnection'
 import { CLAUDE_EFFORTS, type ClaudeEffort, type ProjectLaunchPrefs } from '../types'
 
 // Launches `claude` interactively inside a PTY hosted by OPEN GROUND.
@@ -155,14 +156,25 @@ export const buildClaudeArgv = (
   >,
   promptFilePath: string | null,
   contextFilePath: string | null = null,
+  resolvedBin: string | null = null,
 ): string[] => {
-  // Launch binary seam. Default is the bare `claude` on PATH (unchanged). Tests
-  // and the E2E suite set OPENGROUND_CLAUDE_BIN to an absolute stub path so the
-  // whole run flow is exercised without the real CLI / a live subscription
-  // (the product is subscription-only — there is no `claude` in CI). A custom
-  // path is shell-quoted so an absolute path containing spaces (the repo dir is
-  // `…/OPEN GROUND`) survives intact in the PTY command line.
-  const claudeBin = process.env.OPENGROUND_CLAUDE_BIN
+  // Launch binary seam, in priority order:
+  //   1. OPENGROUND_CLAUDE_BIN — the E2E/operator override (tests + the E2E suite
+  //      point it at an absolute stub so the whole run flow is exercised without
+  //      the real CLI / a live subscription; the product is subscription-only,
+  //      there is no `claude` in CI).
+  //   2. resolvedBin — the absolute path claudeConnection just VALIDATED. Passing
+  //      an absolute path makes the spawn immune to the PTY login shell (`zsh -l`,
+  //      no `.zshrc`) resolving `claude` differently than the connection probe
+  //      (`zsh -lic`) did — the gap that left auto title/description silently
+  //      empty on distributed builds (indicator green, spawned claude not found).
+  //   3. bare `claude` — resolved by the PTY's inherited PATH (unchanged default).
+  // Any custom path is shell-quoted so an absolute path containing spaces (the
+  // repo dir is `…/OPEN GROUND`) survives intact in the PTY command line.
+  const claudeBin = process.env.OPENGROUND_CLAUDE_BIN ?? resolvedBin
+  // The truthiness check (not `??`) is what maps an empty-string override back to
+  // the bare name — `OPENGROUND_CLAUDE_BIN=''` means "use the default", and `''`
+  // is not nullish so `?? resolvedBin` wouldn't catch it. Keep this `? :`.
   const args: string[] = [claudeBin ? sq(claudeBin) : 'claude']
   // `--add-dir` is variadic, so multiple dirs ride ONE flag (still bounded by
   // the `--session-id`/`--resume` flag that always follows — see rule 1 above).
@@ -232,7 +244,12 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
     const f = contextFilePath
     setTimeout(() => { rm(f, { force: true }, () => {}) }, 60_000)
   }
-  const args = buildClaudeArgv(opts, promptFilePath, contextFilePath)
+  // Spawn the EXACT claude the connection probe validated (absolute path) so the
+  // PTY's non-interactive login shell can't fail to resolve a bare `claude` —
+  // the distributed-build gap that silently broke auto title/description. Every
+  // spawn route pre-flights claudeConnection() right before this, so the cached
+  // absolute path is fresh; null falls through to the bare name in buildClaudeArgv.
+  const args = buildClaudeArgv(opts, promptFilePath, contextFilePath, resolvedClaudeBin())
 
   // `; exit` so when claude quits (`/quit`, Ctrl-D, finished --print, etc.)
   // the wrapping shell exits too. The PTY then closes and the observer's

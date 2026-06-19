@@ -25,14 +25,16 @@ import { dependencyCandidates } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
 
 /** Result of a task-terminal launch attempt (ProjectPanel.launchTaskTerminal).
- *  `reason` is set only on failure: 'claudeMissing' = the server pre-flight
- *  said the `claude` CLI isn't installed (503 { claudeMissing: true });
- *  'other' = anything else (5xx, offline, …). On success `terminalId` carries
- *  the slot's PTY id so a caller can act on the fresh session before the
+ *  `reason` is set only on failure: 'claudeMissing' = the `claude` CLI isn't
+ *  installed (503 { claudeMissing: true }); 'claudeLoggedOut' = installed but
+ *  signed out (503 { claudeLoggedOut: true }) — the drawer offers a single
+ *  "sign in to Claude" terminal rather than letting the run open claude's OAuth
+ *  browser; 'other' = anything else (5xx, offline, …). On success `terminalId`
+ *  carries the slot's PTY id so a caller can act on the fresh session before the
  *  panel's state write re-renders (the "Review with claude" paste). */
 export type TaskLaunchResult = {
   ok: boolean
-  reason?: 'claudeMissing' | 'other'
+  reason?: 'claudeMissing' | 'claudeLoggedOut' | 'other'
   terminalId?: string
 }
 
@@ -93,6 +95,17 @@ export interface BoardModuleProps {
    *  Drives the one-line welcome strip a freshly imported shared clone
    *  shows above the board (F002/F090). */
   shared?: boolean
+  /** Whether the local `claude` CLI is signed in (from useClaudeConnection in
+   *  ProjectPanel). `undefined` = not yet known. Used to SKIP the fire-and-forget
+   *  auto-title spawn while signed out — a signed-out claude opens its OAuth
+   *  browser, and the run already returns claudeLoggedOut, so firing the title
+   *  too would just be a second doomed request. */
+  claudeLoggedIn?: boolean
+  /** Open the single interactive "sign in to Claude" terminal (ProjectPanel
+   *  owns it, via /api/terminal/claude-login). The drawer surfaces this when a
+   *  run fails with claudeLoggedOut, so the user signs in ONCE instead of every
+   *  run opening a fresh OAuth tab. */
+  onClaudeLogin?: () => void
 }
 
 export const BoardModule = ({
@@ -108,6 +121,8 @@ export const BoardModule = ({
   onLaunchTask,
   onOpenProjectSettings,
   shared,
+  claudeLoggedIn,
+  onClaudeLogin,
 }: BoardModuleProps) => {
   const { t } = useT()
   // The user's display name (Settings.displayName) — feeds the drawer's "Me"
@@ -533,9 +548,9 @@ export const BoardModule = ({
   // button again IS the retry — nothing relaunches by itself. (The drawer
   // auto-launch died 2026-06-12: opening a card no longer spawns anything;
   // the explicit 実行 button below is the only way a task session starts.)
-  const [launchFailed, setLaunchFailed] = useState<Map<string, 'claudeMissing' | 'other'>>(
-    new Map(),
-  )
+  const [launchFailed, setLaunchFailed] = useState<
+    Map<string, 'claudeMissing' | 'claudeLoggedOut' | 'other'>
+  >(new Map())
 
   // 実行 — launch the task's claude session WITH the composed task prompt
   // auto-sent (the server builds it from the LIVE fields + this card's run
@@ -562,7 +577,12 @@ export const BoardModule = ({
       runTitle = provisionalTitle(content)
       if (runTitle) {
         patchTask(task, { title: runTitle, titleAuto: true })
-        if (wantsAutoTitle(deriveCardFields(content)))
+        // Auto-title is a SECOND, fire-and-forget claude spawn. Skip it while
+        // the CLI is signed out: a signed-out claude opens its OAuth browser,
+        // and the run below already returns claudeLoggedOut (→ sign-in CTA), so
+        // firing this too would just be a second doomed request. `undefined`
+        // (not yet known) still fires — the server gate is the real guard.
+        if (claudeLoggedIn !== false && wantsAutoTitle(deriveCardFields(content)))
           void api.api.project['task-title']
             .$post({ json: { path: project.path, id: task.id } })
             .catch(() => {})
@@ -698,7 +718,16 @@ export const BoardModule = ({
       if (!ptyId) {
         const launched = await onLaunchTask(task, { cwd: json.dir })
         if (!launched.ok) {
-          setReviewNotice(t('board.detail.reviewWithClaudeFailed'))
+          // Signed out: don't dead-end on a generic failure — route to the SAME
+          // single sign-in terminal the 実行 button offers (it never opens
+          // claude's OAuth on its own; this is gated). onClaudeLogin is
+          // single-instance, so this can't spawn a second login terminal.
+          if (launched.reason === 'claudeLoggedOut' && onClaudeLogin) {
+            onClaudeLogin()
+            setReviewNotice(t('board.run.failedClaudeLoggedOut'))
+          } else {
+            setReviewNotice(t('board.detail.reviewWithClaudeFailed'))
+          }
           return
         }
         if (launched.terminalId) {
@@ -1577,15 +1606,35 @@ export const BoardModule = ({
                         {profileTextFor(detailTask)}
                       </span>
                     </p>
-                    {launchFailed.has(detailTask.id) && (
-                      <p className="text-[11px] leading-relaxed text-accent">
-                        {t(
-                          launchFailed.get(detailTask.id) === 'claudeMissing'
-                            ? 'board.run.failedClaudeMissing'
-                            : 'board.run.failed',
-                        )}
-                      </p>
-                    )}
+                    {launchFailed.has(detailTask.id) &&
+                      (launchFailed.get(detailTask.id) === 'claudeLoggedOut' ? (
+                        // Signed-out: don't let the run open claude's OAuth
+                        // browser — offer the SINGLE sign-in terminal instead
+                        // (ProjectPanel owns it). After sign-in, pressing 実行
+                        // again launches normally.
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-accent">
+                            {t('board.run.failedClaudeLoggedOut')}
+                          </p>
+                          {onClaudeLogin && (
+                            <button
+                              type="button"
+                              onClick={onClaudeLogin}
+                              className="shrink-0 rounded-sm border border-accent px-2.5 py-1 text-[11px] text-accent transition-colors hover:bg-accent hover:text-bg-card active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                            >
+                              {t('board.run.signIn')}
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] leading-relaxed text-accent">
+                          {t(
+                            launchFailed.get(detailTask.id) === 'claudeMissing'
+                              ? 'board.run.failedClaudeMissing'
+                              : 'board.run.failed',
+                          )}
+                        </p>
+                      ))}
                     {/* Action bar — 実行 anchors the bottom-right; Review (only on
                         review/blocked cards with a branch) sits to its left; a
                         review notice fills the remaining width on the left. */}

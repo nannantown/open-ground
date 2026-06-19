@@ -287,6 +287,72 @@ describe('BoardModule drawer — Draft mode', () => {
     expect(queryByText(/board\.run\.failedClaudeMissing/)).toBeNull()
   })
 
+  it('a signed-out run shows the sign-in CTA, which opens the single login terminal (not another spawn)', async () => {
+    const onClaudeLogin = vi.fn()
+    const onLaunchTask = vi
+      .fn(async (_t: ProjectTask): Promise<TaskLaunchResult> => ({ ok: true }))
+      .mockResolvedValueOnce({ ok: false, reason: 'claudeLoggedOut' })
+    const { getByText, queryByText } = render(
+      <BoardModule
+        data={makeData(makeTask())}
+        project={baseProject}
+        persist={vi.fn()}
+        detailId="t1"
+        onOpenDetail={vi.fn()}
+        renderConversation={() => <div data-testid="conversation" />}
+        hasTerminalSlot={() => false}
+        liveTerminalId={() => null}
+        onDeleteTask={vi.fn()}
+        onLaunchTask={onLaunchTask}
+        claudeLoggedIn={false}
+        onClaudeLogin={onClaudeLogin}
+      />,
+    )
+    await flush()
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    expect(onLaunchTask).toHaveBeenCalledTimes(1)
+    // Signed-out copy (sign-in guidance), NOT the install-claude copy.
+    expect(getByText(/board\.run\.failedClaudeLoggedOut/)).toBeTruthy()
+    expect(queryByText(/board\.run\.failedClaudeMissing/)).toBeNull()
+    // The CTA routes to the ONE sign-in terminal — it must NOT re-run the task
+    // (re-running while signed out is exactly what opened OAuth repeatedly).
+    fireEvent.click(getByText('board.run.signIn'))
+    expect(onClaudeLogin).toHaveBeenCalledTimes(1)
+    expect(onLaunchTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('while signed out, the fire-and-forget auto-title spawn is skipped (claudeLoggedIn=false)', async () => {
+    taskTitlePost.mockClear()
+    const onLaunchTask = vi.fn(
+      async (_t: ProjectTask): Promise<TaskLaunchResult> => ({ ok: true }),
+    )
+    const { getByText } = render(
+      <BoardModule
+        data={makeData(
+          makeTask({ title: '', notes: 'Account settings page\nUse the modal.\nAdd email.' }),
+        )}
+        project={baseProject}
+        persist={vi.fn()}
+        detailId="t1"
+        onOpenDetail={vi.fn()}
+        renderConversation={() => <div data-testid="conversation" />}
+        hasTerminalSlot={() => false}
+        liveTerminalId={() => null}
+        onDeleteTask={vi.fn()}
+        onLaunchTask={onLaunchTask}
+        claudeLoggedIn={false}
+      />,
+    )
+    await flush()
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    // The run still goes (the server gate is the real guard), but the SECOND,
+    // automatic title spawn — the extra OAuth tab — must not even be requested.
+    expect(onLaunchTask).toHaveBeenCalledTimes(1)
+    expect(taskTitlePost).not.toHaveBeenCalled()
+  })
+
   it('review card: no silent spawn — 実行 is the deliberate start (F031 holds)', async () => {
     const { getByText, onLaunchTask } = renderDrawer(
       makeData(makeTask({ boardColumn: 'review' })),
