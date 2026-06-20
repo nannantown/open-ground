@@ -178,6 +178,7 @@ export const canvas = {
     'canvas.insp.cellBottomLeft': 'Bottom left',
     'canvas.insp.cellBottomCenter': 'Bottom center',
     'canvas.insp.cellBottomRight': 'Bottom right',
+    'canvas.insp.alignGrid': 'Alignment',
   } as Record<string, string>,
   ja: {
     'canvas.undo': '元に戻す (⌘Z)',
@@ -352,5 +353,6 @@ export const canvas = {
     'canvas.insp.cellBottomLeft': '左下',
     'canvas.insp.cellBottomCenter': '中央下',
     'canvas.insp.cellBottomRight': '右下',
+    'canvas.insp.alignGrid': '整列',
   } as Record<string, string>,
 }

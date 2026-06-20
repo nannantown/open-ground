@@ -77,6 +77,46 @@ jobs:
       - name: Unit tests (vitest)
         run: npm test
 
+  worker:
+    # The realtime-collab Cloudflare Worker (worker/) is an INDEPENDENT npm
+    # package with its own package-lock.json, so it gets its own job: install
+    # its deps, typecheck it, and run its in-process miniflare convergence test.
+    # Runs in PARALLEL with quality-gate (no `needs`) — heavy wrangler/miniflare
+    # boot stays off the fast app gate, and worker breakage gets its own signal.
+    name: worker (typecheck + collab test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          # The worker has its own lockfile — key the npm cache off it.
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        # Exact-lockfile install (partyserver, y-partyserver, yjs, wrangler, ws,
+        # typescript, @cloudflare/workers-types). No node-gyp deps here, so no
+        # Python pin is needed (unlike the root job's node-pty rebuild).
+        run: npm ci
+        working-directory: worker
+
+      - name: Typecheck worker (tsc --noEmit)
+        run: npx tsc --noEmit
+        working-directory: worker
+
+      - name: Worker collab test (miniflare, in-process)
+        # node test/local.mjs boots the Worker via wrangler unstable_dev (local
+        # miniflare) and asserts Yjs convergence, DO persistence, ticket gating,
+        # R2 asset auth, and the zero-config /ticket mint — all in-process.
+        run: node test/local.mjs
+        working-directory: worker
+
   e2e:
     # Separate job so a fast quality-gate failure doesn't have to wait for the
     # slower e2e bootstrap (npm + playwright browser download + first compile).

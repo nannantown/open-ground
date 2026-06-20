@@ -767,7 +767,11 @@ const AlignGrid = ({
   const justify = layout.justify ?? 'start'
   const spaceBetween = justify === 'space-between'
   return (
-    <div className="grid w-[88px] shrink-0 grid-cols-3 rounded-[4px] border border-line bg-bg p-0.5">
+    <div
+      role="group"
+      aria-label={t('canvas.insp.alignGrid')}
+      className="grid w-[88px] shrink-0 grid-cols-3 rounded-[4px] border border-line bg-bg p-0.5"
+    >
       {[0, 1, 2].flatMap((r) =>
         [0, 1, 2].map((c) => {
           const cellJustify = row ? GRID_POS[c] : GRID_POS[r]

@@ -250,7 +250,13 @@ test.describe('Canvas tab (Figma parity)', () => {
     await expect(page.getByLabel('Gap mode')).toBeVisible()
 
     // Centre cell of the 3×3 align grid → justify center × align center.
-    await page.getByRole('button', { name: 'Center', exact: true }).click()
+    // Scope to the Alignment group: the cell's "Center" a11y name would
+    // otherwise collide with the stroke-align "Center" button that the same
+    // frame inspector also renders (strict-mode violation).
+    await page
+      .getByRole('group', { name: 'Alignment' })
+      .getByRole('button', { name: 'Center', exact: true })
+      .click()
     // Engine math for the seeded frame (x40 w400 pad10 gap10, kids 60×60):
     // innerMain 380, content+gap 130 → A.x = 50+125 = 175, B.x = 245;
     // innerCross 100 → both y = 210+20 = 230.
