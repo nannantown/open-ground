@@ -26,8 +26,8 @@ import { sanitizeBranch } from './reviewWorktree'
 
 const execFile = promisify(execFileCb)
 
-// House convention (mergedBranches.ts / gitShare.ts): git never hangs on a
-// credential prompt and gets a hard timeout. maxBuffer is generous because a
+// House convention (mergedBranches.ts): git never hangs on a credential
+// prompt and gets a hard timeout. maxBuffer is generous because a
 // big working tree's status / numstat can exceed node's 1MB default.
 const GIT_OPTS = {
   timeout: 30_000,

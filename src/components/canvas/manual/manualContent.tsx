@@ -19,7 +19,6 @@ import {
   Columns3,
   Palette,
   Terminal,
-  GitBranch,
   Puzzle,
   SlidersHorizontal,
   Keyboard,
@@ -272,8 +271,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'OPEN GROUND never writes into your repo. A project’s Board and Canvas data live centrally under `~/.openground/projects/<id>/` (see Reference → Where your data lives). The one exception is Git-shared mode.',
-          ja: 'OPEN GROUND はあなたのリポジトリに書き込みません。プロジェクトの Board・Canvas データは `~/.openground/projects/<id>/` の下に中央集約されます（リファレンス → データの保存場所 を参照）。唯一の例外が Git 共有モードです。',
+          en: 'OPEN GROUND never writes into your repo. A project’s Board and Canvas data live centrally under `~/.openground/projects/<id>/` (see Reference → Where your data lives).',
+          ja: 'OPEN GROUND はあなたのリポジトリに書き込みません。プロジェクトの Board・Canvas データは `~/.openground/projects/<id>/` の下に中央集約されます（リファレンス → データの保存場所 を参照）。',
         },
       },
     ],
@@ -477,61 +476,7 @@ export const MANUAL_SECTIONS: Section[] = [
     ],
   },
 
-  // ─────────────────────────────── 8 · Share ────────────────────────────────
-  {
-    id: 'share',
-    icon: <GitBranch {...ICON} />,
-    kicker: { en: 'Advanced', ja: '上級' },
-    title: { en: 'Share via Git', ja: 'Git で共有' },
-    intro: {
-      en: 'Share a project’s Board & Canvas with teammates through plain git — no accounts, no tokens.',
-      ja: 'プロジェクトの Board と Canvas を、ただの git でチームと共有。アカウントもトークンも不要。',
-    },
-    blocks: [
-      {
-        kind: 'p',
-        text: {
-          en: 'Sharing moves Board and Canvas data into the repo under `.openground/`. Click Share… in the project header, confirm your display name, members, completion flow and target branch, then hand out the invite.',
-          ja: '共有すると、Board と Canvas のデータがリポジトリの `.openground/` 配下に移ります。プロジェクトヘッダの「共有…」を押し、表示名・メンバー・完了時の挙動・対象ブランチを確認して、招待を渡します。',
-        },
-      },
-      { kind: 'subhead', text: { en: 'Sync', ja: '同期' } },
-      {
-        kind: 'p',
-        text: {
-          en: 'The Sync button commits — scoped to `.openground/` only, never your code — then pull --rebase --autostash, then push. It is pure git; OPEN GROUND uses no GitHub API or tokens. Auto-sync also runs quietly in the background.',
-          ja: '「同期」ボタンはコミットし（対象は `.openground/` のみ。あなたのコードには触れません）、続いて pull --rebase --autostash、そして push します。純粋な git です —— OPEN GROUND は GitHub の API もトークンも使いません。自動同期もバックグラウンドで静かに動きます。',
-        },
-      },
-      { kind: 'subhead', text: { en: 'Teammates join', ja: '同僚が参加する' } },
-      {
-        kind: 'p',
-        text: {
-          en: 'A teammate just clones the repo and Imports the folder — OPEN GROUND detects the `.openground/` marker and loads the shared board automatically.',
-          ja: '同僚はリポジトリをクローンしてフォルダをインポートするだけ —— OPEN GROUND が `.openground/` のマーカーを検知し、共有ボードを自動で読み込みます。',
-        },
-      },
-      { kind: 'subhead', text: { en: 'Shared vs personal', ja: '共有と個人' } },
-      {
-        kind: 'rows',
-        mono: false,
-        rows: [
-          { k: 'Shared (in the repo)', v: { en: 'Board cards, notes, canvases, target branch, members, completion flow.', ja: 'ボードのカード・メモ・キャンバス・対象ブランチ・メンバー・完了時の挙動。' } },
-          { k: 'Personal (your machine)', v: { en: 'Tab order, active canvas, launch prefs, auto-sync on/off.', ja: 'タブ順・アクティブなキャンバス・起動設定・自動同期のオンオフ。' } },
-        ],
-      },
-      {
-        kind: 'note',
-        tone: 'warn',
-        text: {
-          en: 'If Sync hits a conflict, OPEN GROUND aborts the rebase and shows a chooser (keep mine / theirs) per card. Your code is never part of the conflict.',
-          ja: '同期がコンフリクトに当たると、OPEN GROUND はリベースを中断し、カードごとに「自分 / 相手」を選ぶ画面を出します。あなたのコードがコンフリクトに含まれることはありません。',
-        },
-      },
-    ],
-  },
-
-  // ──────────────────────────── 9 · Custom tabs ─────────────────────────────
+  // ──────────────────────────── 8 · Custom tabs ─────────────────────────────
   {
     id: 'custom',
     icon: <Puzzle {...ICON} />,
@@ -681,8 +626,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'OPEN GROUND keeps per-project data centrally, mirroring how Claude Code keeps state under `~/.claude/` — never inside your repo, unless you turn on Git-shared mode.',
-          ja: 'OPEN GROUND はプロジェクトごとのデータを中央に保ちます —— Claude Code が `~/.claude/` に状態を置くのと同じ流儀で、リポジトリの中には置きません（Git 共有モードを有効にした場合を除く）。',
+          en: 'OPEN GROUND keeps per-project data centrally, mirroring how Claude Code keeps state under `~/.claude/` — never inside your repo.',
+          ja: 'OPEN GROUND はプロジェクトごとのデータを中央に保ちます —— Claude Code が `~/.claude/` に状態を置くのと同じ流儀で、リポジトリの中には置きません。',
         },
       },
       {
@@ -693,7 +638,6 @@ export const MANUAL_SECTIONS: Section[] = [
           { k: '~/.openground/projects/<id>/tasks.json', v: { en: 'A project’s board cards and notes.', ja: 'プロジェクトのボードカードとメモ。' } },
           { k: '~/.openground/projects/<id>/canvases/', v: { en: 'A project’s design canvases and their images.', ja: 'プロジェクトのデザインキャンバスと画像。' } },
           { k: '~/.openground/custom-modules/', v: { en: 'Your custom tab modules.', ja: '自作のカスタムタブモジュール。' } },
-          { k: '.openground/  (in the repo)', v: { en: 'Git-shared mode only: board + canvas shared with the team.', ja: 'Git 共有モードのみ：チームと共有するボードとキャンバス。' } },
         ],
       },
       { kind: 'subhead', text: { en: 'Architecture', ja: 'アーキテクチャ' } },

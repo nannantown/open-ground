@@ -26,6 +26,12 @@ import type { ProjectData, ProjectMeta, ProjectTask } from '@/lib/types'
 //     - chevron header expands the fields block (content textarea, no title)
 
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
+// Presence overlay reads useAuth; this suite renders BoardModule bare (no
+// AuthProvider) and tests drawer behavior, not presence — so stub it out.
+vi.mock('@/components/canvas/CollabPresence', () => ({
+  CollabPresence: () => null,
+  usePublishPresence: () => {},
+}))
 const taskTitlePost = vi.fn((_a?: unknown) =>
   Promise.resolve({ ok: true, json: () => Promise.resolve({ title: null }) }),
 )

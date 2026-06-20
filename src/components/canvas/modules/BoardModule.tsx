@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useBoardCollab } from '@/lib/collab/RealtimeContext'
 import { ChevronRight, GitBranch, Trash2, X } from 'lucide-react'
 import { BoardTab, columnOf } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
@@ -90,11 +91,6 @@ export interface BoardModuleProps {
   /** Open the Project Settings dialog (owned by ProjectPanel). Optional —
    *  unset hides the Board toolbar's settings affordance. */
   onOpenProjectSettings?: () => void
-  /** True when the project's Board/Canvas data is git-shared
-   *  (ShareStatus.shared — the `.openground/openground.json` marker).
-   *  Drives the one-line welcome strip a freshly imported shared clone
-   *  shows above the board (F002/F090). */
-  shared?: boolean
   /** Whether the local `claude` CLI is signed in (from useClaudeConnection in
    *  ProjectPanel). `undefined` = not yet known. Used to SKIP the fire-and-forget
    *  auto-title spawn while signed out — a signed-out claude opens its OAuth
@@ -120,7 +116,6 @@ export const BoardModule = ({
   onDeleteTask,
   onLaunchTask,
   onOpenProjectSettings,
-  shared,
   claudeLoggedIn,
   onClaudeLogin,
 }: BoardModuleProps) => {
@@ -130,10 +125,6 @@ export const BoardModule = ({
   // Settings from the panel, so fetch it lazily once per mount (cheap local
   // GET); unset/failed just hides both affordances.
   const [displayName, setDisplayName] = useState<string | null>(null)
-  // True once the settings fetch has RESOLVED — the welcome strip's "is my
-  // name registered?" check must wait for the real displayName, or it would
-  // flash for every member during the initial null.
-  const [settingsLoaded, setSettingsLoaded] = useState(false)
   useEffect(() => {
     let cancelled = false
     api.api.settings
@@ -142,7 +133,6 @@ export const BoardModule = ({
       .then(s => {
         if (!cancelled) {
           setDisplayName(s.displayName?.trim() || null)
-          setSettingsLoaded(true)
         }
       })
       .catch(() => {})
@@ -192,26 +182,6 @@ export const BoardModule = ({
     }
   }, [])
 
-  // ---- Shared-board welcome strip (F002/F090) ------------------------------
-  // A teammate who imports a shared clone gets connected to the team board
-  // silently — this one line says so the first time. Shown while the project
-  // is git-shared AND the user's displayName isn't in the shared member list
-  // (the "I just arrived" heuristic); ✕ dismisses it permanently per project
-  // (localStorage, og.board.sharedWelcome.<projectId>).
-  const welcomeKey = `og.board.sharedWelcome.${project.id}`
-  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean>(
-    () => localStorage.getItem(welcomeKey) === '1',
-  )
-  const isRegisteredMember =
-    !!displayName &&
-    (data.config?.members ?? []).some(
-      m => m.trim().toLowerCase() === displayName.toLowerCase(),
-    )
-  const showWelcome = !!shared && settingsLoaded && !welcomeDismissed && !isRegisteredMember
-  const dismissWelcome = () => {
-    localStorage.setItem(welcomeKey, '1')
-    setWelcomeDismissed(true)
-  }
   // "+ Add" inline input for a brand-new assignee name; closed whenever the
   // drawer switches cards so a half-typed name never leaks across tasks.
   const [addingAssignee, setAddingAssignee] = useState(false)
@@ -322,6 +292,28 @@ export const BoardModule = ({
   const dataRef = useRef(data)
   dataRef.current = data
 
+  // ── Realtime collab (feature-flagged; null when OFF / not a member) ────────
+  // When non-null, every local persist is ALSO mirrored into the shared Y.Doc
+  // (seed is idempotent → loop-safe), and remote peer edits arrive via onRemote
+  // → persist, reusing the existing external-adoption machinery below. When
+  // null, persistLocal === persist, so the single-user path is byte-for-byte
+  // unchanged.
+  const collab = useBoardCollab(project.path)
+  const collabRef = useRef(collab)
+  collabRef.current = collab
+  // Presence (u15): the binding is handed to BoardTab as `presence` — its
+  // toolbar <CollabPresence> both PUBLISHES the owner's identity into the board
+  // room (so members see them online) and DISPLAYS the other present peers.
+  // No-op for the member's own BoardModule (collab is null for its synthetic
+  // path-'' project — the member publishes via SharedProjectPanel).
+  const persistLocal = useCallback(
+    (next: ProjectData) => {
+      persist(next)
+      collabRef.current?.seed(next)
+    },
+    [persist],
+  )
+
   // ---- Undo / redo history (B013 / F087) -----------------------------------
   // Snapshot history of the tasks array, transplanted from CanvasWorkspace's
   // snapshot + idle-coalescing pattern: every LOCAL persist that changes
@@ -373,13 +365,13 @@ export const BoardModule = ({
   const persistTracked = useCallback(
     (next: ProjectData) => {
       lastLocalTasksRef.current = next.tasks
-      persist(next)
+      persistLocal(next)
       // Coalesce on idle. Harmless for config-only persists (the flush no-ops
       // when the tasks identity didn't move off the baseline).
       if (histTimer.current) clearTimeout(histTimer.current)
       histTimer.current = setTimeout(flushHistory, HIST_IDLE_MS)
     },
-    [persist, flushHistory],
+    [persistLocal, flushHistory],
   )
 
   // A pending coalescing timer must never outlive the module (it would call
@@ -418,6 +410,15 @@ export const BoardModule = ({
     setHistVer(v => v + 1)
   }, [data.tasks, flushHistory])
 
+  // Realtime: seed the doc from our current disk state once connected, then push
+  // every peer change through `persist` (the external-adoption path renders it
+  // without polluting local undo). persistLocal re-seeds idempotently → no loop.
+  useEffect(() => {
+    if (!collab) return
+    collab.seed(dataRef.current)
+    return collab.onRemote(() => persistLocal(collab.extract(dataRef.current)))
+  }, [collab, persistLocal])
+
   const undo = useCallback(() => {
     flushHistory()
     if (!undoRef.current.length) return
@@ -425,9 +426,9 @@ export const BoardModule = ({
     redoRef.current.push(baselineRef.current)
     baselineRef.current = prev
     lastLocalTasksRef.current = prev
-    persist({ ...dataRef.current, tasks: prev })
+    persistLocal({ ...dataRef.current, tasks: prev })
     setHistVer(v => v + 1)
-  }, [flushHistory, persist])
+  }, [flushHistory, persistLocal])
 
   const redo = useCallback(() => {
     // Commit any pending coalesced edit first (mirrors undo). flushHistory
@@ -439,9 +440,9 @@ export const BoardModule = ({
     undoRef.current.push(baselineRef.current)
     baselineRef.current = next
     lastLocalTasksRef.current = next
-    persist({ ...dataRef.current, tasks: next })
+    persistLocal({ ...dataRef.current, tasks: next })
     setHistVer(v => v + 1)
-  }, [flushHistory, persist])
+  }, [flushHistory, persistLocal])
 
   // ⌘Z / ⇧⌘Z (and ⌘Y) — active only while the Board tab is mounted (this
   // module unmounts on tab switch). Never steals the combo from a focused
@@ -1439,27 +1440,13 @@ export const BoardModule = ({
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {showWelcome && (
-          <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-4 py-1.5">
-            <p className="min-w-0 flex-1 truncate text-[11px] leading-relaxed text-ink-muted">
-              {t('projectPanel.sharedWelcome')}
-              {!displayName && <> {t('projectPanel.sharedWelcomeName')}</>}
-            </p>
-            <button
-              type="button"
-              onClick={dismissWelcome}
-              title={t('projectPanel.sharedWelcomeDismiss')}
-              aria-label={t('projectPanel.sharedWelcomeDismiss')}
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-            >
-              <X size={12} />
-            </button>
-          </div>
-        )}
         <div className="min-h-0 min-w-0 flex-1">
           <BoardTab
             data={data}
             onPersist={persistTracked}
+            // Presence (u15): the board collab binding (null when collab is OFF /
+            // not a member) — BoardTab's toolbar publishes + shows who else is here.
+            presence={collab}
             // Undo/redo (B013) — history lives HERE (the layer owning data +
             // persist); BoardTab only renders the toolbar affordance.
             undoState={{ canUndo, canRedo, onUndo: undo, onRedo: redo }}

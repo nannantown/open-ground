@@ -4,15 +4,14 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { app } from '../../app'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
-import { boardAssetsDir, sharedDataDir } from '@/lib/server/sharedData'
 import { projectDataDir } from '@/lib/server/projectDataPath'
 import { TASK_ASSETS_SUBDIR } from '@/lib/server/taskAssets'
 
 // Route-level contract for /api/project/task-asset (B022 — Board-card image
 // attachments): base64-JSON upload with a 5MB cap and an image-only mime
 // whitelist, content-hash ids (sha1.ext — the GET/DELETE traversal guard),
-// binary serving with the right content-type, and the shared-mode storage
-// switch (.openground/board/assets/ inside the repo, mirroring canvas assets).
+// binary serving with the right content-type. All bytes live centrally
+// (~/.openground/projects/<uuid>/task-assets/) — the repo stays untouched.
 
 const json = (body: unknown): RequestInit => ({
   method: 'POST',
@@ -71,21 +70,12 @@ describe('POST /api/project/task-asset — upload', () => {
     // and the repo stays free of OPEN GROUND files.
     const central = join(await projectDataDir(dir), TASK_ASSETS_SUBDIR)
     expect(await readdir(central)).toEqual([body.id])
-    await expect(stat(sharedDataDir(dir))).rejects.toThrow()
+    // The repo working tree stays free of OPEN GROUND files.
+    await expect(stat(join(dir, '.openground'))).rejects.toThrow()
     // Content-addressed: re-uploading the same bytes returns the SAME id.
     const again = (await (await upload(dir)).json()) as { id: string }
     expect(again.id).toBe(body.id)
     expect(await readdir(central)).toEqual([body.id])
-  })
-
-  it('git-shared project → bytes land in .openground/board/assets/ (synced via git)', async () => {
-    const dir = await makeRegisteredDir('shared')
-    await mkdir(sharedDataDir(dir), { recursive: true })
-    await writeFile(join(sharedDataDir(dir), 'openground.json'), '{"version":1}', 'utf8')
-    const res = await upload(dir)
-    expect(res.status).toBe(200)
-    const { id } = (await res.json()) as { id: string }
-    expect(await readdir(boardAssetsDir(dir))).toEqual([id])
   })
 
   it('rejects a non-image mime with 400', async () => {

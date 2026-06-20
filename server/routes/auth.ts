@@ -241,6 +241,16 @@ export const authRoutes = new Hono()
     return c.json<AuthSessionResponse>({ user: refreshed.user })
   })
 
+  // NOTE: the v1 realtime endpoints (GET /api/auth/realtime-token and
+  // /api/auth/realtime-config) were REMOVED in the Cloudflare-DO migration. The
+  // collab WebSocket no longer goes through Supabase Realtime, so the SPA no
+  // longer needs a browser-held Supabase JWT or a supabase-js client config —
+  // it authorizes the Worker connection with the short-lived HMAC ticket from
+  // GET /api/collab/ticket instead (server/routes/collab.ts + ./ticket.ts). The
+  // "tokens are never returned to the client" boundary is therefore restored:
+  // GET /api/auth/session is once again the ONLY auth payload, and it never
+  // carries a token.
+
   // --- POST /api/auth/signout -----------------------------------------------
   // Delete auth.json (best-effort) and ask Supabase to revoke the token (also
   // best-effort — a failed remote logout must not block local sign-out). Always

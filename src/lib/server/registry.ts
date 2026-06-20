@@ -232,6 +232,35 @@ export const updateProjectEntryPath = async (
   })
 }
 
+/** Set (or clear) a project's optional display name — the cosmetic project name
+ *  shown on the Ground card / project header in place of the folder basename. A
+ *  blank name DROPS the field (reverting to the folder name) rather than storing
+ *  "". Keyed by canonical PATH (the project is active, so its path resolves) so
+ *  it lines up with the route's validateProjectPath guard. The entry's id is
+ *  untouched, so canvas position + central data stay put. Returns the updated
+ *  entry, or null if the path isn't registered. */
+export const setProjectDisplayName = async (
+  path: string,
+  name: string,
+): Promise<ProjectEntry | null> => {
+  const canon = await canonicalize(path)
+  const clean = name.trim()
+  return withRegistryLock(async () => {
+    const projects = await canonProjects()
+    const entry = projects.find((e) => e.path === canon)
+    if (!entry) return null
+    let updated: ProjectEntry
+    if (clean) {
+      updated = { ...entry, displayName: clean }
+    } else {
+      const { displayName: _drop, ...rest } = entry
+      updated = rest
+    }
+    await setSettings({ projects: projects.map((e) => (e.id === entry.id ? updated : e)) })
+    return updated
+  })
+}
+
 // ─── Import safety ────────────────────────────────────────────────────────────
 // Importing registers an arbitrary path as a new security-boundary root, so
 // reject targets that would make far too much of the filesystem writable, or

@@ -111,19 +111,24 @@ export const postToken = async (
   }
 }
 
-// A still-valid access token for the signed-in app account, refreshing (and
-// persisting the rotated refresh token) when the stored one is expired or
-// about to be. Returns null when signed out, unconfigured, or the refresh
-// fails. Unlike GET /api/auth/session this NEVER clears the stored session on
-// failure — a transient network error during a background role check must not
-// sign the user out; the session route remains the place that decides that.
-export const getFreshAccessToken = async (): Promise<string | null> => {
+// A still-valid session (access token + its epoch-ms expiry) for the signed-in
+// app account, refreshing (and persisting the rotated refresh token) when the
+// stored one is expired or about to be. Returns null when signed out,
+// unconfigured, or the refresh fails. Unlike GET /api/auth/session this NEVER
+// clears the stored session on failure — a transient network error during a
+// background check must not sign the user out; the session route decides that.
+export const getFreshSession = async (): Promise<{
+  accessToken: string
+  expiresAt: number
+} | null> => {
   const config = readAuthConfig()
   if (!config) return null
   const stored = await readSession()
   if (!stored) return null
   // 60s skew so we refresh just before a request would fail.
-  if (stored.expiresAt - 60_000 > Date.now()) return stored.accessToken
+  if (stored.expiresAt - 60_000 > Date.now()) {
+    return { accessToken: stored.accessToken, expiresAt: stored.expiresAt }
+  }
   const token = await postToken(config, 'refresh_token', {
     refresh_token: stored.refreshToken,
   })
@@ -135,5 +140,26 @@ export const getFreshAccessToken = async (): Promise<string | null> => {
     refreshToken: token.refresh_token, // rotated — persist the new one.
   }
   await writeSession(refreshed)
-  return refreshed.accessToken
+  return { accessToken: refreshed.accessToken, expiresAt: refreshed.expiresAt }
+}
+
+// Back-compat helper: just the access token (used by the custom-tab role
+// resolver and any caller that doesn't need the expiry).
+export const getFreshAccessToken = async (): Promise<string | null> =>
+  (await getFreshSession())?.accessToken ?? null
+
+// Public Realtime config for the loopback SPA: the Supabase URL + a PUBLIC key
+// (the modern publishable key when SUPABASE_PUBLISHABLE_KEY is set, else the
+// anon key — both are public by design). null when unconfigured, so the collab
+// UI stays hidden on the credential-free build. NEVER a secret.
+export interface RealtimePublicConfig {
+  url: string
+  publishableKey: string
+}
+
+export const readRealtimeConfig = (): RealtimePublicConfig | null => {
+  const base = readAuthConfig()
+  if (!base) return null
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY?.trim() || base.anonKey
+  return { url: base.url, publishableKey }
 }

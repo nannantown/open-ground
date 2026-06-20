@@ -103,7 +103,6 @@ export const ProjectDataSchema = z.object({
         .enum(['low', 'medium', 'high', 'xhigh', 'max'])
         .optional()
         .catch(undefined),
-      autoSync: z.boolean().optional(),
     })
     .optional(),
   tasks: z.array(ProjectTaskSchema).default([]),

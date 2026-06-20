@@ -9,6 +9,7 @@ import {
   CircleUser,
   HelpCircle,
   Sparkles,
+  Users,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { useAuth } from '@/lib/auth/AuthContext'
@@ -30,6 +31,10 @@ interface Props {
    *  server-side); undefined hides the account control so the public build
    *  (no env) shows nothing. */
   onAccount?: () => void
+  /** Provided only when realtime collab is enabled; opens the "Shared with me"
+   *  dialog (join by code + open a folder-less shared project). Undefined hides
+   *  the entry so the default build shows nothing. */
+  onShared?: () => void
   projectCount: number
   /** Count of feedback submissions not yet seen (owner build only). >0 shows a
    *  small dot on the settings gear; the inbox lives inside Settings. */
@@ -51,6 +56,7 @@ export const Toolbar = ({
   onOpenSkills,
   onFeedback,
   onAccount,
+  onShared,
   projectCount,
   unreadFeedback = 0,
   usage,
@@ -123,6 +129,14 @@ export const Toolbar = ({
           <IconButton onClick={onOpenSkills} title={t('toolbar.skills')}>
             <Sparkles size={13} strokeWidth={1.75} />
           </IconButton>
+          {onShared && (
+            <>
+              <span className="h-4 w-px bg-line-soft" />
+              <IconButton onClick={onShared} title={t('toolbar.shared')}>
+                <Users size={13} strokeWidth={1.75} />
+              </IconButton>
+            </>
+          )}
           <span className="h-4 w-px bg-line-soft" />
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />

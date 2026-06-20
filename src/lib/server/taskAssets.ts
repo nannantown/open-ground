@@ -18,7 +18,6 @@ import { createHash } from 'crypto'
 import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { projectDataDir } from './projectDataPath'
-import { boardAssetsDir, isShared } from './sharedData'
 import { extForMime } from './canvasImages'
 
 /** Central asset-dir name under ~/.openground/projects/<uuid>/. */
@@ -47,12 +46,10 @@ export const isValidTaskAssetId = (id: string): boolean => {
   return /^[0-9a-f]{40}$/.test(id.slice(0, dot)) && Boolean(EXT_TO_MIME[id.slice(dot + 1)])
 }
 
-/** The live assets dir for this project's current mode (fresh marker check per
- *  call — same no-cache philosophy as canvasImages/sharedData). */
+/** The project's central task-assets dir
+ *  (~/.openground/projects/<uuid>/task-assets/). */
 export const taskAssetsDir = async (projectPath: string): Promise<string> =>
-  (await isShared(projectPath))
-    ? boardAssetsDir(projectPath)
-    : join(await projectDataDir(projectPath), TASK_ASSETS_SUBDIR)
+  join(await projectDataDir(projectPath), TASK_ASSETS_SUBDIR)
 
 /** Persist an uploaded image's bytes; returns the content-hash id. Throws on a
  *  mime outside the whitelist (the route pre-checks and 400s, so a throw here

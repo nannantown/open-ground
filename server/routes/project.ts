@@ -23,6 +23,7 @@ import {
   updateProjectEntryPath,
   removeProjectEntry,
   relocateProjectEntry,
+  setProjectDisplayName,
 } from '@/lib/server/registry'
 import { projectCentralDir } from '@/lib/server/paths'
 import {
@@ -654,6 +655,33 @@ export const projectRoutes = new Hono()
     return c.json({ error: result.rejection }, status)
   }
   return c.json({ ok: true, id: result.entry.id, path: result.entry.path })
+})
+  // ── /api/projects/display-name ────────────────────────────────────────────
+  // POST { path, displayName } → set the project's cosmetic NAME (shown on the
+  // Ground card / project header in place of the folder basename). A blank name
+  // clears it back to the folder name. This does NOT touch the folder on disk
+  // (cf. /api/project/rename) — displayName is display-only and never used as a
+  // path. The member-visible shared name (collab label) is synced client-side
+  // after this returns. Allowlist: validateProjectPath (registry-gated).
+  //   400 missing/invalid · 403 path not allowed · 404 not registered
+  .post('/api/projects/display-name', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    path?: string
+    displayName?: string
+  }
+  const path = typeof body.path === 'string' ? body.path : ''
+  const displayName = typeof body.displayName === 'string' ? body.displayName : ''
+  if (!path) return c.json({ error: 'path is required' }, 400)
+  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+  const clean = displayName.trim()
+  // Lenient vs validateName (folder names): a display label is never a path, so
+  // slashes/dots are fine — only bound length and reject control chars. Empty is
+  // valid (clears the override).
+  if (clean.length > 64) return c.json({ error: 'name is too long (max 64 chars)' }, 400)
+  if (/[\x00-\x1f]/.test(clean)) return c.json({ error: 'name contains invalid characters' }, 400)
+  const updated = await setProjectDisplayName(path, clean)
+  if (!updated) return c.json({ error: 'project not registered' }, 404)
+  return c.json({ ok: true, id: updated.id, name: updated.displayName ?? '' })
 })
   // ── /api/project/tasks ────────────────────────────────────────────────────
   // POST { path, add?, markDone? } → mutate task list

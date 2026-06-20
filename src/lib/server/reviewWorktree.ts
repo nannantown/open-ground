@@ -25,8 +25,8 @@ import { projectUUIDFromPath } from './projectDataPath'
 
 const execFile = promisify(execFileCb)
 
-// House convention (gitShare.ts): network git must never hang on a credential
-// prompt, and gets a hard timeout.
+// House convention (mergedBranches.ts): network git must never hang on a
+// credential prompt, and gets a hard timeout.
 const GIT_OPTS = {
   timeout: 30_000,
   env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },

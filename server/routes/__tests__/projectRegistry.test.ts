@@ -4,7 +4,10 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { app } from '../../app'
 import { getSettings, setSettings } from '@/lib/server/store'
-import { __resetMigrationCacheForTests } from '@/lib/server/registry'
+import {
+  __resetMigrationCacheForTests,
+  setProjectDisplayName,
+} from '@/lib/server/registry'
 
 // Exercises the registry routes (import / remove / new / delete boundary)
 // against the real Hono app, with OPENGROUND_HOME pointed at a throwaway dir
@@ -126,5 +129,77 @@ describe('POST /api/projects/remove', () => {
     expect((await stat(dir)).isDirectory()).toBe(true)
     // removing again → 404
     expect((await app.request('/api/projects/remove', json({ path: dir }))).status).toBe(404)
+  })
+})
+
+describe('POST /api/projects/display-name', () => {
+  // Helper: the card/header name GET /api/projects derives for a given path.
+  const nameOf = async (path: string): Promise<string | undefined> => {
+    const list = (await (await app.request('/api/projects')).json()).projects as {
+      path: string
+      name: string
+    }[]
+    return list.find((p) => p.path === path)?.name
+  }
+
+  it('sets a cosmetic name that shows in /api/projects, leaving the folder', async () => {
+    const dir = join(scratch, 'my-app')
+    await mkdir(dir)
+    await app.request('/api/projects/import', json({ path: dir }))
+    // Default name is the folder basename.
+    expect(await nameOf(dir)).toBe('my-app')
+
+    const res = await app.request(
+      '/api/projects/display-name',
+      json({ path: dir, displayName: 'Customer Portal' }),
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json()).name).toBe('Customer Portal')
+    // The card now shows the display name; the folder on disk is untouched.
+    expect(await nameOf(dir)).toBe('Customer Portal')
+    expect((await stat(dir)).isDirectory()).toBe(true)
+    expect((await getSettings()).projects?.[0]?.displayName).toBe('Customer Portal')
+  })
+
+  it('a blank name clears the override, reverting to the folder name', async () => {
+    const dir = join(scratch, 'reverts')
+    await mkdir(dir)
+    await app.request('/api/projects/import', json({ path: dir }))
+    await app.request('/api/projects/display-name', json({ path: dir, displayName: 'Renamed' }))
+    expect(await nameOf(dir)).toBe('Renamed')
+
+    const res = await app.request(
+      '/api/projects/display-name',
+      json({ path: dir, displayName: '   ' }),
+    )
+    expect(res.status).toBe(200)
+    expect(await nameOf(dir)).toBe('reverts')
+    // The field is dropped, not stored as "".
+    expect((await getSettings()).projects?.[0]).not.toHaveProperty('displayName')
+  })
+
+  it('rejects an over-long name (400) and an unregistered path (403)', async () => {
+    const dir = join(scratch, 'app')
+    await mkdir(dir)
+    await app.request('/api/projects/import', json({ path: dir }))
+
+    const tooLong = await app.request(
+      '/api/projects/display-name',
+      json({ path: dir, displayName: 'x'.repeat(65) }),
+    )
+    expect(tooLong.status).toBe(400)
+
+    // A path not under any registered project is rejected by validateProjectPath.
+    const outside = await app.request(
+      '/api/projects/display-name',
+      json({ path: join(scratch, 'not-registered'), displayName: 'Nope' }),
+    )
+    expect(outside.status).toBe(403)
+  })
+
+  it('setProjectDisplayName returns null for an unregistered path', async () => {
+    const dir = join(scratch, 'ghost')
+    await mkdir(dir)
+    expect(await setProjectDisplayName(dir, 'Whatever')).toBeNull()
   })
 })

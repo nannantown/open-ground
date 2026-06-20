@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Invite bounce page. A `openground://join?code=…` deep link opens the app
+         directly, but a raw custom-scheme URL isn't clickable everywhere (chat
+         apps, email). The human-facing share link points here with ?code=…; this
+         page hands the code to the app via the custom scheme (app installed) or
+         shows a download CTA (not installed).
+
+         SECURITY: the code IS the invite secret, so this page NEVER logs or
+         transmits the query string — it only reads it locally to build the
+         openground:// URL. No analytics, no network calls. -->
+    <title>Open in OPEN GROUND</title>
+    <meta name="robots" content="noindex" />
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #0f0f10;
+        color: #f4f4f5;
+      }
+      .card {
+        width: 100%;
+        max-width: 420px;
+        text-align: center;
+      }
+      h1 {
+        font-size: 19px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 6px;
+      }
+      .sub { margin: 0; color: #a1a1aa; font-size: 13px; }
+      .sub.ja { margin-top: 2px; }
+      .actions { margin-top: 22px; display: flex; flex-direction: column; gap: 10px; }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px 16px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        text-decoration: none;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+      }
+      .btn-primary { background: #f4f4f5; color: #0f0f10; }
+      .btn-primary:hover { background: #e4e4e7; }
+      .btn-primary:active { background: #d4d4d8; }
+      .btn-ghost { background: transparent; color: #d4d4d8; border-color: rgba(255, 255, 255, 0.16); }
+      .btn-ghost:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.28); color: #fff; }
+      .btn-ghost:active { background: rgba(255, 255, 255, 0.1); }
+      .btn:focus-visible { outline: 2px solid #6ea8fe; outline-offset: 2px; }
+      .err { color: #fca5a5; font-size: 13px; margin-top: 18px; }
+      .foot { margin-top: 26px; font-size: 11px; color: #71717a; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Opening OPEN GROUND…</h1>
+      <p class="sub">If nothing happens, use the buttons below.</p>
+      <p class="sub ja">アプリが開かない場合は下のボタンを使ってください。</p>
+
+      <div class="actions" id="actions" hidden>
+        <a class="btn btn-primary" id="open" href="#">Open OPEN GROUND</a>
+        <a class="btn btn-ghost" id="download" href="./">Don’t have the app? Download</a>
+      </div>
+
+      <p class="err" id="err" hidden>
+        This invite link is missing its code. Ask the project owner to share it again.
+      </p>
+
+      <p class="foot">Your invite code stays on this page — it is never logged or sent anywhere.</p>
+    </main>
+
+    <script>
+      ;(function () {
+        // Read the code locally. NEVER log location.search — it carries the secret.
+        var code = new URLSearchParams(window.location.search).get('code')
+        var actions = document.getElementById('actions')
+        var err = document.getElementById('err')
+
+        if (!code || !code.trim()) {
+          err.hidden = false
+          return
+        }
+        code = code.trim()
+        var appUrl = 'openground://join?code=' + encodeURIComponent(code)
+
+        // Wire the manual "Open" button to re-trigger the scheme.
+        var openBtn = document.getElementById('open')
+        openBtn.setAttribute('href', appUrl)
+        actions.hidden = false
+
+        // Auto-bounce once. A custom-scheme navigation either opens the app or is a
+        // no-op (not installed) — either way the buttons remain for a manual retry.
+        try {
+          window.location.href = appUrl
+        } catch (e) {
+          /* scheme not handled — the manual button + download CTA cover it */
+        }
+      })()
+    </script>
+  </body>
+</html>

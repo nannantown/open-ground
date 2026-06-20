@@ -26,7 +26,7 @@ import { sanitizeBranch } from './reviewWorktree'
 const execFile = promisify(execFileCb)
 
 /** Run git in the project dir; null on any failure (no git, not a repo, …). */
-// House convention (gitShare.ts): network git never hangs on a credential
+// House convention (branchChanges.ts): network git never hangs on a credential
 // prompt and gets a hard timeout.
 const GIT_OPTS = {
   timeout: 30_000,

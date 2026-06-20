@@ -20,6 +20,13 @@ export interface ProjectEntry {
   path: string
   addedAt: string
   description?: string
+  /** Optional owner-chosen project name, shown on the Ground card and the
+   *  project header in place of the folder's basename. Empty/unset → fall back
+   *  to the folder name (the default). Purely cosmetic: it is NEVER used as a
+   *  path (the path is always {@link path}), so it may contain spaces/dots/etc.
+   *  When the project is shared via realtime collab, renaming it syncs to the
+   *  member-visible shared name (og_projects.label). */
+  displayName?: string
 }
 
 export interface Settings {
@@ -34,6 +41,10 @@ export interface Settings {
    *  model has run. Idempotency keys off THIS (not `projects.length`), so a user
    *  who later removes every project is never re-scanned from the old root. */
   projectsMigratedAt?: string
+  /** Sentinel: set once the one-shot "Share via Git" evacuation has run —
+   *  legacy in-repo `.openground/` data is copied back to the central store, so
+   *  the (now-removed) feature never reads the repo again. */
+  shareEvacuatedAt?: string
   /** @deprecated Legacy single-root model. Kept only so back-compat parse +
    *  the one-shot migration scan can still read it. No longer auto-scanned. */
   projectsRoot: string | null
@@ -461,6 +472,20 @@ export interface CanvasElement {
    *  `<project>/.openground/canvases/<canvasId>-assets/<assetId>.<ext>`.
    *  Resolved at render time by `<img src="/api/canvas/asset?...">`. */
   assetId?: string
+  /** Image-only (collab, u14b). Object key for the image bytes in shared object
+   *  storage — **Cloudflare R2** on the owner's CF account (migration 0005
+   *  dropped the v1 Supabase Storage bucket — R2 is egress-free). Key shape
+   *  `<projectUuid>/<canvasId>/<assetId>`. The owner's ProjectCanvas sweep
+   *  uploads the local `assetId` bytes and writes this onto the element; the
+   *  Y.Doc carries THIS reference, never the bytes. ImageView prefers the local
+   *  `assetId` file (owner, fast) and uses this only for folder-less members, so
+   *  collab-OFF / git-shared installs render unchanged. Members with no
+   *  storageKey yet see the "not synced" placeholder (u14a).
+   *  INVARIANT: clear `storageKey` whenever `assetId` changes — a new asset means
+   *  a new upload, or members would fetch stale bytes at the old key. (Today the
+   *  only image-insert path creates a fresh element, so this holds; preserve it
+   *  if you ever add a replace-in-place edit.) */
+  storageKey?: string
   /** Image-only: original filename — used for tooltip / download label. */
   filename?: string
   /** Image-only: accessibility alt text (also fed back to Claude as context
@@ -802,10 +827,6 @@ export interface ProjectLaunchPrefs {
   model?: string
   /** Effort level passed to `claude --effort` (empty = CLI default). */
   effort?: ClaudeEffort
-  /** Auto-sync the shared Board/Canvas data in the background (adaptive
-   *  fetch + debounced push). Default ON for shared projects; personal —
-   *  one teammate opting out never affects the others. */
-  autoSync?: boolean
 }
 
 export interface ProjectData {
@@ -844,6 +865,12 @@ export interface ProjectData {
   launch?: ProjectLaunchPrefs
   notes: string
   updatedAt: string
+  /** SHARED canvas index for realtime collab — the list of canvases a folder-less
+   *  member can discover + open (published into the board collab doc by the
+   *  owner's Canvas tab; read by the member's SharedProjectPanel). NOT a local
+   *  source of truth — canvases-index.json remains authoritative on the owner's
+   *  disk; this is the cross-user mirror. Absent for non-collab/local use. */
+  canvasIndex?: { id: string; name: string }[]
 }
 
 /** Response of POST /api/project/describe — the auto-generated, NOT-yet-saved
@@ -855,156 +882,6 @@ export interface DescribeProjectResponse {
   description: string
   descriptionJa?: string
   descriptionEn?: string
-}
-
-/** Optional body extension of POST /api/project/share/enable: seeds the
- *  shared policy (a subset of {@link ProjectConfig}) before the migration
- *  carries it into the marker — the ShareStartDialog sends the user-confirmed
- *  workflow + members with the enable itself. Server-validated: exactly these
- *  keys, 400 on anything else. Omitted body.config = legacy behaviour. */
-export interface ShareEnableConfig {
-  completionFlow?: 'merge' | 'pr'
-  /** Empty string = explicitly clear any saved target branch (the route
-   *  drops the key from the merged config); absent = leave it untouched. */
-  targetBranch?: string
-  members?: string[]
-}
-
-/** GET /api/project/share/status — where a project's Board/Canvas data lives
- *  and whether the repo copy has unsynced local changes. See
- *  docs/SHARED_DATA_PLAN.md. */
-export interface ShareStatus {
-  /** `.openground/openground.json` marker present → data lives in the repo. */
-  shared: boolean
-  /** The project folder is inside a git work tree (precondition for enable). */
-  gitRepo: boolean
-  /** `git remote get-url origin`, or null when no remote is configured. */
-  remoteUrl: string | null
-  /** `git status --porcelain -- .openground/` is non-empty (always false when
-   *  not shared). Drives the dot on the Sync button. */
-  dirty: boolean
-  /** Commits touching .openground/ that exist locally but not upstream
-   *  (unpushed syncs). 0 when not shared / no upstream. */
-  ahead: number
-  /** Commits touching .openground/ that exist upstream but not locally —
-   *  a teammate pushed; Sync will pull them. Backed by a throttled
-   *  `git fetch` inside the status call. 0 when not shared / no upstream. */
-  behind: number
-  /** An upstream tracking branch is configured for the checked-out branch.
-   *  False until the first successful publish (`push -u`): without it the
-   *  ahead/behind counts degrade to 0, so "published" decisions must check
-   *  this flag, never just `ahead === 0`. */
-  upstream: boolean
-  /** The last fetch saw the upstream rewritten ("(forced update)") — someone
-   *  force-pushed. Present only when true; cleared by the next clean fetch. */
-  forcedUpdate?: boolean
-  /** Checked-out branch name (shared data follows the branch — S27). Absent
-   *  when not a git repo or on a detached HEAD. */
-  branch?: string
-  /** Auto-sync engine snapshot (present when the project is shared). The
-   *  status route composes it from shareAutoSync — gitShare stays pure. */
-  auto?: ShareAutoStatus
-}
-
-/** Live state of the per-project auto-sync engine ("Notion-feel on git
- *  bones"): adaptive background fetch, apply-on-behind, debounced push of
- *  shared-data edits — with code as sacred ground (any non-.openground
- *  commit ahead suspends ALL automatic git operations).
- *  - 'live'         idle and in sync; background fetch is watching
- *  - 'syncing'      a sync round is running right now
- *  - 'paused-code'  the user's own code commits are ahead — nothing moves
- *                   automatically until THEY push (manual Sync still works)
- *  - 'conflict'     the last auto sync hit a shared-data conflict; waiting
- *                   for the user to resolve (dialog via the Sync button)
- *  - 'offline'      the remote is unreachable; retrying on the backoff
- *  - 'blocked'      repo busy (user's rebase/merge/detached HEAD)
- *  - 'error'        a loud failure (e.g. autostash restore conflict)
- *  - 'disabled'     the personal autoSync pref is off */
-export interface ShareAutoStatus {
-  enabled: boolean
-  mode:
-    | 'live'
-    | 'syncing'
-    | 'paused-code'
-    | 'conflict'
-    | 'offline'
-    | 'blocked'
-    | 'error'
-    | 'disabled'
-  /** Last successful auto/manual sync (ms epoch), null before the first. */
-  lastSyncAt: number | null
-  /** A shared-data edit is waiting for the debounced auto push. */
-  pendingPush: boolean
-  /** Current adaptive fetch interval (ms) — surfaced for transparency/tests. */
-  intervalMs: number
-  /** Human detail for error-ish modes (raw English; UI maps known shapes). */
-  message?: string
-}
-
-/** POST /api/project/share/sync — commit (scoped to .openground/ only) →
- *  pull --rebase --autostash → push. Never touches paths outside
- *  .openground/ and never disturbs the user's staged code changes. */
-/** One conflicted file in a Sync rebase, described for the resolution dialog.
- *  Sides are named from the USER's point of view: `mine` = the local commit
- *  being replayed, `theirs` = the teammate's upstream version. (Inside a git
- *  rebase the index stages are inverted — stage 2 "ours" is upstream — the
- *  engine owns that mapping; this type never exposes it.) */
-export interface ShareConflict {
-  /** Repo-relative path (always under .openground/). */
-  file: string
-  /** Display label: `card "Title"` / `notes` / .openground-relative path. */
-  label: string
-  /** What kind of shared file this is — drives the dialog's wording. */
-  kind: 'card' | 'notes' | 'other'
-  mine: { exists: boolean; title?: string }
-  theirs: { exists: boolean; title?: string }
-}
-
-export interface ShareSyncResult {
-  ok: boolean
-  /** A commit was created (there were local .openground/ changes). */
-  committed: boolean
-  pulled: boolean
-  pushed: boolean
-  /** The pull hit a rebase conflict; the rebase was aborted and the user
-   *  should pull/resolve manually. */
-  conflict?: boolean
-  /** Human-readable labels of WHAT conflicted (collected before the abort):
-   *  `card "Title"` for board cards, `notes`, else the .openground-relative
-   *  path. Capped — the point is orientation, not a full listing (S15–S20). */
-  conflictFiles?: string[]
-  /** Structured conflict descriptions feeding the in-app resolution dialog
-   *  ("keep mine" / "take theirs" per file). `mine` = the local version,
-   *  `theirs` = the teammate's (upstream) version; `exists:false` marks the
-   *  delete side of a delete/modify conflict. Titles are extracted from the
-   *  card JSON on each side when parseable. Uncapped but bounded by how many
-   *  files one rebase step can conflict. */
-  conflicts?: ShareConflict[]
-  /** Machine-readable cause for ok:false / degraded outcomes — the client
-   *  maps these to localized, actionable notices (the `message` is the raw
-   *  English fallback).
-   *  - 'rebase-in-progress' / 'merge-in-progress': the repo was already mid
-   *    rebase/merge when Sync was pressed; nothing was touched (S29).
-   *  - 'detached-head': not on a branch; a sync commit would float (S26).
-   *  - 'autostash-conflict': the pull succeeded but restoring the user's
-   *    uncommitted CODE changes conflicted — they are also kept in the stash;
-   *    loud, persistent warning instead of a silent "Synced" (S22). */
-  reason?:
-    | 'rebase-in-progress'
-    | 'merge-in-progress'
-    | 'detached-head'
-    | 'autostash-conflict'
-    | 'no-identity'
-  /** The remote could not be reached (DNS / connection / timeout) — the
-   *  commit is safely local; the next sync retries (S23). */
-  offline?: boolean
-  /** No git remote is configured — committed locally only (S3). */
-  noRemote?: boolean
-  /** The pull observed a rewritten upstream ("forced update") — the board
-   *  after this sync deserves a review (S25). */
-  forcedUpdate?: boolean
-  /** Human-readable detail for toasts (push skipped, auth failure, …). */
-  message?: string
 }
 
 /** Which Claude Code permission mode a spawned `claude` uses.
@@ -1137,6 +1014,246 @@ export interface FeedbackItem {
  *  when signed out (or the env is unconfigured); tokens are never returned. */
 export interface AuthSessionResponse {
   user: AuthUser | null
+}
+
+// ─── Realtime collab (CRDT over a Cloudflare Durable Object) ─────────────────
+// Optional, feature-flagged layer (server env OPENGROUND_REALTIME). When OFF,
+// every endpoint below reports {enabled:false} and the SPA never loads the
+// y-partyserver / yjs bundle, so the single-user fetch/POST path is unchanged.
+// The claude PTY is NEVER part of this — only Board ProjectData.tasks/notes and
+// Canvas CanvasFile.elements document state sync.
+//
+// collabProjectId = og_projects.id (owner-managed; migration 0005), NOT the
+// git-share marker. Transport = a Cloudflare Durable Object room keyed
+// `<collabProjectId>:<scope>` (y-partyserver), authorized by a short-lived HMAC
+// ticket; Supabase only stores membership. See docs/COLLAB_CF_DO_PLAN.md.
+
+/** Which document a Y.Doc represents: the board, or one specific canvas. The
+ *  Durable-Object room is `<collabProjectId>:<DocScope>`. */
+export type DocScope = 'board' | `canvas:${string}`
+
+/** Where a collab room comes from. OWNER flow: a local project `path` (resolved
+ *  + membership-seeded server-side). MEMBER flow: a cross-user `collabProjectId`
+ *  for a project the caller was invited to but has NO local folder for — the
+ *  server gates it on membership, no path required. */
+export type CollabSource = { path: string } | { collabProjectId: string }
+
+/** A remote collaborator currently present in a room (via the DO awareness
+ *  channel, u15). `clientId` is the Yjs awareness client id (stable per live
+ *  connection); name/color are the peer's self-reported identity. */
+export interface PresencePeer {
+  clientId: number
+  name: string
+  color: string
+}
+
+/** GET /api/collab/config — the client gate. `enabled` is true only when the
+ *  server has OPENGROUND_REALTIME set AND Supabase is configured AND a session
+ *  exists. Mirrors the auth/feedback graceful-degrade contract. */
+export interface CollabConfigResponse {
+  enabled: boolean
+}
+
+/** GET /api/collab/project — per-project resolution: the cross-user collab id
+ *  (collabProjectId = og_projects.id, owner-managed; resolved-or-created for the
+ *  signed-in OWNER from the canonical local path) + whether the caller is a
+ *  member. `collabProjectId` is null when signed out / unconfigured / the resolve
+ *  fails. An optional `collabProjectId` query param lets a MEMBER (who has no
+ *  local folder) resolve membership by id instead of by path. */
+export interface CollabProjectResponse {
+  collabProjectId: string | null
+  member: boolean
+  /** The owner-set, member-visible SHARED NAME (og_projects.label), if any. NOT
+   *  the local path (that stays private as an opaque hash). Used to pre-fill the
+   *  owner's invite dialog and to label a member's shared project. */
+  label?: string
+}
+
+/** One project the signed-in user can READ (owner OR member), as returned by
+ *  GET /api/collab/projects — the "shared with me" feed. */
+export interface CollabProjectListItem {
+  /** collabProjectId (og_projects.id) — the room key + the data-dir key for a
+   *  folder-less shared project. */
+  id: string
+  /** Owner-set, member-visible SHARED NAME — what the shared card shows. The
+   *  owner's opaque path-hash is never sent to the client. */
+  label?: string
+  /** True when the caller OWNS this project (owner_id == their uid). The Ground
+   *  shows only `owned:false` rows as SHARED cards — owned projects already
+   *  appear as local cards via the registry. */
+  owned: boolean
+}
+
+/** GET /api/collab/projects — every project the caller can read (owner OR
+ *  member). Member-flow groundwork: lets a future "shared with me" UI enumerate
+ *  collabProjectIds an invited member can open even without a local folder. */
+export interface CollabProjectsListResponse {
+  projects: CollabProjectListItem[]
+}
+
+/** GET /api/collab/ticket?path=&scope= — the short-lived, signed credential the
+ *  client hands the Cloudflare Durable-Object Worker to open a collab WebSocket.
+ *  ZERO-CONFIG: the loopback Hono no longer mints it — the Hono RELAYS the
+ *  signed-in user's server-held Supabase access token to the operator Worker
+ *  (server-to-server, never to the browser), and the Worker verifies membership
+ *  and mints the ticket (the HMAC secret lives only on the Worker). The Worker's
+ *  WS/asset gates then recompute the HMAC, check `expiresAt`, and check the
+ *  embedded pid+scope match the requested room. Replaces the old supabase-js
+ *  realtime config/token pair (the WS no longer goes through Supabase Realtime).
+ *  - `wsUrl`     — the Worker's WS endpoint (env OPENGROUND_COLLAB_WS_URL); a
+ *    full `wss://host[:port]` URL or a bare `host:port`.
+ *  - `room`      — `<collabProjectId>:<scope>` (scope = 'board' | 'canvas:<id>').
+ *  - `token`     — `base64url(JSON) + "." + base64url(HMAC_SHA256)` ticket.
+ *  - `expiresAt` — epoch ms the ticket stops verifying (~60s TTL); partysocket
+ *    re-runs the params callback on every reconnect so a fresh ticket is minted
+ *    automatically (no manual refresh timer). */
+export interface CollabTicketResponse {
+  wsUrl: string
+  room: string
+  token: string
+  expiresAt: number
+}
+
+/** A row of og_project_members — who may join a project's collab channel. The
+ *  RLS allowlist; resolved server-side with the caller's own JWT. */
+export interface ProjectMember {
+  projectId: string
+  userId?: string
+  email?: string
+  role: 'owner' | 'member'
+}
+
+/** GET /api/collab/members?path= — the project's full roster for the owner's
+ *  "Collaborators" UI (read under the caller's JWT; RLS lets any member read it). */
+export interface CollabMembersResponse {
+  members: ProjectMember[]
+}
+
+/** A link invite's PERMISSION MODE (docs/COLLAB_ZEROCONFIG_PLAN.md §3.1):
+ *  - `open`     — anyone signed-in who opens the link joins immediately (default).
+ *  - `approval` — opening the link files a PENDING request the owner must approve;
+ *    nobody gains access until approved. */
+export type CollabInviteMode = 'open' | 'approval'
+
+/** POST /api/collab/invite-link {path, mode?, maxUses?, memberCap?} — the owner
+ *  mints a secret, time-limited invite CODE (a row in og_project_invites, 7-day
+ *  expiry; migration 0007/0010). Any LOGGED-IN user who later presents the code
+ *  self-joins (open) or requests to join (approval) as a member. The code IS the
+ *  secret — only the project owner can mint/read it (owner-JWT RLS write).
+ *  - `ok`        — false when the caller is not the owner / unconfigured / signed
+ *    out / the insert failed (the client shows "try again").
+ *  - `code`      — the opaque invite secret to share. Carried in an
+ *    `openground://join?code=…` deep link (Track C) or pasted into "Shared with me".
+ *  - `id`        — the og_project_invites row id, so the UI can revoke THIS link.
+ *  - `mode`      — the permission mode the owner chose for this link.
+ *  - `maxUses`   — redemption cap for this link (null/absent = unlimited).
+ *  - `expiresAt` — epoch ms the code stops working (~7 days), read back from the
+ *    row so the UI can show "expires in N days". */
+export interface CollabInviteLinkResponse {
+  ok: boolean
+  code?: string
+  id?: string
+  mode?: CollabInviteMode
+  maxUses?: number | null
+  expiresAt?: number
+}
+
+/** One row of og_project_invites as the OWNER's roster lists it (the raw token is
+ *  NEVER returned — only metadata + the id needed to revoke it). */
+export interface CollabInviteLinkItem {
+  id: string
+  mode: CollabInviteMode
+  /** Redemption cap (null = unlimited). */
+  maxUses: number | null
+  /** Redemptions so far (members joined for `open`, requests filed for `approval`). */
+  useCount: number
+  /** Epoch ms the link expires (absent if the row had no/invalid expiry). */
+  expiresAt?: number
+  /** Epoch ms the link was created (for ordering / "newest" identification). */
+  createdAt?: number
+}
+
+/** GET /api/collab/invite-links?path= — the owner's live links + the project-level
+ *  collaborator cap, for the manage-links roster. */
+export interface CollabInviteLinksResponse {
+  links: CollabInviteLinkItem[]
+  /** og_projects.member_cap — max collaborators (null = unlimited). */
+  memberCap: number | null
+}
+
+/** POST /api/collab/join {code} — a logged-in user redeems an invite code to
+ *  join a shared project as a MEMBER (self-join via the join_with_invite SECURITY
+ *  DEFINER RPC, migration 0007 — it inserts ONLY the caller, identified by their
+ *  JWT uid/email). Login-required: a signed-out call enrolls no one. Returns the
+ *  joined collabProjectId so the client can open the shared room immediately
+ *  (the invitee has no local folder for it — this is the member-flow entry point).
+ *  - `ok`              — false for an invalid/expired code, signed out, or
+ *    unconfigured.
+ *  - `collabProjectId` — the project just joined OR requested (present when ok).
+ *  - `status`          — `joined` (open mode: now a member, open the room) or
+ *    `pending` (approval mode: a request was filed, awaiting the owner). Absent on
+ *    legacy/ambiguous responses → the client treats it as `joined`.
+ *  - `error`           — a short, user-safe reason when not ok. */
+export interface CollabJoinResponse {
+  ok: boolean
+  collabProjectId?: string
+  status?: 'joined' | 'pending'
+  error?: string
+}
+
+/** One pending entry in a project's approval queue, as the owner sees it
+ *  (GET /api/collab/join-requests). The token/invite id stay server-side; the
+ *  owner approves/denies by request id. */
+export interface CollabJoinRequestItem {
+  id: string
+  /** The requester's email (lowercased identity, same as the roster). */
+  email: string
+  /** Epoch ms the request was filed (absent if the row had no/invalid timestamp). */
+  createdAt?: number
+}
+
+/** GET /api/collab/join-requests?path= — the owner's pending approval queue. */
+export interface CollabJoinRequestsResponse {
+  requests: CollabJoinRequestItem[]
+}
+
+/** POST /api/collab/label {path, label} — the owner sets the member-visible
+ *  SHARED NAME for a project (og_projects.label, owner-JWT RLS write). `ok` is
+ *  false when not the owner / unconfigured / signed out / the update failed.
+ *  `label` echoes the saved (trimmed) value; absent when cleared. */
+export interface CollabLabelResponse {
+  ok: boolean
+  label?: string
+}
+
+/** GET /api/collab/shared-data?collabProjectId= — the member's LOCAL board cache
+ *  for a FOLDER-LESS shared project (option A: ~/.openground/shared/<id>/). The
+ *  authoritative source is the Y.Doc; this cache just makes the panel open
+ *  instantly / offline. `data` is null when nothing is cached yet. Membership-
+ *  gated. POST /api/collab/shared-data {collabProjectId, data} mirrors the
+ *  doc-derived board back ({ ok }). */
+export interface CollabSharedDataResponse {
+  data: ProjectData | null
+}
+
+/** GET /api/collab/shared-canvas?collabProjectId=&canvasId= — a member's LOCAL
+ *  cache of ONE shared canvas (cv4; ~/.openground/shared/<id>/canvas/<cid>.json).
+ *  Like the board cache: the Y.Doc is authoritative, this just opens the canvas
+ *  instantly/offline. Membership-gated. POST {collabProjectId, canvasId, data}
+ *  mirrors the doc-derived canvas back ({ ok }). */
+export interface CollabSharedCanvasResponse {
+  data: CanvasFile | null
+}
+
+/** POST /api/collab/asset?path=&canvasId=&assetId= — the OWNER uploads a local
+ *  canvas image's bytes to shared object storage (R2, via the Worker) and gets
+ *  back the object key to write into the element's `storageKey` (u14b). The
+ *  matching GET (?collabProjectId=&canvasId=&assetId=) streams the bytes back to
+ *  a folder-less member. */
+export interface CollabAssetUploadResponse {
+  ok: boolean
+  /** `<collabProjectId>/<canvasId>/<assetId>` — store on CanvasElement.storageKey. */
+  storageKey: string
 }
 
 // ─── Custom modules (user-built tabs) ────────────────────────────────────────

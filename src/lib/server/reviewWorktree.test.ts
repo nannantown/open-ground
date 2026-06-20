@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { sanitizeBranch, reviewWorktreeName } from './reviewWorktree'
 
 // ensureReviewWorktree needs a REGISTERED project (projectUUIDFromPath throws
-// otherwise), which the gitShare-style harness covers elsewhere; here we pin
+// otherwise), which the git-fixture harness covers elsewhere; here we pin
 // the pure parts — the argv-safety gate and the deterministic dir naming.
 
 describe('sanitizeBranch', () => {

@@ -27,6 +27,9 @@ export const canvasElements = {
     'canvasEl.frame.tidyTooltip': 'Tidy the cards inside this frame',
     // ImageView
     'canvasEl.image.notFound': 'Image not found',
+    // Folder-less collab member: the image bytes live only on the owner's
+    // device (the shared doc carries the reference, not the binary).
+    'canvasEl.image.unavailable': 'Image not synced',
     // CommentPin
     'canvasEl.comment.placeholder': 'Comment on this element — ⌘↵ to Run',
     // InfiniteCanvas context menu
@@ -62,6 +65,7 @@ export const canvasElements = {
     'canvasEl.frame.tidyTooltip': 'フレーム内のカードを整理',
     // ImageView
     'canvasEl.image.notFound': '画像が見つかりません',
+    'canvasEl.image.unavailable': '画像は同期されていません',
     // CommentPin
     'canvasEl.comment.placeholder': 'この要素についてのコメント — ⌘↵ で Run',
     // InfiniteCanvas context menu

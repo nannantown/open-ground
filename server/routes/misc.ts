@@ -25,6 +25,7 @@ import {
   addImportedProjectEntry,
   removeProjectEntry,
 } from '@/lib/server/registry'
+import { ensureShareEvacuated, evacuateImportedProject } from '@/lib/server/shareEvac'
 import { collectClaudeUsage } from '@/lib/server/claudeUsage'
 import { fetchClaudeUsageCli, invalidateUsageCache } from '@/lib/server/claudeUsageCli'
 import { claudeConnection } from '@/lib/server/claudeConnection'
@@ -124,6 +125,9 @@ export const miscRoutes = new Hono()
     // Runs the one-shot legacy migration (existing users' projectsRoot →
     // registry, with canvas positions re-keyed) before listing. Idempotent.
     await ensureProjectsMigrated()
+    // Carry any legacy in-repo "Share via Git" data (.openground/) back to the
+    // central store once — the Share feature is gone. Idempotent (sentinel).
+    await ensureShareEvacuated()
     const settings = await getSettings()
     const canvas = await getCanvas()
     const projects = await scanProjects(settings)
@@ -226,6 +230,11 @@ export const miscRoutes = new Hono()
       return c.json({ error: 'Pick a specific project folder, not your whole drive or home folder.' }, 400)
     }
     const entry = result.entry
+    // A shared-clone (.openground/openground.json) imported AFTER the one-shot
+    // global evac sentinel was stamped is never caught by the boot-time sweep —
+    // rescue its inert Board/Canvas data into the central store now. No-op for a
+    // normal folder (no marker); the fresh UUID means there is nothing to clobber.
+    await evacuateImportedProject(entry)
     return c.json({ path: entry.path, name: entry.path.split('/').pop() ?? entry.path, id: entry.id })
   })
   // --- POST /api/projects/remove --------------------------------------------

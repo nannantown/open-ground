@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import type { CanvasElement } from '@/lib/types'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { useT } from '@/i18n/I18nContext'
@@ -15,6 +16,21 @@ interface Props {
 // width / height once the onload handler fires.
 const DEFAULT_W = 320
 const DEFAULT_H = 240
+
+// Build the same-origin loopback URL for a shared (R2) asset from its storageKey
+// `<pid>/<canvasId>/<assetId>` (u14b). Returns null for a malformed key. The
+// proxy re-authorizes membership of <pid> server-side, so deriving the id here is
+// safe; ImageView imports NO transport, preserving the OFF-bundle guarantee.
+const collabAssetUrl = (storageKey: string): string | null => {
+  const parts = storageKey.split('/')
+  if (parts.length !== 3) return null
+  const [pid, cid, aid] = parts
+  if (!pid || !cid || !aid) return null
+  return (
+    `/api/collab/asset?collabProjectId=${encodeURIComponent(pid)}` +
+    `&canvasId=${encodeURIComponent(cid)}&assetId=${encodeURIComponent(aid)}`
+  )
+}
 
 // One image element on the Canvas. Resolves via the per-canvas asset API
 // (no asset bytes in the canvas JSON itself). Resize is handled by the
@@ -34,24 +50,48 @@ export const ImageView = ({
   const ring = selected
     ? 'ring-2 ring-accent ring-offset-1 ring-offset-bg'
     : ''
-  if (!element.assetId) {
-    return (
-      <div
-        onPointerDown={onPointerDown}
-        style={{ width: w, height: h, opacity }}
-        className={[
-          'flex items-center justify-center overflow-hidden rounded-[4px] border border-dashed border-line bg-bg-inset text-[11px] text-ink-faint cursor-grab active:cursor-grabbing',
-          ring,
-        ].join(' ')}
-      >
-        {t('canvasEl.image.notFound')}
-      </div>
-    )
+  // Track a failed asset load so we swap the (browser-default) broken-image
+  // glyph for a styled placeholder. Reset whenever the source identity changes.
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [element.assetId, element.storageKey, projectPath])
+
+  // The dashed placeholder box, shared by every "no image to show" branch.
+  const placeholder = (label: string) => (
+    <div
+      onPointerDown={onPointerDown}
+      style={{ width: w, height: h, opacity }}
+      className={[
+        'flex items-center justify-center overflow-hidden rounded-[4px] border border-dashed border-line bg-bg-inset text-[11px] text-ink-faint cursor-grab active:cursor-grabbing',
+        ring,
+      ].join(' ')}
+    >
+      {label}
+    </div>
+  )
+
+  // Resolve which URL backs this image (u14a + u14b):
+  //  • OWNER (real projectPath): prefer the fast local file; fall back to the
+  //    shared (R2) copy only if there's no local assetId.
+  //  • MEMBER (folder-less, empty projectPath): only the shared copy can render
+  //    — use it when the owner has uploaded it (storageKey present), else show
+  //    the neutral "not synced" placeholder (u14a) instead of a doomed request.
+  if (!element.assetId && !element.storageKey) return placeholder(t('canvasEl.image.notFound'))
+  let src: string | null = null
+  if (projectPath) {
+    src = element.assetId
+      ? `/api/canvas/asset?path=${encodeURIComponent(projectPath)}` +
+        `&canvasId=${encodeURIComponent(canvasId)}` +
+        `&assetId=${encodeURIComponent(element.assetId)}`
+      : element.storageKey
+        ? collabAssetUrl(element.storageKey)
+        : null
+  } else if (element.storageKey) {
+    src = collabAssetUrl(element.storageKey)
+  } else {
+    return placeholder(t('canvasEl.image.unavailable'))
   }
-  const src =
-    `/api/canvas/asset?path=${encodeURIComponent(projectPath)}` +
-    `&canvasId=${encodeURIComponent(canvasId)}` +
-    `&assetId=${encodeURIComponent(element.assetId)}`
+  if (!src) return placeholder(t('canvasEl.image.notFound'))
+  if (failed) return placeholder(t('canvasEl.image.notFound'))
   return (
     <div
       onPointerDown={onPointerDown}
@@ -66,6 +106,7 @@ export const ImageView = ({
         src={src}
         alt={element.alt ?? element.filename ?? ''}
         draggable={false}
+        onError={() => setFailed(true)}
         style={{
           width: '100%',
           height: '100%',

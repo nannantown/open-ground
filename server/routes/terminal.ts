@@ -23,7 +23,6 @@ import { centralWorktreesDir, customModuleDir } from '@/lib/server/paths'
 import { getCustomTabRole } from '@/lib/server/roles'
 import { getModule } from '@/lib/server/customModules'
 import { projectDataDir, projectUUIDFromPath } from '@/lib/server/projectDataPath'
-import { isShared } from '@/lib/server/sharedData'
 import { Hono } from 'hono'
 import { readProjectData, validateProjectPath } from '@/lib/server/projectData'
 import {
@@ -177,12 +176,11 @@ export const terminalRoutes = new Hono()
         await mkdir(worktreesDir, { recursive: true })
         dirs.push(worktreesDir)
       }
-      // Card attachments: in normal (central) mode the bytes live OUTSIDE the
-      // repo (~/.openground/projects/<uuid>/task-assets/), so a session whose
-      // cwd is the repo trips a path prompt on every attachment Read —
-      // pre-authorize that dir too (git or not). In git-shared mode the assets
-      // sit inside the repo (.openground/board/assets/), already covered by cwd.
-      if (!(await isShared(cwd))) {
+      // Card attachments: the bytes live OUTSIDE the repo
+      // (~/.openground/projects/<uuid>/task-assets/), so a session whose cwd is
+      // the repo trips a path prompt on every attachment Read — pre-authorize
+      // that dir too (git or not).
+      {
         const assetsDir = join(await projectDataDir(cwd), TASK_ASSETS_SUBDIR)
         await mkdir(assetsDir, { recursive: true })
         dirs.push(assetsDir)

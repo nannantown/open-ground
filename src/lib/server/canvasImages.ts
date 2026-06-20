@@ -2,13 +2,10 @@ import { mkdir, readFile, writeFile, readdir, unlink, stat, rm } from 'fs/promis
 import { join } from 'path'
 import type { CanvasFile } from '../types'
 import { projectDataDir } from './projectDataPath'
-import { canvasAssetsDir as sharedCanvasAssetsDir, isShared } from './sharedData'
 
 const CANVASES_SUBDIR = 'canvases'
 
-/** Central asset-dir suffix (canvases/<canvasId>-assets). Exported for the
- *  canvas share migration (canvasData.ts), which must address the central
- *  layout explicitly regardless of the project's current mode. */
+/** Central asset-dir suffix (canvases/<canvasId>-assets). */
 export const CANVAS_ASSETS_SUFFIX = '-assets'
 
 // mime <-> extension whitelist. Pasted/uploaded images are effectively always
@@ -45,20 +42,13 @@ export const isValidAssetId = (id: string) =>
 export const isValidCanvasId = (id: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 
-/** Central (non-shared) asset dir:
- *  ~/.openground/projects/<uuid>/canvases/<canvasId>-assets. Exported for the
- *  share migration alongside CANVAS_ASSETS_SUFFIX. */
+/** Central asset dir: ~/.openground/projects/<uuid>/canvases/<canvasId>-assets. */
 export const centralCanvasAssetsDir = async (projectPath: string, canvasId: string) =>
   join(await projectDataDir(projectPath), CANVASES_SUBDIR, `${canvasId}${CANVAS_ASSETS_SUFFIX}`)
 
-// In git-shared mode (.openground marker — see sharedData.ts) assets live in
-// the repo (.openground/canvas/assets/<canvasId>/) so collaborators get the
-// images through normal git. The asset-id/URL/route contracts are unchanged in
-// both modes — only the disk location branches here.
-const assetsDir = async (projectPath: string, canvasId: string) =>
-  (await isShared(projectPath))
-    ? sharedCanvasAssetsDir(projectPath, canvasId)
-    : centralCanvasAssetsDir(projectPath, canvasId)
+// Canvas image assets live in the project's central data dir.
+const assetsDir = (projectPath: string, canvasId: string) =>
+  centralCanvasAssetsDir(projectPath, canvasId)
 
 /** Persist an uploaded image's bytes. Throws if the mime type isn't on the
  *  whitelist (MIME_TO_EXT above). */

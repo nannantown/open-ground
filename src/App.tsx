@@ -10,6 +10,10 @@ import { GlobalSkillsPanel } from '@/components/canvas/GlobalSkillsPanel'
 import { AccountModal } from '@/components/canvas/AccountModal'
 import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
+import { CollabSharedDialog } from '@/components/canvas/CollabSharedDialog'
+import { SharedProjectPanel } from '@/components/canvas/SharedProjectPanel'
+import { useCollab } from '@/lib/collab/RealtimeContext'
+import { useJoinDeepLink } from '@/lib/useJoinDeepLink'
 import { Onboarding } from '@/components/Onboarding'
 import { BulkActionBar } from '@/components/canvas/BulkActionBar'
 import { ElementBar } from '@/components/canvas/ElementBar'
@@ -112,6 +116,27 @@ export default function App() {
   // Full-screen in-app manual (the "?" toolbar entry + first-run link).
   const [manualOpen, setManualOpen] = useState(false)
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
+  // Realtime collab (member flow). `enabled` gates the "Shared with me" entry
+  // entirely — the default build (no collab env) shows nothing. `sharedDialogOpen`
+  // is the list/join dialog; `openShared` is the folder-less shared project the
+  // member is currently viewing in SharedProjectPanel (null = none).
+  const { enabled: collabEnabled } = useCollab()
+  const [sharedDialogOpen, setSharedDialogOpen] = useState(false)
+  const [openShared, setOpenShared] = useState<{ id: string; label: string } | null>(null)
+  // An invite code carried in by an `openground://join?code=…` deep link — opens
+  // the "Shared with me" dialog and auto-redeems it. Cleared when the dialog
+  // closes / opens a project. null = no pending deep link.
+  const [deepLinkCode, setDeepLinkCode] = useState<string | null>(null)
+  const onJoinCode = useCallback(
+    (code: string) => {
+      // A join link is meaningless with collab off (the dialog is gated) — ignore.
+      if (!collabEnabled) return
+      setDeepLinkCode(code)
+      setSharedDialogOpen(true)
+    },
+    [collabEnabled],
+  )
+  useJoinDeepLink(onJoinCode)
   // Per-project claude beacon: projectId → 'working' (claude is busy) |
   // 'waiting' (claude sits on the human — its turn signal). Polled from
   // /api/terminal/active; the only "something is happening here" signal on
@@ -704,8 +729,8 @@ export default function App() {
         onToolChange={setTool}
         // The Ground goes keyboard-inert while a project panel covers it —
         // otherwise V/F/Delete/⌘A typed into the panel's canvas would also
-        // drive this invisible surface.
-        suspendKeys={!!singleSelected}
+        // drive this invisible surface. A shared-project panel covers it too.
+        suspendKeys={!!singleSelected || !!openShared}
       />
       {showEmpty && (
         <EmptyState
@@ -729,6 +754,7 @@ export default function App() {
         // submissions); either having unread lights it, opening Settings (which
         // loads both inboxes and marks them seen) clears it.
         unreadFeedback={feedbackUnread + moduleSubmissionUnread}
+        onShared={collabEnabled ? () => setSharedDialogOpen(true) : undefined}
         projectCount={visibleProjects.length}
         usage={<UsageHud />}
       />
@@ -758,21 +784,62 @@ export default function App() {
           load()
         }}
         onRename={async (project, newName) => {
-          const res = await api.api.project.rename.$post({
-            json: { path: project.path, name: newName },
+          // Set the cosmetic PROJECT NAME (registry displayName) — NOT a folder
+          // rename. The folder on disk is untouched; the name is display-only.
+          const res = await api.api.projects['display-name'].$post({
+            json: { path: project.path, displayName: newName },
           })
-          const json = (await res.json().catch(() => ({}))) as {
-            error?: string
-            path?: string
-          }
+          const json = (await res.json().catch(() => ({}))) as { error?: string }
           if (!res.ok) return { error: json.error ?? 'Rename failed' }
-          // The project id is a stable registry UUID — it survives the rename —
-          // so the panel stays on the same project. Reload to pick up the new
-          // path/name; the selection id is unchanged.
+          // Realtime collab: keep the member-visible shared name in step with the
+          // project name so a rename shows up for members too. Best-effort —
+          // 412 (this project isn't shared) / 403 (not owner) are expected no-ops.
+          if (collabEnabled) {
+            void api.api.collab.label
+              .$post({ json: { path: project.path, label: newName } })
+              .catch(() => {})
+          }
+          // The registry id is stable, so the panel stays on the same project;
+          // reload to pick up the new display name.
           await load()
           return undefined
         }}
       />
+      {/* Realtime collab — the "Shared with me" entry (member flow). Both are
+          gated on collabEnabled via the Toolbar entry, so the default build never
+          mounts them. The shared panel is a folder-less overlay (its own doc
+          source); it doesn't touch the Ground selection. */}
+      {collabEnabled && sharedDialogOpen && (
+        <CollabSharedDialog
+          // Re-key on the incoming code so a deep link arriving while the dialog is
+          // already open remounts it (fresh initialCode + re-armed auto-join guard).
+          key={deepLinkCode ?? 'shared-dialog'}
+          initialCode={deepLinkCode ?? undefined}
+          onClose={() => {
+            setSharedDialogOpen(false)
+            setDeepLinkCode(null)
+          }}
+          onOpen={(id, label) => {
+            setSharedDialogOpen(false)
+            setDeepLinkCode(null)
+            // Defense-in-depth: clear any Ground selection so the shared overlay
+            // and ProjectPanel (both z-20) can never co-exist.
+            setSelectedIds([])
+            setOpenShared({ id, label })
+          }}
+        />
+      )}
+      {openShared && (
+        <SharedProjectPanel
+          // key on collabProjectId forces a fresh mount (data/adopted/binding)
+          // per project — an id swap can never inherit the prior project's
+          // whole-value meta into the new doc (review Finding 1).
+          key={openShared.id}
+          collabProjectId={openShared.id}
+          label={openShared.label}
+          onClose={() => setOpenShared(null)}
+        />
+      )}
       {selectedProjects.length >= 2 && (
         <BulkActionBar
           projects={selectedProjects}

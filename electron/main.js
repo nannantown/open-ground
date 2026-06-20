@@ -139,6 +139,51 @@ let serverChild = null
 let isQuitting = false
 
 // ---------------------------------------------------------------------------
+// Deep links — the `openground://` custom scheme (Figma-style invite links,
+// docs/COLLAB_ZEROCONFIG_PLAN.md §3.3). An invite URL is
+// `openground://join?code=<token>`; clicking it opens the app on the join flow.
+//
+//   - macOS delivers it via the `open-url` event (cold or warm).
+//   - Windows/Linux deliver it as an argv to the (single-instance) second launch,
+//     and on the very first launch as part of process.argv.
+//
+// We BUFFER the most recent link until a renderer is ready: the renderer fetches a
+// cold-start link via the `openground:getInitialDeepLink` IPC (returns + clears the
+// buffer) and listens for warm links via `openground:deep-link` (webContents.send).
+// We only ever forward URLs of our own scheme — never an arbitrary string.
+// ---------------------------------------------------------------------------
+const DEEP_LINK_SCHEME = 'openground'
+/** @type {string | null} */
+let pendingDeepLink = null
+
+// Pull the first `openground://…` token out of an argv array (Win/Linux delivery).
+function deepLinkFromArgv(argv) {
+  if (!Array.isArray(argv)) return null
+  const hit = argv.find(
+    (a) => typeof a === 'string' && a.toLowerCase().startsWith(`${DEEP_LINK_SCHEME}://`),
+  )
+  return hit || null
+}
+
+// Route a deep link to the renderer. If a window with a live renderer exists, send
+// it now (warm path) and raise the window; otherwise buffer it for the renderer to
+// pick up once it mounts (cold path). Ignores anything not of our scheme.
+function deliverDeepLink(url) {
+  if (typeof url !== 'string' || !url.toLowerCase().startsWith(`${DEEP_LINK_SCHEME}://`)) {
+    return
+  }
+  const wc = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null
+  if (wc && !wc.isLoading()) {
+    wc.send('openground:deep-link', url)
+    focusExistingWindow()
+  } else {
+    // No renderer yet (cold start) — buffer; the renderer asks via IPC on mount.
+    pendingDeepLink = url
+    focusExistingWindow()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Single instance — app.requestSingleInstanceLock(). A second `open` of the
 // app gets denied the lock and quits immediately; the first instance gets a
 // 'second-instance' event and raises its window. This is the Electron-native
@@ -148,7 +193,33 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
+  // Claim the openground:// scheme. In dev (unpackaged) Electron must be told the
+  // exact binary + script to relaunch, or the OS can't map the scheme back to us;
+  // a packaged app registers itself via the bundle's Info.plist / registry
+  // (electron-builder `protocols`), so the bare form is enough there.
+  try {
+    if (process.defaultApp && process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [
+        path.resolve(process.argv[1]),
+      ])
+    } else {
+      app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME)
+    }
+  } catch (err) {
+    console.error('[openground] could not register protocol client:', err && err.message)
+  }
+
+  // macOS deep-link delivery (cold or warm). Registered up here (not in whenReady)
+  // so a cold-start open-url that fires before the app is ready is still captured.
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    deliverDeepLink(url)
+  })
+
+  app.on('second-instance', (_event, argv) => {
+    // Win/Linux deliver a warm deep link as an argv to the second launch.
+    const url = deepLinkFromArgv(argv)
+    if (url) deliverDeepLink(url)
     focusExistingWindow()
   })
 
@@ -227,6 +298,15 @@ function registerIpcHandlers() {
     }
     await shell.openExternal(url)
     return true
+  })
+
+  // Hand the renderer the cold-start deep link the app was launched with (if any),
+  // then clear it so a later reload doesn't replay a stale join. Returns null when
+  // there's nothing buffered. Warm links arrive separately via 'openground:deep-link'.
+  ipcMain.handle('openground:getInitialDeepLink', () => {
+    const url = pendingDeepLink
+    pendingDeepLink = null
+    return url
   })
 }
 
@@ -647,6 +727,14 @@ function portConflictRecoveryText() {
 // Orchestration.
 // ---------------------------------------------------------------------------
 async function start() {
+  // Windows/Linux deliver a cold-start deep link as part of the launch argv (macOS
+  // uses the open-url event instead, which has likely already buffered it). Capture
+  // it before the window comes up so the renderer can fetch it on mount.
+  if (!pendingDeepLink) {
+    const fromArgv = deepLinkFromArgv(process.argv)
+    if (fromArgv) pendingDeepLink = fromArgv
+  }
+
   createWindow()
 
   try {

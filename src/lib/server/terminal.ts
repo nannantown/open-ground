@@ -293,7 +293,7 @@ export const listActiveTerminalCwds = (): string[] => {
 }
 
 /** Working/waiting judgement for a claude PTY. Pure — `now` is injected so
- *  tests don't need fake timers (house style; see shareAutoSync.test.ts).
+ *  tests don't need fake timers (house style).
  *  - An open TUI menu (permission prompt etc.) means claude is blocked on the
  *    human, regardless of how recently it painted — `waiting`.
  *  - Otherwise recent output (< WORKING_SILENCE_MS) means its spinner is

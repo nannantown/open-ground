@@ -1,0 +1,58 @@
+{
+  // OPEN GROUND realtime collab Worker.
+  //
+  // This is the PRIMARY config used by `wrangler dev` and `wrangler deploy`.
+  // (A minimal wrangler.toml also exists ONLY because some `unstable_dev`
+  //  paths historically preferred TOML; the programmatic local test points
+  //  `unstable_dev` at THIS .jsonc explicitly via `{ config: "wrangler.jsonc" }`
+  //  so the two never disagree. See test/local.mjs.)
+  //
+  // SECRET — set before deploy, do NOT put it here (this file is committed):
+  //   wrangler secret put OPENGROUND_COLLAB_TICKET_SECRET
+  // It must be the SAME value the Hono ticket minter signs with
+  // (env OPENGROUND_COLLAB_TICKET_SECRET on the app side).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "og-collab",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The DO that hosts each Yjs room. binding name === class_name so the
+  // Worker's Env.OgCollabDoc resolves the namespace, and y-partyserver's
+  // routePartykitRequest can find it by the kebab-cased party name
+  // "og-collab-doc".
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OgCollabDoc",
+        "class_name": "OgCollabDoc"
+      }
+    ]
+  },
+
+  // SQLite-backed DO (required for `this.ctx.storage` SQL + free tier).
+  // new_sqlite_classes (NOT new_classes) so the class gets a SQLite
+  // storage backend, which YServer hibernation + our onLoad/onSave persist
+  // through.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OgCollabDoc"]
+    }
+  ],
+
+  // R2 bucket for shared canvas image bytes (u14b). The owner uploads image
+  // bytes here (via the ticket-gated /assets PUT route) and members download
+  // them; the Y.Doc only carries the object key (CanvasElement.storageKey).
+  // Provision once: `wrangler r2 bucket create og-collab-assets`.
+  "r2_buckets": [
+    {
+      "binding": "ASSET_BUCKET",
+      "bucket_name": "og-collab-assets"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

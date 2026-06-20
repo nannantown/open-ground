@@ -16,7 +16,6 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { health } from './routes/health'
 import { projectRoutes } from './routes/project'
-import { shareRoutes } from './routes/share'
 import { canvasRoutes } from './routes/canvas'
 import { canvasAiRoutes } from './routes/canvasAi'
 import { miscRoutes } from './routes/misc'
@@ -26,6 +25,7 @@ import { feedbackRoutes } from './routes/feedback'
 import { authRoutes } from './routes/auth'
 import { customModulesRoutes } from './routes/customModules'
 import { moduleSubmissionsRoutes } from './routes/moduleSubmissions'
+import { collabRoutes } from './routes/collab'
 
 export const createApp = () => {
   const app = new Hono()
@@ -71,7 +71,6 @@ export const createApp = () => {
   const routed = app
     .route('/', health)
     .route('/', projectRoutes)   // A — project / tasks / canvases
-    .route('/', shareRoutes)     // C — git-shared data (status / sync)
     .route('/', canvasRoutes)    // D — canvas / asset / paste
     .route('/', canvasAiRoutes)  // D2 — canvas AI (generate-elements / tweak-screen)
     .route('/', miscRoutes)      // E — projects / settings / usage
@@ -81,6 +80,7 @@ export const createApp = () => {
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)
     .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', moduleSubmissionsRoutes) // J — module submission review queue (env-gated; docs/CUSTOM_TABS_PLAN.md)
+    .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall
   // through to the SPA static handler below (which would return index.html

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, Plus, X } from 'lucide-react'
+import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
 import type { CanvasSummary } from '@/lib/types'
 
@@ -11,6 +12,10 @@ interface Props {
   onDelete: (id: string) => void
   onRename: (id: string, name: string) => void
   onReorder: (order: string[]) => void
+  /** Realtime presence channel for this project's board room (u15). DISPLAY-only
+   *  here — ProjectCanvas publishes the owner's presence; this just shows who
+   *  else is in the project. null when collab is OFF / not shared. */
+  presence?: PresenceChannel | null
 }
 
 // Figma-style "Pages" section at the top of the Canvas left sidebar — the
@@ -31,6 +36,7 @@ export const PagesSection = ({
   onDelete,
   onRename,
   onReorder,
+  presence,
 }: Props) => {
   const { t } = useT()
   const [collapsed, setCollapsed] = useState(false)
@@ -75,14 +81,19 @@ export const PagesSection = ({
           )}
           <span className="label-cap">{t('canvas.pages')}</span>
         </button>
-        <button
-          type="button"
-          onClick={onCreate}
-          title={t('canvas.newCanvas')}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          <Plus size={13} strokeWidth={2} />
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* Presence (u15) — who else is in this project (display only; the
+              owner publishes via ProjectCanvas). Renders nothing when alone. */}
+          <CollabPresence channel={presence ?? null} publish={false} />
+          <button
+            type="button"
+            onClick={onCreate}
+            title={t('canvas.newCanvas')}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            <Plus size={13} strokeWidth={2} />
+          </button>
+        </div>
       </div>
       {!collapsed && (
         <ul aria-label={t('canvas.pages')} className="min-h-0 overflow-y-auto pb-1">

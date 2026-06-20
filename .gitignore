@@ -1,5 +1,9 @@
 # dependencies
 /node_modules
+# CF worker package artifacts (its own node_modules + local wrangler state/build)
+/worker/node_modules
+/worker/.wrangler
+/worker/dist
 /.pnp
 .pnp.js
 .yarn/install-state.gz

@@ -20,6 +20,12 @@ import type { ProjectData, ProjectMeta, ProjectTask } from '@/lib/types'
 // a stand-in "App" bubble listener on window asserts suppression.
 
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
+// Presence overlay reads useAuth; this suite renders BoardModule bare (no
+// AuthProvider) and tests Escape layering, not presence — so stub it out.
+vi.mock('@/components/canvas/CollabPresence', () => ({
+  CollabPresence: () => null,
+  usePublishPresence: () => {},
+}))
 vi.mock('@/lib/api-client', () => ({
   api: { api: { settings: { $get: () => Promise.resolve({ json: () => Promise.resolve({}) }) } } },
 }))

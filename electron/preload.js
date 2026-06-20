@@ -59,4 +59,27 @@ contextBridge.exposeInMainWorld('openground', {
       return false
     }
   },
+
+  // Deep links (openground://join?code=…). `onDeepLink` subscribes to WARM links
+  // (the app is already open); it returns an unsubscribe. `getInitialDeepLink`
+  // fetches the COLD-start link the app was launched with (one-shot — main clears
+  // it after handing it over). Both degrade to no-op/null in a plain dev browser.
+  onDeepLink: (cb) => {
+    const listener = (_event, url) => {
+      try {
+        cb(url)
+      } catch {
+        /* renderer handler threw — never let it break the IPC channel */
+      }
+    }
+    ipcRenderer.on('openground:deep-link', listener)
+    return () => ipcRenderer.removeListener('openground:deep-link', listener)
+  },
+  getInitialDeepLink: async () => {
+    try {
+      return await ipcRenderer.invoke('openground:getInitialDeepLink')
+    } catch {
+      return null
+    }
+  },
 })

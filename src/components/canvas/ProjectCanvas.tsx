@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useBoardCollab, useCanvasCollab } from '@/lib/collab/RealtimeContext'
+import { usePublishPresence } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
 import { PagesSection } from './PagesSection'
 import { CanvasWorkspace } from './CanvasWorkspace'
@@ -13,11 +15,6 @@ interface Props {
   /** Absolute project path — used as the API path argument and as the
    *  remount key so switching projects throws away in-flight state. */
   projectPath: string
-  /** Bumped by the parent when canvas files may have changed on disk under us
-   *  (a git-share Sync pulled teammates' edits, or a window-focus refetch
-   *  while the project is shared). A change re-reads the index + the active
-   *  canvas IN PLACE — no loading blank, no remount. */
-  reloadToken?: number
 }
 
 // Persist no faster than once per 400ms — fast pan/zoom and rapid chat edits
@@ -28,6 +25,11 @@ const SAVE_DEBOUNCE_MS = 400
 
 // ⌘\ focus-mode choice survives reloads. '0' = hidden; anything else visible.
 const SIDEBARS_KEY = 'openground.canvas.sidebars'
+
+// Owner asset-upload (u14b) retry backoff: a failed upload isn't retried until
+// this long has passed, so a persistently-failing R2/Worker can't be hammered by
+// the sweep re-firing on every canvas change during active collaboration.
+const ASSET_RETRY_COOLDOWN_MS = 30_000
 
 // Top-level orchestrator for the Canvas tab — the Figma-style docked 3-pane
 // shell. Left sidebar: Pages (Canvas list) over a Layers slot; centre: the
@@ -41,12 +43,42 @@ const SIDEBARS_KEY = 'openground.canvas.sidebars'
 //    inactive Canvases stay on disk so heavy drawings don't all live in memory)
 //  • debounced persistence + flush-on-unmount
 //  • the ⌘\ both-sidebars toggle (focus mode), persisted to localStorage
-export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
+export const ProjectCanvas = ({ projectPath }: Props) => {
   const { t } = useT()
   const [canvases, setCanvases] = useState<CanvasSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [active, setActive] = useState<CanvasFile | null>(null)
+  const activeRef = useRef<CanvasFile | null>(null)
+  activeRef.current = active
+  // Realtime collab for the ACTIVE canvas (null when OFF / not a member). Scope
+  // is canvas:<activeId>, so switching canvases swaps docs automatically.
+  const collab = useCanvasCollab(projectPath, activeId)
+  // OWNER publish of the SHARED canvas index (cv2): a second, board-scope binding
+  // (null when OFF / not a member) used ONLY to write `m:canvasIndex` so a
+  // folder-less member can discover this project's canvases. It does NOT seed the
+  // board (BoardModule owns that on the Board tab); writing only m:canvasIndex
+  // upholds the two-writer no-clobber invariant (see boardDoc.ts).
+  const boardCollab = useBoardCollab(projectPath)
+  // Presence (u15): publish the owner's identity into the board room while on the
+  // Canvas tab, so members see them online here too.
+  usePublishPresence(boardCollab)
   const [loaded, setLoaded] = useState(false)
+  useEffect(() => {
+    // Gate on `loaded`: before the canvas list has loaded, `canvases` is [] — and
+    // publishing an empty index could briefly LWW-win over a real server index
+    // (clientID tiebreak), flickering the member's list empty (review LOW). Once
+    // loaded, the list is real and this also re-fires causally after any merge.
+    if (!boardCollab || !loaded) return
+    const index = canvases.map((c) => ({ id: c.id, name: c.name }))
+    let cancelled = false
+    // Lazy-import keeps boardDoc/yjs out of this module's static graph (OFF guard).
+    void import('@/lib/collab/boardDoc').then((m) => {
+      if (!cancelled) m.writeBoardCanvasIndex(boardCollab.doc, index)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [boardCollab, canvases, loaded])
   const [sidebarsVisible, setSidebarsVisible] = useState(() => {
     try {
       return localStorage.getItem(SIDEBARS_KEY) !== '0'
@@ -152,9 +184,9 @@ export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
 
   // Flush whatever's pending whenever the active id changes (so switching
   // Canvases doesn't drop the prior one's last unsaved edit). Same on unmount.
-  // Returns the save promise so a caller about to RE-READ from disk (the
-  // reloadToken effect below) can await the write instead of racing it; the
-  // fire-and-forget call sites just ignore it.
+  // Returns the save promise so a caller about to RE-READ from disk can await
+  // the write instead of racing it; the fire-and-forget call sites just ignore
+  // it.
   const flushPending = useCallback((): Promise<void> => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
@@ -174,33 +206,6 @@ export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
       void flushPending()
     }
   }, [flushPending])
-
-  // External reload (git share). The ref guards the mount run: the parent's
-  // token persists across tab switches, so a remount with a non-zero token
-  // must NOT trigger a redundant reload on top of the bootstrap fetch.
-  const lastReloadRef = useRef(reloadToken)
-  useEffect(() => {
-    if (reloadToken === undefined || reloadToken === lastReloadRef.current)
-      return
-    lastReloadRef.current = reloadToken
-    let cancelled = false
-    ;(async () => {
-      // Write our own pending edit first so the re-read can't resurrect a
-      // pre-edit file (last-writer-wins, same as every other save here).
-      await flushPending()
-      const { index, canvases: list } = await refreshList()
-      if (cancelled) return
-      const id = index.activeId ?? list[0]?.id ?? null
-      if (!id) return
-      const file = await fetchCanvas(id)
-      if (cancelled || !file) return
-      setActiveId(id)
-      setActive(file)
-    })().catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [reloadToken, flushPending, refreshList, fetchCanvas])
 
   const persistActive = useCallback(
     (next: CanvasFile) => {
@@ -237,6 +242,79 @@ export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
     },
     [persistActive],
   )
+
+  // Realtime: mirror every local canvas change into the shared Y.Doc (seed is
+  // idempotent → loop-safe; this also seeds the doc once the canvas loads), and
+  // apply peer changes by feeding the merged file through setActive + persist
+  // (CanvasWorkspace's external-adoption path renders it). OFF → both no-op.
+  useEffect(() => {
+    if (collab && active) collab.seed(active)
+  }, [collab, active])
+
+  useEffect(() => {
+    if (!collab) return
+    return collab.onRemote(() => {
+      const base = activeRef.current
+      if (!base) return
+      const merged = collab.extract(base)
+      setActive(merged)
+      persistActive(merged)
+    })
+  }, [collab, persistActive])
+
+  // Owner asset upload (u14b): while this canvas is collab-shared, push any local
+  // image bytes members can't see yet to shared storage (R2 via the loopback
+  // proxy), then write the returned storageKey onto the element so the doc
+  // carries it to members (the seed effect above mirrors it). Self-terminating —
+  // once an element has a storageKey the filter skips it; uploadingRef dedupes
+  // concurrent attempts and a failed upload is retried on a later change. Owner-
+  // only by construction (members render SharedCanvasView, not ProjectCanvas).
+  const uploadingRef = useRef<Set<string>>(new Set())
+  const failedAtRef = useRef<Map<string, number>>(new Map())
+  useEffect(() => {
+    if (!collab || !active || !projectPath) return
+    const canvasId = active.id
+    const now = Date.now()
+    const pending = active.elements.filter((e) => {
+      if (e.type !== 'image' || !e.assetId || e.storageKey) return false
+      if (uploadingRef.current.has(e.assetId)) return false // in-flight
+      const failedAt = failedAtRef.current.get(e.assetId)
+      if (failedAt !== undefined && now - failedAt < ASSET_RETRY_COOLDOWN_MS) return false // backoff
+      return true
+    })
+    if (pending.length === 0) return
+    let cancelled = false
+    void (async () => {
+      const m = await import('@/lib/collab/assetSync')
+      const updates = new Map<string, string>() // elementId -> storageKey
+      for (const el of pending) {
+        const aid = el.assetId as string
+        uploadingRef.current.add(aid)
+        const key = await m.uploadCanvasAsset(projectPath, canvasId, aid)
+        if (key) {
+          updates.set(el.id, key)
+          failedAtRef.current.delete(aid) // clear any prior failure
+        } else {
+          uploadingRef.current.delete(aid)
+          failedAtRef.current.set(aid, Date.now()) // back off before retrying
+        }
+      }
+      if (cancelled || updates.size === 0) return
+      const base = activeRef.current
+      if (!base || base.id !== canvasId) return // canvas switched mid-upload
+      const merged: CanvasFile = {
+        ...base,
+        elements: base.elements.map((e) =>
+          updates.has(e.id) ? { ...e, storageKey: updates.get(e.id) } : e,
+        ),
+      }
+      setActive(merged)
+      persistActive(merged) // → the seed effect mirrors storageKey to members
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [collab, active, projectPath, persistActive])
 
   const switchTo = useCallback(
     async (id: string) => {
@@ -356,6 +434,9 @@ export const ProjectCanvas = ({ projectPath, reloadToken }: Props) => {
             onDelete={deleteCanvas}
             onRename={renameCanvas}
             onReorder={reorderCanvases}
+            // Presence avatars in the Pages header (display only — ProjectCanvas
+            // publishes the owner's presence above so it survives focus mode).
+            presence={boardCollab}
           />
           <section className="flex min-h-0 flex-1 flex-col border-t border-line">
             <div className="label-cap shrink-0 px-3 py-2 text-ink-muted">

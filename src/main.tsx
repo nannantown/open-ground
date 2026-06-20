@@ -4,6 +4,7 @@ import './app/globals.css'
 import App from './App'
 import { AuthProvider } from '@/lib/auth/AuthContext'
 import { I18nProvider } from '@/i18n/I18nContext'
+import { RealtimeProvider } from '@/lib/collab/RealtimeContext'
 
 // AuthProvider wraps the whole app so useAuth() is the single seam any future
 // entitlement check reads (see docs/BILLING_PLAN.md). It is inert when the
@@ -12,7 +13,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <I18nProvider>
       <AuthProvider>
-        <App />
+        <RealtimeProvider>
+          <App />
+        </RealtimeProvider>
       </AuthProvider>
     </I18nProvider>
   </StrictMode>,

@@ -14,6 +14,7 @@ import {
 import { newId } from '@/lib/ids'
 import { formatDueShort, isOverdue, unresolvedDeps } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
+import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
 
@@ -306,6 +307,10 @@ interface BoardTabProps {
     onUndo: () => void
     onRedo: () => void
   }
+  /** Realtime presence channel for this project's board room (u15). The owner
+   *  passes their board collab binding; null when collab is OFF / not a member.
+   *  Drives the toolbar avatar strip — publishes self, shows the other peers. */
+  presence?: PresenceChannel | null
 }
 
 export const BoardTab = ({
@@ -322,6 +327,7 @@ export const BoardTab = ({
   onOpenProjectSettings,
   sessionStatus,
   undoState,
+  presence,
 }: BoardTabProps) => {
   const { t } = useT()
   // The optional review lane is a SHARED per-project policy (config travels
@@ -543,6 +549,9 @@ export const BoardTab = ({
           )}
         </div>
         <div className="flex items-center gap-3">
+          {/* Presence (u15) — who else is in this project's board room right now.
+              Renders nothing unless collab is live and a peer is present. */}
+          <CollabPresence channel={presence ?? null} />
           {/* Undo / redo (B013) — unlike Canvas, the Board gives ⌘Z no visual
               home of its own, so these small icons keep the history
               discoverable. Disabled states mirror the stacks. */}

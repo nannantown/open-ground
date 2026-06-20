@@ -1,0 +1,24 @@
+{
+  "name": "og-collab-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OPEN GROUND realtime collab — Cloudflare Worker + Durable Object (y-partyserver YServer). Ticket-gated, hibernating, SQLite-persisted Yjs rooms.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/local.mjs"
+  },
+  "dependencies": {
+    "partyserver": "^0.5.8",
+    "y-partyserver": "^2.2.0",
+    "yjs": "^13.6.20"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.100.0",
+    "ws": "^8.18.0"
+  }
+}

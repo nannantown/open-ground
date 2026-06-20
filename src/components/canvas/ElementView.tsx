@@ -25,9 +25,9 @@ interface Props {
   onToggleCommentResolved?: (id: string) => void
   /** Comment-only: short label of the element this comment was anchored to. */
   commentAnchorLabel?: string | null
-  /** Image elements need these to resolve their per-canvas asset URLs. Absent
-   *  on the top-level Ground canvas (which doesn't support image elements
-   *  yet); the image case falls back to a placeholder there. */
+  /** Image elements need these to resolve their per-canvas asset URLs. A
+   *  folder-less collab member opens a shared canvas with an empty path, so
+   *  ImageView renders a "not synced" placeholder instead of fetching (u14a). */
   projectPath?: string
   canvasId?: string
   /** True while the Comment tool is active. A mock/screen covers its iframe

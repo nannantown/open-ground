@@ -14,12 +14,12 @@ import { centralWorktreesDir } from './paths'
 import { canonicalize } from './canonicalize'
 import { registerTestProject } from '../../test/registerProject'
 
-// Engine tests against REAL git repos + REAL worktrees (gitBranches/gitShare
+// Engine tests against REAL git repos + REAL worktrees (gitBranches
 // flavor): the repo lives in a tmpdir and is REGISTERED via the test registry
 // helper (projectUUIDFromPath needs an owning entry — same harness as
 // projectDataPath.test.ts), so its central worktrees dir resolves under the
 // suite's isolated OPENGROUND_HOME (setup-home.ts), never the real one. Git's
-// global/system config is kept out via HOME redirection (gitShare.test.ts
+// global/system config is kept out via HOME redirection (gitBranches.test.ts
 // pattern) so commit.gpgsign etc. can't bend the fixtures.
 
 vi.setConfig({ testTimeout: 30_000 })

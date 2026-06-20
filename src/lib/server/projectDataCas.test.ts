@@ -7,11 +7,8 @@ import {
   ProjectDataConflictError,
   readProjectData,
   writeProjectData,
-  migrateBoardToShared,
 } from './projectData'
-import { boardCardsDir } from './sharedData'
 import { registerTestProject } from '../../test/registerProject'
-import { readdir } from 'fs/promises'
 
 // CAS guard on writeProjectData (expectUpdatedAt): a writer holding a STALE
 // snapshot must be refused instead of clobbering newer data. Born from a real
@@ -71,27 +68,5 @@ describe('writeProjectData — compare-and-swap on updatedAt', () => {
     await writeProjectData(dir, data({ tasks: [card('a')] }))
     const overwritten = await writeProjectData(dir, data({ tasks: [] }))
     expect(overwritten.tasks).toHaveLength(0)
-  })
-
-  it('SHARED mode: the incident — a stale empty snapshot cannot delete card files', async () => {
-    const seeded = await writeProjectData(dir, data({ tasks: [card('a')] }))
-    const staleToken = seeded.updatedAt
-    await migrateBoardToShared(dir)
-    // A teammate / fresh window writes after the share (bumps the token).
-    const current = await readProjectData(dir)
-    await writeProjectData(
-      dir,
-      { ...current, tasks: [...current.tasks, card('b')] },
-      { expectUpdatedAt: current.updatedAt },
-    )
-    // The stale window persists its PRE-share empty board → must be refused…
-    await expect(
-      writeProjectData(dir, data({ tasks: [], description: '', notes: '' }), {
-        expectUpdatedAt: staleToken,
-      }),
-    ).rejects.toBeInstanceOf(ProjectDataConflictError)
-    // …and both card files survive on disk.
-    const files = await readdir(boardCardsDir(dir))
-    expect(files.sort()).toEqual(['a.json', 'b.json'])
   })
 })

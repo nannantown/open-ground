@@ -6,6 +6,13 @@ import type { CanvasSummary } from '@/lib/types'
 // i18n is mocked to the identity (t(key) → key), matching LayersPanel.test —
 // so titles/labels in queries below are the raw 'canvas.*' keys.
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
+// PagesSection now renders the presence strip, which calls useAuth — stub it
+// (this suite mounts PagesSection bare, with no AuthProvider, and tests the
+// canvas list, not presence).
+vi.mock('@/components/canvas/CollabPresence', () => ({
+  CollabPresence: () => null,
+  usePublishPresence: () => {},
+}))
 
 import { PagesSection } from './PagesSection'
 

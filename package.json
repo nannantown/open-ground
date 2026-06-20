@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -37,9 +37,13 @@
     "hono": "^4.12.23",
     "lucide-react": "^0.460.0",
     "node-pty": "^1.2.0-beta.13",
+    "partysocket": "^1.1.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uuid": "^11.0.3",
+    "y-partyserver": "^2.2.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.20",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -74,6 +78,14 @@
   "build": {
     "appId": "local.openground.app",
     "productName": "OPEN GROUND",
+    "protocols": [
+      {
+        "name": "OPEN GROUND",
+        "schemes": [
+          "openground"
+        ]
+      }
+    ],
     "directories": {
       "output": "dist-electron",
       "buildResources": "build"

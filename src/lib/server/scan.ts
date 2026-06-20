@@ -42,7 +42,9 @@ const missingMeta = (entry: ProjectEntry, name: string): ProjectMeta => ({
 
 const projectMeta = async (entry: ProjectEntry, lang: 'en' | 'ja'): Promise<ProjectMeta> => {
   const absPath = entry.path
-  const name = absPath.split(sep).pop() || absPath
+  // The card/header name is the owner-chosen display name when set, else the
+  // folder's basename (the default). Cosmetic only — path stays entry.path.
+  const name = entry.displayName?.trim() || absPath.split(sep).pop() || absPath
 
   let s
   try {

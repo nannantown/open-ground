@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { listProjectBranches } from './gitBranches'
 
-// Tests against REAL local git fixtures in a tmpdir (gitShare.test.ts house
+// Tests against REAL local git fixtures in a tmpdir (REAL-fixtures house
 // style) — no mocks, no network. HOME isolation for ~/.openground is handled
 // by the global setup; git config isolation is per-command via `-c` flags so a
 // machine's commit.gpgsign / defaultBranch can't bend these assertions.

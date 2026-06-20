@@ -1,0 +1,27 @@
+# MINIMAL fallback config — kept ONLY in case an `unstable_dev` / tooling path
+# prefers TOML. The canonical config is wrangler.jsonc, and test/local.mjs
+# passes `{ config: "wrangler.jsonc" }` to unstable_dev EXPLICITLY, so this
+# file is not normally loaded. If you edit bindings/migrations, mirror BOTH.
+#
+# SECRET (do NOT commit a value): wrangler secret put OPENGROUND_COLLAB_TICKET_SECRET
+name = "og-collab"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "OgCollabDoc"
+class_name = "OgCollabDoc"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OgCollabDoc"]
+
+# R2 bucket for shared canvas image bytes (u14b) — see wrangler.jsonc.
+# Provision once: `wrangler r2 bucket create og-collab-assets`.
+[[r2_buckets]]
+binding = "ASSET_BUCKET"
+bucket_name = "og-collab-assets"
+
+[observability]
+enabled = true

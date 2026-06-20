@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   AlertCircle,
   Archive,
@@ -31,32 +31,18 @@ import type {
   ProjectLaunchPrefs,
   ProjectMeta,
   ProjectTask,
-  ShareAutoStatus,
-  ShareConflict,
-  ShareStatus,
-  SettingsResponse,
   ProjectWorktreeInfo,
   CleanWorktreesResult,
   CustomModuleDef,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import {
-  disableShare,
-  fetchShareStatus,
-  remoteShortName,
-  resolveShare,
-  syncShare,
-} from '@/lib/shareClient'
-import { settingsSections, showHeaderShare } from '@/lib/shareUx'
-import {
-  FIELD_INPUT_CSS,
   MembersField,
-  ShareStartDialog,
   TargetBranchField,
   useProjectBranches,
-  type SyncOutcome,
-} from '@/components/canvas/ShareStartDialog'
-import { boardDiffDigest } from '@/lib/boardDigest'
+} from '@/components/canvas/ProjectConfigFields'
+import { CollabInviteDialog } from '@/components/canvas/CollabInviteDialog'
+import { useCollab } from '@/lib/collab/RealtimeContext'
 import { migrateLs } from '@/lib/lsMigrate'
 import {
   loadPersistedView,
@@ -1349,158 +1335,18 @@ export const ProjectPanel = ({
   const dataRef = useRef<ProjectData | null>(data)
   dataRef.current = data
 
-  // ── Git-shared data (.openground/ in the repo — docs/SHARED_DATA_PLAN.md) ──
-  // The whole feature is driven by ShareStatus | null: null means "unknown"
-  // (routes not deployed yet / fetch failed / project switch in flight) and
-  // hides every share affordance quietly. The panel is reused across project
-  // switches (no key), so every async return is pinned to the path it was
-  // requested for — same idiom as describingPath above.
-  const [shareStatus, setShareStatus] = useState<ShareStatus | null>(null)
-  const shareStatusRef = useRef<ShareStatus | null>(null)
-  shareStatusRef.current = shareStatus
   const projectPathRef = useRef<string | null>(null)
   projectPathRef.current = project?.path ?? null
-  // Path currently syncing (null = idle) — a stale return must not clear a
-  // newer project's in-flight state.
-  const [syncingPath, setSyncingPath] = useState<string | null>(null)
-  const syncing = !!project && syncingPath === project.path
-  // Inline feedback next to the Sync button (the panel has no toast system;
-  // the delete flow's inline-error language is the established pattern).
-  // Successes auto-fade; errors stay until the next action or project switch.
-  const [shareNotice, setShareNotice] = useState<
-    { kind: 'ok' | 'error'; text: string } | null
-  >(null)
-  const shareNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // The unshare confirmation (the only ShareConfirm left — enabling goes
-  // through ShareStartDialog below).
-  const [shareDialog, setShareDialog] = useState<'disable' | null>(null)
-  // Share-start dialog / invite panel ('start' = the full enable form,
-  // 'invite' = re-show the invite instructions for an already-shared project).
-  const [shareStart, setShareStart] = useState<'start' | 'invite' | null>(null)
-  // Conflict-resolution dialog (S15–S20 phase 3): the structured conflicts of
-  // the last failed Sync, or null. Only offered when EVERY conflicted file is
-  // shared data (.openground/) — the app never auto-resolves the user's code.
-  const [conflictDialog, setConflictDialog] = useState<ShareConflict[] | null>(null)
-  const [resolving, setResolving] = useState(false)
-  const [shareBusy, setShareBusy] = useState(false)
-  const [shareDialogError, setShareDialogError] = useState<string | null>(null)
-  // Bumped whenever shared files may have changed on disk (after a successful
-  // Sync / enable / disable, and on window focus while shared) — ProjectCanvas
-  // re-reads the index + active canvas in place when it changes.
-  const [canvasReloadToken, setCanvasReloadToken] = useState(0)
-  // "Last sync" timestamp (S10): per-project, local-machine memory — gives the
-  // assignee/column info on the board a freshness anchor. Shown in the Sync
-  // button's tooltip.
-  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null)
-  useEffect(() => {
-    if (!project?.path) {
-      setLastSyncAt(null)
-      return
-    }
-    const v = Number(localStorage.getItem(`og.share.lastSync.${project.path}`))
-    setLastSyncAt(Number.isFinite(v) && v > 0 ? v : null)
-  }, [project?.path])
-  const formatSyncTime = (ts: number): string => {
-    const d = new Date(ts)
-    const sameDay = new Date().toDateString() === d.toDateString()
-    return sameDay
-      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : d.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-  }
-  // ── Auto-sync presentation (ShareStatus.auto) ───────────────────────────
-  // When the engine is on, the Sync button reads as a LIVE indicator; the
-  // click stays a manual force-sync. All modes degrade to the classic manual
-  // button when auto is absent/disabled.
-  const auto = shareStatus?.auto
-  const autoLive = auto?.enabled === true
-  const autoMode: ShareAutoStatus['mode'] | 'manual-syncing' = syncing
-    ? 'manual-syncing'
-    : (auto?.mode ?? 'disabled')
-  const autoLabel =
-    autoMode === 'manual-syncing' || autoMode === 'syncing'
-      ? t('projectPanel.syncing')
-      : autoMode === 'paused-code'
-        ? t('projectPanel.autoPausedCode')
-        : autoMode === 'conflict'
-          ? t('projectPanel.autoConflict')
-          : autoMode === 'offline'
-            ? t('projectPanel.autoOffline')
-            : autoMode === 'blocked'
-              ? t('projectPanel.autoBlocked')
-              : autoMode === 'error'
-                ? t('projectPanel.autoError')
-                : t('projectPanel.autoLive')
-  const autoTitle =
-    autoMode === 'paused-code'
-      ? t('projectPanel.autoPausedCodeHint')
-      : autoMode === 'conflict'
-        ? t('projectPanel.autoConflictHint')
-        : autoMode === 'offline'
-          ? t('projectPanel.syncOffline')
-          : autoMode === 'blocked'
-            ? t('projectPanel.autoBlockedHint')
-            : autoMode === 'error'
-              ? (auto?.message ?? t('projectPanel.autoErrorHint'))
-              : t('projectPanel.autoLiveHint')
-  const effectiveLastSync = auto?.lastSyncAt ?? lastSyncAt
-  // Surface auto-round outcomes the user would otherwise never see (the
-  // engine runs without clicks): a conflict or loud error posts a persistent
-  // notice ON TRANSITION; recovering clears a stale one.
-  const prevAutoModeRef = useRef<string | null>(null)
-  useEffect(() => {
-    const prev = prevAutoModeRef.current
-    prevAutoModeRef.current = autoMode
-    if (!autoLive || prev === null || prev === autoMode) return
-    if (autoMode === 'conflict') {
-      setShareNoticeFading({ kind: 'error', text: t('projectPanel.autoConflictHint') })
-    } else if (autoMode === 'error') {
-      const msg = auto?.message ?? ''
-      setShareNoticeFading({
-        kind: 'error',
-        text: /stash/i.test(msg)
-          ? t('projectPanel.syncAutostashConflict')
-          : t('projectPanel.syncFailed', { error: msg || 'auto-sync error' }),
-      })
-    } else if (prev === 'conflict' || prev === 'error') {
-      setShareNoticeFading(null)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoMode, autoLive])
-  // An auto round just landed new data (lastSyncAt moved): refresh the board
-  // immediately (instead of waiting for the 5s poll) and re-read canvases.
-  const prevAutoSyncAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    const at = auto?.lastSyncAt ?? null
-    const prev = prevAutoSyncAtRef.current
-    prevAutoSyncAtRef.current = at
-    if (at === null || prev === at || prev === null) return
-    void reloadProjectData()
-    setCanvasReloadToken(v => v + 1)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto?.lastSyncAt])
-  const remoteName = useMemo(
-    () => remoteShortName(shareStatus?.remoteUrl ?? null),
-    [shareStatus?.remoteUrl],
-  )
+  // Realtime-collab invite dialog (owner side). Gated on collab being enabled —
+  // the default (no collab env) build never shows the entry or this dialog.
+  const { enabled: collabEnabled } = useCollab()
+  const [collabInviteOpen, setCollabInviteOpen] = useState(false)
 
-  const refreshShareStatus = useCallback(async () => {
-    const path = project?.path
-    if (!path) return
-    const status = await fetchShareStatus(path)
-    if (projectPathRef.current !== path) return
-    // A transient fetch failure (null) must not wipe a known status — that
-    // would hide the Sync button and kill the 90s poll until the next focus.
-    // Project switches reset the state to null explicitly, so keeping the
-    // last-known value here never leaks across projects.
-    setShareStatus((prev) => status ?? prev)
-  }, [project?.path])
-
-  // Re-read ProjectData from disk after an external change (Sync pulled
-  // teammates' edits, or a terminal claude touched .openground/). Skipped when
-  // a local edit hasn't flushed through the debounced persist yet — the local
-  // save wins and the next focus refetch picks the merge up. Resolves with the
-  // data it applied (null on every skip path) so doSync can diff it against
-  // its pre-sync snapshot for the board digest.
+  // Re-read ProjectData from disk after an external change — chiefly a terminal
+  // claude calling POST /api/project/tasks adds board cards out-of-band; the
+  // focus refetch and the 5s poll below adopt them. Skipped when a local edit
+  // hasn't flushed through the debounced persist yet — the local save wins and
+  // the next refetch picks the merge up.
   const reloadProjectData = useCallback(async (): Promise<ProjectData | null> => {
     const path = project?.path
     if (!path) return null
@@ -1520,8 +1366,7 @@ export const ProjectPanel = ({
       // object with identical content would still replace the tasks ARRAY
       // IDENTITY, which BoardModule's external-update detection reads as a
       // remote change and answers by dropping the undo/redo stacks — the 5s
-      // poll would wipe ⌘Z history every tick. Returning d (not null) is
-      // correct for doSync's digest: the reload succeeded, the diff is empty.
+      // poll would wipe ⌘Z history every tick.
       const body = JSON.stringify(d)
       if (body === lastSavedJson.current) return d
       setData(d)
@@ -1535,284 +1380,15 @@ export const ProjectPanel = ({
     }
   }, [project?.path, onSaved])
 
-  const setShareNoticeFading = useCallback(
-    (notice: { kind: 'ok' | 'error'; text: string } | null) => {
-      if (shareNoticeTimer.current) {
-        clearTimeout(shareNoticeTimer.current)
-        shareNoticeTimer.current = null
-      }
-      setShareNotice(notice)
-      if (notice?.kind === 'ok') {
-        shareNoticeTimer.current = setTimeout(() => setShareNotice(null), 5000)
-      }
-    },
-    [],
-  )
-
-  // One click: commit (scoped to .openground/) → pull --rebase → push, then
-  // pull the freshly-merged data back into the UI. Resolves with what
-  // happened (SyncOutcome) so callers covering the header notice — the
-  // InvitePanel's "Publish now" — can show the failure INLINE; the outcome's
-  // error is the exact localized text this function posts to shareNotice.
-  const doSync = useCallback(async (): Promise<SyncOutcome> => {
-    const path = project?.path
-    // Guarded no-op (already syncing / missing project): nothing failed,
-    // nothing to report — callers' buttons are disabled in these states.
-    if (!path || syncingPath || project?.missing) return { ok: true }
-    setSyncingPath(path)
-    setShareNoticeFading(null)
-    // Snapshot the board BEFORE the sync so a successful pull can be diffed
-    // into a "what changed" digest (boardDiffDigest) for the notice line.
-    const beforeTasks = dataRef.current?.tasks ?? null
-    let outcome: SyncOutcome = { ok: true }
-    try {
-      const r = await syncShare(path)
-      // Stale return (project switched mid-sync): the dialog that asked is
-      // gone — report a no-op, never touch the new project's notices.
-      if (projectPathRef.current !== path) return { ok: true }
-      if ('error' in r) {
-        const text = t('projectPanel.syncFailed', { error: r.error })
-        outcome = { ok: false, error: text }
-        setShareNoticeFading({ kind: 'error', text })
-      } else if (r.result.conflict) {
-        // Say WHAT conflicted (card titles / notes / canvas files) — the
-        // server's message is the raw English fallback for the rest.
-        const items = r.result.conflictFiles?.length
-          ? t('projectPanel.syncConflictItems', {
-              items: r.result.conflictFiles.join(', '),
-            })
-          : r.result.message
-        const text = [t('projectPanel.syncConflict'), items]
-          .filter(Boolean)
-          .join(' — ')
-        outcome = { ok: false, error: text }
-        setShareNoticeFading({ kind: 'error', text })
-        // Offer in-app resolution ONLY for pure shared-data conflicts — a
-        // conflicted code file is the user's own rebase to run.
-        const cs = r.result.conflicts
-        if (cs?.length && cs.every(c => c.file.startsWith('.openground/'))) {
-          setConflictDialog(cs)
-        }
-      } else if (!r.result.ok) {
-        // Machine-readable reasons get a localized, actionable line; anything
-        // else falls back to the server's raw message. Error notices persist
-        // (no auto-fade) — an autostash conflict must never slip by unseen.
-        const reasonTexts: Record<string, string> = {
-          'rebase-in-progress': t('projectPanel.syncBlockedRebase'),
-          'merge-in-progress': t('projectPanel.syncBlockedMerge'),
-          'detached-head': t('projectPanel.syncBlockedDetached'),
-          'autostash-conflict': t('projectPanel.syncAutostashConflict'),
-          'no-identity': t('projectPanel.syncNoIdentity'),
-        }
-        const reasonText = r.result.reason ? reasonTexts[r.result.reason] : undefined
-        const text =
-          reasonText ??
-          t('projectPanel.syncFailed', { error: r.result.message ?? 'sync error' })
-        outcome = { ok: false, error: text }
-        setShareNoticeFading({ kind: 'error', text })
-        // An autostash conflict still pulled — show the merged board, not the
-        // pre-sync snapshot.
-        if (r.result.pulled) {
-          await reloadProjectData()
-          setCanvasReloadToken(v => v + 1)
-        }
-      } else {
-        // ok — pull the freshly-merged data back in first, then say WHAT the
-        // pull changed on the board (added/done/moved/removed cards) instead
-        // of the generic "Synced". Falls back to the generic text when the
-        // pull brought nothing board-visible (or the refetch was skipped),
-        // and keeps any caveat message (e.g. push skipped: no upstream).
-        const reloaded = await reloadProjectData()
-        setCanvasReloadToken(v => v + 1)
-        const digest =
-          r.result.pulled && beforeTasks && reloaded
-            ? boardDiffDigest(beforeTasks, reloaded.tasks ?? [], t)
-            : null
-        // Localized lines for the classified degradations replace the raw
-        // git notes; an unclassified note still shows verbatim as a caveat.
-        const caveat = r.result.offline
-          ? t('projectPanel.syncOffline')
-          : r.result.noRemote
-            ? t('projectPanel.syncNoRemote')
-            : r.result.message
-        // Remember when this machine last synced (the tooltip's freshness line).
-        const now = Date.now()
-        localStorage.setItem(`og.share.lastSync.${path}`, String(now))
-        setLastSyncAt(now)
-        if (r.result.forcedUpdate) {
-          // A rewritten upstream deserves a persistent warning, not a 5s toast.
-          setShareNoticeFading({
-            kind: 'error',
-            text: [t('projectPanel.syncForcedUpdate'), digest]
-              .filter((s): s is string => !!s)
-              .join(' — '),
-          })
-        } else {
-          const parts = [digest, caveat].filter((s): s is string => !!s)
-          setShareNoticeFading({
-            kind: r.result.offline ? 'error' : 'ok',
-            text: parts.length > 0 ? parts.join(' — ') : t('projectPanel.syncDone'),
-          })
-        }
-        // ok-but-nothing-pushed (offline / no remote): the local sync is fine
-        // but a caller asking "did this publish?" must hear NO with the why.
-        if (r.result.offline || r.result.noRemote) {
-          outcome = {
-            ok: false,
-            error: r.result.offline
-              ? t('projectPanel.syncOffline')
-              : t('projectPanel.syncNoRemote'),
-          }
-        }
-      }
-      // Whatever happened, the dirty dot may have changed (commit succeeded
-      // even when push didn't, etc.) — re-read the truth.
-      void refreshShareStatus()
-      return outcome
-    } finally {
-      setSyncingPath(p => (p === path ? null : p))
-    }
-  }, [
-    project?.path,
-    project?.missing,
-    syncingPath,
-    t,
-    setShareNoticeFading,
-    reloadProjectData,
-    refreshShareStatus,
-  ])
-
-  // Confirm in the share / unshare dialog → POST enable|disable, then refetch
-  // everything (status decides which UI shows; data + canvases changed source).
-  // Confirm in the conflict-resolution dialog → POST resolve with the chosen
-  // side per file. Success closes the dialog and reloads the merged data; a
-  // FRESH conflict set (files changed since the dialog opened) re-populates
-  // the dialog instead of dumping the user back to the manual path.
-  const confirmResolve = useCallback(
-    async (choices: Record<string, 'mine' | 'theirs'>) => {
-      const path = project?.path
-      if (!path || resolving) return
-      setResolving(true)
-      try {
-        const r = await resolveShare(path, choices)
-        if (projectPathRef.current !== path) return
-        if ('error' in r) {
-          setConflictDialog(null)
-          setShareNoticeFading({
-            kind: 'error',
-            text: t('projectPanel.syncFailed', { error: r.error }),
-          })
-          return
-        }
-        if (r.result.conflict) {
-          const cs = r.result.conflicts
-          if (cs?.length && cs.every(c => c.file.startsWith('.openground/'))) {
-            setConflictDialog(cs)
-          } else {
-            setConflictDialog(null)
-            setShareNoticeFading({
-              kind: 'error',
-              text: [t('projectPanel.syncConflict'), r.result.message]
-                .filter(Boolean)
-                .join(' — '),
-            })
-          }
-          return
-        }
-        setConflictDialog(null)
-        if (!r.result.ok) {
-          const reasonTexts: Record<string, string> = {
-            'rebase-in-progress': t('projectPanel.syncBlockedRebase'),
-            'merge-in-progress': t('projectPanel.syncBlockedMerge'),
-            'detached-head': t('projectPanel.syncBlockedDetached'),
-            'autostash-conflict': t('projectPanel.syncAutostashConflict'),
-            'no-identity': t('projectPanel.syncNoIdentity'),
-          }
-          const reasonText = r.result.reason ? reasonTexts[r.result.reason] : undefined
-          setShareNoticeFading({
-            kind: 'error',
-            text:
-              reasonText ?? t('projectPanel.syncFailed', { error: r.result.message ?? 'sync error' }),
-          })
-          if (r.result.pulled) {
-            await reloadProjectData()
-            setCanvasReloadToken(v => v + 1)
-          }
-          return
-        }
-        await reloadProjectData()
-        setCanvasReloadToken(v => v + 1)
-        const now = Date.now()
-        localStorage.setItem(`og.share.lastSync.${path}`, String(now))
-        setLastSyncAt(now)
-        setShareNoticeFading({
-          kind: 'ok',
-          text: [t('projectPanel.syncResolvedDone'), r.result.message]
-            .filter((s): s is string => !!s)
-            .join(' — '),
-        })
-        void refreshShareStatus()
-      } finally {
-        setResolving(false)
-      }
-    },
-    [project?.path, resolving, t, setShareNoticeFading, reloadProjectData, refreshShareStatus],
-  )
-
-  // Confirm in the unshare dialog → POST disable, then refetch everything
-  // (status decides which UI shows; data + canvases changed source). The
-  // ENABLE side lives in ShareStartDialog (display name + policy + invite).
-  const confirmShareDialog = useCallback(async () => {
-    const path = project?.path
-    if (!path || !shareDialog || shareBusy) return
-    setShareBusy(true)
-    setShareDialogError(null)
-    try {
-      const r = await disableShare(path)
-      if (projectPathRef.current !== path) return
-      if (!r.ok) {
-        setShareDialogError(r.error)
-        return
-      }
-      setShareDialog(null)
-      await refreshShareStatus()
-      await reloadProjectData()
-      setCanvasReloadToken(v => v + 1)
-    } finally {
-      setShareBusy(false)
-    }
-  }, [project?.path, shareDialog, shareBusy, refreshShareStatus, reloadProjectData])
-
-  // After a successful enable inside ShareStartDialog: pull the new truth in
-  // (the dialog itself stays open, switching to the invite panel).
-  const onShareEnabled = useCallback(async () => {
-    await refreshShareStatus()
-    await reloadProjectData()
-    setCanvasReloadToken(v => v + 1)
-  }, [refreshShareStatus, reloadProjectData])
-
-  // Fetch the status when a project opens (and reset all share UI state so
-  // nothing leaks across a project switch).
+  // Reset collab-invite state on project switch so it never leaks across cards.
   useEffect(() => {
-    setShareStatus(null)
-    setShareNoticeFading(null)
-    setShareDialog(null)
-    setShareStart(null)
-    setShareDialogError(null)
-    setConflictDialog(null)
-    if (!project?.path) return
-    void refreshShareStatus()
-    // refreshShareStatus is recreated with project?.path — listing it here
-    // would double-run the effect for the same path.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setCollabInviteOpen(false)
   }, [project?.path])
 
-  // Window focus while the panel is open: re-check the share status and
-  // refetch the project data (a terminal claude may have added board cards via
-  // the API in ANY mode — see the launch-time app context in claudeTerminal —
-  // and in shared mode a teammate's pull may have edited .openground/).
-  // Canvases refetch only while shared (their writers are git/the app).
-  // Debounced so a tab-switch flurry doesn't hammer the server.
+  // Window focus while the panel is open: refetch the project data (a terminal
+  // claude may have added board cards via the API — see the launch-time app
+  // context in claudeTerminal). Debounced so a tab-switch flurry doesn't hammer
+  // the server.
   const lastFocusRefetchRef = useRef(0)
   useEffect(() => {
     if (!project?.path) return
@@ -1820,31 +1396,11 @@ export const ProjectPanel = ({
       const now = Date.now()
       if (now - lastFocusRefetchRef.current < 3000) return
       lastFocusRefetchRef.current = now
-      void refreshShareStatus()
       void reloadProjectData()
-      if (shareStatusRef.current?.shared) {
-        setCanvasReloadToken(v => v + 1)
-      }
     }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [project?.path, refreshShareStatus, reloadProjectData])
-
-  // Remote awareness while shared: re-check the share status every 90s while
-  // the window is visible, so the Sync button's ↓ badge appears when a
-  // teammate pushes even if the user never refocuses the window. The server
-  // throttles the underlying `git fetch` to one per minute per project, so
-  // this stays cheap; hidden windows skip the tick entirely.
-  useEffect(() => {
-    if (!project?.path || !shareStatus?.shared) return
-    // Auto-sync on: the status poll is also the live-indicator heartbeat —
-    // tighter (the server side stays cheap: fetches are engine-throttled).
-    const everyMs = shareStatus.auto?.enabled ? 20_000 : 90_000
-    const id = setInterval(() => {
-      if (document.visibilityState === 'visible') void refreshShareStatus()
-    }, everyMs)
-    return () => clearInterval(id)
-  }, [project?.path, shareStatus?.shared, shareStatus?.auto?.enabled, refreshShareStatus])
+  }, [project?.path, reloadProjectData])
 
   // Live board: while the panel is open and visible, poll the project data
   // every 5s so cards added from OUTSIDE this window — chiefly a terminal
@@ -1860,13 +1416,6 @@ export const ProjectPanel = ({
     const iv = setInterval(tick, 5000)
     return () => clearInterval(iv)
   }, [project?.path, reloadProjectData])
-
-  // Clear the fade timer on unmount so it can't fire into an unmounted panel.
-  useEffect(() => {
-    return () => {
-      if (shareNoticeTimer.current) clearTimeout(shareNoticeTimer.current)
-    }
-  }, [])
 
   // "Open this folder in…" — only the apps the user has registered. The first
   // entry is the default for one-click Open; the dropdown can re-star it.
@@ -2198,8 +1747,8 @@ export const ProjectPanel = ({
             feedback button flow onto further rows on very narrow windows. */}
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
           {/* Skills: lists the Claude skills defined inside this project
-              (.claude/skills/). A quiet text+icon button — always present (not
-              git/share-gated), disabled only for a vanished folder. */}
+              (.claude/skills/). A quiet text+icon button — always present,
+              disabled only for a vanished folder. */}
           <button
             type="button"
             onClick={() => setSkillsOpen(true)}
@@ -2211,131 +1760,17 @@ export const ProjectPanel = ({
             <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
             {t('projectPanel.skillsButton')}
           </button>
-          {/* Git share: a quiet text-only Sync button (dot = unsynced local
-              changes) + the remote's short name as faint context. Lives with
-              the project-scoped header controls; hidden entirely unless the
-              project is actually shared. */}
-          {/* Pre-share occupant of the same slot: a quiet text "Share…"
-              button for an unshared git repo — after sharing this exact spot
-              becomes the Sync/Live cluster, so the location only has to be
-              learned once. Non-git projects show nothing here. */}
-          {showHeaderShare(shareStatus, !!project.missing) && (
+          {/* Realtime-collab invite — a quiet text button, only when collab is
+              enabled (default build: hidden, no collab UI at all). */}
+          {collabEnabled && !project.missing && (
             <button
               type="button"
-              onClick={() => setShareStart('start')}
-              title={t('projectPanel.shareButtonHint')}
+              onClick={() => setCollabInviteOpen(true)}
+              title={t('projectPanel.collabEntryTitle')}
               className="shrink-0 rounded-sm px-1 py-1 text-[11px] text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
-              {t('projectPanel.shareButton')}
+              {t('projectPanel.collabEntry')}
             </button>
-          )}
-          {shareStatus?.shared && (
-            <div className="flex min-w-0 items-center gap-2">
-              {shareNotice && (
-                <span
-                  role="status"
-                  className={[
-                    // Errors carry the actionable detail (conflicted card
-                    // names, recovery steps) — give them room; the full text
-                    // is always on the tooltip either way.
-                    shareNotice.kind === 'error'
-                      ? 'max-w-[480px] text-accent'
-                      : 'max-w-[260px] text-ink-faint',
-                    'truncate text-[11px] transition-opacity duration-150',
-                  ].join(' ')}
-                  title={shareNotice.text}
-                >
-                  {shareNotice.text}
-                </span>
-              )}
-              {remoteName && (
-                <span
-                  title={shareStatus.remoteUrl ?? undefined}
-                  className="max-w-[160px] truncate font-mono text-[10px] text-ink-faint"
-                >
-                  {remoteName}
-                </span>
-              )}
-              {/* Shared data follows the checked-out branch (S27) — name the
-                  branch so a switch explains a suddenly-different board. */}
-              {shareStatus.branch && (
-                <span
-                  title={t('projectPanel.syncBranchHint')}
-                  className="flex max-w-[140px] items-center gap-0.5 font-mono text-[10px] text-ink-faint"
-                >
-                  <GitBranch size={10} className="shrink-0" aria-hidden />
-                  <span className="truncate">{shareStatus.branch}</span>
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => void doSync()}
-                disabled={syncing || project.missing}
-                title={[
-                  autoLive
-                    ? autoTitle
-                    : shareStatus.forcedUpdate
-                      ? t('projectPanel.syncForcedHint')
-                      : shareStatus.behind > 0
-                        ? t('projectPanel.syncBehindHint', { count: shareStatus.behind })
-                        : shareStatus.dirty || shareStatus.ahead > 0
-                          ? t('projectPanel.syncDirtyHint')
-                          : t('projectPanel.syncHint'),
-                  effectiveLastSync
-                    ? t('projectPanel.syncLastAt', { time: formatSyncTime(effectiveLastSync) })
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-                className="flex shrink-0 items-center gap-1.5 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-              >
-                {/* Auto-sync on: the button reads as a LIVE indicator (the
-                    click is still a manual force-sync). Auto-sync off: the
-                    classic Sync button. */}
-                {autoLive ? (
-                  <>
-                    <span
-                      aria-hidden
-                      className={[
-                        'h-[5px] w-[5px] shrink-0 rounded-full',
-                        autoMode === 'live' ? 'bg-moss' : 'bg-accent',
-                      ].join(' ')}
-                    />
-                    {autoLabel}
-                  </>
-                ) : (
-                  <>
-                    {shareStatus.dirty && !syncing && (
-                      <span
-                        aria-hidden
-                        className="h-[5px] w-[5px] shrink-0 rounded-full bg-accent"
-                      />
-                    )}
-                    {syncing ? t('projectPanel.syncing') : t('projectPanel.sync')}
-                  </>
-                )}
-                {/* Unpushed (↑) / incoming (↓) commit counts, scoped to
-                    .openground/. ↓ is the "a teammate pushed — pull me"
-                    signal, so it reads in accent. Under auto-sync these only
-                    linger in the paused/parked modes — live mode drains them. */}
-                {!syncing && shareStatus.ahead > 0 && (
-                  <span aria-hidden className="tabular-nums text-[10px] text-ink-faint">
-                    ↑{shareStatus.ahead}
-                  </span>
-                )}
-                {!syncing && shareStatus.behind > 0 && (
-                  <span aria-hidden className="tabular-nums text-[10px] text-accent">
-                    ↓{shareStatus.behind}
-                  </span>
-                )}
-                {/* Rewritten upstream (force-push) — warn before the pull. */}
-                {!syncing && shareStatus.forcedUpdate && (
-                  <span aria-hidden className="text-[10px] text-accent">
-                    ⚠
-                  </span>
-                )}
-              </button>
-            </div>
           )}
           {/* Mirrors the Ground's top-right usage strip — model + token gauge,
               kept visible while working inside a project so the user always
@@ -2597,7 +2032,6 @@ export const ProjectPanel = ({
           <div className="min-h-0 flex-1">
             <ProjectCanvas
               projectPath={project.path}
-              reloadToken={canvasReloadToken}
             />
           </div>
           {/* Terminal-only mode: tabbed raw claude terminals to drive design
@@ -2651,9 +2085,6 @@ export const ProjectPanel = ({
           data={data}
           project={project}
           persist={persist}
-          // Git-shared board (marker detected) — drives the one-line welcome
-          // strip a freshly imported shared clone shows above the board.
-          shared={shareStatus?.shared ?? false}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
           // Surface Project Settings right on the Board toolbar (the ⋯ menu
@@ -2727,21 +2158,6 @@ export const ProjectPanel = ({
           projectName={project.name}
           projectPath={project.path}
           data={data}
-          shareStatus={shareStatus}
-          projectMissing={!!project.missing}
-          onStartShare={() => {
-            setProjectSettingsOpen(false)
-            setShareStart('start')
-          }}
-          onShowInvite={() => {
-            setProjectSettingsOpen(false)
-            setShareStart('invite')
-          }}
-          onStopShare={() => {
-            setProjectSettingsOpen(false)
-            setShareDialogError(null)
-            setShareDialog('disable')
-          }}
           onBrowseMarket={
             customRole !== 'none'
               ? () => {
@@ -2776,40 +2192,11 @@ export const ProjectPanel = ({
         />
       )}
 
-      {shareDialog && (
-        <UnshareConfirm
-          busy={shareBusy}
-          error={shareDialogError}
-          onCancel={() => {
-            setShareDialog(null)
-            setShareDialogError(null)
-          }}
-          onConfirm={() => void confirmShareDialog()}
-        />
-      )}
-
-      {shareStart && (
-        <ShareStartDialog
+      {collabInviteOpen && (
+        <CollabInviteDialog
           projectName={project.name}
           projectPath={project.path}
-          mode={shareStart}
-          shareStatus={shareStatus}
-          initialConfig={data?.config}
-          syncing={syncing}
-          onSync={doSync}
-          onEnabled={onShareEnabled}
-          onClose={() => setShareStart(null)}
-        />
-      )}
-
-      {conflictDialog && (
-        <ConflictResolveDialog
-          // Re-key on the file set so a FRESH conflict batch resets choices.
-          key={conflictDialog.map(c => c.file).join('|')}
-          conflicts={conflictDialog}
-          busy={resolving}
-          onCancel={() => setConflictDialog(null)}
-          onConfirm={choices => void confirmResolve(choices)}
+          onClose={() => setCollabInviteOpen(false)}
         />
       )}
 
@@ -2967,177 +2354,15 @@ export const ProjectPanel = ({
   )
 }
 
-// Sync conflict resolution — per conflicted file, keep MY version or take the
-// TEAMMATE's (the losing version stays in git history either way). Same
-// full-panel overlay language as DeleteConfirm/ShareConfirm. Card conflicts
-// show both titles; the delete side of a delete/modify conflict is labelled —
-// choosing it deletes the card.
-const ConflictResolveDialog = ({
-  conflicts,
-  busy,
-  onCancel,
-  onConfirm,
-}: {
-  conflicts: ShareConflict[]
-  busy: boolean
-  onCancel: () => void
-  onConfirm: (choices: Record<string, 'mine' | 'theirs'>) => void
-}) => {
-  const { t } = useT()
-  // Default to keeping the user's own version — the safe, predictable side.
-  const [choices, setChoices] = useState<Record<string, 'mine' | 'theirs'>>(() =>
-    Object.fromEntries(conflicts.map(c => [c.file, 'mine' as const])),
-  )
-  const sideButton = (
-    c: ShareConflict,
-    side: 'mine' | 'theirs',
-  ): ReactNode => {
-    const info = side === 'mine' ? c.mine : c.theirs
-    const active = choices[c.file] === side
-    const base = side === 'mine' ? t('projectPanel.syncResolveMine') : t('projectPanel.syncResolveTheirs')
-    const detail = !info.exists
-      ? t('projectPanel.syncResolveDeleted')
-      : info.title ?? null
-    return (
-      <button
-        type="button"
-        aria-pressed={active}
-        onClick={() => setChoices(prev => ({ ...prev, [c.file]: side }))}
-        disabled={busy}
-        className={[
-          'min-w-0 flex-1 rounded-[4px] border px-2.5 py-2 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50',
-          active
-            ? 'border-accent bg-accent text-bg-card'
-            : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink',
-        ].join(' ')}
-      >
-        <span className="block text-[11px] font-medium">{base}</span>
-        {detail && (
-          <span
-            className={[
-              'mt-0.5 block truncate text-[11px]',
-              active ? 'text-bg-card/85' : 'text-ink-faint',
-            ].join(' ')}
-          >
-            {detail}
-          </span>
-        )}
-      </button>
-    )
-  }
-  return (
-    <div
-      data-esc-overlay
-      className="absolute inset-0 z-20 flex flex-col justify-center gap-5 overflow-y-auto bg-bg-card px-6 py-8"
-    >
-      <div className="mx-auto w-full max-w-[480px]">
-        <p className="label-cap text-accent mb-2">{t('projectPanel.syncResolveLabel')}</p>
-        <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
-          {t('projectPanel.syncResolveTitle')}
-        </h3>
-        <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
-          {t('projectPanel.syncResolveExplain')}
-        </p>
-        <div className="mt-4 max-h-[45vh] space-y-3 overflow-y-auto pr-1">
-          {conflicts.map(c => (
-            <div key={c.file} className="rounded-[4px] border border-line p-3">
-              <p className="truncate text-[12px] text-ink" title={c.file}>
-                {c.label}
-              </p>
-              <div className="mt-2 flex gap-2">
-                {sideButton(c, 'mine')}
-                {sideButton(c, 'theirs')}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <Btn variant="subtle" size="md" onClick={onCancel} disabled={busy}>
-            {t('common.cancel')}
-          </Btn>
-          <Btn variant="primary" size="md" onClick={() => onConfirm(choices)} disabled={busy}>
-            {busy ? t('projectPanel.syncResolveWorking') : t('projectPanel.syncResolveConfirm')}
-          </Btn>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Unshare confirmation. Same modal language as DeleteConfirm (the panel's
-// established pattern): full-panel overlay, label-cap heading, one short
-// explanation paragraph, inline error, subtle-cancel + primary-confirm.
-// (Enabling has its own ShareStartDialog — this side stays a confirm.)
-const UnshareConfirm = ({
-  busy,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  busy: boolean
-  error: string | null
-  onCancel: () => void
-  onConfirm: () => void
-}) => {
-  const { t } = useT()
-  return (
-    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col justify-center gap-5 bg-bg-card px-6">
-      <div className="mx-auto w-full max-w-[420px]">
-        <p className="label-cap text-accent mb-2">
-          {t('projectPanel.unshareDialogLabel')}
-        </p>
-        <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
-          {t('projectPanel.unshareDialogTitle')}
-        </h3>
-        <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
-          {t('projectPanel.unshareDialogExplain')}
-        </p>
-        {/* S036: the teammates' clones fall back to their (empty) central
-            data once the removal lands — warn the owner to tell them. */}
-        <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
-          {t('projectPanel.unshareTeammateNote')}
-        </p>
-        {error && (
-          <p className="mt-3 text-[11px] leading-relaxed text-accent">
-            {t('projectPanel.shareFailed', { error })}
-          </p>
-        )}
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <Btn variant="subtle" size="md" onClick={onCancel} disabled={busy}>
-            {t('common.cancel')}
-          </Btn>
-          <Btn variant="primary" size="md" onClick={onConfirm} disabled={busy}>
-            {busy
-              ? t('projectPanel.shareWorking')
-              : t('projectPanel.unshareConfirm')}
-          </Btn>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Project settings — section layout adapts to the project's share/git state
-// (settingsSections in src/lib/shareUx.ts — docs/SHARE_UX_FLOWS.md §2a):
-//   - shared:           共有 (team) + タスクのワークフロー + Personal
-//   - unshared git:     タスクのワークフロー + Personal + "share…" CTA
-//                       (NO share vocabulary anywhere — S033/S034)
-//   - non-git:          Personal only (S047)
+// Project settings — タスクのワークフロー + Personal. (Git-share is gone; the
+// team / share-CTA sections went with it.)
 // AUTOSAVE dialog: every committed change persists the moment it's made (the
-// parent debounces the PUT); a single Back button / ESC just dismisses. The
-// display name is a GLOBAL setting (settings.displayName) edited inline while
-// shared and saved to /api/settings on its own debounced path — separate from
-// the per-project config.
+// parent debounces the PUT); a single Back button / ESC just dismisses.
 
 const ProjectSettingsDialog = ({
   projectName,
   projectPath,
   data,
-  shareStatus,
-  projectMissing,
-  onStartShare,
-  onShowInvite,
-  onStopShare,
   onBrowseMarket,
   onClose,
   onChange,
@@ -3145,15 +2370,6 @@ const ProjectSettingsDialog = ({
   projectName: string
   projectPath: string
   data: ProjectData
-  /** null = unknown (share routes unreachable) → conservative layout. */
-  shareStatus: ShareStatus | null
-  projectMissing: boolean
-  /** Open the ShareStartDialog (the bottom CTA, unshared git repos only). */
-  onStartShare: () => void
-  /** Re-show the invite panel (shared projects). */
-  onShowInvite: () => void
-  /** Open the unshare confirmation (shared projects). */
-  onStopShare: () => void
   /** Owner|tester: open the marketplace dialog (the parent closes settings
    *  first). undefined hides the settings-side marketplace entry. */
   onBrowseMarket?: () => void
@@ -3161,7 +2377,6 @@ const ProjectSettingsDialog = ({
   onChange: (config: ProjectConfig, launch: ProjectLaunchPrefs) => void
 }) => {
   const { t } = useT()
-  const sections = useMemo(() => settingsSections(shareStatus), [shareStatus])
 
   // ESC dismisses the dialog (same as the Back button). Skips an Escape that
   // cancels an IME composition or one another handler already consumed, and
@@ -3186,91 +2401,8 @@ const ProjectSettingsDialog = ({
   const [members, setMembers] = useState<string[]>(() =>
     Array.from(new Set(data.config?.members ?? [])),
   )
-  // Personal drafts
-  const [autoSync, setAutoSync] = useState(data.launch?.autoSync !== false)
 
-  // Display name (GLOBAL settings) — read on open while the team section is
-  // visible; null = still loading (input disabled, never clobbered by a slow
-  // fetch). Saved back via POST /api/settings only when actually changed.
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const initialDisplayNameRef = useRef<string>('')
-  useEffect(() => {
-    if (!sections.team) return
-    let cancelled = false
-    fetch('/api/settings', { cache: 'no-store' })
-      .then(r => (r.ok ? (r.json() as Promise<SettingsResponse>) : null))
-      .then(body => {
-        if (cancelled) return
-        initialDisplayNameRef.current = body?.displayName ?? ''
-        setDisplayName(prev => (prev !== null ? prev : (body?.displayName ?? '')))
-      })
-      .catch(() => {
-        if (!cancelled) setDisplayName(prev => (prev !== null ? prev : ''))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [sections.team])
-  // Display name autosave — its own debounced write to /api/settings (the
-  // POST merges partial bodies), since it is GLOBAL, not part of ProjectData.
-  // Local state stays the source of truth (nothing re-reads the server after
-  // the initial fetch), so an in-flight IME composition is never rolled back.
-  // Blur — and unmount, for a Back/ESC right after typing — flushes the
-  // pending write. A FAILED post is never swallowed (assignees/mineOnly
-  // depend on the name): the error shows inline under the field, and
-  // lastPosted rolls back so the next change/blur retries naturally.
-  const displayNameRef = useRef<string | null>(null)
-  displayNameRef.current = displayName
-  const displayNameTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastPostedDisplayName = useRef<string | null>(null)
-  const [displayNameError, setDisplayNameError] = useState<string | null>(null)
-  const postDisplayName = useCallback(() => {
-    const raw = displayNameRef.current
-    if (raw === null) return
-    const v = raw.trim()
-    const prev = lastPostedDisplayName.current ?? initialDisplayNameRef.current
-    if (v === prev) return
-    lastPostedDisplayName.current = v
-    void fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ displayName: v }),
-    })
-      .catch(() => null)
-      .then(res => {
-        if (res && res.ok) {
-          setDisplayNameError(null)
-          return
-        }
-        // Roll back ONLY if no newer post superseded this one, so the next
-        // edit / blur diffs against the last value the server confirmed.
-        if (lastPostedDisplayName.current === v) {
-          lastPostedDisplayName.current = prev
-        }
-        setDisplayNameError(
-          t('projectPanel.settingsDisplayNameSaveFailed', {
-            error: res ? `HTTP ${res.status}` : t('projectPanel.networkError'),
-          }),
-        )
-      })
-  }, [t])
-  const flushDisplayName = useCallback(() => {
-    if (displayNameTimer.current) {
-      clearTimeout(displayNameTimer.current)
-      displayNameTimer.current = null
-    }
-    postDisplayName()
-  }, [postDisplayName])
-  const scheduleDisplayNameSave = useCallback(() => {
-    if (displayNameTimer.current) clearTimeout(displayNameTimer.current)
-    displayNameTimer.current = setTimeout(() => {
-      displayNameTimer.current = null
-      postDisplayName()
-    }, 350)
-  }, [postDisplayName])
-  useEffect(() => flushDisplayName, [flushDisplayName])
-
-  // The repo's branch list (shared hook with ShareStartDialog) — a failed
+  // The repo's branch list — a failed
   // fetch / non-git folder falls back to the plain text input.
   const { branches, failed: branchesFailed } = useProjectBranches(projectPath)
   // Central worktrees (B012 / F082) — fetched once when the dialog opens so
@@ -3350,29 +2482,17 @@ const ProjectSettingsDialog = ({
   const persistChange = (over: {
     targetBranch?: string
     members?: string[]
-    autoSync?: boolean
   }) => {
     const d = dataRef.current
     // Spread first: every config key this dialog doesn't currently SHOW
-    // (completionFlow, verifyCommands, reviewColumn — and the
-    // workflow/members fields when their sections are hidden) is carried
-    // through untouched — saving must never strip data the user couldn't see.
+    // (completionFlow, verifyCommands, reviewColumn) is carried through
+    // untouched — saving must never strip data the user couldn't see.
     const config: ProjectConfig = { ...d.config }
-    if (sections.workflow) {
-      config.targetBranch = (over.targetBranch ?? targetBranch).trim() || undefined
-      // The members list is editable in BOTH layouts: as the team roster
-      // while shared, and as the plain assignee-name roster (workflow
-      // section) on an unshared git project.
-      const nextMembers = over.members ?? members
-      config.members = nextMembers.length > 0 ? nextMembers : undefined
-    }
+    config.targetBranch = (over.targetBranch ?? targetBranch).trim() || undefined
+    // The assignee-name roster (solo users assign cards too).
+    const nextMembers = over.members ?? members
+    config.members = nextMembers.length > 0 ? nextMembers : undefined
     const launch: ProjectLaunchPrefs = { ...d.launch }
-    if (sections.team) {
-      // Default ON — only an explicit opt-out is stored. Only editable while
-      // shared (the checkbox lives in the team section); otherwise the spread
-      // above preserves whatever was saved.
-      launch.autoSync = (over.autoSync ?? autoSync) ? undefined : false
-    }
     onChange(config, launch)
   }
 
@@ -3396,187 +2516,47 @@ const ProjectSettingsDialog = ({
             {projectName}
           </h3>
 
-          {/* Two columns on md+ when the project has more than Personal to
-              show: 共有(team) + workflow stack on the left, Personal on the
-              right; stacks vertically on narrow widths. A non-git project
-              collapses to the Personal column alone. */}
-          <div
-            className={[
-              'mt-5 grid grid-cols-1 gap-x-10',
-              sections.team || sections.workflow ? 'md:grid-cols-2' : '',
-            ].join(' ')}
-          >
-            {(sections.team || sections.workflow) && (
-              <div>
-                {/* ── 共有 — only while actually shared (S033/S034) ── */}
-                {sections.team && (
-                  <div className="border-t border-line pt-4">
-                    <p className="label-cap text-ink">{t('projectPanel.settingsTeamHeading')}</p>
-                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-                      {t('projectPanel.settingsTeamHint')}
-                    </p>
-                    {/* Status one-liner: where it syncs (remote · branch). */}
-                    {(remoteShortName(shareStatus?.remoteUrl ?? null) || shareStatus?.branch) && (
-                      <p className="mt-2 flex items-center gap-2 font-mono text-[10px] text-ink-faint">
-                        {remoteShortName(shareStatus?.remoteUrl ?? null) && (
-                          <span
-                            title={shareStatus?.remoteUrl ?? undefined}
-                            className="max-w-[180px] truncate"
-                          >
-                            {remoteShortName(shareStatus?.remoteUrl ?? null)}
-                          </span>
-                        )}
-                        {shareStatus?.branch && (
-                          <span className="flex items-center gap-0.5">
-                            <GitBranch size={10} className="shrink-0" aria-hidden />
-                            <span className="truncate">{shareStatus.branch}</span>
-                          </span>
-                        )}
-                      </p>
-                    )}
-
-                    <div className="mt-3 space-y-3.5">
-                      {/* Your display name — the GLOBAL setting, editable in
-                          the share context where it matters (S009/S018). */}
-                      <div>
-                        <label className="mb-1 block label-cap text-ink-muted">
-                          {t('projectPanel.settingsDisplayName')}
-                        </label>
-                        <input
-                          value={displayName ?? ''}
-                          onChange={e => {
-                            setDisplayName(e.target.value)
-                            scheduleDisplayNameSave()
-                          }}
-                          onBlur={flushDisplayName}
-                          disabled={displayName === null}
-                          placeholder={t('projectPanel.settingsDisplayName')}
-                          className={FIELD_INPUT_CSS}
-                        />
-                        {displayNameError && (
-                          <p className="mt-1 text-[11px] leading-relaxed text-accent">
-                            {displayNameError}
-                          </p>
-                        )}
-                        <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                          {t('projectPanel.settingsDisplayNameHint')}
-                        </p>
-                      </div>
-
-                      {/* MembersField keeps its typing draft internal — only
-                          an Add-confirmed name (or a ✕ removal) reaches
-                          onChange, so unconfirmed text is never persisted. */}
-                      <MembersField
-                        members={members}
-                        onChange={next => {
-                          setMembers(next)
-                          persistChange({ members: next })
-                        }}
-                        hint={t('projectPanel.settingsMembersSyncHint')}
-                      />
-
-                      <div>
-                        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink transition-colors hover:text-accent">
-                          <input
-                            type="checkbox"
-                            checked={autoSync}
-                            onChange={e => {
-                              setAutoSync(e.target.checked)
-                              persistChange({ autoSync: e.target.checked })
-                            }}
-                            className="accent-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                          />
-                          {t('projectPanel.settingsAutoSync')}
-                        </label>
-                        {/* Sits in the share context but is PERSONAL — say so. */}
-                        <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                          {t('projectPanel.settingsAutoSyncDeviceNote')}{' '}
-                          {t('projectPanel.settingsAutoSyncHint')}
-                        </p>
-                      </div>
-
-                      {/* Text links: re-show the invite instructions (S015's
-                          standing entry) / stop sharing (moved here from ⋯). */}
-                      <div className="flex flex-col items-start gap-1.5">
-                        <button
-                          type="button"
-                          onClick={onShowInvite}
-                          className="text-[12px] text-ink-muted underline-offset-2 transition-colors hover:text-ink hover:underline active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                        >
-                          {t('projectPanel.settingsInviteLink')}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={onStopShare}
-                          className="text-[12px] text-accent underline-offset-2 transition-colors hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                        >
-                          {t('projectPanel.unshareMenu')}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* ── タスクのワークフロー — git projects (no share words) ── */}
-                {sections.workflow && (
-                  <div
-                    className={[
-                      'border-t border-line pt-4',
-                      sections.team ? 'mt-5' : '',
-                    ].join(' ')}
-                  >
-                    <p className="label-cap text-ink">{t('projectPanel.settingsWorkflowHeading')}</p>
-                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-                      {t(
-                        sections.team
-                          ? 'projectPanel.settingsWorkflowSharedHint'
-                          : 'projectPanel.settingsWorkflowHint',
-                      )}
-                    </p>
-                    <div className="mt-3 space-y-3.5">
-                      {/* The completion-flow choice (merge/PR) moved to the
-                          Board's run-defaults strip (2026-06-12) — one editor,
-                          right where tasks run. This section keeps the fields
-                          with no second home: base branch + roster. */}
-                      <TargetBranchField
-                        value={targetBranch}
-                        onChange={v => {
-                          setTargetBranch(v)
-                          persistChange({ targetBranch: v })
-                        }}
-                        branches={branches}
-                        branchesFailed={branchesFailed}
-                        savedBranch={savedBranch}
-                      />
-                      {/* Assignee-name roster for UNSHARED git projects —
-                          deliberately share-free vocabulary ("assignee
-                          names", not "members"/"team"): solo users assign
-                          cards too. While shared the same list lives in the
-                          共有 section above as the team roster. */}
-                      {!sections.team && (
-                        <MembersField
-                          members={members}
-                          onChange={next => {
-                            setMembers(next)
-                            persistChange({ members: next })
-                          }}
-                          label={t('projectPanel.settingsAssigneeNames')}
-                          hint={t('projectPanel.settingsAssigneeNamesHint')}
-                        />
-                      )}
-                    </div>
-                  </div>
-                )}
+          {/* Two columns on md+: タスクのワークフロー stack on the left,
+              Personal on the right; stacks vertically on narrow widths. */}
+          <div className="mt-5 grid grid-cols-1 gap-x-10 md:grid-cols-2">
+            <div>
+              {/* ── タスクのワークフロー ── */}
+              <div className="border-t border-line pt-4">
+                <p className="label-cap text-ink">{t('projectPanel.settingsWorkflowHeading')}</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                  {t('projectPanel.settingsWorkflowHint')}
+                </p>
+                <div className="mt-3 space-y-3.5">
+                  {/* The completion-flow choice (merge/PR) moved to the
+                      Board's run-defaults strip (2026-06-12) — one editor,
+                      right where tasks run. This section keeps the fields
+                      with no second home: base branch + roster. */}
+                  <TargetBranchField
+                    value={targetBranch}
+                    onChange={v => {
+                      setTargetBranch(v)
+                      persistChange({ targetBranch: v })
+                    }}
+                    branches={branches}
+                    branchesFailed={branchesFailed}
+                    savedBranch={savedBranch}
+                  />
+                  {/* Assignee-name roster — solo users assign cards too. */}
+                  <MembersField
+                    members={members}
+                    onChange={next => {
+                      setMembers(next)
+                      persistChange({ members: next })
+                    }}
+                    label={t('projectPanel.settingsAssigneeNames')}
+                    hint={t('projectPanel.settingsAssigneeNamesHint')}
+                  />
+                </div>
               </div>
-            )}
+            </div>
 
             {/* ── Personal ── */}
-            <div
-              className={[
-                'border-t border-line pt-4',
-                sections.team || sections.workflow ? 'mt-5 md:mt-0' : '',
-              ].join(' ')}
-            >
+            <div className="mt-5 border-t border-line pt-4 md:mt-0">
               <p className="label-cap text-ink">{t('projectPanel.settingsPersonalHeading')}</p>
               <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
                 {t('projectPanel.settingsPersonalHint')}
@@ -3615,9 +2595,7 @@ const ProjectSettingsDialog = ({
 
                 {/* ── Worktrees (B012/F082) — sweep the task/review checkouts
                     that pile up under ~/.openground/…/worktrees/. Only CLEAN
-                    ones are removed; dirty ones are reported, never touched.
-                    A git concept — hidden for known non-git folders (S047). */}
-                {sections.worktrees && (
+                    ones are removed; dirty ones are reported, never touched. */}
                 <div>
                   <label className="mb-1 block label-cap text-ink-muted">
                     {t('projectPanel.settingsWorktrees')}
@@ -3663,29 +2641,9 @@ const ProjectSettingsDialog = ({
                     {t('projectPanel.settingsWorktreesHint')}
                   </p>
                 </div>
-                )}
               </div>
             </div>
           </div>
-
-          {/* ── Share CTA — only for a positively-known unshared git repo
-              (the second entry point besides the header Share… button). ── */}
-          {sections.shareCta && (
-            <div className="mt-6 border-t border-line pt-4">
-              <p className="text-[11px] leading-relaxed text-ink-faint">
-                {t('projectPanel.settingsShareCtaText')}
-              </p>
-              <button
-                type="button"
-                onClick={onStartShare}
-                disabled={projectMissing}
-                title={projectMissing ? t('projectPanel.folderGone') : undefined}
-                className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              >
-                {t('projectPanel.settingsShareCta')}
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -4106,10 +3064,11 @@ const MoreMenu = ({
 
 // ---------- Editable project title ----------
 
-// Read-only display heading; double-click (or hit Enter while typing in the
-// input) to rename the folder on disk. Validation errors surface inline so a
-// collision doesn't silently swallow the rename. Disabled when onRename is
-// omitted (e.g. archived projects, until we support rename-within-archive).
+// Display heading; CLICK (or hit Enter while typing in the input) to set the
+// project NAME — the cosmetic registry displayName, NOT the folder on disk.
+// Default name is the folder basename; clearing the field reverts to it.
+// Validation errors surface inline. Disabled (read-only) when onRename is
+// omitted — e.g. the member side, which can't rename a shared project.
 const TITLE_CSS = {
   fullscreen: {
     // min-w-0 + break-words: a long folder name wraps inside the header
@@ -4222,8 +3181,8 @@ const EditableTitle = ({
 
   return (
     <h2
-      onDoubleClick={start}
-      title={onRename ? t('projectPanel.doubleClickToRename') : undefined}
+      onClick={start}
+      title={onRename ? t('projectPanel.clickToRenameProject') : undefined}
       className={[css.text, onRename ? 'cursor-text' : ''].join(' ')}
       style={css.style}
     >
