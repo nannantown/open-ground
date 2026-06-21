@@ -6,6 +6,7 @@ import { InfiniteCanvas, type CanvasZoomApi } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
 import { SelectionInspector } from './SelectionInspector'
 import { LayersPanel } from './LayersPanel'
+import { ClaudeTerminalPane } from './ClaudeTerminalPane'
 import { CanvasAssetProvider } from './CanvasAssetContext'
 import { uploadCanvasAsset } from '@/lib/canvasAssets'
 import { newId } from '@/lib/ids'
@@ -558,6 +559,30 @@ export const CanvasWorkspace = ({
   const [genPrompt, setGenPrompt] = useState('')
   const [genPending, setGenPending] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
+  // Signed-out (503 { claudeLoggedOut }): the run gate refuses to spawn a
+  // signed-out claude, so instead of a generic error we surface a "sign in to
+  // Claude" CTA that opens the dedicated login terminal (below). claudeMissing
+  // keeps its own install-guidance copy.
+  const [genLoggedOut, setGenLoggedOut] = useState(false)
+
+  // Live elapsed-seconds counter while a generation is in flight. A whole
+  // claude session can take 30s–3min; a bare spinner reads as "frozen", so the
+  // pending bar shows "Generating… Ns" ticking every second. We recompute from
+  // a Date.now() delta (not a ++counter) so a backgrounded tab — where
+  // setInterval is throttled — still shows the true elapsed time on return.
+  const [genElapsed, setGenElapsed] = useState(0)
+  useEffect(() => {
+    if (!genPending) {
+      setGenElapsed(0)
+      return
+    }
+    const started = Date.now()
+    setGenElapsed(0)
+    const id = window.setInterval(() => {
+      setGenElapsed(Math.floor((Date.now() - started) / 1000))
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [genPending])
 
   // In-flight generation — abortable: closing the bar (✕ / Escape) cancels
   // the request, and the abort propagates server-side to kill the claude
@@ -577,13 +602,79 @@ export const CanvasWorkspace = ({
     setGenOpen(false)
     setGenPrompt('')
     setGenError(null)
+    setGenLoggedOut(false)
   }, [])
+
+  // ── "Sign in to Claude" terminal (signed-out generate) ───────────────────
+  // generate-elements answers 503 { claudeLoggedOut } when the CLI is installed
+  // but signed out. Rather than dead-end on a generic error, the CTA opens the
+  // SAME single login terminal the Board drawer uses (POST
+  // /api/terminal/claude-login → a plain claude PTY that runs its OAuth once).
+  // Kept self-contained here so the Canvas needs no new prop from its shell.
+  const [loginOpen, setLoginOpen] = useState(false)
+  const [loginPty, setLoginPty] = useState<string | null>(null)
+  const [loginError, setLoginError] = useState<string | null>(null)
+  const loginInFlight = useRef(false)
+  const openClaudeLogin = useCallback(async () => {
+    setLoginOpen(true)
+    // Single-flight + single instance: a second click re-focuses the open
+    // terminal instead of spawning a twin.
+    if (loginPty || loginInFlight.current) return
+    loginInFlight.current = true
+    setLoginError(null)
+    try {
+      const r = await fetch('/api/terminal/claude-login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: projectPath }),
+      })
+      if (!r.ok) {
+        const b = (await r.json().catch(() => ({}))) as { error?: string }
+        setLoginError(b.error || `HTTP ${r.status}`)
+        return
+      }
+      const info = (await r.json().catch(() => ({}))) as { id?: string }
+      if (info.id) setLoginPty(info.id)
+      else setLoginError(`HTTP ${r.status}`)
+    } catch (e) {
+      setLoginError(e instanceof Error ? e.message : String(e))
+    } finally {
+      loginInFlight.current = false
+    }
+  }, [projectPath, loginPty])
+  const closeClaudeLogin = useCallback(() => {
+    setLoginOpen(false)
+    setLoginPty((prev) => {
+      // Sign-in persists to claude's own credential store, so killing the PTY
+      // afterwards is safe. Best-effort.
+      if (prev)
+        fetch(`/api/terminal/${encodeURIComponent(prev)}`, { method: 'DELETE' }).catch(() => {})
+      return null
+    })
+    setLoginError(null)
+    // A completed sign-in clears the run gate — drop the CTA so the user can
+    // just press Generate again.
+    setGenLoggedOut(false)
+  }, [])
+  // Kill a still-open login PTY if the workspace unmounts (tab / canvas switch)
+  // mid sign-in — it would otherwise linger waiting at its prompt.
+  const loginPtyRef = useRef<string | null>(null)
+  loginPtyRef.current = loginPty
+  useEffect(
+    () => () => {
+      const id = loginPtyRef.current
+      if (id)
+        fetch(`/api/terminal/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {})
+    },
+    [],
+  )
 
   const submitGenerate = useCallback(async () => {
     const prompt = genPrompt.trim()
     if (!prompt || genPending) return
     setGenPending(true)
     setGenError(null)
+    setGenLoggedOut(false)
     const controller = new AbortController()
     genAbortRef.current = controller
     // Generation takes ~a minute — the user may switch Canvas tabs meanwhile.
@@ -602,13 +693,20 @@ export const CanvasWorkspace = ({
       const json = (await res.json().catch(() => ({}))) as Partial<GenerateElementsResponse> & {
         error?: string
         claudeMissing?: boolean
+        claudeLoggedOut?: boolean
       }
       if (!res.ok || !Array.isArray(json.elements) || json.elements.length === 0) {
-        setGenError(
-          json.claudeMissing
-            ? t('canvas.generate.claudeMissing')
-            : json.error || t('canvas.generate.error'),
-        )
+        // Installed-but-signed-out (503) gets the sign-in CTA instead of a
+        // generic error; claudeMissing keeps its install guidance.
+        if (json.claudeLoggedOut) {
+          setGenLoggedOut(true)
+        } else {
+          setGenError(
+            json.claudeMissing
+              ? t('canvas.generate.claudeMissing')
+              : json.error || t('canvas.generate.error'),
+          )
+        }
         return
       }
       if (canvasRef.current.id !== forCanvasId) return
@@ -863,6 +961,7 @@ export const CanvasWorkspace = ({
           onGenerate={() => {
             setGenOpen(true)
             setGenError(null)
+            setGenLoggedOut(false)
           }}
         />
         {/* Generate prompt bar — floats bottom-centre while open, just above
@@ -893,33 +992,71 @@ export const CanvasWorkspace = ({
                 placeholder={t('canvas.generate.placeholder')}
                 className="min-w-0 flex-1 bg-transparent text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               />
-              {genPending && (
-                <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-ink-muted">
-                  <Loader2 size={12} strokeWidth={2} className="animate-spin" />
-                  {t('canvas.generate.hint')}
-                </span>
+              {genPending ? (
+                <>
+                  {/* Live "working" status: spinner + label + elapsed seconds,
+                      so a 30s–3min claude session never reads as "frozen". */}
+                  <span
+                    className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-ink-muted"
+                    aria-live="polite"
+                  >
+                    <Loader2 size={12} strokeWidth={2} className="animate-spin" />
+                    <span>{t('canvas.generate.generating')}</span>
+                    <span className="tabular-nums text-ink-faint" data-testid="canvas-gen-elapsed">
+                      {genElapsed}
+                      {t('canvas.generate.elapsedUnit')}
+                    </span>
+                  </span>
+                  {/* A clearly-labelled cancel (Escape cancels too) — never trap
+                      the user in a mode they can't leave. */}
+                  <button
+                    type="button"
+                    onClick={closeGenerate}
+                    className="h-7 shrink-0 rounded-full border border-line px-3 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  >
+                    {t('canvas.generate.cancel')}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void submitGenerate()}
+                    disabled={!genPrompt.trim()}
+                    className="h-7 shrink-0 rounded-full bg-accent px-3 text-[11.5px] font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
+                  >
+                    {t('canvas.generate.go')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeGenerate}
+                    title={t('canvas.generate.close')}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  >
+                    <X size={13} strokeWidth={2} />
+                  </button>
+                </>
               )}
-              <button
-                type="button"
-                onClick={() => void submitGenerate()}
-                disabled={genPending || !genPrompt.trim()}
-                className="h-7 shrink-0 rounded-full bg-accent px-3 text-[11.5px] font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
-              >
-                {t('canvas.generate.go')}
-              </button>
-              <button
-                type="button"
-                onClick={closeGenerate}
-                title={genPending ? t('canvas.generate.cancel') : t('canvas.generate.close')}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                <X size={13} strokeWidth={2} />
-              </button>
             </div>
-            {genError && (
-              <p className="mt-1.5 truncate px-4 text-center text-[11px] text-accent">
-                {genError}
-              </p>
+            {genLoggedOut ? (
+              <div className="mt-1.5 flex flex-col items-center gap-1.5 px-4 text-center">
+                <p className="text-[11px] leading-relaxed text-ink-muted">
+                  {t('canvas.generate.claudeLoggedOut')}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void openClaudeLogin()}
+                  className="rounded-full border border-line px-3 py-1 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  {t('canvas.generate.signIn')}
+                </button>
+              </div>
+            ) : (
+              genError && (
+                <p className="mt-1.5 truncate px-4 text-center text-[11px] text-accent">
+                  {genError}
+                </p>
+              )
             )}
           </div>
         )}
@@ -1047,6 +1184,73 @@ export const CanvasWorkspace = ({
             <Redo2 size={14} strokeWidth={2} />
           </button>
         </div>
+        {/* "Sign in to Claude" terminal — opened from the signed-out CTA above.
+            Portaled to <body> so the canvas's transformed / overflow-hidden
+            ancestors can't clip or mis-position the fixed overlay. Mirrors the
+            Board drawer's login terminal (same /api/terminal/claude-login PTY +
+            ClaudeTerminalPane). */}
+        {loginOpen &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t('projectPanel.claudeLogin.title')}
+            >
+              <div className="flex h-[70vh] max-h-[640px] w-full max-w-[780px] flex-col overflow-hidden rounded-lg border border-line bg-bg-card shadow-2xl">
+                <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-[13px] font-medium text-ink">
+                      {t('projectPanel.claudeLogin.title')}
+                    </p>
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                      {t('projectPanel.claudeLogin.hint')}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeClaudeLogin}
+                    aria-label={t('common.close')}
+                    className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col bg-bg">
+                  {loginPty ? (
+                    <ClaudeTerminalPane
+                      terminalId={loginPty}
+                      chrome={false}
+                      onExit={closeClaudeLogin}
+                    />
+                  ) : (
+                    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+                      {loginError ? (
+                        <>
+                          <p className="max-w-[90%] text-[12px] leading-relaxed text-accent">
+                            {loginError}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => void openClaudeLogin()}
+                            className="rounded-sm border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                          >
+                            {t('projectPanel.claudeLogin.retry')}
+                          </button>
+                        </>
+                      ) : (
+                        <p className="text-[12px] text-ink-faint">
+                          {t('projectPanel.claudeLogin.starting')}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )}
       </div>
     </div>
     </CanvasAssetProvider>

@@ -22,6 +22,14 @@ export const canvas = {
     'canvas.generate.error': 'Generation failed. Try again.',
     'canvas.generate.claudeMissing':
       'claude CLI not found — install Claude Code to use this.',
+    // Generation progress (live elapsed-seconds counter) — a whole claude
+    // session can take 30s–3min, so a bare spinner reads as "frozen".
+    'canvas.generate.generating': 'Generating with Claude…',
+    'canvas.generate.elapsedUnit': 's',
+    // Signed-out (503 claudeLoggedOut): a sign-in CTA, not a generic error.
+    'canvas.generate.claudeLoggedOut':
+      'Claude is installed but not signed in. Sign in once, then generate again.',
+    'canvas.generate.signIn': 'Sign in to Claude',
     // PagesSection (left sidebar Canvas list)
     'canvas.pages': 'Pages',
     'canvas.switchToCanvas': 'Switch to {name}',
@@ -198,6 +206,14 @@ export const canvas = {
     'canvas.generate.error': '生成に失敗しました。もう一度お試しください。',
     'canvas.generate.claudeMissing':
       'claude CLI が見つかりません — Claude Code をインストールしてください。',
+    // Generation progress (live elapsed-seconds counter) — a whole claude
+    // session can take 30s–3min, so a bare spinner reads as "frozen".
+    'canvas.generate.generating': 'Claude で生成中…',
+    'canvas.generate.elapsedUnit': '秒',
+    // Signed-out (503 claudeLoggedOut): a sign-in CTA, not a generic error.
+    'canvas.generate.claudeLoggedOut':
+      'Claude はインストール済みですが未サインインです。一度サインインしてから、もう一度生成してください。',
+    'canvas.generate.signIn': 'Claude にサインイン',
     // PagesSection (left sidebar Canvas list)
     'canvas.pages': 'ページ',
     'canvas.switchToCanvas': '{name} に切り替え',

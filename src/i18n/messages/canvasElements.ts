@@ -17,6 +17,9 @@ export const canvasElements = {
     'canvasEl.tweak.error': 'Tweak failed. Try again.',
     'canvasEl.tweak.claudeMissing':
       'claude CLI not found — install Claude Code to use this.',
+    // Signed-out (503 claudeLoggedOut): a sign-in CTA, not a generic error.
+    'canvasEl.tweak.claudeLoggedOut':
+      'Claude is installed but not signed in. Sign in once, then tweak again.',
     // ScreenView
     'canvasEl.screen.legacyTitle': 'Legacy Screen format',
     'canvasEl.screen.emptyTitle': 'Empty Screen',
@@ -55,6 +58,9 @@ export const canvasElements = {
     'canvasEl.tweak.error': '調整に失敗しました。もう一度お試しください。',
     'canvasEl.tweak.claudeMissing':
       'claude CLI が見つかりません — Claude Code をインストールしてください。',
+    // Signed-out (503 claudeLoggedOut): a sign-in CTA, not a generic error.
+    'canvasEl.tweak.claudeLoggedOut':
+      'Claude はインストール済みですが未サインインです。一度サインインしてから、もう一度調整してください。',
     // ScreenView
     'canvasEl.screen.legacyTitle': '旧形式の Screen です',
     'canvasEl.screen.emptyTitle': '空の Screen',
