@@ -140,24 +140,58 @@ describe('CollabSharedDialog (member: join + open)', () => {
     expect(JSON.parse((joinCall![1] as RequestInit).body as string)).toEqual({ code: 'deep-code' })
   })
 
-  it('shows a consent step before the first join; reveals the join UI only after agreeing', async () => {
-    localStorage.clear() // no prior consent → the privacy gate shows
+  it('shows the privacy consent inline; the join stays gated until the box is ticked', async () => {
+    localStorage.clear() // no prior consent → the inline consent notice shows
     stub()
-    render(<CollabSharedDialog onOpen={() => {}} onClose={() => {}} />)
+    // A deep-link code prefills the field so the Join button toggles purely on consent.
+    render(<CollabSharedDialog initialCode="deep-code" onOpen={() => {}} onClose={() => {}} />)
 
-    // The join field is gated behind the consent step…
-    expect(
-      screen.queryByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'),
-    ).toBeNull()
-    // …which names the cloud destinations and links the privacy policy.
-    expect(screen.getByText(/Supabase/)).toBeTruthy()
-    expect(screen.getByText(/Cloudflare/)).toBeTruthy()
+    // The join field is visible from the first paint (no separate gate), but Join
+    // is disabled and the "I agree" box is unticked…
+    const joinBtn = (
+      await screen.findByText('projectPanel.collabSharedDialogJoin')
+    ).closest('button')!
+    expect(joinBtn.disabled).toBe(true)
+    const agree = screen.getByRole('checkbox', { name: /privacy policy/i })
+    // …and the disclosure names destinations by ROLE (no vendor brands) + links the policy.
+    expect(screen.getByText(/login service/i)).toBeTruthy()
+    expect(screen.getByText(/sync server/i)).toBeTruthy()
     expect(screen.getByText(/privacy policy/i)).toBeTruthy()
+    expect(screen.queryByText(/Supabase/)).toBeNull()
+    expect(screen.queryByText(/Cloudflare/)).toBeNull()
 
-    // Agreeing reveals the join UI.
-    fireEvent.click(screen.getByText('Agree & continue'))
-    expect(
-      await screen.findByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'),
-    ).toBeTruthy()
+    // Ticking the box records consent and enables Join.
+    fireEvent.click(agree)
+    await waitFor(() =>
+      expect(
+        screen.getByText('projectPanel.collabSharedDialogJoin').closest('button')!.disabled,
+      ).toBe(false),
+    )
+  })
+
+  it('does NOT join before consent — the write is gated on the "I agree" tick', async () => {
+    localStorage.clear() // no prior consent
+    const spy = stub({ ok: true, collabProjectId: 'b' })
+    const onOpen = vi.fn()
+    render(<CollabSharedDialog initialCode="deep-code" onOpen={onOpen} onClose={() => {}} />)
+    await screen.findByRole('checkbox', { name: /privacy policy/i })
+
+    const joinPostFired = () =>
+      spy.mock.calls.some(
+        ([u, i]) =>
+          String(u).includes('/api/collab/join') && (i as RequestInit)?.method === 'POST',
+      )
+
+    // Join is disabled pre-consent AND the join() guard refuses to write — so even
+    // a click lands no POST /api/collab/join and opens nothing.
+    fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
+    expect(joinPostFired()).toBe(false)
+    expect(onOpen).not.toHaveBeenCalled()
+
+    // After ticking consent, the same join writes + opens the joined project.
+    fireEvent.click(screen.getByRole('checkbox', { name: /privacy policy/i }))
+    fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith('b', 'Beta'))
+    expect(joinPostFired()).toBe(true)
   })
 })

@@ -29,7 +29,7 @@ import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import { FIELD_INPUT_CSS } from './ProjectConfigFields'
 import {
-  CollabConsentGate,
+  CollabConsentNotice,
   collabConsentAccepted,
   markCollabConsent,
 } from './CollabConsentDialog'
@@ -126,7 +126,10 @@ export const CollabInviteDialog = ({
   }, [projectPath, projectName, consented])
 
   const trimmed = (name ?? '').trim()
-  const canCreate = !!trimmed && !busy && name !== null && !unavailable
+  // `consented` is belt-and-suspenders: the mount fetch that resolves `name` is
+  // itself gated on consent, so `name === null` already blocks this pre-consent —
+  // but gating the action explicitly keeps the invariant local + obvious.
+  const canCreate = !!trimmed && !busy && name !== null && !unavailable && consented
   // The collaborator cap parsed from the input: a positive int, else null (none).
   const parsedCap = (() => {
     const raw = memberCap.trim()
@@ -378,33 +381,6 @@ export const CollabInviteDialog = ({
   const iconBtn =
     'shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
-  // Consent step — shown before any invite UI until the owner agrees to the data
-  // disclosure. Same outer layout as the main view so the gate reads as step one.
-  if (!consented) {
-    return (
-      <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
-        <div className="grid min-h-full place-items-center">
-          <div className="w-full px-6 py-10">
-            <div className="mx-auto w-full max-w-[480px]">
-              <p className="label-cap text-accent mb-2">{t('projectPanel.collabLabel')}</p>
-              <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
-                {t('projectPanel.collabTitle', { name: projectName })}
-              </h3>
-              <CollabConsentGate
-                role="owner"
-                onAgree={() => {
-                  markCollabConsent('owner')
-                  setConsented(true)
-                }}
-                onCancel={onClose}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
       <div className="grid min-h-full place-items-center">
@@ -417,6 +393,23 @@ export const CollabInviteDialog = ({
             <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
               {t('projectPanel.collabExplain')}
             </p>
+
+            {/* Privacy consent — an inline gate, NOT a separate screen: the form is
+                visible from the first paint, but the data disclosure + "I agree"
+                tick sit above it and nothing reaches the collab server (the mount
+                fetch creates the shared-project row) until the owner ticks the box.
+                Shown only until consent is recorded — returning owners never see it. */}
+            {!consented && (
+              <CollabConsentNotice
+                role="owner"
+                checked={consented}
+                onCheckedChange={(v) => {
+                  if (!v) return
+                  markCollabConsent('owner')
+                  setConsented(true)
+                }}
+              />
+            )}
 
             {/* Shared name — what collaborators see (the local path stays private).
                 Locked once a code is minted so the displayed name matches it. */}
@@ -574,8 +567,10 @@ export const CollabInviteDialog = ({
               )}
             </div>
 
-            {/* Pending requests (approval mode) — the owner approves / denies each. */}
-            {!unavailable && requests && requests.length > 0 && (
+            {/* Pending requests (approval mode) — the owner approves / denies each.
+                All the loaded-data sections below are gated on consent too: their
+                loaders only run post-consent, so pre-consent there's nothing to show. */}
+            {consented && !unavailable && requests && requests.length > 0 && (
               <div className="mt-5 border-t border-line pt-4">
                 <label className="mb-1.5 block label-cap text-ink-muted">
                   {t('projectPanel.collabRequestsLabel')}
@@ -613,7 +608,7 @@ export const CollabInviteDialog = ({
             )}
 
             {/* Active links — per-link revoke + Reset link + the member cap. */}
-            {!unavailable && links && links.length > 0 && (
+            {consented && !unavailable && links && links.length > 0 && (
               <div className="mt-5 border-t border-line pt-4">
                 <div className="mb-1.5 flex items-center justify-between gap-2">
                   <label className="label-cap text-ink-muted">
@@ -674,7 +669,7 @@ export const CollabInviteDialog = ({
             )}
 
             {/* Collaborators — the roster + email invite + per-member remove. */}
-            {!unavailable && (
+            {consented && !unavailable && (
               <div className="mt-5 border-t border-line pt-4">
                 <label className="mb-1.5 block label-cap text-ink-muted">
                   {t('projectPanel.collabMembersLabel')}
@@ -747,7 +742,7 @@ export const CollabInviteDialog = ({
             {/* Eviction: revoke ALL outstanding invite links (owner-gated). Quiet,
                 separate from the mint action — used after removing a collaborator
                 so an old 7-day code can't let them rejoin. */}
-            {!unavailable && (
+            {consented && !unavailable && (
               <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
                 <span className="min-w-0 text-[11px] leading-relaxed text-ink-faint">
                   {revoked

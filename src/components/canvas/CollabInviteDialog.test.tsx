@@ -38,8 +38,8 @@ beforeEach(() => {
 })
 
 describe('CollabInviteDialog (owner invite UI)', () => {
-  it('shows a consent step before the first invite; reveals the invite UI only after agreeing', async () => {
-    localStorage.clear() // no prior consent → the privacy gate shows
+  it('shows the privacy consent inline; the mint stays gated until the box is ticked', async () => {
+    localStorage.clear() // no prior consent → the inline consent notice shows
     stubFetch((url) =>
       url.includes('/api/collab/project')
         ? json({ collabProjectId: PID, member: true, label: 'X' })
@@ -47,21 +47,30 @@ describe('CollabInviteDialog (owner invite UI)', () => {
     )
     render(<CollabInviteDialog projectName="My Repo" projectPath="/p" onClose={() => {}} />)
 
-    // The consent gate is shown; the mint action is NOT reachable yet…
-    expect(await screen.findByText('Agree & continue')).toBeTruthy()
-    expect(screen.queryByText('projectPanel.collabCreateLink')).toBeNull()
-    // …and it names the cloud destinations and links the privacy policy.
-    expect(screen.getByText(/Supabase/)).toBeTruthy()
-    expect(screen.getByText(/Cloudflare/)).toBeTruthy()
+    // The invite form is visible from the first paint (no separate gate screen),
+    // but the mint button is disabled and the "I agree" box is unticked…
+    const mint = (await screen.findByText('projectPanel.collabCreateLink')).closest('button')!
+    expect(mint.disabled).toBe(true)
+    const agree = screen.getByRole('checkbox', { name: /privacy policy/i })
+    // …and the disclosure names destinations by ROLE (no vendor brands) + links
+    // the privacy policy.
+    expect(screen.getByText(/login service/i)).toBeTruthy()
+    expect(screen.getByText(/sync server/i)).toBeTruthy()
     expect(screen.getByText(/privacy policy/i)).toBeTruthy()
+    expect(screen.queryByText(/Supabase/)).toBeNull()
+    expect(screen.queryByText(/Cloudflare/)).toBeNull()
 
-    // Agreeing reveals the invite UI.
-    fireEvent.click(screen.getByText('Agree & continue'))
-    expect(await screen.findByText('projectPanel.collabCreateLink')).toBeTruthy()
+    // Ticking the box records consent and releases the form: the mint enables.
+    fireEvent.click(agree)
+    await waitFor(() =>
+      expect(
+        screen.getByText('projectPanel.collabCreateLink').closest('button')!.disabled,
+      ).toBe(false),
+    )
   })
 
   it('does NOT touch the collab server before consent (no pre-agreement writes)', async () => {
-    localStorage.clear() // no prior consent → the gate shows, nothing should fetch
+    localStorage.clear() // no prior consent → nothing should fetch yet
     const spy = stubFetch((url) =>
       url.includes('/api/collab/project')
         ? json({ collabProjectId: PID, member: true, label: 'X' })
@@ -69,14 +78,14 @@ describe('CollabInviteDialog (owner invite UI)', () => {
     )
     render(<CollabInviteDialog projectName="My Repo" projectPath="/p" onClose={() => {}} />)
 
-    // The consent gate is up and NOT a single collab call has fired — the project
-    // GET would create the og_projects row + owner membership in Supabase, so it
-    // must wait for consent.
-    await screen.findByText('Agree & continue')
+    // The inline consent notice is up and NOT a single collab call has fired — the
+    // project GET would create the og_projects row + owner membership, so it must
+    // wait for the "I agree" tick (the consent-before-write invariant).
+    const agree = await screen.findByRole('checkbox', { name: /privacy policy/i })
     expect(spy).not.toHaveBeenCalled()
 
-    // Agreeing releases the gated fetches.
-    fireEvent.click(screen.getByText('Agree & continue'))
+    // Ticking the box releases the gated fetches.
+    fireEvent.click(agree)
     await waitFor(() =>
       expect(spy.mock.calls.some(([u]) => String(u).includes('/api/collab/project'))).toBe(true),
     )

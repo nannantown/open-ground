@@ -119,10 +119,12 @@ export default function App() {
   // Full-screen in-app manual (the "?" toolbar entry + first-run link).
   const [manualOpen, setManualOpen] = useState(false)
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
-  // Realtime collab (member flow). `enabled` gates the "Shared with me" entry
-  // entirely — the default build (no collab env) shows nothing. `sharedDialogOpen`
-  // is the list/join dialog; `openShared` is the folder-less shared project the
-  // member is currently viewing in SharedProjectPanel (null = none).
+  // Realtime collab (member flow). `enabled` gates collab entirely — the default
+  // build (no collab env) shows nothing. `sharedDialogOpen` is the join dialog,
+  // now opened ONLY by an `openground://join?code=…` invite deep link (the manual
+  // "Shared with me" toolbar entry was removed — projects shared with you surface
+  // as Ground cards, so a member just follows the invite link). `openShared` is the
+  // folder-less shared project currently viewed in SharedProjectPanel (null = none).
   const { enabled: collabEnabled } = useCollab()
   const [sharedDialogOpen, setSharedDialogOpen] = useState(false)
   const [openShared, setOpenShared] = useState<{ id: string; label: string } | null>(null)
@@ -133,8 +135,9 @@ export default function App() {
   // Ground stays byte-for-byte unchanged.
   const [sharedProjects, setSharedProjects] = useState<CollabProjectListItem[]>([])
   // An invite code carried in by an `openground://join?code=…` deep link — opens
-  // the "Shared with me" dialog and auto-redeems it. Cleared when the dialog
-  // closes / opens a project. null = no pending deep link.
+  // the join dialog with the code PREFILLED (never auto-joined: the member still
+  // ticks consent + clicks Join). Cleared when the dialog closes / opens a
+  // project. null = no pending deep link.
   const [deepLinkCode, setDeepLinkCode] = useState<string | null>(null)
   const onJoinCode = useCallback(
     (code: string) => {
@@ -787,7 +790,6 @@ export default function App() {
         // submissions); either having unread lights it, opening Settings (which
         // loads both inboxes and marks them seen) clears it.
         unreadFeedback={feedbackUnread + moduleSubmissionUnread}
-        onShared={collabEnabled ? () => setSharedDialogOpen(true) : undefined}
         projectCount={visibleProjects.length}
         usage={<UsageHud />}
       />
@@ -838,14 +840,14 @@ export default function App() {
           return undefined
         }}
       />
-      {/* Realtime collab — the "Shared with me" entry (member flow). Both are
-          gated on collabEnabled via the Toolbar entry, so the default build never
-          mounts them. The shared panel is a folder-less overlay (its own doc
-          source); it doesn't touch the Ground selection. */}
+      {/* Realtime collab — the join dialog (member flow), opened by an invite
+          deep link. Gated on collabEnabled, so the default build never mounts it.
+          The shared panel is a folder-less overlay (its own doc source); it
+          doesn't touch the Ground selection. */}
       {collabEnabled && sharedDialogOpen && (
         <CollabSharedDialog
           // Re-key on the incoming code so a deep link arriving while the dialog is
-          // already open remounts it (fresh initialCode + re-armed auto-join guard).
+          // already open remounts it with the fresh initialCode prefilled.
           key={deepLinkCode ?? 'shared-dialog'}
           initialCode={deepLinkCode ?? undefined}
           onClose={() => {

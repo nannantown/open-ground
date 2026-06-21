@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OPEN GROUND — Privacy Policy / プライバシーポリシー</title>
 
-  <meta name="description" content="What OPEN GROUND sends, where, and why. By default nothing leaves your machine; collaboration (opt-in) syncs your Board and Canvas through Cloudflare and Supabase." />
+  <meta name="description" content="What OPEN GROUND sends, where, and why. By default nothing leaves your machine; collaboration (opt-in) syncs your Board and Canvas to the cloud." />
   <meta name="theme-color" content="#F2EDDE" />
   <meta name="color-scheme" content="light" />
   <meta name="robots" content="index,follow" />
 
   <meta property="og:type" content="article" />
   <meta property="og:title" content="OPEN GROUND — Privacy Policy" />
-  <meta property="og:description" content="By default nothing leaves your machine. Collaboration (opt-in) syncs your Board and Canvas through Cloudflare and Supabase. Here's exactly what, where, and why." />
+  <meta property="og:description" content="By default nothing leaves your machine. Collaboration (opt-in) syncs your Board and Canvas to the cloud. Here's exactly what, where, and why." />
   <meta property="og:url" content="https://open-ground.app/privacy.html" />
   <meta property="og:site_name" content="OPEN GROUND" />
 
@@ -101,12 +101,12 @@
         </ul>
 
         <h2>2. Optional sign-in</h2>
-        <p>OPEN GROUND has an <strong>optional</strong> account login (Google or GitHub, via Supabase OAuth). Login is not required to use the app on your own. If you sign in, authentication is handled by <strong>Supabase</strong>: your email address and a user ID are associated with your account. The OAuth flow opens in your real browser, and access tokens are held by the local OPEN GROUND process — never exposed to the web UI. Signing in by itself does not publish your project data.</p>
+        <p>OPEN GROUND has an <strong>optional</strong> account login (Google or GitHub). Login is not required to use the app on your own. If you sign in, authentication is handled by a <strong>third-party login &amp; membership service</strong>: your email address and a user ID are associated with your account. The OAuth flow opens in your real browser, and access tokens are held by the local OPEN GROUND process — never exposed to the web UI. Signing in by itself does not publish your project data.</p>
 
         <h2>3. Real-time collaboration (opt-in)</h2>
-        <p>Collaboration is <strong>off unless you turn it on.</strong> When you invite a collaborator (as an owner) or join a shared project (as a member), OPEN GROUND enables real-time sync, and the data below is sent to and <strong>stored</strong> by these third-party services.</p>
+        <p>Collaboration is <strong>off unless you turn it on.</strong> When you invite a collaborator (as an owner) or join a shared project (as a member), OPEN GROUND enables real-time sync, and the data below is sent to and <strong>stored</strong> by third-party cloud infrastructure.</p>
 
-        <h3>Sent to Supabase — membership &amp; control plane</h3>
+        <h3>Login &amp; membership service — membership &amp; control plane</h3>
         <table>
           <thead><tr><th>Data</th><th>When</th></tr></thead>
           <tbody>
@@ -119,24 +119,24 @@
         </table>
         <p>Member emails are visible to the project owner and to other members of the same project. Your <strong>local file path is not sent</strong> — a project is keyed by a one-way hash.</p>
 
-        <h3>Sent to Cloudflare — real-time sync engine &amp; storage</h3>
-        <p>The contents of the shared project's <strong>Board and Canvas</strong> travel through Cloudflare (a Durable Object is the live sync hub) and are <strong>persisted</strong> there so collaborators can reconnect and work offline:</p>
+        <h3>Real-time sync server &amp; cloud storage</h3>
+        <p>The contents of the shared project's <strong>Board and Canvas</strong> travel through a <strong>real-time sync server</strong> (the live sync hub) and are <strong>persisted</strong> in cloud storage so collaborators can reconnect and work offline:</p>
         <ul>
           <li><strong>Board:</strong> task titles, descriptions, notes, status, ordering, and project configuration — such as assignees, the Review column, completion flow, target branch, and any verify commands you set.</li>
           <li><strong>Canvas:</strong> every element — sticky notes, text, frames, comments, images, and <strong>mock / screen elements including their source code</strong> (the live HTML/React you write into them).</li>
-          <li><strong>Images</strong> you place on a Canvas are uploaded to Cloudflare R2 object storage (images only, up to 10 MB each).</li>
+          <li><strong>Images</strong> you place on a Canvas are uploaded to cloud object storage (images only, up to 10 MB each).</li>
         </ul>
         <p class="note"><strong>In plain terms:</strong> turning on collaboration means your Board and Canvas content — including any source code in mock/screen elements and any images — is stored in the cloud, not just on your machine. Your repository's own files, terminal, and Claude chats are still never sent.</p>
 
         <h2>4. Retention &amp; deletion</h2>
         <ul>
-          <li><strong>Membership data (Supabase)</strong> is kept until the owner removes a member or deletes the project.</li>
-          <li><strong>Board/Canvas content and images (Cloudflare)</strong> are kept while the project is shared. Stopping sharing halts further sync; deleting the project removes its shared state.</li>
+          <li><strong>Membership data</strong> (held by the login &amp; membership service) is kept until the owner removes a member or deletes the project.</li>
+          <li><strong>Board/Canvas content and images</strong> (held by the sync server &amp; cloud storage) are kept while the project is shared. Stopping sharing halts further sync; deleting the project removes its shared state.</li>
           <li><strong>Invite codes</strong> expire automatically (7 days by default) and can be revoked by the owner at any time.</li>
         </ul>
 
-        <h2>5. Third parties</h2>
-        <p>Real-time collaboration relies on <a href="https://supabase.com/privacy" target="_blank" rel="noreferrer">Supabase</a> (authentication and membership storage) and <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noreferrer">Cloudflare</a> (Durable Objects for live sync &amp; persistence, and R2 for image storage). OPEN GROUND does not sell your data, does not use it for advertising, and sends it to no third parties other than those named here for the purpose of running collaboration.</p>
+        <h2>5. Infrastructure providers</h2>
+        <p>Real-time collaboration runs on third-party cloud infrastructure, used purely to operate collaboration: a <strong>login &amp; membership service</strong> (authentication and membership storage) and a <strong>real-time sync server with cloud object storage</strong> (live sync &amp; persistence of Board/Canvas content, and image storage). OPEN GROUND does not sell your data, does not use it for advertising, and sends it to no third parties other than the infrastructure described here for the purpose of running collaboration. For questions about the specific providers we use, contact us through the in-app feedback form or the home page.</p>
 
         <h2>6. Your choices</h2>
         <ul>
@@ -161,12 +161,12 @@
         </ul>
 
         <h2>2. 任意のサインイン</h2>
-        <p>OPEN GROUND には<strong>任意</strong>のアカウントログイン（Google / GitHub、Supabase OAuth 経由）があります。自分だけで使うのにログインは不要です。サインインした場合、認証は <strong>Supabase</strong> が扱い、あなたのメールアドレスとユーザー ID がアカウントに紐づきます。OAuth フローは実ブラウザで開き、アクセストークンはローカルの OPEN GROUND プロセスが保持し、Web UI には渡されません。サインイン単体ではプロジェクトデータは公開されません。</p>
+        <p>OPEN GROUND には<strong>任意</strong>のアカウントログイン（Google / GitHub）があります。自分だけで使うのにログインは不要です。サインインした場合、認証は<strong>第三者のログイン・メンバー管理サービス</strong>が扱い、あなたのメールアドレスとユーザー ID がアカウントに紐づきます。OAuth フローは実ブラウザで開き、アクセストークンはローカルの OPEN GROUND プロセスが保持し、Web UI には渡されません。サインイン単体ではプロジェクトデータは公開されません。</p>
 
         <h2>3. リアルタイム共同編集（オプトイン）</h2>
-        <p>共同編集は<strong>オンにしない限りオフ</strong>です。メンバーを招待する（オーナーとして）か、共有プロジェクトに参加する（メンバーとして）と、OPEN GROUND はリアルタイム同期を有効化し、以下のデータが下記の外部サービスに送信・<strong>保存</strong>されます。</p>
+        <p>共同編集は<strong>オンにしない限りオフ</strong>です。メンバーを招待する（オーナーとして）か、共有プロジェクトに参加する（メンバーとして）と、OPEN GROUND はリアルタイム同期を有効化し、以下のデータが下記の外部クラウド基盤に送信・<strong>保存</strong>されます。</p>
 
-        <h3>Supabase へ ── メンバー管理・コントロールプレーン</h3>
+        <h3>ログイン・メンバー管理サービスへ ── メンバー管理・コントロールプレーン</h3>
         <table>
           <thead><tr><th>データ</th><th>タイミング</th></tr></thead>
           <tbody>
@@ -179,24 +179,24 @@
         </table>
         <p>メンバーのメールアドレスは、オーナーと同じプロジェクトの他メンバーに表示されます。<strong>ローカルのファイルパスは送信されません</strong> ── プロジェクトは一方向ハッシュをキーとします。</p>
 
-        <h3>Cloudflare へ ── リアルタイム同期エンジン・保存</h3>
-        <p>共有プロジェクトの <strong>Board と Canvas の中身</strong>は Cloudflare（Durable Object がライブ同期のハブ）を通り、再接続やオフライン作業のためにそこに<strong>保存され続けます</strong>：</p>
+        <h3>リアルタイム同期サーバ・クラウドストレージへ</h3>
+        <p>共有プロジェクトの <strong>Board と Canvas の中身</strong>は<strong>リアルタイム同期サーバ</strong>（ライブ同期のハブ）を通り、再接続やオフライン作業のためにクラウドストレージに<strong>保存され続けます</strong>：</p>
         <ul>
           <li><strong>Board：</strong> タスクのタイトル、説明、メモ、状態、並び順、プロジェクト設定（担当者、レビュー列、完了フロー、対象ブランチ、設定した検証コマンドなど）。</li>
           <li><strong>Canvas：</strong> すべての要素 ── 付箋、テキスト、フレーム、コメント、画像、そして <strong>mock / screen 要素（書き込んだ HTML/React のソースコードを含む）</strong>。</li>
-          <li>Canvas に置いた<strong>画像</strong>は Cloudflare R2 オブジェクトストレージにアップロードされます（画像のみ・1 枚あたり最大 10 MB）。</li>
+          <li>Canvas に置いた<strong>画像</strong>はクラウドオブジェクトストレージにアップロードされます（画像のみ・1 枚あたり最大 10 MB）。</li>
         </ul>
         <p class="note"><strong>平たく言うと：</strong> 共同編集をオンにすると、Board と Canvas の中身 ── mock/screen 要素のソースコードや画像を含む ── が、あなたのマシンだけでなくクラウドにも保存されます。リポジトリのファイル・ターミナル・Claude との会話は、依然として一切送信されません。</p>
 
         <h2>4. 保持と削除</h2>
         <ul>
-          <li><strong>メンバー情報（Supabase）</strong>は、オーナーがメンバーを削除するかプロジェクトを削除するまで保持されます。</li>
-          <li><strong>Board/Canvas の中身と画像（Cloudflare）</strong>は、プロジェクトが共有されている間保持されます。共有を停止すると以後の同期は止まり、プロジェクトを削除すると共有状態は削除されます。</li>
+          <li><strong>メンバー情報</strong>（ログイン・メンバー管理サービスが保持）は、オーナーがメンバーを削除するかプロジェクトを削除するまで保持されます。</li>
+          <li><strong>Board/Canvas の中身と画像</strong>（同期サーバ・クラウドストレージが保持）は、プロジェクトが共有されている間保持されます。共有を停止すると以後の同期は止まり、プロジェクトを削除すると共有状態は削除されます。</li>
           <li><strong>招待コード</strong>は自動的に失効し（既定 7 日）、オーナーはいつでも無効化できます。</li>
         </ul>
 
-        <h2>5. 第三者</h2>
-        <p>リアルタイム共同編集は <a href="https://supabase.com/privacy" target="_blank" rel="noreferrer">Supabase</a>（認証とメンバー情報の保存）と <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noreferrer">Cloudflare</a>（ライブ同期・保存の Durable Objects、画像保存の R2）に依存します。OPEN GROUND はあなたのデータを販売せず、広告に使わず、共同編集を動かす目的で上記以外の第三者に送信しません。</p>
+        <h2>5. インフラ提供者</h2>
+        <p>リアルタイム共同編集は、共同編集を動かす目的だけに使う第三者のクラウド基盤の上で動作します：<strong>ログイン・メンバー管理サービス</strong>（認証とメンバー情報の保存）と、<strong>リアルタイム同期サーバ＋クラウドオブジェクトストレージ</strong>（Board/Canvas の中身のライブ同期・保存と、画像の保存）。OPEN GROUND はあなたのデータを販売せず、広告に使わず、共同編集を動かす目的で上記のインフラ以外の第三者に送信しません。利用している具体的な提供者についてのお問い合わせは、アプリ内のフィードバックフォームまたはホームページからご連絡ください。</p>
 
         <h2>6. あなたの選択肢</h2>
         <ul>

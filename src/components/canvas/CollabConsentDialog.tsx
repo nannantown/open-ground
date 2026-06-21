@@ -1,18 +1,23 @@
 import { Cloud, Database, Laptop, ShieldCheck } from 'lucide-react'
-import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 
-// Privacy disclosure + consent gate shown BEFORE the first realtime-collab action
-// — an OWNER minting an invite / inviting by email, or a MEMBER joining a shared
-// project. Turning collab on sends data off the user's machine: their email to
-// Supabase (membership), and the WHOLE Board/Canvas — task text, notes, every
-// canvas element including the SOURCE CODE of mock/screen elements, plus images —
-// to Cloudflare (the realtime sync engine + storage), where it is kept. So we
-// disclose exactly what goes where, link the full privacy policy, and require an
-// explicit "Agree" before any of those network calls can fire.
+// Privacy disclosure + consent CHECKBOX shown INLINE in the first realtime-collab
+// surface — an OWNER minting an invite (CollabInviteDialog) or a MEMBER joining a
+// shared project (CollabSharedDialog). Turning collab on sends data off the user's
+// machine: their email to the membership / login service, and the WHOLE
+// Board/Canvas — task text, notes, every canvas element including the SOURCE CODE
+// of mock/screen elements, plus images — to the real-time sync server + cloud
+// storage, where it is kept. So we disclose exactly what goes where and require an
+// explicit "I agree" tick before any of those network calls can fire.
+//
+// We describe each destination by its ROLE (login service / sync server / cloud
+// storage), not by vendor brand: from the user's side OPEN GROUND is the single
+// service they deal with, so the disclosure shows the STRUCTURE — what data goes
+// where and why — rather than the names of the infrastructure behind it. The full
+// privacy policy (linked from the checkbox) carries the complete detail.
 //
 // Consent is remembered per role in localStorage so it's a one-time step, not a
-// nag — once you've agreed as an owner, future invites skip straight to the UI;
+// nag — once you've agreed as an owner, future invites skip the notice entirely;
 // likewise for members. The two roles are tracked separately because their
 // disclosures differ (an owner shares a whole project; a member contributes their
 // edits + email).
@@ -49,17 +54,23 @@ export const markCollabConsent = (role: CollabRole): void => {
   }
 }
 
-export const CollabConsentGate = ({
+/** Inline privacy disclosure + an "I agree to the privacy policy" checkbox.
+ *  Rendered by the invite / join form ONLY until the user agrees — the parent
+ *  stops rendering it once consent is recorded, so returning users never see it.
+ *  Ticking the box IS the consent action: the parent persists it via
+ *  markCollabConsent and releases the gated network calls (the first of which is a
+ *  WRITE that creates the shared-project row), so nothing leaves the machine until
+ *  the box is ticked. */
+export const CollabConsentNotice = ({
   role,
-  busy,
-  onAgree,
-  onCancel,
+  checked,
+  onCheckedChange,
 }: {
   role: CollabRole
-  /** Disable both actions while a parent operation is in flight. */
-  busy?: boolean
-  onAgree: () => void
-  onCancel: () => void
+  /** Whether the "I agree" box is ticked (controlled by the parent's consent). */
+  checked: boolean
+  /** Fired when the box is toggled — the parent records consent on `true`. */
+  onCheckedChange: (checked: boolean) => void
 }) => {
   const { lang } = useT()
   const ja = lang === 'ja'
@@ -91,12 +102,12 @@ export const CollabConsentGate = ({
             </p>
           </div>
 
-          {/* Sent to Supabase — membership identity (email). */}
+          {/* Email → the membership / login service (identity + the roster). */}
           <div className="flex items-start gap-2">
             <Database size={13} className="mt-0.5 shrink-0 text-ink-faint" />
             <p className="text-[12px] leading-relaxed text-ink-muted">
               <span className="font-medium text-ink">
-                {ja ? 'Supabase（メンバー管理）：' : 'Supabase (membership): '}
+                {ja ? 'メンバー管理（ログイン基盤）：' : 'Membership (login service): '}
               </span>
               {ja
                 ? owner
@@ -108,13 +119,15 @@ export const CollabConsentGate = ({
             </p>
           </div>
 
-          {/* Sent to Cloudflare — the Board/Canvas body, incl. mock/screen source
-              code + images. The headline disclosure of this whole gate. */}
+          {/* Board/Canvas body + images → the real-time sync server + cloud
+              storage. The headline disclosure of this whole notice. */}
           <div className="flex items-start gap-2">
             <Cloud size={13} className="mt-0.5 shrink-0 text-ink-faint" />
             <p className="text-[12px] leading-relaxed text-ink-muted">
               <span className="font-medium text-ink">
-                {ja ? 'Cloudflare（ライブ同期・保存）：' : 'Cloudflare (live sync & storage): '}
+                {ja
+                  ? 'リアルタイム同期・保存（同期サーバ）：'
+                  : 'Live sync & storage (sync server): '}
               </span>
               {ja
                 ? owner
@@ -136,24 +149,46 @@ export const CollabConsentGate = ({
             </p>
           </div>
 
-          <a
-            href={PRIVACY_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-block text-[12px] text-accent underline underline-offset-2 transition-colors hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            {ja ? 'プライバシーポリシーを読む ↗' : 'Read the full privacy policy ↗'}
-          </a>
+          {/* The consent gate: an explicit "I agree" with the policy linked inline.
+              Ticking it is what releases the first (write) network call. */}
+          <label className="flex cursor-pointer items-start gap-2 pt-0.5">
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={(e) => onCheckedChange(e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
+            />
+            <span className="text-[12px] leading-relaxed text-ink-muted">
+              {ja ? (
+                <>
+                  <a
+                    href={PRIVACY_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-accent underline underline-offset-2 transition-colors hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    プライバシーポリシー
+                  </a>
+                  に同意します
+                </>
+              ) : (
+                <>
+                  I agree to the{' '}
+                  <a
+                    href={PRIVACY_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-accent underline underline-offset-2 transition-colors hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    privacy policy
+                  </a>
+                </>
+              )}
+            </span>
+          </label>
         </div>
-      </div>
-
-      <div className="mt-4 flex items-center justify-end gap-2">
-        <Btn variant="subtle" size="md" onClick={onCancel} disabled={busy}>
-          {ja ? 'キャンセル' : 'Cancel'}
-        </Btn>
-        <Btn variant="primary" size="md" onClick={onAgree} disabled={busy}>
-          {ja ? '同意して続ける' : 'Agree & continue'}
-        </Btn>
       </div>
     </div>
   )
