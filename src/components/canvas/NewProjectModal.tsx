@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { X, Loader2, FolderPlus, Folder } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { api } from '@/lib/api-client'
+import { pickFolder } from '@/lib/pickFolder'
 import { useT } from '@/i18n/I18nContext'
 
 interface Props {
@@ -40,26 +41,18 @@ export const NewProjectModal = ({ open, defaultWorkspace, onClose, onCreated }: 
   if (!open) return null
 
   // Native folder picker for choosing where new projects live. Stores the
-  // chosen path and returns it (or null if cancelled).
+  // chosen path and returns it (or null if cancelled). pickFolder uses the
+  // Electron dialog under the desktop app (cross-platform) and falls back to the
+  // server's osascript route in a plain dev browser — see src/lib/pickFolder.ts.
   const pickWorkspace = async (): Promise<string | null> => {
-    try {
-      const res = await api.api['pick-folder'].$post()
-      const data = (await res.json().catch(() => ({}))) as {
-        path?: string
-        cancelled?: boolean
-        error?: string
-      }
-      if (data.cancelled || !data.path) {
-        if (data.error) setError(data.error)
-        return null
-      }
-      setWorkspace(data.path)
-      setError(null)
-      return data.path
-    } catch (e: any) {
-      setError(e?.message ?? t('modals.newProject.pickerFailed'))
+    const data = await pickFolder()
+    if (data.cancelled || !data.path) {
+      if (data.error) setError(t('modals.newProject.pickerFailed'))
       return null
     }
+    setWorkspace(data.path)
+    setError(null)
+    return data.path
   }
 
   const submit = async () => {

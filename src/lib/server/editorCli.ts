@@ -16,12 +16,12 @@
 //
 // All gone → EditorNotFoundError (route maps it to 503 with the message).
 
-import { execFile as execFileCb, spawn } from 'child_process'
+import { execFile as execFileCb, spawn, type SpawnOptions } from 'child_process'
 import { promisify } from 'util'
 import { access } from 'fs/promises'
 import { constants } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, win32 as winPath } from 'path'
 import { resolveViaLoginShell } from './cliResolve'
 import type { OpenApp } from '../types'
 
@@ -47,11 +47,43 @@ export const EDITOR_CANDIDATES = ['cursor', 'code', 'windsurf', 'zed'] as const
 export const parseEditorCmd = (raw: string): string[] =>
   raw.trim().split(/\s+/).filter(Boolean)
 
-/** Well-known install targets per candidate, tried last (no shell involved):
- *  brew on Apple Silicon and Intel, the official installers' ~/.local/bin,
- *  and the .app bundles' embedded CLI shims for VS Code / Cursor.
+/** Windows well-known CLI shim locations per candidate: VS Code and its forks
+ *  install a `<name>.cmd` under their program dir's `bin/`. Both the user-scoped
+ *  (`%LOCALAPPDATA%\Programs`) and machine-scoped (`%ProgramFiles%`) installers
+ *  are covered. PATHEXT resolution of a bare name happens in the process-PATH /
+ *  `where` stages; these absolute `.cmd` shims are the no-shell last resort.
+ *  (zed has no stable Windows CLI shim path yet — it rides the PATH/`where`
+ *  stages.) Built with `win32` path joins so the shape is correct regardless of
+ *  the host the resolver/tests run on. */
+const windowsEditorLocations = (name: string): string[] => {
+  const localApp = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
+  const userPrograms = winPath.join(localApp, 'Programs')
+  const shim = `${name}.cmd`
+  if (name === 'code') {
+    return [
+      winPath.join(userPrograms, 'Microsoft VS Code', 'bin', shim),
+      winPath.join(programFiles, 'Microsoft VS Code', 'bin', shim),
+    ]
+  }
+  // Cursor & Windsurf are VS Code forks: their CLI shim lives under
+  // resources\app\bin (NOT a root-level bin\ as VS Code's own user setup uses).
+  if (name === 'cursor') {
+    return [winPath.join(userPrograms, 'cursor', 'resources', 'app', 'bin', shim)]
+  }
+  if (name === 'windsurf') {
+    return [winPath.join(userPrograms, 'Windsurf', 'resources', 'app', 'bin', shim)]
+  }
+  return []
+}
+
+/** Well-known install targets per candidate, tried last (no shell involved).
+ *  macOS/Linux: brew on Apple Silicon and Intel, the official installers'
+ *  ~/.local/bin, and the .app bundles' embedded CLI shims for VS Code / Cursor.
+ *  Windows: the VS Code-family `.cmd` shims (see windowsEditorLocations).
  *  Exported for unit tests. */
 export const knownEditorLocations = (name: string): string[] => {
+  if (process.platform === 'win32') return windowsEditorLocations(name)
   const locs = [
     `/opt/homebrew/bin/${name}`,
     `/usr/local/bin/${name}`,
@@ -79,10 +111,12 @@ export const __resetEditorCacheForTests = (): void => {
 
 /** Is this bare name runnable on the server process's own PATH?
  *  `--version` because every candidate (VS Code family + zed) answers it
- *  quickly without opening a window. */
+ *  quickly without opening a window. shell:true on Windows so a `.cmd`/`.bat`
+ *  shim (the usual VS Code-family CLI form, which Node can't exec directly)
+ *  resolves through PATHEXT and runs — mirrors claudeConnection's probe. */
 const onProcessPath = async (name: string): Promise<boolean> => {
   try {
-    await execFile(name, ['--version'], { timeout: 5000 })
+    await execFile(name, ['--version'], { timeout: 5000, shell: process.platform === 'win32' })
     return true
   } catch {
     return false
@@ -136,14 +170,43 @@ export const resolveEditorArgv = async (): Promise<string[] | null> => {
   return argv
 }
 
+/** Build the (command, args, options) for spawning the editor on `projectPath`,
+ *  detached. On Windows the editor CLI is almost always a `.cmd`/`.bat` shim,
+ *  which Node (v20+) can only spawn through a shell (`shell:true`); with the
+ *  shell on, each argument is wrapped in quotes and `windowsVerbatimArguments`
+ *  stops Node re-quoting, so a path containing spaces ("C:\Program Files\…" or a
+ *  project dir with a space) survives intact. POSIX spawns the binary directly,
+ *  exactly as before. Exported for unit tests. */
+export const buildEditorSpawn = (
+  argv: string[],
+  projectPath: string,
+): { command: string; args: string[]; options: SpawnOptions } => {
+  const rest = [...argv.slice(1), projectPath]
+  if (process.platform === 'win32') {
+    return {
+      command: `"${argv[0]}"`,
+      args: rest.map((a) => `"${a}"`),
+      options: {
+        cwd: projectPath,
+        detached: true,
+        stdio: 'ignore',
+        shell: true,
+        windowsVerbatimArguments: true,
+      },
+    }
+  }
+  return {
+    command: argv[0],
+    args: rest,
+    options: { cwd: projectPath, detached: true, stdio: 'ignore' },
+  }
+}
+
 /** Spawn the editor on the project dir, detached (the editor outlives us and
  *  we never wait on it). */
 const spawnDetached = (argv: string[], projectPath: string): void => {
-  const child = spawn(argv[0], [...argv.slice(1), projectPath], {
-    cwd: projectPath,
-    detached: true,
-    stdio: 'ignore',
-  })
+  const { command, args, options } = buildEditorSpawn(argv, projectPath)
+  const child = spawn(command, args, options)
   // The binary was probed moments ago, but it can still vanish in between —
   // swallow the async 'error' so it can't crash the server process.
   child.on('error', () => {})

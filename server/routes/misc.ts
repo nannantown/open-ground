@@ -13,7 +13,7 @@
 
 import { Hono } from 'hono'
 import { mkdir, stat, readFile } from 'fs/promises'
-import { join, resolve } from 'path'
+import { basename, join, resolve } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { getSettings, setSettings, getCanvas, setCanvas } from '@/lib/server/store'
@@ -103,6 +103,14 @@ const gNotes = globalThis as typeof globalThis & {
 // Opens the native macOS folder picker and returns the chosen absolute path.
 // A browser folder input cannot expose absolute paths, but OPEN GROUND's server
 // runs locally — so it can ask macOS directly via osascript.
+//
+// NOTE: this is the DEV-BROWSER FALLBACK only. The packaged app (Electron, any
+// OS) picks folders through the cross-platform Electron dialog instead — the
+// client prefers window.openground.showOpenDialog and only falls back to this
+// route when that bridge is absent (a plain vite dev browser, which is macOS).
+// See src/lib/pickFolder.ts. osascript exists on macOS alone, which is why a
+// Windows/Linux build must NOT reach here (it would fail with "Could not open
+// the folder picker").
 const PICK_FOLDER_SCRIPT = `set theFolder to choose folder with prompt "Choose a folder" default location (path to home folder)
 POSIX path of theFolder`
 
@@ -235,7 +243,9 @@ export const miscRoutes = new Hono()
     // rescue its inert Board/Canvas data into the central store now. No-op for a
     // normal folder (no marker); the fresh UUID means there is nothing to clobber.
     await evacuateImportedProject(entry)
-    return c.json({ path: entry.path, name: entry.path.split('/').pop() ?? entry.path, id: entry.id })
+    // basename (not split('/')) so the response name is the folder name on
+    // Windows too — entry.path uses '\' there, which split('/') would miss.
+    return c.json({ path: entry.path, name: basename(entry.path) || entry.path, id: entry.id })
   })
   // --- POST /api/projects/remove --------------------------------------------
   // Unregister a project ("Remove from canvas"). The folder is left untouched
@@ -405,6 +415,9 @@ export const miscRoutes = new Hono()
     }
   })
   // --- POST /api/pick-folder ------------------------------------------------
+  // Dev-browser fallback for the folder picker (macOS osascript). The packaged
+  // app goes through the Electron dialog (cross-platform) — see the helper note
+  // above and src/lib/pickFolder.ts.
   .post('/api/pick-folder', async (c) => {
     try {
       const { stdout } = await execFile('osascript', ['-e', PICK_FOLDER_SCRIPT], {

@@ -171,12 +171,23 @@ const appendBuffer = (s: PtySession, chunk: string) => {
   }
 }
 
-const pickShell = (): string => {
-  return (
-    process.env.OPENGROUND_TERMINAL_SHELL ||
-    process.env.SHELL ||
-    (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh')
-  )
+// Pick the PTY's host shell. `platform` / `env` are injectable so both branches
+// unit-test on one host; production uses the real values (the defaults).
+//   - An explicit OPENGROUND_TERMINAL_SHELL always wins.
+//   - Windows: ALWAYS PowerShell. The claude launch-command framing
+//     (claudeTerminal.buildLaunchCommand) is PowerShell-specific (`$env:` +
+//     call operator + `$(Get-Content -Raw …)`), so a stray POSIX `SHELL`
+//     (inherited from a Git Bash / MSYS launch) must NOT select a shell that
+//     framing can't drive.
+//   - POSIX: honour `SHELL` (so the login PATH — nvm/volta — matches the user's
+//     real shell), falling back to /bin/zsh.
+export const pickShell = (
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string => {
+  if (env.OPENGROUND_TERMINAL_SHELL) return env.OPENGROUND_TERMINAL_SHELL
+  if (platform === 'win32') return 'powershell.exe'
+  return env.SHELL || '/bin/zsh'
 }
 
 export const createTerminal = (opts: {

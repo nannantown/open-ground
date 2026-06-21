@@ -6,14 +6,22 @@ vi.mock('./terminal', () => ({
   killTerminal: vi.fn(() => true),
   createTerminal: vi.fn(),
 }))
+// launchClaude's collaborators that would otherwise touch the real machine:
+// claudeTrust writes ~/.claude.json (keep the test hermetic — see
+// feedback_tests_isolate_home) and resolvedClaudeBin reads the last live probe
+// (null here → the bare `claude`, matching a fresh process).
+vi.mock('./claudeTrust', () => ({ ensureClaudeFolderTrusted: vi.fn() }))
+vi.mock('./claudeConnection', () => ({ resolvedClaudeBin: vi.fn(() => null) }))
 import {
   shellQuoteArg,
   buildClaudeArgv,
+  buildLaunchCommand,
   buildAppContextPrompt,
   launchOptsFromPrefs,
+  launchClaude,
   sendInterrupt,
 } from './claudeTerminal'
-import { writeInput } from './terminal'
+import { writeInput, createTerminal } from './terminal'
 
 describe('sendInterrupt (Ctrl-C control byte)', () => {
   it('writes the ETX byte (\\x03), never an empty string', () => {
@@ -98,6 +106,51 @@ describe('buildClaudeArgv (launch argv order/quoting contract)', () => {
   it('omits --append-system-prompt when no context file (appContext: false)', () => {
     const argv = buildClaudeArgv(base, '/tmp/prompt.txt', null)
     expect(argv).not.toContain('--append-system-prompt')
+  })
+})
+
+describe('buildClaudeArgv on Windows (platform=win32 — PowerShell framing)', () => {
+  // The bug: PowerShell (the default Windows PTY shell) can't parse the POSIX
+  // `$(cat <file>)` the prompt/context were passed through, so claude launched
+  // with an empty/garbled prompt (Board run / auto-title / auto-description /
+  // skill-gen all silently no-op'd). On win32 the file is read with
+  // `$(Get-Content -Raw …)` instead, landing as a single claude argument.
+  const base = { agentSessionId: 'SID', permissionMode: 'bypass' as const }
+  const WIN = 'win32' as const
+
+  it('reads the positional prompt via $(Get-Content -Raw …), never $(cat …)', () => {
+    const argv = buildClaudeArgv(base, 'C:\\tmp\\prompt.txt', null, null, WIN)
+    expect(argv[argv.length - 1]).toBe("$(Get-Content -Raw 'C:\\tmp\\prompt.txt')")
+    expect(argv.join(' ')).not.toContain('$(cat')
+  })
+
+  it('reads --append-system-prompt context via $(Get-Content -Raw …), BEFORE the prompt', () => {
+    const argv = buildClaudeArgv(base, 'C:\\tmp\\prompt.txt', 'C:\\tmp\\ctx.md', null, WIN)
+    const flagIdx = argv.indexOf('--append-system-prompt')
+    expect(flagIdx).toBeGreaterThanOrEqual(0)
+    expect(argv[flagIdx + 1]).toBe("$(Get-Content -Raw 'C:\\tmp\\ctx.md')")
+    expect(argv[argv.length - 1]).toBe("$(Get-Content -Raw 'C:\\tmp\\prompt.txt')")
+    expect(argv.join(' ')).not.toContain('$(cat')
+  })
+
+  it('single-quotes the resolved absolute bin + add-dir paths the PowerShell way (backslashes literal)', () => {
+    const argv = buildClaudeArgv(
+      { ...base, addDir: 'C:\\data\\worktrees' },
+      'C:\\tmp\\prompt.txt',
+      null,
+      'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd',
+      WIN,
+    )
+    expect(argv[0]).toBe("'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd'")
+    const addIdx = argv.indexOf('--add-dir')
+    expect(argv[addIdx + 1]).toBe("'C:\\data\\worktrees'")
+  })
+
+  it('still single-quotes --model / --effort for PowerShell', () => {
+    const opts = launchOptsFromPrefs({ permissionMode: 'acceptEdits', model: 'opus', effort: 'high' })
+    const argv = buildClaudeArgv({ agentSessionId: 'SID', ...opts }, null, null, null, WIN)
+    expect(argv[argv.indexOf('--model') + 1]).toBe("'opus'")
+    expect(argv[argv.indexOf('--effort') + 1]).toBe("'high'")
   })
 })
 
@@ -265,5 +318,93 @@ describe('shellQuoteArg (PowerShell / POSIX prompt quoting)', () => {
     it('preserves embedded newlines', () => {
       expect(shellQuoteArg('a\nb', 'darwin')).toBe("'a\nb'")
     })
+  })
+})
+
+describe('buildLaunchCommand (per-shell PTY command framing)', () => {
+  // The argv content is buildClaudeArgv's contract; this pins only the per-shell
+  // FRAMING — env-prefix, the Windows call operator, and the `; exit` teardown.
+  const argv = ['claude', '--session-id', 'SID']
+
+  it('POSIX: inline env-prefix, no call operator, `; exit` teardown', () => {
+    expect(buildLaunchCommand(argv, 'darwin')).toBe(
+      'OPENGROUND_OWNED=1 claude --session-id SID ; exit\n',
+    )
+  })
+
+  it('Windows: `$env:` statement + `&` call operator + `; exit` teardown', () => {
+    expect(buildLaunchCommand(argv, 'win32')).toBe(
+      "$env:OPENGROUND_OWNED='1'; & claude --session-id SID ; exit\n",
+    )
+  })
+
+  it('Windows invokes a QUOTED absolute bin through `&` (string-expression trap)', () => {
+    // This is the exact string launchClaude would write to the PTY on Windows:
+    // buildLaunchCommand(buildClaudeArgv(…, win32), win32). Without `&`, the
+    // leading quoted `claude.cmd` path is a PowerShell string expression and
+    // claude never runs — a second Windows launch breakage beyond `$(cat …)`.
+    const win = buildLaunchCommand(
+      buildClaudeArgv(
+        { agentSessionId: 'SID', permissionMode: 'bypass' },
+        'C:\\tmp\\prompt.txt',
+        'C:\\tmp\\ctx.md',
+        'C:\\claude.cmd',
+        'win32',
+      ),
+      'win32',
+    )
+    // Exact PTY string launchClaude writes on Windows (completion condition 3):
+    // `&` call operator + single-quoted bin, BOTH file-read args via
+    // $(Get-Content -Raw …), `$env:` env-set, `; exit` teardown.
+    expect(win).toBe(
+      "$env:OPENGROUND_OWNED='1'; & 'C:\\claude.cmd' --session-id SID " +
+        '--dangerously-skip-permissions --append-system-prompt ' +
+        "$(Get-Content -Raw 'C:\\tmp\\ctx.md') " +
+        "$(Get-Content -Raw 'C:\\tmp\\prompt.txt') ; exit\n",
+    )
+    // …and the same pinned piecewise, as readable documentation of each part:
+    expect(win).toContain("& 'C:\\claude.cmd'")
+    expect(win).toContain("--append-system-prompt $(Get-Content -Raw 'C:\\tmp\\ctx.md')")
+    expect(win.endsWith("$(Get-Content -Raw 'C:\\tmp\\prompt.txt') ; exit\n")).toBe(true)
+    // No POSIX-isms leaked: no $(cat …), no inline `VAR=1 ` prefix.
+    expect(win).not.toContain('$(cat')
+    expect(win).not.toContain('OPENGROUND_OWNED=1 ')
+    expect(win.startsWith("$env:OPENGROUND_OWNED='1'; &")).toBe(true)
+  })
+})
+
+describe('launchClaude (routes the prompt through a temp file + buildLaunchCommand)', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('writes ONE launch command that reads the prompt from a file, never inline', () => {
+    vi.mocked(createTerminal).mockReturnValue({
+      id: 'tid',
+      cwd: '/p',
+      shell: '/bin/zsh',
+      cols: 120,
+      rows: 32,
+      startedAt: 'now',
+    } as never)
+    const wi = vi.mocked(writeInput)
+    wi.mockClear()
+    // Fake timers so launchClaude's 60s temp-file cleanup timer doesn't linger
+    // past the test; runOnlyPendingTimers fires the rm so nothing is left behind.
+    vi.useFakeTimers()
+    launchClaude({
+      cwd: '/p',
+      agentSessionId: 'SID',
+      initialPrompt: 'SECRET-PROMPT-TEXT',
+      appContext: false,
+    })
+    vi.runOnlyPendingTimers()
+    expect(wi).toHaveBeenCalledTimes(1)
+    const [id, cmd] = wi.mock.calls[0]
+    expect(id).toBe('tid')
+    // POSIX host: env-prefixed, reads the prompt via $(cat <tmpfile>), tears down.
+    expect(cmd).toContain('OPENGROUND_OWNED=1 ')
+    expect(cmd).toMatch(/\$\(cat '[^']+'\)/)
+    expect((cmd as string).endsWith(' ; exit\n')).toBe(true)
+    // The literal prompt text NEVER appears inline on the PTY command line.
+    expect(cmd).not.toContain('SECRET-PROMPT-TEXT')
   })
 })

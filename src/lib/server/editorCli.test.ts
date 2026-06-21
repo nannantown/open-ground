@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
   EDITOR_CANDIDATES,
   __resetEditorCacheForTests,
+  buildEditorSpawn,
   editorLaunchTarget,
   knownEditorLocations,
   parseEditorCmd,
@@ -124,5 +125,80 @@ describe('editorLaunchTarget (the `open -a` target for a chosen editor)', () => 
       'Visual Studio Code',
     )
     expect(editorLaunchTarget({ name: 'Zed', path: '   ', mode: 'open' })).toBe('Zed')
+  })
+})
+
+// Windows resolution: these tests run on macOS, so we flip process.platform to
+// exercise the win32 branches (same seam editorDetect.test.ts uses). os.homedir
+// isn't mocked here, so the Windows env vars are stubbed to keep the well-known
+// paths deterministic.
+const realPlatform = process.platform
+const setPlatform = (p: string) =>
+  Object.defineProperty(process, 'platform', { value: p, configurable: true })
+
+describe('knownEditorLocations on Windows', () => {
+  afterEach(() => {
+    setPlatform(realPlatform)
+    vi.unstubAllEnvs()
+  })
+
+  it('returns the VS Code / Cursor / Windsurf .cmd shims under the Programs dirs', () => {
+    setPlatform('win32')
+    vi.stubEnv('LOCALAPPDATA', 'C:\\Users\\u\\AppData\\Local')
+    vi.stubEnv('ProgramFiles', 'C:\\Program Files')
+    expect(knownEditorLocations('code')).toContain(
+      'C:\\Users\\u\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd',
+    )
+    expect(knownEditorLocations('code')).toContain(
+      'C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd',
+    )
+    expect(knownEditorLocations('cursor')).toContain(
+      'C:\\Users\\u\\AppData\\Local\\Programs\\cursor\\resources\\app\\bin\\cursor.cmd',
+    )
+    expect(knownEditorLocations('windsurf')).toContain(
+      'C:\\Users\\u\\AppData\\Local\\Programs\\Windsurf\\resources\\app\\bin\\windsurf.cmd',
+    )
+  })
+
+  it('every Windows shim ends in .cmd (so the shell stage can spawn it)', () => {
+    setPlatform('win32')
+    vi.stubEnv('LOCALAPPDATA', 'C:\\Users\\u\\AppData\\Local')
+    for (const name of EDITOR_CANDIDATES) {
+      for (const loc of knownEditorLocations(name)) {
+        expect(loc.endsWith('.cmd')).toBe(true)
+      }
+    }
+  })
+})
+
+describe('buildEditorSpawn', () => {
+  afterEach(() => setPlatform(realPlatform))
+
+  it('POSIX: spawns the binary directly, project path appended, detached', () => {
+    setPlatform('darwin')
+    const { command, args, options } = buildEditorSpawn(['cursor'], '/my/proj')
+    expect(command).toBe('cursor')
+    expect(args).toEqual(['/my/proj'])
+    expect(options.shell).toBeFalsy()
+    expect(options.detached).toBe(true)
+    expect(options.cwd).toBe('/my/proj')
+  })
+
+  it('Windows: runs a quoted command through the shell so spaced paths survive', () => {
+    setPlatform('win32')
+    const cmd = 'C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd'
+    const { command, args, options } = buildEditorSpawn([cmd], 'C:\\My Projects\\app')
+    expect(command).toBe(`"${cmd}"`)
+    expect(args).toEqual(['"C:\\My Projects\\app"'])
+    expect(options.shell).toBe(true)
+    expect(options.windowsVerbatimArguments).toBe(true)
+    expect(options.detached).toBe(true)
+  })
+
+  it('Windows: preserves extra argv flags before the project path', () => {
+    setPlatform('win32')
+    const { command, args } = buildEditorSpawn(['code', '--new-window'], 'C:\\proj')
+    expect(command).toBe('"code"')
+    expect(args).toEqual(['"--new-window"', '"C:\\proj"'])
   })
 })

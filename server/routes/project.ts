@@ -143,8 +143,10 @@ const isLaunchableEditor = async (raw: unknown): Promise<OpenApp | null> => {
   return hit ? { name: hit.name, path: hit.path, mode: 'open' } : null
 }
 
-// POST /api/project/delete moves the folder to the macOS Trash via JXA /
-// NSFileManager.
+// POST /api/project/delete moves the folder to the OS trash. The command is
+// platform-branched by buildTrashCommand() below: macOS uses this JXA /
+// NSFileManager.trashItemAtURL script; Windows uses PowerShell's VisualBasic
+// FileSystem.DeleteDirectory(…SendToRecycleBin); Linux uses `gio trash`.
 const TRASH_JXA = `ObjC.import('Foundation');
 function run(argv) {
   var fm = $.NSFileManager.defaultManager;
@@ -152,6 +154,45 @@ function run(argv) {
   var ok = fm.trashItemAtURLResultingItemURLError(url, null, null);
   if (!ok) throw new Error('Could not move the folder to the Trash.');
 }`
+
+/**
+ * Build the OS-native "move folder to the trash" command for `target` on the
+ * given platform. Exported so the platform routing is unit-testable without
+ * spawning a real process. Returns the execFile (cmd, args) pair — execFile
+ * runs WITHOUT a shell, so no token in `args` is ever shell-interpreted.
+ *
+ * - darwin: Finder Trash via JXA / NSFileManager.trashItemAtURL. The path rides
+ *   as a trailing argv (argv[0]) passed UNCHANGED — macOS behaviour is
+ *   byte-for-byte what it was before the platform split (no regression).
+ * - win32: Windows Recycle Bin via PowerShell's Microsoft.VisualBasic
+ *   FileSystem.DeleteDirectory(…, SendToRecycleBin). The path is embedded in a
+ *   single-quoted PowerShell string literal (every `'` doubled): `-Command`
+ *   re-parses its argument so trailing `$args` are unreliable, and embedding
+ *   sidesteps that. The script contains no double quotes, so Node's Windows
+ *   argument quoting can't split it. A thrown .NET exception (missing/locked
+ *   dir) makes powershell.exe exit non-zero → the caller's catch returns 500.
+ * - else (linux/*): freedesktop trash via `gio trash <path>` (trailing argv).
+ */
+export function buildTrashCommand(
+  platform: NodeJS.Platform,
+  target: string,
+): { cmd: string; args: string[] } {
+  if (platform === 'win32') {
+    const psPath = target.replace(/'/g, "''")
+    const ps =
+      `Add-Type -AssemblyName Microsoft.VisualBasic; ` +
+      `[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(` +
+      `'${psPath}', 'OnlyErrorDialogs', 'SendToRecycleBin')`
+    return {
+      cmd: 'powershell.exe',
+      args: ['-NoProfile', '-NonInteractive', '-Command', ps],
+    }
+  }
+  if (platform === 'darwin') {
+    return { cmd: 'osascript', args: ['-l', 'JavaScript', '-e', TRASH_JXA, target] }
+  }
+  return { cmd: 'gio', args: ['trash', target] }
+}
 
 interface TasksBody {
   path: string
@@ -595,9 +636,11 @@ export const projectRoutes = new Hono()
   }
 })
   // ── /api/project/delete ───────────────────────────────────────────────────
-  // POST { path } → move folder to the macOS Trash AND unregister it. Only a
+  // POST { path } → move folder to the OS trash AND unregister it. Only a
   // registered project (or a path under one) may be deleted — the registry is
-  // the allowlist, enforced via validateProjectPath.
+  // the allowlist, enforced via validateProjectPath. The trash step is
+  // platform-branched (buildTrashCommand): macOS Finder Trash, Windows Recycle
+  // Bin, Linux freedesktop trash — so delete works off macOS, not just on it.
   .post('/api/project/delete', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const path = typeof body?.path === 'string' ? body.path : ''
@@ -606,11 +649,10 @@ export const projectRoutes = new Hono()
     return c.json({ error: 'path not allowed' }, 403)
   }
   const target = resolve(path)
+  const { cmd, args } = buildTrashCommand(process.platform, target)
 
   try {
-    await execFileAsync('osascript', ['-l', 'JavaScript', '-e', TRASH_JXA, target], {
-      timeout: 30_000,
-    })
+    await execFileAsync(cmd, args, { timeout: 30_000 })
   } catch (e: any) {
     return c.json(
       { error: e?.stderr?.toString().trim() || e?.message || 'delete failed' },

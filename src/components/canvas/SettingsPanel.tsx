@@ -23,6 +23,7 @@ import type {
   ReleaseNotesResponse,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
+import { pickFolder } from '@/lib/pickFolder'
 import { feedbackImageDataUrl } from '@/lib/feedbackImages'
 import { useClaudeConnection } from '@/lib/useClaudeConnection'
 import { useT } from '@/i18n/I18nContext'
@@ -152,8 +153,9 @@ export const SettingsPanel = ({
   const browse = async () => {
     setPicking(true)
     try {
-      const res = await api.api['pick-folder'].$post()
-      const data = (await res.json()) as { path?: string }
+      // Electron dialog under the desktop app (cross-platform); osascript route
+      // in a plain dev browser — see src/lib/pickFolder.ts.
+      const data = await pickFolder()
       if (data.path) {
         setDefaultWorkspace(data.path)
         // Discrete action — persist right away (the state set above hasn't
@@ -161,10 +163,10 @@ export const SettingsPanel = ({
         latest.current = { ...latest.current, defaultWorkspace: data.path }
         flush()
       }
-    } catch {
-      /* user can still type the path manually */
+    } finally {
+      // pickFolder never throws, but keep the spinner guaranteed-cleared.
+      setPicking(false)
     }
-    setPicking(false)
   }
 
   return (

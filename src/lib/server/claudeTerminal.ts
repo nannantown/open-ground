@@ -113,16 +113,16 @@ export interface ClaudeTerminalRef {
   info: TerminalInfo
 }
 
-const isWindows = process.platform === 'win32'
-
-// Single-quote a shell argument for the host shell.
-//   - POSIX (zsh/bash): preserve embedded newlines and every byte except `'`,
-//     escaped via the standard `'\''` idiom.
+// Single-quote a shell argument for the host shell — used for the launch
+// binary, --add-dir paths, --model / --effort / --name values, and (on Windows)
+// the temp-file PATHS the prompt / context are read from. None of those carry
+// newlines: the multi-line prompt / context CONTENT is never placed inline on
+// the command line — it is read from a temp file at launch (see promptFileArg)
+// on BOTH platforms.
+//   - POSIX (zsh/bash): every byte except `'` is literal; `'` is escaped via
+//     the standard `'\''` idiom.
 //   - PowerShell (Windows default PTY shell, see terminal.ts pickShell): a
-//     single-quoted string is literal except `'`, which is escaped by doubling
-//     it (`''`). Newlines inside a single-quoted PowerShell string are fine.
-// UNTESTED ON WINDOWS — see file footer note. The interactive prompt arg with
-// embedded newlines is the riskiest part of the Windows path.
+//     single-quoted string is literal except `'`, escaped by doubling it (`''`).
 // Exported for unit testing. `platform` is injectable so the test can exercise
 // both the POSIX and PowerShell branches on a single host; production always
 // passes the real `process.platform` (via the default).
@@ -134,7 +134,34 @@ export const shellQuoteArg = (
     ? `'${s.replace(/'/g, "''")}'`
     : `'${s.replace(/'/g, "'\\''")}'`
 
-const sq = (s: string): string => shellQuoteArg(s, process.platform)
+// One argv token that hands a temp FILE's contents to claude as a SINGLE
+// argument, read by the host shell at launch — so the PTY command line itself
+// stays tiny and newline-free. A long, multi-line value placed inline would
+// blow the TTY's canonical line limit (~1KB MAX_CANON on macOS) AND, on any
+// interactive shell, its embedded newlines would submit the command early.
+//   - POSIX (zsh/bash): `"$(cat '<path>')"` — command substitution; the double
+//     quotes keep the whole result one argument. (Unchanged from before.)
+//   - PowerShell (Windows): `$(Get-Content -Raw '<path>')` — PowerShell cannot
+//     parse `$(cat …)` at all (the bug this fixes). `-Raw` returns the file as
+//     ONE string (without it Get-Content yields an array → one arg PER LINE); a
+//     subexpression result is passed to a native command as a single argument
+//     (PowerShell does not word-split it), so no surrounding quotes are wanted.
+// SCOPE — this fixes the PARSE-level breakage: PowerShell choking on `$(cat …)`
+// and launching claude with NO prompt. One DELIVERY-level limitation sits below
+// it, inherent to Windows: a child process is created from a single command-LINE
+// STRING (POSIX exec takes an argv ARRAY and is immune), so claude re-parses its
+// argv from the string PowerShell builds. Windows PowerShell 5.1 auto-quotes a
+// space-containing argument VALUE, so ordinary prose prompts (spaces, newlines)
+// arrive as one argument — but it does NOT robustly escape a value's embedded
+// double quotes (about_Parsing 5.1; PowerShell#1995), so an argument that itself
+// contains `"` — e.g. the app-context JSON below — can be corrupted / re-split
+// on claude's side. That is a Windows native-arg limitation, not a shell-quoting
+// one; the remedy (escape inner quotes once Windows-tested, or have claude read
+// the prompt from a file) is a separate change, to be confirmed on real Windows.
+const promptFileArg = (path: string, platform: NodeJS.Platform): string =>
+  platform === 'win32'
+    ? `$(Get-Content -Raw ${shellQuoteArg(path, platform)})`
+    : `"$(cat ${shellQuoteArg(path, platform)})"`
 
 // Assemble the `claude …` argv. Pure + exported so the order/quoting contract
 // is unit-tested (claudeTerminal.test.ts) — two ordering bugs here silently
@@ -145,10 +172,11 @@ const sq = (s: string): string => shellQuoteArg(s, process.platform)
 //     — claude starts but never gets a message, idles, writes no session JSONL
 //     (run wedges, empty log). So it MUST be followed by another flag: we emit
 //     it FIRST, right after `claude`, so `--session-id`/`--resume` bounds it.
-//  2. The positional prompt goes LAST, passed as `"$(cat <file>)"` (the caller
-//     wrote it to `promptFilePath`), never inline — a long prompt written
-//     inline to the PTY exceeds canonical-mode line length (~1KB MAX_CANON on
-//     macOS) and gets truncated. Passing a file path keeps the PTY line tiny.
+//  2. The positional prompt goes LAST, read from `promptFilePath` at launch via
+//     promptFileArg (`$(cat …)` on POSIX, `$(Get-Content -Raw …)` on
+//     PowerShell), never inline — a long / multi-line prompt inline exceeds the
+//     TTY canonical line limit (~1KB MAX_CANON on macOS) and/or submits early.
+//     Passing a file path keeps the PTY command line tiny on every platform.
 export const buildClaudeArgv = (
   opts: Pick<
     LaunchClaudeOpts,
@@ -157,7 +185,13 @@ export const buildClaudeArgv = (
   promptFilePath: string | null,
   contextFilePath: string | null = null,
   resolvedBin: string | null = null,
+  // Injectable so one host can unit-test the PowerShell framing. Production
+  // always passes the real platform (via the default). Every embedded arg is
+  // quoted for THIS platform (the local `q` below) — replacing the old
+  // module-level `sq`, which hard-coded process.platform.
+  platform: NodeJS.Platform = process.platform,
 ): string[] => {
+  const q = (s: string): string => shellQuoteArg(s, platform)
   // Launch binary seam, in priority order:
   //   1. OPENGROUND_CLAUDE_BIN — the E2E/operator override (tests + the E2E suite
   //      point it at an absolute stub so the whole run flow is exercised without
@@ -175,11 +209,11 @@ export const buildClaudeArgv = (
   // The truthiness check (not `??`) is what maps an empty-string override back to
   // the bare name — `OPENGROUND_CLAUDE_BIN=''` means "use the default", and `''`
   // is not nullish so `?? resolvedBin` wouldn't catch it. Keep this `? :`.
-  const args: string[] = [claudeBin ? sq(claudeBin) : 'claude']
+  const args: string[] = [claudeBin ? q(claudeBin) : 'claude']
   // `--add-dir` is variadic, so multiple dirs ride ONE flag (still bounded by
   // the `--session-id`/`--resume` flag that always follows — see rule 1 above).
   const addDirs = typeof opts.addDir === 'string' ? [opts.addDir] : opts.addDir ?? []
-  if (addDirs.length) args.push('--add-dir', ...addDirs.map(sq))
+  if (addDirs.length) args.push('--add-dir', ...addDirs.map(q))
   if (opts.resume) {
     args.push('--resume', opts.agentSessionId)
   } else {
@@ -195,19 +229,46 @@ export const buildClaudeArgv = (
   } else if (opts.permissionMode && opts.permissionMode !== 'default') {
     args.push('--permission-mode', opts.permissionMode)
   }
-  if (opts.model) args.push('--model', sq(opts.model))
-  if (opts.effort) args.push('--effort', sq(opts.effort))
-  if (opts.name) args.push('--name', sq(opts.name))
-  // App-context system prompt — same cat-a-file trick as the positional
-  // prompt (an inline multi-line value would blow the PTY's canonical-mode
-  // line limit). Placed BEFORE the positional prompt; the flag takes exactly
-  // one value, so it can never swallow the prompt the way --add-dir could.
+  if (opts.model) args.push('--model', q(opts.model))
+  if (opts.effort) args.push('--effort', q(opts.effort))
+  if (opts.name) args.push('--name', q(opts.name))
+  // App-context system prompt — read from a file via promptFileArg, same as the
+  // positional prompt (an inline multi-line value would blow the canonical line
+  // limit / submit early). Placed BEFORE the positional prompt; the flag takes
+  // exactly one value, so it can never swallow the prompt the way --add-dir could.
   if (contextFilePath) {
-    args.push('--append-system-prompt', `"$(cat ${sq(contextFilePath)})"`)
+    args.push('--append-system-prompt', promptFileArg(contextFilePath, platform))
   }
-  if (promptFilePath) args.push(`"$(cat ${sq(promptFilePath)})"`)
+  if (promptFilePath) args.push(promptFileArg(promptFilePath, platform))
   return args
 }
+
+// Assemble the ONE PTY command line that runs the claude argv and tears the
+// wrapping shell down (`; exit`) when claude quits (`/quit`, Ctrl-D, finished
+// --print …) — the PTY-exit listener is the run-completion signal. Pure +
+// platform-injectable so both shells' framing is unit-tested on one host.
+//
+// `OPENGROUND_OWNED=1` marks THIS claude invocation as OPEN GROUND-launched; the
+// hook script (scripts/openground-hook.js) inherits it and gates on it, so a
+// claude the user starts in their own shell never feeds OPEN GROUND data.
+//   - POSIX (zsh/bash): `OPENGROUND_OWNED=1 <argv> ; exit` — the env var is
+//     scoped to this one command (not exported), so a later command typed into
+//     the same PTY won't carry it.
+//   - PowerShell (Windows default PTY shell): no inline per-command env syntax,
+//     so set `$env:OPENGROUND_OWNED='1'` as its own statement (it leaks into the
+//     rest of the session — fine: the next statement is the claude run, then
+//     `exit` tears the shell down). argv[0] is invoked through the call operator
+//     `&` because a QUOTED absolute path (the distributed-build norm —
+//     resolvedClaudeBin hands back an absolute `claude.cmd` / `claude.exe`) at
+//     statement position would otherwise parse as a string EXPRESSION and never
+//     run. `& <bareword>` is equally valid, so the operator is unconditional.
+export const buildLaunchCommand = (
+  argv: string[],
+  platform: NodeJS.Platform = process.platform,
+): string =>
+  platform === 'win32'
+    ? `$env:OPENGROUND_OWNED='1'; & ${argv.join(' ')} ; exit\n`
+    : `OPENGROUND_OWNED=1 ${argv.join(' ')} ; exit\n`
 
 export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // Pre-accept claude's "trust this folder?" gate for this cwd (see
@@ -251,36 +312,11 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // absolute path is fresh; null falls through to the bare name in buildClaudeArgv.
   const args = buildClaudeArgv(opts, promptFilePath, contextFilePath, resolvedClaudeBin())
 
-  // `; exit` so when claude quits (`/quit`, Ctrl-D, finished --print, etc.)
-  // the wrapping shell exits too. The PTY then closes and the observer's
-  // pty-exit listener fires the cancelled / finished transition.
-  //
-  // `OPENGROUND_OWNED=1` is a per-command env-var that marks this specific
-  // claude invocation as launched by OPEN GROUND. The hook script
-  // (scripts/openground-hook.js) inherits it via claude → hook process
-  // and uses it as a gate: any claude session started elsewhere on the
-  // user's machine (their own shell, another tool) has no such env and
-  // the hook no-ops, so OPEN GROUND never records data from unrelated
-  // sessions. The variable is scoped to this single command — the shell
-  // does NOT export it, so even subsequent commands typed into the same
-  // PTY (after claude exits but before `; exit` fires) won't carry it.
-  // Mark this specific claude invocation as OPEN GROUND-owned (the hook script
-  // gates on OPENGROUND_OWNED) and chain `exit` so the wrapping shell closes
-  // when claude quits — the PTY-exit listener is the run-completion signal.
-  //
-  // The env-prefix syntax is shell-specific:
-  //   - POSIX (zsh/bash): `VAR=1 cmd ; exit` — VAR is scoped to that one
-  //     command only (the shell does NOT export it), so a later command typed
-  //     into the same PTY won't carry it.
-  //   - PowerShell (Windows default PTY shell): there is no inline per-command
-  //     env syntax, so we set `$env:OPENGROUND_OWNED='1'` as a separate
-  //     statement. NOTE: unlike the POSIX form this leaks into the rest of the
-  //     PowerShell session — acceptable because the very next statement is the
-  //     claude run and then `exit` tears the shell down. UNTESTED ON WINDOWS.
-  const cmd = isWindows
-    ? `$env:OPENGROUND_OWNED='1'; ` + args.join(' ') + ` ; exit\n`
-    : 'OPENGROUND_OWNED=1 ' + args.join(' ') + ' ; exit\n'
-  writeInput(info.id, cmd)
+  // One command line: mark this invocation OPEN GROUND-owned, run claude, and
+  // `; exit` the wrapping shell when it quits so the PTY-exit listener fires the
+  // cancelled / finished transition. Shell-specific framing (POSIX env-prefix
+  // vs PowerShell `$env:` + call operator) lives in buildLaunchCommand.
+  writeInput(info.id, buildLaunchCommand(args))
 
   return {
     terminalId: info.id,

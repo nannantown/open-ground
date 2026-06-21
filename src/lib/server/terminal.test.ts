@@ -9,6 +9,7 @@ import {
   trackFlowSent,
   ackFlowStream,
   unregisterFlowStream,
+  pickShell,
   WORKING_SILENCE_MS,
   FLOW_HIGH_WATERMARK,
   FLOW_LOW_WATERMARK,
@@ -483,5 +484,28 @@ describe('flow control (ACK-based PTY pause/resume)', () => {
       expect(stalls).toEqual([])
       expect(calls).toEqual(['pause'])
     })
+  })
+})
+
+describe('pickShell (host shell selection per platform)', () => {
+  // platform / env are injectable so both branches test on one host.
+  it('Windows ALWAYS uses PowerShell, even when a stray POSIX $SHELL is set', () => {
+    // The claude launch-command framing (claudeTerminal.buildLaunchCommand) is
+    // PowerShell-specific, so a SHELL inherited from a Git Bash / MSYS launch
+    // must not win on win32 (it would pick a shell that framing can't drive).
+    expect(pickShell('win32', {})).toBe('powershell.exe')
+    expect(pickShell('win32', { SHELL: '/usr/bin/bash' })).toBe('powershell.exe')
+  })
+
+  it('POSIX honours $SHELL, falling back to /bin/zsh', () => {
+    expect(pickShell('darwin', { SHELL: '/bin/fish' })).toBe('/bin/fish')
+    expect(pickShell('linux', {})).toBe('/bin/zsh')
+  })
+
+  it('OPENGROUND_TERMINAL_SHELL overrides on every platform', () => {
+    expect(pickShell('win32', { OPENGROUND_TERMINAL_SHELL: 'pwsh.exe' })).toBe('pwsh.exe')
+    expect(
+      pickShell('darwin', { OPENGROUND_TERMINAL_SHELL: '/bin/bash', SHELL: '/bin/zsh' }),
+    ).toBe('/bin/bash')
   })
 })

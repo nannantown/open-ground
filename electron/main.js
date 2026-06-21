@@ -32,6 +32,8 @@ const { fork, execFileSync } = require('child_process')
 const crypto = require('crypto')
 const { readBakedAuthEnv } = require('./runtimeConfig')
 const { maybeResetCachesOnVersionChange } = require('./cacheReset')
+const { runStartupSequence } = require('./startup')
+const { buildServerForkEnv } = require('./forkEnv')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -227,9 +229,14 @@ if (!gotLock) {
   app.whenReady().then(() => {
     // Heal a stale/corrupt Chromium cache left by an update/reinstall BEFORE any
     // window (and thus any renderer cache read) exists — see resetStaleCachesOnVersionChange.
-    resetStaleCachesOnVersionChange()
-    registerIpcHandlers()
-    void start()
+    // The ordering (cache reset → IPC → window bringup) is encoded in
+    // runStartupSequence (electron/startup.js) so a unit test can lock it
+    // (server/__tests__/startup.test.ts) and go red if it is ever reordered.
+    void runStartupSequence({
+      resetCaches: resetStaleCachesOnVersionChange,
+      registerIpc: registerIpcHandlers,
+      start,
+    })
   })
 
   // macOS: keep the app alive when all windows close (lives in the dock).
@@ -537,40 +544,27 @@ async function spawnServerChild() {
     `[openground] realtime collab: ${bakedAuthEnv.OPENGROUND_REALTIME && bakedAuthEnv.OPENGROUND_COLLAB_WS_URL ? 'enabled (baked config present)' : 'disabled (no baked config)'}`
   )
 
+  // Env layering — baked PUBLIC config → process.env → fixed launch overrides
+  // (PORT/HOSTNAME/bootId/projectDir/webRoot) → the login-shell PATH → the BAKED
+  // collab WS URL re-applied LAST so a tampered OPENGROUND_COLLAB_WS_URL can't
+  // redirect the token relay (the security lock; OPENGROUND_REALTIME stays
+  // overridable). Assembled by the unit-tested buildServerForkEnv
+  // (electron/forkEnv.js, server/__tests__/forkEnv.test.ts) so the ordering is
+  // locked against silent regressions.
   const child = fork(serverPath, [], {
     cwd: appRoot,
     detached: false, // tied to our lifetime; dies with the parent tree.
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-    env: {
-      ...bakedAuthEnv,
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      PORT: String(FIXED_PORT),
-      HOSTNAME: HOST,
-      OPENGROUND_BOOT_ID: BOOT_ID,
-      OPENGROUND_PROJECT_DIR: PROJECT_DIR,
-      ...(webRoot ? { OPENGROUND_WEB_ROOT: webRoot } : {}),
-      // A packaged .app launched from Finder/Dock inherits a minimal PATH
-      // (/usr/bin:/bin), so node-pty's posix_spawn of `zsh`/`claude` fails with
-      // "No such file or directory". The old shell launcher dodged this by
-      // running under `zsh -lic` (full login PATH). We reproduce that here.
-      PATH: enrichedPath,
-      // SECURITY — collab token-relay destination lock. The collab Worker WS
-      // endpoint is where the signed-in user's Supabase access token is relayed
-      // (server-to-server) to mint a ticket. In a SHIPPED build that destination
-      // must be the value we baked and NOTHING the local launch environment can
-      // change — otherwise a tampered `OPENGROUND_COLLAB_WS_URL=wss://attacker`
-      // in the user's env would redirect the token relay. So when a baked WS URL
-      // exists, re-apply it AFTER ...process.env so it wins over any env override.
-      // When NO WS URL was baked (a local/dev `electron:prod` build), process.env
-      // still flows through, so a developer can still point at a local/staging
-      // Worker — i.e. env override is dev-only. (OPENGROUND_REALTIME stays
-      // overridable: flipping the flag off is a legitimate opt-out, not an attack,
-      // and it can't change where the token goes.)
-      ...(bakedAuthEnv.OPENGROUND_COLLAB_WS_URL
-        ? { OPENGROUND_COLLAB_WS_URL: bakedAuthEnv.OPENGROUND_COLLAB_WS_URL }
-        : {}),
-    },
+    env: buildServerForkEnv({
+      bakedAuthEnv,
+      processEnv: process.env,
+      port: FIXED_PORT,
+      host: HOST,
+      bootId: BOOT_ID,
+      projectDir: PROJECT_DIR,
+      webRoot,
+      enrichedPath,
+    }),
   })
 
   child.stdout?.on('data', (d) => process.stdout.write(`[hono] ${d}`))

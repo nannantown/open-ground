@@ -11,6 +11,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { win32 as winPath } from 'path'
 
 const execFile = promisify(execFileCb)
 
@@ -51,10 +52,55 @@ export const pathFromShellOutput = (stdout: string): string | null => {
   return paths.length > 0 ? paths[paths.length - 1] : null
 }
 
-/** Resolve several command names through ONE fresh login shell. Returns a
- *  basename → absolute-path map of the ones the shell found; {} on any
- *  failure (shell missing, profile error, timeout). */
-export const resolveViaLoginShell = async (
+/** Executable extensions Windows treats as runnable, from PATHEXT (so a bare
+ *  `code` resolves to `code.cmd`). Lower-cased; falls back to the documented
+ *  default set when PATHEXT is unset. */
+const windowsExeExts = (): string[] =>
+  (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+
+/** Strip a Windows executable extension (`.cmd`/`.exe`/…) from a basename so a
+ *  `where` hit like `code.cmd` maps back to the requested name `code`. A name
+ *  carrying no PATHEXT extension is returned unchanged. Exported for unit tests. */
+export const stripWindowsExeExt = (base: string): string => {
+  const lower = base.toLowerCase()
+  for (const ext of windowsExeExts()) {
+    if (ext && lower.endsWith(ext)) return base.slice(0, base.length - ext.length)
+  }
+  return base
+}
+
+/** Windows resolver: `where a b c` prints one absolute path line per match,
+ *  honouring PATHEXT (so a bare `code` surfaces `…\code.cmd`). Map each hit back
+ *  to the requested name by stripping the directory and the exe extension; the
+ *  first path per name wins (`where` lists in PATH-priority order). {} on any
+ *  failure (no `where`, nothing found, timeout, unsafe name — never throws). */
+const resolveViaWhere = async (commands: string[]): Promise<Record<string, string>> => {
+  try {
+    for (const c of commands) {
+      if (!SAFE_NAME.test(c)) throw new Error(`unsafe command name: ${c}`)
+    }
+    const { stdout } = await execFile('where', commands, { timeout: 8000 })
+    const out: Record<string, string> = {}
+    for (const line of stdout.split(/\r?\n/)) {
+      const p = line.trim()
+      if (!p) continue
+      const base = stripWindowsExeExt(winPath.basename(p))
+      // First hit per name wins (`where` lists in PATH-priority order).
+      if (commands.includes(base) && !(base in out)) out[base] = p
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** POSIX resolver: re-resolve through a fresh login shell — the same source of
+ *  truth a real terminal uses, so nvm/volta and late `.zshrc` PATH edits the
+ *  server's boot-time snapshot can't see are honoured. */
+const resolveViaPosixLoginShell = async (
   commands: string[],
 ): Promise<Record<string, string>> => {
   try {
@@ -70,4 +116,16 @@ export const resolveViaLoginShell = async (
   } catch {
     return {}
   }
+}
+
+/** Resolve several command names through ONE OS-native lookup that sees past the
+ *  server's boot-time PATH snapshot: a fresh login shell on POSIX, `where` on
+ *  Windows (which also expands PATHEXT, so `code` → `code.cmd`). Returns a
+ *  basename → absolute-path map of the ones found; {} on any failure. */
+export const resolveViaLoginShell = async (
+  commands: string[],
+): Promise<Record<string, string>> => {
+  return process.platform === 'win32'
+    ? resolveViaWhere(commands)
+    : resolveViaPosixLoginShell(commands)
 }

@@ -25,6 +25,7 @@ import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
 import { loadPersistedView, savePersistedView } from '@/lib/persistView'
 import { api } from '@/lib/api-client'
+import { pickFolder } from '@/lib/pickFolder'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
 import type {
@@ -688,12 +689,7 @@ export default function App() {
   // Import an existing folder: pick it natively, register it, then open + centre
   // its new card.
   const importProject = async () => {
-    const pick = await api.api['pick-folder'].$post()
-    const picked = (await pick.json().catch(() => ({}))) as {
-      path?: string
-      cancelled?: boolean
-      error?: string
-    }
+    const picked = await pickFolder()
     if (picked.cancelled || !picked.path) {
       if (picked.error) alert(picked.error)
       return
@@ -717,12 +713,7 @@ export default function App() {
   // its central data (tasks / journal / canvases) reconnects. Distinct from
   // Import (which mints a new id). Mirrors importProject's pick→call→reload flow.
   const relocateProject = async (id: string) => {
-    const pick = await api.api['pick-folder'].$post()
-    const picked = (await pick.json().catch(() => ({}))) as {
-      path?: string
-      cancelled?: boolean
-      error?: string
-    }
+    const picked = await pickFolder()
     if (picked.cancelled || !picked.path) {
       if (picked.error) alert(picked.error)
       return
