@@ -14,6 +14,7 @@ import {
 } from '../collabInvites'
 import {
   getMyMembership,
+  removeProjectMember,
   clearMembershipCache,
 } from '../projectMembers'
 import { writeSession, clearSession } from '../authStore'
@@ -639,5 +640,63 @@ describe('join requests — list / approve / deny', () => {
     expect(init.method).toBe('DELETE')
     expect(url).toContain('id=eq.r1')
     expect(url).toContain(`project_id=eq.${PROJECT}`)
+  })
+})
+
+describe('eviction closes the re-entry path — remove → the SAME code can no longer join', () => {
+  it('a redeemed-then-removed member cannot rejoin with the code they still hold', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com', 'owner-uid')
+
+    // Model the invites store: join_with_invite succeeds only while the code still
+    // exists. The eviction's project-wide DELETE on og_project_invites removes it,
+    // after which the same code RAISEs (PostgREST 400) like a real expired/missing
+    // token — exactly what closes the re-entry path.
+    let codeRevoked = false
+    const calls: Array<{ url: string; method: string }> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        calls.push({ url, method })
+        if (url.includes('/rpc/join_with_invite')) {
+          return codeRevoked
+            ? new Response(JSON.stringify({ message: 'invite not found' }), { status: 400 })
+            : new Response(
+                JSON.stringify({ project_id: PROJECT, status: 'joined' }),
+                { status: 200 },
+              )
+        }
+        if (method === 'DELETE' && url.includes('og_project_invites')) {
+          codeRevoked = true // the eviction rotated the project's links
+          return new Response(null, { status: 204 })
+        }
+        return new Response(null, { status: 204 }) // member-row DELETE, etc.
+      }) as unknown as typeof fetch,
+    )
+
+    // 1) The invited member redeems the shared code → joins.
+    expect(await joinWithInvite('shared-code')).toMatchObject({
+      ok: true,
+      collabProjectId: PROJECT,
+      status: 'joined',
+    })
+
+    // 2) The owner evicts them — which ALSO DELETEs the project's invite links.
+    expect(await removeProjectMember(PROJECT, 'member@example.com')).toEqual({ ok: true })
+    expect(
+      calls.some(
+        (cl) =>
+          cl.method === 'DELETE' &&
+          cl.url.includes('og_project_invites') &&
+          cl.url.includes(`project_id=eq.${PROJECT}`),
+      ),
+    ).toBe(true)
+
+    // 3) Re-entry with the SAME code now fails — the code was revoked on eviction.
+    expect(await joinWithInvite('shared-code')).toEqual({
+      ok: false,
+      error: 'invalid or expired invite',
+    })
   })
 })

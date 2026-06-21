@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 
 vi.mock('@/i18n/I18nContext', () => ({
@@ -32,6 +32,12 @@ const stub = (joinResult: unknown = { ok: true, collabProjectId: 'b' }) => {
 }
 
 afterEach(() => vi.unstubAllGlobals())
+beforeEach(() => {
+  localStorage.clear()
+  // Most specs exercise the post-consent join UI; seed member consent so the
+  // privacy gate is skipped. The dedicated consent-gate spec clears this first.
+  localStorage.setItem('og-collab-consent-member-v1', 'accepted')
+})
 
 describe('CollabSharedDialog (member: join + open)', () => {
   it('lists only the projects shared with me (owned:false), not owned ones', async () => {
@@ -100,10 +106,32 @@ describe('CollabSharedDialog (member: join + open)', () => {
     expect(onOpen).not.toHaveBeenCalled()
   })
 
-  it('auto-redeems an initialCode (deep link) on mount and opens the joined project', async () => {
+  it('does NOT auto-join an initialCode (deep link) on mount — prefills and waits for a click', async () => {
     const spy = stub({ ok: true, collabProjectId: 'b' })
     const onOpen = vi.fn()
     render(<CollabSharedDialog initialCode="deep-code" onOpen={onOpen} onClose={() => {}} />)
+    await screen.findByText('Alpha') // initial projects load settled
+
+    // The code is prefilled and a confirmation prompt is shown…
+    const field = screen.getByPlaceholderText(
+      'projectPanel.collabSharedDialogJoinPlaceholder',
+    ) as HTMLInputElement
+    expect(field.value).toBe('deep-code')
+    // …but nothing was joined automatically: no onOpen, no join POST.
+    expect(onOpen).not.toHaveBeenCalled()
+    const joinPost = spy.mock.calls.find(
+      ([u, i]) => String(u).includes('/api/collab/join') && (i as RequestInit)?.method === 'POST',
+    )
+    expect(joinPost).toBeUndefined()
+  })
+
+  it('joins a deep-link code only after an explicit click', async () => {
+    const spy = stub({ ok: true, collabProjectId: 'b' })
+    const onOpen = vi.fn()
+    render(<CollabSharedDialog initialCode="deep-code" onOpen={onOpen} onClose={() => {}} />)
+    await screen.findByText('Alpha')
+
+    fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
 
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith('b', 'Beta'))
     const joinCall = spy.mock.calls.find(
@@ -112,12 +140,24 @@ describe('CollabSharedDialog (member: join + open)', () => {
     expect(JSON.parse((joinCall![1] as RequestInit).body as string)).toEqual({ code: 'deep-code' })
   })
 
-  it('an initialCode for an approval link auto-redeems then awaits approval', async () => {
-    stub({ ok: true, collabProjectId: 'b', status: 'pending' })
-    const onOpen = vi.fn()
-    render(<CollabSharedDialog initialCode="approval-code" onOpen={onOpen} onClose={() => {}} />)
+  it('shows a consent step before the first join; reveals the join UI only after agreeing', async () => {
+    localStorage.clear() // no prior consent → the privacy gate shows
+    stub()
+    render(<CollabSharedDialog onOpen={() => {}} onClose={() => {}} />)
 
-    expect(await screen.findByText('projectPanel.collabSharedDialogAwaiting')).toBeTruthy()
-    expect(onOpen).not.toHaveBeenCalled()
+    // The join field is gated behind the consent step…
+    expect(
+      screen.queryByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'),
+    ).toBeNull()
+    // …which names the cloud destinations and links the privacy policy.
+    expect(screen.getByText(/Supabase/)).toBeTruthy()
+    expect(screen.getByText(/Cloudflare/)).toBeTruthy()
+    expect(screen.getByText(/privacy policy/i)).toBeTruthy()
+
+    // Agreeing reveals the join UI.
+    fireEvent.click(screen.getByText('Agree & continue'))
+    expect(
+      await screen.findByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'),
+    ).toBeTruthy()
   })
 })

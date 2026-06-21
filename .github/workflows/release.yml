@@ -71,16 +71,33 @@ jobs:
 
       - name: Build (web + server)
         run: npm run build
-        # Bakes the PUBLIC app-login config (SUPABASE_URL + anon key) into the
-        # packaged app via scripts/write-runtime-config.js → electron/runtime-config.json,
-        # so the toolbar's "Sign in" appears for end users. The anon key is a
-        # PUBLIC key — safe to ship; Row Level Security is the real boundary (see
-        # docs/AUTH_SETUP.md §6 + REPORT.md). NEVER add SUPABASE_SERVICE_ROLE_KEY
-        # here. Set both in open-ground → Settings → Secrets and variables →
-        # Actions. If absent, the script writes {} and login stays disabled.
+        # Bakes the PUBLIC build-time config into the packaged app via
+        # scripts/write-runtime-config.js → electron/runtime-config.json, which
+        # electron/main.js injects into the forked server's env at launch.
+        #
+        #   App login (SUPABASE_URL + anon key): so the toolbar's "Sign in"
+        #   appears for end users. The anon key is a PUBLIC key — safe to ship;
+        #   Row Level Security is the real boundary (docs/AUTH_SETUP.md §6 +
+        #   REPORT.md). NEVER add SUPABASE_SERVICE_ROLE_KEY here.
+        #
+        #   Realtime collab (OPENGROUND_REALTIME + OPENGROUND_COLLAB_WS_URL): so
+        #   collab auto-enables for logged-in users in the shipped app. Both are
+        #   PUBLIC values (a feature flag and the public Worker WS endpoint the
+        #   browser dials) — NOT credentials. The collab HMAC ticket secret lives
+        #   ONLY on the Worker and is NEVER baked here. These read from repo
+        #   Variables (Settings → Secrets and variables → Actions → Variables),
+        #   with the public constant as a fallback so a release never silently
+        #   ships with collab off if the Var is unset. The WS endpoint is treated
+        #   as a fixed baked constant at runtime (main.js locks it against local
+        #   env tampering — see its token-relay destination lock).
+        #
+        # If SUPABASE_* are absent, the script writes {} for them and login stays
+        # disabled (graceful degrade); collab is independent.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME || '1' }}
+          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL || 'wss://og-collab.mindbrew.workers.dev' }}
 
       - name: Build & publish (macOS, signed + notarized)
         if: matrix.platform == 'mac'

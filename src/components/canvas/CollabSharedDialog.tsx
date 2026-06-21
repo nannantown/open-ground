@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Clock, Users, X } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Clock, LogIn, Users, X } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import { FIELD_INPUT_CSS } from './ProjectConfigFields'
+import {
+  CollabConsentGate,
+  collabConsentAccepted,
+  markCollabConsent,
+} from './CollabConsentDialog'
 import type {
   CollabJoinResponse,
   CollabProjectListItem,
@@ -15,8 +20,10 @@ import type {
 //
 // Two ways a code arrives: pasted into the field, or carried by an
 // `openground://join?code=…` deep link (Track C) → App passes it as `initialCode`,
-// and we auto-redeem it once on mount. On an APPROVAL-mode link the join returns
-// status:'pending' → we show an "awaiting approval" state instead of opening.
+// which we PREFILL into the field. We never auto-join: joining always requires an
+// explicit click — a deep link can come from anywhere, so it must be confirmed,
+// and a privacy-consent step gates the first join. On an APPROVAL-mode link the
+// join returns status:'pending' → we show an "awaiting approval" state.
 //
 // This is the reachability surface for the member flow: a member has no local
 // folder, so a shared project can't appear via the registry/Ground scan — it's
@@ -29,21 +36,23 @@ export const CollabSharedDialog = ({
   onOpen,
   onClose,
 }: {
-  /** A code carried in by a deep link — prefilled and auto-redeemed once on mount. */
+  /** A code carried in by a deep link — prefilled into the field. NEVER auto-joined:
+   *  the member must pass the consent step and click Join explicitly. */
   initialCode?: string
   /** Open a shared project (folder-less) in SharedProjectPanel. */
   onOpen: (collabProjectId: string, label: string) => void
   onClose: () => void
 }) => {
-  const { t } = useT()
+  const { t, lang } = useT()
   // null = still loading; [] = none.
   const [shared, setShared] = useState<CollabProjectListItem[] | null>(null)
   const [code, setCode] = useState(initialCode ?? '')
   const [joining, setJoining] = useState(false)
   const [awaiting, setAwaiting] = useState(false) // approval-mode request filed
   const [error, setError] = useState<string | null>(null)
-  // Auto-redeem the deep-link code exactly once (StrictMode double-mounts effects).
-  const autoJoined = useRef(false)
+  // Privacy consent — the member must agree to the data disclosure BEFORE the
+  // first join. Remembered per role so it's one-time.
+  const [consented, setConsented] = useState(() => collabConsentAccepted('member'))
 
   // Shared-with-me = projects the caller can READ but does NOT own (owned:false);
   // owned ones already appear as local Ground cards. Returns the list so join()
@@ -101,13 +110,48 @@ export const CollabSharedDialog = ({
     [code, joining, load, onOpen, t],
   )
 
-  // Auto-redeem a deep-link code once.
-  useEffect(() => {
-    const c = (initialCode ?? '').trim()
-    if (!c || autoJoined.current) return
-    autoJoined.current = true
-    void join(c)
-  }, [initialCode, join])
+  // Consent step — shown before the join UI until the member agrees to the data
+  // disclosure. A deep-link code (if any) is preserved in `code` and surfaced once
+  // the join UI is revealed; we never auto-join.
+  if (!consented) {
+    return (
+      <div
+        data-esc-overlay
+        className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4 backdrop-blur-sm"
+        onClick={onClose}
+      >
+        <div
+          className="flex max-h-[80vh] w-[440px] max-w-[92vw] flex-col overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-line px-5 pt-4 pb-3">
+            <h3 className="flex items-center gap-2 font-display text-[16px] text-ink">
+              <Users size={15} className="text-ink-muted" />
+              {t('projectPanel.collabSharedDialogTitle')}
+            </h3>
+            <button
+              type="button"
+              onClick={onClose}
+              title={t('common.cancel')}
+              className="rounded-sm p-1 text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            <CollabConsentGate
+              role="member"
+              onAgree={() => {
+                markCollabConsent('member')
+                setConsented(true)
+              }}
+              onCancel={onClose}
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -147,6 +191,20 @@ export const CollabSharedDialog = ({
                   {t('projectPanel.collabSharedDialogAwaitingBody')}
                 </p>
               </div>
+            </div>
+          )}
+
+          {/* Followed an invite link — confirm before joining. The code is
+              prefilled; we NEVER auto-join, so the explicit Join click below is
+              the confirmation. */}
+          {initialCode && !awaiting && (
+            <div className="flex items-start gap-2.5 rounded-[3px] border border-accent/40 bg-accent-soft px-3 py-2.5">
+              <LogIn size={14} className="mt-0.5 shrink-0 text-accent" />
+              <p className="text-[12px] leading-relaxed text-ink">
+                {lang === 'ja'
+                  ? '招待リンクを開きました。コードを確認して「参加」を押すと参加します。'
+                  : 'You opened an invite link. Review the code below and click Join to join.'}
+              </p>
             </div>
           )}
 

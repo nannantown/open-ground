@@ -481,12 +481,67 @@ describe('removeProjectMember — caller-JWT (owner) delete', () => {
     expect(reFetch).toHaveBeenCalledTimes(1)
   })
 
+  it('ALSO revokes the project invite links (close the re-entry path on eviction)', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com')
+    const calls: Array<{ url: string; method?: string }> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, method: init.method })
+        return new Response(null, { status: 204 })
+      }) as unknown as typeof fetch,
+    )
+    expect(await removeProjectMember(PROJECT, 'Gone@Example.com')).toEqual({ ok: true })
+
+    // 1) the roster row delete (by lowercased email)
+    expect(
+      calls.some(
+        (cl) =>
+          cl.method === 'DELETE' &&
+          cl.url.includes('/rest/v1/og_project_members') &&
+          cl.url.includes(`project_id=eq.${PROJECT}`) &&
+          cl.url.includes('email=eq.gone%40example.com'),
+      ),
+    ).toBe(true)
+    // 2) the project-wide invite-link delete — a held code can no longer rejoin
+    expect(
+      calls.some(
+        (cl) =>
+          cl.method === 'DELETE' &&
+          cl.url.includes('/rest/v1/og_project_invites') &&
+          cl.url.includes(`project_id=eq.${PROJECT}`),
+      ),
+    ).toBe(true)
+  })
+
+  it('a failed invite-link sweep does NOT flip the result (member is already removed)', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com')
+    // The roster DELETE succeeds (204); the invite-link DELETE fails (500). The
+    // member is removed regardless, so the result stays {ok:true} — the sweep is
+    // best-effort hardening, not the primary contract.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        url.includes('og_project_invites')
+          ? new Response('boom', { status: 500 })
+          : new Response(null, { status: 204 }),
+      ) as unknown as typeof fetch,
+    )
+    expect(await removeProjectMember(PROJECT, 'a@example.com')).toEqual({ ok: true })
+  })
+
   it('a non-ok response → {ok:false} (no throw); a thrown fetch → {ok:false}', async () => {
     stubAnonEnv()
     await signInAs('owner@example.com')
 
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 403 })))
+    // The roster DELETE 403s (RLS no-op for a non-owner) → bail BEFORE the invite
+    // sweep, so no link rotation is even attempted.
+    const fetchSpy = vi.fn(async () => new Response('nope', { status: 403 }))
+    vi.stubGlobal('fetch', fetchSpy)
     expect(await removeProjectMember(PROJECT, 'a@example.com')).toEqual({ ok: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(1) // member DELETE only; no invite sweep
 
     vi.stubGlobal(
       'fetch',

@@ -3,10 +3,19 @@
 // cannot import TypeScript), but TS callers — the vitest suite — get full types
 // from here. Runtime resolves the .js; TypeScript resolves this .d.ts.
 
-export type BakedAuthEnv = Partial<Record<'SUPABASE_URL' | 'SUPABASE_ANON_KEY', string>>
+/** The exact (public) keys ever baked into a shipped build: app-login
+ *  (SUPABASE_*) plus realtime-collab (OPENGROUND_REALTIME / the public Worker WS
+ *  endpoint). Never a credential — see electron/runtimeConfig.js. */
+export type BakedKey =
+  | 'SUPABASE_URL'
+  | 'SUPABASE_ANON_KEY'
+  | 'OPENGROUND_REALTIME'
+  | 'OPENGROUND_COLLAB_WS_URL'
+
+export type BakedAuthEnv = Partial<Record<BakedKey, string>>
 
 /** The exact (public) keys ever baked into a shipped build. */
-export const BAKED_KEYS: ReadonlyArray<'SUPABASE_URL' | 'SUPABASE_ANON_KEY'>
+export const BAKED_KEYS: ReadonlyArray<BakedKey>
 
 /** Absolute path of the baked config file (electron/runtime-config.json). */
 export const CONFIG_FILE: string

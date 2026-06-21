@@ -192,6 +192,10 @@ export const projectPanel = {
     'projectPanel.collabSharedDialogUntitled': 'Untitled shared project',
     'projectPanel.collabSharedDialogAwaiting': 'Request sent — awaiting approval',
     'projectPanel.collabSharedDialogAwaitingBody': 'The owner of this project approves new collaborators. You’ll be able to open it once they approve your request.',
+    // Ground shared card — a project shared WITH you (owned:false), shown on the
+    // Ground canvas alongside your own cards (collab enabled only).
+    'projectPanel.groundSharedBadge': 'Shared',
+    'projectPanel.groundSharedTitle': 'Shared with you',
     // Invite link v2 — permission mode + bounds picker (owner, before minting).
     'projectPanel.collabModeLabel': 'Who can join',
     'projectPanel.collabModeOpen': 'Anyone with the link',
@@ -450,6 +454,10 @@ export const projectPanel = {
     'projectPanel.collabSharedDialogUntitled': '名称未設定の共有プロジェクト',
     'projectPanel.collabSharedDialogAwaiting': 'リクエストを送信しました — 承認待ちです',
     'projectPanel.collabSharedDialogAwaitingBody': 'このプロジェクトはオーナーが新しい共同編集者を承認します。承認されると開けるようになります。',
+    // Ground 共有カード — あなたに共有された（owned:false）プロジェクト。Ground
+    // キャンバスで自分のカードと並べて表示（collab 有効時のみ）。
+    'projectPanel.groundSharedBadge': '共有',
+    'projectPanel.groundSharedTitle': 'あなたに共有されたプロジェクト',
     // 招待リンク v2 — 権限モード + 上限の選択（オーナー・作成前）。
     'projectPanel.collabModeLabel': '参加できる人',
     'projectPanel.collabModeOpen': 'リンクを知っている人は誰でも',

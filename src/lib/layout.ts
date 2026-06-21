@@ -1,4 +1,4 @@
-import type { CanvasState, ProjectMeta } from './types'
+import type { CanvasState } from './types'
 
 const CARD_W = 256
 const CARD_H = 132
@@ -7,10 +7,12 @@ const PER_ROW = 4
 const ORIGIN_X = 80
 const ORIGIN_Y = 80
 
-// Grid-fill: gives every project that lacks a saved position a slot, so new
-// folders show up on the canvas without overlapping existing cards.
+// Grid-fill: gives every card that lacks a saved position a slot, so new
+// folders show up on the canvas without overlapping existing cards. Takes only
+// `{ id }` (not full ProjectMeta) so the Ground can lay out owned cards AND
+// folder-less shared cards (keyed by collabProjectId) through one call.
 export const autoLayout = (
-  projects: ProjectMeta[],
+  projects: readonly { id: string }[],
   existing: Record<string, { x: number; y: number }>,
 ): Record<string, { x: number; y: number }> => {
   const positions = { ...existing }

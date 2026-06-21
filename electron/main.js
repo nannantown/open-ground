@@ -31,6 +31,7 @@ const http = require('http')
 const { fork, execFileSync } = require('child_process')
 const crypto = require('crypto')
 const { readBakedAuthEnv } = require('./runtimeConfig')
+const { maybeResetCachesOnVersionChange } = require('./cacheReset')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -224,6 +225,9 @@ if (!gotLock) {
   })
 
   app.whenReady().then(() => {
+    // Heal a stale/corrupt Chromium cache left by an update/reinstall BEFORE any
+    // window (and thus any renderer cache read) exists — see resetStaleCachesOnVersionChange.
+    resetStaleCachesOnVersionChange()
     registerIpcHandlers()
     void start()
   })
@@ -513,18 +517,24 @@ async function spawnServerChild() {
   // ~560ms `zsh -lic` probe never blocked window creation earlier in startup.
   const enrichedPath = await resolveEnrichedPath()
 
-  // PUBLIC app-login config (SUPABASE_URL / SUPABASE_ANON_KEY), baked at build
-  // time into electron/runtime-config.json (see electron/runtimeConfig.js). A
+  // PUBLIC build-time config, baked into electron/runtime-config.json (see
+  // electron/runtimeConfig.js): app login (SUPABASE_URL / SUPABASE_ANON_KEY) AND
+  // realtime collab (OPENGROUND_REALTIME / OPENGROUND_COLLAB_WS_URL). A
   // Finder/Dock-launched .app inherits a stripped env with these NOWHERE, so
   // without this the forked server reports `/api/auth/config → { enabled:false }`
-  // and the toolbar hides "Sign in" — the exact bug this fixes. We spread it
-  // BEFORE ...process.env so an explicit env var (an operator override) still
-  // wins; in the normal packaged case process.env has neither key, so the baked
-  // value fills in. An absent/empty file yields {} → login stays disabled
-  // (graceful degrade). The SERVICE_ROLE key is NEVER baked (see REPORT.md).
+  // (toolbar hides "Sign in") AND `/api/collab/config → { enabled:false }` (collab
+  // off for every shipped user) — the exact bug this fixes. We spread it BEFORE
+  // ...process.env so an explicit env var (an operator override) still wins for
+  // the overridable keys; in the normal packaged case process.env has none of
+  // them, so the baked values fill in. An absent/empty file yields {} → login +
+  // collab stay disabled (graceful degrade). The SERVICE_ROLE key and the collab
+  // HMAC ticket secret are NEVER baked (see REPORT.md / runtimeConfig.js guard).
   const bakedAuthEnv = readBakedAuthEnv()
   console.log(
     `[openground] app login: ${bakedAuthEnv.SUPABASE_URL ? 'enabled (baked config present)' : 'disabled (no baked config)'}`
+  )
+  console.log(
+    `[openground] realtime collab: ${bakedAuthEnv.OPENGROUND_REALTIME && bakedAuthEnv.OPENGROUND_COLLAB_WS_URL ? 'enabled (baked config present)' : 'disabled (no baked config)'}`
   )
 
   const child = fork(serverPath, [], {
@@ -545,6 +555,21 @@ async function spawnServerChild() {
       // "No such file or directory". The old shell launcher dodged this by
       // running under `zsh -lic` (full login PATH). We reproduce that here.
       PATH: enrichedPath,
+      // SECURITY — collab token-relay destination lock. The collab Worker WS
+      // endpoint is where the signed-in user's Supabase access token is relayed
+      // (server-to-server) to mint a ticket. In a SHIPPED build that destination
+      // must be the value we baked and NOTHING the local launch environment can
+      // change — otherwise a tampered `OPENGROUND_COLLAB_WS_URL=wss://attacker`
+      // in the user's env would redirect the token relay. So when a baked WS URL
+      // exists, re-apply it AFTER ...process.env so it wins over any env override.
+      // When NO WS URL was baked (a local/dev `electron:prod` build), process.env
+      // still flows through, so a developer can still point at a local/staging
+      // Worker — i.e. env override is dev-only. (OPENGROUND_REALTIME stays
+      // overridable: flipping the flag off is a legitimate opt-out, not an attack,
+      // and it can't change where the token goes.)
+      ...(bakedAuthEnv.OPENGROUND_COLLAB_WS_URL
+        ? { OPENGROUND_COLLAB_WS_URL: bakedAuthEnv.OPENGROUND_COLLAB_WS_URL }
+        : {}),
     },
   })
 
@@ -721,6 +746,41 @@ function portConflictRecoveryText() {
     `also clear its state, then relaunch:\n\n` +
     `  rm -rf ~/.openground/bootstrap.lock ~/.openground/server.json`
   )
+}
+
+// ---------------------------------------------------------------------------
+// Cache self-heal (white-screen-after-reinstall fix).
+//
+// A reinstall/update over an existing user-data dir keeps the PREVIOUS install's
+// Chromium caches (HTTP `Cache`, V8 `Code Cache`, GPU caches). If those are stale
+// or corrupt relative to the freshly installed SPA bundle, the renderer can fail
+// to boot and the window paints nothing but the background colour — the
+// "white screen after reinstall" bug (observed 2026-06-21; moving the Cache dirs
+// aside fixed it by hand, which this does automatically).
+//
+// We delete ONLY the regenerable Chromium cache directories (never
+// localStorage/IndexedDB/cookies/login state) and ONLY when the version persisted
+// in user-data differs from app.getVersion() — i.e. exactly on an update/reinstall
+// or the first launch of this fix, never on a normal same-version relaunch (so
+// steady-state startup speed is untouched). Runs in whenReady BEFORE createWindow()
+// so the renderer hasn't opened the HTTP/Code caches yet — the safe moment to
+// remove them. Wrapped so a clear failure can NEVER prevent the app from
+// launching. Pure, unit-tested logic lives in electron/cacheReset.js.
+// ---------------------------------------------------------------------------
+function resetStaleCachesOnVersionChange() {
+  try {
+    maybeResetCachesOnVersionChange({
+      userDataPath: app.getPath('userData'),
+      currentVersion: app.getVersion(),
+      log: (msg) => console.log(`[openground] ${msg}`),
+    })
+  } catch (err) {
+    // Never fatal — fall through to a normal launch with the cache left as-is.
+    console.error(
+      '[openground] cache self-heal skipped:',
+      err && err.message ? err.message : err,
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------

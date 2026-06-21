@@ -359,7 +359,10 @@ export const collabRoutes = new Hono()
 
   // POST /api/collab/remove {path, email} — the owner removes one collaborator.
   // Owner-JWT RLS write (0005): a non-owner's DELETE matches no rows it is
-  // allowed to touch, so ownership is enforced in the database.
+  // allowed to touch, so ownership is enforced in the database. removeProjectMember
+  // ALSO rotates the project's self-join invite links (a project-wide code is the
+  // evicted member's re-entry vector) so they can't rejoin with a code they still
+  // hold — see its SECURITY note in projectMembers.ts.
   .post('/api/collab/remove', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
@@ -379,11 +382,12 @@ export const collabRoutes = new Hono()
   })
 
   // POST /api/collab/invite-link/revoke {path, inviteId?} — the owner revokes invite
-  // links. With NO inviteId: ALL outstanding links (project-wide EVICTION — removing
-  // a member does NOT stop them rejoining with an unexpired code, so a full eviction
-  // also revokes links). With an inviteId: just THAT link (kill one leaked link,
-  // keep the rest). Owner-JWT RLS delete (0007 "invites owner all"): a non-owner
-  // matches no rows, so ownership is enforced in the database.
+  // links EXPLICITLY. With NO inviteId: ALL outstanding links (project-wide link
+  // rotation without removing anyone — e.g. a code leaked). With an inviteId: just
+  // THAT link (kill one leaked link, keep the rest). NOTE: removing a member already
+  // revokes all links automatically (removeProjectMember), so this route is for
+  // rotating links on their own. Owner-JWT RLS delete (0007 "invites owner all"): a
+  // non-owner matches no rows, so ownership is enforced in the database.
   //   412 no collabProjectId · 403 non-owner
   .post('/api/collab/invite-link/revoke', async (c) => {
     const path = await requireProjectPath(c)

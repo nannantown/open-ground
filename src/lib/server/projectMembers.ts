@@ -60,6 +60,13 @@ const membersTable = (): string =>
 const projectsTable = (): string =>
   process.env.SUPABASE_PROJECTS_TABLE?.trim() || 'og_projects'
 
+// The self-join invite-code table (migrations 0007/0010). Resolved the same way
+// collabInvites.ts does, so removeProjectMember can rotate a project's links on
+// eviction without importing that module (which would create a cycle — it imports
+// clearMembershipCache from here).
+const invitesTable = (): string =>
+  process.env.SUPABASE_INVITES_TABLE?.trim() || 'og_project_invites'
+
 const CACHE_TTL_MS = 5 * 60 * 1000
 
 interface CachedMembership {
@@ -587,10 +594,58 @@ export const upsertProjectMembers = async (
   }
 }
 
+// Delete EVERY outstanding self-join invite CODE for a project (link rotation on
+// eviction). A removed member only loses their roster row; the project's invite
+// codes (og_project_invites, 7-day) are PROJECT-WIDE, so an evicted member who
+// still holds an unexpired code could immediately self-rejoin via the
+// join_with_invite RPC. Removing a member therefore MUST also revoke the
+// project's links to close that re-entry path. Owner-JWT DELETE under RLS (0007
+// "invites owner all") — a non-owner matches no rows. Best-effort + never throws:
+// inlined here (rather than importing collabInvites' revokeProjectInvites) to keep
+// projectMembers free of a projectMembers↔collabInvites import cycle.
+const revokeProjectInviteLinks = async (
+  auth: OwnerAuth,
+  collabProjectId: string,
+): Promise<void> => {
+  try {
+    const res = await fetch(
+      `${auth.url}/rest/v1/${invitesTable()}?project_id=eq.${encodeURIComponent(
+        collabProjectId,
+      )}`,
+      {
+        method: 'DELETE',
+        headers: {
+          apikey: auth.anonKey,
+          Authorization: `Bearer ${auth.token}`,
+          Prefer: 'return=minimal',
+        },
+        signal: AbortSignal.timeout(10_000),
+      },
+    )
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      console.error(`[openground:members] revoke invites on remove ${res.status}: ${detail}`)
+    }
+  } catch (e) {
+    console.error(
+      '[openground:members] revoke invites on remove failed',
+      e instanceof Error ? e.message : e,
+    )
+  }
+}
+
 // Remove ONE member (by email) from a project the caller OWNS. Owner DELETE under
 // RLS (0005). Lowercases the email to match how rows are stored. No-op
 // ({ok:false}) when unconfigured / signed out / blank email. Invalidates this
 // project's read cache on success. Never throws.
+//
+// SECURITY — eviction is TWO deletes: the roster row AND the project's self-join
+// invite links (revokeProjectInviteLinks above), so a removed member can't rejoin
+// with an unexpired code they still hold. The link rotation runs ONLY after the
+// roster DELETE succeeds (so a non-owner, whose roster DELETE is an RLS no-op /
+// failure, never triggers it) and is best-effort: a failed sweep is logged but
+// does NOT flip the result — the member is already removed, and the owner can
+// still revoke-all manually (POST /api/collab/invite-link/revoke).
 export const removeProjectMember = async (
   collabProjectId: string,
   email: string,
@@ -622,6 +677,9 @@ export const removeProjectMember = async (
       return { ok: false }
     }
     clearMembershipCache(collabProjectId)
+    // Close the re-entry path: rotate the project's invite links so the evicted
+    // member can't self-rejoin with a code they still hold. Best-effort.
+    await revokeProjectInviteLinks(auth, collabProjectId)
     return { ok: true }
   } catch (e) {
     console.error(

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, fireEvent, screen, waitFor } from '@testing-library/react'
 import type { ProjectMember } from '@/lib/types'
 
@@ -30,8 +30,58 @@ const json = (body: unknown, status = 200) =>
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+beforeEach(() => {
+  localStorage.clear()
+  // Most specs exercise the post-consent invite UI; seed owner consent so the
+  // privacy gate is skipped. The dedicated consent-gate spec clears this first.
+  localStorage.setItem('og-collab-consent-owner-v1', 'accepted')
+})
 
 describe('CollabInviteDialog (owner invite UI)', () => {
+  it('shows a consent step before the first invite; reveals the invite UI only after agreeing', async () => {
+    localStorage.clear() // no prior consent → the privacy gate shows
+    stubFetch((url) =>
+      url.includes('/api/collab/project')
+        ? json({ collabProjectId: PID, member: true, label: 'X' })
+        : json({}),
+    )
+    render(<CollabInviteDialog projectName="My Repo" projectPath="/p" onClose={() => {}} />)
+
+    // The consent gate is shown; the mint action is NOT reachable yet…
+    expect(await screen.findByText('Agree & continue')).toBeTruthy()
+    expect(screen.queryByText('projectPanel.collabCreateLink')).toBeNull()
+    // …and it names the cloud destinations and links the privacy policy.
+    expect(screen.getByText(/Supabase/)).toBeTruthy()
+    expect(screen.getByText(/Cloudflare/)).toBeTruthy()
+    expect(screen.getByText(/privacy policy/i)).toBeTruthy()
+
+    // Agreeing reveals the invite UI.
+    fireEvent.click(screen.getByText('Agree & continue'))
+    expect(await screen.findByText('projectPanel.collabCreateLink')).toBeTruthy()
+  })
+
+  it('does NOT touch the collab server before consent (no pre-agreement writes)', async () => {
+    localStorage.clear() // no prior consent → the gate shows, nothing should fetch
+    const spy = stubFetch((url) =>
+      url.includes('/api/collab/project')
+        ? json({ collabProjectId: PID, member: true, label: 'X' })
+        : json({}),
+    )
+    render(<CollabInviteDialog projectName="My Repo" projectPath="/p" onClose={() => {}} />)
+
+    // The consent gate is up and NOT a single collab call has fired — the project
+    // GET would create the og_projects row + owner membership in Supabase, so it
+    // must wait for consent.
+    await screen.findByText('Agree & continue')
+    expect(spy).not.toHaveBeenCalled()
+
+    // Agreeing releases the gated fetches.
+    fireEvent.click(screen.getByText('Agree & continue'))
+    await waitFor(() =>
+      expect(spy.mock.calls.some(([u]) => String(u).includes('/api/collab/project'))).toBe(true),
+    )
+  })
+
   it('prefills the shared name from the owner’s saved label', async () => {
     stubFetch((url) =>
       url.includes('/api/collab/project')

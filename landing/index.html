@@ -506,11 +506,11 @@
           <span class="kicker"><span data-lang="en">Your repos, your rules</span><span data-lang="ja">リポジトリとの距離感</span></span>
           <h2 class="section-title">
             <span data-lang="en">Untouched by default. Shared when you say so.</span>
-            <span data-lang="ja">基本は、何も書き込まない。共有したい時だけ、git で。</span>
+            <span data-lang="ja">基本は、何も書き込まない。共有したい時だけ、クラウドで。</span>
           </h2>
           <p class="section-lead">
-            <span data-lang="en">Add any folder, from anywhere on your computer. By default, all of OPEN GROUND's data is kept in one place (<code>~/.openground</code>) — your project folders never get a single extra file. And when teammates join, flip one switch: the project's Board and Canvas move into the repo and travel through git itself.</span>
-            <span data-lang="ja">パソコンのどこにあるフォルダでも追加できる。標準では、OPEN GROUND のデータはすべて1か所（<code>~/.openground</code>）に保存され、あなたのプロジェクトフォルダには余計なファイルが1つも増えない。そして仲間が加わったら、スイッチを1つ ── そのプロジェクトの Board と Canvas はリポジトリに引っ越し、git そのものに乗って共有される。</span>
+            <span data-lang="en">Add any folder, from anywhere on your computer. By default, all of OPEN GROUND's data is kept in one place (<code>~/.openground</code>) — your project folders never get a single extra file, and nothing leaves your machine. When you invite teammates, the project's Board and Canvas sync in real time through the cloud (Cloudflare for live updates, Supabase for membership).</span>
+            <span data-lang="ja">パソコンのどこにあるフォルダでも追加できる。標準では、OPEN GROUND のデータはすべて1か所（<code>~/.openground</code>）に保存され、プロジェクトフォルダには余計なファイルが1つも増えず、何もマシンの外に出ない。仲間を招待すると、そのプロジェクトの Board と Canvas はクラウド経由でリアルタイムに同期される（ライブ更新は Cloudflare、メンバー管理は Supabase）。</span>
           </p>
         </div>
 
@@ -527,19 +527,15 @@
           </article>
 
           <article class="mode-card mode-card--share">
-            <span class="mode-tag mode-tag--share"><span data-lang="en">Opt-in — Share via Git</span><span data-lang="ja">任意で ── Git で共有</span></span>
-            <h3><span data-lang="en">Build the board together, over plain git.</span><span data-lang="ja">ボードもキャンバスも、素の git でチーム共有。</span></h3>
-            <p><span data-lang="en">Turn on sharing and the Board + Canvas move into a <code>.openground/</code> folder inside the repo. A teammate downloads the project, adds the folder — and sees the exact same board: who's assigned, a Review column, a finish-the-task flow. Nothing to set up on their side.</span><span data-lang="ja">共有をオンにすると、Board と Canvas はリポジトリ内の <code>.openground/</code> フォルダへ。仲間はプロジェクトを取得してフォルダを追加するだけで、まったく同じボードが見える ── 担当者も、レビュー列も、タスク完了の流れも。相手側の設定は不要。</span></p>
+            <span class="mode-tag mode-tag--share"><span data-lang="en">Opt-in — Live collaboration</span><span data-lang="ja">任意で ── リアルタイム共有</span></span>
+            <h3><span data-lang="en">Build the board together, in real time.</span><span data-lang="ja">ボードもキャンバスも、リアルタイムでチーム共有。</span></h3>
+            <p><span data-lang="en">Turn on sharing and invite teammates with a link (or by email). Your Board and Canvas sync live over the cloud — everyone sees the same cards and edits as they happen: who's assigned, a Review column, a finish-the-task flow. Nothing to set up on their side.</span><span data-lang="ja">共有をオンにして、リンク（またはメール）で仲間を招待。Board と Canvas はクラウド経由でライブ同期され、カードも編集も起きたそばから全員に見える ── 担当者も、レビュー列も、タスク完了の流れも。相手側の設定は不要。</span></p>
             <ul class="mode-points">
-              <li><span data-lang="en"><strong>Just git.</strong> No new accounts, no logins to set up — it uses the git you already have. Works with GitHub, GitLab, anything.</span><span data-lang="ja"><strong>git だけ。</strong>新しいアカウントもログイン設定も不要 ── すでにお使いの git をそのまま使う。GitHub でも GitLab でも、何でも動く。</span></li>
+              <li><span data-lang="en"><strong>Invite by link.</strong> Mint an invite link (or add a teammate by email) and they join with one click. Sharing needs a quick sign-in; live sync runs over Cloudflare, with membership in Supabase.</span><span data-lang="ja"><strong>リンクで招待。</strong>招待リンクを発行（またはメールで追加）すれば、相手はワンクリックで参加。共有にはかんたんなサインインが必要で、ライブ同期は Cloudflare、メンバー管理は Supabase で動く。</span></li>
               <li><span data-lang="en"><strong>Shared work, personal settings.</strong> Who's assigned, the Review column, and how each task finishes (merge it, or open a pull request for review) are synced to everyone. Your own preferences — how much you let Claude do, which model — stay on your machine.</span><span data-lang="ja"><strong>共有は仕事の進め方、個人は自分の設定。</strong>担当者・レビュー列・各タスクの終わり方（そのままマージするか、レビュー用にプルリクエストを出すか）はチーム全員に同期。一方で、Claude にどこまで任せるか・どのモデルを使うかといった自分の設定は、あなたの端末だけに残る。</span></li>
               <li><span data-lang="en"><strong>Made for a team.</strong> Assign cards, filter to just yours, watch the Review column — when the work is merged in, its card shows <em>Merged</em> and a clear <em>→ Done</em>.</span><span data-lang="ja"><strong>チームのために。</strong>カードに担当を付け、自分のぶんだけ絞り込み、レビュー列で進み具合を追う ── 作業がマージされると、カードに <em>Merged</em> と、はっきりした <em>→ 完了</em> が出る。</span></li>
-              <li><span data-lang="en"><strong>Auto-sync, only for <code>.openground/</code>.</strong> It syncs in the background, shows whether you're up to date with your teammates, sorts out clashes right in the app, and gives a one-line summary of who changed what. Your code is never touched — stop sharing any time.</span><span data-lang="ja"><strong>自動同期、対象は <code>.openground/</code> だけ。</strong>裏で同期し、チームと足並みがそろっているかを表示、ぶつかってもアプリ内で解決でき、誰が何を変えたかを1行でまとめてくれる。あなたのコードには一切触れず、いつでも共有を解除できる。</span></li>
+              <li><span data-lang="en"><strong>Board &amp; Canvas only — never your code.</strong> Sharing syncs your Board and Canvas (including images and any mock/screen source you put on the canvas) to the cloud. Your repository's files, your terminal, and your Claude chats never leave your machine. Stop sharing any time. <a href="privacy.html" target="_blank" rel="noopener">See what's shared →</a></span><span data-lang="ja"><strong>共有されるのは Board と Canvas だけ ── コードには触れない。</strong>共有で同期されるのは Board と Canvas（Canvas に置いた画像や mock/screen のソースを含む）で、クラウドに保存される。リポジトリのファイル・ターミナル・Claude との会話はマシンの外に出ない。共有はいつでも解除できる。<a href="privacy.html" target="_blank" rel="noopener">何が共有されるか →</a></span></li>
             </ul>
-            <pre class="file-tree" aria-hidden="true">.openground/
-  openground.json
-  board/cards/&lt;task&gt;.json
-  canvas/canvases/&lt;id&gt;.json</pre>
           </article>
         </div>
       </div>
@@ -618,8 +614,8 @@
             <span data-lang="ja">ターミナルたちに、ホームグラウンドを。</span>
           </h2>
           <p class="cta-sub">
-            <span data-lang="en">OPEN GROUND is a local desktop app for macOS &amp; Windows — solo by default, team-ready over git. Grab the free beta above, or leave your email and we'll ping you when big updates land.</span>
-            <span data-lang="ja">OPEN GROUND はローカルで動く macOS・Windows 対応のデスクトップアプリ ── 基本はソロ、git に乗ればチームでも。上のボタンから無料ベータを入手するか、メールを残せば大きな更新時にお知らせします。</span>
+            <span data-lang="en">OPEN GROUND is a local desktop app for macOS &amp; Windows — solo by default, ready for real-time team collaboration live over the cloud. Grab the free beta above, or leave your email and we'll ping you when big updates land.</span>
+            <span data-lang="ja">OPEN GROUND はローカルで動く macOS・Windows 対応のデスクトップアプリ ── 基本はソロ、必要なときはクラウド経由でリアルタイムにチーム共同編集。上のボタンから無料ベータを入手するか、メールを残せば大きな更新時にお知らせします。</span>
           </p>
 
           <form class="waitlist-form" action="/api/waitlist" method="POST" onsubmit="return handleWaitlist(event)">
@@ -679,6 +675,7 @@
           <a href="#clean"><span data-lang="en">Solo &amp; team</span><span data-lang="ja">ソロでもチームでも</span></a>
           <a href="#who"><span data-lang="en">Who it's for</span><span data-lang="ja">対象</span></a>
           <a href="https://github.com/nannantown/open-ground/releases" target="_blank" rel="noopener"><span data-lang="en">Release notes</span><span data-lang="ja">リリースノート</span></a>
+          <a href="privacy.html"><span data-lang="en">Privacy policy</span><span data-lang="ja">プライバシーポリシー</span></a>
         </div>
       </nav>
     </div>

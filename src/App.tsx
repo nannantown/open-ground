@@ -31,6 +31,8 @@ import type {
   ActiveTerminalsResponse,
   CanvasState,
   ClaudeBeaconStatus,
+  CollabProjectListItem,
+  CollabProjectsListResponse,
   ProjectMeta,
   Settings,
   ProjectsResponse,
@@ -123,6 +125,12 @@ export default function App() {
   const { enabled: collabEnabled } = useCollab()
   const [sharedDialogOpen, setSharedDialogOpen] = useState(false)
   const [openShared, setOpenShared] = useState<{ id: string; label: string } | null>(null)
+  // Ground member flow: projects shared WITH the user (owned:false from
+  // /api/collab/projects), rendered as read-only "Shared" cards on the Ground
+  // next to the owned ones. Empty unless collab is enabled — the fetch is gated
+  // in load(), so the default (collab-off) build shows zero shared cards and the
+  // Ground stays byte-for-byte unchanged.
+  const [sharedProjects, setSharedProjects] = useState<CollabProjectListItem[]>([])
   // An invite code carried in by an `openground://join?code=…` deep link — opens
   // the "Shared with me" dialog and auto-redeems it. Cleared when the dialog
   // closes / opens a project. null = no pending deep link.
@@ -153,15 +161,45 @@ export default function App() {
 
   const load = useCallback(async (): Promise<ProjectsResponse | null> => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    const res = await api.api.projects.$get({}, { init: { cache: 'no-store' } })
+    // Ground member flow: fetch the projects shared WITH the user (owned:false)
+    // in parallel — but ONLY when collab is enabled. With collab off this is a
+    // resolved-empty promise (no network at all), so everything below is the
+    // owned-only path and the Ground stays byte-for-byte unchanged.
+    const [res, shared] = await Promise.all([
+      api.api.projects.$get({}, { init: { cache: 'no-store' } }),
+      collabEnabled
+        ? fetch('/api/collab/projects')
+            .then((r) => (r.ok ? (r.json() as Promise<CollabProjectsListResponse>) : null))
+            .then((j) => (j?.projects ?? []).filter((p) => !p.owned))
+            .catch(() => [] as CollabProjectListItem[])
+        : Promise.resolve([] as CollabProjectListItem[]),
+    ])
     const data = (await res.json()) as ProjectsResponse
-    const positions = autoLayout(data.projects, data.canvas.positions)
+    // Lay out owned + shared cards through one call so the shared cards (keyed
+    // by collabProjectId) get non-overlapping grid slots after the owned ones.
+    // When `shared` is empty the input is the owned list itself (same reference),
+    // so autoLayout's result is identical to the owned-only build.
+    const layoutInput = shared.length ? [...data.projects, ...shared] : data.projects
+    const positions = autoLayout(layoutInput, data.canvas.positions)
     const canvas = { ...data.canvas, positions }
     setProjects(data.projects)
     setSettings(data.settings)
     setCanvas(canvas)
+    setSharedProjects(shared)
     return { ...data, canvas }
-  }, [])
+  }, [collabEnabled])
+
+  // Open a Ground shared card (member flow) — the SAME path CollabSharedDialog's
+  // onOpen uses: clear any Ground selection (so the folder-less SharedProjectPanel
+  // and the owned ProjectPanel can never co-exist), then show the shared panel.
+  const openSharedCard = useCallback(
+    (id: string) => {
+      const s = sharedProjects.find((p) => p.id === id)
+      setSelectedIds([])
+      setOpenShared({ id, label: s?.label || t('projectPanel.collabSharedDialogUntitled') })
+    },
+    [sharedProjects, t],
+  )
 
   // Restore "where the user was" exactly once, after the first project scan:
   // re-open the project they had open before reload, if it still exists. A
@@ -718,6 +756,10 @@ export default function App() {
       <InfiniteCanvas
         projects={visibleProjects}
         claudeStatuses={claudeStatusById}
+        // Ground member flow: pass shared cards ONLY when collab is enabled, so
+        // the default build renders zero shared cards (undefined → none).
+        sharedProjects={collabEnabled ? sharedProjects : undefined}
+        onOpenShared={openSharedCard}
         canvas={canvas}
         onCanvasChange={onCanvasChange}
         selectedIds={selectedIds}

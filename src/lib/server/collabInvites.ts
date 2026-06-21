@@ -168,10 +168,12 @@ export const createInviteLink = async (
 }
 
 // Revoke (delete) invite links for a project the caller OWNS. With no `inviteId`
-// it deletes ALL outstanding links (project-wide eviction — the second half of
-// removing a member, who could otherwise rejoin with an unexpired 7-day code).
-// With an `inviteId` it deletes just THAT link (kill one leaked link, keep the
-// rest). Owner-JWT DELETE under RLS (0007 "invites owner all") — a non-owner
+// it deletes ALL outstanding links (project-wide link rotation — e.g. a leaked
+// code). With an `inviteId` it deletes just THAT link (kill one leaked link, keep
+// the rest). NOTE: removing a member ALSO revokes all links automatically
+// (removeProjectMember in projectMembers.ts inlines the same DELETE) so an evicted
+// member can't rejoin with an unexpired code; this helper is the EXPLICIT,
+// standalone rotation. Owner-JWT DELETE under RLS (0007 "invites owner all") — a non-owner
 // matches no rows it may touch, so it's a silent no-op. Returns { ok:false } when
 // unconfigured / signed out / the delete fails; { ok:true } on success (including
 // 0 rows). Never throws.

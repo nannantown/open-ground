@@ -28,6 +28,11 @@ import { Trash2 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import { FIELD_INPUT_CSS } from './ProjectConfigFields'
+import {
+  CollabConsentGate,
+  collabConsentAccepted,
+  markCollabConsent,
+} from './CollabConsentDialog'
 import type {
   CollabInviteLinkItem,
   CollabInviteLinkResponse,
@@ -78,6 +83,9 @@ export const CollabInviteDialog = ({
   const [members, setMembers] = useState<ProjectMember[] | null>(null) // null=loading
   const [email, setEmail] = useState('')
   const [inviting, setInviting] = useState(false)
+  // Privacy consent — the owner must agree to the data disclosure BEFORE any
+  // invite (link or email) can be issued. Remembered per role so it's one-time.
+  const [consented, setConsented] = useState(() => collabConsentAccepted('owner'))
   // Synchronous in-flight latch: `busy`/`disabled` gate clicks, but they only
   // take effect after a re-render, so a same-tick double-click could mint two
   // codes before the disable commits. The ref closes that window immediately.
@@ -87,6 +95,11 @@ export const CollabInviteDialog = ({
   const prefilledCap = useRef(false)
 
   useEffect(() => {
+    // Don't touch the collab server until the owner has agreed to the data
+    // disclosure: GET /api/collab/project creates the project row + the owner's
+    // membership in Supabase, so firing it pre-consent would be a write BEFORE
+    // consent. Gate on `consented` — the effect re-runs the moment it flips true.
+    if (!consented) return
     let cancelled = false
     fetch(`/api/collab/project?path=${encodeURIComponent(projectPath)}`)
       .then((r) => (r.ok ? (r.json() as Promise<CollabProjectResponse>) : null))
@@ -110,7 +123,7 @@ export const CollabInviteDialog = ({
     return () => {
       cancelled = true
     }
-  }, [projectPath, projectName])
+  }, [projectPath, projectName, consented])
 
   const trimmed = (name ?? '').trim()
   const canCreate = !!trimmed && !busy && name !== null && !unavailable
@@ -157,10 +170,14 @@ export const CollabInviteDialog = ({
   }, [projectPath])
 
   useEffect(() => {
+    // Same consent gate as the project fetch above — no roster / links / requests
+    // calls until the owner has agreed (these are owner-scoped reads keyed to the
+    // project, which must not be touched pre-consent).
+    if (!consented) return
     void loadMembers()
     void loadLinks()
     void loadRequests()
-  }, [loadMembers, loadLinks, loadRequests])
+  }, [loadMembers, loadLinks, loadRequests, consented])
 
   const createLink = async () => {
     if (!canCreate || inFlight.current) return
@@ -350,7 +367,9 @@ export const CollabInviteDialog = ({
       setError(t('projectPanel.collabMemberRemoveFailed'))
       return
     }
-    await loadMembers()
+    // Removing a member also invalidates outstanding invite links, so refresh
+    // BOTH the roster and the link list — otherwise the links section is stale.
+    await Promise.all([loadMembers(), loadLinks()])
   }
 
   // Shared classes for the small text "link" buttons in the lists.
@@ -358,6 +377,33 @@ export const CollabInviteDialog = ({
     'shrink-0 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
   const iconBtn =
     'shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+
+  // Consent step — shown before any invite UI until the owner agrees to the data
+  // disclosure. Same outer layout as the main view so the gate reads as step one.
+  if (!consented) {
+    return (
+      <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
+        <div className="grid min-h-full place-items-center">
+          <div className="w-full px-6 py-10">
+            <div className="mx-auto w-full max-w-[480px]">
+              <p className="label-cap text-accent mb-2">{t('projectPanel.collabLabel')}</p>
+              <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
+                {t('projectPanel.collabTitle', { name: projectName })}
+              </h3>
+              <CollabConsentGate
+                role="owner"
+                onAgree={() => {
+                  markCollabConsent('owner')
+                  setConsented(true)
+                }}
+                onCancel={onClose}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">

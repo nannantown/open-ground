@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OPEN GROUND — Privacy Policy / プライバシーポリシー</title>
+
+  <meta name="description" content="What OPEN GROUND sends, where, and why. By default nothing leaves your machine; collaboration (opt-in) syncs your Board and Canvas through Cloudflare and Supabase." />
+  <meta name="theme-color" content="#F2EDDE" />
+  <meta name="color-scheme" content="light" />
+  <meta name="robots" content="index,follow" />
+
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="OPEN GROUND — Privacy Policy" />
+  <meta property="og:description" content="By default nothing leaves your machine. Collaboration (opt-in) syncs your Board and Canvas through Cloudflare and Supabase. Here's exactly what, where, and why." />
+  <meta property="og:url" content="https://open-ground.app/privacy.html" />
+  <meta property="og:site_name" content="OPEN GROUND" />
+
+  <link rel="icon" type="image/svg+xml" href="brand/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="256x256" href="brand/favicon-256.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+
+  <style>
+    /* Scoped reading layout for the legal page — reuses the site's tokens. */
+    .legal { padding: 56px 0 88px; position: relative; z-index: 1; }
+    .legal-inner { max-width: 760px; }
+    .legal .eyebrow {
+      font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--accent-deep); margin: 0 0 10px;
+    }
+    .legal h1 {
+      font-family: var(--serif); font-weight: 500; font-size: clamp(30px, 5vw, 44px);
+      line-height: 1.1; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 10px;
+    }
+    .legal .updated { font-family: var(--mono); font-size: 12.5px; color: var(--ink-subtle); margin: 0 0 28px; }
+    .legal h2 {
+      font-family: var(--serif); font-weight: 500; font-size: 22px; line-height: 1.25;
+      color: var(--ink); margin: 40px 0 12px; padding-top: 22px; border-top: 1px solid var(--line-soft);
+    }
+    .legal h3 { font-family: var(--sans); font-weight: 600; font-size: 15px; color: var(--ink); margin: 24px 0 8px; }
+    .legal p, .legal li { font-size: 15.5px; line-height: 1.7; color: var(--ink-muted); }
+    .legal p { margin: 0 0 14px; }
+    .legal strong { color: var(--ink); font-weight: 600; }
+    .legal a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    .legal a:hover { color: var(--accent-hover); }
+    .legal ul { margin: 0 0 16px; padding-left: 20px; }
+    .legal li { margin: 0 0 7px; }
+    .legal code { font-family: var(--mono); font-size: 0.88em; background: var(--inset); border: 1px solid var(--line-soft); border-radius: 3px; padding: 1px 5px; color: var(--ink); }
+    .legal .note {
+      margin: 16px 0; padding: 14px 16px; border-radius: 4px;
+      background: var(--accent-soft); border: 1px solid var(--line-strong); color: var(--ink);
+      font-size: 14.5px; line-height: 1.65;
+    }
+    .legal table { width: 100%; border-collapse: collapse; margin: 6px 0 18px; font-size: 14px; }
+    .legal th, .legal td { text-align: left; vertical-align: top; padding: 9px 12px; border: 1px solid var(--line); color: var(--ink-muted); line-height: 1.55; }
+    .legal th { background: var(--inset); color: var(--ink); font-family: var(--sans); font-weight: 600; }
+    .legal .back { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 13px; margin-top: 36px; }
+  </style>
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-glow bg-glow--1" aria-hidden="true"></div>
+
+  <header class="site-header" id="top">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="OPEN GROUND home">
+        <img class="brand-mark" src="brand/openground-mark-small.svg" width="21" height="21" alt="" aria-hidden="true" />
+        <img class="brand-word" src="brand/openground-wordmark.svg" height="17" alt="OPEN GROUND" />
+      </a>
+      <div class="header-actions">
+        <button class="lang-toggle" onclick="toggleLanguage()" aria-label="Switch language / 言語を切り替え">
+          <span id="lang-ja">JA</span><span class="divider">/</span><span id="lang-en">EN</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="legal">
+    <div class="container legal-inner">
+      <p class="eyebrow"><span data-lang="en">Privacy</span><span data-lang="ja">プライバシー</span></p>
+      <h1><span data-lang="en">Privacy Policy</span><span data-lang="ja">プライバシーポリシー</span></h1>
+      <p class="updated"><span data-lang="en">Last updated: 2026-06-21</span><span data-lang="ja">最終更新：2026-06-21</span></p>
+
+      <!-- ============ ENGLISH ============ -->
+      <div data-lang="en">
+        <p>OPEN GROUND is a <strong>local, single-user tool</strong> that runs on your own machine. <strong>By default, nothing you do in OPEN GROUND leaves your computer.</strong> Data only goes to the cloud when you take two specific, opt-in actions: signing in, and turning on real-time collaboration. This page explains exactly what is sent, where, and why.</p>
+
+        <h2>1. The default: everything stays local</h2>
+        <p>When you simply use OPEN GROUND — adding projects, opening terminals, editing Boards and Canvases on your own — <strong>no project data is transmitted anywhere.</strong> It all lives on your machine under <code>~/.openground/</code>. OPEN GROUND drives the <code>claude</code> CLI you already have; it never sends your code or prompts to an Anthropic API on your behalf, and it uses no API key of its own.</p>
+        <p>The following <strong>never leave your machine</strong>, in any mode:</p>
+        <ul>
+          <li>Your repository's source files and git history.</li>
+          <li>Your terminal sessions and command history.</li>
+          <li>Your Claude Code conversations and transcripts.</li>
+          <li>Your local file paths (when collaboration is on, a project is identified by a one-way hash, not its path).</li>
+        </ul>
+
+        <h2>2. Optional sign-in</h2>
+        <p>OPEN GROUND has an <strong>optional</strong> account login (Google or GitHub, via Supabase OAuth). Login is not required to use the app on your own. If you sign in, authentication is handled by <strong>Supabase</strong>: your email address and a user ID are associated with your account. The OAuth flow opens in your real browser, and access tokens are held by the local OPEN GROUND process — never exposed to the web UI. Signing in by itself does not publish your project data.</p>
+
+        <h2>3. Real-time collaboration (opt-in)</h2>
+        <p>Collaboration is <strong>off unless you turn it on.</strong> When you invite a collaborator (as an owner) or join a shared project (as a member), OPEN GROUND enables real-time sync, and the data below is sent to and <strong>stored</strong> by these third-party services.</p>
+
+        <h3>Sent to Supabase — membership &amp; control plane</h3>
+        <table>
+          <thead><tr><th>Data</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td>Your email, and the emails of collaborators you invite</td><td>On invite / on join</td></tr>
+            <tr><td>A user ID (UUID) per member</td><td>On join</td></tr>
+            <tr><td>The shared project's display name</td><td>When the owner sets it</td></tr>
+            <tr><td>Invite codes, mode (open / approval), limits, expiry (7 days default)</td><td>When the owner mints a link</td></tr>
+            <tr><td>Join requests (email + status) for approval-mode links</td><td>When a member requests to join</td></tr>
+          </tbody>
+        </table>
+        <p>Member emails are visible to the project owner and to other members of the same project. Your <strong>local file path is not sent</strong> — a project is keyed by a one-way hash.</p>
+
+        <h3>Sent to Cloudflare — real-time sync engine &amp; storage</h3>
+        <p>The contents of the shared project's <strong>Board and Canvas</strong> travel through Cloudflare (a Durable Object is the live sync hub) and are <strong>persisted</strong> there so collaborators can reconnect and work offline:</p>
+        <ul>
+          <li><strong>Board:</strong> task titles, descriptions, notes, status, ordering, and project configuration — such as assignees, the Review column, completion flow, target branch, and any verify commands you set.</li>
+          <li><strong>Canvas:</strong> every element — sticky notes, text, frames, comments, images, and <strong>mock / screen elements including their source code</strong> (the live HTML/React you write into them).</li>
+          <li><strong>Images</strong> you place on a Canvas are uploaded to Cloudflare R2 object storage (images only, up to 10 MB each).</li>
+        </ul>
+        <p class="note"><strong>In plain terms:</strong> turning on collaboration means your Board and Canvas content — including any source code in mock/screen elements and any images — is stored in the cloud, not just on your machine. Your repository's own files, terminal, and Claude chats are still never sent.</p>
+
+        <h2>4. Retention &amp; deletion</h2>
+        <ul>
+          <li><strong>Membership data (Supabase)</strong> is kept until the owner removes a member or deletes the project.</li>
+          <li><strong>Board/Canvas content and images (Cloudflare)</strong> are kept while the project is shared. Stopping sharing halts further sync; deleting the project removes its shared state.</li>
+          <li><strong>Invite codes</strong> expire automatically (7 days by default) and can be revoked by the owner at any time.</li>
+        </ul>
+
+        <h2>5. Third parties</h2>
+        <p>Real-time collaboration relies on <a href="https://supabase.com/privacy" target="_blank" rel="noreferrer">Supabase</a> (authentication and membership storage) and <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noreferrer">Cloudflare</a> (Durable Objects for live sync &amp; persistence, and R2 for image storage). OPEN GROUND does not sell your data, does not use it for advertising, and sends it to no third parties other than those named here for the purpose of running collaboration.</p>
+
+        <h2>6. Your choices</h2>
+        <ul>
+          <li>Use OPEN GROUND fully <strong>without signing in and without collaboration</strong> — then nothing is sent off your machine.</li>
+          <li><strong>Stop sharing</strong> any time; owners can revoke invite links and remove members.</li>
+          <li>Questions or removal requests: use the in-app feedback form or the contact on the home page.</li>
+        </ul>
+      </div>
+
+      <!-- ============ 日本語 ============ -->
+      <div data-lang="ja">
+        <p>OPEN GROUND は、あなたのマシンで動く<strong>ローカルな単一ユーザー向けツール</strong>です。<strong>既定では、OPEN GROUND での操作は何もあなたのパソコンの外に出ません。</strong>データがクラウドへ行くのは、2 つのオプトイン操作（サインインと、リアルタイム共同編集の有効化）をしたときだけです。このページは、何が・どこに・なぜ送られるのかを正確に説明します。</p>
+
+        <h2>1. 既定：すべてローカルに留まる</h2>
+        <p>OPEN GROUND を普通に使う限り（プロジェクトの追加、ターミナルの利用、自分だけで Board や Canvas を編集する等）、<strong>プロジェクトのデータはどこにも送信されません。</strong>すべてはマシン内の <code>~/.openground/</code> 配下に保存されます。OPEN GROUND は既にお使いの <code>claude</code> CLI を動かすだけで、あなたのコードやプロンプトを代わりに Anthropic API へ送ることはなく、独自の API キーも使いません。</p>
+        <p>以下は<strong>どのモードでもマシンの外に出ません</strong>：</p>
+        <ul>
+          <li>リポジトリのソースファイルと git 履歴</li>
+          <li>ターミナルのセッションとコマンド履歴</li>
+          <li>Claude Code との会話・トランスクリプト</li>
+          <li>ローカルのファイルパス（共有時、プロジェクトはパスではなく一方向ハッシュで識別）</li>
+        </ul>
+
+        <h2>2. 任意のサインイン</h2>
+        <p>OPEN GROUND には<strong>任意</strong>のアカウントログイン（Google / GitHub、Supabase OAuth 経由）があります。自分だけで使うのにログインは不要です。サインインした場合、認証は <strong>Supabase</strong> が扱い、あなたのメールアドレスとユーザー ID がアカウントに紐づきます。OAuth フローは実ブラウザで開き、アクセストークンはローカルの OPEN GROUND プロセスが保持し、Web UI には渡されません。サインイン単体ではプロジェクトデータは公開されません。</p>
+
+        <h2>3. リアルタイム共同編集（オプトイン）</h2>
+        <p>共同編集は<strong>オンにしない限りオフ</strong>です。メンバーを招待する（オーナーとして）か、共有プロジェクトに参加する（メンバーとして）と、OPEN GROUND はリアルタイム同期を有効化し、以下のデータが下記の外部サービスに送信・<strong>保存</strong>されます。</p>
+
+        <h3>Supabase へ ── メンバー管理・コントロールプレーン</h3>
+        <table>
+          <thead><tr><th>データ</th><th>タイミング</th></tr></thead>
+          <tbody>
+            <tr><td>あなたのメールアドレス、招待した相手のメールアドレス</td><td>招待時 / 参加時</td></tr>
+            <tr><td>メンバーごとのユーザー ID (UUID)</td><td>参加時</td></tr>
+            <tr><td>共有プロジェクトの表示名</td><td>オーナーが設定したとき</td></tr>
+            <tr><td>招待コード、モード（オープン / 承認）、上限、有効期限（既定 7 日）</td><td>オーナーがリンク発行時</td></tr>
+            <tr><td>参加リクエスト（メール + 状態）※承認モード</td><td>メンバーが参加申請時</td></tr>
+          </tbody>
+        </table>
+        <p>メンバーのメールアドレスは、オーナーと同じプロジェクトの他メンバーに表示されます。<strong>ローカルのファイルパスは送信されません</strong> ── プロジェクトは一方向ハッシュをキーとします。</p>
+
+        <h3>Cloudflare へ ── リアルタイム同期エンジン・保存</h3>
+        <p>共有プロジェクトの <strong>Board と Canvas の中身</strong>は Cloudflare（Durable Object がライブ同期のハブ）を通り、再接続やオフライン作業のためにそこに<strong>保存され続けます</strong>：</p>
+        <ul>
+          <li><strong>Board：</strong> タスクのタイトル、説明、メモ、状態、並び順、プロジェクト設定（担当者、レビュー列、完了フロー、対象ブランチ、設定した検証コマンドなど）。</li>
+          <li><strong>Canvas：</strong> すべての要素 ── 付箋、テキスト、フレーム、コメント、画像、そして <strong>mock / screen 要素（書き込んだ HTML/React のソースコードを含む）</strong>。</li>
+          <li>Canvas に置いた<strong>画像</strong>は Cloudflare R2 オブジェクトストレージにアップロードされます（画像のみ・1 枚あたり最大 10 MB）。</li>
+        </ul>
+        <p class="note"><strong>平たく言うと：</strong> 共同編集をオンにすると、Board と Canvas の中身 ── mock/screen 要素のソースコードや画像を含む ── が、あなたのマシンだけでなくクラウドにも保存されます。リポジトリのファイル・ターミナル・Claude との会話は、依然として一切送信されません。</p>
+
+        <h2>4. 保持と削除</h2>
+        <ul>
+          <li><strong>メンバー情報（Supabase）</strong>は、オーナーがメンバーを削除するかプロジェクトを削除するまで保持されます。</li>
+          <li><strong>Board/Canvas の中身と画像（Cloudflare）</strong>は、プロジェクトが共有されている間保持されます。共有を停止すると以後の同期は止まり、プロジェクトを削除すると共有状態は削除されます。</li>
+          <li><strong>招待コード</strong>は自動的に失効し（既定 7 日）、オーナーはいつでも無効化できます。</li>
+        </ul>
+
+        <h2>5. 第三者</h2>
+        <p>リアルタイム共同編集は <a href="https://supabase.com/privacy" target="_blank" rel="noreferrer">Supabase</a>（認証とメンバー情報の保存）と <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noreferrer">Cloudflare</a>（ライブ同期・保存の Durable Objects、画像保存の R2）に依存します。OPEN GROUND はあなたのデータを販売せず、広告に使わず、共同編集を動かす目的で上記以外の第三者に送信しません。</p>
+
+        <h2>6. あなたの選択肢</h2>
+        <ul>
+          <li><strong>サインインも共同編集もせず</strong>に OPEN GROUND をフルに使えます ── その場合、何もマシンの外に出ません。</li>
+          <li>いつでも<strong>共有を停止</strong>できます。オーナーは招待リンクの無効化やメンバーの削除が可能です。</li>
+          <li>お問い合わせ・削除のご依頼：アプリ内のフィードバックフォーム、またはトップページの連絡先までご連絡ください。</li>
+        </ul>
+      </div>
+
+      <a class="back" href="index.html">
+        <span data-lang="en">← Back to OPEN GROUND</span><span data-lang="ja">← OPEN GROUND に戻る</span>
+      </a>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-bottom">
+      <span class="footer-copy">© <span id="year">2026</span> OPEN GROUND · <span data-lang="en">Runs on your computer. Subscription-only.</span><span data-lang="ja">あなたのパソコンで動く。サブスク専用。</span></span>
+      <a href="index.html" class="footer-copy"><span data-lang="en">Home →</span><span data-lang="ja">ホーム →</span></a>
+    </div>
+  </footer>
+
+  <script>
+    function detectLanguage() {
+      const browserLang = navigator.language || (navigator.languages && navigator.languages[0]) || 'en';
+      return browserLang.toLowerCase().startsWith('ja') ? 'ja' : 'en';
+    }
+    function getLanguage() {
+      return localStorage.getItem('og-lang') || detectLanguage();
+    }
+    function setLanguage(lang) {
+      document.documentElement.lang = lang;
+      localStorage.setItem('og-lang', lang);
+      const ja = document.getElementById('lang-ja');
+      const en = document.getElementById('lang-en');
+      if (ja) ja.classList.toggle('active', lang === 'ja');
+      if (en) en.classList.toggle('active', lang === 'en');
+    }
+    function toggleLanguage() {
+      setLanguage(document.documentElement.lang === 'ja' ? 'en' : 'ja');
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      setLanguage(getLanguage());
+      const y = document.getElementById('year');
+      if (y) y.textContent = String(new Date().getFullYear());
+    });
+  </script>
+</body>
+</html>

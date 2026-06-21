@@ -31,6 +31,7 @@ import type {
   CanvasElement,
   CanvasState,
   ClaudeBeaconStatus,
+  CollabProjectListItem,
   ProjectMeta,
   Tool,
 } from '@/lib/types'
@@ -91,6 +92,16 @@ interface Props {
    *  with no entry shows no beacon (plain shells don't count). The per-project
    *  Canvas tab renders no project cards, so it leaves this undefined. */
   claudeStatuses?: ReadonlyMap<string, ClaudeBeaconStatus>
+  /** Ground member flow (collab enabled only): projects shared WITH the user
+   *  (owned:false), rendered as read-only "Shared" cards intermixed with the
+   *  owned cards. Positioned by collabProjectId in `canvas.positions` (same map
+   *  as owned cards), draggable, but click-to-OPEN (onOpenShared) rather than
+   *  selectable. Undefined/empty (the default, collab-off build) → no shared
+   *  cards and every owned-card path stays byte-for-byte unchanged. */
+  sharedProjects?: CollabProjectListItem[]
+  /** Open a shared card (folder-less) — wired to the host's SharedProjectPanel
+   *  flow. Called on a click (no-drag) release of a shared card. */
+  onOpenShared?: (collabProjectId: string) => void
   canvas: CanvasState
   onCanvasChange: (c: CanvasState) => void
   selectedIds: string[]
@@ -310,6 +321,11 @@ interface DragPress {
    *  single-item drag. Lets a marquee selection move as one unit instead of
    *  dragging out only the item directly under the cursor. */
   group?: { id: string; isCard: boolean; ox: number; oy: number }[]
+  /** Ground member flow: this 'card' press is on a SHARED card (a project shared
+   *  WITH the user, not in the registry). It drags via the same positions[id]
+   *  path, but a click (no-move) release opens it through onOpenShared instead
+   *  of selecting it — shared cards are read-only overlays, never selectable. */
+  shared?: boolean
 }
 
 type Press =
@@ -396,6 +412,8 @@ type Press =
 export const InfiniteCanvas = ({
   projects,
   claudeStatuses,
+  sharedProjects,
+  onOpenShared,
   canvas,
   onCanvasChange,
   selectedIds,
@@ -1715,6 +1733,36 @@ export const InfiniteCanvas = ({
     capture(e)
   }
 
+  // Shared card (Ground member flow) — drags through the very same card path
+  // (live move commits positions[id]; the host persists it under collabProjectId),
+  // but the press is flagged `shared` so a click (no-move) release opens it via
+  // onOpenShared instead of selecting it. No group/restore-group: a shared card
+  // is never in `projects` or `selectedIds`, so it can't join a multi-select,
+  // frame, or marquee — it's a standalone read-only overlay.
+  const onSharedCardPointerDown = (id: string) => (e: React.PointerEvent) => {
+    if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
+    e.stopPropagation()
+    setEditingId(null)
+    const c = canvasRef.current
+    const pos = c.positions[id]
+    if (!pos) return
+    press.current = {
+      kind: 'card',
+      id,
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: pos.x,
+      oy: pos.y,
+      moved: false,
+      shift: e.shiftKey,
+      restore: snapshotForRestore(),
+      shared: true,
+    }
+    setPanning(true)
+    capture(e)
+  }
+
   // ⌥-drag duplicate: clone `ids` in place (z-top, like paste) and return the
   // id remap so the caller rebuilds its press/selection against the CLONES —
   // the originals stay put and the drag moves the copies (Figma).
@@ -2500,6 +2548,13 @@ export const InfiniteCanvas = ({
               }
             }
           }
+        } else if (p.kind === 'card' && p.shared) {
+          // Shared card click (no drag): open the folder-less SharedProjectPanel
+          // via the host. A shared card never selects (it isn't a registry
+          // project) and never pairs into a double-click-to-edit (cards carry no
+          // inline text), so we stop here without touching the selection.
+          lastClick.current = null
+          onOpenShared?.(p.id)
         } else {
           // Group-aware selection: clicking any member of a group selects the
           // whole group (the selection unit), so a follow-up drag moves it all.
@@ -3525,6 +3580,42 @@ export const InfiniteCanvas = ({
                 onPointerDown={onCardPointerDown(p)}
                 selected={selectedIds.includes(p.id)}
                 claudeStatus={claudeStatuses?.get(p.id)}
+              />
+            </div>
+          )
+        })}
+
+        {/* Ground member flow: projects shared WITH the user (collab enabled
+            only). Positioned by collabProjectId in the SAME positions map as
+            owned cards, draggable via onSharedCardPointerDown, click-to-open.
+            The synthetic ProjectMeta only carries id + name (the label); the
+            card's `shared` variant renders neither path/git nor task count, so
+            the empty fields are never shown. Empty/undefined → nothing renders,
+            so the collab-off Ground stays byte-for-byte unchanged. */}
+        {(sharedProjects ?? []).map((s) => {
+          const pos = positions[s.id]
+          if (!pos) return null
+          return (
+            <div
+              key={s.id}
+              data-card-id={s.id}
+              className="absolute"
+              style={{ left: pos.x, top: pos.y }}
+            >
+              <ProjectCard
+                shared
+                project={{
+                  id: s.id,
+                  name: s.label || t('projectPanel.collabSharedDialogUntitled'),
+                  path: '',
+                  description: '',
+                  lastModified: '',
+                  hasGit: false,
+                  openTaskCount: 0,
+                  totalTaskCount: 0,
+                }}
+                onPointerDown={onSharedCardPointerDown(s.id)}
+                selected={false}
               />
             </div>
           )

@@ -1,8 +1,10 @@
 import {
   GitBranch,
   FolderClosed,
+  Users,
 } from 'lucide-react'
 import type { ClaudeBeaconStatus, ProjectMeta } from '@/lib/types'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   project: ProjectMeta
@@ -13,6 +15,13 @@ interface Props {
    *  bar + stamp, 'waiting' → amber "Waiting" (claude is sitting on you).
    *  Undefined = no claude session (plain shells show nothing). */
   claudeStatus?: ClaudeBeaconStatus
+  /** Ground member flow: this card is a project shared WITH the user
+   *  (owned:false in /api/collab/projects), not one of their own registry
+   *  projects. Renders a "Shared" badge + a distinct icon and hides
+   *  owner-only chrome (git glyph, task count, folder path); the caller wires
+   *  its click to open the folder-less SharedProjectPanel. Undefined/false →
+   *  the normal owned card, rendered byte-for-byte unchanged. */
+  shared?: boolean
 }
 
 const coordFromId = (id: string) => {
@@ -31,10 +40,13 @@ export const ProjectCard = ({
   selected,
   active,
   claudeStatus,
+  shared,
 }: Props) => {
+  const { t } = useT()
   return (
     <div
       onPointerDown={onPointerDown}
+      title={shared ? t('projectPanel.groundSharedTitle') : undefined}
       className={[
         'group relative select-none bg-bg-card transition-all',
         'w-64 cursor-grab active:cursor-grabbing',
@@ -94,12 +106,16 @@ export const ProjectCard = ({
             className={[
               'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center',
               'border rounded-[2px]',
-              project.hasGit
+              shared
                 ? 'border-accent/40 bg-accent-soft text-accent'
-                : 'border-line bg-bg-inset text-ink-subtle',
+                : project.hasGit
+                  ? 'border-accent/40 bg-accent-soft text-accent'
+                  : 'border-line bg-bg-inset text-ink-subtle',
             ].join(' ')}
           >
-            {project.hasGit ? (
+            {shared ? (
+              <Users size={12} strokeWidth={2} />
+            ) : project.hasGit ? (
               <GitBranch size={12} strokeWidth={2} />
             ) : (
               <FolderClosed size={12} strokeWidth={2} />
@@ -111,28 +127,43 @@ export const ProjectCard = ({
           >
             {project.name}
           </div>
-          {project.openTaskCount > 0 && (
-            <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-accent">
-              <span className="h-1 w-1 rounded-full bg-accent" />
-              {project.openTaskCount} open
+          {shared ? (
+            <span className="mt-0.5 flex shrink-0 items-center gap-1 label-cap text-accent">
+              <Users size={10} strokeWidth={2.25} />
+              {t('projectPanel.groundSharedBadge')}
             </span>
-          )}
-          {project.missing && (
-            <span className="mt-0.5 shrink-0 label-cap text-accent">missing</span>
+          ) : (
+            <>
+              {project.openTaskCount > 0 && (
+                <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-accent">
+                  <span className="h-1 w-1 rounded-full bg-accent" />
+                  {project.openTaskCount} open
+                </span>
+              )}
+              {project.missing && (
+                <span className="mt-0.5 shrink-0 label-cap text-accent">missing</span>
+              )}
+            </>
           )}
         </div>
 
         <div className="mt-2.5">
-          <p
-            className={[
-              'line-clamp-4',
-              project.description
-                ? 'text-[11.5px] leading-snug text-ink-muted'
-                : 'font-mono text-[10px] text-ink-subtle',
-            ].join(' ')}
-          >
-            {project.description || (project.missing ? 'Folder no longer exists — remove it from the Ground.' : project.path)}
-          </p>
+          {shared ? (
+            <p className="text-[11.5px] leading-snug text-ink-muted">
+              {t('projectPanel.groundSharedTitle')}
+            </p>
+          ) : (
+            <p
+              className={[
+                'line-clamp-4',
+                project.description
+                  ? 'text-[11.5px] leading-snug text-ink-muted'
+                  : 'font-mono text-[10px] text-ink-subtle',
+              ].join(' ')}
+            >
+              {project.description || (project.missing ? 'Folder no longer exists — remove it from the Ground.' : project.path)}
+            </p>
+          )}
         </div>
       </div>
     </div>
