@@ -466,6 +466,7 @@ const MockView = ({
     iframeRef,
     selected,
     projectPath,
+    elementId: element.id,
     source: element.text,
     framework,
     onChangeText,

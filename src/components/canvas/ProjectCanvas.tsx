@@ -5,10 +5,12 @@ import { useT } from '@/i18n/I18nContext'
 import { PagesSection } from './PagesSection'
 import { CanvasWorkspace } from './CanvasWorkspace'
 import type {
+  CanvasElement,
   CanvasFile,
   CanvasSummary,
   CanvasesIndex,
 } from '@/lib/types'
+import { reconcileCanvasElements } from '@/lib/canvasMerge'
 import { api } from '@/lib/api-client'
 
 interface Props {
@@ -22,6 +24,13 @@ interface Props {
 // on every change; on unmount we flush synchronously so a quick tab-out
 // doesn't drop the last edit.
 const SAVE_DEBOUNCE_MS = 400
+
+// Optimistic concurrency: a save whose rev is behind the server's (a Canvas AI
+// job appended/tweaked since this client loaded the canvas) is rejected 409; we
+// refetch, 3-way-merge our edits with the server's new elements, and retry
+// against the fresh rev. Bounded so a canvas under a burst of AI writes can't
+// loop forever — on exhaustion we drop the save and the next local edit retries.
+const MAX_SAVE_RETRIES = 5
 
 // ⌘\ focus-mode choice survives reloads. '0' = hidden; anything else visible.
 const SIDEBARS_KEY = 'openground.canvas.sidebars'
@@ -148,12 +157,113 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     [projectPath],
   )
 
+  // ── Optimistic concurrency control (OCC) state ───────────────────────────
+  // Per-canvas-id: the server rev this client is synced to, and the element set
+  // at that rev (the 3-way-merge base). KEYED BY ID — not a single "active" pair
+  // — because a save for a canvas the user just switched AWAY from can still be
+  // finishing on the chain (e.g. an AI job appended to it mid-navigation); a
+  // global pair would let that late save's rev/base clobber the just-adopted new
+  // canvas's state. Refs so the serialised save chain reads the freshest values.
+  const revByIdRef = useRef<Map<string, number>>(new Map())
+  const baseByIdRef = useRef<Map<string, CanvasElement[]>>(new Map())
+  // All saves funnel through one promise chain so a 409 refetch+merge+retry
+  // can't interleave with a concurrent debounced save racing the same id's state.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
+
+  // Adopt a freshly-loaded server canvas as the OCC base (rev + elements) for its id.
+  const adoptServerCanvas = useCallback((file: CanvasFile) => {
+    revByIdRef.current.set(file.id, Number.isFinite(file.rev) ? file.rev : 0)
+    baseByIdRef.current.set(file.id, file.elements)
+  }, [])
+
+  // Persist a full canvas under OCC. Sends the rev we're synced to for THIS id;
+  // on 409 (an AI job advanced the file since our base) refetch the server
+  // canvas, 3-way-merge (keep our edits ∪ AI's new/updated elements, never
+  // resurrect our deletions), reflect the merge locally so the AI additions
+  // appear, and retry against the fresh rev. A non-409 failure (or exhausted
+  // retries) is dropped — matching the prior fire-and-forget behaviour; the next
+  // edit re-saves.
+  const doSave = useCallback(
+    async (initial: CanvasFile): Promise<void> => {
+      let payload = initial
+      const id = initial.id
+      for (let attempt = 0; attempt <= MAX_SAVE_RETRIES; attempt++) {
+        const expectedRev = revByIdRef.current.get(id) ?? 0
+        const res = await api.api.project.canvases.$post({
+          json: { path: projectPath, canvas: { ...payload, rev: expectedRev } },
+        })
+        if (res.ok) {
+          const saved = (await res.json()) as CanvasFile
+          revByIdRef.current.set(id, Number.isFinite(saved.rev) ? saved.rev : expectedRev + 1)
+          // The server now holds exactly what we sent → it's the new base.
+          baseByIdRef.current.set(id, payload.elements)
+          // Keep tab-bar timestamps fresh without an extra round-trip.
+          setCanvases((prev) =>
+            prev.map((c) =>
+              c.id === id ? { ...c, name: payload.name, updatedAt: saved.updatedAt } : c,
+            ),
+          )
+          return
+        }
+        if (res.status !== 409) return
+        let serverCanvas: CanvasFile | null = null
+        try {
+          const conflict = (await res.json()) as { canvas?: CanvasFile }
+          serverCanvas = conflict.canvas ?? null
+        } catch {
+          serverCanvas = null
+        }
+        if (!serverCanvas) serverCanvas = await fetchCanvas(id)
+        if (!serverCanvas) return
+        // Merge against our LATEST local state (the user may have edited during
+        // the round-trip) when this canvas is still active; else the snapshot.
+        const liveLocal =
+          activeRef.current && activeRef.current.id === id ? activeRef.current : payload
+        const mergedElements = reconcileCanvasElements(
+          baseByIdRef.current.get(id) ?? [],
+          liveLocal.elements,
+          serverCanvas.elements,
+        )
+        const merged: CanvasFile = {
+          ...liveLocal,
+          elements: mergedElements,
+          rev: serverCanvas.rev,
+        }
+        // We now KNOW the server holds serverCanvas at this rev → new merge base.
+        revByIdRef.current.set(
+          id,
+          Number.isFinite(serverCanvas.rev) ? serverCanvas.rev : expectedRev,
+        )
+        baseByIdRef.current.set(id, serverCanvas.elements)
+        // Reflect the reconciled canvas so AI additions appear immediately — but
+        // only while we're still on this canvas (a mid-flight switch must win).
+        if (activeRef.current && activeRef.current.id === id) setActive(merged)
+        payload = merged
+      }
+    },
+    [projectPath, fetchCanvas],
+  )
+
+  // Serialise every save through one chain (see saveChainRef).
+  const enqueueSave = useCallback(
+    (payload: CanvasFile): Promise<void> => {
+      const run = saveChainRef.current.catch(() => {}).then(() => doSave(payload))
+      saveChainRef.current = run.catch(() => {})
+      return run
+    },
+    [doSave],
+  )
+
   // Bootstrap: read the index, then either fetch the active Canvas or create
   // a first one. Re-runs on project switch so state never leaks across cards.
   useEffect(() => {
     let cancelled = false
     setLoaded(false)
     setActive(null)
+    // New project → the prior project's per-id OCC state is irrelevant; clear it
+    // so the maps don't accumulate across projects over a long session.
+    revByIdRef.current.clear()
+    baseByIdRef.current.clear()
     ;(async () => {
       const { index, canvases: list } = await refreshList()
       if (cancelled) return
@@ -166,6 +276,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         if (cancelled) return
         await refreshList()
         setActive(data.canvas)
+        adoptServerCanvas(data.canvas)
         setLoaded(true)
         return
       }
@@ -173,6 +284,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
       const file = await fetchCanvas(id)
       if (cancelled) return
       setActive(file)
+      if (file) adoptServerCanvas(file)
       setLoaded(true)
     })().catch(() => {
       if (!cancelled) setLoaded(true)
@@ -180,7 +292,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     return () => {
       cancelled = true
     }
-  }, [projectPath, refreshList, fetchCanvas])
+  }, [projectPath, refreshList, fetchCanvas, adoptServerCanvas])
 
   // Flush whatever's pending whenever the active id changes (so switching
   // Canvases doesn't drop the prior one's last unsaved edit). Same on unmount.
@@ -195,11 +307,8 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     const payload = pendingRef.current
     if (!payload) return Promise.resolve()
     pendingRef.current = null
-    return api.api.project.canvases
-      .$post({ json: { path: projectPath, canvas: payload } })
-      .then(() => {})
-      .catch(() => {})
-  }, [projectPath])
+    return enqueueSave(payload)
+  }, [enqueueSave])
 
   useEffect(() => {
     return () => {
@@ -216,23 +325,12 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         if (!payload) return
         pendingRef.current = null
         saveTimer.current = null
-        api.api.project.canvases
-          .$post({ json: { path: projectPath, canvas: payload } })
-          .then(() => {
-            // Keep tab-bar timestamps fresh so updatedAt ordering hints stay
-            // accurate without an extra round-trip.
-            setCanvases((prev) =>
-              prev.map((c) =>
-                c.id === payload.id
-                  ? { ...c, name: payload.name, updatedAt: new Date().toISOString() }
-                  : c,
-              ),
-            )
-          })
-          .catch(() => {})
+        // doSave (via the chain) handles the rev round-trip, the tab-bar
+        // timestamp refresh, and 409 → refetch+merge+retry.
+        void enqueueSave(payload)
       }, SAVE_DEBOUNCE_MS)
     },
-    [projectPath],
+    [enqueueSave],
   )
 
   const handleActiveChange = useCallback(
@@ -328,8 +426,9 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         .catch(() => {})
       const file = await fetchCanvas(id)
       setActive(file)
+      if (file) adoptServerCanvas(file)
     },
-    [activeId, flushPending, fetchCanvas, projectPath],
+    [activeId, flushPending, fetchCanvas, projectPath, adoptServerCanvas],
   )
 
   const createCanvas = useCallback(async () => {
@@ -345,7 +444,8 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     ])
     setActiveId(data.canvas.id)
     setActive(data.canvas)
-  }, [flushPending, projectPath])
+    adoptServerCanvas(data.canvas)
+  }, [flushPending, projectPath, adoptServerCanvas])
 
   const deleteCanvas = useCallback(
     async (id: string) => {
@@ -358,6 +458,10 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         index: CanvasesIndex
         createdReplacement?: CanvasFile
       }
+      // The deleted canvas's OCC state is dead — drop it (its id is a UUID and
+      // never recurs, so a lingering entry would only leak).
+      revByIdRef.current.delete(id)
+      baseByIdRef.current.delete(id)
       // Refresh the list against the server's authoritative view rather than
       // patching locally — the "delete the last one" branch creates a
       // replacement we'd otherwise miss.
@@ -365,14 +469,16 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
       const target = index.activeId ?? list[0]?.id ?? null
       if (data.createdReplacement && target === data.createdReplacement.id) {
         setActive(data.createdReplacement)
+        adoptServerCanvas(data.createdReplacement)
       } else if (target) {
         const file = await fetchCanvas(target)
         setActive(file)
+        if (file) adoptServerCanvas(file)
       } else {
         setActive(null)
       }
     },
-    [flushPending, projectPath, refreshList, fetchCanvas],
+    [flushPending, projectPath, refreshList, fetchCanvas, adoptServerCanvas],
   )
 
   const renameCanvas = useCallback(
@@ -386,6 +492,15 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
       setCanvases((prev) =>
         prev.map((c) => (c.id === id ? { ...c, name: updated.name, updatedAt: updated.updatedAt } : c)),
       )
+      // Rename bumped the server rev (renameCanvas writes through the lock).
+      // Advance our synced rev for THIS id so the next save isn't a needless
+      // 409. Elements are untouched by a rename, so the merge base stays valid.
+      if (revByIdRef.current.has(id)) {
+        revByIdRef.current.set(
+          id,
+          Number.isFinite(updated.rev) ? updated.rev : revByIdRef.current.get(id) ?? 0,
+        )
+      }
       if (active && active.id === id) {
         setActive({ ...active, name: updated.name, updatedAt: updated.updatedAt })
       }

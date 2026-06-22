@@ -52,6 +52,9 @@ const NOOP = () => {}
 const emptyCanvas = (id: string): CanvasFile => ({
   id,
   name: '',
+  // rev is a disk-OCC concept; a collab member never saves through that path
+  // (they sync via the Y.Doc), so 0 is fine — docToCanvasFile layers over this.
+  rev: 0,
   viewport: { x: 0, y: 0, zoom: 1 },
   elements: [],
   chats: [],

@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import type { CanvasFile, CanvasSummary, CanvasesIndex } from '../types'
+import type { CanvasElement, CanvasFile, CanvasSummary, CanvasesIndex } from '../types'
 import { normalizeLayoutOrder } from '../canvasAutoLayout'
 import { atomicWriteJson } from './atomicWrite'
 import { projectDataDir } from './projectDataPath'
@@ -22,6 +22,7 @@ const emptyCanvas = (id: string, name: string): CanvasFile => {
   return {
     id,
     name,
+    rev: 0,
     viewport: { x: 0, y: 0, zoom: 1 },
     elements: [],
     chats: [],
@@ -84,19 +85,34 @@ export const readCanvasFile = async (
     const canvas = { ...emptyCanvas(id, parsed.name ?? 'Canvas'), ...parsed }
     // Converge files saved by the old position-sorting auto-layout engine to the
     // v2 array-order contract, so the picture doesn't change on load. No-op
-    // (same array) on v2 files.
-    return { ...canvas, elements: normalizeLayoutOrder(canvas.elements ?? []) }
+    // (same array) on v2 files. `rev` is normalised to a finite number so a
+    // legacy file written before rev existed loads as 0 (the client then saves
+    // with expectedRev 0, which matches and upgrades the file to rev 1).
+    return {
+      ...canvas,
+      rev: Number.isFinite(canvas.rev) ? canvas.rev : 0,
+      elements: normalizeLayoutOrder(canvas.elements ?? []),
+    }
   } catch {
     return null
   }
 }
 
+// Low-level canvas writer. ALWAYS bumps `rev` (the OCC version) off whatever
+// rev the passed object carries, so every write — client save, AI append, AI
+// tweak, rename, create — advances the revision. It is deliberately UNLOCKED:
+// the in-lock callers (appendCanvasElements / updateCanvasElementSource /
+// saveCanvasFile / renameCanvas) compose it INSIDE withCanvasFileLock after
+// reading the current canvas, so the rev they bump from is the on-disk one.
+// Calling it directly (create/delete of a brand-new unique id, tests) is safe
+// because those ids have no concurrent writer.
 export const writeCanvasFile = async (
   projectPath: string,
   canvas: CanvasFile,
 ): Promise<CanvasFile> => {
   await ensureCanvasesDir(projectPath)
-  const next: CanvasFile = { ...canvas, updatedAt: new Date().toISOString() }
+  const baseRev = Number.isFinite(canvas.rev) ? canvas.rev : 0
+  const next: CanvasFile = { ...canvas, rev: baseRev + 1, updatedAt: new Date().toISOString() }
   await atomicWriteJson(await canvasFilePath(projectPath,canvas.id), next)
   return next
 }
@@ -205,13 +221,15 @@ export const createCanvas = (
     const { index, canvases } = await listCanvases(projectPath)
     const id = newId()
     const canvas = emptyCanvas(id, name?.trim() || nextCanvasName(canvases))
-    await writeCanvasFile(projectPath, canvas)
+    // Return the WRITTEN canvas (rev 1, not the pre-write rev 0) so the client
+    // adopts the correct rev as its OCC base from the create response.
+    const written = await writeCanvasFile(projectPath, canvas)
     const nextIndex: CanvasesIndex = {
       order: [...index.order, id],
       activeId: id,
     }
     await writeCanvasesIndex(projectPath, nextIndex)
-    return { index: nextIndex, canvas }
+    return { index: nextIndex, canvas: written }
   })
 
 // Removing the last Canvas is treated as "reset" rather than an error: a fresh
@@ -241,10 +259,10 @@ export const deleteCanvas = (
     if (remaining.length === 0) {
       const replacementId = newId()
       const replacement = emptyCanvas(replacementId, 'Canvas 1')
-      await writeCanvasFile(projectPath, replacement)
+      const written = await writeCanvasFile(projectPath, replacement)
       const nextIndex: CanvasesIndex = { order: [replacementId], activeId: replacementId }
       await writeCanvasesIndex(projectPath, nextIndex)
-      return { index: nextIndex, createdReplacement: replacement }
+      return { index: nextIndex, createdReplacement: written }
     }
     const activeId =
       index.activeId === id ? remaining[0] : index.activeId ?? remaining[0]
@@ -260,9 +278,15 @@ export const renameCanvas = async (
 ): Promise<CanvasFile | null> => {
   const trimmed = name.trim()
   if (!trimmed) return null
-  const canvas = await readCanvasFile(projectPath, id)
-  if (!canvas) return null
-  return writeCanvasFile(projectPath, { ...canvas, name: trimmed })
+  // Read-modify-write of the single canvas file → serialise with AI append /
+  // tweak (and client save) via the same per-(project,canvas) lock, so a rename
+  // landing between an AI job's read and write can't drop the appended elements
+  // (the same lost-update class this OCC work closes for the client save path).
+  return withCanvasFileLock(projectPath, id, async () => {
+    const canvas = await readCanvasFile(projectPath, id)
+    if (!canvas) return null
+    return writeCanvasFile(projectPath, { ...canvas, name: trimmed })
+  })
 }
 
 export const reorderCanvases = (
@@ -293,6 +317,178 @@ export const setActiveCanvas = (
     const nextIndex: CanvasesIndex = { ...index, activeId: id }
     await writeCanvasesIndex(projectPath, nextIndex)
     return nextIndex
+  })
+
+// ── Canvas AI persistence (server-side job results) ──────────────────────────
+// A Canvas AI job (src/lib/server/canvasAi.ts) writes its result straight into
+// the target canvas on completion, so the design lands whether or not the user
+// is still watching the canvas. Both ops are a read-modify-write of the SINGLE
+// canvas file, serialised per (project, canvas) so two jobs targeting the same
+// canvas can't clobber each other's append (the AI chain serialises the claude
+// runs, but the persist that follows each run can still overlap the next). The
+// concurrent CLIENT persist (the debounced /api/project/canvases POST) now runs
+// through saveCanvasFile, which takes this SAME lock and gates on rev — so a
+// client save can no longer interleave (or silently overwrite) an AI append /
+// tweak; a stale one is rejected (409) and the client merges + retries.
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __openground_canvas_file_writes: Map<string, Promise<unknown>> | undefined
+}
+
+const canvasFileWriteQueue: Map<string, Promise<unknown>> =
+  globalThis.__openground_canvas_file_writes ??
+  (globalThis.__openground_canvas_file_writes = new Map())
+
+const withCanvasFileLock = <T>(
+  projectPath: string,
+  canvasId: string,
+  fn: () => Promise<T>,
+): Promise<T> => {
+  const key = `${projectPath}::${canvasId}`
+  const prev = canvasFileWriteQueue.get(key) ?? Promise.resolve()
+  const myRun = prev.then(fn)
+  canvasFileWriteQueue.set(key, myRun.catch(() => undefined))
+  return myRun
+}
+
+// Bounding box over x/y/(width|height). Rotation is ignored — this only feeds
+// the append-placement offset, where an axis-aligned box is close enough.
+interface ElBounds { minX: number; minY: number; maxX: number; maxY: number }
+const elementsBounds = (els: CanvasElement[]): ElBounds | null => {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const el of els) {
+    if (!Number.isFinite(el.x) || !Number.isFinite(el.y)) continue
+    const w = typeof el.width === 'number' && Number.isFinite(el.width) ? el.width : 0
+    const h = typeof el.height === 'number' && Number.isFinite(el.height) ? el.height : 0
+    minX = Math.min(minX, el.x)
+    minY = Math.min(minY, el.y)
+    maxX = Math.max(maxX, el.x + w)
+    maxY = Math.max(maxY, el.y + h)
+  }
+  return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null
+}
+
+// Gap between existing content and a freshly appended AI batch.
+const APPEND_GAP = 80
+
+/** Offset a freshly generated batch so it sits to the RIGHT of the canvas's
+ *  existing content with a gap (top-aligned), or near the origin on an empty
+ *  canvas — so an AI generation never lands on top of what's already there.
+ *  Mutates each element's x/y in place. Exported for unit tests. */
+export const placeAppendedElements = (
+  existing: CanvasElement[],
+  incoming: CanvasElement[],
+): CanvasElement[] => {
+  const inB = elementsBounds(incoming)
+  if (!inB) return incoming
+  const exB = elementsBounds(existing)
+  const targetX = exB ? exB.maxX + APPEND_GAP : 0
+  const targetY = exB ? exB.minY : 0
+  const dx = Math.round(targetX - inB.minX)
+  const dy = Math.round(targetY - inB.minY)
+  if (dx === 0 && dy === 0) return incoming
+  for (const el of incoming) {
+    el.x += dx
+    el.y += dy
+  }
+  return incoming
+}
+
+/** Append AI-generated elements to a canvas at a non-overlapping position
+ *  (right of existing content), server-side. Returns the appended elements with
+ *  their FINAL positions, so a still-open canvas can reflect them locally with
+ *  no extra refetch. Throws when the canvas no longer exists (deleted mid-run).
+ */
+export const appendCanvasElements = (
+  projectPath: string,
+  canvasId: string,
+  elements: CanvasElement[],
+): Promise<CanvasElement[]> =>
+  withCanvasFileLock(projectPath, canvasId, async () => {
+    const canvas = await readCanvasFile(projectPath, canvasId)
+    if (!canvas) throw new Error('canvas no longer exists')
+    const placed = placeAppendedElements(
+      canvas.elements,
+      elements.map((e) => ({ ...e })),
+    )
+    await writeCanvasFile(projectPath, {
+      ...canvas,
+      elements: [...canvas.elements, ...placed],
+    })
+    return placed
+  })
+
+/** Write a tweaked source onto one screen/mock element in a canvas, server-side.
+ *  Returns true when the element was found and updated; false when the canvas or
+ *  element is gone (deleted mid-run). */
+export const updateCanvasElementSource = (
+  projectPath: string,
+  canvasId: string,
+  elementId: string,
+  source: string,
+): Promise<boolean> =>
+  withCanvasFileLock(projectPath, canvasId, async () => {
+    const canvas = await readCanvasFile(projectPath, canvasId)
+    if (!canvas) return false
+    let found = false
+    const next = canvas.elements.map((el) => {
+      if (el.id !== elementId) return el
+      found = true
+      return { ...el, text: source }
+    })
+    if (!found) return false
+    await writeCanvasFile(projectPath, { ...canvas, elements: next })
+    return true
+  })
+
+// ── Client save (optimistic concurrency control) ────────────────────────────
+// The debounced full-canvas POST from the client used to blind-overwrite the
+// file OUTSIDE the lock, so a save based on a snapshot taken BEFORE an AI job
+// appended could silently erase the appended elements (lost update). This is
+// the serialised, rev-checked replacement: it runs INSIDE withCanvasFileLock
+// (so it can't interleave an AI append/tweak) and only writes when the client's
+// expected rev still matches the on-disk rev. If the server has advanced (an AI
+// job landed since the client's load), it returns a conflict + the CURRENT
+// canvas so the route can 409 and the client can refetch → 3-way-merge
+// (canvasMerge.reconcileCanvasElements) → retry, preserving BOTH the client's
+// edits and the AI's additions and never resurrecting a client-deleted element.
+
+export interface SaveCanvasOutcome {
+  ok: boolean
+  /** true when the write was rejected because the client's rev was stale. */
+  conflict?: boolean
+  /** ok → the written canvas (new rev). conflict → the CURRENT server canvas
+   *  (so the client can merge against it and retry). */
+  canvas: CanvasFile
+}
+
+/** Persist a full client-authored Canvas under optimistic concurrency control.
+ *  `incoming.rev` is the rev the client loaded; the write succeeds only while
+ *  it still matches the on-disk rev (or the canvas isn't on disk yet — a
+ *  brand-new first save). Otherwise the save is rejected as a conflict without
+ *  touching the file, so an AI job's just-appended elements are never lost. */
+export const saveCanvasFile = (
+  projectPath: string,
+  incoming: CanvasFile,
+): Promise<SaveCanvasOutcome> =>
+  withCanvasFileLock(projectPath, incoming.id, async () => {
+    const current = await readCanvasFile(projectPath, incoming.id)
+    const currentRev = current?.rev ?? 0
+    const expectedRev = Number.isFinite(incoming.rev) ? incoming.rev : 0
+    // Brand-new (not on disk yet) OR the client is up to date → write + bump.
+    // Bump from the SERVER's current rev, not the client's echoed value, so a
+    // client that under-reports can't rewind the version.
+    if (!current || currentRev === expectedRev) {
+      const written = await writeCanvasFile(projectPath, { ...incoming, rev: currentRev })
+      return { ok: true, canvas: written }
+    }
+    // Server advanced past the client's base (an AI job appended/tweaked, or a
+    // rename landed) → conflict; hand back the current canvas for the merge.
+    return { ok: false, conflict: true, canvas: current }
   })
 
 // Used by tests / debugging only — wipes the entire Canvases directory so

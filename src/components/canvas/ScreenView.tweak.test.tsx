@@ -3,12 +3,13 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, act, waitFor } from '@testing-library/react'
 import type { CanvasElement } from '@/lib/types'
 
-// The Screen/Mock in-tile "tweak" flow (useInspectTweak, in ScreenView) must
-// match the Canvas generate bar: a signed-out 503 routes to a "sign in to
-// Claude" CTA (the SAME /api/terminal/claude-login terminal the Board drawer +
-// generate bar use) instead of a generic error. claudeMissing keeps its own
-// install-guidance copy; the success path (rewritten source → onChangeText) is
-// unchanged.
+// The Screen/Mock in-tile "tweak" flow (useInspectTweak, in ScreenView) now
+// drives a SERVER-SIDE JOB, matching the Canvas generate bar: the POST returns
+// a { jobId } fast and the run survives the tile unmounting — the hook starts
+// the job and POLLS it for the result, never holding the request open. A
+// signed-out 503 still routes to the "sign in to Claude" CTA; claudeMissing
+// keeps its install copy; and the rewritten source (job done) flows out through
+// onChangeText, exactly like a manual edit.
 
 // t(key) → key, so assertions match message keys (mirrors the other canvas suites).
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
@@ -20,6 +21,7 @@ vi.mock('./ClaudeTerminalPane', () => ({
 }))
 
 import { ScreenView } from './ScreenView'
+import { CanvasAssetProvider } from './CanvasAssetContext'
 
 const makeElement = (): CanvasElement => ({
   id: 's1',
@@ -31,27 +33,32 @@ const makeElement = (): CanvasElement => ({
   text: 'export default function S(){ return <button>Hi</button> }',
 })
 
+// The hook reads canvasId from CanvasAssetProvider (the persistence target of
+// the tweak job), so the tile must be wrapped in it.
 const renderScreen = (onChangeText = vi.fn()) => ({
   onChangeText,
   ...render(
-    <ScreenView
-      element={makeElement()}
-      selected
-      editing={false}
-      onPointerDown={() => {}}
-      onChangeText={onChangeText}
-      onEditDone={() => {}}
-      ring=""
-      projectPath="/tmp/proj"
-    />,
+    <CanvasAssetProvider value={{ projectPath: '/tmp/proj', canvasId: 'c1' }}>
+      <ScreenView
+        element={makeElement()}
+        selected
+        editing={false}
+        onPointerDown={() => {}}
+        onChangeText={onChangeText}
+        onEditDone={() => {}}
+        ring=""
+        projectPath="/tmp/proj"
+      />
+    </CanvasAssetProvider>,
   ),
 })
 
+const reply = (status: number, body: unknown) =>
+  Promise.resolve({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) })
+
 // Enter tweak mode, then replay the "pick" the inspect bridge posts from inside
-// the sandboxed iframe. The hook only accepts picks whose `source` is OUR
-// iframe's contentWindow, so we read it off the rendered iframe and pass it
-// verbatim — matching whatever jsdom assigns (a Window, or null for a sandboxed
-// frame; either way the test value === the hook's value, so the guard passes).
+// the sandboxed iframe (the hook only accepts picks from OUR iframe, so we read
+// it off the rendered iframe and pass it verbatim).
 const enterTweakAndPick = (
   container: HTMLElement,
   getByText: (t: string) => HTMLElement,
@@ -85,21 +92,12 @@ afterEach(() => {
 describe('ScreenView tweak — claudeLoggedOut handling', () => {
   it('a signed-out 503 shows the sign-in CTA (not a generic error) and opens the login terminal', async () => {
     const fetchMock = vi.fn((url: string) => {
-      if (String(url).includes('/api/canvas/tweak-screen')) {
-        return Promise.resolve({
-          ok: false,
-          status: 503,
-          json: () => Promise.resolve({ error: 'signed out', claudeLoggedOut: true }),
-        })
-      }
-      if (String(url).includes('/api/terminal/claude-login')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve({ id: 'login-pty-1' }),
-        })
-      }
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+      const u = String(url)
+      if (u.includes('/api/canvas/ai/active')) return reply(200, { jobs: [] })
+      if (u.includes('/api/canvas/ai/tweak'))
+        return reply(503, { error: 'signed out', claudeLoggedOut: true })
+      if (u.includes('/api/terminal/claude-login')) return reply(200, { id: 'login-pty-1' })
+      return reply(200, {})
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -133,14 +131,11 @@ describe('ScreenView tweak — claudeLoggedOut handling', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string) => {
-        if (String(url).includes('/api/canvas/tweak-screen')) {
-          return Promise.resolve({
-            ok: false,
-            status: 503,
-            json: () => Promise.resolve({ error: 'no cli', claudeMissing: true }),
-          })
-        }
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+        const u = String(url)
+        if (u.includes('/api/canvas/ai/active')) return reply(200, { jobs: [] })
+        if (u.includes('/api/canvas/ai/tweak'))
+          return reply(503, { error: 'no cli', claudeMissing: true })
+        return reply(200, {})
       }),
     )
 
@@ -158,20 +153,28 @@ describe('ScreenView tweak — claudeLoggedOut handling', () => {
   })
 })
 
-describe('ScreenView tweak — success flow (no regression)', () => {
-  it('routes the rewritten source through onChangeText and shows the applied notice', async () => {
+describe('ScreenView tweak — success flow (job completes)', () => {
+  it('polls the job and routes the rewritten source through onChangeText, with the applied notice', async () => {
     const NEW_SOURCE = 'export default function S(){ return <button>Bigger</button> }'
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string) => {
-        if (String(url).includes('/api/canvas/tweak-screen')) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () => Promise.resolve({ source: NEW_SOURCE }),
+        const u = String(url)
+        if (u.includes('/api/canvas/ai/active')) return reply(200, { jobs: [] })
+        if (u.includes('/api/canvas/ai/tweak')) return reply(200, { jobId: 'tj1' })
+        if (u.includes('/api/canvas/ai/job/')) {
+          return reply(200, {
+            id: 'tj1',
+            kind: 'tweak',
+            canvasId: 'c1',
+            elementId: 's1',
+            status: 'done',
+            startedAt: '2026-01-01T00:00:00.000Z',
+            elapsedMs: 1000,
+            source: NEW_SOURCE,
           })
         }
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+        return reply(200, {})
       }),
     )
 
@@ -185,9 +188,9 @@ describe('ScreenView tweak — success flow (no regression)', () => {
       fireEvent.click(getByText('canvasEl.tweak.send'))
     })
 
-    // Same persistence path as a manual edit — the rewritten source flows out.
-    await waitFor(() => expect(onChangeText).toHaveBeenCalled())
-    expect(onChangeText).toHaveBeenCalledWith(NEW_SOURCE)
+    // Same persistence path as a manual edit — the rewritten source flows out
+    // once the job completes.
+    await waitFor(() => expect(onChangeText).toHaveBeenCalledWith(NEW_SOURCE))
     // Success notice; no sign-in CTA and no error.
     expect(await findByText('canvasEl.tweak.applied')).toBeTruthy()
     expect(queryByText('canvas.generate.signIn')).toBeNull()

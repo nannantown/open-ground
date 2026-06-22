@@ -55,8 +55,8 @@ import {
   readCanvasFile,
   renameCanvas,
   reorderCanvases,
+  saveCanvasFile,
   setActiveCanvas,
-  writeCanvasFile,
 } from '@/lib/server/canvasData'
 import type {
   BoardColumn,
@@ -938,11 +938,19 @@ export const projectRoutes = new Hono()
     const result = await setActiveCanvas(body.path, body.id)
     return c.json(result)
   }
-  // Default: save a full Canvas file.
+  // Default: save a full Canvas file under optimistic concurrency control
+  // (saveCanvasFile — serialised with AI append/tweak via withCanvasFileLock).
   const canvas = body.canvas as CanvasFile | undefined
   if (!canvas?.id) return c.json({ error: 'canvas.id required' }, 400)
-  const saved = await writeCanvasFile(body.path, canvas)
-  return c.json(saved)
+  const outcome = await saveCanvasFile(body.path, canvas)
+  if (!outcome.ok) {
+    // Stale write: an AI job (or rename) advanced the canvas since the client
+    // loaded it. Return 409 + the CURRENT canvas so the client can 3-way-merge
+    // its edits with the server's new elements and retry — never a blind
+    // overwrite that would erase the AI's additions.
+    return c.json({ conflict: true, canvas: outcome.canvas }, 409)
+  }
+  return c.json(outcome.canvas)
 })
   // ── /api/project/describe ─────────────────────────────────────────────────
   // POST ?path → auto-generate a project description by briefly running the

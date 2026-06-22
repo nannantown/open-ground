@@ -23,10 +23,12 @@ import { applyAutoLayout, addAutoLayout, insertIntoLayoutAtPoint } from '@/lib/c
 import { pickStyle, applyStyle, type CopiedStyle } from '@/lib/canvasStyleClipboard'
 import { elementBounds } from '@/lib/canvasBounds'
 import type {
+  CanvasAiActiveResponse,
+  CanvasAiJobState,
+  CanvasAiStartResponse,
   CanvasElement,
   CanvasFile,
-  GenerateElementsRequest,
-  GenerateElementsResponse,
+  GenerateCanvasAiRequest,
   Tool,
 } from '@/lib/types'
 
@@ -564,40 +566,194 @@ export const CanvasWorkspace = ({
   // Claude" CTA that opens the dedicated login terminal (below). claudeMissing
   // keeps its own install-guidance copy.
   const [genLoggedOut, setGenLoggedOut] = useState(false)
+  // The running SERVER-SIDE generate job's id (null = none). The whole run lives
+  // on the server (src/lib/server/canvasAi.ts), so it SURVIVES this component
+  // unmounting (tab / project / Ground switch): we only START it and POLL it —
+  // we never hold the request open and we never kill it on unmount. Only an
+  // explicit Cancel kills it.
+  const [genJobId, setGenJobId] = useState<string | null>(null)
+  // Client-clock baseline for the elapsed counter, derived from the job's
+  // SERVER-side startedAt (Date.now() - elapsedMs) so a remount that re-attaches
+  // to a still-running job shows the TRUE elapsed time, not a reset to zero.
+  const genStartedRef = useRef<number | null>(null)
+  // Set when the user cancels DURING the start POST (before we hold a jobId): the
+  // POST resolves with a jobId we must immediately cancel, so the run the user
+  // already dismissed doesn't keep going and insert behind them.
+  const genCancelRef = useRef(false)
 
-  // Live elapsed-seconds counter while a generation is in flight. A whole
-  // claude session can take 30s–3min; a bare spinner reads as "frozen", so the
-  // pending bar shows "Generating… Ns" ticking every second. We recompute from
-  // a Date.now() delta (not a ++counter) so a backgrounded tab — where
-  // setInterval is throttled — still shows the true elapsed time on return.
+  // Insert a completed generation's elements. The SERVER already assigned fresh
+  // ids, inferred frame parentage, and placed the batch at a non-overlapping
+  // position, so we append as-is (no re-id / no viewport offset), select it as a
+  // block, and pan — keeping zoom — so the user sees it land.
+  const applyGenerated = useCallback(
+    (elements: CanvasElement[]) => {
+      const generated = elements.filter(
+        (el) =>
+          Number.isFinite(el.x) &&
+          Number.isFinite(el.y) &&
+          (el.width === undefined || Number.isFinite(el.width)) &&
+          (el.height === undefined || Number.isFinite(el.height)),
+      )
+      if (generated.length === 0) return
+      mutateElements([...canvasRef.current.elements, ...generated])
+      const groupIds = new Set(
+        generated.filter((c) => c.type === 'group').map((c) => c.id),
+      )
+      const members = generated.filter((c) => !groupIds.has(c.id))
+      setSelectedIds((members.length ? members : generated).map((c) => c.id))
+      setEditingId(null)
+      // Pan the viewport to centre the new batch's bounding box (zoom kept).
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const el of generated) {
+        const b = elementBounds(el)
+        if (!b) continue
+        minX = Math.min(minX, b.x)
+        minY = Math.min(minY, b.y)
+        maxX = Math.max(maxX, b.x + b.w)
+        maxY = Math.max(maxY, b.y + b.h)
+      }
+      if (Number.isFinite(minX)) {
+        const rect = surfaceRef.current?.getBoundingClientRect()
+        const W = rect ? rect.width : 800
+        const H = rect ? rect.height : 600
+        const zoom = canvasRef.current.viewport.zoom
+        const cx = (minX + maxX) / 2
+        const cy = (minY + maxY) / 2
+        patch({ viewport: { x: W / 2 - cx * zoom, y: H / 2 - cy * zoom, zoom } })
+      }
+    },
+    [mutateElements, patch],
+  )
+
+  // Live elapsed-seconds counter while a generation is in flight. A whole claude
+  // session can take 30s–3min; a bare spinner reads as "frozen", so the pending
+  // bar shows "Generating… Ns" ticking every second. Recomputed from a Date.now()
+  // delta against the job's startedAt baseline (not a ++counter) so a
+  // backgrounded tab — where setInterval is throttled — still shows the true
+  // elapsed time, and a remount re-attach shows the real (not reset) age.
   const [genElapsed, setGenElapsed] = useState(0)
   useEffect(() => {
     if (!genPending) {
       setGenElapsed(0)
       return
     }
-    const started = Date.now()
-    setGenElapsed(0)
-    const id = window.setInterval(() => {
-      setGenElapsed(Math.floor((Date.now() - started) / 1000))
-    }, 1000)
+    const tick = () => {
+      const base = genStartedRef.current ?? Date.now()
+      setGenElapsed(Math.max(0, Math.floor((Date.now() - base) / 1000)))
+    }
+    tick()
+    const id = window.setInterval(tick, 1000)
     return () => window.clearInterval(id)
   }, [genPending])
 
-  // In-flight generation — abortable: closing the bar (✕ / Escape) cancels
-  // the request, and the abort propagates server-side to kill the claude
-  // session instead of letting it burn subscription quota for nobody.
-  const genAbortRef = useRef<AbortController | null>(null)
-  useEffect(
-    () => () => {
-      genAbortRef.current?.abort()
-    },
-    [],
-  )
+  // Re-attach to a generate job ALREADY running for this canvas — e.g. the user
+  // started one, navigated away (this component unmounted), and came back. The
+  // run kept going server-side; restore the progress bar + Cancel so it isn't a
+  // mystery, and the poll effect below picks up the result. Runs once per canvas
+  // mount (CanvasWorkspace remounts on canvas switch via its key).
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/canvas/ai/active')
+        if (!res.ok) return
+        const data = (await res.json()) as CanvasAiActiveResponse
+        if (cancelled) return
+        const mine = data.jobs.find(
+          (j) => j.kind === 'generate' && j.canvasId === canvasRef.current.id,
+        )
+        if (!mine) return
+        genStartedRef.current = Date.now() - mine.elapsedMs
+        setGenJobId(mine.id)
+        setGenPending(true)
+        setGenOpen(true)
+      } catch {
+        // offline / server restarting — nothing to re-attach to
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [canvas.id])
 
+  // Poll the running job for progress + result. On 'done' insert the elements;
+  // on 'error' surface it. Stops watching on unmount WITHOUT cancelling the job
+  // (the run must survive navigation) — only an explicit Cancel kills it.
+  useEffect(() => {
+    if (!genJobId) return
+    let cancelled = false
+    // Guard against overlapping polls: if a job-state GET runs past the 1.5s
+    // interval, the next tick must NOT fire a second request that could read
+    // 'done' and apply the SAME elements twice (duplicate ids).
+    let inFlight = false
+    const finish = () => {
+      setGenPending(false)
+      setGenJobId(null)
+      genStartedRef.current = null
+    }
+    const poll = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const res = await fetch(`/api/canvas/ai/job/${encodeURIComponent(genJobId)}`)
+        if (cancelled) return
+        if (res.status === 404) {
+          // Swept / unknown — stop watching (any result is already persisted).
+          finish()
+          return
+        }
+        if (!res.ok) return
+        const job = (await res.json()) as CanvasAiJobState
+        if (cancelled || job.status === 'running') return
+        if (job.status === 'done') {
+          if (job.elements && job.elements.length) applyGenerated(job.elements)
+          setGenOpen(false)
+          setGenPrompt('')
+        } else {
+          setGenError(t('canvas.generate.error'))
+        }
+        finish()
+      } catch {
+        // transient (server reloading) — keep polling
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [genJobId, applyGenerated, t])
+
+  // Explicit cancel — kills the server-side job (the ONLY thing that does) and
+  // closes the bar. Closing the bar without cancelling leaves any run going;
+  // this is the one path that stops it.
+  const cancelGenerate = useCallback(() => {
+    // Mark cancelled so a start-POST still in flight kills the job it creates
+    // (cancelGenerate may run before we hold a jobId).
+    genCancelRef.current = true
+    const jobId = genJobId
+    if (jobId) {
+      fetch(`/api/canvas/ai/job/${encodeURIComponent(jobId)}/cancel`, {
+        method: 'POST',
+      }).catch(() => {})
+    }
+    setGenJobId(null)
+    genStartedRef.current = null
+    setGenPending(false)
+    setGenOpen(false)
+    setGenPrompt('')
+    setGenError(null)
+    setGenLoggedOut(false)
+  }, [genJobId])
+
+  // Close the bar when idle (no running job to cancel) — just resets the UI.
   const closeGenerate = useCallback(() => {
-    genAbortRef.current?.abort()
-    genAbortRef.current = null
     setGenPending(false)
     setGenOpen(false)
     setGenPrompt('')
@@ -675,27 +831,37 @@ export const CanvasWorkspace = ({
     setGenPending(true)
     setGenError(null)
     setGenLoggedOut(false)
-    const controller = new AbortController()
-    genAbortRef.current = controller
-    // Generation takes ~a minute — the user may switch Canvas tabs meanwhile.
-    // A late response must land in THIS canvas or nowhere (inserting into
-    // whichever canvas happens to be active would corrupt it).
-    const forCanvasId = canvasRef.current.id
+    genCancelRef.current = false
+    // The elapsed counter starts now; the poll effect (keyed on genJobId) takes
+    // over once the job id is in hand and corrects the baseline if needed.
+    genStartedRef.current = Date.now()
     try {
-      const body: GenerateElementsRequest = { path: projectPath, prompt }
-      const res = await fetch('/api/canvas/generate-elements', {
+      const body: GenerateCanvasAiRequest = {
+        path: projectPath,
+        canvasId: canvasRef.current.id,
+        prompt,
+      }
+      // We do NOT hold this request for the whole run — it returns a jobId fast.
+      // The run lives server-side and survives this component unmounting.
+      const res = await fetch('/api/canvas/ai/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: controller.signal,
       })
-      if (controller.signal.aborted) return
-      const json = (await res.json().catch(() => ({}))) as Partial<GenerateElementsResponse> & {
+      const json = (await res.json().catch(() => ({}))) as Partial<CanvasAiStartResponse> & {
         error?: string
         claudeMissing?: boolean
         claudeLoggedOut?: boolean
       }
-      if (!res.ok || !Array.isArray(json.elements) || json.elements.length === 0) {
+      if (json.jobId && genCancelRef.current) {
+        // The user cancelled while this POST was in flight — kill the job we
+        // just created and bail (the bar is already closed by cancelGenerate).
+        fetch(`/api/canvas/ai/job/${encodeURIComponent(json.jobId)}/cancel`, {
+          method: 'POST',
+        }).catch(() => {})
+        return
+      }
+      if (!res.ok || !json.jobId) {
         // Installed-but-signed-out (503) gets the sign-in CTA instead of a
         // generic error; claudeMissing keeps its install guidance.
         if (json.claudeLoggedOut) {
@@ -707,72 +873,19 @@ export const CanvasWorkspace = ({
               : json.error || t('canvas.generate.error'),
           )
         }
+        setGenPending(false)
+        genStartedRef.current = null
         return
       }
-      if (canvasRef.current.id !== forCanvasId) return
-      // Client-side sanity on what the server returns: require finite
-      // coordinates, drop anything else (NaN x would poison every later
-      // arithmetic pass through the canvas file).
-      const generated = (json.elements as CanvasElement[]).filter(
-        (el) =>
-          Number.isFinite(el.x) &&
-          Number.isFinite(el.y) &&
-          (el.width === undefined || Number.isFinite(el.width)) &&
-          (el.height === undefined || Number.isFinite(el.height)),
-      )
-      if (generated.length === 0) {
-        setGenError(t('canvas.generate.error'))
-        return
-      }
-      // Bounding box of the returned batch (positions are relative to ~(0,0)).
-      let minX = Infinity
-      let minY = Infinity
-      let maxX = -Infinity
-      let maxY = -Infinity
-      for (const el of generated) {
-        const b = elementBounds(el)
-        if (!b) continue
-        minX = Math.min(minX, b.x)
-        minY = Math.min(minY, b.y)
-        maxX = Math.max(maxX, b.x + b.w)
-        maxY = Math.max(maxY, b.y + b.h)
-      }
-      if (!Number.isFinite(minX)) {
-        minX = 0
-        minY = 0
-        maxX = 0
-        maxY = 0
-      }
-      // Current viewport centre in world coordinates: screen → world is
-      // (screen - viewport.offset) / zoom (see InfiniteCanvas's transform).
-      const rect = surfaceRef.current?.getBoundingClientRect()
-      const v = canvasRef.current.viewport
-      const cx = ((rect ? rect.width : 800) / 2 - v.x) / v.zoom
-      const cy = ((rect ? rect.height : 600) / 2 - v.y) / v.zoom
-      const dx = Math.round(cx - (minX + maxX) / 2)
-      const dy = Math.round(cy - (minY + maxY) / 2)
-      // cloneForPaste gives fresh ids (claude-authored ids may collide) and
-      // applies the offset while remapping parentId/anchorId within the batch.
-      const copies = cloneForPaste(generated, dx, dy)
-      mutateElements([...canvasRef.current.elements, ...copies])
-      // Select the inserted MEMBERS (not invisible group elements) so the
-      // placement can be adjusted as one block right away.
-      const groupIds = new Set(copies.filter((c) => c.type === 'group').map((c) => c.id))
-      const members = copies.filter((c) => !groupIds.has(c.id))
-      setSelectedIds((members.length ? members : copies).map((c) => c.id))
-      setEditingId(null)
-      setGenOpen(false)
-      setGenPrompt('')
-    } catch (e) {
-      // A user-initiated cancel is not an error.
-      if (!(e instanceof DOMException && e.name === 'AbortError')) {
-        setGenError(t('canvas.generate.error'))
-      }
-    } finally {
-      if (genAbortRef.current === controller) genAbortRef.current = null
+      // Hand off to the poll effect — it watches genJobId for progress + result
+      // and inserts the elements (applyGenerated) when the job completes.
+      setGenJobId(json.jobId)
+    } catch {
+      setGenError(t('canvas.generate.error'))
       setGenPending(false)
+      genStartedRef.current = null
     }
-  }, [genPrompt, genPending, projectPath, mutateElements, t])
+  }, [genPrompt, genPending, projectPath, t])
 
   // Keyboard map: the workspace owns the ⌘-combos that touch ITS state —
   // undo/redo stacks and the in-canvas clipboards (elements AND style).
@@ -983,8 +1096,9 @@ export const CanvasWorkspace = ({
                     e.preventDefault()
                     void submitGenerate()
                   } else if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
-                    // While pending this CANCELS the generation — never trap
-                    // the user in a mode they can't leave.
+                    // Only reachable while idle (the input is disabled once a run
+                    // is pending) — just closes the bar. Killing a running job is
+                    // the Cancel button's job (closing alone never kills it now).
                     closeGenerate()
                   }
                 }}
@@ -1007,11 +1121,12 @@ export const CanvasWorkspace = ({
                       {t('canvas.generate.elapsedUnit')}
                     </span>
                   </span>
-                  {/* A clearly-labelled cancel (Escape cancels too) — never trap
-                      the user in a mode they can't leave. */}
+                  {/* A clearly-labelled cancel — the ONLY thing that kills the
+                      run (navigating away no longer does). Never trap the user
+                      in a mode they can't leave. */}
                   <button
                     type="button"
-                    onClick={closeGenerate}
+                    onClick={cancelGenerate}
                     className="h-7 shrink-0 rounded-full border border-line px-3 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
                     {t('canvas.generate.cancel')}

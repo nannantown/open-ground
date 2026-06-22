@@ -1,5 +1,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Loader2, Sparkles } from 'lucide-react'
 import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
 import { Toolbar } from '@/components/canvas/Toolbar'
 import { ToolPalette } from '@/components/canvas/ToolPalette'
@@ -30,6 +31,7 @@ import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
 import type {
   ActiveTerminalsResponse,
+  CanvasAiActiveResponse,
   CanvasState,
   ClaudeBeaconStatus,
   CollabProjectListItem,
@@ -158,6 +160,11 @@ export default function App() {
   const [claudeStatusById, setClaudeStatusById] = useState<
     ReadonlyMap<string, ClaudeBeaconStatus>
   >(() => new Map())
+  // Count of RUNNING Canvas AI jobs (generate / tweak) across all projects —
+  // polled from /api/canvas/ai/active (same cadence as the terminal beacon) so a
+  // run started on one canvas stays visible from anywhere (Ground / another
+  // tab). Drives the global "Claude is designing" beacon below. 0 = none.
+  const [aiActiveCount, setAiActiveCount] = useState(0)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('select')
@@ -445,6 +452,36 @@ export default function App() {
       window.removeEventListener('focus', onFocus)
     }
   }, [projects])
+
+  // Poll for RUNNING Canvas AI jobs (every 5s, skipped while the tab is hidden;
+  // immediate re-poll on focus) — same pattern as the claude beacon above. The
+  // count drives the global "Claude is designing" beacon, so a generation / tweak
+  // started on one canvas stays visible from anywhere, including Ground. Best-
+  // effort: a failed poll keeps the last known count rather than flashing off.
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      if (document.hidden) return
+      try {
+        const res = await fetch('/api/canvas/ai/active')
+        if (!res.ok) return
+        const data = (await res.json()) as CanvasAiActiveResponse
+        if (cancelled) return
+        setAiActiveCount(data.jobs?.length ?? 0)
+      } catch {
+        /* server restarting / offline — keep the last known count */
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 5_000)
+    const onFocus = () => void poll()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [])
 
   // One-shot probe of whether the optional app login is configured server-side
   // (same Supabase env as feedback). Gates the toolbar account entry; any
@@ -778,6 +815,21 @@ export default function App() {
       {/* Canvas tools are meaningless with no projects — hide them under the
           empty-state modal so the first-run screen stays focused. */}
       {!showEmpty && <ToolPalette tool={tool} onToolChange={setTool} />}
+      {/* Global "Claude is designing" beacon — a Canvas AI run lives server-side
+          and survives leaving its canvas, so surface it here at the header so the
+          user knows it's still going from anywhere (Ground included). */}
+      {aiActiveCount > 0 && (
+        <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2">
+          <div className="flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-3 py-1.5 text-[11px] font-medium text-ink-muted shadow-card backdrop-blur">
+            <Loader2 size={12} strokeWidth={2} className="animate-spin text-accent" />
+            <Sparkles size={11} strokeWidth={2} className="text-accent" />
+            <span>{t('canvas.generate.generating')}</span>
+            {aiActiveCount > 1 && (
+              <span className="tabular-nums text-ink-faint">{aiActiveCount}</span>
+            )}
+          </div>
+        </div>
+      )}
       <Toolbar
         onNewProject={() => setNewProjectOpen(true)}
         onImport={importProject}

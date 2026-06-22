@@ -44,6 +44,7 @@ const sampleData = (): ProjectData => ({
 const sampleCanvas = (): CanvasFile => ({
   id: 'c1',
   name: 'Untitled',
+  rev: 0,
   viewport: { x: 10, y: 20, zoom: 1.5 }, // personal — out of the doc
   elements: [
     { id: 'e1', type: 'sticky', x: 0, y: 0, width: 100, height: 80, text: 'hi', color: '#ff0' },

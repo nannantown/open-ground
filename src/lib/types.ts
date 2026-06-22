@@ -100,23 +100,96 @@ export interface ReleaseNotesResponse {
   error?: string
 }
 
-/** POST /api/canvas/generate-elements — the "design as elements" path: claude
+/** ── Canvas AI: server-side JOBS ──────────────────────────────────────────
+ *  A Canvas AI run (generate native elements, or tweak a screen/mock's source)
+ *  is a whole claude PTY session — 30s–3min — and MUST survive the client
+ *  navigating away: switching tab / project / returning to Ground unmounts the
+ *  canvas, and the OLD design (a fetch held for the whole run, aborted on
+ *  unmount) killed claude mid-flight. So a run is now a SERVER-SIDE JOB: the
+ *  POST returns a {jobId} immediately and the work keeps running even if the
+ *  request connection drops; only an EXPLICIT cancel kills it. The result is
+ *  persisted to the target canvas server-side on completion (so it's there
+ *  whether or not anyone is watching), and the client polls the job for
+ *  progress + result. Engine: src/lib/server/canvasAi.ts. */
+export type CanvasAiJobKind = 'generate' | 'tweak'
+export type CanvasAiJobStatus = 'running' | 'done' | 'error'
+
+/** POST /api/canvas/ai/generate — start a "design as elements" job: claude
  *  authors NATIVE canvas elements (frame/shape/text/sticky), not code, so the
- *  result is hand-tweakable piece by piece (Figma-lite). Positions in the
- *  returned elements are relative to (0,0); the client offsets them to the
- *  current viewport center before inserting. */
-export interface GenerateElementsRequest {
+ *  result is hand-tweakable piece by piece (Figma-lite). On completion the
+ *  elements are appended to `canvasId` at a position that doesn't overlap its
+ *  existing content, server-side. */
+export interface GenerateCanvasAiRequest {
   path: string
+  canvasId: string
   prompt: string
 }
-export interface GenerateElementsResponse {
-  elements: CanvasElement[]
+/** POST /api/canvas/ai/tweak — start a screen/mock tweak job: claude rewrites
+ *  the picked element's source per an instruction aimed at a node inside its
+ *  rendered iframe (the canvasInspect postMessage bridge supplies `element`).
+ *  On completion the rewritten source is written onto `elementId` in
+ *  `canvasId`, server-side. */
+export interface TweakCanvasAiRequest {
+  path: string
+  canvasId: string
+  /** The screen/mock element whose `text` (source) the tweak rewrites. */
+  elementId: string
+  source: string
+  framework: 'react' | 'html'
+  instruction: string
+  /** The picked element, as the bridge reported it. `html` is a truncated
+   *  outerHTML snippet — enough for claude to locate the node in source. */
+  element: { tag: string; classes: string; text: string; html: string }
+}
+/** Both POSTs answer with the new job's id — OR a 503 with the same
+ *  `claudeMissing` / `claudeLoggedOut` preflight body the old endpoints used,
+ *  so the "sign in to Claude" CTA in the client is unchanged. */
+export interface CanvasAiStartResponse {
+  jobId: string
+}
+/** One RUNNING job, as GET /api/canvas/ai/active lists them — feeds the global
+ *  "Claude is designing" beacon (App polls it like the terminal beacon). Done /
+ *  errored jobs are excluded. */
+export interface CanvasAiActiveJob {
+  id: string
+  kind: CanvasAiJobKind
+  projectPath: string
+  canvasId: string
+  /** Present for tweak jobs (the target element); absent for generate. */
+  elementId?: string
+  elapsedMs: number
+}
+export interface CanvasAiActiveResponse {
+  jobs: CanvasAiActiveJob[]
+}
+/** GET /api/canvas/ai/job/:id — the full state the STARTING client polls. On
+ *  `done`: a generate job carries `elements` (the appended elements, with their
+ *  final server-assigned ids + positions); a tweak job carries `source` (+
+ *  `unchanged` when claude judged the instruction already satisfied). On
+ *  `error`: `error` is the message. `elapsedMs` is derived from the job's
+ *  server-side startedAt, so the progress counter shows the TRUE elapsed time
+ *  even after the canvas remounts and re-attaches to a still-running job. */
+export interface CanvasAiJobState {
+  id: string
+  kind: CanvasAiJobKind
+  canvasId: string
+  elementId?: string
+  status: CanvasAiJobStatus
+  startedAt: string
+  elapsedMs: number
+  error?: string
+  /** generate, done: the elements appended to the canvas. */
+  elements?: CanvasElement[]
+  /** tweak, done: the rewritten source. */
+  source?: string
+  /** tweak, done: true when the instruction was already satisfied (no rewrite). */
+  unchanged?: boolean
 }
 
-/** POST /api/canvas/tweak-screen — patch ONE screen/mock's source per an
- *  instruction aimed at a picked element inside its rendered iframe (the
- *  canvasInspect postMessage bridge supplies `element`). Returns the FULL
- *  rewritten source; the client swaps element.text and the iframe re-renders. */
+/** Internal prompt-builder input for tweakScreenSource / buildTweakScreenPrompt
+ *  (src/lib/server/canvasAi.ts). The HTTP layer (TweakCanvasAiRequest) adds the
+ *  canvasId + elementId needed to persist the result; this is just the slice
+ *  the prompt needs. */
 export interface TweakScreenRequest {
   path: string
   source: string
@@ -125,12 +198,6 @@ export interface TweakScreenRequest {
   /** The picked element, as the bridge reported it. `html` is a truncated
    *  outerHTML snippet — enough for claude to locate the node in source. */
   element: { tag: string; classes: string; text: string; html: string }
-}
-export interface TweakScreenResponse {
-  source: string
-  /** True when claude judged the instruction already satisfied — the source
-   *  is returned verbatim and the client shows "no change was needed". */
-  unchanged?: boolean
 }
 
 /** Aggregated usage over the rolling 5-hour rate-limit window, scraped from
@@ -546,6 +613,14 @@ export interface CanvasState {
 export interface CanvasFile {
   id: string
   name: string
+  /** Monotonic per-canvas revision for optimistic concurrency control. Every
+   *  server write (client save, AI append, AI tweak, rename) bumps it. The
+   *  client loads it and echoes it back on save; a save whose rev is behind the
+   *  server's (an AI job landed since the load) is rejected with 409 so the
+   *  client can refetch + 3-way-merge + retry instead of silently clobbering
+   *  the AI's additions (see canvasData.saveCanvasFile + canvasMerge.ts).
+   *  Legacy files written before rev existed read back as 0. */
+  rev: number
   viewport: {
     x: number
     y: number

@@ -106,6 +106,7 @@ describe('shared CANVAS cache (cv4)', () => {
   const canvas = (): CanvasFile => ({
     id: CID,
     name: 'Wireframes',
+    rev: 0,
     viewport: { x: 0, y: 0, zoom: 1 },
     elements: [{ id: 'e1', type: 'sticky', x: 0, y: 0, text: 'hi' } as CanvasFile['elements'][number]],
     chats: [],

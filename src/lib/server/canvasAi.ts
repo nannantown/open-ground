@@ -31,7 +31,15 @@ import { join } from 'path'
 import { z } from 'zod'
 import { rectInside, type Rect } from '@/lib/canvasContainment'
 import { newId } from '@/lib/ids'
-import type { CanvasElement, TweakScreenRequest } from '@/lib/types'
+import type {
+  CanvasAiActiveJob,
+  CanvasAiJobKind,
+  CanvasAiJobState,
+  CanvasAiJobStatus,
+  CanvasElement,
+  TweakScreenRequest,
+} from '@/lib/types'
+import { appendCanvasElements, updateCanvasElementSource } from './canvasData'
 import { launchClaude } from './claudeTerminal'
 import { killTerminal, subscribeTerminal } from './terminal'
 
@@ -465,4 +473,243 @@ export const tweakScreenSource = async (
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
+}
+
+// ── Server-side job registry ─────────────────────────────────────────────────
+//
+// WHY JOBS: a Canvas AI run is a whole claude PTY session (30s–3min). The old
+// design held one HTTP fetch open for the entire run and the client aborted it
+// on unmount — so switching tab / project / returning to Ground (all of which
+// unmount the canvas) aborted the request → c.req.raw.signal fired → the claude
+// session was killed mid-flight. That defeats the multiplexer premise (run AI
+// in one project, go work in another). So a run is now a JOB that is NOT bound
+// to any request connection: it runs to completion on its OWN AbortController
+// and is killed ONLY by an explicit cancel. The result is persisted to the
+// target canvas server-side regardless of who's watching, and the client polls
+// the job for progress + result.
+//
+// Stored on globalThis so the registry survives `tsx watch` reloads in dev —
+// same pattern as the terminal pool and the serialization chain above.
+// SERIALIZATION is preserved: the actual claude run still flows through
+// generateCanvasElements/tweakScreenSource → runFileTask → __openground_canvas_ai_chain
+// (one session at a time, for quota); jobs only change WHO can kill it.
+
+interface CanvasAiJobInternal {
+  id: string
+  kind: CanvasAiJobKind
+  projectPath: string
+  canvasId: string
+  /** tweak only — the element whose source the run rewrites. */
+  elementId?: string
+  status: CanvasAiJobStatus
+  startedAt: number
+  /** Aborting this (and only this) kills the claude session — explicit cancel. */
+  controller: AbortController
+  finishedAt?: number
+  // ── results (set on status 'done') ──
+  elements?: CanvasElement[]
+  source?: string
+  unchanged?: boolean
+  error?: string
+}
+
+const jobGlobal = globalThis as typeof globalThis & {
+  __openground_canvas_ai_jobs?: Map<string, CanvasAiJobInternal>
+}
+const jobs: Map<string, CanvasAiJobInternal> =
+  jobGlobal.__openground_canvas_ai_jobs ??
+  (jobGlobal.__openground_canvas_ai_jobs = new Map())
+
+// Keep a finished job around this long so a polling client reliably catches its
+// terminal state + result before it's swept (the client polls every ~1.5s, so
+// this is ~200× the poll interval — a miss is effectively impossible while the
+// canvas stays open).
+const JOB_RETAIN_MS = 5 * 60_000
+
+const scheduleJobSweep = (id: string): void => {
+  const timer = setTimeout(() => {
+    jobs.delete(id)
+  }, JOB_RETAIN_MS)
+  // Never keep the process alive just for a sweep (clean exit / tests).
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+}
+
+/** Spawn a job: run `work` on the job's OWN AbortController (never a request
+ *  signal), record its result/status, and return the job id immediately. */
+const startJob = (
+  meta: {
+    kind: CanvasAiJobKind
+    projectPath: string
+    canvasId: string
+    elementId?: string
+  },
+  work: (
+    signal: AbortSignal,
+  ) => Promise<Pick<CanvasAiJobInternal, 'elements' | 'source' | 'unchanged'>>,
+): string => {
+  const id = newId()
+  const controller = new AbortController()
+  const job: CanvasAiJobInternal = {
+    id,
+    kind: meta.kind,
+    projectPath: meta.projectPath,
+    canvasId: meta.canvasId,
+    elementId: meta.elementId,
+    status: 'running',
+    startedAt: Date.now(),
+    controller,
+  }
+  jobs.set(id, job)
+  // Fire-and-forget by design: the route returns {jobId} right away and the run
+  // is NOT awaited by — nor bound to — the HTTP connection.
+  void (async () => {
+    try {
+      const result = await work(controller.signal)
+      job.elements = result.elements
+      job.source = result.source
+      job.unchanged = result.unchanged
+      job.status = 'done'
+    } catch (e) {
+      job.status = 'error'
+      job.error = controller.signal.aborted
+        ? 'cancelled'
+        : e instanceof Error
+          ? e.message
+          : 'canvas AI job failed'
+    } finally {
+      job.finishedAt = Date.now()
+      scheduleJobSweep(id)
+    }
+  })()
+  return id
+}
+
+/** Dependencies of the generate job — injectable for tests (defaults = the real
+ *  engine + the real canvasData persistence). */
+export interface GenerateJobDeps {
+  generate?: typeof generateCanvasElements
+  persist?: typeof appendCanvasElements
+}
+
+/** Start a generate-elements job. Returns the job id immediately; on completion
+ *  the elements are appended to `canvasId` at a non-overlapping position,
+ *  server-side. */
+export const startGenerateJob = (
+  args: { projectPath: string; canvasId: string; prompt: string; timeoutMs?: number },
+  deps: GenerateJobDeps = {},
+): string => {
+  const generate = deps.generate ?? generateCanvasElements
+  const persist = deps.persist ?? appendCanvasElements
+  return startJob(
+    { kind: 'generate', projectPath: args.projectPath, canvasId: args.canvasId },
+    async (signal) => {
+      const elements = await generate(args.prompt, { signal, timeoutMs: args.timeoutMs })
+      // A cancel that lands after claude finished but before we persist must
+      // still win — otherwise a "cancelled" run would silently write to the
+      // canvas. Re-check here so the abort short-circuits the persist.
+      if (signal.aborted) throw new Error('canvas AI task aborted')
+      const appended = await persist(args.projectPath, args.canvasId, elements)
+      return { elements: appended }
+    },
+  )
+}
+
+/** Dependencies of the tweak job — injectable for tests. */
+export interface TweakJobDeps {
+  tweak?: typeof tweakScreenSource
+  persist?: typeof updateCanvasElementSource
+}
+
+/** Start a tweak-screen job. Returns the job id immediately; on completion the
+ *  rewritten source is written onto the target element server-side (unless
+ *  claude judged the instruction already satisfied). */
+export const startTweakJob = (
+  args: {
+    projectPath: string
+    canvasId: string
+    elementId: string
+    req: TweakScreenRequest
+    timeoutMs?: number
+  },
+  deps: TweakJobDeps = {},
+): string => {
+  const tweak = deps.tweak ?? tweakScreenSource
+  const persist = deps.persist ?? updateCanvasElementSource
+  return startJob(
+    {
+      kind: 'tweak',
+      projectPath: args.projectPath,
+      canvasId: args.canvasId,
+      elementId: args.elementId,
+    },
+    async (signal) => {
+      const { source, unchanged } = await tweak(args.req, { signal, timeoutMs: args.timeoutMs })
+      // Honour a cancel that landed after claude finished but before persist (see
+      // startGenerateJob) — a cancelled tweak must not overwrite the element.
+      if (signal.aborted) throw new Error('canvas AI task aborted')
+      if (!unchanged) await persist(args.projectPath, args.canvasId, args.elementId, source)
+      return { source, unchanged }
+    },
+  )
+}
+
+/** Serializable state of one job (GET /api/canvas/ai/job/:id). null when the id
+ *  is unknown or already swept. `now` is injected so tests need no fake timers. */
+export const getCanvasAiJobState = (
+  id: string,
+  now: number = Date.now(),
+): CanvasAiJobState | null => {
+  const j = jobs.get(id)
+  if (!j) return null
+  return {
+    id: j.id,
+    kind: j.kind,
+    canvasId: j.canvasId,
+    elementId: j.elementId,
+    status: j.status,
+    startedAt: new Date(j.startedAt).toISOString(),
+    elapsedMs: Math.max(0, now - j.startedAt),
+    error: j.error,
+    elements: j.elements,
+    source: j.source,
+    unchanged: j.unchanged,
+  }
+}
+
+/** Every RUNNING job (GET /api/canvas/ai/active — feeds the global beacon).
+ *  Done / errored jobs are excluded. `now` injected for tests. */
+export const listActiveCanvasAiJobs = (now: number = Date.now()): CanvasAiActiveJob[] => {
+  const out: CanvasAiActiveJob[] = []
+  jobs.forEach((j) => {
+    if (j.status !== 'running') return
+    out.push({
+      id: j.id,
+      kind: j.kind,
+      projectPath: j.projectPath,
+      canvasId: j.canvasId,
+      elementId: j.elementId,
+      elapsedMs: Math.max(0, now - j.startedAt),
+    })
+  })
+  return out
+}
+
+/** Explicitly cancel a job — aborts its AbortController, which kills the claude
+ *  session. This is the ONLY thing that kills a run; a dropped HTTP connection
+ *  does NOT. Returns whether the job existed. */
+export const cancelCanvasAiJob = (id: string): boolean => {
+  const j = jobs.get(id)
+  if (!j) return false
+  try {
+    j.controller.abort()
+  } catch {
+    // already torn down
+  }
+  return true
+}
+
+// Test-only: the registry lives on globalThis, so it would leak across test
+// files without an explicit reset.
+export const _resetCanvasAiJobsForTest = (): void => {
+  jobs.clear()
 }

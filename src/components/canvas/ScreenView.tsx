@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, MonitorSmartphone, Sparkles, X } from 'lucide-react'
-import type { CanvasElement, TweakScreenRequest, TweakScreenResponse } from '@/lib/types'
+import type {
+  CanvasAiActiveResponse,
+  CanvasAiJobState,
+  CanvasAiStartResponse,
+  CanvasElement,
+  TweakCanvasAiRequest,
+} from '@/lib/types'
 import { buildScreenSrcdoc, hash32 } from '@/lib/screenSrcdoc'
 import type { InspectPick } from '@/lib/canvasInspect'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { useT } from '@/i18n/I18nContext'
 import { ClaudeTerminalPane } from './ClaudeTerminalPane'
+import { useCanvasAsset } from './CanvasAssetContext'
 
 interface Props {
   element: CanvasElement
@@ -19,8 +26,8 @@ interface Props {
   /** True while the Comment tool is active — the overlay drops its grab cursor
    *  so the canvas wrapper's comment-bubble cursor shows over the screen. */
   commentTool?: boolean
-  /** Project path for /api/canvas/tweak-screen — absent on surfaces that
-   *  don't carry one (the tweak button simply hides then). */
+  /** Project path for the tweak job (/api/canvas/ai/tweak) — absent on surfaces
+   *  that don't carry one (the tweak button simply hides then). */
   projectPath?: string
 }
 
@@ -41,6 +48,7 @@ export function useInspectTweak({
   iframeRef,
   selected,
   projectPath,
+  elementId,
   source,
   framework,
   onChangeText,
@@ -48,15 +56,31 @@ export function useInspectTweak({
   iframeRef: React.RefObject<HTMLIFrameElement | null>
   selected: boolean
   projectPath?: string
+  /** The screen/mock element this tile renders — the tweak rewrites its source,
+   *  and the server-side job persists onto it by this id. */
+  elementId: string
   source: string
   framework: 'react' | 'html'
   onChangeText: (text: string) => void
 }) {
   const { t } = useT()
+  // The canvas this tile lives in (for the tweak job's persistence target). Set
+  // by CanvasWorkspace's CanvasAssetProvider; null outside a canvas (the tweak
+  // affordance is gated on projectPath anyway, which is absent there too).
+  const canvasId = useCanvasAsset()?.canvasId ?? null
   const [inspecting, setInspecting] = useState(false)
   const [picked, setPicked] = useState<InspectPick | null>(null)
   const [instruction, setInstruction] = useState('')
   const [pending, setPending] = useState(false)
+  // The running SERVER-SIDE tweak job's id (null = none). Like the generate job
+  // (CanvasWorkspace), the run lives on the server and SURVIVES this tile
+  // unmounting — we only start + poll it, never hold the request or kill on
+  // unmount. Only an explicit close/cancel kills it.
+  const [jobId, setJobId] = useState<string | null>(null)
+  // Set when the user closes/cancels DURING the start POST (before we hold a
+  // jobId): the POST resolves with a jobId we must immediately cancel so the
+  // dismissed run doesn't keep going and rewrite the source behind them.
+  const cancelRef = useRef(false)
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   // Signed-out (503 { claudeLoggedOut }): the run gate refuses to spawn a
   // signed-out claude, so instead of a generic error we surface a "sign in to
@@ -120,39 +144,146 @@ export function useInspectTweak({
     return () => window.removeEventListener('message', onMsg)
   }, [inspecting, iframeRef])
 
-  // In-flight tweak — abortable: closing the panel cancels the request and
-  // the abort kills the server-side claude session. Without this, ✕ during
-  // pending closed the panel but the response landed later and silently
-  // rewrote the design behind the user's back.
-  const abortRef = useRef<AbortController | null>(null)
-  useEffect(
-    () => () => {
-      abortRef.current?.abort()
-    },
-    [],
-  )
+  // The tweak run is a SERVER-SIDE JOB (src/lib/server/canvasAi.ts): the POST
+  // returns a jobId fast and the run SURVIVES this tile unmounting (canvas / tab
+  // / Ground switch). We poll the job for its result; on completion the
+  // rewritten source flows through onChangeText (the SAME persistence path a
+  // manual edit uses — undo/redo included). The server ALSO writes the result
+  // onto the element, so a tile that navigated away still gets it on return.
+  // The OLD design aborted on unmount and so killed claude mid-tweak; it no
+  // longer does — only an explicit close cancels.
 
+  // Apply a completed tweak job's terminal state to the UI.
+  const applyTweakResult = useCallback(
+    (job: CanvasAiJobState) => {
+      if (job.status === 'error') {
+        setNotice({ kind: 'err', text: t('canvasEl.tweak.error') })
+        return
+      }
+      if (job.unchanged) {
+        // claude judged the instruction already satisfied — informational.
+        setNotice({ kind: 'ok', text: t('canvasEl.tweak.unchanged') })
+        return
+      }
+      if (typeof job.source !== 'string') return
+      onChangeText(job.source)
+      setInstruction('')
+      // The pick snapshot describes the PRE-rewrite DOM; against the new source
+      // it would mislead the next tweak. Ask for a fresh pick (the bridge
+      // re-arms on iframe load, so it's one click).
+      setPicked(null)
+      setNotice({ kind: 'ok', text: t('canvasEl.tweak.applied') })
+    },
+    [onChangeText, t],
+  )
+  // The poll effect reads the LATEST applyTweakResult through a ref so it can
+  // depend on `jobId` alone — `onChangeText` is a fresh closure on every parent
+  // render, so depending on applyTweakResult directly would tear down + re-fire
+  // the poll (an extra GET) on each canvas re-render during a multi-minute run.
+  const applyTweakResultRef = useRef(applyTweakResult)
+  applyTweakResultRef.current = applyTweakResult
+
+  // Re-attach to a tweak job ALREADY running for THIS element — e.g. the user
+  // started one, navigated away (this tile unmounted), and came back. The run
+  // kept going server-side; pick it back up so its result still lands here (a
+  // re-pick then shows the spinner). Background only — no panel is forced open.
+  useEffect(() => {
+    if (!canvasId) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/canvas/ai/active')
+        if (!res.ok) return
+        const data = (await res.json()) as CanvasAiActiveResponse
+        if (cancelled) return
+        const mine = data.jobs.find(
+          (j) => j.kind === 'tweak' && j.canvasId === canvasId && j.elementId === elementId,
+        )
+        if (!mine) return
+        setPending(true)
+        setJobId(mine.id)
+      } catch {
+        // offline / server restarting — nothing to re-attach to
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [canvasId, elementId])
+
+  // Poll the running job for its result. Stops watching on unmount WITHOUT
+  // cancelling it (the run must survive navigation) — only an explicit close
+  // kills it.
+  useEffect(() => {
+    if (!jobId) return
+    let cancelled = false
+    // Guard against overlapping polls (a GET running past the 1.5s interval).
+    let inFlight = false
+    const finish = () => {
+      setPending(false)
+      setJobId(null)
+    }
+    const poll = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const res = await fetch(`/api/canvas/ai/job/${encodeURIComponent(jobId)}`)
+        if (cancelled) return
+        if (res.status === 404) {
+          finish()
+          return
+        }
+        if (!res.ok) return
+        const job = (await res.json()) as CanvasAiJobState
+        if (cancelled || job.status === 'running') return
+        applyTweakResultRef.current(job)
+        finish()
+      } catch {
+        // transient (server reloading) — keep polling
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [jobId])
+
+  // Close the panel. An EXPLICIT close while a run is pending cancels it (the
+  // only thing that kills it — navigating away does not). Idle close just
+  // resets the panel.
   const close = useCallback(() => {
-    abortRef.current?.abort()
-    abortRef.current = null
+    // Mark cancelled so a start-POST still in flight kills the job it creates
+    // (close may run before we hold a jobId).
+    cancelRef.current = true
+    if (jobId) {
+      fetch(`/api/canvas/ai/job/${encodeURIComponent(jobId)}/cancel`, {
+        method: 'POST',
+      }).catch(() => {})
+    }
+    setJobId(null)
     setPending(false)
     setInspecting(false)
     setPicked(null)
     setInstruction('')
     setNotice(null)
     setLoggedOut(false)
-  }, [])
+  }, [jobId])
 
   const submit = useCallback(async () => {
-    if (pending || !picked || !projectPath || !instruction.trim()) return
+    if (pending || jobId || !picked || !projectPath || !canvasId || !instruction.trim()) return
     setPending(true)
     setNotice(null)
     setLoggedOut(false)
-    const controller = new AbortController()
-    abortRef.current = controller
+    cancelRef.current = false
     try {
-      const body: TweakScreenRequest = {
+      const body: TweakCanvasAiRequest = {
         path: projectPath,
+        canvasId,
+        elementId,
         source,
         framework,
         instruction: instruction.trim(),
@@ -163,19 +294,26 @@ export function useInspectTweak({
           html: picked.html,
         },
       }
-      const res = await fetch('/api/canvas/tweak-screen', {
+      // Returns a jobId fast; the run lives server-side and survives unmount.
+      const res = await fetch('/api/canvas/ai/tweak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: controller.signal,
       })
-      if (controller.signal.aborted) return
-      const json = (await res.json().catch(() => ({}))) as Partial<TweakScreenResponse> & {
+      const json = (await res.json().catch(() => ({}))) as Partial<CanvasAiStartResponse> & {
         error?: string
         claudeMissing?: boolean
         claudeLoggedOut?: boolean
       }
-      if (!res.ok || typeof json.source !== 'string') {
+      if (json.jobId && cancelRef.current) {
+        // The user closed the panel while this POST was in flight — kill the job
+        // it created and bail.
+        fetch(`/api/canvas/ai/job/${encodeURIComponent(json.jobId)}/cancel`, {
+          method: 'POST',
+        }).catch(() => {})
+        return
+      }
+      if (!res.ok || !json.jobId) {
         // Installed-but-signed-out (503) gets the sign-in CTA instead of a
         // generic error; claudeMissing keeps its install guidance.
         if (json.claudeLoggedOut) {
@@ -188,28 +326,27 @@ export function useInspectTweak({
               : json.error || t('canvasEl.tweak.error'),
           })
         }
-      } else if (json.unchanged) {
-        // claude judged the instruction already satisfied — informational.
-        setNotice({ kind: 'ok', text: t('canvasEl.tweak.unchanged') })
-      } else {
-        // Same persistence path as a manual code edit — undo/redo included.
-        onChangeText(json.source)
-        setInstruction('')
-        // The pick snapshot describes the PRE-rewrite DOM; against the new
-        // source it would mislead the next tweak. Ask for a fresh pick (the
-        // bridge re-arms on iframe load, so it's one click).
-        setPicked(null)
-        setNotice({ kind: 'ok', text: t('canvasEl.tweak.applied') })
+        setPending(false)
+        return
       }
-    } catch (e) {
-      if (!(e instanceof DOMException && e.name === 'AbortError')) {
-        setNotice({ kind: 'err', text: t('canvasEl.tweak.error') })
-      }
-    } finally {
-      if (abortRef.current === controller) abortRef.current = null
+      // Hand off to the poll effect (watches jobId for the result).
+      setJobId(json.jobId)
+    } catch {
+      setNotice({ kind: 'err', text: t('canvasEl.tweak.error') })
       setPending(false)
     }
-  }, [pending, picked, projectPath, instruction, source, framework, onChangeText, t])
+  }, [
+    pending,
+    jobId,
+    picked,
+    projectPath,
+    canvasId,
+    elementId,
+    instruction,
+    source,
+    framework,
+    t,
+  ])
 
   // ── "Sign in to Claude" terminal (signed-out tweak) ──────────────────────
   // tweak-screen answers 503 { claudeLoggedOut } when the CLI is installed but
@@ -553,6 +690,7 @@ export const ScreenView = ({
     iframeRef,
     selected,
     projectPath,
+    elementId: element.id,
     source,
     framework,
     onChangeText,
