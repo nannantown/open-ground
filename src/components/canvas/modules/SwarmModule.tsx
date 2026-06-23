@@ -22,7 +22,7 @@
 // `claude -p` / the SDK. This module never spawns claude itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Network, Send } from 'lucide-react'
+import { Network, Send, Inbox, Boxes } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -34,9 +34,11 @@ import type {
   ProjectMeta,
   ProjectTask,
   RemoveSwarmWorktreeResponse,
+  SpawnSwarmSupplyResponse,
   SpawnSwarmWorkerResponse,
 } from '@/lib/types'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
+import { SwarmSupplyPane } from './SwarmSupplyPane'
 
 // A dispatched worker, as remembered client-side. The PTY (terminalId) lives
 // server-side and survives this tab unmounting; we persist the metadata that
@@ -101,6 +103,54 @@ const saveWorkers = (projectId: string, workers: SwarmWorker[]) => {
   }
 }
 
+// The single supply (補給官) session, remembered client-side. Like a worker the
+// PTY (terminalId) lives server-side and survives this tab unmounting; we
+// persist the metadata so a tab switch / reload reattaches the same session.
+// Unlike a worker there is no branch/worktree — supply runs in the project's
+// primary checkout — so this is just the PTY id + minted session id + start time.
+interface SwarmSupply {
+  terminalId: string
+  agentSessionId: string
+  startedAt: string
+}
+
+const supplyKey = (projectId: string) => `openground.swarm.supply.${projectId}`
+
+/** Load + SANITISE the persisted supply session (localStorage is untrusted — a
+ *  user/extension can forge any JSON, so coerce every field; a bad shape → null
+ *  rather than crashing the render). */
+const loadSupply = (projectId: string): SwarmSupply | null => {
+  try {
+    const raw = localStorage.getItem(supplyKey(projectId))
+    if (!raw) return null
+    const o: unknown = JSON.parse(raw)
+    if (!o || typeof o !== 'object') return null
+    const r = o as Record<string, unknown>
+    if (typeof r.terminalId !== 'string') return null
+    return {
+      terminalId: String(r.terminalId),
+      agentSessionId: typeof r.agentSessionId === 'string' ? r.agentSessionId : '',
+      startedAt: typeof r.startedAt === 'string' ? r.startedAt : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+const saveSupply = (projectId: string, supply: SwarmSupply | null) => {
+  try {
+    if (supply) localStorage.setItem(supplyKey(projectId), JSON.stringify(supply))
+    else localStorage.removeItem(supplyKey(projectId))
+  } catch {
+    /* quota / disabled storage — the in-memory state is still authoritative */
+  }
+}
+
+// The two halves of the main area: the supply conversation desk vs the worker
+// tiles. The todo rail (the queue supply feeds and dispatch drains) stays
+// visible alongside both, so the supply→todo→worker pipeline is never hidden.
+type MainView = 'supply' | 'workers'
+
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
 
@@ -118,6 +168,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
 
+  // The single supply (補給官) session + which half of the main area is shown.
+  // Supply is the conversational entry point, so the main area opens on it; a
+  // successful dispatch flips to the worker tiles so the user sees the worker
+  // they just launched. supplyBusy = a launch/stop round-trip is in flight.
+  const [supply, setSupply] = useState<SwarmSupply | null>(() => loadSupply(project.id))
+  const [mainView, setMainView] = useState<MainView>('supply')
+  const [supplyBusy, setSupplyBusy] = useState(false)
+
   // PTY ids ever seen alive by the active poll. If an id was seen and then drops
   // out of the poll, the PTY died — used by statusOf so a missed SSE 'exit'
   // doesn't leave a dead worker stuck on 'starting'. A ref (not state) because it
@@ -130,6 +188,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // (ProjectPanel keeps one SwarmModule instance across project switches).
   useEffect(() => {
     setWorkers(loadWorkers(project.id))
+    setSupply(loadSupply(project.id))
+    setMainView('supply')
+    setSupplyBusy(false)
     setExitedIds(new Set())
     setRetained(new Map())
     setError(null)
@@ -207,16 +268,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   //   else if it was seen alive earlier but is now gone from the poll → exited
   //     (covers a missed SSE 'exit' / a stream-only drop),
   //   else 'starting' (spawned, the 5s poll hasn't observed it yet).
-  const statusOf = useCallback(
-    (w: SwarmWorker): WorkerStatus => {
-      if (exitedIds.has(w.terminalId)) return 'exited'
-      const s = statusByPty.get(w.terminalId)
+  const statusOfPty = useCallback(
+    (terminalId: string): WorkerStatus => {
+      if (exitedIds.has(terminalId)) return 'exited'
+      const s = statusByPty.get(terminalId)
       if (s === 'working' || s === 'waiting') return s
-      if (seenRef.current.has(w.terminalId)) return 'exited'
+      if (seenRef.current.has(terminalId)) return 'exited'
       return 'starting'
     },
     [exitedIds, statusByPty],
   )
+  const statusOf = useCallback((w: SwarmWorker): WorkerStatus => statusOfPty(w.terminalId), [statusOfPty])
 
   const handleExit = useCallback((terminalId: string) => {
     setExitedIds((prev) => (prev.has(terminalId) ? prev : new Set(prev).add(terminalId)))
@@ -256,6 +318,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           saveWorkers(project.id, next)
           return next
         })
+        // Reveal the worker the user just launched (they may have dispatched
+        // from the always-visible todo rail while watching the supply desk).
+        setMainView('workers')
         // Move the card to 'doing' + record the branch. The worker is already
         // live, so a failed Board write must NOT lose it — but we DO surface the
         // failure (the card stays in todo; the live-worker guard below stops a
@@ -399,6 +464,69 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     [busyIds, project.path, project.id, refreshTodos, t],
   )
 
+  // Launch the single supply (補給官) session: POST /api/swarm/supply spawns a
+  // claude PTY in the project's PRIMARY checkout (NO worktree) running /supply.
+  // No card is read — supply IS the conversation desk; the user types requests
+  // into it and it files Board:todo cards. Raw fetch + typed cast, same as the
+  // worker spawn (the /api/swarm/* routes aren't on the typed RPC tree).
+  const launchSupply = useCallback(async () => {
+    if (supply || supplyBusy) return
+    setSupplyBusy(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/swarm/supply', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body?.error || `HTTP ${res.status}`)
+      }
+      const spawn = (await res.json()) as SpawnSwarmSupplyResponse
+      const next: SwarmSupply = {
+        terminalId: spawn.terminalId,
+        agentSessionId: spawn.agentSessionId,
+        startedAt: new Date().toISOString(),
+      }
+      setSupply(next)
+      saveSupply(project.id, next)
+    } catch (e) {
+      setError(
+        t('projectPanel.swarm.supply.launchFailed', {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      )
+    } finally {
+      setSupplyBusy(false)
+    }
+  }, [supply, supplyBusy, project.path, project.id, t])
+
+  // Stop the supply session: kill the PTY. There is NO worktree to tear down
+  // (supply runs in the primary checkout), so unlike a worker terminate this is
+  // a plain terminal kill — the session drops back to the launch CTA, and we
+  // clear its id from the exited/seen bookkeeping so a relaunch starts clean.
+  const stopSupply = useCallback(async () => {
+    if (!supply || supplyBusy) return
+    const term = supply.terminalId
+    setSupplyBusy(true)
+    setError(null)
+    try {
+      await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
+    } finally {
+      setSupply(null)
+      saveSupply(project.id, null)
+      setExitedIds((prev) => {
+        if (!prev.has(term)) return prev
+        const s = new Set(prev)
+        s.delete(term)
+        return s
+      })
+      seenRef.current.delete(term)
+      setSupplyBusy(false)
+    }
+  }, [supply, supplyBusy, project.id])
+
   // Cards that already have a live worker (their dispatch failed to move them
   // out of todo). Disable re-dispatch for these so one card never gets twins.
   const liveTaskIds = new Set(
@@ -465,14 +593,100 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         )}
       </aside>
 
-      {/* ── Worker tiles: live `claude` PTYs, up to 6 side by side ─────────── */}
-      {/* No bg on this wrapper: the empty state below is a PAPER surface (bg-bg)
-          so the paper ink tokens keep 4.5:1+ contrast. The dark terminal bg
-          (#1a1a1a) is scoped to the tiles branch only, where ClaudeTerminalPane's
-          own light-on-dark xterm lives — putting it here would bury the empty
-          state's dark ink on a dark ground. */}
+      {/* ── Main area: supply desk ⇆ worker tiles, switched by a toggle ────── */}
+      {/* No bg on this wrapper: the empty/CTA states below are PAPER surfaces
+          (bg-bg) so the paper ink tokens keep 4.5:1+ contrast. The dark terminal
+          bg (#1a1a1a) is scoped to the pane branches only, where
+          ClaudeTerminalPane's own light-on-dark xterm lives — putting it here
+          would bury the empty states' dark ink on a dark ground. */}
       <div className="flex min-h-0 flex-1 flex-col">
-        {workers.length === 0 ? (
+        {/* Toggle: supply (補給官) ⇆ workers. Underline tabs, the same vocabulary
+            as the project tab row, on a PAPER strip (bg-bg) regardless of the
+            content below so the ink tokens always have contrast. The todo rail
+            stays beside both, so the supply→todo→worker pipeline is never hidden. */}
+        <div
+          role="tablist"
+          aria-label={t('projectPanel.swarm.title')}
+          className="flex shrink-0 items-center gap-4 border-b border-line-soft bg-bg px-3"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mainView === 'supply'}
+            onClick={() => setMainView('supply')}
+            className={[
+              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+              mainView === 'supply'
+                ? 'border-accent text-accent'
+                : 'border-transparent text-ink-muted hover:text-accent',
+            ].join(' ')}
+          >
+            <Inbox size={12} strokeWidth={2} />
+            {t('projectPanel.swarm.supply.tab')}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mainView === 'workers'}
+            onClick={() => setMainView('workers')}
+            className={[
+              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+              mainView === 'workers'
+                ? 'border-accent text-accent'
+                : 'border-transparent text-ink-muted hover:text-accent',
+            ].join(' ')}
+          >
+            <Boxes size={12} strokeWidth={2} />
+            {t('projectPanel.swarm.workersTab')}
+            {workers.length > 0 && (
+              <span className="rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint">
+                {workers.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {mainView === 'supply' ? (
+          supply ? (
+            // The live supply session — a single reused ClaudeTerminalPane.
+            <div className="min-h-0 flex-1">
+              <SwarmSupplyPane
+                terminalId={supply.terminalId}
+                status={statusOfPty(supply.terminalId)}
+                busy={supplyBusy}
+                onExit={() => supply && handleExit(supply.terminalId)}
+                onStop={() => void stopSupply()}
+              />
+            </div>
+          ) : (
+            // Launch CTA — the conversation desk that turns requests into cards.
+            <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
+              <div className="max-w-sm">
+                <div className="mx-auto mb-4 inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
+                  <Inbox size={20} strokeWidth={1.75} />
+                </div>
+                <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.supply.badge')}</p>
+                <h2 className="mb-2 text-[15px] font-medium text-ink">
+                  {t('projectPanel.swarm.supply.title')}
+                </h2>
+                <p className="mb-4 text-[12px] leading-relaxed text-ink-subtle">
+                  {t('projectPanel.swarm.supply.empty')}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void launchSupply()}
+                  disabled={supplyBusy}
+                  className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                >
+                  <Inbox size={13} strokeWidth={2} />
+                  {supplyBusy
+                    ? t('projectPanel.swarm.supply.launching')
+                    : t('projectPanel.swarm.supply.launch')}
+                </button>
+              </div>
+            </div>
+          )
+        ) : workers.length === 0 ? (
           <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
             <div className="max-w-sm">
               <div className="mx-auto mb-4 inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">

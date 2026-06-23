@@ -3,16 +3,23 @@
 // POST /api/swarm/worker          — spawn a worker: isolated central worktree +
 //                                   one interactive `claude` PTY + a /order goal
 //                                   typed in once the TUI is ready.
+// POST /api/swarm/supply          — spawn the SUPPLY OFFICER (補給官): one
+//                                   interactive `claude` PTY in the project's
+//                                   PRIMARY checkout running the /supply skill
+//                                   (turns the user's requests into Board:todo
+//                                   cards). NO worktree — it only talks + writes
+//                                   the Board, so stopping it is a plain PTY kill.
 // POST /api/swarm/worktree/remove — tear a worker worktree down (kill/complete).
 //
-// Thin adapters over src/lib/server/swarmWorker.ts. OWNER-ONLY: both routes
-// gate on the signed-in app-login role (getCustomTabRole, owner-only) at the
-// very top, so a non-owner / signed-out caller gets 403 before any body parse,
-// path validation, or git — closing the local curl/SDK direct-call hole. Then
-// every path-accepting route runs validateProjectPath (the registry allowlist)
-// BEFORE any work, and the spawn route also runs the shared claude preflight so
-// a missing/signed-out CLI fails fast (503) instead of orphaning a worktree+PTY.
-// Subscription-only: the worker is an interactive `claude` PTY (launchClaude),
+// Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts. OWNER-ONLY:
+// every route gates on the signed-in app-login role (getCustomTabRole,
+// owner-only) at the very top, so a non-owner / signed-out caller gets 403
+// before any body parse, path validation, or git — closing the local curl/SDK
+// direct-call hole (the UI hiding the tab is NOT the only guard). Then every
+// path-accepting route runs validateProjectPath (the registry allowlist) BEFORE
+// any work, and the spawn routes also run the shared claude preflight so a
+// missing/signed-out CLI fails fast (503) instead of orphaning a PTY (+worktree).
+// Subscription-only: every spawn is an interactive `claude` PTY (launchClaude),
 // never `claude -p`/SDK.
 
 import { Hono } from 'hono'
@@ -20,6 +27,7 @@ import { getCustomTabRole } from '@/lib/server/roles'
 import { readProjectData, validateProjectPath } from '@/lib/server/projectData'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
+import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
 // Board goal is a short observable completion condition; 8 KiB is a generous
@@ -96,6 +104,44 @@ export const swarmRoutes = new Hono()
       return c.json(res)
     } catch (e: any) {
       return c.json({ error: `failed to spawn worker: ${e?.message ?? e}` }, 500)
+    }
+  })
+  // --- POST /api/swarm/supply — spawn the in-app supply officer (補給官) ------
+  // Body: { path, cols?, rows? }. Launches ONE interactive claude PTY in the
+  // project's PRIMARY checkout (NOT a worktree) running the /supply skill, which
+  // turns the user's vague requests into observable Board:todo cards. No
+  // worktree is created (supply only talks + writes the Board), so there is
+  // nothing to tear down — stopping it is a plain terminal kill (DELETE
+  // /api/terminal/:id). Owner-only + validated + preflighted exactly like
+  // /worker; bypass + SWARM_MANAGER=1 (set in swarmSupply) so the guard blocks
+  // any stray destructive git in the real checkout.
+  .post('/api/swarm/supply', async (c) => {
+    // OWNER-ONLY gate (see /api/swarm/worker): the supply session is an
+    // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
+    // body parse / path validation.
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+
+    // Preflight BEFORE spawning: a missing/signed-out claude would open its own
+    // OAuth browser and orphan a PTY. Same machine-readable 503 as /worker.
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
+
+    const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
+    const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
+    try {
+      const res = await spawnSwarmSupply({ projectPath: path, cols, rows })
+      return c.json(res)
+    } catch (e: any) {
+      return c.json({ error: `failed to spawn supply: ${e?.message ?? e}` }, 500)
     }
   })
   // --- POST /api/swarm/worktree/remove — tear a worker worktree down ---------

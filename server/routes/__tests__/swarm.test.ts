@@ -99,6 +99,25 @@ describe('POST /api/swarm/worker (validation)', () => {
   })
 })
 
+describe('POST /api/swarm/supply (validation)', () => {
+  // Supply reads no card (it IS the desk that fills the board), so its only
+  // pre-spawn validation is owner gate (below) → path required → registry
+  // allowlist. These branches all run BEFORE the claude preflight / any spawn,
+  // so no `claude` CLI is needed. The happy path (PTY + /supply) is
+  // curl-verified on the real machine, like the worker spawn.
+  it('400 when path is missing', async () => {
+    const res = await app.request('/api/swarm/supply', json({}))
+    expect(res.status).toBe(400)
+  })
+
+  it('403 when the path is not a registered project (the allowlist holds)', async () => {
+    const dir = join(scratch, 'unregistered')
+    await mkdir(dir, { recursive: true })
+    const res = await app.request('/api/swarm/supply', json({ path: dir }))
+    expect(res.status).toBe(403)
+  })
+})
+
 describe('POST /api/swarm/worktree/remove (validation + central-only guard)', () => {
   it('400 when path is missing', async () => {
     const res = await app.request('/api/swarm/worktree/remove', json({ worktree: '/x' }))
@@ -195,6 +214,24 @@ describe('owner gate — the in-app swarm is owner-only', () => {
   it('POST /api/swarm/worktree/remove → owner passes the gate (reaches validation: 400)', async () => {
     await signInAs(OWNER)
     const res = await app.request('/api/swarm/worktree/remove', json({}))
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /api/swarm/supply → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/supply', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/supply → 403 for a signed-in non-owner (tester)', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/supply', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/supply → owner passes the gate (reaches validation: 400)', async () => {
+    await signInAs(OWNER)
+    const res = await app.request('/api/swarm/supply', json({}))
     expect(res.status).toBe(400)
   })
 })

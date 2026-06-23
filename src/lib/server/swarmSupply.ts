@@ -1,0 +1,104 @@
+// swarmSupply — the in-app, tmux-free replacement for the shell swarm's
+// `swarm-supply.sh`. It is the "supply officer (補給官)" primitive of the OPEN
+// GROUND swarm port (docs / auto-memory project_inapp_swarm_port): the user's
+// CONVERSATION DESK. Given a registered project it launches ONE interactive
+// `claude` PTY in the project's PRIMARY checkout running the `/supply` skill,
+// which listens to the user's vague requests, sharpens each into an OBSERVABLE
+// task, and files it into the project's Board `todo` column (via the Board HTTP
+// API / swarm-board.sh). It does NOT dispatch workers and does NOT merge — it
+// only fills the queue; the human (or a future manager) drains todo → workers.
+//
+// Unlike a WORKER (swarmWorker.ts) the supply officer gets NO worktree: it
+// operates on the primary checkout — it only READS the repo + writes the
+// recoverable Board, never editing code or pushing. So there is nothing to tear
+// down on stop; stopping it is a plain PTY kill (the terminal DELETE route).
+//
+// This mirrors `swarm-supply.sh` exactly:
+//   exec env SWARM_MANAGER=1 claude --model opus --effort max \
+//        --dangerously-skip-permissions --remote-control supply "/supply"
+//   - SWARM_MANAGER=1 — supply runs bypass IN THE REAL CHECKOUT, so (unlike a
+//     worker, which is contained in a throwaway worktree and passes NO env) it
+//     opts INTO the swarm PreToolUse guard, which blocks any stray destructive
+//     git. This is the exact purpose of launchClaude's `env` port.
+//   - bypass (--dangerously-skip-permissions) — the desk writes Board cards
+//     unattended-style so the conversation isn't interrupted by a tool-approval
+//     prompt on every `swarm-board.sh add`; the guard above is the safety net.
+//   - opus / max — the supply officer is a PM translating intent into precise,
+//     observable tasks; it runs at full capability (mirrors the shell launcher).
+//   - /supply as claude's POSITIONAL prompt — claude runs the skill on startup,
+//     then stays interactive for the conversation. (A TUI-injected slash command
+//     would not submit — the same delivery fix swarmWorker documents for /order.)
+// Subscription-only: launchClaude drives the user's `claude` CLI, never
+// `claude -p` / the SDK.
+
+import { randomUUID } from 'crypto'
+import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
+import { CLAUDE_EFFORTS, type SpawnSwarmSupplyResponse } from '../types'
+
+/** The skill the supply session runs, handed to claude as its positional prompt
+ *  (claude submits it on startup; a TUI-injected slash command would not). */
+export const SUPPLY_INJECTION = '/supply'
+
+/** Model + effort the supply officer runs at — mirrors swarm-supply.sh's
+ *  `--model opus --effort max`. `effort` is guarded against CLAUDE_EFFORTS so a
+ *  rename here can never emit a broken `--effort` argv (the same discipline
+ *  launchOptsFromPrefs applies); 'max' is a member today. */
+const SUPPLY_MODEL = 'opus'
+const SUPPLY_EFFORT = 'max'
+
+export interface SpawnSwarmSupplyOpts {
+  /** The registered project to feed — the supply PTY's cwd (its primary
+   *  checkout). The route validates this with validateProjectPath first. */
+  projectPath: string
+  cols?: number
+  rows?: number
+}
+
+/** Build the LaunchClaudeOpts for a supply session — pure + exported so the
+ *  launch contract is unit-tested without spawning a PTY:
+ *   - cwd = the project's PRIMARY checkout (NOT a worktree); supply reads the
+ *     repo + writes the Board, it never branches.
+ *   - permissionMode:'bypass' — so board writes aren't gated by a tool-approval
+ *     prompt on every turn (mirrors swarm-supply.sh's --dangerously-skip-…).
+ *   - env { SWARM_MANAGER:'1' } — supply runs bypass in the REAL checkout, so it
+ *     opts INTO the swarm guard (which blocks stray destructive git). The WORKER
+ *     deliberately passes none (contained worktree); supply must NOT (real tree).
+ *   - appContext:true — supply's whole job is writing Board cards, so the
+ *     app-context card (board API + "track on the Board, not an internal todo")
+ *     is exactly on-mission (the worker turns it off for leanness; supply keeps it).
+ *   - model/effort — opus/max, mirroring the shell supply officer.
+ *   - initialPrompt — `/supply` positional (claude runs the skill on startup). */
+export const supplyLaunchOpts = (
+  cwd: string,
+  agentSessionId: string,
+  opts: { cols?: number; rows?: number } = {},
+): LaunchClaudeOpts => ({
+  cwd,
+  agentSessionId,
+  permissionMode: 'bypass',
+  appContext: true,
+  model: SUPPLY_MODEL,
+  // Only a value the CLI actually accepts passes through (legacy/hand-edited
+  // junk would degrade to "CLI default", never a broken argv).
+  effort: CLAUDE_EFFORTS.includes(SUPPLY_EFFORT) ? SUPPLY_EFFORT : undefined,
+  env: { SWARM_MANAGER: '1' },
+  cols: opts.cols,
+  rows: opts.rows,
+  initialPrompt: SUPPLY_INJECTION,
+})
+
+/** Launch ONE interactive claude PTY in the project's primary checkout running
+ *  the `/supply` skill (handed positionally so claude submits it on startup).
+ *  Subscription-only (launchClaude — never `claude -p`/the SDK). Returns as soon
+ *  as the PTY is up; claude boots and invokes /supply on its own. No worktree is
+ *  created, so there is nothing to clean up on stop — the caller just kills the
+ *  PTY. */
+export const spawnSwarmSupply = async (
+  opts: SpawnSwarmSupplyOpts,
+): Promise<SpawnSwarmSupplyResponse> => {
+  const agentSessionId = randomUUID()
+  const ref = launchClaude(
+    supplyLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }),
+  )
+  return { terminalId: ref.terminalId, agentSessionId }
+}

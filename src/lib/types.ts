@@ -820,6 +820,17 @@ export interface RemoveSwarmWorktreeResponse {
   reason?: string
 }
 
+/** POST /api/swarm/supply — a freshly spawned in-app SUPPLY (補給官) session:
+ *  the claude PTY id + minted session id. Unlike a worker it has NO worktree —
+ *  it runs in the project's PRIMARY checkout cwd, running the /supply skill to
+ *  turn the user's vague requests into observable Board:todo cards. It only
+ *  talks to the user + writes the Board; it never edits code or pushes (so no
+ *  worktree to return, and stopping it is a plain PTY kill). */
+export interface SpawnSwarmSupplyResponse {
+  terminalId: string
+  agentSessionId: string
+}
+
 /** An image attached to a Board card (B022 — bug screenshots etc). No path is
  *  stored: `id` is the content-addressed file name (`<sha1>.<ext>`) inside the
  *  project's task-asset store (central task-assets/ or, git-shared,

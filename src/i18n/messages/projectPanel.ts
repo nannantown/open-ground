@@ -47,6 +47,22 @@ export const projectPanel = {
     'projectPanel.swarm.forceRemove': 'Force remove',
     'projectPanel.swarm.forceFailed': "Couldn't remove the worktree: {reason}. Remove it by hand if needed.",
     'projectPanel.swarm.dispatchFailed': 'Dispatch failed: {error}',
+    // Supply officer (補給官) — the conversation desk that turns the user's
+    // requests into Board:todo cards. Writes the Board only; never edits code.
+    'projectPanel.swarm.workersTab': 'Workers',
+    'projectPanel.swarm.supply.tab': 'Supply',
+    'projectPanel.swarm.supply.badge': 'Supply officer',
+    'projectPanel.swarm.supply.title': 'Turn requests into to-do cards',
+    'projectPanel.swarm.supply.empty':
+      'Talk to the supply officer — a `claude` PM that sharpens your vague requests into observable to-do cards and files them on the Board to the left. It only writes the Board; it never edits code or dispatches workers.',
+    'projectPanel.swarm.supply.launch': 'Start supply officer',
+    'projectPanel.swarm.supply.launching': 'Starting…',
+    'projectPanel.swarm.supply.launchFailed': "Couldn't start the supply officer: {error}",
+    'projectPanel.swarm.supply.identity': 'Supply · files to-do',
+    'projectPanel.swarm.supply.hint':
+      'The supply officer files your requests as Board to-do cards — it never edits code or dispatches workers.',
+    'projectPanel.swarm.supply.stop': 'Stop',
+    'projectPanel.swarm.supply.stopping': 'Stopping…',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -337,6 +353,22 @@ export const projectPanel = {
     'projectPanel.swarm.forceRemove': '強制撤去',
     'projectPanel.swarm.forceFailed': 'worktree を撤去できませんでした: {reason}。必要なら手動で削除してください。',
     'projectPanel.swarm.dispatchFailed': '振り分けに失敗しました: {error}',
+    // Supply officer (補給官) — 要望を Board:todo カードに積む対話デスク。
+    // Board に書くだけで、コードは編集しない。
+    'projectPanel.swarm.workersTab': 'ワーカー',
+    'projectPanel.swarm.supply.tab': '補給官',
+    'projectPanel.swarm.supply.badge': '補給官（PM）',
+    'projectPanel.swarm.supply.title': '要望を todo カードに変える',
+    'projectPanel.swarm.supply.empty':
+      '補給官と話してください。あいまいな要望を観測可能な todo カードに整えて、左の Board に積む `claude` の PM です。Board に書くだけで、コードの編集や worker への割り当てはしません。',
+    'projectPanel.swarm.supply.launch': '補給官を起動',
+    'projectPanel.swarm.supply.launching': '起動中…',
+    'projectPanel.swarm.supply.launchFailed': '補給官を起動できませんでした: {error}',
+    'projectPanel.swarm.supply.identity': '補給官 · todo に供給',
+    'projectPanel.swarm.supply.hint':
+      '補給官は要望を Board の todo カードに積みます（コードの編集や worker への割り当てはしません）。',
+    'projectPanel.swarm.supply.stop': '停止',
+    'projectPanel.swarm.supply.stopping': '停止中…',
     // Sidebar resizer
     // Chat header
     // Delete confirm
