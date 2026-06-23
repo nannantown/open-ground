@@ -20,6 +20,7 @@ import { canvasRoutes } from './routes/canvas'
 import { canvasAiRoutes } from './routes/canvasAi'
 import { miscRoutes } from './routes/misc'
 import { terminalRoutes } from './routes/terminal'
+import { swarmRoutes } from './routes/swarm'
 import { sseRoutes } from './routes/sse'
 import { feedbackRoutes } from './routes/feedback'
 import { authRoutes } from './routes/auth'
@@ -75,6 +76,7 @@ export const createApp = () => {
     .route('/', canvasAiRoutes)  // D2 — canvas AI (generate-elements / tweak-screen)
     .route('/', miscRoutes)      // E — projects / settings / usage
     .route('/', terminalRoutes)  // F — terminal CRUD (dynamic :id)
+    .route('/', swarmRoutes)     // F2 — in-app swarm worker spawn + worktree lifecycle
     .route('/', sseRoutes)       // SSE — terminal stream
     .route('/', feedbackRoutes)  // G — in-app feedback proxy (env-gated)
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)

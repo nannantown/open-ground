@@ -73,6 +73,31 @@ export interface Settings {
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
    *  language toggle so the server can pick the matching prompt language. */
   language?: 'en' | 'ja'
+  /** Owner-only experiment toggles (hidden, default off). The RAW stored
+   *  switches — the resolved gate ANDs each with the owner role server-side
+   *  (see {@link ExperimentsResponse} / resolveExperiments), so a non-owner who
+   *  forges a `true` here never actually opens the gate. Absent ⇒ all off. */
+  experiments?: Partial<ExperimentFlags>
+}
+
+/** Owner-only experiment ids — hidden features gated behind the owner role AND
+ *  a per-experiment settings toggle (default off). They never ship in release
+ *  notes or the in-app manual; the registry hides their modules entirely until
+ *  the gate is open. `swarm` = the in-app swarm orchestration surface. */
+export type ExperimentId = 'swarm'
+
+/** Resolved open/closed state for every experiment, keyed by id. TRUE only when
+ *  the user is the owner AND has turned that experiment on. */
+export type ExperimentFlags = Record<ExperimentId, boolean>
+
+/** GET /api/experiments. `eligible` = this user may toggle experiments at all
+ *  (owner). `flags` = the RESOLVED per-experiment gate (owner && the settings
+ *  toggle). A non-owner / signed-out user always gets `eligible: false` and
+ *  all-false flags, so every experimental surface stays invisible regardless of
+ *  any settings they forge. */
+export interface ExperimentsResponse {
+  eligible: boolean
+  flags: ExperimentFlags
 }
 
 /** GET /api/settings response: the persisted {@link Settings} plus a
@@ -773,6 +798,26 @@ export interface ProjectWorktreeInfo {
 export interface CleanWorktreesResult {
   removed: string[]
   skippedDirty: string[]
+}
+
+/** POST /api/swarm/worker — a freshly spawned in-app swarm worker: the claude
+ *  PTY id + minted session id, and the isolated `swarm/*` worktree/branch it
+ *  runs in (under the project's CENTRAL worktrees dir). The /order goal is
+ *  typed into the PTY asynchronously once its TUI is ready, so this returns
+ *  before the goal lands — the heartbeat / session JSONL is the arrival proof. */
+export interface SpawnSwarmWorkerResponse {
+  terminalId: string
+  agentSessionId: string
+  worktree: string
+  branch: string
+}
+
+/** POST /api/swarm/worktree/remove — whether the worktree was torn down, with
+ *  a `reason` when it was kept (dirty/locked without force, or not a central
+ *  worktree). */
+export interface RemoveSwarmWorktreeResponse {
+  removed: boolean
+  reason?: string
 }
 
 /** An image attached to a Board card (B022 — bug screenshots etc). No path is

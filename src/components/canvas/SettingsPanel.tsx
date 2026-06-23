@@ -49,6 +49,10 @@ interface Props {
   moduleReviewCanReview?: boolean
   /** Called once the review inbox loads, with the newest submission's created_at. */
   onModuleSubmissionSeen?: (latestCreatedAt: string | null) => void
+  /** Owner-only: when true, reveal the experiment toggles (Advanced). Resolved
+   *  server-side from the og_roles owner role. Non-owners get false, so the
+   *  toggles — and the very existence of the experiments — stay hidden. */
+  experimentsEligible?: boolean
 }
 
 // Settings drawer. Deliberately minimal: only real preferences are visible
@@ -66,10 +70,14 @@ export const SettingsPanel = ({
   onOpenFeedback,
   moduleReviewCanReview = false,
   onModuleSubmissionSeen,
+  experimentsEligible = false,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
   const [displayName, setDisplayName] = useState(settings.displayName ?? '')
+  // Owner-only experiment toggle (swarm). Local state for instant feedback;
+  // persisted immediately on toggle (below) and re-seeded from settings on open.
+  const [swarmExp, setSwarmExp] = useState(settings.experiments?.swarm === true)
   // Non-persisted placeholder for the Display name input: the user's global
   // git identity, served by GET /api/settings as `suggestedDisplayName`.
   const [suggestedName, setSuggestedName] = useState<string | null>(null)
@@ -126,8 +134,26 @@ export const SettingsPanel = ({
     if (!open) return
     setDefaultWorkspace(settings.defaultWorkspace ?? '')
     setDisplayName(settings.displayName ?? '')
+    setSwarmExp(settings.experiments?.swarm === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  // Set an owner-only experiment and persist immediately (a discrete switch, not
+  // debounced text). Save the explicit value, preserving any pending
+  // workspace/displayName edits via the same normalization flush uses — so
+  // toggling never drops an in-progress text edit, and `{ ...s }` keeps every
+  // other experiment flag intact.
+  const setSwarm = (next: boolean) => {
+    if (next === swarmExp) return
+    setSwarmExp(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      experiments: { ...s.experiments, swarm: next },
+    })
+  }
 
   // Fetch the display-name suggestion when the drawer opens (cheap: the server
   // caches the git lookup for its process lifetime). Best-effort — without it
@@ -375,6 +401,51 @@ export const SettingsPanel = ({
                   </div>
                   <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{t('settings.connection.hint')}</p>
                 </Section>
+
+                {/* Experiments — owner only (experimentsEligible from the
+                    server's og_roles owner check). Hidden for everyone else, so
+                    the toggles never betray the feature's existence. The same
+                    segmented On/Off pattern as the language switch, persisted
+                    immediately. */}
+                {experimentsEligible && (
+                  <Section
+                    heading={t('settings.experiments.heading')}
+                    hint={t('settings.experiments.hint')}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-[13px] text-ink">{t('settings.experiments.swarm')}</span>
+                      <div
+                        role="group"
+                        aria-label={t('settings.experiments.swarm')}
+                        className="inline-flex items-center gap-0 border border-line rounded-[3px] p-0.5"
+                      >
+                        {([
+                          [false, t('settings.experiments.off')],
+                          [true, t('settings.experiments.on')],
+                        ] as [boolean, string][]).map(([value, label]) => {
+                          const active = swarmExp === value
+                          return (
+                            <button
+                              key={String(value)}
+                              type="button"
+                              onClick={() => setSwarm(value)}
+                              aria-pressed={active}
+                              className={[
+                                'h-7 min-w-[44px] px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                                'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+                                active
+                                  ? 'bg-accent text-bg-card border-accent'
+                                  : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
+                              ].join(' ')}
+                            >
+                              {label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </Section>
+                )}
               </div>
             )}
           </div>

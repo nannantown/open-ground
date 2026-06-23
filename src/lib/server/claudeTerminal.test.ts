@@ -371,6 +371,43 @@ describe('buildLaunchCommand (per-shell PTY command framing)', () => {
     expect(win).not.toContain('OPENGROUND_OWNED=1 ')
     expect(win.startsWith("$env:OPENGROUND_OWNED='1'; &")).toBe(true)
   })
+
+  // The extra-env port (in-app swarm manager). Workers pass NONE → the launch
+  // line stays byte-identical to before; a future manager passes SWARM_MANAGER.
+  it('no env → byte-identical to the pre-env launch line (workers pass none)', () => {
+    expect(buildLaunchCommand(argv, 'darwin', {})).toBe(
+      'OPENGROUND_OWNED=1 claude --session-id SID ; exit\n',
+    )
+    expect(buildLaunchCommand(argv, 'win32', {})).toBe(
+      "$env:OPENGROUND_OWNED='1'; & claude --session-id SID ; exit\n",
+    )
+  })
+
+  it('POSIX: inline K=\'v\' assignments precede OPENGROUND_OWNED', () => {
+    expect(buildLaunchCommand(argv, 'darwin', { SWARM_MANAGER: '1' })).toBe(
+      "SWARM_MANAGER='1' OPENGROUND_OWNED=1 claude --session-id SID ; exit\n",
+    )
+  })
+
+  it('Windows: $env: statements precede OPENGROUND_OWNED', () => {
+    expect(buildLaunchCommand(argv, 'win32', { SWARM_MANAGER: '1' })).toBe(
+      "$env:SWARM_MANAGER='1'; $env:OPENGROUND_OWNED='1'; & claude --session-id SID ; exit\n",
+    )
+  })
+
+  it('shell-quotes env values (a crafted value cannot break the line)', () => {
+    // A single quote in the value is escaped by the POSIX `'\''` idiom.
+    expect(buildLaunchCommand(argv, 'darwin', { K: "a'b" })).toBe(
+      "K='a'\\''b' OPENGROUND_OWNED=1 claude --session-id SID ; exit\n",
+    )
+  })
+
+  it('drops env keys that are not POSIX env-name shaped (defence in depth)', () => {
+    const out = buildLaunchCommand(argv, 'darwin', { 'bad key': 'x', '1nope': 'y', OK_1: 'z' })
+    expect(out).toContain("OK_1='z'")
+    expect(out).not.toContain('bad key')
+    expect(out).not.toContain('1nope')
+  })
 })
 
 describe('launchClaude (routes the prompt through a temp file + buildLaunchCommand)', () => {

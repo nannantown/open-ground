@@ -59,6 +59,15 @@ export interface LaunchClaudeOpts {
   // via --append-system-prompt. Set false for utility sessions whose output is
   // marker-scraped and must not drift (generateDescription).
   appContext?: boolean
+  // Extra environment variables to inject into THIS claude invocation's command
+  // line, scoped to the one command (exactly like OPENGROUND_OWNED=1). The
+  // in-app swarm WORKER passes NONE — so the swarm PreToolUse guard, which fires
+  // only on SWARM_MANAGER=1, stays inert for workers (it `pass`es, as today).
+  // The port exists so a future in-app MANAGER spawn can pass
+  // `{ SWARM_MANAGER: '1' }` without reopening the launch internals. Keys must
+  // be POSIX env-name shaped (others are dropped in buildLaunchCommand); values
+  // are shell-quoted for the host shell. NEVER sourced from an API request body.
+  env?: Record<string, string>
   cols?: number
   rows?: number
 }
@@ -262,13 +271,35 @@ export const buildClaudeArgv = (
 //     resolvedClaudeBin hands back an absolute `claude.cmd` / `claude.exe`) at
 //     statement position would otherwise parse as a string EXPRESSION and never
 //     run. `& <bareword>` is equally valid, so the operator is unconditional.
+// Validates an extra-env KEY before it reaches the command line. env is set by
+// internal callers (never an API body), but a malformed key must never break
+// the launch line, so anything not POSIX env-name shaped is dropped.
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
 export const buildLaunchCommand = (
   argv: string[],
   platform: NodeJS.Platform = process.platform,
-): string =>
-  platform === 'win32'
-    ? `$env:OPENGROUND_OWNED='1'; & ${argv.join(' ')} ; exit\n`
-    : `OPENGROUND_OWNED=1 ${argv.join(' ')} ; exit\n`
+  // Extra env injected ahead of OPENGROUND_OWNED, scoped to this one command.
+  // Empty by default → byte-identical to the pre-env launch line (workers pass
+  // none). Values are shell-quoted for THIS platform, same as every other
+  // embedded arg (shellQuoteArg). OPENGROUND_OWNED is always emitted LAST so a
+  // caller-supplied key can never shadow it.
+  env: Record<string, string> = {},
+): string => {
+  const pairs = Object.entries(env).filter(([k]) => ENV_KEY_RE.test(k))
+  if (platform === 'win32') {
+    // PowerShell has no inline per-command env syntax: each var is its own
+    // `$env:K='v';` statement. It leaks into the rest of this short-lived
+    // session — fine: the next statement is the claude run, then `; exit` tears
+    // the wrapping shell down.
+    const sets = pairs.map(([k, v]) => `$env:${k}=${shellQuoteArg(v, platform)};`).join(' ')
+    return `${sets ? sets + ' ' : ''}$env:OPENGROUND_OWNED='1'; & ${argv.join(' ')} ; exit\n`
+  }
+  // POSIX: inline `K='v'` assignments scoped to the single command (not
+  // exported), in front of the always-present OPENGROUND_OWNED=1.
+  const prefix = pairs.map(([k, v]) => `${k}=${shellQuoteArg(v, platform)}`).join(' ')
+  return `${prefix ? prefix + ' ' : ''}OPENGROUND_OWNED=1 ${argv.join(' ')} ; exit\n`
+}
 
 export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // Pre-accept claude's "trust this folder?" gate for this cwd (see
@@ -312,11 +343,12 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // absolute path is fresh; null falls through to the bare name in buildClaudeArgv.
   const args = buildClaudeArgv(opts, promptFilePath, contextFilePath, resolvedClaudeBin())
 
-  // One command line: mark this invocation OPEN GROUND-owned, run claude, and
-  // `; exit` the wrapping shell when it quits so the PTY-exit listener fires the
+  // One command line: mark this invocation OPEN GROUND-owned, inject any caller
+  // env (the swarm manager port — workers pass none), run claude, and `; exit`
+  // the wrapping shell when it quits so the PTY-exit listener fires the
   // cancelled / finished transition. Shell-specific framing (POSIX env-prefix
   // vs PowerShell `$env:` + call operator) lives in buildLaunchCommand.
-  writeInput(info.id, buildLaunchCommand(args))
+  writeInput(info.id, buildLaunchCommand(args, process.platform, opts.env ?? {}))
 
   return {
     terminalId: info.id,

@@ -17,6 +17,7 @@ import { basename, join, resolve } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { getSettings, setSettings, getCanvas, setCanvas } from '@/lib/server/store'
+import { resolveExperiments } from '@/lib/server/experiments'
 import { scanProjects } from '@/lib/server/scan'
 import { writeProjectData } from '@/lib/server/projectData'
 import {
@@ -281,6 +282,12 @@ export const miscRoutes = new Hono()
     await setSettings(body)
     return c.json({ ok: true })
   })
+  // --- GET /api/experiments -------------------------------------------------
+  // Owner-only experiment gate, resolved server-side (owner role AND the
+  // settings toggle). Non-owners / signed-out users get eligible:false and
+  // all-false flags, so every experimental surface stays invisible — see
+  // src/lib/server/experiments.ts.
+  .get('/api/experiments', async (c) => c.json(await resolveExperiments()))
   // --- GET /api/usage -------------------------------------------------------
   .get('/api/usage', async (c) => {
     try {

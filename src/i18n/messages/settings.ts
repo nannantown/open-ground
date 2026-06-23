@@ -17,6 +17,12 @@ export const settings = {
     // Notifications
     // Advanced disclosure
     'settings.advanced': 'Advanced',
+    // Experiments (owner-only — hidden unless the server marks you eligible)
+    'settings.experiments.heading': 'Experiments',
+    'settings.experiments.hint': 'Early, owner-only features. Off by default; not covered by support.',
+    'settings.experiments.swarm': 'Swarm orchestration',
+    'settings.experiments.off': 'Off',
+    'settings.experiments.on': 'On',
     // Plan
     // Workspace
     'settings.workspace.heading': 'Default workspace',
@@ -57,6 +63,11 @@ export const settings = {
     'settings.displayName.heading': '表示名',
     'settings.displayName.hint': '共有ボードでの担当者名として使われます。',
     'settings.advanced': '詳細設定',
+    'settings.experiments.heading': '実験的機能',
+    'settings.experiments.hint': '初期段階のオーナー限定機能です。既定はオフで、サポート対象外です。',
+    'settings.experiments.swarm': 'Swarm オーケストレーション',
+    'settings.experiments.off': 'オフ',
+    'settings.experiments.on': 'オン',
     'settings.workspace.heading': 'デフォルトの作業フォルダ',
     'settings.workspace.hint': '新規作成したプロジェクトの置き場所です。既存フォルダのインポートはどこからでも可能です。',
     'settings.workspace.browse': '参照',

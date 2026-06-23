@@ -34,6 +34,7 @@ import type {
   ProjectWorktreeInfo,
   CleanWorktreesResult,
   CustomModuleDef,
+  ExperimentFlags,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import {
@@ -73,10 +74,13 @@ import {
 import {
   customModuleTabDef,
   enabledModules,
+  gateFromFlags,
   isModuleIdEnabled,
   nativeDescriptors,
+  type ModuleGate,
   type TabDef,
 } from '@/components/canvas/moduleRegistry'
+import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
 import { attachCustomTab, detachCustomTab } from '@/lib/modules/customTabAttach'
@@ -102,13 +106,6 @@ const isMvpVisibleTab = isModuleIdEnabled
 // (hide it from this project via disabledModules). The row's menu derives its
 // label/icon from `kind`; null from the resolver means no menu for that tab.
 type TabRowAction = { kind: 'detach' | 'disable'; run: () => void | Promise<void> }
-
-// The enabled module ids in registry (default) order. Per project this is
-// reordered by the user (drag-to-reorder, persisted in ProjectData.tabOrder)
-// and normalised via effectiveTabOrder; the result drives both the tab row's
-// left-to-right order AND the Ctrl+Tab cycle order ("next" = the tab to my
-// right). With no saved order a project falls back to this default order.
-const ENABLED_MODULE_IDS: PanelView[] = enabledModules().map(m => m.id)
 
 // A Terminal-tab pane is a plain shell, nothing more. Claude is something the
 // user types (`claude`) — the old slot-level promotion ("▶ Claude" /
@@ -224,6 +221,11 @@ interface Props {
    *  Gated so the whole feature only appears when feedback is configured
    *  (the integrator passes this down from App.tsx). */
   feedbackEnabled?: boolean
+  /** Resolved owner-only experiment gate (owner && the settings toggle, decided
+   *  server-side). Drives which experimental modules surface as tabs. Omitted /
+   *  all-false ⇒ no experimental module shows — the default for every non-owner
+   *  and the shipped build, so the tab row is unchanged for everyone else. */
+  experiments?: ExperimentFlags
 }
 
 export const ProjectPanel = ({
@@ -236,6 +238,7 @@ export const ProjectPanel = ({
   onRelocate,
   frameLabel,
   feedbackEnabled,
+  experiments,
 }: Props) => {
   const { t, lang } = useT()
   // Per-tab contextual feedback: opening the modal here tags the submission
@@ -305,11 +308,13 @@ export const ProjectPanel = ({
     }).catch(() => {})
   }, [project])
 
-  // ── "Open in editor" (`<>`) — a chooser, not an auto-pick ──────────────────
+  // ── "Open in editor" split button: `<>` launches, `▼` chooses ──────────────
   // The editors actually installed on this machine (macOS Applications scan)
-  // plus a remembered one-click default. Clicking the button opens the default
-  // in one click; with no default it drops the menu so the user picks one (and
-  // can star it as the default). Replaces the old "always auto-pick cursor".
+  // plus a remembered one-click default. The `<>` half ALWAYS launches in one
+  // click — the default if set, else the first detected editor, else the
+  // server's CLI auto-detection — it never opens the menu. The separate `▼`
+  // half is the only thing that drops the chooser (open any editor, star one as
+  // the default, pick another app, clear the default).
   const [editorMenuOpen, setEditorMenuOpen] = useState(false)
   const [installedEditors, setInstalledEditors] = useState<OpenApp[]>([])
   const [defaultEditor, setDefaultEditor] = useState<OpenApp | null>(null)
@@ -370,17 +375,18 @@ export const ProjectPanel = ({
 
   // Can we offer the chooser at all? Yes if editors were detected, or if the
   // native Finder picker is available (macOS). Otherwise — e.g. Windows/Linux
-  // with nothing detected — the button falls back to CLI auto-detection.
+  // with nothing detected — only the launch half shows and it falls back to CLI
+  // auto-detection.
   const canChooseEditor = installedEditors.length > 0 || canPickEditor
-  // The `<>` button itself: a default opens in one click; else drop the chooser;
-  // and when there's nothing to choose from, fall back to the server's CLI
-  // auto-detection so the button still works on Windows/Linux.
+  // The `<>` button itself ALWAYS launches (never opens the menu — that's the
+  // `▼` half's job): the saved default if any, else the first detected editor,
+  // else the server's CLI auto-detection so it still works on Windows/Linux.
   const handleEditorButton = useCallback(() => {
     if (!project || project.missing) return
     if (defaultEditor) void openInEditorWith(defaultEditor)
-    else if (canChooseEditor) setEditorMenuOpen((v) => !v)
+    else if (installedEditors.length > 0) void openInEditorWith(installedEditors[0])
     else void openInEditorWith()
-  }, [project, defaultEditor, canChooseEditor, openInEditorWith])
+  }, [project, defaultEditor, installedEditors, openInEditorWith])
 
   // Remember / clear the one-click default (persisted server-side).
   const saveDefaultEditor = useCallback(async (editor: OpenApp | null) => {
@@ -646,14 +652,26 @@ export const ProjectPanel = ({
     const lib = new Set(customModules.map(m => m.id))
     return (data?.customTabs ?? []).filter(id => lib.has(id))
   }, [data?.customTabs, customModules])
-  // Built-in modules this project has HIDDEN (ProjectData.disabledModules —
-  // personal per-project state like tabOrder). A native ships pre-installed and
-  // can't be uninstalled, but a project may drop it from its row. Empty for
-  // every project until the user hides one, so the default row is unchanged.
+  // Owner-only experiment gate (App resolves it server-side; all-false for
+  // non-owners and the shipped build). An experiment-gated module is invisible
+  // until its gate is open, so this Set is empty for everyone but the owner with
+  // the toggle on — keeping the registry filter below a no-op in the common case.
+  const moduleGate = useMemo<ModuleGate>(
+    () => gateFromFlags(experiments ?? { swarm: false }),
+    // One key per experiment — extend when a new ExperimentId is added so the
+    // gate recomputes when that flag flips. (Stable across identity-only changes.)
+    [experiments?.swarm],
+  )
+  // The enabled built-in module ids in registry (default) order — gated
+  // experiments included only when `moduleGate` opens them — then with this
+  // project's HIDDEN natives (ProjectData.disabledModules) dropped. disabledModules
+  // is personal per-project state like tabOrder; a native ships pre-installed and
+  // can't be uninstalled, but a project may drop it from its row. The resulting
+  // order drives the tab row's left-to-right order AND the Ctrl+Tab cycle.
   const enabledNativeIds = useMemo<PanelView[]>(() => {
     const hidden = new Set(data?.disabledModules ?? [])
-    return ENABLED_MODULE_IDS.filter(id => !hidden.has(id))
-  }, [data?.disabledModules])
+    return enabledModules(moduleGate).map(m => m.id).filter(id => !hidden.has(id))
+  }, [data?.disabledModules, moduleGate])
   // Every id that can appear in the tab row: enabled built-ins in registry
   // order, then the ATTACHED custom tabs in attachment order. effectiveTabOrder
   // reconciles a saved per-project order against this set.
@@ -781,15 +799,17 @@ export const ProjectPanel = ({
     [persist],
   )
   // The built-in modules + their per-project enabled state, for the picker's
-  // "Built-in" section (enabled = not hidden via disabledModules).
+  // "Built-in" section (enabled = not hidden via disabledModules). Gated through
+  // the same `moduleGate`, so a hidden experiment never leaks into the picker
+  // either.
   const nativePickerItems = useMemo(() => {
     const hidden = new Set(data?.disabledModules ?? [])
-    return nativeDescriptors().map(d => ({
+    return nativeDescriptors(moduleGate).map(d => ({
       id: d.id,
       label: d.label,
       enabled: !hidden.has(d.id),
     }))
-  }, [data?.disabledModules])
+  }, [data?.disabledModules, moduleGate])
   // The single right-click action for a tab in the row (see TabRowAction).
   // null = no menu: the role can't manage it, or it's the last remaining tab
   // (the floor invariant — never strand a project with zero visible tabs).
@@ -1552,11 +1572,12 @@ export const ProjectPanel = ({
             >
               <FolderOpen size={16} strokeWidth={1.75} />
             </button>
-            {/* Open the folder in an editor. The `<>` half opens the default
-                (or, with none yet, drops the chooser); the ▼ half always drops
-                the chooser of editors installed on this machine — open any, or
-                star one as the new default. mousedown stops at the container so
-                the outside-click closer only fires for clicks truly outside. */}
+            {/* Open the folder in an editor. The `<>` half always launches —
+                the default, else the first detected editor, else CLI
+                auto-detection; the ▼ half is the only menu trigger (editors
+                installed on this machine — open any, or star one as the new
+                default). mousedown stops at the container so the outside-click
+                closer only fires for clicks truly outside. */}
             <div
               className="relative flex shrink-0 items-center"
               onMouseDown={(e) => e.stopPropagation()}
@@ -1831,6 +1852,10 @@ export const ProjectPanel = ({
         order={tabOrder}
         onReorder={reorderTabs}
         terminalInfo={terminalInfo}
+        // Same gate as `order` was built from, so the row can resolve a gated
+        // module's icon/label; without it an open experiment's tab would have an
+        // id in `order` but no metadata and silently fail to render.
+        gate={moduleGate}
         // Custom tabs (label from the fetched def, fixed Puzzle icon) — the
         // row renders them wherever `order` puts them; `order` only ever
         // contains tabs ATTACHED to this project (allTabIds above).
@@ -2043,6 +2068,14 @@ export const ProjectPanel = ({
             hint={t('projectPanel.canvasDockHint')}
           />
         </div>
+      ) : view === 'swarm' && experiments?.swarm ? (
+        // Owner-only experiment. Re-checking `experiments.swarm` HERE — not just
+        // relying on the tab being hidden — means a forged `view: 'swarm'` (from
+        // a stale/hostile localStorage value) never renders the surface for a
+        // non-owner; the fallback effect then moves the view off it. Task C
+        // builds the real orchestration UI; this mounted placeholder is what the
+        // gate makes appear when the owner turns the experiment on.
+        <SwarmModule project={project} />
       ) : isCustomTabId(view) ? (
         // Custom tab: the module's component in a sandboxed iframe, plus the
         // owner's claude sidebar. Keyed by module id so switching between two
@@ -2741,6 +2774,7 @@ const ViewTabs = ({
   onReorder,
   terminalInfo,
   customTabs,
+  gate,
   onAddTab,
   rowMenu,
   badges,
@@ -2753,6 +2787,9 @@ const ViewTabs = ({
   // space, matching moveTab's convention).
   onReorder: (from: number, to: number) => void
   terminalInfo: TerminalInfo | null
+  /** Owner-only experiment gate — the same one `order` was computed from, so the
+   *  row can resolve a gated module's metadata. Omitted ⇒ no experiment open. */
+  gate?: ModuleGate
   /** Custom-tab row metadata (`custom:<uuid>` ids — docs/CUSTOM_TABS_PLAN.md).
    *  Ids in `order` with no entry here (a module deleted elsewhere) just
    *  don't render. */
@@ -2772,13 +2809,15 @@ const ViewTabs = ({
   badges?: Partial<Record<PanelView, number>>
 }) => {
   const { t } = useT()
-  // Metadata (icon/label) keyed by id; the row is rendered in `order`.
+  // Metadata (icon/label) keyed by id; the row is rendered in `order`. Built from
+  // the SAME gate as `order`, so an open experiment's module resolves its
+  // icon/label (and a closed one is absent from both — never a half-rendered tab).
   const byId = useMemo(() => {
     const m = new Map<PanelView, TabDef>()
-    for (const def of enabledModules()) m.set(def.id, def)
+    for (const def of enabledModules(gate)) m.set(def.id, def)
     for (const def of customTabs ?? []) m.set(def.id, def)
     return m
-  }, [customTabs])
+  }, [customTabs, gate])
   const tabs = order.map(id => byId.get(id)).filter((m): m is TabDef => !!m)
 
   // Right-click menu on a custom tab (detach from this project's row —

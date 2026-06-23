@@ -7,11 +7,18 @@ export type ModuleId =
   | 'terminal'
   | 'canvas'
   | 'board'
+  // Owner-only experiment module (hidden by default; see `experiment` in
+  // moduleRegistry + ExperimentId in types). A KNOWN native id so persistence
+  // / tab-order code treats it like any other built-in — but the registry's
+  // gate keeps it out of every visible surface until the swarm experiment is
+  // open. Listed here only so the type system knows it exists.
+  | 'swarm'
 
 export const MODULE_IDS: readonly ModuleId[] = [
   'terminal',
   'canvas',
   'board',
+  'swarm',
 ]
 
 // ─── Custom tabs (user-built modules) ───────────────────────────────────────

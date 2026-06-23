@@ -14,6 +14,7 @@ import { ProjectPanel } from '@/components/canvas/ProjectPanel'
 import { CollabSharedDialog } from '@/components/canvas/CollabSharedDialog'
 import { SharedProjectPanel } from '@/components/canvas/SharedProjectPanel'
 import { useCollab } from '@/lib/collab/RealtimeContext'
+import { useExperiments } from '@/lib/modules/useExperiments'
 import { useJoinDeepLink } from '@/lib/useJoinDeepLink'
 import { Onboarding } from '@/components/Onboarding'
 import { BulkActionBar } from '@/components/canvas/BulkActionBar'
@@ -128,6 +129,11 @@ export default function App() {
   // as Ground cards, so a member just follows the invite link). `openShared` is the
   // folder-less shared project currently viewed in SharedProjectPanel (null = none).
   const { enabled: collabEnabled } = useCollab()
+  // Owner-only experiment gate (hidden features, default off). `eligible` reveals
+  // the Settings toggle to the owner; `flags` gates which modules surface as tabs
+  // in the project panel. Refreshed after a settings save (see saveSettings) so a
+  // toggle shows/hides its module immediately.
+  const experiments = useExperiments()
   const [sharedDialogOpen, setSharedDialogOpen] = useState(false)
   const [openShared, setOpenShared] = useState<{ id: string; label: string } | null>(null)
   // Ground member flow: projects shared WITH the user (owned:false from
@@ -690,6 +696,9 @@ export default function App() {
   const saveSettings = async (s: Settings) => {
     await api.api.settings.$post({ json: s })
     await load()
+    // Re-resolve the experiment gate: toggling an experiment in Settings must
+    // show/hide its module right away, not on the next window focus.
+    await experiments.refresh()
   }
 
   // "Remove from Ground" — unregister the project. The folder is left on disk;
@@ -850,6 +859,9 @@ export default function App() {
         onRelocate={relocateProject}
         frameLabel={frameLabel}
         feedbackEnabled={feedbackEnabled}
+        // Owner-only experiment gate: which experimental modules surface as tabs.
+        // All-false for non-owners, so the row is unchanged for everyone else.
+        experiments={experiments.flags}
         onClose={() => setSelectedIds([])}
         onRemove={removeFromCanvas}
         onSaved={(path, d) =>
@@ -984,6 +996,9 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         onSave={saveSettings}
         onReload={load}
+        // Owner-only: reveals the experiment toggles. Non-owners never see them
+        // (eligible:false), so the feature's existence stays hidden.
+        experimentsEligible={experiments.eligible}
         feedbackCanRead={feedbackCanRead}
         onFeedbackSeen={markFeedbackSeen}
         moduleReviewCanReview={moduleReviewCanReview}

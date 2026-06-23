@@ -21,6 +21,32 @@ export const projectPanel = {
     'projectPanel.loading': 'Loading…',
     'projectPanel.loadFailed': "Couldn't load the project — the server is unreachable. Check that the dev server is running, then retry.",
     'projectPanel.retry': 'Retry',
+    // Swarm — owner-only experiment (the in-app swarm orchestration surface,
+    // project_inapp_swarm_port). Never shown unless the experiment is on
+    // (owner + the settings toggle, resolved server-side).
+    'projectPanel.swarm.badge': 'Experimental',
+    'projectPanel.swarm.title': 'Swarm orchestration',
+    'projectPanel.swarm.body': 'Run a team of Claude sessions across your projects from one surface. This is an early experiment, off by default.',
+    // Phase 1 controls (dispatch a Board to-do card to an isolated claude worker).
+    'projectPanel.swarm.todoHeading': 'To do',
+    'projectPanel.swarm.alreadyRunning': 'Running',
+    'projectPanel.swarm.boardMoveFailed': 'Worker started, but moving the card to Doing failed — move it by hand in the Board tab.',
+    'projectPanel.swarm.todoEmpty': 'No to-do cards. Add cards in the Board tab, then dispatch them here.',
+    'projectPanel.swarm.untitled': '(untitled)',
+    'projectPanel.swarm.dispatch': 'Dispatch',
+    'projectPanel.swarm.dispatching': 'Dispatching…',
+    'projectPanel.swarm.workersEmpty': 'No workers running. Dispatch a to-do card to start one — it gets its own isolated worktree and `claude` session.',
+    'projectPanel.swarm.workersFull': 'Worker limit reached (6). Finish or terminate one to dispatch more.',
+    'projectPanel.swarm.statusWorking': 'Working',
+    'projectPanel.swarm.statusWaiting': 'Waiting',
+    'projectPanel.swarm.statusStarting': 'Starting…',
+    'projectPanel.swarm.statusExited': 'Exited',
+    'projectPanel.swarm.terminate': 'Terminate',
+    'projectPanel.swarm.terminating': 'Terminating…',
+    'projectPanel.swarm.retained': 'Worktree kept — it has uncommitted changes.',
+    'projectPanel.swarm.forceRemove': 'Force remove',
+    'projectPanel.swarm.forceFailed': "Couldn't remove the worktree: {reason}. Remove it by hand if needed.",
+    'projectPanel.swarm.dispatchFailed': 'Dispatch failed: {error}',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -286,6 +312,31 @@ export const projectPanel = {
     'projectPanel.loading': '読み込み中…',
     'projectPanel.loadFailed': 'プロジェクトを読み込めませんでした — サーバーに接続できません。dev サーバーが起動しているか確認して、再試行してください。',
     'projectPanel.retry': '再試行',
+    // Swarm — オーナー限定の実験（アプリ内 swarm オーケストレーション面、project_inapp_swarm_port）。
+    // 実験 ON（オーナー＋設定トグル、サーバー解決）時のみ表示。
+    'projectPanel.swarm.badge': '実験的',
+    'projectPanel.swarm.title': 'Swarm オーケストレーション',
+    'projectPanel.swarm.body': '複数プロジェクトにまたがる Claude セッションのチームを 1 つの画面から動かします。これは初期の実験で、既定ではオフです。',
+    // Phase 1 の操作（Board の todo カードを隔離 claude worker に振る）。
+    'projectPanel.swarm.todoHeading': '未着手',
+    'projectPanel.swarm.alreadyRunning': '起動済み',
+    'projectPanel.swarm.boardMoveFailed': 'worker は起動しましたが、カードを Doing に移動できませんでした — Board タブで手動で移動してください。',
+    'projectPanel.swarm.todoEmpty': 'todo カードがありません。Board タブで追加してから、ここで振ってください。',
+    'projectPanel.swarm.untitled': '（無題）',
+    'projectPanel.swarm.dispatch': '振る',
+    'projectPanel.swarm.dispatching': '起動中…',
+    'projectPanel.swarm.workersEmpty': 'worker は動いていません。todo カードを振ると、隔離された worktree と `claude` セッションが割り当てられます。',
+    'projectPanel.swarm.workersFull': 'worker は上限（6体）です。1 体を完了または終了すると追加できます。',
+    'projectPanel.swarm.statusWorking': '稼働中',
+    'projectPanel.swarm.statusWaiting': '待機中',
+    'projectPanel.swarm.statusStarting': '起動中…',
+    'projectPanel.swarm.statusExited': '終了',
+    'projectPanel.swarm.terminate': '終了',
+    'projectPanel.swarm.terminating': '終了中…',
+    'projectPanel.swarm.retained': 'worktree を残しました — 未コミットの変更があります。',
+    'projectPanel.swarm.forceRemove': '強制撤去',
+    'projectPanel.swarm.forceFailed': 'worktree を撤去できませんでした: {reason}。必要なら手動で削除してください。',
+    'projectPanel.swarm.dispatchFailed': '振り分けに失敗しました: {error}',
     // Sidebar resizer
     // Chat header
     // Delete confirm
