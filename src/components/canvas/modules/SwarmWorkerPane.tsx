@@ -6,7 +6,7 @@
 // chrome around it. The worker PTY is spawned by SwarmModule via the B API
 // (POST /api/swarm/worker); this pane only attaches to the returned terminalId.
 
-import { Power, Trash2, AlertTriangle } from 'lucide-react'
+import { Power, Trash2, AlertTriangle, Gauge } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useT } from '@/i18n/I18nContext'
 
@@ -26,26 +26,38 @@ interface Props {
   /** The dispatched card's title — shown in the header tooltip for context. */
   taskTitle: string
   status: WorkerStatus
+  /** Who owns this worker's lifecycle:
+   *  - 'manual' = the user dispatched it from the worker tab; it owns its
+   *    worktree, so the terminate / force-remove controls are wired up.
+   *  - 'engine' = the autonomous orchestrator spawned it (read-only here). The
+   *    engine owns its lifecycle, so we render its live screen but NO terminate
+   *    control — exactly as the manager monitor treats it. Defaults to 'manual'
+   *    so the existing manual tiles are unchanged. */
+  source?: 'manual' | 'engine'
   /** Set when a soft "Terminate" kept the worktree (dirty/locked); shows a
-   *  force-remove affordance. Undefined = the worktree is clean / gone. */
+   *  force-remove affordance. Undefined = the worktree is clean / gone.
+   *  Only meaningful for a manual worker. */
   retainedReason?: string
   /** A terminate / force-remove request is in flight for this worker. */
-  busy: boolean
+  busy?: boolean
   /** The PTY closed — SwarmModule marks the worker 'exited'. */
   onExit: () => void
-  /** Kill the PTY + remove the worktree (soft: keeps a dirty tree). */
-  onTerminate: () => void
-  /** Remove the worktree with --force (the dirty/abandon case). */
-  onForceRemove: () => void
+  /** Kill the PTY + remove the worktree (soft: keeps a dirty tree). Manual only;
+   *  omitted for an engine worker (read-only). */
+  onTerminate?: () => void
+  /** Remove the worktree with --force (the dirty/abandon case). Manual only. */
+  onForceRemove?: () => void
 }
 
 // Status dot colour — the SAME beacon vocabulary as the Ground/Board cards
 // (ProjectCard.tsx, BoardTab.tsx): azure = busy, ochre = waiting for input.
+// starting/exited use ink-faint (not line-strong) so the inert grey dot clears
+// the 3:1 graphic-contrast floor on the paper header (CLAUDE.md contrast rule).
 const DOT: Record<WorkerStatus, string> = {
   working: 'bg-azure',
   waiting: 'bg-ochre',
-  starting: 'bg-line-strong',
-  exited: 'bg-line-strong',
+  starting: 'bg-ink-faint',
+  exited: 'bg-ink-faint',
 }
 
 export const SwarmWorkerPane = ({
@@ -53,13 +65,18 @@ export const SwarmWorkerPane = ({
   branch,
   taskTitle,
   status,
+  source = 'manual',
   retainedReason,
-  busy,
+  busy = false,
   onExit,
   onTerminate,
   onForceRemove,
 }: Props) => {
   const { t } = useT()
+  // Engine-owned workers are read-only here: the autonomous orchestrator owns
+  // their teardown, so terminating from this tile would fight the engine. We show
+  // the live screen + a small "Engine" badge instead of the terminate control.
+  const isEngine = source === 'engine'
   const statusLabel: string = {
     working: t('projectPanel.swarm.statusWorking'),
     waiting: t('projectPanel.swarm.statusWaiting'),
@@ -83,25 +100,38 @@ export const SwarmWorkerPane = ({
         >
           {branch}
         </span>
-        <button
-          type="button"
-          onClick={onTerminate}
-          disabled={busy}
-          title={t('projectPanel.swarm.terminate')}
-          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-        >
-          <Power size={10} strokeWidth={2.25} />
-          {busy ? t('projectPanel.swarm.terminating') : t('projectPanel.swarm.terminate')}
-        </button>
+        {isEngine ? (
+          // Read-only badge: the engine owns this worker's lifecycle. A static
+          // chip (not a button) so it can't be mistaken for a terminate control.
+          <span
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
+            title={t('projectPanel.swarm.engineOwnedHint')}
+          >
+            <Gauge size={10} strokeWidth={2.25} aria-hidden />
+            {t('projectPanel.swarm.engineOwned')}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={onTerminate}
+            disabled={busy}
+            title={t('projectPanel.swarm.terminate')}
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          >
+            <Power size={10} strokeWidth={2.25} />
+            {busy ? t('projectPanel.swarm.terminating') : t('projectPanel.swarm.terminate')}
+          </button>
+        )}
       </div>
 
       {/* Retained-worktree strip: a soft terminate kept a dirty/locked tree so
-          the worker's uncommitted work isn't lost. Offer an explicit force. */}
-      {retainedReason && (
+          the worker's uncommitted work isn't lost. Offer an explicit force.
+          Manual workers only — an engine worker has no terminate path here. */}
+      {!isEngine && retainedReason && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft bg-bg-inset px-2.5 py-1">
           <AlertTriangle size={11} className="shrink-0 text-ochre" aria-hidden />
           <span
-            className="min-w-0 flex-1 truncate text-[10px] text-ink-subtle"
+            className="min-w-0 flex-1 truncate text-[10px] text-ink-muted"
             title={retainedReason}
           >
             {t('projectPanel.swarm.retained')}

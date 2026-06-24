@@ -77,6 +77,11 @@ export const ProjectTaskSchema = z.object({
     })
     .optional()
     .catch(undefined),
+  // Set by the commander engine (Card③) when auto-integration could not land
+  // this review card's branch because a rebase conflicted — a human must merge
+  // it by hand. Cleared on any move out of review. (3点セット: types.ts /
+  // tasks route setColumn clearing / here.)
+  integrationConflict: z.boolean().optional(),
 })
 
 export const ProjectDataSchema = z.object({

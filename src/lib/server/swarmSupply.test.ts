@@ -37,6 +37,13 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.effort).toBe('max')
   })
 
+  it('starts with Remote Control ON, named "supply" (mirrors --remote-control supply)', () => {
+    // swarm-supply.sh runs `… --remote-control supply "/supply"`; the in-app
+    // supply officer must match so it is controllable from claude.ai / mobile
+    // with no manual toggle.
+    expect(base.remoteControl).toBe('supply')
+  })
+
   it('delivers /supply as the positional prompt (claude runs the skill on startup)', () => {
     expect(base.initialPrompt).toBe('/supply')
     expect(SUPPLY_INJECTION).toBe('/supply')

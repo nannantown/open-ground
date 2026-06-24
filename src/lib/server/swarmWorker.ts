@@ -32,6 +32,7 @@ import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { killTerminalsByCwd } from './terminal'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
+import { swarmLaunchDefaults } from './swarmLaunch'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
 
 const execFile = promisify(execFileCb)
@@ -298,6 +299,11 @@ export interface SpawnSwarmWorkerOpts {
  *   - env passthrough — the MANAGER port; a worker's `opts.env` is undefined, so
  *     the SWARM_MANAGER=1 guard stays inert (buildLaunchCommand emits no extra
  *     env), exactly as the shell worker does today.
+ *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
+ *     swarm launch default (swarmLaunch.ts), so a worker runs at full capability
+ *     and is controllable from claude.ai / mobile like the supply officer
+ *     (mirrors swarm-new.sh). effort is CLAUDE_EFFORTS-guarded there, never a
+ *     broken argv; the Remote Control session is named 'worker'.
  *   - initialPrompt — the goal as a positional `/order …` (claude submits it on
  *     startup; a TUI-injected slash command would not). */
 export const workerLaunchOpts = (
@@ -309,6 +315,7 @@ export const workerLaunchOpts = (
   agentSessionId,
   permissionMode: 'bypass',
   appContext: false,
+  ...swarmLaunchDefaults('worker'),
   env: opts.env,
   cols: opts.cols,
   rows: opts.rows,

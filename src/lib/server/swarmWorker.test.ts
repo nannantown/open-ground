@@ -130,6 +130,18 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(base.initialPrompt).toBe('/order ゴール: Add logout')
   })
 
+  it('runs at opus / max (shared swarm launch default — parity with supply)', () => {
+    // The shell worker (swarm-new.sh) runs `--model opus --effort max`; the
+    // in-app worker must match so a dispatched worker isn't silently the CLI
+    // default model. Sourced from swarmLaunch.ts so all 3 roles stay in lockstep.
+    expect(base.model).toBe('opus')
+    expect(base.effort).toBe('max')
+  })
+
+  it('starts with Remote Control ON, named "worker" (controllable from claude.ai/mobile)', () => {
+    expect(base.remoteControl).toBe('worker')
+  })
+
   it('passes NO env for a worker — the SWARM_MANAGER guard stays inert', () => {
     // undefined env → buildLaunchCommand emits no extra env → guard never fires.
     expect(base.env).toBeUndefined()

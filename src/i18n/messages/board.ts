@@ -44,6 +44,9 @@ export const board = {
     'board.card.mergedToDone': '→ Done',
     'board.card.mergedToDoneTitle':
       'Move this card to Done — the branch has landed (nothing moves without this click)',
+    'board.card.integrationConflict': 'Needs manual merge',
+    'board.card.integrationConflictTitle':
+      'Auto-integration hit a rebase conflict on this branch — it was aborted (never force-merged). Integrate it by hand, then move the card.',
     'board.card.untitledParen': '(Untitled)',
     'board.card.duplicate': 'Duplicate card',
     'board.card.duplicateTitle':
@@ -200,6 +203,9 @@ export const board = {
     'board.card.mergedToDone': '→ 完了',
     'board.card.mergedToDoneTitle':
       'このカードを完了列へ移動します — ブランチはマージ済み（クリックするまで動きません）',
+    'board.card.integrationConflict': '要手動統合',
+    'board.card.integrationConflictTitle':
+      '自動統合がこのブランチの rebase で衝突したため中止しました（強制マージはしません）。手動で統合してからカードを移動してください。',
     'board.card.untitledParen': '（無題）',
     'board.card.duplicate': 'カードを複製',
     'board.card.duplicateTitle':

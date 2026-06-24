@@ -5,6 +5,8 @@ import { join } from 'path'
 import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
+import { __resetOrchestratorForTests } from '@/lib/server/swarmOrchestrator'
+import type { SwarmOrchestratorState } from '@/lib/types'
 
 // POST /api/swarm/worker + /worktree/remove against the real Hono app, with
 // OPENGROUND_HOME on a throwaway dir so the registry (the validateProjectPath
@@ -53,6 +55,9 @@ beforeEach(async () => {
   await signInAs(OWNER)
 })
 afterEach(async () => {
+  // Drop any engine + its pending timer chain so a started orchestrator can't
+  // leak a setTimeout into the next test.
+  __resetOrchestratorForTests()
   await clearSession()
   await rm(home, { recursive: true, force: true })
   await rm(scratch, { recursive: true, force: true })
@@ -233,5 +238,138 @@ describe('owner gate — the in-app swarm is owner-only', () => {
     await signInAs(OWNER)
     const res = await app.request('/api/swarm/supply', json({}))
     expect(res.status).toBe(400)
+  })
+
+  it('GET /api/swarm/orchestrator → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/orchestrator')
+    expect(res.status).toBe(403)
+  })
+
+  it('GET /api/swarm/orchestrator → 403 for a signed-in non-owner (tester)', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/orchestrator')
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/start → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/orchestrator/start', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/start → 403 for a tester', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/orchestrator/start', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/stop → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/orchestrator/stop', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/start → owner passes the gate (reaches validation: 400)', async () => {
+    await signInAs(OWNER)
+    const res = await app.request('/api/swarm/orchestrator/start', json({}))
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /api/swarm/orchestrator/automerge → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/automerge → 403 for a tester', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/automerge → owner passes the gate (reaches validation: 400)', async () => {
+    await signInAs(OWNER)
+    const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
+    expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /api/swarm/orchestrator/automerge (auto-integrate toggle — owner)', () => {
+  // setAutoMerge only flips an in-memory flag + returns state — no claude
+  // preflight, no git — so the happy path is fully exercisable here (unlike
+  // /start, which spawns workers and is curl-verified on the real machine).
+  it('403 when the path is not a registered project (the allowlist holds)', async () => {
+    const dir = join(scratch, 'unregistered')
+    await mkdir(dir, { recursive: true })
+    const res = await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: true }))
+    expect(res.status).toBe(403)
+  })
+
+  it('400 when `enabled` is missing or not a boolean', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    expect((await app.request('/api/swarm/orchestrator/automerge', json({ path: dir }))).status).toBe(400)
+    expect(
+      (await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: 'yes' }))).status,
+    ).toBe(400)
+  })
+
+  it('arms (default OFF) then disarms auto-integration, reflected in the state', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    // Default is OFF on a never-armed engine.
+    const initial = (await (await app.request(`/api/swarm/orchestrator?path=${encodeURIComponent(dir)}`)).json()) as SwarmOrchestratorState
+    expect(initial.autoMerge).toBe(false)
+
+    const on = await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: true }))
+    expect(on.status).toBe(200)
+    expect(((await on.json()) as SwarmOrchestratorState).autoMerge).toBe(true)
+
+    const off = await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: false }))
+    expect(((await off.json()) as SwarmOrchestratorState).autoMerge).toBe(false)
+  })
+})
+
+describe('GET /api/swarm/orchestrator (state — owner)', () => {
+  // The happy-path START (spawning workers) needs the `claude` CLI + a live
+  // board listener, so it is curl-verified on the real machine like the worker
+  // spawn. Here we prove the OWNER-reachable validation + the never-started
+  // state shape, which need neither.
+  it('400 when path is missing', async () => {
+    const res = await app.request('/api/swarm/orchestrator')
+    expect(res.status).toBe(400)
+  })
+
+  it('403 when the path is not a registered project (the allowlist holds)', async () => {
+    const dir = join(scratch, 'unregistered')
+    await mkdir(dir, { recursive: true })
+    const res = await app.request(
+      `/api/swarm/orchestrator?path=${encodeURIComponent(dir)}`,
+    )
+    expect(res.status).toBe(403)
+  })
+
+  it('a registered, never-started project reads back as a stopped empty engine', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    const res = await app.request(
+      `/api/swarm/orchestrator?path=${encodeURIComponent(dir)}`,
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as SwarmOrchestratorState
+    expect(body.running).toBe(false)
+    expect(body.workers).toEqual([])
+    expect(body.log).toEqual([])
+    expect(body.maxWorkers).toBeGreaterThan(0)
+  })
+
+  it('stop on a never-started project is a no-op stopped state (idempotent)', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    const res = await app.request('/api/swarm/orchestrator/stop', json({ path: dir }))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as SwarmOrchestratorState
+    expect(body.running).toBe(false)
   })
 })

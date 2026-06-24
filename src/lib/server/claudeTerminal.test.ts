@@ -107,6 +107,36 @@ describe('buildClaudeArgv (launch argv order/quoting contract)', () => {
     const argv = buildClaudeArgv(base, '/tmp/prompt.txt', null)
     expect(argv).not.toContain('--append-system-prompt')
   })
+
+  it('emits --remote-control <name> (quoted) when remoteControl is set', () => {
+    const argv = buildClaudeArgv({ ...base, remoteControl: 'supply' }, '/tmp/prompt.txt')
+    const idx = argv.indexOf('--remote-control')
+    expect(idx).toBeGreaterThanOrEqual(0)
+    expect(argv[idx + 1]).toBe("'supply'")
+  })
+
+  it('omits --remote-control entirely when no name is given (off = CLI default)', () => {
+    expect(buildClaudeArgv(base, '/tmp/prompt.txt')).not.toContain('--remote-control')
+    // an empty string is "off" too (falsy) — never a bare flag that would swallow
+    // the positional prompt as its optional name
+    expect(buildClaudeArgv({ ...base, remoteControl: '' }, '/tmp/prompt.txt')).not.toContain(
+      '--remote-control',
+    )
+  })
+
+  it("keeps the positional prompt LAST so --remote-control's optional name can't swallow it", () => {
+    // claude's `--remote-control [name]` takes an OPTIONAL value; the explicit
+    // name must be the token right after the flag, and the prompt must stay last.
+    const argv = buildClaudeArgv(
+      { ...base, remoteControl: 'worker' },
+      '/tmp/prompt.txt',
+      '/tmp/ctx.md',
+    )
+    const idx = argv.indexOf('--remote-control')
+    expect(argv[idx + 1]).toBe("'worker'") // its name, never the prompt
+    expect(argv[idx + 1]).not.toContain('$(cat') // not the prompt/context file arg
+    expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/prompt.txt')"`) // prompt stays last
+  })
 })
 
 describe('buildClaudeArgv on Windows (platform=win32 — PowerShell framing)', () => {

@@ -47,6 +47,9 @@ export const projectPanel = {
     'projectPanel.swarm.forceRemove': 'Force remove',
     'projectPanel.swarm.forceFailed': "Couldn't remove the worktree: {reason}. Remove it by hand if needed.",
     'projectPanel.swarm.dispatchFailed': 'Dispatch failed: {error}',
+    'projectPanel.swarm.engineOwned': 'Engine',
+    'projectPanel.swarm.engineOwnedHint':
+      'The autonomous engine spawned and owns this worker — manage it from the Manager tab.',
     // Supply officer (補給官) — the conversation desk that turns the user's
     // requests into Board:todo cards. Writes the Board only; never edits code.
     'projectPanel.swarm.workersTab': 'Workers',
@@ -63,6 +66,92 @@ export const projectPanel = {
       'The supply officer files your requests as Board to-do cards — it never edits code or dispatches workers.',
     'projectPanel.swarm.supply.stop': 'Stop',
     'projectPanel.swarm.supply.stopping': 'Stopping…',
+    // Commander (司令官) dashboard — the third Swarm view: the worker-monitor +
+    // integration-control surface. Drives the autonomous orchestration engine
+    // (start/stop · auto-integrate), lets each worker's live screen open inline,
+    // and shows the engine's live log. (Board pipeline tallies live on the Board.)
+    'projectPanel.swarm.manager.tab': 'Manager',
+    'projectPanel.swarm.manager.badge': 'Commander',
+    'projectPanel.swarm.manager.autonomy': 'Autonomy',
+    'projectPanel.swarm.manager.autonomyHint':
+      'Run the engine loop: auto-drain the Board → dispatch → monitor → integrate.',
+    'projectPanel.swarm.manager.autoMerge': 'Auto-integrate',
+    'projectPanel.swarm.manager.autoMergeHint':
+      'Let the engine land review cards on the trunk itself — fast-forward / rebase only, never forced; conflicts are left for you. It does NOT run tests or review the diff first — for verified merges, drive them through the commander conversation (/manage) instead. Off by default.',
+    'projectPanel.swarm.manager.on': 'On',
+    'projectPanel.swarm.manager.off': 'Off',
+    'projectPanel.swarm.manager.engineRunning': 'Engine running',
+    'projectPanel.swarm.manager.engineStopped': 'Engine stopped',
+    'projectPanel.swarm.manager.engineOffline': 'Engine not available yet',
+    'projectPanel.swarm.manager.engineFailed': "Couldn't reach the engine: {error}",
+    'projectPanel.swarm.manager.workersHeading': 'Workers',
+    'projectPanel.swarm.manager.showScreen': 'Show live screen',
+    'projectPanel.swarm.manager.hideScreen': 'Hide live screen',
+    'projectPanel.swarm.manager.stageStarting': 'Starting',
+    'projectPanel.swarm.manager.stageRunning': 'Running',
+    'projectPanel.swarm.manager.stageDone': 'Done',
+    'projectPanel.swarm.manager.noWorkers': 'No workers running.',
+    'projectPanel.swarm.manager.reviewsHeading': 'Review · integration',
+    'projectPanel.swarm.manager.reviewFf': 'Ready',
+    'projectPanel.swarm.manager.reviewRebase': 'Needs rebase',
+    'projectPanel.swarm.manager.reviewConflict': 'Conflict',
+    'projectPanel.swarm.manager.reviewUnknown': 'Checking…',
+    // Why each review card is (not) integrable — the tooltip on its status label.
+    'projectPanel.swarm.manager.reviewFfHint': 'Fast-forwardable — ready to land on the trunk now.',
+    'projectPanel.swarm.manager.reviewRebaseHint': 'Diverged from the trunk — needs a rebase (which may conflict).',
+    'projectPanel.swarm.manager.reviewConflictHint': 'A rebase hit a conflict — needs manual integration.',
+    'projectPanel.swarm.manager.reviewUnknownHint': 'Not judgeable yet (no remote trunk, or still checking).',
+    // Worker source badge: manual (you dispatched it) vs engine (autonomous).
+    'projectPanel.swarm.manager.sourceManual': 'Manual',
+    'projectPanel.swarm.manager.sourceEngine': 'Auto',
+    'projectPanel.swarm.manager.sourceManualHint': 'You dispatched this worker by hand.',
+    'projectPanel.swarm.manager.sourceEngineHint': 'The autonomous engine dispatched this worker.',
+    'projectPanel.swarm.manager.logHeading': 'Engine log',
+    'projectPanel.swarm.manager.logImportant': 'Key',
+    'projectPanel.swarm.manager.logAll': 'All',
+    // Structured log-event kind chips (条件1) — the event TYPE at a glance.
+    'projectPanel.swarm.manager.logKindDispatch': 'Dispatch',
+    'projectPanel.swarm.manager.logKindPromote': 'Review',
+    'projectPanel.swarm.manager.logKindIntegrate': 'Merge',
+    'projectPanel.swarm.manager.logKindConflict': 'Conflict',
+    'projectPanel.swarm.manager.logKindCleanup': 'Cleanup',
+    'projectPanel.swarm.manager.logKindCrash': 'Crash',
+    // Anomalies (条件2) — state inconsistencies the engine detected.
+    'projectPanel.swarm.manager.anomaliesHeading': 'Inconsistencies',
+    'projectPanel.swarm.manager.anomalyOrphanDoing': 'Card stuck in Doing — its worker is gone',
+    'projectPanel.swarm.manager.anomalyWorktreeMissing': "Worker's worktree is missing",
+    'projectPanel.swarm.manager.anomalyWorkerStale': 'Worker silent — possibly stuck',
+    'projectPanel.swarm.manager.anomalyStaleFor': 'no heartbeat for {min} min',
+    'projectPanel.swarm.manager.logOnlyRoutine': 'Only routine bookkeeping so far — switch to All to see it.',
+    'projectPanel.swarm.manager.logEmpty':
+      'No engine events yet. Turn on Autonomy to let the engine drain the Board.',
+    // Commander command bar — issue an order to /manage without focusing the xterm.
+    'projectPanel.swarm.manager.command': 'Command the commander',
+    'projectPanel.swarm.manager.commandPlaceholder':
+      'Tell the commander what to do… (Enter to send, Shift+Enter for a new line)',
+    'projectPanel.swarm.manager.send': 'Send',
+    'projectPanel.swarm.manager.quickStatus': 'Status',
+    'projectPanel.swarm.manager.quickMerge': 'Merge',
+    'projectPanel.swarm.manager.quickClean': 'Clean up',
+    // Commander conversation (/manage) — the human-in-the-loop counterpart to
+    // the autonomous engine: a `claude` you talk to (status / merge / advise),
+    // launched in the primary checkout (no worktree, like supply). It shares the
+    // tab with the engine controls + worker monitor + log.
+    'projectPanel.swarm.manager.engineHeading': 'Engine',
+    'projectPanel.swarm.manager.conversationTitle': 'Talk to the commander',
+    'projectPanel.swarm.manager.conversationEmpty':
+      'Start a `claude` commander running /manage in this project. Ask it for status, to integrate finished branches (fast-forward / rebase only), to clean up, or for advice. It runs in the primary checkout — no worktree — alongside the autonomous engine.',
+    'projectPanel.swarm.manager.launch': 'Start commander',
+    'projectPanel.swarm.manager.launching': 'Starting…',
+    'projectPanel.swarm.manager.launchFailed': "Couldn't start the commander: {error}",
+    'projectPanel.swarm.manager.stop': 'Stop',
+    'projectPanel.swarm.manager.stopping': 'Stopping…',
+    'projectPanel.swarm.manager.stopWorkerHint':
+      'Stop this worker — tear down its worktree and `claude`, and park its card in Blocked.',
+    'projectPanel.swarm.manager.conversationIdentity': 'Commander · /manage',
+    'projectPanel.swarm.manager.conversationHint':
+      'The commander monitors workers and integrates finished branches — talk to it here.',
+    'projectPanel.swarm.manager.backToCommander': 'Back to commander',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -353,6 +442,9 @@ export const projectPanel = {
     'projectPanel.swarm.forceRemove': '強制撤去',
     'projectPanel.swarm.forceFailed': 'worktree を撤去できませんでした: {reason}。必要なら手動で削除してください。',
     'projectPanel.swarm.dispatchFailed': '振り分けに失敗しました: {error}',
+    'projectPanel.swarm.engineOwned': 'エンジン',
+    'projectPanel.swarm.engineOwnedHint':
+      '自律エンジンが起動・管理している worker です — 操作は司令官タブから行ってください。',
     // Supply officer (補給官) — 要望を Board:todo カードに積む対話デスク。
     // Board に書くだけで、コードは編集しない。
     'projectPanel.swarm.workersTab': 'ワーカー',
@@ -369,6 +461,90 @@ export const projectPanel = {
       '補給官は要望を Board の todo カードに積みます（コードの編集や worker への割り当てはしません）。',
     'projectPanel.swarm.supply.stop': '停止',
     'projectPanel.swarm.supply.stopping': '停止中…',
+    // 司令官（commander）ダッシュボード — Swarm の3つ目のビュー。worker 監視＋統合
+    // コントロールの面。自律オーケストレーションエンジン（起動/停止・自動統合）を
+    // 操作し、各 worker のライブ画面をその場で開け、エンジンのライブログを見せる。
+    // （Board のパイプライン件数は Board タブで見る。）
+    'projectPanel.swarm.manager.tab': '司令官',
+    'projectPanel.swarm.manager.badge': '司令官',
+    'projectPanel.swarm.manager.autonomy': '自律',
+    'projectPanel.swarm.manager.autonomyHint':
+      'エンジンのループを回す: Board を自動 drain → 振り分け → 監視 → 統合。',
+    'projectPanel.swarm.manager.autoMerge': '自動統合',
+    'projectPanel.swarm.manager.autoMergeHint':
+      'review のカードをエンジンが本流へ自動で取り込みます（早送り/rebase のみ・強制プッシュはしません）。衝突は手動に残します。テストやレビューは回しません — 検証込みのマージは司令官との対話（/manage）に任せてください。既定はオフ。',
+    'projectPanel.swarm.manager.on': 'オン',
+    'projectPanel.swarm.manager.off': 'オフ',
+    'projectPanel.swarm.manager.engineRunning': 'エンジン稼働中',
+    'projectPanel.swarm.manager.engineStopped': 'エンジン停止中',
+    'projectPanel.swarm.manager.engineOffline': 'エンジンは未配備です',
+    'projectPanel.swarm.manager.engineFailed': 'エンジンに到達できませんでした: {error}',
+    'projectPanel.swarm.manager.workersHeading': 'ワーカー',
+    'projectPanel.swarm.manager.showScreen': 'ライブ画面を表示',
+    'projectPanel.swarm.manager.hideScreen': 'ライブ画面を隠す',
+    'projectPanel.swarm.manager.stageStarting': '起動中',
+    'projectPanel.swarm.manager.stageRunning': '稼働中',
+    'projectPanel.swarm.manager.stageDone': '完了',
+    'projectPanel.swarm.manager.noWorkers': 'worker は動いていません。',
+    'projectPanel.swarm.manager.reviewsHeading': 'review · 統合',
+    'projectPanel.swarm.manager.reviewFf': '統合可',
+    'projectPanel.swarm.manager.reviewRebase': '要 rebase',
+    'projectPanel.swarm.manager.reviewConflict': '要手動統合',
+    'projectPanel.swarm.manager.reviewUnknown': '判定中',
+    // 各 review カードがなぜ統合可（不可）か — ステータスラベルの tooltip。
+    'projectPanel.swarm.manager.reviewFfHint': '早送り可能 — いま本流へ取り込めます。',
+    'projectPanel.swarm.manager.reviewRebaseHint': '本流から分岐 — rebase が必要です（衝突する可能性あり）。',
+    'projectPanel.swarm.manager.reviewConflictHint': 'rebase で衝突 — 手動統合が必要です。',
+    'projectPanel.swarm.manager.reviewUnknownHint': 'まだ判定できません（リモート本流なし／確認中）。',
+    // worker のソースバッジ: 手動（あなたが割り当て）か 自律（エンジンが割り当て）か。
+    'projectPanel.swarm.manager.sourceManual': '手動',
+    'projectPanel.swarm.manager.sourceEngine': '自律',
+    'projectPanel.swarm.manager.sourceManualHint': 'あなたが手動で割り当てた worker です。',
+    'projectPanel.swarm.manager.sourceEngineHint': '自律エンジンが割り当てた worker です。',
+    'projectPanel.swarm.manager.logHeading': 'エンジンログ',
+    'projectPanel.swarm.manager.logImportant': '重要',
+    'projectPanel.swarm.manager.logAll': 'すべて',
+    // 構造化ログイベントの種別チップ（条件1）— イベントの種類が一目で分かる。
+    'projectPanel.swarm.manager.logKindDispatch': '起動',
+    'projectPanel.swarm.manager.logKindPromote': 'review',
+    'projectPanel.swarm.manager.logKindIntegrate': '統合',
+    'projectPanel.swarm.manager.logKindConflict': '衝突',
+    'projectPanel.swarm.manager.logKindCleanup': '掃除',
+    'projectPanel.swarm.manager.logKindCrash': '異常終了',
+    // 不整合（条件2）— エンジンが検出した状態の食い違い。
+    'projectPanel.swarm.manager.anomaliesHeading': '不整合',
+    'projectPanel.swarm.manager.anomalyOrphanDoing': 'doing のまま放置 — 担当 worker が消失',
+    'projectPanel.swarm.manager.anomalyWorktreeMissing': 'worker の worktree が消失',
+    'projectPanel.swarm.manager.anomalyWorkerStale': 'worker が無応答 — 停滞の可能性',
+    'projectPanel.swarm.manager.anomalyStaleFor': '{min}分 心拍なし',
+    'projectPanel.swarm.manager.logOnlyRoutine': 'いまは定常処理のみ — 「すべて」で表示します。',
+    'projectPanel.swarm.manager.logEmpty':
+      'まだエンジンのイベントはありません。自律をオンにすると、エンジンが Board を drain します。',
+    // 司令官への命令バー — xterm にフォーカスせず /manage に指示を出す。
+    'projectPanel.swarm.manager.command': '司令官に指示',
+    'projectPanel.swarm.manager.commandPlaceholder':
+      '司令官への指示を入力…（Enter で送信・Shift+Enter で改行）',
+    'projectPanel.swarm.manager.send': '送信',
+    'projectPanel.swarm.manager.quickStatus': '状況',
+    'projectPanel.swarm.manager.quickMerge': 'マージ',
+    'projectPanel.swarm.manager.quickClean': '掃除',
+    // 司令官との対話（/manage）— 自律エンジンの human-in-the-loop 対。状況/統合/
+    // 相談を頼める対話型 `claude` を primary checkout に起動する（worktree なし・
+    // supply と同型）。エンジン制御＋worker 監視＋ログと同じタブに同居する。
+    'projectPanel.swarm.manager.engineHeading': 'エンジン',
+    'projectPanel.swarm.manager.conversationTitle': '司令官と対話する',
+    'projectPanel.swarm.manager.conversationEmpty':
+      'このプロジェクトで /manage を実行する `claude` 司令官を起動します。状況確認・完了ブランチの統合（早送り/rebase のみ）・掃除・相談を頼めます。primary checkout で動き（worktree なし）、上の自律エンジンと並行して働きます。',
+    'projectPanel.swarm.manager.launch': '司令官を起動',
+    'projectPanel.swarm.manager.launching': '起動中…',
+    'projectPanel.swarm.manager.launchFailed': '司令官を起動できませんでした: {error}',
+    'projectPanel.swarm.manager.stop': '停止',
+    'projectPanel.swarm.manager.stopping': '停止中…',
+    'projectPanel.swarm.manager.stopWorkerHint': 'この worker を停止 — worktree と `claude` を片付け、カードを Blocked に戻します。',
+    'projectPanel.swarm.manager.conversationIdentity': '司令官 · /manage',
+    'projectPanel.swarm.manager.conversationHint':
+      '司令官は worker を監視し、完了ブランチを統合します。ここで対話してください。',
+    'projectPanel.swarm.manager.backToCommander': '司令官に戻る',
     // Sidebar resizer
     // Chat header
     // Delete confirm

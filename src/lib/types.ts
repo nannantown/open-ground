@@ -831,6 +831,182 @@ export interface SpawnSwarmSupplyResponse {
   agentSessionId: string
 }
 
+/** POST /api/swarm/manager — a freshly spawned in-app COMMANDER (司令官)
+ *  CONVERSATION session: the claude PTY id + minted session id. Like the supply
+ *  officer (and unlike a worker) it has NO worktree — it runs in the project's
+ *  PRIMARY checkout cwd, running the /manage skill so the owner can talk to the
+ *  commander (status / merge / advise) interactively. It complements the
+ *  AUTONOMOUS engine (the orchestrator behind /api/swarm/orchestrator): the
+ *  engine is the unattended drain+integrate loop, this is the human-in-the-loop
+ *  conversational counterpart. Stopping it is a plain PTY kill (no worktree). */
+export interface SpawnSwarmManagerResponse {
+  terminalId: string
+  agentSessionId: string
+}
+
+/** The coarse lifecycle stage the COMMANDER engine reports for one of its
+ *  workers (Card②'s monitoring): 'starting' = PTY spawned, claude still booting;
+ *  'running' = actively working (heartbeat/commit seen, or past the boot window);
+ *  'done' = the worker finished — its branch carries integrable commits and it
+ *  signalled completion, so the engine moved its card doing→review. */
+export type OrchestratorWorkerStage = 'starting' | 'running' | 'done'
+
+/** A worker the COMMANDER engine (swarmOrchestrator) dispatched and still counts
+ *  against the concurrency cap — a live `claude` PTY in an isolated `swarm/*`
+ *  worktree, born from a Board:todo card. The engine prunes one from its set
+ *  when the PTY exits (the slot frees). Card② adds continuous MONITORING: each
+ *  pass re-probes the worker (PTY liveness + branch commits + the heartbeat
+ *  completion sign) to advance `stage` and, when it conservatively judges the
+ *  worker done, moves its card doing→review (recording the branch as the
+ *  integration handle the next stage reads). */
+export interface OrchestratorWorker {
+  /** The worker's `claude` PTY id (liveness key — getTerminal). */
+  terminalId: string
+  /** The `swarm/*` branch the worker checked out (recorded on the card too, as
+   *  the durable handle the integration stage merges). */
+  branch: string
+  /** Absolute path of the worker's isolated worktree (under the central
+   *  worktrees dir) — the integration stage tears it down. */
+  worktree: string
+  /** The Board card this worker drains. */
+  taskId: string
+  /** The card title at dispatch time (display-only). */
+  taskTitle: string
+  /** ISO timestamp the engine dispatched it. */
+  startedAt: string
+  /** Coarse lifecycle stage, recomputed every monitor pass — see
+   *  {@link OrchestratorWorkerStage}. The state API surfaces it; the Swarm
+   *  commander pane renders a per-worker dot from it. */
+  stage: OrchestratorWorkerStage
+  /** The worker's self-reported phase from its heartbeat (`swarm-beat.sh`'s
+   *  first arg — e.g. 'audit' / 'implement' / 'verify' / 'blocked'), or absent
+   *  when it has not written one yet. Display-only: the commander pane shows it
+   *  so each worker's CURRENT phase is legible at a glance (finer than `stage`,
+   *  which only coarsens to starting/running/done). Never affects the engine's
+   *  (commit-gated) DONE judgement. */
+  phase?: string
+  /** The worker's one-line heartbeat summary (`swarm-beat.sh`'s task arg) —
+   *  what it says it is doing right now. Display-only; absent until it beats. */
+  note?: string
+  /** ISO timestamp of the worker's latest heartbeat (`updatedAt`), or absent
+   *  when it never beat. Display-only — the pane uses it to show staleness. */
+  heartbeatAt?: string
+}
+
+/** One human-readable line of the commander engine's drain/dispatch journal —
+ *  rendered by the (separate) Swarm UI card so the owner can watch the engine
+ *  reason about the queue. A ring buffer capped server-side. */
+export interface OrchestratorLogLine {
+  /** ISO timestamp the line was emitted. */
+  at: string
+  level: 'info' | 'warn' | 'error'
+  message: string
+  /** Structured event class for the commander dashboard's log filter + per-event
+   *  styling. A PURE display hint — it never changes what the engine does.
+   *   - 'routine'   — per-pass bookkeeping (a slot freeing on a NORMAL exit, a
+   *                   card gone, a column move reconciled); hidden by default so
+   *                   the meaningful events below aren't buried.
+   *   - 'dispatch'  — a worker was launched for a card (or the launch failed:
+   *                   read `level` for success vs failure).
+   *   - 'promote'   — a worker was judged done; its card moved doing→review.
+   *   - 'integrate' — a review branch landed on the trunk (review→done).
+   *   - 'conflict'  — an auto-integration hit a rebase conflict; needs a human.
+   *   - 'cleanup'   — a landed worker's worktree/branch teardown was KEPT (a
+   *                   potential zombie the owner should clear).
+   *   - 'crash'     — a worker's PTY died WITHOUT integrable work (no commits, or
+   *                   it reported a blocker) — its card is left in 'doing'. This
+   *                   is the abnormal counterpart of a 'routine' slot-free.
+   *  Absent ⇒ an uncategorized meaningful event (always shown). The dashboard's
+   *  "Key" filter hides only 'routine'; every other kind is a shown event. */
+  kind?: 'routine' | 'dispatch' | 'promote' | 'integrate' | 'conflict' | 'cleanup' | 'crash'
+}
+
+/** Read-only integration readiness of ONE review-column card whose branch the
+ *  commander engine could land (Card③). Computed each pass WITHOUT mutating git
+ *  so the dashboard can show "統合可" while auto-integrate is OFF (the default).
+ *   - 'ff'       → a clean fast-forward (or already merged) — finalizable now.
+ *   - 'rebase'   → diverged from the trunk; needs a rebase (which MAY conflict).
+ *   - 'conflict' → an actual auto-integration attempt hit a rebase conflict and
+ *                  was aborted; needs manual integration (mirrors the card's
+ *                  integrationConflict stamp).
+ *   - 'unknown'  → not judgeable (no remote trunk, tip missing, git error). */
+export type OrchestratorReviewStatus = 'ff' | 'rebase' | 'conflict' | 'unknown'
+
+export interface OrchestratorReview {
+  /** The Board card sitting in review. */
+  taskId: string
+  /** Its `swarm/*` branch (the integration subject). */
+  branch: string
+  /** Card title at classify time (display-only). */
+  taskTitle: string
+  /** How it relates to the trunk — see {@link OrchestratorReviewStatus}. */
+  status: OrchestratorReviewStatus
+}
+
+/** A STATE INCONSISTENCY the commander engine detected between its own worker
+ *  set, the Board, and the on-disk worktrees — surfaced so the owner notices a
+ *  drift the autonomy loop can't silently self-heal (the残課題 from the QA
+ *  report: "状態が食い違った時に気づけない"). Detection is READ-ONLY (it never
+ *  moves a card or kills a PTY); it only reports. The kinds:
+ *   - 'orphan-doing'    — a card sits in 'doing' with a `swarm/*` branch, yet no
+ *                         counted worker drains it AND its worktree is gone: the
+ *                         worker that owned it vanished, but the card never left
+ *                         'doing' (it will never advance on its own).
+ *   - 'worktree-missing'— a worker the engine still counts has lost its isolated
+ *                         worktree directory (deleted out from under it): its PTY
+ *                         may run but its work tree is gone.
+ *   - 'worker-stale'    — a counted, still-alive worker has not beat its
+ *                         heartbeat for a long time (likely stuck / hung). */
+export type OrchestratorAnomalyKind = 'orphan-doing' | 'worktree-missing' | 'worker-stale'
+
+export interface OrchestratorAnomaly {
+  /** Which inconsistency — see {@link OrchestratorAnomalyKind}. */
+  kind: OrchestratorAnomalyKind
+  /** Stable identity for dedup + the UI React key: the taskId for a card-rooted
+   *  anomaly (orphan-doing), else the branch for a worker-rooted one. */
+  ref: string
+  /** The `swarm/*` branch involved, when known (display-only). */
+  branch?: string
+  /** The card title involved, when known (display-only). */
+  taskTitle?: string
+  /** For 'worker-stale': minutes since the last heartbeat (display-only, so the
+   *  pane can say "no heartbeat for N min" without a second clock). */
+  staleMinutes?: number
+}
+
+/** GET/POST /api/swarm/orchestrator{,/start,/stop,/automerge} — the commander
+ *  engine's state for ONE project: whether the autonomous drain loop is running,
+ *  whether auto-integration is armed, the workers it counts against the cap, the
+ *  review cards it could land, the recent journal, and the concurrency ceiling.
+ *  Owner-only (same gate as the rest of /api/swarm/*). */
+export interface SwarmOrchestratorState {
+  /** True while the autonomous drain+dispatch loop is scheduled. OFF ⇒ the
+   *  engine never dispatches (manual POST /api/swarm/worker is untouched) AND
+   *  never integrates — the global stop. */
+  running: boolean
+  /** True while auto-integration (Card③) is armed: a SEPARATE switch from
+   *  `running`, default OFF. When OFF the engine only CLASSIFIES review cards
+   *  (the `reviews` readiness below) and shows "統合可"; when ON it lands the
+   *  fast-forwardable / cleanly-rebasable ones on the trunk and moves them to
+   *  done. Only ever acts while `running` — turning the engine off stops
+   *  integration too. */
+  autoMerge: boolean
+  /** Workers the engine dispatched and still counts as live (≤ maxWorkers). */
+  workers: OrchestratorWorker[]
+  /** Review-column swarm cards and their integration readiness (read-only,
+   *  recomputed each pass while running). Empty until the engine has run an
+   *  integration pass. */
+  reviews: OrchestratorReview[]
+  /** Recent drain/dispatch/integrate journal, oldest-first (ring buffer). */
+  log: OrchestratorLogLine[]
+  /** State inconsistencies the engine detected this pass (worker set ↔ Board ↔
+   *  worktrees) — empty when everything is coherent. The commander pane renders
+   *  these as warnings so a drift can't go unnoticed. Recomputed each pass. */
+  anomalies: OrchestratorAnomaly[]
+  /** The concurrency ceiling — the engine never has more live workers than this. */
+  maxWorkers: number
+}
+
 /** An image attached to a Board card (B022 — bug screenshots etc). No path is
  *  stored: `id` is the content-addressed file name (`<sha1>.<ext>`) inside the
  *  project's task-asset store (central task-assets/ or, git-shared,
@@ -897,6 +1073,14 @@ export interface ProjectTask {
    *  optional override of the board's defaults; an absent key inherits live
    *  (resolved at 実行 time, not frozen at edit time). Shared data. */
   run?: TaskRunSettings
+  /** Set by the commander engine's auto-integration stage (Card③) when this
+   *  review card's branch could NOT be landed automatically because rebasing it
+   *  onto the trunk hit a conflict — a human must integrate it by hand. The
+   *  engine never auto-resolves a conflict; it stamps this, leaves the card in
+   *  review, and surfaces it on the Board. Cleared whenever the card moves out
+   *  of the review column (a rework / completion invalidates the stamp). Shared
+   *  data. */
+  integrationConflict?: boolean
 }
 
 /** Claude CLI effort levels (`claude --effort <level>`). */

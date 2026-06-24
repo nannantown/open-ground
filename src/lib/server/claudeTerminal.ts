@@ -48,6 +48,16 @@ export interface LaunchClaudeOpts {
   effort?: string
   // Optional display name shown in claude's prompt box / /resume picker.
   name?: string
+  // Remote Control session name. When set (non-empty), the session starts with
+  // claude's Remote Control ENABLED under this name (`--remote-control <name>`),
+  // so it shows up as a controllable session on claude.ai / mobile with NO
+  // manual toggle — exactly what the in-app swarm roles want. ALWAYS pass an
+  // explicit, non-empty name: claude's `--remote-control [name]` takes an
+  // OPTIONAL value, so a BARE flag would consume the following positional prompt
+  // as the name (the same optional/variadic-swallows-the-prompt hazard
+  // --add-dir guards). Empty/undefined = off (CLI default) — ordinary launches
+  // (Board 実行, generateDescription) leave it off; only the swarm sets it.
+  remoteControl?: string
   // Absolute extra directory (or directories — the flag is variadic) to grant
   // the spawned claude read access to via `--add-dir` — the project's CENTRAL
   // data dirs (worktrees, task-assets). Per-project attachments and
@@ -189,7 +199,14 @@ const promptFileArg = (path: string, platform: NodeJS.Platform): string =>
 export const buildClaudeArgv = (
   opts: Pick<
     LaunchClaudeOpts,
-    'addDir' | 'resume' | 'agentSessionId' | 'permissionMode' | 'model' | 'effort' | 'name'
+    | 'addDir'
+    | 'resume'
+    | 'agentSessionId'
+    | 'permissionMode'
+    | 'model'
+    | 'effort'
+    | 'name'
+    | 'remoteControl'
   >,
   promptFilePath: string | null,
   contextFilePath: string | null = null,
@@ -241,6 +258,14 @@ export const buildClaudeArgv = (
   if (opts.model) args.push('--model', q(opts.model))
   if (opts.effort) args.push('--effort', q(opts.effort))
   if (opts.name) args.push('--name', q(opts.name))
+  // Remote Control: start the session controllable from claude.ai / mobile under
+  // an explicit name. claude's `--remote-control [name]` takes an OPTIONAL value,
+  // so the name MUST be explicit + non-empty — a bare flag would consume the
+  // following positional prompt as the name (the same optional/variadic hazard
+  // --add-dir guards in rule 1 above). We only emit it for a non-empty name, and
+  // it sits among the flags (the positional prompt always stays LAST), so the one
+  // token after `--remote-control` is reliably its own name, never the prompt.
+  if (opts.remoteControl) args.push('--remote-control', q(opts.remoteControl))
   // App-context system prompt — read from a file via promptFileArg, same as the
   // positional prompt (an inline multi-line value would blow the canonical line
   // limit / submit early). Placed BEFORE the positional prompt; the flag takes

@@ -53,6 +53,7 @@ import {
 } from '@/lib/persistView'
 import { paneHeaderTitle, paneTooltip } from '@/lib/paneTitle'
 import { descriptionForLang } from '@/lib/descriptionLang'
+import { reconcileExternalData } from '@/lib/projectDataReconcile'
 import {
   TerminalPane,
   type TerminalInfo,
@@ -1355,6 +1356,16 @@ export const ProjectPanel = ({
   const dataRef = useRef<ProjectData | null>(data)
   dataRef.current = data
 
+  // `onSaved` is an INLINE arrow from App.tsx — a fresh identity on every App
+  // render (App re-renders whenever a claude beacon flips, i.e. constantly while
+  // a session works). Reading it through a ref keeps reloadProjectData's identity
+  // STABLE so the 5s poll's setInterval is created once per project and actually
+  // reaches its 5s tick — depending on `onSaved` directly tore the interval down
+  // and recreated it before it could fire, so the live board refresh never ran
+  // (the dual-writer "external move silently reverts" bug, 2026-06-24).
+  const onSavedRef = useRef(onSaved)
+  onSavedRef.current = onSaved
+
   const projectPathRef = useRef<string | null>(null)
   projectPathRef.current = project?.path ?? null
   // Realtime-collab invite dialog (owner side). Gated on collab being enabled —
@@ -1379,26 +1390,33 @@ export const ProjectPanel = ({
       const d = (await res.json()) as ProjectData
       if (projectPathRef.current !== path || loadedDataPathRef.current !== path)
         return null
-      if (dataRef.current && JSON.stringify(dataRef.current) !== lastSavedJson.current)
-        return null
-      // Content unchanged since the last save/load (lastSavedJson is the JSON
-      // of whatever setData last adopted) → DON'T setData: swapping in a fresh
-      // object with identical content would still replace the tasks ARRAY
-      // IDENTITY, which BoardModule's external-update detection reads as a
-      // remote change and answers by dropping the undo/redo stacks — the 5s
-      // poll would wipe ⌘Z history every tick.
-      const body = JSON.stringify(d)
-      if (body === lastSavedJson.current) return d
-      setData(d)
-      lastSavedJson.current = body
+      // Decide adopt / echo / skip-local-edit with the documented dual-writer
+      // policy (src/lib/projectDataReconcile.ts): a pending local edit wins this
+      // round (CAS reconciles it), our own echo is dropped so the poll can't
+      // churn the tasks array identity (which BoardModule reads as a remote
+      // replacement → wiped undo), and a genuine external change is adopted.
+      const decision = reconcileExternalData({
+        current: dataRef.current,
+        lastSavedJson: lastSavedJson.current,
+        fetched: d,
+      })
+      if (decision.kind === 'skip-local-edit') return null
+      if (decision.kind === 'echo') return d
+      setData(decision.data)
+      lastSavedJson.current = decision.json
       // Keep the Ground card's mirror (description / task counts) fresh too.
-      onSaved?.(path, d)
-      return d
+      // Read through the ref so this callback's identity stays stable (see
+      // onSavedRef) — otherwise the poll interval below never fires.
+      onSavedRef.current?.(path, decision.data)
+      return decision.data
     } catch {
       /* keep showing the data we have */
       return null
     }
-  }, [project?.path, onSaved])
+    // onSaved is intentionally read via onSavedRef (stable identity) so the 5s
+    // poll's interval survives App re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.path])
 
   // Reset collab-invite state on project switch so it never leaks across cards.
   useEffect(() => {

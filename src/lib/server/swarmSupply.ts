@@ -33,18 +33,12 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { CLAUDE_EFFORTS, type SpawnSwarmSupplyResponse } from '../types'
+import { swarmLaunchDefaults } from './swarmLaunch'
+import { type SpawnSwarmSupplyResponse } from '../types'
 
 /** The skill the supply session runs, handed to claude as its positional prompt
  *  (claude submits it on startup; a TUI-injected slash command would not). */
 export const SUPPLY_INJECTION = '/supply'
-
-/** Model + effort the supply officer runs at — mirrors swarm-supply.sh's
- *  `--model opus --effort max`. `effort` is guarded against CLAUDE_EFFORTS so a
- *  rename here can never emit a broken `--effort` argv (the same discipline
- *  launchOptsFromPrefs applies); 'max' is a member today. */
-const SUPPLY_MODEL = 'opus'
-const SUPPLY_EFFORT = 'max'
 
 export interface SpawnSwarmSupplyOpts {
   /** The registered project to feed — the supply PTY's cwd (its primary
@@ -66,7 +60,10 @@ export interface SpawnSwarmSupplyOpts {
  *   - appContext:true — supply's whole job is writing Board cards, so the
  *     app-context card (board API + "track on the Board, not an internal todo")
  *     is exactly on-mission (the worker turns it off for leanness; supply keeps it).
- *   - model/effort — opus/max, mirroring the shell supply officer.
+ *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
+ *     swarm launch default (swarmLaunch.ts), mirroring the shell supply officer's
+ *     `--model opus --effort max … --remote-control supply`. effort is
+ *     CLAUDE_EFFORTS-guarded there; the Remote Control session is named 'supply'.
  *   - initialPrompt — `/supply` positional (claude runs the skill on startup). */
 export const supplyLaunchOpts = (
   cwd: string,
@@ -77,10 +74,7 @@ export const supplyLaunchOpts = (
   agentSessionId,
   permissionMode: 'bypass',
   appContext: true,
-  model: SUPPLY_MODEL,
-  // Only a value the CLI actually accepts passes through (legacy/hand-edited
-  // junk would degrade to "CLI default", never a broken argv).
-  effort: CLAUDE_EFFORTS.includes(SUPPLY_EFFORT) ? SUPPLY_EFFORT : undefined,
+  ...swarmLaunchDefaults('supply'),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,

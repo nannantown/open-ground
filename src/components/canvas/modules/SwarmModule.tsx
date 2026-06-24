@@ -22,7 +22,7 @@
 // `claude -p` / the SDK. This module never spawns claude itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Network, Send, Inbox, Boxes } from 'lucide-react'
+import { Network, Send, Inbox, Boxes, Gauge } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -34,11 +34,14 @@ import type {
   ProjectMeta,
   ProjectTask,
   RemoveSwarmWorktreeResponse,
+  SpawnSwarmManagerResponse,
   SpawnSwarmSupplyResponse,
   SpawnSwarmWorkerResponse,
 } from '@/lib/types'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
+import { SwarmManagerPane, type ManagerWorker, type ManagerWorkerStage } from './SwarmManagerPane'
+import { useSwarmEngine, mergeSwarmWorkers } from './useSwarmEngine'
 
 // A dispatched worker, as remembered client-side. The PTY (terminalId) lives
 // server-side and survives this tab unmounting; we persist the metadata that
@@ -54,10 +57,25 @@ interface SwarmWorker {
   startedAt: string
 }
 
-// Mirrors the Terminal tab's pane sizing: full width for one, halves/thirds/
-// quarters up to four, then a min width + horizontal scroll beyond that.
+// MAX_WORKERS caps the MANUAL spawn count (the dispatch button disables at it).
+// The rendered grid is NOT capped at it: manual + engine workers together can
+// exceed it, and every worker must still show (the bug this whole change fixes).
 const MAX_WORKERS = 6
-const paneWidthPct = (count: number) => 100 / Math.min(Math.max(count, 1), 4)
+
+// Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
+// to fill the area when there are few (1 worker → full width) but never shrinks
+// below MIN_TILE_WIDTH, so the embedded terminal always stays readable; once the
+// tiles together exceed the area width the row scrolls horizontally so EVERY
+// worker — including the engine's, past the manual cap — stays reachable.
+// (Replaces the old N-column grid, which squished every tile thinner as the
+// count grew and could clip a pane off-screen with no way to scroll to it.)
+const MIN_TILE_WIDTH = 360
+// Vertical counterpart of MIN_TILE_WIDTH: a tile never shrinks below this height
+// either, so a short viewport scrolls the row VERTICALLY (overflow-y-auto)
+// instead of crushing the terminal to a couple of rows. 220 matches the old
+// grid's per-row minimum (minmax(220px, 1fr)), so this restores the exact
+// short-window escape hatch the grid had — symmetric with the horizontal one.
+const MIN_TILE_HEIGHT = 220
 
 // ── localStorage worker registry (keyed by the stable project UUID) ──────────
 const workersKey = (projectId: string) => `openground.swarm.workers.${projectId}`
@@ -146,10 +164,60 @@ const saveSupply = (projectId: string, supply: SwarmSupply | null) => {
   }
 }
 
-// The two halves of the main area: the supply conversation desk vs the worker
-// tiles. The todo rail (the queue supply feeds and dispatch drains) stays
-// visible alongside both, so the supply→todo→worker pipeline is never hidden.
-type MainView = 'supply' | 'workers'
+// The single commander (司令官) CONVERSATION session, remembered client-side —
+// the exact same shape + lifecycle as the supply session (no worktree; it runs
+// in the primary checkout running /manage). The PTY (terminalId) lives
+// server-side and survives this tab unmounting; we persist the metadata so a
+// tab switch / reload reattaches the same /manage session. It is SEPARATE from
+// the autonomous orchestrator engine (which has no PTY of its own) — this is the
+// conversational commander the owner talks to.
+interface SwarmManager {
+  terminalId: string
+  agentSessionId: string
+  startedAt: string
+}
+
+const managerKey = (projectId: string) => `openground.swarm.manager.${projectId}`
+
+/** Load + SANITISE the persisted commander session (localStorage is untrusted —
+ *  a user/extension can forge any JSON, so coerce every field; a bad shape →
+ *  null rather than crashing the render). Mirrors loadSupply. */
+const loadManager = (projectId: string): SwarmManager | null => {
+  try {
+    const raw = localStorage.getItem(managerKey(projectId))
+    if (!raw) return null
+    const o: unknown = JSON.parse(raw)
+    if (!o || typeof o !== 'object') return null
+    const r = o as Record<string, unknown>
+    if (typeof r.terminalId !== 'string') return null
+    return {
+      terminalId: String(r.terminalId),
+      agentSessionId: typeof r.agentSessionId === 'string' ? r.agentSessionId : '',
+      startedAt: typeof r.startedAt === 'string' ? r.startedAt : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+const saveManager = (projectId: string, manager: SwarmManager | null) => {
+  try {
+    if (manager) localStorage.setItem(managerKey(projectId), JSON.stringify(manager))
+    else localStorage.removeItem(managerKey(projectId))
+  } catch {
+    /* quota / disabled storage — the in-memory state is still authoritative */
+  }
+}
+
+// The three faces of the main area: the supply conversation desk, the commander
+// (司令官) dashboard that drives the autonomous engine, and the worker tiles. The
+// todo rail (the queue supply feeds and dispatch drains) stays visible alongside
+// all three, so the supply→todo→worker pipeline is never hidden.
+type MainView = 'supply' | 'manager' | 'workers'
+
+// Collapse a worker's fine-grained status into the commander's three stages.
+const managerStageOf = (s: WorkerStatus): ManagerWorkerStage =>
+  s === 'starting' ? 'starting' : s === 'exited' ? 'done' : 'running'
 
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
@@ -176,6 +244,28 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [mainView, setMainView] = useState<MainView>('supply')
   const [supplyBusy, setSupplyBusy] = useState(false)
 
+  // The single commander (司令官) CONVERSATION session + its in-flight flag,
+  // owned here exactly like the supply session and passed down to
+  // SwarmManagerPane (which only renders it). managerBusy = a launch/stop
+  // round-trip is in flight.
+  const [manager, setManager] = useState<SwarmManager | null>(() => loadManager(project.id))
+  const [managerBusy, setManagerBusy] = useState(false)
+
+  // The autonomous engine's state — polled ONCE here (the shared hook) so BOTH
+  // the worker tab and the manager dashboard read the same snapshot. This is the
+  // single-source fix: the worker tab used to render only the manual localStorage
+  // registry and so showed an empty state while the engine had live workers. Now
+  // `engine.workers` is merged into the unified list below, feeding both views.
+  const {
+    engine,
+    available: engineAvailable,
+    busy: engineBusy,
+    error: engineError,
+    toggleAutonomy,
+    toggleAutoMerge,
+    stopWorker: stopEngineWorker,
+  } = useSwarmEngine(project.path)
+
   // PTY ids ever seen alive by the active poll. If an id was seen and then drops
   // out of the poll, the PTY died — used by statusOf so a missed SSE 'exit'
   // doesn't leave a dead worker stuck on 'starting'. A ref (not state) because it
@@ -189,6 +279,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   useEffect(() => {
     setWorkers(loadWorkers(project.id))
     setSupply(loadSupply(project.id))
+    setManager(loadManager(project.id))
+    setManagerBusy(false)
     setMainView('supply')
     setSupplyBusy(false)
     setExitedIds(new Set())
@@ -205,7 +297,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       const res = await api.api.project.$get({ query: { path: project.path } })
       if (!res.ok) return
       const data = (await res.json()) as ProjectData
-      const next = (data.tasks ?? [])
+      const all = data.tasks ?? []
+      const next = all
         .filter((tk) => columnOf(tk) === 'todo')
         .sort((a, b) => (a.boardOrder ?? 0) - (b.boardOrder ?? 0))
       setTodos(next)
@@ -278,7 +371,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     },
     [exitedIds, statusByPty],
   )
-  const statusOf = useCallback((w: SwarmWorker): WorkerStatus => statusOfPty(w.terminalId), [statusOfPty])
 
   const handleExit = useCallback((terminalId: string) => {
     setExitedIds((prev) => (prev.has(terminalId) ? prev : new Set(prev).add(terminalId)))
@@ -527,14 +619,110 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     }
   }, [supply, supplyBusy, project.id])
 
-  // Cards that already have a live worker (their dispatch failed to move them
-  // out of todo). Disable re-dispatch for these so one card never gets twins.
+  // Launch the single commander (司令官) conversation: POST /api/swarm/manager
+  // spawns a claude PTY in the project's PRIMARY checkout (NO worktree) running
+  // /manage. The exact mirror of launchSupply — the commander IS a conversation
+  // desk the owner talks to (status / merge / advise). Raw fetch + typed cast,
+  // same as the worker/supply spawns (the /api/swarm/* routes aren't on the
+  // typed RPC tree).
+  const launchManager = useCallback(async () => {
+    if (manager || managerBusy) return
+    setManagerBusy(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/swarm/manager', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body?.error || `HTTP ${res.status}`)
+      }
+      const spawn = (await res.json()) as SpawnSwarmManagerResponse
+      const next: SwarmManager = {
+        terminalId: spawn.terminalId,
+        agentSessionId: spawn.agentSessionId,
+        startedAt: new Date().toISOString(),
+      }
+      setManager(next)
+      saveManager(project.id, next)
+    } catch (e) {
+      setError(
+        t('projectPanel.swarm.manager.launchFailed', {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      )
+    } finally {
+      setManagerBusy(false)
+    }
+  }, [manager, managerBusy, project.path, project.id, t])
+
+  // Stop the commander conversation: kill the PTY. There is NO worktree to tear
+  // down (it runs in the primary checkout), so — like stopSupply — this is a
+  // plain terminal kill; the session drops back to the launch CTA, and we clear
+  // its id from the exited/seen bookkeeping so a relaunch starts clean.
+  const stopManager = useCallback(async () => {
+    if (!manager || managerBusy) return
+    const term = manager.terminalId
+    setManagerBusy(true)
+    setError(null)
+    try {
+      await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
+    } finally {
+      setManager(null)
+      saveManager(project.id, null)
+      setExitedIds((prev) => {
+        if (!prev.has(term)) return prev
+        const s = new Set(prev)
+        s.delete(term)
+        return s
+      })
+      seenRef.current.delete(term)
+      setManagerBusy(false)
+    }
+  }, [manager, managerBusy, project.id])
+
+  // ── The SINGLE worker source both tabs render ────────────────────────────
+  // Fold the manual registry and the engine's own workers into ONE deduped list
+  // (PTY id; manual wins). The worker TAB maps this for its tiles and the manager
+  // DASHBOARD gets the same set projected to its row shape — so the two views can
+  // never disagree and the worker tab is never empty while the engine has workers.
+  const allWorkers = mergeSwarmWorkers(workers, engine.workers)
+
+  // Lookup back to the full manual SwarmWorker (worktree + taskId) for the tile's
+  // terminate path — engine workers have no entry here (read-only tiles).
+  const manualByPty = new Map(workers.map((w) => [w.terminalId, w]))
+
+  // Cards that already have a live worker (their dispatch failed to move them out
+  // of todo, OR the engine dispatched them). Disable re-dispatch for these so one
+  // card never gets twins — covers both manual and engine workers via the union.
   const liveTaskIds = new Set(
-    workers.map((w) => w.taskId).filter((id): id is string => !!id),
+    allWorkers.map((w) => w.taskId).filter((id): id is string => !!id),
   )
 
+  // The unified list projected to the commander dashboard's row shape. A manual
+  // worker's stage comes from the SAME live PTY poll the worker tiles use; an
+  // engine worker uses the stage the engine reported (folded to 'running' when an
+  // older engine omits it). Reusing one source keeps the two views in lockstep.
+  const managerWorkers: ManagerWorker[] = allWorkers.map((w) => ({
+    terminalId: w.terminalId,
+    taskTitle: w.taskTitle,
+    branch: w.branch,
+    source: w.source,
+    stage:
+      w.source === 'manual'
+        ? managerStageOf(statusOfPty(w.terminalId))
+        : (w.engineStage ?? 'running'),
+    // Heartbeat passthrough — engine workers only (a manual worker has no
+    // heartbeat the engine reads). Display-only, so each worker's phase + one-
+    // liner are legible on the monitor row (条件3).
+    ...(w.phase ? { phase: w.phase } : {}),
+    ...(w.note ? { note: w.note } : {}),
+  }))
+
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="flex min-h-0 min-w-0 flex-1">
       {/* ── To-do rail: this project's todo cards, each dispatchable ───────── */}
       <aside className="flex w-[260px] shrink-0 flex-col border-r border-line bg-bg">
         <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-3 py-2">
@@ -599,7 +787,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           bg (#1a1a1a) is scoped to the pane branches only, where
           ClaudeTerminalPane's own light-on-dark xterm lives — putting it here
           would bury the empty states' dark ink on a dark ground. */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      {/* min-w-0 is load-bearing: without it this flex item's min-width:auto
+          would grow to the worker grid's intrinsic width and push the whole
+          tile area off-screen — the bug this layout fixes. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Toggle: supply (補給官) ⇆ workers. Underline tabs, the same vocabulary
             as the project tab row, on a PAPER strip (bg-bg) regardless of the
             content below so the ink tokens always have contrast. The todo rail
@@ -627,6 +818,21 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           <button
             type="button"
             role="tab"
+            aria-selected={mainView === 'manager'}
+            onClick={() => setMainView('manager')}
+            className={[
+              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+              mainView === 'manager'
+                ? 'border-accent text-accent'
+                : 'border-transparent text-ink-muted hover:text-accent',
+            ].join(' ')}
+          >
+            <Gauge size={12} strokeWidth={2} />
+            {t('projectPanel.swarm.manager.tab')}
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={mainView === 'workers'}
             onClick={() => setMainView('workers')}
             className={[
@@ -638,9 +844,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           >
             <Boxes size={12} strokeWidth={2} />
             {t('projectPanel.swarm.workersTab')}
-            {workers.length > 0 && (
+            {allWorkers.length > 0 && (
               <span className="rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint">
-                {workers.length}
+                {allWorkers.length}
               </span>
             )}
           </button>
@@ -686,7 +892,33 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               </div>
             </div>
           )
-        ) : workers.length === 0 ? (
+        ) : mainView === 'manager' ? (
+          // Commander (司令官) dashboard: integration controls + worker monitor
+          // (live screens) + engine log. Its worker set is the SAME unified list
+          // the worker tab renders (managerWorkers, derived from allWorkers), and
+          // its engine state comes from the shared useSwarmEngine hook above — no
+          // own fetch. The Board pipeline tallies live on the Board tab.
+          <div className="min-h-0 flex-1">
+            <SwarmManagerPane
+              projectPath={project.path}
+              workers={managerWorkers}
+              session={
+                manager ? { terminalId: manager.terminalId, status: statusOfPty(manager.terminalId) } : null
+              }
+              sessionBusy={managerBusy}
+              onLaunchSession={() => void launchManager()}
+              onStopSession={() => void stopManager()}
+              onSessionExit={() => manager && handleExit(manager.terminalId)}
+              engine={engine}
+              available={engineAvailable}
+              busy={engineBusy}
+              error={engineError}
+              onToggleAutonomy={toggleAutonomy}
+              onToggleAutoMerge={toggleAutoMerge}
+              onStopWorker={stopEngineWorker}
+            />
+          </div>
+        ) : allWorkers.length === 0 ? (
           <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
             <div className="max-w-sm">
               <div className="mx-auto mb-4 inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
@@ -702,26 +934,47 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             </div>
           </div>
         ) : (
-          <div className="flex min-h-0 flex-1 overflow-x-auto bg-[#1a1a1a]">
-            {workers.map((w) => (
-              <div
-                key={w.terminalId}
-                className="flex min-w-[320px] flex-col border-r border-line last:border-r-0"
-                style={{ width: `${paneWidthPct(workers.length)}%`, flex: '0 0 auto' }}
-              >
-                <SwarmWorkerPane
-                  terminalId={w.terminalId}
-                  branch={w.branch}
-                  taskTitle={w.taskTitle}
-                  status={statusOf(w)}
-                  retainedReason={retained.get(w.terminalId)}
-                  busy={busyIds.has(w.terminalId)}
-                  onExit={() => handleExit(w.terminalId)}
-                  onTerminate={() => void terminate(w)}
-                  onForceRemove={() => void terminate(w, { force: true })}
-                />
-              </div>
-            ))}
+          // Single horizontally-scrolling row of worker tiles (see MIN_TILE_WIDTH).
+          // min-w-0 keeps this flex item from growing to the row's intrinsic
+          // (scrollable) width; overflow-x-auto provides the horizontal scrollbar
+          // that makes every worker reachable once the tiles overflow the area,
+          // and overflow-y-auto provides the vertical one for a short viewport
+          // (see MIN_TILE_HEIGHT) — in a normal-height area neither tile reaches
+          // its minimum so only the horizontal bar ever shows.
+          <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
+            {allWorkers.map((w) => {
+              // Manual workers are terminable (they own their worktree); engine
+              // workers are read-only here (the engine owns their lifecycle).
+              // Look the full manual entry up for the terminate path.
+              const manual = w.source === 'manual' ? manualByPty.get(w.terminalId) : undefined
+              return (
+                <div
+                  key={w.terminalId}
+                  className="h-full overflow-hidden"
+                  // Grow to fill when few, but never shrink below MIN_TILE_WIDTH ×
+                  // MIN_TILE_HEIGHT; the explicit min-width also overrides flex's
+                  // default min-width:auto so a wide xterm can't stretch the tile.
+                  style={{
+                    flex: `1 0 ${MIN_TILE_WIDTH}px`,
+                    minWidth: MIN_TILE_WIDTH,
+                    minHeight: MIN_TILE_HEIGHT,
+                  }}
+                >
+                  <SwarmWorkerPane
+                    terminalId={w.terminalId}
+                    branch={w.branch}
+                    taskTitle={w.taskTitle}
+                    status={statusOfPty(w.terminalId)}
+                    source={w.source}
+                    retainedReason={manual ? retained.get(w.terminalId) : undefined}
+                    busy={manual ? busyIds.has(w.terminalId) : false}
+                    onExit={() => handleExit(w.terminalId)}
+                    onTerminate={manual ? () => void terminate(manual) : undefined}
+                    onForceRemove={manual ? () => void terminate(manual, { force: true }) : undefined}
+                  />
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

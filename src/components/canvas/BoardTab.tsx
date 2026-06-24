@@ -249,12 +249,17 @@ export const withCardMoved = (
       // "reviewed" stamp would vouch for code that's about to change.
       const reviewedBy =
         col === 'todo' || col === 'doing' || col === 'blocked' ? undefined : t.reviewedBy
+      // The commander engine's "needs manual integration" stamp (Card③) is only
+      // meaningful while the card sits in review — any move out of it (rework or
+      // completion) clears it, mirroring reviewedBy.
+      const integrationConflict = col === 'review' ? t.integrationConflict : undefined
       return {
         ...t,
         boardColumn: col,
         boardOrder: orderById.get(id),
         done: col === 'done',
         reviewedBy,
+        integrationConflict,
       }
     }
     if (orderById.has(t.id)) return { ...t, boardOrder: orderById.get(t.id) }
@@ -995,6 +1000,23 @@ export const BoardTab = ({
                                   {t('board.card.markReviewed')}
                                 </button>
                               ) : null
+                            )}
+                            {/* Auto-integration conflict (Card③) — the commander
+                                engine tried to land this review card's branch but
+                                rebasing it onto the trunk conflicted, so it was
+                                left for a human. A red chip surfaces it ON the
+                                board; it clears automatically on any move out of
+                                review (moveCard). */}
+                            {!isEditing && col.key === 'review' && task.integrationConflict && (
+                              <div
+                                className="mt-1 flex min-w-0 items-center gap-1 rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
+                                title={t('board.card.integrationConflictTitle')}
+                              >
+                                <span aria-hidden className="shrink-0">⚠</span>
+                                <span className="min-w-0 truncate">
+                                  {t('board.card.integrationConflict')}
+                                </span>
+                              </div>
                             )}
                             {/* Merged detection (B018/F065) — the branch this
                                 review card carries already landed in the

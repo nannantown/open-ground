@@ -207,6 +207,10 @@ interface TasksBody {
   /** Record the task branch claude created (right after `git worktree add`).
    *  Plain branch-name strings only; anything else is ignored. */
   setBranch?: { id: string; branch: string }[]
+  /** Stamp / clear a card's "auto-integration conflicted — merge by hand" flag.
+   *  The commander engine (Card③) sets it when a rebase conflicts; it is also
+   *  cleared automatically whenever a card leaves the review column. */
+  setIntegrationConflict?: { id: string; value: boolean }[]
 }
 
 // Conservative git branch-name shape: word char first, then word chars, dots,
@@ -790,7 +794,23 @@ export const projectRoutes = new Hono()
   for (const mv of body.setColumn ?? []) {
     if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) continue
     data.tasks = data.tasks.map((t) =>
-      t.id === mv.id ? { ...t, boardColumn: mv.column, done: mv.column === 'done' } : t,
+      t.id === mv.id
+        ? {
+            ...t,
+            boardColumn: mv.column,
+            done: mv.column === 'done',
+            // Leaving review invalidates the commander engine's conflict stamp
+            // (Card③) — a rework or completion supersedes it, mirroring reviewedBy.
+            integrationConflict: mv.column === 'review' ? t.integrationConflict : undefined,
+          }
+        : t,
+    )
+  }
+
+  for (const ic of body.setIntegrationConflict ?? []) {
+    if (!ic || typeof ic.id !== 'string' || typeof ic.value !== 'boolean') continue
+    data.tasks = data.tasks.map((t) =>
+      t.id === ic.id ? { ...t, integrationConflict: ic.value || undefined } : t,
     )
   }
 

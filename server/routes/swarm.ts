@@ -9,9 +9,20 @@
 //                                   (turns the user's requests into Board:todo
 //                                   cards). NO worktree — it only talks + writes
 //                                   the Board, so stopping it is a plain PTY kill.
+// POST /api/swarm/manager         — spawn the COMMANDER (司令官) CONVERSATION:
+//                                   one interactive `claude` PTY in the project's
+//                                   PRIMARY checkout running the /manage skill
+//                                   (the human-in-the-loop counterpart to the
+//                                   autonomous orchestrator engine below). NO
+//                                   worktree — like supply, stopping it is a
+//                                   plain PTY kill.
 // POST /api/swarm/worktree/remove — tear a worker worktree down (kill/complete).
+// GET  /api/swarm/orchestrator    — the COMMANDER engine's state for a project.
+// POST /api/swarm/orchestrator/start — turn the autonomous drain+dispatch ON.
+// POST /api/swarm/orchestrator/stop  — turn it OFF (manual spawn untouched).
 //
-// Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts. OWNER-ONLY:
+// Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts +
+// swarmOrchestrator.ts. OWNER-ONLY:
 // every route gates on the signed-in app-login role (getCustomTabRole,
 // owner-only) at the very top, so a non-owner / signed-out caller gets 403
 // before any body parse, path validation, or git — closing the local curl/SDK
@@ -24,10 +35,19 @@
 
 import { Hono } from 'hono'
 import { getCustomTabRole } from '@/lib/server/roles'
-import { readProjectData, validateProjectPath } from '@/lib/server/projectData'
+import { readProjectData, writeProjectData, validateProjectPath } from '@/lib/server/projectData'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
 import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
+import { spawnSwarmManager } from '@/lib/server/swarmManager'
+import {
+  startOrchestrator,
+  stopOrchestrator,
+  stopOrchestratorWorker,
+  getOrchestratorState,
+  setAutoMerge,
+  ClaudeNotReadyError,
+} from '@/lib/server/swarmOrchestrator'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
 // Board goal is a short observable completion condition; 8 KiB is a generous
@@ -101,6 +121,35 @@ export const swarmRoutes = new Hono()
         cols,
         rows,
       })
+      // CLAIM the card (todo→doing, recording its branch) so the autonomous
+      // orchestrator engine doesn't ALSO grab this still-todo card on its next
+      // pass and spawn a SECOND worker for it (twin-dispatch). Mirrors the engine's
+      // own todo→doing move. Best-effort + only for a card still in `todo`: a
+      // re-dispatch of a doing/review card is left where it is, and a kept CAS
+      // write just leaves the card in todo (no worse than before this guard).
+      if (taskId) {
+        try {
+          const fresh = await readProjectData(path)
+          const cardNow = fresh.tasks.find((t) => t.id === taskId)
+          const columnNow = cardNow?.boardColumn ?? (cardNow?.done ? 'done' : 'todo')
+          if (cardNow && columnNow === 'todo') {
+            await writeProjectData(
+              path,
+              {
+                ...fresh,
+                tasks: fresh.tasks.map((t) =>
+                  t.id === taskId
+                    ? { ...t, boardColumn: 'doing' as const, done: false, branch: res.branch }
+                    : t,
+                ),
+              },
+              { expectUpdatedAt: typeof fresh.updatedAt === 'string' ? fresh.updatedAt : undefined },
+            )
+          }
+        } catch {
+          /* best-effort claim — the worker is already live; a kept write is fine */
+        }
+      }
       return c.json(res)
     } catch (e: any) {
       return c.json({ error: `failed to spawn worker: ${e?.message ?? e}` }, 500)
@@ -144,6 +193,45 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `failed to spawn supply: ${e?.message ?? e}` }, 500)
     }
   })
+  // --- POST /api/swarm/manager — spawn the in-app commander (司令官) ----------
+  // Body: { path, cols?, rows? }. Launches ONE interactive claude PTY in the
+  // project's PRIMARY checkout (NOT a worktree) running the /manage skill — the
+  // conversational commander the owner talks to (status / merge / advise),
+  // complementing the autonomous orchestrator engine. No worktree is created
+  // (the commander operates on the primary checkout), so there is nothing to
+  // tear down — stopping it is a plain terminal kill (DELETE /api/terminal/:id).
+  // Owner-only + validated + preflighted exactly like /supply; bypass +
+  // SWARM_MANAGER=1 (set in swarmManager) so the guard blocks any stray
+  // destructive git in the real checkout.
+  .post('/api/swarm/manager', async (c) => {
+    // OWNER-ONLY gate (see /api/swarm/worker): the commander session is an
+    // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
+    // body parse / path validation.
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+
+    // Preflight BEFORE spawning: a missing/signed-out claude would open its own
+    // OAuth browser and orphan a PTY. Same machine-readable 503 as /supply.
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
+
+    const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
+    const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
+    try {
+      const res = await spawnSwarmManager({ projectPath: path, cols, rows })
+      return c.json(res)
+    } catch (e: any) {
+      return c.json({ error: `failed to spawn manager: ${e?.message ?? e}` }, 500)
+    }
+  })
   // --- POST /api/swarm/worktree/remove — tear a worker worktree down ---------
   // Body: { path, worktree, force? }. `force` (the kill/abandon case) lets a
   // dirty mid-implementation tree be removed; without it a dirty worktree is
@@ -171,4 +259,104 @@ export const swarmRoutes = new Hono()
     } catch (e: any) {
       return c.json({ error: `failed to remove worktree: ${e?.message ?? e}` }, 500)
     }
+  })
+  // --- GET /api/swarm/orchestrator — the commander engine's state ------------
+  // Query: ?path= . Returns SwarmOrchestratorState { running, workers, log,
+  // maxWorkers }. A project whose engine was never started reads back as a
+  // stopped empty state. Owner-only + validated, like the rest of /api/swarm/*.
+  .get('/api/swarm/orchestrator', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    const path = c.req.query('path') ?? ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await getOrchestratorState(path))
+  })
+  // --- POST /api/swarm/orchestrator/start — turn autonomous drain ON ---------
+  // Body: { path }. Starts the per-project drain+dispatch loop (idempotent). The
+  // engine itself spawns workers via the existing B primitive (spawnSwarmWorker —
+  // interactive claude PTY, never `claude -p`/SDK) and moves cards todo→doing
+  // through the project's own Board HTTP API. Preflights claude up front, so a
+  // missing/signed-out CLI is a fast 503 (same body as POST /api/swarm/worker)
+  // rather than a silently idle engine. Owner-only + validated.
+  .post('/api/swarm/orchestrator/start', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    try {
+      return c.json(await startOrchestrator(path))
+    } catch (e: any) {
+      // Same machine-readable 503 the worker route returns when claude is
+      // missing / signed out, so the client shows one sign-in affordance.
+      if (e instanceof ClaudeNotReadyError) return c.json(e.body, 503)
+      return c.json({ error: `failed to start orchestrator: ${e?.message ?? e}` }, 500)
+    }
+  })
+  // --- POST /api/swarm/orchestrator/stop — turn autonomous drain OFF ---------
+  // Body: { path }. Stops dispatching (idempotent). Already-running workers are
+  // LEFT ALONE (the manual control plane owns their teardown); the existing
+  // manual spawn (POST /api/swarm/worker) is unaffected either way. Owner-only.
+  .post('/api/swarm/orchestrator/stop', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await stopOrchestrator(path))
+  })
+  // --- POST /api/swarm/orchestrator/worker/stop — STOP one engine worker -------
+  // Body: { path, terminalId }. The owner halts a SINGLE autonomous worker: the
+  // engine tears down its worktree + kills its `claude` PTY and parks its Board
+  // card in 'blocked' (so the running engine doesn't immediately re-dispatch the
+  // card just halted), freeing the slot. Idempotent — an unknown id (already gone,
+  // or a manual-spawn worker the engine never owned) is a no-op. The engine acts
+  // only on its OWN workers; a manual worker is stopped via the existing
+  // /api/swarm/worktree/remove. Returns the full SwarmOrchestratorState. Owner-only.
+  .post('/api/swarm/orchestrator/worker/stop', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    const terminalId = typeof body?.terminalId === 'string' ? body.terminalId : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!terminalId) return c.json({ error: 'terminalId is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await stopOrchestratorWorker(path, terminalId))
+  })
+  // --- POST /api/swarm/orchestrator/automerge — arm/disarm auto-integration ---
+  // Body: { path, enabled:boolean }. Toggles Card③ (auto-merge completed review
+  // cards onto the trunk). A SEPARATE switch from autonomy (start/stop), default
+  // OFF: when OFF the engine only classifies review cards and shows "統合可"; when
+  // ON it lands the fast-forwardable / cleanly-rebasable ones (FF / rebase only,
+  // never force, never auto-resolving a conflict) and moves them review→done.
+  // Only ever acts while the engine is running — the global stop halts it too.
+  // Owner-only + validated, like the rest of /api/swarm/*.
+  .post('/api/swarm/orchestrator/automerge', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
+    return c.json(await setAutoMerge(path, body.enabled))
   })
