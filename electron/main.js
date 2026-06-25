@@ -906,7 +906,15 @@ function initAutoUpdater() {
       .then((res) => {
         if (res.response === 0) {
           isQuitting = true
-          autoUpdater.quitAndInstall()
+          // Tear the forked server down FIRST, then quitAndInstall. Otherwise the
+          // before-quit handler below preventDefault()s quitAndInstall's quit and
+          // replaces it with a plain app.quit() — the update downloads but is never
+          // applied, so "Restart now" appears to do nothing (observed 2026-06-25).
+          // Settling shutdownServerChild first leaves serverChild === null by the
+          // time quitAndInstall fires, so before-quit no longer intercepts it.
+          shutdownServerChild().finally(() => {
+            autoUpdater.quitAndInstall()
+          })
         }
       })
       .catch(() => {})

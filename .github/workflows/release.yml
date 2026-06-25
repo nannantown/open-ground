@@ -69,6 +69,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Defensive clean. v0.11.7 built the CORRECT 0.11.7 git tree (verified: tag
+      # tree == origin/main, swarm sources present) yet produced a 0.10.1 installer.
+      # The only explanation is a stale dist-web/server/dist/dist-electron (or a
+      # vite/esbuild cache) surviving into the build on the runner. Ephemeral
+      # runners shouldn't carry these across runs, but wiping them before build is
+      # free insurance against exactly this "right source, wrong artifact" class of
+      # bug (observed 2026-06-25). Cross-platform: rimraf via node, no shell rm.
+      - name: Clean stale build artifacts
+        run: node -e "const {rmSync}=require('fs');for(const p of ['dist-web','server/dist','dist-electron','node_modules/.vite','node_modules/.cache'])try{rmSync(p,{recursive:true,force:true})}catch{}"
+
       - name: Build (web + server)
         run: npm run build
         # Bakes the PUBLIC build-time config into the packaged app via
