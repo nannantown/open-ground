@@ -14,6 +14,7 @@ describe('HealthSchema — shape', () => {
       bootId: 'boot-abc123',
       port: 47776,
       startedAt: '2026-05-29T12:00:00.000Z',
+      version: '0.11.8',
     })
     expect(r.success).toBe(true)
   })
@@ -28,6 +29,7 @@ describe('HealthSchema — shape', () => {
       bootId: null,
       port: 47776,
       startedAt: '2026-05-29T12:00:00.000Z',
+      version: '0.11.8',
     })
     expect(r.success).toBe(false)
   })
@@ -41,6 +43,7 @@ describe('HealthSchema — shape', () => {
       bootId: null,
       port: 47776,
       startedAt: '2026-05-29T12:00:00.000Z',
+      version: '0.11.8',
     })
     expect(r.success).toBe(true)
   })
@@ -52,6 +55,7 @@ describe('HealthSchema — shape', () => {
       bootId: null,
       port: 47776,
       startedAt: '2026-05-29T12:00:00.000Z',
+      version: '0.11.8',
     })
     expect(r.success).toBe(false)
   })
@@ -63,6 +67,7 @@ describe('HealthSchema — shape', () => {
       bootId: null,
       port: 47776,
       startedAt: '2026-05-29T12:00:00.000Z',
+      version: '0.11.8',
     })
     expect(r.success).toBe(false)
   })
@@ -74,7 +79,22 @@ describe('HealthSchema — shape', () => {
       bootId: 'boot-1',
       port: null,
       startedAt: '2026-05-29T12:00:00.000Z',
+      version: '0.11.8',
     })
     expect(r.success).toBe(true)
+  })
+
+  it('requires version to be present (the UI always shows a build number)', () => {
+    // version is what lets a user confirm an update took effect; the schema must
+    // reject a payload missing it so a regression can't silently drop the field.
+    const r = HealthSchema.safeParse({
+      app: 'openground',
+      projectDir: '/tmp',
+      bootId: 'boot-1',
+      port: 47776,
+      startedAt: '2026-05-29T12:00:00.000Z',
+      // version omitted
+    })
+    expect(r.success).toBe(false)
   })
 })

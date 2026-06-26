@@ -42,6 +42,12 @@ interface Props {
   busy?: boolean
   /** The PTY closed — SwarmModule marks the worker 'exited'. */
   onExit: () => void
+  /** Relaunch the worker after it exits — REUSES the same worktree (so its
+   *  swarm/* branch + in-progress work is preserved, no orphan tree). Wired to
+   *  the exit overlay's Restart button. Manual workers only; omitted for an
+   *  engine worker (the orchestrator owns its lifecycle → no restart affordance,
+   *  so its pane keeps the plain exit strip). */
+  onRestart?: () => void
   /** Kill the PTY + remove the worktree (soft: keeps a dirty tree). Manual only;
    *  omitted for an engine worker (read-only). */
   onTerminate?: () => void
@@ -69,6 +75,7 @@ export const SwarmWorkerPane = ({
   retainedReason,
   busy = false,
   onExit,
+  onRestart,
   onTerminate,
   onForceRemove,
 }: Props) => {
@@ -152,7 +159,12 @@ export const SwarmWorkerPane = ({
           module flips the worker to 'exited' (our header shows it; the pane's
           own exit strip stays hidden under chrome={false} until then). */}
       <div className="min-h-0 flex-1">
-        <ClaudeTerminalPane terminalId={terminalId} chrome={false} onExit={() => onExit()} />
+        <ClaudeTerminalPane
+          terminalId={terminalId}
+          chrome={false}
+          onExit={() => onExit()}
+          onRestart={onRestart}
+        />
       </div>
     </div>
   )

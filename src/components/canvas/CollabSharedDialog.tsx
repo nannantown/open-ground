@@ -13,25 +13,28 @@ import type {
   CollabProjectListItem,
   CollabProjectsListResponse,
 } from '@/lib/types'
+import { parseJoinDeepLink } from '@/lib/deepLink'
 
 // The MEMBER join dialog. Lists the folder-less projects the signed-in user was
-// invited to (owned:false), and lets them redeem an invite CODE to join a new
-// one. Picking a project opens it in SharedProjectPanel.
+// invited to (owned:false), and lets them redeem an invite CODE or LINK to join a
+// new one. Picking a project opens it in SharedProjectPanel.
 //
-// Reached by an `openground://join?code=…` invite deep link (Track C) → App
-// passes the code as `initialCode`, which we PREFILL into the field. (There is no
-// manual "Shared with me" toolbar entry anymore — projects shared with you also
-// surface as Ground cards, so a member just follows the invite link.) We never
-// auto-join: joining always requires an explicit click — a deep link can come from
-// anywhere, so it must be confirmed, and an inline privacy-consent checkbox gates
-// the first join. On an APPROVAL-mode link the join returns status:'pending' → we
-// show an "awaiting approval" state.
+// Reached TWO ways: (a) the Toolbar "Shared with me" entry (the member's path to
+// the INITIAL join — they paste the invite code or link the owner sent them); and
+// (b) an `openground://join?code=…` invite deep link → App passes the code as
+// `initialCode`, which we PREFILL into the field. (Already-joined projects also
+// surface as Ground cards, so the dialog is mainly for the first join.) The join
+// field accepts EITHER a bare code OR a full invite link (we extract the embedded
+// code). We never auto-join: joining always requires an explicit click — a deep
+// link can come from anywhere, so it must be confirmed, and an inline
+// privacy-consent checkbox gates the first join. On an APPROVAL-mode link the join
+// returns status:'pending' → we show an "awaiting approval" state.
 //
 // This is the reachability surface for the member flow: a member has no local
 // folder, so a shared project can't appear via the registry/Ground scan — it's
 // discovered here instead. Fetch-only (no heavy collab import); only mounted
-// behind the collab-enabled gate (via a deep link), so the default build never
-// shows it.
+// behind the collab-enabled gate (the Toolbar entry + the dialog are both gated on
+// collabEnabled), so the default build never shows it.
 
 export const CollabSharedDialog = ({
   initialCode,
@@ -76,7 +79,12 @@ export const CollabSharedDialog = ({
   // prefilled into the field (never auto-joined), so join() reads the field state.
   const join = useCallback(
     async () => {
-      const c = code.trim()
+      // Accept EITHER a bare code OR a full invite LINK pasted into the field — an
+      // owner may share `openground://join?code=…` (the clickable link) or just the
+      // raw code, and the member shouldn't have to know the difference. parseJoinDeepLink
+      // returns the embedded code for a valid link, else null → fall back to the
+      // trimmed raw input. (Card 6067c41e: コード/リンク入力フィールドから join.)
+      const c = parseJoinDeepLink(code) ?? code.trim()
       // Joining is the member's first WRITE (POST /api/collab/join enrols them) —
       // it must not fire until the data-disclosure box is ticked. The button is
       // disabled pre-consent too; this guard closes the programmatic path. Any
@@ -94,7 +102,19 @@ export const CollabSharedDialog = ({
           .then((r) => (r.ok ? (r.json() as Promise<CollabJoinResponse>) : null))
           .catch(() => null)
         if (!res?.ok || !res.collabProjectId) {
-          setError(t('projectPanel.collabSharedDialogJoinFailed'))
+          // Surface WHY it failed instead of one opaque message (条件4: 無言失敗
+          // しない). The server returns a structured `error` for the two user-facing
+          // cases — an expired/invalid code and a signed-out caller — both 200s
+          // (user-input outcomes, not network errors). Anything else (null = network /
+          // disabled, or an unrecognised error) falls back to the combined hint.
+          const e = res?.error
+          setError(
+            e === 'not signed in'
+              ? t('projectPanel.collabSharedDialogErrorSignedOut')
+              : e && /invalid|expired/i.test(e)
+                ? t('projectPanel.collabSharedDialogErrorInvalid')
+                : t('projectPanel.collabSharedDialogJoinFailed'),
+          )
           return
         }
         setCode('')

@@ -914,11 +914,16 @@ export interface OrchestratorLogLine {
    *   - 'cleanup'   — a landed worker's worktree/branch teardown was KEPT (a
    *                   potential zombie the owner should clear).
    *   - 'crash'     — a worker's PTY died WITHOUT integrable work (no commits, or
-   *                   it reported a blocker) — its card is left in 'doing'. This
-   *                   is the abnormal counterpart of a 'routine' slot-free.
+   *                   it reported a blocker) — recovered (worktree+PTY torn down,
+   *                   card re-homed). The abnormal counterpart of a 'routine'
+   *                   slot-free.
+   *   - 'stall'     — a worker is ALIVE but went silent (no heartbeat AND no PTY
+   *                   output for minutes): the engine nudged it (Enter) to try to
+   *                   un-stick it, or — when nudges failed — reclaimed it like a
+   *                   crash (torn down + re-homed).
    *  Absent ⇒ an uncategorized meaningful event (always shown). The dashboard's
    *  "Key" filter hides only 'routine'; every other kind is a shown event. */
-  kind?: 'routine' | 'dispatch' | 'promote' | 'integrate' | 'conflict' | 'cleanup' | 'crash'
+  kind?: 'routine' | 'dispatch' | 'promote' | 'integrate' | 'conflict' | 'cleanup' | 'crash' | 'stall'
 }
 
 /** Read-only integration readiness of ONE review-column card whose branch the
@@ -956,14 +961,28 @@ export interface OrchestratorReview {
  *                         worktree directory (deleted out from under it): its PTY
  *                         may run but its work tree is gone.
  *   - 'worker-stale'    — a counted, still-alive worker has not beat its
- *                         heartbeat for a long time (likely stuck / hung). */
-export type OrchestratorAnomalyKind = 'orphan-doing' | 'worktree-missing' | 'worker-stale'
+ *                         heartbeat for a long time (likely stuck / hung).
+ *   - 'move-stuck'      — a Board COLUMN MOVE kept failing (the write was rejected
+ *                         / errored) past the retry budget, so the work happened
+ *                         but the card couldn't follow it: a worker finished but
+ *                         its card is stuck in 'doing' (`intent:'review'`), a
+ *                         branch LANDED on the trunk but its card is stuck in
+ *                         'review' (`intent:'done'` — "done なのに review"), or a
+ *                         lost worker's card couldn't be re-homed out of 'doing'
+ *                         (`intent:'recover'` — "dead なのに doing"). The engine
+ *                         keeps retrying (and escalates a recoverable case to
+ *                         'blocked'); this surfaces the ones a human must move. */
+export type OrchestratorAnomalyKind =
+  | 'orphan-doing'
+  | 'worktree-missing'
+  | 'worker-stale'
+  | 'move-stuck'
 
 export interface OrchestratorAnomaly {
   /** Which inconsistency — see {@link OrchestratorAnomalyKind}. */
   kind: OrchestratorAnomalyKind
   /** Stable identity for dedup + the UI React key: the taskId for a card-rooted
-   *  anomaly (orphan-doing), else the branch for a worker-rooted one. */
+   *  anomaly (orphan-doing / move-stuck), else the branch for a worker-rooted one. */
   ref: string
   /** The `swarm/*` branch involved, when known (display-only). */
   branch?: string
@@ -972,6 +991,12 @@ export interface OrchestratorAnomaly {
   /** For 'worker-stale': minutes since the last heartbeat (display-only, so the
    *  pane can say "no heartbeat for N min" without a second clock). */
   staleMinutes?: number
+  /** For 'move-stuck': WHICH column move is stuck, so the pane can say exactly
+   *  what zombied ('review' = stuck in doing, 'done' = stuck in review, 'recover'
+   *  = a lost worker stuck in doing). */
+  intent?: 'review' | 'done' | 'recover'
+  /** For 'move-stuck': how many consecutive writes were kept (display-only). */
+  attempts?: number
 }
 
 /** GET/POST /api/swarm/orchestrator{,/start,/stop,/automerge} — the commander
@@ -1005,6 +1030,68 @@ export interface SwarmOrchestratorState {
   anomalies: OrchestratorAnomaly[]
   /** The concurrency ceiling — the engine never has more live workers than this. */
   maxWorkers: number
+}
+
+// ── swarm janitor (residual-cleanup) ─────────────────────────────────────────
+// The janitor sweeps the leftovers the worktree/PTY-body cleaner does NOT own:
+// (1) stale `swarm/*` branches, (2) orphaned heartbeat files, (3) dead
+// terminal-pool entries. Every verdict is observable (a typed report) and SAFE:
+// unmerged/dirty/active work is KEPT and surfaced, never deleted. Pure git
+// (`branch -d` + non-force `push --delete swarm/*`); no force-delete, no
+// force-push.
+
+/** Why a `swarm/*` branch was KEPT instead of swept. `unmerged` = open vs trunk
+ *  (would lose commits); `unknown` = ancestry unjudgeable (tip missing / no
+ *  trunk / git error — never guessed); `checked-out` = a live worktree still has
+ *  it (an active worker, or a worktree the body-cleaner hasn't removed yet). */
+export type SwarmBranchKeepReason = 'unmerged' | 'unknown' | 'checked-out'
+
+/** A `swarm/*` branch the janitor left in place, with the reason it was spared. */
+export interface SwarmBranchKept {
+  branch: string
+  reason: SwarmBranchKeepReason
+  /** True when `reason: 'checked-out'` and that worktree has uncommitted changes
+   *  (dirty) — the most important class to never touch. */
+  dirty?: boolean
+}
+
+/** Result of the local+remote `swarm/*` branch sweep. */
+export interface SwarmBranchSweepResult {
+  /** Local `swarm/*` branches deleted (merged into the trunk, or empty). */
+  deletedLocal: string[]
+  /** Remote `origin/swarm/*` branches deleted (merged; non-force `--delete`).
+   *  Always empty unless the caller opted into `deleteRemote`. */
+  deletedRemote: string[]
+  /** Branches deliberately NOT deleted, each with its keep reason (the warning
+   *  list). */
+  kept: SwarmBranchKept[]
+}
+
+/** Result of the heartbeat-file sweep under `~/.openground/swarm/<key>/`. */
+export interface SwarmHeartbeatSweepResult {
+  /** Heartbeat files removed — stale AND their worker is provably gone (branch
+   *  or worktree missing), or unparseable + stale. */
+  swept: string[]
+  /** Heartbeat files kept — fresh (a live worker is still writing it) or its
+   *  branch+worktree both still exist. */
+  kept: string[]
+}
+
+/** Result of the in-memory terminal-pool sweep (terminal.ts). */
+export interface TerminalPoolSweepResult {
+  /** PTY session ids dropped from the pool — exited past the linger window
+   *  (a delete-timer lost across a server reload), or their process is gone. */
+  swept: string[]
+  /** Number of live sessions left untouched. */
+  kept: number
+}
+
+/** Combined janitor report — the three residual-cleanup sweeps, each observable
+ *  and independently safe. */
+export interface SwarmJanitorReport {
+  branches: SwarmBranchSweepResult
+  heartbeats: SwarmHeartbeatSweepResult
+  terminals: TerminalPoolSweepResult
 }
 
 /** An image attached to a Board card (B022 — bug screenshots etc). No path is

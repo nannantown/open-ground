@@ -9,6 +9,7 @@ import {
   CircleUser,
   HelpCircle,
   Sparkles,
+  Users,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { useAuth } from '@/lib/auth/AuthContext'
@@ -23,6 +24,12 @@ interface Props {
   /** Opens the global skills panel (the user's own ~/.claude/skills — view +
    *  create). Always available. */
   onOpenSkills: () => void
+  /** Opens the "Shared with me" join dialog (paste an invite code or link →
+   *  join a collaborator's project). Provided ONLY when realtime collab is
+   *  enabled — undefined hides the entry, so the default build shows nothing.
+   *  This is the member's entry to the INITIAL join (already-joined projects also
+   *  surface as Ground cards, but the first join needs this dialog). */
+  onOpenShared?: () => void
   /** Provided only when in-app feedback is configured (env-gated server-side);
    *  surfaces a "Feedback" item inside the account menu. */
   onFeedback?: () => void
@@ -49,6 +56,7 @@ export const Toolbar = ({
   onOpenSettings,
   onOpenManual,
   onOpenSkills,
+  onOpenShared,
   onFeedback,
   onAccount,
   projectCount,
@@ -117,6 +125,14 @@ export const Toolbar = ({
             <>
               <span className="h-4 w-px bg-line-soft" />
               <AccountControl onAccount={onAccount} />
+            </>
+          )}
+          {onOpenShared && (
+            <>
+              <span className="h-4 w-px bg-line-soft" />
+              <IconButton onClick={onOpenShared} title={t('toolbar.sharedWithMe')}>
+                <Users size={13} strokeWidth={1.75} />
+              </IconButton>
             </>
           )}
           <span className="h-4 w-px bg-line-soft" />

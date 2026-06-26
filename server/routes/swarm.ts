@@ -44,6 +44,7 @@ import {
   startOrchestrator,
   stopOrchestrator,
   stopOrchestratorWorker,
+  resolveOrchestratorReview,
   getOrchestratorState,
   setAutoMerge,
   ClaudeNotReadyError,
@@ -56,9 +57,13 @@ const MAX_GOAL = 8 * 1024
 
 export const swarmRoutes = new Hono()
   // --- POST /api/swarm/worker — spawn an in-app worker ----------------------
-  // Body: { path, taskId? , title?, notes?, hint?, cols?, rows? }
-  //  - taskId  → the goal is read from that Board card (title + notes).
-  //  - title   → explicit goal (curl / non-card callers); notes optional.
+  // Body: { path, taskId? , title?, notes?, hint?, worktree?, cols?, rows? }
+  //  - taskId   → the goal is read from that Board card (title + notes).
+  //  - title    → explicit goal (curl / non-card callers); notes optional.
+  //  - worktree → RESTART: relaunch in this EXISTING central worktree (same
+  //               swarm/* branch + in-progress work) instead of forking a new one.
+  //               Validated under the central worktrees dir by spawnSwarmWorker
+  //               (resolveExistingSwarmWorktree), so a crafted path can't escape.
   // One of taskId | title is required.
   .post('/api/swarm/worker', async (c) => {
     // OWNER-ONLY gate (runs first, before body parse / path validation): the
@@ -111,6 +116,10 @@ export const swarmRoutes = new Hono()
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     const hint = typeof body?.hint === 'string' ? body.hint : undefined
+    // RESTART: an existing central worktree to relaunch in place. Validated to sit
+    // under this project's central worktrees dir by spawnSwarmWorker
+    // (resolveExistingSwarmWorktree) — a crafted path throws there, not escapes.
+    const worktree = typeof body?.worktree === 'string' && body.worktree ? body.worktree : undefined
     try {
       // WORKER: no env passed → the SWARM_MANAGER=1 guard stays inert (pass).
       const res = await spawnSwarmWorker({
@@ -118,6 +127,7 @@ export const swarmRoutes = new Hono()
         title,
         notes,
         hint,
+        worktree,
         cols,
         rows,
       })
@@ -359,4 +369,29 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
     return c.json(await setAutoMerge(path, body.enabled))
+  })
+  // --- POST /api/swarm/orchestrator/review/resolve — resolve a stuck review card -
+  // Body: { path, taskId, target:'blocked'|'todo' }. The owner takes a review card
+  // the engine can NOT auto-land (a real rebase conflict, or one that keeps failing
+  // verification) OUT of review so it never sits there forever: 'blocked' parks it
+  // for manual resolution, 'todo' requeues it for a fresh worker. The engine clears
+  // the card's conflict flag + its conflict/verify memos and tears down any
+  // leftover worker. Idempotent — a card not currently in review is a no-op.
+  // Returns the full SwarmOrchestratorState. Owner-only + validated.
+  .post('/api/swarm/orchestrator/review/resolve', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    const taskId = typeof body?.taskId === 'string' ? body.taskId : ''
+    const target = body?.target === 'todo' ? 'todo' : body?.target === 'blocked' ? 'blocked' : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!taskId) return c.json({ error: 'taskId is required' }, 400)
+    if (!target) return c.json({ error: 'target must be blocked or todo' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await resolveOrchestratorReview(path, taskId, target))
   })

@@ -1,8 +1,10 @@
-// SwarmModule — the owner-only "swarm" experiment surface (Phase 1).
+// SwarmModule — the owner-only "swarm" experiment surface.
 //
-// PURPOSE (project_inapp_swarm_port): dispatch this project's Board to-do cards
-// to isolated `claude` workers and watch them run, all from one tab — the in-app
-// version of the tmux supply/manage/worker cockpit, minus the autonomy.
+// PURPOSE (project_inapp_swarm_port): watch this project's isolated `claude`
+// workers run, all from one tab — the in-app version of the tmux
+// supply/manage/worker cockpit. Workers are started by the autonomous engine
+// (the Manager tab's Autonomy switch) or the commander session — the old manual
+// per-card "dispatch" rail was removed; browsing todos lives on the Board tab.
 //
 // SECURITY: this component is mounted ONLY from ProjectPanel's render branch
 // `view === 'swarm' && experiments?.swarm` — itself behind the server-resolved
@@ -12,17 +14,20 @@
 // There is therefore nothing extra to gate INSIDE this file — the trace-zero
 // guarantee is structural (Task A), and this file just consumes it.
 //
-// SCOPE (Phase 1, deliberately NOT autonomous): the user dispatches and
-// terminates by hand. There is no auto-drain, no auto-merge, no scheduled column
-// movement — those are Phase 2. The only column moves here are the two halves of
-// an explicit user action: dispatch (todo→doing) and terminate (doing→todo).
+// SCOPE: this surface LAUNCHES the role PTYs (supply / commander / worker
+// restart) and RENDERS state — it does NOT own autonomy. Auto-drain / auto-merge
+// / scheduled column movement live in the server-side engine, driven from the
+// commander dashboard's Autonomy switch. The only column move owned here is a
+// terminate's doing→todo requeue (its todo→doing counterpart left with the
+// removed manual-dispatch rail).
 //
-// SUBSCRIPTION-ONLY: workers are spawned solely through the B API
-// (POST /api/swarm/worker), which launches an interactive `claude` PTY — never
-// `claude -p` / the SDK. This module never spawns claude itself.
+// SUBSCRIPTION-ONLY: every role PTY is spawned through the /api/swarm/* routes
+// (worker restart → POST /api/swarm/worker, supply / commander → their own
+// routes), each launching an interactive `claude` PTY — never `claude -p` / the
+// SDK. This module never spawns claude itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Network, Send, Inbox, Boxes, Gauge } from 'lucide-react'
+import { Network, Inbox, Boxes, Gauge } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -32,7 +37,6 @@ import type {
   ClaudeBeaconStatus,
   ProjectData,
   ProjectMeta,
-  ProjectTask,
   RemoveSwarmWorktreeResponse,
   SpawnSwarmManagerResponse,
   SpawnSwarmSupplyResponse,
@@ -40,7 +44,7 @@ import type {
 } from '@/lib/types'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
-import { SwarmManagerPane, type ManagerWorker, type ManagerWorkerStage } from './SwarmManagerPane'
+import { SwarmManagerPane } from './SwarmManagerPane'
 import { useSwarmEngine, mergeSwarmWorkers } from './useSwarmEngine'
 
 // A dispatched worker, as remembered client-side. The PTY (terminalId) lives
@@ -57,9 +61,14 @@ interface SwarmWorker {
   startedAt: string
 }
 
-// MAX_WORKERS caps the MANUAL spawn count (the dispatch button disables at it).
-// The rendered grid is NOT capped at it: manual + engine workers together can
-// exceed it, and every worker must still show (the bug this whole change fixes).
+// MAX_WORKERS bounds how many manual worker entries we RESTORE from localStorage
+// — a sanity cap against a forged/oversized registry, NOT a live spawn limit.
+// Manual hand-dispatch was removed (the "to-do rail + dispatch" panel is gone):
+// workers are now started by the autonomous engine (Manager tab's Autonomy
+// switch) or the commander session, so nothing in THIS file adds to the registry
+// except a restart (which swaps an existing dead entry's PTY id, not a new spawn).
+// The rendered grid is NOT capped: restored-manual + engine workers together can
+// exceed it, and every worker must still show.
 const MAX_WORKERS = 6
 
 // Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
@@ -209,37 +218,31 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
   }
 }
 
-// The three faces of the main area: the supply conversation desk, the commander
-// (司令官) dashboard that drives the autonomous engine, and the worker tiles. The
-// todo rail (the queue supply feeds and dispatch drains) stays visible alongside
-// all three, so the supply→todo→worker pipeline is never hidden.
+// The three faces of the main area, switched by the tab row: the supply
+// conversation desk, the commander (司令官) dashboard that drives the autonomous
+// engine, and the worker tiles. (The old todo rail was removed — todos live on
+// the Board tab now, and workers start from the engine or the commander, not a
+// per-card hand dispatch here.)
 type MainView = 'supply' | 'manager' | 'workers'
-
-// Collapse a worker's fine-grained status into the commander's three stages.
-const managerStageOf = (s: WorkerStatus): ManagerWorkerStage =>
-  s === 'starting' ? 'starting' : s === 'exited' ? 'done' : 'running'
 
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
 
   const [workers, setWorkers] = useState<SwarmWorker[]>(() => loadWorkers(project.id))
-  const [todos, setTodos] = useState<ProjectTask[]>([])
   // PTY id → live status from GET /api/terminal/active (working|waiting).
   const [statusByPty, setStatusByPty] = useState<ReadonlyMap<string, ClaudeBeaconStatus>>(new Map())
   // PTY ids whose stream has closed (ClaudeTerminalPane.onExit / dead probe).
   const [exitedIds, setExitedIds] = useState<ReadonlySet<string>>(new Set())
   // PTY id → reason a soft terminate KEPT the worktree (dirty/locked).
   const [retained, setRetained] = useState<ReadonlyMap<string, string>>(new Map())
-  const [dispatchingId, setDispatchingId] = useState<string | null>(null)
   // PTY ids with a terminate/force-remove in flight — a Set (not a single id) so
   // tearing one worker down doesn't block terminating another concurrently.
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
 
-  // The single supply (補給官) session + which half of the main area is shown.
-  // Supply is the conversational entry point, so the main area opens on it; a
-  // successful dispatch flips to the worker tiles so the user sees the worker
-  // they just launched. supplyBusy = a launch/stop round-trip is in flight.
+  // The single supply (補給官) session + which face of the main area is shown.
+  // Supply is the conversational entry point, so the main area opens on it.
+  // supplyBusy = a launch/stop round-trip is in flight.
   const [supply, setSupply] = useState<SwarmSupply | null>(() => loadSupply(project.id))
   const [mainView, setMainView] = useState<MainView>('supply')
   const [supplyBusy, setSupplyBusy] = useState(false)
@@ -263,7 +266,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     error: engineError,
     toggleAutonomy,
     toggleAutoMerge,
-    stopWorker: stopEngineWorker,
   } = useSwarmEngine(project.path)
 
   // PTY ids ever seen alive by the active poll. If an id was seen and then drops
@@ -271,8 +273,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // doesn't leave a dead worker stuck on 'starting'. A ref (not state) because it
   // only refines the render that statusByPty already triggers.
   const seenRef = useRef<Set<string>>(new Set())
-
-  const atLimit = workers.length >= MAX_WORKERS
 
   // Reset per-project view state when the panel is reused for another project
   // (ProjectPanel keeps one SwarmModule instance across project switches).
@@ -286,36 +286,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setExitedIds(new Set())
     setRetained(new Map())
     setError(null)
-    setDispatchingId(null)
     setBusyIds(new Set())
     seenRef.current = new Set()
   }, [project.id])
-
-  // Pull this project's to-do cards (boardColumn 'todo'), ordered by boardOrder.
-  const refreshTodos = useCallback(async () => {
-    try {
-      const res = await api.api.project.$get({ query: { path: project.path } })
-      if (!res.ok) return
-      const data = (await res.json()) as ProjectData
-      const all = data.tasks ?? []
-      const next = all
-        .filter((tk) => columnOf(tk) === 'todo')
-        .sort((a, b) => (a.boardOrder ?? 0) - (b.boardOrder ?? 0))
-      setTodos(next)
-    } catch {
-      /* server restarting / offline — keep the last known list */
-    }
-  }, [project.path])
-
-  // Mount + window focus → refresh todos (another session may have edited the
-  // Board). refreshTodos changes identity with project.path, so a project
-  // switch re-runs this too.
-  useEffect(() => {
-    void refreshTodos()
-    const onFocus = () => void refreshTodos()
-    window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
-  }, [refreshTodos])
 
   // Live worker status — same power etiquette as the Ground beacon (App.tsx)
   // and the Board (BoardModule): poll every 5s, skip while hidden, re-poll on
@@ -376,81 +349,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setExitedIds((prev) => (prev.has(terminalId) ? prev : new Set(prev).add(terminalId)))
   }, [])
 
-  // Dispatch a to-do card → spawn an isolated worker (B API), then move the
-  // card to 'doing' and record its branch on the Board.
-  const dispatch = useCallback(
-    async (card: ProjectTask) => {
-      if (atLimit || dispatchingId) return
-      setDispatchingId(card.id)
-      setError(null)
-      try {
-        // B API (raw fetch + typed cast): spawn the worktree + claude PTY. The
-        // server reads the goal from the card (title + notes) and injects
-        // `/order ゴール: …` — we pass only the taskId.
-        const res = await fetch('/api/swarm/worker', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: project.path, taskId: card.id }),
-        })
-        if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string }
-          throw new Error(body?.error || `HTTP ${res.status}`)
-        }
-        const spawn = (await res.json()) as SpawnSwarmWorkerResponse
-        const worker: SwarmWorker = {
-          terminalId: spawn.terminalId,
-          branch: spawn.branch,
-          worktree: spawn.worktree,
-          taskId: card.id,
-          taskTitle: card.title || '',
-          startedAt: new Date().toISOString(),
-        }
-        setWorkers((prev) => {
-          const next = [...prev, worker]
-          saveWorkers(project.id, next)
-          return next
-        })
-        // Reveal the worker the user just launched (they may have dispatched
-        // from the always-visible todo rail while watching the supply desk).
-        setMainView('workers')
-        // Move the card to 'doing' + record the branch. The worker is already
-        // live, so a failed Board write must NOT lose it — but we DO surface the
-        // failure (the card stays in todo; the live-worker guard below stops a
-        // second dispatch, and the user can move it by hand).
-        let moved = false
-        try {
-          const mv = await api.api.project.tasks.$post({
-            json: {
-              path: project.path,
-              setColumn: [{ id: card.id, column: 'doing' as BoardColumn }],
-              setBranch: [{ id: card.id, branch: spawn.branch }],
-            },
-          })
-          moved = mv.ok
-        } catch {
-          moved = false
-        }
-        if (!moved) setError(t('projectPanel.swarm.boardMoveFailed'))
-        await refreshTodos()
-      } catch (e) {
-        setError(
-          t('projectPanel.swarm.dispatchFailed', {
-            error: e instanceof Error ? e.message : String(e),
-          }),
-        )
-      } finally {
-        setDispatchingId(null)
-      }
-    },
-    [atLimit, dispatchingId, project.path, project.id, refreshTodos, t],
-  )
-
   // Terminate a worker: kill the PTY, then tear the worktree down. A soft
   // attempt keeps a dirty/locked tree (removed:false) so uncommitted work isn't
   // lost — we surface a force option. Force that still refuses drops the worker
   // anyway (the PTY is dead) and reports the reason for manual cleanup. Whenever
-  // the worker is dropped, its card goes back to 'todo' so it can be
-  // re-dispatched here (the manual counterpart of dispatch — NOT autonomous).
+  // the worker is dropped, its card goes back to 'todo' so it's re-queued (the
+  // autonomous engine, or a fresh worker, can pick it up again — hand-dispatch
+  // from here was removed). Manual (restored / restarted) workers only.
   const terminate = useCallback(
     async (worker: SwarmWorker, opts?: { force?: boolean }) => {
       if (busyIds.has(worker.terminalId)) return
@@ -504,7 +409,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         } catch {
           /* board read/write failed — the card stays put, recoverable by hand */
         }
-        await refreshTodos()
       }
 
       try {
@@ -553,7 +457,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         })
       }
     },
-    [busyIds, project.path, project.id, refreshTodos, t],
+    [busyIds, project.path, project.id, t],
   )
 
   // Launch the single supply (補給官) session: POST /api/swarm/supply spawns a
@@ -683,6 +587,173 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     }
   }, [manager, managerBusy, project.id])
 
+  // Drop a now-dead PTY id from the exited/seen bookkeeping so a relaunched
+  // session starts clean and exitedIds never grows unbounded. `keep` is the
+  // freshly installed id — never evict THAT (paranoia: a relaunch that somehow
+  // returned the same id must stay tracked). Shared by the three restart paths.
+  const forgetPty = useCallback((id: string | undefined, keep?: string) => {
+    if (!id || id === keep) return
+    setExitedIds((prev) => {
+      if (!prev.has(id)) return prev
+      const s = new Set(prev)
+      s.delete(id)
+      return s
+    })
+    seenRef.current.delete(id)
+  }, [])
+
+  // ── Restart an EXITED role PTY (the ClaudeTerminalPane exit overlay's button) ─
+  // Re-launch the role-specific PTY and SWAP IN the new terminalId, which re-keys
+  // the embedded ClaudeTerminalPane's effect and clears its exited overlay. The
+  // overlay only ever shows on a DEAD PTY (SSE 'exit' / dead probe) and the busy
+  // guard blocks a second click, so a restart can NEVER double-launch a live
+  // session (条件: 二重起動しない). On failure we surface restartFailed and leave
+  // the old (exited) id in place, so the overlay stays and the user can retry.
+  const restartSupply = useCallback(async () => {
+    if (supplyBusy) return
+    const old = supply?.terminalId
+    setSupplyBusy(true)
+    setError(null)
+    try {
+      // Best-effort kill the old PTY first. The overlay normally shows only on a
+      // dead PTY, but a transient mount-probe failure could surface it for a live
+      // one — killing first guarantees we never orphan a still-running session.
+      if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
+      const res = await fetch('/api/swarm/supply', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body?.error || `HTTP ${res.status}`)
+      }
+      const spawn = (await res.json()) as SpawnSwarmSupplyResponse
+      const next: SwarmSupply = {
+        terminalId: spawn.terminalId,
+        agentSessionId: spawn.agentSessionId,
+        startedAt: new Date().toISOString(),
+      }
+      setSupply(next)
+      saveSupply(project.id, next)
+      forgetPty(old, next.terminalId)
+    } catch (e) {
+      setError(
+        t('projectPanel.swarm.restartFailed', {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      )
+    } finally {
+      setSupplyBusy(false)
+    }
+  }, [supply, supplyBusy, project.path, project.id, forgetPty, t])
+
+  const restartManager = useCallback(async () => {
+    if (managerBusy) return
+    const old = manager?.terminalId
+    setManagerBusy(true)
+    setError(null)
+    try {
+      // Best-effort kill the old PTY first (see restartSupply) so a transient
+      // probe false positive can't orphan a still-running commander.
+      if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
+      const res = await fetch('/api/swarm/manager', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body?.error || `HTTP ${res.status}`)
+      }
+      const spawn = (await res.json()) as SpawnSwarmManagerResponse
+      const next: SwarmManager = {
+        terminalId: spawn.terminalId,
+        agentSessionId: spawn.agentSessionId,
+        startedAt: new Date().toISOString(),
+      }
+      setManager(next)
+      saveManager(project.id, next)
+      forgetPty(old, next.terminalId)
+    } catch (e) {
+      setError(
+        t('projectPanel.swarm.restartFailed', {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      )
+    } finally {
+      setManagerBusy(false)
+    }
+  }, [manager, managerBusy, project.path, project.id, forgetPty, t])
+
+  // A worker restart REUSES the existing worktree (passed back to /api/swarm/worker
+  // as `worktree`), so the same swarm/* branch + its in-progress work is preserved
+  // and NO orphan worktree / twin branch is created — claude just re-boots in place
+  // and re-runs its /order goal. We swap the worker entry's terminalId (branch /
+  // worktree stay) and clear the dead id's bookkeeping. Manual workers only — an
+  // engine worker's lifecycle is the orchestrator's (read-only here).
+  const restartWorker = useCallback(
+    async (worker: SwarmWorker) => {
+      if (busyIds.has(worker.terminalId)) return
+      const old = worker.terminalId
+      setBusyIds((prev) => new Set(prev).add(old))
+      setError(null)
+      try {
+        // Best-effort kill the old PTY first (see restartSupply). The worktree is
+        // reused (passed below), so only the dead/stale PTY is cleared — a transient
+        // probe false positive can't race a second claude in the same tree.
+        if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
+        const res = await fetch('/api/swarm/worker', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            path: project.path,
+            // Goal source: the Board card when we have one (live title/notes),
+            // else the remembered title (a curl-spawned worker without a card).
+            ...(worker.taskId ? { taskId: worker.taskId } : { title: worker.taskTitle }),
+            // Reuse the SAME worktree — relaunch in place, don't fork a new tree.
+            worktree: worker.worktree,
+          }),
+        })
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string }
+          throw new Error(body?.error || `HTTP ${res.status}`)
+        }
+        const spawn = (await res.json()) as SpawnSwarmWorkerResponse
+        setWorkers((prev) => {
+          const next = prev.map((w) =>
+            w.terminalId === old
+              ? {
+                  ...w,
+                  terminalId: spawn.terminalId,
+                  branch: spawn.branch,
+                  worktree: spawn.worktree,
+                  startedAt: new Date().toISOString(),
+                }
+              : w,
+          )
+          saveWorkers(project.id, next)
+          return next
+        })
+        forgetPty(old, spawn.terminalId)
+      } catch (e) {
+        setError(
+          t('projectPanel.swarm.restartFailed', {
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        )
+      } finally {
+        setBusyIds((prev) => {
+          if (!prev.has(old)) return prev
+          const s = new Set(prev)
+          s.delete(old)
+          return s
+        })
+      }
+    },
+    [busyIds, project.path, project.id, forgetPty, t],
+  )
+
   // ── The SINGLE worker source both tabs render ────────────────────────────
   // Fold the manual registry and the engine's own workers into ONE deduped list
   // (PTY id; manual wins). The worker TAB maps this for its tiles and the manager
@@ -694,94 +765,24 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // terminate path — engine workers have no entry here (read-only tiles).
   const manualByPty = new Map(workers.map((w) => [w.terminalId, w]))
 
-  // Cards that already have a live worker (their dispatch failed to move them out
-  // of todo, OR the engine dispatched them). Disable re-dispatch for these so one
-  // card never gets twins — covers both manual and engine workers via the union.
-  const liveTaskIds = new Set(
-    allWorkers.map((w) => w.taskId).filter((id): id is string => !!id),
-  )
-
-  // The unified list projected to the commander dashboard's row shape. A manual
-  // worker's stage comes from the SAME live PTY poll the worker tiles use; an
-  // engine worker uses the stage the engine reported (folded to 'running' when an
-  // older engine omits it). Reusing one source keeps the two views in lockstep.
-  const managerWorkers: ManagerWorker[] = allWorkers.map((w) => ({
-    terminalId: w.terminalId,
-    taskTitle: w.taskTitle,
-    branch: w.branch,
-    source: w.source,
-    stage:
-      w.source === 'manual'
-        ? managerStageOf(statusOfPty(w.terminalId))
-        : (w.engineStage ?? 'running'),
-    // Heartbeat passthrough — engine workers only (a manual worker has no
-    // heartbeat the engine reads). Display-only, so each worker's phase + one-
-    // liner are legible on the monitor row (条件3).
-    ...(w.phase ? { phase: w.phase } : {}),
-    ...(w.note ? { note: w.note } : {}),
-  }))
-
   return (
-    <div className="flex min-h-0 min-w-0 flex-1">
-      {/* ── To-do rail: this project's todo cards, each dispatchable ───────── */}
-      <aside className="flex w-[260px] shrink-0 flex-col border-r border-line bg-bg">
-        <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-3 py-2">
-          <span className="label-cap text-ink-faint">{t('projectPanel.swarm.todoHeading')}</span>
-          <span className="font-mono text-[10px] text-ink-faint">{todos.length}</span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          {todos.length === 0 ? (
-            <p className="px-2 py-6 text-center text-[11px] leading-relaxed text-ink-faint">
-              {t('projectPanel.swarm.todoEmpty')}
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1.5">
-              {todos.map((card) => {
-                const live = liveTaskIds.has(card.id)
-                return (
-                  <li key={card.id} className="rounded-[4px] border border-line bg-bg-card p-2.5">
-                    <p className="mb-2 line-clamp-2 text-[12px] leading-snug text-ink">
-                      {card.title || t('projectPanel.swarm.untitled')}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => void dispatch(card)}
-                      disabled={atLimit || dispatchingId !== null || live}
-                      title={
-                        live
-                          ? t('projectPanel.swarm.alreadyRunning')
-                          : atLimit
-                            ? t('projectPanel.swarm.workersFull')
-                            : undefined
-                      }
-                      className="flex w-full items-center justify-center gap-1.5 rounded-[3px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-                    >
-                      <Send size={11} strokeWidth={2.25} />
-                      {live
-                        ? t('projectPanel.swarm.alreadyRunning')
-                        : dispatchingId === card.id
-                          ? t('projectPanel.swarm.dispatching')
-                          : t('projectPanel.swarm.dispatch')}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
-        {error && (
-          <p className="shrink-0 border-t border-line-soft px-3 py-2 text-[11px] leading-relaxed text-accent">
-            {error}
-          </p>
-        )}
-        {atLimit && (
-          <p className="shrink-0 border-t border-line-soft px-3 py-1.5 text-center text-[10px] text-ink-faint">
-            {t('projectPanel.swarm.workersFull')}
-          </p>
-        )}
-      </aside>
+    // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
+    // panel was removed — browsing todos now lives on the Board tab (一本化), and
+    // workers are started by the autonomous engine (Manager tab's Autonomy switch)
+    // or the commander session, NOT by a per-card hand "dispatch" here (条件1/2/3).
+    // This wrapper is now a vertical stack: a top error banner + the full-height
+    // tab surface below it.
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* A transient action error (worker terminate / restart, supply・commander
+          launch). The old to-do rail hosted this; with the rail gone it banners
+          across the top of the pane so a failure is never lost. */}
+      {error && (
+        <p className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-[11px] leading-relaxed text-accent">
+          {error}
+        </p>
+      )}
 
-      {/* ── Main area: supply desk ⇆ worker tiles, switched by a toggle ────── */}
+      {/* ── Tab surface: supply desk ⇆ commander ⇆ worker tiles ───────────── */}
       {/* No bg on this wrapper: the empty/CTA states below are PAPER surfaces
           (bg-bg) so the paper ink tokens keep 4.5:1+ contrast. The dark terminal
           bg (#1a1a1a) is scoped to the pane branches only, where
@@ -791,10 +792,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           would grow to the worker grid's intrinsic width and push the whole
           tile area off-screen — the bug this layout fixes. */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Toggle: supply (補給官) ⇆ workers. Underline tabs, the same vocabulary
-            as the project tab row, on a PAPER strip (bg-bg) regardless of the
-            content below so the ink tokens always have contrast. The todo rail
-            stays beside both, so the supply→todo→worker pipeline is never hidden. */}
+        {/* Toggle: supply (補給官) ⇆ commander (司令官) ⇆ workers. Underline tabs,
+            the same vocabulary as the project tab row, on a PAPER strip (bg-bg)
+            regardless of the content below so the ink tokens always have contrast. */}
         <div
           role="tablist"
           aria-label={t('projectPanel.swarm.title')}
@@ -862,6 +862,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 busy={supplyBusy}
                 onExit={() => supply && handleExit(supply.terminalId)}
                 onStop={() => void stopSupply()}
+                onRestart={() => void restartSupply()}
               />
             </div>
           ) : (
@@ -893,15 +894,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             </div>
           )
         ) : mainView === 'manager' ? (
-          // Commander (司令官) dashboard: integration controls + worker monitor
-          // (live screens) + engine log. Its worker set is the SAME unified list
-          // the worker tab renders (managerWorkers, derived from allWorkers), and
-          // its engine state comes from the shared useSwarmEngine hook above — no
-          // own fetch. The Board pipeline tallies live on the Board tab.
+          // Commander (司令官) dashboard: the conversation stage + the engine
+          // controls (Autonomy / Auto-integrate). Its engine state comes from the
+          // shared useSwarmEngine hook above — no own fetch. Live worker screens
+          // live on the worker tab; the Board pipeline tallies on the Board tab.
           <div className="min-h-0 flex-1">
             <SwarmManagerPane
-              projectPath={project.path}
-              workers={managerWorkers}
               session={
                 manager ? { terminalId: manager.terminalId, status: statusOfPty(manager.terminalId) } : null
               }
@@ -909,13 +907,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               onLaunchSession={() => void launchManager()}
               onStopSession={() => void stopManager()}
               onSessionExit={() => manager && handleExit(manager.terminalId)}
+              onRestartSession={() => void restartManager()}
               engine={engine}
               available={engineAvailable}
               busy={engineBusy}
               error={engineError}
               onToggleAutonomy={toggleAutonomy}
               onToggleAutoMerge={toggleAutoMerge}
-              onStopWorker={stopEngineWorker}
             />
           </div>
         ) : allWorkers.length === 0 ? (
@@ -969,6 +967,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                     retainedReason={manual ? retained.get(w.terminalId) : undefined}
                     busy={manual ? busyIds.has(w.terminalId) : false}
                     onExit={() => handleExit(w.terminalId)}
+                    onRestart={manual ? () => void restartWorker(manual) : undefined}
                     onTerminate={manual ? () => void terminate(manual) : undefined}
                     onForceRemove={manual ? () => void terminate(manual, { force: true }) : undefined}
                   />

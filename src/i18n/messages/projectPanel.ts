@@ -27,26 +27,27 @@ export const projectPanel = {
     'projectPanel.swarm.badge': 'Experimental',
     'projectPanel.swarm.title': 'Swarm orchestration',
     'projectPanel.swarm.body': 'Run a team of Claude sessions across your projects from one surface. This is an early experiment, off by default.',
-    // Phase 1 controls (dispatch a Board to-do card to an isolated claude worker).
-    'projectPanel.swarm.todoHeading': 'To do',
-    'projectPanel.swarm.alreadyRunning': 'Running',
-    'projectPanel.swarm.boardMoveFailed': 'Worker started, but moving the card to Doing failed — move it by hand in the Board tab.',
-    'projectPanel.swarm.todoEmpty': 'No to-do cards. Add cards in the Board tab, then dispatch them here.',
-    'projectPanel.swarm.untitled': '(untitled)',
-    'projectPanel.swarm.dispatch': 'Dispatch',
-    'projectPanel.swarm.dispatching': 'Dispatching…',
-    'projectPanel.swarm.workersEmpty': 'No workers running. Dispatch a to-do card to start one — it gets its own isolated worktree and `claude` session.',
-    'projectPanel.swarm.workersFull': 'Worker limit reached (6). Finish or terminate one to dispatch more.',
+    // Workers list. Manual hand-dispatch was removed (the to-do rail is gone —
+    // browse todos on the Board tab); workers are started by the autonomous
+    // engine (Manager tab's Autonomy switch) or the commander session.
+    'projectPanel.swarm.workersEmpty': 'No workers running yet. Turn on Autonomy in the Manager tab (or ask the commander) to start one — each gets its own isolated worktree and `claude` session.',
     'projectPanel.swarm.statusWorking': 'Working',
     'projectPanel.swarm.statusWaiting': 'Waiting',
     'projectPanel.swarm.statusStarting': 'Starting…',
     'projectPanel.swarm.statusExited': 'Exited',
+    // Exit overlay (ClaudeTerminalPane) — a dead PTY shows "session ended ·
+    // Restart" instead of a black screen + raw error. Shared by all three swarm
+    // roles (supply / commander / worker); the role decides which API relaunches.
+    'projectPanel.swarm.sessionEnded': 'Session ended',
+    'projectPanel.swarm.sessionExitCode': 'exit code {code}',
+    'projectPanel.swarm.restart': 'Restart',
+    'projectPanel.swarm.restarting': 'Restarting…',
+    'projectPanel.swarm.restartFailed': "Couldn't restart the session: {error}",
     'projectPanel.swarm.terminate': 'Terminate',
     'projectPanel.swarm.terminating': 'Terminating…',
     'projectPanel.swarm.retained': 'Worktree kept — it has uncommitted changes.',
     'projectPanel.swarm.forceRemove': 'Force remove',
     'projectPanel.swarm.forceFailed': "Couldn't remove the worktree: {reason}. Remove it by hand if needed.",
-    'projectPanel.swarm.dispatchFailed': 'Dispatch failed: {error}',
     'projectPanel.swarm.engineOwned': 'Engine',
     'projectPanel.swarm.engineOwnedHint':
       'The autonomous engine spawned and owns this worker — manage it from the Manager tab.',
@@ -122,6 +123,21 @@ export const projectPanel = {
     'projectPanel.swarm.manager.anomalyWorktreeMissing': "Worker's worktree is missing",
     'projectPanel.swarm.manager.anomalyWorkerStale': 'Worker silent — possibly stuck',
     'projectPanel.swarm.manager.anomalyStaleFor': 'no heartbeat for {min} min',
+    // Move-stuck anomaly (anti-zombie): a Board column move kept failing past the
+    // retry budget, so the card couldn't follow its work. The intent names the
+    // exact zombie on the detail line.
+    'projectPanel.swarm.manager.anomalyMoveStuck': "Card can't follow its work — its board move keeps failing",
+    'projectPanel.swarm.manager.moveStuckReview': 'worker finished, stuck in Doing',
+    'projectPanel.swarm.manager.moveStuckDone': 'landed on the trunk, stuck in Review',
+    'projectPanel.swarm.manager.moveStuckRecover': 'lost worker, stuck in Doing',
+    // Review resolution — take a stuck (conflict / failing-verify) card out of review.
+    'projectPanel.swarm.manager.resolvePrompt': 'Resolve:',
+    'projectPanel.swarm.manager.resolvePark': 'Park',
+    'projectPanel.swarm.manager.resolveParkHint':
+      'Move this card to Blocked and take its branch over by hand (rebase in a terminal), then mark it done.',
+    'projectPanel.swarm.manager.resolveRequeue': 'Requeue',
+    'projectPanel.swarm.manager.resolveRequeueHint':
+      'Move this card back to To do so a fresh worker re-attempts it off the current trunk.',
     'projectPanel.swarm.manager.logOnlyRoutine': 'Only routine bookkeeping so far — switch to All to see it.',
     'projectPanel.swarm.manager.logEmpty':
       'No engine events yet. Turn on Autonomy to let the engine drain the Board.',
@@ -313,11 +329,13 @@ export const projectPanel = {
     'projectPanel.collabCanvasEmpty': 'No canvases in this project yet.',
     // "Shared with me" dialog (the member entry point — join by code + open).
     'projectPanel.collabSharedDialogTitle': 'Shared with me',
-    'projectPanel.collabSharedDialogJoinLabel': 'Join with a code',
-    'projectPanel.collabSharedDialogJoinPlaceholder': 'Paste invite code',
+    'projectPanel.collabSharedDialogJoinLabel': 'Join with a code or link',
+    'projectPanel.collabSharedDialogJoinPlaceholder': 'Paste invite code or link',
     'projectPanel.collabSharedDialogJoin': 'Join',
     'projectPanel.collabSharedDialogJoining': 'Joining…',
-    'projectPanel.collabSharedDialogJoinFailed': 'Couldn’t join — check the code (it may be invalid or expired) and that you’re signed in.',
+    'projectPanel.collabSharedDialogJoinFailed': 'Couldn’t join — check the code or link (it may be invalid or expired) and that you’re signed in.',
+    'projectPanel.collabSharedDialogErrorInvalid': 'This invite is invalid or has expired. Ask the owner for a fresh invite link.',
+    'projectPanel.collabSharedDialogErrorSignedOut': 'Sign in (Google or GitHub) first, then paste the invite to join.',
     'projectPanel.collabSharedDialogListLabel': 'Your shared projects',
     'projectPanel.collabSharedDialogEmpty': 'No shared projects yet. Paste an invite code above to join one.',
     'projectPanel.collabSharedDialogUntitled': 'Untitled shared project',
@@ -422,26 +440,26 @@ export const projectPanel = {
     'projectPanel.swarm.badge': '実験的',
     'projectPanel.swarm.title': 'Swarm オーケストレーション',
     'projectPanel.swarm.body': '複数プロジェクトにまたがる Claude セッションのチームを 1 つの画面から動かします。これは初期の実験で、既定ではオフです。',
-    // Phase 1 の操作（Board の todo カードを隔離 claude worker に振る）。
-    'projectPanel.swarm.todoHeading': '未着手',
-    'projectPanel.swarm.alreadyRunning': '起動済み',
-    'projectPanel.swarm.boardMoveFailed': 'worker は起動しましたが、カードを Doing に移動できませんでした — Board タブで手動で移動してください。',
-    'projectPanel.swarm.todoEmpty': 'todo カードがありません。Board タブで追加してから、ここで振ってください。',
-    'projectPanel.swarm.untitled': '（無題）',
-    'projectPanel.swarm.dispatch': '振る',
-    'projectPanel.swarm.dispatching': '起動中…',
-    'projectPanel.swarm.workersEmpty': 'worker は動いていません。todo カードを振ると、隔離された worktree と `claude` セッションが割り当てられます。',
-    'projectPanel.swarm.workersFull': 'worker は上限（6体）です。1 体を完了または終了すると追加できます。',
+    // Workers リスト。手動の「振る」は撤去（todo 一覧は Board タブへ一本化）。
+    // worker は自律エンジン（司令官タブの Autonomy）または司令官セッションが起動します。
+    'projectPanel.swarm.workersEmpty': 'worker はまだ動いていません。司令官タブで Autonomy をオンにする（または司令官に頼む）と起動します — それぞれに隔離された worktree と `claude` セッションが割り当てられます。',
     'projectPanel.swarm.statusWorking': '稼働中',
     'projectPanel.swarm.statusWaiting': '待機中',
     'projectPanel.swarm.statusStarting': '起動中…',
     'projectPanel.swarm.statusExited': '終了',
+    // 終了オーバーレイ（ClaudeTerminalPane）— 落ちた PTY は黒画面＋生エラーでなく
+    // 「セッション終了 · 再起動」を出す。3ロール（補給官／司令官／worker）共通で、
+    // どの API で立て直すかはロール側が決める。
+    'projectPanel.swarm.sessionEnded': 'セッションが終了しました',
+    'projectPanel.swarm.sessionExitCode': '終了コード {code}',
+    'projectPanel.swarm.restart': '再起動',
+    'projectPanel.swarm.restarting': '再起動中…',
+    'projectPanel.swarm.restartFailed': 'セッションを再起動できませんでした: {error}',
     'projectPanel.swarm.terminate': '終了',
     'projectPanel.swarm.terminating': '終了中…',
     'projectPanel.swarm.retained': 'worktree を残しました — 未コミットの変更があります。',
     'projectPanel.swarm.forceRemove': '強制撤去',
     'projectPanel.swarm.forceFailed': 'worktree を撤去できませんでした: {reason}。必要なら手動で削除してください。',
-    'projectPanel.swarm.dispatchFailed': '振り分けに失敗しました: {error}',
     'projectPanel.swarm.engineOwned': 'エンジン',
     'projectPanel.swarm.engineOwnedHint':
       '自律エンジンが起動・管理している worker です — 操作は司令官タブから行ってください。',
@@ -517,6 +535,20 @@ export const projectPanel = {
     'projectPanel.swarm.manager.anomalyWorktreeMissing': 'worker の worktree が消失',
     'projectPanel.swarm.manager.anomalyWorkerStale': 'worker が無応答 — 停滞の可能性',
     'projectPanel.swarm.manager.anomalyStaleFor': '{min}分 心拍なし',
+    // Move-stuck anomaly（ゾンビ防止）: 列移動が予算超で失敗し続け、カードが作業に
+    // 追従できない状態。intent が詳細行で具体的なゾンビを示す。
+    'projectPanel.swarm.manager.anomalyMoveStuck': 'カードが作業に追従できず — 列移動が失敗し続けています',
+    'projectPanel.swarm.manager.moveStuckReview': 'worker 完了済みだが doing で滞留',
+    'projectPanel.swarm.manager.moveStuckDone': 'trunk へ統合済みだが review で滞留',
+    'projectPanel.swarm.manager.moveStuckRecover': 'worker 消失だが doing で滞留',
+    // Review 解決 — 滞留した（衝突／検証失敗）カードを review から退避させる。
+    'projectPanel.swarm.manager.resolvePrompt': '解決:',
+    'projectPanel.swarm.manager.resolvePark': '保留',
+    'projectPanel.swarm.manager.resolveParkHint':
+      'このカードを Blocked に移し、ブランチを手動で解決（ターミナルで rebase）してから done にします。',
+    'projectPanel.swarm.manager.resolveRequeue': 'やり直す',
+    'projectPanel.swarm.manager.resolveRequeueHint':
+      'このカードを To do に戻し、新しい worker が現在の trunk から再挑戦します。',
     'projectPanel.swarm.manager.logOnlyRoutine': 'いまは定常処理のみ — 「すべて」で表示します。',
     'projectPanel.swarm.manager.logEmpty':
       'まだエンジンのイベントはありません。自律をオンにすると、エンジンが Board を drain します。',
@@ -703,11 +735,13 @@ export const projectPanel = {
     'projectPanel.collabCanvasEmpty': 'このプロジェクトにはまだ Canvas がありません。',
     // 「共有プロジェクト」ダイアログ（メンバーの入口 — コードで参加＋開く）。
     'projectPanel.collabSharedDialogTitle': '共有プロジェクト',
-    'projectPanel.collabSharedDialogJoinLabel': 'コードで参加',
-    'projectPanel.collabSharedDialogJoinPlaceholder': '招待コードを貼り付け',
+    'projectPanel.collabSharedDialogJoinLabel': 'コードまたはリンクで参加',
+    'projectPanel.collabSharedDialogJoinPlaceholder': '招待コードまたはリンクを貼り付け',
     'projectPanel.collabSharedDialogJoin': '参加',
     'projectPanel.collabSharedDialogJoining': '参加中…',
-    'projectPanel.collabSharedDialogJoinFailed': '参加できませんでした — コード（無効か失効の可能性）とサインイン状態を確認してください。',
+    'projectPanel.collabSharedDialogJoinFailed': '参加できませんでした — コードまたはリンク（無効か失効の可能性）とサインイン状態を確認してください。',
+    'projectPanel.collabSharedDialogErrorInvalid': '招待が無効か期限切れです。オーナーに新しい招待リンクを発行してもらってください。',
+    'projectPanel.collabSharedDialogErrorSignedOut': 'まずサインイン（Google または GitHub）してから招待を貼り付けて参加してください。',
     'projectPanel.collabSharedDialogListLabel': '参加中の共有プロジェクト',
     'projectPanel.collabSharedDialogEmpty': 'まだ共有プロジェクトはありません。上に招待コードを貼って参加してください。',
     'projectPanel.collabSharedDialogUntitled': '名称未設定の共有プロジェクト',

@@ -164,3 +164,15 @@ a:focus-visible {
   animation: survey-pulse 1.35s ease-in-out infinite;
 }
 
+/* Respect reduced-motion: the status beacons (terminal pulse, the claude /
+   swarm-worker scanning edge, the running dot) are status hints, never load-
+   bearing — so honour the OS "reduce motion" preference by holding them still.
+   The colour still distinguishes working/waiting; only the movement stops. */
+@media (prefers-reduced-motion: reduce) {
+  .term-pulse,
+  .run-scan,
+  .run-pulse {
+    animation: none;
+  }
+}
+

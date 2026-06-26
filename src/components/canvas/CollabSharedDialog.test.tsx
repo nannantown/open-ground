@@ -75,7 +75,7 @@ describe('CollabSharedDialog (member: join + open)', () => {
     expect(JSON.parse((joinCall![1] as RequestInit).body as string)).toEqual({ code: 'my-code' })
   })
 
-  it('a failed join shows an inline error and does not open anything', async () => {
+  it('an invalid/expired code shows the SPECIFIC error and opens nothing (条件4: 無言失敗しない)', async () => {
     stub({ ok: false, error: 'invalid or expired invite' })
     const onOpen = vi.fn()
     render(<CollabSharedDialog onOpen={onOpen} onClose={() => {}} />)
@@ -86,8 +86,59 @@ describe('CollabSharedDialog (member: join + open)', () => {
     })
     fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
 
+    expect(await screen.findByText('projectPanel.collabSharedDialogErrorInvalid')).toBeTruthy()
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('a signed-out join shows the sign-in error (not a silent failure)', async () => {
+    stub({ ok: false, error: 'not signed in' })
+    const onOpen = vi.fn()
+    render(<CollabSharedDialog onOpen={onOpen} onClose={() => {}} />)
+    await screen.findByText('Alpha')
+
+    fireEvent.change(screen.getByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'), {
+      target: { value: 'x' },
+    })
+    fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
+
+    expect(await screen.findByText('projectPanel.collabSharedDialogErrorSignedOut')).toBeTruthy()
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('an unrecognised failure falls back to the generic message', async () => {
+    stub({ ok: false }) // no structured error → combined hint
+    const onOpen = vi.fn()
+    render(<CollabSharedDialog onOpen={onOpen} onClose={() => {}} />)
+    await screen.findByText('Alpha')
+
+    fireEvent.change(screen.getByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'), {
+      target: { value: 'x' },
+    })
+    fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
+
     expect(await screen.findByText('projectPanel.collabSharedDialogJoinFailed')).toBeTruthy()
     expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('accepts a pasted invite LINK (not just a bare code) — extracts the code for the POST', async () => {
+    // Card 6067c41e: the owner may share `openground://join?code=…` (the clickable
+    // link) rather than a raw code; pasting the whole link must still join.
+    const spy = stub({ ok: true, collabProjectId: 'b' })
+    const onOpen = vi.fn()
+    render(<CollabSharedDialog onOpen={onOpen} onClose={() => {}} />)
+    await screen.findByText('Alpha')
+
+    fireEvent.change(screen.getByPlaceholderText('projectPanel.collabSharedDialogJoinPlaceholder'), {
+      target: { value: 'openground://join?code=LINK-CODE-123' },
+    })
+    fireEvent.click(screen.getByText('projectPanel.collabSharedDialogJoin'))
+
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith('b', 'Beta'))
+    const joinCall = spy.mock.calls.find(
+      ([u, i]) => String(u).includes('/api/collab/join') && (i as RequestInit)?.method === 'POST',
+    )
+    // The EMBEDDED code was extracted from the link — not the raw URL.
+    expect(JSON.parse((joinCall![1] as RequestInit).body as string)).toEqual({ code: 'LINK-CODE-123' })
   })
 
   it('a pending join (approval mode) shows "awaiting approval", not onOpen', async () => {

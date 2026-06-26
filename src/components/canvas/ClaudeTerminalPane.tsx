@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Power, RotateCcw } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
+import { useT } from '@/i18n/I18nContext'
 
 export interface TerminalInfo {
   id: string
@@ -26,6 +28,19 @@ interface Props {
    *  Set false when embedded under the split-pane's own header — Ctrl-C still
    *  works by typing it into the terminal, so no affordance is lost. */
   chrome?: boolean
+  /** Re-launch this PTY after it exits. When provided, an exited/dead-probe PTY
+   *  shows a centred "session ended · Restart" OVERLAY (instead of leaving a dead
+   *  black screen with only a raw error). Clicking Restart calls this — the parent
+   *  spawns the role-specific PTY (/api/swarm/{supply,manager,worker}) and swaps in
+   *  the new terminalId, which re-keys this pane's effect and clears the exited
+   *  state. The promise it returns drives the button's in-flight state so a second
+   *  click can't double-launch (paired with the parent's own busy guard; and the
+   *  parent best-effort kills the old id before spawning, so even a transient
+   *  mount-probe false positive can't orphan a live session or race a second one).
+   *  Omitted (the default — TaskTerminal / EmbeddedClaudeTerminal / a manager's
+   *  read-only worker screen) = NO overlay; the pre-existing thin exit strip stays,
+   *  so those callers are byte-for-byte unchanged. */
+  onRestart?: () => void | Promise<void>
 }
 
 // Flow-control ACK threshold: once xterm has parsed this many UTF-16 code
@@ -41,7 +56,8 @@ const ACK_THRESHOLD = 65536
 //     entry.terminalId is the source of truth)
 //   - exposes a "Ctrl-C" affordance for soft-cancelling claude in place
 //   - hides itself / signals exit when the PTY closes
-export const ClaudeTerminalPane = ({ terminalId, label, onExit, chrome = true }: Props) => {
+export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrome = true }: Props) => {
+  const { t } = useT()
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<any>(null)
   const fitRef = useRef<any>(null)
@@ -49,9 +65,35 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, chrome = true }:
   const [info, setInfo] = useState<TerminalInfo | null>(null)
   const [exited, setExited] = useState<TerminalInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // A relaunch via onRestart is in flight — drives the overlay button's disabled
+  // state so a second click can't fire a second spawn.
+  const [restarting, setRestarting] = useState(false)
 
   const onExitRef = useRef(onExit)
   onExitRef.current = onExit
+  // Latest onRestart without re-keying the spawn effect (mirrors onExitRef).
+  const onRestartRef = useRef(onRestart)
+  onRestartRef.current = onRestart
+
+  // Restart the exited PTY: call the parent's role-specific relaunch, which swaps
+  // in a new terminalId (re-keying the effect below, clearing exited/error). The
+  // in-flight flag resets in finally so a failed relaunch (the parent surfaces the
+  // error) leaves the button usable again. The overlay normally shows only on a
+  // dead PTY; the parent's restart ALSO best-effort kills the old id before
+  // spawning, so even a transient mount-probe false positive can't orphan a live
+  // session or race a second one (the no-double-launch guarantee).
+  const handleRestart = useCallback(async () => {
+    const fn = onRestartRef.current
+    if (!fn) return
+    setRestarting(true)
+    try {
+      await fn()
+    } catch {
+      /* parent surfaces the failure; keep the overlay so the user can retry */
+    } finally {
+      setRestarting(false)
+    }
+  }, [])
 
   // Send a literal byte sequence to the PTY (used by Ctrl-C button and
   // keyboard input). No-op on null id.
@@ -385,8 +427,12 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, chrome = true }:
         </div>
       </div>
       ) : (
-        // Embedded: no header bar — surface only a terminal exit/error strip.
-        (exited || error) && (
+        // Embedded: no header bar. With NO onRestart, surface the pre-existing
+        // thin exit/error strip (unchanged for TaskTerminal / EmbeddedClaude /
+        // the manager's read-only worker screen). With onRestart wired, the
+        // centred overlay below owns the exit affordance, so this strip is
+        // suppressed to avoid a duplicate notice.
+        (exited || error) && !onRestart && (
           <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1">
             {exited && (
               <span className="font-mono text-[10px] text-accent">
@@ -397,10 +443,52 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, chrome = true }:
           </div>
         )
       )}
-      <div
-        ref={hostRef}
-        className="min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2"
-      />
+      {/* Terminal viewport + (when a relaunch is wired) the exit overlay. The
+          wrapper is `relative` so the overlay covers ONLY the terminal area, not
+          the header/strip above — the last screen of output stays dimly visible
+          behind it rather than collapsing to a black void with a raw error. */}
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={hostRef}
+          className="h-full w-full overflow-hidden bg-[#1a1a1a] px-2 py-2"
+        />
+        {onRestart && (exited || error) && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[1px]">
+            <div className="flex max-w-[260px] flex-col items-center gap-3 rounded-[6px] border border-white/15 bg-[#222222] px-5 py-4 text-center shadow-lg">
+              <span
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-white/[0.06] text-white/70"
+                aria-hidden
+              >
+                <Power size={17} strokeWidth={1.75} />
+              </span>
+              <div>
+                <p className="text-[13px] font-medium text-white/90">
+                  {t('projectPanel.swarm.sessionEnded')}
+                </p>
+                {exited?.exitCode != null && (
+                  <p className="mt-1 font-mono text-[10px] text-white/40">
+                    {t('projectPanel.swarm.sessionExitCode', { code: String(exited.exitCode) })}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleRestart()}
+                disabled={restarting}
+                className="inline-flex items-center gap-1.5 rounded-[4px] bg-white px-3.5 py-1.5 text-[12px] font-medium text-black transition-colors hover:bg-white/90 active:bg-white/80 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+              >
+                <RotateCcw
+                  size={13}
+                  strokeWidth={2.25}
+                  className={restarting ? 'animate-spin' : undefined}
+                  aria-hidden
+                />
+                {restarting ? t('projectPanel.swarm.restarting') : t('projectPanel.swarm.restart')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

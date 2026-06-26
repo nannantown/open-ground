@@ -126,6 +126,20 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(base.agentSessionId).toBe('sid-1')
   })
 
+  it('keeps bypass UNCONDITIONAL — set AFTER the swarmLaunchDefaults spread (Card 4880e9c6)', () => {
+    // "bypass徹底": an unattended worker must NEVER wedge on a permission/trust
+    // prompt. permissionMode is the last key written (after the defaults spread),
+    // so no field swarmLaunchDefaults might gain later can silently disable it.
+    // Asserted across every call shape, including one that threads an env through.
+    for (const o of [
+      base,
+      workerLaunchOpts('/wt', 'sid-x', { title: 't', env: { SWARM_MANAGER: '1' } }),
+      workerLaunchOpts('/wt', 'sid-y', { title: 't', notes: 'n', cols: 100, rows: 30 }),
+    ]) {
+      expect(o.permissionMode).toBe('bypass')
+    }
+  })
+
   it('delivers the goal as a positional /order prompt (claude submits it itself)', () => {
     expect(base.initialPrompt).toBe('/order ゴール: Add logout')
   })

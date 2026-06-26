@@ -67,7 +67,7 @@ import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
 import { openGroundHome } from './paths'
-import { getTerminal, killTerminal } from './terminal'
+import { getTerminal, getTerminalScreen, killTerminal, writeInput } from './terminal'
 import { claudeRunPreflight } from './claudePreflight'
 import {
   spawnSwarmWorker,
@@ -139,6 +139,104 @@ export const STARTUP_GRACE_MS = 25_000
  *  that DECLARED itself done with nothing to merge, is parked immediately (no
  *  retry) — see {@link recoveryColumn}. */
 export const RECOVER_MAX_REQUEUE = 1
+
+/** How many times a Board COLUMN MOVE may be KEPT (its write rejected/failed) in a
+ *  row before the engine ESCALATES instead of just logging + retrying forever. A
+ *  handful of consecutive failures absorbs a transient CAS contention / board
+ *  restart blip on the fast (3s) dispatch loop; beyond it the move is genuinely
+ *  stuck and would zombie the card ("done なのに review" / "dead なのに doing"), so
+ *  the engine escalates: a lost-worker recovery is parked in 'blocked', and every
+ *  stuck move is surfaced as a 'move-stuck' anomaly for the owner. */
+export const MOVE_STUCK_MAX_RETRIES = 5
+
+/** STALL SELF-HEALING (Card e8022e — distinct from the crash recovery above,
+ *  which handles a DEAD PTY). A worker can be ALIVE yet unresponsive — hung on an
+ *  unsent prompt, a TUI wedge, or an API-overload stall (the documented "API 529"
+ *  freeze). Such a worker never trips the crash path (its PTY lives), so without
+ *  this it would sit in 'doing' forever holding a slot.
+ *
+ *  A worker is SILENT when BOTH its liveness channels go quiet — no heartbeat AND
+ *  no PTY output — for this long. The AND matters: a worker streaming tokens (a
+ *  long phase between heartbeats) is plainly alive, so requiring both to fall
+ *  silent avoids interrupting real work. A `claude` that emits nothing for ten
+ *  minutes is almost always waiting on input or wedged. */
+export const STALL_SILENCE_MS = 10 * 60_000
+
+/** After nudging a silent worker (sending Enter), wait this long before nudging
+ *  again or escalating to a reclaim — give the keystroke time to wake it and
+ *  produce a fresh heartbeat. */
+export const STALL_NUDGE_COOLDOWN_MS = 3 * 60_000
+
+/** Try the cheap Enter-nudge this many times before reclaiming a worker that
+ *  stays silent. 2 ⇒ ~10min(detect)+2×3min(nudge cooldowns) ≈ 16min to reclaim a
+ *  truly wedged worker, well under the 30-min read-only worker-stale backstop. */
+export const STALL_MAX_NUDGES = 2
+
+/** PTY output within this window AFTER a nudge is treated as the Enter ECHO, not a
+ *  sign of life. A bare CR makes a `claude` TUI repaint (stamping lastOutputAt),
+ *  so without this guard the nudge's OWN echo would (a) reset the silence clock and
+ *  (b) look like recovery — letting a wedged-but-echoing worker dodge reclaim, and
+ *  resetting the nudge budget on nothing. A live worker that the nudge genuinely
+ *  un-stuck streams output for far longer than a one-shot repaint, so output PAST
+ *  this guard is real recovery; a heartbeat (never produced by an echo) is too. A
+ *  few tens of seconds cleanly separates a single repaint from sustained work. */
+export const STALL_ECHO_GUARD_MS = 30_000
+
+/** Read a minutes-valued tunable from the environment, clamped to a sane band,
+ *  falling back to `defMin` when unset / unparseable. The "定数化・調整可"
+ *  (constant-ised AND adjustable) contract for the non-progress thresholds: the
+ *  exported consts below ARE the defaults, but an operator can retune them per
+ *  machine without a rebuild (e.g. a slow box wanting a longer runaway ceiling).
+ *  Resolved ONCE at module load — the engine is forked fresh per boot. */
+const envMinutesMs = (name: string, defMin: number, minMin: number, maxMin: number): number => {
+  const raw = process.env[name]
+  const n = raw != null && raw.trim() !== '' ? Number(raw) : Number.NaN
+  const mins = Number.isFinite(n) ? Math.max(minMin, Math.min(maxMin, n)) : defMin
+  return Math.round(mins * 60_000)
+}
+
+/** RUNAWAY CEILING — the HARD wall-clock cap on one worker's lifetime, measured
+ *  from dispatch. A worker still alive past this is a 暴走 (a task too big, an
+ *  infinite /order loop, a wedge the silence detector can't see because it keeps
+ *  emitting output): the engine STOPS it (teardown + re-home to 'blocked') and
+ *  logs why, regardless of liveness — this is the one check that fires on a busy
+ *  worker, not just a silent one. Generous by default (a real /order round —
+ *  audit→implement→verify→integrate — legitimately runs long; the whole point of
+ *  the swarm is heavy, unhurried work), so it never guillotines productive work;
+ *  it only catches the genuinely-unbounded. Adjustable via env. NOTE: it counts
+ *  wall-clock INCLUDING any rate-limit waits — kept simple on purpose; the band
+ *  is wide enough that a normal worker that paused for a limit still finishes
+ *  well under it. Min 10m guards against an env typo bricking every worker. */
+export const MAX_EXEC_MS = envMinutesMs('OPENGROUND_SWARM_MAX_EXEC_MIN', 90, 10, 600)
+
+/** RATE-LIMIT GRACE — how long a worker WAITING on a usage / quota / overload
+ *  limit is HELD before its card is requeued to 'todo' (slot recovery). A
+ *  rate-limited worker is NOT a stall: Enter won't lift the limit and reclaiming
+ *  it throws away committed work + re-dispatches into the SAME wall, so the
+ *  engine never nudges it and never reclaims it on the (much shorter) silence
+ *  clock. It just waits — the worker's own `claude` resumes when the limit
+ *  resets. Only if it is STILL limited this long does the engine free the slot
+ *  and requeue (the work already on its branch is preserved; a later attempt
+ *  retries once the limit has cleared). Kept under STALE_HEARTBEAT_MS so a
+ *  legitimately-waiting worker is requeued before it would be mislabelled
+ *  "hung". Adjustable via env. */
+export const RATE_LIMIT_GRACE_MS = Math.min(
+  envMinutesMs('OPENGROUND_SWARM_RATE_LIMIT_GRACE_MIN', 20, 2, 360),
+  // CLAMP strictly under the runaway ceiling so a transient waiter is requeued
+  // ('todo') before the runaway path could ever park it ('blocked') — robust even
+  // if an operator inverts the two env knobs (the reviewer's band-inversion footgun).
+  MAX_EXEC_MS - 60_000,
+)
+
+/** PERMISSION-WAIT GRACE — how long after auto-accepting a startup permission /
+ *  trust prompt the engine waits for the worker to move on before parking it in
+ *  'blocked'. Workers launch with permissionMode:'bypass'
+ *  (--dangerously-skip-permissions), so a prompt should NEVER appear; this is the
+ *  backstop for when one slips through anyway (a `claude` that ignored bypass, an
+ *  unexpected first-run dialog). Short — once Enter accepts the (default-Yes)
+ *  trust dialog the worker proceeds within seconds; still stuck after this means
+ *  bypass is genuinely broken and a human is needed. */
+export const PERMISSION_WAIT_GRACE_MS = 2 * 60_000
 
 // ── Pure helpers (exported, unit-tested without a server) ────────────────────
 
@@ -377,15 +475,29 @@ export const classifyWorker = (
   return { promote: false, stage: working ? 'running' : 'starting' }
 }
 
-/** Where a LOST worker's card goes — called ONLY when its PTY is dead and
- *  {@link classifyWorker} did NOT promote it (a crash/kill with no integrable
- *  commits, a self-declared block, or a "done but produced nothing" finish). The
- *  card NEVER stays stranded in 'doing' (the old behavior — a zombie card no
- *  worker is draining); it always returns to the board:
- *    • heartbeat `ready` ⇒ 'blocked' — the worker DECLARED itself done yet has
- *      nothing integrable (classifyWorker already filtered out the commits case);
- *      re-running a finished task is wrong, so a human checks why it committed
- *      nothing rather than the engine looping on it.
+/** Why a worker was reclaimed/recovered — selects its recovery column and labels
+ *  the journal. 'crash' = dead PTY; 'stall' = alive but silent past every nudge;
+ *  'runaway' = blew the execution-time ceiling; 'rate-limit' = waited on a
+ *  usage/quota limit past its grace; 'permission' = a startup prompt bypass
+ *  couldn't clear. (Card 4880e9c6.) */
+export type WorkerRecoveryReason = 'crash' | 'stall' | 'runaway' | 'rate-limit' | 'permission'
+
+/** Where a LOST/RECLAIMED worker's card goes — called when its PTY is dead and
+ *  {@link classifyWorker} did NOT promote it (a crash/kill, a self-declared block,
+ *  a "done but produced nothing" finish), OR when an ALIVE worker is reclaimed for
+ *  a non-progress reason (stall / runaway / rate-limit / permission). The card
+ *  NEVER stays stranded in 'doing' (the old behavior — a zombie card no worker is
+ *  draining); it always returns to the board. The reason decides first:
+ *    • 'rate-limit' ⇒ 'todo' — a transient WAIT, never a human's problem: requeue
+ *      so a later attempt retries once the limit has reset (its committed work is
+ *      preserved on the branch). Auto-retry is correct here, NOT a block.
+ *    • 'runaway' / 'permission' ⇒ 'blocked' — a human is needed: a task that blows
+ *      the time ceiling would just overrun again on retry, and a prompt bypass
+ *      can't clear means the environment is wrong. Park, don't loop.
+ *  Otherwise (crash / stall — a possibly-transient failure) the heartbeat + retry
+ *  budget decide, exactly as before:
+ *    • heartbeat `ready` ⇒ 'blocked' — it DECLARED itself done yet has nothing
+ *      integrable; re-running a finished task is wrong, a human checks why.
  *    • heartbeat `blocked` ⇒ 'blocked' — it reported a real blocker; a human
  *      unblocks it (auto-retry would just hit the same wall).
  *    • retry budget spent (`requeues >= maxRequeues`) ⇒ 'blocked' — a card that
@@ -397,21 +509,205 @@ export const recoveryColumn = (
   probe: WorkerProbe,
   requeues: number,
   maxRequeues: number,
+  reason: WorkerRecoveryReason = 'crash',
 ): 'todo' | 'blocked' => {
+  if (reason === 'rate-limit') return 'todo'
+  if (reason === 'runaway' || reason === 'permission') return 'blocked'
   if (probe.heartbeat?.ready === true) return 'blocked'
   if (probe.heartbeat?.blocked === true) return 'blocked'
   if (requeues >= maxRequeues) return 'blocked'
   return 'todo'
 }
 
-/** ms since an ISO timestamp; +Infinity for a missing/garbage stamp (so an
- *  unknown age reads as "past the startup window" — display-only). */
-const ageMs = (iso: string): number => {
-  const t = Date.parse(iso)
-  return Number.isFinite(t) ? Date.now() - t : Number.POSITIVE_INFINITY
+/** The most recent sign of life from a worker (epoch ms) across BOTH liveness
+ *  channels — its heartbeat and its PTY's last output — with its dispatch time as
+ *  the floor. Unparseable / missing stamps are ignored; 0 only when nothing at all
+ *  resolves (a worker always has a startedAt, so that floor is real in practice).
+ *  Shared by the stall monitor AND the read-only worker-stale anomaly so the two
+ *  AGREE on "silent": a worker streaming output but not beating (or beating but
+ *  quiet) is alive to BOTH. Pure. */
+export const lastActivityMs = (a: {
+  heartbeatAt?: string
+  lastOutputAt?: number | null
+  startedAt?: string
+}): number => {
+  const cands: number[] = []
+  const hb = a.heartbeatAt ? Date.parse(a.heartbeatAt) : Number.NaN
+  if (Number.isFinite(hb)) cands.push(hb)
+  if (typeof a.lastOutputAt === 'number' && Number.isFinite(a.lastOutputAt)) cands.push(a.lastOutputAt)
+  const st = a.startedAt ? Date.parse(a.startedAt) : Number.NaN
+  if (Number.isFinite(st)) cands.push(st)
+  return cands.length ? Math.max(...cands) : 0
 }
 
+/** Tunables for {@link classifyStall} — injected so the unit test drives the whole
+ *  escalation with tiny windows and a fake clock. */
+export interface StallParams {
+  /** No sign of life (heartbeat NOR real PTY output) for this long ⇒ silent. */
+  stallMs: number
+  /** Wait this long after a nudge before nudging again / reclaiming. */
+  cooldownMs: number
+  /** Output within this window after a nudge is the Enter echo, not life. */
+  echoGuardMs: number
+  /** Nudge attempts before a still-silent worker is reclaimed. */
+  maxNudges: number
+}
+
+/** What to do about ONE alive worker's (possible) stall — PURE (clock + raw signals
+ *  passed in). The escalation, in order:
+ *    • active (any REAL life within `stallMs`) ⇒ 'none'.
+ *    • silent, never nudged ⇒ 'nudge' (send Enter — the cheap un-stick).
+ *    • silent, nudged but still inside `cooldownMs` ⇒ 'none' (let it take effect).
+ *    • silent, nudged, cooldown elapsed, budget remains ⇒ 'nudge' again.
+ *    • silent, nudges spent, cooldown elapsed ⇒ 'reclaim' (tear down + re-home).
+ *
+ *  ECHO HANDLING (the load-bearing subtlety): a bare Enter makes a `claude` TUI
+ *  repaint, stamping PTY output. So output landing within `echoGuardMs` AFTER our
+ *  own nudge is DISCOUNTED — it counts as life for NEITHER the silence gate NOR
+ *  the recovery signal. Otherwise the nudge's own echo would keep a wedged worker
+ *  looking "alive" (dodging reclaim) and would falsely reset its budget.
+ *
+ *  `progressed` = REAL recovery since the last nudge, by EITHER channel: a fresh
+ *  heartbeat (an echo can't write one — /order phases do), OR sustained output PAST
+ *  the echo guard (a one-shot repaint can't). Both are needed because heartbeats
+ *  are SPARSE (only at phase boundaries): a worker the nudge genuinely revived
+ *  often resumes streaming output for many minutes before it next beats, and that
+ *  real progress MUST clear the budget — else its next, independent stall would
+ *  reclaim with zero nudges. The caller clears the nudge counter when `progressed`. */
+export const classifyStall = (
+  input: {
+    /** Heartbeat epoch ms, or null if it never beat. */
+    heartbeatAtMs: number | null
+    /** PTY last-output epoch ms, or null if none. */
+    lastOutputAtMs: number | null
+    /** Dispatch epoch ms — the activity floor (a just-spawned worker isn't silent). */
+    startedAtMs: number
+    /** Prior nudge bookkeeping, or undefined if never nudged. */
+    nudge: { count: number; lastNudgeAt: number } | undefined
+  },
+  now: number,
+  p: StallParams,
+): { action: 'none' | 'nudge' | 'reclaim'; progressed: boolean; silentMs: number } => {
+  const count = input.nudge?.count ?? 0
+  const lastNudgeAt = input.nudge?.lastNudgeAt ?? 0
+
+  // Discount the Enter echo: output within echoGuardMs after our nudge is the TUI
+  // repaint, not life. Kept output is either pre-nudge or sustained past the guard.
+  const realOutput =
+    input.lastOutputAtMs !== null && count > 0 && input.lastOutputAtMs <= lastNudgeAt + p.echoGuardMs
+      ? null
+      : input.lastOutputAtMs
+  const activity = Math.max(
+    input.heartbeatAtMs ?? Number.NEGATIVE_INFINITY,
+    realOutput ?? Number.NEGATIVE_INFINITY,
+    input.startedAtMs,
+  )
+  const silentMs = Math.max(0, now - activity)
+  // Real recovery since the nudge — a fresh heartbeat OR real (post-echo-guard)
+  // output strictly after it. Either clears the budget; an echo can fake neither.
+  const progressed =
+    count > 0 &&
+    ((input.heartbeatAtMs !== null && input.heartbeatAtMs > lastNudgeAt) ||
+      (realOutput !== null && realOutput > lastNudgeAt))
+
+  if (silentMs < p.stallMs) return { action: 'none', progressed, silentMs } // alive
+  if (count > 0) {
+    if (progressed) return { action: 'none', progressed: true, silentMs } // recovered; re-stall handled fresh next pass
+    if (now - lastNudgeAt < p.cooldownMs) return { action: 'none', progressed: false, silentMs } // give the nudge time
+    if (count >= p.maxNudges) return { action: 'reclaim', progressed: false, silentMs } // nudges spent, still silent
+  }
+  return { action: 'nudge', progressed: false, silentMs }
+}
+
+/** Strip ANSI/CSI escape sequences and collapse whitespace, lowercased — so the
+ *  output classifier below matches against the clean text a human reads, immune
+ *  to the cursor-addressing a `claude` TUI interleaves (and to a raw-buffer
+ *  fallback that still carries escapes). Pure. */
+const normalizeScreen = (s: string): string =>
+  s
+    // CSI / OSC / single-char escapes — enough to clear the sequences claude emits.
+    .replace(/\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\][^]*(?:|\\)/g, '')
+    .replace(/[@-Z\\-_]/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+
+/** High-precision markers that a worker's `claude` is WAITING on a rate / usage /
+ *  quota / overload limit — a legitimate pause, NOT a hang. Matched against the
+ *  normalized screen text. Deliberately tuned to claude's RUNTIME messages
+ *  ("usage limit reached", an API overload error, a backoff "retrying in 30s"),
+ *  which a worker editing source would not reproduce verbatim — so a worker
+ *  literally writing rate-limit CODE is rarely misread. The residual risk is a
+ *  FALSE POSITIVE (extra grace for a worker that isn't really limited), the SAFE
+ *  direction: it never kills, and the runaway ceiling still backstops a worker
+ *  that genuinely never progresses. A false NEGATIVE would be the dangerous one
+ *  (reclaiming a real waiter) — hence the bias toward catching the limit. */
+export const RATE_LIMIT_PATTERNS: readonly RegExp[] = [
+  /usage limit/, // "claude usage limit reached", "approaching your usage limit"
+  /limit (?:will )?reset/, // "your limit will reset at 3pm", "limit resets in…"
+  /\boverloaded_error\b/,
+  /\brate_limit_error\b/,
+  /api error[^.]{0,40}\b(?:429|500|503|529|overloaded)\b/,
+  /\b(?:429|529)\b[^.]{0,40}\boverloaded\b/,
+  /too many requests/,
+  /retrying in \d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes)\b/,
+]
+
+/** Markers of a permission / trust prompt blocking a worker. DELIBERATELY NARROW
+ *  — only `claude`'s literal directory-trust dialog phrasing, which a worker's
+ *  ordinary output (planning lists like "1. Yes, proceed…", a "press Enter to
+ *  continue" aside, or source/diff text) does NOT reproduce verbatim. The earlier
+ *  loose option-line / "press enter" patterns matched normal claude output and
+ *  were dropped (they risked the exact false KILL this card forbids). Consulted
+ *  only for an already-SILENT worker (see the monitor), so even this exact phrase
+ *  appearing in code is harmless: a streaming worker is never classified. */
+export const PERMISSION_PROMPT_PATTERNS: readonly RegExp[] = [
+  /do you trust the files in this (?:folder|directory)/,
+  /do you want to (?:proceed|trust|allow) .{0,40}\?/, // claude's trust/allow confirmation line
+]
+
+/** Classify a worker's current screen into WHY it might not be progressing:
+ *    • 'permission-wait' — a startup trust/permission dialog is blocking it.
+ *    • 'rate-limited'    — it is waiting on a usage/quota/overload limit.
+ *    • 'normal'          — neither; ordinary work (the silence-based stall path
+ *                          then applies if it has also gone quiet).
+ *  Permission is checked first: at boot it blocks ALL progress and is the more
+ *  urgent unblock. PURE (the only input is the text) — the TIMING gates (startup
+ *  window, grace clocks) live in the monitor, so this stays trivially testable.
+ *  A null/empty screen ⇒ 'normal' (no signal — never invent a wait). */
+export const classifyOutput = (
+  screen: string | null,
+): 'rate-limited' | 'permission-wait' | 'normal' => {
+  if (!screen) return 'normal'
+  const text = normalizeScreen(screen)
+  if (!text) return 'normal'
+  if (PERMISSION_PROMPT_PATTERNS.some((re) => re.test(text))) return 'permission-wait'
+  if (RATE_LIMIT_PATTERNS.some((re) => re.test(text))) return 'rate-limited'
+  return 'normal'
+}
+
+/** Has a worker blown the hard execution ceiling — a 暴走 to stop? True iff its
+ *  dispatch time is known (finite, > 0) and `maxExecMs` has elapsed since. The
+ *  finite/positive guard is load-bearing: a worker with an unparseable / missing
+ *  startedAt is NEVER judged runaway (no false kill on a clockless fixture). Pure
+ *  (clock injected). */
+export const isRunaway = (startedAtMs: number, now: number, maxExecMs: number): boolean =>
+  Number.isFinite(startedAtMs) && startedAtMs > 0 && now - startedAtMs >= maxExecMs
+
 // ── Engine state (per project, on a globalThis singleton) ────────────────────
+
+/** One card whose Board COLUMN MOVE keeps being KEPT (the write is rejected /
+ *  errors) pass after pass — the anti-zombie tracker. `intent` is WHICH move is
+ *  stuck (doing→review / review→done / lost-worker recovery); `attempts` is how
+ *  many consecutive passes it has been kept. Reset to 1 when the intent changes
+ *  (a different move), cleared the moment a move lands, escalated + surfaced once
+ *  `attempts` crosses {@link MOVE_STUCK_MAX_RETRIES}. In-memory only. */
+export interface StuckMove {
+  intent: 'review' | 'done' | 'recover'
+  attempts: number
+  branch: string
+  taskTitle: string
+}
 
 /** A live ProjectEngine. Exported so the dispatch-pass unit test can drive a
  *  plain engine literal with fake deps — no timers, no globalThis. The `timer`
@@ -462,6 +758,34 @@ export interface ProjectEngine {
    *  when the card is parked in 'blocked' (so a human requeue starts fresh) or
    *  succeeds/leaves the retry cycle. In-memory only. */
   recoveries: Map<string, number>
+  /** Cards whose Board COLUMN MOVE is stuck (kept pass after pass) — keyed by
+   *  taskId. The anti-zombie tracker: bumped on every kept move, cleared when the
+   *  move lands, escalated to 'blocked' (recovery) / surfaced as a 'move-stuck'
+   *  anomaly once past {@link MOVE_STUCK_MAX_RETRIES}. See {@link StuckMove}.
+   *  Pruned by board column (pruneStuckMoves) the moment a card leaves the stuck
+   *  situation, so a resolved zombie never lingers. In-memory only. */
+  stuckMoves: Map<string, StuckMove>
+  /** Per-worker (keyed by terminalId) Enter-nudge bookkeeping for STALL recovery:
+   *  how many times we've nudged this silent-but-alive worker and when last.
+   *  Bumped on each nudge, cleared on real recovery (a post-nudge heartbeat) or
+   *  when the worker leaves the live set (reclaimed / promoted-and-exited). Keyed
+   *  by terminalId — not taskId — so a re-dispatched card's fresh worker gets a
+   *  fresh budget. In-memory only. (Card stall self-healing.) */
+  nudges: Map<string, { count: number; lastNudgeAt: number }>
+  /** Per-worker (keyed by terminalId) RATE-LIMIT bookkeeping: when we first saw
+   *  this worker waiting on a usage/quota/overload limit (`since`, epoch ms). Set
+   *  the pass its screen first reads as rate-limited, cleared the moment its
+   *  screen reads normal again (it resumed) or it leaves the live set. Drives the
+   *  "hold, don't nudge, requeue only after RATE_LIMIT_GRACE_MS" path — NOT the
+   *  stall clock. In-memory only. (Card 4880e9c6 — 進まない分類.) */
+  rateLimited: Map<string, { since: number }>
+  /** Per-worker (keyed by terminalId) PERMISSION-WAIT bookkeeping for a startup
+   *  trust/permission prompt that slipped past bypass: `since` (epoch ms first
+   *  seen) and whether the auto-accept Enter was delivered. Set on first sight in
+   *  the startup window, cleared when the screen reads normal or the worker leaves
+   *  the live set. Drives the auto-accept → park-if-persists path. In-memory only.
+   *  (Card 4880e9c6.) */
+  permissionWaits: Map<string, { since: number; accepted: boolean }>
   /** Drain/dispatch/integrate journal (ring buffer, oldest-first). */
   log: OrchestratorLogLine[]
   /** State inconsistencies detected on the latest pass (read-only — see
@@ -501,6 +825,10 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       verifyFailed: new Map(),
       lastIntegrateAt: 0,
       recoveries: new Map(),
+      stuckMoves: new Map(),
+      nudges: new Map(),
+      rateLimited: new Map(),
+      permissionWaits: new Map(),
       log: [],
       anomalies: [],
     }
@@ -520,6 +848,10 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.lastIntegrateAt ??= 0
     engine.anomalies ??= []
     engine.recoveries ??= new Map()
+    engine.stuckMoves ??= new Map()
+    engine.nudges ??= new Map()
+    engine.rateLimited ??= new Map()
+    engine.permissionWaits ??= new Map()
   }
   return engine
 }
@@ -537,6 +869,32 @@ const logLine = (
   if (engine.log.length > MAX_LOG_LINES) {
     engine.log.splice(0, engine.log.length - MAX_LOG_LINES)
   }
+}
+
+// ── Stuck-move tracker (anti-zombie: bounded retry → escalate → surface) ──────
+
+/** Record that a Board column move for `taskId` was KEPT (its write rejected /
+ *  errored) this pass, returning the new consecutive-kept count. Resets to 1 when
+ *  the INTENT changes (a different move now fails). Marks the task touched THIS
+ *  pass so the prune keeps a still-failing move and drops a stale one the moment
+ *  its move site stops firing. Pure state mutation — no IO, no clock. */
+const recordKeptMove = (
+  engine: ProjectEngine,
+  taskId: string,
+  intent: StuckMove['intent'],
+  branch: string,
+  taskTitle: string,
+): number => {
+  const prev = engine.stuckMoves.get(taskId)
+  const attempts = (prev && prev.intent === intent ? prev.attempts : 0) + 1
+  engine.stuckMoves.set(taskId, { intent, attempts, branch, taskTitle })
+  return attempts
+}
+
+/** A move for `taskId` LANDED (or the card left the stuck situation) — forget any
+ *  stuck-move tracking so it never surfaces a now-resolved zombie. Idempotent. */
+const clearKeptMove = (engine: ProjectEngine, taskId: string): void => {
+  engine.stuckMoves.delete(taskId)
 }
 
 const emptyState = (): SwarmOrchestratorState => ({
@@ -612,6 +970,23 @@ export interface OrchestratorDeps {
     worktree: string
     terminalId: string
   }) => Promise<{ removed: boolean; reason?: string }>
+  /** Epoch ms of the worker PTY's last output chunk (terminal.ts stamps it on
+   *  every onData), or null when unknown / it has produced none yet. The SECOND
+   *  liveness channel beside the heartbeat: a worker streaming tokens is alive even
+   *  between heartbeats, so a stall requires BOTH to fall silent. (Stall detection.) */
+  lastOutputAt: (terminalId: string) => number | null
+  /** NUDGE a silent worker: send a bare Enter (CR) to its PTY to submit a prompt
+   *  left unsent / un-stick a waiting TUI — the cheap first recovery before a
+   *  reclaim. Returns false when the PTY is gone. Workers run permissionMode:
+   *  'bypass' (no permission menus), so a stray Enter cannot approve anything.
+   *  (Stall recovery.) */
+  nudge: (terminalId: string) => boolean
+  /** The worker PTY's CURRENT visible screen as plain text (the headless `claude`
+   *  TUI frame), or null when unknown. Read-only. The orchestrator classifies it
+   *  (classifyOutput) to tell WHY a non-promoting worker isn't progressing — a
+   *  usage/rate-limit WAIT or a startup permission prompt — rather than treating
+   *  every quiet worker as a stall. (Card 4880e9c6 — 進まない分類.) */
+  recentOutput: (terminalId: string) => string | null
 }
 
 /** The anomaly-detection stage's injectable surface — split from the others so
@@ -915,6 +1290,21 @@ const defaultRecoverWorker = async (opts: {
   }
 }
 
+/** The worker PTY's last-output epoch (terminal.ts tracks it per session), or null
+ *  when the PTY is unknown / has produced no output yet. The stall monitor's
+ *  second liveness channel. */
+const defaultLastOutputAt = (terminalId: string): number | null =>
+  getTerminal(terminalId)?.lastOutputAt ?? null
+
+/** Send a bare Enter (CR) to a worker's PTY — the stall nudge. writeInput returns
+ *  false when the session is gone/finished (nothing to wake). */
+const defaultNudge = (terminalId: string): boolean => writeInput(terminalId, '\r')
+
+/** The worker PTY's current visible screen (headless `claude` TUI frame), or null
+ *  — the source classifyOutput inspects to spot a rate-limit wait / permission
+ *  prompt. Read-only (terminal.ts reconstructs the frame without touching the PTY). */
+const defaultRecentOutput = (terminalId: string): string | null => getTerminalScreen(terminalId)
+
 // --- Default integration deps (Card③) -----------------------------------------
 
 const defaultFetchReview = async (projectPath: string): Promise<ProjectTask[]> => {
@@ -1158,6 +1548,9 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   readHeartbeat: defaultReadHeartbeat,
   recoverCard: defaultRecoverCard,
   recoverWorker: defaultRecoverWorker,
+  lastOutputAt: defaultLastOutputAt,
+  nudge: defaultNudge,
+  recentOutput: defaultRecentOutput,
   fetchReview: defaultFetchReview,
   prepareTarget: defaultPrepareTarget,
   classify: classifyBranch,
@@ -1197,31 +1590,51 @@ const withHeartbeat = (w: OrchestratorWorker, hb: HeartbeatSign | null): Orchest
  *   • its card is back in todo/blocked (a human pulled it) → don't fight it; keep
  *     while alive (reconcile re-moves a todo card), drop if dead.
  *   • its card is in 'doing' → PROBE (commits + heartbeat + liveness) and judge:
- *     promote doing→review when conservatively DONE, else update the stage and,
- *     if the PTY has exited with nothing to promote, free the slot (card stays in
- *     'doing' — never advanced on a broken/empty worker).
- *  Pure-decision (classifyWorker) + guarded IO; never throws. */
+ *     promote doing→review when conservatively DONE; else, if the PTY EXITED with
+ *     nothing to promote, recover the crash (tear down + re-home); else, if it is
+ *     ALIVE but has gone SILENT (no heartbeat AND no PTY output for STALL_SILENCE_MS),
+ *     try to un-stick it with an Enter nudge and, when nudges are spent, RECLAIM it
+ *     through the same crash-recovery path; else update the stage and keep it.
+ *  Pure-decision (classifyWorker / classifyStall) + guarded IO; never throws. `now`
+ *  is injected (no clock here) so the stall escalation is unit-tested deterministically. */
 const monitorWorkers = async (
   engine: ProjectEngine,
   deps: OrchestratorDeps,
   byId: Map<string, ProjectTask>,
+  now: number,
 ): Promise<void> => {
   const next: OrchestratorWorker[] = []
+  const sinceStart = (iso: string): number => {
+    const t = Date.parse(iso)
+    return Number.isFinite(t) ? now - t : Number.POSITIVE_INFINITY
+  }
 
-  // Recover a LOST worker — its `claude` PTY died / was killed without integrable
-  // work. Tear down its worktree + PTY so nothing zombies on disk (the gap the old
-  // monitor left: it freed the slot but stranded the worktree AND left the card in
-  // 'doing' forever), and — when WE still own its card (still in 'doing') — return
-  // it to the board ('todo' to retry, 'blocked' to park; see recoveryColumn). A
-  // card a human already moved out of 'doing', or deleted, is left to the human
-  // (its worktree is still cleaned). Returns true iff the worker must be KEPT (the
-  // card move was KEPT/failed and will be retried next pass — its PTY is already
-  // dead so it holds no live slot, it only carries the pending retry). Never throws.
+  // Recover a LOST worker — its `claude` PTY died/was killed (reason 'crash') OR it
+  // stayed silent past every nudge (reason 'stall'). Tear down its worktree + PTY so
+  // nothing zombies on disk (the gap the old monitor left: it freed the slot but
+  // stranded the worktree AND left the card in 'doing' forever), and — when WE still
+  // own its card (still in 'doing') — return it to the board ('todo' to retry,
+  // 'blocked' to park; see recoveryColumn). A card a human already moved out of
+  // 'doing', or deleted, is left to the human (its worktree is still cleaned).
+  // Returns true iff the worker must be KEPT (the card move was KEPT/failed and will
+  // be retried next pass — a dead/reclaimed PTY holds no live slot, it only carries
+  // the pending retry). Never throws.
   const recoverLost = async (
     w: OrchestratorWorker,
     card: ProjectTask | undefined,
     probe: WorkerProbe,
+    reason: WorkerRecoveryReason = 'crash',
   ): Promise<boolean> => {
+    const verb =
+      reason === 'stall'
+        ? 'stalled — reclaimed'
+        : reason === 'runaway'
+          ? 'runaway (hit execution-time limit) — stopped'
+          : reason === 'rate-limit'
+            ? 'rate/usage-limited too long — requeued'
+            : reason === 'permission'
+              ? 'permission/trust prompt unresolved — parked'
+              : 'lost'
     let teardown: { removed: boolean; reason?: string } = { removed: false }
     try {
       teardown = await deps.recoverWorker({
@@ -1238,44 +1651,73 @@ const monitorWorkers = async (
     // nothing to move; a human-moved one is the human's now — clean, don't fight.
     if (!card || columnOf(card) !== 'doing') {
       engine.recoveries.delete(w.taskId)
+      clearKeptMove(engine, w.taskId) // card left 'doing' (human/deleted) — nothing stuck
       logLine(
         engine,
         'info',
-        `worker lost — slot freed: ${w.branch} (${shorten(w.taskTitle)})${keptNote}`,
+        `worker ${verb} — slot freed: ${w.branch} (${shorten(w.taskTitle)})${keptNote}`,
         'routine',
       )
       return false
     }
 
     const requeues = engine.recoveries.get(w.taskId) ?? 0
-    const col = recoveryColumn(probe, requeues, RECOVER_MAX_REQUEUE)
+    let col = recoveryColumn(probe, requeues, RECOVER_MAX_REQUEUE, reason)
     let moved = false
     try {
       moved = await deps.recoverCard(engine.path, w.taskId, col)
     } catch {
       moved = false
     }
+    // Board write kept — bump the stuck-move tracker. Past the retry budget,
+    // ESCALATE a 'todo' requeue to 'blocked' (blocked退避): a card whose recovery
+    // write keeps failing must NOT zombie in 'doing' ("dead なのに doing"), so we
+    // park it for a human instead of gently requeueing it forever. (If the write
+    // ITSELF keeps failing the card can't move at all — the 'move-stuck' anomaly
+    // then surfaces it; see detectAnomalies.)
     if (!moved) {
-      // Board write kept — KEEP the (dead) worker so the next pass retries the
-      // move; until it lands the card stays in 'doing' (selectDispatch's column
-      // gate skips it, so no re-dispatch). A dead worker holds no live slot.
+      const attempts = recordKeptMove(engine, w.taskId, 'recover', w.branch, w.taskTitle)
+      if (attempts >= MOVE_STUCK_MAX_RETRIES && col !== 'blocked') {
+        col = 'blocked'
+        try {
+          moved = await deps.recoverCard(engine.path, w.taskId, 'blocked')
+        } catch {
+          moved = false
+        }
+      }
+    }
+    if (!moved) {
+      // Still kept — KEEP the (dead) worker so the next pass retries the move;
+      // until it lands the card stays in 'doing' (selectDispatch's column gate
+      // skips it, so no re-dispatch). A dead worker holds no live slot. The
+      // move-stuck anomaly now surfaces this for the owner (more than a warn).
       logLine(
         engine,
         'warn',
-        `worker lost but card move kept (will retry): ${w.branch} (${shorten(w.taskTitle)})`,
+        `worker ${verb} but card move kept (will retry): ${w.branch} (${shorten(w.taskTitle)})`,
       )
       return true
     }
-    if (col === 'todo') engine.recoveries.set(w.taskId, requeues + 1)
-    else engine.recoveries.delete(w.taskId) // parked — a human requeue starts fresh
-    // 'crash' kind + warn level: the worker's PTY died WITHOUT integrable work —
-    // the abnormal counterpart of a 'routine' slot-free, surfaced (not hidden) so
-    // the owner sees the recovered crash + where its card went.
+    clearKeptMove(engine, w.taskId) // the recovery write landed — forget the stuck tracking
+    // A 'rate-limit' requeue is ORTHOGONAL to the crash/stall retry budget: it is a
+    // transient WAIT, not a failed attempt, so it must neither consume that budget
+    // (else a real later crash would skip its retries) nor be capped by it (a
+    // limited account self-heals — looping todo↔doing until it lifts is fine, no
+    // work is lost). Only crash/stall (and the budget-driven cases) touch it.
+    if (reason !== 'rate-limit') {
+      if (col === 'todo') engine.recoveries.set(w.taskId, requeues + 1)
+      else engine.recoveries.delete(w.taskId) // parked — a human requeue starts fresh
+    }
+    // warn level + structured kind: 'crash' for a dead PTY, 'stall' for a reclaimed
+    // silent one; runaway / rate-limit / permission ride as uncategorized-but-shown
+    // events (no UI chip exists for them yet — the message carries the reason). The
+    // abnormal counterpart of a 'routine' slot-free, surfaced (not hidden) so the
+    // owner sees the recovered worker + where its card went + WHY.
     logLine(
       engine,
       'warn',
-      `worker lost — card → ${col}: ${w.branch} (${shorten(w.taskTitle)})${keptNote}`,
-      'crash',
+      `worker ${verb} — card → ${col}: ${w.branch} (${shorten(w.taskTitle)})${keptNote}`,
+      reason === 'stall' ? 'stall' : reason === 'crash' ? 'crash' : undefined,
     )
     return false
   }
@@ -1330,7 +1772,7 @@ const monitorWorkers = async (
 
     const { promote, stage } = classifyWorker(
       { alive, commitsAhead, heartbeat },
-      ageMs(w.startedAt) >= STARTUP_GRACE_MS,
+      sinceStart(w.startedAt) >= STARTUP_GRACE_MS,
     )
 
     if (promote) {
@@ -1343,12 +1785,16 @@ const monitorWorkers = async (
       if (moved) {
         logLine(engine, 'info', `promoted to review: ${shorten(w.taskTitle)} → ${w.branch}`, 'promote')
         engine.recoveries.delete(w.taskId) // succeeded — drop any prior retry budget
+        clearKeptMove(engine, w.taskId) // the review move landed — forget any stuck tracking
         // Keep a lingering PTY as 'done' (UI shows it; its exit frees the slot);
         // a worker that already exited has nothing left to count.
         if (alive) next.push(withHeartbeat({ ...w, stage: 'done' }, heartbeat))
       } else {
-        // Board write hiccup — keep the worker (card still in 'doing') and retry
-        // next pass; don't claim 'done' until the move actually lands.
+        // Board write kept — keep the worker (card still in 'doing') and retry next
+        // pass; don't claim 'done' until the move lands. Track it so a worker that
+        // FINISHED but can't advance (a "done worker stuck in doing") surfaces as a
+        // 'move-stuck' anomaly past the budget instead of a silent warn loop.
+        recordKeptMove(engine, w.taskId, 'review', w.branch, w.taskTitle)
         logLine(engine, 'warn', `review move kept (will retry): ${shorten(w.taskTitle)}`)
         next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
       }
@@ -1367,6 +1813,181 @@ const monitorWorkers = async (
       if (await recoverLost(w, card, { alive, commitsAhead, heartbeat })) next.push(w)
       continue
     }
+
+    // ── Card 4880e9c6: ALIVE, 'doing', not promoted — decide WHY it isn't
+    // progressing. A RUNAWAY (overran the time ceiling) is stopped regardless of
+    // liveness. Everything else is judged ONLY for a worker the stall detector
+    // ALREADY considers SILENT: a worker still streaming output or beating is
+    // plainly working and is NEVER touched, whatever text sits on its screen — the
+    // load-bearing false-kill guard (a plan, a diff, or this very code mentioning a
+    // limit/prompt can't trip it while output flows). For a silent worker we then
+    // refine the ACTION by reading its screen: a rate-limit WAIT is held (not
+    // nudged/reclaimed — that would throw away its committed work), a trust prompt
+    // is auto-accepted, and anything else takes the existing nudge→reclaim path.
+    const startedMs = Date.parse(w.startedAt)
+
+    // (1) RUNAWAY — wall-clock since dispatch past MAX_EXEC_MS. Checked FIRST and
+    // INDEPENDENT of liveness: a worker streaming output forever (an infinite
+    // /order loop, a task too big) still overruns, and is the one case a silence
+    // detector can never catch. Stop it (teardown + → 'blocked': a re-run would
+    // just overrun again, so a human looks). Clear all per-worker bookkeeping so a
+    // reclaimed terminalId never carries stale state into a future spawn.
+    if (isRunaway(startedMs, now, MAX_EXEC_MS)) {
+      engine.nudges.delete(w.terminalId)
+      engine.rateLimited.delete(w.terminalId)
+      engine.permissionWaits.delete(w.terminalId)
+      logLine(
+        engine,
+        'warn',
+        `worker runaway — alive ${Math.floor((now - startedMs) / 60_000)}m ≥ ${Math.floor(MAX_EXEC_MS / 60_000)}m execution limit: ${w.branch} (${shorten(w.taskTitle)})`,
+      )
+      if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'runaway')) next.push(w)
+      continue
+    }
+
+    // Compute the stall verdict UP FRONT: its `silentMs` GATES the rate-limit /
+    // permission classification below (only a silent worker is a candidate), and
+    // its `action` drives the normal path. A worker NOT yet silent yields action
+    // 'none' with silentMs < STALL_SILENCE_MS, so it sails through every branch
+    // untouched — exactly the "never interrupt a working worker" contract.
+    let lastOut: number | null = null
+    try {
+      lastOut = deps.lastOutputAt(w.terminalId)
+    } catch {
+      /* unknown → no output signal; heartbeat + startedAt still apply */
+    }
+    const hbMs = heartbeat?.at ? Date.parse(heartbeat.at) : Number.NaN
+    const stall = classifyStall(
+      {
+        heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
+        lastOutputAtMs: lastOut,
+        startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
+        nudge: engine.nudges.get(w.terminalId),
+      },
+      now,
+      {
+        stallMs: STALL_SILENCE_MS,
+        cooldownMs: STALL_NUDGE_COOLDOWN_MS,
+        echoGuardMs: STALL_ECHO_GUARD_MS,
+        maxNudges: STALL_MAX_NUDGES,
+      },
+    )
+
+    // Only an ALREADY-SILENT worker (the stall detector's own threshold) is judged
+    // for a rate-limit / permission WAIT. This is the false-kill fix: a productive
+    // worker that merely PRINTS limit-/prompt-like text (a plan, a diff, this very
+    // code) is still streaming output ⇒ silentMs < STALL_SILENCE_MS ⇒ not silent ⇒
+    // never classified, never Enter-nudged, never reclaimed. Reading the screen only
+    // when silent also avoids a per-pass TUI scrape for every busy worker.
+    if (stall.silentMs >= STALL_SILENCE_MS) {
+      let screen: string | null = null
+      try {
+        screen = deps.recentOutput(w.terminalId)
+      } catch {
+        /* unknown → classifyOutput('normal') → ordinary stall handling below */
+      }
+      const output = classifyOutput(screen)
+
+      // RATE-LIMIT WAIT — silent because it is waiting on a usage/quota/overload
+      // limit, NOT wedged. Enter can't lift a limit and reclaiming throws away
+      // committed work + re-dispatches into the same wall, so the engine does
+      // NEITHER: it HOLDS the worker (dropping any stall-nudge budget) and only
+      // requeues to 'todo' once STILL limited past RATE_LIMIT_GRACE_MS (slot
+      // recovery; the branch keeps its commits, a later attempt retries when the
+      // limit resets). `since` is stamped once and persists across passes.
+      if (output === 'rate-limited') {
+        engine.permissionWaits.delete(w.terminalId)
+        engine.nudges.delete(w.terminalId)
+        const rl = engine.rateLimited.get(w.terminalId)
+        if (!rl) {
+          engine.rateLimited.set(w.terminalId, { since: now })
+          logLine(
+            engine,
+            'warn',
+            `worker rate/usage-limited — holding (no nudge; requeue after ${Math.floor(RATE_LIMIT_GRACE_MS / 60_000)}m): ${w.branch} (${shorten(w.taskTitle)})`,
+          )
+        } else if (now - rl.since >= RATE_LIMIT_GRACE_MS) {
+          engine.rateLimited.delete(w.terminalId)
+          if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'rate-limit')) next.push(w)
+          continue
+        }
+        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        continue
+      }
+
+      // PERMISSION-WAIT — silent at a trust/permission prompt that slipped past
+      // bypass (--dangerously-skip-permissions should suppress every prompt; this
+      // is the backstop). AUTO-ACCEPT once (Enter takes the trust dialog's default
+      // 'Yes'); still prompting past PERMISSION_WAIT_GRACE_MS ⇒ bypass is genuinely
+      // broken → park in 'blocked' (NOT 'todo' — a retry hits the same broken bypass
+      // and loops). commitsAhead===0 gate: a worker that already produced integrable
+      // work is not stuck at a boot dialog, so it takes the ordinary stall path.
+      if (output === 'permission-wait' && commitsAhead === 0) {
+        engine.rateLimited.delete(w.terminalId)
+        engine.nudges.delete(w.terminalId)
+        const pw = engine.permissionWaits.get(w.terminalId)
+        if (!pw) {
+          let sent = false
+          try {
+            sent = deps.nudge(w.terminalId)
+          } catch {
+            sent = false
+          }
+          engine.permissionWaits.set(w.terminalId, { since: now, accepted: sent })
+          logLine(
+            engine,
+            'warn',
+            `worker permission/trust prompt — auto-accepted (Enter)${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
+          )
+        } else if (now - pw.since >= PERMISSION_WAIT_GRACE_MS) {
+          engine.permissionWaits.delete(w.terminalId)
+          if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'permission')) next.push(w)
+          continue
+        }
+        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        continue
+      }
+    }
+
+    // Reached here ⇒ NOT silent, OR silent with a 'normal' screen ⇒ neither a
+    // rate-limit nor a permission wait applies. Drop any stale waiting-state (the
+    // worker recovered, or was never in one) and take the ordinary STALL path: a
+    // silent worker is NUDGED (Enter) up to STALL_MAX_NUDGES then RECLAIMED
+    // (teardown + re-home) like a crash; a still-active one (action 'none') is
+    // simply kept. Unchanged from the pre-card stall self-healing (c9fe657).
+    engine.rateLimited.delete(w.terminalId)
+    engine.permissionWaits.delete(w.terminalId)
+    if (stall.action === 'reclaim') {
+      engine.nudges.delete(w.terminalId)
+      // A silent worker is reclaimed like a crash: recoveryColumn (via recoverLost)
+      // sends a bare hang to 'todo' (one retry) or 'blocked' (budget spent), never
+      // to review — a stall NEVER fakes progress.
+      if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'stall')) next.push(w)
+      continue
+    }
+    if (stall.action === 'nudge') {
+      let sent = false
+      try {
+        sent = deps.nudge(w.terminalId)
+      } catch {
+        sent = false
+      }
+      const count = (engine.nudges.get(w.terminalId)?.count ?? 0) + 1
+      engine.nudges.set(w.terminalId, { count, lastNudgeAt: now })
+      logLine(
+        engine,
+        'warn',
+        `worker stalled ${Math.floor(stall.silentMs / 60_000)}m — nudged (Enter ${count}/${STALL_MAX_NUDGES})` +
+          `${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
+        'stall',
+      )
+    } else if (stall.progressed && engine.nudges.has(w.terminalId)) {
+      // Real progress since the nudge (a fresh heartbeat OR sustained output past
+      // the echo guard) proves the Enter woke it — clear the budget so a LATER,
+      // independent stall gets the full nudge allowance again.
+      engine.nudges.delete(w.terminalId)
+      logLine(engine, 'info', `worker recovered after nudge: ${w.branch} (${shorten(w.taskTitle)})`, 'routine')
+    }
     next.push(withHeartbeat({ ...w, stage }, heartbeat))
   }
 
@@ -1381,6 +2002,22 @@ const monitorWorkers = async (
     const c = byId.get(id)
     const col = c ? columnOf(c) : null
     if (col === null || col === 'done' || col === 'review') engine.recoveries.delete(id)
+  }
+
+  // Forget per-worker bookkeeping (nudge budget + rate-limit / permission-wait
+  // tracking) for workers no longer in the live set (reclaimed, promoted-and-
+  // exited, crashed) — all keyed by terminalId, so a worker that survives this
+  // pass keeps its state while a departed one's is dropped. Prevents a stale entry
+  // from ever outliving its worker (and from leaking onto a future spawn's id).
+  const liveTerminalIds = new Set(next.map((w) => w.terminalId))
+  for (const id of Array.from(engine.nudges.keys())) {
+    if (!liveTerminalIds.has(id)) engine.nudges.delete(id)
+  }
+  for (const id of Array.from(engine.rateLimited.keys())) {
+    if (!liveTerminalIds.has(id)) engine.rateLimited.delete(id)
+  }
+  for (const id of Array.from(engine.permissionWaits.keys())) {
+    if (!liveTerminalIds.has(id)) engine.permissionWaits.delete(id)
   }
 
   engine.workers = next
@@ -1400,10 +2037,12 @@ const monitorWorkers = async (
  *      declared-file conflict with active work — see selectDispatch), spawn a
  *      worker for each, then move its card todo→doing (+branch).
  *  Never throws — every external call is guarded and logged; a bad pass just
- *  yields to the next tick. */
+ *  yields to the next tick. `now` is injected (default Date.now()) so the monitor's
+ *  stall escalation is driven deterministically by the unit test. */
 export const runDispatchPass = async (
   engine: ProjectEngine,
   deps: OrchestratorDeps,
+  now: number = Date.now(),
 ): Promise<void> => {
   if (!engine.running) return
 
@@ -1420,8 +2059,9 @@ export const runDispatchPass = async (
   const todos = tasks.filter(isTodoCard)
 
   // 2. Monitor existing workers: advance stages, promote the done ones
-  //    doing→review, and prune dead/finished workers (freeing their slots).
-  await monitorWorkers(engine, deps, byId)
+  //    doing→review, recover crashed AND stalled ones, and prune dead/finished
+  //    workers (freeing their slots).
+  await monitorWorkers(engine, deps, byId, now)
   if (!engine.running) return // a stop during the (awaiting) monitor halts promptly
 
   // 3. Reconcile: a counted worker whose card is STILL in todo means an earlier
@@ -1574,7 +2214,10 @@ export const runIntegratePass = async (
         continue
       }
       engine.conflictedBranches.delete(card.branch)
-      await deps.markConflict(engine.path, card.id, false)
+      // Clear the persistent stamp, and reflect a SUCCESSFUL clear in the local
+      // snapshot so the land-path backstop below skips a redundant re-clear. A KEPT
+      // clear leaves the snapshot stamped → the backstop still fixes it on land.
+      if (await deps.markConflict(engine.path, card.id, false)) card.integrationConflict = false
     }
 
     // VERIFICATION GATE — never let the engine auto-merge code that doesn't even
@@ -1633,6 +2276,20 @@ export const runIntegratePass = async (
       if (await deps.moveToDone(engine.path, card.id)) {
         const cl = await deps.cleanup(engine.path, card.branch)
         engine.conflictedBranches.delete(card.branch)
+        clearKeptMove(engine, card.id) // the done move landed — forget any stuck tracking
+        // Reliable flag CLEAR — the BACKSTOP for two cases the became-ff clear above
+        // can miss: (a) the stamp survived a server restart that lost the in-memory
+        // memo (so that block never ran), and (b) that block's markConflict(false)
+        // was itself KEPT (then the snapshot stays stamped). Only fires for a still-
+        // stamped card — the happy path and an already-cleared became-ff card write
+        // nothing — so a "done but flagged conflict" zombie can never survive a land.
+        if (card.integrationConflict) {
+          try {
+            await deps.markConflict(engine.path, card.id, false)
+          } catch {
+            /* best-effort — the card is already done; a kept clear is only cosmetic */
+          }
+        }
         // Drop the just-landed card from the readiness snapshot so the dashboard
         // doesn't show it as still-in-review until the next pass re-reads.
         engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
@@ -1674,6 +2331,11 @@ export const runIntegratePass = async (
           )
         }
       } else {
+        // Landed on the trunk but the review→done move was KEPT — the work is safe
+        // (commits are on the trunk) yet the card is stuck in review ("done なのに
+        // review"). Track it: a persistently-kept done-move surfaces as a
+        // 'move-stuck' anomaly so a human moves it, instead of an endless warn loop.
+        recordKeptMove(engine, card.id, 'done', card.branch, card.title ?? '')
         logLine(engine, 'warn', `landed on ${target} but column move kept (will retry): ${shorten(card.title ?? '')}`)
       }
     } else if (outcome.status === 'conflict') {
@@ -1692,10 +2354,17 @@ export const runIntegratePass = async (
       // (half A classified it before the attempt revealed the conflict).
       const r = engine.reviews.find((x) => x.taskId === card.id)
       if (r) r.status = 'conflict'
+      // Name WHERE it conflicts (the unmerged files swarmIntegrate captured) so the
+      // human resolving it knows what to open — capped so the log line stays legible.
+      const files = outcome.files ?? []
+      const filesNote = files.length
+        ? ` · conflicts in: ${files.slice(0, 6).join(', ')}${files.length > 6 ? ` (+${files.length - 6})` : ''}`
+        : ''
       logLine(
         engine,
         'error',
         `conflict — manual integration needed: ${card.branch} (${shorten(card.title ?? '')})` +
+          filesNote +
           (stamped ? '' : ' · card stamp kept (will re-stamp next pass)'),
         'conflict',
       )
@@ -1721,8 +2390,16 @@ export const STALE_HEARTBEAT_MS = 30 * 60_000
  *  fakes; `now` is passed in (no clock here) for deterministic staleness.
  *  Three independent checks — see {@link OrchestratorAnomalyKind}:
  *   • worktree-missing — a counted+alive worker whose worktree dir is gone.
- *   • worker-stale     — a counted+alive, NON-done worker whose heartbeat (or, if
- *                        it never beat, its dispatch) is older than the threshold.
+ *   • worker-stale     — a counted+alive, NON-done worker SILENT on BOTH liveness
+ *                        channels (no heartbeat AND no PTY output, falling back to
+ *                        its dispatch time) longer than the threshold. Uses the
+ *                        same activity notion the stall monitor acts on
+ *                        (lastActivityMs), so this read-only backstop never
+ *                        contradicts the engine's own liveness view — a worker the
+ *                        engine considers active (streaming output) is never flagged
+ *                        stale here. By the time it would fire, the stall monitor
+ *                        has usually already nudged/reclaimed it; it remains as the
+ *                        display backstop for a worker whose reclaim couldn't land.
  *   • orphan-doing     — a 'doing' card with a `swarm/*` branch that NO counted
  *                        worker drains AND whose worktree is gone (its worker
  *                        vanished but the card never advanced). A doing card whose
@@ -1756,9 +2433,24 @@ export const detectAnomalies = async (
     // A promoted ('done') worker lingering its PTY is FINISHED, not stuck — never
     // stale. Only an actively-working worker can be hung.
     if (w.stage === 'done') continue
-    const beat = w.heartbeatAt ? Date.parse(w.heartbeatAt) : Number.NaN
-    const since = Number.isFinite(beat) ? beat : Date.parse(w.startedAt)
-    if (Number.isFinite(since) && now - since >= STALE_HEARTBEAT_MS) {
+    // A worker the monitor is HOLDING because it is rate/usage-limited or waiting
+    // on a startup permission prompt is silent BY DESIGN, not hung — it is being
+    // managed (held / auto-accepted / about to requeue), so flagging it 'worker-
+    // stale' ("no heartbeat for N min", i.e. likely hung) would be misleading
+    // noise. Skip it here; its dedicated log line already says why it is paused.
+    // (Card 4880e9c6 — keep the anomaly view honest about WAIT vs HANG.)
+    if (engine.rateLimited.has(w.terminalId) || engine.permissionWaits.has(w.terminalId)) continue
+    // Silence across BOTH channels (heartbeat + PTY output) — the same activity
+    // notion the stall monitor uses, so a worker streaming output (alive to the
+    // engine) is never falsely flagged stale here.
+    let lastOut: number | null = null
+    try {
+      lastOut = deps.lastOutputAt(w.terminalId)
+    } catch {
+      lastOut = null
+    }
+    const since = lastActivityMs({ heartbeatAt: w.heartbeatAt, lastOutputAt: lastOut, startedAt: w.startedAt })
+    if (since > 0 && now - since >= STALE_HEARTBEAT_MS) {
       out.push({
         kind: 'worker-stale',
         ref: w.branch,
@@ -1787,7 +2479,46 @@ export const detectAnomalies = async (
     }
   }
 
+  // Move-stuck check (anti-zombie): a card whose Board COLUMN MOVE has been KEPT
+  // past the retry budget — the work happened but the card couldn't follow it
+  // ("done なのに review" / a finished/dead worker stuck in 'doing'). The move
+  // sites maintain engine.stuckMoves (bumped on each kept write, cleared the moment
+  // it lands); here we only SURFACE the ones past the threshold so the owner can
+  // move them by hand (the engine keeps retrying, and has already escalated a lost
+  // worker's recovery to 'blocked'). Read-only, like the rest of detection.
+  for (const [taskId, sm] of Array.from(engine.stuckMoves)) {
+    if (sm.attempts < MOVE_STUCK_MAX_RETRIES) continue
+    out.push({
+      kind: 'move-stuck',
+      ref: taskId,
+      branch: sm.branch,
+      taskTitle: sm.taskTitle,
+      intent: sm.intent,
+      attempts: sm.attempts,
+    })
+  }
+
   return out
+}
+
+/** Drop stuck-move entries whose card has LEFT the stuck situation — the move
+ *  finally landed (a human moved it / the engine's retry succeeded) or the card
+ *  was deleted — so the tracker never surfaces a now-resolved zombie. A COLUMN
+ *  rule (not a per-pass touched-set), so it is immune to the integration
+ *  throttle (a 'done' entry isn't wrongly pruned on the 4-of-5 ticks the
+ *  integrate pass skips):
+ *    - 'done'               valid only while the card is still in 'review'.
+ *    - 'review' / 'recover' valid only while the card is still in 'doing'.
+ *  A vanished (deleted) card is always pruned. Pure state mutation — no IO.
+ *  Exported for the unit test (driven with a plain engine + board snapshot). */
+export const pruneStuckMoves = (engine: ProjectEngine, tasks: readonly ProjectTask[]): void => {
+  const byId = new Map(tasks.map((t) => [t.id, t]))
+  for (const [taskId, sm] of Array.from(engine.stuckMoves)) {
+    const card = byId.get(taskId)
+    const col = card ? columnOf(card) : null
+    const valid = sm.intent === 'done' ? col === 'review' : col === 'doing'
+    if (!valid) engine.stuckMoves.delete(taskId)
+  }
 }
 
 /** ONE full engine tick: dispatch, then (still running) integrate, then detect
@@ -1814,6 +2545,9 @@ export const runEnginePass = async (
     if (engine.running) {
       try {
         const tasks = await deps.fetchTasks(engine.path)
+        // Prune resolved stuck-moves BEFORE detection reads them, so a zombie that
+        // a human (or a recovered write) already fixed never surfaces as an anomaly.
+        pruneStuckMoves(engine, tasks)
         engine.anomalies = await detectAnomalies(engine, tasks, deps, Date.now())
       } catch {
         // A transient board read isn't itself an anomaly to surface — keep the last
@@ -1967,6 +2701,98 @@ export const stopOrchestratorWorker = async (
     'info',
     `worker stopped by owner — ${note}: ${w.branch} (${shorten(w.taskTitle)})` +
       (teardown.removed ? '' : ` · worktree kept (${teardown.reason ?? '?'})`),
+  )
+  return stateOf(engine, deps.isAlive)
+}
+
+/** Resolve a STUCK review card on the owner's command — the human resolution path
+ *  for a card the engine can NOT auto-land (a real rebase conflict, or one that
+ *  keeps failing verification), so it never sits in review forever. Moves the card
+ *  OUT of review into a human-actionable column, clears its conflict flag + the
+ *  engine's conflict/verify memos, tears down any leftover worker (keeping the
+ *  branch), and drops it from the readiness snapshot:
+ *    - target 'blocked' — PARK it: the owner takes the branch over by hand (resolve
+ *      the conflict in a terminal, then move the card to done / back to review).
+ *    - target 'todo'    — REQUEUE it: dropping the stale worker frees the card to be
+ *      re-dispatched, so a fresh worker re-attempts the goal off the current trunk
+ *      (the old branch is left for reference — branch names are unique per spawn).
+ *  Idempotent: a card NOT currently in review (already resolved / moved / deleted)
+ *  is a no-op returning the current state. Best-effort writes (a kept move leaves
+ *  the card in review — the owner retries); never throws. Owner-gated at the route.
+ *  Works whether the engine is running or stopped. */
+export const resolveOrchestratorReview = async (
+  projectPath: string,
+  taskId: string,
+  target: 'blocked' | 'todo',
+  deps: OrchestratorDeps & IntegrationDeps = defaultDeps(),
+): Promise<SwarmOrchestratorState> => {
+  const key = await canonicalize(projectPath)
+  const engine = store.engines.get(key)
+  if (!engine) return emptyState()
+
+  // Act ONLY on a card actually in review (idempotent otherwise). Read fresh — the
+  // engine.reviews snapshot can lag a pass behind the board.
+  let card: ProjectTask | undefined
+  try {
+    card = (await deps.fetchTasks(key)).find((t) => t.id === taskId)
+  } catch {
+    return stateOf(engine, deps.isAlive)
+  }
+  if (!card || columnOf(card) !== 'review') return stateOf(engine, deps.isAlive)
+  const branch = typeof card.branch === 'string' ? card.branch : ''
+
+  // Move the card OUT of review FIRST — the critical, must-succeed step (it must
+  // not sit in review forever). A KEPT move changes NOTHING: the worker + memos
+  // stay intact and the owner simply retries, so a board-write blip never leaves
+  // the card half-resolved.
+  let moved = false
+  try {
+    moved = await deps.recoverCard(key, taskId, target)
+  } catch {
+    moved = false
+  }
+  if (!moved) {
+    logLine(engine, 'warn', `review resolve kept (will retry): ${shorten(card.title ?? '')} → ${target}`)
+    return stateOf(engine, deps.isAlive)
+  }
+
+  // Moved — tear down any worker still counted for this branch: its promoted 'done'
+  // PTY may linger and its worktree is stale scratch (cleanup never ran — we didn't
+  // integrate). Keeps the BRANCH (the human / next worker may want its commits) and
+  // — for a 'todo' requeue — frees the card to be re-dispatched (its id leaves the
+  // counted set, so selectDispatch's id gate no longer skips it).
+  const owned = branch ? engine.workers.filter((w) => w.branch === branch) : []
+  for (const w of owned) {
+    try {
+      await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId: w.terminalId })
+    } catch {
+      /* best-effort teardown — the card already left review, which is the point */
+    }
+  }
+  if (owned.length) engine.workers = engine.workers.filter((w) => !owned.includes(w))
+
+  // Clear EVERY engine memo tied to this branch so a re-attempt re-classifies clean:
+  // the persistent conflict stamp (reliable CLEAR), the in-memory conflict + verify
+  // memos, the readiness snapshot row, and any recovery / stuck-move tracking.
+  if (branch) {
+    engine.conflictedBranches.delete(branch)
+    engine.verifyFailed.delete(branch)
+  }
+  if (card.integrationConflict) {
+    try {
+      await deps.markConflict(key, taskId, false)
+    } catch {
+      /* best-effort — the card already left review; a kept clear is only cosmetic */
+    }
+  }
+  engine.reviews = engine.reviews.filter((r) => r.taskId !== taskId)
+  engine.recoveries.delete(taskId)
+  clearKeptMove(engine, taskId)
+  logLine(
+    engine,
+    'info',
+    `review resolved by owner — card → ${target}: ${branch || '(no branch)'} (${shorten(card.title ?? '')})`,
+    'integrate',
   )
   return stateOf(engine, deps.isAlive)
 }

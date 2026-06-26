@@ -35,6 +35,8 @@ import {
   defaultDeps,
   makeVerify,
   tscCheck,
+  STALL_SILENCE_MS,
+  STALL_NUDGE_COOLDOWN_MS,
   __resetOrchestratorForTests,
   type OrchestratorDeps,
   type IntegrationDeps,
@@ -176,10 +178,14 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
   timer: null,
   workers: [],
   reviews: [],
+  nudges: new Map(),
   conflictedBranches: new Set(),
   verifyFailed: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
+  stuckMoves: new Map(),
+  rateLimited: new Map(),
+  permissionWaits: new Map(),
   log: [],
   anomalies: [],
   ...over,
@@ -473,6 +479,56 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(col('a')).toBe('todo') // ← requeued, not stranded in doing
     expect(engine.workers).toHaveLength(0) // slot freed
     expect(engine.log.some((l) => l.message.startsWith('worker lost — card → todo'))).toBe(true)
+  })
+
+  it('(a)+(3) RECLAIMS a STALLED (alive but silent) worker: nudges, then REAL worktree torn down + card requeued', async () => {
+    const { proj } = await setupRepo()
+    const { col, boardDeps } = makeBoard([todoCard('a')])
+    const nudged: string[] = []
+    // A spawn that creates a REAL `swarm/*` worktree off origin/main; the worker
+    // stays ALIVE the whole time (isAlive true) but produces NO heartbeat and NO PTY
+    // output — the alive-but-unresponsive STALL the crash path can never catch.
+    const spawn = (async ({ hint }: { title: string; hint?: string }) => {
+      const wt = await createSwarmWorktree(proj, { hint })
+      return { terminalId: `pty-${wt.branch}`, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
+    }) as OrchestratorDeps['spawnWorker']
+    const deps: OrchestratorDeps & IntegrationDeps = {
+      ...defaultDeps(), // REAL recoverWorker (removeSwarmWorktree)
+      ...boardDeps,
+      spawnWorker: spawn,
+      isAlive: () => true, // ALIVE throughout — exercises the STALL path, not the crash path
+      readHeartbeat: async () => null, // never beats
+      lastOutputAt: () => null, // never emits output → silent on BOTH channels
+      nudge: (id) => {
+        nudged.push(id)
+        return true
+      },
+      killPty: () => {},
+    }
+    const engine = newEngine(proj)
+
+    // Pass 1 — dispatch: a real worktree is created; card → doing.
+    await runDispatchPass(engine, deps)
+    expect(col('a')).toBe('doing')
+    expect(engine.workers).toHaveLength(1)
+    const { worktree, startedAt } = engine.workers[0]
+    expect(await exists(worktree)).toBe(true) // real worktree on disk
+    const t0 = Date.parse(startedAt)
+
+    // Pass 2 — silent past STALL_SILENCE_MS → NUDGE #1 (worktree untouched).
+    await runDispatchPass(engine, deps, t0 + STALL_SILENCE_MS + 1)
+    expect(nudged).toHaveLength(1)
+    expect(await exists(worktree)).toBe(true)
+    // Pass 3 — cooldown elapsed, still silent → NUDGE #2.
+    await runDispatchPass(engine, deps, t0 + STALL_SILENCE_MS + STALL_NUDGE_COOLDOWN_MS + 2)
+    expect(nudged).toHaveLength(2)
+    expect(await exists(worktree)).toBe(true)
+    // Pass 4 — budget spent, still silent → RECLAIM: the REAL worktree is force-removed.
+    await runDispatchPass(engine, deps, t0 + STALL_SILENCE_MS + 2 * STALL_NUDGE_COOLDOWN_MS + 3)
+    expect(await exists(worktree)).toBe(false) // ← zombie worktree GONE from disk
+    expect(col('a')).toBe('todo') // ← requeued for one retry, not stranded in doing
+    expect(engine.workers).toHaveLength(0) // slot freed
+    expect(engine.log.some((l) => l.message.startsWith('worker stalled — reclaimed — card → todo'))).toBe(true)
   })
 })
 

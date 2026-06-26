@@ -272,6 +272,33 @@ export const removeSwarmWorktree = async (
     : { removed: false, reason: opts.force ? 'git refused' : 'worktree dirty or locked' }
 }
 
+/** Validate an EXISTING worktree for the RESTART path and read its branch. Same
+ *  hard safety as removeSwarmWorktree: the dir MUST sit strictly under THIS
+ *  project's central worktrees dir (canonicalized; the bare central root is
+ *  refused), so an API-supplied path can never point relaunch at the main
+ *  checkout or another project's tree. Returns the ORIGINAL (non-canonicalized)
+ *  path so the relaunched PTY's cwd matches the first spawn's exactly (the
+ *  killTerminalsByCwd / live-cwd bookkeeping is by exact path). Throws if the
+ *  path escapes the central dir, no longer exists, or has no current branch. */
+export const resolveExistingSwarmWorktree = async (
+  projectPath: string,
+  worktree: string,
+): Promise<{ worktree: string; branch: string }> => {
+  const central = await canonicalize(centralWorktreesDir(await projectUUIDFromPath(projectPath)))
+  const canon = await canonicalize(worktree)
+  if (canon === central || !isUnderCentralDir(canon, central)) {
+    throw new Error('restart worktree is not under this project’s central worktrees dir')
+  }
+  if (!(await stat(worktree).then(() => true).catch(() => false))) {
+    throw new Error('restart worktree no longer exists')
+  }
+  // The branch checked out there — the worker keeps working its same swarm/*
+  // branch on relaunch (a detached HEAD has none, which we refuse).
+  const branch = (await git(worktree, ['branch', '--show-current']))?.trim()
+  if (!branch) throw new Error('restart worktree has no current branch')
+  return { worktree, branch }
+}
+
 // ── Spawn orchestration ─────────────────────────────────────────────────────
 
 export interface SpawnSwarmWorkerOpts {
@@ -286,6 +313,12 @@ export interface SpawnSwarmWorkerOpts {
   env?: Record<string, string>
   cols?: number
   rows?: number
+  /** RESTART path: reuse this EXISTING central worktree instead of creating a
+   *  fresh one, so a dead worker relaunches in place — same `swarm/*` branch +
+   *  its in-progress work, no orphan tree / twin branch. Validated to sit under
+   *  the project's central worktrees dir (resolveExistingSwarmWorktree); throws
+   *  otherwise. Omitted (a fresh dispatch) = create a new worktree off the trunk. */
+  worktree?: string
 }
 
 /** Build the LaunchClaudeOpts for a worker — pure + exported so the worker's
@@ -313,9 +346,16 @@ export const workerLaunchOpts = (
 ): LaunchClaudeOpts => ({
   cwd: worktree,
   agentSessionId,
-  permissionMode: 'bypass',
   appContext: false,
   ...swarmLaunchDefaults('worker'),
+  // permissionMode LAST — AFTER the spread — so 'bypass' is UNCONDITIONAL: an
+  // unattended worker must never wedge on a tool-approval / trust prompt with no
+  // human watching (Card 4880e9c6's "塞ぐ権限待ち経路"). Positioned here so a
+  // future field added to swarmLaunchDefaults can never silently clobber it; the
+  // orchestrator's permission-wait detector is only the BACKSTOP for a prompt that
+  // somehow still appears. (swarmLaunchDefaults sets no permissionMode today, so
+  // this is purely defensive — no behavior change.)
+  permissionMode: 'bypass',
   env: opts.env,
   cols: opts.cols,
   rows: opts.rows,
@@ -331,7 +371,11 @@ export const workerLaunchOpts = (
 export const spawnSwarmWorker = async (
   opts: SpawnSwarmWorkerOpts,
 ): Promise<SpawnSwarmWorkerResponse> => {
-  const { worktree, branch } = await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
+  // RESTART (opts.worktree) relaunches IN the existing worktree — same swarm/*
+  // branch + work preserved; a fresh dispatch creates a new isolated worktree.
+  const { worktree, branch } = opts.worktree
+    ? await resolveExistingSwarmWorktree(opts.projectPath, opts.worktree)
+    : await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
   const agentSessionId = randomUUID()
   const ref = launchClaude(workerLaunchOpts(worktree, agentSessionId, opts))
   return { terminalId: ref.terminalId, agentSessionId, worktree, branch }

@@ -44,6 +44,8 @@ export const settings = {
     'settings.releaseNotes.loading': 'Loading releases…',
     'settings.releaseNotes.error': "Couldn't load release notes. Check your connection and try again.",
     'settings.releaseNotes.current': 'Current',
+    // App version (so users can confirm an update actually took effect)
+    'settings.version.heading': 'Version',
     // Owner inbox
     'settings.inbox.heading': 'Incoming feedback',
     'settings.inbox.refresh': 'Refresh',
@@ -83,6 +85,7 @@ export const settings = {
     'settings.releaseNotes.loading': 'リリース情報を読み込み中…',
     'settings.releaseNotes.error': 'リリースノートを取得できませんでした。接続を確認して再度開いてください。',
     'settings.releaseNotes.current': '使用中',
+    'settings.version.heading': 'バージョン',
     'settings.inbox.heading': '受信したフィードバック',
     'settings.inbox.refresh': '再読み込み',
     'settings.inbox.loading': '送信内容を読み込み中…',

@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto'
 import { Terminal as HeadlessTerminal } from '@xterm/headless'
 import { detectMenu } from '@/lib/claudeMenu'
-import type { ActiveTerminalsResponse, ClaudeBeaconStatus } from '@/lib/types'
+import type { ActiveTerminalsResponse, ClaudeBeaconStatus, TerminalPoolSweepResult } from '@/lib/types'
 // node-pty is a native module — require it lazily so a missing/broken build
 // doesn't crash the whole route layer on import (it'll surface on first use).
 type IPty = any
@@ -127,6 +127,13 @@ const state: TerminalState =
   (globalThis.__openground_terminal = { sessions: new Map() })
 
 const { sessions } = state
+
+// How long after a PTY exits sweepTerminalPool will reap its lingering session.
+// The happy path is the 30s onExit delete timer; this is strictly LARGER so the
+// sweep only ever catches entries whose timer was lost across a server reload
+// (the sessions Map lives on globalThis and survives reloads — the pending
+// setTimeout does not). Never races a client still draining the buffer.
+export const TERMINAL_LINGER_SWEEP_MS = 60_000
 
 // Keep the replay buffer bounded so a long-running shell can't blow up memory.
 // Claude sessions can be hours long and emit a lot more output than a typical
@@ -279,8 +286,20 @@ export const createTerminal = (opts: {
     for (const l of Array.from(session.exitListeners)) {
       try { l(info) } catch {}
     }
+    // Release the subscriber sets now the PTY is dead: onData can never fire
+    // again (the process is gone) and every exitListener has just run, so both
+    // sets are pure leak from here. Dropping them here — not only at the 30s
+    // delete below — bounds the leak even if that delete timer is lost across a
+    // server reload (the sessions Map lives on globalThis and survives reloads;
+    // the pending setTimeout does NOT). A client that (re)subscribes during the
+    // linger window still gets its exit: the SSE route reads info.finishedAt
+    // synchronously after init and emits it, never relying on these listeners.
+    session.listeners.clear()
+    session.exitListeners.clear()
     // Keep the session around briefly so the client can read the exit and
-    // drain the buffer; then drop it.
+    // drain the buffer; then drop it. sweepTerminalPool is the safety net for
+    // when this timer is lost (reload) — it removes finished sessions past the
+    // linger window.
     setTimeout(() => sessions.delete(id), 30_000)
   })
 
@@ -289,6 +308,32 @@ export const createTerminal = (opts: {
 
 export const getTerminal = (id: string): TerminalInfo | null =>
   sessions.get(id)?.info ?? null
+
+/** The session's CURRENT visible screen as plain text (the headless xterm's
+ *  reconstructed frame for a tag:'claude' PTY), or null when the session is
+ *  gone / has no headless terminal (a plain shell, or a fake test session).
+ *  Read-only — no side effects on the PTY or its buffers.
+ *
+ *  Why the SCREEN, not the raw replay buffer: claude is a cursor-addressed TUI,
+ *  so its raw stdout is interleaved escape sequences (a partial repaint), while
+ *  the headless terminal applies them to give the clean text a human sees — the
+ *  right surface for spotting a usage/rate-limit message or a permission/trust
+ *  prompt (the swarm orchestrator's "why isn't this worker progressing?" probe).
+ *  Falls back to the last slice of the raw buffer when there is no headless
+ *  terminal, so a caller still gets *something* to inspect (it must tolerate the
+ *  embedded escape codes — the orchestrator's classifier strips them). */
+export const getTerminalScreen = (id: string): string | null => {
+  const s = sessions.get(id)
+  if (!s) return null
+  if (s.headless) {
+    try {
+      return readScreen(s.headless)
+    } catch {
+      /* fall through to the raw buffer */
+    }
+  }
+  return s.buffer ? s.buffer.slice(-4000) : null
+}
 
 /** Cwds of terminals whose PTY is still alive — feeds the Ground's
  *  "terminal active" card indicator. A session records `finishedAt` in its
@@ -377,6 +422,86 @@ export const killTerminalsByCwd = (cwd: string): number => {
     killed++
   })
   return killed
+}
+
+/** Liveness probe for a PTY pid: signal 0 doesn't deliver a signal, it only
+ *  checks the process exists. ESRCH ⇒ gone (reap it); EPERM ⇒ exists but not
+ *  ours (alive — keep). Anything else (e.g. EINVAL) is treated as alive so we
+ *  never reap on an ambiguous error. */
+const defaultIsAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code !== 'ESRCH'
+  }
+}
+
+/** Tear down ONE pool entry idempotently and drop it from the map. Mirrors the
+ *  onExit teardown so it's safe whether or not onExit already ran:
+ *   - exited-but-lingering session → fields are already cleared; just delete.
+ *   - orphan (process died, onExit never fired) → stamp the exit, notify any
+ *     still-attached subscriber (so its SSE closes), then release everything.
+ *  Never kills — a confirmed-dead process needs no signal, and reaping a LIVE
+ *  PTY is the body-cleaner's job, not the janitor's. */
+const reapSession = (id: string, s: PtySession, now: number): void => {
+  if (s.menuTimer) { clearTimeout(s.menuTimer); s.menuTimer = null }
+  if (s.pauseTimer) { clearTimeout(s.pauseTimer); s.pauseTimer = null }
+  if (s.headless) { try { s.headless.dispose() } catch {}; s.headless = null }
+  s.flows?.clear()
+  if (!s.info.finishedAt) {
+    s.info.finishedAt = new Date(now).toISOString()
+    if (s.info.exitCode === undefined) s.info.exitCode = -1
+    s.info.menuOpen = false
+    for (const l of Array.from(s.exitListeners)) {
+      try { l(s.info) } catch {}
+    }
+  }
+  s.listeners.clear()
+  s.exitListeners.clear()
+  sessions.delete(id)
+}
+
+export interface SweepTerminalPoolOpts {
+  /** Injected clock (epoch ms) — pure-testable, house style. */
+  now?: number
+  /** Reap an EXITED session once it's lingered at least this long. Default
+   *  {@link TERMINAL_LINGER_SWEEP_MS}; tests shrink it. */
+  lingerMs?: number
+  /** PTY-liveness probe (injected for tests). Default = signal-0 process check. */
+  isAlive?: (pid: number) => boolean
+}
+
+/** Reap DEAD pool entries — the janitor's terminal-pool sweep. Two classes of
+ *  dead entry, neither of which kills anything:
+ *   1. EXITED + past the linger window — normally the 30s onExit timer deletes
+ *      these; the sweep is the safety net for when that timer was lost on a
+ *      server reload (globalThis Map survives; the setTimeout does not).
+ *   2. ORPHAN — `finishedAt` unset yet the process is gone (killed out-of-band,
+ *      a missed exit event). Reconciled into the map (stamped + dropped) only
+ *      when the pid is CONFIRMED dead; sessions without a real numeric pid
+ *      (test fixtures) are left untouched.
+ *  Live sessions are always kept. Returns {swept ids, kept count}. */
+export const sweepTerminalPool = (opts: SweepTerminalPoolOpts = {}): TerminalPoolSweepResult => {
+  const now = opts.now ?? Date.now()
+  const lingerMs = opts.lingerMs ?? TERMINAL_LINGER_SWEEP_MS
+  const isAlive = opts.isAlive ?? defaultIsAlive
+  const swept: string[] = []
+  let kept = 0
+  for (const [id, s] of Array.from(sessions)) {
+    let dead = false
+    if (s.info.finishedAt) {
+      const finAt = Date.parse(s.info.finishedAt)
+      if (!Number.isNaN(finAt) && now - finAt >= lingerMs) dead = true
+    } else {
+      const pid = (s.pty as { pid?: unknown } | null)?.pid
+      if (typeof pid === 'number' && pid > 0 && !isAlive(pid)) dead = true
+    }
+    if (!dead) { kept++; continue }
+    reapSession(id, s, now)
+    swept.push(id)
+  }
+  return { swept, kept }
 }
 
 export const subscribeTerminal = (

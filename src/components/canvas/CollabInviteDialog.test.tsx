@@ -324,4 +324,45 @@ describe('CollabInviteDialog (owner invite UI)', () => {
     await waitFor(() => expect(approveBody).toMatchObject({ path: '/p', requestId: 'rq1' }))
     await waitFor(() => expect(screen.queryByText('wanna@join.co')).toBeNull())
   })
+
+  // The header chrome is an always-visible exit (Back top-left + close X
+  // top-right) plus Esc. The dialog is a long scroller and the old Cancel/Done
+  // buttons sat mid-page, so a scrolled-down owner had no way out (the dead-end
+  // these cover). One small render helper keeps the three exit specs focused.
+  const renderForExit = (onClose: () => void) => {
+    stubFetch((url) =>
+      url.includes('/api/collab/project')
+        ? json({ collabProjectId: PID, member: true, label: 'Repo' })
+        : json({}),
+    )
+    return render(<CollabInviteDialog projectName="R" projectPath="/p" onClose={onClose} />)
+  }
+
+  it('closes via the top-right X (always-visible header exit)', async () => {
+    const onClose = vi.fn()
+    renderForExit(onClose)
+    await screen.findByDisplayValue('Repo')
+    fireEvent.click(screen.getByLabelText('common.close'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes via the top-left Back affordance', async () => {
+    const onClose = vi.fn()
+    renderForExit(onClose)
+    await screen.findByDisplayValue('Repo')
+    fireEvent.click(screen.getByText('common.back'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes on Escape, but not while an IME composition is active', async () => {
+    const onClose = vi.fn()
+    renderForExit(onClose)
+    await screen.findByDisplayValue('Repo')
+    // IME-confirm Esc (isComposing) must be ignored so it can't close mid-conversion.
+    fireEvent.keyDown(window, { key: 'Escape', isComposing: true })
+    expect(onClose).not.toHaveBeenCalled()
+    // A plain Escape closes.
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
 })

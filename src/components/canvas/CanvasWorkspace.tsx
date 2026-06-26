@@ -44,6 +44,10 @@ interface Props {
    *  via ⌘\, or shell absent) skips the portal. */
   layersHost?: HTMLElement | null
   inspectorHost?: HTMLElement | null
+  /** Notify the shell whether the inspector currently has something to edit,
+   *  so it can collapse the right dock (widening the canvas) on an empty
+   *  selection and auto-restore it on selection — Figma-style. */
+  onInspectorOpenChange?: (open: boolean) => void
 }
 
 // Clone elements for paste / duplicate: fresh ids and a small offset. Run-
@@ -84,6 +88,7 @@ export const CanvasWorkspace = ({
   onChange,
   layersHost,
   inspectorHost,
+  onInspectorOpenChange,
 }: Props) => {
   const { t } = useT()
   const [tool, setTool] = useState<Tool>('select')
@@ -994,6 +999,20 @@ export const CanvasWorkspace = ({
     const parent = canvas.elements.find((e) => e.id === el.parentId)
     return parent?.type === 'frame'
   })()
+
+  // Drive the shell's right dock open whenever there's a real (non-comment)
+  // selection. This deliberately IGNORES editingId: entering/leaving the inline
+  // text editor must not thrash the dock open/closed, since the selection
+  // persists across an edit. Mid-edit the panel *content* still falls back to
+  // the canvas summary (the portal below keys off inspectorElements), but the
+  // dock itself stays put. A boolean gates the effect so it fires only on real
+  // open/close transitions, not on every render.
+  const hasInspectableSelection = canvas.elements.some(
+    (e) => selectedIds.includes(e.id) && e.type !== 'comment',
+  )
+  useEffect(() => {
+    onInspectorOpenChange?.(hasInspectableSelection)
+  }, [hasInspectableSelection, onInspectorOpenChange])
 
   return (
     <CanvasAssetProvider value={{ projectPath, canvasId: canvas.id }}>

@@ -22,6 +22,7 @@ import type {
   FeedbackListResponse,
   ReleaseNotesResponse,
 } from '@/lib/types'
+import type { Health } from '@/lib/healthSchema'
 import { api } from '@/lib/api-client'
 import { pickFolder } from '@/lib/pickFolder'
 import { feedbackImageDataUrl } from '@/lib/feedbackImages'
@@ -312,6 +313,10 @@ export const SettingsPanel = ({
           {/* Release notes — what changed, per published version. */}
           {open && <ReleaseNotesSection />}
 
+          {/* Current app version — always visible (not behind Advanced) so a user
+              can confirm an update took effect. Reads GET /api/health. */}
+          {open && <AppVersionSection />}
+
           {/* Advanced — working defaults; hidden until needed. */}
           <div className="mt-6 border-t border-line pt-4">
             <button
@@ -563,6 +568,37 @@ const ReleaseNotesSection = () => {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// The running app's version, shown so a user can confirm an update took effect
+// (e.g. after the auto-updater restarts the app). Reads GET /api/health, whose
+// `version` is package.json inlined at build time — always the real running
+// build, never a stale hard-coded value.
+const AppVersionSection = () => {
+  const { t } = useT()
+  const [version, setVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/health')
+      .then((res) => (res.ok ? (res.json() as Promise<Health>) : null))
+      .then((body) => {
+        if (!cancelled && body && typeof body.version === 'string') setVersion(body.version)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <div className="mt-6 border-t border-line pt-4">
+      <p className="label-cap text-ink-muted mb-1.5">{t('settings.version.heading')}</p>
+      <p className="font-mono text-[12px] text-ink-subtle">
+        OPEN GROUND{version ? ` v${version}` : ''}
+      </p>
     </div>
   )
 }

@@ -25,6 +25,9 @@ interface Props {
   onExit: () => void
   /** Kill the PTY (there is no worktree to tear down for supply). */
   onStop: () => void
+  /** Relaunch the supply PTY after it exits — wired to the exit overlay's
+   *  Restart button inside ClaudeTerminalPane (POST /api/swarm/supply again). */
+  onRestart: () => void
 }
 
 // Status dot colour — the SAME beacon vocabulary as the worker tiles
@@ -38,7 +41,7 @@ const DOT: Record<WorkerStatus, string> = {
   exited: 'bg-ink-faint',
 }
 
-export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop }: Props) => {
+export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRestart }: Props) => {
   const { t } = useT()
   const statusLabel: string = {
     working: t('projectPanel.swarm.statusWorking'),
@@ -80,7 +83,12 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop }: Pr
       {/* The PTY itself — reused verbatim. onExit bubbles the close up so the
           module flips the session to 'exited' (our header shows it). */}
       <div className="min-h-0 flex-1">
-        <ClaudeTerminalPane terminalId={terminalId} chrome={false} onExit={() => onExit()} />
+        <ClaudeTerminalPane
+          terminalId={terminalId}
+          chrome={false}
+          onExit={() => onExit()}
+          onRestart={onRestart}
+        />
       </div>
     </div>
   )

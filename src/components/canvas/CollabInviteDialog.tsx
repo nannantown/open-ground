@@ -24,7 +24,7 @@
 //   POST /api/collab/join-requests/deny {path,requestId}
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Clock, Copy, Trash2, X } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import { FIELD_INPUT_CSS } from './ProjectConfigFields'
@@ -181,6 +181,17 @@ export const CollabInviteDialog = ({
     void loadLinks()
     void loadRequests()
   }, [loadMembers, loadLinks, loadRequests, consented])
+
+  // Esc closes the dialog — parity with every other overlay (App's global Esc
+  // handler bails on data-esc-overlay, so the dialog owns its own). The
+  // isComposing guard preserves the IME-confirm Esc.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.isComposing) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   const createLink = async () => {
     if (!canCreate || inFlight.current) return
@@ -382,7 +393,32 @@ export const CollabInviteDialog = ({
     'shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
   return (
-    <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
+    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col bg-bg-card">
+      {/* Header chrome — a persistent exit in BOTH habitual spots: a "back"
+          affordance top-left and a close X top-right, in a fixed (non-scrolling)
+          bar. The body below scrolls on its own, so the exit is always reachable
+          however far the owner scrolls into the roster / links sections (the old
+          layout buried its only Cancel / Done buttons mid-page — a dead-end). */}
+      <div className="flex shrink-0 items-center justify-between border-b border-line px-4 py-2.5">
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex items-center gap-1 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          <ArrowLeft size={13} />
+          {t('common.back')}
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t('common.close')}
+          title={t('common.close')}
+          className="rounded-sm p-1.5 text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          <X size={16} />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="grid min-h-full place-items-center">
         <div className="w-full px-6 py-10">
           <div className="mx-auto w-full max-w-[480px]">
@@ -499,7 +535,8 @@ export const CollabInviteDialog = ({
               </div>
             )}
 
-            {/* The minted code — select-all + copy. */}
+            {/* The minted code — select-all + a prominent Copy button with
+                copied feedback, then the expiry + hand-off note. */}
             {code && (
               <div className="mt-4">
                 <label className="mb-1 block label-cap text-ink-muted">
@@ -512,17 +549,28 @@ export const CollabInviteDialog = ({
                   <button
                     type="button"
                     onClick={() => void copy()}
-                    className="inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-[3px] border border-line px-3 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    className={`inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[3px] border border-accent px-3 text-[11px] font-medium text-bg-card transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                      copied ? 'bg-accent' : 'bg-accent hover:bg-accent-hover active:bg-accent-deeper'
+                    }`}
                   >
-                    {copied ? t('projectPanel.inviteCopied') : t('projectPanel.inviteCopy')}
+                    {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
+                    <span>
+                      {copied ? t('projectPanel.inviteCopied') : t('projectPanel.inviteCopy')}
+                    </span>
                   </button>
                 </div>
-                <p className="mt-2 text-[11px] leading-relaxed text-ink-muted">
-                  {t('projectPanel.collabExpires')}
-                </p>
-                <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                  {t('projectPanel.collabAfterNote')}
-                </p>
+                {/* Expiry + hand-off — what the code is and how to pass it on. */}
+                <div className="mt-2.5 flex items-start gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-2">
+                  <Clock size={13} className="mt-0.5 shrink-0 text-ink-faint" aria-hidden />
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-[11px] leading-relaxed text-ink-muted">
+                      {t('projectPanel.collabExpires')}
+                    </p>
+                    <p className="text-[11px] leading-relaxed text-ink-faint">
+                      {t('projectPanel.collabAfterNote')}
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -763,6 +811,7 @@ export const CollabInviteDialog = ({
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   )

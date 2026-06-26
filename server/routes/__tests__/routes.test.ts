@@ -37,6 +37,10 @@ describe('Hono routes — existence / contract (GET reads)', () => {
     expect(body.app).toBe('openground')
     expect(typeof body.projectDir).toBe('string')
     expect(typeof body.startedAt).toBe('string')
+    // version is the running build's package.json version — the UI shows it so a
+    // user can confirm an update actually took effect.
+    expect(typeof body.version).toBe('string')
+    expect(body.version.length).toBeGreaterThan(0)
     // bootId / port may be null when hand-launched (no launcher env set).
     expect(body).toHaveProperty('bootId')
     expect(body).toHaveProperty('port')

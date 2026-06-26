@@ -99,6 +99,11 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
   // portals when a slot mounts/unmounts (⌘\ toggle).
   const [layersHost, setLayersHost] = useState<HTMLDivElement | null>(null)
   const [inspectorHost, setInspectorHost] = useState<HTMLDivElement | null>(null)
+  // Right dock visibility — driven by the active workspace's selection
+  // (CanvasWorkspace calls onInspectorOpenChange). Collapsed → the canvas
+  // widens into the freed space (Figma-style). Starts closed: a freshly
+  // mounted canvas has no selection.
+  const [inspectorOpen, setInspectorOpen] = useState(false)
 
   // ⌘\ toggles both sidebars (Figma focus mode). Inert while the user is
   // typing — focused input/textarea/contenteditable or mid-IME-composition.
@@ -130,6 +135,14 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+
+  // No active canvas → nothing is selectable, so keep the right dock collapsed.
+  // Once a canvas mounts, CanvasWorkspace re-drives openness from its selection
+  // via onInspectorOpenChange.
+  const hasActiveCanvas = active != null
+  useEffect(() => {
+    if (!hasActiveCanvas) setInspectorOpen(false)
+  }, [hasActiveCanvas])
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingRef = useRef<CanvasFile | null>(null)
@@ -570,6 +583,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
             onChange={handleActiveChange}
             layersHost={layersHost}
             inspectorHost={inspectorHost}
+            onInspectorOpenChange={setInspectorOpen}
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-[12px] text-ink-subtle">
@@ -578,8 +592,18 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         )}
       </div>
       {sidebarsVisible && (
-        <aside className="flex w-60 shrink-0 flex-col border-l border-line bg-bg-card">
-          <div ref={setInspectorHost} className="min-h-0 flex-1" />
+        // Figma-style auto-collapse: width animates 240px↔0 with selection.
+        // overflow-hidden clips the fixed-width (w-60) host as it slides, so
+        // the inspector never reflows; the freed width flows to the canvas
+        // (flex-1), which follows the transition. border only while open so no
+        // 1px seam lingers when collapsed.
+        <aside
+          className={`flex shrink-0 flex-col overflow-hidden bg-bg-card transition-[width] duration-200 ease-out ${
+            inspectorOpen ? 'w-60 border-l border-line' : 'w-0'
+          }`}
+          aria-hidden={!inspectorOpen}
+        >
+          <div ref={setInspectorHost} className="min-h-0 w-60 flex-1" />
         </aside>
       )}
     </div>

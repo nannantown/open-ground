@@ -21,6 +21,8 @@ import {
   type TaskRunSettings,
 } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
+import { sanitizeEngineState, type EngineWorker } from '@/components/canvas/modules/useSwarmEngine'
+import { deriveWorkerActivity, type BoardCardWorker } from '@/lib/boardWorker'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
 import { dependencyCandidates } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
@@ -181,6 +183,85 @@ export const BoardModule = ({
       window.removeEventListener('focus', onFocus)
     }
   }, [])
+
+  // Swarm worker map by taskId — the commander engine's live workers for THIS
+  // project, keyed by the card they're dispatched onto (worker.taskId === card.id).
+  // STRICTLY display-only: we never POST, never touch the engine's logic, just
+  // read GET /api/swarm/orchestrator so a doing card can show WHICH worker owns
+  // it + whether it's running. Owner-gated UPSTREAM — the route 403s for
+  // non-owners, so a non-owner's poll keeps the map empty (no worker strip/band
+  // for anyone but the owner). Same power etiquette as the beacon poll above
+  // (every 5s, hidden skips, focus re-polls, a failed/forbidden poll keeps the
+  // last map). The engine's own ~5s pass + this 5s read are what sync a card's
+  // band to its worker starting and stopping (条件④): when the engine drops a
+  // finished/crashed worker, the next poll yields no entry → the band vanishes.
+  const [workersByTask, setWorkersByTask] = useState<ReadonlyMap<string, EngineWorker>>(
+    new Map(),
+  )
+  useEffect(() => {
+    // Clear the prior project's workers immediately on a project switch (or when
+    // the folder is gone) so a stale worker strip never lingers on the new board
+    // before the first poll answers.
+    setWorkersByTask(new Map())
+    if (!project.path || project.missing) return
+    let cancelled = false
+    const poll = async () => {
+      if (document.hidden) return
+      try {
+        // Typed client (same idiom as the beacon poll above), NOT raw fetch:
+        // a renamed/removed route becomes a tsc error, and tests that mock the
+        // api client partially see this throw-and-catch harmlessly.
+        const res = await api.api.swarm.orchestrator.$get({
+          query: { path: project.path },
+        })
+        if (cancelled) return
+        // A 403 means "not the owner" — a standing auth state, not a transient
+        // blip — so drop any workers we were showing (owner-gate contract: a
+        // non-owner sees nothing; an owner who signs out clears on the next
+        // poll). Guard the clear so a non-owner's steady-state poll doesn't churn
+        // the map identity every 5s. Other non-ok (404 old server / 5xx) is
+        // transient → keep the last map rather than flashing the strips off.
+        if (!res.ok) {
+          if (res.status === 403) setWorkersByTask(prev => (prev.size ? new Map() : prev))
+          return
+        }
+        const { workers } = sanitizeEngineState(await res.json())
+        if (cancelled) return
+        const next = new Map<string, EngineWorker>()
+        for (const w of workers) if (w.taskId) next.set(w.taskId, w)
+        // Keep the previous Map identity when nothing the card shows changed, so
+        // the board doesn't re-render every 5s (heartbeatAt/startedAt churn is
+        // ignored — neither is displayed). Same identity trick as the beacon poll.
+        setWorkersByTask(prev =>
+          prev.size === next.size &&
+          Array.from(next).every(([id, w]) => {
+            const p = prev.get(id)
+            return (
+              !!p &&
+              p.terminalId === w.terminalId &&
+              p.branch === w.branch &&
+              p.stage === w.stage &&
+              p.phase === w.phase &&
+              p.note === w.note
+            )
+          })
+            ? prev
+            : next,
+        )
+      } catch {
+        /* server restarting / offline / forbidden — keep the last known map */
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 5_000)
+    const onFocus = () => void poll()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [project.path, project.missing])
 
   // "+ Add" inline input for a brand-new assignee name; closed whenever the
   // drawer switches cards so a half-typed name never leaks across tasks.
@@ -1482,6 +1563,22 @@ export const BoardModule = ({
               // A just-launched pane the poll hasn't seen yet is painting its
               // banner right now — 'working' is the truthful default.
               return claudeStatusByPty.get(ptyId) ?? 'working'
+            }}
+            // Swarm worker on a doing card (条件①②④) — read-only, owner-gated
+            // upstream. Combine the orchestrator's reported worker (which/branch/
+            // stage/heartbeat) with the live PTY beacon (working/waiting) into the
+            // card's render-ready worker view; null when no worker owns the card.
+            workerForTask={taskId => {
+              const w = workersByTask.get(taskId)
+              if (!w) return null
+              const live = claudeStatusByPty.get(w.terminalId)
+              const view: BoardCardWorker = {
+                branch: w.branch,
+                activity: deriveWorkerActivity(w.stage, live),
+                ...(w.phase ? { phase: w.phase } : {}),
+                ...(w.note ? { note: w.note } : {}),
+              }
+              return view
             }}
             onOpenProjectSettings={onOpenProjectSettings}
           />

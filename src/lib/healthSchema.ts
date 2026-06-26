@@ -11,6 +11,10 @@ export const HealthSchema = z.object({
   bootId: z.string().nullable(),
   port: z.number().nullable(),
   startedAt: z.string(),
+  // The running app's version (package.json `version`, inlined into the server
+  // bundle at build time). Lets the UI show which build is actually running so a
+  // user can confirm an update took effect.
+  version: z.string(),
 })
 
 export type Health = z.infer<typeof HealthSchema>

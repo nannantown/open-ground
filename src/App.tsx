@@ -124,10 +124,11 @@ export default function App() {
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
   // Realtime collab (member flow). `enabled` gates collab entirely — the default
   // build (no collab env) shows nothing. `sharedDialogOpen` is the join dialog,
-  // now opened ONLY by an `openground://join?code=…` invite deep link (the manual
-  // "Shared with me" toolbar entry was removed — projects shared with you surface
-  // as Ground cards, so a member just follows the invite link). `openShared` is the
-  // folder-less shared project currently viewed in SharedProjectPanel (null = none).
+  // opened EITHER by the Toolbar "Shared with me" entry (the member's path to the
+  // INITIAL join — paste an invite code or link) OR by an `openground://join?code=…`
+  // invite deep link (which prefills the code). Already-joined projects also surface
+  // as Ground cards. `openShared` is the folder-less shared project currently viewed
+  // in SharedProjectPanel (null = none).
   const { enabled: collabEnabled } = useCollab()
   // Owner-only experiment gate (hidden features, default off). `eligible` reveals
   // the Settings toggle to the owner; `flags` gates which modules surface as tabs
@@ -845,6 +846,11 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenManual={() => setManualOpen(true)}
         onOpenSkills={() => setSkillsPanelOpen(true)}
+        // Member entry to the join dialog — the INITIAL join needs it (a member
+        // with an invite code/link has nowhere to paste it otherwise; already-
+        // joined projects also show as Ground cards). Gated on collabEnabled, so
+        // the default (collab-off) build never shows it.
+        onOpenShared={collabEnabled ? () => setSharedDialogOpen(true) : undefined}
         onFeedback={feedbackEnabled ? () => setFeedbackOpen(true) : undefined}
         onAccount={authEnabled ? () => setAccountOpen(true) : undefined}
         // The settings-gear dot covers BOTH owner inboxes (feedback + tab

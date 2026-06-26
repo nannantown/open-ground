@@ -331,6 +331,55 @@ describe('POST /api/swarm/orchestrator/automerge (auto-integrate toggle — owne
   })
 })
 
+describe('POST /api/swarm/orchestrator/review/resolve (resolve a stuck review card — owner)', () => {
+  it('403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/orchestrator/review/resolve', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('403 for a tester (owner-only)', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/orchestrator/review/resolve', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('owner: 400 for a missing taskId / target, or an invalid target', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    expect((await app.request('/api/swarm/orchestrator/review/resolve', json({ path: dir }))).status).toBe(400)
+    expect(
+      (await app.request('/api/swarm/orchestrator/review/resolve', json({ path: dir, taskId: 'a' }))).status,
+    ).toBe(400)
+    expect(
+      (await app.request('/api/swarm/orchestrator/review/resolve', json({ path: dir, taskId: 'a', target: 'done' }))).status,
+    ).toBe(400) // only blocked | todo are valid targets
+  })
+
+  it('403 when the path is not a registered project (the allowlist holds)', async () => {
+    const dir = join(scratch, 'unregistered-resolve')
+    await mkdir(dir, { recursive: true })
+    const res = await app.request(
+      '/api/swarm/orchestrator/review/resolve',
+      json({ path: dir, taskId: 'a', target: 'blocked' }),
+    )
+    expect(res.status).toBe(403)
+  })
+
+  it('a registered project with no engine returns a stopped empty state (idempotent no-op)', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    const res = await app.request(
+      '/api/swarm/orchestrator/review/resolve',
+      json({ path: dir, taskId: 'nope', target: 'blocked' }),
+    )
+    expect(res.status).toBe(200)
+    const state = (await res.json()) as SwarmOrchestratorState
+    expect(state.running).toBe(false)
+    expect(state.reviews).toHaveLength(0)
+  })
+})
+
 describe('GET /api/swarm/orchestrator (state — owner)', () => {
   // The happy-path START (spawning workers) needs the `claude` CLI + a live
   // board listener, so it is curl-verified on the real machine like the worker

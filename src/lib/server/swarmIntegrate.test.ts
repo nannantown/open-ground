@@ -256,7 +256,9 @@ describe('integrateBranch — conflict', () => {
     const dir = intDir()
 
     const out = await integrateBranch(project, 'swarm/conf', { target: 'main', integrateDir: dir })
-    expect(out).toEqual({ status: 'conflict' })
+    // The conflicted file(s) are captured (the human's resolution hint) before the
+    // abort — a pure read of the mid-conflict index.
+    expect(out).toEqual({ status: 'conflict', files: ['fileX'] })
 
     // Trunk NOT advanced by us (still just the trunk's own edit).
     expect(await trunkTip(origin)).toBe(trunkBefore)

@@ -9,6 +9,11 @@
 
 import { Hono } from 'hono'
 import type { Health } from '@/lib/healthSchema'
+// App version, read from package.json at BUILD time: esbuild inlines the JSON
+// into the server bundle and tsx/vitest resolve it via resolveJsonModule, so the
+// value is cwd-independent — the packaged app reports the real shipped version,
+// not whatever package.json the forked server's cwd happens to resolve.
+import { version as APP_VERSION } from '../../package.json'
 
 // Frozen at module load — this module is evaluated once per server boot, so
 // `startedAt` reports when the server came up, not when /api/health was polled.
@@ -21,6 +26,7 @@ export const health = new Hono().get('/api/health', (c) => {
     bootId: process.env.OPENGROUND_BOOT_ID || null,
     port: process.env.PORT ? Number(process.env.PORT) : null,
     startedAt: STARTED_AT,
+    version: APP_VERSION,
   }
   return c.json(body)
 })

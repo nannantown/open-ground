@@ -4,12 +4,15 @@ import {
   listActiveTerminals,
   claudeStatus,
   getTerminal,
+  getTerminalScreen,
   killTerminalsByCwd,
   registerFlowStream,
   trackFlowSent,
   ackFlowStream,
   unregisterFlowStream,
   pickShell,
+  sweepTerminalPool,
+  TERMINAL_LINGER_SWEEP_MS,
   WORKING_SILENCE_MS,
   FLOW_HIGH_WATERMARK,
   FLOW_LOW_WATERMARK,
@@ -182,6 +185,40 @@ describe('listActiveTerminals', () => {
     const res = listActiveTerminals()
     expect(res.cwds).toEqual(['/tmp/proj-a'])
     expect(res.claude).toEqual([])
+  })
+})
+
+describe('getTerminalScreen', () => {
+  // The swarm orchestrator reads this to classify WHY a worker is quiet. The
+  // headless-xterm path needs a real PTY (covered by the live menu-detection
+  // code); here we exercise the contract + the raw-buffer FALLBACK (a session
+  // without a headless terminal), which is what the fake sessions model.
+  it('returns null for an unknown session', () => {
+    expect(getTerminalScreen('nope')).toBeNull()
+  })
+
+  it('returns null when the buffer is empty (no signal to classify)', () => {
+    state().sessions.set('empty', fakeSession('empty', '/tmp/p'))
+    expect(getTerminalScreen('empty')).toBeNull()
+  })
+
+  it('falls back to the raw buffer tail when there is no headless terminal', () => {
+    const s = fakeSession('buf', '/tmp/p', { tag: 'shell' })
+    s.buffer = 'booting…\nClaude usage limit reached · resets 3pm'
+    state().sessions.set('buf', s)
+    // The orchestrator's classifier normalizes this; here we just prove the text
+    // (the rate-limit signal) reaches the caller verbatim.
+    expect(getTerminalScreen('buf')).toContain('usage limit reached')
+  })
+
+  it('bounds a huge buffer to its last 4000 chars (the recent frame)', () => {
+    const s = fakeSession('long', '/tmp/p')
+    s.buffer = 'X'.repeat(6000) + 'TAIL_MARKER'
+    state().sessions.set('long', s)
+    const out = getTerminalScreen('long')
+    expect(out).not.toBeNull()
+    expect(out!.length).toBeLessThanOrEqual(4000)
+    expect(out!.endsWith('TAIL_MARKER')).toBe(true)
   })
 })
 
@@ -507,5 +544,110 @@ describe('pickShell (host shell selection per platform)', () => {
     expect(
       pickShell('darwin', { OPENGROUND_TERMINAL_SHELL: '/bin/bash', SHELL: '/bin/zsh' }),
     ).toBe('/bin/bash')
+  })
+})
+
+describe('sweepTerminalPool — reaps dead pool entries, never kills', () => {
+  const NOW = 1_000_000_000_000
+
+  // Build a fake session with controllable pid + populated listener sets, so we
+  // can assert the sweep both DROPS the entry and RELEASES its listeners.
+  const fake = (
+    id: string,
+    opts: { finishedAt?: string; pid?: number } = {},
+  ): FakeSessionShape & { pty: { pid?: number }; killed: boolean } => {
+    const s = fakeSession(id, '/tmp/p', opts.finishedAt ? { finishedAt: opts.finishedAt } : {}) as
+      FakeSessionShape & { pty: { pid?: number; kill: () => void }; killed: boolean }
+    s.listeners.add(() => {})
+    s.exitListeners.add(() => {})
+    s.killed = false
+    s.pty = { ...(opts.pid !== undefined ? { pid: opts.pid } : {}), kill: () => { s.killed = true } }
+    return s
+  }
+
+  it('reaps an EXITED session past the linger window and releases its listeners', () => {
+    const s = fake('done', { finishedAt: new Date(NOW - TERMINAL_LINGER_SWEEP_MS - 1).toISOString() })
+    state().sessions.set('done', s)
+
+    const res = sweepTerminalPool({ now: NOW })
+
+    expect(res.swept).toEqual(['done'])
+    expect(res.kept).toBe(0)
+    expect(state().sessions.has('done')).toBe(false)
+    expect(s.listeners.size).toBe(0)
+    expect(s.exitListeners.size).toBe(0)
+    expect(s.killed).toBe(false) // a dead PTY is never signalled
+  })
+
+  it('KEEPS an exited session still within the linger window', () => {
+    const s = fake('recent', { finishedAt: new Date(NOW - 5_000).toISOString() })
+    state().sessions.set('recent', s)
+
+    const res = sweepTerminalPool({ now: NOW })
+
+    expect(res.swept).toEqual([])
+    expect(res.kept).toBe(1)
+    expect(state().sessions.has('recent')).toBe(true)
+  })
+
+  it('reconciles an ORPHAN (no finishedAt, pid confirmed dead): stamps exit, fires exitListeners, drops it', () => {
+    const s = fake('orphan', { pid: 4242 })
+    let exitInfo: TerminalInfo | null = null
+    s.exitListeners.clear()
+    s.exitListeners.add((info: unknown) => { exitInfo = info as TerminalInfo })
+    state().sessions.set('orphan', s)
+
+    // isAlive injected → pid 4242 reported dead.
+    const res = sweepTerminalPool({ now: NOW, isAlive: () => false })
+
+    expect(res.swept).toEqual(['orphan'])
+    expect(state().sessions.has('orphan')).toBe(false)
+    expect(exitInfo).not.toBeNull()
+    expect(exitInfo!.finishedAt).toBe(new Date(NOW).toISOString()) // stamped
+    expect(s.listeners.size).toBe(0)
+    expect(s.killed).toBe(false) // reconcile only — already-dead process is not signalled
+  })
+
+  it('KEEPS a live session (no finishedAt, pid alive)', () => {
+    const s = fake('live', { pid: 4243 })
+    state().sessions.set('live', s)
+
+    const res = sweepTerminalPool({ now: NOW, isAlive: () => true })
+
+    expect(res.swept).toEqual([])
+    expect(res.kept).toBe(1)
+    expect(state().sessions.has('live')).toBe(true)
+  })
+
+  it('leaves a running session WITHOUT a real pid untouched (cannot verify liveness)', () => {
+    // The bare test/legacy fixtures carry `pty: {}` — no pid. The orphan probe
+    // must never reap those: an unverifiable session is treated as alive.
+    const s = fakeSession('bare', '/tmp/p') // pty: {}, no finishedAt
+    state().sessions.set('bare', s)
+
+    const res = sweepTerminalPool({ now: NOW, isAlive: () => false })
+
+    expect(res.swept).toEqual([])
+    expect(res.kept).toBe(1)
+    expect(state().sessions.has('bare')).toBe(true)
+  })
+
+  it('sweeps a MIXED pool: dead entries go, live ones stay', () => {
+    state().sessions.set('exited', fake('exited', {
+      finishedAt: new Date(NOW - TERMINAL_LINGER_SWEEP_MS - 1).toISOString(),
+    }))
+    state().sessions.set('lingering', fake('lingering', { finishedAt: new Date(NOW - 1_000).toISOString() }))
+    state().sessions.set('orphan', fake('orphan', { pid: 99 }))
+    state().sessions.set('alive', fake('alive', { pid: 100 }))
+
+    const res = sweepTerminalPool({ now: NOW, isAlive: (pid) => pid === 100 })
+
+    expect(res.swept.sort()).toEqual(['exited', 'orphan'])
+    expect(res.kept).toBe(2) // lingering + alive
+  })
+
+  it('default lingerMs is the documented 60s safety-net constant (> the 30s onExit timer)', () => {
+    expect(TERMINAL_LINGER_SWEEP_MS).toBe(60_000)
+    expect(TERMINAL_LINGER_SWEEP_MS).toBeGreaterThan(30_000)
   })
 })

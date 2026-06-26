@@ -106,6 +106,20 @@ const isAncestor = async (cwd: string, a: string, b: string): Promise<{ found: b
   return { found: false, yes: false } // error (bad ref / no git)
 }
 
+/** The files left UNMERGED by a failed rebase (the conflict surface), as repo-
+ *  relative paths — `git diff --name-only --diff-filter=U` read from the
+ *  mid-conflict worktree BEFORE the abort. A pure read: [] on any failure or a
+ *  clean index. Capped so a pathological conflict can't bloat the surfaced log. */
+const conflictedFiles = async (cwd: string): Promise<string[]> => {
+  const out = await git(cwd, ['diff', '--name-only', '--diff-filter=U'])
+  if (out === null) return []
+  return out
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 20)
+}
+
 // ── Target (trunk) resolution ────────────────────────────────────────────────
 
 /** Best-effort `git fetch <remote> <target>` so the ancestry/push judgments run
@@ -201,7 +215,7 @@ export type IntegrateMode = 'ff' | 'rebase'
  *     on a later pass (the trunk may have moved). */
 export type IntegrateOutcome =
   | { status: 'integrated'; mode: IntegrateMode }
-  | { status: 'conflict' }
+  | { status: 'conflict'; files?: string[] }
   | { status: 'skipped'; reason: string }
   | { status: 'error'; reason: string }
 
@@ -297,9 +311,13 @@ const rebaseAndPush = async (
     const rebased = await gitExit(integrateDir, ['rebase', targetRef])
     if (!rebased.ok) {
       // Conflict (or any rebase failure): abort so nothing is left half-applied.
-      // We NEVER resolve it automatically.
+      // We NEVER resolve it automatically. Capture the unmerged files FIRST (a pure
+      // read of the mid-conflict index) so the human resolving it knows WHERE the
+      // conflict is — surfaced in the engine log. Best-effort: a read failure just
+      // omits the list (the conflict verdict is unchanged either way).
+      const files = await conflictedFiles(integrateDir)
       await git(integrateDir, ['rebase', '--abort'])
-      return { status: 'conflict' }
+      return files.length ? { status: 'conflict', files } : { status: 'conflict' }
     }
     // Rebased HEAD now has the trunk as an ancestor → a true fast-forward push.
     // Still no --force: a trunk that moved again during the rebase rejects this.

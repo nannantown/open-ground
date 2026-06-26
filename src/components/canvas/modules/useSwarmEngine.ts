@@ -85,7 +85,7 @@ export interface EngineReview {
 /** A state inconsistency the engine detected (mirrors the server's
  *  OrchestratorAnomaly) — surfaced as a warning so a drift the autonomy loop
  *  can't self-heal is noticed (条件2). */
-export type EngineAnomalyKind = 'orphan-doing' | 'worktree-missing' | 'worker-stale'
+export type EngineAnomalyKind = 'orphan-doing' | 'worktree-missing' | 'worker-stale' | 'move-stuck'
 
 export interface EngineAnomaly {
   kind: EngineAnomalyKind
@@ -95,6 +95,12 @@ export interface EngineAnomaly {
   taskTitle?: string
   /** 'worker-stale' only — minutes since the last heartbeat (display-only). */
   staleMinutes?: number
+  /** 'move-stuck' only — WHICH column move is stuck ('review' = a finished worker
+   *  stuck in doing, 'done' = a landed branch stuck in review, 'recover' = a lost
+   *  worker stuck in doing), so the pane can name the exact zombie. */
+  intent?: 'review' | 'done' | 'recover'
+  /** 'move-stuck' only — consecutive kept writes (display-only). */
+  attempts?: number
 }
 
 export interface SwarmEngineState {
@@ -132,8 +138,9 @@ const KNOWN_LOG_KINDS: ReadonlySet<string> = new Set([
   'routine', 'dispatch', 'promote', 'integrate', 'conflict', 'cleanup', 'crash',
 ])
 const KNOWN_ANOMALY_KINDS: ReadonlySet<string> = new Set([
-  'orphan-doing', 'worktree-missing', 'worker-stale',
+  'orphan-doing', 'worktree-missing', 'worker-stale', 'move-stuck',
 ])
+const KNOWN_MOVE_INTENTS: ReadonlySet<string> = new Set(['review', 'done', 'recover'])
 
 // The engine response is untrusted (on disk anything could answer the route), so
 // coerce every field and drop malformed rows rather than letting a bad shape
@@ -220,6 +227,12 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
           ...(typeof a.taskTitle === 'string' ? { taskTitle: a.taskTitle } : {}),
           ...(typeof a.staleMinutes === 'number' && Number.isFinite(a.staleMinutes)
             ? { staleMinutes: a.staleMinutes }
+            : {}),
+          ...(typeof a.intent === 'string' && KNOWN_MOVE_INTENTS.has(a.intent)
+            ? { intent: a.intent as EngineAnomaly['intent'] }
+            : {}),
+          ...(typeof a.attempts === 'number' && Number.isFinite(a.attempts)
+            ? { attempts: a.attempts }
             : {}),
         }))
         .slice(0, 50) // cap — defensive against a forged huge list
@@ -331,6 +344,12 @@ export interface UseSwarmEngine {
    *  worktree + PTY and parks its card in 'blocked', then this adopts the fresh
    *  state. A no-op while another engine round-trip is in flight. */
   stopWorker: (terminalId: string) => void
+  /** Resolve a STUCK review card the engine can't auto-land (a real conflict /
+   *  repeatedly-failing verification): the server moves it OUT of review ('blocked'
+   *  to park for manual resolution, 'todo' to requeue a fresh worker), clears its
+   *  conflict flag + memos, and this adopts the fresh state. A no-op while another
+   *  engine round-trip is in flight. */
+  resolveReview: (taskId: string, target: 'blocked' | 'todo') => void
 }
 
 /** Own the commander engine's state for one project: one poll, the two switches,
@@ -497,6 +516,37 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     [busy, projectPath, t],
   )
 
+  // Resolve a stuck review card (the owner clicked "park" / "requeue" on a card the
+  // engine can't auto-land). Same busy/error bookkeeping + authoritative-state
+  // adoption as stopWorker; a 404 (old server) surfaces the engine-failure note.
+  const resolveReview = useCallback(
+    async (taskId: string, target: 'blocked' | 'todo') => {
+      if (busy) return
+      setBusy(true)
+      setError(null)
+      try {
+        const res = await fetch('/api/swarm/orchestrator/review/resolve', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: projectPath, taskId, target }),
+        })
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string }
+          throw new Error(body?.error || `HTTP ${res.status}`)
+        }
+        setEngine(sanitizeEngineState(await res.json()))
+        setAvailable(true)
+      } catch (e) {
+        setError(
+          t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
+        )
+      } finally {
+        setBusy(false)
+      }
+    },
+    [busy, projectPath, t],
+  )
+
   return {
     engine,
     available,
@@ -505,6 +555,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     toggleAutonomy: (next) => void toggleAutonomy(next),
     toggleAutoMerge: (next) => void toggleAutoMerge(next),
     stopWorker: (terminalId) => void stopWorker(terminalId),
+    resolveReview: (taskId, target) => void resolveReview(taskId, target),
   }
 }
 

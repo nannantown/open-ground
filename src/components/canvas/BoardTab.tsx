@@ -13,6 +13,7 @@ import {
 } from '@/lib/types'
 import { newId } from '@/lib/ids'
 import { formatDueShort, isOverdue, unresolvedDeps } from '@/lib/boardDeps'
+import type { BoardCardWorker, WorkerActivity } from '@/lib/boardWorker'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
 import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
@@ -24,6 +25,39 @@ type TFn = (key: MessageKey, vars?: Record<string, string | number>) => string
 // four pickers can't drift apart visually.
 const DEFAULTS_SELECT_CLS =
   'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+
+// ── Swarm worker status vocabulary (doing-column cards) ──────────────────────
+// The SAME beacon palette the Ground/Board cards + the SwarmWorkerPane already
+// use: azure = working, ochre = waiting, ink-faint = booting/idle, moss = done.
+// Display-only (the strip carries no interactions) — these are status colours,
+// so contrast on the paper card (azure/ochre/moss/ink-faint all clear AA) is the
+// only CLAUDE.md rule that bites here.
+const WORKER_BAND: Record<WorkerActivity, string> = {
+  working: 'bg-azure',
+  waiting: 'bg-ochre',
+  starting: 'bg-ink-faint',
+  done: 'bg-moss',
+}
+const WORKER_DOT: Record<WorkerActivity, string> = {
+  working: 'bg-azure',
+  waiting: 'bg-ochre',
+  starting: 'bg-ink-faint',
+  done: 'bg-moss',
+}
+const WORKER_LABEL_CLS: Record<WorkerActivity, string> = {
+  working: 'text-azure',
+  waiting: 'text-[var(--beacon-waiting)]',
+  starting: 'text-ink-faint',
+  done: 'text-moss',
+}
+// Localized via the SAME keys the Swarm Manager monitor + worker pane use, so a
+// JA owner sees 稼働中 / 待機中 / 起動中 / 完了 — not a board-only English island.
+const WORKER_LABEL_KEY: Record<WorkerActivity, MessageKey> = {
+  working: 'projectPanel.swarm.manager.stageRunning',
+  waiting: 'projectPanel.swarm.statusWaiting',
+  starting: 'projectPanel.swarm.manager.stageStarting',
+  done: 'projectPanel.swarm.manager.stageDone',
+}
 
 // ─── Board tab ───────────────────────────────────────────────────────────────
 // A kanban of task cards (one source of truth in the central tasks.json).
@@ -302,6 +336,13 @@ interface BoardTabProps {
    *  edge plus a "Running"/"Waiting" stamp at the head of the title. null =
    *  no live session. Optional: plain callers show no marking. */
   sessionStatus?: (taskId: string) => ClaudeBeaconStatus | null
+  /** The swarm worker the commander engine dispatched onto this doing card, or
+   *  null when none owns it (the ordinary case — plain cards show nothing).
+   *  Read-only + owner-gated UPSTREAM (the orchestrator poll 403s for non-owners
+   *  → this returns null for everyone but the owner). Drives the doing card's
+   *  worker info strip + the "something is running here" band synced to the
+   *  worker's live activity. Unset on plain hosts (no swarm surface). */
+  workerForTask?: (taskId: string) => BoardCardWorker | null
   /** Undo/redo of board mutations (B013) — owned by the host (BoardModule,
    *  the layer holding data + persist + the snapshot history); BoardTab only
    *  renders the toolbar affordance. Unset hides the buttons (back-compat for
@@ -331,6 +372,7 @@ export const BoardTab = ({
   openTaskId,
   onOpenProjectSettings,
   sessionStatus,
+  workerForTask,
   undoState,
   presence,
 }: BoardTabProps) => {
@@ -782,6 +824,16 @@ export const BoardTab = ({
           const renderCard = (task: ProjectTask, colKey: BoardColumn, visIdx: number) => {
             const isEditing = task.id === editingId
             const claudeSt = sessionStatus?.(task.id) ?? null
+            // The swarm worker dispatched onto this card — ONLY in the doing
+            // column (a finished worker's card has already moved to review), and
+            // ONLY for the owner (the orchestrator poll 403s otherwise → null).
+            // When present, the worker is the AUTHORITATIVE status for this card:
+            // it owns the top edge AND the title stamp below, suppressing the
+            // drawer claude band/stamp so the two can never show conflicting
+            // states (a doing card CAN host a drawer claude session too — opening
+            // its drawer auto-launches plain claude — so this guard is real, not
+            // theoretical).
+            const worker = colKey === 'doing' ? workerForTask?.(task.id) ?? null : null
             return (
                       <article
                         key={task.id}
@@ -844,20 +896,37 @@ export const BoardTab = ({
                           dragId === task.id && dragHidden ? 'hidden' : '',
                         ].join(' ')}
                       >
-                        {/* claude-status edge — the same surveyor's marking the
-                            Ground cards carry: azure scanning while claude
-                            works, steady amber while it waits on the human. */}
-                        {claudeSt && (
+                        {/* Top edge — the surveyor's marking. A swarm worker on a
+                            doing card takes precedence (azure scanning while its
+                            PTY produces output, steady otherwise — synced to the
+                            worker; it disappears the moment the engine drops the
+                            worker). Otherwise the same claude-status band the
+                            Ground cards carry: azure scanning while claude works,
+                            steady amber while it waits on the human. */}
+                        {worker ? (
                           <div
                             className={[
                               'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-                              claudeSt === 'working' ? 'bg-azure' : 'bg-ochre',
+                              WORKER_BAND[worker.activity],
                             ].join(' ')}
                           >
-                            {claudeSt === 'working' && (
+                            {worker.activity === 'working' && (
                               <div className="run-scan h-full w-1/3 bg-gradient-to-r from-transparent via-bg-card/85 to-transparent" />
                             )}
                           </div>
+                        ) : (
+                          claudeSt && (
+                            <div
+                              className={[
+                                'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
+                                claudeSt === 'working' ? 'bg-azure' : 'bg-ochre',
+                              ].join(' ')}
+                            >
+                              {claudeSt === 'working' && (
+                                <div className="run-scan h-full w-1/3 bg-gradient-to-r from-transparent via-bg-card/85 to-transparent" />
+                              )}
+                            </div>
+                          )
                         )}
                         {/* Duplicate (F020) — small icon button in the card's
                             top-right corner, revealed on hover (same
@@ -920,7 +989,11 @@ export const BoardTab = ({
                               />
                             ) : (
                             <p className="text-[12.5px] leading-snug text-ink line-clamp-2">
-                              {claudeSt === 'working' && (
+                              {/* Drawer-claude stamp — suppressed when a swarm
+                                  worker owns the card (its strip below is the
+                                  authoritative status), so the two never show
+                                  conflicting states on one card. */}
+                              {!worker && claudeSt === 'working' && (
                                 <span
                                   title={t('board.card.sessionWorking')}
                                   className="label-cap mr-1.5 inline-flex items-center gap-1 align-middle text-azure"
@@ -929,7 +1002,7 @@ export const BoardTab = ({
                                   Running
                                 </span>
                               )}
-                              {claudeSt === 'waiting' && (
+                              {!worker && claudeSt === 'waiting' && (
                                 // Steady, no pulse — "your turn" must stay
                                 // visible at a glance (same register as the
                                 // Ground card's Waiting stamp).
@@ -948,6 +1021,43 @@ export const BoardTab = ({
                               <p className="mt-1 text-[11px] leading-snug line-clamp-2 text-ink-muted">
                                 {task.notes.trim()}
                               </p>
+                            )}
+                            {/* Swarm worker strip (条件①②) — WHICH worker owns this
+                                doing card (its swarm/* branch) + whether it's
+                                running / waiting / booting, in the same beacon
+                                vocabulary as the band above and the Swarm pane.
+                                Owner-only + doing-only (gated where `worker` is
+                                computed); the dot breathes only while working so
+                                "your worker is busy" reads at a glance without a
+                                second moving element competing with the band. */}
+                            {!isEditing && worker && (
+                              <div className="mt-1 flex min-w-0 items-center gap-1.5">
+                                <span
+                                  aria-hidden
+                                  className={[
+                                    'h-[5px] w-[5px] shrink-0 rounded-full',
+                                    WORKER_DOT[worker.activity],
+                                    worker.activity === 'working' ? 'run-pulse' : '',
+                                  ].join(' ')}
+                                />
+                                <span
+                                  className={['label-cap shrink-0', WORKER_LABEL_CLS[worker.activity]].join(' ')}
+                                >
+                                  {t(WORKER_LABEL_KEY[worker.activity])}
+                                </span>
+                                <span
+                                  className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted"
+                                  title={
+                                    worker.note
+                                      ? `${worker.branch} — ${worker.note}`
+                                      : worker.phase
+                                        ? `${worker.branch} · ${worker.phase}`
+                                        : worker.branch
+                                  }
+                                >
+                                  {worker.branch}
+                                </span>
+                              </div>
                             )}
                             {/* Review stamp — review-column cards carry an
                                 explicit "I looked at this" affordance so the
