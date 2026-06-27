@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type { CustomModuleDef } from '@/lib/types'
 
@@ -76,9 +77,17 @@ export const CustomTabCreateDialog = ({
   }
 
   return (
-    <div
-      data-esc-overlay
-      className="absolute inset-0 z-20 flex items-center justify-center overflow-y-auto bg-bg-card/70 px-6 py-8"
+    <Overlay
+      position="absolute"
+      layer="local"
+      backdrop="veil"
+      placement="center"
+      padded={false}
+      className="overflow-y-auto px-6 py-8"
+      onClose={onClose}
+      closeOnBackdrop={false}
+      closeOnEsc={false}
+      aria-label={t('customTabs.createTitle')}
       onKeyDown={e => {
         // Cmd/Ctrl+Enter submits. isComposing guard: an Enter that commits an
         // IME conversion must never double as submit.
@@ -157,6 +166,6 @@ export const CustomTabCreateDialog = ({
           </Btn>
         </footer>
       </section>
-    </div>
+    </Overlay>
   )
 }

@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { CornerDownRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
-import { BackLink } from '@/components/ui/BackLink'
+import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { MANUAL_SECTIONS, type Bi, type Block, type Section } from './manualContent'
 
 // Fraunces optical-size axis for large display headings (matches EmptyState).
@@ -45,20 +45,6 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
   const [active, setActive] = useState(MANUAL_SECTIONS[0].id)
   const scrollRef = useRef<HTMLDivElement>(null)
   const secRefs = useRef<Record<string, HTMLElement | null>>({})
-
-  // Esc closes. (App's global Esc handler is suppressed by data-esc-overlay, so
-  // it won't also clear the Ground selection underneath.)
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
 
   // Reset to the top each time the manual is opened.
   useEffect(() => {
@@ -191,15 +177,27 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
   )
 
   return (
-    <div data-esc-overlay className="fixed inset-0 z-[60] flex flex-col bg-bg font-body">
+    <Overlay
+      position="fixed"
+      layer="top"
+      backdrop="paper"
+      placement="fill"
+      onClose={onClose}
+      aria-label={lang === 'ja' ? 'マニュアル' : 'Manual'}
+      className="font-body"
+    >
       {/* Header */}
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-bg-card/95 px-5 py-3 shadow-card backdrop-blur">
-        <div className="flex min-w-0 items-center gap-3.5">
-          <BackLink
-            label={lang === 'ja' ? '戻る' : 'Back'}
-            onClick={onClose}
-            className="shrink-0"
-          />
+      <DialogHeader
+        separator="line"
+        density="panel"
+        align="center"
+        // The manual's header keeps its raised frosted-bar treatment (a tone
+        // lighter than the bg-bg paper body, with a soft shadow + blur) — the
+        // shared bar provides the structure, this surface adds its own bg.
+        className="bg-bg-card/95 shadow-card backdrop-blur"
+        onBack={onClose}
+        backLabel={lang === 'ja' ? '戻る' : 'Back'}
+        leading={
           <div className="flex min-w-0 items-center gap-2.5">
             <OpenGroundMark size={20} className="shrink-0 select-none" />
             <div className="flex min-w-0 flex-col leading-none">
@@ -209,9 +207,9 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
               </span>
             </div>
           </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2.5">
-          {/* Language toggle */}
+        }
+        actions={
+          /* Language toggle */
           <div className="flex items-center rounded-[3px] border border-line bg-bg-card p-0.5">
             {(['en', 'ja'] as const).map((l) => (
               <button
@@ -228,8 +226,8 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
               </button>
             ))}
           </div>
-        </div>
-      </header>
+        }
+      />
 
       {/* Body */}
       <div className="flex min-h-0 flex-1">
@@ -270,7 +268,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
           </div>
         </div>
       </div>
-    </div>
+    </Overlay>
   )
 }
 

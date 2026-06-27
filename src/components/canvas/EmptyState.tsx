@@ -21,7 +21,7 @@ export const EmptyState = ({
   const { t } = useT()
 
   return (
-    <div className="fixed inset-0 z-[8] flex items-center justify-center overflow-hidden">
+    <div className="fixed inset-0 z-overlay-hint flex items-center justify-center overflow-hidden">
       <style>{`
         @keyframes og-empty-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
         @keyframes og-empty-drift{from{transform:rotate(0)}to{transform:rotate(360deg)}}

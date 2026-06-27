@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  X,
   FolderOpen,
   ChevronRight,
   Check,
@@ -11,7 +10,7 @@ import {
   RefreshCw,
   MessageSquare,
 } from 'lucide-react'
-import { Btn } from '@/components/ui/Btn'
+import { DialogHeader } from '@/components/ui/overlay'
 import { Markdown } from '@/components/canvas/Markdown'
 import { ModuleReviewInbox } from '@/components/canvas/modules/ModuleReviewInbox'
 import { pickReleaseNotesLang } from '@/lib/releaseNotesLang'
@@ -206,7 +205,7 @@ export const SettingsPanel = ({
         // Board drawer's Escape.
         {...(open ? { 'data-esc-overlay': '' } : {})}
         className={[
-          'fixed inset-0 z-50 bg-ink/30 backdrop-blur-sm transition-opacity duration-200 ease-out',
+          'fixed inset-0 z-overlay-modal bg-ink/30 backdrop-blur-sm transition-opacity duration-200 ease-out',
           open ? 'opacity-100' : 'opacity-0 pointer-events-none',
         ].join(' ')}
       />
@@ -216,26 +215,20 @@ export const SettingsPanel = ({
         aria-label="Settings"
         onClick={(e) => e.stopPropagation()}
         className={[
-          'fixed top-0 right-0 z-50 h-full w-[440px] max-w-[92vw]',
+          'fixed top-0 right-0 z-overlay-modal h-full w-[440px] max-w-[92vw]',
           'bg-bg-card border-l border-line shadow-card-hover flex flex-col',
           'transition-transform duration-200 ease-out',
           open ? 'translate-x-0' : 'translate-x-full pointer-events-none',
         ].join(' ')}
       >
-        <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
-          <div>
-            <p className="label-cap text-accent mb-1.5">{t('settings.eyebrow')}</p>
-            <h2
-              className="font-display text-[22px] text-ink leading-none tracking-tightest"
-              style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
-            >
-              Settings
-            </h2>
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose}>
-            <X size={16} />
-          </Btn>
-        </header>
+        <DialogHeader
+          align="baseline"
+          eyebrow={t('settings.eyebrow')}
+          title={<span style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}>Settings</span>}
+          titleClassName="font-display text-[22px] leading-none tracking-tightest text-ink"
+          onClose={onClose}
+          closeLabel={t('common.close')}
+        />
 
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
           {/* Feedback — a clear, single call to action (not a label). */}

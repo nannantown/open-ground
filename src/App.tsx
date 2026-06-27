@@ -12,7 +12,6 @@ import { AccountModal } from '@/components/canvas/AccountModal'
 import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
 import { CollabSharedDialog } from '@/components/canvas/CollabSharedDialog'
-import { SharedProjectPanel } from '@/components/canvas/SharedProjectPanel'
 import { useCollab } from '@/lib/collab/RealtimeContext'
 import { useExperiments } from '@/lib/modules/useExperiments'
 import { useJoinDeepLink } from '@/lib/useJoinDeepLink'
@@ -32,11 +31,15 @@ import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
 import type {
   ActiveTerminalsResponse,
+  AppNotification,
   CanvasAiActiveResponse,
   CanvasState,
   ClaudeBeaconStatus,
+  CollabInviteForMe,
+  CollabInvitesResponse,
   CollabProjectListItem,
   CollabProjectsListResponse,
+  NotificationStateResponse,
   ProjectMeta,
   Settings,
   ProjectsResponse,
@@ -64,6 +67,11 @@ const feedbackSeenKey = (sourceId: string | null) =>
 const MODULE_SUBMISSION_SEEN_KEY = 'openground:moduleSubmissionSeenAt'
 const moduleSubmissionSeenKey = (sourceId: string | null) =>
   sourceId ? `${MODULE_SUBMISSION_SEEN_KEY}:${sourceId}` : MODULE_SUBMISSION_SEEN_KEY
+
+// Stable id for a collab-invite notification — the read-state key persisted
+// server-side (so re-login keeps unread state). Keyed by collabProjectId, which
+// is unique + stable per shared project.
+const collabInviteNotifId = (collabProjectId: string) => `collab-invite:${collabProjectId}`
 
 // Arrow-key nudge vectors for the canvas keyboard shortcuts. Static, so it
 // lives outside the component (and outside the effect's dependency list).
@@ -128,7 +136,7 @@ export default function App() {
   // INITIAL join — paste an invite code or link) OR by an `openground://join?code=…`
   // invite deep link (which prefills the code). Already-joined projects also surface
   // as Ground cards. `openShared` is the folder-less shared project currently viewed
-  // in SharedProjectPanel (null = none).
+  // in ProjectPanel's member body (null = none).
   const { enabled: collabEnabled } = useCollab()
   // Owner-only experiment gate (hidden features, default off). `eligible` reveals
   // the Settings toggle to the owner; `flags` gates which modules surface as tabs
@@ -158,6 +166,15 @@ export default function App() {
     [collabEnabled],
   )
   useJoinDeepLink(onJoinCode)
+  // In-app notifications (the Ground お知らせ bell). `invites` is the first source:
+  // collab invites addressed to the signed-in user (GET /api/collab/invites, which
+  // is RLS-self-scoped server-side — a user only ever reads their own invites).
+  // `readNotifIds` is the SERVER-persisted set of seen ids (GET /api/notifications)
+  // so unread state survives a re-login. Both are fetched only when the app login
+  // is configured AND the user is signed in (see the effect below); otherwise empty,
+  // so the bell stays 控えめ (no badge) for the public / signed-out build.
+  const [invites, setInvites] = useState<CollabInviteForMe[]>([])
+  const [readNotifIds, setReadNotifIds] = useState<ReadonlySet<string>>(() => new Set())
   // Per-project claude beacon: projectId → 'working' (claude is busy) |
   // 'waiting' (claude sits on the human — its turn signal). Polled from
   // /api/terminal/active; the only "something is happening here" signal on
@@ -208,8 +225,8 @@ export default function App() {
   }, [collabEnabled])
 
   // Open a Ground shared card (member flow) — the SAME path CollabSharedDialog's
-  // onOpen uses: clear any Ground selection (so the folder-less SharedProjectPanel
-  // and the owned ProjectPanel can never co-exist), then show the shared panel.
+  // onOpen uses: clear any Ground selection (so the member body and the owned
+  // body can never co-exist — ProjectPanel renders one or the other), then open.
   const openSharedCard = useCallback(
     (id: string) => {
       const s = sharedProjects.find((p) => p.id === id)
@@ -218,6 +235,47 @@ export default function App() {
     },
     [sharedProjects, t],
   )
+
+  // Open a notification's target. A collab invite → open the folder-less shared
+  // project via the SAME member open-flow openSharedCard / CollabSharedDialog use
+  // (clear the Ground selection so the member body and an owned body can't
+  // co-exist, then setOpenShared). The invitee is ALREADY a member (their email is
+  // in og_project_members), so no invite-code redemption is needed — opening the
+  // room is the whole action.
+  const openNotification = useCallback(
+    (n: AppNotification) => {
+      if (n.kind === 'collab-invite' && n.collabInvite) {
+        setSelectedIds([])
+        setOpenShared({
+          id: n.collabInvite.collabProjectId,
+          label: n.collabInvite.label || t('projectPanel.collabSharedDialogUntitled'),
+        })
+      }
+    },
+    [t],
+  )
+
+  // Opening the bell marks the currently-shown UNREAD notifications read —
+  // optimistically in local state, then persisted server-side so a re-login doesn't
+  // resurface them as unread. Only the not-yet-read ids are sent (no redundant POST
+  // when nothing is new); marking read is monotonic (the server UNIONs ids), so a
+  // failed POST just leaves them unread to retry next open.
+  const markNotificationsSeen = useCallback(() => {
+    const unreadIds = invites
+      .map((iv) => collabInviteNotifId(iv.collabProjectId))
+      .filter((id) => !readNotifIds.has(id))
+    if (unreadIds.length === 0) return
+    setReadNotifIds((prev) => {
+      const next = new Set(prev)
+      unreadIds.forEach((id) => next.add(id))
+      return next
+    })
+    fetch('/api/notifications/read', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: unreadIds }),
+    }).catch(() => {})
+  }, [invites, readNotifIds])
 
   // Restore "where the user was" exactly once, after the first project scan:
   // re-open the project they had open before reload, if it still exists. A
@@ -355,6 +413,54 @@ export default function App() {
       window.removeEventListener('focus', onFocus)
     }
   }, [feedbackCanRead, settingsOpen, feedbackSourceId])
+
+  // Fetch the in-app notifications (collab invites) + the server-persisted read-
+  // state for the お知らせ bell. Gated on collabEnabled (NOT just auth): invites are
+  // a collab notification, and acting on one — opening the folder-less shared
+  // project — needs the realtime transport, so we never surface a "Join" that would
+  // dead-end in a collab-off build. The BELL itself stays present on authEnabled
+  // (常設); in an auth-on / collab-off build it's simply always empty. Re-checks on
+  // mount, on sign-in change, every 5 min, and on focus (throttled to once a minute,
+  // like the feedback poll). The invites route is RLS-self-scoped server-side.
+  useEffect(() => {
+    if (!collabEnabled || !authUser?.id) {
+      setInvites([])
+      return
+    }
+    let cancelled = false
+    let lastPoll = 0
+    const pollInvites = () => {
+      lastPoll = Date.now()
+      fetch('/api/collab/invites')
+        .then((r) => (r.ok ? (r.json() as Promise<CollabInvitesResponse>) : null))
+        .then((d) => {
+          if (!cancelled && d) setInvites(d.invites ?? [])
+        })
+        .catch(() => {})
+    }
+    // Load the server-persisted seen-set FIRST, then start polling invites — so the
+    // badge never briefly counts an already-read invite as unread on launch. Invites
+    // poll regardless of whether the seen-set read succeeds (.finally).
+    fetch('/api/notifications')
+      .then((r) => (r.ok ? (r.json() as Promise<NotificationStateResponse>) : null))
+      .then((d) => {
+        if (!cancelled && d) setReadNotifIds(new Set(d.readIds ?? []))
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) pollInvites()
+      })
+    const onFocus = () => {
+      if (Date.now() - lastPoll >= 60_000) pollInvites()
+    }
+    const id = window.setInterval(pollInvites, 300_000)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [collabEnabled, authUser?.id])
 
   // Called by the Settings inbox once it has loaded submissions: record the
   // newest timestamp as "seen" (scoped per data source) and clear the gear dot.
@@ -569,24 +675,27 @@ export default function App() {
   // deselect, enter-to-edit and arrow-key nudging.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Another surface already claimed this key (BoardModule's capture-phase
-      // ⌘Z/⌘Y handler preventDefaults before this bubble listener runs; the
-      // ⌘K palette / modals do the same) — one keypress must never drive two
-      // undo stacks (Board + Ground canvas) at once.
+      // Another surface already claimed this key (the ⌘K palette / modals
+      // preventDefault before this bubble listener runs) — leave it to them so
+      // one keypress never drives two surfaces at once.
       if (e.defaultPrevented) return
       const ae = document.activeElement
       const typing = !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')
       const mod = e.metaKey || e.ctrlKey
       const k = e.key.toLowerCase()
 
-      // A single selected project card means the ProjectPanel overlay is open
-      // and the Ground beneath it is inert: leave every key to the panel's
-      // own surfaces (its canvas / board / terminals have their own maps).
+      // A project panel is open — an owner's single selected card, OR a member's
+      // shared project (openShared, which has no Ground card so the selection is
+      // empty) — so the ProjectPanel overlay covers the Ground and owns every
+      // key: leave them to the panel's own surfaces (its canvas / board /
+      // terminals have their own maps; the Board no longer has its own ⌘Z, so
+      // here that combo must simply do nothing rather than drive Ground undo).
       // Two stay global: ⌘K (the jump palette overlays anything) and Escape —
       // clearing the selection IS the panel's close path; the panel's canvas
       // preventDefaults the Escapes it consumes before this bubble listener.
       if (
-        visibleProjects.filter((p) => selectedIds.includes(p.id)).length === 1 &&
+        (visibleProjects.filter((p) => selectedIds.includes(p.id)).length === 1 ||
+          !!openShared) &&
         !(mod && k === 'k') &&
         k !== 'escape'
       )
@@ -689,6 +798,7 @@ export default function App() {
     selectedIds,
     editingId,
     visibleProjects,
+    openShared,
     mutateCanvas,
   ])
 
@@ -782,6 +892,20 @@ export default function App() {
   }
 
   const showEmpty = projects.length === 0
+  // Compose the bell's notification list from the fetched sources (today: collab
+  // invites) and tally how many are still unread (id not in the server-persisted
+  // seen-set). Cheap derivations — recomputed each render from `invites` /
+  // `readNotifIds`. Newest-first ordering already comes from the server.
+  const notificationList: AppNotification[] = invites.map((iv) => ({
+    id: collabInviteNotifId(iv.collabProjectId),
+    kind: 'collab-invite',
+    createdAt: iv.invitedAt,
+    collabInvite: iv,
+  }))
+  const unreadNotifications = notificationList.reduce(
+    (count, n) => (readNotifIds.has(n.id) ? count : count + 1),
+    0,
+  )
   const selectedProjects = visibleProjects.filter((p) => selectedIds.includes(p.id))
   const singleSelected = selectedProjects.length === 1 ? selectedProjects[0] : null
   const selectedElement =
@@ -853,6 +977,14 @@ export default function App() {
         onOpenShared={collabEnabled ? () => setSharedDialogOpen(true) : undefined}
         onFeedback={feedbackEnabled ? () => setFeedbackOpen(true) : undefined}
         onAccount={authEnabled ? () => setAccountOpen(true) : undefined}
+        // In-app notifications (Ground お知らせ bell). Provided only when the app
+        // login is configured (notifications are an account feature) — undefined
+        // hides the bell, so the public no-auth build shows nothing. An empty list
+        // (signed out / no invites) still renders the bell, just without a badge.
+        notifications={authEnabled ? notificationList : undefined}
+        unreadNotifications={unreadNotifications}
+        onOpenNotification={openNotification}
+        onNotificationsSeen={markNotificationsSeen}
         // The settings-gear dot covers BOTH owner inboxes (feedback + tab
         // submissions); either having unread lights it, opening Settings (which
         // loads both inboxes and marks them seen) clears it.
@@ -861,14 +993,19 @@ export default function App() {
         usage={<UsageHud />}
       />
       <ProjectPanel
-        project={singleSelected}
+        // One panel for both modes: `shared` (a folder-less collab project shared
+        // WITH the user) flips ProjectPanel into the member body; otherwise the
+        // selected card opens the owner body. Mutually exclusive — opening a
+        // shared project clears the Ground selection (singleSelected → null).
+        project={openShared ? null : singleSelected}
+        shared={openShared ?? undefined}
         onRelocate={relocateProject}
         frameLabel={frameLabel}
         feedbackEnabled={feedbackEnabled}
         // Owner-only experiment gate: which experimental modules surface as tabs.
         // All-false for non-owners, so the row is unchanged for everyone else.
         experiments={experiments.flags}
-        onClose={() => setSelectedIds([])}
+        onClose={openShared ? () => setOpenShared(null) : () => setSelectedIds([])}
         onRemove={removeFromCanvas}
         onSaved={(path, d) =>
           setProjects((prev) =>
@@ -932,17 +1069,6 @@ export default function App() {
             setSelectedIds([])
             setOpenShared({ id, label })
           }}
-        />
-      )}
-      {openShared && (
-        <SharedProjectPanel
-          // key on collabProjectId forces a fresh mount (data/adopted/binding)
-          // per project — an id swap can never inherit the prior project's
-          // whole-value meta into the new doc (review Finding 1).
-          key={openShared.id}
-          collabProjectId={openShared.id}
-          label={openShared.label}
-          onClose={() => setOpenShared(null)}
         />
       )}
       {selectedProjects.length >= 2 && (

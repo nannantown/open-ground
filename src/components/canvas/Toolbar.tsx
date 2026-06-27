@@ -8,12 +8,15 @@ import {
   LogOut,
   CircleUser,
   HelpCircle,
-  Sparkles,
-  Users,
+  Blocks,
+  DoorOpen,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
+import { IconButton } from '@/components/canvas/IconButton'
+import { NotificationBell } from '@/components/canvas/NotificationBell'
+import type { AppNotification } from '@/lib/types'
 
 interface Props {
   onNewProject: () => void
@@ -37,6 +40,18 @@ interface Props {
    *  server-side); undefined hides the account control so the public build
    *  (no env) shows nothing. */
   onAccount?: () => void
+  /** In-app notifications (the Ground お知らせ bell). Provided ONLY when the
+   *  optional app login is configured (notifications are an account feature) —
+   *  undefined hides the bell entirely, so the public no-auth build shows nothing.
+   *  An EMPTY array (e.g. signed in but no invites, or signed out) still shows the
+   *  bell, just with no badge — the always-present-but-控えめ "常設" behaviour. */
+  notifications?: AppNotification[]
+  /** Count of notifications not yet read — drives the bell badge (shown only >0). */
+  unreadNotifications?: number
+  /** Open a notification's target (a collab invite → open the shared project). */
+  onOpenNotification?: (n: AppNotification) => void
+  /** Fired when the panel OPENS — the app marks the shown notifications read. */
+  onNotificationsSeen?: () => void
   projectCount: number
   /** Count of feedback submissions not yet seen (owner build only). >0 shows a
    *  small dot on the settings gear; the inbox lives inside Settings. */
@@ -46,10 +61,12 @@ interface Props {
   usage?: React.ReactNode
 }
 
-// Ground top bar. Kept deliberately minimal: a single "+" (new / import), the
-// account control (avatar + menu when signed in), and Settings. Language lives
-// in Settings now (auto-detected from the OS otherwise), and refresh is ⌘R /
-// auto-on-focus — so neither needs a permanent button here.
+// Ground top bar. Kept deliberately minimal, but every control reads WITHOUT a
+// hover: the controls whose icon alone is ambiguous carry a permanent text label
+// (Add, the shared-project Join entry, Skills) while the self-evident ones stay
+// icon-only (the account avatar, the "?" manual, the settings gear). Language
+// lives in Settings now (auto-detected from the OS otherwise), and refresh is ⌘R
+// / auto-on-focus — so neither needs a permanent button here.
 export const Toolbar = ({
   onNewProject,
   onImport,
@@ -59,6 +76,10 @@ export const Toolbar = ({
   onOpenShared,
   onFeedback,
   onAccount,
+  notifications,
+  unreadNotifications = 0,
+  onOpenNotification,
+  onNotificationsSeen,
   projectCount,
   unreadFeedback = 0,
   usage,
@@ -130,19 +151,46 @@ export const Toolbar = ({
           {onOpenShared && (
             <>
               <span className="h-4 w-px bg-line-soft" />
-              <IconButton onClick={onOpenShared} title={t('toolbar.sharedWithMe')}>
-                <Users size={13} strokeWidth={1.75} />
+              {/* The member's entry to the INITIAL join (paste an invite code /
+                  link). A bare "Users" icon read as "members" and was easy to
+                  miss — a permanent "Join shared" label + the DoorOpen (enter a
+                  shared space) glyph make it discoverable without a hover. The
+                  DoorOpen glyph (vs a LogIn door-arrow) deliberately avoids the
+                  "sign in" read of the neighbouring account control. Tooltip
+                  ("Shared with me") unchanged. */}
+              <IconButton
+                onClick={onOpenShared}
+                title={t('toolbar.sharedWithMe')}
+                label={t('toolbar.joinShared')}
+              >
+                <DoorOpen size={13} strokeWidth={1.75} />
               </IconButton>
             </>
           )}
           <span className="h-4 w-px bg-line-soft" />
-          <IconButton onClick={onOpenSkills} title={t('toolbar.skills')}>
-            <Sparkles size={13} strokeWidth={1.75} />
+          {/* Skills (the user's own ~/.claude/skills). "Sparkles" implied AI/magic;
+              a "Skills" label + the modular Blocks glyph say what it opens. */}
+          <IconButton onClick={onOpenSkills} title={t('toolbar.skills')} label={t('toolbar.skills')}>
+            <Blocks size={13} strokeWidth={1.75} />
           </IconButton>
           <span className="h-4 w-px bg-line-soft" />
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />
           </IconButton>
+          {/* In-app notifications (Ground お知らせ). Shown only when notifications
+              are wired (the app-login build); the bell stays present-but-quiet
+              with no badge when there's nothing unread / signed out. */}
+          {notifications && (
+            <>
+              <span className="h-4 w-px bg-line-soft" />
+              <NotificationBell
+                notifications={notifications}
+                unreadCount={unreadNotifications}
+                onOpen={(n) => onOpenNotification?.(n)}
+                onPanelOpen={() => onNotificationsSeen?.()}
+              />
+            </>
+          )}
           <span className="h-4 w-px bg-line-soft" />
           <IconButton
             onClick={onOpenSettings}
@@ -188,7 +236,12 @@ const AddMenu = ({
   }, [open])
   return (
     <div ref={ref} className="relative">
-      <IconButton onClick={() => setOpen((o) => !o)} title={t('toolbar.add')} active={open}>
+      <IconButton
+        onClick={() => setOpen((o) => !o)}
+        title={t('toolbar.add')}
+        label={t('toolbar.addLabel')}
+        active={open}
+      >
         <Plus size={14} strokeWidth={2} />
       </IconButton>
       {open && (
@@ -324,40 +377,3 @@ const MenuItem = ({
   </button>
 )
 
-const IconButton = ({
-  children,
-  onClick,
-  title,
-  active,
-  disabled,
-  dot,
-}: {
-  children: React.ReactNode
-  onClick: () => void
-  title: string
-  active?: boolean
-  disabled?: boolean
-  /** Small accent dot in the top-right corner — an unread/attention marker. */
-  dot?: boolean
-}) => (
-  <button
-    type="button"
-    onClick={onClick}
-    title={title}
-    aria-label={title}
-    aria-pressed={active}
-    disabled={disabled}
-    className={[
-      'relative flex h-7 w-7 items-center justify-center rounded-sm transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
-      'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-      active
-        ? 'bg-accent-soft text-accent'
-        : 'text-ink-muted hover:text-ink hover:bg-bg-inset',
-    ].join(' ')}
-  >
-    {children}
-    {dot && (
-      <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-accent ring-2 ring-bg-card" />
-    )}
-  </button>
-)

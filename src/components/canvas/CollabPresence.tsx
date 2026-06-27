@@ -9,7 +9,7 @@ import type { PresencePeer } from '@/lib/types'
 // or when collab isn't bound, so the default build shows nothing.
 
 export interface PresenceChannel {
-  setPresence: (state: { name: string; color: string } | null) => void
+  setPresence: (state: { name: string; color: string; email?: string } | null) => void
   onPresence: (cb: (peers: PresencePeer[]) => void) => () => void
 }
 
@@ -25,14 +25,16 @@ const initialsOf = (name: string): string => name.trim().slice(0, 2).toUpperCase
 /** Publish THIS client's presence into the channel while bound + identified —
  *  no UI. Owner surfaces (BoardModule on the Board tab, ProjectCanvas on the
  *  Canvas tab) call this so a member sees the owner is here, even where there's
- *  no avatar strip yet. Identity = the email's local part (always available for
- *  an OAuth user; avoids broadcasting the full address). */
+ *  no avatar strip yet. Identity = the email's local part as the compact `name`
+ *  (drives the avatar initials + color), plus the full `email` so a peer's
+ *  tooltip can show the complete address. Broadcasting the address is
+ *  acceptable: only collaborators the owner invited share a room. */
 export const usePublishPresence = (channel: PresenceChannel | null): void => {
   const { user } = useAuth()
   const me = useMemo(() => {
     const email = user?.email ?? ''
     const name = email.includes('@') ? email.slice(0, email.indexOf('@')) : email
-    return name ? { name, color: colorFor(email) } : null
+    return name ? { name, color: colorFor(email), email } : null
   }, [user?.email])
   useEffect(() => {
     if (!channel || !me) return
@@ -74,7 +76,7 @@ export const CollabPresence = ({
   return (
     <div
       className="flex items-center -space-x-1.5"
-      title={peers.map((p) => p.name).join(', ')}
+      title={peers.map((p) => p.email || p.name).join(', ')}
       aria-label={`${peers.length} other${peers.length === 1 ? '' : 's'} here`}
     >
       {shown.map((p) => (
@@ -82,7 +84,7 @@ export const CollabPresence = ({
           key={p.clientId}
           className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-bg-card text-[9px] font-semibold text-white shadow-card"
           style={{ backgroundColor: p.color }}
-          title={p.name}
+          title={p.email || p.name}
         >
           {initialsOf(p.name)}
         </span>

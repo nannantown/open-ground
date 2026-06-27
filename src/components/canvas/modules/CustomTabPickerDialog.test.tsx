@@ -237,8 +237,9 @@ describe('CustomTabPickerDialog', () => {
     )
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(1)
-    // Backdrop (the data-esc-overlay element itself) closes; a click inside
-    // the card must not.
+    // Backdrop (the data-esc-overlay element itself) closes on mousedown; a
+    // press inside the card must not (the card stops mousedown propagation, so a
+    // drag begun inside and released on the veil never dismisses).
     fireEvent.mouseDown(getByText('customTabs.pickerTitle'))
     expect(onClose).toHaveBeenCalledTimes(1)
     const backdrop = document.querySelector('[data-esc-overlay]')!

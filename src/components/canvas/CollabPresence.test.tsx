@@ -38,17 +38,37 @@ describe('CollabPresence (u15 awareness avatars)', () => {
     expect(c2.firstChild).toBeNull() // bound but alone → nothing
   })
 
-  it('publishes the local identity (email local-part + color) and renders peers', () => {
+  it('publishes the local identity (name local-part + full email + color) and renders peers', () => {
     const { channel, emit } = makeChannel()
     render(<CollabPresence channel={channel} />)
-    // Published our presence using the email's local part (not the full address).
+    // Published our presence: the email local-part as the compact name, PLUS the
+    // full email so a peer's tooltip can show the complete address.
     expect(channel.setPresence).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'namihna', color: expect.stringContaining('hsl') }),
+      expect.objectContaining({
+        name: 'namihna',
+        email: 'namihna@icloud.com',
+        color: expect.stringContaining('hsl'),
+      }),
     )
     // A peer arrives → an avatar with their initials + the "N others here" label.
     emit([{ clientId: 2, name: 'koki', color: '#ff0000' }])
     expect(screen.getByText('KO')).toBeTruthy()
     expect(screen.getByLabelText(/1 other/)).toBeTruthy()
+  })
+
+  it('avatar tooltip shows the full email, falling back to name for older peers', () => {
+    const { channel, emit } = makeChannel()
+    render(<CollabPresence channel={channel} />)
+    emit([
+      { clientId: 2, name: 'op', color: '#ff0000', email: 'opengroundcoffee@gmail.com' },
+      { clientId: 3, name: 'koki', color: '#00ff00' }, // older peer: no email field
+    ])
+    // The peer that published an email → its avatar tooltip is the FULL address.
+    expect(screen.getByText('OP').getAttribute('title')).toBe('opengroundcoffee@gmail.com')
+    // The peer with no email → tooltip falls back to the name (unchanged behaviour).
+    expect(screen.getByText('KO').getAttribute('title')).toBe('koki')
+    // The initials themselves are unchanged (still derived from the name).
+    expect(screen.getByText('OP')).toBeTruthy()
   })
 
   it('caps avatars at 5 and shows a +N overflow', () => {

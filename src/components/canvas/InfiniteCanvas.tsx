@@ -27,6 +27,7 @@ import {
 import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
 import { cloneSubset } from '@/lib/canvasClone'
+import { initialDrawnFrameFill } from '@/lib/canvasFillStyle'
 import type {
   CanvasElement,
   CanvasState,
@@ -99,8 +100,8 @@ interface Props {
    *  selectable. Undefined/empty (the default, collab-off build) → no shared
    *  cards and every owned-card path stays byte-for-byte unchanged. */
   sharedProjects?: CollabProjectListItem[]
-  /** Open a shared card (folder-less) — wired to the host's SharedProjectPanel
-   *  flow. Called on a click (no-drag) release of a shared card. */
+  /** Open a shared card (folder-less) — wired to the host's member-mode
+   *  ProjectPanel flow. Called on a click (no-drag) release of a shared card. */
   onOpenShared?: (collabProjectId: string) => void
   canvas: CanvasState
   onCanvasChange: (c: CanvasState) => void
@@ -2549,7 +2550,7 @@ export const InfiniteCanvas = ({
             }
           }
         } else if (p.kind === 'card' && p.shared) {
-          // Shared card click (no drag): open the folder-less SharedProjectPanel
+          // Shared card click (no drag): open the folder-less member-mode ProjectPanel
           // via the host. A shared card never selects (it isn't a registry
           // project) and never pairs into a double-click-to-edit (cards carry no
           // inline text), so we stop here without touching the selection.
@@ -2749,6 +2750,15 @@ export const InfiniteCanvas = ({
           const fh = sized ? box.h : FRAME_DEFAULT_H
           const x = sized ? box.x : anchorX
           const y = sized ? box.y : anchorY
+          // A drawn frame's initial fill depends on the canvas variant (see
+          // initialDrawnFrameFill): a DESIGN artboard ships an explicit white
+          // fill so it reads against the paper canvas; a GROUND grouping box
+          // leaves `fill` UNSET (helper returns undefined) so resolveFrameStyle
+          // falls back to DEFAULT_FRAME_FILL — the paper wash lets the
+          // background grid show through and the new frame matches legacy Ground
+          // frames (card 587cc625). A wrap-in-auto-layout frame is separately
+          // transparent — see addAutoLayout in canvasAutoLayout.ts.
+          const drawnFill = initialDrawnFrameFill(frameVariant)
           const newFrame: CanvasElement = {
             id,
             type: 'frame',
@@ -2757,13 +2767,7 @@ export const InfiniteCanvas = ({
             width: fw,
             height: fh,
             text: '',
-            // Figma parity: a frame DRAWN with the frame tool ships with an
-            // explicit white fill so it reads as a real artboard against the
-            // paper canvas (the legacy fallback for an absent fill is the
-            // near-invisible paper wash). A wrap-in-auto-layout frame stays
-            // transparent instead — that's a grouping container, not an
-            // artboard (see addAutoLayout in canvasAutoLayout.ts).
-            fill: '#FFFFFF',
+            ...(drawnFill !== undefined ? { fill: drawnFill } : {}),
           }
           // Drawn ON a layout frame (and not wrapping it — the helper's
           // contains-guard) → the fresh frame nests into that flow at the
@@ -3588,10 +3592,13 @@ export const InfiniteCanvas = ({
         {/* Ground member flow: projects shared WITH the user (collab enabled
             only). Positioned by collabProjectId in the SAME positions map as
             owned cards, draggable via onSharedCardPointerDown, click-to-open.
-            The synthetic ProjectMeta only carries id + name (the label); the
-            card's `shared` variant renders neither path/git nor task count, so
-            the empty fields are never shown. Empty/undefined → nothing renders,
-            so the collab-off Ground stays byte-for-byte unchanged. */}
+            The synthetic ProjectMeta carries id + name (the label) + a shared
+            caption in the description slot; `shared` gives the card the invite
+            accent (left band + tinted ring + Users icon + "Shared" badge) so it
+            reads at a glance as shared, distinct from the user's own cards.
+            hasGit:false + openTaskCount:0 hide the git/task stamps.
+            Empty/undefined → nothing renders, so the collab-off Ground stays
+            byte-for-byte unchanged. */}
         {(sharedProjects ?? []).map((s) => {
           const pos = positions[s.id]
           if (!pos) return null
@@ -3603,12 +3610,14 @@ export const InfiniteCanvas = ({
               style={{ left: pos.x, top: pos.y }}
             >
               <ProjectCard
-                shared
                 project={{
                   id: s.id,
                   name: s.label || t('projectPanel.collabSharedDialogUntitled'),
                   path: '',
-                  description: '',
+                  // Folder-less: no real git/tasks. The shared caption rides in
+                  // the description slot; `shared` below paints the invite accent
+                  // so the card reads at a glance as shared (vs. owned cards).
+                  description: t('projectPanel.groundSharedTitle'),
                   lastModified: '',
                   hasGit: false,
                   openTaskCount: 0,
@@ -3616,6 +3625,7 @@ export const InfiniteCanvas = ({
                 }}
                 onPointerDown={onSharedCardPointerDown(s.id)}
                 selected={false}
+                shared
               />
             </div>
           )

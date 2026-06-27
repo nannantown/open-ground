@@ -17,6 +17,8 @@ import {
   DEFAULT_STROKE_WIDTH,
   MIN_STROKE_WIDTH,
   MAX_STROKE_WIDTH,
+  initialDrawnFrameFill,
+  DRAWN_ARTBOARD_FILL,
 } from './canvasFillStyle'
 
 const sticky = (over: Partial<CanvasElement> = {}): CanvasElement => ({
@@ -190,5 +192,31 @@ describe('isNoFill', () => {
     expect(isNoFill(null)).toBe(false)
     expect(isNoFill(undefined)).toBe(false)
     expect(isNoFill('')).toBe(false)
+  })
+})
+
+describe('initialDrawnFrameFill', () => {
+  it('gives a DESIGN-canvas drawn frame an explicit white artboard fill', () => {
+    // Figma parity: a design-canvas frame is an artboard, so it must read white
+    // against the paper canvas rather than the near-invisible paper wash.
+    expect(initialDrawnFrameFill('design')).toBe(DRAWN_ARTBOARD_FILL)
+    expect(initialDrawnFrameFill('design')).toBe('#FFFFFF')
+  })
+  it('leaves a GROUND-canvas drawn frame fill UNSET (regression card 587cc625)', () => {
+    // A Ground portfolio frame is a grouping box, not an artboard. Returning
+    // undefined keeps `fill` off the new element so resolveFrameStyle falls back
+    // to DEFAULT_FRAME_FILL and the background grid shows through — matching
+    // legacy Ground frames. A white fill here was the white-interior regression.
+    expect(initialDrawnFrameFill('ground')).toBeUndefined()
+  })
+  it('round-trips through resolveFrameStyle: ground → paper wash, design → white', () => {
+    // The end-to-end contract the draw-commit handler relies on: a frame built
+    // with the variant's initial fill resolves to the right body colour. An
+    // absent (ground) fill must land on the paper wash, an explicit (design)
+    // white must survive.
+    const groundFill = initialDrawnFrameFill('ground')
+    const designFill = initialDrawnFrameFill('design')
+    expect(resolveFrameStyle(frame({ fill: groundFill })).fill).toBe(DEFAULT_FRAME_FILL)
+    expect(resolveFrameStyle(frame({ fill: designFill })).fill).toBe(DRAWN_ARTBOARD_FILL)
   })
 })

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Loader2, Sparkles, X } from 'lucide-react'
+import { Loader2, Sparkles } from 'lucide-react'
+import { Overlay, DialogCard, DialogHeader, DialogBody } from '@/components/ui/overlay'
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import type {
@@ -67,20 +68,6 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  // Escape closes — but NOT while a creation is in flight (don't strand the
-  // server-side claude session / lose the user's typed request by accident).
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !creating) {
-        e.stopPropagation()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose, creating])
-
   const create = async () => {
     const req = request.trim()
     if (!req || creating) return
@@ -130,33 +117,33 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
   if (!open) return null
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4 backdrop-blur-sm"
-      onClick={() => {
+    <Overlay
+      onClose={() => {
         if (!creating) onClose()
       }}
+      aria-label={t('projectPanel.skillsPanelTitle')}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[82vh] w-[560px] max-w-[94vw] flex-col overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
+      <DialogCard
+        className="w-[560px] max-w-[94vw] max-h-[82vh]"
+        ariaLabel={t('projectPanel.skillsPanelTitle')}
       >
-        <header className="rule-double flex shrink-0 items-start justify-between px-6 pt-5 pb-4">
-          <div className="min-w-0">
-            <p className="label-cap mb-1.5 flex items-center gap-1.5 text-accent">
+        <DialogHeader
+          eyebrow={
+            <>
               <Sparkles size={12} strokeWidth={2} />
               {t('projectPanel.skillsPanelTitle')}
-            </p>
-            <p className="font-mono text-[12px] text-ink-muted">
-              {t('projectPanel.skillsPanelSubtitle')}
-            </p>
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose} disabled={creating} aria-label={t('common.close')}>
-            <X size={16} />
-          </Btn>
-        </header>
+            </>
+          }
+          title={t('projectPanel.skillsPanelSubtitle')}
+          titleClassName="font-mono text-[12px] text-ink-muted"
+          onClose={() => {
+            if (!creating) onClose()
+          }}
+          closeLabel={t('common.close')}
+          closeDisabled={creating}
+        />
 
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
+        <DialogBody className="space-y-4 px-6 py-4">
           {/* ── Create a skill (the "order") ─────────────────────────────── */}
           <section>
             <label className="mb-1.5 block label-cap text-ink-muted" htmlFor="skill-request">
@@ -244,8 +231,8 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
                 </ul>
               ))}
           </section>
-        </div>
-      </div>
-    </div>
+        </DialogBody>
+      </DialogCard>
+    </Overlay>
   )
 }

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
-import { X, LogIn, LogOut, Loader2 } from 'lucide-react'
+import { useState } from 'react'
+import { LogIn, LogOut, Loader2 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
 
@@ -26,19 +27,6 @@ export const AccountModal = ({ open, onClose }: Props) => {
   // Fall back to initials if the provider avatar fails to load (broken/blocked URL).
   const [avatarError, setAvatarError] = useState(false)
 
-  // ESC closes — match FeedbackModal's keyboard behaviour.
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
   if (!open) return null
 
   // Disable the provider buttons during the initial session probe AND while a
@@ -47,29 +35,20 @@ export const AccountModal = ({ open, onClose }: Props) => {
   const busy = signingIn || status === 'loading'
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex flex-col w-[420px] max-w-[92vw] bg-bg-card border border-line shadow-card-hover overflow-hidden rounded-[3px]"
-      >
-        <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
-          <div>
-            <p className="label-cap text-accent mb-1.5">{t('modals.account.label')}</p>
-            <h2
-              className="font-display text-[22px] text-ink leading-none tracking-tightest"
-              style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
-            >
+    <Overlay onClose={onClose} aria-label={t('modals.account.label')}>
+      <DialogCard className="w-[420px] max-w-[92vw]" ariaLabel={t('modals.account.label')}>
+        <DialogHeader
+          align="baseline"
+          eyebrow={t('modals.account.label')}
+          title={
+            <span style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}>
               {user ? t('modals.account.titleSignedIn') : t('modals.account.titleSignedOut')}
-            </h2>
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose} aria-label={t('common.close')}>
-            <X size={16} />
-          </Btn>
-        </header>
+            </span>
+          }
+          titleClassName="font-display text-[22px] leading-none tracking-tightest text-ink"
+          onClose={onClose}
+          closeLabel={t('common.close')}
+        />
 
         {user ? (
           // --- Signed in --------------------------------------------------
@@ -168,7 +147,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
             </div>
           </>
         )}
-      </div>
-    </div>
+      </DialogCard>
+    </Overlay>
   )
 }

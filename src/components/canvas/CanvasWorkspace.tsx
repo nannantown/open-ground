@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Minus, Plus, Redo2, Sparkles, Undo2, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { InfiniteCanvas, type CanvasZoomApi } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
 import { SelectionInspector } from './SelectionInspector'
@@ -898,7 +899,7 @@ export const CanvasWorkspace = ({
   // lives in InfiniteCanvas, the single owner for both surfaces.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return // another surface claimed it (Board ⌘Z…)
+      if (e.defaultPrevented) return // another surface claimed it (a modal, ⌘K…)
       const ae = document.activeElement
       const inField =
         !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')
@@ -1326,31 +1327,33 @@ export const CanvasWorkspace = ({
         {loginOpen &&
           typeof document !== 'undefined' &&
           createPortal(
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+            <Overlay
+              placement="center"
+              backdrop="scrimStrong"
+              layer="modal"
+              escOverlay={false}
               role="dialog"
-              aria-modal="true"
+              aria-modal
               aria-label={t('projectPanel.claudeLogin.title')}
             >
               <div className="flex h-[70vh] max-h-[640px] w-full max-w-[780px] flex-col overflow-hidden rounded-lg border border-line bg-bg-card shadow-2xl">
-                <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-[13px] font-medium text-ink">
-                      {t('projectPanel.claudeLogin.title')}
-                    </p>
-                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-                      {t('projectPanel.claudeLogin.hint')}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={closeClaudeLogin}
-                    aria-label={t('common.close')}
-                    className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
+                <DialogHeader
+                  separator="line"
+                  density="bar"
+                  align="center"
+                  leading={
+                    <div className="min-w-0">
+                      <p className="truncate text-[13px] font-medium text-ink">
+                        {t('projectPanel.claudeLogin.title')}
+                      </p>
+                      <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                        {t('projectPanel.claudeLogin.hint')}
+                      </p>
+                    </div>
+                  }
+                  onClose={closeClaudeLogin}
+                  closeLabel={t('common.close')}
+                />
                 <div className="flex min-h-0 flex-1 flex-col bg-bg">
                   {loginPty ? (
                     <ClaudeTerminalPane
@@ -1382,7 +1385,7 @@ export const CanvasWorkspace = ({
                   )}
                 </div>
               </div>
-            </div>,
+            </Overlay>,
             document.body,
           )}
       </div>

@@ -71,7 +71,7 @@ export function Onboarding({
     'disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-card disabled:translate-y-0'
 
   return (
-    <div className="fixed inset-0 z-[70] flex overflow-hidden bg-bg font-body">
+    <div className="fixed inset-0 z-overlay-gate flex overflow-hidden bg-bg font-body">
       <style>{`
         @keyframes og-rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
         @keyframes og-card-in{from{opacity:0;transform:translateY(20px) scale(.97)}to{opacity:1}}

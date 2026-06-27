@@ -3,6 +3,8 @@
 export const toolbar = {
   en: {
     'toolbar.add': 'Add project',
+    // Concise visible label for the pill button; `toolbar.add` stays the tooltip.
+    'toolbar.addLabel': 'Add',
     'toolbar.newProject': 'New project',
     'toolbar.importFolder': 'Import folder',
     'toolbar.refresh': 'Refresh',
@@ -16,6 +18,8 @@ export const toolbar = {
     'toolbar.manual': 'Manual',
     'toolbar.skills': 'Skills',
     'toolbar.sharedWithMe': 'Shared with me',
+    // Visible label on the toolbar Join entry; `sharedWithMe` stays the tooltip.
+    'toolbar.joinShared': 'Join shared',
     'toolbar.language': 'Language',
     'toolbar.langEn': 'EN',
     'toolbar.langJa': 'JA',
@@ -23,6 +27,7 @@ export const toolbar = {
   } as Record<string, string>,
   ja: {
     'toolbar.add': 'プロジェクトを追加',
+    'toolbar.addLabel': '追加',
     'toolbar.newProject': '新規プロジェクト',
     'toolbar.importFolder': 'フォルダをインポート',
     'toolbar.refresh': '再読み込み',
@@ -36,6 +41,7 @@ export const toolbar = {
     'toolbar.manual': 'マニュアル',
     'toolbar.skills': 'スキル',
     'toolbar.sharedWithMe': '共有プロジェクト',
+    'toolbar.joinShared': '共有に参加',
     'toolbar.language': '言語',
     'toolbar.langEn': 'EN',
     'toolbar.langJa': 'JA',

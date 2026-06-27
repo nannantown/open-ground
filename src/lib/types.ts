@@ -1269,7 +1269,7 @@ export interface ProjectData {
   updatedAt: string
   /** SHARED canvas index for realtime collab — the list of canvases a folder-less
    *  member can discover + open (published into the board collab doc by the
-   *  owner's Canvas tab; read by the member's SharedProjectPanel). NOT a local
+   *  owner's Canvas tab; read by the member's SharedProjectBody). NOT a local
    *  source of truth — canvases-index.json remains authoritative on the owner's
    *  disk; this is the cross-user mirror. Absent for non-collab/local use. */
   canvasIndex?: { id: string; name: string }[]
@@ -1442,11 +1442,14 @@ export type CollabSource = { path: string } | { collabProjectId: string }
 
 /** A remote collaborator currently present in a room (via the DO awareness
  *  channel, u15). `clientId` is the Yjs awareness client id (stable per live
- *  connection); name/color are the peer's self-reported identity. */
+ *  connection); name/color are the peer's self-reported identity. `email` is the
+ *  peer's full address when published — the avatar tooltip prefers it, falling
+ *  back to `name` (the email local-part) for older peers that omit it. */
 export interface PresencePeer {
   clientId: number
   name: string
   color: string
+  email?: string
 }
 
 /** GET /api/collab/config — the client gate. `enabled` is true only when the
@@ -1491,6 +1494,62 @@ export interface CollabProjectListItem {
  *  collabProjectIds an invited member can open even without a local folder. */
 export interface CollabProjectsListResponse {
   projects: CollabProjectListItem[]
+}
+
+/** One pending in-app collab INVITE addressed to the SIGNED-IN user: a project
+ *  shared WITH them that they do NOT own. Built server-side (GET
+ *  /api/collab/invites) from og_project_members read under the user's OWN JWT —
+ *  RLS ("og members read roster": private.og_is_member) returns only the rosters
+ *  of projects the caller belongs to (matched by uid OR JWT email), so a caller
+ *  can never see an invite addressed to someone else; "for me" is enforced by the
+ *  database, not a query param. The first NOTIFICATION source (the Ground お知らせ
+ *  bell — see {@link AppNotification}). */
+export interface CollabInviteForMe {
+  /** collabProjectId (og_projects.id) — the room key; the "open" action hands it
+   *  to the member open-flow (setOpenShared) to view the shared project. */
+  collabProjectId: string
+  /** Owner-set, member-visible SHARED NAME (og_projects.label); null if unset. */
+  label: string | null
+  /** Email of the owner who invited them (the roster's owner row); null when it
+   *  can't be resolved. */
+  inviterEmail: string | null
+  /** Epoch ms the invite (their og_project_members row) was created — for newest-
+   *  first ordering. Absent if the row had no/invalid timestamp. */
+  invitedAt?: number
+}
+
+/** GET /api/collab/invites — every pending collab invite for the signed-in user
+ *  (projects shared WITH them they don't own). Empty when signed out /
+ *  unconfigured / they have none — never an error. */
+export interface CollabInvitesResponse {
+  invites: CollabInviteForMe[]
+}
+
+/** The kind discriminator for an in-app notification (Ground お知らせ). Only
+ *  'collab-invite' exists today; the bell is built so more kinds can be added. */
+export type NotificationKind = 'collab-invite'
+
+/** One in-app notification shown in the Ground お知らせ bell/panel. Composed on
+ *  the CLIENT from a notification source (today: {@link CollabInviteForMe}) so the
+ *  panel can render a kind-specific row + action. `id` is the STABLE read-state
+ *  key (persisted server-side via /api/notifications) — e.g.
+ *  `collab-invite:<collabProjectId>` — so opening the panel marks it read and a
+ *  re-login doesn't resurface it as unread. */
+export interface AppNotification {
+  id: string
+  kind: NotificationKind
+  /** Epoch ms for newest-first ordering (absent → sorts last). */
+  createdAt?: number
+  /** Present when kind === 'collab-invite'. */
+  collabInvite?: CollabInviteForMe
+}
+
+/** GET /api/notifications — the persisted set of notification ids the user has
+ *  already SEEN (home-cache: ~/.openground/notifications.json), so unread state
+ *  survives a re-login (NOT localStorage). POST /api/notifications/read {ids}
+ *  merges ids in (marking read is MONOTONIC — you never un-read). */
+export interface NotificationStateResponse {
+  readIds: string[]
 }
 
 /** GET /api/collab/ticket?path=&scope= — the short-lived, signed credential the

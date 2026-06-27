@@ -24,8 +24,9 @@
 //   POST /api/collab/join-requests/deny {path,requestId}
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Check, Clock, Copy, Trash2, X } from 'lucide-react'
+import { Check, Clock, Copy, Trash2 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import { FIELD_INPUT_CSS } from './ProjectConfigFields'
 import {
@@ -181,17 +182,6 @@ export const CollabInviteDialog = ({
     void loadLinks()
     void loadRequests()
   }, [loadMembers, loadLinks, loadRequests, consented])
-
-  // Esc closes the dialog — parity with every other overlay (App's global Esc
-  // handler bails on data-esc-overlay, so the dialog owns its own). The
-  // isComposing guard preserves the IME-confirm Esc.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.isComposing) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
 
   const createLink = async () => {
     if (!canCreate || inFlight.current) return
@@ -393,31 +383,27 @@ export const CollabInviteDialog = ({
     'shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
   return (
-    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col bg-bg-card">
+    <Overlay
+      position="absolute"
+      layer="local"
+      backdrop="surface"
+      placement="fill"
+      onClose={onClose}
+      aria-label={t('projectPanel.collabTitle', { name: projectName })}
+    >
       {/* Header chrome — a persistent exit in BOTH habitual spots: a "back"
           affordance top-left and a close X top-right, in a fixed (non-scrolling)
           bar. The body below scrolls on its own, so the exit is always reachable
           however far the owner scrolls into the roster / links sections (the old
           layout buried its only Cancel / Done buttons mid-page — a dead-end). */}
-      <div className="flex shrink-0 items-center justify-between border-b border-line px-4 py-2.5">
-        <button
-          type="button"
-          onClick={onClose}
-          className="flex items-center gap-1 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          <ArrowLeft size={13} />
-          {t('common.back')}
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={t('common.close')}
-          title={t('common.close')}
-          className="rounded-sm p-1.5 text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          <X size={16} />
-        </button>
-      </div>
+      <DialogHeader
+        separator="line"
+        density="bar"
+        onBack={onClose}
+        backLabel={t('common.back')}
+        onClose={onClose}
+        closeLabel={t('common.close')}
+      />
       <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="grid min-h-full place-items-center">
         <div className="w-full px-6 py-10">
@@ -813,6 +799,6 @@ export const CollabInviteDialog = ({
         </div>
       </div>
       </div>
-    </div>
+    </Overlay>
   )
 }

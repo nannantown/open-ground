@@ -535,12 +535,9 @@ describe('BoardModule drawer — Session mode', () => {
   })
 })
 
-// ─── Undo / redo (B013) ──────────────────────────────────────────────────────
-// History lives in BoardModule (the data+persist layer): local persists are
-// coalesced snapshots, ⌘Z restores the previous tasks array THROUGH persist
-// (so the undo itself syncs), Shift+⌘Z redoes, focused text fields keep the
-// combo, and external tasks replacements reset the history (lastLocal
-// pattern) — except the drawer delete, which is adopted as an undoable step.
+// ─── Shared multi-card board harness ─────────────────────────────────────────
+// renderBoard mounts a BoardModule over makeMultiData's task list; reused by the
+// suites below.
 
 const makeMultiData = (tasks: ProjectTask[]): ProjectData =>
   ({ description: '', tasks, notes: '', updatedAt: '' }) as ProjectData
@@ -569,92 +566,6 @@ const renderBoard = (data: ProjectData, detailId: string | null = null) => {
       utils.rerender(<BoardModule {...props(d, openId)} />),
   }
 }
-
-describe('BoardModule — board undo/redo (B013)', () => {
-  it('clear Done → ⌘Z restores the cleared cards (undo persists), ⇧⌘Z re-clears', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
-    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'todo' })
-    const b = makeTask({ id: 'b', title: 'B', boardColumn: 'done', done: true })
-    const { persist, getByText, getByTitle } = renderBoard(makeMultiData([a, b]))
-    await flush()
-    // Nothing to undo yet — the toolbar affordance starts disabled.
-    expect((getByTitle('board.toolbar.undo') as HTMLButtonElement).disabled).toBe(true)
-    expect((getByTitle('board.toolbar.redo') as HTMLButtonElement).disabled).toBe(true)
-
-    fireEvent.click(getByText('board.toolbar.clearDone'))
-    expect(persist).toHaveBeenCalledTimes(1)
-    expect((persist.mock.calls[0][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
-
-    // ⌘Z — flushes the pending coalesced step and persists the pre-clear tasks.
-    fireEvent.keyDown(window, { key: 'z', metaKey: true })
-    expect(persist).toHaveBeenCalledTimes(2)
-    expect((persist.mock.calls[1][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a', 'b'])
-
-    // Redo is now live — via the toolbar button this time.
-    const redoBtn = getByTitle('board.toolbar.redo') as HTMLButtonElement
-    expect(redoBtn.disabled).toBe(false)
-    fireEvent.click(redoBtn)
-    expect(persist).toHaveBeenCalledTimes(3)
-    expect((persist.mock.calls[2][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
-  })
-
-  it('drawer delete is adopted into history — ⌘Z restores the deleted card', async () => {
-    const before = makeData(makeTask()) // id t1, titled, todo
-    const { persist, onDeleteTask, getByTitle, rerenderWith } = renderBoard(before, 't1')
-    await flush()
-    fireEvent.click(getByTitle('projectPanel.deleteTask'))
-    expect(onDeleteTask).toHaveBeenCalledWith('t1')
-    // ProjectPanel persisted the removal itself — the data prop comes back
-    // without the task (an EXTERNAL change from this module's viewpoint).
-    rerenderWith({ ...before, tasks: [] }, null)
-    await flush()
-    fireEvent.keyDown(window, { key: 'z', metaKey: true })
-    const last = persist.mock.calls.at(-1)![0] as ProjectData
-    expect(last.tasks.map(t => t.id)).toEqual(['t1'])
-  })
-
-  it('a re-render that KEEPS the tasks array identity preserves the history (poll no-op contract)', async () => {
-    // ProjectPanel's 5s reloadProjectData now skips setData when the fetched
-    // JSON equals lastSavedJson — the data prop re-arrives with the SAME tasks
-    // identity. That must read as "nothing happened", not as an external
-    // replacement that wipes the stacks.
-    vi.stubGlobal('confirm', vi.fn(() => true))
-    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'done', done: true })
-    const data = makeMultiData([a])
-    const { persist, getByText, rerenderWith } = renderBoard(data)
-    await flush()
-    fireEvent.click(getByText('board.toolbar.clearDone'))
-    expect(persist).toHaveBeenCalledTimes(1)
-    // ProjectPanel adopts our own write (setData(next)) — the echo render
-    // carries the tasks array WE emitted…
-    const cleared = persist.mock.calls[0][0] as ProjectData
-    rerenderWith(cleared)
-    await flush()
-    // …and the poll tick re-renders with the SAME object (the skip path keeps
-    // identity instead of swapping in a content-equal fresh fetch).
-    rerenderWith(cleared)
-    await flush()
-    // ⌘Z still restores the cleared card — the stacks survived the tick.
-    fireEvent.keyDown(window, { key: 'z', metaKey: true })
-    expect(persist).toHaveBeenCalledTimes(2)
-    expect((persist.mock.calls[1][0] as ProjectData).tasks.map(t => t.id)).toEqual(['a'])
-  })
-
-  it('an UNFLAGGED external tasks replacement (remote sync) resets the history', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
-    const a = makeTask({ id: 'a', title: 'A', boardColumn: 'done', done: true })
-    const { persist, getByText, rerenderWith } = renderBoard(makeMultiData([a]))
-    await flush()
-    fireEvent.click(getByText('board.toolbar.clearDone'))
-    expect(persist).toHaveBeenCalledTimes(1)
-    // A wholesale replacement arrives (teammate's sync) — stacks drop.
-    const remote = makeMultiData([makeTask({ id: 'remote', title: 'R' })])
-    rerenderWith(remote)
-    await flush()
-    fireEvent.keyDown(window, { key: 'z', metaKey: true })
-    expect(persist).toHaveBeenCalledTimes(1) // no undo across the reset
-  })
-})
 
 // The run-defaults strip (board-wide launch profile) is set-once chrome, so it
 // opens COLLAPSED — the label is a disclosure toggle, the pickers render only

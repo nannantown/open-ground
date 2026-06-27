@@ -322,6 +322,61 @@ export const mergeSwarmWorkers = (
   return out
 }
 
+// ── The single master power switch's contract (条件: 単一の開始/停止スイッチ) ─────
+// One control governs the whole Swarm tab's "power". Turning it ON starts the
+// autonomous orchestrator engine (which drains the Board's todo column and
+// dispatches workers) AND launches the commander (/manage) + supply (/supply)
+// conversations TOGETHER. Turning it OFF only halts NEW dispatch — the engine
+// stops, but running workers finish on their own and their worktrees/branches
+// are kept (this switch never tears anything down or kills a conversation).
+//
+// This pure planner is the SINGLE source of those semantics, so the idempotency
+// rules are unit-testable without React: ON never re-starts an already-running
+// engine and never re-launches a conversation that's already up
+// (既に起動済みなら二重起動しない); OFF only ever stops the engine and never
+// touches the conversations. SwarmModule executes the plan against the actions
+// it owns (toggleAutonomy / launchSupply / launchManager), each of which ALSO
+// guards itself — so the planner is the documented contract and the action
+// guards are the second line of defence.
+export interface SwarmPowerInputs {
+  /** The orchestrator engine is currently running (its drain+dispatch loop). */
+  running: boolean
+  /** A supply (補給官 /supply) conversation session already exists. */
+  hasSupply: boolean
+  /** A commander (司令官 /manage) conversation session already exists. */
+  hasManager: boolean
+}
+
+export interface SwarmPowerPlan {
+  /** Desired engine state to set, or undefined when no change is needed (ON while
+   *  already running, or OFF while already stopped). */
+  engine?: boolean
+  /** Launch the supply conversation (ON only, and only when it's not already up). */
+  launchSupply: boolean
+  /** Launch the commander conversation (ON only, and only when it's not already up). */
+  launchManager: boolean
+}
+
+/** Decide what flipping the master switch to `on` should do, given what's already
+ *  running. PURE — no React, no fetch — so the idempotency + OFF-stops-dispatch-only
+ *  semantics are locked by a unit test. */
+export const planSwarmPower = (on: boolean, s: SwarmPowerInputs): SwarmPowerPlan =>
+  on
+    ? {
+        // Start the engine only if it isn't already running (idempotent).
+        ...(s.running ? {} : { engine: true }),
+        // Launch each conversation only if it isn't already up (no double-launch).
+        launchSupply: !s.hasSupply,
+        launchManager: !s.hasManager,
+      }
+    : {
+        // OFF stops the engine only — and only if it's actually running. The
+        // conversations are LEFT ALONE (条件: オフは新規 dispatch の停止のみ).
+        ...(s.running ? { engine: false } : {}),
+        launchSupply: false,
+        launchManager: false,
+      }
+
 // Poll cadence matches SwarmModule's other polls (Ground beacon / Board): every
 // 5s, skipped while hidden, re-polled on focus.
 const ENGINE_POLL_MS = 5_000

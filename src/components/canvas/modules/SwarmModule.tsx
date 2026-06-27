@@ -3,8 +3,9 @@
 // PURPOSE (project_inapp_swarm_port): watch this project's isolated `claude`
 // workers run, all from one tab — the in-app version of the tmux
 // supply/manage/worker cockpit. Workers are started by the autonomous engine
-// (the Manager tab's Autonomy switch) or the commander session — the old manual
-// per-card "dispatch" rail was removed; browsing todos lives on the Board tab.
+// (the master power switch in this module's header bar — SwarmPowerBar) or the
+// commander session — the old manual per-card "dispatch" rail was removed;
+// browsing todos lives on the Board tab.
 //
 // SECURITY: this component is mounted ONLY from ProjectPanel's render branch
 // `view === 'swarm' && experiments?.swarm` — itself behind the server-resolved
@@ -15,11 +16,14 @@
 // guarantee is structural (Task A), and this file just consumes it.
 //
 // SCOPE: this surface LAUNCHES the role PTYs (supply / commander / worker
-// restart) and RENDERS state — it does NOT own autonomy. Auto-drain / auto-merge
-// / scheduled column movement live in the server-side engine, driven from the
-// commander dashboard's Autonomy switch. The only column move owned here is a
-// terminate's doing→todo requeue (its todo→doing counterpart left with the
-// removed manual-dispatch rail).
+// restart) and RENDERS state. It owns the master power SWITCH (start/stop +
+// the idempotent launches, composed in `powerSwarm`), but NOT the autonomy
+// LOOP: the auto-drain / dispatch / auto-merge / scheduled column movement all
+// run in the server-side engine — the switch just starts/stops it via
+// toggleAutonomy. Auto-integrate stays a separate switch on the commander
+// dashboard (default off). The only column move owned here is a terminate's
+// doing→todo requeue (its todo→doing counterpart left with the removed
+// manual-dispatch rail).
 //
 // SUBSCRIPTION-ONLY: every role PTY is spawned through the /api/swarm/* routes
 // (worker restart → POST /api/swarm/worker, supply / commander → their own
@@ -45,7 +49,8 @@ import type {
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
-import { useSwarmEngine, mergeSwarmWorkers } from './useSwarmEngine'
+import { SwarmPowerBar } from './SwarmPowerBar'
+import { useSwarmEngine, mergeSwarmWorkers, planSwarmPower } from './useSwarmEngine'
 
 // A dispatched worker, as remembered client-side. The PTY (terminalId) lives
 // server-side and survives this tab unmounting; we persist the metadata that
@@ -64,9 +69,9 @@ interface SwarmWorker {
 // MAX_WORKERS bounds how many manual worker entries we RESTORE from localStorage
 // — a sanity cap against a forged/oversized registry, NOT a live spawn limit.
 // Manual hand-dispatch was removed (the "to-do rail + dispatch" panel is gone):
-// workers are now started by the autonomous engine (Manager tab's Autonomy
-// switch) or the commander session, so nothing in THIS file adds to the registry
-// except a restart (which swaps an existing dead entry's PTY id, not a new spawn).
+// workers are now started by the autonomous engine (the master power switch in
+// the header bar) or the commander session, so nothing in THIS file adds to the
+// registry except a restart (which swaps a dead entry's PTY id, not a new spawn).
 // The rendered grid is NOT capped: restored-manual + engine workers together can
 // exceed it, and every worker must still show.
 const MAX_WORKERS = 6
@@ -754,6 +759,32 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     [busyIds, project.path, project.id, forgetPty, t],
   )
 
+  // ── The SINGLE master power switch (条件: 単一の開始/停止スイッチ) ────────────
+  // ON: start the autonomous engine (which drains todo → dispatches workers) AND
+  // launch the commander + supply conversations together. OFF: stop the engine's
+  // NEW dispatch only — running workers finish (the server engine leaves them
+  // alone) and their worktrees/branches are kept; the conversations stay up too.
+  // The PURE planner (planSwarmPower) decides what to do given what's already
+  // running, so every step is IDEMPOTENT (既に起動済みなら二重起動しない). It's
+  // belt-and-suspenders: each executed action ALSO self-guards — toggleAutonomy
+  // no-ops when the engine is already in the target state, and launchSupply /
+  // launchManager no-op when their session exists or a launch is in flight. The
+  // server engine's twin-dispatch / blocked / same-file gates are untouched, and
+  // Auto-integrate stays a SEPARATE switch on the commander dashboard (default off).
+  const powerSwarm = useCallback(
+    (next: boolean) => {
+      const plan = planSwarmPower(next, {
+        running: engine.running,
+        hasSupply: !!supply,
+        hasManager: !!manager,
+      })
+      if (plan.engine !== undefined) toggleAutonomy(plan.engine)
+      if (plan.launchSupply) void launchSupply()
+      if (plan.launchManager) void launchManager()
+    },
+    [engine.running, supply, manager, toggleAutonomy, launchSupply, launchManager],
+  )
+
   // ── The SINGLE worker source both tabs render ────────────────────────────
   // Fold the manual registry and the engine's own workers into ONE deduped list
   // (PTY id; manual wins). The worker TAB maps this for its tiles and the manager
@@ -768,11 +799,22 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
     // panel was removed — browsing todos now lives on the Board tab (一本化), and
-    // workers are started by the autonomous engine (Manager tab's Autonomy switch)
+    // workers are started by the autonomous engine (the master power switch above)
     // or the commander session, NOT by a per-card hand "dispatch" here (条件1/2/3).
-    // This wrapper is now a vertical stack: a top error banner + the full-height
-    // tab surface below it.
+    // This wrapper is now a vertical stack: the power bar + an error banner +
+    // the full-height tab surface below them.
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* The SINGLE master power switch (条件1) — start/stop the whole swarm from
+          one control, visible above every sub-view. ON starts the engine +
+          launches commander & supply (idempotent); OFF halts new dispatch only.
+          Its status spells out running/stopped + the live worker count (条件4). */}
+      <SwarmPowerBar
+        running={engine.running}
+        available={engineAvailable}
+        busy={engineBusy}
+        workerCount={allWorkers.length}
+        onToggle={powerSwarm}
+      />
       {/* A transient action error (worker terminate / restart, supply・commander
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}
@@ -912,7 +954,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               available={engineAvailable}
               busy={engineBusy}
               error={engineError}
-              onToggleAutonomy={toggleAutonomy}
               onToggleAutoMerge={toggleAutoMerge}
             />
           </div>

@@ -149,3 +149,25 @@ export function resolveFrameStyle(el: CanvasElement): {
     strokeWidth: el.strokeWidth ?? DEFAULT_STROKE_WIDTH,
   }
 }
+
+// ── Newly-drawn frame fill (by canvas variant) ──
+// The fill a frame DRAWN with the frame tool ships with depends on which canvas
+// it's drawn on. Figma parity, but variant-aware (card 587cc625):
+//   - `design` canvas: the frame is an ARTBOARD, so it gets an explicit white
+//     (#FFFFFF) fill to read as a real artboard against the paper canvas.
+//     Without this the absent-fill fallback is the near-invisible
+//     DEFAULT_FRAME_FILL paper wash, which is why a drawn design frame looked
+//     colourless before the fill was introduced.
+//   - `ground` (the Ground portfolio canvas, and the default): the frame is a
+//     grouping box, NOT an artboard. We return `undefined` so the draw-commit
+//     handler leaves `fill` UNSET on the new element; resolveFrameStyle then
+//     falls back to DEFAULT_FRAME_FILL via its `??`, so the paper wash lets the
+//     background grid show through and the new frame matches legacy Ground
+//     frames. (A blanket white fill here was the regression card 587cc625
+//     fixes.)
+// A wrap-in-auto-layout frame is a separate case (transparent + borderless) —
+// see addAutoLayout in canvasAutoLayout.ts.
+export const DRAWN_ARTBOARD_FILL = '#FFFFFF'
+export function initialDrawnFrameFill(frameVariant: 'ground' | 'design'): string | undefined {
+  return frameVariant === 'design' ? DRAWN_ARTBOARD_FILL : undefined
+}

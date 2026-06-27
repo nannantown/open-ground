@@ -25,9 +25,7 @@ export const board = {
     'board.toolbar.clearDone': 'Clear',
     'board.toolbar.clearDoneTitle': 'Delete every card in Done',
     'board.toolbar.clearDoneConfirm':
-      'Delete {count} cards in Done. On a shared board the deletion applies to everyone. (⌘Z right after brings them back.)',
-    'board.toolbar.undo': 'Undo (⌘Z)',
-    'board.toolbar.redo': 'Redo (⇧⌘Z)',
+      'Delete {count} cards in Done. On a shared board the deletion applies to everyone.',
     // Card
     'board.card.untitled': 'Untitled',
     'board.empty.guide': 'Write a task in “+ Add a card” → check its run settings (PR / model / effort) → Run → the terminal opens and the task starts by itself → on finish the work merges (or opens a PR).',
@@ -184,9 +182,7 @@ export const board = {
     'board.toolbar.clearDone': 'クリア',
     'board.toolbar.clearDoneTitle': '完了列のカードをすべて削除',
     'board.toolbar.clearDoneConfirm':
-      'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。（直後なら ⌘Z で戻せます）',
-    'board.toolbar.undo': '元に戻す (⌘Z)',
-    'board.toolbar.redo': 'やり直す (⇧⌘Z)',
+      'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。',
     // Card
     'board.card.untitled': '無題',
     'board.empty.guide': '「＋ カードを追加」にやることを書く → 設定（PR/モデル/effort）を確認 → 実行 → ターミナルでタスクが自動で走る → 完了でマージ（または PR）。',

@@ -386,7 +386,7 @@ export const BoardModule = ({
   // toolbar <CollabPresence> both PUBLISHES the owner's identity into the board
   // room (so members see them online) and DISPLAYS the other present peers.
   // No-op for the member's own BoardModule (collab is null for its synthetic
-  // path-'' project — the member publishes via SharedProjectPanel).
+  // path-'' project — the member publishes via SharedProjectBody).
   const persistLocal = useCallback(
     (next: ProjectData) => {
       persist(next)
@@ -395,177 +395,23 @@ export const BoardModule = ({
     [persist],
   )
 
-  // ---- Undo / redo history (B013 / F087) -----------------------------------
-  // Snapshot history of the tasks array, transplanted from CanvasWorkspace's
-  // snapshot + idle-coalescing pattern: every LOCAL persist that changes
-  // `tasks` is committed to the undo stack after a short idle, so a drag /
-  // typing / multi-patch burst collapses into ONE ⌘Z step. EXTERNAL updates
-  // (shared auto-sync pulls, the panel's reload, a 409 adoption, project
-  // switch) are never undoable: they reset the baseline and drop both stacks —
-  // undoing a teammate's change from here would silently revert work this
-  // client never made (the CanvasWorkspace lastLocal pattern). The one
-  // exception is the drawer's delete, which routes through ProjectPanel
-  // (onDeleteTask persists the removal itself) and announces itself via
-  // adoptNextExternalRef so the deletion lands in history like a local edit.
-  // An undo/redo result is persisted normally — on a shared board it syncs to
-  // everyone, which is correct (the undo is itself an edit).
-  const undoRef = useRef<ProjectTask[][]>([])
-  const redoRef = useRef<ProjectTask[][]>([])
-  const baselineRef = useRef<ProjectTask[]>(data.tasks)
-  // The tasks array WE last emitted via persist — distinguishes the echo of
-  // our own write (ProjectPanel's setData keeps the array identity) from an
-  // external replacement.
-  const lastLocalTasksRef = useRef<ProjectTask[]>(data.tasks)
-  const histTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const adoptNextExternalRef = useRef(false)
-  // Bumps to re-render the toolbar's undo/redo affordances when the stacks
-  // change (they live in refs, invisible to React otherwise).
-  const [, setHistVer] = useState(0)
-  const HIST_IDLE_MS = 350
-  const HIST_MAX = 80
-
-  // Commit the pending coalesced change: push the last committed baseline onto
-  // the undo stack and adopt the latest locally-emitted tasks as the baseline.
-  const flushHistory = useCallback(() => {
-    if (histTimer.current) {
-      clearTimeout(histTimer.current)
-      histTimer.current = null
-    }
-    const latest = lastLocalTasksRef.current
-    if (baselineRef.current === latest) return
-    undoRef.current.push(baselineRef.current)
-    if (undoRef.current.length > HIST_MAX) undoRef.current.shift()
-    redoRef.current = []
-    baselineRef.current = latest
-    setHistVer(v => v + 1)
-  }, [])
-
-  // The single local-persist entry point: every board mutation in this module
-  // (and everything BoardTab persists — drag, inline edit, clear Done,
-  // duplicate, reviewed stamp, …) goes through here so it lands in history.
-  const persistTracked = useCallback(
-    (next: ProjectData) => {
-      lastLocalTasksRef.current = next.tasks
-      persistLocal(next)
-      // Coalesce on idle. Harmless for config-only persists (the flush no-ops
-      // when the tasks identity didn't move off the baseline).
-      if (histTimer.current) clearTimeout(histTimer.current)
-      histTimer.current = setTimeout(flushHistory, HIST_IDLE_MS)
-    },
-    [persistLocal, flushHistory],
-  )
-
-  // A pending coalescing timer must never outlive the module (it would call
-  // setState on an unmounted component after a tab switch).
-  useEffect(
-    () => () => {
-      if (histTimer.current) clearTimeout(histTimer.current)
-    },
-    [],
-  )
-
-  // External tasks replacements arrive as a data prop whose tasks array is NOT
-  // the one we last emitted. Adopt as the new baseline; drop the stacks unless
-  // the change was a flagged local continuation (drawer delete).
-  useEffect(() => {
-    if (data.tasks === lastLocalTasksRef.current) return
-    const adopt = adoptNextExternalRef.current
-    adoptNextExternalRef.current = false
-    if (adopt) {
-      // Commit any pending local edit first, then record the pre-delete state
-      // as one undoable step.
-      flushHistory()
-      undoRef.current.push(baselineRef.current)
-      if (undoRef.current.length > HIST_MAX) undoRef.current.shift()
-      redoRef.current = []
-    } else {
-      if (histTimer.current) {
-        clearTimeout(histTimer.current)
-        histTimer.current = null
-      }
-      undoRef.current = []
-      redoRef.current = []
-    }
-    baselineRef.current = data.tasks
-    lastLocalTasksRef.current = data.tasks
-    setHistVer(v => v + 1)
-  }, [data.tasks, flushHistory])
-
   // Realtime: seed the doc from our current disk state once connected, then push
-  // every peer change through `persist` (the external-adoption path renders it
-  // without polluting local undo). persistLocal re-seeds idempotently → no loop.
+  // every peer change through persistLocal (the data prop re-render shows it).
+  // persistLocal re-seeds idempotently → no loop.
   useEffect(() => {
     if (!collab) return
     collab.seed(dataRef.current)
     return collab.onRemote(() => persistLocal(collab.extract(dataRef.current)))
   }, [collab, persistLocal])
 
-  const undo = useCallback(() => {
-    flushHistory()
-    if (!undoRef.current.length) return
-    const prev = undoRef.current.pop()!
-    redoRef.current.push(baselineRef.current)
-    baselineRef.current = prev
-    lastLocalTasksRef.current = prev
-    persistLocal({ ...dataRef.current, tasks: prev })
-    setHistVer(v => v + 1)
-  }, [flushHistory, persistLocal])
-
-  const redo = useCallback(() => {
-    // Commit any pending coalesced edit first (mirrors undo). flushHistory
-    // clears redo when it commits, so a fresh-edit-then-redo correctly becomes
-    // a no-op that preserves the edit instead of dropping it.
-    flushHistory()
-    if (!redoRef.current.length) return
-    const next = redoRef.current.pop()!
-    undoRef.current.push(baselineRef.current)
-    baselineRef.current = next
-    lastLocalTasksRef.current = next
-    persistLocal({ ...dataRef.current, tasks: next })
-    setHistVer(v => v + 1)
-  }, [flushHistory, persistLocal])
-
-  // ⌘Z / ⇧⌘Z (and ⌘Y) — active only while the Board tab is mounted (this
-  // module unmounts on tab switch). Never steals the combo from a focused
-  // text field (CanvasWorkspace's field guard; xterm's hidden helper is a
-  // textarea, so the terminal is covered too).
-  // CAPTURE phase: App.tsx's Ground-canvas undo is a bubble listener on the
-  // same window — capture guarantees this handler runs FIRST regardless of
-  // registration order, so its preventDefault() is visible to App's
-  // `e.defaultPrevented` guard and one ⌘Z can never fire BOTH the board undo
-  // and the Ground-canvas undo.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
-      const ae = document.activeElement
-      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
-      const k = e.key.toLowerCase()
-      if (k === 'z') {
-        e.preventDefault()
-        if (e.shiftKey) redo()
-        else undo()
-      } else if (k === 'y') {
-        e.preventDefault()
-        redo()
-      }
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [undo, redo])
-
-  // A change made <idle window> ago hasn't been committed to the undo stack
-  // yet — treat a live divergence from the baseline as undoable too.
-  const canUndo = undoRef.current.length > 0 || baselineRef.current !== data.tasks
-  const canRedo = redoRef.current.length > 0
-
   const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>
-    persistTracked({
+    persistLocal({
       ...data,
       tasks: data.tasks.map(t => (t.id === task.id ? { ...t, ...patch } : t)),
     })
   const patchTaskFresh = (taskId: string, patch: Partial<ProjectTask>) => {
     const current = dataRef.current
-    persistTracked({
+    persistLocal({
       ...current,
       tasks: current.tasks.map(t => (t.id === taskId ? { ...t, ...patch } : t)),
     })
@@ -1297,7 +1143,7 @@ export const BoardModule = ({
                     const v = e.currentTarget.value.trim()
                     // Register into the shared member list AND assign —
                     // the name is now a chip on EVERY card.
-                    if (v) persistTracked(withRegisteredAssignee(data, task.id, v))
+                    if (v) persistLocal(withRegisteredAssignee(data, task.id, v))
                     setAddingAssignee(false)
                   } else if (e.key === 'Escape') {
                     e.stopPropagation() // cancel the add only — keep the drawer open
@@ -1313,7 +1159,7 @@ export const BoardModule = ({
                   e.preventDefault()
                   const input = e.currentTarget.previousElementSibling as HTMLInputElement | null
                   const v = input?.value.trim() ?? ''
-                  if (v) persistTracked(withRegisteredAssignee(data, task.id, v))
+                  if (v) persistLocal(withRegisteredAssignee(data, task.id, v))
                   setAddingAssignee(false)
                 }}
                 className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
@@ -1455,7 +1301,7 @@ export const BoardModule = ({
     !hasTerminalSlot(task.id)
   const closeDrawer = () => {
     if (detailTask && isUntouchedEmpty(detailTask))
-      persistTracked({ ...data, tasks: data.tasks.filter(t => t.id !== detailTask.id) })
+      persistLocal({ ...data, tasks: data.tasks.filter(t => t.id !== detailTask.id) })
     onOpenDetail(null)
   }
   const closeDrawerRef = useRef(closeDrawer)
@@ -1524,13 +1370,10 @@ export const BoardModule = ({
         <div className="min-h-0 min-w-0 flex-1">
           <BoardTab
             data={data}
-            onPersist={persistTracked}
+            onPersist={persistLocal}
             // Presence (u15): the board collab binding (null when collab is OFF /
             // not a member) — BoardTab's toolbar publishes + shows who else is here.
             presence={collab}
-            // Undo/redo (B013) — history lives HERE (the layer owning data +
-            // persist); BoardTab only renders the toolbar affordance.
-            undoState={{ canUndo, canRedo, onUndo: undo, onRedo: redo }}
             openTaskId={detailId}
             // Board self-contained (P1): open the card's conversation in an
             // in-tab drawer.
@@ -1548,7 +1391,7 @@ export const BoardModule = ({
                 createdAt: new Date().toISOString(),
                 boardColumn: column,
               }
-              persistTracked({ ...data, tasks: [...data.tasks, task] })
+              persistLocal({ ...data, tasks: [...data.tasks, task] })
               return task.id
             }}
             projectMissing={project.missing}
@@ -1607,10 +1450,7 @@ export const BoardModule = ({
               type="button"
               onClick={() => {
                 // The delete persists via ProjectPanel (terminal teardown +
-                // task removal) — flag it so the resulting external tasks
-                // change is ADOPTED into undo history instead of wiping it
-                // (誤削除 must be ⌘Z-recoverable).
-                adoptNextExternalRef.current = true
+                // task removal).
                 onDeleteTask(detailTask.id)
                 onOpenDetail(null)
               }}

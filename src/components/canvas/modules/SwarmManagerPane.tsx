@@ -11,26 +11,29 @@
 //      session — this pane only renders it.
 //
 //   ② a SIDEBAR (right) — the autonomous orchestration ENGINE's CONTROLS ONLY:
-//        • Engine — the two switches (Autonomy ① / Auto-integrate ③) + status.
-//      The worker monitor + engine log that used to live here were REMOVED: the
-//      live worker set is the WORKER TAB's job now (一本化), so this sidebar is
-//      purely the engine's two switches + its run / stop / offline status. (The
-//      Board pipeline tallies stay on the Board tab; per-worker screens + their
-//      stop/resolve controls stay on the worker tab.)
+//        • Engine — the run/stop/offline status badge + the Auto-integrate (③)
+//          switch. The autonomy ON/OFF (Card①) moved OUT to the module-level
+//          master power switch (SwarmPowerBar) so the engine has a SINGLE
+//          start/stop control; this dashboard no longer toggles it (it only
+//          shows the resulting `running` status). The worker monitor + engine
+//          log that used to live here were REMOVED: the live worker set is the
+//          WORKER TAB's job now (一本化). (The Board pipeline tallies stay on the
+//          Board tab; per-worker screens + their stop/resolve controls stay on
+//          the worker tab.)
 //
 // SPLIT OF CONCERNS: the autonomous engine lives server-side behind
 // /api/swarm/orchestrator{,/start,/stop,/automerge}; its FRONT-END half (the
 // poll, the switches, graceful 404 degradation) lives in the shared
 // `useSwarmEngine` hook, which SwarmModule calls ONCE and threads down here as
 // props. This pane is therefore PURELY PRESENTATIONAL for the engine — it never
-// fetches.
+// fetches. Start/stop (autonomy) is driven from SwarmModule's master power
+// switch; only Auto-integrate is toggled here:
 //
-//   • Autonomy (①) — POST /start, /stop. The engine state's `running`.
 //   • Auto-integrate (③) — POST /api/swarm/orchestrator/automerge. The engine
 //     lands fast-forwardable / cleanly-rebasable review cards on the trunk
 //     itself (FF / rebase only, never forced; conflicts left for a human). Read
-//     off the state's `autoMerge`, default OFF. Both switches dim when the route
-//     is unreachable (`available === false`) and go live once it answers.
+//     off the state's `autoMerge`, default OFF. The switch dims when the route
+//     is unreachable (`available === false`) and goes live once it answers.
 //
 // The commander CONVERSATION (/manage) is a SEPARATE PTY session, independent of
 // the engine route — it works whether or not the autonomous engine is available;
@@ -81,9 +84,9 @@ interface Props {
   busy: boolean
   /** Last engine-action failure, already localized (null when none). */
   error: string | null
-  /** Autonomy switch (Card①). */
-  onToggleAutonomy: (next: boolean) => void
-  /** Auto-integrate switch (Card③). */
+  /** Auto-integrate switch (Card③). The autonomy ON/OFF (Card①) moved OUT of this
+   *  dashboard to the module-level master power switch (SwarmPowerBar), so the
+   *  engine has a SINGLE start/stop control; this pane keeps only Auto-integrate. */
   onToggleAutoMerge: (next: boolean) => void
 }
 
@@ -117,7 +120,6 @@ export const SwarmManagerPane = ({
   available,
   busy,
   error,
-  onToggleAutonomy,
   onToggleAutoMerge,
 }: Props) => {
   const { t } = useT()
@@ -268,16 +270,12 @@ export const SwarmManagerPane = ({
             </span>
           </div>
 
+          {/* Autonomy (Card① start/stop) moved to the module-level master power
+              switch (SwarmPowerBar) — the engine's SINGLE on/off — so this
+              dashboard keeps only Auto-integrate (Card③), the separate
+              default-off landing policy. The engine status badge above still
+              reads `engine.running` (driven by the master switch). */}
           <div className="flex flex-col gap-2.5">
-            <ControlRow
-              label={t('projectPanel.swarm.manager.autonomy')}
-              hint={t('projectPanel.swarm.manager.autonomyHint')}
-              value={engine.running}
-              disabled={busy || !available}
-              ariaLabel={t('projectPanel.swarm.manager.autonomy')}
-              onToggle={(v) => onToggleAutonomy(v)}
-              t={t}
-            />
             <ControlRow
               label={t('projectPanel.swarm.manager.autoMerge')}
               hint={t('projectPanel.swarm.manager.autoMergeHint')}

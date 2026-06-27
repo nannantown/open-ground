@@ -27,10 +27,25 @@ export const projectPanel = {
     'projectPanel.swarm.badge': 'Experimental',
     'projectPanel.swarm.title': 'Swarm orchestration',
     'projectPanel.swarm.body': 'Run a team of Claude sessions across your projects from one surface. This is an early experiment, off by default.',
+    // Master power switch (SwarmPowerBar) — the SINGLE Start/Stop for the whole
+    // Swarm tab. ON starts the autonomous engine AND launches the commander +
+    // supply conversations together (idempotent); OFF only halts new dispatch
+    // (running workers finish, worktrees are kept). The status shows running /
+    // stopped + how many workers are live. (Auto-integrate stays a separate
+    // switch on the commander dashboard, default off.)
+    'projectPanel.swarm.power.label': 'Swarm',
+    'projectPanel.swarm.power.start': 'Start',
+    'projectPanel.swarm.power.stop': 'Stop',
+    'projectPanel.swarm.power.running': 'Running',
+    'projectPanel.swarm.power.stopped': 'Stopped',
+    'projectPanel.swarm.power.offline': 'Not available yet',
+    'projectPanel.swarm.power.workers': '{count} workers',
+    'projectPanel.swarm.power.hint':
+      'Start the engine, commander, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
     // Workers list. Manual hand-dispatch was removed (the to-do rail is gone —
     // browse todos on the Board tab); workers are started by the autonomous
-    // engine (Manager tab's Autonomy switch) or the commander session.
-    'projectPanel.swarm.workersEmpty': 'No workers running yet. Turn on Autonomy in the Manager tab (or ask the commander) to start one — each gets its own isolated worktree and `claude` session.',
+    // engine (the master power switch above) or the commander session.
+    'projectPanel.swarm.workersEmpty': 'No workers running yet. Start the swarm with the switch above (or ask the commander) to dispatch one — each gets its own isolated worktree and `claude` session.',
     'projectPanel.swarm.statusWorking': 'Working',
     'projectPanel.swarm.statusWaiting': 'Waiting',
     'projectPanel.swarm.statusStarting': 'Starting…',
@@ -73,9 +88,6 @@ export const projectPanel = {
     // and shows the engine's live log. (Board pipeline tallies live on the Board.)
     'projectPanel.swarm.manager.tab': 'Manager',
     'projectPanel.swarm.manager.badge': 'Commander',
-    'projectPanel.swarm.manager.autonomy': 'Autonomy',
-    'projectPanel.swarm.manager.autonomyHint':
-      'Run the engine loop: auto-drain the Board → dispatch → monitor → integrate.',
     'projectPanel.swarm.manager.autoMerge': 'Auto-integrate',
     'projectPanel.swarm.manager.autoMergeHint':
       'Let the engine land review cards on the trunk itself — fast-forward / rebase only, never forced; conflicts are left for you. It does NOT run tests or review the diff first — for verified merges, drive them through the commander conversation (/manage) instead. Off by default.',
@@ -440,9 +452,23 @@ export const projectPanel = {
     'projectPanel.swarm.badge': '実験的',
     'projectPanel.swarm.title': 'Swarm オーケストレーション',
     'projectPanel.swarm.body': '複数プロジェクトにまたがる Claude セッションのチームを 1 つの画面から動かします。これは初期の実験で、既定ではオフです。',
+    // 電源スイッチ（SwarmPowerBar）— Swarm タブ全体の単一の開始/停止。オンで自律
+    // エンジンを起動し、司令官＋補給官の対話もまとめて起動（冪等）。オフは新規の
+    // 振り分けを止めるだけ（走行中の worker は完走・worktree は温存）。状態として
+    // 稼働中/停止中＋稼働ワーカー数を表示。（自動統合は司令官ダッシュボードの別
+    // スイッチのまま・既定オフ。）
+    'projectPanel.swarm.power.label': 'Swarm',
+    'projectPanel.swarm.power.start': '開始',
+    'projectPanel.swarm.power.stop': '停止',
+    'projectPanel.swarm.power.running': '稼働中',
+    'projectPanel.swarm.power.stopped': '停止中',
+    'projectPanel.swarm.power.offline': '未配備',
+    'projectPanel.swarm.power.workers': 'ワーカー {count}',
+    'projectPanel.swarm.power.hint':
+      'エンジン・司令官・補給官をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
     // Workers リスト。手動の「振る」は撤去（todo 一覧は Board タブへ一本化）。
-    // worker は自律エンジン（司令官タブの Autonomy）または司令官セッションが起動します。
-    'projectPanel.swarm.workersEmpty': 'worker はまだ動いていません。司令官タブで Autonomy をオンにする（または司令官に頼む）と起動します — それぞれに隔離された worktree と `claude` セッションが割り当てられます。',
+    // worker は自律エンジン（上の電源スイッチ）または司令官セッションが起動します。
+    'projectPanel.swarm.workersEmpty': 'worker はまだ動いていません。上のスイッチで Swarm を開始する（または司令官に頼む）と振り分けが始まります — それぞれに隔離された worktree と `claude` セッションが割り当てられます。',
     'projectPanel.swarm.statusWorking': '稼働中',
     'projectPanel.swarm.statusWaiting': '待機中',
     'projectPanel.swarm.statusStarting': '起動中…',
@@ -485,9 +511,6 @@ export const projectPanel = {
     // （Board のパイプライン件数は Board タブで見る。）
     'projectPanel.swarm.manager.tab': '司令官',
     'projectPanel.swarm.manager.badge': '司令官',
-    'projectPanel.swarm.manager.autonomy': '自律',
-    'projectPanel.swarm.manager.autonomyHint':
-      'エンジンのループを回す: Board を自動 drain → 振り分け → 監視 → 統合。',
     'projectPanel.swarm.manager.autoMerge': '自動統合',
     'projectPanel.swarm.manager.autoMergeHint':
       'review のカードをエンジンが本流へ自動で取り込みます（早送り/rebase のみ・強制プッシュはしません）。衝突は手動に残します。テストやレビューは回しません — 検証込みのマージは司令官との対話（/manage）に任せてください。既定はオフ。',

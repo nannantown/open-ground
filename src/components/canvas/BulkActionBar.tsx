@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Archive, Trash2, X } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import type { ProjectMeta } from '@/lib/types'
 
 interface Props {
@@ -78,29 +79,41 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
       </div>
 
       {confirming && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
-          onClick={() => !busy && closeConfirm()}
+        <Overlay
+          onClose={() => {
+            if (!busy) closeConfirm()
+          }}
+          aria-label={
+            confirming === 'delete'
+              ? `Move ${projects.length} projects to the Trash?`
+              : `Remove ${projects.length} projects from the Ground?`
+          }
         >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="flex max-h-[80vh] w-[460px] max-w-[92vw] flex-col overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
+          <DialogCard
+            className="w-[460px] max-w-[92vw] max-h-[80vh]"
+            ariaLabel={
+              confirming === 'delete'
+                ? `Move ${projects.length} projects to the Trash?`
+                : `Remove ${projects.length} projects from the Ground?`
+            }
           >
-            <div className="rule-double px-6 pt-5 pb-4">
-              <p className="label-cap text-accent mb-1.5">
-                {confirming === 'delete' ? 'Delete projects' : 'Remove from Ground'}
-              </p>
-              <h2 className="font-display text-[21px] leading-snug text-ink tracking-tightest">
-                {confirming === 'delete'
-                  ? `Move ${projects.length} projects to the Trash?`
-                  : `Remove ${projects.length} projects from the Ground?`}
-              </h2>
-              <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
-                {confirming === 'delete'
-                  ? 'Each folder is moved to the macOS Trash — removed from OPEN GROUND, but restorable from Finder.'
-                  : 'Each card is taken off the canvas. The folders stay on disk — re-import them anytime.'}
-              </p>
-            </div>
+            <DialogHeader separator="double" density="modal">
+              <div className="min-w-0 flex-1">
+                <p className="label-cap text-accent mb-1.5">
+                  {confirming === 'delete' ? 'Delete projects' : 'Remove from Ground'}
+                </p>
+                <h2 className="font-display text-[21px] leading-snug text-ink tracking-tightest">
+                  {confirming === 'delete'
+                    ? `Move ${projects.length} projects to the Trash?`
+                    : `Remove ${projects.length} projects from the Ground?`}
+                </h2>
+                <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
+                  {confirming === 'delete'
+                    ? 'Each folder is moved to the macOS Trash — removed from OPEN GROUND, but restorable from Finder.'
+                    : 'Each card is taken off the canvas. The folders stay on disk — re-import them anytime.'}
+                </p>
+              </div>
+            </DialogHeader>
             <ul className="flex-1 divide-y divide-line-soft overflow-y-auto px-6 py-2">
               {projects.map((p) => (
                 <li
@@ -131,8 +144,8 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
                     : `Remove ${projects.length}`}
               </Btn>
             </div>
-          </div>
-        </div>
+          </DialogCard>
+        </Overlay>
       )}
     </>
   )

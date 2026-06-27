@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Search, FolderOpen, Archive } from 'lucide-react'
+import { Overlay, DialogCard } from '@/components/ui/overlay'
 import type { ProjectMeta } from '@/lib/types'
 
 interface Props {
@@ -93,15 +94,16 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
   }
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-start justify-center bg-ink/30 backdrop-blur-sm pt-[14vh]"
-      onClick={onClose}
+    <Overlay
+      placement="top"
+      onClose={onClose}
+      closeOnEsc={false}
+      aria-label="Jump to project"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
+      <DialogCard
+        className="w-[520px] max-w-[92vw] max-h-[68vh]"
         onKeyDown={onKey}
-        className="flex flex-col w-[520px] max-w-[92vw] max-h-[68vh] bg-bg-card border border-line shadow-card-hover overflow-hidden rounded-[3px]"
+        ariaLabel="Jump to project"
       >
         <div className="shrink-0 flex items-center gap-2.5 border-b border-line px-4 py-3">
           <Search size={14} className="text-ink-faint shrink-0" />
@@ -149,7 +151,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
             ))
           )}
         </div>
-      </div>
-    </div>
+      </DialogCard>
+    </Overlay>
   )
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { X, Loader2, Send, CheckCircle2, ImagePlus } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { api } from '@/lib/api-client'
 import { useT } from '@/i18n/I18nContext'
 import type { FeedbackImage } from '@/lib/types'
@@ -222,10 +223,13 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
   const canAddMore = images.length < FEEDBACK_IMAGE_MAX_COUNT
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
-      onClick={onClose}
+    <Overlay
+      onClose={onClose}
+      // The card's onKeyDown (onKey) owns Esc + ⌘Enter, so the Overlay must NOT
+      // also wire its own Esc→close. data-esc-overlay still renders (escOverlay
+      // default) so App's global Escape defers to us.
+      closeOnEsc={false}
+      aria-label={t('modals.feedback.title')}
       // Backstop: a file dropped on the dim backdrop (outside the card) must not
       // navigate the app away to that file. Swallow it here without attaching.
       onDragOver={(e) => {
@@ -235,29 +239,29 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
         if (e.dataTransfer?.types.includes('Files')) e.preventDefault()
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
+      <DialogCard
+        // `relative` is load-bearing: the inner z-10 drag-highlight (absolute
+        // inset-0) pins to this card.
+        className="relative w-[460px] max-w-[92vw]"
+        ariaLabel={t('modals.feedback.title')}
         onKeyDown={onKey}
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
-        className="relative flex flex-col w-[460px] max-w-[92vw] bg-bg-card border border-line shadow-card-hover overflow-hidden rounded-[3px]"
       >
-        <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
-          <div>
-            <p className="label-cap text-accent mb-1.5">{t('modals.feedback.label')}</p>
-            <h2
-              className="font-display text-[22px] text-ink leading-none tracking-tightest"
-              style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
-            >
+        <DialogHeader
+          align="baseline"
+          eyebrow={t('modals.feedback.label')}
+          title={
+            <span style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}>
               {t('modals.feedback.title')}
-            </h2>
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose} aria-label={t('common.close')}>
-            <X size={16} />
-          </Btn>
-        </header>
+            </span>
+          }
+          titleClassName="font-display text-[22px] text-ink leading-none tracking-tightest"
+          onClose={onClose}
+          closeLabel={t('common.close')}
+        />
 
         {sent ? (
           <div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
@@ -430,7 +434,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+      </DialogCard>
+    </Overlay>
   )
 }

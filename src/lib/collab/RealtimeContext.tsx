@@ -68,8 +68,9 @@ export interface CollabBinding<T> {
    *  are filtered out. Returns an unsubscribe fn. */
   onRemote: (cb: () => void) => () => void
   /** Presence (u15): publish THIS client's identity into the awareness channel
-   *  (null clears it). No-op when the provider has no awareness. */
-  setPresence: (state: { name: string; color: string } | null) => void
+   *  (null clears it). No-op when the provider has no awareness. `email` is the
+   *  full address (optional, back-compat) the peer tooltip prefers over `name`. */
+  setPresence: (state: { name: string; color: string; email?: string } | null) => void
   /** Subscribe to the set of OTHER present peers (self excluded). Fires once
    *  immediately, then on every awareness change. Returns an unsubscribe fn. */
   onPresence: (cb: (peers: PresencePeer[]) => void) => () => void
@@ -84,7 +85,10 @@ export const peersFromAwareness = (aw: AwarenessLike): PresencePeer[] => {
     if (clientId === aw.clientID) continue
     const name = typeof st?.name === 'string' ? st.name : ''
     const color = typeof st?.color === 'string' ? st.color : '#888888'
-    if (name) out.push({ clientId, name, color })
+    // Full email when the peer published one; omitted (no field) for older
+    // peers or a non-string value, so the tooltip falls back to `name`.
+    const email = typeof st?.email === 'string' ? st.email : ''
+    if (name) out.push(email ? { clientId, name, color, email } : { clientId, name, color })
   }
   return out
 }

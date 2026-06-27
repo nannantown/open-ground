@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { GitBranch, Loader2, X } from 'lucide-react'
-import { Btn } from '@/components/ui/Btn'
+import { GitBranch, Loader2 } from 'lucide-react'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type { BranchChangesResponse, FileDiffResponse, FileDiffScope } from '@/lib/types'
 
@@ -98,19 +98,6 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, path])
 
-  // Escape closes from anywhere (the backdrop click handles the mouse).
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
   const toggleRow = useCallback(
     (scope: FileDiffScope, file: string) => {
       const key = diffKey(scope, file)
@@ -204,43 +191,43 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
   const git = info && info.isGit ? info : null
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[82vh] w-[680px] max-w-[94vw] flex-col overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
+    <Overlay onClose={onClose} aria-label={t('projectPanel.branchChangesTitle')}>
+      <DialogCard
+        className="w-[680px] max-w-[94vw] max-h-[82vh]"
+        ariaLabel={t('projectPanel.branchChangesTitle')}
       >
-        <header className="rule-double flex shrink-0 items-start justify-between px-6 pt-5 pb-4">
-          <div className="min-w-0">
-            <p className="label-cap mb-1.5 text-accent">{t('projectPanel.branchChangesTitle')}</p>
-            {git && (
-              <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <span className="flex min-w-0 items-center gap-1.5 font-mono text-[14px] text-ink">
-                  <GitBranch size={13} strokeWidth={1.75} className="shrink-0 text-ink-muted" />
-                  <span className="truncate">{git.branch ?? 'HEAD'}</span>
-                </span>
-                {git.target && !git.sameBranch && (
-                  <>
-                    <span className="text-[12px] text-ink-faint">→</span>
-                    <span className="truncate font-mono text-[13px] text-ink-muted">{git.target}</span>
-                    <span className="text-[11px] tabular-nums text-ink-faint">
-                      {t('projectPanel.branchAheadBehind', {
-                        ahead: String(git.ahead),
-                        behind: String(git.behind),
-                      })}
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose} aria-label={t('common.close')}>
-            <X size={16} />
-          </Btn>
-        </header>
+        <DialogHeader
+          separator="double"
+          density="modal"
+          align="start"
+          onClose={onClose}
+          closeLabel={t('common.close')}
+          leading={
+            <div className="min-w-0">
+              <p className="label-cap mb-1.5 text-accent">{t('projectPanel.branchChangesTitle')}</p>
+              {git && (
+                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <span className="flex min-w-0 items-center gap-1.5 font-mono text-[14px] text-ink">
+                    <GitBranch size={13} strokeWidth={1.75} className="shrink-0 text-ink-muted" />
+                    <span className="truncate">{git.branch ?? 'HEAD'}</span>
+                  </span>
+                  {git.target && !git.sameBranch && (
+                    <>
+                      <span className="text-[12px] text-ink-faint">→</span>
+                      <span className="truncate font-mono text-[13px] text-ink-muted">{git.target}</span>
+                      <span className="text-[11px] tabular-nums text-ink-faint">
+                        {t('projectPanel.branchAheadBehind', {
+                          ahead: String(git.ahead),
+                          behind: String(git.behind),
+                        })}
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          }
+        />
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
           {!info && !error && (
@@ -313,7 +300,7 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
             </div>
           )}
         </div>
-      </div>
-    </div>
+      </DialogCard>
+    </Overlay>
   )
 }

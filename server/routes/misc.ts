@@ -16,7 +16,14 @@ import { mkdir, stat, readFile } from 'fs/promises'
 import { basename, join, resolve } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { getSettings, setSettings, getCanvas, setCanvas } from '@/lib/server/store'
+import {
+  getSettings,
+  setSettings,
+  getCanvas,
+  setCanvas,
+  getNotificationState,
+  markNotificationsRead,
+} from '@/lib/server/store'
 import { resolveExperiments } from '@/lib/server/experiments'
 import { scanProjects } from '@/lib/server/scan'
 import { writeProjectData } from '@/lib/server/projectData'
@@ -33,6 +40,7 @@ import { claudeConnection } from '@/lib/server/claudeConnection'
 import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
 import type {
+  NotificationStateResponse,
   ProjectsResponse,
   ReleaseNote,
   ReleaseNotesResponse,
@@ -281,6 +289,30 @@ export const miscRoutes = new Hono()
     const body = await c.req.json()
     await setSettings(body)
     return c.json({ ok: true })
+  })
+  // --- GET /api/notifications · POST /api/notifications/read -----------------
+  // In-app notification READ-STATE (the Ground お知らせ bell). GET returns the set
+  // of notification ids the user has already seen; POST merges more ids in (marking
+  // read is monotonic — you never un-read). Persisted in ~/.openground (home-cache),
+  // so unread state survives a re-login. This tracks ONLY read/unread — the
+  // notification CONTENT comes from per-kind sources (today GET /api/collab/invites,
+  // which is itself RLS-self-scoped). Local per-machine state with no cross-user
+  // data (ids are opaque), so it needs no auth gate — mirrors /api/settings.
+  .get('/api/notifications', async (c) => {
+    const state = await getNotificationState()
+    // Guard against a corrupted file so the client always gets a real array
+    // (new Set(non-array) would throw client-side).
+    return c.json<NotificationStateResponse>({
+      readIds: Array.isArray(state.readIds) ? state.readIds : [],
+    })
+  })
+  .post('/api/notifications/read', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { ids?: unknown }
+    const ids = Array.isArray(body.ids)
+      ? body.ids.filter((s): s is string => typeof s === 'string')
+      : []
+    const readIds = await markNotificationsRead(ids)
+    return c.json<NotificationStateResponse>({ readIds })
   })
   // --- GET /api/experiments -------------------------------------------------
   // Owner-only experiment gate, resolved server-side (owner role AND the

@@ -58,4 +58,26 @@ describe('peersFromAwareness (u15 presence projection)', () => {
     ])
     expect(peersFromAwareness(aw).map((p) => p.name)).toEqual(['a', 'b', 'c'])
   })
+
+  it('carries the full email when a peer publishes one (tooltip uses it)', () => {
+    const aw = fakeAwareness(1, [
+      [2, { name: 'op', color: '#f00', email: 'opengroundcoffee@gmail.com' }],
+    ])
+    expect(peersFromAwareness(aw)).toEqual([
+      { clientId: 2, name: 'op', color: '#f00', email: 'opengroundcoffee@gmail.com' },
+    ])
+  })
+
+  it('omits email for older peers that publish only a name (back-compat)', () => {
+    const peer = peersFromAwareness(fakeAwareness(1, [[2, { name: 'koki', color: '#f00' }]]))[0]
+    expect(peer).toEqual({ clientId: 2, name: 'koki', color: '#f00' })
+    expect(peer.email).toBeUndefined()
+  })
+
+  it('drops a non-string email (keeps the peer, no email field)', () => {
+    const peer = peersFromAwareness(
+      fakeAwareness(1, [[2, { name: 'koki', color: '#f00', email: 42 }]]),
+    )[0]
+    expect(peer.email).toBeUndefined()
+  })
 })

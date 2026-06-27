@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { BackLink } from '@/components/ui/BackLink'
+import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type {
   BranchChangesResponse,
@@ -43,6 +44,7 @@ import {
   useProjectBranches,
 } from '@/components/canvas/ProjectConfigFields'
 import { CollabInviteDialog } from '@/components/canvas/CollabInviteDialog'
+import { SharedProjectBody } from '@/components/canvas/SharedProjectBody'
 import { useCollab } from '@/lib/collab/RealtimeContext'
 import { migrateLs } from '@/lib/lsMigrate'
 import {
@@ -227,9 +229,18 @@ interface Props {
    *  all-false ⇒ no experimental module shows — the default for every non-owner
    *  and the shipped build, so the tab row is unchanged for everyone else. */
   experiments?: ExperimentFlags
+  /** Member capability flag — the SINGLE owner/member switch. When present, this
+   *  project is a folder-less collab project shared WITH the user, so ProjectPanel
+   *  renders the member body (Board + Canvas over the Cloudflare DO — no Terminal/
+   *  Claude tabs, Share invite, branch chip, Reveal in Finder, Open in Editor, or
+   *  Generate description). Absent ⇒ the owner body, byte-for-byte unchanged. */
+  shared?: { id: string; label: string }
 }
 
-export const ProjectPanel = ({
+// The owner body — the full project surface (Terminal / Canvas / Board / Swarm /
+// custom tabs, header chrome, settings, delete, share invite). Rendered by
+// ProjectPanel for every NON-shared project. Unchanged from the pre-merge panel.
+const OwnedProjectBody = ({
   project,
   onClose,
   onRemove,
@@ -1559,7 +1570,7 @@ export const ProjectPanel = ({
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col bg-bg-card">
+    <Overlay position="fixed" layer="panel" backdrop="surface" placement="fill" escOverlay={false}>
       {/* flex-wrap: when the window is too narrow to fit the title column and
           the controls cluster side by side, the controls drop to their own row
           below instead of crushing the title / overflowing the viewport. */}
@@ -2343,31 +2354,33 @@ export const ProjectPanel = ({
           THIS one terminal, where the user completes claude's OAuth once. After
           sign-in, closing it re-checks the connection and runs go through. */}
       {claudeLoginOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        <Overlay
+          placement="center"
+          backdrop="scrimStrong"
+          layer="modal"
+          escOverlay={false}
           role="dialog"
-          aria-modal="true"
+          aria-modal
           aria-label={t('projectPanel.claudeLogin.title')}
         >
           <div className="flex h-[70vh] max-h-[640px] w-full max-w-[780px] flex-col overflow-hidden rounded-lg border border-line bg-bg-card shadow-2xl">
-            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
-              <div className="min-w-0">
-                <p className="truncate text-[13px] font-medium text-ink">
-                  {t('projectPanel.claudeLogin.title')}
-                </p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
-                  {t('projectPanel.claudeLogin.hint')}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closeClaudeLogin}
-                aria-label={t('common.close')}
-                className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:scale-[0.97] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              >
-                <X size={16} />
-              </button>
-            </div>
+            <DialogHeader
+              separator="line"
+              density="bar"
+              align="center"
+              leading={
+                <div className="min-w-0">
+                  <p className="truncate text-[13px] font-medium text-ink">
+                    {t('projectPanel.claudeLogin.title')}
+                  </p>
+                  <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                    {t('projectPanel.claudeLogin.hint')}
+                  </p>
+                </div>
+              }
+              onClose={closeClaudeLogin}
+              closeLabel={t('common.close')}
+            />
             <div className="flex min-h-0 flex-1 flex-col bg-bg">
               {claudeLoginPty ? (
                 <ClaudeTerminalPane
@@ -2399,10 +2412,31 @@ export const ProjectPanel = ({
               )}
             </div>
           </div>
-        </div>
+        </Overlay>
       )}
-    </div>
+    </Overlay>
   )
+}
+
+// ProjectPanel — the single project overlay App mounts. One capability flag
+// (`shared`) decides owner vs member: a folder-less collab project shared WITH
+// the user renders SharedProjectBody (Board + Canvas over the DO, reduced
+// chrome); every other project renders OwnedProjectBody (the full owner surface,
+// unchanged). There is no separate shared panel — this is the only one.
+export const ProjectPanel = (props: Props) => {
+  if (props.shared) {
+    return (
+      // key on the collab id forces a fresh member subtree per shared project —
+      // an id swap can never inherit the prior project's doc/adopted/cache state.
+      <SharedProjectBody
+        key={props.shared.id}
+        collabProjectId={props.shared.id}
+        label={props.shared.label}
+        onClose={props.onClose}
+      />
+    )
+  }
+  return <OwnedProjectBody {...props} />
 }
 
 // Project settings — タスクのワークフロー + Personal. (Git-share is gone; the
@@ -2429,19 +2463,9 @@ const ProjectSettingsDialog = ({
 }) => {
   const { t } = useT()
 
-  // ESC dismisses the dialog (same as the Back button). Skips an Escape that
-  // cancels an IME composition or one another handler already consumed, and
-  // preventDefault keeps App's global Escape handler (clear selection / close
-  // panel / JumpPalette) from also acting on it.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return
-      e.preventDefault()
-      onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  // Esc-to-dismiss (same as Back) is handled by the shared <Overlay> below via
+  // closeOnEsc — IME-guarded + preventDefault so App's global Escape doesn't
+  // also clear the selection / close the panel.
 
   // Workflow drafts. (completionFlow and the launch profile — permission
   // mode / model / effort — are edited on the Board's run-defaults strip
@@ -2552,7 +2576,7 @@ const ProjectSettingsDialog = ({
     // on a min-h-full inner track centers short content but grows with tall
     // content, so the header can never be clipped above the scroll origin
     // (the old flex-center + my-auto pattern clipped the top edge).
-    <div data-esc-overlay className="absolute inset-0 z-20 overflow-y-auto bg-bg-card">
+    <Overlay position="absolute" layer="local" backdrop="surface" placement="scroll" onClose={onClose}>
       <div className="grid min-h-full place-items-center">
         <div className="mx-auto w-full max-w-[760px] px-8 py-10">
           <BackLink
@@ -2697,7 +2721,7 @@ const ProjectSettingsDialog = ({
           </div>
         </div>
       </div>
-    </div>
+    </Overlay>
   )
 }
 
@@ -2720,7 +2744,15 @@ const DeleteConfirm = ({
 }) => {
   const { t } = useT()
   return (
-  <div className="absolute inset-0 z-20 flex flex-col justify-center gap-5 bg-bg-card px-6">
+  <Overlay
+    position="absolute"
+    layer="local"
+    backdrop="surface"
+    placement="fill"
+    padded={false}
+    className="justify-center gap-5 px-6"
+    onClose={onCancel}
+  >
     <div className="mx-auto w-full max-w-[420px]">
       <p className="label-cap text-accent mb-2">{t('projectPanel.deleteProjectLabel')}</p>
       <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
@@ -2760,7 +2792,7 @@ const DeleteConfirm = ({
         </Btn>
       </div>
     </div>
-  </div>
+  </Overlay>
   )
 }
 

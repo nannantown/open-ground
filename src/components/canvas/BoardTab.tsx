@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ChevronRight, Copy, GripVertical, Redo2, Settings2, Undo2 } from 'lucide-react'
+import { ChevronRight, Copy, GripVertical, Settings2 } from 'lucide-react'
 import {
   CLAUDE_EFFORTS,
   type BoardColumn,
@@ -343,16 +343,6 @@ interface BoardTabProps {
    *  worker info strip + the "something is running here" band synced to the
    *  worker's live activity. Unset on plain hosts (no swarm surface). */
   workerForTask?: (taskId: string) => BoardCardWorker | null
-  /** Undo/redo of board mutations (B013) — owned by the host (BoardModule,
-   *  the layer holding data + persist + the snapshot history); BoardTab only
-   *  renders the toolbar affordance. Unset hides the buttons (back-compat for
-   *  plain hosts). */
-  undoState?: {
-    canUndo: boolean
-    canRedo: boolean
-    onUndo: () => void
-    onRedo: () => void
-  }
   /** Realtime presence channel for this project's board room (u15). The owner
    *  passes their board collab binding; null when collab is OFF / not a member.
    *  Drives the toolbar avatar strip — publishes self, shows the other peers. */
@@ -373,7 +363,6 @@ export const BoardTab = ({
   onOpenProjectSettings,
   sessionStatus,
   workerForTask,
-  undoState,
   presence,
 }: BoardTabProps) => {
   const { t } = useT()
@@ -599,33 +588,6 @@ export const BoardTab = ({
           {/* Presence (u15) — who else is in this project's board room right now.
               Renders nothing unless collab is live and a peer is present. */}
           <CollabPresence channel={presence ?? null} />
-          {/* Undo / redo (B013) — unlike Canvas, the Board gives ⌘Z no visual
-              home of its own, so these small icons keep the history
-              discoverable. Disabled states mirror the stacks. */}
-          {undoState && (
-            <div className="flex items-center gap-0.5">
-              <button
-                type="button"
-                onClick={undoState.onUndo}
-                disabled={!undoState.canUndo}
-                title={t('board.toolbar.undo')}
-                aria-label={t('board.toolbar.undo')}
-                className="flex h-6 w-6 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-              >
-                <Undo2 size={13} strokeWidth={2} />
-              </button>
-              <button
-                type="button"
-                onClick={undoState.onRedo}
-                disabled={!undoState.canRedo}
-                title={t('board.toolbar.redo')}
-                aria-label={t('board.toolbar.redo')}
-                className="flex h-6 w-6 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-              >
-                <Redo2 size={13} strokeWidth={2} />
-              </button>
-            </div>
-          )}
           {/* Review-column toggle — lives in the toolbar (where the column would
               appear) for discoverability; this is the ONLY review-column switch
               (the settings dialog no longer duplicates it). Label + a small

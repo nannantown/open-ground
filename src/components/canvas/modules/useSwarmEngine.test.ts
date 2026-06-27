@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest'
 import {
   mergeSwarmWorkers,
   sanitizeEngineState,
+  planSwarmPower,
   type EngineWorker,
   type ManualWorkerInput,
   type ManagerWorkerStage,
@@ -200,5 +201,68 @@ describe('sanitizeEngineState — engine workers survive the poll → merge path
   it('degrades to empty anomalies on a garbage response', () => {
     expect(sanitizeEngineState(null).anomalies).toEqual([])
     expect(sanitizeEngineState({ anomalies: 'boom' }).anomalies).toEqual([])
+  })
+})
+
+// The single master power switch's contract (条件: 単一の開始/停止スイッチ). ON
+// starts the engine AND launches the commander + supply conversations together;
+// OFF stops the engine's NEW dispatch only and never touches the conversations.
+// Every step is IDEMPOTENT — no double start, no double launch. This locks that
+// contract so a future refactor can't silently re-introduce a twin launch or let
+// OFF tear a running conversation down.
+describe('planSwarmPower — the master Start/Stop switch contract', () => {
+  it('ON from cold: starts the engine and launches BOTH conversations', () => {
+    expect(planSwarmPower(true, { running: false, hasSupply: false, hasManager: false })).toEqual({
+      engine: true,
+      launchSupply: true,
+      launchManager: true,
+    })
+  })
+
+  it('ON is idempotent: nothing re-starts / re-launches when everything is already up', () => {
+    // No `engine` key (the engine is already running) and no launches — 二重起動しない.
+    expect(planSwarmPower(true, { running: true, hasSupply: true, hasManager: true })).toEqual({
+      launchSupply: false,
+      launchManager: false,
+    })
+  })
+
+  it('ON launches ONLY the missing conversations (partial up)', () => {
+    // Engine + supply already up, commander missing → launch only the commander.
+    expect(planSwarmPower(true, { running: true, hasSupply: true, hasManager: false })).toEqual({
+      launchSupply: false,
+      launchManager: true,
+    })
+    // Engine down, commander up, supply missing → start engine + launch supply only.
+    expect(planSwarmPower(true, { running: false, hasSupply: false, hasManager: true })).toEqual({
+      engine: true,
+      launchSupply: true,
+      launchManager: false,
+    })
+  })
+
+  it('OFF stops the engine ONLY — never launches or touches the conversations', () => {
+    // 条件: オフは新規 dispatch の停止のみ（走行中 worker / 会話は kill しない）.
+    expect(planSwarmPower(false, { running: true, hasSupply: true, hasManager: true })).toEqual({
+      engine: false,
+      launchSupply: false,
+      launchManager: false,
+    })
+  })
+
+  it('OFF while already stopped is a no-op (no engine key)', () => {
+    expect(planSwarmPower(false, { running: false, hasSupply: false, hasManager: false })).toEqual({
+      launchSupply: false,
+      launchManager: false,
+    })
+  })
+
+  it('OFF never launches a conversation even when one is missing', () => {
+    // Powering down must not spawn supply/manager as a side effect.
+    expect(planSwarmPower(false, { running: true, hasSupply: false, hasManager: false })).toEqual({
+      engine: false,
+      launchSupply: false,
+      launchManager: false,
+    })
   })
 })

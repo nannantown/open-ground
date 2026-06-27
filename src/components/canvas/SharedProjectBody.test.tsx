@@ -52,7 +52,7 @@ vi.mock('@/components/canvas/CanvasWorkspace', () => ({
   ),
 }))
 
-import { SharedProjectPanel } from './SharedProjectPanel'
+import { SharedProjectBody } from './SharedProjectBody'
 
 const makeBinding = (
   tasks: Array<{ id: string }>,
@@ -89,11 +89,11 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('SharedProjectPanel (member Board view)', () => {
+describe('SharedProjectBody (member Board view)', () => {
   it('renders the board with the adopted doc tasks + the shared label, no local path', () => {
     mockBinding = makeBinding([{ id: 't1' }, { id: 't2' }], true)
     render(
-      <SharedProjectPanel collabProjectId="pid-1" label="Design System" onClose={() => {}} />,
+      <SharedProjectBody collabProjectId="pid-1" label="Design System" onClose={() => {}} />,
     )
     expect(screen.getByTestId('board')).toBeTruthy()
     expect(screen.getByTestId('proj-name').textContent).toBe('Design System')
@@ -108,13 +108,13 @@ describe('SharedProjectPanel (member Board view)', () => {
 
   it('shows the Live status when the doc is synced', () => {
     mockBinding = makeBinding([], true)
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={() => {}} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={() => {}} />)
     expect(screen.getByText('projectPanel.collabSharedLive')).toBeTruthy()
   })
 
   it('shows "unavailable" (not the board) when the binding is null (non-member / disabled)', () => {
     mockBinding = null
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={() => {}} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={() => {}} />)
     expect(screen.queryByTestId('board')).toBeNull()
     expect(screen.getByText('projectPanel.collabSharedUnavailable')).toBeTruthy()
   })
@@ -123,7 +123,7 @@ describe('SharedProjectPanel (member Board view)', () => {
     // binding present but synced:false → interactivity is gated so a pre-sync edit
     // can't seed empty meta over the authoritative doc (review Finding 2).
     mockBinding = makeBinding([{ id: 't1' }], false)
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={() => {}} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={() => {}} />)
     expect(screen.queryByTestId('board')).toBeNull()
     // "Connecting" shows in both the status pill and the body until synced.
     expect(screen.getAllByText('projectPanel.collabSharedConnecting').length).toBeGreaterThan(0)
@@ -146,7 +146,7 @@ describe('SharedProjectPanel (member Board view)', () => {
       ) as unknown as typeof fetch,
     )
     mockBinding = makeBinding([], false) // present but not synced → !ready
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={() => {}} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={() => {}} />)
     // The cached board renders (its 2 tasks) with the read-only banner.
     expect(await screen.findByTestId('board')).toBeTruthy()
     expect(screen.getByTestId('task-count').textContent).toBe('2')
@@ -165,7 +165,7 @@ describe('SharedProjectPanel (member Board view)', () => {
         }) as unknown as typeof fetch,
       )
       mockBinding = makeBinding([{ id: 't1' }], true) // synced → ready
-      render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={() => {}} />)
+      render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={() => {}} />)
       // Flush effects + the 800ms mirror debounce.
       await vi.advanceTimersByTimeAsync(900)
       const posts = calls.filter(
@@ -183,7 +183,7 @@ describe('SharedProjectPanel (member Board view)', () => {
       { id: 'cv2', name: 'Moodboard' },
     ])
     mockCanvasBinding = makeCanvasBinding(true)
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={() => {}} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={() => {}} />)
 
     // Switch to the Canvas tab → the shared canvas index lists the canvases.
     fireEvent.click(screen.getByText('Canvas'))
@@ -200,7 +200,7 @@ describe('SharedProjectPanel (member Board view)', () => {
   it('Escape closes the panel', () => {
     mockBinding = makeBinding([], true)
     const onClose = vi.fn()
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={onClose} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={onClose} />)
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
   })
@@ -208,7 +208,7 @@ describe('SharedProjectPanel (member Board view)', () => {
   it('Back to Ground calls onClose', () => {
     mockBinding = makeBinding([], true)
     const onClose = vi.fn()
-    render(<SharedProjectPanel collabProjectId="pid-1" label="X" onClose={onClose} />)
+    render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={onClose} />)
     fireEvent.click(screen.getByText('projectPanel.backToGround'))
     expect(onClose).toHaveBeenCalledOnce()
   })

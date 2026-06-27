@@ -22,6 +22,16 @@ const owned: ProjectMeta = {
   totalTaskCount: 0,
 }
 
+// A folder-less collab project shared WITH the user (the synthetic meta the
+// Ground builds): no path, no git, the shared caption in the description slot.
+const sharedMeta: ProjectMeta = {
+  ...owned,
+  name: 'Shared Alpha',
+  path: '',
+  hasGit: false,
+  description: 'Shared with you',
+}
+
 describe('ProjectCard', () => {
   it('owned card shows the folder path and carries no Shared badge', () => {
     render(<ProjectCard project={owned} />)
@@ -29,7 +39,6 @@ describe('ProjectCard', () => {
     expect(screen.getByText('/Users/me/code/my-project')).toBeTruthy()
     // The shared-only chrome must be absent on an owned card.
     expect(screen.queryByText('projectPanel.groundSharedBadge')).toBeNull()
-    expect(screen.queryByText('projectPanel.groundSharedTitle')).toBeNull()
   })
 
   it('owned card still shows the open-task stamp (shared variant does not steal it)', () => {
@@ -38,16 +47,26 @@ describe('ProjectCard', () => {
     expect(screen.queryByText('projectPanel.groundSharedBadge')).toBeNull()
   })
 
-  it('shared card shows the Shared badge + "shared with you" caption and hides the folder path', () => {
-    // Member flow: only id + name (the label) are real; the other fields are the
-    // synthetic placeholders the Ground passes and the shared variant ignores.
-    const sharedMeta: ProjectMeta = { ...owned, name: 'Shared Alpha', path: '', hasGit: false }
+  it('shared card (shared prop) wears the invite Shared badge + keeps its caption', () => {
+    // Member flow: the Ground passes the synthetic meta AND shared=true, which
+    // paints the invite accent and restores the Shared badge so the card is
+    // distinguishable at a glance from the user's own cards.
     render(<ProjectCard project={sharedMeta} shared />)
     expect(screen.getByText('Shared Alpha')).toBeTruthy()
+    // The Shared badge (invite chrome) is present...
     expect(screen.getByText('projectPanel.groundSharedBadge')).toBeTruthy()
-    // The body caption (also reused as the card's title tooltip).
-    expect(screen.getByText('projectPanel.groundSharedTitle')).toBeTruthy()
-    // A shared card never leaks the (empty) synthetic path or an owner-only stamp.
+    // ...and the shared caption still shows through the description slot.
+    expect(screen.getByText('Shared with you')).toBeTruthy()
+    // hasGit:false + openTaskCount:0 → no git/task stamp leaks in.
     expect(screen.queryByText('0 open')).toBeNull()
+  })
+
+  it('the invite chrome is driven by the shared PROP, not the meta shape', () => {
+    // A shared-shaped meta rendered WITHOUT shared=true is just a local card:
+    // no badge, no invite accent — proving owned cards are never altered by the
+    // mere shape of their meta.
+    render(<ProjectCard project={sharedMeta} />)
+    expect(screen.getByText('Shared Alpha')).toBeTruthy()
+    expect(screen.queryByText('projectPanel.groundSharedBadge')).toBeNull()
   })
 })

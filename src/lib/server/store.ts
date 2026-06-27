@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises'
-import { ensureOpenGroundHome, settingsFile, canvasFile } from './paths'
+import { ensureOpenGroundHome, settingsFile, canvasFile, notificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import type { Settings, CanvasState } from '../types'
 
@@ -68,3 +68,43 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)
 export const setCanvas = (c: CanvasState) => writeJson(canvasFile(), c)
+
+// ─── In-app notification read-state (Ground お知らせ bell) ─────────────────────
+// A tiny home-cache file (~/.openground/notifications.json) holding the ids the
+// user has already seen, so the bell's unread state survives a re-login — NOT
+// localStorage (which a re-login / new machine would lose). Kept in its OWN file
+// (not settings.json): a "seen" set is app STATE, not a user preference, and it
+// can grow independently. The notification CONTENT lives elsewhere (per-kind
+// sources, today GET /api/collab/invites); this only records read/unread.
+interface NotificationState {
+  /** Stable ids the user has marked read (e.g. `collab-invite:<collabProjectId>`). */
+  readIds: string[]
+}
+const DEFAULT_NOTIFICATIONS: NotificationState = { readIds: [] }
+
+export const getNotificationState = () =>
+  readJson<NotificationState>(notificationsFile(), DEFAULT_NOTIFICATIONS)
+
+// Mark ids READ. Marking read is MONOTONIC — ids are only ever ADDED (you never
+// un-read) — so we UNION into the stored set rather than replace. The single-
+// flight chain (like setSettings) makes every call re-read inside the lock, so
+// two concurrent marks can't lose each other's ids. Returns the merged id list.
+let notificationsChain: Promise<unknown> = Promise.resolve()
+export const markNotificationsRead = async (ids: string[]): Promise<string[]> => {
+  const clean = Array.from(
+    new Set((ids ?? []).filter((s): s is string => typeof s === 'string' && s.length > 0)),
+  )
+  if (clean.length === 0) return (await getNotificationState()).readIds
+  const run = notificationsChain.then(async () => {
+    const current = await getNotificationState()
+    // Guard against a hand-corrupted notifications.json (readJson merges blindly):
+    // a non-array readIds would otherwise spread char-by-char / throw.
+    const existing = Array.isArray(current.readIds) ? current.readIds : []
+    const merged = Array.from(new Set([...existing, ...clean]))
+    await writeJson(notificationsFile(), { readIds: merged } satisfies NotificationState)
+    return merged
+  })
+  // Keep the chain advancing even if one write throws (mirrors settingsChain).
+  notificationsChain = run.catch(() => {})
+  return run
+}

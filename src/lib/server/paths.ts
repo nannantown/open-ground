@@ -15,6 +15,11 @@ export const canvasFile = () => join(openGroundHome(), 'canvas.json')
 // src/lib/server/authStore.ts. This is the APP's own login — NOT the Claude CLI
 // subscription token — and it gates nothing today (see docs/BILLING_PLAN.md).
 export const authFile = () => join(openGroundHome(), 'auth.json')
+// In-app notification READ-STATE (the Ground お知らせ bell). A tiny home-cache
+// file holding the ids the user has already seen, so unread state survives a
+// re-login (server-side, not localStorage). The notification CONTENT comes from
+// per-kind sources (today: GET /api/collab/invites); this only tracks read/unread.
+export const notificationsFile = () => join(openGroundHome(), 'notifications.json')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental

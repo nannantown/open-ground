@@ -42,6 +42,7 @@ import {
   upsertProjectMembers,
   removeProjectMember,
   listMyProjects,
+  listInvitesForMe,
   listProjectMembers,
   getProjectLabel,
   setProjectLabel,
@@ -81,6 +82,7 @@ import type {
   CollabInviteLinkResponse,
   CollabInviteLinksResponse,
   CollabInviteMode,
+  CollabInvitesResponse,
   CollabJoinRequestsResponse,
   CollabJoinResponse,
   CollabLabelResponse,
@@ -256,6 +258,19 @@ export const collabRoutes = new Hono()
   .get('/api/collab/projects', async (c) => {
     const projects = await listMyProjects()
     return c.json<CollabProjectsListResponse>({ projects })
+  })
+
+  // GET /api/collab/invites — the signed-in user's pending collab INVITES: every
+  // project shared WITH them that they don't own (the first in-app notification
+  // source — the Ground お知らせ bell). SELF-SCOPED BY RLS: listInvitesForMe reads
+  // og_project_members under the caller's OWN JWT, and the "og members read roster"
+  // policy returns only the rosters of projects the caller belongs to (matched by
+  // uid OR JWT email) — so a caller can NEVER read an invite addressed to someone
+  // else. No path; "for me" is the only mode. Empty (never an error) when signed
+  // out / unconfigured / they have none — so the bell is quiet by default.
+  .get('/api/collab/invites', async (c) => {
+    const invites = await listInvitesForMe()
+    return c.json<CollabInvitesResponse>({ invites })
   })
 
   // GET /api/collab/members?path= — the project's roster for the owner's

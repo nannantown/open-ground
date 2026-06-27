@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Loader2, FolderPlus, Folder } from 'lucide-react'
+import { Loader2, FolderPlus, Folder } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { api } from '@/lib/api-client'
 import { pickFolder } from '@/lib/pickFolder'
 import { useT } from '@/i18n/I18nContext'
@@ -94,30 +95,24 @@ export const NewProjectModal = ({ open, defaultWorkspace, onClose, onCreated }: 
   }
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
+    <Overlay onClose={onClose} closeOnEsc={false} aria-label={t('modals.newProject.title')}>
+      <DialogCard
+        className="w-[460px] max-w-[92vw]"
         onKeyDown={onKey}
-        className="flex flex-col w-[460px] max-w-[92vw] bg-bg-card border border-line shadow-card-hover overflow-hidden rounded-[3px]"
+        ariaLabel={t('modals.newProject.title')}
       >
-        <header className="shrink-0 rule-double flex items-baseline justify-between px-6 pt-5 pb-4">
-          <div>
-            <p className="label-cap text-accent mb-1.5">{t('modals.newProject.label')}</p>
-            <h2
-              className="font-display text-[22px] text-ink leading-none tracking-tightest"
-              style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}
-            >
+        <DialogHeader
+          align="baseline"
+          eyebrow={t('modals.newProject.label')}
+          title={
+            <span style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}>
               {t('modals.newProject.title')}
-            </h2>
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose} aria-label={t('common.close')}>
-            <X size={16} />
-          </Btn>
-        </header>
+            </span>
+          }
+          titleClassName="font-display text-[22px] text-ink leading-none tracking-tightest"
+          onClose={onClose}
+          closeLabel={t('common.close')}
+        />
 
         <div className="px-6 py-5 space-y-4">
           <div>
@@ -177,7 +172,7 @@ export const NewProjectModal = ({ open, defaultWorkspace, onClose, onCreated }: 
             {t('modals.newProject.create')}
           </Btn>
         </div>
-      </div>
-    </div>
+      </DialogCard>
+    </Overlay>
   )
 }

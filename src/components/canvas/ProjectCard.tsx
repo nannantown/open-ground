@@ -15,12 +15,11 @@ interface Props {
    *  bar + stamp, 'waiting' → amber "Waiting" (claude is sitting on you).
    *  Undefined = no claude session (plain shells show nothing). */
   claudeStatus?: ClaudeBeaconStatus
-  /** Ground member flow: this card is a project shared WITH the user
-   *  (owned:false in /api/collab/projects), not one of their own registry
-   *  projects. Renders a "Shared" badge + a distinct icon and hides
-   *  owner-only chrome (git glyph, task count, folder path); the caller wires
-   *  its click to open the folder-less SharedProjectPanel. Undefined/false →
-   *  the normal owned card, rendered byte-for-byte unchanged. */
+  /** This card is a project shared WITH the user (collab member flow, folder-
+   *  less). Marks it with the dedicated `invite` accent — a left band, a tinted
+   *  ring, a Users icon and a "Shared" badge — so it reads at a glance as
+   *  shared, distinct from the user's own (local) cards. Local cards pass this
+   *  falsy and are rendered byte-for-byte as before. */
   shared?: boolean
 }
 
@@ -34,6 +33,14 @@ const coordFromId = (id: string) => {
 // live here the card carries the runner-era surveyor's marking — a coloured
 // band along the top edge plus a stamp on the right margin: azure "Running"
 // (scanning) while claude works, amber "Waiting" when it sits on the human.
+//
+// A folder-less collab project shared WITH the user (shared=true) renders
+// through this SAME path but wears the dedicated `invite` accent so it reads at
+// a glance as shared, not lost among the user's own cards: a left band, an
+// invite-tinted ring, a Users icon and a "Shared" badge — all from the single
+// `invite` design token. Local cards pass shared falsy and are unchanged. The
+// synthetic meta's empty git/task fields still hide the git icon and open-task
+// stamp; the shared caption rides in the description slot.
 export const ProjectCard = ({
   project,
   onPointerDown,
@@ -51,13 +58,25 @@ export const ProjectCard = ({
         'group relative select-none bg-bg-card transition-all',
         'w-64 cursor-grab active:cursor-grabbing',
         'border rounded-[3px]',
-        active
-          ? 'border-accent shadow-card-active'
-          : selected
-            ? 'border-accent shadow-card-hover'
-            : claudeStatus
-              ? 'border-line-strong shadow-card-hover'
-              : 'border-line shadow-card hover:shadow-card-hover hover:border-line-strong',
+        // Shared (invite) cards are read-only overlays, never selectable, so they
+        // only ever sit in default / hover — plus the dormant focus-visible state
+        // (the canvas is pointer-driven, so the div isn't tab-focusable today,
+        // but the rule is defined and ready) and the missing→opacity disabled
+        // state below. All composed in the invite token, kept lighter than the
+        // accent ring an *active* owned card gets so the hierarchy stays clear.
+        shared
+          ? [
+              'border-invite/45 shadow-card',
+              'hover:border-invite/70 hover:shadow-card-hover',
+              'outline-none focus-visible:outline focus-visible:outline-[1.5px] focus-visible:outline-offset-2 focus-visible:outline-invite',
+            ].join(' ')
+          : active
+            ? 'border-accent shadow-card-active'
+            : selected
+              ? 'border-accent shadow-card-hover'
+              : claudeStatus
+                ? 'border-line-strong shadow-card-hover'
+                : 'border-line shadow-card hover:shadow-card-hover hover:border-line-strong',
         project.missing ? 'opacity-50' : '',
       ].join(' ')}
     >
@@ -73,6 +92,13 @@ export const ProjectCard = ({
             <div className="run-scan h-full w-1/3 bg-gradient-to-r from-transparent via-bg-card/85 to-transparent" />
           )}
         </div>
+      )}
+
+      {/* shared (invite) marker — a solid band down the left edge, the at-a-
+          glance "this is shared with you" signal that survives any zoom. On a
+          different axis from the claude top band so the two never collide. */}
+      {shared && (
+        <div className="absolute bottom-0 left-0 top-0 w-[3px] rounded-l-[2px] bg-invite" />
       )}
 
       {/* coordinate label, like a map index */}
@@ -107,7 +133,7 @@ export const ProjectCard = ({
               'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center',
               'border rounded-[2px]',
               shared
-                ? 'border-accent/40 bg-accent-soft text-accent'
+                ? 'border-invite/40 bg-invite-soft text-invite'
                 : project.hasGit
                   ? 'border-accent/40 bg-accent-soft text-accent'
                   : 'border-line bg-bg-inset text-ink-subtle',
@@ -127,43 +153,37 @@ export const ProjectCard = ({
           >
             {project.name}
           </div>
-          {shared ? (
-            <span className="mt-0.5 flex shrink-0 items-center gap-1 label-cap text-accent">
+          {shared && (
+            // The Shared badge, restored from the pre-member-merge card but now
+            // carried in the invite token (text + soft fill = the "badge 地色"):
+            // colour reinforces the band/ring, the glyph + label name it.
+            <span className="mt-0.5 flex shrink-0 items-center gap-1 rounded-[3px] bg-invite-soft px-1.5 py-0.5 label-cap text-invite">
               <Users size={10} strokeWidth={2.25} />
               {t('projectPanel.groundSharedBadge')}
             </span>
-          ) : (
-            <>
-              {project.openTaskCount > 0 && (
-                <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-accent">
-                  <span className="h-1 w-1 rounded-full bg-accent" />
-                  {project.openTaskCount} open
-                </span>
-              )}
-              {project.missing && (
-                <span className="mt-0.5 shrink-0 label-cap text-accent">missing</span>
-              )}
-            </>
+          )}
+          {project.openTaskCount > 0 && (
+            <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-accent">
+              <span className="h-1 w-1 rounded-full bg-accent" />
+              {project.openTaskCount} open
+            </span>
+          )}
+          {project.missing && (
+            <span className="mt-0.5 shrink-0 label-cap text-accent">missing</span>
           )}
         </div>
 
         <div className="mt-2.5">
-          {shared ? (
-            <p className="text-[11.5px] leading-snug text-ink-muted">
-              {t('projectPanel.groundSharedTitle')}
-            </p>
-          ) : (
-            <p
-              className={[
-                'line-clamp-4',
-                project.description
-                  ? 'text-[11.5px] leading-snug text-ink-muted'
-                  : 'font-mono text-[10px] text-ink-subtle',
-              ].join(' ')}
-            >
-              {project.description || (project.missing ? 'Folder no longer exists — remove it from the Ground.' : project.path)}
-            </p>
-          )}
+          <p
+            className={[
+              'line-clamp-4',
+              project.description
+                ? 'text-[11.5px] leading-snug text-ink-muted'
+                : 'font-mono text-[10px] text-ink-subtle',
+            ].join(' ')}
+          >
+            {project.description || (project.missing ? 'Folder no longer exists — remove it from the Ground.' : project.path)}
+          </p>
         </div>
       </div>
     </div>

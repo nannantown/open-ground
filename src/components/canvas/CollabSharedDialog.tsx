@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Clock, LogIn, Users, X } from 'lucide-react'
+import { Clock, LogIn, Users } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import { FIELD_INPUT_CSS } from './ProjectConfigFields'
 import {
@@ -17,7 +18,7 @@ import { parseJoinDeepLink } from '@/lib/deepLink'
 
 // The MEMBER join dialog. Lists the folder-less projects the signed-in user was
 // invited to (owned:false), and lets them redeem an invite CODE or LINK to join a
-// new one. Picking a project opens it in SharedProjectPanel.
+// new one. Picking a project opens it in ProjectPanel's member body.
 //
 // Reached TWO ways: (a) the Toolbar "Shared with me" entry (the member's path to
 // the INITIAL join — they paste the invite code or link the owner sent them); and
@@ -44,7 +45,7 @@ export const CollabSharedDialog = ({
   /** A code carried in by a deep link — prefilled into the field. NEVER auto-joined:
    *  the member must pass the consent step and click Join explicitly. */
   initialCode?: string
-  /** Open a shared project (folder-less) in SharedProjectPanel. */
+  /** Open a shared project (folder-less) in ProjectPanel's member body. */
   onOpen: (collabProjectId: string, label: string) => void
   onClose: () => void
 }) => {
@@ -137,29 +138,25 @@ export const CollabSharedDialog = ({
   )
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[80vh] w-[440px] max-w-[92vw] flex-col overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
-        onClick={(e) => e.stopPropagation()}
+    <Overlay onClose={onClose} aria-label={t('projectPanel.collabSharedDialogTitle')}>
+      <DialogCard
+        className="w-[440px] max-w-[92vw] max-h-[80vh]"
+        ariaLabel={t('projectPanel.collabSharedDialogTitle')}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-line px-5 pt-4 pb-3">
-          <h3 className="flex items-center gap-2 font-display text-[16px] text-ink">
-            <Users size={15} className="text-ink-muted" />
-            {t('projectPanel.collabSharedDialogTitle')}
-          </h3>
-          <button
-            type="button"
-            onClick={onClose}
-            title={t('common.cancel')}
-            className="rounded-sm p-1 text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            <X size={14} />
-          </button>
-        </div>
+        <DialogHeader
+          align="center"
+          separator="line"
+          density="panel"
+          title={
+            <>
+              <Users size={15} className="text-ink-muted" />
+              {t('projectPanel.collabSharedDialogTitle')}
+            </>
+          }
+          titleClassName="flex items-center gap-2 font-display text-[16px] text-ink"
+          onClose={onClose}
+          closeLabel={t('common.cancel')}
+        />
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
           {/* Privacy consent — an inline gate, NOT a separate screen. The join
@@ -279,7 +276,7 @@ export const CollabSharedDialog = ({
             )}
           </div>
         </div>
-      </div>
-    </div>
+      </DialogCard>
+    </Overlay>
   )
 }

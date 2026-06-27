@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Plus, Store, Trash2, Check, X, Eye, EyeOff } from 'lucide-react'
+import { Overlay } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type { CustomModuleDef, CustomTabRole } from '@/lib/types'
 
@@ -88,19 +89,6 @@ export const CustomTabPickerDialog = ({
   // The module id whose DELETE is in flight (disables both of its buttons).
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  // ESC dismisses (same pattern as the panel's settings dialog): skip an
-  // Escape that cancels an IME composition or one already consumed, and
-  // preventDefault so App's global Escape handler doesn't also act on it.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return
-      e.preventDefault()
-      onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
   const remove = async (moduleId: string) => {
     if (deletingId) return
     setDeletingId(moduleId)
@@ -144,12 +132,22 @@ export const CustomTabPickerDialog = ({
   )
 
   return (
-    // Semi-opaque backdrop over the panel: a click anywhere outside the card
-    // dismisses (mousedown, so a drag that starts inside doesn't close).
-    <div
-      data-esc-overlay
-      className="absolute inset-0 z-20 flex items-center justify-center overflow-y-auto bg-bg-card/70 px-6 py-8"
+    <Overlay
+      position="absolute"
+      layer="local"
+      backdrop="veil"
+      placement="center"
+      padded={false}
+      className="overflow-y-auto px-6 py-8"
+      onClose={onClose}
+      // Backdrop dismiss fires on MOUSEDOWN (not click), gated by the section's
+      // onMouseDown stopPropagation, so a press begun inside the card and
+      // released on the veil never dismisses (load-bearing — preserves the
+      // pre-shell behaviour). closeOnBackdrop disables Overlay's click path; Esc
+      // still closes via Overlay's default closeOnEsc.
+      closeOnBackdrop={false}
       onMouseDown={onClose}
+      aria-label={t('customTabs.pickerTitle')}
     >
       <section
         role="dialog"
@@ -482,6 +480,6 @@ export const CustomTabPickerDialog = ({
           </button>
         </footer>
       </section>
-    </div>
+    </Overlay>
   )
 }

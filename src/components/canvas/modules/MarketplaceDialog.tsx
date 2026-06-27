@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Overlay } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type {
   CustomModuleDef,
@@ -106,10 +107,22 @@ export const MarketplaceDialog = ({
   )
 
   return (
-    <div
-      data-esc-overlay
-      className="absolute inset-0 z-20 flex items-center justify-center overflow-y-auto bg-bg-card/70 px-6 py-8"
+    <Overlay
+      position="absolute"
+      layer="local"
+      backdrop="veil"
+      placement="center"
+      padded={false}
+      className="overflow-y-auto px-6 py-8"
+      onClose={onClose}
+      closeOnEsc={false}
+      // Backdrop dismiss fires on MOUSEDOWN (not click), gated by the section's
+      // onMouseDown stopPropagation, so a press begun inside the card and
+      // released on the veil never dismisses (load-bearing — preserves the
+      // pre-shell behaviour). closeOnBackdrop disables Overlay's click path.
+      closeOnBackdrop={false}
       onMouseDown={onClose}
+      aria-label={t('customTabs.marketTitle')}
     >
       <section
         role="dialog"
@@ -215,6 +228,6 @@ export const MarketplaceDialog = ({
           </button>
         </footer>
       </section>
-    </div>
+    </Overlay>
   )
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Palette, Users } from 'lucide-react'
+import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import {
   useBoardCollabShared,
@@ -17,7 +18,9 @@ import type {
   ProjectTask,
 } from '@/lib/types'
 
-// SharedProjectPanel — the MEMBER view of a folder-less shared project.
+// SharedProjectBody — the MEMBER view of a folder-less shared project,
+// rendered by ProjectPanel when its `shared` capability flag is set (the single
+// owner/member switch — there is no separate shared panel mounted by App).
 //
 // A collaborator who joined by invite has NO local folder, so the normal
 // path-keyed ProjectPanel can't open the project. This panel opens it by
@@ -186,7 +189,7 @@ function SharedCanvasView({
   )
 }
 
-export const SharedProjectPanel = ({
+export const SharedProjectBody = ({
   collabProjectId,
   label,
   onClose,
@@ -334,16 +337,6 @@ export const SharedProjectPanel = ({
     [],
   )
 
-  // Escape closes the panel — parity with every other overlay (the global Esc
-  // handler bails on data-esc-overlay, so the panel owns its own).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.isComposing) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
   // If the open canvas disappears from the shared index (the owner deleted it),
   // drop back to the canvas list instead of leaving a frozen, stale canvas open
   // (review LOW). `data` changes on adopt, so this re-checks on every peer update.
@@ -354,56 +347,63 @@ export const SharedProjectPanel = ({
   }, [data, activeCanvasId])
 
   return (
-    <div data-esc-overlay className="absolute inset-0 z-20 flex flex-col bg-bg-card">
+    <Overlay
+      position="absolute"
+      layer="local"
+      backdrop="surface"
+      placement="fill"
+      onClose={onClose}
+      aria-label={label}
+    >
       {/* Header — back to Ground, the shared name, and a realtime status pill. */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
-        <button
-          type="button"
-          onClick={onClose}
-          title={t('projectPanel.backToGround')}
-          className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          <ArrowLeft size={13} />
-          {t('projectPanel.backToGround')}
-        </button>
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
-            <Users size={10} />
-            {t('projectPanel.collabSharedBadge')}
-          </span>
-          <span className="truncate font-display text-[15px] text-ink" title={label}>
-            {label}
-          </span>
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          {/* Board / Canvas switcher. */}
-          <div className="flex items-center gap-0.5 rounded-sm border border-line p-0.5">
-            {(['board', 'canvas'] as const).map((tk) => (
-              <button
-                key={tk}
-                type="button"
-                onClick={() => setTab(tk)}
-                className={`rounded-[2px] px-2 py-0.5 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
-                  tab === tk
-                    ? 'bg-ink text-bg-card'
-                    : 'text-ink-muted hover:text-ink'
-                }`}
-              >
-                {tk === 'board' ? 'Board' : 'Canvas'}
-              </button>
-            ))}
+      <DialogHeader
+        separator="line"
+        density="bar"
+        align="center"
+        onBack={onClose}
+        backLabel={t('projectPanel.backToGround')}
+        leading={
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
+              <Users size={10} />
+              {t('projectPanel.collabSharedBadge')}
+            </span>
+            <span className="truncate font-display text-[15px] text-ink" title={label}>
+              {label}
+            </span>
           </div>
-          {/* Presence — who else is in this shared project right now (u15). */}
-          <CollabPresence channel={collab} />
-          <span
-            className={`shrink-0 text-[10px] uppercase tracking-wide ${
-              live ? 'text-ink-muted' : 'text-ink-faint'
-            }`}
-          >
-            {live ? t('projectPanel.collabSharedLive') : t('projectPanel.collabSharedConnecting')}
-          </span>
-        </div>
-      </div>
+        }
+        actions={
+          <>
+            {/* Board / Canvas switcher. */}
+            <div className="flex items-center gap-0.5 rounded-sm border border-line p-0.5">
+              {(['board', 'canvas'] as const).map((tk) => (
+                <button
+                  key={tk}
+                  type="button"
+                  onClick={() => setTab(tk)}
+                  className={`rounded-[2px] px-2 py-0.5 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                    tab === tk
+                      ? 'bg-ink text-bg-card'
+                      : 'text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  {tk === 'board' ? 'Board' : 'Canvas'}
+                </button>
+              ))}
+            </div>
+            {/* Presence — who else is in this shared project right now (u15). */}
+            <CollabPresence channel={collab} />
+            <span
+              className={`shrink-0 text-[10px] uppercase tracking-wide ${
+                live ? 'text-ink-muted' : 'text-ink-faint'
+              }`}
+            >
+              {live ? t('projectPanel.collabSharedLive') : t('projectPanel.collabSharedConnecting')}
+            </span>
+          </>
+        }
+      />
 
       <div className="relative min-h-0 flex-1">
         {tab === 'canvas' ? (
@@ -502,6 +502,6 @@ export const SharedProjectPanel = ({
           </div>
         )}
       </div>
-    </div>
+    </Overlay>
   )
 }

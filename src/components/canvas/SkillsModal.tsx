@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Loader2, Sparkles, X } from 'lucide-react'
-import { Btn } from '@/components/ui/Btn'
+import { Loader2, Sparkles } from 'lucide-react'
+import { Overlay, DialogCard, DialogHeader, DialogBody } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type { ProjectSkill, ProjectSkillsResponse } from '@/lib/types'
 
@@ -57,52 +57,37 @@ export const SkillsModal = ({ open, path, projectName, onClose }: Props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, path])
 
-  // Escape closes from anywhere (the backdrop click handles the mouse).
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
   if (!open) return null
 
   const count = load.state === 'done' ? load.skills.length : null
 
   return (
-    <div
-      data-esc-overlay
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[82vh] w-[560px] max-w-[94vw] flex-col overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
+    <Overlay onClose={onClose} aria-label={t('projectPanel.skillsModalTitle')}>
+      <DialogCard
+        className="w-[560px] max-w-[94vw] max-h-[82vh]"
+        ariaLabel={t('projectPanel.skillsModalTitle')}
       >
-        <header className="rule-double flex shrink-0 items-start justify-between px-6 pt-5 pb-4">
-          <div className="min-w-0">
-            <p className="label-cap mb-1.5 flex items-center gap-1.5 text-accent">
+        <DialogHeader
+          eyebrow={
+            <>
               <Sparkles size={12} strokeWidth={2} />
               {t('projectPanel.skillsModalTitle')}
               {count !== null && count > 0 && (
                 <span className="tabular-nums text-ink-faint">({count})</span>
               )}
-            </p>
-            <p className="truncate font-mono text-[12px] text-ink-muted" title={projectName}>
+            </>
+          }
+          title={
+            <span title={projectName} className="font-mono">
               {projectName}
-            </p>
-          </div>
-          <Btn variant="icon" size="sm" onClick={onClose} aria-label={t('common.close')}>
-            <X size={16} />
-          </Btn>
-        </header>
+            </span>
+          }
+          titleClassName="truncate font-mono text-[12px] text-ink-muted"
+          onClose={onClose}
+          closeLabel={t('common.close')}
+        />
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+        <DialogBody className="px-6 py-4">
           {load.state === 'loading' && (
             <p className="flex items-center gap-2 text-[12px] text-ink-faint">
               <Loader2 size={12} className="animate-spin" /> {t('projectPanel.loading')}
@@ -145,8 +130,8 @@ export const SkillsModal = ({ open, path, projectName, onClose }: Props) => {
                 ))}
               </ul>
             ))}
-        </div>
-      </div>
-    </div>
+        </DialogBody>
+      </DialogCard>
+    </Overlay>
   )
 }

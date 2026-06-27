@@ -35,7 +35,7 @@
 import { createHash } from 'node:crypto'
 import { readAuthConfig, getFreshAccessToken } from './supabaseAuth'
 import { readSession } from './authStore'
-import type { ProjectMember } from '../types'
+import type { CollabInviteForMe, ProjectMember } from '../types'
 
 // --- Env override -----------------------------------------------------------
 // Parse the comma list of collabProjectIds. No fallback — unset/blank means
@@ -103,6 +103,13 @@ interface MemberRow {
 
 const toRole = (raw: string | undefined): ProjectMember['role'] =>
   raw === 'owner' ? 'owner' : 'member'
+
+// Parse a PostgREST timestamptz → epoch ms, or undefined when absent/invalid.
+const toEpoch = (raw: unknown): number | undefined => {
+  if (typeof raw !== 'string' || !raw) return undefined
+  const t = Date.parse(raw)
+  return Number.isFinite(t) ? t : undefined
+}
 
 const toMember = (row: MemberRow, collabProjectId: string): ProjectMember => ({
   // Prefer the row's project_id, but fall back to the queried id (the row is
@@ -286,6 +293,99 @@ export const listMyProjects = async (): Promise<
   } catch (e) {
     console.error(
       '[openground:members] list projects failed',
+      e instanceof Error ? e.message : e,
+    )
+    return []
+  }
+}
+
+// List the SIGNED-IN user's pending collab INVITES: every project shared WITH
+// them that they do NOT own (the first in-app notification source — the Ground
+// お知らせ bell). Read entirely under the caller's OWN JWT — RLS ("og members
+// read roster": private.og_is_member) returns only the rosters of projects the
+// caller belongs to (matched by uid OR JWT email), so a caller can ONLY ever see
+// invites addressed to themselves; "for me" is enforced by the database, never a
+// query param. Two reads joined in memory:
+//   1) og_project_members (all my rosters) → my role per project, the OWNER row's
+//      email (the inviter) and my invite row's created_at.
+//   2) og_projects (id,label,owner_id) → the member-visible label + the
+//      authoritative owner check (so a project I own is excluded as "not an invite").
+// Returns [] when unconfigured / signed out / I have none / the read fails. Never throws.
+export const listInvitesForMe = async (): Promise<CollabInviteForMe[]> => {
+  const auth = await ownerAuth()
+  if (!auth) return []
+  const session = await readSession()
+  const myUid = session?.user.id
+  const myEmail = session?.user.email?.trim().toLowerCase()
+  // Without an identity we can't tell "mine" from "someone else's" row — bail
+  // (RLS would scope reads anyway, but this also avoids a pointless round-trip).
+  if (!myUid && !myEmail) return []
+
+  // Does a roster row belong to ME? (uid match OR case-insensitive email match —
+  // the same dual identity RLS / og_is_member use, so an email-only invite seeded
+  // before that account's first login still resolves.)
+  const isMine = (r: { user_id?: string | null; email?: string | null }): boolean =>
+    (!!myUid && r.user_id === myUid) ||
+    (!!myEmail && !!r.email && r.email.toLowerCase() === myEmail)
+
+  try {
+    const headers = { apikey: auth.anonKey, Authorization: `Bearer ${auth.token}` }
+    const [rosterRes, projRes] = await Promise.all([
+      fetch(`${auth.url}/rest/v1/${membersTable()}?select=project_id,user_id,email,role,created_at`, {
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      }),
+      fetch(`${auth.url}/rest/v1/${projectsTable()}?select=id,label,owner_id`, {
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      }),
+    ])
+    if (!rosterRes.ok || !projRes.ok) {
+      console.error(`[openground:members] invites lookup ${rosterRes.status}/${projRes.status}`)
+      return []
+    }
+    const rosterRows = (await rosterRes.json()) as unknown
+    const projRows = (await projRes.json()) as unknown
+    if (!Array.isArray(rosterRows) || !Array.isArray(projRows)) return []
+
+    // Group roster rows by project_id so each project's owner row + my row are
+    // resolvable without an O(n²) scan.
+    type Row = MemberRow & { created_at?: string }
+    const byProject = new Map<string, Row[]>()
+    for (const r of rosterRows as Row[]) {
+      const pid = typeof r.project_id === 'string' ? r.project_id : ''
+      if (!pid) continue
+      const list = byProject.get(pid)
+      if (list) list.push(r)
+      else byProject.set(pid, [r])
+    }
+
+    const invites: CollabInviteForMe[] = []
+    for (const p of projRows as Array<{ id?: unknown; label?: unknown; owner_id?: unknown }>) {
+      const pid = typeof p.id === 'string' ? p.id : ''
+      if (!pid) continue
+      // Skip projects I OWN — they're mine, not an invite (authoritative
+      // og_projects.owner_id check).
+      if (myUid && p.owner_id === myUid) continue
+      const roster = byProject.get(pid) ?? []
+      const myRow = roster.find(isMine)
+      // Only surface it if I'm actually on the roster as a NON-owner. (RLS already
+      // guarantees I can only read rosters I belong to — this is belt-and-braces.)
+      if (!myRow || toRole(myRow.role) === 'owner') continue
+      const ownerRow = roster.find((r) => r.role === 'owner')
+      invites.push({
+        collabProjectId: pid,
+        label: typeof p.label === 'string' && p.label ? p.label : null,
+        inviterEmail: ownerRow?.email ? ownerRow.email : null,
+        invitedAt: toEpoch(myRow.created_at),
+      })
+    }
+    // Newest invite first (undated rows sort last).
+    invites.sort((a, b) => (b.invitedAt ?? 0) - (a.invitedAt ?? 0))
+    return invites
+  } catch (e) {
+    console.error(
+      '[openground:members] invites lookup failed',
       e instanceof Error ? e.message : e,
     )
     return []
