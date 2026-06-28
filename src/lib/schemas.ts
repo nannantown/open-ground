@@ -89,14 +89,13 @@ export const ProjectDataSchema = z.object({
   // Generated language pair (descriptionForLang picks by UI language).
   descriptionJa: z.string().optional(),
   descriptionEn: z.string().optional(),
-  // Shared project policy (completion flow / target branch / verify commands /
-  // review column) + personal launch prefs — see types.ts.
+  // Shared project policy (completion flow / target branch / verify commands)
+  // + personal launch prefs — see types.ts.
   config: z
     .object({
       completionFlow: z.enum(['merge', 'pr']).optional(),
       targetBranch: z.string().optional(),
       verifyCommands: z.array(z.string()).optional(),
-      reviewColumn: z.boolean().optional(),
       members: z.array(z.string()).optional(),
     })
     .optional(),

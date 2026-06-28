@@ -236,23 +236,51 @@ export default function App() {
     [sharedProjects, t],
   )
 
-  // Open a notification's target. A collab invite → open the folder-less shared
-  // project via the SAME member open-flow openSharedCard / CollabSharedDialog use
-  // (clear the Ground selection so the member body and an owned body can't
-  // co-exist, then setOpenShared). The invitee is ALREADY a member (their email is
-  // in og_project_members), so no invite-code redemption is needed — opening the
-  // room is the whole action.
+  // One-shot re-fetch of the お知らせ invites (used right after ACCEPTING one, so the
+  // bell drops it without waiting for the 5-min poll). Mirrors the effect's poll but
+  // imperative; gated the same way so a signed-out / collab-off build is a no-op.
+  const refreshInvites = useCallback(() => {
+    if (!collabEnabled || !authUser?.id) return
+    fetch('/api/collab/invites')
+      .then((r) => (r.ok ? (r.json() as Promise<CollabInvitesResponse>) : null))
+      .then((d) => {
+        if (d) setInvites(d.invites ?? [])
+      })
+      .catch(() => {})
+  }, [collabEnabled, authUser?.id])
+
+  // Open (and ACCEPT) a notification's target. A collab invite is now a PENDING
+  // email invite — the named person has zero collab access until they accept it —
+  // so "Join" both ACCEPTS (flips their og_project_members row pending→accepted via
+  // POST /api/collab/accept, which the room's ticket gate requires) and OPENS the
+  // folder-less shared project via the SAME member open-flow CollabSharedDialog uses
+  // (clear the Ground selection so the member body and an owned body can't co-exist,
+  // then setOpenShared). Accept runs FIRST so the room's first ticket request isn't
+  // racing the membership flip; then we refresh the Ground (the shared card now
+  // appears) and the bell (the accepted invite drops out). Accept is idempotent +
+  // best-effort — a transient failure still opens the room (it surfaces its own
+  // connecting / unavailable state).
   const openNotification = useCallback(
     (n: AppNotification) => {
-      if (n.kind === 'collab-invite' && n.collabInvite) {
+      if (n.kind !== 'collab-invite' || !n.collabInvite) return
+      const { collabProjectId, label } = n.collabInvite
+      void (async () => {
+        await fetch('/api/collab/accept', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ collabProjectId }),
+        }).catch(() => {})
         setSelectedIds([])
         setOpenShared({
-          id: n.collabInvite.collabProjectId,
-          label: n.collabInvite.label || t('projectPanel.collabSharedDialogUntitled'),
+          id: collabProjectId,
+          label: label || t('projectPanel.collabSharedDialogUntitled'),
         })
-      }
+        // The shared card now appears on the Ground; the invite leaves the bell.
+        void load()
+        refreshInvites()
+      })()
     },
-    [t],
+    [t, load, refreshInvites],
   )
 
   // Opening the bell marks the currently-shown UNREAD notifications read —

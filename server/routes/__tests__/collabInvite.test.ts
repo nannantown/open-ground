@@ -237,4 +237,61 @@ describe('invite v2 routes — path security boundary', () => {
     ).toBe(403)
     expect(fetchSpy).not.toHaveBeenCalled()
   })
+
+  it('POST /invite/cancel: 400 no path, 403 unregistered (path-gated like /remove)', async () => {
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchSpy)
+    expect((await postJson('/api/collab/invite/cancel', { email: 'a@b.co' })).status).toBe(400)
+    await signIn()
+    expect(
+      (await postJson('/api/collab/invite/cancel', { path: ETC, email: 'a@b.co' })).status,
+    ).toBe(403)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/collab/accept — invitee accepts their own pending invite (member flow)', () => {
+  const WS_URL = 'wss://collab.example.workers.dev'
+  // accept is gated on collabEnabled() (flag + WS URL + session) — NOT a path.
+  const enableCollab = async () => {
+    vi.stubEnv('OPENGROUND_REALTIME', '1')
+    vi.stubEnv('OPENGROUND_COLLAB_WS_URL', WS_URL)
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
+    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
+    await signIn()
+  }
+
+  it('503 when collab is disabled (the default build), no backend call', async () => {
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+    await signIn() // signed in, but OPENGROUND_REALTIME unset → collab off
+    const res = await postJson('/api/collab/accept', {
+      collabProjectId: '33333333-3333-3333-3333-333333333333',
+    })
+    expect(res.status).toBe(503)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('400 for a malformed collabProjectId (strict-UUID guard), no backend call', async () => {
+    await enableCollab()
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+    expect((await postJson('/api/collab/accept', {})).status).toBe(400)
+    expect((await postJson('/api/collab/accept', { collabProjectId: 'not-a-uuid' })).status).toBe(400)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('valid id → calls the accept_invite RPC and returns its result', async () => {
+    await enableCollab()
+    const PID = '33333333-3333-3333-3333-333333333333'
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ project_id: PID, accepted: 1 }), { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch)
+    const res = await postJson('/api/collab/accept', { collabProjectId: PID })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true, accepted: 1 })
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(url).toContain('/rest/v1/rpc/accept_invite')
+  })
 })

@@ -41,11 +41,11 @@ interface Props {
 export const SwarmPowerBar = ({ running, available, busy, workerCount, onToggle }: Props) => {
   const { t } = useT()
 
-  // Status: not-available (route 404) · running (moss) · stopped (inert grey).
-  // The dot carries the state at a glance; the label + live worker count spell it
-  // out (条件: 稼働中/停止中・何体動いているか). ink-faint is the inert grey that
-  // still clears 3:1 on paper (unlike the near-invisible line-strong).
-  const statusDot = !available ? 'bg-ink-faint' : running ? 'bg-moss' : 'bg-ink-faint'
+  // State at a glance (条件: 稼働中/停止中・何体動いているか). running pops in MOSS
+  // — a calm "go" green, NOT the app's alarming accent red — so the live state is
+  // unmistakable; stopped / offline stay inert grey. ink-faint is the inert grey
+  // that still clears 3:1 on paper (unlike the near-invisible line-strong).
+  const live = available && running
   const statusLabel = !available
     ? t('projectPanel.swarm.power.offline')
     : running
@@ -64,26 +64,38 @@ export const SwarmPowerBar = ({ running, available, busy, workerCount, onToggle 
         {t('projectPanel.swarm.power.label')}
       </span>
 
-      {/* Status: dot + running/stopped/offline (+ live worker count when the
-          engine route is reachable). */}
-      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-ink-muted">
-        <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${statusDot}`} aria-hidden />
+      {/* Status: a MOSS-tinted pill when running (so "running · N workers" pops at
+          a glance), inert when stopped / offline. dot + label (+ live worker count
+          once the engine route answers). */}
+      <span
+        className={[
+          'flex min-w-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] transition-colors duration-150',
+          live ? 'bg-moss-soft text-ink' : 'text-ink-muted',
+        ].join(' ')}
+      >
+        <span
+          className={`h-[6px] w-[6px] shrink-0 rounded-full ${live ? 'bg-moss' : 'bg-ink-faint'}`}
+          aria-hidden
+        />
         <span className="truncate">
           {statusLabel}
           {available && <> · {t('projectPanel.swarm.power.workers', { count: workerCount })}</>}
         </span>
       </span>
 
-      {/* The SINGLE switch — segmented Stop | Start, the active side = current
-          state. The house segmented pattern (SwarmManagerPane's ControlRow): the
-          selected side flips BACKGROUND + TEXT together so contrast holds, with
-          explicit hover / disabled / focus-visible states. */}
+      {/* The SINGLE master switch — a segmented Stop | Start on a subtle inset
+          track. The SELECTED side is filled and colored by MEANING — Start-active
+          = moss ("running"), Stop-active = ink ("stopped") — so WHICH state is
+          current reads instantly (and without the old accent-red, which made a
+          mere idle "Stop" look like a danger action). The inactive side is a ghost
+          with an explicit hover; both share disabled + focus-visible (5-state,
+          ui-interactive-states). */}
       <div
         role="group"
         aria-label={t('projectPanel.swarm.power.label')}
         title={t('projectPanel.swarm.power.hint')}
         aria-disabled={disabled}
-        className="ml-auto inline-flex shrink-0 items-center gap-0 rounded-[3px] border border-line p-0.5"
+        className="ml-auto inline-flex shrink-0 items-center gap-0.5 rounded-[5px] border border-line bg-bg-inset p-0.5"
       >
         {(
           [
@@ -92,6 +104,9 @@ export const SwarmPowerBar = ({ running, available, busy, workerCount, onToggle 
           ] as [boolean, string][]
         ).map(([v, label]) => {
           const active = running === v
+          // Selected fill colored by meaning: Start (v=true) → moss = running,
+          // Stop (v=false) → ink = stopped; both inverse text for AA contrast.
+          const activeClass = v ? 'border-moss bg-moss text-bg-card' : 'border-ink bg-ink text-bg-card'
           return (
             <button
               key={String(v)}
@@ -102,12 +117,12 @@ export const SwarmPowerBar = ({ running, available, busy, workerCount, onToggle 
               aria-pressed={active}
               disabled={disabled}
               className={[
-                'h-6 min-w-[52px] rounded-[2px] px-3 text-[11px] font-medium transition-all duration-150',
+                'h-6 min-w-[56px] rounded-[3px] px-3 text-[11px] font-medium transition-all duration-150',
                 'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                 'disabled:cursor-not-allowed disabled:opacity-40',
                 active
-                  ? 'border-accent bg-accent text-bg-card'
-                  : 'border-line bg-transparent text-ink-muted enabled:hover:border-line-strong enabled:hover:bg-bg-inset enabled:hover:text-ink',
+                  ? activeClass
+                  : 'border-transparent bg-transparent text-ink-muted enabled:hover:bg-bg-card enabled:hover:text-ink',
               ].join(' ')}
             >
               {label}

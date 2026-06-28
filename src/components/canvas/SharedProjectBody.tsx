@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Palette, Users } from 'lucide-react'
+import { ArrowLeft, FolderPlus, Palette, Users } from 'lucide-react'
 import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import {
@@ -9,8 +9,11 @@ import {
 import { BoardModule, type TaskLaunchResult } from '@/components/canvas/modules/BoardModule'
 import { CanvasWorkspace } from '@/components/canvas/CanvasWorkspace'
 import { CollabPresence } from '@/components/canvas/CollabPresence'
+import { TerminalPane } from '@/components/canvas/TerminalPane'
+import { pickFolder } from '@/lib/pickFolder'
 import type {
   CanvasFile,
+  CollabLinkResponse,
   CollabSharedCanvasResponse,
   CollabSharedDataResponse,
   ProjectData,
@@ -33,12 +36,17 @@ import type {
 // stays inert and we drive everything).
 //
 // Per the product model ("the place is shared, the hands are each your own"),
-// Claude/Terminal is NOT available here — a member has no local checkout to spawn
-// `claude` in. The per-card conversation pane explains that instead.
+// Claude runs on the MEMBER's own machine in their OWN checkout — never the
+// owner's code. A member who hasn't linked a folder yet sees a "Link local folder"
+// call-to-action; once they pick their own clone (POST /api/collab/link registers
+// it on the validateProjectPath allowlist) a Terminal tab appears, rooted at that
+// folder, while Board/Canvas keep syncing over the doc. Unlinked = Board + Canvas
+// only (backward-compatible).
 //
-// SCOPE: Board + Canvas. The board doc carries the shared canvas index
-// (m:canvasIndex) so a member can list canvases; opening one binds its own
-// canvas doc and renders the existing CanvasWorkspace (see SharedCanvasView).
+// SCOPE: Board + Canvas (+ Terminal once a local folder is linked). The board doc
+// carries the shared canvas index (m:canvasIndex) so a member can list canvases;
+// opening one binds its own canvas doc and renders the existing CanvasWorkspace
+// (see SharedCanvasView).
 
 // Minimal base the doc layers over (boardDocToProjectData fills the rest from the
 // doc). Only the required ProjectData fields — never meaningful defaults that a
@@ -48,6 +56,24 @@ const EMPTY_DATA: ProjectData = { description: '', tasks: [], notes: '', updated
 // Shared, arg-ignoring no-op for the read-only cached preview's BoardModule
 // callbacks (persist / open-detail / delete are inert while not synced).
 const NOOP = () => {}
+
+// Map a POST /api/collab/link rejection code to a friendly i18n key (generic
+// fallback for anything else, e.g. a transport error).
+const linkErrorKey = (code?: string): string => {
+  switch (code) {
+    case 'already-linked':
+      return 'projectPanel.collabLinkAlreadyLinked'
+    case 'duplicate':
+      return 'projectPanel.collabLinkDuplicate'
+    case 'overlap':
+      return 'projectPanel.collabLinkOverlap'
+    case 'home-root':
+    case 'filesystem-root':
+      return 'projectPanel.collabLinkBadTarget'
+    default:
+      return 'projectPanel.collabLinkFailed'
+  }
+}
 
 // Minimal CanvasFile base the canvas doc layers over (docToCanvasFile fills the
 // rest from the doc). Only required fields — no meaningful defaults a seed could
@@ -206,9 +232,10 @@ export const SharedProjectBody = ({
   const dataRef = useRef(data)
   dataRef.current = data
   const [detailId, setDetailId] = useState<string | null>(null)
-  // Board / Canvas switcher (member view of both). activeCanvasId = the canvas
-  // currently open (null = the canvas list).
-  const [tab, setTab] = useState<'board' | 'canvas'>('board')
+  // Board / Canvas / Terminal switcher (member view). Terminal only appears once a
+  // local folder is linked (linkedPath). activeCanvasId = the canvas currently open
+  // (null = the canvas list).
+  const [tab, setTab] = useState<'board' | 'canvas' | 'terminal'>('board')
   const [activeCanvasId, setActiveCanvasId] = useState<string | null>(null)
   // True once we've adopted the doc at least once — until then the board is
   // "connecting" and NON-interactive, so a pre-sync edit can't seed-clobber the
@@ -218,6 +245,17 @@ export const SharedProjectBody = ({
   // Shown READ-ONLY while connecting/offline (instant open), then replaced by the
   // live doc once synced. null = nothing cached.
   const [cached, setCached] = useState<ProjectData | null>(null)
+  // The member's LINKED local folder for this shared project (their own clone), or
+  // null until they link one. Once set, the path is on the validateProjectPath
+  // allowlist, so a Terminal can spawn Claude there while Board/Canvas keep syncing
+  // over the doc. Fetched on open (self-contained — every member open-flow lands
+  // here, so App needn't thread it through) and set on a successful link.
+  const [linkedPath, setLinkedPath] = useState<string | null>(null)
+  const [linking, setLinking] = useState(false)
+  // Guards against a slow on-open GET /api/collab/link (it hits Supabase via the
+  // membership check) landing LATE and nulling-out a folder the user just linked
+  // in this session. Set on a local link, re-armed per project by the fetch below.
+  const linkedLocallyRef = useRef(false)
 
   // Adopt the authoritative doc: once on connect, then on every peer change. The
   // binding filters our own seed-origin updates out of onRemote, so a local edit
@@ -251,6 +289,27 @@ export const SharedProjectBody = ({
     }
   }, [collabProjectId])
 
+  // Resolve whether this member has already linked a local folder for the project,
+  // so we know to show the Terminal vs the "Link local folder" CTA. Self-contained
+  // (runs on open, keyed by collabProjectId) so it works from every open-flow —
+  // Ground card, invite, join dialog — without App threading the link through.
+  useEffect(() => {
+    let cancelled = false
+    linkedLocallyRef.current = false
+    setLinkedPath(null)
+    fetch(`/api/collab/link?collabProjectId=${encodeURIComponent(collabProjectId)}`)
+      .then((r) => (r.ok ? (r.json() as Promise<CollabLinkResponse>) : null))
+      .then((res) => {
+        // Skip if the user already linked locally meanwhile — a late null from
+        // this initial GET must not clobber the freshly-linked path.
+        if (!cancelled && res && !linkedLocallyRef.current) setLinkedPath(res.localPath)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [collabProjectId])
+
   // The single write path: update local state AND push to the shared doc. seed is
   // idempotent (writes only changed keys) and, post-adoption, `next` already
   // mirrors the doc + this one edit, so reconcile never deletes a peer's card.
@@ -261,6 +320,38 @@ export const SharedProjectBody = ({
     },
     [collab],
   )
+
+  // Link the member's OWN local folder (their clone) so a Terminal can run Claude
+  // in it. Native folder pick → POST /api/collab/link (registers it on the registry
+  // allowlist via the SAME guard as Import — the boundary is never weakened, and
+  // the owner's code is never transferred: this only points at the member's own
+  // folder) → reveal the Terminal. Board/Canvas are untouched (they keep syncing).
+  const handleLinkFolder = useCallback(async () => {
+    if (linking) return
+    setLinking(true)
+    try {
+      const picked = await pickFolder()
+      if (picked.cancelled || !picked.path) {
+        if (picked.error) alert(picked.error)
+        return
+      }
+      const r = await fetch('/api/collab/link', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ collabProjectId, localPath: picked.path }),
+      })
+      const res = (await r.json().catch(() => ({}))) as CollabLinkResponse & { error?: string }
+      if (!r.ok || !res.localPath) {
+        alert(t(linkErrorKey(res.error)))
+        return
+      }
+      linkedLocallyRef.current = true
+      setLinkedPath(res.localPath)
+      setTab('terminal')
+    } finally {
+      setLinking(false)
+    }
+  }, [collabProjectId, linking, t])
 
   // Realtime status. `live` = the doc has synced; `ready` = safe to render the
   // INTERACTIVE board (see the render + review Finding 2 — editing before sync
@@ -346,6 +437,13 @@ export const SharedProjectBody = ({
     }
   }, [data, activeCanvasId])
 
+  // The Terminal tab only exists while a folder is linked. If we ever land on
+  // 'terminal' without a linkedPath (defensive — there's no unlink yet), fall back
+  // to the board so the body never renders an empty Terminal branch.
+  useEffect(() => {
+    if (tab === 'terminal' && !linkedPath) setTab('board')
+  }, [tab, linkedPath])
+
   return (
     <Overlay
       position="absolute"
@@ -375,9 +473,12 @@ export const SharedProjectBody = ({
         }
         actions={
           <>
-            {/* Board / Canvas switcher. */}
+            {/* Board / Canvas (+ Terminal once a local folder is linked) switcher. */}
             <div className="flex items-center gap-0.5 rounded-sm border border-line p-0.5">
-              {(['board', 'canvas'] as const).map((tk) => (
+              {(linkedPath
+                ? (['board', 'canvas', 'terminal'] as const)
+                : (['board', 'canvas'] as const)
+              ).map((tk) => (
                 <button
                   key={tk}
                   type="button"
@@ -388,10 +489,24 @@ export const SharedProjectBody = ({
                       : 'text-ink-muted hover:text-ink'
                   }`}
                 >
-                  {tk === 'board' ? 'Board' : 'Canvas'}
+                  {tk === 'board' ? 'Board' : tk === 'canvas' ? 'Canvas' : 'Terminal'}
                 </button>
               ))}
             </div>
+            {/* Not linked yet → CTA to link a local folder, which unlocks Terminal.
+                Sits where the Terminal tab will appear (the "obvious place"). */}
+            {!linkedPath && (
+              <button
+                type="button"
+                onClick={handleLinkFolder}
+                disabled={linking}
+                title={t('projectPanel.collabLinkFolderHint')}
+                className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-2 py-0.5 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <FolderPlus size={12} />
+                {t('projectPanel.collabLinkFolder')}
+              </button>
+            )}
             {/* Presence — who else is in this shared project right now (u15). */}
             <CollabPresence channel={collab} />
             <span
@@ -406,7 +521,15 @@ export const SharedProjectBody = ({
       />
 
       <div className="relative min-h-0 flex-1">
-        {tab === 'canvas' ? (
+        {tab === 'terminal' && linkedPath ? (
+          // Terminal rooted at the member's OWN linked folder — a plain login shell
+          // (POST /api/terminal validates the cwd is on the allowlist) where they
+          // run `claude` in their own checkout. Dark, terminal-native surface to
+          // match the owner's Terminal tab. Board/Canvas keep syncing meanwhile.
+          <div className="flex h-full flex-col bg-[#1a1a1a]">
+            <TerminalPane projectPath={linkedPath} slotKey="default" />
+          </div>
+        ) : tab === 'canvas' ? (
           activeCanvasId ? (
             <div className="flex h-full flex-col">
               <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-1.5">

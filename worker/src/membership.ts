@@ -31,6 +31,10 @@ interface MemberRow {
   user_id?: string | null
   email?: string | null
   role?: string
+  // Acceptance state (og_project_members.status, migration 0013). A still-PENDING
+  // email invite grants NO collab access until accepted; absent (pre-0013 row /
+  // transitional null) → treated as 'accepted'.
+  status?: string | null
 }
 
 const normalizeUrl = (u: string): string => u.replace(/\/+$/, '')
@@ -60,7 +64,7 @@ export async function resolveMembership(
     const res = await fetch(
       `${baseUrl}/rest/v1/${MEMBERS_TABLE}?project_id=eq.${encodeURIComponent(
         pid,
-      )}&select=user_id,email,role`,
+      )}&select=user_id,email,role,status`,
       {
         headers: {
           apikey: env.SUPABASE_ANON_KEY,
@@ -89,5 +93,12 @@ export async function resolveMembership(
   )
   // Member confirmed by RLS but no self-row isolated (data quirk): least privilege.
   if (own.length === 0) return 'member'
-  return own.some((r) => r.role === 'owner') ? 'owner' : 'member'
+  // A still-PENDING email invite grants NO access — the named person is
+  // pre-confirmed but must accept (accept_invite RPC) before they may open the
+  // room. So an access-granting row is owner OR accepted; if the caller's only
+  // rows are pending, they are NOT yet a member (→ null → the route 403s, no
+  // ticket). `status` absent → 'accepted' (pre-0013 row).
+  const accessible = own.filter((r) => r.role === 'owner' || (r.status ?? 'accepted') !== 'pending')
+  if (accessible.length === 0) return null
+  return accessible.some((r) => r.role === 'owner') ? 'owner' : 'member'
 }

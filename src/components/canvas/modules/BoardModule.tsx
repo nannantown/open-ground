@@ -22,6 +22,7 @@ import {
 } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import { sanitizeEngineState, type EngineWorker } from '@/components/canvas/modules/useSwarmEngine'
+import { SwarmWorkerPane, type WorkerStatus } from '@/components/canvas/modules/SwarmWorkerPane'
 import { deriveWorkerActivity, type BoardCardWorker } from '@/lib/boardWorker'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
 import { dependencyCandidates } from '@/lib/boardDeps'
@@ -422,6 +423,23 @@ export const BoardModule = ({
   // exists): the terminal owns it and the fields collapse behind the header.
   const [fieldsOpen, setFieldsOpen] = useState(false)
   useEffect(() => setFieldsOpen(false), [detailId])
+  // A swarm worker's live screen was shown in the drawer and its PTY then exited
+  // (ClaudeTerminalPane.onExit, or a dead mount-probe). Keyed by terminalId — a
+  // re-dispatched worker gets a FRESH id, so it shows again, while the dead one
+  // falls back to the normal drawer instead of leaving ClaudeTerminalPane's dark
+  // "exited" void (条件: worker 終了時のフォールバック). terminalIds are
+  // crypto.randomUUID per spawn (never reused), so this set never needs pruning.
+  const [exitedWorkerScreens, setExitedWorkerScreens] = useState<ReadonlySet<string>>(
+    new Set(),
+  )
+  const markWorkerScreenExited = useCallback((terminalId: string) => {
+    setExitedWorkerScreens(prev => {
+      if (prev.has(terminalId)) return prev
+      const next = new Set(prev)
+      next.add(terminalId)
+      return next
+    })
+  }, [])
   // The "options" disclosure (assignee · depends · due) inside the fields —
   // collapsed by default so the content-first drawer stays uncluttered; the
   // user expands it only when a task needs an owner / dependency / deadline.
@@ -825,12 +843,10 @@ export const BoardModule = ({
     const base = data.config?.targetBranch?.trim() || t('board.detail.flowBaseDefault')
     const flow = task.run?.flow ?? data.config?.completionFlow
     if (flow === 'pr') {
-      // With the review column on, the card MOVES on PR-open — say so up
-      // front, or the auto-move reads as "the board did something behind
-      // my back" (F049/F050).
-      return data.config?.reviewColumn
-        ? t('board.detail.flowPrReview', { base })
-        : t('board.detail.flowPr', { base })
+      // The card MOVES to Review on PR-open (the review lane is always shown) —
+      // say so up front, or the auto-move reads as "the board did something
+      // behind my back" (F049/F050).
+      return t('board.detail.flowPrReview', { base })
     }
     return t('board.detail.flowMerge', { base })
   }
@@ -1364,6 +1380,34 @@ export const BoardModule = ({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [detailId])
 
+  // ── Swarm worker live screen in the drawer (条件①: workersByTask にこのカードの
+  //    worker がいる) ─────────────────────────────────────────────────────────
+  // When a swarm worker is dispatching the OPEN card, the drawer shows that
+  // worker's live `claude` screen (reusing SwarmWorkerPane, source='engine' —
+  // read-only, the orchestrator owns its lifecycle) INSTEAD of the Run button.
+  // A card with no worker keeps the Run button / session drawer unchanged
+  // (従来維持). The worker's terminalId comes from the runtime orchestrator poll
+  // (workersByTask), NOT persisted on ProjectTask — preserving the existing
+  // "no worker/terminalId on the card" design — and that poll is owner-gated
+  // upstream (403 → empty map), so a non-owner never enters this branch. When
+  // the worker's PTY exits, or the engine drops it from the poll, workerScreenId
+  // falls to null and we revert to the normal drawer — a dead worker never
+  // leaves a black screen.
+  const drawerWorker = detailTask ? workersByTask.get(detailTask.id) : undefined
+  const workerScreenId =
+    drawerWorker && !exitedWorkerScreens.has(drawerWorker.terminalId)
+      ? drawerWorker.terminalId
+      : null
+  // Map the worker's live beacon (+ coarse stage) to SwarmWorkerPane's status
+  // vocabulary — same derivation as the card band (deriveWorkerActivity), minus
+  // 'done'/'exited' (an exited PTY drops us out of this branch via onExit).
+  const workerScreenStatus: WorkerStatus = (() => {
+    const live = drawerWorker ? claudeStatusByPty.get(drawerWorker.terminalId) : undefined
+    if (live === 'working') return 'working'
+    if (live === 'waiting') return 'waiting'
+    return drawerWorker?.stage === 'starting' ? 'starting' : 'waiting'
+  })()
+
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1470,7 +1514,43 @@ export const BoardModule = ({
               <X size={15} />
             </button>
           </div>
-          {!hasTerminalSlot(detailTask.id) ? (
+          {workerScreenId && drawerWorker ? (
+            /* ── WORKER — a swarm worker (engine-dispatched) owns this card:
+                  show its live `claude` screen instead of the Run button. No
+                  session controls (restart / insert-task) — those act on the
+                  user's OWN slot, which a worker task has none of; the worker is
+                  the orchestrator's, surfaced read-only via SwarmWorkerPane
+                  (source='engine'). On its PTY exit we mark the id and fall back
+                  to the draft drawer below — never a dead black screen. */
+            <>
+              <div className="shrink-0 border-b border-line-soft px-5 py-2">
+                <div
+                  className="truncate text-[13px] text-ink"
+                  title={detailTask.title.trim() || undefined}
+                >
+                  {detailTask.title.trim() || t('board.card.untitled')}
+                </div>
+                {drawerWorker.note && (
+                  <div
+                    className="mt-0.5 truncate text-[11px] text-ink-faint"
+                    title={drawerWorker.note}
+                  >
+                    {drawerWorker.note}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col">
+                <SwarmWorkerPane
+                  terminalId={workerScreenId}
+                  branch={drawerWorker.branch}
+                  taskTitle={detailTask.title}
+                  status={workerScreenStatus}
+                  source="engine"
+                  onExit={() => markWorkerScreenExited(workerScreenId)}
+                />
+              </div>
+            </>
+          ) : !hasTerminalSlot(detailTask.id) ? (
             /* ── DRAFT — authoring gets the whole drawer; no terminal pane.
                   Content-first: one content textarea (autofocused) fills the
                   height, images paste/drop into it, and assignee/depends/due

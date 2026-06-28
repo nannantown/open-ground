@@ -148,6 +148,58 @@ describe('parseGeneratedElements', () => {
     expect(out[0].fill).toBeUndefined()
   })
 
+  // ── AI-path readable color floor (non-frame) ───────────────────────────────
+  // The manual editor defaults stay as-is; the AI path pins contrasting colors
+  // so a generated design can't blend into the paper canvas / a white artboard.
+
+  it('forces a high-contrast fill onto a fill-less generated shape', () => {
+    // The manual shape default (#D9CDA8) is a paper-adjacent tan; the AI path
+    // pins a readable neutral (the `ink-muted` token) so the shape stays visible.
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'shape', x: 0, y: 0, width: 80, height: 80, text: '' }]),
+    )
+    expect(out[0].fill).toBe('#6B5847')
+  })
+
+  it('keeps an explicit shape fill (override wins over the readable default)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'shape', x: 0, y: 0, width: 80, height: 80, text: '', fill: '#3A6B8C' },
+      ]),
+    )
+    expect(out[0].fill).toBe('#3A6B8C')
+  })
+
+  it('pins a readable textColor onto a text that omits one (dark ink)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'text', x: 0, y: 0, text: 'hi' }]),
+    )
+    expect(out[0].textColor).toBe('#2A1F1A')
+  })
+
+  it('keeps an explicit textColor (override wins)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'text', x: 0, y: 0, text: 'hi', textColor: '#F8F4E8' }]),
+    )
+    expect(out[0].textColor).toBe('#F8F4E8')
+  })
+
+  it('pins a visible body color onto a sticky that omits one', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'sticky', x: 0, y: 0, width: 200, height: 200, text: 'note' }]),
+    )
+    expect(out[0].color).toBe('#ECD79A')
+  })
+
+  it('keeps an explicit sticky color (override wins)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'sticky', x: 0, y: 0, width: 200, height: 200, text: 'note', color: '#F4B8A8' },
+      ]),
+    )
+    expect(out[0].color).toBe('#F4B8A8')
+  })
+
   // ── parent inference (frame containment) ───────────────────────────────────
 
   it('infers nested parentIds: text → inner frame → outer frame', () => {
@@ -204,6 +256,133 @@ describe('parseGeneratedElements', () => {
     expect(a.parentId).toBeUndefined()
     expect(b.parentId).toBe(a.id)
   })
+
+  // ── auto layout (childful frames become Figma auto-layout frames) ───────────
+
+  it('makes a childful frame an auto-layout frame and packs its children evenly', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 400, height: 600, text: 'Stack' },
+        { type: 'sticky', x: 40, y: 40, width: 100, height: 80, text: 'a' },
+        { type: 'sticky', x: 40, y: 200, width: 100, height: 80, text: 'b' },
+      ]),
+    )
+    const [frame, a, b] = out
+    // The frame gained a column layout (children spread vertically) with the
+    // shared auto-layout defaults (gap 20 / padding 24 / align start).
+    expect(frame.layout).toEqual({ mode: 'column', gap: 20, padding: 24, align: 'start' })
+    expect(a.parentId).toBe(frame.id)
+    expect(b.parentId).toBe(frame.id)
+    // Children are re-stacked by the engine: both at the left padding (24), the
+    // first at the top padding (24), the second one child-height + gap below
+    // (24 + 80 + 20 = 124) — consistent spacing, not the model's hand x/y.
+    expect(a.x).toBe(24)
+    expect(a.y).toBe(24)
+    expect(b.x).toBe(24)
+    expect(b.y).toBe(124)
+  })
+
+  it('does NOT add a layout to a childless frame (would collapse to padding)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'frame', x: 0, y: 0, width: 200, height: 200, text: 'Empty' }]),
+    )
+    expect(out[0].layout).toBeUndefined()
+  })
+
+  it("respects a model-provided layout (the model's intent wins over the default)", () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        {
+          type: 'frame',
+          x: 0,
+          y: 0,
+          width: 400,
+          height: 200,
+          text: 'Row',
+          layout: { mode: 'row', gap: 8, padding: 12, align: 'center' },
+        },
+        { type: 'sticky', x: 20, y: 20, width: 60, height: 60, text: 'a' },
+        { type: 'sticky', x: 200, y: 20, width: 60, height: 60, text: 'b' },
+      ]),
+    )
+    const [frame, a, b] = out
+    expect(frame.layout).toMatchObject({ mode: 'row', gap: 8, padding: 12, align: 'center' })
+    // Packed as a row: left padding 12, then child-width + gap (12 + 60 + 8 = 80),
+    // vertically centred (12 + (176 - 60) / 2 = 70).
+    expect(a.x).toBe(12)
+    expect(b.x).toBe(80)
+    expect(a.y).toBe(70)
+    expect(b.y).toBe(70)
+  })
+
+  it('fills in defaults for a partial model layout (only mode given)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 400, height: 400, text: 'F', layout: { mode: 'row' } },
+        { type: 'sticky', x: 40, y: 40, width: 80, height: 80, text: 'x' },
+      ]),
+    )
+    expect(out[0].layout).toEqual({ mode: 'row', gap: 20, padding: 24, align: 'start' })
+  })
+
+  it('never drops a frame for a malformed layout — supplements a valid one', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'frame', x: 0, y: 0, width: 400, height: 400, text: 'Bad', layout: { mode: 'diagonal' } },
+        { type: 'sticky', x: 40, y: 40, width: 80, height: 80, text: 'x' },
+      ]),
+    )
+    expect(out).toHaveLength(2)
+    expect(out[0].type).toBe('frame')
+    // The invalid layout was discarded (.catch) and a valid one supplemented.
+    expect(out[0].layout?.mode === 'row' || out[0].layout?.mode === 'column').toBe(true)
+    expect(out[1].parentId).toBe(out[0].id)
+  })
+
+  // ── variable text sizing (content-fitting boxes, no overflow) ───────────────
+
+  it('defaults a short label to auto-width and drops any oversized model box', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'text', x: 0, y: 0, width: 800, height: 200, text: 'Buy now' }]),
+    )
+    expect(out[0].textSizing).toBe('auto-width')
+    // auto-width hugs both axes — the model's oversized 800×200 box is dropped so
+    // the renderer measures the real glyph footprint.
+    expect(out[0].width).toBeUndefined()
+    expect(out[0].height).toBeUndefined()
+  })
+
+  it('defaults a long paragraph to auto-height with a bounded width (wraps, no overflow)', () => {
+    const long =
+      'This is a fairly long paragraph of body copy that must wrap within a bounded width instead of running off the canvas in one extremely long single line.'
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'text', x: 0, y: 0, width: 2000, text: long }]),
+    )
+    expect(out[0].textSizing).toBe('auto-height')
+    expect(out[0].width).toBeLessThanOrEqual(560)
+    expect(out[0].width).toBeGreaterThanOrEqual(120)
+    // height is measured for auto-height — never a model-set value.
+    expect(out[0].height).toBeUndefined()
+  })
+
+  it('treats a multi-line text as a paragraph (auto-height even when each line is short)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([{ type: 'text', x: 0, y: 0, text: 'Line one\nLine two' }]),
+    )
+    expect(out[0].textSizing).toBe('auto-height')
+    expect(out[0].width).toBe(360) // the default paragraph width when none given
+  })
+
+  it('respects an explicit fixed textSizing (keeps the clamped box)', () => {
+    const out = parseGeneratedElements(
+      JSON.stringify([
+        { type: 'text', x: 0, y: 0, width: 300, height: 120, text: 'pinned', textSizing: 'fixed' },
+      ]),
+    )
+    expect(out[0].textSizing).toBe('fixed')
+    expect(out[0].width).toBe(300)
+    expect(out[0].height).toBe(120)
+  })
 })
 
 // ── prompt builders ──────────────────────────────────────────────────────────
@@ -219,12 +398,34 @@ describe('buildGenerateElementsPrompt', () => {
     expect(prompt).toContain(String(MAX_GENERATED_ELEMENTS))
   })
 
+  it('teaches the readability floor (paper contrast / textColor / opacity / overlap)', () => {
+    // The generated-design-is-invisible fix: the prompt must name the paper
+    // background and demand contrast, explicit text colors, full opacity, and no
+    // legibility-killing overlaps.
+    expect(prompt).toMatch(/readab/i)
+    expect(prompt).toContain('#F2EDDE')
+    expect(prompt).toContain('textColor')
+    expect(prompt).toContain('opacity')
+    expect(prompt).toMatch(/contrast/i)
+  })
+
   it('spells the completion marker in halves — never the literal marker', () => {
     // The TUI echoes the prompt into the PTY stream; a literal marker in the
     // prompt would false-positive completion on the first repaint.
     expect(prompt).not.toContain(CANVAS_DONE_MARKER)
     expect(prompt).toContain('OPENGROUND_CANVAS')
     expect(prompt).toContain('_DONE')
+  })
+
+  it('teaches auto-layout structure and content-fitting (variable) text', () => {
+    // The model must build with auto-layout frames (not loose free placement /
+    // groups) and let text auto-size so it fits.
+    expect(prompt).toMatch(/auto layout/i)
+    expect(prompt).toContain('"row" | "column"')
+    expect(prompt).toContain('layout')
+    expect(prompt).toContain('textSizing')
+    expect(prompt).toContain('auto-height')
+    expect(prompt).toMatch(/group/i)
   })
 })
 

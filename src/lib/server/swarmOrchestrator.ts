@@ -149,6 +149,17 @@ export const RECOVER_MAX_REQUEUE = 1
  *  stuck move is surfaced as a 'move-stuck' anomaly for the owner. */
 export const MOVE_STUCK_MAX_RETRIES = 5
 
+/** REVIEW→DOING 差し戻し(rework)の往復上限 — レビューで must-fix(verify が RED)に
+ *  なったカードを doing へ戻して worker に再作業させてよい回数(conflict は対象外 —
+ *  既存の conflictedBranches/human-resolve フローのまま)。
+ *  これを超えたら 'blocked' へ退避し、review→doing→review の無限バウンスを断つ。
+ *  手動運用の `swarm-board.sh rework <id> [max]` ループガードの in-app(自律エンジン)
+ *  版で、同じ "差し戻しすぎたら人間に上げる" 契約。既定は控えめに 2(worker に最大 2
+ *  回直すチャンス、3 度目の must-fix で blocked + 'rework-exhausted' anomaly)。差し戻し
+ *  自体は autoMerge が armed のときだけ起きる(統合パスの問題分岐に乗るため)— OFF 時は
+ *  従来どおり read-only classify のみで、カードは review に留まる。 */
+export const MAX_REWORKS = 2
+
 /** STALL SELF-HEALING (Card e8022e — distinct from the crash recovery above,
  *  which handles a DEAD PTY). A worker can be ALIVE yet unresponsive — hung on an
  *  unsent prompt, a TUI wedge, or an API-overload stall (the documented "API 529"
@@ -758,6 +769,16 @@ export interface ProjectEngine {
    *  when the card is parked in 'blocked' (so a human requeue starts fresh) or
    *  succeeds/leaves the retry cycle. In-memory only. */
   recoveries: Map<string, number>
+  /** How many times each card (taskId) has been sent review→doing on a 差し戻し
+   *  (rework) — the {@link MAX_REWORKS} loop guard. Bumped on every rework; KEPT
+   *  while the card is mid-cycle (doing/review) or PARKED past the budget (in
+   *  'blocked' with count > MAX_REWORKS, which detectAnomalies reads to surface the
+   *  'rework-exhausted' anomaly); PRUNED the moment the card reaches a
+   *  fresh-start/success column (todo|done) so a human re-queue or a completion
+   *  starts its budget fresh (mirrors swarm-board.sh's rework counter reset). Keyed
+   *  by taskId — a card may be re-dispatched to a FRESH branch, so the branch is the
+   *  wrong key. In-memory only. */
+  reworks: Map<string, number>
   /** Cards whose Board COLUMN MOVE is stuck (kept pass after pass) — keyed by
    *  taskId. The anti-zombie tracker: bumped on every kept move, cleared when the
    *  move lands, escalated to 'blocked' (recovery) / surfaced as a 'move-stuck'
@@ -825,6 +846,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       verifyFailed: new Map(),
       lastIntegrateAt: 0,
       recoveries: new Map(),
+      reworks: new Map(),
       stuckMoves: new Map(),
       nudges: new Map(),
       rateLimited: new Map(),
@@ -848,6 +870,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.lastIntegrateAt ??= 0
     engine.anomalies ??= []
     engine.recoveries ??= new Map()
+    engine.reworks ??= new Map()
     engine.stuckMoves ??= new Map()
     engine.nudges ??= new Map()
     engine.rateLimited ??= new Map()
@@ -1045,6 +1068,35 @@ export interface IntegrationDeps {
    *  and it lets the engine free the slot IMMEDIATELY (no waiting for the next
    *  monitor pass to notice the PTY died). Default: killTerminal. */
   killPty: (terminalId: string) => void
+  // ── 差し戻し(rework)用 — レビューで must-fix が出たカードを review→doing に戻して
+  //    worker を再作業させるため runIntegratePass が使う seam。moveToDoing /
+  //    recoverCard / isAlive / recoverWorker は OrchestratorDeps と同型・同実体
+  //    (defaultDeps が両 interface に1つの実装を供給する)だが、runIntegratePass は
+  //    IntegrationDeps しか受け取らないので、その差し戻し経路が使うぶんをここにも宣言する。
+  /** Move a card review→doing (差し戻し) and re-record its branch — the same Board
+   *  write seam as the dispatch/promotion moves. False on a kept write (retry next
+   *  pass). (Same dep as OrchestratorDeps.moveToDoing.) */
+  moveToDoing: (projectPath: string, taskId: string, branch: string) => Promise<boolean>
+  /** Move a card to a recovery column — 'blocked' to PARK one whose rework budget is
+   *  spent, 'todo' to RE-QUEUE (re-dispatch) one whose worker is already gone. False
+   *  on a kept write. (Same dep as OrchestratorDeps.recoverCard.) */
+  recoverCard: (projectPath: string, taskId: string, column: 'todo' | 'blocked') => Promise<boolean>
+  /** Is this worker's PTY still alive? — picks the 差し戻し strategy: a LIVE worker is
+   *  continued in place (review→doing + 修正指示); a DEAD one is re-dispatched
+   *  (review→todo). (Same dep as OrchestratorDeps.isAlive.) */
+  isAlive: (terminalId: string) => boolean
+  /** Tear down a worker's worktree + PTY (KEEPS its branch) — used to clean up a
+   *  parked / re-dispatched worker on 差し戻し. (Same dep as OrchestratorDeps.recoverWorker.) */
+  recoverWorker: (opts: {
+    projectPath: string
+    worktree: string
+    terminalId: string
+  }) => Promise<{ removed: boolean; reason?: string }>
+  /** Tell a LIVE worker (over its PTY) WHY its card was sent back and to fix it
+   *  IN PLACE — one line written to its terminal so a review→doing 差し戻し actually
+   *  restarts work instead of leaving an idle (post-done) worker untouched.
+   *  best-effort (a no-op when the session is gone). Default: defaultInstructRework. */
+  instructRework: (terminalId: string, message: string) => void
 }
 
 // --- Default (real) deps ------------------------------------------------------
@@ -1305,6 +1357,17 @@ const defaultNudge = (terminalId: string): boolean => writeInput(terminalId, '\r
  *  prompt. Read-only (terminal.ts reconstructs the frame without touching the PTY). */
 const defaultRecentOutput = (terminalId: string): string | null => getTerminalScreen(terminalId)
 
+/** Send a LIVE worker a one-line 差し戻し instruction over its PTY (the rework
+ *  conduit's "fix in place" message): collapse the reason to a SINGLE line (a raw
+ *  newline would submit the half-typed prompt early) and write it with a trailing
+ *  CR so the worker's `claude` takes it as its next turn. best-effort — writeInput
+ *  is a no-op when the session is gone/finished, and workers run permissionMode
+ *  'bypass' so a stray line can't approve anything. */
+const defaultInstructRework = (terminalId: string, message: string): void => {
+  const line = message.replace(/\s+/g, ' ').trim()
+  if (line) writeInput(terminalId, `${line}\r`)
+}
+
 // --- Default integration deps (Card③) -----------------------------------------
 
 const defaultFetchReview = async (projectPath: string): Promise<ProjectTask[]> => {
@@ -1560,6 +1623,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   markConflict: defaultMarkConflict,
   cleanup: defaultCleanup,
   killPty: killTerminal,
+  instructRework: defaultInstructRework,
   worktreeExists: defaultWorktreeExists,
 })
 
@@ -1770,10 +1834,30 @@ const monitorWorkers = async (
       /* treat as null */
     }
 
-    const { promote, stage } = classifyWorker(
+    let { promote, stage } = classifyWorker(
       { alive, commitsAhead, heartbeat },
       sinceStart(w.startedAt) >= STARTUP_GRACE_MS,
     )
+
+    // 差し戻し後の re-promote 抑制(re-promote race 対策): a worker the integrate stage just sent
+    // review→doing carries `reworkAt`; its heartbeat FILE still says readyToMerge:true (the engine
+    // can't clear it), so without this guard the very next pass would re-promote it on that STALE
+    // sign — and the same-tip verify would skip-RED → 差し戻し again, burning the whole rework budget
+    // by wall-clock (~30s) before the worker can possibly fix anything. Until the worker posts a
+    // FRESH completion sign (a heartbeat strictly newer than the 差し戻し), DROP the promote and treat
+    // it as ordinary in-flight work — falling THROUGH (deliberately not `continue`) so the
+    // stall/runaway monitor below still watches it: a worker that hangs AFTER a 差し戻し must still be
+    // nudged/reclaimed, never silently parked in doing forever. A worker that genuinely fixed +
+    // re-reported beats anew → promote runs → its NEW tip is verified (green ⇒ land).
+    if (promote && w.reworkAt) {
+      const hbAtMs = heartbeat?.at ? Date.parse(heartbeat.at) : Number.NaN
+      const reworkAtMs = Date.parse(w.reworkAt)
+      const freshSign = Number.isFinite(hbAtMs) && Number.isFinite(reworkAtMs) && hbAtMs > reworkAtMs
+      if (!freshSign) {
+        promote = false
+        stage = 'running' // re-working after a 差し戻し — not 'done'
+      }
+    }
 
     if (promote) {
       let moved = false
@@ -1787,8 +1871,9 @@ const monitorWorkers = async (
         engine.recoveries.delete(w.taskId) // succeeded — drop any prior retry budget
         clearKeptMove(engine, w.taskId) // the review move landed — forget any stuck tracking
         // Keep a lingering PTY as 'done' (UI shows it; its exit frees the slot);
-        // a worker that already exited has nothing left to count.
-        if (alive) next.push(withHeartbeat({ ...w, stage: 'done' }, heartbeat))
+        // a worker that already exited has nothing left to count. Clear reworkAt — the card
+        // left doing for review, so the re-promote suppression is no longer relevant.
+        if (alive) next.push(withHeartbeat({ ...w, stage: 'done', reworkAt: undefined }, heartbeat))
       } else {
         // Board write kept — keep the worker (card still in 'doing') and retry next
         // pass; don't claim 'done' until the move lands. Track it so a worker that
@@ -2193,6 +2278,132 @@ export const runIntegratePass = async (
   }
   engine.reviews = readiness
 
+  // 差し戻し(rework) — レビューで must-fix(verify が RED)を見つけたカードを review に
+  // 滞留させず doing へ戻し、worker に再作業させる『欠落遷移』。手動 swarm-board.sh の
+  // `rework <id> [max]` と同じく per-card のループガード(engine.reworks / MAX_REWORKS)を
+  // 持ち、上限超過で 'blocked' へ退避して review→doing→review の無限バウンスを断つ。LIVE
+  // worker は同一ブランチ/worktree で継続(stage→running + 修正指示で『戻して直す』);
+  // worker が居ない/死んでいる(継続不可)なら resolveOrchestratorReview('todo') と整合的に
+  // 'todo' へ戻して再 dispatch。autoMerge が armed のとき(下の B.)だけ呼ばれる — OFF 時は
+  // 従来どおりカードは review に留まる。安全ゲート(verify GREEN まで done にしない等)は不変。
+  const reworkOrPark = async (
+    card: ProjectTask & { branch: string },
+    reasonLine: string,
+  ): Promise<void> => {
+    if (!engine.running) return // owner stop landed during the (slow) verify await — don't touch the card
+    const branch = card.branch
+    const title = shorten(card.title ?? '')
+    const count = (engine.reworks.get(card.id) ?? 0) + 1
+    const w = engine.workers.find((x) => x.branch === branch)
+
+    // 上限超過 → 'blocked' 退避(無限バウンス遮断)。leftover worker は teardown(branch 維持)。
+    if (count > MAX_REWORKS) {
+      let parked = false
+      try {
+        parked = await deps.recoverCard(engine.path, card.id, 'blocked')
+      } catch {
+        parked = false
+      }
+      if (!parked) {
+        // park の write が kept — reworks は bump せず次パスで再試行(カードは review に残る)。
+        logLine(engine, 'warn', `rework→blocked move kept (will retry): ${title}`)
+        return
+      }
+      engine.reworks.set(card.id, count) // count > MAX を保持 → detectAnomalies が surface
+      engine.verifyFailed.delete(branch)
+      engine.conflictedBranches.delete(branch)
+      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+      if (w) {
+        try {
+          await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+        } catch {
+          /* best-effort teardown */
+        }
+        engine.workers = engine.workers.filter((x) => x !== w)
+      }
+      logLine(
+        engine,
+        'error',
+        `差し戻し上限(${MAX_REWORKS})超過 — 'blocked' 退避(要人手): ${branch} (${title}) — ${reasonLine}`,
+      )
+      return
+    }
+
+    // 上限内 → 差し戻し。LIVE worker は同一ブランチで継続(『戻して直す』)。
+    const workerAlive = !!w && deps.isAlive(w.terminalId)
+    if (workerAlive && w) {
+      let moved = false
+      try {
+        moved = await deps.moveToDoing(engine.path, card.id, branch)
+      } catch {
+        moved = false
+      }
+      if (!moved) {
+        logLine(engine, 'warn', `rework→doing move kept (will retry): ${title}`)
+        return
+      }
+      engine.reworks.set(card.id, count)
+      engine.conflictedBranches.delete(branch)
+      // verifyFailed は KEEP: worker が直さず同 tip で再 promote したら verify は skip され
+      // (無駄な再 tsc 無し)また差し戻されて count が進む; 直して tip が変われば再 verify が
+      // 走り、緑なら done。
+      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+      clearKeptMove(engine, card.id)
+      // promote 済み('done' 表示)の worker を「再作業中」に戻し、なぜ戻されたかを伝えて idle の
+      // ままにしない。reworkAt は monitorWorkers の re-promote 抑制の基準時刻 — worker の心拍ファイルは
+      // まだ差し戻し前の readyToMerge:true を保持しているため、これが無いと次パスで即 re-promote され、
+      // worker が修正する間もなく差し戻しが連打されて budget を浪費する(re-promote race)。worker が
+      // 差し戻し後の新しい完了報告を出すまで promote を抑える。
+      w.stage = 'running'
+      w.reworkAt = new Date(now).toISOString()
+      try {
+        deps.instructRework(
+          w.terminalId,
+          `[レビュー差し戻し ${count}/${MAX_REWORKS}] このカードはレビューで問題が見つかり doing に戻されました。理由: ${reasonLine}。同じブランチ ${branch} で修正し、tsc/lint/test を緑にしてから swarm-beat.sh で done を再報告してください。`,
+        )
+      } catch {
+        /* best-effort PTY write */
+      }
+      logLine(
+        engine,
+        'warn',
+        `差し戻し review→doing (${count}/${MAX_REWORKS}) 同一ブランチ継続: ${branch} (${title}) — ${reasonLine}`,
+      )
+      return
+    }
+
+    // worker が居ない/死んでいる → 同一継続は不可。'todo' へ戻して新 worker に再 dispatch
+    // (resolveOrchestratorReview('todo') と整合)。leftover の死んだ worker は teardown。
+    let moved = false
+    try {
+      moved = await deps.recoverCard(engine.path, card.id, 'todo')
+    } catch {
+      moved = false
+    }
+    if (!moved) {
+      logLine(engine, 'warn', `rework→todo move kept (will retry): ${title}`)
+      return
+    }
+    engine.reworks.set(card.id, count)
+    engine.verifyFailed.delete(branch)
+    engine.conflictedBranches.delete(branch)
+    engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+    clearKeptMove(engine, card.id)
+    if (w) {
+      try {
+        await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+      } catch {
+        /* best-effort teardown */
+      }
+      engine.workers = engine.workers.filter((x) => x !== w)
+    }
+    logLine(
+      engine,
+      'warn',
+      `差し戻し review→todo (${count}/${MAX_REWORKS}) 再 dispatch(worker 不在): ${branch} (${title}) — ${reasonLine}`,
+    )
+  }
+
   // B. Act only when armed (and a trunk exists to land on).
   if (!engine.autoMerge) return
   if (!target) {
@@ -2246,16 +2457,12 @@ export const runIntegratePass = async (
       // gets — both mean "auto-merge can't take it from here").
       const r = engine.reviews.find((x) => x.taskId === card.id)
       if (r) r.status = 'conflict'
-      // Log the first time we see this red tip (a `skipped` re-check stays quiet so
-      // a stuck-red branch doesn't flood the journal every pass).
-      if (!verdict.skipped) {
-        logLine(
-          engine,
-          'error',
-          `verification failed — not merging: ${card.branch} (${shorten(card.title ?? '')}) — ${verdict.reason ?? 'check not green'}`,
-        )
-      }
-      continue // leave the card in review; do NOT integrate unverified work
+      // 差し戻し: 検証 RED は worker のコード問題 — review に滞留させず doing へ戻して直させる
+      // (『欠落遷移』の核心)。上限超過で 'blocked' 退避。verdict.reason(tsc エラー要約)を worker
+      // への修正指示に渡す。skipped(同 tip の再評価=worker が直さず同じ commit で戻ってきた)でも
+      // 差し戻して count を進め、最終的に blocked へ寄せる — これが review↔doing の無限往復を断つ。
+      await reworkOrPark(card, verdict.reason ?? 'verification not green (tsc)')
+      continue // never integrate unverified work
     }
     // Verified green (or nothing to verify) — a previously-red branch was fixed.
     engine.verifyFailed.delete(card.branch)
@@ -2277,6 +2484,7 @@ export const runIntegratePass = async (
         const cl = await deps.cleanup(engine.path, card.branch)
         engine.conflictedBranches.delete(card.branch)
         clearKeptMove(engine, card.id) // the done move landed — forget any stuck tracking
+        engine.reworks.delete(card.id) // landed — reset the 差し戻し budget (success column)
         // Reliable flag CLEAR — the BACKSTOP for two cases the became-ff clear above
         // can miss: (a) the stamp survived a server restart that lost the in-memory
         // memo (so that block never ran), and (b) that block's markConflict(false)
@@ -2498,6 +2706,25 @@ export const detectAnomalies = async (
     })
   }
 
+  // Rework-exhausted check: a card whose 差し戻し(rework)budget is spent — it bounced
+  // review→doing more than MAX_REWORKS times and the loop guard PARKED it in 'blocked'
+  // (engine.reworks keeps the over-budget count until the card reaches todo|done).
+  // Surface the parked ones so the owner sees a card the autonomy loop gave up
+  // auto-fixing (mirrors swarm-board.sh's "上限超過→blocked→ユーザーに報告して判断を仰ぐ").
+  const byIdRework = new Map(tasks.map((t) => [t.id, t]))
+  for (const [taskId, count] of Array.from(engine.reworks)) {
+    if (count <= MAX_REWORKS) continue
+    const card = byIdRework.get(taskId)
+    if (!card || columnOf(card) !== 'blocked') continue
+    out.push({
+      kind: 'rework-exhausted',
+      ref: taskId,
+      branch: typeof card.branch === 'string' ? card.branch : undefined,
+      taskTitle: card.title ?? '',
+      attempts: count,
+    })
+  }
+
   return out
 }
 
@@ -2518,6 +2745,27 @@ export const pruneStuckMoves = (engine: ProjectEngine, tasks: readonly ProjectTa
     const col = card ? columnOf(card) : null
     const valid = sm.intent === 'done' ? col === 'review' : col === 'doing'
     if (!valid) engine.stuckMoves.delete(taskId)
+  }
+}
+
+/** Drop rework counters whose card reached a SUCCESS column ('done') or vanished —
+ *  a completion resets the 差し戻し budget. A card still mid-cycle (doing | review)
+ *  or PARKED ('blocked', where the over-budget count feeds the 'rework-exhausted'
+ *  anomaly) KEEPS its counter. CRUCIALLY 'todo' is NOT pruned here: the engine's OWN
+ *  dead-worker rework re-queues a card to 'todo' (recoverCard('todo')) and the counter
+ *  MUST survive that re-dispatch, else the cap never bites and a worker that keeps
+ *  dying loops forever (review→todo→dispatch→review→…) — the exact infinite-bounce the
+ *  guard exists to stop, and the reason the counter is keyed by taskId (stable across
+ *  the fresh branch a re-dispatch mints). A human's DELIBERATE re-queue clears the
+ *  counter at its own site (resolveOrchestratorReview / stopOrchestratorWorker), so a
+ *  hand-driven fresh start still resets it. Pure state mutation — no IO. Exported for
+ *  the unit test. */
+export const pruneReworks = (engine: ProjectEngine, tasks: readonly ProjectTask[]): void => {
+  const byId = new Map(tasks.map((t) => [t.id, t]))
+  for (const taskId of Array.from(engine.reworks.keys())) {
+    const card = byId.get(taskId)
+    const col = card ? columnOf(card) : null
+    if (col === null || col === 'done') engine.reworks.delete(taskId)
   }
 }
 
@@ -2548,6 +2796,9 @@ export const runEnginePass = async (
         // Prune resolved stuck-moves BEFORE detection reads them, so a zombie that
         // a human (or a recovered write) already fixed never surfaces as an anomaly.
         pruneStuckMoves(engine, tasks)
+        // Same for rework counters: a card a human re-queued (todo) or that landed
+        // (done) drops its 差し戻し budget before detection reads it for the anomaly.
+        pruneReworks(engine, tasks)
         engine.anomalies = await detectAnomalies(engine, tasks, deps, Date.now())
       } catch {
         // A transient board read isn't itself an anomaly to surface — keep the last
@@ -2694,6 +2945,7 @@ export const stopOrchestratorWorker = async (
   }
 
   engine.recoveries.delete(w.taskId)
+  engine.reworks.delete(w.taskId) // owner halted this worker — drop its 差し戻し budget too
   engine.workers = engine.workers.filter((x) => x.terminalId !== terminalId)
   const note = parked === 'blocked' ? 'card → blocked' : parked === 'kept' ? 'card move kept' : 'card left as-is'
   logLine(
@@ -2787,6 +3039,7 @@ export const resolveOrchestratorReview = async (
   }
   engine.reviews = engine.reviews.filter((r) => r.taskId !== taskId)
   engine.recoveries.delete(taskId)
+  engine.reworks.delete(taskId) // owner's deliberate resolve = fresh 差し戻し budget
   clearKeptMove(engine, taskId)
   logLine(
     engine,

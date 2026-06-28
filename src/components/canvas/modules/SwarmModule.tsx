@@ -50,6 +50,7 @@ import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { SwarmPowerBar } from './SwarmPowerBar'
+import { SwarmOnboarding } from './SwarmOnboarding'
 import { useSwarmEngine, mergeSwarmWorkers, planSwarmPower } from './useSwarmEngine'
 
 // A dispatched worker, as remembered client-side. The PTY (terminalId) lives
@@ -796,6 +797,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // terminate path — engine workers have no entry here (read-only tiles).
   const manualByPty = new Map(workers.map((w) => [w.terminalId, w]))
 
+  // OFF / first-run: the swarm is FULLY idle — the engine isn't running and no
+  // supply / commander / worker session exists. In that state we replace the tab
+  // surface with the central onboarding (条件1/5) so a first-time owner sees the
+  // three roles + the work-flow + what Start does BEFORE pressing it. The master
+  // power bar stays above it (its Start, and the onboarding's, run the SAME
+  // powerSwarm composition). The moment anything comes up, the normal tabs return.
+  const swarmIdle = !engine.running && !supply && !manager && allWorkers.length === 0
+
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
     // panel was removed — browsing todos now lives on the Board tab (一本化), and
@@ -833,6 +842,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       {/* min-w-0 is load-bearing: without it this flex item's min-width:auto
           would grow to the worker grid's intrinsic width and push the whole
           tile area off-screen — the bug this layout fixes. */}
+      {/* OFF / first-run → the central onboarding (条件1/5): the three roles, the
+          work-flow, and what Start does, shown BEFORE pressing it. Its Start fires
+          the SAME powerSwarm composition as the bar above. Otherwise → the normal
+          supply ⇆ commander ⇆ workers tab surface. */}
+      {swarmIdle ? (
+        <SwarmOnboarding
+          onStart={() => powerSwarm(true)}
+          busy={engineBusy}
+          available={engineAvailable}
+          error={engineError}
+        />
+      ) : (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Toggle: supply (補給官) ⇆ commander (司令官) ⇆ workers. Underline tabs,
             the same vocabulary as the project tab row, on a PAPER strip (bg-bg)
@@ -1018,6 +1039,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           </div>
         )}
       </div>
+      )}
     </div>
   )
 }

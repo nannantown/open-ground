@@ -26,6 +26,9 @@ import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type {
   BranchChangesResponse,
+  ActiveBranchesResponse,
+  DescribeActiveResponse,
+  DescribeJobState,
   OpenApp,
   ProjectConfig,
   ProjectData,
@@ -297,17 +300,27 @@ const OwnedProjectBody = ({
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSavedJson = useRef<string>('')
 
-  // ── Regenerate description (auto-generate via the local `claude` CLI) ──
+  // ── Regenerate description (a navigation-safe server-side JOB) ──────────────
   // Subscription-only: the server runs claude inside a PTY (never `claude -p`).
-  // On success we AUTO-SAVE: the generated text just swaps in as the new
-  // description (no edit form, no ⌘↵) — generation is a one-shot replace.
-  // Path currently being described (null = idle). Tracked by path, not a bare
-  // boolean, because this panel is reused across project switches (no key): if
-  // the user opens a different project while claude is working, the spinner
-  // belongs to the one we started for, and a stale return must not flip the
-  // new project's state.
-  const [describingPath, setDescribingPath] = useState<string | null>(null)
-  const describing = !!project && describingPath === project.path
+  // POST /api/project/describe now START a JOB and returns { jobId } at once; the
+  // run completes + PERSISTS the description server-side even if the user
+  // navigates away, and the client polls the job. The result swaps in as the new
+  // description (no edit form, no ⌘↵) once the job lands.
+  //
+  // `describeJob` carries the PATH it belongs to, not a bare boolean: this panel
+  // is reused across project switches (no key), so a job is "mine" only while
+  // its path matches the open project. `id: null` is the brief optimistic
+  // "starting" window between the click and the {jobId} response.
+  const [describeJob, setDescribeJob] = useState<{ id: string | null; path: string } | null>(
+    null,
+  )
+  const describing = !!project && describeJob?.path === project.path
+  // Paths whose describe was STOPPED during the optimistic "starting" window —
+  // before the start POST returned a jobId, so there was nothing to cancel yet.
+  // The start POST consults this the moment it learns the jobId and cancels the
+  // job the server already created. Path-keyed (a Set) so a Stop on project A
+  // still cancels A even if the user kicks off project B before A's POST returns.
+  const describeCancelStartRef = useRef<Set<string>>(new Set())
 
   // Open the project folder in the host OS file manager (Finder / Explorer /
   // xdg-open) — fire-and-forget; the server picks the right command per platform.
@@ -387,18 +400,19 @@ const OwnedProjectBody = ({
 
   // Can we offer the chooser at all? Yes if editors were detected, or if the
   // native Finder picker is available (macOS). Otherwise — e.g. Windows/Linux
-  // with nothing detected — only the launch half shows and it falls back to CLI
-  // auto-detection.
+  // with nothing detected — there's nothing to choose, so the single button
+  // launches directly via the server's CLI auto-detection instead.
   const canChooseEditor = installedEditors.length > 0 || canPickEditor
-  // The `<>` button itself ALWAYS launches (never opens the menu — that's the
-  // `▼` half's job): the saved default if any, else the first detected editor,
-  // else the server's CLI auto-detection so it still works on Windows/Linux.
+  // The single "Open in editor" button. Clicking it opens the chooser menu when
+  // there's anything to choose (detected editors and/or the native picker) — the
+  // user picks an editor there and the saved default stays starred. With nothing
+  // to choose there's no menu to show, so it launches in one click via the
+  // server's CLI auto-detection, preserving open-in-editor on Windows/Linux.
   const handleEditorButton = useCallback(() => {
     if (!project || project.missing) return
-    if (defaultEditor) void openInEditorWith(defaultEditor)
-    else if (installedEditors.length > 0) void openInEditorWith(installedEditors[0])
+    if (canChooseEditor) setEditorMenuOpen((v) => !v)
     else void openInEditorWith()
-  }, [project, defaultEditor, installedEditors, openInEditorWith])
+  }, [project, canChooseEditor, openInEditorWith])
 
   // Remember / clear the one-click default (persisted server-side).
   const saveDefaultEditor = useCallback(async (editor: OpenApp | null) => {
@@ -447,10 +461,14 @@ const OwnedProjectBody = ({
   // data on open and pushes it back here, so the chip never drifts far).
   const [branchInfo, setBranchInfo] = useState<BranchChangesResponse | null>(null)
   const [branchModalOpen, setBranchModalOpen] = useState(false)
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false)
+  const [activeBranches, setActiveBranches] =
+    useState<ActiveBranchesResponse | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
   useEffect(() => {
     setBranchInfo(null)
     setBranchModalOpen(false)
+    setBranchMenuOpen(false)
     if (!project || project.missing) return
     let cancelled = false
     fetch(`/api/project/branch-changes?path=${encodeURIComponent(project.path)}`)
@@ -467,58 +485,217 @@ const OwnedProjectBody = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.path, project?.missing])
 
-  const regenerateDescription = useCallback(async () => {
-    if (!project || project.missing || describing) return
-    // claude can take ~2 min to answer; this panel is reused across project
-    // switches (no key), so the user may open a different project meanwhile.
-    // Pin the path we asked for and, on return, only apply the result if that
-    // project is still the loaded one — otherwise we'd prefill (and let the
-    // user save) project A's text into project B. loadedDataPathRef tracks the
-    // currently-loaded project, surviving the stale `project` closure.
-    const requestedPath = project.path
-    setDescribingPath(requestedPath)
-    try {
-      const res = await api.api.project.describe.$post({
-        query: { path: requestedPath },
-      })
-      if (loadedDataPathRef.current !== requestedPath) return
-      if (!res.ok) return
-      const body = (await res.json()) as {
-        description?: string
-        descriptionJa?: string
-        descriptionEn?: string
-      }
-      if (loadedDataPathRef.current !== requestedPath) return
-      const text = (body.description ?? '').trim()
-      // Auto-confirm: replace the description and persist immediately — the text
-      // just swaps in, no edit form / ⌘↵. dataRef holds the latest data and
-      // requestedPath is verified current above, so we never write into a
-      // switched-to project. (Saved directly rather than via the debounced
-      // persist() because that callback is defined below this hook.)
-      const base = dataRef.current
-      if (text && base) {
-        // Store the generated language pair alongside the active-language copy
-        // so a later language switch shows the matching text instantly.
-        const next = {
-          ...base,
-          description: text,
-          ...(body.descriptionJa ? { descriptionJa: body.descriptionJa.trim() } : {}),
-          ...(body.descriptionEn ? { descriptionEn: body.descriptionEn.trim() } : {}),
+  // The branch dropdown lists every active branch + its worktree. Fetch lazily
+  // when the menu opens (the chip name itself comes from branch-changes above).
+  useEffect(() => {
+    if (!branchMenuOpen) return
+    if (!project || project.missing) return
+    let cancelled = false
+    setActiveBranches(null)
+    fetch(`/api/project/active-branches?path=${encodeURIComponent(project.path)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => {
+        if (
+          !cancelled &&
+          body &&
+          Array.isArray((body as ActiveBranchesResponse).branches)
+        ) {
+          setActiveBranches(body as ActiveBranchesResponse)
+        } else if (!cancelled) {
+          setActiveBranches({ isGit: false, branches: [] })
         }
-        setData(next)
-        lastSavedJson.current = JSON.stringify(next)
-        void api.api.project
-          .$put({ query: { path: requestedPath }, json: next })
-          .then(() => onSaved?.(requestedPath, next))
-      }
-    } catch {
-      // Network/CLI failure — leave the existing description untouched.
-    } finally {
-      // Clear the spinner only for the project we started for; a stale return
-      // must not reset another project's (possibly in-flight) state.
-      setDescribingPath((p) => (p === requestedPath ? null : p))
+      })
+      .catch(() => {
+        if (!cancelled) setActiveBranches({ isGit: false, branches: [] })
+      })
+    return () => {
+      cancelled = true
     }
-  }, [project, describing, onSaved])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branchMenuOpen, project?.path, project?.missing])
+
+  // Outside-click closes the branch dropdown. The dropdown stops mousedown
+  // propagation (see JSX), so clicks inside never reach this listener.
+  useEffect(() => {
+    if (!branchMenuOpen) return
+    const close = () => setBranchMenuOpen(false)
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [branchMenuOpen])
+
+  const regenerateDescription = useCallback(async () => {
+    if (!project || project.missing) return
+    const path = project.path
+    // The run survives navigation now, so the spinner doubles as a STOP button:
+    // clicking while it's running explicitly cancels (the only thing that kills
+    // the server-side session). Single-flight on the server means a stray
+    // double-start can't fork the work, but cancelling needs the live job id.
+    if (describing) {
+      const id = describeJob?.id
+      setDescribeJob((prev) => (prev?.path === path ? null : prev))
+      if (id) {
+        fetch(`/api/project/describe/job/${encodeURIComponent(id)}/cancel`, {
+          method: 'POST',
+        }).catch(() => {})
+      } else {
+        // Optimistic "starting" window: the start POST hasn't returned a jobId
+        // yet, so there's nothing to cancel *right now*. Flag this path — the
+        // POST cancels the job the server already created the instant it learns
+        // the id. Without this, a Stop here is silently ignored: claude keeps
+        // running, persists the description, and the 5s board poll surfaces it
+        // as if the cancel never happened (plus a wasted subscription session).
+        describeCancelStartRef.current.add(path)
+      }
+      return
+    }
+    // Optimistic spinner for THIS path (id:null = "starting") while the start
+    // POST is in flight, then adopt the real job id. Clear any stale stop-flag.
+    describeCancelStartRef.current.delete(path)
+    setDescribeJob({ id: null, path })
+    try {
+      const res = await api.api.project.describe.$post({ query: { path } })
+      if (!res.ok) {
+        describeCancelStartRef.current.delete(path)
+        setDescribeJob((prev) => (prev?.path === path ? null : prev))
+        return
+      }
+      const body = (await res.json()) as { jobId?: string }
+      if (!body.jobId) {
+        describeCancelStartRef.current.delete(path)
+        setDescribeJob((prev) => (prev?.path === path ? null : prev))
+        return
+      }
+      const jobId = body.jobId
+      // A Stop pressed during the starting window flagged this path — cancel the
+      // job the server just created instead of adopting it (the Stop already
+      // cleared the spinner state). This closes the "cancelled but the
+      // description silently appears" gap.
+      if (describeCancelStartRef.current.has(path)) {
+        describeCancelStartRef.current.delete(path)
+        fetch(`/api/project/describe/job/${encodeURIComponent(jobId)}/cancel`, {
+          method: 'POST',
+        }).catch(() => {})
+        setDescribeJob((prev) => (prev?.path === path && prev.id === null ? null : prev))
+        return
+      }
+      // Only adopt if we're still optimistically describing THIS path (a fast
+      // project switch + back could have moved us; the re-attach effect covers
+      // that case from the server instead).
+      setDescribeJob((prev) => (prev?.path === path && prev.id === null ? { id: jobId, path } : prev))
+    } catch {
+      describeCancelStartRef.current.delete(path)
+      setDescribeJob((prev) => (prev?.path === path ? null : prev))
+    }
+  }, [project, describing, describeJob])
+
+  // Re-attach to a describe job ALREADY running for the open project — e.g. the
+  // user started one, switched tab / project / went to Ground (this panel is
+  // reused across switches), and came back. The run kept going server-side;
+  // restore the spinner so it isn't a mystery and let the poll effect pick up
+  // the result. Runs on every project switch.
+  useEffect(() => {
+    const path = project?.path
+    // Stop tracking the previous project's job synchronously (it keeps running
+    // server-side; we re-attach below if THIS project has one). Keep an
+    // optimistic start we just kicked off for the same path.
+    setDescribeJob((prev) => (prev && prev.path === path ? prev : null))
+    if (!path || project?.missing) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/project/describe/active')
+        if (!res.ok) return
+        const data = (await res.json()) as DescribeActiveResponse
+        if (cancelled || project?.path !== path) return
+        const mine = data.jobs.find((j) => j.projectPath === path)
+        if (mine) setDescribeJob({ id: mine.id, path })
+      } catch {
+        // offline / server restarting — nothing to re-attach to
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.path, project?.missing])
+
+  // Poll the running describe job for completion. The job persisted the
+  // description into projectData server-side, so on 'done' we adopt the FRESH
+  // projectData — but only while this project is still the loaded one, so a
+  // stale return never writes project A's text into project B (the original
+  // bug). Stops watching on unmount WITHOUT cancelling the job (the run must
+  // survive navigation) — only an explicit Cancel kills it.
+  useEffect(() => {
+    const job = describeJob
+    if (!job || !job.id) return // idle, or optimistically "starting"
+    const jobId = job.id
+    const path = job.path
+    let cancelled = false
+    // Guard against overlapping polls running past the 1.5s interval.
+    let inFlight = false
+    const stop = () => setDescribeJob((prev) => (prev?.id === jobId ? null : prev))
+    const poll = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const res = await fetch(`/api/project/describe/job/${encodeURIComponent(jobId)}`)
+        if (cancelled) return
+        if (res.status === 404) {
+          // Swept / unknown — stop watching (any result is already persisted).
+          stop()
+          return
+        }
+        if (!res.ok) return
+        const state = (await res.json()) as DescribeJobState
+        if (cancelled || state.status === 'running') return
+        if (state.status === 'done' && loadedDataPathRef.current === path) {
+          // The job persisted the description into projectData server-side. Adopt
+          // it through the SAME dual-writer policy as the live-board poll
+          // (reconcileExternalData — what reloadProjectData uses): a pending local
+          // edit (config/launch, a task delete, a module toggle not yet flushed)
+          // must NOT be clobbered — it wins this round and the debounced persist's
+          // CAS reconciles it; our own echo is dropped; only a genuine external
+          // change is adopted. (A bespoke setData here silently ate unsaved edits.)
+          // onSavedRef (not onSaved) keeps this consistent with the stable-identity
+          // refresh pattern reloadProjectData established.
+          const fresh = await api.api.project
+            .$get({ query: { path } }, { init: { cache: 'no-store' } })
+            .catch(() => null)
+          if (!cancelled && fresh?.ok && loadedDataPathRef.current === path) {
+            const d = (await fresh.json()) as ProjectData
+            const decision = reconcileExternalData({
+              current: dataRef.current,
+              lastSavedJson: lastSavedJson.current,
+              fetched: d,
+            })
+            if (decision.kind === 'adopt') {
+              setData(decision.data)
+              lastSavedJson.current = decision.json
+              onSavedRef.current?.(path, decision.data)
+            }
+          }
+        }
+        // 'error' (incl. 'cancelled') → just stop; leave the description as-is.
+        stop()
+      } catch {
+        // transient (server reloading) — keep polling
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const intervalId = window.setInterval(() => void poll(), 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+    // Keyed on the job id only: (id, path) are set together and immutable, so a
+    // re-subscribe is needed only when the id changes — not on every describeJob
+    // object identity churn. onSaved is read via onSavedRef (stable identity), so
+    // it's intentionally not a dep (App re-renders would otherwise tear the
+    // 1.5s interval down before it ticks — the same trap reloadProjectData hit).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [describeJob?.id])
 
   useEffect(() => {
     setProjectSettingsOpen(false)
@@ -1601,12 +1778,11 @@ const OwnedProjectBody = ({
             >
               <FolderOpen size={16} strokeWidth={1.75} />
             </button>
-            {/* Open the folder in an editor. The `<>` half always launches —
-                the default, else the first detected editor, else CLI
-                auto-detection; the ▼ half is the only menu trigger (editors
-                installed on this machine — open any, or star one as the new
-                default). mousedown stops at the container so the outside-click
-                closer only fires for clicks truly outside. */}
+            {/* Open the folder in an editor — a single button. Clicking it opens
+                the chooser menu (editors installed on this machine — open any, or
+                star one as the new default); with nothing to choose it launches
+                directly via CLI auto-detection. mousedown stops at the container
+                so the outside-click closer only fires for clicks truly outside. */}
             <div
               className="relative flex shrink-0 items-center"
               onMouseDown={(e) => e.stopPropagation()}
@@ -1614,39 +1790,25 @@ const OwnedProjectBody = ({
               <button
                 onClick={handleEditorButton}
                 disabled={project.missing}
-                title={
-                  defaultEditor
-                    ? t('projectPanel.openInEditorWith', { name: defaultEditor.name })
-                    : t('projectPanel.openInEditor')
-                }
-                aria-label={
-                  defaultEditor
-                    ? t('projectPanel.openInEditorWith', { name: defaultEditor.name })
-                    : t('projectPanel.openInEditor')
-                }
-                className={`rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
-                  canChooseEditor ? 'rounded-r-none' : ''
+                title={t('projectPanel.openInEditor')}
+                aria-label={t('projectPanel.openInEditor')}
+                aria-haspopup={canChooseEditor ? 'menu' : undefined}
+                aria-expanded={canChooseEditor ? editorMenuOpen : undefined}
+                className={`flex shrink-0 items-center gap-0.5 rounded-sm p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
+                  editorMenuOpen
+                    ? 'bg-bg-inset text-ink-muted'
+                    : 'text-ink-faint hover:bg-bg-inset hover:text-ink-muted active:bg-bg-inset active:text-ink-muted'
                 }`}
               >
                 <SquareCode size={16} strokeWidth={1.75} />
+                {canChooseEditor && (
+                  <ChevronDown
+                    size={12}
+                    strokeWidth={2}
+                    className={`shrink-0 transition-transform ${editorMenuOpen ? 'rotate-180' : ''}`}
+                  />
+                )}
               </button>
-              {canChooseEditor && (
-                <button
-                  onClick={() => setEditorMenuOpen((v) => !v)}
-                  disabled={project.missing}
-                  title={t('projectPanel.chooseEditor')}
-                  aria-label={t('projectPanel.chooseEditor')}
-                  aria-haspopup="menu"
-                  aria-expanded={editorMenuOpen}
-                  className={`-ml-px rounded-sm rounded-l-none p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
-                    editorMenuOpen
-                      ? 'bg-bg-inset text-ink-muted'
-                      : 'text-ink-faint hover:bg-bg-inset hover:text-ink-muted'
-                  }`}
-                >
-                  <ChevronDown size={12} strokeWidth={2} />
-                </button>
-              )}
               {editorMenuOpen && (
                 <div
                   role="menu"
@@ -1722,24 +1884,113 @@ const OwnedProjectBody = ({
             {/* Branch chip — only for git projects: current branch, a dot when
                 the working tree is dirty; opens the Branch changes modal. */}
             {branchInfo?.isGit && (
-              <button
-                onClick={() => setBranchModalOpen(true)}
-                disabled={project.missing}
-                title={t('projectPanel.branchChipTitle')}
-                aria-label={t('projectPanel.branchChipTitle')}
-                className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-line px-2.5 py-0.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+              <div
+                className="relative flex shrink-0 items-center"
+                onMouseDown={(e) => e.stopPropagation()}
               >
-                <GitBranch size={11} strokeWidth={2} className="shrink-0" />
-                <span className="max-w-[180px] truncate font-mono">
-                  {branchInfo.branch ?? 'HEAD'}
-                </span>
-                {branchInfo.working.length > 0 && (
-                  <span
-                    aria-hidden
-                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
+                <button
+                  onClick={() => setBranchMenuOpen((v) => !v)}
+                  disabled={project.missing}
+                  title={t('projectPanel.branchMenuTitle')}
+                  aria-label={t('projectPanel.branchMenuTitle')}
+                  aria-haspopup="menu"
+                  aria-expanded={branchMenuOpen}
+                  className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
+                    branchMenuOpen
+                      ? 'border-line bg-bg-inset text-ink'
+                      : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink'
+                  }`}
+                >
+                  <GitBranch size={11} strokeWidth={2} className="shrink-0" />
+                  <span className="max-w-[180px] truncate font-mono">
+                    {branchInfo.branch ?? 'HEAD'}
+                  </span>
+                  {branchInfo.working.length > 0 && (
+                    <span
+                      aria-hidden
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
+                    />
+                  )}
+                  <ChevronDown
+                    size={11}
+                    strokeWidth={2}
+                    className={`shrink-0 transition-transform ${
+                      branchMenuOpen ? 'rotate-180' : ''
+                    }`}
                   />
+                </button>
+                {branchMenuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute left-0 top-full z-50 mt-1 max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                  >
+                    <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
+                      {t('projectPanel.branchMenuTitle')}
+                    </div>
+                    {activeBranches === null ? (
+                      <div className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-faint">
+                        <Loader2 size={12} className="animate-spin" />
+                      </div>
+                    ) : activeBranches.branches.length === 0 ? (
+                      <div className="px-3 py-1.5 text-[12px] text-ink-faint">
+                        {t('projectPanel.branchMenuEmpty')}
+                      </div>
+                    ) : (
+                      activeBranches.branches.map((b) => (
+                        <div
+                          key={b.name}
+                          role="menuitem"
+                          className="flex items-start gap-2 px-3 py-1.5"
+                        >
+                          <GitBranch
+                            size={12}
+                            strokeWidth={2}
+                            className={`mt-0.5 shrink-0 ${
+                              b.current ? 'text-accent' : 'text-ink-faint'
+                            }`}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`truncate font-mono text-[12px] ${
+                                  b.current ? 'text-ink' : 'text-ink-muted'
+                                }`}
+                                title={b.name}
+                              >
+                                {b.name}
+                              </span>
+                              {b.current && (
+                                <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-[9px] uppercase tracking-wide text-ink-faint">
+                                  {t('projectPanel.branchMenuCurrent')}
+                                </span>
+                              )}
+                            </div>
+                            {b.worktreePath && (
+                              <div
+                                className="truncate text-[11px] text-ink-faint"
+                                title={b.worktreePath}
+                              >
+                                {b.worktreePath}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    <div className="my-1 border-t border-line" />
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setBranchMenuOpen(false)
+                        setBranchModalOpen(true)
+                      }}
+                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                    >
+                      {t('projectPanel.branchChangesTitle')}
+                    </button>
+                  </div>
                 )}
-              </button>
+              </div>
             )}
           </div>
           {data && (
@@ -1751,13 +2002,17 @@ const OwnedProjectBody = ({
                 {/* Refresh button — spins while claude works */}
                 <button
                   onClick={regenerateDescription}
-                  disabled={describing || project.missing}
+                  disabled={project.missing}
                   title={
                     describing
-                      ? t('projectPanel.generating')
+                      ? t('projectPanel.cancelDescription')
                       : t('projectPanel.regenerateDescription')
                   }
-                  aria-label={t('projectPanel.regenerateDescription')}
+                  aria-label={
+                    describing
+                      ? t('projectPanel.cancelDescription')
+                      : t('projectPanel.regenerateDescription')
+                  }
                   className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
                 >
                   {describing ? (
@@ -1775,13 +2030,17 @@ const OwnedProjectBody = ({
               <div className="mt-1">
                 <button
                   onClick={regenerateDescription}
-                  disabled={describing || project.missing}
+                  disabled={project.missing}
                   title={
                     describing
-                      ? t('projectPanel.generating')
+                      ? t('projectPanel.cancelDescription')
                       : t('projectPanel.generateDescription')
                   }
-                  aria-label={t('projectPanel.generateDescription')}
+                  aria-label={
+                    describing
+                      ? t('projectPanel.cancelDescription')
+                      : t('projectPanel.generateDescription')
+                  }
                   className="rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
                 >
                   {describing
@@ -1898,13 +2157,10 @@ const OwnedProjectBody = ({
         // Right-click menu on a tab: detach a custom (non-destructive — library
         // delete lives in the picker) or hide a built-in from this project.
         rowMenu={{ actionFor: tabRowAction }}
-        // Cards waiting in Review — the reviewer's pull signal (F066). Only
-        // counted when the review column is enabled for this board.
+        // Cards waiting in Review — the reviewer's pull signal (F066).
         badges={{
           board:
-            data?.config?.reviewColumn
-              ? data.tasks.filter(t => !t.done && t.boardColumn === 'review').length
-              : 0,
+            data?.tasks.filter(t => !t.done && t.boardColumn === 'review').length ?? 0,
         }}
       />
 
@@ -2560,8 +2816,8 @@ const ProjectSettingsDialog = ({
   }) => {
     const d = dataRef.current
     // Spread first: every config key this dialog doesn't currently SHOW
-    // (completionFlow, verifyCommands, reviewColumn) is carried through
-    // untouched — saving must never strip data the user couldn't see.
+    // (completionFlow, verifyCommands) is carried through untouched — saving
+    // must never strip data the user couldn't see.
     const config: ProjectConfig = { ...d.config }
     config.targetBranch = (over.targetBranch ?? targetBranch).trim() || undefined
     // The assignee-name roster (solo users assign cards too).

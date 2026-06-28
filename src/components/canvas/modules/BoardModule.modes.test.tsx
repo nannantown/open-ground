@@ -443,7 +443,7 @@ describe('BoardModule drawer — Session mode', () => {
     )
     await flush()
     expect(getByText('task/u2-105-account')).toBeTruthy()
-    expect(getByText('board.detail.flowPr')).toBeTruthy()
+    expect(getByText('board.detail.flowPrReview')).toBeTruthy()
     const pr = container.querySelector('a[href="https://github.com/o/r/pull/42"]')
     expect(pr).toBeTruthy()
   })

@@ -27,6 +27,18 @@
 import { newId } from '@/lib/ids'
 import { launchClaude } from './claudeTerminal'
 import { killTerminal, subscribeTerminal } from './terminal'
+import { getPromptLang, type PromptLang } from './promptLang'
+import {
+  ProjectDataConflictError,
+  readProjectData,
+  writeProjectData,
+} from './projectData'
+import type {
+  DescribeActiveJob,
+  DescribeJobState,
+  DescribeJobStatus,
+  ProjectData,
+} from '@/lib/types'
 
 export const DESC_MARKER_EN = 'OPENGROUND_DESC_EN:'
 export const DESC_MARKER_JA = 'OPENGROUND_DESC_JA:'
@@ -126,9 +138,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 export const generateProjectDescription = async (
   projectPath: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<GeneratedDescriptions> => {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  // An already-aborted run (the job was cancelled before it reached the front of
+  // the queue) must not burn a claude session out of the subscription window.
+  if (opts.signal?.aborted) throw new Error('description generation aborted')
 
   // bypass (= --dangerously-skip-permissions): no human is at the TTY to
   // approve tool use, and the prompt forbids any mutation, so the read-only
@@ -147,6 +162,19 @@ export const generateProjectDescription = async (
 
   let buffer = ''
   let exited = false
+  // An explicit cancel kills the PTY mid-flight (the ONLY thing that stops a
+  // run now that it's a navigation-safe job — a dropped HTTP connection does
+  // not). Same shape as canvasAi.ts's runFileTaskOnce abort handling.
+  let aborted = false
+  const onAbort = () => {
+    aborted = true
+    try {
+      killTerminal(ref.terminalId)
+    } catch {
+      // already gone
+    }
+  }
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
   const sub = subscribeTerminal(
     ref.terminalId,
     (chunk) => {
@@ -160,18 +188,21 @@ export const generateProjectDescription = async (
   try {
     while (Date.now() < deadline) {
       await sleep(POLL_MS)
+      if (aborted) throw new Error('description generation aborted')
       const pair = extractMarkerPair(buffer)
       // Complete only when BOTH languages landed — the two lines arrive
       // together at the very end, so a one-sided read is just mid-stream.
       if (pair.en && pair.ja) return pair
       if (exited || sub?.info.finishedAt) break
     }
+    if (aborted) throw new Error('description generation aborted')
     // Timed out, or the session ended early — take whatever DID land (one
     // language alone is still better than nothing).
     const pair = extractMarkerPair(buffer)
     if (pair.en || pair.ja) return pair
     throw new Error('could not extract a description from the claude session')
   } finally {
+    opts.signal?.removeEventListener('abort', onAbort)
     sub?.unsubscribe()
     try {
       killTerminal(ref.terminalId)
@@ -179,4 +210,227 @@ export const generateProjectDescription = async (
       // best-effort teardown
     }
   }
+}
+
+// ── Server-side job registry ─────────────────────────────────────────────────
+//
+// WHY JOBS (mirrors canvasAi.ts's registry — read its top comment): a describe
+// run is a whole claude PTY session (haiku, but still up to ~2min). The old
+// design held one HTTP fetch open for the entire run and the UI applied the
+// result on return — so navigating away (switching tab / project / back to
+// Ground re-keys or unmounts the panel) discarded the result via the panel's
+// loadedDataPathRef guard, and the generated description was lost. So a run is
+// now a JOB that is NOT bound to any request connection: it runs to completion
+// on its OWN AbortController (killed ONLY by an explicit cancel) and PERSISTS
+// the result into the project's central tasks.json server-side regardless of
+// who's watching. The client polls the job for progress + result, and
+// re-attaches to a still-running one after a navigation.
+//
+// Stored on globalThis so the registry survives `tsx watch` reloads in dev —
+// same pattern as the terminal pool and the canvas AI registry.
+
+interface DescribeJobInternal {
+  id: string
+  projectPath: string
+  status: DescribeJobStatus
+  startedAt: number
+  /** Aborting this (and only this) kills the claude session — explicit cancel. */
+  controller: AbortController
+  finishedAt?: number
+  // ── results (set on status 'done') ──
+  description?: string
+  descriptionJa?: string
+  descriptionEn?: string
+  error?: string
+}
+
+const jobGlobal = globalThis as typeof globalThis & {
+  __openground_describe_jobs?: Map<string, DescribeJobInternal>
+}
+const describeJobs: Map<string, DescribeJobInternal> =
+  jobGlobal.__openground_describe_jobs ??
+  (jobGlobal.__openground_describe_jobs = new Map())
+
+// Keep a finished job around this long so a polling client reliably catches its
+// terminal state before it's swept (the client polls every ~1.5s, so this is
+// ~200× the interval — a miss is effectively impossible while the panel is open).
+const JOB_RETAIN_MS = 5 * 60_000
+
+const scheduleJobSweep = (id: string): void => {
+  const timer = setTimeout(() => {
+    describeJobs.delete(id)
+  }, JOB_RETAIN_MS)
+  // Never keep the process alive just for a sweep (clean exit / tests).
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+}
+
+/** Read-modify-write the generated description pair into the project's central
+ *  tasks.json under CAS, retrying a few times so a concurrent board edit (the
+ *  user kept working in the panel while claude described) neither blocks the
+ *  description nor gets clobbered by it. Mirrors the field-merge the client used
+ *  to do: only the languages that landed are written, the legacy single-string
+ *  `description` holds the active-language copy. */
+const persistDescription = async (
+  projectPath: string,
+  fields: { description: string; descriptionJa?: string; descriptionEn?: string },
+): Promise<void> => {
+  for (let attempt = 0; ; attempt++) {
+    const data = await readProjectData(projectPath)
+    const next: ProjectData = {
+      ...data,
+      description: fields.description,
+      ...(fields.descriptionJa ? { descriptionJa: fields.descriptionJa } : {}),
+      ...(fields.descriptionEn ? { descriptionEn: fields.descriptionEn } : {}),
+    }
+    try {
+      await writeProjectData(projectPath, next, {
+        expectUpdatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
+      })
+      return
+    } catch (e) {
+      // A concurrent write moved the CAS token — re-read and retry so the
+      // description still lands. Bounded so a pathological write storm can't spin.
+      if (e instanceof ProjectDataConflictError && attempt < 3) continue
+      throw e
+    }
+  }
+}
+
+/** Dependencies of the describe job — injectable for tests (defaults = the real
+ *  PTY engine + projectData persistence + the settings prompt language). Tests
+ *  MUST inject all three so a job never spawns claude or touches ~/.openground. */
+export interface DescribeJobDeps {
+  generate?: typeof generateProjectDescription
+  persist?: typeof persistDescription
+  lang?: () => Promise<PromptLang>
+}
+
+/** Start a describe job for `projectPath`. Returns the job id immediately; on
+ *  completion the description pair is persisted to the project's tasks.json
+ *  server-side. SINGLE-FLIGHT per project: if a run is already going for this
+ *  path, its id is returned (the client re-attaches to it) rather than spawning
+ *  a second claude session — so a double-click, or a re-open mid-run, never
+ *  forks the work. */
+export const startDescribeJob = (
+  args: { projectPath: string; timeoutMs?: number },
+  deps: DescribeJobDeps = {},
+): string => {
+  // Single-flight: reuse a still-running job for the same project.
+  const existing = Array.from(describeJobs.values()).find(
+    (j) => j.status === 'running' && j.projectPath === args.projectPath,
+  )
+  if (existing) return existing.id
+  const generate = deps.generate ?? generateProjectDescription
+  const persist = deps.persist ?? persistDescription
+  const lang = deps.lang ?? getPromptLang
+  const id = newId()
+  const controller = new AbortController()
+  const job: DescribeJobInternal = {
+    id,
+    projectPath: args.projectPath,
+    status: 'running',
+    startedAt: Date.now(),
+    controller,
+  }
+  describeJobs.set(id, job)
+  // Fire-and-forget by design: the route returns {jobId} right away and the run
+  // is NOT awaited by — nor bound to — the HTTP connection.
+  void (async () => {
+    try {
+      const pair = await generate(args.projectPath, {
+        signal: controller.signal,
+        timeoutMs: args.timeoutMs,
+      })
+      if (controller.signal.aborted) throw new Error('cancelled')
+      const l = await lang()
+      // Active-language copy first; fall back to the other so the persisted
+      // `description` is never empty when at least one language landed.
+      const description = (l === 'ja' ? pair.ja : pair.en) ?? pair.en ?? pair.ja ?? ''
+      if (!description) {
+        throw new Error('could not extract a description from the claude session')
+      }
+      // A cancel that lands after claude finished but before we persist must
+      // still win — otherwise a "cancelled" run would silently write the
+      // description into projectData. Re-check so the abort short-circuits it.
+      if (controller.signal.aborted) throw new Error('cancelled')
+      await persist(args.projectPath, {
+        description,
+        ...(pair.ja ? { descriptionJa: pair.ja } : {}),
+        ...(pair.en ? { descriptionEn: pair.en } : {}),
+      })
+      job.description = description
+      job.descriptionJa = pair.ja ?? undefined
+      job.descriptionEn = pair.en ?? undefined
+      job.status = 'done'
+    } catch (e) {
+      job.status = 'error'
+      job.error = controller.signal.aborted
+        ? 'cancelled'
+        : e instanceof Error
+          ? e.message
+          : 'description generation failed'
+    } finally {
+      job.finishedAt = Date.now()
+      scheduleJobSweep(id)
+    }
+  })()
+  return id
+}
+
+/** Serializable state of one describe job (GET /api/project/describe/job/:id).
+ *  null when the id is unknown or already swept. `now` is injected so tests need
+ *  no fake timers. */
+export const getDescribeJobState = (
+  id: string,
+  now: number = Date.now(),
+): DescribeJobState | null => {
+  const j = describeJobs.get(id)
+  if (!j) return null
+  return {
+    id: j.id,
+    projectPath: j.projectPath,
+    status: j.status,
+    startedAt: new Date(j.startedAt).toISOString(),
+    elapsedMs: Math.max(0, now - j.startedAt),
+    error: j.error,
+    description: j.description,
+    descriptionJa: j.descriptionJa,
+    descriptionEn: j.descriptionEn,
+  }
+}
+
+/** Every RUNNING describe job (GET /api/project/describe/active) — the panel
+ *  re-attaches to its own project's run after a navigation. Done / errored jobs
+ *  are excluded. `now` injected for tests. */
+export const listActiveDescribeJobs = (now: number = Date.now()): DescribeActiveJob[] => {
+  const out: DescribeActiveJob[] = []
+  describeJobs.forEach((j) => {
+    if (j.status !== 'running') return
+    out.push({
+      id: j.id,
+      projectPath: j.projectPath,
+      elapsedMs: Math.max(0, now - j.startedAt),
+    })
+  })
+  return out
+}
+
+/** Explicitly cancel a describe job — aborts its AbortController, which kills
+ *  the claude session. This is the ONLY thing that kills a run; a dropped HTTP
+ *  connection does NOT. Returns whether the job existed. */
+export const cancelDescribeJob = (id: string): boolean => {
+  const j = describeJobs.get(id)
+  if (!j) return false
+  try {
+    j.controller.abort()
+  } catch {
+    // already torn down
+  }
+  return true
+}
+
+// Test-only: the registry lives on globalThis, so it would leak across test
+// files without an explicit reset.
+export const _resetDescribeJobsForTest = (): void => {
+  describeJobs.clear()
 }

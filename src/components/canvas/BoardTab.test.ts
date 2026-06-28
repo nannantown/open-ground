@@ -3,9 +3,7 @@ import {
   assigneeMatches,
   boardColumnKeys,
   columnOf,
-  displayColumnOf,
   byColumnOrder,
-  withReviewColumnToggled,
   withDoneCleared,
   withCardDuplicated,
   withCardMoved,
@@ -31,34 +29,20 @@ describe('columnOf (back-compat)', () => {
   it('respects an explicit column over the done flag', () => {
     expect(columnOf(task({ done: true, boardColumn: 'doing' }))).toBe('doing')
   })
+  it('keeps an explicit review-column card in review (always-shown lane)', () => {
+    expect(columnOf(task({ boardColumn: 'review' }))).toBe('review')
+  })
 })
 
-describe('boardColumnKeys (review column derivation)', () => {
-  it('omits review when the flag is off', () => {
-    expect(boardColumnKeys(false)).toEqual(['todo', 'doing', 'done', 'blocked'])
-  })
-  it('slots review between doing and done when the flag is on', () => {
-    expect(boardColumnKeys(true)).toEqual([
+describe('boardColumnKeys (always all five lanes)', () => {
+  it('returns the five fixed lanes with review between doing and done', () => {
+    expect(boardColumnKeys()).toEqual([
       'todo',
       'doing',
       'review',
       'done',
       'blocked',
     ])
-  })
-})
-
-describe('displayColumnOf (review fold-into-doing rule)', () => {
-  it('keeps a review card in review when the flag is on', () => {
-    expect(displayColumnOf(task({ boardColumn: 'review' }), true)).toBe('review')
-  })
-  it('folds a review card into doing when the flag is off — never lost', () => {
-    expect(displayColumnOf(task({ boardColumn: 'review' }), false)).toBe('doing')
-  })
-  it('leaves non-review cards alone regardless of the flag', () => {
-    expect(displayColumnOf(task({ boardColumn: 'doing' }), false)).toBe('doing')
-    expect(displayColumnOf(task({ done: true }), false)).toBe('done')
-    expect(displayColumnOf(task({}), true)).toBe('todo')
   })
 })
 
@@ -78,47 +62,6 @@ describe('assigneeMatches (Mine-only filter compare)', () => {
     expect(assigneeMatches('   ', '   ')).toBe(false)
   })
 })
-
-describe('withReviewColumnToggled (toolbar toggle → persisted config)', () => {
-  const projectData = (config?: ProjectData['config']): ProjectData => ({
-    description: '',
-    notes: '',
-    updatedAt: '2026-01-01T00:00:00Z',
-    tasks: [task({})],
-    ...(config !== undefined ? { config } : {}),
-  })
-
-  it('off → on stores true', () => {
-    expect(withReviewColumnToggled(projectData()).config?.reviewColumn).toBe(true)
-    expect(
-      withReviewColumnToggled(projectData({ reviewColumn: undefined })).config
-        ?.reviewColumn,
-    ).toBe(true)
-  })
-
-  it('on → off stores undefined, never false (settings-dialog convention)', () => {
-    const next = withReviewColumnToggled(projectData({ reviewColumn: true }))
-    expect(next.config?.reviewColumn).toBeUndefined()
-    expect(next.config?.reviewColumn).not.toBe(false)
-  })
-
-  it('round-trips: two toggles land back on undefined', () => {
-    const once = withReviewColumnToggled(projectData())
-    const twice = withReviewColumnToggled(once)
-    expect(once.config?.reviewColumn).toBe(true)
-    expect(twice.config?.reviewColumn).toBeUndefined()
-  })
-
-  it('preserves the rest of the data and config — only the flag changes', () => {
-    const data = projectData({ completionFlow: 'pr', targetBranch: 'main' })
-    const next = withReviewColumnToggled(data)
-    expect(next.tasks).toBe(data.tasks)
-    expect(next.description).toBe(data.description)
-    expect(next.config?.completionFlow).toBe('pr')
-    expect(next.config?.targetBranch).toBe('main')
-  })
-})
-
 
 describe('withDoneCleared (Done-column bulk clear)', () => {
   const projectData = (tasks: ProjectTask[]): ProjectData => ({
@@ -265,7 +208,7 @@ describe('withCardMoved (drag/drop + merged-chip move — full-column renumberin
     const a = task({ id: 'a', boardColumn: 'todo', boardOrder: 0 })
     const b = task({ id: 'b', boardColumn: 'todo', boardOrder: 1 })
     const m = task({ id: 'm', boardColumn: 'doing', boardOrder: 0 })
-    const next = withCardMoved(projectData([a, b, m]), 'm', 'todo', 'b', false)
+    const next = withCardMoved(projectData([a, b, m]), 'm', 'todo', 'b')
     expect(next.tasks.find(t => t.id === 'm')).toMatchObject({
       boardColumn: 'todo',
       boardOrder: 1,
@@ -285,7 +228,7 @@ describe('withCardMoved (drag/drop + merged-chip move — full-column renumberin
     const m = task({ id: 'm', boardColumn: 'doing', boardOrder: 0 })
     // The UI drops m before v3 (a VISIBLE card) — in the full column that is
     // the slot between h2 and v3.
-    const next = withCardMoved(projectData([h0, v1, h2, v3, m]), 'm', 'done', 'v3', false)
+    const next = withCardMoved(projectData([h0, v1, h2, v3, m]), 'm', 'done', 'v3')
     expect(['h0', 'v1', 'h2', 'm', 'v3'].map(id => orderOf(next, id))).toEqual([
       0, 1, 2, 3, 4,
     ])
@@ -298,7 +241,7 @@ describe('withCardMoved (drag/drop + merged-chip move — full-column renumberin
   it('a null beforeId (drop at the end / merged-chip "→ Done") appends after EVERY card, hidden included', () => {
     const hidden = task({ id: 'hidden', boardColumn: 'done', boardOrder: 5, done: true })
     const m = task({ id: 'm', boardColumn: 'review', boardOrder: 0, branch: 'task/x' })
-    const next = withCardMoved(projectData([hidden, m]), 'm', 'done', null, true)
+    const next = withCardMoved(projectData([hidden, m]), 'm', 'done', null)
     expect(orderOf(next, 'hidden')).toBe(0)
     expect(next.tasks.find(t => t.id === 'm')).toMatchObject({
       boardColumn: 'done',
@@ -314,27 +257,32 @@ describe('withCardMoved (drag/drop + merged-chip move — full-column renumberin
       boardOrder: 0,
       reviewedBy: 'koki',
     })
-    const back = withCardMoved(projectData([m]), 'm', 'doing', null, true)
+    const back = withCardMoved(projectData([m]), 'm', 'doing', null)
     expect(back.tasks[0]).toMatchObject({ boardColumn: 'doing', done: false })
     expect(back.tasks[0].reviewedBy).toBeUndefined()
-    const done = withCardMoved(projectData([m]), 'm', 'done', null, true)
+    const done = withCardMoved(projectData([m]), 'm', 'done', null)
     expect(done.tasks[0]).toMatchObject({ boardColumn: 'done', done: true })
     expect(done.tasks[0].reviewedBy).toBe('koki') // kept for Done — the stamp survives
   })
 
-  it('counts review-parked cards as doing when the review lane is off (displayColumnOf)', () => {
-    // Review lane off: the parked card RENDERS in doing, so a move into doing
-    // must slot relative to it — same grouping the board paints from.
+  it('keeps a review-column card in review — never folded into doing (review lane always shown)', () => {
+    // The review lane is always shown, so a card in 'review' groups by columnOf
+    // directly: moving another card into doing slots in an EMPTY doing column,
+    // independent of the review card (no fold-into-doing renumber).
     const parked = task({ id: 'parked', boardColumn: 'review', boardOrder: 0 })
     const m = task({ id: 'm', boardColumn: 'todo', boardOrder: 0 })
-    const next = withCardMoved(projectData([parked, m]), 'm', 'doing', null, false)
+    const next = withCardMoved(projectData([parked, m]), 'm', 'doing', null)
+    expect(next.tasks.find(t => t.id === 'parked')!.boardColumn).toBe('review')
     expect(orderOf(next, 'parked')).toBe(0)
-    expect(orderOf(next, 'm')).toBe(1)
+    expect(next.tasks.find(t => t.id === 'm')).toMatchObject({
+      boardColumn: 'doing',
+      boardOrder: 0,
+    })
   })
 
   it('returns the data unchanged for an unknown id', () => {
     const data = projectData([task({ id: 'a' })])
-    expect(withCardMoved(data, 'nope', 'done', null, false)).toBe(data)
+    expect(withCardMoved(data, 'nope', 'done', null)).toBe(data)
   })
 })
 
@@ -346,12 +294,7 @@ describe('reviewBranchesOf (merged-detection poll input — B018)', () => {
       task({ id: 'c', boardColumn: 'doing', branch: 'task/c' }), // wrong column
       task({ id: 'd', boardColumn: 'done', branch: 'task/d' }), // wrong column
     ]
-    expect(reviewBranchesOf(tasks, true)).toEqual(['task/a'])
-  })
-
-  it('returns [] when the review column is off — no poll at all', () => {
-    const tasks = [task({ id: 'a', boardColumn: 'review', branch: 'task/a' })]
-    expect(reviewBranchesOf(tasks, false)).toEqual([])
+    expect(reviewBranchesOf(tasks)).toEqual(['task/a'])
   })
 
   it('dedupes, trims and sorts (stable identity for the effect dependency)', () => {
@@ -361,19 +304,19 @@ describe('reviewBranchesOf (merged-detection poll input — B018)', () => {
       task({ id: 'c', boardColumn: 'review', branch: 'task/a' }),
       task({ id: 'd', boardColumn: 'review', branch: '   ' }), // blank → excluded
     ]
-    expect(reviewBranchesOf(tasks, true)).toEqual(['task/a', 'task/z'])
+    expect(reviewBranchesOf(tasks)).toEqual(['task/a', 'task/z'])
   })
 
   it('caps the list at the API limit of 50', () => {
     const tasks = Array.from({ length: 60 }, (_, i) =>
       task({ id: `t${i}`, boardColumn: 'review', branch: `task/b${String(i).padStart(2, '0')}` }),
     )
-    expect(reviewBranchesOf(tasks, true)).toHaveLength(50)
+    expect(reviewBranchesOf(tasks)).toHaveLength(50)
   })
 
   it('ignores the legacy done-flag fallback — only explicit review counts', () => {
     const tasks = [task({ id: 'a', done: true, branch: 'task/a' })] // columnOf → done
-    expect(reviewBranchesOf(tasks, true)).toEqual([])
+    expect(reviewBranchesOf(tasks)).toEqual([])
   })
 })
 

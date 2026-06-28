@@ -41,6 +41,7 @@ import {
   isSafeRepoRelFile,
 } from '@/lib/server/branchChanges'
 import { listProjectBranches } from '@/lib/server/gitBranches'
+import { listActiveBranches } from '@/lib/server/activeBranches'
 import { checkMergedBranches } from '@/lib/server/mergedBranches'
 import { fetchPrInfo } from '@/lib/server/prInfo'
 import { ensureReviewWorktree, ReviewWorktreeError } from '@/lib/server/reviewWorktree'
@@ -84,9 +85,13 @@ import { extForMime } from '@/lib/server/canvasImages'
 import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
-import { generateProjectDescription } from '@/lib/server/generateDescription'
+import {
+  cancelDescribeJob,
+  getDescribeJobState,
+  listActiveDescribeJobs,
+  startDescribeJob,
+} from '@/lib/server/generateDescription'
 import { generateTaskTitle } from '@/lib/server/generateTaskTitle'
-import { getPromptLang } from '@/lib/server/promptLang'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -262,6 +267,15 @@ export const projectRoutes = new Hono()
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
     return c.json(await listProjectBranches(path))
+  })
+  // ── /api/project/active-branches ──────────────────────────────────────────
+  // GET ?path= → ActiveBranchesResponse: every local branch (current first),
+  // annotated with the worktree it's checked out in. Feeds the ProjectPanel
+  // header branch dropdown. Read-only; non-repo → { isGit:false, branches:[] }.
+  .get('/api/project/active-branches', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    return c.json(await listActiveBranches(path))
   })
   // ── /api/project/merged-branches ─────────────────────────────────────────
   // POST { path, branches (≤50), targetBranch? } → MergedBranchesResponse —
@@ -973,34 +987,48 @@ export const projectRoutes = new Hono()
   return c.json(outcome.canvas)
 })
   // ── /api/project/describe ─────────────────────────────────────────────────
-  // POST ?path → auto-generate a project description by briefly running the
-  // local `claude` CLI in the project (read-only). Thin adapter; the
-  // subscription-safe PTY logic lives in generateDescription.ts. Returns
-  // { description } on success; does NOT persist — the UI prefills it into the
-  // editor for the user to review and save.
+  // POST ?path → START a server-side JOB that auto-generates the project
+  // description by briefly running the local `claude` CLI (read-only), and
+  // returns { jobId } immediately. The run is NOT bound to this HTTP connection:
+  // it completes on its own AbortController (killed only by an explicit cancel)
+  // and PERSISTS the result (description / descriptionJa / descriptionEn) into
+  // the project's central tasks.json server-side — so switching tab / project /
+  // back to Ground mid-run no longer loses it. SINGLE-FLIGHT per project lives
+  // in startDescribeJob. Thin adapter; the engine + registry live in
+  // generateDescription.ts.
+  //   GET  /describe/active        → { jobs } running describe jobs (re-attach)
+  //   GET  /describe/job/:id       → DescribeJobState (the starting client polls)
+  //   POST /describe/job/:id/cancel → { ok } explicit cancel (kills the session)
   .post('/api/project/describe', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    // Pre-flight: refuse the spawn unless claude is installed AND signed in
-    // (shared run gate). describe auto-runs a one-off claude; a signed-out one
-    // would open OAuth, so gate it and let the 503 flag (claudeMissing |
-    // claudeLoggedOut) drive the UI.
+    // Pre-flight BEFORE creating a job: refuse the spawn unless claude is
+    // installed AND signed in (shared run gate). describe auto-runs a one-off
+    // claude; a signed-out one would open OAuth, so gate it and let the 503 flag
+    // (claudeMissing | claudeLoggedOut) drive the UI — no orphan job is created.
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
-    try {
-      const pair = await generateProjectDescription(path)
-      const lang = await getPromptLang()
-      // Active-language copy first; fall back to the other so `description`
-      // is never empty when at least one language landed.
-      const description = (lang === 'ja' ? pair.ja : pair.en) ?? pair.en ?? pair.ja ?? ''
-      return c.json({
-        description,
-        ...(pair.ja ? { descriptionJa: pair.ja } : {}),
-        ...(pair.en ? { descriptionEn: pair.en } : {}),
-      })
-    } catch (e: any) {
-      return c.json({ error: e?.message ?? 'description generation failed' }, 500)
-    }
+    const jobId = startDescribeJob({ projectPath: path })
+    return c.json({ jobId })
+  })
+  // ── /api/project/describe/active ──────────────────────────────────────────
+  // Running describe jobs — the panel re-attaches to its own project's run
+  // after a navigation. Returns only metadata about jobs THIS app spawned
+  // (mirrors /api/canvas/ai/active); the client filters by projectPath.
+  .get('/api/project/describe/active', (c) => c.json({ jobs: listActiveDescribeJobs() }))
+  // ── /api/project/describe/job/:id ─────────────────────────────────────────
+  // The starting client polls this for progress + result.
+  .get('/api/project/describe/job/:id', (c) => {
+    const state = getDescribeJobState(c.req.param('id'))
+    if (!state) return c.json({ error: 'job not found' }, 404)
+    return c.json(state)
+  })
+  // ── /api/project/describe/job/:id/cancel ──────────────────────────────────
+  // Explicit cancel — kills the claude session (the ONLY thing that does).
+  .post('/api/project/describe/job/:id/cancel', (c) => {
+    const ok = cancelDescribeJob(c.req.param('id'))
+    if (!ok) return c.json({ error: 'job not found' }, 404)
+    return c.json({ ok: true })
   })
   // ── /api/project/task-title ───────────────────────────────────────────────
   // POST { path, id } → summarize the card's content into a short title via a

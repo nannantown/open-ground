@@ -183,6 +183,7 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
   verifyFailed: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
+  reworks: new Map(),
   stuckMoves: new Map(),
   rateLimited: new Map(),
   permissionWaits: new Map(),
@@ -332,7 +333,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(branch.trim()).not.toBe('')
   })
 
-  it('(1) auto-merge REFUSES a branch whose verification is RED — card stays in review, trunk UNTOUCHED', async () => {
+  it('(1) auto-merge REFUSES a branch whose verification is RED — sends it back review→doing, trunk UNTOUCHED', async () => {
     const { proj } = await setupRepo()
     const alive = new Set<string>()
     const { board, col, boardDeps } = makeBoard([])
@@ -355,6 +356,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       isAlive: (id) => alive.has(id),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
       killPty: () => {},
+      instructRework: () => {}, // synthetic PTY in this fixture — keep the fix-in-place nudge inert
       verify: makeVerify({
         applicable: async () => true,
         run: async (dir) => {
@@ -363,17 +365,32 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
         },
       }),
     }
-    const engine = newEngine(proj)
+    // The engine OWNS this live worker, so a RED verify CONTINUES it in place — the card
+    // is sent review→doing (差し戻し) for the same worker to fix on the same branch.
+    const engine = newEngine(proj, {
+      workers: [
+        {
+          terminalId: res.terminalId,
+          branch: res.branch,
+          worktree: res.worktree,
+          taskId: 'v',
+          taskTitle: 'card v',
+          startedAt: new Date(0).toISOString(),
+          stage: 'done',
+        },
+      ],
+    })
     await runIntegratePass(engine, deps)
 
-    // Blocked: card stays in review, nothing landed, the trunk never moved.
+    // Sent back to rework: card → doing, nothing landed, the trunk never moved.
     expect(checked).toHaveLength(1) // the rebased tree was really built + checked
-    expect(col('v')).toBe('review')
+    expect(col('v')).toBe('doing')
+    expect(engine.reworks.get('v')).toBe(1)
     await git(proj, ['fetch', 'origin', 'main'])
     const { stdout: trunkAfter } = await git(proj, ['rev-parse', 'origin/main'])
     expect(trunkAfter).toBe(trunkBefore)
-    expect(engine.log.some((l) => l.message.startsWith('verification failed — not merging'))).toBe(true)
-    // The worker's branch is LEFT for the human (not cleaned up).
+    expect(engine.log.some((l) => l.message.includes('差し戻し review→doing'))).toBe(true)
+    // The worker's branch is LEFT — the worker keeps working it (not cleaned up).
     const { stdout: branch } = await git(proj, ['branch', '--list', res.branch])
     expect(branch.trim()).not.toBe('')
     // The verify worktree was torn down — no zombie left behind.

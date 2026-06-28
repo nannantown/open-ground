@@ -16,11 +16,6 @@ export const board = {
     'board.toolbar.count': 'Board · {count} cards',
     'board.toolbar.mineOnly': 'Mine only',
     'board.toolbar.mineOnlyNeedsName': 'Set your display name in Settings to filter by assignee',
-    'board.toolbar.reviewColumn': 'Review',
-    'board.toolbar.reviewColumnShowHint':
-      'Add an "In review" column for PR-waiting cards — shared with everyone on this board.',
-    'board.toolbar.reviewColumnHideHint':
-      'Hide the review column — cards parked there fold into In progress until it returns.',
     'board.toolbar.projectSettings': 'Settings',
     'board.toolbar.clearDone': 'Clear',
     'board.toolbar.clearDoneTitle': 'Delete every card in Done',
@@ -173,11 +168,6 @@ export const board = {
     'board.toolbar.count': 'ボード · {count} カード',
     'board.toolbar.mineOnly': '自分のみ',
     'board.toolbar.mineOnlyNeedsName': '設定で表示名を設定すると、担当者で絞り込めます',
-    'board.toolbar.reviewColumn': 'レビュー',
-    'board.toolbar.reviewColumnShowHint':
-      'PR レビュー待ちカード用の「レビュー待ち」列を追加します — このボードの全員に共有されます。',
-    'board.toolbar.reviewColumnHideHint':
-      'レビュー列を隠します — 置かれていたカードは再表示まで「実行中」に畳まれます。',
     'board.toolbar.projectSettings': '設定',
     'board.toolbar.clearDone': 'クリア',
     'board.toolbar.clearDoneTitle': '完了列のカードをすべて削除',

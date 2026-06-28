@@ -10,8 +10,8 @@
 //  - targetBranch: names the merge/PR base explicitly (default: the branch
 //    checked out at launch time).
 //  - completionFlow 'pr': instead of merging back, push the branch and open a
-//    PR via `gh pr create`; a HUMAN merges it. With reviewColumn on, the card
-//    moves to the review column instead of done.
+//    PR via `gh pr create`; a HUMAN merges it. The card moves to the review
+//    column (always shown) instead of done.
 //
 // (verifyCommands — the old "Definition of done" section — was retired
 // 2026-06-11 with its Settings editor: hidden prompt-steering state with no
@@ -32,9 +32,8 @@ export interface TaskPromptInput {
   /** Central worktrees dir for this project, or null when the project is not
    *  a git repo (the branch protocol is omitted entirely then). */
   worktreesDir: string | null
-  /** Shared per-project policy (completion flow / target branch / review
-   *  column). Omitted or empty = legacy defaults: merge back into the
-   *  launch-time branch. */
+  /** Shared per-project policy (completion flow / target branch). Omitted or
+   *  empty = legacy defaults: merge back into the launch-time branch. */
   config?: ProjectConfig
 }
 
@@ -82,22 +81,11 @@ export const buildTaskPrompt = ({ cwd, task, port, worktreesDir, config }: TaskP
   }
 
   if (task.id) {
-    if (isPr && config?.reviewColumn) {
+    if (isPr) {
       lines.push(
         '',
         'Once the PR is open, record its URL on the task card AND move the card to the review column on the app board (the human merges the PR and marks it done) — substitute the real PR URL:',
         `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","setPrUrl":[{"id":"${task.id}","url":"<PR-URL>"}],"setColumn":[{"id":"${task.id}","column":"review"}]}'`,
-      )
-    } else if (isPr) {
-      lines.push(
-        '',
-        'Once the PR is open, record its URL on the task card (substitute the real PR URL):',
-        `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","setPrUrl":[{"id":"${task.id}","url":"<PR-URL>"}]}'`,
-      )
-      lines.push(
-        '',
-        `When the task is finished and its PR is open, mark its card done on the app board:`,
-        `curl -s -X POST http://127.0.0.1:${port}/api/project/tasks -H 'content-type: application/json' -d '{"path":"${cwd}","markDone":["${task.id}"]}'`,
       )
     } else {
       const when = worktreesDir ? ' and merged' : ''

@@ -4,6 +4,7 @@ import {
   STALE_HEARTBEAT_MS,
   RECOVER_MAX_REQUEUE,
   MOVE_STUCK_MAX_RETRIES,
+  MAX_REWORKS,
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
   STALL_ECHO_GUARD_MS,
@@ -23,6 +24,7 @@ import {
   lastActivityMs,
   detectAnomalies,
   pruneStuckMoves,
+  pruneReworks,
   recoveryColumn,
   runDispatchPass,
   runIntegratePass,
@@ -91,6 +93,7 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   verifyFailed: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
+  reworks: new Map(),
   stuckMoves: new Map(),
   nudges: new Map(),
   rateLimited: new Map(),
@@ -1676,6 +1679,11 @@ const makeIntDeps = (init: {
   // reports for the memo key (default `tip-<branch>`, stable so skipIfTip matches);
   // mutate an entry between passes to model a fix (tip changes ⇒ re-verify).
   verifyResults?: Record<string, { ok: boolean; tip?: string | null; reason?: string }>
+  // 差し戻し(rework)テスト用: dead = isAlive=false を返す terminalId(→ 'todo' 再 dispatch
+  // 経路を駆動); moveToDoingFails / recoverFails は最初の review→doing / recover 書込を false に。
+  dead?: Set<string>
+  moveToDoingFails?: Set<string>
+  recoverFails?: Set<string>
 }): IntegrationDeps & {
   integrated: string[]
   moved: string[]
@@ -1683,6 +1691,10 @@ const makeIntDeps = (init: {
   killed: string[]
   marks: { taskId: string; value: boolean }[]
   verified: { branch: string; skipIfTip?: string }[]
+  reworkedToDoing: { taskId: string; branch: string }[]
+  recovered: { taskId: string; column: 'todo' | 'blocked' }[]
+  tornDown: string[]
+  instructed: { terminalId: string; message: string }[]
 } => {
   const reviews = [...init.reviews]
   const outcomes = init.outcomes ?? {}
@@ -1695,7 +1707,22 @@ const makeIntDeps = (init: {
   const killed: string[] = []
   const marks: { taskId: string; value: boolean }[] = []
   const verified: { branch: string; skipIfTip?: string }[] = []
+  const reworkedToDoing: { taskId: string; branch: string }[] = []
+  const recovered: { taskId: string; column: 'todo' | 'blocked' }[] = []
+  const tornDown: string[] = []
+  const instructed: { terminalId: string; message: string }[] = []
+  const dead = init.dead ?? new Set<string>()
+  const moveToDoingFails = new Set(init.moveToDoingFails ?? [])
+  const recoverFails = new Set(init.recoverFails ?? [])
+  const dropReview = (taskId: string) => {
+    const i = reviews.findIndex((c) => c.id === taskId)
+    if (i >= 0) reviews.splice(i, 1)
+  }
   return {
+    reworkedToDoing,
+    recovered,
+    tornDown,
+    instructed,
     integrated,
     moved,
     cleaned,
@@ -1736,6 +1763,34 @@ const makeIntDeps = (init: {
     },
     killPty: (terminalId) => {
       killed.push(terminalId)
+    },
+    // 差し戻し(rework)seam — review→doing 移動 / recovery 移動 / worker liveness /
+    // teardown / 修正指示。runIntegratePass の reworkOrPark が使う。
+    moveToDoing: async (_p, taskId, branch) => {
+      if (moveToDoingFails.has(taskId)) {
+        moveToDoingFails.delete(taskId) // only the FIRST move fails
+        return false
+      }
+      reworkedToDoing.push({ taskId, branch })
+      dropReview(taskId)
+      return true
+    },
+    recoverCard: async (_p, taskId, column) => {
+      if (recoverFails.has(taskId)) {
+        recoverFails.delete(taskId) // only the FIRST recover move fails
+        return false
+      }
+      recovered.push({ taskId, column })
+      dropReview(taskId)
+      return true
+    },
+    isAlive: (terminalId) => !dead.has(terminalId),
+    recoverWorker: async ({ terminalId }) => {
+      tornDown.push(terminalId)
+      return { removed: true }
+    },
+    instructRework: (terminalId, message) => {
+      instructed.push({ terminalId, message })
     },
   }
 }
@@ -1936,26 +1991,27 @@ describe('runIntegratePass — throttle', () => {
 // branch isn't re-checked every pass, yet a fix (new tip) re-verifies and lands.
 
 describe('runIntegratePass — verification gate', () => {
-  it('does NOT integrate a branch that fails verification — leaves it in review, logs the reason', async () => {
-    const engine = newEngine({ autoMerge: true })
+  it('does NOT integrate a branch that fails verification — sends it back to rework, never the trunk', async () => {
+    const engine = newEngine({
+      autoMerge: true,
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a', worktree: '/wt/a', stage: 'done' })],
+    })
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
       verifyResults: { 'swarm/a': { ok: false, tip: 'sha-a', reason: 'src/x.ts(9): error TS2322' } },
     })
     await runIntegratePass(engine, deps)
-    // The gate ran; integrate / move / cleanup did NOT — nothing reached the trunk.
+    // 安全ゲート: the gate ran; integrate / move / cleanup did NOT — nothing reached the trunk.
     expect(deps.verified.map((v) => v.branch)).toEqual(['swarm/a'])
     expect(deps.integrated).toHaveLength(0)
     expect(deps.moved).toHaveLength(0)
     expect(deps.cleaned).toHaveLength(0)
-    // The red tip is remembered; the dashboard shows it needs a human; the reason logs.
+    // Sent back review→doing for the LIVE worker to fix (差し戻し); the red tip is remembered
+    // (so an un-fixed re-promote skips re-tsc); the worker is told WHY.
+    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(engine.reworks.get('a')).toBe(1)
     expect(engine.verifyFailed.get('swarm/a')).toBe('sha-a')
-    expect(engine.reviews.map((r) => r.status)).toEqual(['conflict'])
-    expect(
-      engine.log.some(
-        (l) => l.level === 'error' && l.message.startsWith('verification failed — not merging'),
-      ),
-    ).toBe(true)
+    expect(deps.instructed[0]?.message).toContain('error TS2322')
   })
 
   it('integrates normally when verification passes (the green path is unchanged)', async () => {
@@ -1976,42 +2032,54 @@ describe('runIntegratePass — verification gate', () => {
     expect(deps.integrated).toHaveLength(0)
   })
 
-  it('does not re-run the check for an unchanged red tip (no tsc thrash) but still blocks', async () => {
-    const engine = newEngine({ autoMerge: true })
+  it('does not re-run the check for an unchanged red tip (memo skip) — re-reworks, no fresh tsc', async () => {
+    // A LIVE worker bounces back un-fixed (same tip) each pass: verifyFailed is KEPT across a
+    // doing-continuation, so the 2nd verify is called WITH skipIfTip and short-circuits.
+    const engine = newEngine({
+      autoMerge: true,
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a', worktree: '/wt/a', stage: 'done' })],
+    })
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
       verifyResults: { 'swarm/a': { ok: false, tip: 'sha-a', reason: 'TS2322' } },
     })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // un-fixed worker keeps re-appearing in review
     await runIntegratePass(engine, deps)
     expect(engine.verifyFailed.get('swarm/a')).toBe('sha-a')
-    const errLogs = engine.log.filter((l) => l.message.startsWith('verification failed')).length
+    expect(engine.reworks.get('a')).toBe(1)
 
-    // Second pass (throttle reset): verify is called WITH skipIfTip; the fake
-    // reports `skipped` (no check run) → still not integrated, and no new loud log.
+    // Second pass (throttle reset): verify is called WITH skipIfTip; the fake reports
+    // `skipped` (no check run) → still not integrated, just re-reworked.
     engine.lastIntegrateAt = 0
     await runIntegratePass(engine, deps)
     expect(deps.verified[1]?.skipIfTip).toBe('sha-a')
-    expect(deps.integrated).toHaveLength(0)
-    expect(engine.log.filter((l) => l.message.startsWith('verification failed')).length).toBe(errLogs)
+    expect(deps.integrated).toHaveLength(0) // never integrates unverified work
+    expect(engine.reworks.get('a')).toBe(2) // re-reworked, not merged
   })
 
-  it('re-verifies and LANDS once the branch tip changes (a fix was pushed)', async () => {
-    const engine = newEngine({ autoMerge: true })
+  it('re-verifies and LANDS once the branch tip changes (the worker fixed it after a 差し戻し)', async () => {
+    const engine = newEngine({
+      autoMerge: true,
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a', worktree: '/wt/a', stage: 'done' })],
+    })
     const verifyResults: Record<string, { ok: boolean; tip?: string | null; reason?: string }> = {
       'swarm/a': { ok: false, tip: 'sha-old', reason: 'TS2322' },
     }
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], verifyResults })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // the worker keeps the card visible in review
     await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0)
+    expect(deps.integrated).toHaveLength(0) // RED → sent back to rework, not landed
     expect(engine.verifyFailed.get('swarm/a')).toBe('sha-old')
+    expect(engine.reworks.get('a')).toBe(1)
 
-    // A fix lands → the branch tip changes and the check now passes.
+    // The worker fixes it → the branch tip changes and the check now passes.
     verifyResults['swarm/a'] = { ok: true, tip: 'sha-new' }
     engine.lastIntegrateAt = 0
     await runIntegratePass(engine, deps)
     expect(deps.integrated).toEqual(['swarm/a']) // verified green at the NEW tip → landed
     expect(deps.moved).toEqual(['a'])
-    expect(engine.verifyFailed.has('swarm/a')).toBe(false) // memo cleared
+    expect(engine.verifyFailed.has('swarm/a')).toBe(false) // memo cleared on green
+    expect(engine.reworks.has('a')).toBe(false) // 差し戻し budget reset on success
   })
 
   it('forgets a verify-fail memo when the card leaves the review column', async () => {
@@ -2043,6 +2111,221 @@ describe('runIntegratePass — verification gate', () => {
     await runIntegratePass(engine, deps)
     expect(deps.verified).toHaveLength(0) // gate not reached
     expect(deps.integrated).toHaveLength(0)
+  })
+})
+
+// ── runIntegratePass — rework 差し戻し (review→doing, the missing transition) ───
+describe('runIntegratePass — rework 差し戻し (review→doing)', () => {
+  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
+    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
+
+  it('sends a verify-RED card back review→doing, keeps the LIVE worker on the same branch + instructs it', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'TS2322 not assignable' } },
+    })
+    await runIntegratePass(engine, deps)
+    // Did NOT integrate; moved review→doing recording the SAME branch (戻して直す).
+    expect(deps.integrated).toHaveLength(0)
+    expect(deps.moved).toHaveLength(0) // moveToDone never called
+    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(deps.recovered).toHaveLength(0) // not todo/blocked — continued in place
+    // Counter bumped, readiness dropped, worker put back to 'running' + instructed why.
+    expect(engine.reworks.get('a')).toBe(1)
+    expect(engine.reviews.find((r) => r.taskId === 'a')).toBeUndefined()
+    expect(engine.workers[0].stage).toBe('running')
+    expect(deps.instructed).toHaveLength(1)
+    expect(deps.instructed[0].terminalId).toBe('pty-a')
+    expect(deps.instructed[0].message).toContain('TS2322 not assignable')
+    expect(deps.tornDown).toHaveLength(0) // live worker kept (not torn down)
+  })
+
+  it('re-dispatches (review→todo) when the worker is DEAD — same-branch continuation impossible', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'tsc red' } },
+      dead: new Set(['pty-a']),
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.reworkedToDoing).toHaveLength(0) // not continued in place
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // re-queued for a fresh worker
+    expect(deps.tornDown).toEqual(['pty-a']) // dead worker torn down
+    expect(deps.instructed).toHaveLength(0) // nothing alive to instruct
+    expect(engine.reworks.get('a')).toBe(1)
+    expect(engine.workers).toHaveLength(0) // dropped from the live set
+  })
+
+  it('PARKS the card in blocked once the rework budget (MAX_REWORKS) is spent — loop guard', async () => {
+    const engine = newEngine({
+      autoMerge: true,
+      workers: [doneWorker('swarm/a', 'a')],
+      reworks: new Map([['a', MAX_REWORKS]]), // already at the cap → this pass overflows it
+    })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'still red' } },
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.reworkedToDoing).toHaveLength(0) // NOT sent back to doing again
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // parked for a human
+    expect(deps.tornDown).toEqual(['pty-a']) // won't keep a worker on a parked card
+    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1) // over-budget count kept for the anomaly
+    expect(engine.workers).toHaveLength(0)
+  })
+
+  it('surfaces a parked (over-budget) card as a rework-exhausted anomaly', async () => {
+    const engine = newEngine({ reworks: new Map([['a', MAX_REWORKS + 1]]) })
+    const tasks = [card('a', { boardColumn: 'blocked', branch: 'swarm/a', title: 'Card A' })]
+    const deps = makeDeps({ cards: tasks })
+    const anomalies = await detectAnomalies(
+      engine,
+      tasks,
+      { ...deps, worktreeExists: async () => true },
+      Date.now(),
+    )
+    const a = anomalies.find((x) => x.kind === 'rework-exhausted')
+    expect(a).toBeTruthy()
+    expect(a?.ref).toBe('a')
+    expect(a?.branch).toBe('swarm/a')
+    expect(a?.attempts).toBe(MAX_REWORKS + 1)
+  })
+
+  it('does NOT rework when autoMerge is OFF — read-only classify, the card stays in review', async () => {
+    const engine = newEngine({ autoMerge: false, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'red' } },
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.reworkedToDoing).toHaveLength(0)
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.reworks.size).toBe(0) // never touched while disarmed
+  })
+
+  it('a verify-GREEN card still integrates — the rework path never fires on success (no regression)', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }) // default green + clean FF
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toEqual(['swarm/a'])
+    expect(deps.moved).toEqual(['a']) // review→done
+    expect(deps.reworkedToDoing).toHaveLength(0)
+    expect(engine.reworks.size).toBe(0)
+  })
+
+  it('keeps bumping the SAME counter across passes when the worker returns un-fixed (same tip)', async () => {
+    // The anti-bounce guarantee: a worker that bounces back to review WITHOUT fixing
+    // (same branch/tip) is escalated, not looped forever. Pass 1 RED → 差し戻し
+    // (count 1); the un-fixed card returns to review; pass 2's verify is `skipped`
+    // (same tip) but still a rework → count 2; pass 3 overflows MAX_REWORKS=2 → parked
+    // in blocked (no 3rd doing bounce). Also proves verifyFailed is KEPT across a
+    // doing-continuation (so the same-tip re-check short-circuits, no wasted tsc).
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'red' } },
+    })
+    // Model the worker bouncing back to review un-fixed each pass (same card/branch):
+    // the board keeps reporting it in review even after the engine sent it to doing.
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(1)
+    engine.lastIntegrateAt = 0 // clear the 15s integration throttle so the next pass acts
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(2)
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1) // budget spent → parked, not bounced
+    expect(deps.recovered.some((r) => r.column === 'blocked')).toBe(true)
+  })
+
+  it('escalates a DEAD-worker rework to blocked across passes — the todo re-dispatch budget is NOT reset', async () => {
+    // A worker that keeps dying with RED work: each pass reworks review→todo (no live worker), and
+    // the taskId-keyed counter survives the todo hop (pruneReworks does NOT wipe todo), so the cap
+    // eventually bites → blocked. Without that it would bounce review→todo forever (the MAJOR fix).
+    const engine = newEngine({ autoMerge: true }) // no live worker → dead/re-dispatch path each pass
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'red' } },
+    })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // card keeps re-appearing in review
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(1)
+    expect(deps.recovered.at(-1)).toEqual({ taskId: 'a', column: 'todo' }) // dead path → re-dispatch
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(2)
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1)
+    expect(deps.recovered.at(-1)).toEqual({ taskId: 'a', column: 'blocked' }) // cap → parked, not looping
+  })
+})
+
+describe('pruneReworks', () => {
+  it('clears only at done|deleted; KEEPS todo (engine re-dispatch), doing/review (mid-cycle), blocked (parked)', () => {
+    const engine = newEngine({
+      reworks: new Map([
+        ['t', 1], // → todo: KEPT — the engine's dead-worker re-dispatch must carry the budget across
+        ['d', 1], // → done: cleared (success)
+        ['g', 2], // → doing: kept (mid-cycle)
+        ['v', 1], // → review: kept (mid-cycle)
+        ['b', MAX_REWORKS + 1], // → blocked: kept (feeds the anomaly)
+        ['gone', 1], // deleted card: cleared
+      ]),
+    })
+    const tasks = [
+      card('t', { boardColumn: 'todo' }),
+      card('d', { boardColumn: 'done', done: true }),
+      card('g', { boardColumn: 'doing' }),
+      card('v', { boardColumn: 'review' }),
+      card('b', { boardColumn: 'blocked' }),
+    ]
+    pruneReworks(engine, tasks)
+    expect(engine.reworks.get('t')).toBe(1) // KEPT — re-dispatch must not reset the cap (MAJOR fix)
+    expect(engine.reworks.has('d')).toBe(false)
+    expect(engine.reworks.get('g')).toBe(2)
+    expect(engine.reworks.get('v')).toBe(1)
+    expect(engine.reworks.get('b')).toBe(MAX_REWORKS + 1)
+    expect(engine.reworks.has('gone')).toBe(false)
+  })
+})
+
+describe('monitorWorkers — re-promote suppression after a 差し戻し (reworkAt)', () => {
+  it('does NOT re-promote a just-reworked worker whose heartbeat is older than the 差し戻し', async () => {
+    const NOW = Date.parse('2026-06-24T12:00:00Z')
+    const reworkAt = new Date(NOW - 1000).toISOString() // 差し戻し 1s ago
+    const staleBeatAt = new Date(NOW - 5000).toISOString() // done report 5s ago — BEFORE the 差し戻し
+    const engine = newEngine({
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a-1', stage: 'running', reworkAt })],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 1]]), // has integrable work
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: staleBeatAt }]]), // STALE ready sign
+    })
+    await runDispatchPass(engine, deps, NOW)
+    expect(deps.reviews).toHaveLength(0) // suppressed — NOT promoted on the stale pre-rework sign
+    expect(engine.workers[0]?.stage).toBe('running')
+    expect(engine.workers[0]?.reworkAt).toBe(reworkAt) // still awaiting a fresh sign
+  })
+
+  it('re-promotes once the worker posts a FRESH completion sign (heartbeat newer than the 差し戻し)', async () => {
+    const NOW = Date.parse('2026-06-24T12:00:00Z')
+    const reworkAt = new Date(NOW - 5000).toISOString() // 差し戻し 5s ago
+    const freshBeatAt = new Date(NOW - 1000).toISOString() // re-reported done 1s ago — AFTER the 差し戻し
+    const engine = newEngine({
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a-1', stage: 'running', reworkAt })],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 2]]), // fixed + committed
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: freshBeatAt }]]),
+    })
+    await runDispatchPass(engine, deps, NOW)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }]) // promoted on the fresh sign
+    expect(engine.workers[0]?.reworkAt).toBeUndefined() // suppression cleared on promote
   })
 })
 
@@ -2091,6 +2374,7 @@ describe('runEnginePass — never overlaps itself', () => {
       markConflict: async () => true,
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
+      instructRework: () => {},
       worktreeExists: async () => true,
     }
     const p1 = runEnginePass(engine, deps)
@@ -2514,10 +2798,15 @@ describe('resolveOrchestratorReview', () => {
   beforeEach(() => __resetOrchestratorForTests())
 
   // resolve uses fetchTasks/recoverCard/recoverWorker/isAlive (OrchestratorDeps) +
-  // markConflict (IntegrationDeps) — the union of the two recording fakes.
+  // markConflict (IntegrationDeps) — the union of the two recording fakes. makeIntDeps
+  // FIRST so its IntegrationDeps-only fakes (markConflict/verify/…) apply, then makeDeps
+  // LAST so the OrchestratorDeps seams shared with IntegrationDeps's rework path
+  // (recoverCard/recoverWorker/isAlive/moveToDoing) resolve to makeDeps's board-updating
+  // versions — resolve exercises THOSE, and makeDeps owns the live board + the
+  // tornDown/recovered records the assertions read.
   const resolveDeps = (cards: ProjectTask[], over: Partial<Parameters<typeof makeDeps>[0]> = {}) => ({
-    ...makeDeps({ cards, ...over }),
     ...makeIntDeps({ reviews: [] }),
+    ...makeDeps({ cards, ...over }),
   })
 
   it('parks a conflicted card in blocked, clears the flag + memos, tears the worker down', async () => {

@@ -18,7 +18,12 @@ const hasGitDir = async (dir: string) => {
 // folder has vanished are surfaced with `missing: true` so the UI can offer
 // "Remove from canvas" instead of silently dropping them.
 export const scanProjects = async (settings: Settings): Promise<ProjectMeta[]> => {
-  const entries = settings.projects ?? []
+  // Skip entries that merely link a member's local folder to a folder-less shared
+  // project (collabProjectId set): the shared card already represents that project
+  // on the Ground, so emitting a standalone card here would duplicate it. The
+  // entry still lives in the registry (so the linked folder stays on the
+  // validateProjectPath allowlist); it's just not its own card.
+  const entries = (settings.projects ?? []).filter((e) => !e.collabProjectId)
   // Card descriptions follow the user's language setting (the data may hold a
   // generated ja/en pair — descriptionForLang picks, falling back to legacy).
   const lang = settings.language === 'ja' ? ('ja' as const) : ('en' as const)

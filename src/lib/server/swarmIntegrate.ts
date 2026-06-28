@@ -42,7 +42,22 @@ const execFile = promisify(execFileCb)
 // can never hang the engine loop.
 const GIT_OPTS = {
   timeout: 60_000,
-  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  // A rebase replays commits, so git needs a committer identity. In CI the
+  // checkout often has no user.name/user.email AND git's auto-detection
+  // (gecos / hostname) also fails, so `git rebase` exits 128 — which this
+  // engine would misread as a rebase failure and report a CLEAN rebase as a
+  // 'conflict'. Supply a fallback identity so integration never depends on
+  // ambient git config. process.env wins (a CI/host that DOES configure an
+  // identity is honored); a rebase preserves each commit's ORIGINAL author, so
+  // only the committer takes this fallback (a rebase authors no new commits).
+  env: {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'OPEN GROUND',
+    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'swarm@openground.local',
+    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'OPEN GROUND',
+    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'swarm@openground.local',
+  },
 }
 
 /** The `swarm/*` prefix is the engine's hard ownership boundary: integrate (and

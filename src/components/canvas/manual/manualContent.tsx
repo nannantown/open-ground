@@ -294,8 +294,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'To do · In progress · (In review) · Done · Blocked. The In review column is optional — toggle it per project from the toolbar. Drag cards between columns; dropping into Done marks a card done.',
-          ja: '未着手 · 実行中 ·（レビュー待ち）· 完了 · ブロック。「レビュー待ち」列は任意で、ツールバーからプロジェクトごとに切り替えます。カードは列をまたいでドラッグでき、完了に落とすとそのカードは完了扱いになります。',
+          en: 'To do · In progress · In review · Done · Blocked. All five columns are always shown. Drag cards between columns; dropping into Done marks a card done.',
+          ja: '未着手 · 実行中 · レビュー待ち · 完了 · ブロック。5つの列は常に表示されます。カードは列をまたいでドラッグでき、完了に落とすとそのカードは完了扱いになります。',
         },
       },
       { kind: 'subhead', text: { en: 'Run a task', ja: 'タスクを実行する' } },

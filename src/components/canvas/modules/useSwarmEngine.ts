@@ -85,7 +85,12 @@ export interface EngineReview {
 /** A state inconsistency the engine detected (mirrors the server's
  *  OrchestratorAnomaly) — surfaced as a warning so a drift the autonomy loop
  *  can't self-heal is noticed (条件2). */
-export type EngineAnomalyKind = 'orphan-doing' | 'worktree-missing' | 'worker-stale' | 'move-stuck'
+export type EngineAnomalyKind =
+  | 'orphan-doing'
+  | 'worktree-missing'
+  | 'worker-stale'
+  | 'move-stuck'
+  | 'rework-exhausted'
 
 export interface EngineAnomaly {
   kind: EngineAnomalyKind
@@ -138,7 +143,7 @@ const KNOWN_LOG_KINDS: ReadonlySet<string> = new Set([
   'routine', 'dispatch', 'promote', 'integrate', 'conflict', 'cleanup', 'crash',
 ])
 const KNOWN_ANOMALY_KINDS: ReadonlySet<string> = new Set([
-  'orphan-doing', 'worktree-missing', 'worker-stale', 'move-stuck',
+  'orphan-doing', 'worktree-missing', 'worker-stale', 'move-stuck', 'rework-exhausted',
 ])
 const KNOWN_MOVE_INTENTS: ReadonlySet<string> = new Set(['review', 'done', 'recover'])
 

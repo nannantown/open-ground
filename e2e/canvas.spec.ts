@@ -180,7 +180,7 @@ test.describe('Canvas tab (Figma parity)', () => {
     await expect(page.locator('.canvas-grid')).toHaveCount(2)
   })
 
-  test('deep-link shows Pages/Layers left + Design panel right; reload stays on the Canvas tab', async ({
+  test('deep-link shows the left Pages/Layers panel; the right Design panel auto-opens only on selection; reload stays on the Canvas tab', async ({
     page,
   }) => {
     const left = page.locator('aside').filter({ hasText: 'Pages' })
@@ -188,11 +188,24 @@ test.describe('Canvas tab (Figma parity)', () => {
     await expect(left.getByText('Layers')).toBeVisible()
     // Pages lists the seeded Canvas by name.
     await expect(left.getByText('Playground')).toBeVisible()
-    // The right sidebar (Design panel) never blanks out: with nothing selected
-    // it shows the canvas summary (name + element count).
-    const right = page.locator('aside').filter({ hasText: /\d+ elements/ })
-    await expect(right).toBeVisible()
-    await expect(right.getByText('Playground')).toBeVisible()
+
+    // Figma-style auto-collapse (0511d06): with NOTHING selected the right
+    // Design panel collapses to width 0. Its canvas summary ("N elements") is
+    // still rendered into the dock, but the w-0 / overflow-hidden aside clips
+    // it, so the panel reads as hidden.
+    const summary = page.locator('aside').filter({ hasText: /\d+ elements/ })
+    await expect(summary).toBeHidden()
+
+    // Selecting an element auto-opens the inspector: the Design panel slides in
+    // and shows that element's properties (the "Sticky note" section header +
+    // the X position field), replacing the bare canvas summary.
+    await page.locator('[data-element-id="wrap-a"]').click()
+    const inspector = page.locator('aside').filter({ hasText: 'Sticky note' })
+    await expect(inspector).toBeVisible()
+    await expect(inspector.getByText('Sticky note')).toBeVisible()
+    await expect(inspector.getByLabel('X', { exact: true })).toBeVisible()
+    // The bare canvas summary is no longer the panel's content.
+    await expect(summary).toBeHidden()
 
     // The APP re-persisted the view on its own (the init script only writes
     // when the key is absent) — so a reload restores the Canvas tab from the
@@ -202,8 +215,10 @@ test.describe('Canvas tab (Figma parity)', () => {
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.locator('.canvas-grid')).toHaveCount(2)
+    // The left panel persists; the right Design panel returns collapsed because
+    // a freshly mounted canvas carries no selection.
     await expect(page.locator('aside').filter({ hasText: 'Pages' })).toBeVisible()
-    await expect(page.locator('aside').filter({ hasText: /\d+ elements/ })).toBeVisible()
+    await expect(page.locator('aside').filter({ hasText: /\d+ elements/ })).toBeHidden()
   })
 
   test('Shift+A wraps a shift-click multi-selection in an auto-layout frame (persisted parentId ×3)', async ({
@@ -413,8 +428,12 @@ test.describe('Canvas tab (Figma parity)', () => {
   })
 
   test('⌘\\ hides both sidebars and brings them back, persisting the choice', async ({ page }) => {
+    // The right Design panel only mounts-and-shows when something is selected
+    // (Figma-style auto-collapse, 0511d06), so select an element first — ⌘\
+    // must hide AND restore it alongside the left Pages panel.
+    await page.locator('[data-element-id="wrap-a"]').click()
     const pages = page.locator('aside').filter({ hasText: 'Pages' })
-    const design = page.locator('aside').filter({ hasText: /\d+ elements/ })
+    const design = page.locator('aside').filter({ hasText: 'Sticky note' })
     await expect(pages).toBeVisible()
     await expect(design).toBeVisible()
 
@@ -426,6 +445,8 @@ test.describe('Canvas tab (Figma parity)', () => {
     ).toBe('0')
 
     await page.keyboard.press('ControlOrMeta+\\')
+    // The selection survives the toggle (the canvas itself never unmounts), so
+    // the right Design panel auto-reopens together with the left one.
     await expect(pages).toBeVisible()
     await expect(design).toBeVisible()
     expect(

@@ -29,7 +29,16 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { z } from 'zod'
+import {
+  AUTO_LAYOUT_DEFAULTS,
+  applyAutoLayout,
+  elementFootprint,
+  inferLayoutMode,
+  normalizeLayoutOrder,
+} from '@/lib/canvasAutoLayout'
 import { rectInside, type Rect } from '@/lib/canvasContainment'
+import { DEFAULT_STICKY_FILL, DRAWN_ARTBOARD_FILL } from '@/lib/canvasFillStyle'
+import { DEFAULT_TEXT_COLOR } from '@/lib/canvasTextStyle'
 import { newId } from '@/lib/ids'
 import type {
   CanvasAiActiveJob,
@@ -260,6 +269,26 @@ const GeneratedElementSchema = z.object({
   opacity: clamped(0, 1).optional(),
   cornerRadius: clamped(0, 1000).optional(),
   rotation: clamped(-360, 360).optional(),
+  // frame: Figma-style auto layout (canvasAutoLayout.ts). A malformed layout
+  // never drops the frame (`.catch` → undefined) — supplementFrameLayouts then
+  // fills a default one in. gap / padding / align fall back to
+  // AUTO_LAYOUT_DEFAULTS when the model omits them.
+  layout: z
+    .object({
+      mode: z.enum(['row', 'column']),
+      gap: clamped(0, 400).default(AUTO_LAYOUT_DEFAULTS.gap),
+      padding: clamped(0, 400).default(AUTO_LAYOUT_DEFAULTS.padding),
+      align: z.enum(['start', 'center', 'end']).default(AUTO_LAYOUT_DEFAULTS.align),
+      justify: z.enum(['start', 'center', 'end', 'space-between']).optional(),
+      primarySizing: z.enum(['fixed', 'hug']).optional(),
+      counterSizing: z.enum(['fixed', 'hug']).optional(),
+    })
+    .optional()
+    .catch(undefined),
+  // text: resize mode (canvasTextSizing.ts). The default is chosen in
+  // normalizeGeneratedText (short label → auto-width, paragraph → auto-height),
+  // so a content-fitting variable box is the norm and text never overflows.
+  textSizing: z.enum(['auto-width', 'auto-height', 'fixed']).optional().catch(undefined),
 })
 
 /** Infer frame parent/child links for a freshly generated batch.
@@ -309,6 +338,115 @@ const inferGeneratedParents = (els: CanvasElement[]): void => {
   }
 }
 
+// The fill the AI path forces onto a generated `shape` when the model omits
+// `fill`. The manual default (DEFAULT_SHAPE_FILL, #D9CDA8) is a warm tan that
+// sits too close to BOTH the paper canvas (#F2EDDE) and a white AI artboard, so
+// a fill-less generated shape would disappear into the page. This warm mid-dark
+// neutral (the `ink-muted` design token) clears WCAG 3:1 graphical contrast
+// against both (≈5.4:1 on paper, ≈6.6:1 on white), so it reads as a solid shape
+// wherever the layout drops it. Shapes render NO text (ShapeView is a pure
+// primitive), so a dark fill can't create an unreadable text-on-fill pairing.
+const AI_SHAPE_FALLBACK_FILL = '#6B5847'
+
+/** Pin a readable color onto an AI-generated element whose color field the model
+ *  left unset, so a generated design can't blend into the paper canvas
+ *  (#F2EDDE) or a white artboard — the root of the "generated visual is
+ *  invisible" bug. AI PATH ONLY: manual elements keep the editor's own defaults
+ *  (DEFAULT_SHAPE_FILL etc.), which the canvas relies on and must stay
+ *  unchanged. An explicit color the model DID set always wins (only `undefined`
+ *  fields are filled). Mutates in place — these are the batch's fresh objects. */
+const forceReadableDefaults = (el: CanvasElement): void => {
+  switch (el.type) {
+    case 'frame':
+      // A fill-less frame reads as a solid white artboard (matching a frame
+      // drawn with the frame tool on a design canvas), not the near-invisible
+      // paper wash the absent-fill fallback would otherwise give.
+      if (el.fill === undefined) el.fill = DRAWN_ARTBOARD_FILL
+      break
+    case 'shape':
+      if (el.fill === undefined) el.fill = AI_SHAPE_FALLBACK_FILL
+      break
+    case 'text':
+      // Pin readable dark ink so generated text never rides on a default that
+      // could drift; dark ink reads against the paper and light fills (the
+      // prompt tells the model to set LIGHT text on dark fills explicitly).
+      if (el.textColor === undefined) el.textColor = DEFAULT_TEXT_COLOR
+      break
+    case 'sticky':
+      // Sticky body color (the `color` field) → the visible warm-yellow default
+      // when the model omits it, never a paper-blending tint.
+      if (el.color === undefined) el.color = DEFAULT_STICKY_FILL
+      break
+  }
+}
+
+// Generated text defaults to a content-fitting box (the `auto-width`/`auto-height`
+// half of the canvasTextSizing.ts contract) so it never overflows or sits in an
+// oversized fixed frame. Tuning for the AI path only — the manual editor keeps
+// its own behaviour.
+const PARAGRAPH_LEN = 48 // chars past which a single-run text reads as a paragraph
+const DEFAULT_PARAGRAPH_WIDTH = 360
+const MIN_PARAGRAPH_WIDTH = 120
+const MAX_PARAGRAPH_WIDTH = 560
+
+/** Default a generated `text` to a variable box that hugs its content, so it
+ *  fits without overflowing and never lands in an oversized fixed frame:
+ *   - a short label / heading → 'auto-width' (hugs both axes; the renderer's
+ *     ResizeObserver owns width+height, so any model-supplied size is dropped —
+ *     a stale oversized seed would only mis-measure);
+ *   - a multi-line / long paragraph → 'auto-height' (width AUTHORITATIVE so the
+ *     text WRAPS within it instead of stretching into one long line; height is
+ *     measured, so it's dropped). The width is bounded to a readable band.
+ *  A `textSizing` the model explicitly set is respected (only the axes that mode
+ *  measures are dropped); a model that chose 'fixed' keeps its clamped box.
+ *  Non-text elements are untouched. Mutates in place (the batch's fresh objects;
+ *  runs AFTER inferGeneratedParents so a width change can't move a text out of
+ *  the frame it was authored inside). */
+const normalizeGeneratedText = (el: CanvasElement): void => {
+  if (el.type !== 'text') return
+  const paragraph = el.text.includes('\n') || el.text.length > PARAGRAPH_LEN
+  const mode = el.textSizing ?? (paragraph ? 'auto-height' : 'auto-width')
+  el.textSizing = mode
+  if (mode === 'auto-width') {
+    // Both axes are measured — drop any model size so the box hugs the glyphs.
+    delete el.width
+    delete el.height
+  } else if (mode === 'auto-height') {
+    // Width is authoritative (text wraps within it); bound it so a long run
+    // wraps instead of running off. Height is measured — drop it.
+    const w = el.width ?? DEFAULT_PARAGRAPH_WIDTH
+    el.width = Math.min(MAX_PARAGRAPH_WIDTH, Math.max(MIN_PARAGRAPH_WIDTH, Math.round(w)))
+    delete el.height
+  }
+  // 'fixed' — the model deliberately asked for a clipped box; keep its
+  // (schema-clamped) width/height as authoritative.
+}
+
+/** Make every generated frame that holds children an AUTO-LAYOUT frame, so the
+ *  composition reads as Figma auto layout — consistent gap / padding / alignment
+ *  — instead of the model's hand-placed free positions. A frame the model
+ *  already gave a `layout` keeps it (the model's intent wins); a frame with no
+ *  children drops any layout (an empty auto-layout frame would otherwise collapse
+ *  to just its padding). Direction is inferred from the children's spread
+ *  (inferLayoutMode, the same heuristic ⇧A uses); gap / padding / align come from
+ *  AUTO_LAYOUT_DEFAULTS. Runs AFTER inferGeneratedParents (reads parentId) and
+ *  BEFORE applyAutoLayout (which then packs the children). Mutates in place. */
+const supplementFrameLayouts = (els: CanvasElement[]): void => {
+  for (const frame of els) {
+    if (frame.type !== 'frame') continue
+    const children = els.filter((e) => e.parentId === frame.id)
+    if (children.length === 0) {
+      delete frame.layout
+      continue
+    }
+    if (frame.layout) continue
+    frame.layout = {
+      mode: inferLayoutMode(children.map((c) => ({ x: c.x, y: c.y, ...elementFootprint(c) }))),
+      ...AUTO_LAYOUT_DEFAULTS,
+    }
+  }
+}
+
 /** Parse + validate the JSON claude wrote. Per-element: unknown fields strip,
  *  unknown types drop the element, numbers clamp, ids are reassigned, and
  *  frame parent/child links are inferred from rect containment (see
@@ -338,16 +476,23 @@ export const parseGeneratedElements = (jsonText: string): CanvasElement[] => {
     out.push({ ...r.data, id: newId() })
   }
   if (out.length === 0) throw new Error('no valid canvas elements were generated')
-  // A frame the model didn't paint a fill on defaults to WHITE — the same
-  // default a frame DRAWN with the frame tool gets, so an AI design's
-  // artboards read as solid white instead of the near-invisible paper wash the
-  // absent-fill fallback would otherwise give (consistency with the editor).
-  for (const el of out) {
-    if (el.type === 'frame' && el.fill === undefined) el.fill = '#FFFFFF'
-  }
-  // AFTER id assignment — the inferred parentId must reference the fresh ids.
+  // Readability floor for the AI path: pin a contrasting color onto any element
+  // whose color the model left unset, so a generated design never blends into
+  // the paper canvas (#F2EDDE) or a white artboard (see forceReadableDefaults).
+  for (const el of out) forceReadableDefaults(el)
+  // Parent links from geometry FIRST (uses the model's authored rects, AFTER id
+  // assignment so the inferred parentId references the fresh ids) — THEN
+  // normalize text sizing, so resizing a text's box can't change which frame it
+  // was found inside.
   inferGeneratedParents(out)
-  return out
+  for (const el of out) normalizeGeneratedText(el)
+  // Turn every childful frame into an auto-layout frame so the composition is
+  // built from structured frames (consistent spacing + alignment), not loose
+  // free-placed elements, then pack each layout frame's children. Both passes
+  // are no-ops / idempotent when there are no layout frames, so a frame-less
+  // batch is returned essentially unchanged.
+  supplementFrameLayouts(out)
+  return applyAutoLayout(normalizeLayoutOrder(out))
 }
 
 /** The generate-elements prompt: teaches the element schema + the file
@@ -365,11 +510,24 @@ export const buildGenerateElementsPrompt = (file: string, userPrompt: string): s
     '- width, height: numbers (px). Give every frame / shape / sticky an explicit size; optional for text.',
     '- text: string — frame label / text content / sticky body. Use "" when none.',
     '- shape: shapeKind "rect" | "ellipse"; fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px, rect only); opacity (0..1).',
-    '- frame: fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px); a frame is a labeled container — place related elements visually inside its rect. A frame defaults to a solid WHITE fill (an artboard); set `fill` only to override it. Give every frame a short, meaningful name in `text` (e.g. "Pricing — Pro card", "Hero"); never leave it empty or literally "Frame". The name renders OUTSIDE the rect (Figma-style), so the full frame area is design content. Any element that belongs to a frame must sit FULLY inside that frame\'s rect coordinates — parent/child nesting is inferred from geometric containment.',
+    '- frame: a labeled CONTAINER — group related elements into it. STRONGLY PREFER giving it auto layout with `layout`: { "mode": "row" | "column", "gap": number (px between children), "padding": number (px inset from the edges), "align": "start" | "center" | "end" (cross-axis), "justify": "start" | "center" | "end" | "space-between" (main-axis) }. Also: fill / strokeColor (CSS colors); strokeWidth (px); cornerRadius (px). A frame defaults to a solid WHITE fill (an artboard); set `fill` only to override it. Give every frame a short, meaningful name in `text` (e.g. "Pricing — Pro card", "Hero"); never leave it empty or literally "Frame". The name renders OUTSIDE the rect (Figma-style), so the full frame area is design content. Any element that belongs to a frame must sit FULLY inside that frame\'s rect coordinates — parent/child nesting is inferred from geometric containment, and the frame\'s auto layout then stacks its children with even spacing.',
     '- sticky: color (CSS color — the sticky background).',
-    '- text: fontSize (px); fontFamily (CSS font stack); textColor (CSS color); fontWeight (100–900); textAlign "left" | "center" | "right"; lineHeight (unitless multiplier).',
+    '- text: fontSize (px); fontFamily (CSS font stack); textColor (CSS color); fontWeight (100–900); textAlign "left" | "center" | "right"; lineHeight (unitless multiplier); textSizing "auto-width" | "auto-height" | "fixed".',
     '- Do NOT include "id" fields — the app assigns ids.',
     `- HARD LIMIT: at most ${MAX_GENERATED_ELEMENTS} elements.`,
+    '',
+    'Structure — compose with AUTO LAYOUT, not free placement (IMPORTANT):',
+    '- Build the design out of `frame` containers that each carry a `layout`. Group every set of related elements (a card, a row of cards, a column of fields, a nav bar, a hero) into a frame with auto layout. There is NO plain "group" type — a frame WITH a `layout` is how you group; never leave related elements as a loose free-floating cluster.',
+    "- Do NOT hand-tune x/y to fake alignment: the app re-stacks each layout frame's direct children automatically, so consistent gaps and alignment come for free once a frame has a `layout`. Pick `mode` (row vs column) to match the flow and set a comfortable `gap` and `padding`.",
+    '- Nest frames for structure — e.g. an outer "column" frame holding several "column" card frames, each card holding its text. List a frame\'s children in the visual order you want them stacked, and size each frame large enough to hold its children with the padding.',
+    '- Text auto-sizes to its content: leave short labels/headings to hug their text (omit width/height); for a multi-line paragraph set `textSizing` to "auto-height" with a sensible `width` (~240–520px) so it WRAPS instead of stretching into one long line. Never park text in an oversized fixed box.',
+    '',
+    'Readability (REQUIRED — the canvas background is a warm paper color, #F2EDDE):',
+    '- Every element must be clearly visible against that paper background. Give fills and text strong contrast to it; never use near-white, near-paper, or washed-out pale tints for anything that must be seen — that makes the design vanish into the page.',
+    '- Always set an explicit `textColor` on every `text` element: dark text on light fills, light text on dark fills, so text always contrasts with whatever is behind it. Never leave text to a default color.',
+    '- Keep `opacity` at 1 (fully opaque). Lower it only for a deliberate, subtle overlay — never let a low opacity leave content faint or washed out.',
+    '- Lay elements out so each stays legible: do not pile elements on top of each other so they hide or muddy one another. Overlap only when one element is intentionally a background or container for another — and then make sure their colors contrast.',
+    "- When you place text or a shape on top of a frame or another shape, contrast its color against THAT element's fill, not just against the paper.",
     '',
     'Design brief from the user:',
     userPrompt,

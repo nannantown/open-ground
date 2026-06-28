@@ -27,6 +27,17 @@ export interface ProjectEntry {
    *  When the project is shared via realtime collab, renaming it syncs to the
    *  member-visible shared name (og_projects.label). */
   displayName?: string
+  /** Set ONLY on a registry entry created to back a folder-less shared project a
+   *  member JOINED by invite: it links the member's OWN local folder (their own
+   *  clone — never the owner's code) to that collab room (og_projects.id). The
+   *  entry exists so the local folder lands on the validateProjectPath allowlist
+   *  (Terminal/Claude can spawn there) AND carries the back-reference so the
+   *  member's shared panel can surface a Terminal once linked. Such entries are
+   *  NOT rendered as standalone Ground cards (scan.ts skips them) — the shared
+   *  card already represents the project, so showing both would duplicate it.
+   *  Created via {@link registry.linkSharedProjectToFolder}; absent on every
+   *  normal Create-new / Import-existing project. */
+  collabProjectId?: string
 }
 
 export interface Settings {
@@ -209,6 +220,59 @@ export interface CanvasAiJobState {
   source?: string
   /** tweak, done: true when the instruction was already satisfied (no rewrite). */
   unchanged?: boolean
+}
+
+// ── Project description jobs ──────────────────────────────────────────────────
+//
+// The card auto-description is ALSO a server-side job, for the SAME reason as
+// Canvas AI: generating it is a whole claude PTY session (up to ~2min) that must
+// survive the user navigating away (switching tab / project / back to Ground all
+// unmount or re-key the panel). POST /api/project/describe returns a { jobId }
+// immediately; the run completes on its OWN AbortController (only an EXPLICIT
+// cancel kills it) and PERSISTS the result (description, descriptionJa,
+// descriptionEn) into the project's central tasks.json server-side — so it's
+// there whether or not anyone is watching, and re-opening the project shows it.
+// The client polls the job for progress + result. Engine + registry:
+// src/lib/server/generateDescription.ts.
+export type DescribeJobStatus = 'running' | 'done' | 'error'
+
+/** GET /api/project/describe/job/:id — the full state the STARTING client polls.
+ *  On `done` the description fields carry the generated language pair (already
+ *  persisted to projectData server-side). On `error`, `error` is the message
+ *  ('cancelled' for an explicit cancel). `elapsedMs` is derived from the job's
+ *  server-side startedAt, so the progress spinner shows the TRUE elapsed time
+ *  even after the panel re-attaches to a still-running job. */
+export interface DescribeJobState {
+  id: string
+  /** The project this run describes — the client matches it against the open
+   *  project so a stale return never lands in the wrong project. */
+  projectPath: string
+  status: DescribeJobStatus
+  startedAt: string
+  elapsedMs: number
+  error?: string
+  /** done: the active-language one-liner (also written to projectData). */
+  description?: string
+  /** done: the Japanese half of the generated pair, when it landed. */
+  descriptionJa?: string
+  /** done: the English half of the generated pair, when it landed. */
+  descriptionEn?: string
+}
+/** One RUNNING describe job, as GET /api/project/describe/active lists them —
+ *  the panel re-attaches to its own project's run after a navigation. */
+export interface DescribeActiveJob {
+  id: string
+  projectPath: string
+  elapsedMs: number
+}
+export interface DescribeActiveResponse {
+  jobs: DescribeActiveJob[]
+}
+/** POST /api/project/describe answers with the new job's id — OR a 503 with the
+ *  same `claudeMissing` / `claudeLoggedOut` preflight body the other run
+ *  endpoints use, so the "sign in to Claude" CTA is unchanged. */
+export interface DescribeStartResponse {
+  jobId: string
 }
 
 /** Internal prompt-builder input for tweakScreenSource / buildTweakScreenPrompt
@@ -751,6 +815,26 @@ export type BranchChangesResponse =
       committed: BranchCommittedChange[]
     }
 
+/** One row of GET /api/project/active-branches: a LOCAL branch plus the
+ *  worktree it's currently checked out in. `worktreePath` is null when the
+ *  branch has no worktree (a plain head you could switch to). */
+export interface ActiveBranch {
+  name: string
+  /** True for the branch checked out in the panel's own project path. */
+  current: boolean
+  /** Absolute path of the worktree this branch is checked out in, or null. */
+  worktreePath: string | null
+}
+
+/** GET /api/project/active-branches?path= — the ProjectPanel header branch
+ *  dropdown. Lists every local head (current first, then alphabetical),
+ *  annotated with the worktree each is checked out in. A non-repo (or any git
+ *  failure) yields { isGit: false, branches: [] } and the chip won't render. */
+export interface ActiveBranchesResponse {
+  isGit: boolean
+  branches: ActiveBranch[]
+}
+
 /** Which diff GET /api/project/file-diff returns: 'working' = uncommitted
  *  changes vs HEAD (untracked → full content), 'branch' = target...HEAD. */
 export type FileDiffScope = 'working' | 'branch'
@@ -891,6 +975,14 @@ export interface OrchestratorWorker {
   /** ISO timestamp of the worker's latest heartbeat (`updatedAt`), or absent
    *  when it never beat. Display-only — the pane uses it to show staleness. */
   heartbeatAt?: string
+  /** ISO timestamp the engine LAST sent this worker's card review→doing on a 差し戻し
+   *  (rework). The monitor suppresses re-promoting the card until the worker emits a
+   *  FRESH completion sign (a heartbeat strictly newer than this) — so a just-reworked
+   *  worker gets time to actually fix the issue instead of being instantly re-promoted
+   *  on its stale pre-rework readyToMerge:true (which would burn the rework budget by
+   *  wall-clock). Cleared on a fresh-heartbeat promote. In-memory only; absent for a
+   *  never-reworked worker. */
+  reworkAt?: string
 }
 
 /** One human-readable line of the commander engine's drain/dispatch journal —
@@ -977,6 +1069,7 @@ export type OrchestratorAnomalyKind =
   | 'worktree-missing'
   | 'worker-stale'
   | 'move-stuck'
+  | 'rework-exhausted'
 
 export interface OrchestratorAnomaly {
   /** Which inconsistency — see {@link OrchestratorAnomalyKind}. */
@@ -995,7 +1088,9 @@ export interface OrchestratorAnomaly {
    *  what zombied ('review' = stuck in doing, 'done' = stuck in review, 'recover'
    *  = a lost worker stuck in doing). */
   intent?: 'review' | 'done' | 'recover'
-  /** For 'move-stuck': how many consecutive writes were kept (display-only). */
+  /** For 'move-stuck': how many consecutive writes were kept (display-only).
+   *  For 'rework-exhausted': how many times the card bounced review→doing before
+   *  the loop guard parked it in 'blocked' (display-only). */
   attempts?: number
 }
 
@@ -1195,10 +1290,8 @@ export interface TaskRunSettings {
 }
 
 /** Kanban columns for the Board tab. 'todo'=未着手 / 'doing'=実行中 /
+ *  'review'=レビュー待ち (PR-waiting, between doing and done, always shown) /
  *  'done'=完了 / 'blocked'=ブロック. */
-/** 'review' is the optional fifth column (PR-waiting) — rendered only when
- *  the project's config.reviewColumn is on; cards parked there while hidden
- *  are treated as 'doing' by the UI. */
 export type BoardColumn = 'todo' | 'doing' | 'review' | 'done' | 'blocked'
 
 /** Shared per-project policy (travels with the board: marker in git-shared
@@ -1212,8 +1305,6 @@ export interface ProjectConfig {
   /** "Definition of done" — commands claude must run and pass before
    *  declaring a task complete (one per entry, e.g. "npm test"). */
   verifyCommands?: string[]
-  /** Show the レビュー待ち column (between doing and done). */
-  reviewColumn?: boolean
   /** Registered member names for the assignee picker — register once in
    *  project settings instead of retyping names on every card. Shared, so
    *  the whole team sees the same list. */
@@ -1496,6 +1587,18 @@ export interface CollabProjectsListResponse {
   projects: CollabProjectListItem[]
 }
 
+/** GET/POST /api/collab/link — a member's LOCAL FOLDER link for a folder-less
+ *  shared project. GET resolves the currently-linked folder (null when the member
+ *  hasn't linked one yet); POST links the folder the member picked. `localPath` is
+ *  the member's OWN canonical folder path (their clone) — safe to return to their
+ *  own client; the owner's path is never involved. Once linked the folder is on
+ *  the registry allowlist, so the shared project's Terminal can spawn Claude in
+ *  it while Board/Canvas keep syncing in realtime. */
+export interface CollabLinkResponse {
+  /** The member's linked local folder (canonical), or null when not yet linked. */
+  localPath: string | null
+}
+
 /** One pending in-app collab INVITE addressed to the SIGNED-IN user: a project
  *  shared WITH them that they do NOT own. Built server-side (GET
  *  /api/collab/invites) from og_project_members read under the user's OWN JWT —
@@ -1523,6 +1626,17 @@ export interface CollabInviteForMe {
  *  unconfigured / they have none — never an error. */
 export interface CollabInvitesResponse {
   invites: CollabInviteForMe[]
+}
+
+/** POST /api/collab/accept {collabProjectId} — the invitee promotes their OWN
+ *  pending email invite to accepted (the お知らせ "Join" action), via the
+ *  accept_invite SECURITY DEFINER RPC. `ok:false` only on a transport/RPC error;
+ *  a caller with no pending invite for the id is a no-op SUCCESS (`accepted:0`)
+ *  — the RPC can only ever touch the caller's own row. */
+export interface CollabAcceptResponse {
+  ok: boolean
+  /** Number of pending rows flipped to accepted (0 = already accepted / none). */
+  accepted?: number
 }
 
 /** The kind discriminator for an in-app notification (Ground お知らせ). Only
@@ -1582,6 +1696,15 @@ export interface ProjectMember {
   userId?: string
   email?: string
   role: 'owner' | 'member'
+  /** Acceptance state (og_project_members.status, migration 0013):
+   *  - `accepted` — a full collaborator with collab access (owner seed, link
+   *    self-join, owner-approved request, and every pre-0013 row).
+   *  - `pending`  — an EMAIL invite the named person hasn't accepted yet:
+   *    pre-confirmed identity, but ZERO collab access until they accept the
+   *    in-app お知らせ. The owner's roster shows these as "invited"; access gates
+   *    (getMyMembership / the Worker / the ticket route) treat them as non-members.
+   *  Absent on legacy payloads → treat as `accepted` (backward compatible). */
+  status: 'pending' | 'accepted'
 }
 
 /** GET /api/collab/members?path= — the project's full roster for the owner's

@@ -41,6 +41,8 @@ import {
   findOrCreateOwnProject,
   upsertProjectMembers,
   removeProjectMember,
+  cancelPendingInvite,
+  acceptInvite,
   listMyProjects,
   listInvitesForMe,
   listProjectMembers,
@@ -69,6 +71,8 @@ import {
   writeSharedCanvasCache,
 } from '@/lib/server/sharedCache'
 import { readCanvasAsset } from '@/lib/server/canvasImages'
+import { findLinkedFolder, linkSharedProjectToFolder } from '@/lib/server/registry'
+import { stat } from 'fs/promises'
 import {
   readCollabWsUrl,
   roomFor,
@@ -77,6 +81,7 @@ import {
 } from './ticket'
 import { requireProjectPath } from '../middleware/projectPath'
 import type {
+  CollabAcceptResponse,
   CollabAssetUploadResponse,
   CollabConfigResponse,
   CollabInviteLinkResponse,
@@ -87,6 +92,7 @@ import type {
   CollabJoinResponse,
   CollabLabelResponse,
   CollabMembersResponse,
+  CollabLinkResponse,
   CollabProjectResponse,
   CollabProjectsListResponse,
   CollabSharedCanvasResponse,
@@ -147,7 +153,7 @@ const resolveOwnedProject = async (
     const seed = await upsertProjectMembers(collabProjectId, [session.user.email], {
       ownerEmail: session.user.email,
     })
-    if (seed.ok) me = { projectId: collabProjectId, role: 'owner' }
+    if (seed.ok) me = { projectId: collabProjectId, role: 'owner', status: 'accepted' }
   }
   return { collabProjectId, me }
 }
@@ -273,6 +279,26 @@ export const collabRoutes = new Hono()
     return c.json<CollabInvitesResponse>({ invites })
   })
 
+  // POST /api/collab/accept {collabProjectId} — the INVITEE accepts their OWN
+  // pending email invite (the お知らせ "Join" action). MEMBER flow: no path (the
+  // invitee has no local folder). The security gate is the accept_invite SECURITY
+  // DEFINER RPC itself, which flips ONLY the caller's own pending row (matched by
+  // their JWT email/uid) — so this route does NOT pre-check getMyMembership (a
+  // pending invitee is intentionally a NON-member for access until they accept).
+  // A caller with no pending invite for the id is a no-op success (accepted:0); a
+  // caller can never accept someone else's invite or self-enrol. Gated only on
+  // collab being enabled + a signed-in session.
+  //   400 missing id · 503 collab-disabled
+  .post('/api/collab/accept', async (c) => {
+    if (!(await collabEnabled())) return c.json({ error: 'collab disabled' }, 503)
+    const body = (await c.req.json().catch(() => ({}))) as { collabProjectId?: unknown }
+    const id =
+      typeof body.collabProjectId === 'string' ? body.collabProjectId.trim() : ''
+    if (!isCollabProjectId(id)) return c.json({ error: 'bad collabProjectId' }, 400)
+    const res = await acceptInvite(id)
+    return c.json<CollabAcceptResponse>(res)
+  })
+
   // GET /api/collab/members?path= — the project's roster for the owner's
   // "Collaborators" UI. Resolves the OWNED project by path, then lists every
   // member (RLS "og members read roster" lets any member read the whole roster,
@@ -393,6 +419,31 @@ export const collabRoutes = new Hono()
     const email = typeof body.email === 'string' ? body.email : ''
     if (!email) return c.json({ error: 'no email' }, 400)
     const res = await removeProjectMember(collabProjectId, email)
+    return c.json(res)
+  })
+
+  // POST /api/collab/invite/cancel {path, email} — the owner cancels a still-PENDING
+  // email invite (the "取消" action on a pending roster row). Owner-JWT RLS delete
+  // (0005), scoped to status='pending' so it can ONLY drop an unaccepted invite,
+  // never an active collaborator (use /api/collab/remove for that). Unlike eviction
+  // it does NOT rotate invite links — a pending invitee never held one, so the
+  // coexisting quick-share links stay intact.
+  //   412 no collabProjectId · 403 non-owner · 400 no email
+  .post('/api/collab/invite/cancel', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+
+    const { collabProjectId, me } = await resolveOwnedProject(path)
+    if (!collabProjectId) {
+      return c.json({ error: 'no collab project for this path' }, 412)
+    }
+    if (me?.role !== 'owner') {
+      return c.json({ error: 'only a project owner can cancel invites' }, 403)
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { email?: unknown }
+    const email = typeof body.email === 'string' ? body.email : ''
+    if (!email) return c.json({ error: 'no email' }, 400)
+    const res = await cancelPendingInvite(collabProjectId, email)
     return c.json(res)
   })
 
@@ -691,6 +742,64 @@ export const collabRoutes = new Hono()
     }
     const ok = await writeSharedCanvasCache(id, canvasId, data as CanvasFile)
     return c.json({ ok })
+  })
+
+  // GET /api/collab/link?collabProjectId= — the member's LOCAL FOLDER link for a
+  // folder-less shared project, if any (null when they haven't linked one yet).
+  // The shared panel calls this on open to decide whether to show the Terminal (a
+  // linked local checkout) or the "Link local folder" call-to-action. The path is
+  // the member's OWN folder, so returning it to their own client leaks nothing
+  // (the owner's path is never involved). MEMBERSHIP-gated + strict-UUID id.
+  //   400 bad id · 403 non-member
+  .get('/api/collab/link', async (c) => {
+    const id = c.req.query('collabProjectId')?.trim() ?? ''
+    if (!isCollabProjectId(id)) return c.json({ error: 'bad collabProjectId' }, 400)
+    if (!(await getMyMembership(id))) {
+      return c.json({ error: 'not a member of this project' }, 403)
+    }
+    const localPath = await findLinkedFolder(id)
+    return c.json<CollabLinkResponse>({ localPath })
+  })
+
+  // POST /api/collab/link {collabProjectId, localPath} — link the member's OWN
+  // local folder (their clone) to a folder-less shared project they joined, so its
+  // Terminal can spawn Claude in that checkout while Board/Canvas keep syncing.
+  // MEMBERSHIP-gated (NOT owner-gated — any member may link their own folder) +
+  // strict-UUID id; the folder must be a real directory; the registry write reuses
+  // Import's canonicalize + dangerous-target guard, so the allowlist is never
+  // weakened and the owner's code is never transferred (the link only points at the
+  // member's own folder). Re-linking the SAME folder is idempotent; pointing an
+  // already-linked project at a different folder is rejected (swap/unlink deferred).
+  //   400 bad id / not a directory / overlap / home-or-fs-root · 403 non-member ·
+  //   409 already linked elsewhere / folder already a project
+  .post('/api/collab/link', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      collabProjectId?: unknown
+      localPath?: unknown
+    }
+    const id = typeof body.collabProjectId === 'string' ? body.collabProjectId.trim() : ''
+    if (!isCollabProjectId(id)) return c.json({ error: 'bad collabProjectId' }, 400)
+    if (!(await getMyMembership(id))) {
+      return c.json({ error: 'not a member of this project' }, 403)
+    }
+    const localPath = typeof body.localPath === 'string' ? body.localPath.trim() : ''
+    if (!localPath) return c.json({ error: 'localPath is required' }, 400)
+    // Must be a real directory (mirrors Import) — a stale/file path is a 400, not a
+    // silent allowlist entry pointing at nothing.
+    try {
+      if (!(await stat(localPath)).isDirectory()) {
+        return c.json({ error: 'not a directory' }, 400)
+      }
+    } catch {
+      return c.json({ error: 'folder not found' }, 400)
+    }
+    const res = await linkSharedProjectToFolder(id, localPath)
+    if ('rejection' in res) {
+      const status =
+        res.rejection === 'already-linked' || res.rejection === 'duplicate' ? 409 : 400
+      return c.json({ error: res.rejection }, status)
+    }
+    return c.json<CollabLinkResponse>({ localPath: res.entry.path })
   })
 
   // GET /api/collab/asset?collabProjectId=&canvasId=&assetId= — stream a shared

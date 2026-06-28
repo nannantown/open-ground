@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   extractDescMarker,
   extractMarkerPair,
@@ -7,6 +7,12 @@ import {
   DESC_MARKER_JA,
   DESC_END,
   MAX_DESC_LEN,
+  startDescribeJob,
+  getDescribeJobState,
+  listActiveDescribeJobs,
+  cancelDescribeJob,
+  _resetDescribeJobsForTest,
+  type GeneratedDescriptions,
 } from './generateDescription'
 
 const pairOutput = [
@@ -104,5 +110,144 @@ describe('buildDescribePrompt', () => {
     expect(p).toContain(DESC_END)
     expect(p).toContain('.openground/')
     expect(p).toMatch(/read-only/i)
+  })
+})
+
+// ── describe job registry ─────────────────────────────────────────────────────
+// Deps are ALWAYS injected (generate / persist / lang) so a job never spawns a
+// claude PTY nor touches ~/.openground — the registry's bookkeeping is what's
+// under test, not the engine (covered by the extract* tests above).
+
+// Let the fire-and-forget job body settle (a couple of awaited microtasks).
+const settle = async () => {
+  await Promise.resolve()
+  await new Promise((r) => setTimeout(r, 0))
+  await new Promise((r) => setTimeout(r, 0))
+}
+
+type Gen = (
+  projectPath: string,
+  opts?: { timeoutMs?: number; signal?: AbortSignal },
+) => Promise<GeneratedDescriptions>
+
+describe('describe job registry', () => {
+  beforeEach(() => _resetDescribeJobsForTest())
+  afterEach(() => _resetDescribeJobsForTest())
+
+  it('single-flight: a second start for the same project reuses the running job', async () => {
+    let resolve!: (v: GeneratedDescriptions) => void
+    const generate: Gen = vi.fn(
+      () => new Promise<GeneratedDescriptions>((r) => (resolve = r)),
+    )
+    const persist = vi.fn(async () => {})
+    const id1 = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'en' })
+    const id2 = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'en' })
+    expect(id2).toBe(id1)
+    expect(generate).toHaveBeenCalledTimes(1)
+    // A DIFFERENT project starts its own job — single-flight is per project.
+    const otherGen: Gen = vi.fn(() => new Promise<GeneratedDescriptions>(() => {}))
+    const id3 = startDescribeJob({ projectPath: '/p/b' }, { generate: otherGen, persist, lang: async () => 'en' })
+    expect(id3).not.toBe(id1)
+    resolve({ en: 'done', ja: null })
+    await settle()
+  })
+
+  it('done: persists the generated pair and reports the result', async () => {
+    const generate: Gen = vi.fn(async () => ({ en: 'A cockpit.', ja: 'コックピット。' }))
+    const persist = vi.fn(async () => {})
+    const id = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'ja' })
+    await settle()
+    expect(persist).toHaveBeenCalledWith('/p/a', {
+      description: 'コックピット。', // ja requested → active-language copy is ja
+      descriptionJa: 'コックピット。',
+      descriptionEn: 'A cockpit.',
+    })
+    const st = getDescribeJobState(id)
+    expect(st?.status).toBe('done')
+    expect(st?.projectPath).toBe('/p/a')
+    expect(st?.description).toBe('コックピット。')
+    expect(st?.descriptionEn).toBe('A cockpit.')
+    expect(listActiveDescribeJobs().some((j) => j.id === id)).toBe(false)
+  })
+
+  it('active-language fallback: uses the other language when the active one is absent', async () => {
+    const generate: Gen = vi.fn(async () => ({ en: 'English only.', ja: null }))
+    const persist = vi.fn(async () => {})
+    const id = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'ja' })
+    await settle()
+    // ja requested but absent → description falls back to en; no stale descriptionJa written.
+    expect(persist).toHaveBeenCalledWith('/p/a', {
+      description: 'English only.',
+      descriptionEn: 'English only.',
+    })
+    expect(getDescribeJobState(id)?.status).toBe('done')
+  })
+
+  it('error: a failed generation reports status error and never persists', async () => {
+    const generate: Gen = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    const persist = vi.fn(async () => {})
+    const id = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'en' })
+    await settle()
+    expect(persist).not.toHaveBeenCalled()
+    const st = getDescribeJobState(id)
+    expect(st?.status).toBe('error')
+    expect(st?.error).toBe('boom')
+  })
+
+  it('cancel: aborts the run, marks it cancelled, drops it from active, and never persists', async () => {
+    let abortSeen = false
+    const generate: Gen = vi.fn(
+      (_p, opts) =>
+        new Promise<GeneratedDescriptions>((_res, rej) => {
+          opts?.signal?.addEventListener(
+            'abort',
+            () => {
+              abortSeen = true
+              rej(new Error('aborted'))
+            },
+            { once: true },
+          )
+        }),
+    )
+    const persist = vi.fn(async () => {})
+    const id = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'en' })
+    expect(listActiveDescribeJobs().some((j) => j.id === id)).toBe(true)
+    expect(cancelDescribeJob(id)).toBe(true)
+    await settle()
+    expect(abortSeen).toBe(true)
+    expect(persist).not.toHaveBeenCalled()
+    expect(getDescribeJobState(id)?.status).toBe('error')
+    expect(getDescribeJobState(id)?.error).toBe('cancelled')
+    expect(listActiveDescribeJobs().some((j) => j.id === id)).toBe(false)
+  })
+
+  it('a cancel that lands AFTER generation finished still wins — the late result is not persisted', async () => {
+    let resolveGen!: (v: GeneratedDescriptions) => void
+    const generate: Gen = vi.fn(
+      () => new Promise<GeneratedDescriptions>((res) => (resolveGen = res)),
+    )
+    const persist = vi.fn(async () => {})
+    const id = startDescribeJob({ projectPath: '/p/a' }, { generate, persist, lang: async () => 'en' })
+    cancelDescribeJob(id) // abort fires now…
+    resolveGen({ en: 'late', ja: null }) // …then generate resolves successfully
+    await settle()
+    expect(persist).not.toHaveBeenCalled()
+    expect(getDescribeJobState(id)?.error).toBe('cancelled')
+  })
+
+  it('getDescribeJobState → null for an unknown id; cancel → false for an unknown id', () => {
+    expect(getDescribeJobState('nope-123')).toBeNull()
+    expect(cancelDescribeJob('nope-123')).toBe(false)
+  })
+
+  it('elapsedMs is derived from startedAt (true age survives a re-attach)', async () => {
+    const generate: Gen = vi.fn(() => new Promise<GeneratedDescriptions>(() => {}))
+    const id = startDescribeJob({ projectPath: '/p/a' }, { generate, persist: vi.fn(async () => {}), lang: async () => 'en' })
+    const st = getDescribeJobState(id, Date.now() + 5_000)
+    expect(st?.elapsedMs).toBeGreaterThanOrEqual(5_000)
+    cancelDescribeJob(id)
+    await settle()
   })
 })

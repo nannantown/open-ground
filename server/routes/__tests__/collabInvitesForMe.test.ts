@@ -65,11 +65,11 @@ describe('GET /api/collab/invites', () => {
     await signIn()
     stubBackend(
       [
-        // SHARED: I'm a member (matched by email); the owner row is the inviter.
-        { project_id: SHARED, user_id: null, email: 'me@x.co', role: 'member', created_at: '2026-06-20T00:00:00Z' },
-        { project_id: SHARED, user_id: 'boss-uid', email: 'boss@x.co', role: 'owner', created_at: '2026-06-19T00:00:00Z' },
+        // SHARED: I'm a PENDING invitee (matched by email); the owner row is the inviter.
+        { project_id: SHARED, user_id: null, email: 'me@x.co', role: 'member', status: 'pending', created_at: '2026-06-20T00:00:00Z' },
+        { project_id: SHARED, user_id: 'boss-uid', email: 'boss@x.co', role: 'owner', status: 'accepted', created_at: '2026-06-19T00:00:00Z' },
         // OWNED: I'm the owner → NOT an invite.
-        { project_id: OWNED, user_id: 'u1', email: 'me@x.co', role: 'owner', created_at: '2026-06-18T00:00:00Z' },
+        { project_id: OWNED, user_id: 'u1', email: 'me@x.co', role: 'owner', status: 'accepted', created_at: '2026-06-18T00:00:00Z' },
       ],
       [
         { id: SHARED, label: 'Design System', owner_id: 'boss-uid' },
@@ -97,8 +97,8 @@ describe('GET /api/collab/invites', () => {
     const P = '33333333-3333-3333-3333-333333333333'
     stubBackend(
       [
-        { project_id: P, user_id: null, email: 'ME@X.CO', role: 'member' }, // case-insensitive match, no created_at
-        { project_id: P, user_id: 'o', email: null, role: 'owner' }, // owner email unresolved
+        { project_id: P, user_id: null, email: 'ME@X.CO', role: 'member', status: 'pending' }, // case-insensitive match, no created_at
+        { project_id: P, user_id: 'o', email: null, role: 'owner', status: 'accepted' }, // owner email unresolved
       ],
       [{ id: P, label: null, owner_id: 'o' }],
     )
@@ -106,6 +106,24 @@ describe('GET /api/collab/invites', () => {
     expect(await res.json()).toEqual({
       invites: [{ collabProjectId: P, label: null, inviterEmail: null, invitedAt: undefined }],
     })
+  })
+
+  it('an ACCEPTED membership is NOT an invite (it shows as a Ground card, not the bell)', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
+    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
+    await signIn()
+    // I'm already an ACCEPTED member of SHARED — once joined, it must leave the
+    // お知らせ bell (the invite is done) and live on the Ground instead.
+    stubBackend(
+      [
+        { project_id: SHARED, user_id: 'u1', email: 'me@x.co', role: 'member', status: 'accepted', created_at: '2026-06-20T00:00:00Z' },
+        { project_id: SHARED, user_id: 'boss-uid', email: 'boss@x.co', role: 'owner', status: 'accepted' },
+      ],
+      [{ id: SHARED, label: 'Design System', owner_id: 'boss-uid' }],
+    )
+    const res = await getReq('/api/collab/invites')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ invites: [] })
   })
 
   it('returns [] when the backend read fails (never an error to the client)', async () => {

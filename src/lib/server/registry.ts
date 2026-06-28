@@ -352,6 +352,72 @@ export const relocateProjectEntry = async (
   })
 }
 
+// ─── Member folder link (folder-less shared project → local checkout) ─────────
+// A collaborator who JOINED a shared project by invite has no local folder for it
+// (Board/Canvas sync over the Cloudflare DO). Linking their OWN local folder
+// (their clone — never the owner's code) registers it as a security-boundary root
+// so the shared project's Terminal can spawn Claude in it, while Board/Canvas keep
+// syncing in realtime. The link is just a normal registry entry carrying a
+// `collabProjectId` back-reference, so it goes through the SAME canonicalize +
+// dangerous-target guard as Import (the allowlist is never weakened) and is hidden
+// from the standalone Ground card list (scan.ts) so it doesn't duplicate the
+// shared card.
+
+export type LinkResult =
+  | { entry: ProjectEntry }
+  | {
+      rejection: 'already-linked' | 'duplicate' | Exclude<ImportRejection, null>
+    }
+
+/** The local folder a member has linked to a folder-less shared project, or null
+ *  if none. Keyed by the cross-user collabProjectId (og_projects.id). */
+export const findLinkedFolder = async (
+  collabProjectId: string,
+): Promise<string | null> => {
+  const projects = await canonProjects()
+  return projects.find((e) => e.collabProjectId === collabProjectId)?.path ?? null
+}
+
+/** Link a member's OWN local folder to a folder-less shared project they joined.
+ *  Mints a NEW registry entry (its own UUID) at the chosen folder, tagged with the
+ *  collabProjectId, so the path lands on the validateProjectPath allowlist (the
+ *  member can now run a Terminal/Claude there) while Board/Canvas stay on the
+ *  shared doc. The duplicate + overlap/dangerous-target checks run INSIDE the lock
+ *  (reusing {@link isDangerousImportTarget}) exactly like Import, so this never
+ *  weakens the security boundary. Idempotent if the SAME folder is re-linked;
+ *  re-pointing an already-linked project at a different folder is rejected
+ *  ('already-linked') — swapping/unlinking is deferred. The caller (the route)
+ *  must first confirm the signed-in user's MEMBERSHIP of collabProjectId and that
+ *  the path is a real directory. */
+export const linkSharedProjectToFolder = async (
+  collabProjectId: string,
+  localPath: string,
+): Promise<LinkResult> => {
+  const canon = await canonicalize(localPath)
+  return withRegistryLock(async () => {
+    const projects = await canonProjects()
+    // Already linked? Same folder → idempotent no-op; different folder → reject
+    // (re-pointing/unlinking is a separate, deferred concern).
+    const linked = projects.find((e) => e.collabProjectId === collabProjectId)
+    if (linked) {
+      return linked.path === canon ? { entry: linked } : { rejection: 'already-linked' }
+    }
+    // The folder must not already be a registered project (don't double-register
+    // one tree) — checked first for a clearer message than the overlap guard.
+    if (projects.some((e) => e.path === canon)) return { rejection: 'duplicate' }
+    const danger = await isDangerousImportTarget(canon, projects)
+    if (danger) return { rejection: danger }
+    const entry: ProjectEntry = {
+      id: randomUUID(),
+      path: canon,
+      addedAt: now(),
+      collabProjectId,
+    }
+    await setSettings({ projects: [...projects, entry] })
+    return { entry }
+  })
+}
+
 // Test seam: reset the per-home migration cache so a test can re-run migration
 // against a freshly-seeded home within the same process.
 export const __resetMigrationCacheForTests = () => migrating.clear()

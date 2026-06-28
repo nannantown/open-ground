@@ -84,6 +84,9 @@ export const CollabInviteDialog = ({
   const [members, setMembers] = useState<ProjectMember[] | null>(null) // null=loading
   const [email, setEmail] = useState('')
   const [inviting, setInviting] = useState(false)
+  // The roster row (by email) whose cancel/remove is in flight — disables just that
+  // row's action so a double-click can't fire twice.
+  const [busyMemberEmail, setBusyMemberEmail] = useState<string | null>(null)
   // Privacy consent — the owner must agree to the data disclosure BEFORE any
   // invite (link or email) can be issued. Remembered per role so it's one-time.
   const [consented, setConsented] = useState(() => collabConsentAccepted('owner'))
@@ -183,27 +186,36 @@ export const CollabInviteDialog = ({
     void loadRequests()
   }, [loadMembers, loadLinks, loadRequests, consented])
 
+  // Persist the shared name FIRST if it changed — members READ this label (the
+  // invitee's notification + their shared card show it), so neither a minted code
+  // nor an email invite should land with a stale / missing name. Returns true on
+  // success or no-op; false on a failed save. Shared by BOTH invite paths so an
+  // email invite carries a name exactly like a link does.
+  const persistLabelIfChanged = async (): Promise<boolean> => {
+    if (trimmed === loadedLabel.trim()) return true
+    const lr = await fetch('/api/collab/label', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, label: trimmed }),
+    })
+      .then((r) => (r.ok ? (r.json() as Promise<CollabLabelResponse>) : null))
+      .catch(() => null)
+    if (!lr?.ok) return false
+    setLoadedLabel(trimmed)
+    return true
+  }
+
   const createLink = async () => {
     if (!canCreate || inFlight.current) return
     inFlight.current = true
     setBusy(true)
     setError(null)
     try {
-      // 1) Persist the shared name FIRST if it changed (separate concern from the
-      //    mint; members read this label, so a "code but no name" state is wrong).
-      if (trimmed !== loadedLabel.trim()) {
-        const lr = await fetch('/api/collab/label', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: projectPath, label: trimmed }),
-        })
-          .then((r) => (r.ok ? (r.json() as Promise<CollabLabelResponse>) : null))
-          .catch(() => null)
-        if (!lr?.ok) {
-          setError(t('projectPanel.collabCreateFailed'))
-          return
-        }
-        setLoadedLabel(trimmed)
+      // 1) Persist the shared name first (members read it — a "code but no name"
+      //    state is wrong).
+      if (!(await persistLabelIfChanged())) {
+        setError(t('projectPanel.collabCreateFailed'))
+        return
       }
       // 2) Mint the 7-day code with the chosen mode + bounds.
       const ir = await fetch('/api/collab/invite-link', {
@@ -336,10 +348,18 @@ export const CollabInviteDialog = ({
 
   const inviteEmail = async () => {
     const e = email.trim().toLowerCase()
-    if (!e || !e.includes('@') || inviting) return
+    if (!e || !e.includes('@') || !trimmed || inviting) return
     setInviting(true)
     setError(null)
     try {
+      // Carry the shared name with the invite (best-effort) so the invitee's
+      // notification shows a named project, not the name-less variant.
+      if (!(await persistLabelIfChanged())) {
+        setError(t('projectPanel.collabInviteEmailFailed'))
+        return
+      }
+      // Creates a PENDING og_project_members row (server-side): the named person is
+      // pre-confirmed but holds no access until they accept the in-app お知らせ.
       const r = await fetch('/api/collab/invite', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -358,22 +378,53 @@ export const CollabInviteDialog = ({
     }
   }
 
-  const removeMember = async (memberEmail: string) => {
+  // Cancel a still-PENDING email invite (the "取消" action on a pending roster row).
+  // Hits the pending-only cancel route, so it can never drop an active collaborator
+  // and — unlike removeMember — does NOT rotate the project's quick-share links.
+  const cancelInvite = async (memberEmail: string) => {
+    if (busyMemberEmail) return
+    setBusyMemberEmail(memberEmail)
     setError(null)
-    const r = await fetch('/api/collab/remove', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: projectPath, email: memberEmail }),
-    })
-      .then((res) => (res.ok ? (res.json() as Promise<{ ok: boolean }>) : null))
-      .catch(() => null)
-    if (!r?.ok) {
-      setError(t('projectPanel.collabMemberRemoveFailed'))
-      return
+    try {
+      const r = await fetch('/api/collab/invite/cancel', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: projectPath, email: memberEmail }),
+      })
+        .then((res) => (res.ok ? (res.json() as Promise<{ ok: boolean }>) : null))
+        .catch(() => null)
+      if (!r?.ok) {
+        setError(t('projectPanel.collabInviteCancelFailed'))
+        return
+      }
+      await loadMembers()
+    } finally {
+      setBusyMemberEmail(null)
     }
-    // Removing a member also invalidates outstanding invite links, so refresh
-    // BOTH the roster and the link list — otherwise the links section is stale.
-    await Promise.all([loadMembers(), loadLinks()])
+  }
+
+  const removeMember = async (memberEmail: string) => {
+    if (busyMemberEmail) return
+    setBusyMemberEmail(memberEmail)
+    setError(null)
+    try {
+      const r = await fetch('/api/collab/remove', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: projectPath, email: memberEmail }),
+      })
+        .then((res) => (res.ok ? (res.json() as Promise<{ ok: boolean }>) : null))
+        .catch(() => null)
+      if (!r?.ok) {
+        setError(t('projectPanel.collabMemberRemoveFailed'))
+        return
+      }
+      // Removing a member also invalidates outstanding invite links, so refresh
+      // BOTH the roster and the link list — otherwise the links section is stale.
+      await Promise.all([loadMembers(), loadLinks()])
+    } finally {
+      setBusyMemberEmail(null)
+    }
   }
 
   // Shared classes for the small text "link" buttons in the lists.
@@ -452,299 +503,30 @@ export const CollabInviteDialog = ({
               </p>
             </div>
 
-            {/* Permission mode + bounds picker — configures the NEXT minted link.
-                Hidden while a freshly-minted code is on screen. */}
-            {!code && !unavailable && (
-              <div className="mt-4">
-                <label className="mb-1.5 block label-cap text-ink-muted">
-                  {t('projectPanel.collabModeLabel')}
-                </label>
-                <div className="flex gap-1.5" role="radiogroup" aria-label={t('projectPanel.collabModeLabel')}>
-                  {(['open', 'approval'] as const).map((m) => {
-                    const selected = mode === m
-                    return (
-                      <button
-                        key={m}
-                        type="button"
-                        role="radio"
-                        aria-checked={selected}
-                        onClick={() => setMode(m)}
-                        disabled={name === null}
-                        className={`flex-1 rounded-[3px] border px-2.5 py-1.5 text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 ${
-                          selected
-                            ? 'border-accent bg-accent text-bg-card'
-                            : 'border-line bg-transparent text-ink-muted hover:border-accent hover:text-accent'
-                        }`}
-                      >
-                        {t(
-                          m === 'open'
-                            ? 'projectPanel.collabModeOpen'
-                            : 'projectPanel.collabModeApproval',
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
-                <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-                  {t(
-                    mode === 'open'
-                      ? 'projectPanel.collabModeOpenHint'
-                      : 'projectPanel.collabModeApprovalHint',
-                  )}
-                </p>
-
-                <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-ink-muted">
-                  <input
-                    type="checkbox"
-                    checked={singleUse}
-                    onChange={(e) => setSingleUse(e.target.checked)}
-                    className="h-3.5 w-3.5 cursor-pointer"
-                  />
-                  {t('projectPanel.collabSingleUse')}
-                </label>
-
-                <div className="mt-2 flex items-center gap-2">
-                  <label htmlFor="collab-member-cap" className="text-[12px] text-ink-muted">
-                    {t('projectPanel.collabMemberCapField')}
-                  </label>
-                  <input
-                    id="collab-member-cap"
-                    type="number"
-                    min={1}
-                    inputMode="numeric"
-                    value={memberCap}
-                    onChange={(e) => setMemberCap(e.target.value)}
-                    placeholder={t('projectPanel.collabMemberCapPlaceholder')}
-                    className={`${FIELD_INPUT_CSS} w-28`}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* The minted code — select-all + a prominent Copy button with
-                copied feedback, then the expiry + hand-off note. */}
-            {code && (
-              <div className="mt-4">
-                <label className="mb-1 block label-cap text-ink-muted">
-                  {t('projectPanel.collabCodeLabel')}
-                </label>
-                <div className="flex items-stretch gap-1.5">
-                  <p className="min-w-0 flex-1 select-all break-all rounded-[3px] border border-line bg-bg px-2.5 py-2 font-mono text-[12px] leading-relaxed text-ink">
-                    {code}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void copy()}
-                    className={`inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[3px] border border-accent px-3 text-[11px] font-medium text-bg-card transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
-                      copied ? 'bg-accent' : 'bg-accent hover:bg-accent-hover active:bg-accent-deeper'
-                    }`}
-                  >
-                    {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
-                    <span>
-                      {copied ? t('projectPanel.inviteCopied') : t('projectPanel.inviteCopy')}
-                    </span>
-                  </button>
-                </div>
-                {/* Expiry + hand-off — what the code is and how to pass it on. */}
-                <div className="mt-2.5 flex items-start gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-2">
-                  <Clock size={13} className="mt-0.5 shrink-0 text-ink-faint" aria-hidden />
-                  <div className="min-w-0 space-y-1">
-                    <p className="text-[11px] leading-relaxed text-ink-muted">
-                      {t('projectPanel.collabExpires')}
-                    </p>
-                    <p className="text-[11px] leading-relaxed text-ink-faint">
-                      {t('projectPanel.collabAfterNote')}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
             {error && (
               <p className="mt-3 text-[11px] leading-relaxed text-accent">{error}</p>
             )}
 
-            <div className="mt-5 flex items-center justify-end gap-2">
-              {code ? (
-                <>
-                  <Btn
-                    variant="subtle"
-                    size="md"
-                    onClick={() => {
-                      setCode(null)
-                      setError(null)
-                    }}
-                  >
-                    {t('projectPanel.collabNewLink')}
-                  </Btn>
-                  <Btn variant="primary" size="md" onClick={onClose}>
-                    {t('projectPanel.inviteDone')}
-                  </Btn>
-                </>
-              ) : (
-                <>
-                  <Btn variant="subtle" size="md" onClick={onClose} disabled={busy}>
-                    {t('common.cancel')}
-                  </Btn>
-                  <Btn
-                    variant="primary"
-                    size="md"
-                    onClick={() => void createLink()}
-                    disabled={!canCreate}
-                    title={!trimmed ? t('projectPanel.collabSharedNameRequired') : undefined}
-                  >
-                    {busy
-                      ? t('projectPanel.collabCreating')
-                      : t('projectPanel.collabCreateLink')}
-                  </Btn>
-                </>
-              )}
-            </div>
-
-            {/* Pending requests (approval mode) — the owner approves / denies each.
-                All the loaded-data sections below are gated on consent too: their
-                loaders only run post-consent, so pre-consent there's nothing to show. */}
-            {consented && !unavailable && requests && requests.length > 0 && (
-              <div className="mt-5 border-t border-line pt-4">
-                <label className="mb-1.5 block label-cap text-ink-muted">
-                  {t('projectPanel.collabRequestsLabel')}
-                </label>
-                <ul className="space-y-1">
-                  {requests.map((rq) => (
-                    <li
-                      key={rq.id}
-                      className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
-                    >
-                      <span className="min-w-0 flex-1 truncate text-ink">{rq.email}</span>
-                      <Btn
-                        variant="ghost"
-                        size="xs"
-                        className="shrink-0"
-                        onClick={() => void actOnRequest(rq.id, 'approve')}
-                        disabled={busyReqId === rq.id}
-                      >
-                        {busyReqId === rq.id
-                          ? t('projectPanel.collabApproving')
-                          : t('projectPanel.collabApprove')}
-                      </Btn>
-                      <button
-                        type="button"
-                        onClick={() => void actOnRequest(rq.id, 'deny')}
-                        disabled={busyReqId === rq.id}
-                        className={textBtn}
-                      >
-                        {t('projectPanel.collabDeny')}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Active links — per-link revoke + Reset link + the member cap. */}
-            {consented && !unavailable && links && links.length > 0 && (
-              <div className="mt-5 border-t border-line pt-4">
-                <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <label className="label-cap text-ink-muted">
-                    {t('projectPanel.collabLinksLabel')}
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => void resetLink()}
-                    disabled={resetting}
-                    className={textBtn}
-                  >
-                    {resetting
-                      ? t('projectPanel.collabResetting')
-                      : t('projectPanel.collabResetLink')}
-                  </button>
-                </div>
-                {loadedCap != null && (
-                  <p className="mb-1.5 text-[11px] text-ink-faint">
-                    {t('projectPanel.collabMemberCapCurrent', { cap: String(loadedCap) })}
-                  </p>
-                )}
-                <ul className="space-y-1">
-                  {links.map((lk) => (
-                    <li
-                      key={lk.id}
-                      className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
-                    >
-                      <span className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
-                        {t(
-                          lk.mode === 'approval'
-                            ? 'projectPanel.collabLinkModeApproval'
-                            : 'projectPanel.collabLinkModeOpen',
-                        )}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-ink-faint">
-                        {lk.maxUses != null
-                          ? t('projectPanel.collabLinkUsesCapped', {
-                              used: String(lk.useCount),
-                              max: String(lk.maxUses),
-                            })
-                          : t('projectPanel.collabLinkUsesUnlimited', {
-                              used: String(lk.useCount),
-                            })}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void revokeOne(lk.id)}
-                        disabled={busyLinkId === lk.id}
-                        title={t('projectPanel.collabLinkRevoke')}
-                        className={iconBtn}
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Collaborators — the roster + email invite + per-member remove. */}
+            {/* ─────────────────────────────────────────────────────────────
+                PRIMARY — Invite by email (the SAFE, recommended path). The owner
+                names exactly WHO may enter; only that person can accept (identity-
+                bound), and they're notified IN-APP (Ground お知らせ). Shown first +
+                framed as recommended, so the safe path is the obvious one. */}
             {consented && !unavailable && (
-              <div className="mt-5 border-t border-line pt-4">
-                <label className="mb-1.5 block label-cap text-ink-muted">
-                  {t('projectPanel.collabMembersLabel')}
-                </label>
-                {members === null ? (
-                  <p className="text-[11px] text-ink-faint">{t('projectPanel.loading')}</p>
-                ) : members.length === 0 ? (
-                  <p className="text-[11px] leading-relaxed text-ink-faint">
-                    {t('projectPanel.collabNoMembers')}
-                  </p>
-                ) : (
-                  <ul className="space-y-1">
-                    {members.map((m) => (
-                      <li
-                        key={(m.email ?? m.userId ?? '') + m.role}
-                        className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
-                      >
-                        <span className="min-w-0 flex-1 truncate text-ink">
-                          {m.email ?? t('projectPanel.collabMemberNoEmail')}
-                        </span>
-                        <span className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
-                          {m.role === 'owner'
-                            ? t('projectPanel.collabMemberOwner')
-                            : t('projectPanel.collabMemberRole')}
-                        </span>
-                        {m.role !== 'owner' && m.email && (
-                          <button
-                            type="button"
-                            onClick={() => void removeMember(m.email as string)}
-                            title={t('projectPanel.collabMemberRemove')}
-                            className={iconBtn}
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {/* Invite by email — the second membership path beside the link. */}
-                <div className="mt-2 flex items-stretch gap-1.5">
+              <section className="mt-5 border-t border-line pt-4">
+                <div className="mb-1 flex flex-wrap items-center gap-2">
+                  <label className="label-cap text-ink-muted">
+                    {t('projectPanel.collabInviteEmailLabel')}
+                  </label>
+                  <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent">
+                    {t('projectPanel.collabInviteRecommended')}
+                  </span>
+                </div>
+                <p className="mb-2.5 text-[11px] leading-relaxed text-ink-faint">
+                  {t('projectPanel.collabInviteEmailExplain')}
+                </p>
+                {/* Email + invite — a PENDING invite the named person accepts in-app. */}
+                <div className="flex items-stretch gap-1.5">
                   <input
                     type="email"
                     value={email}
@@ -759,41 +541,360 @@ export const CollabInviteDialog = ({
                     className={`${FIELD_INPUT_CSS} min-w-0 flex-1`}
                   />
                   <Btn
-                    variant="ghost"
+                    variant="primary"
                     size="sm"
                     className="shrink-0 whitespace-nowrap"
                     onClick={() => void inviteEmail()}
-                    disabled={!email.trim() || inviting}
+                    disabled={!email.trim() || !trimmed || inviting}
+                    title={!trimmed ? t('projectPanel.collabSharedNameRequired') : undefined}
                   >
                     {inviting
                       ? t('projectPanel.collabInviteEmailBusy')
                       : t('projectPanel.collabInviteEmailBtn')}
                   </Btn>
                 </div>
-              </div>
+
+                {/* Roster — who's IN vs still INVITED (pending), with per-row cancel
+                    (pending invite) / remove (accepted member). */}
+                <div className="mt-3">
+                  <label className="mb-1.5 block label-cap text-ink-muted">
+                    {t('projectPanel.collabMembersLabel')}
+                  </label>
+                  {members === null ? (
+                    <p className="text-[11px] text-ink-faint">{t('projectPanel.loading')}</p>
+                  ) : members.length === 0 ? (
+                    <p className="text-[11px] leading-relaxed text-ink-faint">
+                      {t('projectPanel.collabNoMembers')}
+                    </p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {members.map((m) => {
+                        const isOwner = m.role === 'owner'
+                        // A non-owner whose invite hasn't been accepted yet.
+                        const isPending = !isOwner && m.status === 'pending'
+                        return (
+                          <li
+                            key={(m.email ?? m.userId ?? '') + m.role}
+                            className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
+                          >
+                            <span className="min-w-0 flex-1 truncate text-ink">
+                              {m.email ?? t('projectPanel.collabMemberNoEmail')}
+                            </span>
+                            <span
+                              className={`shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+                                isPending
+                                  ? 'border-accent/40 bg-accent-soft text-accent'
+                                  : 'border-line text-ink-muted'
+                              }`}
+                            >
+                              {isOwner
+                                ? t('projectPanel.collabMemberOwner')
+                                : isPending
+                                  ? t('projectPanel.collabMemberPending')
+                                  : t('projectPanel.collabMemberRole')}
+                            </span>
+                            {!isOwner && m.email && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  isPending
+                                    ? void cancelInvite(m.email as string)
+                                    : void removeMember(m.email as string)
+                                }
+                                disabled={busyMemberEmail === m.email}
+                                title={
+                                  isPending
+                                    ? t('projectPanel.collabInviteCancel')
+                                    : t('projectPanel.collabMemberRemove')
+                                }
+                                className={iconBtn}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </section>
             )}
 
-            {/* Eviction: revoke ALL outstanding invite links (owner-gated). Quiet,
-                separate from the mint action — used after removing a collaborator
-                so an old 7-day code can't let them rejoin. */}
-            {consented && !unavailable && (
-              <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
-                <span className="min-w-0 text-[11px] leading-relaxed text-ink-faint">
-                  {revoked
-                    ? t('projectPanel.collabRevoked')
-                    : t('projectPanel.collabRevokeHint')}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void revokeLinks()}
-                  disabled={revoking}
-                  className={textBtn}
-                >
-                  {revoking
-                    ? t('projectPanel.collabRevoking')
-                    : t('projectPanel.collabRevoke')}
-                </button>
-              </div>
+            {/* ─────────────────────────────────────────────────────────────
+                SECONDARY — Quick share link. Anyone signed in WITH the link can
+                join (or request to). Handy for a fast hand-off, but you can’t
+                pre-confirm who ends up in — framed as the quicker, looser
+                alternative below the named-invite path. Visible from first paint
+                (no separate gate screen) — the mint button stays DISABLED until
+                consent (canCreate); only the write-capable revoke is consent-gated. */}
+            {!unavailable && (
+              <section className="mt-5 border-t border-line pt-4">
+                <label className="mb-1 block label-cap text-ink-muted">
+                  {t('projectPanel.collabQuickShareLabel')}
+                </label>
+                <p className="mb-2.5 text-[11px] leading-relaxed text-ink-faint">
+                  {t('projectPanel.collabQuickShareExplain')}
+                </p>
+
+                {/* Permission mode + bounds picker — configures the NEXT minted
+                    link. Hidden while a freshly-minted code is on screen. */}
+                {!code && (
+                  <div>
+                    <label className="mb-1.5 block label-cap text-ink-muted">
+                      {t('projectPanel.collabModeLabel')}
+                    </label>
+                    <div className="flex gap-1.5" role="radiogroup" aria-label={t('projectPanel.collabModeLabel')}>
+                      {(['open', 'approval'] as const).map((m) => {
+                        const selected = mode === m
+                        return (
+                          <button
+                            key={m}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            onClick={() => setMode(m)}
+                            disabled={name === null}
+                            className={`flex-1 rounded-[3px] border px-2.5 py-1.5 text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 ${
+                              selected
+                                ? 'border-accent bg-accent text-bg-card'
+                                : 'border-line bg-transparent text-ink-muted hover:border-accent hover:text-accent'
+                            }`}
+                          >
+                            {t(
+                              m === 'open'
+                                ? 'projectPanel.collabModeOpen'
+                                : 'projectPanel.collabModeApproval',
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                      {t(
+                        mode === 'open'
+                          ? 'projectPanel.collabModeOpenHint'
+                          : 'projectPanel.collabModeApprovalHint',
+                      )}
+                    </p>
+
+                    <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-ink-muted">
+                      <input
+                        type="checkbox"
+                        checked={singleUse}
+                        onChange={(e) => setSingleUse(e.target.checked)}
+                        className="h-3.5 w-3.5 cursor-pointer"
+                      />
+                      {t('projectPanel.collabSingleUse')}
+                    </label>
+
+                    <div className="mt-2 flex items-center gap-2">
+                      <label htmlFor="collab-member-cap" className="text-[12px] text-ink-muted">
+                        {t('projectPanel.collabMemberCapField')}
+                      </label>
+                      <input
+                        id="collab-member-cap"
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        value={memberCap}
+                        onChange={(e) => setMemberCap(e.target.value)}
+                        placeholder={t('projectPanel.collabMemberCapPlaceholder')}
+                        className={`${FIELD_INPUT_CSS} w-28`}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* The minted code — select-all + a prominent Copy button with
+                    copied feedback, then the expiry + hand-off note. */}
+                {code && (
+                  <div>
+                    <label className="mb-1 block label-cap text-ink-muted">
+                      {t('projectPanel.collabCodeLabel')}
+                    </label>
+                    <div className="flex items-stretch gap-1.5">
+                      <p className="min-w-0 flex-1 select-all break-all rounded-[3px] border border-line bg-bg px-2.5 py-2 font-mono text-[12px] leading-relaxed text-ink">
+                        {code}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void copy()}
+                        className={`inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[3px] border border-accent px-3 text-[11px] font-medium text-bg-card transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                          copied ? 'bg-accent' : 'bg-accent hover:bg-accent-hover active:bg-accent-deeper'
+                        }`}
+                      >
+                        {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
+                        <span>
+                          {copied ? t('projectPanel.inviteCopied') : t('projectPanel.inviteCopy')}
+                        </span>
+                      </button>
+                    </div>
+                    <div className="mt-2.5 flex items-start gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-2">
+                      <Clock size={13} className="mt-0.5 shrink-0 text-ink-faint" aria-hidden />
+                      <div className="min-w-0 space-y-1">
+                        <p className="text-[11px] leading-relaxed text-ink-muted">
+                          {t('projectPanel.collabExpires')}
+                        </p>
+                        <p className="text-[11px] leading-relaxed text-ink-faint">
+                          {t('projectPanel.collabAfterNote')}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Link action — mint a fresh code, or (when one is shown) start over. */}
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  {code ? (
+                    <Btn
+                      variant="subtle"
+                      size="md"
+                      onClick={() => {
+                        setCode(null)
+                        setError(null)
+                      }}
+                    >
+                      {t('projectPanel.collabNewLink')}
+                    </Btn>
+                  ) : (
+                    <Btn
+                      variant="subtle"
+                      size="md"
+                      onClick={() => void createLink()}
+                      disabled={!canCreate}
+                      title={!trimmed ? t('projectPanel.collabSharedNameRequired') : undefined}
+                    >
+                      {busy
+                        ? t('projectPanel.collabCreating')
+                        : t('projectPanel.collabCreateLink')}
+                    </Btn>
+                  )}
+                </div>
+
+                {/* Pending requests (approval mode) — the owner approves / denies each. */}
+                {requests && requests.length > 0 && (
+                  <div className="mt-4 border-t border-line pt-4">
+                    <label className="mb-1.5 block label-cap text-ink-muted">
+                      {t('projectPanel.collabRequestsLabel')}
+                    </label>
+                    <ul className="space-y-1">
+                      {requests.map((rq) => (
+                        <li
+                          key={rq.id}
+                          className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
+                        >
+                          <span className="min-w-0 flex-1 truncate text-ink">{rq.email}</span>
+                          <Btn
+                            variant="ghost"
+                            size="xs"
+                            className="shrink-0"
+                            onClick={() => void actOnRequest(rq.id, 'approve')}
+                            disabled={busyReqId === rq.id}
+                          >
+                            {busyReqId === rq.id
+                              ? t('projectPanel.collabApproving')
+                              : t('projectPanel.collabApprove')}
+                          </Btn>
+                          <button
+                            type="button"
+                            onClick={() => void actOnRequest(rq.id, 'deny')}
+                            disabled={busyReqId === rq.id}
+                            className={textBtn}
+                          >
+                            {t('projectPanel.collabDeny')}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Active links — per-link revoke + Reset link + the member cap. */}
+                {links && links.length > 0 && (
+                  <div className="mt-4 border-t border-line pt-4">
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <label className="label-cap text-ink-muted">
+                        {t('projectPanel.collabLinksLabel')}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void resetLink()}
+                        disabled={resetting}
+                        className={textBtn}
+                      >
+                        {resetting
+                          ? t('projectPanel.collabResetting')
+                          : t('projectPanel.collabResetLink')}
+                      </button>
+                    </div>
+                    {loadedCap != null && (
+                      <p className="mb-1.5 text-[11px] text-ink-faint">
+                        {t('projectPanel.collabMemberCapCurrent', { cap: String(loadedCap) })}
+                      </p>
+                    )}
+                    <ul className="space-y-1">
+                      {links.map((lk) => (
+                        <li
+                          key={lk.id}
+                          className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
+                        >
+                          <span className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
+                            {t(
+                              lk.mode === 'approval'
+                                ? 'projectPanel.collabLinkModeApproval'
+                                : 'projectPanel.collabLinkModeOpen',
+                            )}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate text-ink-faint">
+                            {lk.maxUses != null
+                              ? t('projectPanel.collabLinkUsesCapped', {
+                                  used: String(lk.useCount),
+                                  max: String(lk.maxUses),
+                                })
+                              : t('projectPanel.collabLinkUsesUnlimited', {
+                                  used: String(lk.useCount),
+                                })}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void revokeOne(lk.id)}
+                            disabled={busyLinkId === lk.id}
+                            title={t('projectPanel.collabLinkRevoke')}
+                            className={iconBtn}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Eviction: revoke ALL outstanding invite links (owner-gated). Quiet,
+                    used after removing a collaborator so an old 7-day code can't let
+                    them rejoin. Consent-gated — it WRITES, so it must not fire before
+                    the owner has agreed (unlike the disabled mint button above). */}
+                {consented && (
+                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
+                    <span className="min-w-0 text-[11px] leading-relaxed text-ink-faint">
+                      {revoked
+                        ? t('projectPanel.collabRevoked')
+                        : t('projectPanel.collabRevokeHint')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void revokeLinks()}
+                      disabled={revoking}
+                      className={textBtn}
+                    >
+                      {revoking
+                        ? t('projectPanel.collabRevoking')
+                        : t('projectPanel.collabRevoke')}
+                    </button>
+                  </div>
+                )}
+              </section>
             )}
           </div>
         </div>

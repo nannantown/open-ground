@@ -6,6 +6,7 @@ export const projectPanel = {
     'projectPanel.backToGround': 'Back to Ground',
     'projectPanel.claudeNotFound': 'claude CLI not found — install Claude Code, then restart OPEN GROUND',
     'projectPanel.generating': 'Generating…',
+    'projectPanel.cancelDescription': 'Stop generating',
     'projectPanel.regenerateDescription': 'Refresh description',
     'projectPanel.generateDescription': 'Generate description',
     // Open in… / pick app
@@ -42,6 +43,32 @@ export const projectPanel = {
     'projectPanel.swarm.power.workers': '{count} workers',
     'projectPanel.swarm.power.hint':
       'Start the engine, commander, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
+    // OFF / first-run onboarding (SwarmOnboarding) — the SINGLE centered screen
+    // shown while the swarm is fully idle (engine stopped + no supply / commander
+    // / worker sessions). It explains the three roles and how a request flows
+    // through them BEFORE the owner presses Start. Role NAMES reuse the existing
+    // supply / manager / worker keys above; only this flow + role-summary copy is
+    // new — no duplicate text (条件3).
+    'projectPanel.swarm.onboarding.intro':
+      'Tell the team what you want — three Claude roles carry it from request to merged, working together.',
+    'projectPanel.swarm.onboarding.flowHeading': 'How work flows',
+    'projectPanel.swarm.onboarding.roleYou': 'You',
+    'projectPanel.swarm.onboarding.flowRequest': 'A request',
+    'projectPanel.swarm.onboarding.flowQueue': 'Filed to Board · To do',
+    'projectPanel.swarm.onboarding.flowDispatch': 'Pulled & dispatched',
+    'projectPanel.swarm.onboarding.flowImplement': 'Built in an isolated worktree',
+    'projectPanel.swarm.onboarding.flowReview': 'Review',
+    'projectPanel.swarm.onboarding.flowIntegrate': 'Integrated',
+    'projectPanel.swarm.onboarding.flowDone': 'Done',
+    'projectPanel.swarm.onboarding.rolesHeading': 'The three roles',
+    'projectPanel.swarm.onboarding.roleSupply':
+      'Turns your requests into observable to-do cards on the Board. Writes the Board only — never code.',
+    'projectPanel.swarm.onboarding.roleManager':
+      'Pulls cards off To do, dispatches one worker each, then reviews and integrates what comes back.',
+    'projectPanel.swarm.onboarding.roleWorker':
+      'A `claude` session that builds one card in its own isolated worktree, then hands it back for review.',
+    'projectPanel.swarm.onboarding.startNote':
+      'Press Start: the engine, supply officer and commander all come up together and begin draining the Board automatically. (Stopping later halts new dispatch only — running workers finish.)',
     // Workers list. Manual hand-dispatch was removed (the to-do rail is gone —
     // browse todos on the Board tab); workers are started by the autonomous
     // engine (the master power switch above) or the commander session.
@@ -208,6 +235,9 @@ export const projectPanel = {
     'projectPanel.editorOpenFailed': "Couldn't open an editor: {error}",
     // Branch changes (header chip + modal)
     'projectPanel.branchChipTitle': 'Show branch changes',
+    'projectPanel.branchMenuTitle': 'Active branches',
+    'projectPanel.branchMenuCurrent': 'current',
+    'projectPanel.branchMenuEmpty': 'No branches',
     'projectPanel.branchChangesTitle': 'Branch changes',
     'projectPanel.branchAheadBehind': 'ahead {ahead} · behind {behind}',
     'projectPanel.branchWorkingHeading': 'Working tree changes',
@@ -323,12 +353,25 @@ export const projectPanel = {
     'projectPanel.collabMemberNoEmail': '(no email)',
     'projectPanel.collabMemberOwner': 'Owner',
     'projectPanel.collabMemberRole': 'Member',
+    // A non-owner whose email invite hasn't been accepted yet (no access until they do).
+    'projectPanel.collabMemberPending': 'Invited',
     'projectPanel.collabMemberRemove': 'Remove',
     'projectPanel.collabMemberRemoveFailed': 'Couldn’t remove that collaborator — try again.',
-    'projectPanel.collabInviteEmailPlaceholder': 'Invite by email',
+    'projectPanel.collabInviteCancel': 'Cancel invite',
+    'projectPanel.collabInviteCancelFailed': 'Couldn’t cancel that invite — try again.',
+    'projectPanel.collabInviteEmailPlaceholder': 'name@example.com',
     'projectPanel.collabInviteEmailBtn': 'Invite',
     'projectPanel.collabInviteEmailBusy': 'Inviting…',
     'projectPanel.collabInviteEmailFailed': 'Couldn’t invite — check the email and try again.',
+    // Email invite as the recommended (safe) path — you name exactly who joins.
+    'projectPanel.collabInviteEmailLabel': 'Invite by email',
+    'projectPanel.collabInviteRecommended': 'Recommended',
+    'projectPanel.collabInviteEmailExplain':
+      'Only this person can join — you choose exactly who’s in. They get a notice inside OPEN GROUND and join by accepting it. Safer than a link.',
+    // Quick share link as the looser, faster alternative.
+    'projectPanel.collabQuickShareLabel': 'Quick share link',
+    'projectPanel.collabQuickShareExplain':
+      'Anyone signed in who has the link can join — handy for a fast hand-off, but you can’t pre-confirm exactly who ends up in.',
     // Shared-project (member) view — opening a folder-less project you joined.
     'projectPanel.collabSharedBadge': 'Shared',
     'projectPanel.collabSharedLive': 'Live',
@@ -337,6 +380,17 @@ export const projectPanel = {
     'projectPanel.collabSharedClaudeTitle': 'Claude runs on your own machine',
     'projectPanel.collabSharedClaudeBody': 'This is a shared workspace — the Board syncs in realtime, but Claude runs in your own local checkout with your own subscription. Open this project’s repository locally to run Claude on a task.',
     'projectPanel.collabSharedCachedBanner': 'Connecting — showing your last saved copy (read-only)',
+    'projectPanel.collabLinkFolder': 'Link local folder',
+    'projectPanel.collabLinkFolderHint':
+      'Link a folder on this computer — your own clone of this project — to open a Terminal and run Claude on it. Board & Canvas keep syncing in realtime; the owner’s code is never sent to you.',
+    'projectPanel.collabLinkFailed': 'Couldn’t link folder',
+    'projectPanel.collabLinkAlreadyLinked':
+      'This shared project is already linked to a different folder.',
+    'projectPanel.collabLinkDuplicate': 'That folder is already registered as another project.',
+    'projectPanel.collabLinkOverlap':
+      'That folder overlaps an existing project — pick a separate folder.',
+    'projectPanel.collabLinkBadTarget':
+      'Pick a normal project folder (not your home folder or the disk root).',
     'projectPanel.collabCanvasBack': 'All canvases',
     'projectPanel.collabCanvasEmpty': 'No canvases in this project yet.',
     // "Shared with me" dialog (the member entry point — join by code + open).
@@ -432,6 +486,7 @@ export const projectPanel = {
     'projectPanel.backToGround': 'Ground に戻る',
     'projectPanel.claudeNotFound': 'claude CLI が見つかりません — Claude Code をインストールして OPEN GROUND を再起動してください',
     'projectPanel.generating': '生成中…',
+    'projectPanel.cancelDescription': '生成を停止',
     'projectPanel.regenerateDescription': '説明を更新',
     'projectPanel.generateDescription': '説明を生成',
     // Open in… / pick app
@@ -466,6 +521,31 @@ export const projectPanel = {
     'projectPanel.swarm.power.workers': 'ワーカー {count}',
     'projectPanel.swarm.power.hint':
       'エンジン・司令官・補給官をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
+    // OFF・初回オンボーディング（SwarmOnboarding）— swarm が完全に待機状態（エンジン
+    // 停止かつ補給官／司令官／worker セッションなし）のとき中央に出す1枚。3つの役割
+    // と、要望がそこをどう流れるかを「開始」前に説明する。役割の名称は上の supply /
+    // manager / worker キーを流用し、ここで新規なのはフロー＋役割サマリの文言のみ
+    // （重複文言は増やさない・条件3）。
+    'projectPanel.swarm.onboarding.intro':
+      '要望を伝えるだけ。3つの役割の Claude が、チームで要望から統合済みまで運びます。',
+    'projectPanel.swarm.onboarding.flowHeading': '仕事の流れ',
+    'projectPanel.swarm.onboarding.roleYou': 'あなた',
+    'projectPanel.swarm.onboarding.flowRequest': '要望',
+    'projectPanel.swarm.onboarding.flowQueue': 'Board・todo に積む',
+    'projectPanel.swarm.onboarding.flowDispatch': '引いて worker に振る',
+    'projectPanel.swarm.onboarding.flowImplement': '隔離 worktree で実装',
+    'projectPanel.swarm.onboarding.flowReview': 'review',
+    'projectPanel.swarm.onboarding.flowIntegrate': '統合',
+    'projectPanel.swarm.onboarding.flowDone': 'done',
+    'projectPanel.swarm.onboarding.rolesHeading': '3つの役割',
+    'projectPanel.swarm.onboarding.roleSupply':
+      '要望を観測可能な todo カードにして Board に積みます。Board に書くだけで、コードは編集しません。',
+    'projectPanel.swarm.onboarding.roleManager':
+      'todo からカードを引いて worker に振り、戻ってきたものを review・統合します。',
+    'projectPanel.swarm.onboarding.roleWorker':
+      '1枚のカードを自分専用の隔離 worktree で実装し、review に戻す `claude` セッションです。',
+    'projectPanel.swarm.onboarding.startNote':
+      '「開始」を押すと、エンジン・補給官・司令官がまとめて立ち上がり、Board を自動で回し始めます。（あとで停止しても新規の振り分けが止まるだけで、走行中の worker は完走します。）',
     // Workers リスト。手動の「振る」は撤去（todo 一覧は Board タブへ一本化）。
     // worker は自律エンジン（上の電源スイッチ）または司令官セッションが起動します。
     'projectPanel.swarm.workersEmpty': 'worker はまだ動いていません。上のスイッチで Swarm を開始する（または司令官に頼む）と振り分けが始まります — それぞれに隔離された worktree と `claude` セッションが割り当てられます。',
@@ -628,6 +708,9 @@ export const projectPanel = {
     'projectPanel.editorOpenFailed': 'エディタを開けませんでした: {error}',
     // Branch changes (header chip + modal)
     'projectPanel.branchChipTitle': 'ブランチの変更を表示',
+    'projectPanel.branchMenuTitle': 'アクティブなブランチ',
+    'projectPanel.branchMenuCurrent': '現在',
+    'projectPanel.branchMenuEmpty': 'ブランチがありません',
     'projectPanel.branchChangesTitle': 'ブランチの変更',
     'projectPanel.branchAheadBehind': '{ahead} 先行 · {behind} 遅れ',
     'projectPanel.branchWorkingHeading': '作業ツリーの変更',
@@ -740,12 +823,25 @@ export const projectPanel = {
     'projectPanel.collabMemberNoEmail': '(メールなし)',
     'projectPanel.collabMemberOwner': 'オーナー',
     'projectPanel.collabMemberRole': 'メンバー',
+    // 招待をまだ承認していない非オーナー（承認するまでアクセス権なし）。
+    'projectPanel.collabMemberPending': '招待中',
     'projectPanel.collabMemberRemove': '削除',
     'projectPanel.collabMemberRemoveFailed': '共同編集者を削除できませんでした。もう一度お試しください。',
-    'projectPanel.collabInviteEmailPlaceholder': 'メールアドレスで招待',
+    'projectPanel.collabInviteCancel': '招待を取消',
+    'projectPanel.collabInviteCancelFailed': '招待を取り消せませんでした。もう一度お試しください。',
+    'projectPanel.collabInviteEmailPlaceholder': 'name@example.com',
     'projectPanel.collabInviteEmailBtn': '招待',
     'projectPanel.collabInviteEmailBusy': '招待中…',
     'projectPanel.collabInviteEmailFailed': '招待できませんでした。メールアドレスを確認してください。',
+    // メール招待を「安全な推奨経路」として提示 — 誰を入れるか事前に確定。
+    'projectPanel.collabInviteEmailLabel': 'メールで招待',
+    'projectPanel.collabInviteRecommended': 'おすすめ',
+    'projectPanel.collabInviteEmailExplain':
+      'この人だけが参加できます（誰を入れるかを事前に確定）。相手には OPEN GROUND 内にお知らせが届き、承認すると参加できます。リンクより安全です。',
+    // クイック共有リンクは手早い・ゆるめの代替手段。
+    'projectPanel.collabQuickShareLabel': 'クイック共有リンク',
+    'projectPanel.collabQuickShareExplain':
+      'リンクを知っていてサインインした人なら誰でも参加できます。手早い共有に便利ですが、誰が入るかは事前に確定できません。',
     // 共有プロジェクト（メンバー）ビュー — 参加したフォルダ無しプロジェクトを開く。
     'projectPanel.collabSharedBadge': '共有',
     'projectPanel.collabSharedLive': 'ライブ',
@@ -754,6 +850,17 @@ export const projectPanel = {
     'projectPanel.collabSharedClaudeTitle': 'Claude は各自のマシンで動きます',
     'projectPanel.collabSharedClaudeBody': '共有ワークスペースです — Board はリアルタイムで同期しますが、Claude は各自のローカルチェックアウトで自分のサブスクリプションで動きます。タスクで Claude を動かすには、このプロジェクトのリポジトリをローカルで開いてください。',
     'projectPanel.collabSharedCachedBanner': '接続中 — 最後に保存したコピーを表示中（読み取り専用）',
+    'projectPanel.collabLinkFolder': 'ローカルフォルダを紐づける',
+    'projectPanel.collabLinkFolderHint':
+      'このコンピュータ上のフォルダ（このプロジェクトのあなた自身のクローン）を紐づけると、Terminal が開いて Claude を動かせます。Board と Canvas は引き続きリアルタイムで同期します。オーナーのコードがあなたに送られることはありません。',
+    'projectPanel.collabLinkFailed': 'フォルダを紐づけられませんでした',
+    'projectPanel.collabLinkAlreadyLinked':
+      'この共有プロジェクトはすでに別のフォルダに紐づけられています。',
+    'projectPanel.collabLinkDuplicate': 'そのフォルダはすでに別のプロジェクトとして登録されています。',
+    'projectPanel.collabLinkOverlap':
+      'そのフォルダは既存のプロジェクトと重なっています — 別のフォルダを選んでください。',
+    'projectPanel.collabLinkBadTarget':
+      '通常のプロジェクトフォルダを選んでください（ホームフォルダやディスクのルートは不可）。',
     'projectPanel.collabCanvasBack': 'すべての Canvas',
     'projectPanel.collabCanvasEmpty': 'このプロジェクトにはまだ Canvas がありません。',
     // 「共有プロジェクト」ダイアログ（メンバーの入口 — コードで参加＋開く）。

@@ -182,8 +182,8 @@ describe('CollabInviteDialog (owner invite UI)', () => {
 
   it('lists collaborators, invites by email, and removes a member', async () => {
     let roster: ProjectMember[] = [
-      { projectId: PID, email: 'owner@e.co', role: 'owner' },
-      { projectId: PID, email: 'mate@e.co', role: 'member' },
+      { projectId: PID, email: 'owner@e.co', role: 'owner', status: 'accepted' },
+      { projectId: PID, email: 'mate@e.co', role: 'member', status: 'accepted' },
     ]
     const seen: Array<{ url: string; body?: string }> = []
     stubFetch((url, init) => {
@@ -191,7 +191,8 @@ describe('CollabInviteDialog (owner invite UI)', () => {
       if (url.includes('/api/collab/members')) return json({ members: roster })
       if (url.includes('/api/collab/project')) return json({ collabProjectId: PID, member: true, label: 'X' })
       if (url.includes('/api/collab/invite') && !url.includes('invite-link')) {
-        roster = [...roster, { projectId: PID, email: 'new@e.co', role: 'member' }]
+        // An email invite lands PENDING (the invitee accepts in-app).
+        roster = [...roster, { projectId: PID, email: 'new@e.co', role: 'member', status: 'pending' }]
         return json({ ok: true, written: 1 })
       }
       if (url.includes('/api/collab/remove')) {
@@ -219,6 +220,38 @@ describe('CollabInviteDialog (owner invite UI)', () => {
     // Remove the member → it disappears from the roster.
     fireEvent.click(screen.getAllByTitle('projectPanel.collabMemberRemove')[0])
     await waitFor(() => expect(screen.queryByText('mate@e.co')).toBeNull())
+  })
+
+  it('shows a PENDING invite distinctly and CANCELS it (not the same as removing a member)', async () => {
+    let roster: ProjectMember[] = [
+      { projectId: PID, email: 'owner@e.co', role: 'owner', status: 'accepted' },
+      { projectId: PID, email: 'invited@e.co', role: 'member', status: 'pending' },
+    ]
+    const seen: Array<{ url: string; body?: string }> = []
+    stubFetch((url, init) => {
+      seen.push({ url, body: init?.body as string | undefined })
+      if (url.includes('/api/collab/members')) return json({ members: roster })
+      if (url.includes('/api/collab/project')) return json({ collabProjectId: PID, member: true, label: 'X' })
+      if (url.includes('/api/collab/invite/cancel')) {
+        roster = roster.filter((m) => m.email !== 'invited@e.co')
+        return json({ ok: true })
+      }
+      return json({})
+    })
+    render(<CollabInviteDialog projectName="R" projectPath="/p" onClose={() => {}} />)
+
+    // The pending invitee carries the "Invited" badge, NOT the "Member" badge.
+    expect(await screen.findByText('invited@e.co')).toBeTruthy()
+    expect(screen.getByText('projectPanel.collabMemberPending')).toBeTruthy()
+    expect(screen.queryByText('projectPanel.collabMemberRole')).toBeNull()
+
+    // Its action is CANCEL (→ /api/collab/invite/cancel), not remove. The pending
+    // cancel must never hit /api/collab/remove (which would rotate quick-share links).
+    fireEvent.click(screen.getByTitle('projectPanel.collabInviteCancel'))
+    await waitFor(() => expect(screen.queryByText('invited@e.co')).toBeNull())
+    const cancelCall = seen.find((s) => s.url.includes('/api/collab/invite/cancel'))
+    expect(JSON.parse(cancelCall!.body as string)).toEqual({ path: '/p', email: 'invited@e.co' })
+    expect(seen.some((s) => s.url.includes('/api/collab/remove'))).toBe(false)
   })
 
   it('revokes all invite links (eviction) and confirms', async () => {

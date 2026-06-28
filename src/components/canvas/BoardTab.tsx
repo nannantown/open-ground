@@ -61,18 +61,21 @@ const WORKER_LABEL_KEY: Record<WorkerActivity, MessageKey> = {
 
 // ─── Board tab ───────────────────────────────────────────────────────────────
 // A kanban of task cards (one source of truth in the central tasks.json).
-// Columns are workflow stages — the optional 'review' fifth column (between
-// doing and done) is toggled per project via config.reviewColumn; a card's
-// vertical position WITHIN a column is its priority (top = highest). The user
-// drags cards between columns; each card's ▶ button (in the detail drawer)
-// launches an interactive claude terminal — there is no batch-run machinery
-// anymore.
+// Columns are workflow stages — five fixed lanes (todo / doing / review / done
+// / blocked), the 'review' lane (PR-waiting, between doing and done) always
+// shown; a card's vertical position WITHIN a column is its priority (top =
+// highest). The user drags cards between columns; each card's ▶ button (in the
+// detail drawer) launches an interactive claude terminal — there is no
+// batch-run machinery anymore.
 
-// The active column keys, derived from the project's review-column flag.
-export const boardColumnKeys = (reviewOn: boolean): BoardColumn[] =>
-  reviewOn
-    ? ['todo', 'doing', 'review', 'done', 'blocked']
-    : ['todo', 'doing', 'done', 'blocked']
+// The board column keys — the five fixed lanes, always shown.
+export const boardColumnKeys = (): BoardColumn[] => [
+  'todo',
+  'doing',
+  'review',
+  'done',
+  'blocked',
+]
 
 const COLUMN_LABEL_KEYS: Record<BoardColumn, MessageKey> = {
   todo: 'board.col.todo',
@@ -84,9 +87,8 @@ const COLUMN_LABEL_KEYS: Record<BoardColumn, MessageKey> = {
 
 export const columns = (
   t: TFn,
-  reviewOn: boolean,
 ): { key: BoardColumn; label: string; hint: string }[] =>
-  boardColumnKeys(reviewOn).map(key => ({
+  boardColumnKeys().map(key => ({
     key,
     label: t(COLUMN_LABEL_KEYS[key]),
     hint:
@@ -102,14 +104,6 @@ export const columns = (
 // 未着手, and a fresh task starts in 未着手.
 export const columnOf = (t: ProjectTask): BoardColumn =>
   t.boardColumn ?? (t.done ? 'done' : 'todo')
-
-// Where a task RENDERS given the review flag. With the review column hidden a
-// card parked in 'review' (the flag was just switched off, or a teammate has
-// it on) folds into 'doing' — cards are never lost, only the lane is.
-export const displayColumnOf = (t: ProjectTask, reviewOn: boolean): BoardColumn => {
-  const col = columnOf(t)
-  return col === 'review' && !reviewOn ? 'doing' : col
-}
 
 // "Mine only" filter predicate: case-insensitive, whitespace-trimmed compare
 // of the card's assignee against the user's display name. Either side empty →
@@ -131,14 +125,6 @@ export const withDoneCleared = (data: ProjectData): ProjectData => ({
   ...data,
   tasks: data.tasks.filter(t => columnOf(t) !== 'done'),
 })
-
-// Flip the shared review-column flag. Off is stored as `undefined` (never
-// `false`) — the same convention the settings dialog uses, so the two entry
-// points can't diverge on what "off" looks like in the persisted config.
-export const withReviewColumnToggled = (data: ProjectData): ProjectData => {
-  const reviewOn = !!data.config?.reviewColumn
-  return { ...data, config: { ...data.config, reviewColumn: !reviewOn || undefined } }
-}
 
 // Duplicate a card in place (F020): the copy lands in the SAME column,
 // DIRECTLY BELOW the source. Title gets a literal ' (copy)' suffix (both
@@ -186,9 +172,7 @@ export const withCardDuplicated = (data: ProjectData, taskId: string): ProjectDa
 // The branches the merged-detection poll should ask about (B018/F065): the
 // branch of every card SITTING IN the review column — deduped, sorted (a
 // stable identity for the effect dependency) and capped at the API's limit.
-// Review column off → no poll at all (the chip renders only there).
-export const reviewBranchesOf = (tasks: ProjectTask[], reviewOn: boolean): string[] => {
-  if (!reviewOn) return []
+export const reviewBranchesOf = (tasks: ProjectTask[]): string[] => {
   const set = new Set<string>()
   for (const t of tasks) {
     const b = t.branch?.trim()
@@ -249,7 +233,7 @@ export const byColumnOrder = (a: ProjectTask, b: ProjectTask): number => {
 }
 
 // Move `id` into `col`, inserting before `beforeId` (or at the end). Reassigns
-// boardOrder = 0..n across the target column's FULL card list (displayColumnOf
+// boardOrder = 0..n across the target column's FULL card list (columnOf
 // + byColumnOrder — the same grouping the board renders from), NOT just the
 // currently visible cards: while a search / "Mine only" filter is active the
 // visible list is a subset, and renumbering only that subset would hand a
@@ -264,12 +248,11 @@ export const withCardMoved = (
   id: string,
   col: BoardColumn,
   beforeId: string | null,
-  reviewOn: boolean,
 ): ProjectData => {
   const moving = data.tasks.find(t => t.id === id)
   if (!moving) return data
   const target = data.tasks
-    .filter(t => t.id !== id && displayColumnOf(t, reviewOn) === col)
+    .filter(t => t.id !== id && columnOf(t) === col)
     .sort(byColumnOrder)
   const idx = beforeId ? target.findIndex(t => t.id === beforeId) : -1
   const ordered = [...target]
@@ -366,10 +349,7 @@ export const BoardTab = ({
   presence,
 }: BoardTabProps) => {
   const { t } = useT()
-  // The optional review lane is a SHARED per-project policy (config travels
-  // with the board), so both collaborators see the same columns.
-  const reviewOn = !!data.config?.reviewColumn
-  const COLUMNS = useMemo(() => columns(t, reviewOn), [t, reviewOn])
+  const COLUMNS = useMemo(() => columns(t), [t])
   const [dragId, setDragId] = useState<string | null>(null)
   // Trello-style live feedback: while dragging, the source card collapses
   // (hidden one frame after dragstart — hiding it synchronously would cancel
@@ -446,8 +426,8 @@ export const BoardTab = ({
   // renders a chip + an explicit "→ Done" button (F050: no surprise moves).
   const [mergedByBranch, setMergedByBranch] = useState<Record<string, MergedBranchStatus>>({})
   const reviewBranches = useMemo(
-    () => reviewBranchesOf(data.tasks, reviewOn),
-    [data.tasks, reviewOn],
+    () => reviewBranchesOf(data.tasks),
+    [data.tasks],
   )
   const reviewBranchesKey = reviewBranches.join('\n')
   const targetBranch = data.config?.targetBranch
@@ -490,10 +470,8 @@ export const BoardTab = ({
 
 
   // Group tasks by column, sorted by priority within each. Every task IS a
-  // Board card now (legacy chat/assistant items are dropped on read). With the
-  // review lane off, review-parked cards fold into doing (displayColumnOf) so
-  // they stay visible; the Mine-only filter narrows what renders, never what
-  // persists.
+  // Board card now (legacy chat/assistant items are dropped on read). The
+  // Mine-only filter narrows what renders, never what persists.
   const boardTasks = data.tasks
   const visibleTasks = useMemo(
     () =>
@@ -510,10 +488,10 @@ export const BoardTab = ({
       done: [],
       blocked: [],
     }
-    for (const t of visibleTasks) groups[displayColumnOf(t, reviewOn)].push(t)
+    for (const t of visibleTasks) groups[columnOf(t)].push(t)
     for (const k of Object.keys(groups) as BoardColumn[]) groups[k].sort(byColumnOrder)
     return groups
-  }, [visibleTasks, reviewOn])
+  }, [visibleTasks])
 
   // Move `id` into `col`, inserting before `beforeId` (or at the end). Pure
   // logic lives in withCardMoved — crucially it renumbers over the column's
@@ -521,7 +499,7 @@ export const BoardTab = ({
   // search / "Mine only" is active can never assign a hidden card and the
   // dropped one the same boardOrder.
   const moveCard = (id: string, col: BoardColumn, beforeId: string | null) => {
-    const next = withCardMoved(data, id, col, beforeId, reviewOn)
+    const next = withCardMoved(data, id, col, beforeId)
     if (next !== data) onPersist(next)
   }
 
@@ -588,42 +566,6 @@ export const BoardTab = ({
           {/* Presence (u15) — who else is in this project's board room right now.
               Renders nothing unless collab is live and a peer is present. */}
           <CollabPresence channel={presence ?? null} />
-          {/* Review-column toggle — lives in the toolbar (where the column would
-              appear) for discoverability; this is the ONLY review-column switch
-              (the settings dialog no longer duplicates it). Label + a small
-              switch: the knob position carries the state, so it reads at a
-              glance without copy. */}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={reviewOn}
-            onClick={() => onPersist(withReviewColumnToggled(data))}
-            disabled={projectMissing}
-            title={
-              reviewOn
-                ? t('board.toolbar.reviewColumnHideHint')
-                : t('board.toolbar.reviewColumnShowHint')
-            }
-            className="group flex items-center gap-1.5 rounded-sm px-1 py-1 text-[11px] text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
-          >
-            {t('board.toolbar.reviewColumn')}
-            <span
-              aria-hidden
-              className={[
-                'relative h-[14px] w-[24px] shrink-0 rounded-full border transition-colors',
-                reviewOn
-                  ? 'border-accent bg-accent group-hover:bg-accent-hover'
-                  : 'border-line bg-bg-inset',
-              ].join(' ')}
-            >
-              <span
-                className={[
-                  'absolute top-[2px] h-[8px] w-[8px] rounded-full transition-[left,background-color]',
-                  reviewOn ? 'left-[12px] bg-bg-card' : 'left-[2px] bg-ink-faint',
-                ].join(' ')}
-              />
-            </span>
-          </button>
           {/* Project settings — surfaces the dialog that used to hide behind
               the ⋯ menu. Quiet text+icon button, same register as the review
               toggle's label. */}

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type { CollabBinding } from '@/lib/collab/RealtimeContext'
 import type { CanvasFile, ProjectData } from '@/lib/types'
 
@@ -51,8 +51,17 @@ vi.mock('@/components/canvas/CanvasWorkspace', () => ({
     </div>
   ),
 }))
+// Stub the real TerminalPane (xterm) + the native folder picker so the member
+// link/Terminal gating is testable without those heavy/native deps.
+vi.mock('@/components/canvas/TerminalPane', () => ({
+  TerminalPane: (props: { projectPath: string }) => (
+    <div data-testid="terminal-pane" data-cwd={props.projectPath} />
+  ),
+}))
+vi.mock('@/lib/pickFolder', () => ({ pickFolder: vi.fn() }))
 
 import { SharedProjectBody } from './SharedProjectBody'
+import { pickFolder } from '@/lib/pickFolder'
 
 const makeBinding = (
   tasks: Array<{ id: string }>,
@@ -211,5 +220,78 @@ describe('SharedProjectBody (member Board view)', () => {
     render(<SharedProjectBody collabProjectId="pid-1" label="X" onClose={onClose} />)
     fireEvent.click(screen.getByText('projectPanel.backToGround'))
     expect(onClose).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SharedProjectBody — local-folder link gating', () => {
+  // Route the panel's two on-open fetches by URL; the /api/collab/link response
+  // drives the gate. Returns a fresh stub each call so per-test linkedPath wins.
+  const stubLinkFetch = (linkedPath: string | null) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        String(url).includes('/api/collab/link')
+          ? new Response(JSON.stringify({ localPath: linkedPath }), { status: 200 })
+          : new Response(JSON.stringify({ data: null }), { status: 200 }),
+      ) as unknown as typeof fetch,
+    )
+  }
+
+  it('UNLINKED → shows the "Link local folder" CTA and offers NO Terminal tab', async () => {
+    stubLinkFetch(null)
+    mockBinding = makeBinding([], true)
+    render(<SharedProjectBody collabProjectId="pid-1" label="Acme" onClose={() => {}} />)
+
+    await waitFor(() =>
+      expect(screen.getByText('projectPanel.collabLinkFolder')).toBeTruthy(),
+    )
+    // Board + Canvas only while unlinked (backward-compatible) — no Terminal.
+    expect(screen.getByText('Board')).toBeTruthy()
+    expect(screen.getByText('Canvas')).toBeTruthy()
+    expect(screen.queryByText('Terminal')).toBeNull()
+    expect(screen.queryByTestId('terminal-pane')).toBeNull()
+  })
+
+  it('LINKED → exposes a Terminal tab, hides the CTA, and runs in the linked cwd', async () => {
+    stubLinkFetch('/Users/me/clone')
+    mockBinding = makeBinding([], true)
+    render(<SharedProjectBody collabProjectId="pid-1" label="Acme" onClose={() => {}} />)
+
+    // The Terminal tab appears once the link resolves…
+    await waitFor(() => expect(screen.getByText('Terminal')).toBeTruthy())
+    // …and the CTA is gone (already linked).
+    expect(screen.queryByText('projectPanel.collabLinkFolder')).toBeNull()
+
+    // Selecting Terminal mounts the pane rooted at the member's OWN linked folder.
+    fireEvent.click(screen.getByText('Terminal'))
+    const pane = await screen.findByTestId('terminal-pane')
+    expect(pane.getAttribute('data-cwd')).toBe('/Users/me/clone')
+  })
+
+  it('clicking the CTA picks a folder, links it, and reveals the Terminal at that cwd', async () => {
+    // GET (on open) → unlinked; POST (the link action) → the picked folder.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url).includes('/api/collab/link')) {
+          return init?.method === 'POST'
+            ? new Response(JSON.stringify({ localPath: '/Users/me/picked' }), { status: 200 })
+            : new Response(JSON.stringify({ localPath: null }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ data: null }), { status: 200 })
+      }) as unknown as typeof fetch,
+    )
+    vi.mocked(pickFolder).mockResolvedValue({ path: '/Users/me/picked' })
+    mockBinding = makeBinding([], true)
+    render(<SharedProjectBody collabProjectId="pid-1" label="Acme" onClose={() => {}} />)
+
+    const cta = await screen.findByText('projectPanel.collabLinkFolder')
+    fireEvent.click(cta)
+
+    // After the link POST resolves: Terminal tab + pane at the picked cwd, CTA gone.
+    const pane = await screen.findByTestId('terminal-pane')
+    expect(pane.getAttribute('data-cwd')).toBe('/Users/me/picked')
+    expect(screen.getByText('Terminal')).toBeTruthy()
+    expect(screen.queryByText('projectPanel.collabLinkFolder')).toBeNull()
   })
 })

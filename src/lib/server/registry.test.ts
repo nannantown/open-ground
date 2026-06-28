@@ -11,8 +11,11 @@ import {
   removeProjectEntry,
   updateProjectEntryPath,
   isDangerousImportTarget,
+  linkSharedProjectToFolder,
+  findLinkedFolder,
   __resetMigrationCacheForTests,
 } from './registry'
+import { isValidProjectPath } from './projectDataPath'
 import type { ProjectEntry } from '../types'
 
 const legacyId = (key: string) =>
@@ -183,5 +186,71 @@ describe('isDangerousImportTarget', () => {
     ]
     expect(await isDangerousImportTarget('/Users/x/projects/app-2', entries)).toBeNull()
     expect(await isDangerousImportTarget('/Users/x/other', entries)).toBeNull()
+  })
+})
+
+describe('linkSharedProjectToFolder (member folder link)', () => {
+  const PID = '55555555-5555-5555-5555-555555555555'
+  const PID2 = '66666666-6666-6666-6666-666666666666'
+
+  beforeEach(async () => {
+    await setSettings({ projectsMigratedAt: new Date().toISOString(), projects: [] })
+  })
+
+  it('registers the chosen folder on the allowlist with the collabProjectId tag', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-link-')))
+    const res = await linkSharedProjectToFolder(PID, dir)
+    expect('entry' in res).toBe(true)
+    if (!('entry' in res)) return
+    expect(res.entry.path).toBe(dir) // canonical
+    expect(res.entry.collabProjectId).toBe(PID)
+    expect(res.entry.id).toBeTruthy()
+    // The link is what puts the folder on the validateProjectPath allowlist —
+    // Terminal/Claude can now spawn there. (The boundary is NOT weakened: only
+    // this explicitly-linked path validates.)
+    expect(await isValidProjectPath(dir)).toBe(true)
+    expect(await isValidProjectPath(join(dir, '..'))).toBe(false)
+    // Resolvable back by collabProjectId.
+    expect(await findLinkedFolder(PID)).toBe(dir)
+    expect(await findLinkedFolder(PID2)).toBeNull()
+  })
+
+  it('is idempotent when the SAME folder is re-linked', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-link-idem-')))
+    const a = await linkSharedProjectToFolder(PID, dir)
+    const b = await linkSharedProjectToFolder(PID, dir)
+    expect('entry' in a && 'entry' in b).toBe(true)
+    if ('entry' in a && 'entry' in b) expect(b.entry.id).toBe(a.entry.id)
+    expect((await getSettings()).projects).toHaveLength(1)
+  })
+
+  it('rejects re-pointing an already-linked project at a different folder', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-link-a-')))
+    const dir2 = await realpath(await mkdtemp(join(tmpdir(), 'og-link-b-')))
+    await linkSharedProjectToFolder(PID, dir)
+    const res = await linkSharedProjectToFolder(PID, dir2)
+    expect(res).toEqual({ rejection: 'already-linked' })
+    expect(await findLinkedFolder(PID)).toBe(dir) // unchanged
+  })
+
+  it('rejects a folder already registered as a plain project (duplicate)', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-link-dup-')))
+    await addProjectEntry(dir)
+    const res = await linkSharedProjectToFolder(PID, dir)
+    expect(res).toEqual({ rejection: 'duplicate' })
+  })
+
+  it('rejects a folder that overlaps an existing project', async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'og-link-ov-')))
+    const child = join(parent, 'nested')
+    await mkdir(child)
+    await addProjectEntry(parent)
+    const res = await linkSharedProjectToFolder(PID, child)
+    expect(res).toEqual({ rejection: 'overlap' })
+  })
+
+  it('rejects the home root (dangerous target guard is reused)', async () => {
+    const res = await linkSharedProjectToFolder(PID, await realpath(homedir()))
+    expect(res).toEqual({ rejection: 'home-root' })
   })
 })

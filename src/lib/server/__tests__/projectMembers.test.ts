@@ -5,6 +5,8 @@ import {
   isMyProject,
   upsertProjectMembers,
   removeProjectMember,
+  cancelPendingInvite,
+  acceptInvite,
   ensureOwnProject,
   clearMembershipCache,
   listMyProjects,
@@ -59,6 +61,7 @@ interface MemberRowLike {
   user_id?: string | null
   email?: string | null
   role?: string
+  status?: string | null
   // og_projects rows reused through the same stub (listMyProjects / getProjectLabel).
   id?: string
   name?: string | null
@@ -125,6 +128,8 @@ describe('getMyMembership — remote og_project_members lookup', () => {
       userId: 'u-123',
       email: 'person@example.com',
       role: 'member',
+      // No status on the row → resolves to 'accepted' (pre-0013 / full member).
+      status: 'accepted',
     })
 
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
@@ -139,6 +144,37 @@ describe('getMyMembership — remote og_project_members lookup', () => {
     stubFetch([])
     await signInAs('stranger@example.com')
     expect(await getMyMembership(PROJECT)).toBeNull()
+  })
+
+  it('a PENDING-only email invite → null (no access until accepted)', async () => {
+    stubAnonEnv()
+    stubFetch([
+      { project_id: PROJECT, email: 'invitee@example.com', role: 'member', status: 'pending' },
+    ])
+    await signInAs('invitee@example.com')
+    // The row exists (RLS lets them read it for the お知らせ bell) but it grants no
+    // ACCESS — getMyMembership is the access gate, so a pending invite resolves null.
+    expect(await getMyMembership(PROJECT)).toBeNull()
+  })
+
+  it('an ACCEPTED member row → member (access granted)', async () => {
+    stubAnonEnv()
+    stubFetch([
+      { project_id: PROJECT, email: 'invitee@example.com', role: 'member', status: 'accepted' },
+    ])
+    await signInAs('invitee@example.com')
+    const member = await getMyMembership(PROJECT)
+    expect(member?.role).toBe('member')
+    expect(member?.status).toBe('accepted')
+  })
+
+  it('owner row always grants access regardless of status', async () => {
+    stubAnonEnv()
+    // Defensive: an owner row should never be pending, but even if it were, owner
+    // access is unconditional.
+    stubFetch([{ project_id: PROJECT, user_id: 'u-1', role: 'owner', status: 'pending' }])
+    await signInAs('owner@example.com', 'u-1')
+    expect((await getMyMembership(PROJECT))?.role).toBe('owner')
   })
 
   it('owner wins when both a user_id row and an email row match', async () => {
@@ -261,7 +297,11 @@ describe('getMyMembership — env override (skips the network)', () => {
     const fetchSpy = stubFetch([{ role: 'owner' }])
     await signInAs('p@example.com')
     const member = await getMyMembership(PROJECT)
-    expect(member).toEqual<ProjectMember>({ projectId: PROJECT, role: 'member' })
+    expect(member).toEqual<ProjectMember>({
+      projectId: PROJECT,
+      role: 'member',
+      status: 'accepted',
+    })
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
@@ -335,13 +375,25 @@ describe('upsertProjectMembers — caller-JWT (owner) write', () => {
     }
     // Each call inserts a SINGLE row object (not a bulk array).
     const rows = calls.map(
-      ([, init]) => JSON.parse(init.body as string) as { project_id: string; email: string; role: string },
+      ([, init]) =>
+        JSON.parse(init.body as string) as {
+          project_id: string
+          email: string
+          role: string
+          status: string
+        },
     )
     expect(rows.every((r) => r.project_id === PROJECT)).toBe(true)
     const byEmail = Object.fromEntries(rows.map((r) => [r.email, r.role]))
     expect(byEmail['owner@example.com']).toBe('owner')
     expect(byEmail['m1@example.com']).toBe('member')
     expect(byEmail['m2@example.com']).toBe('member')
+    // The owner seeds themselves ACCEPTED; every invited email lands PENDING
+    // (no access until they accept the in-app お知らせ).
+    const statusByEmail = Object.fromEntries(rows.map((r) => [r.email, r.status]))
+    expect(statusByEmail['owner@example.com']).toBe('accepted')
+    expect(statusByEmail['m1@example.com']).toBe('pending')
+    expect(statusByEmail['m2@example.com']).toBe('pending')
   })
 
   it('treats a 409 duplicate as an idempotent success (re-invite), fails on other errors', async () => {
@@ -606,42 +658,68 @@ describe('ensureOwnProject — caller-JWT (owner) create', () => {
   })
 })
 
-describe('listMyProjects — readable projects (owner OR member), member-flow groundwork', () => {
+describe('listMyProjects — readable projects (owner OR ACCEPTED member)', () => {
+  // listMyProjects now reads BOTH og_projects AND og_project_members (to learn the
+  // caller's acceptance per shared project), so the stub discriminates by URL: an
+  // og_projects request gets `projects`, an og_project_members request gets `roster`.
+  const stubProjectsAndRoster = (
+    projects: MemberRowLike[],
+    roster: MemberRowLike[],
+  ) => {
+    const fn = vi.fn(async (url: string) =>
+      new Response(
+        JSON.stringify(url.includes('og_project_members') ? roster : projects),
+        { status: 200 },
+      ),
+    )
+    vi.stubGlobal('fetch', fn as unknown as typeof fetch)
+    return fn
+  }
+
   it('unconfigured / signed out → [], no fetch', async () => {
     const fetchSpy = stubFetch([])
     expect(await listMyProjects()).toEqual([])
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('returns id + label + owned for every readable row (owned = owner_id == self)', async () => {
+  it('owned projects always show; a SHARED project shows ONLY when I have an accepted row', async () => {
     stubAnonEnv()
-    await signInAs('p@example.com', 'me-uid') // myUid = 'me-uid'
-    const fetchSpy = stubFetch([
-      { id: 'p1', owner_id: 'me-uid', label: 'Design System' }, // I own this → owned
-      { id: 'p2', owner_id: 'other-uid' }, // shared with me → not owned, no label
-      { id: '', owner_id: 'me-uid', label: 'skip-me' }, // malformed id → dropped
-      { id: 'p3', owner_id: 'me-uid', label: '' }, // blank label → omitted; owned
-    ] as unknown as MemberRowLike[])
+    await signInAs('me@example.com', 'me-uid') // myUid = 'me-uid'
+    const fetchSpy = stubProjectsAndRoster(
+      [
+        { id: 'p1', owner_id: 'me-uid', label: 'Design System' }, // I own → owned
+        { id: 'p2', owner_id: 'other-uid', label: 'Joined' }, // shared, accepted → shown
+        { id: 'p3', owner_id: 'other-uid', label: 'Invited' }, // shared, PENDING → hidden
+        { id: 'p4', owner_id: 'other-uid', label: 'Stranger' }, // no row for me → hidden
+        { id: '', owner_id: 'me-uid', label: 'skip-me' }, // malformed id → dropped
+        { id: 'p5', owner_id: 'me-uid', label: '' }, // blank label → omitted; owned
+      ],
+      [
+        // My roster rows across those shared projects.
+        { project_id: 'p2', email: 'me@example.com', role: 'member', status: 'accepted' },
+        { project_id: 'p3', email: 'me@example.com', role: 'member', status: 'pending' },
+      ],
+    )
 
     expect(await listMyProjects()).toEqual([
       { id: 'p1', label: 'Design System', owned: true },
-      { id: 'p2', owned: false },
-      { id: 'p3', owned: true },
+      { id: 'p2', label: 'Joined', owned: false }, // accepted shared → a card
+      // p3 (pending) and p4 (no row) are NOT cards — p3 lives in the bell.
+      { id: 'p5', owned: true },
     ])
 
-    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toContain('/rest/v1/og_projects')
-    expect(url).toContain('select=id,label,owner_id')
-    expect(headersOf(init).apikey).toBe('anon-key')
-    expect(headersOf(init).Authorization).toBe('Bearer test-access')
+    const urls = (fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>).map(([u]) => u)
+    expect(urls.some((u) => u.includes('/rest/v1/og_projects'))).toBe(true)
+    expect(urls.some((u) => u.includes('/rest/v1/og_project_members'))).toBe(true)
   })
 
-  it('falls CLOSED to owned:false when the caller uid is unknown', async () => {
+  it('falls CLOSED to owned:false when the caller uid is unknown (and no accepted row → hidden)', async () => {
     stubAnonEnv()
     // Signed in so the JWT exists, but craft a row whose owner_id can't match.
     await signInAs('p@example.com', 'me-uid')
-    stubFetch([{ id: 'p9', owner_id: 'someone' }] as unknown as MemberRowLike[])
-    expect(await listMyProjects()).toEqual([{ id: 'p9', owned: false }])
+    stubProjectsAndRoster([{ id: 'p9', owner_id: 'someone' }], [])
+    // Not owned + no accepted member row → not surfaced.
+    expect(await listMyProjects()).toEqual([])
   })
 
   it('a non-array / non-ok / thrown response → [] (never throws)', async () => {
@@ -819,5 +897,136 @@ describe('setProjectLabel — owner-JWT UPDATE of the shared name', () => {
       }),
     )
     expect(await setProjectLabel(PROJECT, 'X')).toEqual({ ok: false })
+  })
+})
+
+describe('listProjectMembers — carries acceptance status for the owner roster', () => {
+  it('maps each row’s status (pending vs accepted), defaulting absent → accepted', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com', 'owner-uid')
+    stubFetch([
+      { project_id: PROJECT, user_id: 'owner-uid', email: 'owner@example.com', role: 'owner', status: 'accepted' },
+      { project_id: PROJECT, email: 'joined@example.com', role: 'member', status: 'accepted' },
+      { project_id: PROJECT, email: 'invited@example.com', role: 'member', status: 'pending' },
+      { project_id: PROJECT, email: 'legacy@example.com', role: 'member' }, // no status → accepted
+    ])
+    const roster = await listProjectMembers(PROJECT)
+    const byEmail = Object.fromEntries(roster.map((m) => [m.email, m.status]))
+    expect(byEmail['owner@example.com']).toBe('accepted')
+    expect(byEmail['joined@example.com']).toBe('accepted')
+    expect(byEmail['invited@example.com']).toBe('pending')
+    expect(byEmail['legacy@example.com']).toBe('accepted')
+  })
+})
+
+describe('cancelPendingInvite — owner cancels a PENDING email invite', () => {
+  it('unconfigured / signed out / blank email → {ok:false}, no fetch', async () => {
+    const fetchSpy = stubFetch([])
+    await signInAs('owner@example.com')
+    expect(await cancelPendingInvite(PROJECT, 'a@example.com')).toEqual({ ok: false })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    stubAnonEnv()
+    expect(await cancelPendingInvite(PROJECT, '  ')).toEqual({ ok: false })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('DELETEs the pending row scoped to status=pending, and does NOT rotate links', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com')
+    const calls: Array<{ url: string; method?: string }> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, method: init.method })
+        return new Response(null, { status: 204 })
+      }) as unknown as typeof fetch,
+    )
+    expect(await cancelPendingInvite(PROJECT, 'Invited@Example.com')).toEqual({ ok: true })
+
+    // ONE delete — the pending roster row, scoped to status=pending + lowercased email.
+    expect(calls).toHaveLength(1)
+    const { url, method } = calls[0]
+    expect(method).toBe('DELETE')
+    expect(url).toContain('/rest/v1/og_project_members')
+    expect(url).toContain(`project_id=eq.${PROJECT}`)
+    expect(url).toContain('email=eq.invited%40example.com')
+    expect(url).toContain('status=eq.pending')
+    // Crucially NOT an og_project_invites delete — quick-share links stay intact.
+    expect(calls.some((cl) => cl.url.includes('og_project_invites'))).toBe(false)
+  })
+
+  it('a non-ok / thrown response → {ok:false} (never throws)', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 403 })))
+    expect(await cancelPendingInvite(PROJECT, 'a@example.com')).toEqual({ ok: false })
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('boom') }))
+    expect(await cancelPendingInvite(PROJECT, 'a@example.com')).toEqual({ ok: false })
+  })
+})
+
+describe('acceptInvite — the invitee accepts their own pending invite (RPC)', () => {
+  it('unconfigured / signed out / empty id → {ok:false}, no fetch', async () => {
+    const fetchSpy = stubFetch([])
+    await signInAs('invitee@example.com')
+    expect(await acceptInvite(PROJECT)).toEqual({ ok: false }) // unconfigured
+    expect(fetchSpy).not.toHaveBeenCalled()
+    stubAnonEnv()
+    expect(await acceptInvite('')).toEqual({ ok: false }) // empty id
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('POSTs to the accept_invite RPC under the caller JWT and returns the flip count', async () => {
+    stubAnonEnv()
+    await signInAs('invitee@example.com')
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ project_id: PROJECT, accepted: 1 }), { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch)
+
+    expect(await acceptInvite(PROJECT)).toEqual({ ok: true, accepted: 1 })
+
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toContain('/rest/v1/rpc/accept_invite')
+    expect(init.method).toBe('POST')
+    expect(headersOf(init).Authorization).toBe('Bearer test-access')
+    const body = JSON.parse(init.body as string) as { p_project_id: string }
+    expect(body.p_project_id).toBe(PROJECT)
+  })
+
+  it('invalidates the membership cache so the next read sees the accepted row', async () => {
+    stubAnonEnv()
+    await signInAs('invitee@example.com')
+    // 1) Prime the cache as a pending invite → null (no access).
+    const readFetch = stubFetch([
+      { project_id: PROJECT, email: 'invitee@example.com', role: 'member', status: 'pending' },
+    ])
+    expect(await getMyMembership(PROJECT)).toBeNull()
+    expect(readFetch).toHaveBeenCalledTimes(1)
+    expect(await getMyMembership(PROJECT)).toBeNull() // cached
+    expect(readFetch).toHaveBeenCalledTimes(1)
+
+    // 2) Accept → must drop the cache.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ accepted: 1 }), { status: 200 })) as unknown as typeof fetch,
+    )
+    expect((await acceptInvite(PROJECT)).ok).toBe(true)
+
+    // 3) Next read re-resolves — now accepted → a member.
+    const reFetch = stubFetch([
+      { project_id: PROJECT, email: 'invitee@example.com', role: 'member', status: 'accepted' },
+    ])
+    expect((await getMyMembership(PROJECT))?.role).toBe('member')
+    expect(reFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('a non-ok / thrown response → {ok:false} (never throws)', async () => {
+    stubAnonEnv()
+    await signInAs('invitee@example.com')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 400 })))
+    expect(await acceptInvite(PROJECT)).toEqual({ ok: false })
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('boom') }))
+    expect(await acceptInvite(PROJECT)).toEqual({ ok: false })
   })
 })

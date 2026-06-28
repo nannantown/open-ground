@@ -99,10 +99,24 @@ interface MemberRow {
   user_id?: string | null
   email?: string | null
   role?: string
+  status?: string | null
 }
 
 const toRole = (raw: string | undefined): ProjectMember['role'] =>
   raw === 'owner' ? 'owner' : 'member'
+
+// Acceptance state (og_project_members.status, migration 0013). A missing/unknown
+// value resolves to 'accepted' — every pre-0013 row predates the column, and the
+// SAFE default is "full member" (a transitional NULL must NOT silently downgrade a
+// real collaborator to no-access; only an explicit 'pending' gates access).
+const toStatus = (raw: string | null | undefined): ProjectMember['status'] =>
+  raw === 'pending' ? 'pending' : 'accepted'
+
+// Does a row grant ACCESS right now? An owner always does; a member only once
+// accepted. A 'pending' email invite does NOT (pre-confirmed identity, zero access
+// until they accept). This is the single predicate every access gate shares.
+const grantsAccess = (row: { role?: string; status?: string | null }): boolean =>
+  row.role === 'owner' || toStatus(row.status) === 'accepted'
 
 // Parse a PostgREST timestamptz → epoch ms, or undefined when absent/invalid.
 const toEpoch = (raw: unknown): number | undefined => {
@@ -118,17 +132,23 @@ const toMember = (row: MemberRow, collabProjectId: string): ProjectMember => ({
   userId: row.user_id ?? undefined,
   email: row.email ?? undefined,
   role: toRole(row.role),
+  status: toStatus(row.status),
 })
 
 // RLS scopes the SELECT to the caller's own row(s); a user may match twice (a
-// user_id row AND an email row), so prefer the strongest (owner > member).
+// user_id row AND an email row), so prefer the strongest. This resolves the
+// caller's ACCESS membership, so a still-PENDING email invite is NOT a member
+// here (it grants no access) — only owner / accepted rows count. Returns null when
+// the caller has no access-granting row (signed in but only a pending invite, or
+// genuinely not on the roster).
 const strongest = (
   rows: MemberRow[],
   collabProjectId: string,
 ): ProjectMember | null => {
-  if (rows.length === 0) return null
-  const owner = rows.find((r) => r.role === 'owner')
-  return toMember(owner ?? rows[0], collabProjectId)
+  const accessible = rows.filter(grantsAccess)
+  if (accessible.length === 0) return null
+  const owner = accessible.find((r) => r.role === 'owner')
+  return toMember(owner ?? accessible[0], collabProjectId)
 }
 
 const fetchRemoteMembership = async (
@@ -177,7 +197,8 @@ export const getMyMembership = async (
   if (!collabProjectId) return null
 
   if (envMemberOf(collabProjectId)) {
-    return { projectId: collabProjectId, role: 'member' }
+    // The dev/test override force-grants membership → an ACCEPTED member.
+    return { projectId: collabProjectId, role: 'member', status: 'accepted' }
   }
 
   const cached = memberCache.get(collabProjectId)
@@ -255,27 +276,48 @@ export const listMyProjects = async (): Promise<
 > => {
   const auth = await ownerAuth()
   if (!auth) return []
-  // The caller's uid decides `owned` (owner_id == self). RLS lets a member read
-  // owner_id of a project they belong to, so this is sound for both roles.
+  // The caller's uid/email decide `owned` (owner_id == self) and which shared
+  // rooms they may OPEN. RLS lets a member read owner_id + the whole roster of a
+  // project they belong to, so this is sound for both roles.
   const session = await readSession()
   const myUid = session?.user.id
+  const myEmail = session?.user.email?.trim().toLowerCase()
+  const isMine = (r: MemberRow): boolean =>
+    (!!myUid && r.user_id === myUid) ||
+    (!!myEmail && !!r.email && r.email.toLowerCase() === myEmail)
   try {
-    const res = await fetch(
-      `${auth.url}/rest/v1/${projectsTable()}?select=id,label,owner_id`,
-      {
-        headers: {
-          apikey: auth.anonKey,
-          Authorization: `Bearer ${auth.token}`,
-        },
+    const headers = { apikey: auth.anonKey, Authorization: `Bearer ${auth.token}` }
+    // Two reads: the projects I can SEE (owner OR any member, incl. a pending
+    // invite — RLS "og projects read" is membership-by-existence) AND my roster
+    // rows (to learn my ACCEPTANCE status per project). A pending email invite is
+    // readable here but must NOT surface as an openable shared card until accepted,
+    // so a non-owned project is included ONLY when I hold an access-granting
+    // (accepted) row — otherwise it lives in the お知らせ bell, not on the Ground.
+    const [projRes, rosterRes] = await Promise.all([
+      fetch(`${auth.url}/rest/v1/${projectsTable()}?select=id,label,owner_id`, {
+        headers,
         signal: AbortSignal.timeout(10_000),
-      },
-    )
-    if (!res.ok) {
-      console.error(`[openground:members] list projects ${res.status}`)
+      }),
+      fetch(
+        `${auth.url}/rest/v1/${membersTable()}?select=project_id,user_id,email,role,status`,
+        { headers, signal: AbortSignal.timeout(10_000) },
+      ),
+    ])
+    if (!projRes.ok || !rosterRes.ok) {
+      console.error(`[openground:members] list projects ${projRes.status}/${rosterRes.status}`)
       return []
     }
-    const rows = (await res.json()) as unknown
+    const rows = (await projRes.json()) as unknown
+    const rosterRows = (await rosterRes.json()) as unknown
     if (!Array.isArray(rows)) return []
+    // Project ids where I hold an access-granting (accepted/owner) membership row.
+    const accessibleIds = new Set<string>()
+    if (Array.isArray(rosterRows)) {
+      for (const r of rosterRows as MemberRow[]) {
+        const pid = typeof r.project_id === 'string' ? r.project_id : ''
+        if (pid && isMine(r) && grantsAccess(r)) accessibleIds.add(pid)
+      }
+    }
     const out: Array<{ id: string; label?: string; owned: boolean }> = []
     for (const r of rows as Array<{ id?: unknown; label?: unknown; owner_id?: unknown }>) {
       if (typeof r.id !== 'string' || !r.id) continue
@@ -283,6 +325,9 @@ export const listMyProjects = async (): Promise<
       // missing uid falls CLOSED to owned:false (treated as shared, never the
       // reverse — owned cards are the privileged local ones).
       const owned = !!myUid && r.owner_id === myUid
+      // A shared (non-owned) project shows as a card ONLY once I've accepted —
+      // a pending invite is surfaced via the bell, not here.
+      if (!owned && !accessibleIds.has(r.id)) continue
       const item: { id: string; label?: string; owned: boolean } = { id: r.id, owned }
       // `label` is the owner-set, member-visible display name (the opaque
       // dedup hash in `name` is never sent to the client).
@@ -331,7 +376,7 @@ export const listInvitesForMe = async (): Promise<CollabInviteForMe[]> => {
   try {
     const headers = { apikey: auth.anonKey, Authorization: `Bearer ${auth.token}` }
     const [rosterRes, projRes] = await Promise.all([
-      fetch(`${auth.url}/rest/v1/${membersTable()}?select=project_id,user_id,email,role,created_at`, {
+      fetch(`${auth.url}/rest/v1/${membersTable()}?select=project_id,user_id,email,role,status,created_at`, {
         headers,
         signal: AbortSignal.timeout(10_000),
       }),
@@ -372,6 +417,10 @@ export const listInvitesForMe = async (): Promise<CollabInviteForMe[]> => {
       // Only surface it if I'm actually on the roster as a NON-owner. (RLS already
       // guarantees I can only read rosters I belong to — this is belt-and-braces.)
       if (!myRow || toRole(myRow.role) === 'owner') continue
+      // An INVITE is a still-PENDING row. Once accepted, the project moves out of
+      // the お知らせ bell and onto the Ground as a shared card (listMyProjects), so
+      // a joined collaborator stops being nagged to "join" what they already joined.
+      if (toStatus(myRow.status) !== 'pending') continue
       const ownerRow = roster.find((r) => r.role === 'owner')
       invites.push({
         collabProjectId: pid,
@@ -645,11 +694,22 @@ export const upsertProjectMembers = async (
   )
   if (unique.length === 0) return { ok: false, written: 0 }
 
-  const rows = unique.map((email) => ({
-    project_id: collabProjectId,
-    email,
-    role: ownerEmail && email === ownerEmail ? 'owner' : 'member',
-  }))
+  // The owner seeding THEIR OWN row is an immediate, accepted member; everyone else
+  // is an EMAIL INVITE that lands as 'pending' — pre-confirmed identity with zero
+  // collab access until that person accepts the in-app お知らせ (accept_invite). This
+  // is the whole "name exactly who may enter, they're not in until they accept"
+  // guarantee, enforced at insert time. (The link self-join / owner-approval paths
+  // never come through here — they insert via their RPCs with the default
+  // 'accepted'.)
+  const rows = unique.map((email) => {
+    const isOwner = !!ownerEmail && email === ownerEmail
+    return {
+      project_id: collabProjectId,
+      email,
+      role: isOwner ? 'owner' : 'member',
+      status: isOwner ? 'accepted' : 'pending',
+    }
+  })
 
   // Insert rows INDIVIDUALLY as plain inserts — do NOT use `on_conflict` /
   // `resolution=ignore-duplicates`. PostgreSQL's ON CONFLICT speculative-
@@ -784,6 +844,104 @@ export const removeProjectMember = async (
   } catch (e) {
     console.error(
       '[openground:members] remove failed',
+      e instanceof Error ? e.message : e,
+    )
+    return { ok: false }
+  }
+}
+
+// The owner CANCELS a still-PENDING email invite (the "取消" action on a pending
+// roster row). A plain owner-JWT DELETE under RLS (0005 "og members owner delete"),
+// scoped by email AND status='pending' so it can ONLY ever drop an UNACCEPTED
+// invite — never an active collaborator (that's removeProjectMember). Unlike
+// eviction it does NOT rotate the project's invite links: a pending invitee never
+// held a link, so cancelling their invite must not nuke everyone else's links (that
+// would break the coexisting quick-share link path). Lowercases the email to match
+// storage. Invalidates the read cache. { ok:false } when unconfigured / signed out
+// / blank email / the delete fails. Never throws.
+export const cancelPendingInvite = async (
+  collabProjectId: string,
+  email: string,
+): Promise<{ ok: boolean }> => {
+  if (!collabProjectId) return { ok: false }
+  const auth = await ownerAuth()
+  if (!auth) return { ok: false }
+  const target = email?.trim().toLowerCase()
+  if (!target) return { ok: false }
+
+  try {
+    const res = await fetch(
+      `${auth.url}/rest/v1/${membersTable()}?project_id=eq.${encodeURIComponent(
+        collabProjectId,
+      )}&email=eq.${encodeURIComponent(target)}&status=eq.pending`,
+      {
+        method: 'DELETE',
+        headers: {
+          apikey: auth.anonKey,
+          Authorization: `Bearer ${auth.token}`,
+          Prefer: 'return=minimal',
+        },
+        signal: AbortSignal.timeout(10_000),
+      },
+    )
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      console.error(`[openground:members] cancel invite ${res.status}: ${detail}`)
+      return { ok: false }
+    }
+    clearMembershipCache(collabProjectId)
+    return { ok: true }
+  } catch (e) {
+    console.error(
+      '[openground:members] cancel invite failed',
+      e instanceof Error ? e.message : e,
+    )
+    return { ok: false }
+  }
+}
+
+// The INVITEE accepts their OWN pending email invite (the Ground お知らせ "Join"
+// action): flips their og_project_members row 'pending' → 'accepted' so they gain
+// collab access and the project moves from the bell to a Ground shared card. Calls
+// the accept_invite SECURITY DEFINER RPC (migration 0013) under the caller's own
+// JWT; the RPC touches ONLY the caller's own row (matched by their verified JWT
+// email/uid), so it can neither accept someone else's invite nor enrol a non-invited
+// caller (no matching pending row → 0 flipped). Invalidates this project's
+// membership cache so the next getMyMembership re-resolves the now-accepted row.
+// Returns { ok, accepted } where `accepted` is the rows flipped (0 = already
+// accepted / no invite). { ok:false } when unconfigured / signed out / the RPC
+// errors. Never throws.
+export const acceptInvite = async (
+  collabProjectId: string,
+): Promise<{ ok: boolean; accepted?: number }> => {
+  if (!collabProjectId) return { ok: false }
+  const auth = await ownerAuth()
+  if (!auth) return { ok: false }
+  try {
+    const res = await fetch(`${auth.url}/rest/v1/rpc/accept_invite`, {
+      method: 'POST',
+      headers: {
+        apikey: auth.anonKey,
+        Authorization: `Bearer ${auth.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_project_id: collabProjectId }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      console.error(`[openground:members] accept ${res.status}: ${detail}`)
+      return { ok: false }
+    }
+    // The caller is now an accepted member — drop any cached negative so the next
+    // getMyMembership (ticket gate) sees the accepted row.
+    clearMembershipCache(collabProjectId)
+    const body = (await res.json().catch(() => null)) as { accepted?: unknown } | null
+    const accepted = typeof body?.accepted === 'number' ? body.accepted : undefined
+    return { ok: true, ...(accepted !== undefined ? { accepted } : {}) }
+  } catch (e) {
+    console.error(
+      '[openground:members] accept failed',
       e instanceof Error ? e.message : e,
     )
     return { ok: false }

@@ -116,11 +116,11 @@ describe('buildTaskPrompt', () => {
     expect(p).toContain('the branch that was checked out when you started')
   })
 
-  it('pr flow + reviewColumn: setColumn review curl replaces the markDone curl', () => {
+  it('pr flow: records the PR URL AND moves the card to review (review lane always shown, no markDone)', () => {
     const p = buildTaskPrompt({
       ...base,
       worktreesDir: WT,
-      config: { completionFlow: 'pr', targetBranch: 'main', reviewColumn: true },
+      config: { completionFlow: 'pr', targetBranch: 'main' },
     })
     expect(p).toContain(
       `curl -s -X POST http://127.0.0.1:47776/api/project/tasks -H 'content-type: application/json' -d '{"path":"/Users/me/projects/app","setPrUrl":[{"id":"card-1","url":"<PR-URL>"}],"setColumn":[{"id":"card-1","column":"review"}]}'`,
@@ -128,23 +128,13 @@ describe('buildTaskPrompt', () => {
     expect(p).not.toContain('markDone')
   })
 
-  it('pr flow with reviewColumn off: records the PR URL, then markDone (after the PR is open)', () => {
-    const p = buildTaskPrompt({ ...base, worktreesDir: WT, config: { completionFlow: 'pr' } })
-    expect(p).toContain('finished and its PR is open')
-    expect(p).toContain('markDone')
-    expect(p).toContain(
-      `curl -s -X POST http://127.0.0.1:47776/api/project/tasks -H 'content-type: application/json' -d '{"path":"/Users/me/projects/app","setPrUrl":[{"id":"card-1","url":"<PR-URL>"}]}'`,
-    )
-    expect(p).not.toContain('setColumn')
-  })
-
   it('branch protocol tells claude to suffix on a name collision (F083)', () => {
     const p = buildTaskPrompt({ ...base, worktreesDir: WT })
     expect(p).toContain('already exists, append a numeric suffix')
   })
 
-  it('reviewColumn without pr flow: merge protocol keeps the plain markDone', () => {
-    const p = buildTaskPrompt({ ...base, worktreesDir: WT, config: { reviewColumn: true } })
+  it('non-pr flow never emits a setColumn move (only markDone)', () => {
+    const p = buildTaskPrompt({ ...base, worktreesDir: WT, config: { completionFlow: 'merge' } })
     expect(p).toContain('markDone')
     expect(p).not.toContain('setColumn')
   })
