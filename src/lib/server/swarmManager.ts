@@ -42,7 +42,9 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { swarmLaunchDefaults } from './swarmLaunch'
+import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { getExecutionMode } from './store'
+import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
 /** The skill the commander session runs, handed to claude as its positional
@@ -80,12 +82,14 @@ export const managerLaunchOpts = (
   cwd: string,
   agentSessionId: string,
   opts: { cols?: number; rows?: number } = {},
+  // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
+  me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
   cwd,
   agentSessionId,
   permissionMode: 'bypass',
   appContext: true,
-  ...swarmLaunchDefaults('manager'),
+  ...swarmLaunchDefaults('manager', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,
@@ -102,8 +106,11 @@ export const spawnSwarmManager = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
   const agentSessionId = randomUUID()
+  // Token budget (card 68d8e00f): economy runs the commander on sonnet; optimize keeps
+  // it on opus (its integration / safety-review judgment is quality-critical).
+  const me = resolveSwarmModelEffort(await getExecutionMode(), 'manager')
   const ref = launchClaude(
-    managerLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }),
+    managerLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }, me),
   )
   return { terminalId: ref.terminalId, agentSessionId }
 }

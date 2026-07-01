@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import {
   ORCHESTRATOR_MAX_WORKERS,
@@ -71,7 +71,12 @@ import {
   type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
-import { rememberSwarmAutonomy, forgetSwarmAutonomy, isSwarmAutonomyRemembered } from './store'
+import {
+  rememberSwarmAutonomy,
+  forgetSwarmAutonomy,
+  isSwarmAutonomyRemembered,
+  setSettings,
+} from './store'
 import type {
   OrchestratorLogLine,
   OrchestratorWorker,
@@ -89,6 +94,14 @@ import type { IntegrateOutcome, ReviewReadiness } from './swarmIntegrate'
 vi.mock('./claudePreflight', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./claudePreflight')>()
   return { ...actual, claudeRunPreflight: async () => ({ ok: true }) }
+})
+
+// These engine tests exercise dispatch at FULL capacity (cap = ORCHESTRATOR_MAX_WORKERS).
+// The default execution mode is now 'optimize' (a middling parallel cap), so pin 'max'
+// file-wide to test the historical full-band behaviour; the per-mode caps are covered
+// in swarmLaunch.test.ts (execModeMaxWorkers). Written to the isolated tmp HOME.
+beforeAll(async () => {
+  await setSettings({ executionMode: 'max' })
 })
 
 // The commander engine's drain+dispatch+monitor logic, exercised with FAKE deps

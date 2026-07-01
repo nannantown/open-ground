@@ -51,6 +51,7 @@ import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { SwarmFlowPane } from './SwarmFlowPane'
 import { SwarmPowerBar } from './SwarmPowerBar'
+import { ExecutionModeToggle } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
 import { useSwarmEngine, mergeSwarmWorkers, planSwarmPower } from './useSwarmEngine'
 
@@ -827,6 +828,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         workerCount={allWorkers.length}
         onToggle={powerSwarm}
       />
+      {/* Token budget (card 68d8e00f): one switch sets the model/effort/parallelism every
+          swarm launch (worker / supply / commander) uses — max / economy / optimize. */}
+      <ExecutionModeToggle />
       {/* A transient action error (worker terminate / restart, supply・commander
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}

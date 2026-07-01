@@ -34,7 +34,9 @@ import { killTerminalsByCwd } from './terminal'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
-import { swarmLaunchDefaults } from './swarmLaunch'
+import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { getExecutionMode } from './store'
+import type { ClaudeEffort } from '../types'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
 
 const execFile = promisify(execFileCb)
@@ -389,13 +391,16 @@ export const workerLaunchOpts = (
     sandbox?: boolean
     sandboxWritePaths?: string[]
   },
+  // Mode-resolved model/effort (see resolveSwarmModelEffort). Omitted ⇒ swarmLaunchDefaults
+  // keeps the historical opus/max, so any non-mode-aware caller is unchanged.
+  me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
   cwd: worktree,
   agentSessionId,
   appContext: false,
   sandbox: opts.sandbox,
   sandboxWritePaths: opts.sandboxWritePaths,
-  ...swarmLaunchDefaults('worker'),
+  ...swarmLaunchDefaults('worker', me),
   // permissionMode LAST — AFTER the spread — so 'bypass' is UNCONDITIONAL: an
   // unattended worker must never wedge on a tool-approval / trust prompt with no
   // human watching (Card 4880e9c6's "塞ぐ権限待ち経路"). Positioned here so a
@@ -434,12 +439,25 @@ export const spawnSwarmWorker = async (
   // fully READ-only — NO carve-out (a writable node_modules would let a sandboxed
   // worker poison code, e.g. `.vite/deps`, the owner later runs UN-sandboxed).
   const sandbox = await isExperimentEnabled('sandbox')
+  // Token budget (card 68d8e00f): the mode (+ this card's weight, in optimize) picks
+  // the worker's model/effort. economy ⇒ sonnet/low, max ⇒ opus/max, optimize ⇒ heavy
+  // cards opus, chores sonnet. A per-card explicit override still wins via the Board
+  // 実行 button's task.run; unattended orchestrator dispatch has none, so it rides the mode.
+  const me = resolveSwarmModelEffort(await getExecutionMode(), 'worker', {
+    title: opts.title,
+    notes: opts.notes,
+  })
   const ref = launchClaude(
-    workerLaunchOpts(worktree, agentSessionId, {
-      ...opts,
-      sandbox,
-      sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
-    }),
+    workerLaunchOpts(
+      worktree,
+      agentSessionId,
+      {
+        ...opts,
+        sandbox,
+        sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
+      },
+      me,
+    ),
   )
   return { terminalId: ref.terminalId, agentSessionId, worktree, branch }
 }

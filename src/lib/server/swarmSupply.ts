@@ -33,7 +33,9 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { swarmLaunchDefaults } from './swarmLaunch'
+import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { getExecutionMode } from './store'
+import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmSupplyResponse } from '../types'
 
 /** The skill the supply session runs, handed to claude as its positional prompt
@@ -69,12 +71,14 @@ export const supplyLaunchOpts = (
   cwd: string,
   agentSessionId: string,
   opts: { cols?: number; rows?: number } = {},
+  // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
+  me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
   cwd,
   agentSessionId,
   permissionMode: 'bypass',
   appContext: true,
-  ...swarmLaunchDefaults('supply'),
+  ...swarmLaunchDefaults('supply', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,
@@ -91,8 +95,10 @@ export const spawnSwarmSupply = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
   const agentSessionId = randomUUID()
+  // Token budget (card 68d8e00f): economy/optimize run the supply officer on sonnet.
+  const me = resolveSwarmModelEffort(await getExecutionMode(), 'supply')
   const ref = launchClaude(
-    supplyLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }),
+    supplyLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }, me),
   )
   return { terminalId: ref.terminalId, agentSessionId }
 }

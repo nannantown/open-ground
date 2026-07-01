@@ -1,7 +1,8 @@
 import { readFile } from 'fs/promises'
 import { ensureOpenGroundHome, settingsFile, canvasFile, notificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
-import type { Settings, CanvasState } from '../types'
+import { asExecutionMode } from './swarmLaunch'
+import type { Settings, CanvasState, ExecutionMode } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
   projects: [],
@@ -129,6 +130,7 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'openApps',
   'defaultEditor',
   'experiments',
+  'executionMode',
 ]
 
 // Persist a settings patch that ORIGINATES FROM AN UNTRUSTED HTTP CLIENT
@@ -195,6 +197,12 @@ export const isSwarmAutonomyRemembered = async (key: string): Promise<boolean> =
   const { swarmAutonomyOn } = await getSettings()
   return Array.isArray(swarmAutonomyOn) && swarmAutonomyOn.includes(key)
 }
+
+// ─── Swarm execution mode (token budget) ─────────────────────────────────────
+// The persisted mode every in-app swarm launch reads to pick model/effort/parallelism.
+// A hand-corrupted / absent value degrades to the smart default via asExecutionMode.
+export const getExecutionMode = async (): Promise<ExecutionMode> =>
+  asExecutionMode((await getSettings()).executionMode)
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)
 export const setCanvas = (c: CanvasState) => writeJson(canvasFile(), c)

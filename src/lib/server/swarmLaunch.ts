@@ -10,7 +10,13 @@
 // launch inherits opus/max (and, once added, Remote Control) for free, without
 // re-deriving the guard.
 
-import { CLAUDE_EFFORTS, type ClaudeEffort } from '../types'
+import {
+  CLAUDE_EFFORTS,
+  type ClaudeEffort,
+  type ExecutionMode,
+  EXECUTION_MODES,
+  DEFAULT_EXECUTION_MODE,
+} from '../types'
 
 /** Model every swarm role launches at — opus (full capability). */
 export const SWARM_LAUNCH_MODEL = 'opus'
@@ -39,14 +45,100 @@ export interface SwarmLaunchDefaults {
   remoteControl: string
 }
 
-/** The shared launch defaults a swarm role runs with — opus + max + Remote
- *  Control ON — spread into the role's LaunchClaudeOpts so supply / worker /
- *  (future) commander stay identical. `remoteName` is the role's Remote Control
- *  label so it's identifiable on claude.ai / mobile (supply / worker / …).
- *  `effort` is omitted entirely when the CLAUDE_EFFORTS guard rejected it (so
- *  the spread never sets `effort: undefined`). */
-export const swarmLaunchDefaults = (remoteName: string): SwarmLaunchDefaults => ({
-  model: SWARM_LAUNCH_MODEL,
-  ...(SWARM_LAUNCH_EFFORT ? { effort: SWARM_LAUNCH_EFFORT } : {}),
+/** The shared launch defaults a swarm role runs with — Remote Control ON, plus a
+ *  model/effort that DEFAULTS to opus/max but is overridable by the execution mode
+ *  (see {@link resolveSwarmModelEffort}). `remoteName` is the role's Remote Control
+ *  label so it's identifiable on claude.ai / mobile (supply / worker / …). Pass
+ *  `me` (the mode-resolved model+effort) to run a role cheaper; omit it and the
+ *  role keeps the historical opus/max (max-output mode / back-compat). `effort` is
+ *  omitted entirely when undefined so the spread never sets `effort: undefined`. */
+export const swarmLaunchDefaults = (
+  remoteName: string,
+  me: { model: string; effort?: ClaudeEffort } = {
+    model: SWARM_LAUNCH_MODEL,
+    effort: SWARM_LAUNCH_EFFORT,
+  },
+): SwarmLaunchDefaults => ({
+  model: me.model,
+  ...(me.effort ? { effort: me.effort } : {}),
   remoteControl: remoteName,
 })
+
+// ─── Execution mode (トークン節約) — card 68d8e00f ────────────────────────────
+// One global switch that sets how much capability the in-app swarm burns, so the
+// owner trades quality ↔ weekly-budget with ONE toggle instead of per-card fiddling.
+// The subscription weekly cap is finite; always-opus/max burns peak cost even on
+// chores. Both models run on the SAME subscription (project_subscription_only) — a
+// sonnet run is simply lighter, so it stretches the cap. NEVER an API key.
+
+/** Narrow an untrusted value (settings / body) to a real mode, else the default.
+ *  (`ExecutionMode` / `EXECUTION_MODES` / `DEFAULT_EXECUTION_MODE` are the shared
+ *  contract in types.ts so the client toggle uses the same source.) */
+export const asExecutionMode = (v: unknown): ExecutionMode =>
+  typeof v === 'string' && (EXECUTION_MODES as readonly string[]).includes(v)
+    ? (v as ExecutionMode)
+    : DEFAULT_EXECUTION_MODE
+
+const guardEffort = (e: string): ClaudeEffort | undefined =>
+  CLAUDE_EFFORTS.includes(e as ClaudeEffort) ? (e as ClaudeEffort) : undefined
+
+/** How heavy a card is — drives model/effort in `optimize` mode. Purely STATIC
+ *  (labels / keywords / size): judging weight with another `claude` call would
+ *  itself burn the budget this feature exists to save. */
+export type CardWeight = 'heavy' | 'medium' | 'light'
+
+// Signals that a card is high-stakes → keep full capability (Opus/max). Safety +
+// architecture + release-blocking work, in EN and JA.
+const HEAVY_SIGNALS =
+  /(\bsandbox\b|\bguard\b|\bauth\b|認証|\bdelete\b|削除|\bbilling\b|課金|\bsecurity\b|セキュリティ|\bMAJOR\b|release[\s-]?block|リリースブロッカ|\bSPIKE\b|\bmigration\b|マイグレ|敵対レビュー|サンドボックス)/i
+// Signals that a card is low-stakes → Sonnet/low is plenty (chores, copy, follow-ups).
+const LIGHT_SIGNALS =
+  /(\[minor\]|\[follow[\s-]?up\]|\btypo\b|\brename\b|文言|\bcomment\b|コメント|\bnit\b|\bcleanup\b|\blint\b|\bdoc\b|\bcopy\b)/i
+
+/** Classify a card by static signals. Unknown/ambiguous → `medium` (the SAFE
+ *  middle — never silently under-powers), and a heavy signal or a large brief
+ *  (big notes ⇒ substantial work) wins over a light one. */
+export const classifyCardWeight = (card: { title?: string; notes?: string }): CardWeight => {
+  const text = `${card.title ?? ''}\n${card.notes ?? ''}`
+  if (HEAVY_SIGNALS.test(text) || text.length > 1200) return 'heavy'
+  if (LIGHT_SIGNALS.test(text) && text.length < 400) return 'light'
+  return 'medium'
+}
+
+/** Resolve the model + effort a swarm role should launch at under `mode`. Workers
+ *  in `optimize` route by card weight; the engine roles (supply/manager) key off
+ *  the mode alone. Principle (card 68d8e00f): cut redundancy/volume, but keep
+ *  CAPABILITY where a judgment's quality matters — so a HEAVY optimize card stays
+ *  Opus/max, and even economy roles keep `medium` effort (they reason across
+ *  integration) while economy workers drop to `low`. */
+export const resolveSwarmModelEffort = (
+  mode: ExecutionMode,
+  role: 'worker' | 'supply' | 'manager',
+  card?: { title?: string; notes?: string },
+): { model: string; effort?: ClaudeEffort } => {
+  if (mode === 'max') return { model: 'opus', effort: guardEffort('max') }
+  if (mode === 'economy') {
+    // Aggressive: everything on sonnet. The owner chose to minimise burn — accept a
+    // slightly lighter commander. Workers drop to low effort; roles keep medium.
+    return { model: 'sonnet', effort: guardEffort(role === 'worker' ? 'low' : 'medium') }
+  }
+  // optimize — keep CAPABILITY where the judgment's quality matters, cut VOLUME/model
+  // elsewhere. The commander's integration / safety-review DECISION is quality-critical,
+  // so it stays on opus (savings there come from fewer review bodies, not a weaker model).
+  if (role === 'manager') return { model: 'opus', effort: guardEffort('high') }
+  // The supply officer only translates intent into cards — sonnet is plenty.
+  if (role === 'supply') return { model: 'sonnet', effort: guardEffort('medium') }
+  // Workers route by card weight: heavy/safety work keeps opus, chores drop to sonnet.
+  const w = card ? classifyCardWeight(card) : 'medium'
+  if (w === 'heavy') return { model: 'opus', effort: guardEffort('max') }
+  if (w === 'light') return { model: 'sonnet', effort: guardEffort('low') }
+  return { model: 'sonnet', effort: guardEffort('medium') }
+}
+
+/** The live-worker ceiling for a mode — economy runs fewer parallel workers (each
+ *  a full `claude`), max keeps the historical band, optimize sits in the middle.
+ *  Clamped to [1, hardMax] so it never breaches ORCHESTRATOR_MAX_WORKERS. */
+export const execModeMaxWorkers = (mode: ExecutionMode, hardMax: number): number => {
+  const want = mode === 'economy' ? 2 : mode === 'optimize' ? 4 : hardMax
+  return Math.max(1, Math.min(hardMax, want))
+}

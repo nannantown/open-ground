@@ -89,6 +89,10 @@ export interface Settings {
   /** The user's display name, used as the default assignee identity on shared
    *  boards ("my cards" filter). Default suggestion: `git config user.name`. */
   displayName?: string
+  /** Swarm execution mode (token budget) — see {@link ExecutionMode}. Unset ⇒
+   *  {@link DEFAULT_EXECUTION_MODE} ('optimize'). Sets the model/effort/parallelism
+   *  every in-app swarm role launches at, with one toggle. User-settable. */
+  executionMode?: ExecutionMode
   /** UI + prompt language. OPEN GROUND is English-first: unset means English.
    *  'ja' switches the UI strings AND the prompts sent to the spawned Claude
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
@@ -1414,6 +1418,16 @@ export const CLAUDE_EFFORTS: readonly ClaudeEffort[] = [
   'xhigh',
   'max',
 ]
+
+/** Swarm execution mode — one toggle that trades capability ↔ weekly budget
+ *  (card 68d8e00f). `max` = every role opus/max (peak quality, peak spend);
+ *  `economy` = sonnet + low/medium effort + fewer parallel workers (minimise the
+ *  subscription burn); `optimize` = per-card weight decides (heavy → opus, chores
+ *  → sonnet) — the smart default. The model/effort/parallelism resolution lives in
+ *  `swarmLaunch.ts`; this is the shared contract the client toggle + settings use. */
+export type ExecutionMode = 'max' | 'economy' | 'optimize'
+export const EXECUTION_MODES: readonly ExecutionMode[] = ['max', 'economy', 'optimize']
+export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'optimize'
 
 /** Per-card overrides for the drawer's 実行 button. Each key falls back to
  *  the board defaults when absent: flow → config.completionFlow,

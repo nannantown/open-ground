@@ -71,13 +71,14 @@ import { getTerminal, getTerminalScreen, killTerminal, subscribeTerminal, writeI
 import { claudeRunPreflight } from './claudePreflight'
 import {
   getSettings,
+  getExecutionMode,
   rememberSwarmAutonomy,
   forgetSwarmAutonomy,
   isSwarmAutonomyRemembered,
 } from './store'
 import { launchClaude } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
-import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
+import { SWARM_LAUNCH_MODEL, execModeMaxWorkers } from './swarmLaunch'
 import {
   spawnSwarmWorker,
   removeSwarmWorktree,
@@ -3830,7 +3831,13 @@ export const runDispatchPass = async (
   // same-file / duplicate / dep-blocked todos out), then DYNAMICALLY scale the
   // target to that backlog instead of always filling to MAX (card ea369937).
   const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
-  const target = computeTargetWorkers({ liveWorkers: live, dispatchableTodos: dispatchable.length })
+  const target = computeTargetWorkers({
+    liveWorkers: live,
+    dispatchableTodos: dispatchable.length,
+    // Token budget (card 68d8e00f): economy caps parallel workers low, optimize middling,
+    // max keeps the historical band — each live worker is a full `claude`, so this is a lever.
+    max: execModeMaxWorkers(await getExecutionMode(), ORCHESTRATOR_MAX_WORKERS),
+  })
   // New spawns = how far below target we are. The engine only ever SPAWNS here; it
   // SHRINKS passively (target < live ⇒ 0 new ⇒ live workers retire as PTYs exit —
   // never killed to hit a lower target). Bounded by `target ≤ MAX`, so this can
@@ -5047,7 +5054,13 @@ export const maybeAutoStartDrain = async (
   const live = engine.workers.filter((w) => deps.isAlive(w.terminalId)).length
   const countedIds = new Set(engine.workers.map((w) => w.taskId))
   const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
-  const target = computeTargetWorkers({ liveWorkers: live, dispatchableTodos: dispatchable.length })
+  const target = computeTargetWorkers({
+    liveWorkers: live,
+    dispatchableTodos: dispatchable.length,
+    // Token budget (card 68d8e00f): economy caps parallel workers low, optimize middling,
+    // max keeps the historical band — each live worker is a full `claude`, so this is a lever.
+    max: execModeMaxWorkers(await getExecutionMode(), ORCHESTRATOR_MAX_WORKERS),
+  })
   const slots = Math.max(0, target - live)
   if (dispatchable.length === 0 || slots === 0) return false
 
