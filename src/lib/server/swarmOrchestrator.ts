@@ -5260,29 +5260,30 @@ export const getOrchestratorState = async (
   return stateOf(engine, deps.isAlive, tasks)
 }
 
-/** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): auto-start
- *  the drain when idle capacity meets a todo backlog (card cf545637), THEN return the
- *  fresh state. A SEPARATE endpoint from the read-only {@link getOrchestratorState} ON
- *  PURPOSE — the GET /api/swarm/orchestrator that BOTH the Swarm hook and the display-only
- *  Board worker-map poll must stay IDEMPOTENT (a GET that spawned `claude` workers violated
- *  the Board's "never touch the engine" contract — a review MUST_FIX). Only the Swarm
- *  surface (useSwarmEngine) POSTs this, so opening the Board never auto-starts. Folds
- *  {@link maybeAutoStartDrain} ahead of the read; uses getOrCreateEngine (not store.get) so
- *  a never-started project still gets an engine that can auto-start — a fresh engine's
- *  snapshot reads identically to emptyState(). The auto-start is best-effort: a fault must
- *  never break the state. Owner-gated at the route. Default deps = the full real set (so the
- *  kicked chain has its integration/anomaly half), exactly like the start path. */
+/** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the
+ *  engine state. DEFAULT OFF (card eadb25e6 — release blocker): it NO LONGER auto-starts a
+ *  stopped engine — the old cf545637 "Swarm pane mounted ⇒ auto-drain" behaviour is
+ *  REVERSED, because a pane restored on app launch made the project spin up workers with no
+ *  fresh consent. Autonomy is now opt-in (Autonomy ON → startOrchestrator, or the env-gated
+ *  global loop). Kept as a SEPARATE endpoint from the read-only {@link getOrchestratorState}
+ *  ON PURPOSE — the GET that BOTH the Swarm hook and the display-only Board worker-map poll
+ *  must stay IDEMPOTENT. Uses getOrCreateEngine (not store.get) so a never-started project
+ *  reads identically to emptyState(). Owner-gated at the route. */
 export const drainTickOrchestrator = async (
   projectPath: string,
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
 ): Promise<SwarmOrchestratorState> => {
   const key = await canonicalize(projectPath)
   const engine = getOrCreateEngine(key)
-  await maybeAutoStartDrain(engine, deps).catch(() => {})
-  // Return the post-tick state. No lead-time board read here (unlike the GET poll's
-  // getOrchestratorState): the only caller (useSwarmEngine) fires this fire-and-forget and
-  // reads the full state — lead-time included — from the idempotent GET. Matches the
-  // start/stop/automerge action endpoints, which also return stateOf without tasks.
+  // DEFAULT OFF (card eadb25e6 — release blocker): the drain-tick NO LONGER auto-starts a
+  // stopped engine. Merely MOUNTING the Swarm pane — including a pane RESTORED on app launch
+  // (App.tsx view-restore) — must NOT spin up workers. The engine store is in-memory, so a
+  // relaunch is always a fresh (running:false, manualStop:false) engine; auto-starting off
+  // that state is exactly the "launch ⇒ everything runs" bug. Autonomy is STRICT opt-in now:
+  // the owner presses "Autonomy ON" (POST /orchestrator/start → startOrchestrator). An
+  // already-running engine drives itself via its scheduled chain, so this tick is a pure
+  // idempotent state read. (maybeAutoStartDrain still backs the global background loop, which
+  // is itself opt-in behind OPENGROUND_SWARM_AUTODRAIN=1.)
   return stateOf(engine, deps.isAlive)
 }
 

@@ -1082,16 +1082,19 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
     })
   })
 
-  describe('drainTickOrchestrator vs getOrchestratorState — tick auto-starts, GET is read-only', () => {
+  describe('drainTickOrchestrator vs getOrchestratorState — tick is opt-in (no auto-start), GET is read-only', () => {
     beforeEach(() => __resetOrchestratorForTests())
     afterEach(() => __resetOrchestratorForTests()) // clear the armed chain timer
 
-    it('drainTickOrchestrator auto-starts + dispatches a queued todo (条件1, e2e)', async () => {
+    it('drainTickOrchestrator does NOT auto-start a stopped engine — autonomy is opt-in (eadb25e6)', async () => {
+      // Merely mounting the Swarm pane (incl. a pane RESTORED on app launch) must NOT spin
+      // up workers. A dispatchable todo + free slot is no longer enough — the owner must
+      // press Autonomy ON (startOrchestrator). The drain-tick is now a pure state read.
       const deps = fullDeps({ cards: [card('a')] })
       const state = await drainTickOrchestrator('/proj-autostart-tick', deps)
-      expect(state.running).toBe(true) // the drain-tick engaged the engine itself
-      expect(deps.spawned.map((s) => s.taskId)).toEqual(['a'])
-      expect(deps.board.get('a')?.boardColumn).toBe('doing')
+      expect(state.running).toBe(false) // the tick left the fresh engine stopped
+      expect(deps.spawned).toHaveLength(0) // nothing auto-spawned
+      expect(deps.board.get('a')?.boardColumn).toBe('todo') // the card stays queued
     })
 
     it('drainTickOrchestrator leaves a stopped engine stopped when the queue is empty', async () => {

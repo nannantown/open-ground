@@ -78,9 +78,16 @@ void (async () => {
 // Swarm-pane drain-tick only covers the mounted-pane case). Reuses maybeAutoStartDrain's
 // cap / manualStop / preflight / twin-dispatch guards — it can't over-spawn, override an
 // explicit OFF, or double-drive a running engine. Started ONLY in this real-server entry
-// (unit tests mount the Hono app, not this file), unref'd, idempotent. Kill-switch:
-// OPENGROUND_SWARM_AUTODRAIN=0 disables it (default ON).
-if (process.env.OPENGROUND_SWARM_AUTODRAIN !== '0') {
+// (unit tests mount the Hono app, not this file), unref'd, idempotent.
+//
+// DEFAULT OFF (card eadb25e6 — release blocker): merely LAUNCHING the app must NOT
+// auto-spawn workers across every registered project. Boot-time auto-drain is now
+// STRICT OPT-IN — enable the global (all-projects) boot loop explicitly with
+// OPENGROUND_SWARM_AUTODRAIN=1, or turn a SINGLE project's drain on at runtime from the
+// Swarm UI (POST /api/swarm/orchestrator/start, owner-only → startOrchestrator(path)).
+// No opt-in ⇒ no background drain, so a fresh install or a plain relaunch stays completely
+// idle until the user explicitly asks for the swarm.
+if (process.env.OPENGROUND_SWARM_AUTODRAIN === '1') {
   startAutoDrainLoop()
 }
 

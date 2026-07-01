@@ -5,15 +5,27 @@
 // change), the gauge used to show a silent "—". This pins the hardened
 // behaviour: the chip still falls back to "—", but the popover now states an
 // explicit reason (from cli.status) AND surfaces the local-jsonl token total as
-// a real fallback value — so the reading is never silent. (The request-cancel
+// a real fallback value — so the reading is never silent. The local total is
+// shown COMPACTED (compactTokens), and the tests pin that interpolated value
+// ("1.2M" / "800k") rather than only the message key. (The request-cancel
 // wiring is covered separately in UsageHud.cancel.test.tsx.)
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 
-// Echo translation keys so we can assert which message rendered without the
-// I18nProvider (same pattern as the cancel test).
+// Echo translation KEYS so we can assert which message rendered without the
+// I18nProvider (same pattern as the cancel test). When interpolation vars are
+// present, also append them as `name=value` pairs — so a test can pin the
+// *interpolated* value (e.g. compactTokens' "1.2M" in the {tokens} slot), not
+// merely the message key. (The real t() substitutes {tokens}/{hours}; the plain
+// echo dropped those values, so the local-estimate line was only key-checked.)
 vi.mock('@/i18n/I18nContext', () => ({
-  useT: () => ({ t: (k: string) => k, lang: 'en', setLang: () => {}, toggleLang: () => {} }),
+  useT: () => ({
+    t: (k: string, vars?: Record<string, string | number>) =>
+      vars ? `${k} ${Object.entries(vars).map(([name, v]) => `${name}=${v}`).join(' ')}` : k,
+    lang: 'en',
+    setLang: () => {},
+    toggleLang: () => {},
+  }),
 }))
 
 import { UsageHud } from './UsageHud'
@@ -55,7 +67,11 @@ describe('UsageHud — no-% fallback (reason + local estimate)', () => {
     // a silent placeholder.
     fireEvent.click(screen.getByLabelText('misc.usage.heading'))
     expect(screen.getByText('misc.usage.reason.scrapeFailed')).toBeTruthy()
-    expect(screen.getByText('misc.usage.localEstimate')).toBeTruthy()
+    // Pin the INTERPOLATED value, not just the message key: 1_200_000 local
+    // tokens must compact to "1.2M" (compactTokens, M-branch → toFixed(1)) and
+    // flow through t()'s {tokens} slot. A key-only assert would pass even if
+    // compactTokens returned garbage.
+    expect(screen.getByText(/misc\.usage\.localEstimate.*tokens=1\.2M/)).toBeTruthy()
   })
 
   it('signed out → the sign-in reason, and no estimate line when there are no local tokens', async () => {
@@ -101,5 +117,8 @@ describe('UsageHud — no-% fallback (reason + local estimate)', () => {
     // The popover tells the same story: an explicit reason, not a week gauge.
     fireEvent.click(screen.getByLabelText('misc.usage.heading'))
     expect(screen.getByText('misc.usage.reason.scrapeFailed')).toBeTruthy()
+    // And it pins a DIFFERENT compactTokens branch than the 1.2M case above:
+    // 800_000 local tokens compact to "800k" (k-branch → Math.round(n/1000)+"k").
+    expect(screen.getByText(/misc\.usage\.localEstimate.*tokens=800k/)).toBeTruthy()
   })
 })
