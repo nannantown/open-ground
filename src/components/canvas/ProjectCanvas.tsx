@@ -29,8 +29,18 @@ const SAVE_DEBOUNCE_MS = 400
 // job appended/tweaked since this client loaded the canvas) is rejected 409; we
 // refetch, 3-way-merge our edits with the server's new elements, and retry
 // against the fresh rev. Bounded so a canvas under a burst of AI writes can't
-// loop forever — on exhaustion we drop the save and the next local edit retries.
-const MAX_SAVE_RETRIES = 5
+// loop forever — on exhaustion we flush the last merge once (see
+// saveCanvasWithOcc) so it can't be lost silently. Exported so the save-loop
+// unit test exercises the real production bound.
+export const MAX_SAVE_RETRIES = 5
+
+// The reason a bottom-right recovery notice is showing. A discriminated kind
+// (not a bare boolean) so a failed delete shows its OWN wording instead of
+// borrowing the save-conflict copy: 'save-conflict' = a debounced save exhausted
+// its OCC retries (re-save to land the merged edits); 'delete-failed' = a canvas
+// delete POST never landed (the canvas still exists and is saveable — re-save to
+// keep any edit dropped during the attempt). null = no notice.
+type CanvasNotice = 'save-conflict' | 'delete-failed'
 
 // ⌘\ focus-mode choice survives reloads. '0' = hidden; anything else visible.
 const SIDEBARS_KEY = 'openground.canvas.sidebars'
@@ -39,6 +49,130 @@ const SIDEBARS_KEY = 'openground.canvas.sidebars'
 // this long has passed, so a persistently-failing R2/Worker can't be hammered by
 // the sweep re-firing on every canvas change during active collaboration.
 const ASSET_RETRY_COOLDOWN_MS = 30_000
+
+// ── Canvas save under optimistic concurrency control (OCC) ─────────────────
+// Extracted from the component (mirroring reconcileCanvasElements) so the retry
+// loop is a pure, deterministically-testable unit with no React/fetch coupling.
+
+/** One POST attempt's outcome, normalised so the OCC loop never touches
+ *  `fetch`/`Response`. */
+export type CanvasSavePost =
+  | { kind: 'saved'; saved: CanvasFile }
+  | { kind: 'conflict'; serverCanvas: CanvasFile | null }
+  | { kind: 'error' }
+
+/** The React side-effects the OCC save loop drives — the seam the unit test
+ *  injects fakes through (rev/base store, the POST transport, local-state
+ *  reflection, and the save-failure notice). */
+export interface CanvasSaveOcc {
+  /** POST `payload` echoing `expectedRev`; classify the response. */
+  post: (payload: CanvasFile, expectedRev: number) => Promise<CanvasSavePost>
+  /** Refetch the server canvas when a 409 body carried none. */
+  fetchCanvas: (id: string) => Promise<CanvasFile | null>
+  getRev: (id: string) => number
+  setRev: (id: string, rev: number) => void
+  getBase: (id: string) => CanvasElement[]
+  setBase: (id: string, elements: CanvasElement[]) => void
+  /** Freshest local canvas for `id` while it's still active (the merge's
+   *  `local` leg — the user may have edited mid-round-trip), else null. */
+  liveLocal: (id: string) => CanvasFile | null
+  /** A server-confirmed save landed: `sent` is exactly what the server now
+   *  holds. (Refresh the tab-bar timestamp + clear any save-failure notice.) */
+  onSaved: (id: string, saved: CanvasFile, sent: CanvasFile) => void
+  /** Reflect a 3-way merge into local state so AI additions appear at once. */
+  onMerged: (merged: CanvasFile) => void
+  /** Retries were exhausted (or a post-merge transport error stopped them) AND
+   *  the final flush save still couldn't land → let the user re-save manually
+   *  instead of losing the merge silently on the next reload. */
+  onExhausted: (id: string) => void
+  maxRetries: number
+}
+
+/** Persist a full canvas under OCC. Sends the rev we're synced to for THIS id;
+ *  on 409 (an AI job advanced the file since our base) refetch, 3-way-merge
+ *  (keep our edits ∪ the AI's new/updated elements, never resurrect our
+ *  deletions), reflect the merge locally, and retry against the fresh rev —
+ *  bounded by `maxRetries`.
+ *
+ *  DATA-LOSS GUARD: the loop merges on its FINAL iteration too, so on exhaustion
+ *  the freshly-merged payload has been reflected into local state (via onMerged)
+ *  but NEVER sent — and would be silently lost on the next reload (it lives only
+ *  in memory). So after the loop — whether it exhausted its retries or broke out
+ *  on a post-merge transport error — flush the last merged payload ONCE; if even
+ *  that can't land, surface onExhausted so the user can re-save. A normal save (a
+ *  success inside the loop) returns before this tail, so its behaviour is
+ *  unchanged. */
+export async function saveCanvasWithOcc(
+  initial: CanvasFile,
+  occ: CanvasSaveOcc,
+): Promise<void> {
+  const id = initial.id
+  let payload = initial
+  let mergedUnsaved = false
+
+  const commit = (saved: CanvasFile, sent: CanvasFile, expectedRev: number) => {
+    occ.setRev(id, Number.isFinite(saved.rev) ? saved.rev : expectedRev + 1)
+    // The server now holds exactly what we sent → it's the new merge base.
+    occ.setBase(id, sent.elements)
+    occ.onSaved(id, saved, sent)
+  }
+
+  for (let attempt = 0; attempt <= occ.maxRetries; attempt++) {
+    const expectedRev = occ.getRev(id)
+    const res = await occ.post(payload, expectedRev)
+    if (res.kind === 'saved') {
+      commit(res.saved, payload, expectedRev)
+      return
+    }
+    // Non-409 mid-loop: stop retrying. If a merge is already pending-unsaved we
+    // still fall through to the final flush below; otherwise (e.g. a transient
+    // error on the very first attempt, nothing merged yet) the prior
+    // fire-and-forget behaviour stands — the next edit re-saves.
+    if (res.kind === 'error') break
+    // 409 → refetch + 3-way-merge + retry against the fresh rev.
+    let serverCanvas = res.serverCanvas
+    if (!serverCanvas) serverCanvas = await occ.fetchCanvas(id)
+    // Couldn't obtain the server's state to merge against → stop, but `break`
+    // (not `return`) so any merge from a PRIOR iteration still gets flushed
+    // below — same silent-loss guard as the non-409 break above. (Unreachable in
+    // prod: the server's 409 always carries the canvas; defensive symmetry.)
+    if (!serverCanvas) break
+    const live = occ.liveLocal(id)
+    const local = live ?? payload
+    const merged: CanvasFile = {
+      ...local,
+      elements: reconcileCanvasElements(
+        occ.getBase(id),
+        local.elements,
+        serverCanvas.elements,
+      ),
+      rev: serverCanvas.rev,
+    }
+    // We now KNOW the server holds serverCanvas at this rev → new merge base.
+    occ.setRev(id, Number.isFinite(serverCanvas.rev) ? serverCanvas.rev : expectedRev)
+    occ.setBase(id, serverCanvas.elements)
+    // Reflect the reconciled canvas so AI additions appear immediately — but
+    // only while we're still on this canvas (a mid-flight switch must win).
+    if (live) occ.onMerged(merged)
+    payload = merged
+    mergedUnsaved = true
+  }
+
+  // Nothing merged → the loop left nothing unpersisted (a normal success already
+  // returned above; a no-merge transient error drops as before).
+  if (!mergedUnsaved) return
+
+  // Flush the last merged payload ONCE so a burst of conflicting writes can't
+  // silently drop the user's merged edits.
+  const expectedRev = occ.getRev(id)
+  const res = await occ.post(payload, expectedRev)
+  if (res.kind === 'saved') {
+    commit(res.saved, payload, expectedRev)
+    return
+  }
+  // Even the flush lost the race (still conflicting) or errored → notify.
+  occ.onExhausted(id)
+}
 
 // Top-level orchestrator for the Canvas tab — the Figma-style docked 3-pane
 // shell. Left sidebar: Pages (Canvas list) over a Layers slot; centre: the
@@ -53,7 +187,7 @@ const ASSET_RETRY_COOLDOWN_MS = 30_000
 //  • debounced persistence + flush-on-unmount
 //  • the ⌘\ both-sidebars toggle (focus mode), persisted to localStorage
 export const ProjectCanvas = ({ projectPath }: Props) => {
-  const { t } = useT()
+  const { t, lang } = useT()
   const [canvases, setCanvases] = useState<CanvasSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [active, setActive] = useState<CanvasFile | null>(null)
@@ -104,6 +238,14 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
   // widens into the freed space (Figma-style). Starts closed: a freshly
   // mounted canvas has no selection.
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  // Set when a recovery affordance must surface bottom-right: either a save that
+  // can't land even after the bounded OCC retries + a final flush (a sustained
+  // conflict burst), or a canvas delete that never landed. The kind drives the
+  // wording so the two cases don't share one message. A 'save-conflict' notice is
+  // cleared by any subsequent successful save (onSaved); a 'delete-failed' one
+  // persists until the user dismisses or re-saves (a save landing doesn't prove
+  // the delete it reports on succeeded).
+  const [notice, setNotice] = useState<CanvasNotice | null>(null)
 
   // ⌘\ toggles both sidebars (Figma focus mode). Inert while the user is
   // typing — focused input/textarea/contenteditable or mid-IME-composition.
@@ -183,83 +325,87 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
   // can't interleave with a concurrent debounced save racing the same id's state.
   const saveChainRef = useRef<Promise<void>>(Promise.resolve())
 
+  // Canvas ids whose deletion has begun. deleteCanvas marks the id here BEFORE
+  // its flush-await, and every save chokepoint drops a payload whose id is marked
+  // (persistActive won't arm a debounced save; enqueueSave won't POST). WHY: during
+  // deleteCanvas's `await flushPending()` — widened to a full server RTT by the
+  // in-flight-await fix — a user edit or a collab onRemote persist can arm a FRESH
+  // debounced save for the doomed id; landing AFTER the delete POST it re-creates
+  // the canvas (the server upserts the unknown id, self-healing listCanvases
+  // revives it) as a ghost. An id is removed again ONLY if its delete fails before
+  // the server confirms it (deleteCanvas's catch — the canvas still exists, so its
+  // saves must work again); a confirmed-deleted id stays (UUIDs never recur). The
+  // whole set is also cleared on project switch alongside the OCC maps.
+  const deletingIdsRef = useRef<Set<string>>(new Set())
+
   // Adopt a freshly-loaded server canvas as the OCC base (rev + elements) for its id.
   const adoptServerCanvas = useCallback((file: CanvasFile) => {
     revByIdRef.current.set(file.id, Number.isFinite(file.rev) ? file.rev : 0)
     baseByIdRef.current.set(file.id, file.elements)
   }, [])
 
-  // Persist a full canvas under OCC. Sends the rev we're synced to for THIS id;
-  // on 409 (an AI job advanced the file since our base) refetch the server
-  // canvas, 3-way-merge (keep our edits ∪ AI's new/updated elements, never
-  // resurrect our deletions), reflect the merge locally so the AI additions
-  // appear, and retry against the fresh rev. A non-409 failure (or exhausted
-  // retries) is dropped — matching the prior fire-and-forget behaviour; the next
-  // edit re-saves.
+  // Persist a full canvas via the pure saveCanvasWithOcc loop above — this
+  // wrapper only wires the React side-effects (the per-id rev/base maps, the
+  // POST transport, setActive on a merge, tab-bar timestamps, and the
+  // save-failure notice) into it. Exhausted retries / a post-merge failure no
+  // longer drop the merge silently: the loop flushes the last merged payload
+  // once and, if even that can't land, flips the notice to 'save-conflict' so the
+  // user can re-save.
   const doSave = useCallback(
-    async (initial: CanvasFile): Promise<void> => {
-      let payload = initial
-      const id = initial.id
-      for (let attempt = 0; attempt <= MAX_SAVE_RETRIES; attempt++) {
-        const expectedRev = revByIdRef.current.get(id) ?? 0
-        const res = await api.api.project.canvases.$post({
-          json: { path: projectPath, canvas: { ...payload, rev: expectedRev } },
-        })
-        if (res.ok) {
-          const saved = (await res.json()) as CanvasFile
-          revByIdRef.current.set(id, Number.isFinite(saved.rev) ? saved.rev : expectedRev + 1)
-          // The server now holds exactly what we sent → it's the new base.
-          baseByIdRef.current.set(id, payload.elements)
+    (initial: CanvasFile): Promise<void> =>
+      saveCanvasWithOcc(initial, {
+        post: async (payload, expectedRev) => {
+          const res = await api.api.project.canvases.$post({
+            json: { path: projectPath, canvas: { ...payload, rev: expectedRev } },
+          })
+          if (res.ok) return { kind: 'saved', saved: (await res.json()) as CanvasFile }
+          if (res.status !== 409) return { kind: 'error' }
+          let serverCanvas: CanvasFile | null = null
+          try {
+            const conflict = (await res.json()) as { canvas?: CanvasFile }
+            serverCanvas = conflict.canvas ?? null
+          } catch {
+            serverCanvas = null
+          }
+          return { kind: 'conflict', serverCanvas }
+        },
+        fetchCanvas,
+        getRev: (id) => revByIdRef.current.get(id) ?? 0,
+        setRev: (id, rev) => revByIdRef.current.set(id, rev),
+        getBase: (id) => baseByIdRef.current.get(id) ?? [],
+        setBase: (id, elements) => baseByIdRef.current.set(id, elements),
+        // Merge against our LATEST local state (the user may have edited during
+        // the round-trip) when this canvas is still active; else the snapshot.
+        liveLocal: (id) =>
+          activeRef.current && activeRef.current.id === id ? activeRef.current : null,
+        onSaved: (id, saved, sent) => {
+          // A save landed → clear any prior save-conflict notice. Leave a
+          // 'delete-failed' notice alone: this save isn't proof the delete it
+          // reports on succeeded, so that notice is the delete path's to clear.
+          setNotice((n) => (n === 'save-conflict' ? null : n))
           // Keep tab-bar timestamps fresh without an extra round-trip.
           setCanvases((prev) =>
             prev.map((c) =>
-              c.id === id ? { ...c, name: payload.name, updatedAt: saved.updatedAt } : c,
+              c.id === id ? { ...c, name: sent.name, updatedAt: saved.updatedAt } : c,
             ),
           )
-          return
-        }
-        if (res.status !== 409) return
-        let serverCanvas: CanvasFile | null = null
-        try {
-          const conflict = (await res.json()) as { canvas?: CanvasFile }
-          serverCanvas = conflict.canvas ?? null
-        } catch {
-          serverCanvas = null
-        }
-        if (!serverCanvas) serverCanvas = await fetchCanvas(id)
-        if (!serverCanvas) return
-        // Merge against our LATEST local state (the user may have edited during
-        // the round-trip) when this canvas is still active; else the snapshot.
-        const liveLocal =
-          activeRef.current && activeRef.current.id === id ? activeRef.current : payload
-        const mergedElements = reconcileCanvasElements(
-          baseByIdRef.current.get(id) ?? [],
-          liveLocal.elements,
-          serverCanvas.elements,
-        )
-        const merged: CanvasFile = {
-          ...liveLocal,
-          elements: mergedElements,
-          rev: serverCanvas.rev,
-        }
-        // We now KNOW the server holds serverCanvas at this rev → new merge base.
-        revByIdRef.current.set(
-          id,
-          Number.isFinite(serverCanvas.rev) ? serverCanvas.rev : expectedRev,
-        )
-        baseByIdRef.current.set(id, serverCanvas.elements)
-        // Reflect the reconciled canvas so AI additions appear immediately — but
-        // only while we're still on this canvas (a mid-flight switch must win).
-        if (activeRef.current && activeRef.current.id === id) setActive(merged)
-        payload = merged
-      }
-    },
+        },
+        onMerged: (merged) => setActive(merged),
+        onExhausted: () => setNotice('save-conflict'),
+        maxRetries: MAX_SAVE_RETRIES,
+      }),
     [projectPath, fetchCanvas],
   )
 
   // Serialise every save through one chain (see saveChainRef).
   const enqueueSave = useCallback(
     (payload: CanvasFile): Promise<void> => {
+      // Drop a save for a canvas whose delete has begun — POSTing it resurrects it
+      // as a ghost (the server upserts the unknown id). Return the chain TAIL (not a
+      // bare resolve) so deleteCanvas's flushPending() still drains any genuinely
+      // in-flight save before its delete POST. This is the comprehensive backstop —
+      // every save path (debounce timer, flush, the re-save button) funnels here.
+      if (deletingIdsRef.current.has(payload.id)) return saveChainRef.current.catch(() => {})
       const run = saveChainRef.current.catch(() => {}).then(() => doSave(payload))
       saveChainRef.current = run.catch(() => {})
       return run
@@ -277,6 +423,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     // so the maps don't accumulate across projects over a long session.
     revByIdRef.current.clear()
     baseByIdRef.current.clear()
+    deletingIdsRef.current.clear()
     ;(async () => {
       const { index, canvases: list } = await refreshList()
       if (cancelled) return
@@ -309,16 +456,29 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
 
   // Flush whatever's pending whenever the active id changes (so switching
   // Canvases doesn't drop the prior one's last unsaved edit). Same on unmount.
-  // Returns the save promise so a caller about to RE-READ from disk can await
-  // the write instead of racing it; the fire-and-forget call sites just ignore
-  // it.
+  // Returns a promise that resolves once BOTH the not-yet-fired debounced save
+  // AND any save already in flight on the chain have landed — so a caller about
+  // to RE-READ or MUTATE this canvas (deleteCanvas / renameCanvas) can await the
+  // write instead of racing it; the fire-and-forget call sites just ignore it.
   const flushPending = useCallback((): Promise<void> => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
     const payload = pendingRef.current
-    if (!payload) return Promise.resolve()
+    if (!payload) {
+      // No debounced payload waiting — but a PREVIOUSLY-debounced save may have
+      // already fired and still be in flight on the chain (its timer elapsed, so
+      // its payload moved onto saveChainRef and pendingRef was cleared). A caller
+      // that next mutates this same canvas — deleteCanvas / renameCanvas await
+      // this — must land AFTER that in-flight save, or the late save races their
+      // mutation: re-creating a just-deleted canvas as a ghost (the server upsert
+      // re-orphans it, listCanvases revives it) or reverting a rename. Await the
+      // chain tail so "flush" means "every save has landed", not just the
+      // not-yet-fired one. (enqueueSave below already chains off this tail, so the
+      // payload path awaits any in-flight save too.)
+      return saveChainRef.current.catch(() => {})
+    }
     pendingRef.current = null
     return enqueueSave(payload)
   }, [enqueueSave])
@@ -331,6 +491,11 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
 
   const persistActive = useCallback(
     (next: CanvasFile) => {
+      // A canvas being deleted must not arm a new debounced save: firing after the
+      // delete POST it would ghost-resurrect the canvas. This is the window a user
+      // edit or a collab onRemote persist slips through while deleteCanvas is parked
+      // on its flush-await (it marks the id first). enqueueSave double-checks below.
+      if (deletingIdsRef.current.has(next.id)) return
       pendingRef.current = next
       if (saveTimer.current) clearTimeout(saveTimer.current)
       saveTimer.current = setTimeout(() => {
@@ -462,33 +627,83 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
 
   const deleteCanvas = useCallback(
     async (id: string) => {
-      flushPending()
-      const res = await api.api.project.canvases.$post({
-        query: { action: 'delete' },
-        json: { path: projectPath, id },
-      })
-      const data = (await res.json()) as {
-        index: CanvasesIndex
-        createdReplacement?: CanvasFile
-      }
-      // The deleted canvas's OCC state is dead — drop it (its id is a UUID and
-      // never recurs, so a lingering entry would only leak).
-      revByIdRef.current.delete(id)
-      baseByIdRef.current.delete(id)
-      // Refresh the list against the server's authoritative view rather than
-      // patching locally — the "delete the last one" branch creates a
-      // replacement we'd otherwise miss.
-      const { index, canvases: list } = await refreshList()
-      const target = index.activeId ?? list[0]?.id ?? null
-      if (data.createdReplacement && target === data.createdReplacement.id) {
-        setActive(data.createdReplacement)
-        adoptServerCanvas(data.createdReplacement)
-      } else if (target) {
-        const file = await fetchCanvas(target)
-        setActive(file)
-        if (file) adoptServerCanvas(file)
-      } else {
-        setActive(null)
+      // Mark the id deleting BEFORE anything async runs: from here on persistActive
+      // and enqueueSave drop any save for this id (see deletingIdsRef). That closes
+      // the window where a user edit / collab onRemote persist, arriving DURING the
+      // flush-await below, arms a fresh debounced save that fires AFTER the delete
+      // POST and resurrects the canvas as a ghost.
+      deletingIdsRef.current.add(id)
+      // `confirmed` flips only once the server has actually removed the canvas
+      // (res.ok). It's the un-mark boundary: BEFORE it, any failure leaves the
+      // canvas still existing, so we MUST un-mark (a stuck mark silently drops every
+      // future save to that still-mounted canvas — data loss, strictly worse than
+      // the ghost the mark guards against). AFTER it the canvas is gone, so the mark
+      // stays even if the UI-refresh below throws (un-marking then would let a later
+      // save re-create it as a ghost).
+      let confirmed = false
+      try {
+        // Still AWAIT the flush: a save ALREADY in flight (dispatched before this
+        // delete, mid-RTT) can't be cancelled — flushPending awaits the chain tail
+        // so it lands while the canvas still exists, instead of after the delete
+        // (which would re-create the just-deleted canvas as a ghost). The not-yet-
+        // fired pending save, by contrast, the guard above drops — no point
+        // persisting a canvas we're about to delete (a failed delete re-queues it
+        // via the delete-failed notice's re-save path below).
+        await flushPending()
+        const res = await api.api.project.canvases.$post({
+          query: { action: 'delete' },
+          json: { path: projectPath, id },
+        })
+        // Check res.ok BEFORE res.json(): a non-2xx body may be non-JSON (json()
+        // would throw an opaque parse error), and a failed delete must surface
+        // rather than silently strand the canvas (and its now-stuck mark).
+        if (!res.ok) throw new Error(`canvas delete failed: HTTP ${res.status}`)
+        const data = (await res.json()) as {
+          index: CanvasesIndex
+          createdReplacement?: CanvasFile
+        }
+        confirmed = true
+        // The deleted canvas's OCC state is dead — drop it (its id is a UUID and
+        // never recurs, so a lingering entry would only leak).
+        revByIdRef.current.delete(id)
+        baseByIdRef.current.delete(id)
+        // Refresh the list against the server's authoritative view rather than
+        // patching locally — the "delete the last one" branch creates a
+        // replacement we'd otherwise miss.
+        const { index, canvases: list } = await refreshList()
+        const target = index.activeId ?? list[0]?.id ?? null
+        if (data.createdReplacement && target === data.createdReplacement.id) {
+          setActive(data.createdReplacement)
+          adoptServerCanvas(data.createdReplacement)
+        } else if (target) {
+          const file = await fetchCanvas(target)
+          setActive(file)
+          if (file) adoptServerCanvas(file)
+        } else {
+          setActive(null)
+        }
+      } catch (err) {
+        if (!confirmed) {
+          // Delete never landed — a transient/network failure, a server swap mid-RTT
+          // (self-update canary / tsx-watch reload), or a non-2xx response. The
+          // canvas still exists and is still mounted, so UN-MARK it: leaving the mark
+          // would silently drop every future save to it (the edit the flush dropped,
+          // plus anything the user types next). Trace the cause first — this catch is
+          // the ONLY place a delete error surfaces (onDelete is fire-and-forget in
+          // PagesSection, so a rejection would just be an unhandled promise) and the
+          // bare `catch {}` here used to swallow it. Then surface a DELETE-specific
+          // notice (not the save-conflict copy) whose "re-save" button re-persists
+          // the now-saveable canvas's live state.
+          console.error('canvas delete failed', err)
+          deletingIdsRef.current.delete(id)
+          setNotice('delete-failed')
+        } else {
+          // confirmed → the canvas is already gone; a UI-refresh failure here is not
+          // data loss and must NOT un-mark (that would re-open the ghost race) — a
+          // reload re-syncs the (now canvas-free or replacement) view. Still trace it
+          // so a broken post-delete refresh isn't swallowed either.
+          console.error('canvas delete: post-delete refresh failed', err)
+        }
       }
     },
     [flushPending, projectPath, refreshList, fetchCanvas, adoptServerCanvas],
@@ -496,6 +711,15 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
 
   const renameCanvas = useCallback(
     async (id: string, name: string) => {
+      // Flush any debounced edit-save FIRST (and await it). persistActive holds a
+      // snapshot carrying the OLD name, and the rename below advances our synced
+      // rev for this id — so a debounced save firing AFTER the rename would POST
+      // that stale name against the now-matching rev (no 409 → it "succeeds") and
+      // silently revert the rename on disk. Flushing first lands the edit under the
+      // current name, then the rename wins. (deleteCanvas awaits its flush for the
+      // same reason; switchTo/createCanvas flush fire-and-forget — they target a
+      // DIFFERENT id, so a stale save there can't clobber the newly-adopted canvas.)
+      await flushPending()
       const res = await api.api.project.canvases.$post({
         query: { action: 'rename' },
         json: { path: projectPath, id, name },
@@ -518,7 +742,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         setActive({ ...active, name: updated.name, updatedAt: updated.updatedAt })
       }
     },
-    [projectPath, active],
+    [projectPath, active, flushPending],
   )
 
   const reorderCanvases = useCallback(
@@ -605,6 +829,41 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
         >
           <div ref={setInspectorHost} className="min-h-0 w-60 flex-1" />
         </aside>
+      )}
+      {notice && (
+        <div
+          role="alert"
+          className="absolute bottom-4 right-4 z-20 flex max-w-md items-center gap-3 rounded-[4px] border border-line bg-bg-card/95 px-4 py-2.5 text-[12px] shadow-card backdrop-blur"
+        >
+          <span className="text-ink">
+            {notice === 'delete-failed'
+              ? lang === 'ja'
+                ? 'キャンバスを削除できませんでした。編集内容を再保存してください。'
+                : "Couldn't delete the canvas. Re-save your edits to be safe."
+              : lang === 'ja'
+                ? '編集の保存が競合で完了しませんでした。再保存してください。'
+                : "Couldn't save your latest edits (save conflict). Please re-save."}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const a = activeRef.current
+              setNotice(null)
+              if (a) void enqueueSave(a)
+            }}
+            className="shrink-0 rounded-[3px] border border-line px-2.5 py-1 font-medium text-accent transition-colors hover:bg-bg-elevated hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            {lang === 'ja' ? '再保存' : 'Save again'}
+          </button>
+          <button
+            type="button"
+            aria-label={lang === 'ja' ? '閉じる' : 'Dismiss'}
+            onClick={() => setNotice(null)}
+            className="shrink-0 rounded-[3px] px-1.5 py-1 text-ink-muted transition-colors hover:bg-bg-elevated hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            ✕
+          </button>
+        </div>
       )}
     </div>
   )

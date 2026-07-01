@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { memo, useEffect, useMemo, useRef } from 'react'
 import { Code2 } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { buildMockSrcdoc, hash32 } from '@/lib/mockSrcdoc'
@@ -79,7 +79,7 @@ function editorKeyDown(e: React.KeyboardEvent, done: () => void) {
 // fixed pins both axes, wraps, clips overflow, and vertically aligns the
 // glyphs. A sticky note is a fixed-size, resizable box. Editing is driven by
 // the `editing` prop; the canvas owns double-click.
-export const ElementView = ({
+export const ElementView = memo(({
   element,
   selected,
   editing,
@@ -411,7 +411,7 @@ export const ElementView = ({
       />
     </div>
   )
-}
+})
 
 // Renders a `mock` element: a chrome strip with a label + framework badge on
 // top of a sandboxed iframe (idle preview) or a code textarea (editing). The

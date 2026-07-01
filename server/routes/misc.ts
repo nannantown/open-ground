@@ -12,13 +12,14 @@
 // between the per-route registrations).
 
 import { Hono } from 'hono'
-import { mkdir, stat, readFile } from 'fs/promises'
+import { mkdir, rmdir, stat, readFile } from 'fs/promises'
 import { basename, join, resolve } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import {
   getSettings,
   setSettings,
+  setUserSettings,
   getCanvas,
   setCanvas,
   getNotificationState,
@@ -35,7 +36,11 @@ import {
 } from '@/lib/server/registry'
 import { ensureShareEvacuated, evacuateImportedProject } from '@/lib/server/shareEvac'
 import { collectClaudeUsage } from '@/lib/server/claudeUsage'
-import { fetchClaudeUsageCli, invalidateUsageCache } from '@/lib/server/claudeUsageCli'
+import {
+  fetchClaudeUsageCli,
+  invalidateUsageCache,
+  emptyCliUsage,
+} from '@/lib/server/claudeUsageCli'
 import { claudeConnection } from '@/lib/server/claudeConnection'
 import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
@@ -187,9 +192,23 @@ export const miscRoutes = new Hono()
       }
     }
 
+    let createdDir = false
+    let registered = false
     try {
       await mkdir(target, { recursive: false })
+      createdDir = true
       const desc = (description ?? '').trim()
+      // Register the new folder BEFORE writing its central data. writeProjectData
+      // routes through projectDataDir → projectUUIDFromPath(target), which THROWS
+      // unless `target` is already a registered project — so a write here before
+      // addProjectEntry would 500 and strand the folder we just made: unregistered
+      // on disk (invisible on the canvas) yet stat-able, so the next same-name
+      // attempt fails the 409 "already exists" check forever. Remember the
+      // workspace as part of this register step so a follow-up canvas/tasks save
+      // can't race the security boundary either.
+      if (ws !== settings.defaultWorkspace) await setSettings({ defaultWorkspace: ws })
+      const entry = await addProjectEntry(target, desc || undefined)
+      registered = true
       if (desc) {
         await writeProjectData(target, {
           description: desc,
@@ -198,13 +217,16 @@ export const miscRoutes = new Hono()
           updatedAt: new Date().toISOString(),
         })
       }
-      // Remember the workspace for next time, then register the new folder
-      // BEFORE returning so a follow-up canvas/tasks save can't race the
-      // security boundary.
-      if (ws !== settings.defaultWorkspace) await setSettings({ defaultWorkspace: ws })
-      const entry = await addProjectEntry(target, desc || undefined)
       return c.json({ path: target, name: clean, id: entry.id })
     } catch (e: any) {
+      // Roll back a partial create so a mid-create failure leaves NO orphan: an
+      // unregistered folder on disk would block same-name re-creation with a 409,
+      // and a registry entry with no folder would surface a phantom "missing"
+      // card. Best-effort (a cleanup failure must not mask the real error); the
+      // folder we made is empty — writeProjectData writes to the central data dir,
+      // never into `target` — so a non-recursive rmdir is safe.
+      if (registered) await removeProjectEntry(target).catch(() => {})
+      if (createdDir) await rmdir(target).catch(() => {})
       return c.json({ error: e.message ?? 'create failed' }, 500)
     }
   })
@@ -286,8 +308,18 @@ export const miscRoutes = new Hono()
     return c.json(body)
   })
   .post('/api/settings', async (c) => {
-    const body = await c.req.json()
-    await setSettings(body)
+    // SECURITY: never blind-merge the raw body. setSettings is a general merge,
+    // so passing the body straight through let a forged / CSRF POST overwrite
+    // `projects` — the validateProjectPath allowlist — with an arbitrary path
+    // (e.g. /etc), which would make EVERY path-accepting route's boundary check
+    // pass and let the caller spawn a shell/claude anywhere on disk. setUserSettings
+    // narrows the body to a USER-PREFERENCE allowlist (language / displayName /
+    // defaultWorkspace / openApps / defaultEditor / experiments), dropping
+    // `projects`, `projectsRoot`, and the migration sentinels before the merge.
+    // (Cross-origin forgery of this route is additionally blocked by the CSRF /
+    // Origin guard in server/app.ts.) A non-JSON body is treated as empty (no-op).
+    const body = await c.req.json().catch(() => ({}))
+    await setUserSettings(body)
     return c.json({ ok: true })
   })
   // --- GET /api/notifications · POST /api/notifications/read -----------------
@@ -323,17 +355,19 @@ export const miscRoutes = new Hono()
   // --- GET /api/usage -------------------------------------------------------
   .get('/api/usage', async (c) => {
     try {
-      // `?refresh=1` busts the 5-min CLI-scrape cache so the user's manual
-      // refresh actually re-runs `claude /usage` (≈9s) instead of returning the
-      // cached value.
+      // `?refresh=1` busts the CLI-scrape cache so the user's manual refresh
+      // actually re-runs `claude /usage` (≈9s) instead of returning the cached
+      // value.
       if (c.req.query('refresh')) invalidateUsageCache()
       // Run both in parallel: the local jsonl scan is fast and always works,
-      // the CLI scrape is slow (~9s wall, 5min cached) but matches Anthropic's
-      // numbers exactly. If the CLI half fails, the HUD falls back to the
+      // the CLI scrape is slow (~9s wall, cached) but matches Anthropic's
+      // numbers exactly. fetchClaudeUsageCli always resolves to a CliUsage
+      // carrying a `status` (the defensive catch only fires on an unexpected
+      // throw), so the HUD always gets a reason and can fall back to the
       // local-estimate fields.
       const [local, cli] = await Promise.all([
         collectClaudeUsage(),
-        fetchClaudeUsageCli().catch(() => null),
+        fetchClaudeUsageCli().catch(() => emptyCliUsage('scrape-failed')),
       ])
       return c.json({ ...local, cli })
     } catch (err) {

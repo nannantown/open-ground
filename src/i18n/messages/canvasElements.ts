@@ -15,6 +15,11 @@ export const canvasElements = {
     'canvasEl.tweak.unchanged': 'No change was needed.',
     'canvasEl.tweak.pickHint': 'Click an element in the design',
     'canvasEl.tweak.error': 'Tweak failed. Try again.',
+    // Full server restart wiped the in-flight tweak job before it finished —
+    // distinct from a plain failure so the user knows it was interrupted, not
+    // rejected, and can re-pick + retry.
+    'canvasEl.tweak.interrupted':
+      'The tweak was interrupted by a server restart. Try again.',
     'canvasEl.tweak.claudeMissing':
       'claude CLI not found — install Claude Code to use this.',
     // Signed-out (503 claudeLoggedOut): a sign-in CTA, not a generic error.
@@ -56,6 +61,8 @@ export const canvasElements = {
     'canvasEl.tweak.close': '閉じる',
     'canvasEl.tweak.applied': '適用しました。続けるには要素をクリック。',
     'canvasEl.tweak.error': '調整に失敗しました。もう一度お試しください。',
+    'canvasEl.tweak.interrupted':
+      'サーバの再起動で調整が中断されました。もう一度お試しください。',
     'canvasEl.tweak.claudeMissing':
       'claude CLI が見つかりません — Claude Code をインストールしてください。',
     // Signed-out (503 claudeLoggedOut): a sign-in CTA, not a generic error.

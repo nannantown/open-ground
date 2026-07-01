@@ -408,6 +408,23 @@ type Press =
   // marquee: sx/sy are viewport-relative screen coordinates
   | { kind: 'marquee'; sx: number; sy: number; shift: boolean }
 
+// Stable per-leaf callback bundles handed to the memoised ProjectCard /
+// ElementView / FrameView so a viewport-only render (pan/zoom) doesn't re-render
+// every card/element. Built once per id and cached (see *CbCache below).
+interface ElementLeafCb {
+  onPointerDown: (e: React.PointerEvent) => void
+  onChangeText: (t: string) => void
+  onChangeColor: (c: string) => void
+  onEditDone: () => void
+  onMeasure: (w: number, h: number) => void
+}
+interface FrameLeafCb {
+  onPointerDown: (e: React.PointerEvent) => void
+  onChangeLabel: (t: string) => void
+  onEditDone: () => void
+  onTidy: () => void
+}
+
 // Free-form canvas: project cards, text/sticky annotations and grouping
 // frames, all freely positioned. The active tool decides what a press does.
 export const InfiniteCanvas = ({
@@ -461,9 +478,21 @@ export const InfiniteCanvas = ({
   // accumulate the in-flight viewport here and resync whenever the canvas
   // prop's viewport object identity changes (i.e. an external update).
   const wheelVpRef = useRef(canvas.viewport)
-  if (wheelVpRef.current !== canvas.viewport) wheelVpRef.current = canvas.viewport
+  // Pending rAF handle for the coalesced wheel commit (declared here so the
+  // resync just below can tell "my own deferred commit is still in flight" from
+  // a genuine EXTERNAL viewport change).
+  const wheelRafRef = useRef<number | null>(null)
+  // Adopt an EXTERNAL viewport change (zoom pill / fit / programmatic) into the
+  // in-flight ref — but NOT while a wheel commit is still pending, or we'd
+  // discard the wheel deltas that arrived after the last flush.
+  if (wheelRafRef.current == null && wheelVpRef.current !== canvas.viewport)
+    wheelVpRef.current = canvas.viewport
   const selectedRef = useRef(selectedIds)
   selectedRef.current = selectedIds
+  // Live mirror of onCanvasChange so the rAF-coalesced wheel commit below always
+  // calls the latest handler without re-subscribing.
+  const onCanvasChangeRef = useRef(onCanvasChange)
+  onCanvasChangeRef.current = onCanvasChange
 
   const [panning, setPanning] = useState(false)
   const [draw, setDraw] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
@@ -532,6 +561,12 @@ export const InfiniteCanvas = ({
   const lastHoverRef = useRef<string | null>(null)
 
   const { viewport, positions, elements } = canvas
+  // A Set for O(1) `selected` lookups in the render maps + derivations below.
+  // `selectedIds.includes(id)` is O(n) and was called once per element (O(n²)
+  // under ⌘A — selectedIds holds all ids). Memoised so its identity is stable
+  // across non-selection renders (pan/zoom/beacon), which is also what lets the
+  // memoised leaves below skip re-rendering when only the viewport changed.
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
   // Layers-panel visibility: a `hidden` element is dropped from EVERY render
   // pass (frames / notes / comments / anchor hints) and from hit-testing below,
   // so it neither paints nor catches clicks — but it stays in `elements`, so it
@@ -539,20 +574,26 @@ export const InfiniteCanvas = ({
   // A group is invisible, so hiding/locking a GROUP must cascade to its members.
   // Precompute the affected id sets ONCE (O(n)); the render passes below then do
   // O(1) lookups instead of an O(depth) ancestor walk per element.
-  const { hiddenViaGroup, lockedViaGroup } = groupCascadeSets(elements)
-  const visible = elements.filter((el) => !el.hidden && !hiddenViaGroup.has(el.id))
+  const { hiddenViaGroup, lockedViaGroup } = useMemo(() => groupCascadeSets(elements), [elements])
+  const visible = useMemo(
+    () => elements.filter((el) => !el.hidden && !hiddenViaGroup.has(el.id)),
+    [elements, hiddenViaGroup],
+  )
   // Frames paint shallowest-first so a CONTAINER frame sits behind the frames it
   // nests (Figma-style): a child frame (deeper) must render after — and so on
   // top of — its parent, otherwise the outer frame would cover the inner one's
   // header. Stable sort preserves insertion order within a depth.
-  const frameById = new Map(
-    visible.filter((el) => el.type === 'frame').map((el) => [el.id, el]),
+  const frameById = useMemo(
+    () => new Map(visible.filter((el) => el.type === 'frame').map((el) => [el.id, el])),
+    [visible],
   )
-  const frames = visible
-    .filter((el) => el.type === 'frame')
-    .sort(
-      (a, b) => containmentDepth(frameById, a.id) - containmentDepth(frameById, b.id),
-    )
+  const frames = useMemo(
+    () =>
+      visible
+        .filter((el) => el.type === 'frame')
+        .sort((a, b) => containmentDepth(frameById, a.id) - containmentDepth(frameById, b.id)),
+    [visible, frameById],
+  )
   // Figma parity (design variant only): NESTED frames hide their floating name
   // label — only top-level frames are titled, so an AI-generated design (one
   // nested frame per card) doesn't read as a wall of "Frame" tags. Two escape
@@ -563,9 +604,9 @@ export const InfiniteCanvas = ({
   // reveals the handles of the frames inside it. Containment is checked
   // against VISIBLE elements only (a hidden parent must not eat its visible
   // child's label). Frames are few, so recomputing per render is fine.
-  const nestedFrameIds = (() => {
+  const nestedFrameIds = useMemo(() => {
     if (frameVariant !== 'design') return new Set<string>()
-    const sel = new Set(selectedIds)
+    const sel = selectedSet
     // Defaults mirror isNestedFrame / DesignFrameView (400×280) so the
     // geometric parent resolved here is the same one that hid the label.
     const frameRects = frames.map((f) => ({
@@ -585,17 +626,18 @@ export const InfiniteCanvas = ({
       out.add(f.id)
     }
     return out
-  })()
+  }, [frames, frameById, visible, selectedSet, frameVariant])
   // Render order: non-comment notes first, then comments. Comment popups
   // need to layer above sibling stickies / mocks so a pin dropped on a
   // mockup can still open its editor cleanly.
   // A `group` is an invisible container (membership only) — it never paints on
   // the canvas; it's managed entirely from the Layers panel + as a selection
   // unit. So it's dropped from every render pass and from hit-testing below.
-  const notes = visible.filter(
-    (el) => el.type !== 'frame' && el.type !== 'comment' && el.type !== 'group',
+  const notes = useMemo(
+    () => visible.filter((el) => el.type !== 'frame' && el.type !== 'comment' && el.type !== 'group'),
+    [visible],
   )
-  const comments = visible.filter((el) => el.type === 'comment')
+  const comments = useMemo(() => visible.filter((el) => el.type === 'comment'), [visible])
 
   // Anchor-visibility: while a comment is selected or being edited, outline the
   // element it points at so the user can see WHICH thing the feedback is about
@@ -603,8 +645,9 @@ export const InfiniteCanvas = ({
   // Unanchored comments contribute nothing (no stray outline); a dangling
   // anchorId resolves to no element below, so deleting the target also clears
   // the highlight for free (same surviving-set rule as clearDanglingAnchors).
-  const anchoredHints = comments.filter(
-    (c) => c.anchorId && (selectedIds.includes(c.id) || editingId === c.id),
+  const anchoredHints = useMemo(
+    () => comments.filter((c) => c.anchorId && (selectedSet.has(c.id) || editingId === c.id)),
+    [comments, selectedSet, editingId],
   )
 
   // Friendly label for a comment's anchor — what shows up in the popup
@@ -641,7 +684,10 @@ export const InfiniteCanvas = ({
   // A locked element (directly, or via a locked group ancestor) shows no
   // resize/rotate handles — its body is already pointer-events:none, and the
   // handles are separate overlays that would otherwise defeat the lock.
-  const isManipulable = (el: CanvasElement) => !el.locked && !lockedViaGroup.has(el.id)
+  const isManipulable = useCallback(
+    (el: CanvasElement) => !el.locked && !lockedViaGroup.has(el.id),
+    [lockedViaGroup],
+  )
 
   // The lone selected sticky/frame/mock/text gets resize handles. Text shows a
   // per-mode subset (see TEXT_HANDLES) — dragging promotes its sizing mode the
@@ -752,6 +798,29 @@ export const InfiniteCanvas = ({
     }
   }
 
+  // rAF-coalesced viewport commit. A trackpad / precision mouse emits wheel
+  // events faster than the frame rate, and each one used to fire a full
+  // onCanvasChange → re-render (re-reconciling every card/element). We now
+  // accumulate the live viewport in wheelVpRef and commit at most ONCE per
+  // animation frame, so a burst of N wheel events costs ~1 render per frame
+  // instead of N. The committed viewport feeds contentStyle the same frame, so
+  // the pan/zoom stays visually current. (Only pan/zoom defers here; pointer
+  // drags still commit per move.)
+  const flushWheelViewport = useCallback(() => {
+    wheelRafRef.current = null
+    onCanvasChangeRef.current({ ...canvasRef.current, viewport: wheelVpRef.current })
+  }, [])
+  const scheduleWheelViewport = useCallback(() => {
+    if (wheelRafRef.current != null) return
+    wheelRafRef.current = requestAnimationFrame(flushWheelViewport)
+  }, [flushWheelViewport])
+  useEffect(
+    () => () => {
+      if (wheelRafRef.current != null) cancelAnimationFrame(wheelRafRef.current)
+    },
+    [],
+  )
+
   const onWheel = useCallback(
     (e: WheelEvent) => {
       if (!viewportRef.current) return
@@ -762,7 +831,6 @@ export const InfiniteCanvas = ({
       const rect = viewportRef.current.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
-      const c = canvasRef.current
       // Compose against the latest in-flight viewport, not the rendered one,
       // so back-to-back trackpad events compound instead of all reading the
       // same stale baseline.
@@ -778,9 +846,9 @@ export const InfiniteCanvas = ({
         next = { ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }
       }
       wheelVpRef.current = next
-      onCanvasChange({ ...c, viewport: next })
+      scheduleWheelViewport()
     },
-    [onCanvasChange],
+    [scheduleWheelViewport],
   )
 
   useEffect(() => {
@@ -1554,6 +1622,7 @@ export const InfiniteCanvas = ({
 
   const onViewportPointerDown = (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (e.button !== 0) return // non-primary (right/middle) → context menu only, no gesture
     if (menu) setMenu(null)
     // A starting gesture ends the hover-sync highlight until the next idle move.
     if (lastHoverRef.current !== null) {
@@ -1711,6 +1780,7 @@ export const InfiniteCanvas = ({
 
   const onCardPointerDown = (project: ProjectMeta) => (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (e.button !== 0) return // non-primary (right/middle) → context menu only, no gesture
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     setEditingId(null)
@@ -1742,6 +1812,7 @@ export const InfiniteCanvas = ({
   // frame, or marquee — it's a standalone read-only overlay.
   const onSharedCardPointerDown = (id: string) => (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (e.button !== 0) return // non-primary (right/middle) → context menu only, no gesture
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     setEditingId(null)
@@ -1777,6 +1848,7 @@ export const InfiniteCanvas = ({
 
   const onElementPointerDown = (el: CanvasElement) => (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (e.button !== 0) return // non-primary (right/middle) → context menu only, no gesture
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     if (editingId === el.id) return
@@ -1839,6 +1911,7 @@ export const InfiniteCanvas = ({
 
   const onFramePointerDown = (frame: CanvasElement) => (e: React.PointerEvent) => {
     if (press.current) return // a gesture is already active (ignore 2nd pointer)
+    if (e.button !== 0) return // non-primary (right/middle) → context menu only, no gesture
     if (tool !== 'select' || spaceDown.current) return // Space → bubble up to pan
     e.stopPropagation()
     if (editingId === frame.id) return
@@ -3282,8 +3355,8 @@ export const InfiniteCanvas = ({
   // Context-menu gating for group/ungroup. Groupable = ≥2 selected top-level
   // elements (a child whose parent is also selected doesn't count). Ungroupable
   // = the selection includes a group, or a member of one.
-  const selById = new Map(elements.map((e) => [e.id, e]))
-  const selSet = new Set(selectedIds)
+  const selById = useMemo(() => new Map(elements.map((e) => [e.id, e])), [elements])
+  const selSet = selectedSet
   const canGroup =
     selectedIds.filter((id) => {
       const el = selById.get(id)
@@ -3299,22 +3372,25 @@ export const InfiniteCanvas = ({
   // non-comment) elements are selected, a bounding box + corner handle scales
   // them all from the top-left anchor. (A single selection uses the per-element
   // resize handle instead.) Sizable types scale their box; text repositions only.
-  const groupResizeItems: GResizeItem[] =
-    tool === 'select' && !editingId && selectedIds.length >= 2
-      ? selectedIds.flatMap((id) => {
-          const el = selById.get(id)
-          if (
-            !el ||
-            el.type === 'group' ||
-            el.type === 'comment' ||
-            el.hidden ||
-            !isManipulable(el)
-          )
-            return []
-          const b = fullBounds(el)
-          return [{ id, x: b.x, y: b.y, w: b.w, h: b.h, sizable: SIZABLE_TYPES.has(el.type) }]
-        })
-      : []
+  const groupResizeItems: GResizeItem[] = useMemo(
+    () =>
+      tool === 'select' && !editingId && selectedIds.length >= 2
+        ? selectedIds.flatMap((id) => {
+            const el = selById.get(id)
+            if (
+              !el ||
+              el.type === 'group' ||
+              el.type === 'comment' ||
+              el.hidden ||
+              !isManipulable(el)
+            )
+              return []
+            const b = fullBounds(el)
+            return [{ id, x: b.x, y: b.y, w: b.w, h: b.h, sizable: SIZABLE_TYPES.has(el.type) }]
+          })
+        : [],
+    [tool, editingId, selectedIds, selById, isManipulable],
+  )
   const groupBox = groupResizeItems.length >= 2 ? unionBounds(groupResizeItems) : null
 
   // Drop-preview dodge: compose the transient translation (siblings making
@@ -3455,6 +3531,133 @@ export const InfiniteCanvas = ({
       ? { ...gridStyle, cursor: chromeCursor }
       : gridStyle
 
+  // ── Stable per-leaf callbacks (memoisation backbone) ──────────────────────
+  // Each leaf (300 elements / 50 cards / frames) used to receive FRESH callback
+  // props every render, so React.memo could never skip it — a pan that changes
+  // only the viewport still re-rendered all of them. We hand each leaf STABLE
+  // callbacks (built once per id, cached) that route through refs to the LATEST
+  // handler, so the memoised leaf skips when nothing about IT changed. Same
+  // ref-mirror trick already used for canvasRef / selectedRef above.
+  const onCardPointerDownRef = useRef(onCardPointerDown)
+  onCardPointerDownRef.current = onCardPointerDown
+  const onSharedCardPointerDownRef = useRef(onSharedCardPointerDown)
+  onSharedCardPointerDownRef.current = onSharedCardPointerDown
+  const onElementPointerDownRef = useRef(onElementPointerDown)
+  onElementPointerDownRef.current = onElementPointerDown
+  const onFramePointerDownRef = useRef(onFramePointerDown)
+  onFramePointerDownRef.current = onFramePointerDown
+  const changeTextRef = useRef(changeText)
+  changeTextRef.current = changeText
+  const changeColorRef = useRef(changeColor)
+  changeColorRef.current = changeColor
+  const onTextMeasuredRef = useRef(onTextMeasured)
+  onTextMeasuredRef.current = onTextMeasured
+  const tidyFrameRef = useRef(tidyFrame)
+  tidyFrameRef.current = tidyFrame
+  const projectsRef = useRef(projects)
+  projectsRef.current = projects
+  const setEditingIdRef = useRef(setEditingId)
+  setEditingIdRef.current = setEditingId
+
+  const cardCbCache = useRef(new Map<string, (e: React.PointerEvent) => void>())
+  const cardPointerDown = (id: string): ((e: React.PointerEvent) => void) => {
+    let cb = cardCbCache.current.get(id)
+    if (!cb) {
+      cb = (e) => {
+        const proj = projectsRef.current.find((p) => p.id === id)
+        if (proj) onCardPointerDownRef.current(proj)(e)
+      }
+      cardCbCache.current.set(id, cb)
+    }
+    return cb
+  }
+  const sharedCardCbCache = useRef(new Map<string, (e: React.PointerEvent) => void>())
+  const sharedCardPointerDown = (id: string): ((e: React.PointerEvent) => void) => {
+    let cb = sharedCardCbCache.current.get(id)
+    if (!cb) {
+      cb = (e) => onSharedCardPointerDownRef.current(id)(e)
+      sharedCardCbCache.current.set(id, cb)
+    }
+    return cb
+  }
+  const elCbCache = useRef(new Map<string, ElementLeafCb>())
+  const elCallbacks = (id: string): ElementLeafCb => {
+    let cb = elCbCache.current.get(id)
+    if (!cb) {
+      cb = {
+        onPointerDown: (e) => {
+          const el = canvasRef.current.elements.find((x) => x.id === id)
+          if (el) onElementPointerDownRef.current(el)(e)
+        },
+        onChangeText: (t) => changeTextRef.current(id, t),
+        onChangeColor: (c) => changeColorRef.current(id, c),
+        onEditDone: () => setEditingIdRef.current(null),
+        onMeasure: (w, h) => onTextMeasuredRef.current(id, w, h),
+      }
+      elCbCache.current.set(id, cb)
+    }
+    return cb
+  }
+  const frameCbCache = useRef(new Map<string, FrameLeafCb>())
+  const frameCallbacks = (id: string): FrameLeafCb => {
+    let cb = frameCbCache.current.get(id)
+    if (!cb) {
+      cb = {
+        onPointerDown: (e) => {
+          const fr = canvasRef.current.elements.find((x) => x.id === id)
+          if (fr) onFramePointerDownRef.current(fr)(e)
+        },
+        onChangeLabel: (t) => changeTextRef.current(id, t),
+        onEditDone: () => setEditingIdRef.current(null),
+        onTidy: () => {
+          const fr = canvasRef.current.elements.find((x) => x.id === id)
+          if (fr) tidyFrameRef.current(fr)
+        },
+      }
+      frameCbCache.current.set(id, cb)
+    }
+    return cb
+  }
+
+  // ── Viewport culling (virtualisation) ─────────────────────────────────────
+  // At scale (> CULL_THRESHOLD elements) render only elements whose world-bounds
+  // intersect the viewport plus a half-screen overscan, so a 300-element canvas
+  // reconciles ~the on-screen subset each render instead of all 300 — the
+  // dominant pan/zoom cost is re-diffing every wrapper div per frame. Selected /
+  // editing elements ALWAYS render: their DOM is addressed by id for the
+  // selection chrome + scroll-into-view and must survive a pan that pushes them
+  // off-screen. Hit-testing / marquee / measurement all read element DATA
+  // (canvasRef + fullBounds), never the rendered DOM, so culling the render is
+  // safe. Small canvases (≤ threshold) and the very first paint (no measured
+  // container yet) render in full — byte-identical to the pre-culling behaviour.
+  const CULL_THRESHOLD = 80
+  const cullRect: { x0: number; y0: number; x1: number; y1: number } | null = (() => {
+    const node = viewportRef.current
+    if (!node || elements.length <= CULL_THRESHOLD) return null
+    const cw = node.clientWidth
+    const ch = node.clientHeight
+    if (!cw || !ch) return null
+    const mx = cw * 0.5
+    const my = ch * 0.5
+    return {
+      x0: (-viewport.x - mx) / viewport.zoom,
+      y0: (-viewport.y - my) / viewport.zoom,
+      x1: (cw - viewport.x + mx) / viewport.zoom,
+      y1: (ch - viewport.y + my) / viewport.zoom,
+    }
+  })()
+  const inView = (el: CanvasElement): boolean => {
+    if (!cullRect) return true
+    if (selectedSet.has(el.id) || editingId === el.id) return true
+    const b = fullBounds(el)
+    return (
+      b.x <= cullRect.x1 &&
+      b.x + b.w >= cullRect.x0 &&
+      b.y <= cullRect.y1 &&
+      b.y + b.h >= cullRect.y0
+    )
+  }
+
   return (
     <div
       ref={viewportRef}
@@ -3510,7 +3713,9 @@ export const InfiniteCanvas = ({
 
       <div className="absolute inset-0 origin-top-left" style={contentStyle}>
         {/* frames sit behind everything */}
-        {frames.map((frame) => (
+        {frames.filter(inView).map((frame) => {
+          const fcb = frameCallbacks(frame.id)
+          return (
           <div
             key={frame.id}
             data-element-id={frame.id}
@@ -3530,31 +3735,32 @@ export const InfiniteCanvas = ({
             {frameVariant === 'design' ? (
               <DesignFrameView
                 frame={frame}
-                selected={selectedIds.includes(frame.id)}
+                selected={selectedSet.has(frame.id)}
                 editing={editingId === frame.id}
                 zoom={viewport.zoom}
                 labelHidden={nestedFrameIds.has(frame.id)}
-                onLabelPointerDown={onFramePointerDown(frame)}
-                onChangeLabel={(t) => changeText(frame.id, t)}
-                onEditDone={() => setEditingId(null)}
+                onLabelPointerDown={fcb.onPointerDown}
+                onChangeLabel={fcb.onChangeLabel}
+                onEditDone={fcb.onEditDone}
               />
             ) : (
               <FrameView
                 frame={frame}
-                selected={selectedIds.includes(frame.id)}
+                selected={selectedSet.has(frame.id)}
                 editing={editingId === frame.id}
-                onHeaderPointerDown={onFramePointerDown(frame)}
-                onChangeLabel={(t) => changeText(frame.id, t)}
-                onEditDone={() => setEditingId(null)}
+                onHeaderPointerDown={fcb.onPointerDown}
+                onChangeLabel={fcb.onChangeLabel}
+                onEditDone={fcb.onEditDone}
                 onTidy={
                   cardsInFrame(frame, { directOnly: true }).length > 0
-                    ? () => tidyFrame(frame)
+                    ? fcb.onTidy
                     : undefined
                 }
               />
             )}
           </div>
-        ))}
+          )
+        })}
 
         {draw && draw.w > 0 && draw.h > 0 && (
           <div
@@ -3581,8 +3787,8 @@ export const InfiniteCanvas = ({
             >
               <ProjectCard
                 project={p}
-                onPointerDown={onCardPointerDown(p)}
-                selected={selectedIds.includes(p.id)}
+                onPointerDown={cardPointerDown(p.id)}
+                selected={selectedSet.has(p.id)}
                 claudeStatus={claudeStatuses?.get(p.id)}
               />
             </div>
@@ -3623,7 +3829,7 @@ export const InfiniteCanvas = ({
                   openTaskCount: 0,
                   totalTaskCount: 0,
                 }}
-                onPointerDown={onSharedCardPointerDown(s.id)}
+                onPointerDown={sharedCardPointerDown(s.id)}
                 selected={false}
                 shared
               />
@@ -3631,7 +3837,9 @@ export const InfiniteCanvas = ({
           )
         })}
 
-        {notes.map((el) => (
+        {notes.filter(inView).map((el) => {
+          const ecb = elCallbacks(el.id)
+          return (
           <div
             key={el.id}
             data-element-id={el.id}
@@ -3655,23 +3863,20 @@ export const InfiniteCanvas = ({
           >
             <ElementView
               element={el}
-              selected={selectedIds.includes(el.id)}
+              selected={selectedSet.has(el.id)}
               editing={editingId === el.id}
-              onPointerDown={onElementPointerDown(el)}
-              onChangeText={(t) => changeText(el.id, t)}
-              onChangeColor={(color) => changeColor(el.id, color)}
-              onEditDone={() => setEditingId(null)}
+              onPointerDown={ecb.onPointerDown}
+              onChangeText={ecb.onChangeText}
+              onChangeColor={ecb.onChangeColor}
+              onEditDone={ecb.onEditDone}
               projectPath={projectPath}
               canvasId={canvasId}
               commentTool={commentCursor}
-              onMeasure={
-                onMeasureEligible(el)
-                  ? (w, h) => onTextMeasured(el.id, w, h)
-                  : undefined
-              }
+              onMeasure={onMeasureEligible(el) ? ecb.onMeasure : undefined}
             />
           </div>
-        ))}
+          )
+        })}
 
         {/* Anchor-visibility overlay: a thin accent outline around the element
             each *selected* comment points at, plus a dashed connector from the
@@ -3748,12 +3953,12 @@ export const InfiniteCanvas = ({
               transform: wrapperTransform(el),
               // The selected comment sits above its peers so an overlapping
               // pin doesn't catch clicks meant for the open popup.
-              zIndex: selectedIds.includes(el.id) || editingId === el.id ? 30 : 10,
+              zIndex: selectedSet.has(el.id) || editingId === el.id ? 30 : 10,
             }}
           >
             <ElementView
               element={el}
-              selected={selectedIds.includes(el.id)}
+              selected={selectedSet.has(el.id)}
               editing={editingId === el.id}
               onPointerDown={onElementPointerDown(el)}
               onChangeText={(t) => changeText(el.id, t)}

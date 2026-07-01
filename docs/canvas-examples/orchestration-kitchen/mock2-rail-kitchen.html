@@ -1,0 +1,343 @@
+<!-- OPEN GROUND — Canvas mock source (framework: html, theme: dark)
+     「レールの厨房」After = 取りに行く (pull). A continuous, auto-looping
+     pipeline: 補給官 puts 伝票 on the rail (Board todo queue) → a free 料理人
+     pulls it into an isolated 調理台 (worktree) → cooks (azure beacon glow =
+     "running", same as the app's Terminal beacon) → パス台 review ✓ → 料理長
+     serves (done). 副料理長 (janitor) patrols + self-repairs a stall. The token
+     colour IS the Board lifecycle: todo(ochre) → doing(azure) → done(moss).
+     Pure CSS/SVG, no CDN. Self-contained dark background so it renders the same
+     inlined in a Canvas mock iframe (buildMockSrcdoc) or opened standalone. -->
+<style>
+  .rk-stage {
+    position:absolute; inset:0; overflow:hidden;
+    background:
+      radial-gradient(80% 60% at 18% -10%, rgba(58,107,140,0.18) 0%, rgba(58,107,140,0) 55%),
+      radial-gradient(70% 70% at 95% 70%, rgba(92,107,61,0.16) 0%, rgba(92,107,61,0) 55%),
+      linear-gradient(160deg, #100f0d 0%, #0b0c0e 60%);
+    color:#f3f3f3;
+    font-family:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,"Noto Sans JP",system-ui,-apple-system,sans-serif;
+    --ink:#f3f3f3; --muted:rgba(255,255,255,.62); --faint:rgba(255,255,255,.42);
+    --panel:rgba(255,255,255,.045); --panel2:rgba(255,255,255,.07); --line:rgba(255,255,255,.12);
+    --azure:#66a6d9; --azure-deep:#3a6b8c; --ochre:#d6a23e; --moss:#8fb25a; --red:#df5d47;
+    -webkit-font-smoothing:antialiased;
+  }
+  .rk-stage * { box-sizing:border-box; }
+
+  /* ── header + legend ─────────────────────────────────── */
+  .rk-head { position:absolute; left:30px; top:20px; right:30px; display:flex; align-items:flex-start; justify-content:space-between; }
+  .rk-tag { font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--faint); }
+  .rk-h1 { margin:4px 0 0; font-size:23px; font-weight:700; }
+  .rk-h1 .en { color:var(--azure); }
+  .rk-sub { margin-top:4px; font-size:12px; color:var(--muted); max-width:860px; line-height:1.5; }
+  .rk-badge { flex:none; font-size:10px; letter-spacing:.18em; text-transform:uppercase; font-weight:700; color:#0b0c0e; background:var(--moss); padding:5px 11px; border-radius:3px; box-shadow:0 0 0 1px rgba(143,178,90,.5),0 6px 18px rgba(92,107,61,.3); }
+
+  .rk-legend { position:absolute; left:30px; top:84px; right:30px; display:flex; gap:7px; flex-wrap:wrap; }
+
+  .rk-keyrow { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted); margin:6px 0; }
+  .rk-keyrow .kd { width:11px; height:11px; border-radius:50%; flex:none; }
+  .rk-p { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:3px 11px 3px 4px; }
+  .rk-n { flex:none; width:18px; height:18px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#0b0c0e; background:var(--azure); }
+  .rk-p.is-pull .rk-n { background:var(--azure); }
+
+  /* circled-number badge pinned to a station, ties it to the legend */
+  .rk-bdg { position:absolute; width:19px; height:19px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#0b0c0e; background:var(--azure); box-shadow:0 2px 6px rgba(0,0,0,.45); z-index:6; }
+
+  /* ── station scaffolding (the static "set") ───────────── */
+  .rk-node { position:absolute; }
+  .rk-cap { font-size:11px; font-weight:700; color:var(--ink); }
+  .rk-role { font-size:10px; color:var(--muted); margin-top:1px; line-height:1.35; }
+  .rk-fig svg { display:block; filter:drop-shadow(0 6px 10px rgba(0,0,0,.45)); }
+
+  /* 注文 card */
+  .rk-order { left:24px; top:126px; width:120px; }
+  .rk-ocard { background:var(--panel2); border:1px solid var(--line); border-left:3px solid var(--ochre); border-radius:7px; padding:8px 10px; }
+  .rk-ocard .t { font-size:12px; font-weight:700; }
+  .rk-ocard .s { font-size:10px; color:var(--muted); margin-top:2px; }
+
+  /* 補給官 */
+  .rk-supply { left:34px; top:196px; width:140px; text-align:center; }
+
+  /* the rail = Board todo queue */
+  .rk-rail { position:absolute; left:150px; top:150px; width:420px; height:30px; border-radius:15px;
+    background:var(--panel); border:1px solid var(--line); overflow:hidden; }
+  .rk-rail::before { content:""; position:absolute; inset:0; background:repeating-linear-gradient(90deg, rgba(255,255,255,.07) 0 12px, transparent 12px 26px); animation:rk-rail 1.3s linear infinite; }
+  @keyframes rk-rail { to { background-position:26px 0; } }
+  .rk-railcap { position:absolute; left:150px; top:184px; width:430px; font-size:10.5px; color:var(--muted); }
+  .rk-railcap b { color:var(--ink); }
+  .rk-railhint { position:absolute; left:430px; top:122px; font-size:10px; color:var(--azure); white-space:nowrap; }
+
+  /* pull junction arrow */
+  .rk-pull { position:absolute; left:556px; top:142px; }
+  .rk-pull .arr { width:60px; height:64px; }
+  .rk-pull .lbl { position:absolute; left:-92px; top:62px; font-size:10.5px; font-weight:700; color:var(--azure); white-space:nowrap; }
+  .rk-pull .lbl .en { color:var(--faint); font-weight:600; }
+
+  /* 調理台 cells (isolated worktrees) */
+  .rk-cell { position:absolute; left:590px; width:232px; height:92px; border-radius:10px;
+    background:linear-gradient(180deg, rgba(58,107,140,.10), rgba(255,255,255,.02));
+    border:1px solid rgba(102,166,217,.40); box-shadow:0 0 0 1px rgba(102,166,217,.10), 0 8px 22px rgba(0,0,0,.35); }
+  .rk-cell.c1 { top:206px; } .rk-cell.c2 { top:316px; } .rk-cell.c3 { top:426px; }
+  .rk-cell .counter { position:absolute; left:14px; right:14px; bottom:14px; height:6px; border-radius:3px; background:rgba(255,255,255,.10); }
+  .rk-cell .ttl { position:absolute; left:78px; top:10px; font-size:11px; font-weight:700; color:var(--ink); }
+  .rk-cell .sub { position:absolute; left:78px; top:27px; font-size:9.5px; color:var(--muted); }
+  /* worker figure inside the cell */
+  .rk-cell .who { position:absolute; left:8px; top:6px; }
+  /* live beacon dot — same breathing as the app's Terminal beacon */
+  .rk-beacon { position:absolute; right:12px; top:11px; width:8px; height:8px; border-radius:50%; background:var(--azure); box-shadow:0 0 10px rgba(102,166,217,.9); animation:rk-breathe 2s ease-in-out infinite; }
+  @keyframes rk-breathe { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:.4; transform:scale(.7)} }
+  .rk-cell .blabel { position:absolute; right:24px; top:8px; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--azure); }
+
+  /* the BOTTOM cell (c3) stalls once per cycle, then self-heals — the janitor
+     sits directly below it, so the repair never crosses another cell */
+  .rk-cell.c3 { animation:rk-stall 12s linear infinite; }
+  @keyframes rk-stall {
+    0%,49%   { border-color:rgba(102,166,217,.40); box-shadow:0 0 0 1px rgba(102,166,217,.10),0 8px 22px rgba(0,0,0,.35); }
+    52%      { border-color:var(--red); box-shadow:0 0 18px rgba(223,93,71,.55); transform:translateX(-2px); }
+    55%      { transform:translateX(2px); }
+    58%      { border-color:var(--red); box-shadow:0 0 18px rgba(223,93,71,.55); transform:translateX(-1px); }
+    63%,100% { border-color:rgba(102,166,217,.40); box-shadow:0 0 0 1px rgba(102,166,217,.10),0 8px 22px rgba(0,0,0,.35); transform:translateX(0); }
+  }
+  .rk-c3beacon { animation: rk-breathe 2s ease-in-out infinite, rk-beacon2 12s linear infinite; }
+  @keyframes rk-beacon2 { 0%,49%{background:var(--azure);box-shadow:0 0 10px rgba(102,166,217,.9)} 52%,60%{background:var(--red);box-shadow:0 0 10px rgba(223,93,71,.9)} 63%,100%{background:var(--azure);box-shadow:0 0 10px rgba(102,166,217,.9)} }
+  .rk-stalltag { position:absolute; left:830px; top:452px; font-size:10px; font-weight:700; color:var(--red); opacity:0; white-space:nowrap; animation:rk-stalltag 12s linear infinite; }
+  @keyframes rk-stalltag { 0%,49%{opacity:0} 53%{opacity:1} 60%{opacity:1} 65%,100%{opacity:0} }
+
+  /* パス台 review */
+  .rk-review { left:892px; top:300px; width:118px; height:120px; border-radius:10px; background:var(--panel); border:1px solid var(--line); }
+  .rk-review .chk { position:absolute; left:50%; top:38px; transform:translateX(-50%); width:38px; height:38px; }
+  .rk-review .cap { position:absolute; left:0; right:0; top:84px; text-align:center; }
+
+  /* 提供 done */
+  .rk-done { left:1052px; top:284px; width:160px; height:150px; border-radius:10px; background:linear-gradient(180deg, rgba(92,107,61,.14), rgba(255,255,255,.02)); border:1px solid rgba(143,178,90,.4); }
+  .rk-served { position:absolute; left:16px; bottom:40px; }
+  .rk-served b { display:block; width:54px; height:7px; margin-top:3px; border-radius:4px; background:radial-gradient(60% 120% at 50% 0%, #c9e0a6, #8fb25a 80%); box-shadow:0 1px 2px rgba(0,0,0,.3); }
+  .rk-counter { position:absolute; left:14px; top:12px; text-align:left; }
+  .rk-counter .num { font-size:26px; font-weight:800; color:var(--moss); line-height:1; }
+  .rk-counter .lab { font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); margin-top:2px; }
+  .rk-plus { position:absolute; right:16px; top:14px; font-size:13px; font-weight:800; color:var(--moss); opacity:0; animation:rk-pop 2s ease-out infinite; }
+  @keyframes rk-pop { 0%{opacity:0; transform:translateY(8px) scale(.6)} 18%{opacity:1; transform:translateY(0) scale(1)} 55%{opacity:1} 100%{opacity:0; transform:translateY(-16px) scale(.9)} }
+  .rk-chef { position:absolute; right:6px; bottom:4px; }
+
+  /* 副料理長 janitor */
+  .rk-jan { position:absolute; left:600px; top:548px; animation:rk-patrol 12s ease-in-out infinite; }
+  @keyframes rk-patrol { 0%{transform:translate(0,0)} 30%{transform:translate(76px,0)} 50%{transform:translate(76px,-22px)} 62%{transform:translate(76px,-22px)} 66%{transform:translate(76px,0)} 84%{transform:translate(200px,0)} 100%{transform:translate(0,0)} }
+  .rk-jan .wr { transform-origin:50% 100%; animation:rk-wrench 12s linear infinite; }
+  @keyframes rk-wrench { 0%,52%{transform:rotate(0)} 55%{transform:rotate(-18deg)} 58%{transform:rotate(14deg)} 61%{transform:rotate(-10deg)} 64%,100%{transform:rotate(0)} }
+  .rk-jancap { position:absolute; left:470px; top:638px; width:500px; font-size:10.5px; color:var(--muted); text-align:center; }
+  .rk-jancap b { color:var(--ink); }
+
+  /* ── the moving tokens: 伝票 → 皿, colour = Board lifecycle ─ */
+  .rk-flow { position:absolute; left:0; top:0; width:40px; height:30px; will-change:transform,opacity; animation:rk-journey 12s linear var(--d) infinite; }
+  @keyframes rk-journey {
+    0%   { transform:translate(70px,206px) scale(.5); opacity:0; }
+    4%   { transform:translate(90px,166px) scale(1);  opacity:1; }   /* rise up at the left, clear of the rail caption */
+    8%   { transform:translate(172px,151px) scale(1); opacity:1; }   /* onto rail */
+    30%  { transform:translate(520px,151px) scale(1); opacity:1; }   /* slide along rail (todo queue) */
+    37%  { transform:translate(var(--sx),var(--sy)) scale(1.05); opacity:1; }  /* PULL into station */
+    60%  { transform:translate(var(--sx),var(--sy)) scale(1.05); opacity:1; }  /* cooking */
+    67%  { transform:translate(936px,344px) scale(1); opacity:1; }   /* → パス台 review */
+    74%  { transform:translate(936px,344px) scale(1); opacity:1; }   /* check pause */
+    83%  { transform:translate(1086px,360px) scale(.92); opacity:1; }/* → 提供 done */
+    90%  { transform:translate(1086px,392px) scale(.7); opacity:1; } /* land on served stack */
+    96%,100% { transform:translate(1086px,392px) scale(.6); opacity:0; }
+  }
+  .rk-token { position:absolute; inset:0; border-radius:7px; animation:rk-state 12s linear var(--d) infinite; }
+  /* two "text lines" so it reads as a 伝票 (ticket) while on the rail */
+  .rk-token .ln { position:absolute; left:7px; height:2px; border-radius:1px; background:rgba(11,12,14,.55); animation:rk-lines 12s linear var(--d) infinite; }
+  .rk-token .ln1 { top:9px; width:22px; } .rk-token .ln2 { top:15px; width:15px; }
+  @keyframes rk-lines { 0%,33%{opacity:.85} 40%,100%{opacity:0} }
+  @keyframes rk-state {
+    0%,33%   { background:var(--ochre); border-radius:7px; box-shadow:0 0 0 1px rgba(214,162,62,.5),0 4px 10px rgba(0,0,0,.45); }  /* todo */
+    40%      { background:var(--azure); border-radius:9px; box-shadow:0 0 16px rgba(102,166,217,.85),0 0 0 1px rgba(102,166,217,.6); } /* doing — beacon glow */
+    60%      { background:var(--azure); border-radius:14px; box-shadow:0 0 16px rgba(102,166,217,.85),0 0 0 1px rgba(102,166,217,.6); }
+    70%,100% { background:var(--moss); border-radius:50%; box-shadow:0 0 0 1px rgba(143,178,90,.5),0 4px 10px rgba(0,0,0,.45); } /* done = a finished 皿 */
+  }
+  .rk-token .chk2 { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#0b0c0e; font-size:15px; font-weight:900; opacity:0; animation:rk-chk 12s linear var(--d) infinite; }
+  @keyframes rk-chk { 0%,64%{opacity:0;transform:scale(.4)} 69%,75%{opacity:1;transform:scale(1)} 81%,100%{opacity:0} }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="rk-cook" viewBox="0 0 84 110">
+    <ellipse cx="42" cy="22" rx="21" ry="13" fill="#e6e0d2"/>
+    <ellipse cx="28" cy="26" rx="10" ry="8" fill="#e6e0d2"/>
+    <ellipse cx="56" cy="26" rx="10" ry="8" fill="#e6e0d2"/>
+    <rect x="24" y="30" width="36" height="8" rx="3" fill="currentColor"/>
+    <circle cx="42" cy="52" r="14" fill="#e3b98f"/>
+    <circle cx="37" cy="50" r="1.7" fill="#3a2a20"/><circle cx="47" cy="50" r="1.7" fill="#3a2a20"/>
+    <path d="M38 57 q4 2.5 8 0" stroke="#7a4f3a" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <path d="M22 74 Q42 64 62 74 L66 108 L18 108 Z" fill="#dfdacb"/>
+    <rect x="36" y="74" width="12" height="34" fill="currentColor" opacity=".18"/>
+  </symbol>
+  <symbol id="rk-supply" viewBox="0 0 96 120">
+    <ellipse cx="48" cy="22" rx="24" ry="14" fill="#efe9dc"/>
+    <ellipse cx="32" cy="27" rx="11" ry="9" fill="#efe9dc"/>
+    <ellipse cx="64" cy="27" rx="11" ry="9" fill="#efe9dc"/>
+    <rect x="26" y="31" width="44" height="9" rx="4" fill="currentColor"/>
+    <circle cx="48" cy="56" r="15" fill="#e3b98f"/>
+    <circle cx="42" cy="54" r="1.8" fill="#3a2a20"/><circle cx="54" cy="54" r="1.8" fill="#3a2a20"/>
+    <path d="M43 61 q5 2.5 10 0" stroke="#7a4f3a" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <path d="M24 80 Q48 69 72 80 L76 118 L20 118 Z" fill="#e7e3d8"/>
+    <!-- clipboard -->
+    <rect x="60" y="78" width="22" height="28" rx="2" fill="#cfc7b4" stroke="currentColor" stroke-width="1.5"/>
+    <rect x="66" y="76" width="10" height="5" rx="1.5" fill="currentColor"/>
+    <rect x="64" y="86" width="14" height="2" fill="#6b5847"/><rect x="64" y="92" width="14" height="2" fill="#6b5847"/><rect x="64" y="98" width="9" height="2" fill="#6b5847"/>
+  </symbol>
+  <symbol id="rk-chef" viewBox="0 0 96 128">
+    <!-- taller toque -->
+    <rect x="30" y="14" width="36" height="34" rx="14" fill="#f2ede1"/>
+    <ellipse cx="48" cy="18" rx="22" ry="13" fill="#f2ede1"/>
+    <ellipse cx="30" cy="24" rx="11" ry="9" fill="#f2ede1"/>
+    <ellipse cx="66" cy="24" rx="11" ry="9" fill="#f2ede1"/>
+    <rect x="26" y="44" width="44" height="9" rx="4" fill="currentColor"/>
+    <circle cx="48" cy="68" r="15" fill="#e3b98f"/>
+    <circle cx="42" cy="66" r="1.8" fill="#3a2a20"/><circle cx="54" cy="66" r="1.8" fill="#3a2a20"/>
+    <path d="M43 73 q5 2.5 10 0" stroke="#7a4f3a" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <path d="M24 92 Q48 81 72 92 L76 126 L20 126 Z" fill="#e7e3d8"/>
+    <!-- star badge = head chef -->
+    <path d="M48 96 l2.2 4.6 5 .5 -3.8 3.4 1.1 5 -4.5 -2.6 -4.5 2.6 1.1 -5 -3.8 -3.4 5 -.5z" fill="currentColor"/>
+  </symbol>
+  <symbol id="rk-jan" viewBox="0 0 84 112">
+    <!-- flat cap -->
+    <path d="M20 30 Q42 14 64 30 L64 34 L20 34 Z" fill="#5c6b3d"/>
+    <rect x="18" y="33" width="48" height="6" rx="3" fill="#46522f"/>
+    <circle cx="42" cy="54" r="14" fill="#e3b98f"/>
+    <circle cx="37" cy="52" r="1.7" fill="#3a2a20"/><circle cx="47" cy="52" r="1.7" fill="#3a2a20"/>
+    <path d="M38 59 q4 2.5 8 0" stroke="#7a4f3a" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <path d="M22 76 Q42 66 62 76 L66 110 L18 110 Z" fill="#cfd2c4"/>
+  </symbol>
+  <symbol id="rk-wrench" viewBox="0 0 40 40">
+    <path d="M27 6 a8 8 0 0 0 -9.5 11 L6 28.5 11.5 34 23 22.5 a8 8 0 0 0 11 -9.5 l-5.5 5.5 -5-1.2 -1.2-5z" fill="#b9b09a" stroke="#8a836f" stroke-width="1.2"/>
+  </symbol>
+</defs></svg>
+
+<div class="rk-stage">
+  <div class="rk-head">
+    <div>
+      <div class="rk-tag">Orchestration · After</div>
+      <h1 class="rk-h1">レールの厨房 — 取りに行く <span class="en">(pull)</span></h1>
+      <p class="rk-sub">伝票はレールを流れ、<b style="color:#fff">手の空いた料理人が自分で取りに行く（pull）</b>。各ステーションが OPEN GROUND の並列実行の役割に対応する。</p>
+    </div>
+    <div class="rk-badge">After</div>
+  </div>
+
+  <div class="rk-legend">
+    <div class="rk-p is-pull"><span class="rk-n">1</span>取りに行く優先（pull優先）</div>
+    <div class="rk-p"><span class="rk-n">2</span>状態は外の黒板に</div>
+    <div class="rk-p"><span class="rk-n">3</span>役割分離</div>
+    <div class="rk-p"><span class="rk-n">4</span>隔離</div>
+    <div class="rk-p"><span class="rk-n">5</span>観測可能な完了</div>
+    <div class="rk-p"><span class="rk-n">6</span>自己修復ループ</div>
+  </div>
+
+  <!-- 注文 -->
+  <div class="rk-node rk-order">
+    <div class="rk-ocard"><div class="t">注文</div><div class="s">＝ 要望</div></div>
+  </div>
+
+  <!-- 補給官 -->
+  <div class="rk-node rk-supply">
+    <span class="rk-fig" style="color:var(--ochre)"><svg width="86" height="108" viewBox="0 0 96 120"><use href="#rk-supply"/></svg></span>
+    <div class="rk-cap">補給官（店長）</div>
+    <div class="rk-role">＝ 要望を伝票にして<br>レールへ積む（振らない）</div>
+    <span class="rk-bdg" style="left:104px; top:70px; background:var(--moss)">3</span>
+  </div>
+
+  <!-- token colour = Board state key (fills the gap, reinforces principle 2) -->
+  <div class="rk-node" style="left:30px; top:360px; width:300px">
+    <div class="rk-cap" style="margin-bottom:7px">伝票の色 ＝ Board の状態</div>
+    <div class="rk-keyrow"><span class="kd" style="background:var(--ochre)"></span>todo（レールで待つ）</div>
+    <div class="rk-keyrow"><span class="kd" style="background:var(--azure); box-shadow:0 0 9px rgba(102,166,217,.85)"></span>作業中 ＝ worker 稼働（beacon グロー）</div>
+    <div class="rk-keyrow"><span class="kd" style="background:var(--moss)"></span>完了 ＝ 提供（done）</div>
+  </div>
+
+  <!-- rail = Board todo queue -->
+  <div class="rk-rail"></div>
+  <div class="rk-railcap"><b>伝票レール ＝ Board（todo キュー）</b> — 誰の頭の中でもなく、外から見える列に積む</div>
+  <div class="rk-railhint">▾ 手が空いた人が取りに行く</div>
+  <span class="rk-bdg" style="left:300px; top:120px; background:var(--ochre); color:#0b0c0e">2</span>
+
+  <!-- pull junction -->
+  <div class="rk-pull">
+    <svg class="arr" viewBox="0 0 60 64" fill="none">
+      <path d="M6 8 H30 a8 8 0 0 1 8 8 V44" stroke="#66a6d9" stroke-width="2.5" stroke-dasharray="4 4"/>
+      <path d="M30 38 L38 50 L46 38" stroke="#66a6d9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <div class="lbl">pull ＝ 取りに行く</div>
+    <span class="rk-bdg" style="left:-6px; top:-8px;">1</span>
+  </div>
+
+  <!-- 調理台 ×3 (isolated worktrees, workers) -->
+  <div class="rk-cell c1">
+    <span class="who"><svg width="62" height="80" viewBox="0 0 84 110" style="color:var(--azure-deep)"><use href="#rk-cook"/></svg></span>
+    <div class="ttl">料理人 1</div><div class="sub">＝ worker</div>
+    <span class="rk-beacon"></span><span class="blabel">cooking</span>
+    <div class="counter"></div>
+    <span class="rk-bdg" style="left:-9px; top:-9px;">4</span>
+  </div>
+  <div class="rk-cell c2">
+    <span class="who"><svg width="62" height="80" viewBox="0 0 84 110" style="color:var(--azure-deep)"><use href="#rk-cook"/></svg></span>
+    <div class="ttl">料理人 2</div><div class="sub">＝ worker</div>
+    <span class="rk-beacon"></span><span class="blabel">cooking</span>
+    <div class="counter"></div>
+    <span class="rk-bdg" style="left:-9px; top:-9px;">4</span>
+  </div>
+  <div class="rk-cell c3">
+    <span class="who"><svg width="62" height="80" viewBox="0 0 84 110" style="color:var(--azure-deep)"><use href="#rk-cook"/></svg></span>
+    <div class="ttl">料理人 3</div><div class="sub">＝ worker</div>
+    <span class="rk-beacon rk-c3beacon"></span><span class="blabel">cooking</span>
+    <div class="counter"></div>
+    <span class="rk-bdg" style="left:-9px; top:-9px;">4</span>
+  </div>
+  <div class="rk-node" style="left:590px; top:522px; width:232px; text-align:center">
+    <div class="rk-role" style="color:var(--azure)">調理台 ＝ 隔離 worktree（混ざらない）</div>
+  </div>
+  <div class="rk-stalltag">stall → 自己修復</div>
+
+  <!-- パス台 review -->
+  <div class="rk-node rk-review">
+    <svg class="chk" viewBox="0 0 38 38" fill="none"><circle cx="19" cy="19" r="17" stroke="#8fb25a" stroke-width="2"/><path d="M11 19 l5 6 11 -13" stroke="#8fb25a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div class="cap"><div class="rk-cap">パス台</div><div class="rk-role">＝ review / 検品</div></div>
+    <span class="rk-bdg" style="left:-9px; top:-9px;">5</span>
+  </div>
+
+  <!-- 提供 done -->
+  <div class="rk-node rk-done">
+    <div class="rk-counter"><div class="num"><span id="rk-count">24</span></div><div class="lab">提供済み done</div></div>
+    <div class="rk-plus">+1</div>
+    <div class="rk-served"><b></b><b></b><b></b><b></b></div>
+    <span class="rk-fig rk-chef" style="color:var(--moss)"><svg width="70" height="94" viewBox="0 0 96 128"><use href="#rk-chef"/></svg></span>
+  </div>
+  <div class="rk-node" style="left:1052px; top:438px; width:160px; text-align:center">
+    <div class="rk-cap">料理長 ＝ 司令官</div>
+    <div class="rk-role">検品して提供＝done（マージ）</div>
+  </div>
+
+  <!-- 副料理長 janitor -->
+  <div class="rk-jan">
+    <svg width="60" height="80" viewBox="0 0 84 112" style="color:#5c6b3d"><use href="#rk-jan"/></svg>
+    <span class="wr" style="position:absolute; right:-10px; top:34px"><svg width="26" height="26" viewBox="0 0 40 40"><use href="#rk-wrench"/></svg></span>
+  </div>
+  <div class="rk-jancap"><b>副料理長 ＝ janitor</b> — 止まった台を直し、伝票をレールに戻す（自己修復ループ）<span class="rk-bdg" style="position:static; display:inline-flex; vertical-align:middle; margin-left:6px; background:var(--red); color:#fff">6</span></div>
+
+  <!-- moving tokens: 伝票 → 皿. --sx/--sy = the station it is pulled into. -->
+  <div class="rk-flow" style="--sx:706px; --sy:228px; --d:0s"><div class="rk-token"><span class="ln ln1"></span><span class="ln ln2"></span><span class="chk2">✓</span></div></div>
+  <div class="rk-flow" style="--sx:706px; --sy:338px; --d:-2s"><div class="rk-token"><span class="ln ln1"></span><span class="ln ln2"></span><span class="chk2">✓</span></div></div>
+  <div class="rk-flow" style="--sx:706px; --sy:448px; --d:-4s"><div class="rk-token"><span class="ln ln1"></span><span class="ln ln2"></span><span class="chk2">✓</span></div></div>
+  <div class="rk-flow" style="--sx:706px; --sy:228px; --d:-6s"><div class="rk-token"><span class="ln ln1"></span><span class="ln ln2"></span><span class="chk2">✓</span></div></div>
+  <div class="rk-flow" style="--sx:706px; --sy:338px; --d:-8s"><div class="rk-token"><span class="ln ln1"></span><span class="ln ln2"></span><span class="chk2">✓</span></div></div>
+  <div class="rk-flow" style="--sx:706px; --sy:448px; --d:-10s"><div class="rk-token"><span class="ln ln1"></span><span class="ln ln2"></span><span class="chk2">✓</span></div></div>
+</div>
+
+<!-- The ONLY script: ticks the "done" counter so completion is observably
+     accumulating (principle 5). Non-load-bearing — guarded; if it throws the
+     scene still animates and the number simply holds. -->
+<script>
+(function () {
+  try {
+    var el = document.getElementById('rk-count');
+    if (!el) return;
+    var n = parseInt(el.textContent, 10) || 0;
+    setInterval(function () { n++; el.textContent = n; }, 2000);
+  } catch (e) { /* visual scene is pure CSS and keeps running */ }
+})();
+</script>

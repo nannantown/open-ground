@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import type { CanvasElement } from '@/lib/types'
 import { resolveFrameStyle } from '@/lib/canvasFillStyle'
 import { cornerRadiusCss, resolveOpacity } from '@/lib/canvasTransform'
@@ -33,7 +33,7 @@ interface Props {
 // in screen space, so it never reads as part of the design itself. The label
 // is the frame's only interactive surface (drag to move, double-click to
 // rename); the body stays click-through so elements inside stay reachable.
-export const DesignFrameView = ({
+export const DesignFrameView = memo(({
   frame,
   selected,
   editing,
@@ -147,4 +147,4 @@ export const DesignFrameView = ({
       )}
     </div>
   )
-}
+})

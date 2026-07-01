@@ -46,6 +46,14 @@ const config: Config = {
         ochre: {
           DEFAULT: '#9A6E20',
           soft: '#E9DFC4',
+          // Darker amber for small labels + filled chips. The DEFAULT #9A6E20
+          // only clears ~4.1:1 on the paper card bg (globals.css says as much) —
+          // below WCAG AA (4.5:1). `deep` (= the --beacon-waiting value) reaches
+          // 5.29:1 as text/fill; `deeper` 6.91:1 for the hover of a filled pill
+          // (mirrors accent's DEFAULT→hover darkening). Used by the Board card
+          // priority 'high' chip + selected pill (src/lib/boardPriority.ts).
+          deep: '#855E17',
+          deeper: '#6E4E13',
         },
         // Shared/invited semantic accent — a folder-less collab project shared
         // WITH the user wears this (and only this) so it reads at a glance as

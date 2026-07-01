@@ -79,17 +79,52 @@ interface CachedMembership {
 declare global {
   // eslint-disable-next-line no-var
   var __openground_project_members: Map<string, CachedMembership> | undefined
+  // Single-flight map for findOrCreateOwnProject (see its definition below): in-
+  // flight resolve-or-create promises keyed by `${ownerId}\n${canonicalPath}`.
+  // eslint-disable-next-line no-var
+  var __openground_project_resolve:
+    | Map<string, Promise<string | null>>
+    | undefined
 }
 
 const memberCache: Map<string, CachedMembership> =
   globalThis.__openground_project_members ??
   (globalThis.__openground_project_members = new Map())
 
+// Cache key = `${userId}\n${collabProjectId}`. Membership is a per-USER fact, so
+// the cache MUST be scoped by the signed-in user — keying by collabProjectId
+// ALONE let a different account (after a sign-out / account switch on the same
+// machine) read the previous user's cached membership within the TTL, which is a
+// cross-account access leak. This mirrors roles.ts (its role cache is keyed by
+// user id). '\n' can't appear in a uuid, so it is an unambiguous separator —
+// the same convention findOrCreateOwnProject's resolveInFlight key uses below,
+// and the suffix clearMembershipCache matches on.
+const membershipCacheKey = (userId: string, collabProjectId: string): string =>
+  `${userId}\n${collabProjectId}`
+
+// Coalesces concurrent findOrCreateOwnProject calls for the SAME (owner, path)
+// onto one promise so duplicate project rows can't be minted by a burst of
+// simultaneous collab-scope opens. On globalThis so a tsx-watch reload keeps it,
+// exactly like memberCache / the terminal pool.
+const resolveInFlight: Map<string, Promise<string | null>> =
+  globalThis.__openground_project_resolve ??
+  (globalThis.__openground_project_resolve = new Map())
+
 // Clear the cache (tests / after a write that changes membership). With no arg
-// clears everything; with an id clears just that project's entry.
+// clears everything; with an id clears that project's entry for EVERY cached
+// user. Entries are keyed `${userId}\n${collabProjectId}` (see membershipCacheKey
+// above), so a roster change for one project — which can affect any cached
+// viewer of it — drops all matching entries by the trailing-separator suffix
+// (unambiguous: uuids hold no '\n'). A sign-out passes no arg to drop everything.
 export const clearMembershipCache = (collabProjectId?: string): void => {
-  if (collabProjectId === undefined) memberCache.clear()
-  else memberCache.delete(collabProjectId)
+  if (collabProjectId === undefined) {
+    memberCache.clear()
+    return
+  }
+  const suffix = `\n${collabProjectId}`
+  for (const key of Array.from(memberCache.keys())) {
+    if (key.endsWith(suffix)) memberCache.delete(key)
+  }
 }
 
 // --- REST row → ProjectMember ----------------------------------------------
@@ -189,24 +224,36 @@ const fetchRemoteMembership = async (
 }
 
 // Resolve the caller's membership of a collab project. Resolution chain mirrors
-// roles.ts: env override → fresh cache → remote lookup → stale cache → null.
-// Unconfigured / signed-out → null (cached briefly too).
+// roles.ts: session gate → env override → fresh cache → remote lookup → stale
+// cache → null. Unconfigured / signed-out → null; the cache is per-user, so an
+// account switch never inherits the prior user's answer.
 export const getMyMembership = async (
   collabProjectId: string,
 ): Promise<ProjectMember | null> => {
   if (!collabProjectId) return null
+
+  // Identity gate FIRST, exactly like roles.ts getCustomTabRole: membership is a
+  // per-USER fact, so resolve it against the signed-in session. Signed out → not
+  // a member, full stop (no env override, no cache, no network). This closes the
+  // sign-out / account-switch leak two ways: a different account can never reach
+  // the previous user's cached entry (the cache is keyed by userId below), and a
+  // signed-out caller is rejected before a still-fresh cached entry is ever read.
+  const session = await readSession()
+  const userId = session?.user.id
+  if (!userId) return null
 
   if (envMemberOf(collabProjectId)) {
     // The dev/test override force-grants membership → an ACCEPTED member.
     return { projectId: collabProjectId, role: 'member', status: 'accepted' }
   }
 
-  const cached = memberCache.get(collabProjectId)
+  const cacheKey = membershipCacheKey(userId, collabProjectId)
+  const cached = memberCache.get(cacheKey)
   if (cached && cached.at > Date.now() - CACHE_TTL_MS) return cached.member
 
   const remote = await fetchRemoteMembership(collabProjectId)
   if (remote !== undefined) {
-    memberCache.set(collabProjectId, { member: remote, at: Date.now() })
+    memberCache.set(cacheKey, { member: remote, at: Date.now() })
     return remote
   }
   // Lookup unavailable (offline / unconfigured / signed out): serve the last
@@ -607,6 +654,84 @@ export const ensureOwnProject = async (name?: string): Promise<string | null> =>
 const ownerProjectNameKey = (ownerId: string, canonicalPath: string): string =>
   createHash('sha256').update(`${ownerId}:${canonicalPath}`).digest('hex')
 
+// DETERMINISTIC find of the caller's OWN og_projects row for a dedup hash. Orders
+// by (created_at, id) ascending and takes the first, so even if duplicate rows
+// somehow exist — legacy data minted before the unique (owner_id,name) index
+// (migration 0014), or a cross-process race the in-process single-flight below
+// can't cover — EVERY caller converges on the SAME (oldest) row rather than a
+// non-deterministic limit-1 pick. The (created_at,id) tiebreak matches 0014's
+// duplicate-collapse survivor, so runtime and migration agree on the survivor.
+// Returns the id, `null` when there is no such row, or `undefined` when the
+// lookup itself FAILED (non-ok / network) so the caller can distinguish "absent"
+// from "couldn't check". Never throws.
+const findOwnProjectByHash = async (
+  auth: OwnerAuth,
+  ownerId: string,
+  nameHash: string,
+): Promise<string | null | undefined> => {
+  try {
+    const res = await fetch(
+      `${auth.url}/rest/v1/${projectsTable()}?owner_id=eq.${encodeURIComponent(
+        ownerId,
+      )}&name=eq.${encodeURIComponent(
+        nameHash,
+      )}&select=id&order=created_at.asc,id.asc&limit=1`,
+      {
+        headers: {
+          apikey: auth.anonKey,
+          Authorization: `Bearer ${auth.token}`,
+        },
+        signal: AbortSignal.timeout(10_000),
+      },
+    )
+    if (!res.ok) {
+      console.error(`[openground:members] find project ${res.status}`)
+      return undefined
+    }
+    const rows = (await res.json()) as Array<{ id?: string }>
+    const existing = Array.isArray(rows) ? rows[0]?.id : undefined
+    return typeof existing === 'string' && existing ? existing : null
+  } catch (e) {
+    console.error(
+      '[openground:members] find project failed',
+      e instanceof Error ? e.message : e,
+    )
+    return undefined
+  }
+}
+
+// The actual resolve-or-create body (find → create → re-find on conflict),
+// wrapped by findOrCreateOwnProject's single-flight below so concurrent collab
+// scopes share one run. Never throws; null only when every step failed.
+const resolveOwnProjectRow = async (
+  auth: OwnerAuth,
+  ownerId: string,
+  canonicalPath: string,
+): Promise<string | null> => {
+  // Opaque, non-reversible dedup key (never the raw path) — used for BOTH the
+  // lookup and the insert so the same folder reuses one row.
+  const nameHash = ownerProjectNameKey(ownerId, canonicalPath)
+
+  // 1) Existing row for this dedup hash? (deterministic — oldest wins.)
+  const existing = await findOwnProjectByHash(auth, ownerId, nameHash)
+  if (existing) return existing
+  // existing === undefined means the read itself failed; fall through to create
+  // anyway — a transient read blip shouldn't block sharing, and the create's own
+  // conflict handling (step 3) still converges if a row actually exists.
+
+  // 2) None found → create one keyed by the opaque dedup hash (not the path).
+  const created = await ensureOwnProject(nameHash)
+  if (created) return created
+
+  // 3) The create returned null. Once the unique (owner_id, name) index
+  //    (migration 0014) is live, a CONCURRENT / cross-process insert that won the
+  //    race makes our insert 409 — the canonical row now exists, so re-find it
+  //    (deterministically) and return the winner instead of a split null. A
+  //    genuine create error re-finds to null too, preserving the best-effort
+  //    "never throw, null on total failure" contract.
+  return (await findOwnProjectByHash(auth, ownerId, nameHash)) ?? null
+}
+
 // IDEMPOTENT resolve-or-create of the caller's OWN og_projects row for a stable
 // key, returning its id (the collabProjectId). `canonicalPath` is the project's
 // CANONICAL LOCAL PATH — unique + stable per owner per machine, so two opens of
@@ -617,6 +742,18 @@ const ownerProjectNameKey = (ownerId: string, canonicalPath: string): string =>
 // every member can read name, so a raw path would leak the owner's local FS
 // layout. Returns null when unconfigured / signed out / both the lookup and the
 // create fail. Never throws.
+//
+// CONCURRENCY: every collab scope (board + each open canvas) mounts its own
+// RealtimeProvider when a project opens and each fires GET /api/collab/project at
+// once, so this is called N times concurrently for the SAME folder. Without
+// coalescing, every call missed the find (no row yet) and INSERTed, minting
+// DUPLICATE og_projects rows for one folder — and a later limit-1 find then
+// returned DIFFERENT ids to different scopes/members, silently SPLITTING the
+// collab room. We single-flight concurrent calls for the same (owner, path) onto
+// one in-flight promise: the get→set below is synchronous (no await between), so
+// a second concurrent call always observes the first's entry and shares its
+// result, guaranteeing exactly one find-then-create and one converged id. The
+// unique index (0014) backstops the rarer cross-process race.
 export const findOrCreateOwnProject = async (
   canonicalPath: string,
 ): Promise<string | null> => {
@@ -626,43 +763,20 @@ export const findOrCreateOwnProject = async (
   const ownerId = session?.user.id
   if (!ownerId || !canonicalPath) return null
 
-  // Opaque, non-reversible dedup key (never the raw path) — used for BOTH the
-  // lookup and the insert so the same folder reuses one row.
-  const nameHash = ownerProjectNameKey(ownerId, canonicalPath)
+  // Keyed by owner too (not just path), so an account switch can't hand back a
+  // stale resolve for the previous user. '\n' can't appear in a uuid, so it's an
+  // unambiguous separator.
+  const key = `${ownerId}\n${canonicalPath}`
+  const inflight = resolveInFlight.get(key)
+  if (inflight) return inflight
 
-  // 1) Look for an existing row this user owns with the same dedup hash. RLS
-  //    (0005 "og projects read") already scopes to owner = self, but we
-  //    also filter owner_id explicitly so the query is unambiguous.
+  const p = resolveOwnProjectRow(auth, ownerId, canonicalPath)
+  resolveInFlight.set(key, p)
   try {
-    const res = await fetch(
-      `${auth.url}/rest/v1/${projectsTable()}?owner_id=eq.${encodeURIComponent(
-        ownerId,
-      )}&name=eq.${encodeURIComponent(nameHash)}&select=id&limit=1`,
-      {
-        headers: {
-          apikey: auth.anonKey,
-          Authorization: `Bearer ${auth.token}`,
-        },
-        signal: AbortSignal.timeout(10_000),
-      },
-    )
-    if (res.ok) {
-      const rows = (await res.json()) as Array<{ id?: string }>
-      const existing = Array.isArray(rows) ? rows[0]?.id : undefined
-      if (typeof existing === 'string' && existing) return existing
-    } else {
-      console.error(`[openground:members] find project ${res.status}`)
-    }
-  } catch (e) {
-    console.error(
-      '[openground:members] find project failed',
-      e instanceof Error ? e.message : e,
-    )
-    // Fall through to create — a transient read failure shouldn't block sharing.
+    return await p
+  } finally {
+    resolveInFlight.delete(key)
   }
-
-  // 2) None found → create one keyed by the opaque dedup hash (not the path).
-  return ensureOwnProject(nameHash)
 }
 
 // Add (or re-add) member emails to a project the caller OWNS. Owner INSERT under

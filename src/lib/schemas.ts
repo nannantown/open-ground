@@ -24,39 +24,92 @@ import { z } from 'zod'
 // agentSessionId / transcriptRef / activeSkill / images). The schema no longer
 // knows them, so zod silently strips them on read and they vanish on the next
 // write — no migration code.
+
+// One image attachment (screenshot) on a board card — id is the content-hash
+// file name in the task-asset store; name/mime are display metadata. Factored
+// out of ProjectTaskSchema so the `attachments` field below can sanitize
+// PER-ELEMENT (drop a broken entry, keep the rest) instead of failing — and
+// thereby silently dropping — the whole card.
+const TaskAttachmentSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  mime: z.string(),
+})
+
 export const ProjectTaskSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
-  notes: z.string().optional(),
+  // .catch(undefined) on the optional metadata throughout this schema: a
+  // malformed value (a git-shared teammate / a hand-edited card) drops just that
+  // ONE FIELD, never the whole card. id/title/done are the card's identity, so
+  // those still reject. Same drop-the-field-never-the-card contract as
+  // priority/dueDate/run — the sibling fields that lacked it were a latent
+  // silent-card-loss hole (readProjectData's field-level recovery drops any card
+  // whose ProjectTaskSchema parse fails, so one junk field = the card vanishes).
+  notes: z.string().optional().catch(undefined),
   done: z.boolean(),
-  createdAt: z.string().default(''),
-  // Board tab (backward compatible): kanban column + in-column sort key.
-  boardColumn: z.enum(['todo', 'doing', 'review', 'done', 'blocked']).optional(),
-  assignee: z.string().optional(),
-  boardOrder: z.number().optional(),
+  // .catch('') in FRONT of .default(''): .default only fills in `undefined`, so
+  // a non-string createdAt (a number 42, an object — a hand-edited / git-shared
+  // teammate's card) would still fail z.string() → ProjectTaskSchema fails →
+  // readProjectData's filterValid drops the card WHOLESALE (silent card loss,
+  // the exact hole the attachments / notes / boardColumn sweep above closed).
+  // createdAt was the last sibling still on a bare .default — .catch('') falls a
+  // junk value back to '' so the card body survives, matching the drop-the-
+  // field-never-the-card contract everywhere else here. (A valid ISO string is
+  // untouched; the catch only fires on a non-string.)
+  createdAt: z.string().catch('').default(''),
+  // Board tab (backward compatible): kanban column + in-column sort key. NOTE
+  // the fallback is 'todo', NOT undefined: readProjectData's dropLegacyNonBoard-
+  // Tasks decides "is this still a board card?" off a NON-null boardColumn, so a
+  // value of undefined would survive THIS read but get DROPPED on the next one
+  // (the write omits the key → next read sees no boardColumn + no kind → the
+  // card is filtered out as a legacy non-board entry). A junk column therefore
+  // falls back to 'todo' so the card stays put across write cycles, for good.
+  boardColumn: z.enum(['todo', 'doing', 'review', 'done', 'blocked']).optional().catch('todo'),
+  assignee: z.string().optional().catch(undefined),
+  boardOrder: z.number().optional().catch(undefined),
+  // In-app swarm dispatch priority (types.ts TaskPriority). MUST be listed here
+  // or it is stripped on the tasks.json read→write round-trip (zod objects strip
+  // unknown keys) and the user's setting silently vanishes — the same "保存が消える"
+  // trap the attachments / selfSupplyKey notes warn about. Same drop-the-field-
+  // never-the-card resilience as dueDate: a hand-edited junk value falls back to
+  // undefined (= 'normal'), the card survives. (3点セット: types.ts / here.)
+  priority: z.enum(['urgent', 'high', 'normal', 'low']).optional().catch(undefined),
   // PR opened for the task (completionFlow 'pr') — set via tasks {setPrUrl}.
-  prUrl: z.string().optional(),
+  // .catch(undefined): a malformed value (a hand-edited shared card) drops the
+  // FIELD, never the whole card — same drop-the-field-never-the-card resilience
+  // as dueDate/run/priority (see readProjectData's field-level recovery).
+  prUrl: z.string().optional().catch(undefined),
   // Task branch claude created — set via tasks {setBranch}.
-  branch: z.string().optional(),
+  branch: z.string().optional().catch(undefined),
   // Teammate who marked the card reviewed (review column); cleared on rework.
-  reviewedBy: z.string().optional(),
+  reviewedBy: z.string().optional().catch(undefined),
   // Title is machine-derived (first line / haiku) and untouched by the user.
-  titleAuto: z.boolean().optional(),
+  titleAuto: z.boolean().optional().catch(undefined),
   // Image attachments — id is the content-hash file name in the task-asset
-  // store; name/mime are display metadata. (3点セット: types.ts /
-  // normalizeCard / here — a field missing from any of the three is silently
-  // dropped on the shared-board round-trip.)
+  // store; name/mime are display metadata. (Persisted contract is types.ts +
+  // here; a field missing from either is silently dropped on the shared-board
+  // round-trip. normalizeCard — the old third point — was removed in the
+  // git-share 0.10.1 work.)
+  //
+  // Per-ELEMENT resilience (the array analogue of dueDate/run/priority's
+  // .catch): a single malformed attachment — e.g. a git-shared teammate / a
+  // hand-edited card carrying a mime-less entry — must NOT take the whole card
+  // down. Without a guard the element parse fails → the array fails →
+  // ProjectTaskSchema fails → readProjectData's field-level recovery drops the
+  // card WHOLESALE (silent card loss; only priority/dueDate/run survived a junk
+  // value before). The preprocess keeps the VALID attachments and drops only the
+  // broken ones (sanitize, not all-or-nothing); the trailing .catch(undefined)
+  // covers a non-array junk value (the field drops, the card still survives).
   attachments: z
-    .array(
-      z.object({
-        id: z.string().min(1),
-        name: z.string(),
-        mime: z.string(),
-      }),
+    .preprocess(
+      v => (Array.isArray(v) ? v.filter(el => TaskAttachmentSchema.safeParse(el).success) : v),
+      z.array(TaskAttachmentSchema).optional(),
     )
-    .optional(),
+    .catch(undefined),
   // Ids of cards that should land before this one (B025) — informational.
-  dependsOn: z.array(z.string()).optional(),
+  // .catch(undefined): a malformed value drops the FIELD, never the whole card.
+  dependsOn: z.array(z.string()).optional().catch(undefined),
   // Soft deadline 'YYYY-MM-DD' (B026) — informational chip only. Strict shape
   // with .catch: a malformed value (a hand-edited shared card file) falls back
   // to undefined — the FIELD is dropped, never the whole card (rejecting the
@@ -81,7 +134,19 @@ export const ProjectTaskSchema = z.object({
   // this review card's branch because a rebase conflicted — a human must merge
   // it by hand. Cleared on any move out of review. (3点セット: types.ts /
   // tasks route setColumn clearing / here.)
-  integrationConflict: z.boolean().optional(),
+  integrationConflict: z.boolean().optional().catch(undefined),
+  // Self-supply provenance + dedup key (card b3fbbfba): set when the commander
+  // engine proposed this card on its own. Presence marks it engine-proposed and
+  // GATED — selectDispatch skips it until selfSupplyApproved is true. MUST be in
+  // this schema or it is stripped on the read→write round-trip (see top-of-file
+  // note) and the dispatch gate would silently fail open. (3点セット: types.ts /
+  // here / selectDispatch gate.) .catch(undefined): a junk value (non-string)
+  // drops the field and the card reverts to a plain todo rather than vanishing —
+  // the engine only ever WRITES a real string key, so a normal gated card never
+  // trips the catch; only a corrupt hand-edit does, where survival beats loss.
+  selfSupplyKey: z.string().optional().catch(undefined),
+  // .catch(undefined): junk → undefined → falsy → the gate stays CLOSED (safe).
+  selfSupplyApproved: z.boolean().optional().catch(undefined),
 })
 
 export const ProjectDataSchema = z.object({

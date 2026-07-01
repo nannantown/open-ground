@@ -32,6 +32,7 @@ import { useT } from '@/i18n/I18nContext'
 import type {
   ActiveTerminalsResponse,
   AppNotification,
+  AppNotificationsResponse,
   CanvasAiActiveResponse,
   CanvasState,
   ClaudeBeaconStatus,
@@ -80,6 +81,37 @@ const ARROW_NUDGE: Record<string, [number, number]> = {
   arrowright: [1, 0],
   arrowup: [0, -1],
   arrowdown: [0, 1],
+}
+
+// The first-run EmptyState overlay covers the whole Ground (its backdrop is
+// inset-0 and captures clicks). Show it ONLY when the Ground has nothing at all
+// to act on — no owned projects AND, on a collab build, no shared (member) cards
+// either. A member who joined a shared project but registered zero owned folders
+// still has clickable Ground cards, so the overlay must NOT hide them. With
+// collab off this collapses to the original `ownedCount === 0`, so the default
+// build is byte-for-byte unchanged. Pure + exported for unit testing.
+export function shouldShowEmptyState(args: {
+  ownedCount: number
+  collabEnabled: boolean
+  sharedCount: number
+}): boolean {
+  return args.ownedCount === 0 && (!args.collabEnabled || args.sharedCount === 0)
+}
+
+// The next selection state when the user OPENS AN OWNED project — via ⌘K jump,
+// New, Import, or clicking its Ground card. It always clears any open shared
+// (member) panel: ProjectPanel renders the owner body OR the member body, never
+// both, and `openShared` wins the `project` prop
+// (project={openShared ? null : singleSelected}). Without clearing it, a
+// lingering openShared would pin the member panel over the owned project the
+// user just opened (the "shared panel sticks" bug). Mirrors the inverse of
+// openSharedCard, which clears selectedIds before setting openShared. Pure +
+// exported for unit testing.
+export function nextSelectionOnOpenOwned(id: string): {
+  selectedIds: string[]
+  openShared: null
+} {
+  return { selectedIds: [id], openShared: null }
 }
 
 export default function App() {
@@ -174,6 +206,11 @@ export default function App() {
   // is configured AND the user is signed in (see the effect below); otherwise empty,
   // so the bell stays 控えめ (no badge) for the public / signed-out build.
   const [invites, setInvites] = useState<CollabInviteForMe[]>([])
+  // The SECOND notification source: server-persisted FATAL swarm events (the
+  // escalation safety valve's in-app half — GET /api/swarm/notifications, owner-
+  // only). Polled separately from invites (it's a local/owner feature, not gated
+  // on collab); a non-owner gets 403 → stays empty, so the bell is unaffected.
+  const [swarmNotifs, setSwarmNotifs] = useState<AppNotification[]>([])
   const [readNotifIds, setReadNotifIds] = useState<ReadonlySet<string>>(() => new Set())
   // Per-project claude beacon: projectId → 'working' (claude is busy) |
   // 'waiting' (claude sits on the human — its turn signal). Polled from
@@ -289,9 +326,13 @@ export default function App() {
   // when nothing is new); marking read is monotonic (the server UNIONs ids), so a
   // failed POST just leaves them unread to retry next open.
   const markNotificationsSeen = useCallback(() => {
-    const unreadIds = invites
-      .map((iv) => collabInviteNotifId(iv.collabProjectId))
-      .filter((id) => !readNotifIds.has(id))
+    // Mark EVERY currently-shown notification read — both sources (collab invites
+    // and fatal swarm events) — so opening the bell clears the badge for all of them.
+    const shownIds = [
+      ...invites.map((iv) => collabInviteNotifId(iv.collabProjectId)),
+      ...swarmNotifs.map((n) => n.id),
+    ]
+    const unreadIds = shownIds.filter((id) => !readNotifIds.has(id))
     if (unreadIds.length === 0) return
     setReadNotifIds((prev) => {
       const next = new Set(prev)
@@ -303,7 +344,7 @@ export default function App() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ ids: unreadIds }),
     }).catch(() => {})
-  }, [invites, readNotifIds])
+  }, [invites, swarmNotifs, readNotifIds])
 
   // Restore "where the user was" exactly once, after the first project scan:
   // re-open the project they had open before reload, if it still exists. A
@@ -490,6 +531,41 @@ export default function App() {
     }
   }, [collabEnabled, authUser?.id])
 
+  // Poll the FATAL swarm notifications (escalation safety valve). Independent of
+  // collab — it's the local owner's safety valve — and gated only on sign-in (the
+  // route is owner-only; a non-owner / signed-out caller gets 403, handled as
+  // empty). More frequent than invites (60s + focus): these are urgent, so the bell
+  // should catch up quickly after the OS toast already fired server-side. Cleared
+  // when signed out so a re-login starts clean.
+  useEffect(() => {
+    if (!authUser?.id) {
+      setSwarmNotifs([])
+      return
+    }
+    let cancelled = false
+    let lastPoll = 0
+    const poll = () => {
+      lastPoll = Date.now()
+      fetch('/api/swarm/notifications')
+        .then((r) => (r.ok ? (r.json() as Promise<AppNotificationsResponse>) : null))
+        .then((d) => {
+          if (!cancelled && d) setSwarmNotifs(d.notifications ?? [])
+        })
+        .catch(() => {})
+    }
+    poll()
+    const onFocus = () => {
+      if (Date.now() - lastPoll >= 30_000) poll()
+    }
+    const id = window.setInterval(poll, 60_000)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [authUser?.id])
+
   // Called by the Settings inbox once it has loaded submissions: record the
   // newest timestamp as "seen" (scoped per data source) and clear the gear dot.
   const markFeedbackSeen = useCallback(
@@ -674,6 +750,12 @@ export default function App() {
 
   // Plain click selects one item; Shift+click toggles multi-selection.
   const handleSelect = useCallback((id: string | null, additive?: boolean) => {
+    // Selecting an owned Ground card returns focus to the owner body, so clear
+    // any open shared (member) panel — otherwise openShared would pin the member
+    // body over it (project={openShared ? null : singleSelected}; openShared
+    // wins). No-op when nothing is shared. A deselect (id === null) leaves
+    // openShared alone: the shared panel's own onClose owns that close path.
+    if (id) setOpenShared(null)
     setSelectedIds((prev) => {
       if (!id) return []
       if (additive) {
@@ -891,7 +973,11 @@ export default function App() {
     const loaded = await load()
     const created = loaded?.projects.find((p) => p.id === data.id)
     if (created) {
-      setSelectedIds([created.id])
+      // Opening the imported (owned) card clears any open shared panel so it
+      // doesn't stay stuck over the new project (see nextSelectionOnOpenOwned).
+      const sel = nextSelectionOnOpenOwned(created.id)
+      setOpenShared(sel.openShared)
+      setSelectedIds(sel.selectedIds)
       const pos = loaded!.canvas.positions[created.id]
       if (pos) centerOnCard(pos)
     }
@@ -919,17 +1005,24 @@ export default function App() {
     return <div className="h-screen w-screen bg-bg" />
   }
 
-  const showEmpty = projects.length === 0
+  const showEmpty = shouldShowEmptyState({
+    ownedCount: projects.length,
+    collabEnabled,
+    sharedCount: sharedProjects.length,
+  })
   // Compose the bell's notification list from the fetched sources (today: collab
   // invites) and tally how many are still unread (id not in the server-persisted
   // seen-set). Cheap derivations — recomputed each render from `invites` /
   // `readNotifIds`. Newest-first ordering already comes from the server.
-  const notificationList: AppNotification[] = invites.map((iv) => ({
-    id: collabInviteNotifId(iv.collabProjectId),
-    kind: 'collab-invite',
-    createdAt: iv.invitedAt,
-    collabInvite: iv,
-  }))
+  const notificationList: AppNotification[] = [
+    ...swarmNotifs,
+    ...invites.map<AppNotification>((iv) => ({
+      id: collabInviteNotifId(iv.collabProjectId),
+      kind: 'collab-invite',
+      createdAt: iv.invitedAt,
+      collabInvite: iv,
+    })),
+  ].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
   const unreadNotifications = notificationList.reduce(
     (count, n) => (readNotifIds.has(n.id) ? count : count + 1),
     0,
@@ -1184,7 +1277,11 @@ export default function App() {
           // path compare would miss when the workspace contains a symlink.
           const created = data?.projects.find((p) => p.id === newId)
           if (created) {
-            setSelectedIds([created.id])
+            // Opening the new (owned) card clears any open shared panel so it
+            // doesn't stay stuck over it (see nextSelectionOnOpenOwned).
+            const sel = nextSelectionOnOpenOwned(created.id)
+            setOpenShared(sel.openShared)
+            setSelectedIds(sel.selectedIds)
             const pos = data!.canvas.positions[created.id]
             if (pos) centerOnCard(pos)
           }
@@ -1211,7 +1308,12 @@ export default function App() {
         onClose={() => setJumpOpen(false)}
         onPick={(p) => {
           setJumpOpen(false)
-          setSelectedIds([p.id])
+          // Jumping to an owned project clears any open shared panel so the
+          // panel doesn't stay stuck on the member body (the jump palette only
+          // lists owned projects — see nextSelectionOnOpenOwned).
+          const sel = nextSelectionOnOpenOwned(p.id)
+          setOpenShared(sel.openShared)
+          setSelectedIds(sel.selectedIds)
           const pos = canvas.positions[p.id]
           if (pos) centerOnCard(pos)
         }}

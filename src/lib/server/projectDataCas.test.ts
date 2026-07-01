@@ -5,6 +5,7 @@ import { join } from 'path'
 import type { ProjectData, ProjectTask } from '../types'
 import {
   ProjectDataConflictError,
+  mutateProjectData,
   readProjectData,
   writeProjectData,
 } from './projectData'
@@ -68,5 +69,49 @@ describe('writeProjectData — compare-and-swap on updatedAt', () => {
     await writeProjectData(dir, data({ tasks: [card('a')] }))
     const overwritten = await writeProjectData(dir, data({ tasks: [] }))
     expect(overwritten.tasks).toHaveLength(0)
+  })
+})
+
+describe('mutateProjectData — lock-scoped read-modify-write', () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'og-rmw-'))
+    await mkdir(dir, { recursive: true })
+    await registerTestProject(dir)
+  })
+
+  it('serializes concurrent mutations so every one lands (no lost update)', async () => {
+    const N = 12
+    await writeProjectData(dir, data({ tasks: Array.from({ length: N }, (_, i) => card(`c${i}`)) }))
+
+    // Fire N mutations at once, each moving a different card to 'review'. Reading
+    // inside the lock means each loser sees the previous winner's write, so all
+    // N moves persist — unlike a bare read→CAS-write, where stale losers would
+    // throw ProjectDataConflictError and drop their move.
+    await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        mutateProjectData(dir, (d) => {
+          const t = d.tasks.find((x) => x.id === `c${i}`)
+          if (t) t.boardColumn = 'review'
+        }),
+      ),
+    )
+
+    const after = await readProjectData(dir)
+    expect(after.tasks).toHaveLength(N)
+    expect(after.tasks.every((t) => t.boardColumn === 'review')).toBe(true)
+  })
+
+  it('persists a replacement object returned by the mutator', async () => {
+    await writeProjectData(dir, data({ tasks: [card('a')] }))
+    const saved = await mutateProjectData(dir, (d) => ({ ...d, notes: 'hello' }))
+    expect(saved.notes).toBe('hello')
+    expect((await readProjectData(dir)).notes).toBe('hello')
+  })
+
+  it('rejects an unregistered path before mutating', async () => {
+    await expect(
+      mutateProjectData('/definitely/not/registered', () => {}),
+    ).rejects.toBeTruthy()
   })
 })

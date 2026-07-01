@@ -19,6 +19,7 @@ import { getCustomTabRole } from './roles'
 import { getSettings } from './store'
 import type {
   CustomTabRole,
+  ExperimentId,
   ExperimentsResponse,
   Settings,
 } from '../types'
@@ -36,6 +37,7 @@ export const computeExperiments = (
     eligible,
     flags: {
       swarm: eligible && settings.experiments?.swarm === true,
+      sandbox: eligible && settings.experiments?.sandbox === true,
     },
   }
 }
@@ -43,3 +45,16 @@ export const computeExperiments = (
 // Resolve the caller's experiment gate from the live session role + settings.
 export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
   computeExperiments(await getCustomTabRole(), await getSettings())
+
+// Is ONE experiment open for the caller? Same gate as resolveExperiments (owner
+// && the toggle) but TOGGLE-FIRST: it reads settings (cheap, local) and only
+// consults the owner role when the toggle is on — so the common path (toggle
+// off, which is the shipped default) never pays for a role lookup. Used by the
+// hot launch paths (every claude spawn), where resolving ALL experiments + a
+// possible Supabase round-trip on each launch would be wasteful. Still
+// server-authoritative: a non-owner with a forged toggle fails the role check.
+export const isExperimentEnabled = async (id: ExperimentId): Promise<boolean> => {
+  const settings = await getSettings()
+  if (settings.experiments?.[id] !== true) return false
+  return (await getCustomTabRole()) === 'owner'
+}

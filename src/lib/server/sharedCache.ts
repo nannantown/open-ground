@@ -1,6 +1,7 @@
 import { join } from 'node:path'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { openGroundHome } from './paths'
+import { atomicWriteText } from './atomicWrite'
 import type { CanvasFile, ProjectData } from '../types'
 
 // Local read-cache for FOLDER-LESS shared projects (member flow, option A).
@@ -75,7 +76,11 @@ export const readSharedBoardCache = async (
 }
 
 // Write the cached board. No-op (false) on invalid id / write error. Never
-// throws. Creates the shared root on first write.
+// throws. Creates the shared root on first write. The write is ATOMIC
+// (atomicWriteText = temp file + rename), so the doc-sync mirror POSTing the same
+// board concurrently — or a crash mid-write — can never leave a torn / truncated
+// board.json for the next readSharedBoardCache to choke on (it would parse-fail →
+// null → fall back to "connecting"). A reader only ever sees a complete file.
 export const writeSharedBoardCache = async (
   collabProjectId: string,
   data: ProjectData,
@@ -98,7 +103,7 @@ export const writeSharedBoardCache = async (
   }
   try {
     await mkdir(sharedCacheDir(collabProjectId), { recursive: true })
-    await writeFile(cacheFile(collabProjectId), json, 'utf8')
+    await atomicWriteText(cacheFile(collabProjectId), json)
     return true
   } catch {
     return false
@@ -131,7 +136,9 @@ export const readSharedCanvasCache = async (
 }
 
 // Write a member's cached CANVAS (cv4). No-op (false) on invalid ids / oversized /
-// non-serializable / write error. Never throws.
+// non-serializable / write error. Never throws. ATOMIC (atomicWriteText = temp +
+// rename) for the same reason as the board: a concurrent doc-sync mirror writing
+// the same canvasId — or a mid-write crash — never leaves a torn cache file.
 export const writeSharedCanvasCache = async (
   collabProjectId: string,
   canvasId: string,
@@ -152,7 +159,7 @@ export const writeSharedCanvasCache = async (
   }
   try {
     await mkdir(join(sharedCacheDir(collabProjectId), 'canvas'), { recursive: true })
-    await writeFile(canvasCacheFile(collabProjectId, canvasId), json, 'utf8')
+    await atomicWriteText(canvasCacheFile(collabProjectId, canvasId), json)
     return true
   } catch {
     return false

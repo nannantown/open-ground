@@ -160,6 +160,10 @@ export const createGlobalSkill = async (
       // Utility session: keep the system prompt pristine (no board-API context)
       // so the OPENGROUND_SKILL_NAME output contract can't drift.
       appContext: false,
+      // Non-sandboxed, bypass: ignore user-scope ~/.claude.json mcpServers so a
+      // sandboxed claude can't plant one that this auto-run spawns outside the
+      // sandbox (sandbox experiment hardening — see strictMcpConfig opt).
+      strictMcpConfig: true,
     })
 
     let buffer = ''

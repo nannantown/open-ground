@@ -348,3 +348,44 @@ const rebaseAndPush = async (
     await git(projectPath, ['worktree', 'prune'])
   }
 }
+
+// ── Conflict → worker rebase delegation (card 012a2848) ───────────────────────
+//
+// integrateBranch ABORTS a rebase that conflicts and reports {status:'conflict'}
+// (it never auto-resolves — the safety contract above). What the COMMANDER then
+// does today BY HAND is hand the conflict back to the branch's worker: "rebase
+// your own branch onto the moved trunk, resolve it, commit, and I'll land it."
+// The orchestrator automates exactly that, and THIS is the single source of the
+// instruction it delegates — kept here, beside integrateBranch (the producer of
+// the conflict), so the conflict contract lives in one module. Pure + total: the
+// orchestrator uses the returned text BOTH as the live worker's PTY instruction
+// AND as the durable /order injection a dead-worker re-dispatch carries.
+
+/** Build the one-line directive handed to a worker whose finished `swarm/*` branch
+ *  CONFLICTS with the trunk at integration. It names the conflicting files (the
+ *  surface {@link integrateBranch} captured), the exact rebase command, and the
+ *  HARD safety contract the worker must honor (the order goal's condition 2):
+ *    • rebase its OWN branch ONLY — never the trunk, never another branch;
+ *    • RESOLVE the conflict + commit, then re-report done (so the engine retries);
+ *    • NEVER push, and NEVER force-push — landing (the push) stays the engine's job.
+ *  The files list is capped so a pathological conflict can't bloat the line. Pure
+ *  (no IO) — unit-tested in isolation. */
+export const buildConflictRebaseInstruction = (opts: {
+  branch: string
+  target: string
+  files?: readonly string[]
+  remote?: string
+}): string => {
+  const remote = opts.remote ?? 'origin'
+  const files = (opts.files ?? []).filter((f) => f && f.trim())
+  const filesNote = files.length
+    ? `競合ファイル: ${files.slice(0, 10).join(', ')}${files.length > 10 ? ` (他${files.length - 10}件)` : ''}`
+    : '競合ファイルは git status で確認'
+  return (
+    `統合時に trunk(${remote}/${opts.target}) との rebase で競合し、自動統合できませんでした。` +
+    `${filesNote}。自分のブランチ ${opts.branch} で ` +
+    `\`git fetch ${remote} && git rebase ${remote}/${opts.target}\` を実行して trunk に乗せ直し、` +
+    `競合を解消して commit してください(解消後は tsc/lint/test を緑に)。` +
+    `push はしないでください — 統合(push)は engine が行います。force-push は絶対に禁止です。`
+  )
+}

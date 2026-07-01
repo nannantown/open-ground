@@ -6,7 +6,8 @@ import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import { __resetOrchestratorForTests } from '@/lib/server/swarmOrchestrator'
-import type { SwarmOrchestratorState } from '@/lib/types'
+import { createSwarmFatalNotification } from '@/lib/server/swarmNotifications'
+import type { SwarmOrchestratorState, AppNotificationsResponse } from '@/lib/types'
 
 // POST /api/swarm/worker + /worktree/remove against the real Hono app, with
 // OPENGROUND_HOME on a throwaway dir so the registry (the validateProjectPath
@@ -293,6 +294,24 @@ describe('owner gate — the in-app swarm is owner-only', () => {
     const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
     expect(res.status).toBe(400)
   })
+
+  it('POST /api/swarm/orchestrator/drain-tick → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/orchestrator/drain-tick', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/drain-tick → 403 for a tester', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/orchestrator/drain-tick', json({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('POST /api/swarm/orchestrator/drain-tick → owner passes the gate (reaches validation: 400)', async () => {
+    await signInAs(OWNER)
+    const res = await app.request('/api/swarm/orchestrator/drain-tick', json({}))
+    expect(res.status).toBe(400)
+  })
 })
 
 describe('POST /api/swarm/orchestrator/automerge (auto-integrate toggle — owner)', () => {
@@ -420,5 +439,56 @@ describe('GET /api/swarm/orchestrator (state — owner)', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as SwarmOrchestratorState
     expect(body.running).toBe(false)
+  })
+})
+
+// The in-app half of the escalation safety valve over the REAL Hono app: prove the
+// owner gate AND that persisted fatal notifications round-trip through the route
+// (newest-first). HOME-isolated (beforeEach), so it writes only to the throwaway
+// home. os:false keeps it off the IPC channel.
+describe('GET /api/swarm/notifications — fatal swarm notifications (owner-only)', () => {
+  it('403 for a signed-out caller', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/notifications')
+    expect(res.status).toBe(403)
+  })
+
+  it('403 for a non-owner', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/notifications')
+    expect(res.status).toBe(403)
+  })
+
+  it('returns the persisted fatal notifications (newest-first) for the owner', async () => {
+    // owner is signed in by beforeEach.
+    await createSwarmFatalNotification(
+      { event: 'all-workers-down', detail: 'zero workers', projectPath: '/p', logHint: 'check log' },
+      { os: false, now: 1000 },
+    )
+    await createSwarmFatalNotification(
+      {
+        event: 'rework-exhausted',
+        detail: 'parked',
+        taskId: 'a',
+        branch: 'swarm/a',
+        logHint: 'blocked col',
+      },
+      { os: false, now: 2000 },
+    )
+    const res = await app.request('/api/swarm/notifications')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as AppNotificationsResponse
+    expect(body.notifications).toHaveLength(2)
+    expect(body.notifications[0].kind).toBe('swarm-fatal')
+    expect(body.notifications[0].swarmFatal?.event).toBe('rework-exhausted') // newest first
+    expect(body.notifications[0].swarmFatal?.logHint).toBe('blocked col') // 導線 round-trips
+    expect(body.notifications[1].swarmFatal?.event).toBe('all-workers-down')
+  })
+
+  it('returns an empty list when nothing fatal has fired', async () => {
+    const res = await app.request('/api/swarm/notifications')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as AppNotificationsResponse
+    expect(body.notifications).toEqual([])
   })
 })

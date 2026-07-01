@@ -11,6 +11,7 @@ import type {
 import { buildScreenSrcdoc, hash32 } from '@/lib/screenSrcdoc'
 import type { InspectPick } from '@/lib/canvasInspect'
 import { resolveOpacity } from '@/lib/canvasTransform'
+import { jobLostToRestart, readBootSignature } from '@/lib/canvasAiRestart'
 import { useT } from '@/i18n/I18nContext'
 import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { ClaudeTerminalPane } from './ClaudeTerminalPane'
@@ -183,6 +184,11 @@ export function useInspectTweak({
   // the poll (an extra GET) on each canvas re-render during a multi-minute run.
   const applyTweakResultRef = useRef(applyTweakResult)
   applyTweakResultRef.current = applyTweakResult
+  // Same rationale for `t`: keep it out of the poll effect's deps (it's a fresh
+  // closure whenever the language provider re-renders) by reading it via a ref,
+  // so a render mid-run never tears down + re-fires the poll.
+  const tRef = useRef(t)
+  tRef.current = t
 
   // Re-attach to a tweak job ALREADY running for THIS element — e.g. the user
   // started one, navigated away (this tile unmounted), and came back. The run
@@ -220,6 +226,13 @@ export function useInspectTweak({
     let cancelled = false
     // Guard against overlapping polls (a GET running past the 1.5s interval).
     let inFlight = false
+    // Fingerprint the server process this job runs under, captured now (while
+    // it's live). A later 404 paired with a DIFFERENT fingerprint means the
+    // whole process was replaced mid-run — the job and its rewrite are gone.
+    let baselineBoot: string | null = null
+    void readBootSignature().then((sig) => {
+      if (!cancelled) baselineBoot = sig
+    })
     const finish = () => {
       setPending(false)
       setJobId(null)
@@ -231,12 +244,24 @@ export function useInspectTweak({
         const res = await fetch(`/api/canvas/ai/job/${encodeURIComponent(jobId)}`)
         if (cancelled) return
         if (res.status === 404) {
+          // Gone from the registry. A NORMAL sweep after the tweak completed
+          // (result already applied) finishes silently as before; a full server
+          // restart that lost the in-flight run surfaces an "interrupted" notice
+          // (the panel stays open with the pick, so it's one click to retry)
+          // rather than letting the tweak quietly disappear.
+          const currentBoot = await readBootSignature()
+          if (cancelled) return
+          if (jobLostToRestart(baselineBoot, currentBoot)) {
+            setNotice({ kind: 'err', text: tRef.current('canvasEl.tweak.interrupted') })
+          }
           finish()
           return
         }
         if (!res.ok) return
         const job = (await res.json()) as CanvasAiJobState
-        if (cancelled || job.status === 'running') return
+        // 'queued' = waiting its turn behind another run in this project — keep
+        // polling (not an error, result not ready).
+        if (cancelled || job.status === 'running' || job.status === 'queued') return
         applyTweakResultRef.current(job)
         finish()
       } catch {

@@ -1,4 +1,4 @@
-import { mkdir, readFile } from 'fs/promises'
+import { mkdir, readFile, rename } from 'fs/promises'
 import { join } from 'path'
 import type { ProjectData } from '../types'
 import { atomicWriteJson } from './atomicWrite'
@@ -137,15 +137,28 @@ declare global {
 // the first. The non-CAS path stays a single atomic whole-file write and is NOT
 // queued. Survives tsx-watch reloads via globalThis (same shape as canvasData's
 // index queue).
+//
+// The lock key MUST be the canonical central data dir (projectDataDir's output —
+// a UUID-derived path), NEVER the raw projectPath. Two spellings of the same
+// project — '/p/x' vs '/p/x/', or a /tmp↔/private/tmp symlink — resolve to the
+// SAME tasks.json but are DIFFERENT raw strings. Keying on the raw path would
+// split them across two queues; both writers then read the same updatedAt at T0,
+// both pass the CAS, both write, and the second SILENTLY clobbers the first (no
+// ProjectDataConflictError thrown). Keying on the resolved dir — the exact file
+// the write touches — makes the lock spelling-independent, so same-project
+// writes always serialize while different projects (different UUIDs ⇒ different
+// dirs) stay parallel.
 const boardWriteQueue: Map<string, Promise<unknown>> =
   globalThis.__openground_board_writes ??
   (globalThis.__openground_board_writes = new Map())
 
-const withBoardLock = <T>(projectPath: string, fn: () => Promise<T>): Promise<T> => {
-  const prev = boardWriteQueue.get(projectPath) ?? Promise.resolve()
+// `lockKey` is the RESOLVED central data dir (await projectDataDir(projectPath)),
+// never the raw path — see the spelling-independence note above.
+const withBoardLock = <T>(lockKey: string, fn: () => Promise<T>): Promise<T> => {
+  const prev = boardWriteQueue.get(lockKey) ?? Promise.resolve()
   const myRun = prev.then(fn)
   // Keep the queue advancing even if one op throws.
-  boardWriteQueue.set(projectPath, myRun.catch(() => undefined))
+  boardWriteQueue.set(lockKey, myRun.catch(() => undefined))
   return myRun
 }
 
@@ -171,16 +184,87 @@ const nextUpdatedAt = (current: string | undefined): string => {
   return new Date(Number.isFinite(cur) && cur >= now ? cur + 1 : now).toISOString()
 }
 
-/** The CAS token lives in the central tasks.json's `updatedAt`. Missing /
- *  unreadable file ⇒ undefined ⇒ first write always passes. */
-const storedUpdatedAt = async (dir: string): Promise<string | undefined> => {
+/** One read of the current central tasks.json yielding the CAS token
+ *  (`updatedAt`) AND whether the file's contents would be LOST by an overwrite —
+ *  either because it is present-but-unparseable (`corrupt`) or because it parses
+ *  but the read path takes its lossy field-level recovery branch (`damaged`:
+ *  the whole-file schema fails, so some tasks/sections get dropped on read).
+ *  A missing file ⇒ all false ⇒ first-write semantics (CAS passes). A
+ *  corrupt/damaged file reports stamp undefined (so CAS still passes, unchanged
+ *  behaviour) so the writer can quarantine it before the overwrite destroys
+ *  recoverable data. */
+const readCasState = async (
+  dir: string,
+): Promise<{ stamp: string | undefined; corrupt: boolean; damaged: boolean }> => {
+  let raw: string
   try {
-    const parsed: unknown = JSON.parse(await readFile(join(dir, TASKS_FILE), 'utf8'))
-    const v = (parsed as { updatedAt?: unknown } | null)?.updatedAt
-    return typeof v === 'string' ? v : undefined
+    raw = await readFile(join(dir, TASKS_FILE), 'utf8')
   } catch {
-    return undefined
+    return { stamp: undefined, corrupt: false, damaged: false } // missing — nothing to quarantine
   }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { stamp: undefined, corrupt: true, damaged: false } // present but unparseable
+  }
+  const v = (parsed as { updatedAt?: unknown } | null)?.updatedAt
+  const stamp = typeof v === 'string' ? v : undefined
+  // `damaged` mirrors readCentralProjectData's decision to fall into field-level
+  // recovery: parse the SAME post-legacy-drop shape through the whole-file
+  // schema. If it fails, reading this file silently drops data — so a write that
+  // overwrites it would make that loss permanent unless we quarantine first.
+  // Legitimate files (extra/legacy keys, .catch() fields) still pass, so the
+  // happy path never quarantines.
+  const damaged = !ProjectDataSchema.safeParse(dropLegacyNonBoardTasks(parsed)).success
+  return { stamp, corrupt: false, damaged }
+}
+
+/** Move a damaged tasks.json aside to a timestamped sibling so the write that
+ *  follows can't silently destroy data the user might still recover by hand
+ *  (goal: a corrupt/invalid file is QUARANTINED, never lost). The epoch-ms stamp
+ *  is Windows-safe (no ':') and unique enough; concurrent writers race on the
+ *  single rename and the loser simply finds the file gone (ENOENT, ignored).
+ *  Best-effort: a quarantine failure must never block the write. */
+const quarantineDamagedTasks = async (dir: string): Promise<void> => {
+  await rename(join(dir, TASKS_FILE), join(dir, `tasks.corrupt-${Date.now()}.json`))
+}
+
+/** The CAS compare + the atomic single-file write as one indivisible unit.
+ *  Locking is the CALLER's job: run this inside {@link withBoardLock} whenever a
+ *  CAS token rides along, so the compare and the write stay atomic against a
+ *  concurrent writer. `dir` is the already-resolved central data dir;
+ *  `expectUpdatedAt` undefined ⇒ a trusting (non-CAS) write. */
+const writeCasGuarded = async (
+  dir: string,
+  data: ProjectData,
+  expectUpdatedAt: string | undefined,
+): Promise<ProjectData> => {
+  // ONE read of the current file: feeds the CAS compare, the next-stamp seed,
+  // and corrupt-file detection from a single consistent snapshot.
+  const current = await readCasState(dir)
+  if (
+    expectUpdatedAt !== undefined &&
+    current.stamp !== undefined &&
+    current.stamp !== expectUpdatedAt
+  ) {
+    throw new ProjectDataConflictError(current.stamp)
+  }
+  // A present-but-damaged file (unparseable, or schema-invalid so the read
+  // dropped data) is about to be overwritten by the atomic write below — and
+  // its (possibly recoverable) contents lost forever. Preserve it as a sibling
+  // quarantine first. Best-effort: never let a quarantine failure block the
+  // user's save.
+  if (current.corrupt || current.damaged) {
+    await quarantineDamagedTasks(dir).catch(() => {})
+  }
+  const next = { ...data, updatedAt: nextUpdatedAt(current.stamp) }
+  // fsync: tasks.json is the user's irreplaceable WORK data (board cards +
+  // notes). Pay the fsync(+dir fsync) cost so a power cut right after a save
+  // can't resurrect an empty/zero file (see atomicWrite's durability note).
+  // Board saves are user-driven (not high-frequency), so the latency is fine.
+  await atomicWriteJson(join(dir, TASKS_FILE), next, { fsync: true })
+  return next
 }
 
 export const writeProjectData = async (
@@ -198,23 +282,59 @@ export const writeProjectData = async (
   // unregistered path).
   const dir = await projectDataDir(projectPath)
   await mkdir(dir, { recursive: true })
-  const checkCas = async (): Promise<void> => {
-    if (opts?.expectUpdatedAt === undefined) return
-    const current = await storedUpdatedAt(dir)
-    if (current !== undefined && current !== opts.expectUpdatedAt) {
-      throw new ProjectDataConflictError(current)
-    }
-  }
   // The single-file write, under the per-project lock when (and only when) a CAS
   // check rides along — the compare and the write must be atomic against a
   // concurrent writer.
-  const write = async () => {
-    await checkCas()
-    const next = { ...data, updatedAt: nextUpdatedAt(await storedUpdatedAt(dir)) }
-    await atomicWriteJson(join(dir, TASKS_FILE), next)
-    return next
-  }
-  return opts?.expectUpdatedAt !== undefined ? withBoardLock(projectPath, write) : write()
+  const write = () => writeCasGuarded(dir, data, opts?.expectUpdatedAt)
+  // Lock on the RESOLVED central dir (not projectPath) so two CAS writes issued
+  // under different spellings of the same project serialize instead of racing —
+  // see withBoardLock's note. `dir` is projectDataDir's UUID-derived output.
+  return opts?.expectUpdatedAt !== undefined ? withBoardLock(dir, write) : write()
+}
+
+/** Atomic server-side read-modify-write of a project's central board data. The
+ *  WHOLE cycle — read the current ProjectData, apply `mutate`, write it back —
+ *  runs inside the per-project board lock, so two concurrent callers can never
+ *  interleave between one's read and its write. The loser waits for the winner's
+ *  write to land, then reads THAT and applies its own mutation on top, so BOTH
+ *  mutations persist — no lost update, no 409/500.
+ *
+ *  This is the race-free way to mutate board cards from a route handler
+ *  (POST /api/project/tasks). The bare `read → mutate →
+ *  writeProjectData({expectUpdatedAt})` sequence races, because its read sits
+ *  OUTSIDE the lock that only the write takes: two handlers read the same
+ *  snapshot, the first write wins, the second fails CAS — which used to surface
+ *  as a 500 with the second handler's mutation silently dropped.
+ *
+ *  `mutate` gets the freshly-read data and may edit it in place (returning
+ *  nothing) or return a replacement. Returns the saved data (bumped updatedAt).
+ *  Throws on an unregistered path like {@link writeProjectData}; can only throw
+ *  {@link ProjectDataConflictError} in the rare case a NON-locked trusting
+ *  writer interleaves — callers map that to 409. */
+export const mutateProjectData = async (
+  projectPath: string,
+  mutate: (data: ProjectData) => void | ProjectData | Promise<void | ProjectData>,
+): Promise<ProjectData> => {
+  // Resolve + registry-check up front (mirrors writeProjectData) so a bad path
+  // fails fast without taking a turn in the lock queue.
+  const dir = await projectDataDir(projectPath)
+  await mkdir(dir, { recursive: true })
+  // Lock on the RESOLVED central dir (not projectPath) — spelling-independent,
+  // so a read-modify-write under one spelling can't interleave with a CAS write
+  // under another spelling of the same project. See withBoardLock's note.
+  return withBoardLock(dir, async () => {
+    const data = await readProjectData(projectPath)
+    const next = (await mutate(data)) ?? data
+    // The CAS token is the stamp we just read INSIDE the lock: other locked
+    // writers serialize behind us so it can't have moved; the guard only fires
+    // if a non-locked trusting writer slipped in, which is exactly when a
+    // refusal is correct.
+    return writeCasGuarded(
+      dir,
+      next,
+      typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
+    )
+  })
 }
 
 export const taskCounts = (data: ProjectData) => {

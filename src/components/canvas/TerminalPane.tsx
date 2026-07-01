@@ -6,10 +6,20 @@ import {
   useRef,
   useState,
 } from 'react'
+import { RotateCcw } from 'lucide-react'
 import { migrateLs } from '@/lib/lsMigrate'
 import { api } from '@/lib/api-client'
 import { sanitizePaneTitle } from '@/lib/paneTitle'
 import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
+import {
+  initialSseState,
+  sseReducer,
+  RECONNECT_PILL_DELAY_MS,
+  RECONNECT_GIVEUP_MS,
+  type SseConnState,
+  type SseInput,
+} from '@/lib/sseReconnect'
+import { useT } from '@/i18n/I18nContext'
 export interface TerminalPaneHandle {
   /** Kill the current PTY and start a fresh shell session. */
   restart: () => void
@@ -76,6 +86,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   { projectPath, slotKey = 'default', onInfo, onTitle },
   ref,
 ) {
+  const { t } = useT()
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<any>(null)
   const fitRef = useRef<any>(null)
@@ -84,6 +95,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const [info, setInfo] = useState<TerminalInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exited, setExited] = useState<TerminalInfo | null>(null)
+  // SSE output-stream status. The browser auto-reconnects on a transport drop
+  // (and the next `init` repaints), but a silent frozen terminal reads as a hang —
+  // so a sustained drop surfaces a debounced "Reconnecting…" pill, and a stream
+  // closed for good offers a manual Reconnect (which re-attaches to the same PTY
+  // via the reloadKey path below). 'connecting' (initial) and 'open' show nothing.
+  const [connState, setConnState] = useState<SseConnState>('connecting')
   // Mirror info upward so the surrounding tab can render `zsh 163×44`. Held
   // in a ref so an inline parent callback doesn't re-fire the effect every
   // render.
@@ -152,6 +169,39 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     let resizeObs: ResizeObserver | null = null
     let es: EventSource | null = null
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    // SSE connection state machine (pure logic in sseReconnect.ts). The pane owns
+    // the side effects the reducer asks for: the two timers, es.close(), and
+    // mirroring conn → React state. dispatch re-enters itself when a timer fires.
+    let machine = initialSseState()
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null
+    let escalateTimer: ReturnType<typeof setTimeout> | null = null
+    const dispatch = (input: SseInput) => {
+      const { state, effects } = sseReducer(machine, input, EventSource.CLOSED)
+      machine = state
+      setConnState(state.conn)
+      for (const eff of effects) {
+        if (eff === 'arm-debounce') {
+          if (!debounceTimer)
+            debounceTimer = setTimeout(() => {
+              debounceTimer = null
+              dispatch({ kind: 'debounce' })
+            }, RECONNECT_PILL_DELAY_MS)
+        } else if (eff === 'arm-escalate') {
+          if (!escalateTimer)
+            escalateTimer = setTimeout(() => {
+              escalateTimer = null
+              dispatch({ kind: 'escalate' })
+            }, RECONNECT_GIVEUP_MS)
+        } else if (eff === 'clear-debounce') {
+          if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
+        } else if (eff === 'clear-escalate') {
+          if (escalateTimer) { clearTimeout(escalateTimer); escalateTimer = null }
+        } else if (eff === 'close-stream') {
+          try { es?.close() } catch {}
+        }
+      }
+    }
+    setConnState('connecting')
 
     ;(async () => {
       // Dynamic import so server-side bundling never reaches into xterm.
@@ -251,6 +301,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       es = new EventSource(`/api/terminal/${session.id}/stream`)
       esRef.current = es
       es.addEventListener('init', (ev: MessageEvent) => {
+        // The stream is (re)connected — clear any pending reconnect notice/timers.
+        dispatch({ kind: 'init' })
         try {
           const { replay, streamId: sid } = JSON.parse(ev.data)
           streamId = typeof sid === 'string' ? sid : null
@@ -300,6 +352,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
         } catch {}
       })
       es.addEventListener('exit', (ev: MessageEvent) => {
+        // A clean PTY exit: stop the reconnect machine (the close that follows is
+        // expected) before surfacing the exited strip.
+        dispatch({ kind: 'exit' })
         try {
           const inf = JSON.parse(ev.data) as TerminalInfo
           setExited(inf)
@@ -311,8 +366,16 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
         // Wipe the cached id so the next mount opens a fresh shell.
         try { localStorage.removeItem(sessionKey(projectPath, slotKey)) } catch {}
       })
-      es.addEventListener('error', () => {
-        // Fires on transport errors too; keep quiet, browser auto-retries.
+      es.addEventListener('error', (ev: Event) => {
+        // A server NAMED error carries data (terminal: the PTY is gone); a plain
+        // transport error has none. The reducer decides ignore/lost/retry and
+        // closes the stream / arms the pill+escalation as needed.
+        const data = (ev as MessageEvent).data
+        dispatch({
+          kind: 'error',
+          hasData: typeof data === 'string' && !!data,
+          readyState: es?.readyState ?? EventSource.CLOSED,
+        })
       })
 
       // Forward keystrokes / paste to the PTY.
@@ -494,6 +557,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     return () => {
       cancelled = true
       if (resizeTimer) clearTimeout(resizeTimer)
+      if (debounceTimer) clearTimeout(debounceTimer)
+      if (escalateTimer) clearTimeout(escalateTimer)
       try { resizeObs?.disconnect() } catch {}
       try { es?.close() } catch {}
       try { (term as any)?._ogDropCleanup?.() } catch {}
@@ -552,13 +617,41 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
           )}
         </div>
       )}
-      <div
-        ref={hostRef}
-        // xterm.js draws inside this div. The padding gives the cursor a bit
-        // of breathing room from the panel edges without confusing fit's math
-        // (its measurements are relative to this container).
-        className="min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2"
-      />
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={hostRef}
+          // xterm.js draws inside this div. The padding gives the cursor a bit
+          // of breathing room from the panel edges without confusing fit's math
+          // (its measurements are relative to this container).
+          className="h-full w-full overflow-hidden bg-[#1a1a1a] px-2 py-2"
+        />
+        {/* SSE reconnect pill — overlays the top of the viewport (no layout shift,
+            so xterm isn't resized) when the output stream drops. Suppressed once
+            the session has exited or an error strip is shown. */}
+        {!exited && !error && (connState === 'reconnecting' || connState === 'lost') && (
+          <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2">
+            <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-[11px] text-white/80 shadow-lg backdrop-blur-[1px]">
+              {connState === 'reconnecting' ? (
+                <>
+                  <RotateCcw size={11} strokeWidth={2.25} className="animate-spin" aria-hidden />
+                  <span>{t('misc.terminal.reconnecting')}</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-accent">{t('misc.terminal.connectionLost')}</span>
+                  <button
+                    type="button"
+                    onClick={() => setReloadKey((k) => k + 1)}
+                    className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white/90 transition-colors hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white"
+                  >
+                    {t('misc.terminal.reconnect')}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 })

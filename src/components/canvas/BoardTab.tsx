@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ChevronRight, Copy, GripVertical, Settings2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ChevronRight, Settings2 } from 'lucide-react'
+import { BoardCard } from '@/components/canvas/BoardCard'
 import {
   CLAUDE_EFFORTS,
   type BoardColumn,
@@ -12,8 +13,8 @@ import {
   type ProjectTask,
 } from '@/lib/types'
 import { newId } from '@/lib/ids'
-import { formatDueShort, isOverdue, unresolvedDeps } from '@/lib/boardDeps'
-import type { BoardCardWorker, WorkerActivity } from '@/lib/boardWorker'
+import { dependencyCycleIds, unresolvedDeps } from '@/lib/boardDeps'
+import type { BoardCardWorker } from '@/lib/boardWorker'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
 import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
@@ -25,39 +26,6 @@ type TFn = (key: MessageKey, vars?: Record<string, string | number>) => string
 // four pickers can't drift apart visually.
 const DEFAULTS_SELECT_CLS =
   'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
-
-// ── Swarm worker status vocabulary (doing-column cards) ──────────────────────
-// The SAME beacon palette the Ground/Board cards + the SwarmWorkerPane already
-// use: azure = working, ochre = waiting, ink-faint = booting/idle, moss = done.
-// Display-only (the strip carries no interactions) — these are status colours,
-// so contrast on the paper card (azure/ochre/moss/ink-faint all clear AA) is the
-// only CLAUDE.md rule that bites here.
-const WORKER_BAND: Record<WorkerActivity, string> = {
-  working: 'bg-azure',
-  waiting: 'bg-ochre',
-  starting: 'bg-ink-faint',
-  done: 'bg-moss',
-}
-const WORKER_DOT: Record<WorkerActivity, string> = {
-  working: 'bg-azure',
-  waiting: 'bg-ochre',
-  starting: 'bg-ink-faint',
-  done: 'bg-moss',
-}
-const WORKER_LABEL_CLS: Record<WorkerActivity, string> = {
-  working: 'text-azure',
-  waiting: 'text-[var(--beacon-waiting)]',
-  starting: 'text-ink-faint',
-  done: 'text-moss',
-}
-// Localized via the SAME keys the Swarm Manager monitor + worker pane use, so a
-// JA owner sees 稼働中 / 待機中 / 起動中 / 完了 — not a board-only English island.
-const WORKER_LABEL_KEY: Record<WorkerActivity, MessageKey> = {
-  working: 'projectPanel.swarm.manager.stageRunning',
-  waiting: 'projectPanel.swarm.statusWaiting',
-  starting: 'projectPanel.swarm.manager.stageStarting',
-  done: 'projectPanel.swarm.manager.stageDone',
-}
 
 // ─── Board tab ───────────────────────────────────────────────────────────────
 // A kanban of task cards (one source of truth in the central tasks.json).
@@ -368,21 +336,21 @@ export const BoardTab = ({
   // cleaned up from the drawer instead — see BoardModule.)
   const addCard = (col: BoardColumn) => onOpenTask(onCreateTask(col))
 
-  // Commit an inline title edit. Empty (trimmed) → the card is removed, so a
-  // card the user added but never named never lingers. Otherwise save the title.
-  const commitCardTitle = (task: ProjectTask, raw: string) => {
-    setEditingId(null)
-    const title = raw.trim()
-    if (!title) {
-      onPersist({ ...data, tasks: data.tasks.filter(x => x.id !== task.id) })
-      return
-    }
-    if (title !== task.title)
-      onPersist({
-        ...data,
-        tasks: data.tasks.map(x => (x.id === task.id ? { ...x, title } : x)),
-      })
-  }
+  // Mutable mirrors of the latest data / persist / drag state. The per-card
+  // callbacks below are wrapped in useCallback with EMPTY dep arrays so their
+  // identity is stable across renders (that stability is precisely what lets the
+  // memoized BoardCard skip untouched cards); they read current values through
+  // these refs instead of closing over render-scoped values. `byColumnRef` is
+  // assigned just after byColumn is computed, below.
+  const dataRef = useRef(data)
+  dataRef.current = data
+  const onPersistRef = useRef(onPersist)
+  onPersistRef.current = onPersist
+  const dragIdRef = useRef(dragId)
+  dragIdRef.current = dragId
+  const dropPosRef = useRef(dropPos)
+  dropPosRef.current = dropPos
+  const byColumnRef = useRef<Record<BoardColumn, ProjectTask[]> | null>(null)
 
   // "Mine only": show just the cards assigned to me. Offered only when the
   // user has a display name to compare against; persisted per project.
@@ -492,33 +460,116 @@ export const BoardTab = ({
     for (const k of Object.keys(groups) as BoardColumn[]) groups[k].sort(byColumnOrder)
     return groups
   }, [visibleTasks])
+  byColumnRef.current = byColumn
+
+  // One id → task lookup per render, shared by every card's unresolvedDeps call.
+  // Built once over ALL tasks (the dep target may be filtered out of the visible
+  // view) — this is what collapses the old per-card `new Map(tasks.map(...))`
+  // (O(N²) per board render, on every drag frame) back to O(N).
+  const tasksById = useMemo(
+    () => new Map(boardTasks.map(task => [task.id, task] as const)),
+    [boardTasks],
+  )
+
+  // Card ids sitting on a dependency CYCLE (A→B→…→A). The swarm's ⑤ DEPENDS gate
+  // would hold these forever — a silent deadlock — so each one's face shows a ⚠
+  // warning chip. Computed over ALL board tasks (not the mine-only visibleTasks
+  // slice) so a loop running through a filtered-out card still warns. See
+  // dependencyCycleIds.
+  const cycleIds = useMemo(() => dependencyCycleIds(boardTasks), [boardTasks])
+
+  // ── Stable per-card callbacks (empty deps; live state read via refs) ───────
+  // Identity stability here is what makes <BoardCard>'s memo effective — a fresh
+  // closure each render would re-render all N cards. The drag-hover slot is set
+  // through `setDrop` with an equality guard so a dragover that doesn't move the
+  // slot is a true no-op; dropPos is NOT a BoardCard prop, so a slot change
+  // re-renders the board shell (placeholder) but not the cards.
 
   // Move `id` into `col`, inserting before `beforeId` (or at the end). Pure
   // logic lives in withCardMoved — crucially it renumbers over the column's
   // FULL card list (not the filtered/visible byColumn slice), so a drag while
   // search / "Mine only" is active can never assign a hidden card and the
   // dropped one the same boardOrder.
-  const moveCard = (id: string, col: BoardColumn, beforeId: string | null) => {
-    const next = withCardMoved(data, id, col, beforeId)
-    if (next !== data) onPersist(next)
-  }
+  const moveCard = useCallback((id: string, col: BoardColumn, beforeId: string | null) => {
+    const next = withCardMoved(dataRef.current, id, col, beforeId)
+    if (next !== dataRef.current) onPersistRef.current(next)
+  }, [])
 
-  const endDrag = () => {
+  const endDrag = useCallback(() => {
     setDragId(null)
     setDragHidden(false)
     setDropPos(null)
-  }
+  }, [])
+
+  const handleDragStart = useCallback((taskId: string, height: number) => {
+    setDragId(taskId)
+    setDragHeight(height)
+    // Hide the source AFTER the browser captured its drag image — hiding
+    // synchronously cancels the native drag.
+    setTimeout(() => setDragHidden(true), 0)
+  }, [])
+
+  // Park the drop slot at {col,index} — but BAIL OUT when it is already there.
+  // dragover fires ~30-60/s; without this guard each fire set a NEW object even
+  // when col+index were unchanged, forcing a board re-render every frame.
+  // Returning the previous reference makes React skip the update entirely.
+  const setDrop = useCallback((col: BoardColumn, index: number) => {
+    setDropPos(prev => (prev && prev.col === col && prev.index === index ? prev : { col, index }))
+  }, [])
 
   // Drop lands where the placeholder is: `index` counts positions in the
   // column's visible cards EXCLUDING the dragged one (the same list the
   // placeholder is rendered into).
-  const commitDrop = () => {
-    if (dragId && dropPos) {
-      const others = byColumn[dropPos.col].filter(t => t.id !== dragId)
-      moveCard(dragId, dropPos.col, others[dropPos.index]?.id ?? null)
+  const commitDrop = useCallback(() => {
+    const draggingId = dragIdRef.current
+    const slot = dropPosRef.current
+    const cols = byColumnRef.current
+    if (draggingId && slot && cols) {
+      const others = cols[slot.col].filter(tk => tk.id !== draggingId)
+      moveCard(draggingId, slot.col, others[slot.index]?.id ?? null)
     }
     endDrag()
-  }
+  }, [moveCard, endDrag])
+
+  // Card-face duplicate (F020).
+  const handleDuplicate = useCallback((taskId: string) => {
+    onPersistRef.current(withCardDuplicated(dataRef.current, taskId))
+  }, [])
+
+  // Merged chip "→ Done": move the card to the done column (F050 — explicit).
+  const handleMoveToDone = useCallback((taskId: string) => {
+    moveCard(taskId, 'done', null)
+  }, [moveCard])
+
+  // Review stamp set/clear (F062). `value === undefined` clears it.
+  const handleSetReviewedBy = useCallback((taskId: string, value: string | undefined) => {
+    const cur = dataRef.current
+    onPersistRef.current({
+      ...cur,
+      tasks: cur.tasks.map(x => (x.id === taskId ? { ...x, reviewedBy: value } : x)),
+    })
+  }, [])
+
+  // Commit an inline title edit (vestigial fallback editor). Empty (trimmed) →
+  // the card is removed, so a card the user added but never named never lingers.
+  // Otherwise save the title.
+  const handleCommitTitle = useCallback(
+    (taskId: string, currentTitle: string, raw: string) => {
+      setEditingId(null)
+      const title = raw.trim()
+      const cur = dataRef.current
+      if (!title) {
+        onPersistRef.current({ ...cur, tasks: cur.tasks.filter(x => x.id !== taskId) })
+        return
+      }
+      if (title !== currentTitle)
+        onPersistRef.current({
+          ...cur,
+          tasks: cur.tasks.map(x => (x.id === taskId ? { ...x, title } : x)),
+        })
+    },
+    [],
+  )
 
   // Bulk-clear the Done column (F073). Counts EVERY done card (filters
   // ignored — the whole column goes), confirms (destructive + shared: on a
@@ -722,430 +773,58 @@ export const BoardTab = ({
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-8 pb-6">
         {COLUMNS.map(col => {
           const cards = byColumn[col.key]
-          const others = dragId ? cards.filter(c => c.id !== dragId) : cards
+          // The column's end-of-list drop index = count of non-source cards.
+          // A count, not a filtered array, so no per-render allocation (#5).
+          const othersCount = dragId
+            ? cards.reduce((n, c) => (c.id !== dragId ? n + 1 : n), 0)
+            : cards.length
           const isDropTarget = dropPos?.col === col.key
           const placeholderIndex = isDropTarget ? dropPos.index : -1
-          const renderCard = (task: ProjectTask, colKey: BoardColumn, visIdx: number) => {
-            const isEditing = task.id === editingId
-            const claudeSt = sessionStatus?.(task.id) ?? null
+          const renderCard = (task: ProjectTask, visIdx: number) => {
+            // Resolve everything board-wide a card needs into PRIMITIVES, so the
+            // memoized BoardCard can shallow-compare and skip when unchanged.
+            // (Passing the raw status functions / data array would make the memo
+            // inert — a fresh value every render re-renders all N cards.)
+            const claudeStatus = sessionStatus?.(task.id) ?? null
             // The swarm worker dispatched onto this card — ONLY in the doing
             // column (a finished worker's card has already moved to review), and
             // ONLY for the owner (the orchestrator poll 403s otherwise → null).
-            // When present, the worker is the AUTHORITATIVE status for this card:
-            // it owns the top edge AND the title stamp below, suppressing the
-            // drawer claude band/stamp so the two can never show conflicting
-            // states (a doing card CAN host a drawer claude session too — opening
-            // its drawer auto-launches plain claude — so this guard is real, not
-            // theoretical).
-            const worker = colKey === 'doing' ? workerForTask?.(task.id) ?? null : null
+            const worker = col.key === 'doing' ? workerForTask?.(task.id) ?? null : null
+            // O(N) total this render: one shared id→task map, no per-card rebuild.
+            const blockedBy = unresolvedDeps(task, tasksById)
             return (
-                      <article
-                        key={task.id}
-                        draggable={!isEditing}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={t('board.card.ariaLabel', {
-                          title: task.title || t('board.card.untitled'),
-                          column: COLUMNS.find(c => c.key === colKey)?.label ?? '',
-                        })}
-                        onClick={() => {
-                          if (!isEditing) onOpenTask(task.id)
-                        }}
-                        onKeyDown={e => {
-                          if (isEditing) return
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            onOpenTask(task.id)
-                          }
-                        }}
-                        onDragStart={e => {
-                          // Some engines (Firefox; Chrome in edge cases) need
-                          // data set for the drag to start at all.
-                          e.dataTransfer?.setData('text/plain', task.id)
-                          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
-                          setDragId(task.id)
-                          setDragHeight(e.currentTarget.offsetHeight)
-                          // Hide the source AFTER the browser captured its drag
-                          // image — hiding synchronously cancels the drag.
-                          setTimeout(() => setDragHidden(true), 0)
-                        }}
-                        onDragEnd={endDrag}
-                        onDragOver={e => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          if (visIdx < 0) return
-                          // Above the card's midline → take its slot; below →
-                          // the slot after it. Index space = visible cards
-                          // excluding the dragged one.
-                          const r = e.currentTarget.getBoundingClientRect()
-                          const before = e.clientY < r.top + r.height / 2
-                          setDropPos({ col: colKey, index: visIdx + (before ? 0 : 1) })
-                        }}
-                        onDrop={e => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          commitDrop()
-                        }}
-                        className={[
-                          'group relative rounded-[3px] border p-2.5 shadow-card transition-colors',
-                          isEditing
-                            ? 'cursor-default border-accent'
-                            : 'cursor-grab hover:border-line-strong active:cursor-grabbing',
-                          // The card whose detail drawer is open reads as
-                          // selected: accent border + a light accent wash.
-                          task.id === openTaskId && !isEditing
-                            ? 'border-accent bg-accent/15'
-                            : 'border-line bg-bg-card',
-                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg-inset',
-                          dragId === task.id && dragHidden ? 'hidden' : '',
-                        ].join(' ')}
-                      >
-                        {/* Top edge — the surveyor's marking. A swarm worker on a
-                            doing card takes precedence (azure scanning while its
-                            PTY produces output, steady otherwise — synced to the
-                            worker; it disappears the moment the engine drops the
-                            worker). Otherwise the same claude-status band the
-                            Ground cards carry: azure scanning while claude works,
-                            steady amber while it waits on the human. */}
-                        {worker ? (
-                          <div
-                            className={[
-                              'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-                              WORKER_BAND[worker.activity],
-                            ].join(' ')}
-                          >
-                            {worker.activity === 'working' && (
-                              <div className="run-scan h-full w-1/3 bg-gradient-to-r from-transparent via-bg-card/85 to-transparent" />
-                            )}
-                          </div>
-                        ) : (
-                          claudeSt && (
-                            <div
-                              className={[
-                                'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-                                claudeSt === 'working' ? 'bg-azure' : 'bg-ochre',
-                              ].join(' ')}
-                            >
-                              {claudeSt === 'working' && (
-                                <div className="run-scan h-full w-1/3 bg-gradient-to-r from-transparent via-bg-card/85 to-transparent" />
-                              )}
-                            </div>
-                          )
-                        )}
-                        {/* Duplicate (F020) — small icon button in the card's
-                            top-right corner, revealed on hover (same
-                            opacity-on-group-hover idiom as the grip). Inserts
-                            a ' (copy)' twin directly below this card. Must
-                            never start a drag or open the drawer. */}
-                        {!isEditing && (
-                          <button
-                            type="button"
-                            draggable={false}
-                            disabled={projectMissing}
-                            aria-label={t('board.card.duplicate')}
-                            title={t('board.card.duplicateTitle')}
-                            onClick={e => {
-                              e.stopPropagation()
-                              onPersist(withCardDuplicated(data, task.id))
-                            }}
-                            onKeyDown={e => {
-                              // Don't let Enter/Space bubble to the card's
-                              // open-drawer keydown handler.
-                              if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
-                            }}
-                            className={[
-                              'absolute right-1 top-1 rounded-sm p-1 text-ink-faint transition-[opacity,color,background-color] focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-                              projectMissing
-                                ? 'cursor-not-allowed opacity-0 group-hover:opacity-40'
-                                : 'opacity-0 hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink group-hover:opacity-100',
-                            ].join(' ')}
-                          >
-                            <Copy size={12} />
-                          </button>
-                        )}
-                        <div className="flex items-start gap-1.5">
-                          <GripVertical
-                            size={12}
-                            className={[
-                              'mt-0.5 shrink-0 text-ink-faint transition-opacity',
-                              isEditing ? 'opacity-0' : 'opacity-0 group-hover:opacity-100',
-                            ].join(' ')}
-                          />
-                          <div className="min-w-0 flex-1">
-                            {isEditing ? (
-                              <textarea
-                                autoFocus
-                                rows={2}
-                                defaultValue={task.title}
-                                placeholder={t('board.detail.titlePlaceholder')}
-                                onClick={e => e.stopPropagation()}
-                                onKeyDown={e => {
-                                  if (e.key === 'Enter' && !e.shiftKey) {
-                                    e.preventDefault()
-                                    e.currentTarget.blur()
-                                  } else if (e.key === 'Escape') {
-                                    e.preventDefault()
-                                    e.currentTarget.blur()
-                                  }
-                                }}
-                                onBlur={e => commitCardTitle(task, e.target.value)}
-                                className="w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-[12.5px] leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
-                              />
-                            ) : (
-                            <p className="text-[12.5px] leading-snug text-ink line-clamp-2">
-                              {/* Drawer-claude stamp — suppressed when a swarm
-                                  worker owns the card (its strip below is the
-                                  authoritative status), so the two never show
-                                  conflicting states on one card. */}
-                              {!worker && claudeSt === 'working' && (
-                                <span
-                                  title={t('board.card.sessionWorking')}
-                                  className="label-cap mr-1.5 inline-flex items-center gap-1 align-middle text-azure"
-                                >
-                                  <span className="run-pulse h-[5px] w-[5px] rounded-full bg-azure" />
-                                  Running
-                                </span>
-                              )}
-                              {!worker && claudeSt === 'waiting' && (
-                                // Steady, no pulse — "your turn" must stay
-                                // visible at a glance (same register as the
-                                // Ground card's Waiting stamp).
-                                <span
-                                  title={t('board.card.sessionWaiting')}
-                                  className="label-cap mr-1.5 inline-flex items-center gap-1 align-middle text-[var(--beacon-waiting)]"
-                                >
-                                  <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
-                                  Waiting
-                                </span>
-                              )}
-                              {task.title || t('board.card.untitledParen')}
-                            </p>
-                            )}
-                            {!isEditing && task.notes?.trim() && (
-                              <p className="mt-1 text-[11px] leading-snug line-clamp-2 text-ink-muted">
-                                {task.notes.trim()}
-                              </p>
-                            )}
-                            {/* Swarm worker strip (条件①②) — WHICH worker owns this
-                                doing card (its swarm/* branch) + whether it's
-                                running / waiting / booting, in the same beacon
-                                vocabulary as the band above and the Swarm pane.
-                                Owner-only + doing-only (gated where `worker` is
-                                computed); the dot breathes only while working so
-                                "your worker is busy" reads at a glance without a
-                                second moving element competing with the band. */}
-                            {!isEditing && worker && (
-                              <div className="mt-1 flex min-w-0 items-center gap-1.5">
-                                <span
-                                  aria-hidden
-                                  className={[
-                                    'h-[5px] w-[5px] shrink-0 rounded-full',
-                                    WORKER_DOT[worker.activity],
-                                    worker.activity === 'working' ? 'run-pulse' : '',
-                                  ].join(' ')}
-                                />
-                                <span
-                                  className={['label-cap shrink-0', WORKER_LABEL_CLS[worker.activity]].join(' ')}
-                                >
-                                  {t(WORKER_LABEL_KEY[worker.activity])}
-                                </span>
-                                <span
-                                  className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted"
-                                  title={
-                                    worker.note
-                                      ? `${worker.branch} — ${worker.note}`
-                                      : worker.phase
-                                        ? `${worker.branch} · ${worker.phase}`
-                                        : worker.branch
-                                  }
-                                >
-                                  {worker.branch}
-                                </span>
-                              </div>
-                            )}
-                            {/* Review stamp — review-column cards carry an
-                                explicit "I looked at this" affordance so the
-                                second pair of eyes is visible ON the board
-                                (F062). Clears automatically on rework moves. */}
-                            {!isEditing && col.key === 'review' && (
-                              task.reviewedBy?.trim() ? (
-                                <button
-                                  type="button"
-                                  draggable={false}
-                                  disabled={projectMissing}
-                                  onClick={e => {
-                                    e.stopPropagation()
-                                    onPersist({
-                                      ...data,
-                                      tasks: data.tasks.map(x =>
-                                        x.id === task.id ? { ...x, reviewedBy: undefined } : x,
-                                      ),
-                                    })
-                                  }}
-                                  // Full name in the tooltip — the visible label
-                                  // truncates on long reviewer names (260px card).
-                                  title={`${t('board.card.reviewedBy', { name: task.reviewedBy.trim() })} — ${t('board.card.reviewedClear')}`}
-                                  className="mt-1 flex max-w-full items-center gap-1 rounded-sm px-0 py-0.5 text-[10px] text-moss transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-moss"
-                                >
-                                  <span aria-hidden className="shrink-0">✓</span>
-                                  <span className="min-w-0 truncate">
-                                    {t('board.card.reviewedBy', { name: task.reviewedBy.trim() })}
-                                  </span>
-                                </button>
-                              ) : displayName?.trim() ? (
-                                <button
-                                  type="button"
-                                  draggable={false}
-                                  disabled={projectMissing}
-                                  onClick={e => {
-                                    e.stopPropagation()
-                                    onPersist({
-                                      ...data,
-                                      tasks: data.tasks.map(x =>
-                                        x.id === task.id
-                                          ? { ...x, reviewedBy: displayName.trim() }
-                                          : x,
-                                      ),
-                                    })
-                                  }}
-                                  title={t('board.card.markReviewedTitle')}
-                                  className="mt-1 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
-                                >
-                                  {t('board.card.markReviewed')}
-                                </button>
-                              ) : null
-                            )}
-                            {/* Auto-integration conflict (Card③) — the commander
-                                engine tried to land this review card's branch but
-                                rebasing it onto the trunk conflicted, so it was
-                                left for a human. A red chip surfaces it ON the
-                                board; it clears automatically on any move out of
-                                review (moveCard). */}
-                            {!isEditing && col.key === 'review' && task.integrationConflict && (
-                              <div
-                                className="mt-1 flex min-w-0 items-center gap-1 rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
-                                title={t('board.card.integrationConflictTitle')}
-                              >
-                                <span aria-hidden className="shrink-0">⚠</span>
-                                <span className="min-w-0 truncate">
-                                  {t('board.card.integrationConflict')}
-                                </span>
-                              </div>
-                            )}
-                            {/* Merged detection (B018/F065) — the branch this
-                                review card carries already landed in the
-                                target branch: a small moss chip + an EXPLICIT
-                                "→ Done" button. Deliberately never automatic
-                                (F050) — the user clicks, the card moves, the
-                                reviewedBy stamp survives (moveCard keeps it
-                                for the done column). */}
-                            {!isEditing &&
-                              col.key === 'review' &&
-                              task.branch &&
-                              mergedByBranch[task.branch] === 'merged' && (
-                                <div className="mt-1 flex min-w-0 items-center gap-1.5">
-                                  <span
-                                    title={t('board.card.mergedTitle')}
-                                    className="shrink-0 rounded-sm border border-moss/40 bg-moss/10 px-1.5 py-0.5 text-[10px] leading-none text-moss"
-                                  >
-                                    {t('board.card.merged')}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    draggable={false}
-                                    disabled={projectMissing}
-                                    onClick={e => {
-                                      e.stopPropagation()
-                                      moveCard(task.id, 'done', null)
-                                    }}
-                                    onKeyDown={e => {
-                                      // Don't let Enter/Space bubble to the
-                                      // card's open-drawer keydown handler.
-                                      if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
-                                    }}
-                                    title={t('board.card.mergedToDoneTitle')}
-                                    className="min-w-0 truncate rounded-sm px-1 py-0.5 text-[10px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-moss active:bg-bg-inset active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-                                  >
-                                    {t('board.card.mergedToDone')}
-                                  </button>
-                                </div>
-                              )}
-                            {/* Footer — PR link + dependency chip "⛓ n"
-                                (unresolved deps, B025) + due chip (B026) on
-                                the left; assignee (small faint text) on the
-                                right. The chips are pure information — not
-                                interactive, title carries the detail. */}
-                            {!isEditing && (() => {
-                              const blockedBy = unresolvedDeps(task, data.tasks)
-                              if (
-                                !task.prUrl &&
-                                !task.assignee?.trim() &&
-                                !task.dueDate &&
-                                blockedBy.length === 0
-                              )
-                                return null
-                              const doneCard = task.done || col.key === 'done'
-                              return (
-                              <div className="mt-1 flex items-center justify-between gap-2">
-                                <span className="flex min-w-0 items-center gap-1.5">
-                                {task.prUrl && (
-                                  <a
-                                    href={task.prUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    draggable={false}
-                                    onClick={e => e.stopPropagation()}
-                                    title={task.prUrl}
-                                    className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-                                  >
-                                    PR ↗
-                                  </a>
-                                )}
-                                {blockedBy.length > 0 && (
-                                  <span
-                                    title={t('board.card.depsTitle', {
-                                      titles: blockedBy
-                                        .map(d => d.title.trim() || t('board.card.untitledParen'))
-                                        .join(', '),
-                                    })}
-                                    className="shrink-0 text-[10px] text-ink-muted"
-                                  >
-                                    {/* U+FE0E pins text presentation — without
-                                        it some platforms render the chain as a
-                                        color emoji. */}
-                                    ⛓︎ {blockedBy.length}
-                                  </span>
-                                )}
-                                {task.dueDate && (
-                                  <span
-                                    title={t('board.card.dueTitle', { date: task.dueDate })}
-                                    className={[
-                                      // max-w + truncate: a malformed/long due
-                                      // string can't blow the card footer row;
-                                      // title carries the full value.
-                                      'max-w-[96px] truncate text-[10px]',
-                                      // Today (inclusive) or earlier = needs
-                                      // attention — unless the card is done.
-                                      !doneCard && isOverdue(task.dueDate)
-                                        ? 'text-accent'
-                                        : 'text-ink-faint',
-                                    ].join(' ')}
-                                  >
-                                    {formatDueShort(task.dueDate)}
-                                  </span>
-                                )}
-                                </span>
-                                {task.assignee?.trim() && (
-                                  <p className="min-w-0 truncate text-right text-[10px] text-ink-faint">
-                                    {task.assignee.trim()}
-                                  </p>
-                                )}
-                              </div>
-                              )
-                            })()}
-                          </div>
-                        </div>
-                      </article>
+              <BoardCard
+                key={task.id}
+                task={task}
+                columnKey={col.key}
+                columnLabel={col.label}
+                visIdx={visIdx}
+                isEditing={task.id === editingId}
+                isSelected={task.id === openTaskId}
+                isDragHidden={dragId === task.id && dragHidden}
+                projectMissing={!!projectMissing}
+                claudeStatus={claudeStatus}
+                workerActivity={worker?.activity ?? null}
+                workerBranch={worker?.branch}
+                workerPhase={worker?.phase}
+                workerNote={worker?.note}
+                depCount={blockedBy.length}
+                depTitlesText={blockedBy
+                  .map(d => d.title.trim() || t('board.card.untitledParen'))
+                  .join(', ')}
+                inCycle={cycleIds.has(task.id)}
+                isMerged={!!(task.branch && mergedByBranch[task.branch] === 'merged')}
+                displayName={displayName}
+                onOpenTask={onOpenTask}
+                onDragStartCard={handleDragStart}
+                onDragEndCard={endDrag}
+                onDragOverCard={setDrop}
+                onDropCard={commitDrop}
+                onDuplicate={handleDuplicate}
+                onCommitTitle={handleCommitTitle}
+                onSetReviewedBy={handleSetReviewedBy}
+                onMoveToDone={handleMoveToDone}
+              />
             )
           }
           return (
@@ -1156,7 +835,7 @@ export const BoardTab = ({
                 // Card-level handlers (capture the precise slot) run first and
                 // stop propagation; reaching here means the pointer is over
                 // column chrome / empty space → park the slot at the end.
-                setDropPos({ col: col.key, index: others.length })
+                setDrop(col.key, othersCount)
               }}
               onDrop={e => {
                 e.preventDefault()
@@ -1228,7 +907,7 @@ export const BoardTab = ({
                     if (!isSource && dragId && placeholderIndex === vis) {
                       rendered.push(placeholder(`ph-${vis}`))
                     }
-                    rendered.push(renderCard(task, col.key, isSource ? -1 : vis))
+                    rendered.push(renderCard(task, isSource ? -1 : vis))
                     if (!isSource) vis++
                   }
                   if (dragId && placeholderIndex >= vis) rendered.push(placeholder('ph-end'))

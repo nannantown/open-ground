@@ -29,7 +29,7 @@ describe('moduleRegistry experiment gate', () => {
   })
 
   it('reveals a gated module only when its experiment is open', () => {
-    const gate = gateFromFlags({ swarm: true })
+    const gate = gateFromFlags({ swarm: true, sandbox: false })
     expect(ids(enabledModules(gate))).toContain('swarm')
     expect(ids(nativeDescriptors(gate))).toContain('swarm')
     // Always-on defaults are unaffected by the gate.
@@ -37,7 +37,17 @@ describe('moduleRegistry experiment gate', () => {
   })
 
   it('a closed flag keeps the module hidden', () => {
-    expect(ids(enabledModules(gateFromFlags({ swarm: false })))).not.toContain('swarm')
+    expect(ids(enabledModules(gateFromFlags({ swarm: false, sandbox: false })))).not.toContain('swarm')
+  })
+
+  it('the sandbox experiment gates NO tab module (it only changes how claude spawns)', () => {
+    // Turning sandbox on must not reveal a tab — it is a launch-time wrapper, not
+    // a module — so the enabled set is identical to the all-off default.
+    expect(ids(enabledModules(gateFromFlags({ swarm: false, sandbox: true })))).toEqual([
+      'board',
+      'canvas',
+      'terminal',
+    ])
   })
 
   it('isModuleEnabled: always-on modules ignore the gate, gated ones require it', () => {
@@ -45,6 +55,6 @@ describe('moduleRegistry experiment gate', () => {
     const swarm = MODULES.find((m) => m.id === 'swarm')!
     expect(isModuleEnabled(board)).toBe(true)
     expect(isModuleEnabled(swarm)).toBe(false) // default gate is closed
-    expect(isModuleEnabled(swarm, gateFromFlags({ swarm: true }))).toBe(true)
+    expect(isModuleEnabled(swarm, gateFromFlags({ swarm: true, sandbox: false }))).toBe(true)
   })
 })

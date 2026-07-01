@@ -65,8 +65,13 @@ const parseLine = (raw: string): UsageLine | null => {
   }
 }
 
-export const collectClaudeUsage = async (): Promise<ClaudeUsage> => {
-  const root = claudeProjectsDir()
+// `projectsDir` defaults to the real ~/.claude/projects; tests pass a fixture
+// dir so the log-aggregation source can be exercised without touching the real
+// home (see claudeUsage.test.ts).
+export const collectClaudeUsage = async (
+  projectsDir: string = claudeProjectsDir(),
+): Promise<ClaudeUsage> => {
+  const root = projectsDir
   const cutoffMs = Date.now() - WINDOW_MS
   const fileCutoffMs = cutoffMs - FILE_MTIME_SLACK_MS
 

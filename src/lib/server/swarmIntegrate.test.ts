@@ -4,13 +4,14 @@ import { promisify } from 'util'
 import { mkdtemp, mkdir, rm, realpath, writeFile, readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, basename } from 'path'
 import {
   classifyBranch,
   integrateBranch,
   resolveTarget,
   fetchTarget,
   isSwarmBranch,
+  buildConflictRebaseInstruction,
 } from './swarmIntegrate'
 
 // Tests against REAL local git fixtures in a tmpdir (mergedBranches /
@@ -19,7 +20,10 @@ import {
 // a SECOND clone simulates another worker landing on the trunk so we exercise
 // the real diverged → rebase → fast-forward path and the conflict abort.
 
-vi.setConfig({ testTimeout: 60_000 })
+// REAL git per test (bare init + two clones + worktree add/commit/rebase/push). 60s
+// covers the body even when the machine is loaded; hookTimeout covers the afterEach
+// recursive rm of a scratch tree that may still hold git worktrees (slow under load).
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
 
 const execFile = promisify(execFileCb)
 
@@ -266,9 +270,11 @@ describe('integrateBranch — conflict', () => {
     expect(trunkX).toBe('from-trunk\n')
     // The worker's branch ref is untouched (no force, no rewrite).
     expect((await git(project, ['rev-parse', 'refs/heads/swarm/conf'])).trim()).toBe(branchTipBefore)
-    // No half-rebase / leftover worktree.
+    // No half-rebase / leftover worktree. Derive the worktree-metadata name from the
+    // dir we actually passed (git names .git/worktrees/<basename>), not from a fragile
+    // `token - 1` recomputation that silently breaks if the counter is touched between.
     expect(existsSync(dir)).toBe(false)
-    expect(existsSync(join(project, '.git', 'worktrees', 'integrate-' + (token - 1)))).toBe(false)
+    expect(existsSync(join(project, '.git', 'worktrees', basename(dir)))).toBe(false)
   })
 })
 
@@ -299,5 +305,49 @@ describe('integrateBranch — refusals', () => {
     const { project } = await makeRemote()
     const out = await integrateBranch(project, 'swarm/ghost', { target: 'main', integrateDir: intDir() })
     expect(out).toEqual({ status: 'skipped', reason: 'branch tip not found' })
+  })
+})
+
+// ── buildConflictRebaseInstruction (card 012a2848) — the worker delegation text ──
+describe('buildConflictRebaseInstruction', () => {
+  it('encodes the rebase command against the trunk and names the conflicting files', () => {
+    const msg = buildConflictRebaseInstruction({
+      branch: 'swarm/w1-abc',
+      target: 'main',
+      files: ['src/a.ts', 'src/b.ts'],
+    })
+    expect(msg).toContain('swarm/w1-abc')
+    expect(msg).toContain('git rebase origin/main') // exact command to land atop trunk
+    expect(msg).toContain('src/a.ts')
+    expect(msg).toContain('src/b.ts')
+    // It is a SINGLE line (the orchestrator writes it to a PTY as one turn).
+    expect(msg).not.toContain('\n')
+  })
+
+  it('states the HARD safety contract: rebase your OWN branch, never (force-)push (condition 2)', () => {
+    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'main' })
+    expect(msg).toContain('自分のブランチ') // own branch only
+    expect(msg).toContain('force-push') // ...and the prohibition on it
+    expect(msg).toMatch(/push はしない/) // the worker never pushes — the engine lands it
+  })
+
+  it('falls back to a git-status hint when no files are surfaced, and respects a custom remote', () => {
+    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'develop', remote: 'upstream' })
+    expect(msg).toContain('git status') // no file list → tell the worker how to find it
+    expect(msg).toContain('git rebase upstream/develop') // honors the remote + target
+  })
+
+  it('caps a pathological conflict-file list so the line stays legible', () => {
+    const files = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`)
+    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'main', files })
+    expect(msg).toContain('他15件') // 25 - 10 shown
+    expect(msg).toContain('src/f0.ts')
+    expect(msg).not.toContain('src/f10.ts') // beyond the cap, not listed inline
+  })
+
+  it('ignores blank/whitespace file entries (no empty tokens in the line)', () => {
+    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'main', files: ['', '  ', 'src/real.ts'] })
+    expect(msg).toContain('競合ファイル: src/real.ts')
+    expect(msg).not.toContain('競合ファイルは git status') // a real file IS present → not the fallback
   })
 })

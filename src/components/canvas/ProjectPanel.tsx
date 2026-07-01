@@ -713,7 +713,17 @@ const OwnedProjectBody = ({
     setLoadError(null)
     api.api.project
       .$get({ query: { path: requestedPath } }, { init: { cache: 'no-store' } })
-      .then(r => r.json() as Promise<ProjectData>)
+      .then(r => {
+        // res.ok guard — the SAME contract as reloadProjectData / persist / the
+        // describe poll. A non-2xx body is an `{ error }` envelope, NOT
+        // ProjectData: if this project was unregistered in another window the
+        // GET returns 403 { error }. Parsing+adopting that as `data` left
+        // loadError null (no Retry) AND fed BoardModule a tasks-less object →
+        // data.tasks.find TypeError → white screen. Throwing routes it through
+        // the catch below to setLoadError, surfacing the designed Retry UI.
+        if (!r.ok) throw new Error(`Failed to load project (${r.status})`)
+        return r.json() as Promise<ProjectData>
+      })
       .then((d: ProjectData) => {
         if (cancelled) return
         setData(d)
@@ -846,9 +856,11 @@ const OwnedProjectBody = ({
   // until its gate is open, so this Set is empty for everyone but the owner with
   // the toggle on — keeping the registry filter below a no-op in the common case.
   const moduleGate = useMemo<ModuleGate>(
-    () => gateFromFlags(experiments ?? { swarm: false }),
+    () => gateFromFlags(experiments ?? { swarm: false, sandbox: false }),
     // One key per experiment — extend when a new ExperimentId is added so the
     // gate recomputes when that flag flips. (Stable across identity-only changes.)
+    // `sandbox` is intentionally absent: it gates no tab module (it only changes
+    // how launchClaude spawns), so it never affects this module gate.
     [experiments?.swarm],
   )
   // The enabled built-in module ids in registry (default) order — gated

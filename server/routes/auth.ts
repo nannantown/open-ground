@@ -24,6 +24,8 @@
 // it directly (the browser does, via Supabase's 302).
 
 import { Hono } from 'hono'
+import type { Context } from 'hono'
+import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import { randomBytes, createHash } from 'node:crypto'
 import {
   readSession,
@@ -37,6 +39,7 @@ import {
   toAuthUser,
   expiryFrom,
 } from '@/lib/server/supabaseAuth'
+import { clearMembershipCache } from '@/lib/server/projectMembers'
 import type { AuthProvider, AuthSessionResponse } from '@/lib/types'
 
 // The OAuth redirect URI — the same loopback Hono origin in dev and prod. This
@@ -94,13 +97,35 @@ const takePending = (): PendingAuth | null => {
   return p
 }
 
+// Cap the reflected message length. A hostile `error` / `error_description` is
+// attacker-controllable; every trusted message we pass is short, so this only
+// ever bites untrusted input and never truncates a real message.
+const MAX_MESSAGE_LEN = 200
+
+// HTML-escape the five significant characters before the message is interpolated
+// into the page. The callback reflects attacker-controllable query params on this
+// privileged loopback origin (127.0.0.1:47776), so an unescaped `<img onerror=…>`
+// / `<script>` would execute and could drive /api/* (file IO, claude PTY). Quotes
+// are escaped too, so the value stays inert even if a future edit moves the
+// interpolation into an attribute context.
+const escapeHtml = (s: string): string =>
+  s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+
 // Tiny self-contained HTML for the callback window. No external assets (the
 // browser tab is short-lived and may have no network to our origin's assets).
-const callbackPage = (ok: boolean, message: string): string => `<!doctype html>
+// `message` is length-capped then escaped; the page's own <style>/<script> carry
+// the per-response `nonce` so the strict CSP in renderCallback authorizes them
+// while the browser refuses any injected script.
+const callbackPage = (ok: boolean, message: string, nonce: string): string => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>OPEN GROUND</title>
-<style>
+<style nonce="${nonce}">
   body{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;
     background:#0a0a0a;color:#fff;font:14px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
   .card{text-align:center;max-width:360px;padding:32px}
@@ -110,10 +135,33 @@ const callbackPage = (ok: boolean, message: string): string => `<!doctype html>
 </style></head>
 <body><div class="card">
   <h1><span class="dot">●</span> ${ok ? 'Signed in' : 'Sign-in failed'}</h1>
-  <p>${message}</p>
+  <p>${escapeHtml(message.slice(0, MAX_MESSAGE_LEN))}</p>
 </div>
-<script>setTimeout(function(){ try { window.close(); } catch (e) {} }, 1200);</script>
+<script nonce="${nonce}">setTimeout(function(){ try { window.close(); } catch (e) {} }, 1200);</script>
 </body></html>`
+
+// Render the callback page with a per-response strict Content-Security-Policy.
+// A fresh nonce authorizes ONLY the page's own inline <style>/<script>; with
+// `default-src 'none'` and a nonce'd (NOT 'unsafe-inline') script-src, the
+// browser refuses every injected <script> AND inline event handler
+// (onerror/onclick) — a second wall behind escapeHtml on this privileged
+// loopback origin.
+const renderCallback = (
+  c: Context,
+  ok: boolean,
+  message: string,
+  status: ContentfulStatusCode = 200,
+): Response => {
+  const nonce = base64url(randomBytes(16))
+  const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'`
+  return c.html(callbackPage(ok, message, nonce), status, {
+    'Content-Security-Policy': csp,
+    // Belt-and-suspenders: c.html already sets text/html; charset=UTF-8, but
+    // nosniff stops any browser from re-interpreting this reflected-input page
+    // as another type.
+    'X-Content-Type-Options': 'nosniff',
+  })
+}
 
 export const authRoutes = new Hono()
   // --- GET /api/auth/config -------------------------------------------------
@@ -160,16 +208,16 @@ export const authRoutes = new Hono()
   // on a blank tab.
   .get('/api/auth/callback', async (c) => {
     const config = readAuthConfig()
-    if (!config) return c.html(callbackPage(false, 'Login is not configured.'), 503)
+    if (!config) return renderCallback(c, false, 'Login is not configured.', 503)
 
     const code = c.req.query('code')
     const errParam = c.req.query('error_description') || c.req.query('error')
 
     if (errParam) {
-      return c.html(callbackPage(false, String(errParam)))
+      return renderCallback(c, false, String(errParam))
     }
     if (!code) {
-      return c.html(callbackPage(false, 'Missing authorization code.'), 400)
+      return renderCallback(c, false, 'Missing authorization code.', 400)
     }
 
     // Single in-flight verifier, read-and-cleared (single-use → guards replay).
@@ -177,7 +225,7 @@ export const authRoutes = new Hono()
     // the security binding; absent/expired = reject.
     const entry = takePending()
     if (!entry) {
-      return c.html(callbackPage(false, 'This sign-in link has expired. Please try again.'), 400)
+      return renderCallback(c, false, 'This sign-in link has expired. Please try again.', 400)
     }
 
     const token = await postToken(config, 'pkce', {
@@ -185,7 +233,7 @@ export const authRoutes = new Hono()
       code_verifier: entry.verifier,
     })
     if (!token?.access_token || !token.refresh_token || !token.user?.id) {
-      return c.html(callbackPage(false, 'Could not complete sign-in. Please try again.'), 502)
+      return renderCallback(c, false, 'Could not complete sign-in. Please try again.', 502)
     }
 
     const session: StoredSession = {
@@ -196,7 +244,7 @@ export const authRoutes = new Hono()
     }
     await writeSession(session)
 
-    return c.html(callbackPage(true, 'You can return to OPEN GROUND.'))
+    return renderCallback(c, true, 'You can return to OPEN GROUND.')
   })
 
   // --- GET /api/auth/session ------------------------------------------------
@@ -275,5 +323,12 @@ export const authRoutes = new Hono()
       }
     }
     await clearSession()
+    // Drop the in-memory membership cache too: it is keyed by user id, but a
+    // stale FRESH entry for the user who just signed out must not linger to be
+    // served to a DIFFERENT account that signs in on this machine within the TTL
+    // (the cross-account collab-data leak this guards against). getMyMembership
+    // also gates on the session now, so this is belt-and-braces — but it keeps
+    // the cache from holding a signed-out user's roster answer at all.
+    clearMembershipCache()
     return c.json({ ok: true })
   })

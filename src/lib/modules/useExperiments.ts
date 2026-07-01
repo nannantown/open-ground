@@ -16,7 +16,7 @@ import type { ExperimentFlags, ExperimentsResponse } from '@/lib/types'
 
 // Fail-closed defaults: nothing eligible, every flag off. Matches the shipped /
 // signed-out / non-owner state until the first fetch resolves.
-const NO_FLAGS: ExperimentFlags = { swarm: false }
+const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false }
 
 export interface ExperimentsState {
   /** The user may toggle experiments at all (owner). Gates the settings toggle. */
@@ -50,7 +50,10 @@ export function useExperiments(): ExperimentsState {
       setEligible(!!body.eligible)
       // Take only known flag keys, coerced to booleans — never trust the wire to
       // be exactly NO_FLAGS' shape.
-      setFlags({ swarm: body.flags?.swarm === true })
+      setFlags({
+        swarm: body.flags?.swarm === true,
+        sandbox: body.flags?.sandbox === true,
+      })
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known gate quietly.

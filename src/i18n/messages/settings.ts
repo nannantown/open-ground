@@ -21,6 +21,7 @@ export const settings = {
     'settings.experiments.heading': 'Experiments',
     'settings.experiments.hint': 'Early, owner-only features. Off by default; not covered by support.',
     'settings.experiments.swarm': 'Swarm orchestration',
+    'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
     // Plan
@@ -68,6 +69,7 @@ export const settings = {
     'settings.experiments.heading': '実験的機能',
     'settings.experiments.hint': '初期段階のオーナー限定機能です。既定はオフで、サポート対象外です。',
     'settings.experiments.swarm': 'Swarm オーケストレーション',
+    'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
     'settings.workspace.heading': 'デフォルトの作業フォルダ',

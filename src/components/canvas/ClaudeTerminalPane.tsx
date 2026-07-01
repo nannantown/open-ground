@@ -2,6 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Power, RotateCcw } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
+import {
+  initialSseState,
+  sseReducer,
+  RECONNECT_PILL_DELAY_MS,
+  RECONNECT_GIVEUP_MS,
+  type SseConnState,
+  type SseInput,
+} from '@/lib/sseReconnect'
 import { useT } from '@/i18n/I18nContext'
 
 export interface TerminalInfo {
@@ -68,6 +76,15 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
   // A relaunch via onRestart is in flight — drives the overlay button's disabled
   // state so a second click can't fire a second spawn.
   const [restarting, setRestarting] = useState(false)
+  // SSE output-stream status. The browser auto-reconnects on a transport drop
+  // (and the next `init` repaints the screen), but a silent frozen terminal reads
+  // as a hang — so a sustained drop surfaces a debounced "Reconnecting…" pill, and
+  // a stream closed for good (readyState CLOSED, or a server 'not found') offers a
+  // manual Reconnect. 'connecting' (initial) and 'open' show nothing.
+  const [connState, setConnState] = useState<SseConnState>('connecting')
+  // Bumped by the manual Reconnect button to re-key the spawn effect (re-probe +
+  // re-open the stream) after the EventSource gave up.
+  const [reconnectKey, setReconnectKey] = useState(0)
 
   const onExitRef = useRef(onExit)
   onExitRef.current = onExit
@@ -115,8 +132,41 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
     let resizeObs: ResizeObserver | null = null
     let es: EventSource | null = null
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    // SSE connection state machine (pure logic in sseReconnect.ts). The pane owns
+    // the side effects the reducer asks for: the two timers, es.close(), and
+    // mirroring conn → React state. dispatch re-enters itself when a timer fires.
+    let machine = initialSseState()
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null
+    let escalateTimer: ReturnType<typeof setTimeout> | null = null
+    const dispatch = (input: SseInput) => {
+      const { state, effects } = sseReducer(machine, input, EventSource.CLOSED)
+      machine = state
+      setConnState(state.conn)
+      for (const eff of effects) {
+        if (eff === 'arm-debounce') {
+          if (!debounceTimer)
+            debounceTimer = setTimeout(() => {
+              debounceTimer = null
+              dispatch({ kind: 'debounce' })
+            }, RECONNECT_PILL_DELAY_MS)
+        } else if (eff === 'arm-escalate') {
+          if (!escalateTimer)
+            escalateTimer = setTimeout(() => {
+              escalateTimer = null
+              dispatch({ kind: 'escalate' })
+            }, RECONNECT_GIVEUP_MS)
+        } else if (eff === 'clear-debounce') {
+          if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
+        } else if (eff === 'clear-escalate') {
+          if (escalateTimer) { clearTimeout(escalateTimer); escalateTimer = null }
+        } else if (eff === 'close-stream') {
+          try { es?.close() } catch {}
+        }
+      }
+    }
     setError(null)
     setExited(null)
+    setConnState('connecting')
 
     ;(async () => {
       // Dynamic import so server-side bundling never reaches into xterm.
@@ -218,6 +268,8 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
       es = new EventSource(`/api/terminal/${terminalId}/stream`)
       esRef.current = es
       es.addEventListener('init', (ev: MessageEvent) => {
+        // The stream is (re)connected — clear any pending reconnect notice/timers.
+        dispatch({ kind: 'init' })
         try {
           const { replay, streamId: sid } = JSON.parse(ev.data)
           streamId = typeof sid === 'string' ? sid : null
@@ -267,12 +319,26 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
         } catch {}
       })
       es.addEventListener('exit', (ev: MessageEvent) => {
+        // A clean PTY exit: stop the reconnect machine (the close that follows is
+        // expected) before surfacing the exited overlay/strip.
+        dispatch({ kind: 'exit' })
         try {
           const inf = JSON.parse(ev.data) as TerminalInfo
           setExited(inf)
           onExitRef.current?.(inf)
         } catch {}
         try { es?.close() } catch {}
+      })
+      es.addEventListener('error', (ev: Event) => {
+        // A server NAMED error carries data (terminal: the PTY is gone); a plain
+        // transport error has none. The reducer decides ignore/lost/retry and
+        // closes the stream / arms the pill+escalation as needed.
+        const data = (ev as MessageEvent).data
+        dispatch({
+          kind: 'error',
+          hasData: typeof data === 'string' && !!data,
+          readyState: es?.readyState ?? EventSource.CLOSED,
+        })
       })
 
       // Forward keystrokes / paste to the PTY (claude TUI reads them as if
@@ -388,6 +454,8 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
     return () => {
       cancelled = true
       if (resizeTimer) clearTimeout(resizeTimer)
+      if (debounceTimer) clearTimeout(debounceTimer)
+      if (escalateTimer) clearTimeout(escalateTimer)
       try { resizeObs?.disconnect() } catch {}
       try { es?.close() } catch {}
       try { (term as any)?._ogDropCleanup?.() } catch {}
@@ -398,7 +466,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
       fitRef.current = null
       esRef.current = null
     }
-  }, [terminalId, sendInput])
+  }, [terminalId, sendInput, reconnectKey])
 
   return (
     <div className="flex h-full w-full min-h-0 flex-col bg-[#1a1a1a]">
@@ -452,6 +520,32 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
           ref={hostRef}
           className="h-full w-full overflow-hidden bg-[#1a1a1a] px-2 py-2"
         />
+        {/* SSE reconnect pill — overlays the top of the viewport (no layout shift,
+            so xterm isn't resized) when the output stream drops. Suppressed once
+            the PTY has exited or a probe error is shown (those own the affordance). */}
+        {!exited && !error && (connState === 'reconnecting' || connState === 'lost') && (
+          <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2">
+            <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-[11px] text-white/80 shadow-lg backdrop-blur-[1px]">
+              {connState === 'reconnecting' ? (
+                <>
+                  <RotateCcw size={11} strokeWidth={2.25} className="animate-spin" aria-hidden />
+                  <span>{t('misc.terminal.reconnecting')}</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-accent">{t('misc.terminal.connectionLost')}</span>
+                  <button
+                    type="button"
+                    onClick={() => setReconnectKey((k) => k + 1)}
+                    className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white/90 transition-colors hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white"
+                  >
+                    {t('misc.terminal.reconnect')}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
         {onRestart && (exited || error) && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[1px]">
             <div className="flex max-w-[260px] flex-col items-center gap-3 rounded-[6px] border border-white/15 bg-[#222222] px-5 py-4 text-center shadow-lg">

@@ -68,6 +68,13 @@ gh release edit vX.Y.Z --repo nannantown/open-ground \
   --notes-file notes.md --draft=false --latest
 ```
 
+> **Before that publish, verify the built dmg.** Download the draft Release's
+> macOS artifact and run `scripts/verify-dmg.sh <dmg> X.Y.Z [marker]` (see §4) —
+> it confirms the bundle's version + arm64 slice from the dmg's **own `hdiutil`
+> mount**, which is exactly the check the 2026-06-25 wrong-volume / Rosetta
+> footguns broke (a phantom version misread → an /Applications downgrade). Only
+> flip the draft `--draft=false` once it reports `verify-dmg: OK`.
+
 That's it — no local signing, no Wine, no Windows hardware needed to *build*.
 electron-builder's `--publish` uploads each runner's artifact to the Release
 named after the tag. Both `latest-mac.yml` (macOS) and `latest.yml` (Windows)
@@ -273,9 +280,26 @@ update is an explicit user action. `autoInstallOnAppQuit` is disabled for the
 same reason. This whole path is gated on `app.isPackaged`, so a dev run never
 contacts GitHub or logs updater errors.
 
+> **Restart-now ordering invariant (regression-guarded).** "Restart now" must
+> tear the forked Hono server child down **before** calling `quitAndInstall()`.
+> The `before-quit` handler reaps that child by `event.preventDefault()`-ing the
+> quit; `quitAndInstall()` also triggers a quit, so if `before-quit` intercepts
+> *that* one it replaces the install with a plain `app.quit()` and the update is
+> downloaded but never applied — "Restart now" becomes a silent no-op (observed
+> 2026-06-25, fixed in 0.11.8 / `cc529d9`). Tearing the server down first leaves
+> `serverChild` null (it exited) or `killed` (SIGKILL flips the flag
+> synchronously), so `before-quit`'s "are there live children?" predicate is
+> false and it returns early without intercepting. The ordering and that
+> predicate now live as pure functions in **`electron/autoUpdate.js`**
+> (`applyDownloadedUpdate` / `hasLiveForkedChildren`), and
+> **`server/__tests__/autoUpdate.test.ts`** locks both — reorder the teardown or
+> drop the `killed` arm of the predicate and the suite goes red.
+
 ---
 
 ## 4. Validating a downloaded build before opening it
+
+**Authenticity** (is this bundle genuinely signed + notarized?):
 
 If you ship to someone else and they want to sanity-check the bundle is
 genuine, they can run:
@@ -288,6 +312,47 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 
 All three should succeed. If `spctl` reports "rejected", the bundle isn't
 properly notarized — re-run step 2 above.
+
+**Identity** (is this dmg really vX.Y.Z, arm64?) — use the script, not ad-hoc
+shell:
+
+```bash
+scripts/verify-dmg.sh "OPEN GROUND-0.11.11-arm64.dmg" 0.11.11 swarmOrchestrator
+```
+
+It mounts the dmg, prints the bundle's `CFBundleShortVersionString` + Mach-O
+arch, optionally greps a feature marker in the server bundle, and detaches —
+exiting non-zero on a version mismatch or a missing feature marker, and **warning
+(not failing)** on a missing arm64 slice (the Intel `--x64` dmg legitimately has
+none, so that stays a heads-up, not an error). **Always verify through this
+script** rather than eyeballing `/Volumes/…`, because two footguns
+have bitten this exact step before (2026-06-25 release post-mortem; the memory is
+`reference_og_dmg_verify_and_autoupdate`):
+
+- **Wrong-volume mix-up.** Mounting several OG dmgs leaves multiple
+  `/Volumes/OPEN GROUND …` volumes (macOS appends ` 1`, ` 2`). Picking one with
+  `ls -d "/Volumes/OPEN GROUND"* | head -1` grabs an **unrelated, different-version**
+  volume and misreads its version — that once produced a phantom *"v0.11.7 dmg
+  actually contains 0.10.1"* and an /Applications **downgrade**. The script takes
+  the mount point from **this attach's own `hdiutil` output** instead:
+
+  ```bash
+  attach_out=$(hdiutil attach -nobrowse -noverify -noautoopen "$DMG" 2>&1)
+  VOL=$(printf '%s\n' "$attach_out" | grep -oE '/Volumes/.*' | tail -1)  # never `ls /Volumes | head`
+  ```
+
+- **Rosetta arch misread.** Under Rosetta 2 a shell runs as x86_64 on Apple
+  Silicon, so **`uname -m` reports Intel** on an M-series Mac. Read the real
+  hardware with `sysctl` and the artifact's arch with `lipo`, never `uname -m`:
+
+  ```bash
+  sysctl -n hw.optional.arm64        # 1 = Apple Silicon (untranslated)
+  lipo -archs "/Volumes/…/OPEN GROUND.app/Contents/MacOS/OPEN GROUND"   # artifact slices
+  ```
+
+Both anti-footgun shapes are regression-locked by
+**`server/__tests__/verifyDmgScript.test.ts`** — revert the script to `ls`-of-
+`/Volumes` or `uname -m` and the suite goes red.
 
 ---
 

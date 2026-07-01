@@ -95,8 +95,9 @@ export const knownClaudeLocations = (): string[] => {
 // absolute target when step 1 matched only the bare name. The server's PATH is
 // the login-shell PATH (Electron resolves it via `zsh -lic` before forking), so
 // this finds the same claude the indicator validated, independent of whatever
-// the spawned PTY's `zsh -l` ends up with.
-const absoluteClaudeOnPath = (): string | null => {
+// the spawned PTY's `zsh -l` ends up with. Exported so the /usage scrape
+// (claudeUsageCli) shares this robust resolution instead of a fixed path list.
+export const absoluteClaudeOnPath = (): string | null => {
   const sep = isWindows ? ';' : ':'
   const names = isWindows ? ['claude.cmd', 'claude.exe', 'claude'] : ['claude']
   for (const dir of (process.env.PATH || '').split(sep)) {

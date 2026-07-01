@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.11",
+  "version": "0.11.12",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -15,6 +15,7 @@
     "start": "PORT=47776 node server/dist/index.cjs",
     "lint": "eslint . --ext .ts,.tsx",
     "check:screens": "npx tsx scripts/check-screen-modules.ts",
+    "you-corpus": "tsx scripts/you-corpus.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
@@ -23,6 +24,7 @@
     "dist": "npm run build && electron-builder --mac --arm64 --x64",
     "dist:local": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --config.mac.notarize=false --config.mac.identity=null",
     "dist:win": "npm run build && electron-builder --win",
+    "verify:dmg": "scripts/verify-dmg.sh",
     "deploy:landing": "rm -rf /tmp/og-landing-deploy && cp -R landing /tmp/og-landing-deploy && cd /tmp/og-landing-deploy && npx wrangler pages deploy . --project-name=open-ground",
     "postinstall": "patch-package && electron-builder install-app-deps"
   },
@@ -36,7 +38,7 @@
     "electron-updater": "^6.3.9",
     "hono": "^4.12.23",
     "lucide-react": "^0.460.0",
-    "node-pty": "^1.2.0-beta.13",
+    "node-pty": "^1.2.0-beta.14",
     "partysocket": "^1.1.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

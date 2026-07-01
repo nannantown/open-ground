@@ -3,6 +3,7 @@ import {
   listActiveTerminalCwds,
   listActiveTerminals,
   claudeStatus,
+  scheduleMenuDetect,
   getTerminal,
   getTerminalScreen,
   killTerminalsByCwd,
@@ -12,13 +13,17 @@ import {
   unregisterFlowStream,
   pickShell,
   sweepTerminalPool,
+  startTerminalSweepLoop,
+  stopTerminalSweepLoop,
   TERMINAL_LINGER_SWEEP_MS,
+  TERMINAL_SWEEP_INTERVAL_MS,
   WORKING_SILENCE_MS,
   FLOW_HIGH_WATERMARK,
   FLOW_LOW_WATERMARK,
   FLOW_PAUSE_CAP_MS,
 } from './terminal'
 import type { TerminalInfo } from './terminal'
+import { Terminal as HeadlessTerminal } from '@xterm/headless'
 
 // listActiveTerminalCwds is exercised through the same globalThis seam the
 // module itself uses to survive tsx-watch reloads (__openground_terminal).
@@ -51,6 +56,7 @@ const fakeSession = (
     tag?: 'shell' | 'claude'
     lastOutputAt?: number
     menuOpen?: boolean
+    hidden?: boolean
   } = {},
 ): FakeSessionShape => ({
   info: {
@@ -63,6 +69,7 @@ const fakeSession = (
     tag: opts.tag ?? 'shell',
     ...(opts.lastOutputAt !== undefined ? { lastOutputAt: opts.lastOutputAt } : {}),
     ...(opts.menuOpen !== undefined ? { menuOpen: opts.menuOpen } : {}),
+    ...(opts.hidden ? { hidden: true } : {}),
     ...(opts.finishedAt ? { finishedAt: opts.finishedAt, exitCode: 0 } : {}),
   },
   pty: {},
@@ -119,6 +126,17 @@ describe('listActiveTerminalCwds', () => {
     )
     expect(listActiveTerminalCwds()).toEqual([])
   })
+
+  it('INCLUDES a hidden utility session — it is the liveness primitive, not the beacon', () => {
+    // worktreeCleanup reads this to never reap a worktree with a live PTY in it,
+    // so a background auto-title/describe session (hidden) must still count here —
+    // only the user-facing beacon (listActiveTerminals) filters hidden out.
+    state().sessions.set(
+      'util',
+      fakeSession('util', '/tmp/proj-a', { tag: 'claude', hidden: true }),
+    )
+    expect(listActiveTerminalCwds()).toEqual(['/tmp/proj-a'])
+  })
 })
 
 describe('claudeStatus', () => {
@@ -141,6 +159,122 @@ describe('claudeStatus', () => {
   it('silence past the threshold (or no output yet) → waiting', () => {
     expect(claudeStatus(info({ lastOutputAt: NOW - WORKING_SILENCE_MS }), NOW)).toBe('waiting')
     expect(claudeStatus(info({}), NOW)).toBe('waiting')
+  })
+})
+
+describe('scheduleMenuDetect — menu verdict across a post-approval work burst', () => {
+  // The bug: after the human answers a permission prompt, claude immediately
+  // floods tool output (chunks < MENU_DETECT_DEBOUNCE_MS apart). The trailing
+  // debounce kept getting cleared + rescheduled on every chunk and so NEVER
+  // fired, leaving menuOpen pinned to the `true` it held before the answer — and
+  // claudeStatus short-circuits menuOpen to 'waiting', so the beacon stuck on
+  // "waiting" for the whole burst even though claude was plainly working. The fix
+  // is the EAGER clear inside scheduleMenuDetect: fresh output ⇒ the screen is
+  // repainting ⇒ not a static menu ⇒ drop the stale verdict at once; the
+  // settled-frame detect re-confirms a real menu so the clear is self-correcting.
+  //
+  // These drive the REAL headless screen model (vitest's default `node` env;
+  // setup-home redirects OPENGROUND_HOME to a tmp dir, so HOME stays isolated).
+
+  type MenuSession = Parameters<typeof scheduleMenuDetect>[0]
+
+  const claudeSessionWithScreen = (): { session: MenuSession; headless: HeadlessTerminal } => {
+    const headless = new HeadlessTerminal({ cols: 80, rows: 24, allowProposedApi: true, scrollback: 0 })
+    const info: TerminalInfo = {
+      id: 'menu-test',
+      cwd: '/tmp/proj-a',
+      shell: '/bin/zsh',
+      cols: 80,
+      rows: 24,
+      startedAt: new Date().toISOString(),
+      tag: 'claude',
+    }
+    const session = {
+      info,
+      pty: {},
+      buffer: '',
+      listeners: new Set<(c: string) => void>(),
+      exitListeners: new Set<(i: TerminalInfo) => void>(),
+      headless,
+      menuTimer: null as ReturnType<typeof setTimeout> | null,
+    }
+    return { session: session as MenuSession, headless }
+  }
+
+  // Resolve once xterm has parsed the chunk into the buffer — a deterministic
+  // flush that doesn't depend on xterm's internal write scheduling.
+  const writeScreen = (h: HeadlessTerminal, data: string): Promise<void> =>
+    new Promise((resolve) => h.write(data, () => resolve()))
+
+  // Poll a postcondition instead of sleeping a fixed span: robust under CPU load
+  // (a delayed 350ms debounce timer just makes us poll a little longer, up to a
+  // cap far below vitest's 5s test timeout — see the flaky-load-test lesson).
+  const waitFor = async (pred: () => boolean, capMs = 3000): Promise<void> => {
+    const start = Date.now()
+    while (!pred()) {
+      if (Date.now() - start > capMs) throw new Error('waitFor: condition not met within cap')
+      await new Promise((r) => setTimeout(r, 15))
+    }
+  }
+
+  it('keeps the beacon on working through a burst (no stuck waiting after approval)', async () => {
+    const { session, headless } = claudeSessionWithScreen()
+    // Pre-approval: the permission menu was detected, so the beacon is waiting.
+    session.info.menuOpen = true
+    session.info.lastOutputAt = Date.now()
+    expect(claudeStatus(session.info, Date.now())).toBe('waiting')
+
+    // The human answers; claude floods non-menu tool output. Each chunk is one
+    // pty.onData → scheduleMenuDetect. In the bug the debounce never fired and
+    // menuOpen stayed true the entire burst.
+    for (const chunk of ['● Running tool…\r\n', 'reading files\r\n', 'applying edit\r\n', 'done step\r\n']) {
+      await writeScreen(headless, chunk)
+      scheduleMenuDetect(session)
+      // The eager clear fires synchronously on every chunk — working THROUGHOUT,
+      // without waiting for any debounce to fire.
+      expect(session.info.menuOpen).toBe(false)
+      session.info.lastOutputAt = Date.now()
+      expect(claudeStatus(session.info, Date.now())).toBe('working')
+    }
+
+    // Once output settles the debounce reads a menu-free frame and confirms the
+    // clear — it must NOT flip back to waiting.
+    await waitFor(() => session.menuTimer === null)
+    expect(session.info.menuOpen).toBe(false)
+    expect(claudeStatus(session.info, Date.now())).toBe('working')
+
+    // Normal transition still holds: true idle past the silence window ⇒ waiting.
+    expect(
+      claudeStatus({ ...session.info, lastOutputAt: Date.now() - WORKING_SILENCE_MS }, Date.now()),
+    ).toBe('waiting')
+    headless.dispose()
+  })
+
+  it('re-flags a genuinely open menu after the frame settles (a real prompt still reads waiting)', async () => {
+    const { session, headless } = claudeSessionWithScreen()
+    // claude paints a permission prompt, then goes quiet on the human.
+    await writeScreen(headless, 'Do you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n')
+    session.info.lastOutputAt = Date.now()
+    scheduleMenuDetect(session)
+    // The eager clear optimistically dropped it on that paint chunk…
+    expect(session.info.menuOpen).toBe(false)
+    // …but the settled-frame detect restores the verdict, so the beacon reads
+    // waiting while the prompt is actually up — the eager clear is self-correcting.
+    await waitFor(() => session.info.menuOpen === true)
+    expect(claudeStatus(session.info, Date.now())).toBe('waiting')
+    headless.dispose()
+  })
+
+  it('is a no-op on a session with no headless screen (a plain shell — never touches menuOpen)', () => {
+    const { session, headless } = claudeSessionWithScreen()
+    headless.dispose()
+    session.headless = null
+    session.info.menuOpen = true
+    scheduleMenuDetect(session)
+    // No headless ⇒ no screen model to consult; the field is left untouched and
+    // no debounce is armed (the eager clear stays gated behind the headless guard).
+    expect(session.info.menuOpen).toBe(true)
+    expect(session.menuTimer).toBeNull()
   })
 })
 
@@ -185,6 +319,36 @@ describe('listActiveTerminals', () => {
     const res = listActiveTerminals()
     expect(res.cwds).toEqual(['/tmp/proj-a'])
     expect(res.claude).toEqual([])
+  })
+
+  it('EXCLUDES a hidden utility claude session from BOTH cwds and claude (no spurious beacon)', () => {
+    // generateTaskTitle / generateProjectDescription spawn a real claude PTY
+    // (tag:'claude') with hidden:true purely to marker-scrape its output — there
+    // is no pane the user opened, so it must not flash "claude working" on the
+    // project's Ground card. It is the ONLY live session here, so a leak would
+    // show up as a non-empty payload.
+    state().sessions.set(
+      'util',
+      fakeSession('util', '/tmp/proj-a', { tag: 'claude', lastOutputAt: Date.now(), hidden: true }),
+    )
+    expect(listActiveTerminals()).toEqual({ cwds: [], claude: [] })
+  })
+
+  it('a hidden utility session never masks a real user session in the SAME project', () => {
+    // A user has a visible claude pane open in proj-a while a background auto-title
+    // run (hidden) fires in the same cwd: the beacon must still report the user's
+    // pane (by its own PTY id), and the hidden one must never appear.
+    state().sessions.set(
+      'user',
+      fakeSession('user', '/tmp/proj-a', { tag: 'claude', lastOutputAt: Date.now() }),
+    )
+    state().sessions.set(
+      'util',
+      fakeSession('util', '/tmp/proj-a', { tag: 'claude', lastOutputAt: Date.now(), hidden: true }),
+    )
+    const res = listActiveTerminals()
+    expect(res.cwds).toEqual(['/tmp/proj-a'])
+    expect(res.claude).toEqual([{ id: 'user', cwd: '/tmp/proj-a', status: 'working' }])
   })
 })
 
@@ -649,5 +813,100 @@ describe('sweepTerminalPool — reaps dead pool entries, never kills', () => {
   it('default lingerMs is the documented 60s safety-net constant (> the 30s onExit timer)', () => {
     expect(TERMINAL_LINGER_SWEEP_MS).toBe(60_000)
     expect(TERMINAL_LINGER_SWEEP_MS).toBeGreaterThan(30_000)
+  })
+})
+
+describe('startTerminalSweepLoop — the server-side sweep is actually wired to a periodic tick', () => {
+  // The whole point of the loop: in production NOTHING called sweepTerminalPool
+  // (runSwarmJanitor, its only caller, has no non-test caller), so a dead pool
+  // entry from a reload race / orphan would never be reaped — a phantom
+  // "terminal active" beacon pinned on a Ground card. These prove a boot-armed
+  // interval reaps them with NO swarm + NO UI. Fake timers: the loop has no async
+  // work (sweepTerminalPool is synchronous), so this stays deterministic — no
+  // sleeping on a real interval (see the flaky-load-test lesson).
+  beforeEach(() => {
+    stopTerminalSweepLoop()
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    stopTerminalSweepLoop()
+    vi.useRealTimers()
+  })
+
+  it('a tick reaps an ORPHAN (no finishedAt, pid dead) and clears its phantom beacon', () => {
+    // node-pty's onExit never fired (out-of-band kill), so finishedAt stays unset
+    // and listActiveTerminals reports the dead session forever — the phantom beacon.
+    const s = fakeSession('orphan', '/tmp/proj-a', { tag: 'claude', lastOutputAt: Date.now() })
+    s.pty = { pid: 4242 }
+    state().sessions.set('orphan', s)
+    // Before the sweep, the orphan lights the beacon.
+    expect(listActiveTerminals().claude.map((c) => c.id)).toEqual(['orphan'])
+    expect(listActiveTerminals().cwds).toEqual(['/tmp/proj-a'])
+
+    // isAlive injected → pid 4242 reported dead (the real signal-0 probe is e2e).
+    startTerminalSweepLoop(1_000, { isAlive: () => false })
+    vi.advanceTimersByTime(1_000)
+
+    // The tick reconciled the orphan out of the pool — beacon cleared.
+    expect(state().sessions.has('orphan')).toBe(false)
+    expect(listActiveTerminals()).toEqual({ cwds: [], claude: [] })
+  })
+
+  it('a tick reaps a reload-orphaned EXITED entry once it passes the linger window', () => {
+    // The 30s onExit delete timer is lost across a `tsx watch` reload (the
+    // globalThis Map survives, the setTimeout does not). The sweep is the net.
+    const NOW = 1_700_000_000_000
+    vi.setSystemTime(NOW)
+    state().sessions.set(
+      'linger',
+      fakeSession('linger', '/tmp/proj-a', { tag: 'claude', finishedAt: new Date(NOW).toISOString() }),
+    )
+    startTerminalSweepLoop(5_000)
+    // One tick inside the 60s linger window → still kept (never races a draining client).
+    vi.advanceTimersByTime(5_000)
+    expect(state().sessions.has('linger')).toBe(true)
+    // Advance past the linger window → a subsequent tick reaps it.
+    vi.advanceTimersByTime(TERMINAL_LINGER_SWEEP_MS)
+    expect(state().sessions.has('linger')).toBe(false)
+  })
+
+  it('ticks repeatedly and never reaps a LIVE session', () => {
+    const s = fakeSession('live', '/tmp/proj-a', { tag: 'claude', lastOutputAt: Date.now() })
+    s.pty = { pid: 4243 }
+    state().sessions.set('live', s)
+    startTerminalSweepLoop(1_000, { isAlive: () => true })
+    vi.advanceTimersByTime(10_000) // ten ticks
+    expect(state().sessions.has('live')).toBe(true)
+    expect(listActiveTerminals().claude.map((c) => c.id)).toEqual(['live'])
+  })
+
+  it('is reload-safe: re-arming clears the previous interval instead of stacking a second loop', () => {
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+    const timerGlobal = globalThis as { __openground_terminal_sweep_timer?: ReturnType<typeof setInterval> | null }
+    startTerminalSweepLoop(1_000)
+    const first = timerGlobal.__openground_terminal_sweep_timer
+    expect(first).toBeTruthy()
+    startTerminalSweepLoop(1_000)
+    // The re-eval cleared the OLD timer (mirrors startAutoDrainLoop) and armed a fresh one.
+    expect(clearSpy).toHaveBeenCalledWith(first)
+    expect(timerGlobal.__openground_terminal_sweep_timer).not.toBe(first)
+    clearSpy.mockRestore()
+  })
+
+  it('stopTerminalSweepLoop halts the ticks (no further sweeps) and is idempotent', () => {
+    const s = fakeSession('orphan', '/tmp/proj-a', { tag: 'claude' })
+    s.pty = { pid: 4242 }
+    state().sessions.set('orphan', s)
+    startTerminalSweepLoop(1_000, { isAlive: () => false })
+    stopTerminalSweepLoop()
+    stopTerminalSweepLoop() // idempotent — no throw, no-op the second time
+    vi.advanceTimersByTime(10_000)
+    // The loop was stopped before any tick fired, so the orphan is untouched.
+    expect(state().sessions.has('orphan')).toBe(true)
+  })
+
+  it('default sweep interval is a sane sub-minute cadence', () => {
+    expect(TERMINAL_SWEEP_INTERVAL_MS).toBe(30_000)
+    expect(TERMINAL_SWEEP_INTERVAL_MS).toBeLessThanOrEqual(60_000)
   })
 })

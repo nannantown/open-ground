@@ -137,6 +137,19 @@ describe('buildClaudeArgv (launch argv order/quoting contract)', () => {
     expect(argv[idx + 1]).not.toContain('$(cat') // not the prompt/context file arg
     expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/prompt.txt')"`) // prompt stays last
   })
+
+  it('emits --strict-mcp-config (a bare flag) when strictMcpConfig is set; prompt stays last', () => {
+    const argv = buildClaudeArgv({ ...base, strictMcpConfig: true }, '/tmp/prompt.txt')
+    expect(argv).toContain('--strict-mcp-config')
+    // It takes NO value, so it's safe to sit right before the positional prompt —
+    // unlike --remote-control's optional name, it can't consume the prompt. The
+    // prompt therefore stays LAST (proof it wasn't swallowed as a flag value).
+    expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/prompt.txt')"`)
+  })
+
+  it('omits --strict-mcp-config by default (the user terminal keeps its MCP servers)', () => {
+    expect(buildClaudeArgv(base, '/tmp/prompt.txt')).not.toContain('--strict-mcp-config')
+  })
 })
 
 describe('buildClaudeArgv on Windows (platform=win32 — PowerShell framing)', () => {

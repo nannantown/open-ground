@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Minus, Plus, Redo2, Sparkles, Undo2, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
@@ -23,6 +23,7 @@ import { alignElements, alignElementsToBox, type AlignOp } from '@/lib/canvasAli
 import { applyAutoLayout, addAutoLayout, insertIntoLayoutAtPoint } from '@/lib/canvasAutoLayout'
 import { pickStyle, applyStyle, type CopiedStyle } from '@/lib/canvasStyleClipboard'
 import { elementBounds } from '@/lib/canvasBounds'
+import { jobLostToRestart, readBootSignature } from '@/lib/canvasAiRestart'
 import type {
   CanvasAiActiveResponse,
   CanvasAiJobState,
@@ -370,17 +371,25 @@ export const CanvasWorkspace = ({
   // Style clipboard for ⌥⌘C / ⌥⌘V — same lifetime rules as clipboardRef.
   const styleClipRef = useRef<CopiedStyle | null>(null)
 
-  const copySelection = useCallback(() => {
+  // Returns whether the in-canvas clipboard consumed a selection — the keydown
+  // handler uses that to decide whether to preventDefault (an empty-selection
+  // ⌘C must fall through to native copy, not silently swallow it).
+  const copySelection = useCallback((): boolean => {
     // Pull in any group element owning a selected member so the clone stays
     // grouped (cloneForPaste remaps the group's id + the members' parentId).
     const ids = new Set(withGroupAncestors(canvasRef.current.elements, selectedIds))
     const picked = canvasRef.current.elements.filter((el) => ids.has(el.id))
-    if (picked.length) clipboardRef.current = picked.map((el) => ({ ...el }))
+    if (!picked.length) return false
+    clipboardRef.current = picked.map((el) => ({ ...el }))
+    return true
   }, [selectedIds])
 
-  const pasteClipboard = useCallback(() => {
+  // Returns whether a paste happened — false on an empty in-canvas clipboard, so
+  // the keydown handler leaves the native `paste` event alone and the OS-image
+  // paste path (InfiniteCanvas' document listener) can handle ⌘V instead.
+  const pasteClipboard = useCallback((): boolean => {
     const clip = clipboardRef.current
-    if (!clip.length) return
+    if (!clip.length) return false
     const copies = cloneForPaste(clip, 24, 24)
     // A LONE pasted element whose landing point sits on a layout frame joins
     // that frame's flow at the slot under it (Figma); comments and off-frame
@@ -399,20 +408,22 @@ export const CanvasWorkspace = ({
     const members = copies.filter((c) => !groupCopyIds.has(c.id))
     setSelectedIds((members.length ? members : copies).map((c) => c.id))
     setEditingId(null)
+    return true
   }, [mutateElements])
 
   // Cut = copy the selection into the in-memory clipboard (so a later ⌘V pastes
   // it), then delete it through removeElements — the SAME path Delete uses — so
   // the cut can't leave a dangling comment anchor or frame/design parentId.
-  const cutSelection = useCallback(() => {
+  const cutSelection = useCallback((): boolean => {
     const ids = new Set(withGroupAncestors(canvasRef.current.elements, selectedIds))
     const picked = canvasRef.current.elements.filter((el) => ids.has(el.id))
-    if (!picked.length) return
+    if (!picked.length) return false
     clipboardRef.current = picked.map((el) => ({ ...el }))
     const next = removeElements(canvasRef.current.elements, ids)
     if (next !== canvasRef.current.elements) mutateElements(next)
     setSelectedIds([])
     setEditingId(null)
+    return true
   }, [selectedIds, mutateElements])
 
   const duplicateSelection = useCallback(() => {
@@ -695,6 +706,14 @@ export const CanvasWorkspace = ({
     // interval, the next tick must NOT fire a second request that could read
     // 'done' and apply the SAME elements twice (duplicate ids).
     let inFlight = false
+    // Fingerprint the server process this job is running under, captured now
+    // (while it's live). If a later poll 404s AND the server reports a DIFFERENT
+    // fingerprint, the whole process was replaced mid-run — the job and its
+    // result are gone — so surface that instead of silently going idle.
+    let baselineBoot: string | null = null
+    void readBootSignature().then((sig) => {
+      if (!cancelled) baselineBoot = sig
+    })
     const finish = () => {
       setGenPending(false)
       setGenJobId(null)
@@ -707,13 +726,26 @@ export const CanvasWorkspace = ({
         const res = await fetch(`/api/canvas/ai/job/${encodeURIComponent(genJobId)}`)
         if (cancelled) return
         if (res.status === 404) {
-          // Swept / unknown — stop watching (any result is already persisted).
+          // Gone from the server's in-memory registry. Either a NORMAL sweep
+          // after the job completed (its result was already applied) — finish
+          // silently, as before — OR the server fully restarted mid-run and the
+          // result was never produced. Tell those apart by the boot fingerprint
+          // so a restart-lost generation doesn't just vanish.
+          const currentBoot = await readBootSignature()
+          if (cancelled) return
+          if (jobLostToRestart(baselineBoot, currentBoot)) {
+            // Keep the bar open (finish doesn't close it) with the prompt intact
+            // so this reads as "interrupted, retry", not a silent disappearance.
+            setGenError(t('canvas.generate.interrupted'))
+          }
           finish()
           return
         }
         if (!res.ok) return
         const job = (await res.json()) as CanvasAiJobState
-        if (cancelled || job.status === 'running') return
+        // 'queued' = still waiting its turn behind another run in this project;
+        // keep polling (it isn't an error and the result isn't ready yet).
+        if (cancelled || job.status === 'running' || job.status === 'queued') return
         if (job.status === 'done') {
           if (job.elements && job.elements.length) applyGenerated(job.elements)
           setGenOpen(false)
@@ -942,11 +974,16 @@ export const CanvasWorkspace = ({
         e.preventDefault()
         redo()
       } else if (k === 'c') {
-        copySelection()
+        // preventDefault only when our in-canvas clipboard actually consumed a
+        // selection, so an empty-selection ⌘C still falls through to native copy.
+        if (copySelection()) e.preventDefault()
       } else if (k === 'x') {
-        cutSelection()
+        if (cutSelection()) e.preventDefault()
       } else if (k === 'v') {
-        pasteClipboard()
+        // A consumed paste suppresses the native `paste` event so the image-paste
+        // listener in InfiniteCanvas can't ALSO fire (one ⌘V = one paste). An
+        // empty in-canvas clipboard falls through → native paste → image insert.
+        if (pasteClipboard()) e.preventDefault()
       } else if (k === 'd') {
         e.preventDefault()
         duplicateSelection()
@@ -1015,8 +1052,44 @@ export const CanvasWorkspace = ({
     onInspectorOpenChange?.(hasInspectableSelection)
   }, [hasInspectableSelection, onInspectorOpenChange])
 
+  // Stable context value so the memoised canvas leaves that consume it
+  // (ShapeView / ScreenView / DesignFrameView via useCanvasAsset) don't
+  // re-render on every CanvasWorkspace render — e.g. a viewport change during a
+  // pan/zoom. A context value change bypasses React.memo, so an inline object
+  // here would defeat the leaf memoisation exactly when it matters most.
+  // Stable handlers for the LayersPanel rows so the (memoised) panel skips
+  // re-rendering its N rows on a viewport-only change (pan/zoom) — the panel
+  // doesn't depend on the viewport, but it used to re-render along with the whole
+  // CanvasWorkspace on every wheel event. useCallback over canvas.elements keeps
+  // them stable across a pan (elements unchanged) and refreshes only when the
+  // element set actually changes.
+  const handleLayerSelect = useCallback(
+    (id: string, additive: boolean) => {
+      const el = canvas.elements.find((e) => e.id === id)
+      const target =
+        el?.type === 'group' ? expandSelectionForElement(canvas.elements, id) : [id]
+      setSelectedIds((prev) => (additive ? Array.from(new Set([...prev, ...target])) : target))
+    },
+    [canvas.elements],
+  )
+  const handleLayerSelectIds = useCallback(
+    (ids: string[]) => {
+      const expanded = ids.flatMap((id) => {
+        const el = canvas.elements.find((e) => e.id === id)
+        return el?.type === 'group' ? expandSelectionForElement(canvas.elements, id) : [id]
+      })
+      setSelectedIds(Array.from(new Set(expanded)))
+    },
+    [canvas.elements],
+  )
+
+  const assetCtx = useMemo(
+    () => ({ projectPath, canvasId: canvas.id }),
+    [projectPath, canvas.id],
+  )
+
   return (
-    <CanvasAssetProvider value={{ projectPath, canvasId: canvas.id }}>
+    <CanvasAssetProvider value={assetCtx}>
     <div className="flex h-full w-full overflow-hidden">
       <div ref={surfaceRef} className="relative min-w-0 flex-1 overflow-hidden">
         <InfiniteCanvas
@@ -1203,31 +1276,8 @@ export const CanvasWorkspace = ({
               <LayersPanel
                 elements={canvas.elements}
                 selectedIds={selectedIds}
-                onSelect={(id, additive) => {
-                  // Clicking a GROUP row selects its members (the group element is
-                  // invisible — selecting its bare id would show nothing on canvas
-                  // and break copy). A member/leaf row selects just itself, so the
-                  // panel can still target individual children.
-                  const el = canvas.elements.find((e) => e.id === id)
-                  const target =
-                    el?.type === 'group' ? expandSelectionForElement(canvas.elements, id) : [id]
-                  setSelectedIds((prev) =>
-                    additive
-                      ? Array.from(new Set([...prev, ...target]))
-                      : target,
-                  )
-                }}
-                onSelectIds={(ids) => {
-                  // Range / toggle selections arrive as raw row ids — expand any
-                  // group rows to their members, same contract as onSelect above.
-                  const expanded = ids.flatMap((id) => {
-                    const el = canvas.elements.find((e) => e.id === id)
-                    return el?.type === 'group'
-                      ? expandSelectionForElement(canvas.elements, id)
-                      : [id]
-                  })
-                  setSelectedIds(Array.from(new Set(expanded)))
-                }}
+                onSelect={handleLayerSelect}
+                onSelectIds={handleLayerSelectIds}
                 onMove={moveElementOne}
                 onToggleHidden={toggleElementHidden}
                 onToggleLocked={toggleElementLocked}

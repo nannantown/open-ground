@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { CanvasElement } from '@/lib/types'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { useT } from '@/i18n/I18nContext'
@@ -36,7 +36,7 @@ const collabAssetUrl = (storageKey: string): string | null => {
 // (no asset bytes in the canvas JSON itself). Resize is handled by the
 // shared resize-handle infra in InfiniteCanvas — this view just renders
 // the box at whatever width/height is on the element.
-export const ImageView = ({
+export const ImageView = memo(({
   element,
   selected,
   onPointerDown,
@@ -121,4 +121,4 @@ export const ImageView = ({
       />
     </div>
   )
-}
+})

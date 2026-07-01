@@ -13,6 +13,9 @@ import { serve } from '@hono/node-server'
 import { app } from './app'
 import { pruneOldAttachments, pruneOldRunFiles, RAW_RETENTION_DAYS } from '@/lib/server/retention'
 import { getSettings } from '@/lib/server/store'
+import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
+import { startAutoDrainLoop } from '@/lib/server/swarmOrchestrator'
+import { startTerminalSweepLoop } from '@/lib/server/terminal'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
@@ -42,6 +45,12 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOSTNAME }, (info
   console.log(`[openground:hono] listening on http://${HOSTNAME}:${info.port}`)
 })
 
+// Escalation safety valve (INWARD half): listen for electron/main.js asking us to
+// create an in-app notification for a self-update rollback / canary failure (events
+// only Electron observes). Fail-safe — a no-op unless we're the forked engine with
+// an IPC channel (prod). The OUTWARD half (server→Electron OS toast) is osNotify.ts.
+registerIncomingNotifications()
+
 // Retention sweep — drop the raw episodic layer (run cache + attachments) older
 // than RAW_RETENTION_DAYS. Fire-and-forget after boot so it never blocks
 // startup or crashes the process.
@@ -62,6 +71,31 @@ void (async () => {
     console.error('[openground:hono] retention sweep failed', e)
   }
 })()
+
+// AUTO-DRAIN background loop (card cf545637) — the UI-INDEPENDENT server-side tick that
+// auto-starts any registered project's stopped engine sitting on a todo backlog + idle
+// slot, so a todo added with NO swarm UI open still drains (the complete deadlock fix; the
+// Swarm-pane drain-tick only covers the mounted-pane case). Reuses maybeAutoStartDrain's
+// cap / manualStop / preflight / twin-dispatch guards — it can't over-spawn, override an
+// explicit OFF, or double-drive a running engine. Started ONLY in this real-server entry
+// (unit tests mount the Hono app, not this file), unref'd, idempotent. Kill-switch:
+// OPENGROUND_SWARM_AUTODRAIN=0 disables it (default ON).
+if (process.env.OPENGROUND_SWARM_AUTODRAIN !== '0') {
+  startAutoDrainLoop()
+}
+
+// TERMINAL-POOL sweep background loop — the UI-INDEPENDENT safety net that reaps
+// dead PTY pool entries the happy-path 30s onExit timer can't: a reload-orphaned
+// EXITED entry (the globalThis sessions Map survives a `tsx watch` reload but its
+// pending setTimeout does not) and an ORPHAN (a PTY killed out-of-band whose
+// node-pty onExit never fired, so it lingers as a PHANTOM "terminal active" beacon
+// on a Ground card forever). Active-swarm-independent — a plain terminal user gets
+// the cleanup too. Same pattern as the auto-drain loop above: started ONLY in this
+// real-server entry (unit tests mount the Hono app, not this file), unref'd,
+// reload-safe. Kill-switch: OPENGROUND_TERMINAL_SWEEP=0 disables it (default ON).
+if (process.env.OPENGROUND_TERMINAL_SWEEP !== '0') {
+  startTerminalSweepLoop()
+}
 
 // Listen errors (chiefly EADDRINUSE on the fixed port) are a TRUE fatal: the
 // single-instance contract says we must fail loudly, never silently shift

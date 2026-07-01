@@ -35,6 +35,7 @@ import {
   writeInput,
 } from '@/lib/server/terminal'
 import { launchClaude, launchOptsFromPrefs } from '@/lib/server/claudeTerminal'
+import { isExperimentEnabled } from '@/lib/server/experiments'
 import { CLAUDE_EFFORTS, type ClaudeEffort } from '@/lib/types'
 import { TASK_ASSETS_SUBDIR } from '@/lib/server/taskAssets'
 import { claudeConnection } from '@/lib/server/claudeConnection'
@@ -195,6 +196,14 @@ export const terminalRoutes = new Hono()
       // effort. Precedence: per-card run settings → explicit request-body
       // model → stored project prefs → CLI default.
       const prefs = launchOptsFromPrefs(projectData.launch)
+      // Owner-only sandbox experiment, resolved SERVER-side (owner role && the
+      // toggle — never a request value; toggle-first so a closed gate skips the
+      // role lookup). When open (macOS), launchClaude wraps this interactive
+      // claude in a Seatbelt sandbox confined to the project cwd AND flips it to
+      // permission-bypass — so the otherwise prompt-heavy default mode runs
+      // prompt-free, contained by the OS instead of the menu. A normal checkout's
+      // .git + node_modules sit INSIDE cwd, so no extra write paths.
+      const sandbox = await isExperimentEnabled('sandbox')
       const ref = launchClaude({
         cwd,
         agentSessionId,
@@ -205,6 +214,7 @@ export const terminalRoutes = new Hono()
         initialPrompt,
         addDir,
         permissionMode: prefs.permissionMode,
+        sandbox,
       })
       return c.json(ref.info)
     } catch (e: any) {
@@ -380,8 +390,23 @@ export const terminalRoutes = new Hono()
     if (prompt.length > MAX_INITIAL_PROMPT) {
       return c.json({ error: 'task content too large' }, 400)
     }
+    // Bind the PTY to the authorizing path: project A's path must not be able
+    // to paste A's task prompt (A's worktree/branch protocol + an A-pointing
+    // markDone curl) into a PTY running in project B. Without this a caller
+    // could send {path:A} to project B's PTY id and cross-contaminate B's
+    // claude. Identical check to the generic /paste sibling below — the pool
+    // knows every session's cwd. (Placed after compose so the existing
+    // task-not-found 404 still precedes the PTY lookup, per the route tests.)
+    const id = c.req.param('id')
+    const info = getTerminal(id)
+    if (!info) return c.json({ error: 'not found or finished' }, 404)
+    const inScope = info.cwd === path || info.cwd.startsWith(path + sep)
+    const inWorktrees = await validateProjectPath(info.cwd).catch(() => false)
+    if (!inScope && !(inWorktrees && (await projectUUIDFromPath(info.cwd).catch(() => null)) === (await projectUUIDFromPath(path).catch(() => '')))) {
+      return c.json({ error: 'terminal does not belong to this project' }, 403)
+    }
     // Bracketed paste, no trailing newline: insert, never auto-send.
-    const ok = writeInput(c.req.param('id'), bracketedPaste(prompt))
+    const ok = writeInput(id, bracketedPaste(prompt))
     if (!ok) return c.json({ error: 'not found or finished' }, 404)
     return c.json({ ok: true })
   })

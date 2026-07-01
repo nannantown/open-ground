@@ -96,17 +96,42 @@ const parseStatusZ = (raw: string): BranchWorkingChange[] => {
   return out
 }
 
-/** `git diff --numstat` → {path, additions, deletions}[]. Binary files report
- *  "-\t-" — surfaced as 0/0 rather than dropped. */
+/** `git diff --numstat -z` → {path, additions, deletions}[]. NUL-delimited
+ *  (mirroring parseStatusZ) so paths with spaces / non-ASCII / control chars
+ *  arrive VERBATIM — the plain `\n` format C-quotes them (a Japanese name comes
+ *  back octal-escaped inside double-quotes), which both dirtied the list and
+ *  made /api/project/file-diff miss, since its pathspec no longer matched the
+ *  on-disk name. A binary file reports "-\t-" → surfaced as 0/0, not dropped.
+ *  A rename/copy emits an EMPTY path field followed by two extra NUL fields
+ *  (preimage, then postimage); we key the row on the POSTIMAGE (new) path so it
+ *  stays a real pathspec file-diff can resolve — an "old → new" arrow (the
+ *  human format) would match no file and yield an empty diff. */
 const parseNumstat = (raw: string): BranchCommittedChange[] => {
   const out: BranchCommittedChange[] = []
-  for (const line of raw.split('\n')) {
-    const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/)
-    if (!m) continue
+  const fields = raw.split('\0')
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]
+    // Split on the FIRST two tabs only: under -z a pathname may itself contain
+    // a tab (only NUL is forbidden), so everything after the 2nd tab is path.
+    const t1 = field.indexOf('\t')
+    const t2 = t1 < 0 ? -1 : field.indexOf('\t', t1 + 1)
+    if (t2 < 0) continue // trailing '' after the final NUL, or a stray line
+    const add = field.slice(0, t1)
+    const del = field.slice(t1 + 1, t2)
+    if (!/^(\d+|-)$/.test(add) || !/^(\d+|-)$/.test(del)) continue
+    let path = field.slice(t2 + 1)
+    if (path === '') {
+      // Rename/copy: the next two NUL fields are preimage then postimage. Key
+      // on the postimage; bail out if the stream is truncated mid-record.
+      const from = fields[++i]
+      const to = fields[++i]
+      if (from === undefined || to === undefined) break
+      path = to
+    }
     out.push({
-      path: m[3],
-      additions: m[1] === '-' ? 0 : parseInt(m[1], 10),
-      deletions: m[2] === '-' ? 0 : parseInt(m[2], 10),
+      path,
+      additions: add === '-' ? 0 : parseInt(add, 10),
+      deletions: del === '-' ? 0 : parseInt(del, 10),
     })
   }
   return out
@@ -136,6 +161,7 @@ export const getBranchChanges = async (
     const numstat = await git(projectPath, [
       'diff',
       '--numstat',
+      '-z', // NUL-delimit so non-ASCII / renamed paths arrive raw (parseNumstat)
       `${target.ref}...HEAD`,
     ])
     committed = numstat ? parseNumstat(numstat) : []
@@ -221,7 +247,17 @@ export const getFileDiff = async (
   if (scope === 'branch') {
     const target = await resolveTarget(projectPath, configuredTarget)
     if (!target) return { diff: '', truncated: false }
-    const out = await git(projectPath, ['diff', `${target.ref}...HEAD`, '--', file])
+    // core.quotePath=false so the unified-diff HEADER renders a non-ASCII name
+    // verbatim, matching the raw `file` we just received from the committed
+    // list (parseNumstat) instead of octal-escaping it back into "…".
+    const out = await git(projectPath, [
+      '-c',
+      'core.quotePath=false',
+      'diff',
+      `${target.ref}...HEAD`,
+      '--',
+      file,
+    ])
     return truncateDiff(out ?? '')
   }
 

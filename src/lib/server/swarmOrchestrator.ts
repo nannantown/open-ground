@@ -60,15 +60,19 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
-import { execFile as execFileCb } from 'child_process'
+import { execFile as execFileCb, spawn } from 'child_process'
 import { promisify } from 'util'
 import { readFile, stat, symlink } from 'fs/promises'
 import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
 import { openGroundHome } from './paths'
-import { getTerminal, getTerminalScreen, killTerminal, writeInput } from './terminal'
+import { getTerminal, getTerminalScreen, killTerminal, subscribeTerminal, writeInput } from './terminal'
 import { claudeRunPreflight } from './claudePreflight'
+import { getSettings } from './store'
+import { launchClaude } from './claudeTerminal'
+import { removeClaudeFolderTrust } from './claudeTrust'
+import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import {
   spawnSwarmWorker,
   removeSwarmWorktree,
@@ -82,9 +86,16 @@ import {
   classifyBranch,
   integrateBranch,
   isSwarmBranch,
+  buildConflictRebaseInstruction,
   type ReviewReadiness,
   type IntegrateOutcome,
 } from './swarmIntegrate'
+import { requestEngineSelfUpdate } from './selfUpdateSignal'
+import {
+  initSelfSupplyRuntime,
+  runSelfSupplyPass,
+  type SelfSupplyRuntime,
+} from './swarmSelfSupply'
 import type {
   OrchestratorAnomaly,
   OrchestratorLogLine,
@@ -95,8 +106,13 @@ import type {
   ProjectData,
   ProjectTask,
   SpawnSwarmWorkerResponse,
+  SwarmConsumption,
+  SwarmKpis,
   SwarmOrchestratorState,
+  SwarmFatalNotification,
 } from '../types'
+import { createSwarmFatalNotification } from './swarmNotifications'
+import { sortByPriority } from '../boardPriority'
 
 const execFile = promisify(execFileCb)
 
@@ -105,8 +121,21 @@ const execFile = promisify(execFileCb)
 /** Concurrency ceiling — the engine never has more live workers of its own than
  *  this. Mirrors the Swarm UI's MAX_WORKERS (SwarmModule.tsx); the two are
  *  independent counters (the UI's is per-client localStorage), but the engine is
- *  the only autonomous driver, so in practice this is THE cap when it's ON. */
+ *  the only autonomous driver, so in practice this is THE cap when it's ON. The
+ *  HARD upper bound of the dynamic worker band — {@link computeTargetWorkers}
+ *  never targets past it, so a flood of independent todos can never spawn more
+ *  than this many parallel workers (過剰並列で衝突する の防止). */
 export const ORCHESTRATOR_MAX_WORKERS = 6
+
+/** Floor of the dynamic worker band — the engine targets AT LEAST this many
+ *  workers WHENEVER there is dispatchable work, so a non-empty queue is never
+ *  under-served (並列度不足で枠を使い切れない の防止). It floors the TARGET number,
+ *  not the live count: an EMPTY queue (nothing dispatchable) targets 0 — the floor
+ *  only bites once independent work exists — and the actual spawn count is still
+ *  bounded by how many non-conflicting cards there are (you cannot run more workers
+ *  than there are independent cards). Clamped ≤ {@link ORCHESTRATOR_MAX_WORKERS} by
+ *  computeTargetWorkers, so an inverted band can never breach the hard ceiling. */
+export const ORCHESTRATOR_MIN_WORKERS = 1
 
 /** How often the drain loop runs while ON. A few seconds matches the 5s polling
  *  etiquette elsewhere (Ground beacon, Board) — the queue does not need
@@ -150,8 +179,9 @@ export const RECOVER_MAX_REQUEUE = 1
 export const MOVE_STUCK_MAX_RETRIES = 5
 
 /** REVIEW→DOING 差し戻し(rework)の往復上限 — レビューで must-fix(verify が RED)に
- *  なったカードを doing へ戻して worker に再作業させてよい回数(conflict は対象外 —
- *  既存の conflictedBranches/human-resolve フローのまま)。
+ *  なったカードを doing へ戻して worker に再作業させてよい回数(統合 conflict は別カウンタ
+ *  {@link MAX_CONFLICT_REWORKS} で数える — conflict は worker のコード問題ではなく trunk が
+ *  動いた結果なので予算を分ける。委譲先は同じ delegate→worker→再統合ループ)。
  *  これを超えたら 'blocked' へ退避し、review→doing→review の無限バウンスを断つ。
  *  手動運用の `swarm-board.sh rework <id> [max]` ループガードの in-app(自律エンジン)
  *  版で、同じ "差し戻しすぎたら人間に上げる" 契約。既定は控えめに 2(worker に最大 2
@@ -159,6 +189,26 @@ export const MOVE_STUCK_MAX_RETRIES = 5
  *  自体は autoMerge が armed のときだけ起きる(統合パスの問題分岐に乗るため)— OFF 時は
  *  従来どおり read-only classify のみで、カードは review に留まる。 */
 export const MAX_REWORKS = 2
+
+/** 統合 conflict → worker rebase 委譲 の往復上限(card 012a2848)。統合時に rebase 競合した
+ *  カードを「自分のブランチを rebase して解消しろ」と worker へ差し戻してよい回数。司令塔が
+ *  手でやっている "conflict は担当 worker に rebase 委譲" の自動化で、{@link MAX_REWORKS}
+ *  (verify/レビュー差し戻し)とは別カウンタ — conflict は worker のコード品質ではなく「trunk が
+ *  動いた」結果なので独立予算で数え、混ぜて早すぎる park を招かない。これを超えたら 'blocked'
+ *  へ退避(conflict stamp を残す)、worker が解けない競合を無限に投げ返すループを断つ。conflict は
+ *  trunk の動き次第で複数回起こりうるので既定は MAX_REWORKS より気持ち多めの 3。委譲自体は
+ *  autoMerge が armed のとき(統合パス)だけ起きる — OFF 時は read-only classify のみで不変。 */
+export const MAX_CONFLICT_REWORKS = 3
+
+/** How many consecutive NO-majority adversarial reviews (defer) on the SAME tip are
+ *  tolerated before the engine STOPS re-spawning the panel for that tip and surfaces
+ *  the card "needs a human". Bounds the resource drain when reviewers persistently
+ *  can't reach a verdict (a genuinely ambiguous diff, or a systemic claude outage that
+ *  makes every reviewer abstain) — without it the panel re-burns N claude sessions
+ *  every INTEGRATE_TICK_MS forever. A NEW commit (different tip) resets the count and
+ *  re-arms the panel. Distinct from MAX_REWORKS: a defer is NOT the worker's fault, so
+ *  it neither bumps the rework budget nor parks to 'blocked'. */
+export const MAX_REVIEW_DEFERS = 3
 
 /** STALL SELF-HEALING (Card e8022e — distinct from the crash recovery above,
  *  which handles a DEAD PTY). A worker can be ALIVE yet unresponsive — hung on an
@@ -206,6 +256,16 @@ const envMinutesMs = (name: string, defMin: number, minMin: number, maxMin: numb
   return Math.round(mins * 60_000)
 }
 
+/** Read an INTEGER-valued tunable from the environment, clamped to [min,max],
+ *  falling back to `def` when unset / unparseable. The integer sibling of
+ *  {@link envMinutesMs} (the consumption budget is a worker COUNT, not minutes) —
+ *  same "定数化・調整可" contract, resolved ONCE at module load. */
+const envInt = (name: string, def: number, min: number, max: number): number => {
+  const raw = process.env[name]
+  const n = raw != null && raw.trim() !== '' ? Number(raw) : Number.NaN
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : def
+}
+
 /** RUNAWAY CEILING — the HARD wall-clock cap on one worker's lifetime, measured
  *  from dispatch. A worker still alive past this is a 暴走 (a task too big, an
  *  infinite /order loop, a wedge the silence detector can't see because it keeps
@@ -249,6 +309,28 @@ export const RATE_LIMIT_GRACE_MS = Math.min(
  *  bypass is genuinely broken and a human is needed. */
 export const PERMISSION_WAIT_GRACE_MS = 2 * 60_000
 
+/** CONSUMPTION BUDGET — the per-session dispatch ceiling the UNATTENDED loop
+ *  WARNS at (card 3f0fd4fa). Once the engine has dispatched this many workers
+ *  since boot, the consumption snapshot flags `overLimit` and the commander pane
+ *  warns the owner to check the loop. A SOFT nudge, never a hard stop: the engine
+ *  keeps draining (per-worker wall-clock is already bounded by MAX_EXEC_MS, and
+ *  the concurrency cap bounds parallelism — this only surfaces "the unattended
+ *  loop has been busy a while, look at it"). Each dispatch is one `claude` session
+ *  against the subscription, so the spawned-worker count is the honest proxy for
+ *  total session spend. Adjustable via env, clamped so a typo can neither disable
+ *  the warning (min 1) nor set an absurd ceiling. Resolved ONCE at module load. */
+export const DISPATCH_BUDGET = envInt('OPENGROUND_SWARM_DISPATCH_BUDGET', 50, 1, 100_000)
+
+/** AUTO-DRAIN background-scan cadence (card cf545637, server-tick variant) — how often
+ *  the UI-INDEPENDENT server loop ({@link startAutoDrainLoop}) sweeps the registered
+ *  projects to auto-start a STOPPED engine sitting on a todo backlog with a free slot.
+ *  MUCH slower than the per-engine TICK_MS (3s): the sweep only acts on stopped engines
+ *  (a running one is driven by its own chain and is a fast no-op here) and it touches
+ *  EVERY project, so a 15s default keeps the all-projects cost negligible while still
+ *  draining an unattended backlog within seconds. Env-overridable, clamped to a sane band
+ *  (≥3s so it can never busy-spin, ≤10min so it stays responsive). Resolved ONCE at load. */
+export const AUTO_DRAIN_SCAN_MS = envInt('OPENGROUND_SWARM_AUTODRAIN_SCAN_MS', 15_000, 3_000, 600_000)
+
 // ── Pure helpers (exported, unit-tested without a server) ────────────────────
 
 /** A Board card sitting in the `todo` column — mirrors BoardTab's columnOf
@@ -260,23 +342,18 @@ export const isTodoCard = (t: ProjectTask): boolean =>
  *  (An undefined column never folds to 'review', so the explicit check suffices.) */
 export const isReviewCard = (t: ProjectTask): boolean => t.boardColumn === 'review'
 
-const cmpCreatedAt = (a: ProjectTask, b: ProjectTask): number =>
-  (a.createdAt ?? '').localeCompare(b.createdAt ?? '')
-
-/** Queue order = how the Board renders the todo column, so the engine pulls what
- *  the owner sees at the top first: cards with an explicit boardOrder ascending
- *  (the drag priority), THEN un-ordered cards oldest-createdAt first ("古い順").
- *  Matches ProjectTask.boardOrder's documented contract ("Undefined sorts after
- *  ordered cards by createdAt"). Pure + total (stable tiebreak). */
-export const sortTodos = (todos: readonly ProjectTask[]): ProjectTask[] =>
-  [...todos].sort((a, b) => {
-    const ao = a.boardOrder
-    const bo = b.boardOrder
-    if (ao != null && bo != null) return ao !== bo ? ao - bo : cmpCreatedAt(a, b)
-    if (ao != null) return -1 // an ordered card precedes an un-ordered one
-    if (bo != null) return 1
-    return cmpCreatedAt(a, b)
-  })
+/** Dispatch queue order. Delegates to the shared {@link sortByPriority} (in
+ *  src/lib/boardPriority.ts — one source of truth with the Board UI) so the
+ *  engine pulls cards by effective priority FIRST (static priority + aging:
+ *  "急ぎを先に・古いカードの放置を防ぐ"), then by the owner's explicit drag order
+ *  (boardOrder ascending, ordered-before-unordered), then oldest-createdAt first.
+ *  The boardOrder/createdAt tail preserves the previous contract WITHIN a
+ *  priority bucket. `now` defaults to wall-clock so the live caller (selectDispatch)
+ *  ages cards in real time; tests inject a fixed `now` for determinism. */
+export const sortTodos = (
+  todos: readonly ProjectTask[],
+  now: number = Date.now(),
+): ProjectTask[] => sortByPriority(todos, now)
 
 /** Collapse free text to a stable comparison form: NFKC-normalized (so full-width
  *  ＡＢＣ folds to ABC), whitespace folded, trimmed, lowercased. Used by both
@@ -334,13 +411,17 @@ export const declaredFiles = (t: ProjectTask): Set<string> => {
   return out
 }
 
-/** The next cards to dispatch this pass. Queue order (sortTodos), gated by FIVE
+/** The next cards to dispatch this pass. Queue order (sortTodos), gated by SIX
  *  independent rules so the engine never starts unsafe parallel work:
  *    ① COLUMN  — only `todo` cards are ever candidates. blocked / doing / review /
  *       done are filtered out here (the gate lives in this function, not just the
  *       caller, so it holds even if a mixed list is passed in).
  *    ② ID      — a card already in flight (its id in `dispatchedIds`, i.e. a
  *       counted worker) is skipped — no re-dispatch of the same card.
+ *    ⑥ SELF-SUPPLY — a card the engine PROPOSED itself (selfSupplyKey set) is held
+ *       until the owner approves it (selfSupplyApproved). The runaway defense for
+ *       the self-supply stage (card b3fbbfba): a discovered improvement point can
+ *       sit in todo but never spawns a worker without explicit owner sign-off.
  *    ③ CONTENT — a card whose content folds to a key already claimed by active
  *       work or by an earlier pick THIS pass is skipped — no double-dispatch of
  *       duplicate cards.
@@ -407,6 +488,12 @@ export const selectDispatch = (
   for (const card of sortTodos(tasks.filter(isTodoCard))) {
     if (picks.length >= slots) break
     if (dispatchedIds.has(card.id)) continue // ② already in flight
+    // ⑥ SELF-SUPPLY APPROVAL (card b3fbbfba) — a card the engine PROPOSED itself
+    //   (selfSupplyKey set) is an inert proposal until the owner approves it. This
+    //   is the primary runaway defense: the engine can fill todo with discovered
+    //   improvement points, but NONE of them spawn a worker without explicit owner
+    //   sign-off. A human-authored card (no selfSupplyKey) is unaffected.
+    if (card.selfSupplyKey && !card.selfSupplyApproved) continue
     const k = contentKey(card)
     if (k && claimedContent.has(k)) continue // ③ duplicate content
     const files = Array.from(declaredFiles(card))
@@ -419,12 +506,300 @@ export const selectDispatch = (
   return picks
 }
 
+/** DYNAMIC WORKER SCALING (card ea369937) — how many workers the engine TARGETS
+ *  for a dispatch pass, the adaptive replacement for the old "always fill to MAX".
+ *  The target tracks the live INDEPENDENT backlog, clamped to the [min, max] band:
+ *
+ *      demand = liveWorkers + dispatchableTodos
+ *      target = demand === 0 ? 0 : clamp(demand, min, max)
+ *
+ *  • `dispatchableTodos` is the count of todo cards that pass EVERY parallel-safety
+ *    gate RIGHT NOW (selectDispatch's column / id / content-dup / same-file /
+ *    dependsOn rules) — i.e. the INDEPENDENT backlog, not the raw todo count. Two
+ *    todos that would touch the same file fold into ONE unit of demand, so the
+ *    target never asks for more parallelism than the work can absorb without
+ *    conflict (過剰並列の回避). This is the "相互の独立性" half of the contract.
+ *  • Many independent todos ⇒ demand high ⇒ target rides up to `max` (枠を使い切る).
+ *    Few ⇒ target settles near `min`. An EMPTY queue with no live worker ⇒ 0 (an
+ *    idle engine targets zero — the floor is for a backlog, not an empty board).
+ *  • `max` is the HARD ceiling: a runaway flood of cards can NEVER target past it
+ *    (the 暴走防止 invariant). `min` is clamped ≤ `max` first, so even an inverted
+ *    band (min > max, an operator/env footgun) still cannot breach `max` — the
+ *    same band-inversion guard RATE_LIMIT_GRACE_MS uses.
+ *
+ *  Inputs are floored / non-negative-clamped so a malformed signal (a fractional
+ *  or negative count) can't produce a nonsense target. The caller derives the new
+ *  spawns as max(0, target − live): when the target drops BELOW the live count
+ *  (the queue drained), that is 0 and the engine simply stops refilling — it
+ *  SHRINKS passively as live workers' PTYs exit, never killing a healthy worker
+ *  to hit a lower number (that would discard committed work). Pure (no IO, no
+ *  clock) — unit-tested directly for the three required cases (多→max / 少→min /
+ *  上限頭打ち). */
+export const computeTargetWorkers = (input: {
+  liveWorkers: number
+  dispatchableTodos: number
+  min?: number
+  max?: number
+}): number => {
+  const max = Math.max(0, Math.floor(input.max ?? ORCHESTRATOR_MAX_WORKERS))
+  // min can never exceed max — clamp it down first so an inverted band still
+  // honors the hard ceiling (target ≤ max always holds).
+  const min = Math.min(max, Math.max(0, Math.floor(input.min ?? ORCHESTRATOR_MIN_WORKERS)))
+  const demand = Math.max(0, Math.floor(input.liveWorkers)) + Math.max(0, Math.floor(input.dispatchableTodos))
+  if (demand <= 0) return 0 // idle: nothing running, nothing to dispatch
+  return Math.max(min, Math.min(max, demand))
+}
+
 const shorten = (s: string, n = 60): string => {
   const flat = s.replace(/\s+/g, ' ').trim()
   return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat || '(untitled)'
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+
+// ── KPI aggregation (the ANALYTICS layer — data foundation for improvement) ───
+// A SEPARATE layer from the live observability above (workers/reviews/log/
+// anomalies): those answer "what is happening NOW"; these answer "is the swarm
+// getting BETTER?" — lead time, rework / conflict / worker-success rates.
+//
+// Two data sources, both READ-ONLY of state the engine already maintains (this
+// stage adds NO new event-site hooks — it only READS):
+//   • Lifetime event COUNTERS (engine.metrics) — bumped in the one logLine
+//     chokepoint by event KIND, so they survive the journal ring buffer's
+//     eviction (a rate over all-time-since-boot, not just the last 200 lines).
+//   • The journal itself — for lead time, each `integrate` line carries the
+//     completion timestamp; pairing it to the Board card's createdAt yields
+//     todo→done. Window-limited to the journal's retained lines (documented).
+
+/** Non-lossy lifetime event counters, bumped in {@link logLine} by event kind.
+ *  In-memory on the engine (a restart resets them — a per-session roll-up, never
+ *  persisted to disk). The rate denominators the KPI roll-up divides. */
+export interface SwarmMetricsCounters {
+  /** Workers launched (a 'dispatch' line at info level — a spawned PTY). */
+  dispatched: number
+  /** Dispatch attempts that FAILED to spawn (a 'dispatch' line at error level). */
+  dispatchFailed: number
+  /** Cards a worker was judged done on → moved doing→review ('promote'). */
+  promoted: number
+  /** Review branches the engine LANDED on the trunk ('integrate'). */
+  integrated: number
+  /** Auto-integration attempts that hit a rebase conflict ('conflict'). */
+  conflicted: number
+  /** Review→doing/todo 差し戻し (rework) rounds — matched by the rework log
+   *  marker, since rework is not a structured journal `kind`. */
+  reworked: number
+  /** Workers reclaimed because their PTY died with nothing to land ('crash'). */
+  crashed: number
+  /** Workers reclaimed because they went silent past every nudge ('stall'). */
+  stalled: number
+}
+
+export const emptyMetricsCounters = (): SwarmMetricsCounters => ({
+  dispatched: 0,
+  dispatchFailed: 0,
+  promoted: 0,
+  integrated: 0,
+  conflicted: 0,
+  reworked: 0,
+  crashed: 0,
+  stalled: 0,
+})
+
+/** The stable marker shared by BOTH rework SUCCESS log lines ("差し戻し review→
+ *  doing …" and "差し戻し review→todo …"). It deliberately EXCLUDES the
+ *  rework-exhausted PARK line ("差し戻し上限(N)超過 …"), which is a block, not a
+ *  rework round. Centralised here (not the rework site — that's a different
+ *  track's territory) so the KPI counter stays decoupled: if the message drifts
+ *  the counter degrades to 0, it never throws. */
+export const REWORK_LOG_MARKER = '差し戻し review→'
+
+/** The integrate journal line's format (defaultMoveToDone's landing log):
+ *  `integrated (<mode>): <shortened-title> → <target>`. The title was logged via
+ *  {@link shorten}, so capturing it lets us pair the line back to a `done` card
+ *  whose own `shorten(title)` matches EXACTLY (shorten is deterministic — not a
+ *  fuzzy match). Non-greedy up to the FIRST " → " so a normal title is captured;
+ *  a title literally containing " → " just won't pair (skipped, never mis-paired
+ *  onto the wrong card unless its shortened form collides — rare, documented).
+ *  DOUBLES as the land-vs-owner-resolve discriminator in {@link classifyMetricEvent}:
+ *  kind:'integrate' is emitted by a real land AND by owner-resolve (a park/requeue),
+ *  and only the former is land-shaped — so the rate counters and the lead-time
+ *  pairing agree on what "a real land" is. */
+const INTEGRATE_TITLE_RE = /^integrated \([^)]*\): (.+?) → /
+
+/** Which lifetime counter (if any) a journal line increments — PURE so the whole
+ *  mapping is unit-tested without an engine. Structured `kind` events map
+ *  directly; a dispatch's level splits spawned vs failed; rework (which carries
+ *  no `kind`) is recognised by {@link REWORK_LOG_MARKER}. Everything else
+ *  (routine / cleanup / uncategorised) maps to null (counts toward nothing). */
+export const classifyMetricEvent = (line: {
+  kind?: OrchestratorLogLine['kind']
+  level: OrchestratorLogLine['level']
+  message: string
+}): keyof SwarmMetricsCounters | null => {
+  switch (line.kind) {
+    case 'dispatch':
+      return line.level === 'error' ? 'dispatchFailed' : 'dispatched'
+    case 'promote':
+      return 'promoted'
+    case 'integrate':
+      // kind:'integrate' is emitted by TWO sites: the real auto-land (message
+      // "integrated (<mode>): <title> → <target>") AND owner-resolve
+      // (resolveOrchestratorReview — "review resolved by owner — card → blocked/
+      // todo …"), a PARK/REQUEUE that is NOT a land. Counting the latter as
+      // `integrated` corrupts every rate (worker-success > 100%, a conflict that's
+      // then owner-resolved double-counts into both conflictRate terms, reworkRate's
+      // denominator inflates). So count ONLY when the message is land-shaped — the
+      // SAME INTEGRATE_TITLE_RE the lead-time pairing already uses, so the two agree
+      // on "a real land". (The journal still shows both as 'integrate' events — this
+      // changes only the analytics classification, never the display.)
+      return INTEGRATE_TITLE_RE.test(line.message) ? 'integrated' : null
+    case 'conflict':
+      return 'conflicted'
+    case 'crash':
+      return 'crashed'
+    case 'stall':
+      return 'stalled'
+  }
+  // Rework has no structured kind — recognise it by its (stable) success marker.
+  if (line.message.includes(REWORK_LOG_MARKER)) return 'reworked'
+  return null
+}
+
+/** A `done` Board card — the lead-time input. Mirrors isTodoCard's fold
+ *  (undefined boardColumn → 'done' iff the card's `done` flag is set). */
+const isDoneCard = (t: ProjectTask): boolean =>
+  (t.boardColumn ?? (t.done ? 'done' : 'todo')) === 'done'
+
+/** Median of a number list (rounded for the even case), or null when empty. Pure. */
+export const medianOf = (xs: readonly number[]): number | null => {
+  if (xs.length === 0) return null
+  const s = [...xs].sort((a, b) => a - b)
+  const mid = Math.floor(s.length / 2)
+  return s.length % 2 === 1 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2)
+}
+
+/** Completed-card lead time todo→done, paired READ-ONLY from existing state:
+ *  each `done` card's createdAt (todo entry) → its `integrate` journal line's
+ *  timestamp (done), matched by the deterministic shortened title. Returns the
+ *  median (ms) + paired count. Window-limited to the journal's retained lines.
+ *  Skips a card with no matching integrate line, an unparseable createdAt, or a
+ *  negative span (clock skew). Latest integrate line wins on a title collision.
+ *  PURE (no IO, no clock). */
+export const computeLeadTimeStats = (
+  tasks: readonly ProjectTask[],
+  log: readonly OrchestratorLogLine[],
+): { medianMs: number | null; count: number } => {
+  // shortened-title → latest integrate-event epoch ms (the done moment).
+  const doneAtByTitle = new Map<string, number>()
+  for (const line of log) {
+    if (line.kind !== 'integrate') continue
+    const m = INTEGRATE_TITLE_RE.exec(line.message)
+    if (!m) continue
+    const at = Date.parse(line.at)
+    if (!Number.isFinite(at)) continue
+    const prev = doneAtByTitle.get(m[1])
+    if (prev === undefined || at > prev) doneAtByTitle.set(m[1], at)
+  }
+  const samples: number[] = []
+  for (const t of tasks) {
+    if (!isDoneCard(t)) continue
+    const doneAt = doneAtByTitle.get(shorten(t.title ?? ''))
+    if (doneAt === undefined) continue
+    const createdAt = t.createdAt ? Date.parse(t.createdAt) : Number.NaN
+    if (!Number.isFinite(createdAt)) continue
+    const span = doneAt - createdAt
+    if (span >= 0) samples.push(span)
+  }
+  return { medianMs: medianOf(samples), count: samples.length }
+}
+
+/** The full KPI roll-up — PURE over the engine's lifetime counters + the Board
+ *  cards + the journal. A rate is null when its denominator is 0 ("no data yet",
+ *  the UI shows a dash) so an empty engine never reads as 0% success. Definitions
+ *  match {@link SwarmKpis}:
+ *    • workerSuccessRate = integrated / dispatched
+ *    • conflictRate      = conflicted / (integrated + conflicted)
+ *    • reworkRate        = reworked / (reworked + integrated) */
+export const computeSwarmKpis = (input: {
+  counters: SwarmMetricsCounters
+  tasks: readonly ProjectTask[]
+  log: readonly OrchestratorLogLine[]
+}): SwarmKpis => {
+  const c = input.counters
+  const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null)
+  return {
+    leadTime: computeLeadTimeStats(input.tasks, input.log),
+    conflictRate: ratio(c.conflicted, c.integrated + c.conflicted),
+    reworkRate: ratio(c.reworked, c.reworked + c.integrated),
+    workerSuccessRate: ratio(c.integrated, c.dispatched),
+    counts: {
+      dispatched: c.dispatched,
+      integrated: c.integrated,
+      conflicted: c.conflicted,
+      reworked: c.reworked,
+      crashed: c.crashed,
+      stalled: c.stalled,
+    },
+  }
+}
+
+const emptyKpis = (): SwarmKpis => ({
+  leadTime: { medianMs: null, count: 0 },
+  conflictRate: null,
+  reworkRate: null,
+  workerSuccessRate: null,
+  counts: { dispatched: 0, integrated: 0, conflicted: 0, reworked: 0, crashed: 0, stalled: 0 },
+})
+
+// ── Consumption metering (the BUDGET layer — runaway-spend guardrail) ─────────
+// A SEPARATE layer from the KPI analytics above: KPIs answer "is the swarm
+// getting BETTER?"; consumption answers "how much is the UNATTENDED loop SPENDING
+// right now, and has it crossed a ceiling I should look at?". Like the KPI layer
+// it is READ-ONLY of state the engine already maintains — it adds NO new
+// event-site hooks (so it never collides with the dispatch / integrate / spawn
+// sites the other stages own); it only READS two things:
+//   • the LIVE worker set (each worker's startedAt vs now) → activeWorkers +
+//     activeRunMs, the in-flight load this instant.
+//   • the non-lossy lifetime dispatch counter (engine.metrics.dispatched, already
+//     bumped in logLine) → the cumulative session spend proxy + the budget
+//     subject.
+
+/** The unattended loop's CONSUMPTION snapshot — PURE over the live worker set +
+ *  the lifetime dispatch counter (no IO; `now` injected, defaulting to wall-clock
+ *  like {@link sortTodos} so the live caller measures real time while tests pass a
+ *  fixed clock). `overLimit` is the budget breach the UI warns on. Definitions
+ *  match {@link SwarmConsumption}. */
+export const computeSwarmConsumption = (input: {
+  liveWorkers: readonly { startedAt: string }[]
+  counters: SwarmMetricsCounters
+  limit: number
+  now?: number
+}): SwarmConsumption => {
+  const now = input.now ?? Date.now()
+  let activeRunMs = 0
+  for (const w of input.liveWorkers) {
+    const started = Date.parse(w.startedAt)
+    // Skip an unparseable/missing startedAt; clamp clock skew to 0 so a worker
+    // stamped "in the future" reads as 0, never SUBTRACTING from the total.
+    if (Number.isFinite(started)) activeRunMs += Math.max(0, now - started)
+  }
+  const dispatched = input.counters.dispatched
+  return {
+    activeWorkers: input.liveWorkers.length,
+    activeRunMs,
+    dispatched,
+    limit: input.limit,
+    overLimit: input.limit > 0 && dispatched >= input.limit,
+  }
+}
+
+const emptyConsumption = (): SwarmConsumption => ({
+  activeWorkers: 0,
+  activeRunMs: 0,
+  dispatched: 0,
+  limit: DISPATCH_BUDGET,
+  overLimit: false,
+})
 
 // ── Worker monitoring (Card②) — the conservative DONE judgement ──────────────
 
@@ -449,8 +824,10 @@ export interface HeartbeatSign {
 export interface WorkerProbe {
   /** Is the worker's `claude` PTY still alive? */
   alive: boolean
-  /** Commits the worker's branch carries AHEAD of trunk (origin/main). 0 ⇒ no
-   *  integrable work yet (a freshly-branched or empty-handed worker). */
+  /** Commits the worker's branch carries AHEAD of trunk (the project's RESOLVED
+   *  trunk — origin/main, origin/master, … — not a hardcoded ref; see
+   *  countCommitsAhead). 0 ⇒ no integrable work yet (a freshly-branched or
+   *  empty-handed worker). */
   commitsAhead: number
   /** The worker's heartbeat sign, or null if it never wrote one. */
   heartbeat: HeartbeatSign | null
@@ -728,6 +1105,13 @@ export interface ProjectEngine {
   path: string
   /** True while the autonomous drain chain is scheduled. */
   running: boolean
+  /** Owner EXPLICITLY paused the engine via the OFF toggle (stopOrchestrator). While
+   *  set, {@link maybeAutoStartDrain} will NOT auto-start the drain — so a manual OFF
+   *  genuinely halts new dispatch (条件2) even though a DEFAULT-off engine auto-drains
+   *  on an idle-slot + todo backlog (条件1). Cleared by a manual ON (startOrchestrator),
+   *  so the two toggle actions are the auto-drain consent. Optional (absent ⇒ NOT
+   *  paused: a fresh / legacy engine auto-drains). In-memory only. */
+  manualStop?: boolean
   /** Auto-integration armed (Card③) — a SEPARATE switch from `running`, default
    *  OFF. Only ever acts while `running` (turning the engine off = global stop). */
   autoMerge: boolean
@@ -739,6 +1123,15 @@ export interface ProjectEngine {
    *  twice. runEnginePass check-and-sets this synchronously at entry, so the second
    *  pass bails before it can spawn. In-memory only. */
   passInFlight: boolean
+  /** Per-engine CRITICAL-SECTION tail — the FIFO promise chain {@link runExclusive}
+   *  serializes the board-mutating dispatch pass against the owner's control-plane
+   *  mutations (stop/resolve), so a stop/resolve can never INTERLEAVE with the
+   *  monitor's await window and have its card-park silently overwritten by the
+   *  still-looping monitor's stale pass-start snapshot. SEPARATE from
+   *  {@link passInFlight} (which only bars a second PASS from overlapping — a control
+   *  op never sets it): this lock is what a control op WAITS on. Absent ⇒ an idle
+   *  (resolved) queue. In-memory only. */
+  lock?: Promise<void>
   /** Monotonic start epoch — bumped on every (re)start so a STALE scheduling chain
    *  (a kick still awaiting when stop→start fired) dies at its next scheduleNext
    *  instead of arming a SECOND timer beside the fresh chain (which would tick two
@@ -762,6 +1155,20 @@ export interface ProjectEngine {
    *  while a NEW commit (different tip ⇒ a fix) re-verifies and can land. Pruned
    *  when the branch leaves review. In-memory only. */
   verifyFailed: Map<string, string>
+  /** Branches whose ADVERSARIAL REVIEW (the independent N-reviewer majority vote
+   *  that runs AFTER verify is green, card a14329dc) returned must-fix, keyed
+   *  branch → the exact tip sha that was sent back. Consulted exactly like
+   *  {@link verifyFailed}: a stuck worker re-reporting the SAME commit re-reworks
+   *  WITHOUT re-spawning the (expensive) claude panel, while a NEW commit (a fix)
+   *  re-reviews and can land. Pruned when the branch leaves review. In-memory only. */
+  reviewFailed: Map<string, string>
+  /** Branches whose adversarial review keeps reaching NO majority (defer), keyed
+   *  branch → {tip, consecutive-defer count}. After {@link MAX_REVIEW_DEFERS} defers on
+   *  the SAME tip the panel is no longer re-spawned (it would just re-burn N claude
+   *  sessions every pass — e.g. a systemic claude outage makes all reviewers abstain
+   *  forever) — the card is surfaced "needs a human" and held until a NEW commit
+   *  (different tip) resets the count. Pruned when the branch leaves review. In-memory only. */
+  reviewDeferred: Map<string, { tip: string; count: number }>
   /** Wall-clock (ms) of the last integration pass — the INTEGRATE_TICK_MS gate. */
   lastIntegrateAt: number
   /** How many times each card (taskId) has been RE-QUEUED after a lost worker —
@@ -779,6 +1186,29 @@ export interface ProjectEngine {
    *  by taskId — a card may be re-dispatched to a FRESH branch, so the branch is the
    *  wrong key. In-memory only. */
   reworks: Map<string, number>
+  /** LEARNING LOOP (card fdf714ef): the REASON each card (taskId) was last sent
+   *  back — a 差し戻し / rollback's cause: the RED verify tail (which tsc/test) or
+   *  the adversarial-review must-fix summary. RECORDED by {@link reworkOrPark}
+   *  every rework (overwritten so it's always the LATEST failure); CONSUMED +
+   *  deleted by {@link runDispatchPass} when the SAME card is re-dispatched (it
+   *  hands the reason to the fresh worker's /order via buildOrderInjection, so the
+   *  swarm stops repeating the same failure), and the dispatch log records whether
+   *  it was injected; PRUNED alongside {@link reworks} ({@link pruneReworks}) when
+   *  the card reaches 'done' / vanishes so a stale reason never lingers. Keyed by
+   *  taskId (stable across the fresh branch a re-dispatch mints), exactly like
+   *  {@link reworks}. In-memory only. */
+  reworkReasons: Map<string, string>
+  /** How many times each card (taskId) has had a 統合 CONFLICT delegated back to its
+   *  worker for a rebase-resolution (card 012a2848) — the {@link MAX_CONFLICT_REWORKS}
+   *  loop guard, SEPARATE from {@link reworks} (a conflict is not the worker's code
+   *  being wrong, just the trunk having moved, so it gets its own budget — mixing the
+   *  two would prematurely park a card that legitimately reworked then merely hit a
+   *  moved trunk). Bumped on every conflict delegation; KEPT across the doing/todo hop
+   *  (taskId-keyed, stable across a re-dispatched branch); PRUNED when the card lands
+   *  or leaves the cycle ({@link pruneReworks}) and cleared on a deliberate human
+   *  resolve (resolveOrchestratorReview / stopOrchestratorWorker), exactly like
+   *  {@link reworks}. In-memory only. */
+  conflictReworks: Map<string, number>
   /** Cards whose Board COLUMN MOVE is stuck (kept pass after pass) — keyed by
    *  taskId. The anti-zombie tracker: bumped on every kept move, cleared when the
    *  move lands, escalated to 'blocked' (recovery) / surfaced as a 'move-stuck'
@@ -812,6 +1242,33 @@ export interface ProjectEngine {
   /** State inconsistencies detected on the latest pass (read-only — see
    *  detectAnomalies). Rebuilt every pass; surfaced verbatim by the state API. */
   anomalies: OrchestratorAnomaly[]
+  /** SELF-SUPPLY (card b3fbbfba) state — armed flag + scan throttle + per-day cap
+   *  bookkeeping. Default OFF; the engine proposes its own improvement cards only
+   *  while this is enabled (and even then they are owner-approval-gated). In-memory
+   *  only (a restart re-arms OFF — fail-safe). See {@link SelfSupplyRuntime}. */
+  selfSupply: SelfSupplyRuntime
+  /** Identity keys of FATAL events already pushed to the human (the escalation
+   *  safety valve's RISING-EDGE dedup): a state-derived fatal condition
+   *  (rework-exhausted / all-workers-down) notifies ONCE on enter and is removed
+   *  the moment it clears, so a genuine recurrence re-notifies but a persisting
+   *  one never spams every pass. In-memory only. (See fireFatalNotifications.) */
+  notified: Set<string>
+  /** EDGE-triggered fatal events queued by the monitor (e.g. a worker reclaimed
+   *  for overrunning MAX_EXEC_MS) for the next runEnginePass to push, then drain.
+   *  Unlike `notified` these are one-shot occurrences (not re-derivable state), so
+   *  they're enqueued at the site and fired exactly once. In-memory only. */
+  pendingFatal: SwarmFatalNotification[]
+  /** KPI lifetime event counters (the analytics layer's denominators) — bumped
+   *  in {@link logLine} by event kind so they survive the journal ring buffer.
+   *  In-memory only (a restart resets them — a per-session roll-up). See
+   *  {@link SwarmMetricsCounters} / {@link computeSwarmKpis}. */
+  metrics: SwarmMetricsCounters
+  /** The last DYNAMIC-SCALE target logged (card ea369937), as a string signature
+   *  ("<target>"), so {@link runDispatchPass} emits the scale-decision journal line
+   *  only when the target CHANGES — the dashboard shows scaling transitions
+   *  (上がった/下がった) instead of a 3s heartbeat that would churn the 200-line ring
+   *  buffer. Optional (a fresh engine has no prior decision). In-memory only. */
+  lastScaleSig?: string
 }
 
 interface OrchestratorStore {
@@ -836,6 +1293,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine = {
       path: key,
       running: false,
+      manualStop: false,
       autoMerge: false,
       passInFlight: false,
       generation: 0,
@@ -844,15 +1302,23 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       reviews: [],
       conflictedBranches: new Set(),
       verifyFailed: new Map(),
+      reviewFailed: new Map(),
+      reviewDeferred: new Map(),
       lastIntegrateAt: 0,
       recoveries: new Map(),
       reworks: new Map(),
+      reworkReasons: new Map(),
+      conflictReworks: new Map(),
       stuckMoves: new Map(),
       nudges: new Map(),
       rateLimited: new Map(),
       permissionWaits: new Map(),
       log: [],
       anomalies: [],
+      selfSupply: initSelfSupplyRuntime(),
+      notified: new Set(),
+      pendingFatal: [],
+      metrics: emptyMetricsCounters(),
     }
     store.engines.set(key, engine)
   } else {
@@ -861,22 +1327,79 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     // integration fields, so a bare `engine.conflictedBranches.has(...)` would
     // throw. Materialize any missing field once on retrieval. Harmless in prod
     // (forked fresh each boot); it only ever fires on a dev hot-reload.
+    engine.manualStop ??= false
     engine.autoMerge ??= false
     engine.passInFlight ??= false
     engine.generation ??= 0
     engine.reviews ??= []
     engine.conflictedBranches ??= new Set()
     engine.verifyFailed ??= new Map()
+    engine.reviewFailed ??= new Map()
+    engine.reviewDeferred ??= new Map()
     engine.lastIntegrateAt ??= 0
     engine.anomalies ??= []
     engine.recoveries ??= new Map()
     engine.reworks ??= new Map()
+    engine.reworkReasons ??= new Map()
+    engine.conflictReworks ??= new Map()
     engine.stuckMoves ??= new Map()
     engine.nudges ??= new Map()
     engine.rateLimited ??= new Map()
     engine.permissionWaits ??= new Map()
+    engine.selfSupply ??= initSelfSupplyRuntime()
+    engine.notified ??= new Set()
+    engine.pendingFatal ??= []
+    engine.metrics ??= emptyMetricsCounters()
   }
   return engine
+}
+
+/** Per-engine CRITICAL SECTION — serialize the autonomous tick's board-mutating
+ *  dispatch pass ({@link runDispatchPass}, driven by {@link runEnginePass} /
+ *  {@link maybeAutoStartDrain}) with the owner's control-plane mutations
+ *  ({@link stopOrchestratorWorker} / {@link resolveOrchestratorReview}) so the two
+ *  never INTERLEAVE their read→decide→write on the shared card + worker state.
+ *
+ *  WHY (the bug this closes): a dispatch pass's monitor reads the board ONCE at pass
+ *  start (the `byId` snapshot) and iterates the pass-start `engine.workers`; both go
+ *  stale the instant a control op mutates them inside one of the monitor's await
+ *  windows (countCommitsAhead / readHeartbeat). A `stop` that lands there kills the
+ *  PTY, parks the card in 'blocked', and drops the worker — yet the still-looping
+ *  monitor, blind to all three, re-homes that SAME card from its stale 'doing'
+ *  snapshot (recoverLost → 'todo', or promote → 'review' when commitsAhead>0),
+ *  silently undoing the owner's explicit halt and re-dispatching the very card they
+ *  stopped. Running both through this ONE FIFO queue removes the interleave: a control
+ *  op runs fully before or fully after a pass, so each always observes the other's
+ *  COMMITTED result (a fresh board read + a current worker set), never a half-updated
+ *  one.
+ *
+ *  A plain promise-chain mutex — append to the tail, run after it settles, and let
+ *  the NEXT link chain off this section's settlement (success OR failure) so one
+ *  thrown section never poisons the queue (every caller guards itself anyway). The
+ *  returned promise settles with `fn`'s OWN result, so a caller still sees its real
+ *  return/throw. NOT re-entrant — only the route-driven control plane and the tick
+ *  enter it, never one nested inside the other (verified: no internal call site).
+ *  The SLOW integrate pass is intentionally NOT wrapped: it can await a multi-minute
+ *  adversarial-review panel, and blocking an owner's stop/resolve click on that would
+ *  be a worse regression than the far narrower resolve-vs-integrate window it leaves
+ *  open (a SEPARATE, pre-existing race on review-column cards — not the doing-column
+ *  bug fixed here — which integrate's own post-review running/autoMerge re-check
+ *  already partly covers). */
+const runExclusive = <T>(engine: ProjectEngine, fn: () => Promise<T>): Promise<T> => {
+  const prior = engine.lock ?? Promise.resolve()
+  // Run our section once the prior holder settles — whether it fulfilled OR rejected
+  // (a failed section must still release the queue), so the chain never wedges.
+  const result = prior.then(
+    () => fn(),
+    () => fn(),
+  )
+  // The next waiter chains off THIS section's settlement, error-swallowed, so the tail
+  // is always a clean Promise<void> (one section's throw can't poison the next).
+  engine.lock = result.then(
+    () => {},
+    () => {},
+  )
+  return result
 }
 
 const logLine = (
@@ -891,6 +1414,15 @@ const logLine = (
   engine.log.push({ at: new Date().toISOString(), level, message, ...(kind ? { kind } : {}) })
   if (engine.log.length > MAX_LOG_LINES) {
     engine.log.splice(0, engine.log.length - MAX_LOG_LINES)
+  }
+  // Tap the SAME line into the NON-LOSSY KPI counters (the analytics layer): this
+  // is the one chokepoint every dispatch/promote/integrate/conflict/crash/stall/
+  // rework event already flows through, so counters survive the ring buffer above
+  // without hooking any event site. Bump-only — never changes what the engine does.
+  const metricKey = classifyMetricEvent({ kind, level, message })
+  if (metricKey) {
+    engine.metrics ??= emptyMetricsCounters()
+    engine.metrics[metricKey] += 1
   }
 }
 
@@ -923,25 +1455,45 @@ const clearKeptMove = (engine: ProjectEngine, taskId: string): void => {
 const emptyState = (): SwarmOrchestratorState => ({
   running: false,
   autoMerge: false,
+  selfSupply: false,
   workers: [],
   reviews: [],
   log: [],
   anomalies: [],
   maxWorkers: ORCHESTRATOR_MAX_WORKERS,
+  kpis: emptyKpis(),
+  consumption: emptyConsumption(),
 })
 
 /** Public state snapshot. Reports only *live* workers (a dead PTY is filtered
  *  out without mutating engine.workers — the pass with its slot-freed log is the
- *  authoritative pruner) so the count the UI shows matches the cap math. */
-const stateOf = (engine: ProjectEngine, isAlive: (id: string) => boolean): SwarmOrchestratorState => ({
-  running: engine.running,
-  autoMerge: engine.autoMerge,
-  workers: engine.workers.filter((w) => isAlive(w.terminalId)),
-  reviews: [...engine.reviews],
-  log: [...engine.log],
-  anomalies: [...engine.anomalies],
-  maxWorkers: ORCHESTRATOR_MAX_WORKERS,
-})
+ *  authoritative pruner) so the count the UI shows matches the cap math.
+ *  `tasks` (the Board cards) is the lead-time input — defaulted to [] for the
+ *  action endpoints that only ack a toggle (their rates still come from the
+ *  non-lossy counters; the 5s poll's getOrchestratorState supplies the cards for
+ *  the full lead-time figure), so no caller is forced to fetch the board. */
+const stateOf = (
+  engine: ProjectEngine,
+  isAlive: (id: string) => boolean,
+  tasks: readonly ProjectTask[] = [],
+): SwarmOrchestratorState => {
+  // Resolve the live worker set ONCE — both the reported `workers` array and the
+  // consumption snapshot (activeWorkers / activeRunMs) read from it.
+  const live = engine.workers.filter((w) => isAlive(w.terminalId))
+  const counters = engine.metrics ?? emptyMetricsCounters()
+  return {
+    running: engine.running,
+    autoMerge: engine.autoMerge,
+    selfSupply: engine.selfSupply.enabled,
+    workers: live,
+    reviews: [...engine.reviews],
+    log: [...engine.log],
+    anomalies: [...engine.anomalies],
+    maxWorkers: ORCHESTRATOR_MAX_WORKERS,
+    kpis: computeSwarmKpis({ counters, tasks, log: engine.log }),
+    consumption: computeSwarmConsumption({ liveWorkers: live, counters, limit: DISPATCH_BUDGET }),
+  }
+}
 
 // ── Injectable dependencies ──────────────────────────────────────────────────
 
@@ -956,12 +1508,16 @@ export interface OrchestratorDeps {
    *  handle the review stage reads. Resolves false on a kept write so the
    *  monitor pass can retry next time. (Card②) */
   moveToReview: (projectPath: string, taskId: string, branch: string) => Promise<boolean>
-  /** Spawn one isolated worker for a goal (worktree + claude PTY + /order). */
+  /** Spawn one isolated worker for a goal (worktree + claude PTY + /order).
+   *  `priorFailure` (LEARNING LOOP, card fdf714ef) is the reason this SAME card was
+   *  last 差し戻し / rolled back — threaded into the worker's /order so a re-dispatch
+   *  doesn't repeat the failure. Omitted on a first dispatch. */
   spawnWorker: (opts: {
     projectPath: string
     title: string
     notes?: string
     hint?: string
+    priorFailure?: string
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
   isAlive: (terminalId: string) => boolean
@@ -1010,6 +1566,13 @@ export interface OrchestratorDeps {
    *  usage/rate-limit WAIT or a startup permission prompt — rather than treating
    *  every quiet worker as a stall. (Card 4880e9c6 — 進まない分類.) */
   recentOutput: (terminalId: string) => string | null
+  /** Preflight `claude` before an AUTO-START engages the engine — `{ok:false}` when the
+   *  CLI is missing / logged out. {@link maybeAutoStartDrain} consults it so it never flips
+   *  `running` true into a spawn it knows will fail (which would make the chain — and the
+   *  unattended background sweep — retry forever). OPTIONAL: absent ⇒ no preflight (the
+   *  dispatch unit tests omit it; the manual ON path has its OWN claudeRunPreflight that
+   *  throws a 503). Default (defaultDeps): claudeRunPreflight. */
+  preflight?: () => Promise<{ ok: boolean }>
 }
 
 /** The anomaly-detection stage's injectable surface — split from the others so
@@ -1022,6 +1585,14 @@ export interface AnomalyDeps {
    *  (treated as missing — conservative: the anomaly check only WARNS, never
    *  mutates, so a transient stat error at worst shows one extra warning). */
   worktreeExists: (projectPath: string, branch: string) => Promise<boolean>
+  /** Push a FATAL event to the human (the escalation safety valve): persist an
+   *  in-app notification (the Ground bell) AND raise an OS toast. Called by
+   *  fireFatalNotifications for the cases the unmanned loop can't self-heal
+   *  (rework-exhausted / all-workers-down / exec-timeout). OPTIONAL + best-effort
+   *  (never awaited into the pass, internal-catch) so a notification fault can
+   *  never disturb a pass — and so existing tests/callers that don't set it keep
+   *  working unchanged. Default (defaultDeps): createSwarmFatalNotification. */
+  notify?: (n: SwarmFatalNotification) => void
 }
 
 /** The integration stage's (Card③) injectable surface — split from
@@ -1054,6 +1625,25 @@ export interface IntegrationDeps {
     target: string,
     opts?: { skipIfTip?: string },
   ) => Promise<{ ok: boolean; tip: string | null; reason?: string; skipped?: boolean }>
+  /** Independent ADVERSARIAL REVIEW of the to-be-landed tree, run AFTER `verify`
+   *  is green and BEFORE `integrate` — the COMPLEMENT to the (mechanical) verify
+   *  gate (card a14329dc). N fresh `claude` reviewers — NONE of them the worker —
+   *  each fact-check the diff and a STRICT majority decides ({@link tallyReview}):
+   *  'rework' (majority must-fix ⇒ 差し戻し review→doing, never merged), 'integrate'
+   *  (majority clean ⇒ proceed to land), or 'defer' (no majority — a tie / reviewers
+   *  that failed to vote ⇒ leave in review, retry next pass; never merge on thin
+   *  signal). OPTIONAL: when absent the review stage is SKIPPED (pre-a14329dc
+   *  behavior — integrate runs straight after verify); {@link defaultDeps} wires the
+   *  real claude panel ({@link makeAdversarialReview}). `opts.tip` is the verified
+   *  tip (the panel reviews exactly that). `opts.skipIfTip`: when it equals `tip`
+   *  (an unchanged branch already reviewed must-fix) return {decision:'rework',
+   *  skipped:true} WITHOUT re-spawning the panel — mirrors verify's memo. */
+  review?: (
+    projectPath: string,
+    branch: string,
+    target: string,
+    opts: { tip: string; skipIfTip?: string },
+  ) => Promise<ReviewResult>
   /** Land one branch on the trunk (FF / rebase / conflict). Never forces. */
   integrate: (projectPath: string, branch: string, target: string) => Promise<IntegrateOutcome>
   /** Move a card review→done. False on a kept write (retry next pass). */
@@ -1167,17 +1757,37 @@ const gitOut = async (cwd: string, args: string[]): Promise<string | null> => {
   }
 }
 
-/** Trunk refs a `swarm/*` branch is measured against, most- to least-preferred
- *  (mirrors swarmWorker's base preference — workers branch off origin/main). */
-const COMMIT_BASE_PREFERENCE = ['origin/main', 'main'] as const
+/** Trunk refs a `swarm/*` branch is measured against, most- to least-preferred,
+ *  RESOLVED for THIS project rather than hardcoded to origin/main. `resolveTarget`
+ *  is the SAME trunk resolver the integrate stage uses (an explicit override, else
+ *  origin/HEAD's symbolic target, else 'main'), so a non-main default branch — a
+ *  `master` repo, or origin/HEAD → origin/release — is measured against ITS trunk.
+ *  Remote-tracking ref first (`origin/<trunk>` — the push target the integrate
+ *  stage lands on), then the local branch as the offline fallback. [] when no
+ *  trunk name resolves (⇒ caller counts 0: no provable base, no promotion).
+ *
+ *  WHY this had to change: workers branch off the best of swarmWorker's
+ *  ['origin/main','main','HEAD'] preference, so in a `master` repo they fork off
+ *  HEAD (the master tip) — but the old hardcoded ['origin/main','main'] resolved
+ *  NEITHER, so countCommitsAhead returned 0, classifyWorker saw hasWork=false, and
+ *  a COMMITTED worker was never promoted to review (card stuck in doing →
+ *  stall/runaway recovery → re-dispatch → forever). resolveTarget aligns the
+ *  promote gate with the integrate gate, which already handled non-main trunks. */
+const commitBasePreference = async (projectPath: string): Promise<string[]> => {
+  const target = await resolveTarget(projectPath)
+  return target ? [`origin/${target}`, target] : []
+}
 
 /** Count commits the worker's branch carries ahead of trunk. Uses the shared
  *  repo + branch ref (not the worktree path), so it still works after the
- *  worktree is removed. 0 when no trunk ref resolves or the branch is gone
+ *  worktree is removed. The trunk is RESOLVED per-project ({@link commitBasePreference}),
+ *  not a hardcoded origin/main, so a committed worker in a non-main-default repo
+ *  (master, …) is seen as ahead and promoted — matching how the integrate stage
+ *  already resolves the trunk. 0 when no trunk ref resolves or the branch is gone
  *  (conservative — no provable work ⇒ no promotion). */
 const defaultCountCommitsAhead = async (projectPath: string, branch: string): Promise<number> => {
   if (!branch) return 0
-  for (const base of COMMIT_BASE_PREFERENCE) {
+  for (const base of await commitBasePreference(projectPath)) {
     if ((await gitOut(projectPath, ['rev-parse', '--verify', '--quiet', base])) === null) continue
     const out = await gitOut(projectPath, ['rev-list', '--count', `${base}..${branch}`])
     if (out === null) return 0 // branch ref missing / git error ⇒ no proof of work
@@ -1289,6 +1899,7 @@ const defaultSpawnWorker = async (opts: {
   title: string
   notes?: string
   hint?: string
+  priorFailure?: string
 }): Promise<SpawnSwarmWorkerResponse> => {
   const pre = await claudeRunPreflight()
   if (!pre.ok) throw new Error(pre.body.error || 'claude not ready')
@@ -1421,6 +2032,23 @@ export interface VerifyCheck {
   run: (worktreeDir: string) => Promise<{ ok: boolean; output: string }>
 }
 
+/** A {@link VerifyCheck} paired with the predicate that decides whether THIS
+ *  branch's diff makes it relevant. The primary check (tsc) runs for every branch
+ *  it applies to; a conditional check runs only when `appliesTo` accepts the
+ *  branch's changed-file set — so the swarm-safety suite is skipped for a branch
+ *  that doesn't touch swarm code (the goal's condition 3: unrelated work is never
+ *  slowed by an extra test run). */
+export interface ConditionalCheck {
+  /** Short label surfaced in the block reason / log (e.g. 'swarm-safety'). */
+  label: string
+  /** Relevant to this branch? Decided from the repo-relative paths it changed vs
+   *  the trunk merge-base ({@link changedFilesVsTrunk}). */
+  appliesTo: (changedFiles: string[]) => boolean
+  /** The check run when `appliesTo` accepts (its own `applicable` still gates on the
+   *  project actually carrying the fixtures, so a non-OPEN-GROUND repo is unaffected). */
+  check: VerifyCheck
+}
+
 /** The default check: `tsc --noEmit`. `applicable` is a TS-PROJECT test (a
  *  tsconfig.json) — NOT an environment test — so a non-TS project (the engine can
  *  drive ANY registered repo) is never blocked, but a TS project we genuinely
@@ -1461,16 +2089,415 @@ export const tscCheck: VerifyCheck = {
   },
 }
 
-/** Build the real `verify` dep from a {@link VerifyCheck}. The worktree mechanics
- *  are identical for any check, so they live here once and the test drives the
- *  WHOLE real path (tip-resolve → rebase → symlink → check → teardown) with a fake
- *  verdict. The verified tree is the branch REBASED ONTO THE TRUNK — what
- *  `integrate` actually pushes — so a branch that compiled against an older trunk
- *  but breaks against the current one is caught. A non-FF / conflicting /
- *  unbuildable case never FALSE-blocks (returns ok:true with a reason); a real
- *  rebase conflict is deferred to `integrate` (which stamps it). */
+// ── Swarm self-modification gate (card 34d42890) ──────────────────────────────
+// When a branch changes swarm code, the swarm is editing ITSELF — so before it may
+// auto-merge, the A1 safety net (swarmSafety.* — invariants A–D, card 8d778645)
+// must still be GREEN against the to-be-landed tree. This wires that suite in as a
+// diff-gated verify check: it runs ONLY for swarm-touching branches (unrelated work
+// stays fast) and a RED suite blocks the merge through the SAME path a RED tsc does
+// (review→doing 差し戻し, then 'blocked' after repeated failure — reworkOrPark).
+// Full invariant list + code map: docs/SWARM_SAFETY_INVARIANTS.md.
+
+/** Repo-relative path patterns that constitute "swarm code" — the goal's enumerated
+ *  set: src/lib/server/swarm*.ts (orchestrator / integrate / worker / janitor / …,
+ *  AND the swarmSafety.test.ts net itself), server/routes/swarm.ts (the /api/swarm
+ *  surface), and src/components/canvas/modules/Swarm* (the UI panes). The anchors are
+ *  deliberately tight: `swarm` must sit DIRECTLY under each dir (a nested
+ *  `…/sub/swarmX.ts` or a stray `docs/swarm.ts` does NOT match). The route-level
+ *  safety net (server/routes/__tests__/swarmSafety.routes.test.ts) is ALSO a trigger:
+ *  the unit net (swarmSafety.test.ts) is already caught by the swarm*.ts glob, but the
+ *  route net lives outside it — without this, a branch deleting/weakening JUST that
+ *  file would never trip the gate. */
+const SWARM_CODE_PATHS: readonly RegExp[] = [
+  /^src\/lib\/server\/swarm[^/]*\.ts$/,
+  /^server\/routes\/swarm\.ts$/,
+  /^server\/routes\/__tests__\/swarmSafety[^/]*$/,
+  /^src\/components\/canvas\/modules\/Swarm[^/]*$/,
+]
+
+/** Does this changed-file set (repo-relative paths) touch any swarm code? Pure — the
+ *  cheap gate deciding whether a branch must pay for the swarm-safety suite. */
+export const touchesSwarmPaths = (changedFiles: readonly string[]): boolean =>
+  changedFiles.some((f) => SWARM_CODE_PATHS.some((re) => re.test(f)))
+
+/** Repo-relative paths the branch changed vs the trunk (its own diff:
+ *  merge-base(trunk,tip)…tip), as a pure read in the main checkout — no worktree.
+ *  [] on any git failure: a diff we cannot compute triggers NO diff-gated check,
+ *  keeping unrelated branches fast (the always-on tsc gate still runs); the only
+ *  realistic failure (no merge-base) is a branch unrelated to the trunk, which
+ *  integrate handles on its own. */
+const changedFilesVsTrunk = async (
+  projectPath: string,
+  tip: string,
+  targetRef: string,
+): Promise<string[]> => {
+  const out = await gitOut(projectPath, ['diff', '--name-only', `${targetRef}...${tip}`])
+  if (!out) return []
+  return out
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/** The swarm safety regression suite (the A1 net, card 8d778645). Running these two
+ *  files green proves the swarm's self-protection invariants (A–D) still hold. */
+export const SWARM_SAFETY_TESTS: readonly string[] = [
+  'src/lib/server/swarmSafety.test.ts',
+  'server/routes/__tests__/swarmSafety.routes.test.ts',
+]
+
+/** A child-process runner for the merge-GATE checks that spawn a tool which itself FORKS a
+ *  worker pool — the two vitest suites and eslint. It differs from {@link execFile} in exactly
+ *  one way that matters: the child is spawned DETACHED (its own process-group leader) and, on
+ *  EVERY exit path (timeout, spawn error, OR a normal close), the WHOLE group is SIGKILLed via a
+ *  negative-pid signal — reaping the tool AND its forks together.
+ *
+ *  WHY: vitest with no explicit pool uses the default FORK pool (child_process workers).
+ *  execFile's `timeout` SIGTERMs ONLY the direct pid, so on a wedged-suite timeout — precisely
+ *  when the suite is stuck and the forks are live — the fork workers ORPHAN, each spinning a
+ *  core to machine saturation. That is this repo's own documented hazard
+ *  (feedback_vitest_no_midrun_kill: killing only the parent orphans the forks worker), and the
+ *  very orphan the engine's self-update path already group-kills (electron/selfUpdate.js
+ *  killProcessTree). A negative-pid SIGKILL reaches the group leader and every fork in it. The
+ *  forks share the leader's group (vitest/eslint never re-group the way playwright's webServer
+ *  does), so an IMMEDIATE group SIGKILL — not the SIGINT-then-escalate gracefulGroupKill — is the
+ *  correct reaper here. We do NOT `unref()` the child: the engine still awaits it; `detached`
+ *  only changes its process group, not the parent's wait.
+ *
+ *  FAIL-CLOSED is preserved exactly: resolves `{ stdout, stderr }` on a clean exit 0, and REJECTS
+ *  with an Error carrying `stdout`/`stderr` (so the existing `errMsg`/tail catch keeps working) on
+ *  non-zero exit, spawn error, OR timeout — so each check turns a timeout into RED, never a silent
+ *  pass. (tscCheck and the git helper keep using execFile: a single process with no worker pool
+ *  has no fork to orphan, so the negative-pid machinery would buy nothing.) */
+export const runGateProcess = (
+  bin: string,
+  args: readonly string[],
+  opts: { cwd: string; timeout: number; maxBuffer: number; env: NodeJS.ProcessEnv },
+): Promise<{ stdout: string; stderr: string }> =>
+  new Promise((resolvePromise, rejectPromise) => {
+    // detached → the child leads its own process group (pgid == pid on POSIX), so a later kill
+    // of -pid reaches the WHOLE group (the child + its vitest/eslint forks).
+    const child = spawn(bin, [...args], { cwd: opts.cwd, env: opts.env, detached: true })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    let timedOut = false
+    // A const holder (not a reassigned `let`) so the timeout handle is referenced by
+    // `settle` AND assigned below without any forward reference between the two.
+    const timerRef: { id?: ReturnType<typeof setTimeout> } = {}
+
+    // SIGKILL the child's whole process group; on POSIX a negative pid hits every member
+    // (forks included). A group already gone (ESRCH — e.g. just after a clean exit) is a
+    // harmless no-op; non-POSIX / non-leader falls back to a direct child kill.
+    const reapGroup = () => {
+      if (process.platform !== 'win32' && typeof child.pid === 'number') {
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+          return
+        } catch {
+          /* not a group leader / already gone — fall through to a direct kill */
+        }
+      }
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* already gone */
+      }
+    }
+
+    const settle = (emit: () => void) => {
+      if (settled) return
+      settled = true
+      if (timerRef.id) clearTimeout(timerRef.id)
+      // Reap on the way out on EVERY path. After a clean close vitest has already reaped its
+      // own forks (this is then a no-op), but the defensive group kill guarantees no straggler
+      // fork survives the gate regardless of how the run ended.
+      reapGroup()
+      emit()
+    }
+
+    // Cap captured output like execFile's maxBuffer (guard against a runaway suite eating
+    // memory) but keep DRAINING the pipes so the child never blocks on a full buffer; the
+    // captured prefix is enough for the RED tail.
+    const append = (cur: string, chunk: string): string =>
+      cur.length >= opts.maxBuffer ? cur : (cur + chunk).slice(0, opts.maxBuffer)
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout = append(stdout, String(chunk))
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = append(stderr, String(chunk))
+    })
+
+    timerRef.id = setTimeout(() => {
+      timedOut = true
+      settle(() => {
+        const e = new Error(`${basename(bin)} timed out after ${opts.timeout}ms`) as Error & {
+          stdout?: string
+          stderr?: string
+          killed?: boolean
+        }
+        e.stdout = stdout
+        e.stderr = stderr
+        e.killed = true
+        rejectPromise(e)
+      })
+    }, opts.timeout)
+
+    child.on('error', (err: Error) => {
+      settle(() => {
+        const e = err as Error & { stdout?: string; stderr?: string }
+        e.stdout = stdout
+        e.stderr = stderr
+        rejectPromise(e)
+      })
+    })
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      if (timedOut) return // the timer already settled (and reaped) this run
+      settle(() => {
+        if (code === 0) {
+          resolvePromise({ stdout, stderr })
+          return
+        }
+        const e = new Error(
+          `${basename(bin)} exited ${code != null ? `with code ${code}` : `via signal ${signal ?? 'unknown'}`}`,
+        ) as Error & { stdout?: string; stderr?: string; code?: number | null }
+        e.stdout = stdout
+        e.stderr = stderr
+        e.code = code
+        rejectPromise(e)
+      })
+    })
+  })
+
+/** A {@link VerifyCheck} that runs the swarm safety suite. Gated to swarm-touching
+ *  branches by {@link swarmSafetyConditional}. `applicable` is an EXISTENCE test for
+ *  the suite, so a project that isn't OPEN GROUND's own source (no such files) is
+ *  never gated. `run` executes the suite with the project's own vitest INSIDE the
+ *  rebased worktree (node_modules symlinked by makeVerify); a RED suite blocks the
+ *  merge. The suite re-pins OPENGROUND_HOME to a tmp dir itself (src/test/setup-home.ts
+ *  runs as a vitest setupFile before any test module loads), so it never touches the
+ *  user's real ~/.openground even though the engine runs with the real home in its
+ *  env. A missing vitest binary (project not installed) is RED — an unverified swarm
+ *  change is never waved through (mirrors tscCheck's no-node_modules stance). */
+export const swarmSafetyCheck: VerifyCheck = {
+  applicable: async (projectPath) =>
+    (
+      await Promise.all(
+        SWARM_SAFETY_TESTS.map((t) =>
+          stat(join(projectPath, t))
+            .then(() => true)
+            .catch(() => false),
+        ),
+      )
+    ).every(Boolean),
+  run: async (worktreeDir) => {
+    // The net must be INTACT in the to-be-landed tree FIRST. vitest, given an explicit
+    // file list, silently SKIPS a missing file and runs the survivors — so a branch
+    // that deleted/renamed a safety file would otherwise pass the gate on the
+    // remaining (or zero) tests. Require every safety file to exist in the worktree;
+    // a missing one is tampering → RED (an evasion attempt, not a pass).
+    for (const t of SWARM_SAFETY_TESTS) {
+      if (!(await stat(join(worktreeDir, t)).then(() => true).catch(() => false))) {
+        return { ok: false, output: `safety test missing in branch: ${t} (the net must stay intact)` }
+      }
+    }
+    const vitestBin = join(worktreeDir, 'node_modules', '.bin', 'vitest')
+    if (!(await stat(vitestBin).then(() => true).catch(() => false))) {
+      return {
+        ok: false,
+        output: 'vitest unavailable (no node_modules in the project — run npm install to arm the swarm-safety gate)',
+      }
+    }
+    try {
+      await runGateProcess(vitestBin, ['run', ...SWARM_SAFETY_TESTS], {
+        cwd: worktreeDir,
+        timeout: 240_000,
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env },
+      })
+      return { ok: true, output: '' }
+    } catch (e: unknown) {
+      const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
+      const tail = out ? out.split('\n').filter(Boolean).slice(-8).join(' · ').slice(0, 800) : errMsg(e)
+      return { ok: false, output: `regression RED: ${tail || 'vitest failed'}` }
+    }
+  },
+}
+
+/** The swarm-safety net wired as a diff-gated check: run {@link swarmSafetyCheck}
+ *  iff the branch touches swarm code ({@link touchesSwarmPaths}). Passed to
+ *  {@link makeVerify} as a conditional check by {@link defaultDeps}. */
+export const swarmSafetyConditional: ConditionalCheck = {
+  label: 'swarm-safety',
+  appliesTo: (changed) => touchesSwarmPaths(changed),
+  check: swarmSafetyCheck,
+}
+
+// ── The project-wide quality floor: lint + tsc + test on EVERY branch (card 4e7f2151) ──
+// B2 (card 34d42890) made ONE suite (swarm-safety) a merge gate, and ONLY for branches
+// that touch swarm code (its condition 3: don't slow unrelated work). This GENERALIZES
+// that gate to the project's full quality floor: before ANY swarm branch may auto-merge
+// it must be lint-clean, type-clean, AND have the FULL test suite green — the same
+// first-red-blocks worktree run as tsc, surfaced through the same review→doing 差し戻し
+// path (a RED check blocks exactly like a RED tsc: reworkOrPark, then 'blocked' after
+// MAX_REWORKS; the failing check's label rides the reason into the engine log + the
+// worker's fix instruction). B2 is CONTAINED, two ways: (a) the full `npm test` SUBSUMES
+// the swarm-safety suite (those tests run inside it), and (b) swarmSafetyConditional is
+// KEPT on top — not for re-running the tests, but for its TAMPER guard: a branch that
+// DELETES a safety file passes the full suite (vitest silently skips a missing file) yet
+// trips swarmSafetyCheck's explicit existence check. Each check's own `applicable` still
+// skips a project that lacks the tooling, so a non-OPEN-GROUND repo the engine drives is
+// never blocked on a gate it can't run (mirrors tscCheck).
+
+/** eslint config filenames that signal "this project lints" — the `applicable` gate for
+ *  {@link lintCheck}. Covers eslintrc (legacy — what OPEN GROUND uses: .eslintrc.json) and
+ *  flat config. A reasonable signal, not exhaustive of every variant (e.g. an `eslintConfig`
+ *  key in package.json is not detected): the goal is to ARM OPEN GROUND's own gate and SKIP
+ *  a repo with no eslint, never to block one we can't lint. */
+const ESLINT_CONFIG_FILES: readonly string[] = [
+  '.eslintrc.json',
+  '.eslintrc.js',
+  '.eslintrc.cjs',
+  '.eslintrc.yml',
+  '.eslintrc.yaml',
+  '.eslintrc',
+  'eslint.config.js',
+  'eslint.config.mjs',
+  'eslint.config.cjs',
+  'eslint.config.ts',
+]
+
+/** `npm run lint` (eslint . --ext .ts,.tsx) wired as a merge-gate {@link VerifyCheck}.
+ *  `applicable` is a LINT-PROJECT test (an eslint config present) — NOT an environment
+ *  test — so a repo with no eslint setup is never blocked; but a project that HAS one we
+ *  cannot run is NOT waved through: `run` reports RED when the binary is absent (no
+ *  node_modules), mirroring tscCheck's conservative stance (never auto-merge unverified).
+ *  The argv matches the `lint` npm script byte-for-byte so the gate == what a human runs. */
+export const lintCheck: VerifyCheck = {
+  applicable: async (projectPath) =>
+    (
+      await Promise.all(
+        ESLINT_CONFIG_FILES.map((f) =>
+          stat(join(projectPath, f))
+            .then(() => true)
+            .catch(() => false),
+        ),
+      )
+    ).some(Boolean),
+  run: async (worktreeDir) => {
+    const eslintBin = join(worktreeDir, 'node_modules', '.bin', 'eslint')
+    if (!(await stat(eslintBin).then(() => true).catch(() => false))) {
+      return {
+        ok: false,
+        output: 'eslint unavailable (no node_modules in the project — run npm install to arm the lint gate)',
+      }
+    }
+    try {
+      await runGateProcess(eslintBin, ['.', '--ext', '.ts,.tsx'], {
+        cwd: worktreeDir,
+        timeout: 180_000,
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env },
+      })
+      return { ok: true, output: '' }
+    } catch (e: unknown) {
+      const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
+      // eslint prints the violation list to stdout; keep the LAST lines (the summary).
+      const tail = out ? out.split('\n').filter(Boolean).slice(-8).join(' · ').slice(0, 800) : errMsg(e)
+      return { ok: false, output: tail || 'eslint failed' }
+    }
+  },
+}
+
+/** vitest/vite config filenames that signal "this project has a test suite" — the
+ *  `applicable` gate for {@link testCheck}. vitest reads a `test` block from a vite config
+ *  too, so both families count. OPEN GROUND has vitest.config.ts. */
+const VITEST_CONFIG_FILES: readonly string[] = [
+  'vitest.config.ts',
+  'vitest.config.js',
+  'vitest.config.mjs',
+  'vitest.config.cjs',
+  'vite.config.ts',
+  'vite.config.js',
+  'vite.config.mjs',
+  'vite.config.cjs',
+]
+
+/** `npm test` (vitest run — the FULL suite) wired as a merge-gate {@link VerifyCheck}. Runs
+ *  EVERY test the project has against the to-be-landed tree, so a swarm change that breaks
+ *  ANY test (not just the swarm-safety subset B2 gated on) cannot auto-merge. The suite
+ *  re-pins OPENGROUND_HOME to a tmp dir itself (src/test/setup-home.ts runs as a vitest
+ *  setupFile before any test module loads), so it never touches the user's real
+ *  ~/.openground even though the engine runs with the real home in env — exactly like
+ *  swarmSafetyCheck. `applicable` is a HAS-TESTS test (a vitest/vite config present); `run`
+ *  reports RED when vitest is absent (mirrors tscCheck). The full suite is HEAVY — it runs
+ *  at most once per new commit per card (makeVerify is memoized by tip in runIntegratePass),
+ *  the deliberate cost of the quality floor the goal asks for. */
+export const testCheck: VerifyCheck = {
+  applicable: async (projectPath) =>
+    (
+      await Promise.all(
+        VITEST_CONFIG_FILES.map((f) =>
+          stat(join(projectPath, f))
+            .then(() => true)
+            .catch(() => false),
+        ),
+      )
+    ).some(Boolean),
+  run: async (worktreeDir) => {
+    const vitestBin = join(worktreeDir, 'node_modules', '.bin', 'vitest')
+    if (!(await stat(vitestBin).then(() => true).catch(() => false))) {
+      return {
+        ok: false,
+        output: 'vitest unavailable (no node_modules in the project — run npm install to arm the test gate)',
+      }
+    }
+    try {
+      await runGateProcess(vitestBin, ['run'], {
+        cwd: worktreeDir,
+        timeout: 600_000,
+        maxBuffer: 32 * 1024 * 1024,
+        env: { ...process.env },
+      })
+      return { ok: true, output: '' }
+    } catch (e: unknown) {
+      const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
+      const tail = out ? out.split('\n').filter(Boolean).slice(-8).join(' · ').slice(0, 800) : errMsg(e)
+      return { ok: false, output: tail || 'vitest failed' }
+    }
+  },
+}
+
+/** lint + full-test wired as ALWAYS-ON checks — `appliesTo` accepts EVERY branch (no
+ *  diff-gating), in deliberate contrast to {@link swarmSafetyConditional}, which only fires
+ *  for swarm-touching branches. THIS is the generalization (card 4e7f2151): B2's gate ran a
+ *  suite only when the diff was relevant; the quality floor (lint/tsc/test) is relevant to
+ *  ALL branches. (Each check's own `applicable` still skips a project missing the tooling.) */
+export const lintConditional: ConditionalCheck = {
+  label: 'lint',
+  appliesTo: () => true,
+  check: lintCheck,
+}
+export const testConditional: ConditionalCheck = {
+  label: 'test',
+  appliesTo: () => true,
+  check: testCheck,
+}
+
+/** Build the real `verify` dep from a primary {@link VerifyCheck} (always run when
+ *  `applicable` — the tsc gate) plus any number of {@link ConditionalCheck}s. A
+ *  conditional with an always-true `appliesTo` runs for EVERY branch (the lint + full
+ *  test quality-floor gates, card 4e7f2151); a diff-gated one runs only when the branch's
+ *  changes make it relevant (the swarm-safety suite → only a branch touching swarm code).
+ *  The worktree mechanics are identical for any check, so
+ *  they live here once and the test drives the WHOLE real path (tip-resolve → rebase →
+ *  symlink → check → teardown) with a fake verdict. The verified tree is the branch
+ *  REBASED ONTO THE TRUNK — what `integrate` actually pushes — so a branch that compiled
+ *  against an older trunk but breaks against the current one is caught. A non-FF /
+ *  conflicting / unbuildable case never FALSE-blocks (returns ok:true with a reason); a
+ *  real rebase conflict is deferred to `integrate` (which stamps it). */
 export const makeVerify =
-  (check: VerifyCheck): IntegrationDeps['verify'] =>
+  (check: VerifyCheck, conditional: ConditionalCheck[] = []): IntegrationDeps['verify'] =>
   async (projectPath, branch, target, opts) => {
     const remote = 'origin'
     if (!isSwarmBranch(branch)) return { ok: true, tip: null, reason: 'not a swarm branch' }
@@ -1493,8 +2520,24 @@ export const makeVerify =
     if ((await gitOut(projectPath, ['merge-base', '--is-ancestor', tip, targetRef])) !== null) {
       return { ok: true, tip, reason: 'already merged' }
     }
-    if (!(await check.applicable(projectPath))) {
-      return { ok: true, tip, reason: 'no typecheck configured' } // can't verify ⇒ don't block
+    // Decide WHICH checks this branch needs, cheaply, BEFORE building a worktree:
+    //  • the primary check (tsc) runs for every project it is `applicable` to;
+    //  • each conditional check runs only when the branch's diff makes it relevant
+    //    (the swarm-safety net → ONLY a branch that touches swarm code) AND the
+    //    project carries that check's fixtures. A branch needing NO check is waved
+    //    through with no worktree (a non-TS, non-swarm change blocks nobody).
+    const checks: { label: string; run: VerifyCheck['run'] }[] = []
+    if (await check.applicable(projectPath)) checks.push({ label: 'tsc', run: check.run })
+    if (conditional.length) {
+      const changed = await changedFilesVsTrunk(projectPath, tip, targetRef)
+      for (const c of conditional) {
+        if (c.appliesTo(changed) && (await c.check.applicable(projectPath))) {
+          checks.push({ label: c.label, run: c.check.run })
+        }
+      }
+    }
+    if (checks.length === 0) {
+      return { ok: true, tip, reason: 'no applicable check (nothing to verify)' }
     }
 
     // Materialize EXACTLY what integrate will push: a detached worktree at the tip,
@@ -1519,21 +2562,583 @@ export const makeVerify =
         await gitOut(dir, ['rebase', '--abort'])
         return { ok: true, tip, reason: 'rebase conflict (deferred to integrate)' }
       }
-      // Symlink node_modules from the MAIN checkout (complete + correct) so tsc
-      // resolves types reliably — a fresh worktree has none, and a swarm worktree's
-      // own node_modules can be incomplete.
+      // Symlink node_modules from the MAIN checkout (complete + correct) so the
+      // checks (tsc, and the swarm-safety suite's vitest) resolve their deps
+      // reliably — a fresh worktree has none, and a swarm worktree's own
+      // node_modules can be incomplete.
       try {
         await symlink(join(projectPath, 'node_modules'), join(dir, 'node_modules'))
       } catch {
         /* best-effort; if it fails the check below reports the real breakage */
       }
-      const r = await check.run(dir)
-      return { ok: r.ok, tip, reason: r.ok ? undefined : r.output }
+      // Run each applicable check IN ORDER; the FIRST red blocks. The order is
+      // cheapest-first / heaviest-last (tsc → lint → swarm-safety → full test), so a fast
+      // failure never pays the cost of the full test suite. The label is surfaced in the
+      // reason so the operator sees WHICH gate blocked the merge.
+      for (const c of checks) {
+        const r = await c.run(dir)
+        if (!r.ok) return { ok: false, tip, reason: `${c.label}: ${r.output}` }
+      }
+      return { ok: true, tip }
     } finally {
       await gitOut(projectPath, ['worktree', 'remove', '--force', dir])
       await gitOut(projectPath, ['worktree', 'prune'])
     }
   }
+
+// ── Independent adversarial pre-merge review (card a14329dc) ───────────────────
+// The verify gate above proves the to-be-landed tree is MECHANICALLY sound (tsc +
+// swarm-safety green). This is the COMPLEMENTARY gate the goal asks for: an
+// INDEPENDENT adversarial fact-check. Once verify is green and BEFORE a branch may
+// auto-merge, N fresh `claude` reviewers — NONE of them the worker that wrote the
+// code — each read the to-be-landed diff and judge must-fix vs clean, and a STRICT
+// majority decides ({@link tallyReview}). This mirrors what the tmux /manage
+// commander does by hand (別 subagent の敵対 fact-check 多数決) before it FF-pushes;
+// here it runs unattended in the in-app auto-merge path. It is NOT a duplicate of
+// the verify gate — verify = "does it build / do the safety tests pass", review =
+// "is the change actually correct" (a human-judgment fact-check no test encodes).
+//
+// SUBSCRIPTION-ONLY (read claudeTerminal.ts top comment): every reviewer is a real
+// interactive PTY (launchClaude), so it bills the user's Claude subscription pool,
+// NEVER the programmatic credit pool — `claude -p` is FORBIDDEN here (same contract
+// as the workers / generateDescription).
+
+/** One reviewer's verdict on a to-be-landed branch. */
+export type ReviewVote = 'must-fix' | 'clean'
+
+/** The specialized review lenses (card 5f85d2f5). In lens-panel mode each reviewer
+ *  runs exactly ONE lens, so the panel covers DISTINCT failure modes (a correctness
+ *  bug, a security hole, a perf cliff, a regression) instead of N reviewers
+ *  re-checking the same surface — the goal's "異なる lens の独立レビュアーで失敗
+ *  モードを網羅". */
+export type ReviewLensKey = 'correctness' | 'security' | 'perf' | 'regression'
+
+/** A specialized adversarial-review lens: ONE focused reviewer judges the
+ *  to-be-landed diff through exactly this lens. */
+export interface ReviewLens {
+  /** Lens identity — surfaced per-lens in the engine log and the reviewer's PTY name. */
+  key: ReviewLensKey
+  /** Contribution to the rework decision. A lens that votes must-fix adds `weight`
+   *  to the must-fix tally; the panel sends back when that tally reaches the
+   *  threshold ({@link tallyLensReview}). Default 1 ⇒ ANY single lens's must-fix
+   *  reworks (条件2 の既定). Lower a noisy lens (e.g. perf → 0.5) so its must-fix
+   *  ALONE no longer blocks — it is still logged — but two such lenses together do. */
+  weight?: number
+  /** The focus instruction injected into this reviewer's prompt — what THIS lens
+   *  must hunt for. Plain prose (never a verdict marker) so it stays echo-safe. */
+  focus: string
+}
+
+export interface ReviewerVerdict {
+  /** 1-based reviewer index (surfaced in the log). */
+  reviewer: number
+  /** null ⇒ the reviewer produced no parseable verdict (timeout / PTY died / no
+   *  marker) — a NON-vote, counted toward NEITHER side. */
+  vote: ReviewVote | null
+  /** Short reason surfaced in the log (the must-fix summary; '' otherwise). */
+  note: string
+  /** The specialized lens this reviewer ran (lens-panel mode only — {@link
+   *  tallyLensReview}); undefined for the homogeneous majority panel
+   *  ({@link tallyReview}). Surfaced per-lens in the engine log (条件3). */
+  lens?: ReviewLensKey
+}
+
+/** What the panel's majority vote resolved to:
+ *   - 'rework'    → majority must-fix: 差し戻し (review→doing), never merge.
+ *   - 'integrate' → majority clean: proceed to land.
+ *   - 'defer'     → no majority (a tie / too many non-votes): leave in review and
+ *     retry next pass — never merge on thin signal, never bump the 差し戻し count. */
+export type ReviewDecision = 'integrate' | 'rework' | 'defer'
+
+export interface ReviewResult {
+  decision: ReviewDecision
+  /** Per-reviewer verdicts (for the engine log / observability). */
+  verdicts: ReviewerVerdict[]
+  /** Decisive-vote tallies (mustFix + clean ≤ panelSize). */
+  mustFix: number
+  clean: number
+  /** One-line summary handed to the worker on a 'rework' send-back, and logged. */
+  reason: string
+  /** The panel was SKIPPED (unchanged tip already reviewed must-fix) — the decision
+   *  was carried over WITHOUT spawning reviewers (mirrors verify's `skipped`). */
+  skipped?: boolean
+}
+
+/** Default panel size — three independent reviewers (odd ⇒ no ties when all vote;
+ *  the goal's "例3"). Used by the homogeneous majority panel ({@link tallyReview});
+ *  the default wiring uses the lens panel below instead. */
+export const REVIEW_PANEL_SIZE = 3
+
+/** The default lens panel (card 5f85d2f5): four INDEPENDENT specialists, each blind
+ *  to the others, collectively covering the failure modes a homogeneous panel
+ *  misses. Every lens carries the default weight (1) ⇒ ANY one lens's must-fix sends
+ *  the branch back (条件2), and the weight is per-lens TUNABLE (条件2「設定可」). */
+export const DEFAULT_REVIEW_LENSES: ReviewLens[] = [
+  {
+    key: 'correctness',
+    focus:
+      'Logic correctness ONLY: off-by-one / boundary errors, null/undefined and empty-input handling, wrong conditionals, broken control flow, mishandled async/promises, incorrect data transforms, and violated function/API contracts. Is the code actually right?',
+  },
+  {
+    key: 'security',
+    focus:
+      'Security ONLY: unvalidated input, path traversal / directory escape, command or SQL injection, missing or weakened authz/authn or security boundary, secret leakage, and unsafe handling of untrusted data. Could this be abused?',
+  },
+  {
+    key: 'perf',
+    focus:
+      'Performance ONLY: accidental quadratic / N+1 work, redundant recomputation or re-render, unbounded memory growth, leaked resources (timers, listeners, handles, PTYs), and blocking I/O on a hot path. Does it scale and clean up after itself?',
+  },
+  {
+    key: 'regression',
+    focus:
+      'Regression ONLY: does this break or silently change existing behavior, remove or weaken a test / invariant it should keep, or alter a contract other code depends on? Is backward compatibility preserved?',
+  },
+]
+
+/** Majority vote over a panel's verdicts. STRICT majority of the FULL panel
+ *  (`panelSize` = the number LAUNCHED, not the number that voted — so a reviewer
+ *  that failed to vote can NEVER lower the bar to a merge), counting only decisive
+ *  votes:
+ *    - mustFix ≥ majority → 'rework'    (送り返す・絶対にマージしない)    [条件2]
+ *    - clean   ≥ majority → 'integrate' (統合に進む)                      [条件3]
+ *    - neither            → 'defer'      (多数決つかず: 同票 / 棄権過多 — 保留して
+ *      次パスで再評価。マージもせず 差し戻しカウントも進めない)。
+ *  Pure + exported for unit tests. `majority = floor(panelSize/2)+1` (2 for 3). */
+export const tallyReview = (verdicts: ReviewerVerdict[], panelSize: number): ReviewResult => {
+  const mustFix = verdicts.filter((v) => v.vote === 'must-fix').length
+  const clean = verdicts.filter((v) => v.vote === 'clean').length
+  const majority = Math.floor(panelSize / 2) + 1
+  if (mustFix >= majority) {
+    const note = verdicts.find((v) => v.vote === 'must-fix' && v.note)?.note
+    return {
+      decision: 'rework',
+      verdicts,
+      mustFix,
+      clean,
+      reason: `敵対レビュー多数決: ${mustFix}/${panelSize} が must-fix 判定${note ? ` — ${note}` : ''}`,
+    }
+  }
+  if (clean >= majority) {
+    return { decision: 'integrate', verdicts, mustFix, clean, reason: `敵対レビュー多数決: ${clean}/${panelSize} clean` }
+  }
+  return {
+    decision: 'defer',
+    verdicts,
+    mustFix,
+    clean,
+    reason: `敵対レビュー多数決つかず (must-fix ${mustFix} / clean ${clean} / 全${panelSize}) — 保留して次パスで再評価`,
+  }
+}
+
+/** Decide a LENS panel's verdicts (card 5f85d2f5). Unlike {@link tallyReview}'s
+ *  majority over homogeneous reviewers, each lens covers a DISTINCT failure mode, so
+ *  the rule is a WEIGHTED OR, not a vote count:
+ *    - must-fix weight (Σ of each must-fix lens's weight) ≥ `reworkThreshold`
+ *      → 'rework'    (差し戻し・絶対にマージしない)                          [条件2]
+ *    - else if EVERY lens returned a decisive verdict (no abstention) → 'integrate'
+ *      (統合に進む — must-fix weight is under threshold)                     [条件4]
+ *    - else (a lens ABSTAINED ⇒ that failure mode went UN-reviewed) → 'defer'
+ *      (保留・次パスで再評価・マージもせず 差し戻しカウントも進めない)。
+ *  Default lens weights are 1 and the default threshold 1, so ANY single lens's
+ *  must-fix reworks — but a lens can be down-weighted so its must-fix alone does not
+ *  block (条件2「lens別の重み付けは設定可」). Per-lens verdicts are folded into
+ *  `reason`, which the engine already logs verbatim (条件3 — NO engine change). Pure
+ *  + exported for unit tests. `mustFix`/`clean` stay lens COUNTS so the engine's
+ *  `must-fix N / clean M` tally line keeps meaning. */
+export const tallyLensReview = (
+  verdicts: ReviewerVerdict[],
+  lenses: ReviewLens[],
+  reworkThreshold = 1,
+): ReviewResult => {
+  const weightOf = (key: ReviewLensKey | undefined): number => lenses.find((l) => l.key === key)?.weight ?? 1
+  const mustFix = verdicts.filter((v) => v.vote === 'must-fix').length
+  const clean = verdicts.filter((v) => v.vote === 'clean').length
+  const abstained = verdicts.filter((v) => v.vote === null).length
+  const mustFixWeight = verdicts
+    .filter((v) => v.vote === 'must-fix')
+    .reduce((sum, v) => sum + weightOf(v.lens), 0)
+  // Per-lens summary, folded into the reason the engine logs (条件3): every lens's
+  // verdict is named so the log shows WHICH lens flagged WHAT.
+  const summary = verdicts
+    .map((v) => {
+      const label = v.lens ?? `r${v.reviewer}`
+      if (v.vote === 'must-fix') return `${label}=must-fix${v.note ? `(${v.note})` : ''}`
+      if (v.vote === 'clean') return `${label}=clean`
+      return `${label}=abstain`
+    })
+    .join(', ')
+  if (mustFixWeight >= reworkThreshold) {
+    return {
+      decision: 'rework',
+      verdicts,
+      mustFix,
+      clean,
+      reason: `lens別敵対レビュー [${summary}] — must-fix 重み ${mustFixWeight} ≥ 閾値 ${reworkThreshold} で差し戻し`,
+    }
+  }
+  if (abstained === 0) {
+    return {
+      decision: 'integrate',
+      verdicts,
+      mustFix,
+      clean,
+      reason: `lens別敵対レビュー [${summary}] — 全lens判定済 (must-fix 重み ${mustFixWeight} < 閾値 ${reworkThreshold}) で統合`,
+    }
+  }
+  return {
+    decision: 'defer',
+    verdicts,
+    mustFix,
+    clean,
+    reason: `lens別敵対レビュー [${summary}] — ${abstained}個のlensが未判定(未レビュー観点あり) → 保留して次パスで再評価`,
+  }
+}
+
+// The reviewer's verdict marker. Bounded by an end token (like generateDescription's
+// OPENGROUND_DESC) so it survives TUI repaints and a PTY line-wrap inside the note.
+export const REVIEW_MARKER = 'OPENGROUND_REVIEW:'
+export const REVIEW_END = '::OG_REVIEW_END::'
+const REVIEW_VOTE_MUSTFIX = 'MUST_FIX'
+const REVIEW_VOTE_CLEAN = 'CLEAN'
+const REVIEW_NOTE_MAX = 200
+
+/** The read-only adversarial-review prompt ONE reviewer runs. Handed the trunk ref
+ *  so it diffs exactly what lands, and told to end with a single verdict marker.
+ *
+ *  ECHO SAFETY (critical): this prompt is rendered into the reviewer's PTY stream,
+ *  so anything that LOOKS like a finished verdict line here will be scraped back by
+ *  extractReviewVerdict. Therefore the only `OPENGROUND_REVIEW: … ::OG_REVIEW_END::`
+ *  span in the prompt uses the placeholder body `<VERDICT>` — which does NOT start
+ *  with MUST_FIX or CLEAN, so the parser skips it. The two real verdict WORDS are
+ *  described on separate, non-marker lines. This is what guarantees that a reviewer
+ *  which emits no verdict of its own (timeout / hang / refusal) scrapes to a NON-vote
+ *  (null), never to the echoed example — a bare echoed `CLEAN` example would
+ *  otherwise be miscounted as a clean vote and let unreviewed code auto-merge. */
+export const buildReviewPrompt = (trunkRef: string, lens?: ReviewLens): string =>
+  [
+    lens
+      ? `You are an INDEPENDENT adversarial code reviewer assigned the ${lens.key.toUpperCase()} lens. A SEPARATE coding agent produced the change on this git branch; you did NOT write it. Your job is to FACT-CHECK it THROUGH YOUR LENS before it is allowed to auto-merge into the trunk.`
+      : 'You are an INDEPENDENT adversarial code reviewer. A SEPARATE coding agent produced the change on this git branch; you did NOT write it. Your job is to FACT-CHECK it before it is allowed to auto-merge into the trunk.',
+    '',
+    ...(lens ? [`YOUR LENS — judge ONLY this, and trust other independent reviewers to cover the rest: ${lens.focus}`, ''] : []),
+    'Steps (STRICTLY READ-ONLY — do NOT create, edit, or delete any file, and do not mutate anything via commands):',
+    `- Inspect the exact change this branch will land: run \`git diff ${trunkRef}...HEAD\` and read the touched files (plus any surrounding context you need to judge correctness).`,
+    lens
+      ? '- Decide ONLY whether there is a MUST-FIX problem WITHIN YOUR LENS: a real, concrete defect of the kind your lens names. Problems outside your lens — plus style, naming, formatting, and nits — are NOT your concern.'
+      : '- Decide ONLY whether there is a MUST-FIX problem: a real correctness bug, a security hole, data loss, a broken or wrongly-weakened test, or a violation of an explicit invariant/contract. Style, naming, formatting, and nits are NOT must-fix.',
+    '- When you are unsure whether something is truly must-fix, prefer the clean verdict — a false block wastes a rework cycle — but never wave through a concrete bug you can point to.',
+    '',
+    'Output contract — at the VERY END, output EXACTLY ONE line in this exact shape, and NOTHING after it:',
+    `    ${REVIEW_MARKER} <VERDICT> ${REVIEW_END}`,
+    'where you replace <VERDICT> (and its angle brackets) with ONE of:',
+    `  - the word ${REVIEW_VOTE_MUSTFIX} followed by one short sentence naming the single most important must-fix — if you found one; or`,
+    `  - the word ${REVIEW_VOTE_CLEAN} by itself — if the change has no must-fix.`,
+    `Substitute the actual word ${REVIEW_VOTE_MUSTFIX} or ${REVIEW_VOTE_CLEAN}: do NOT output the literal text "<VERDICT>" or any angle brackets. Put nothing else on that line, and nothing after the ${REVIEW_END} token.`,
+  ].join('\n')
+
+// Strip ANSI escapes / control chars from a reviewer's raw PTY stream — the TUI
+// POSITIONS text with cursor moves, so a naive strip fuses words. Mirrors
+// generateDescription.ts's split strip (kept LOCAL so the review path never has to
+// import that module's private control-char regexes): SGR (style) deletes silently
+// (can sit mid-word); every OTHER CSI is a positioning/erase op → a space; OSC
+// titles are removed; the remaining control chars become spaces in the candidate.
+// eslint-disable-next-line no-control-regex
+const REVIEW_SGR_RE = /\x1b\[[0-9;]*m/g
+// eslint-disable-next-line no-control-regex
+const REVIEW_CSI_OTHER_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
+// eslint-disable-next-line no-control-regex
+const REVIEW_OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+// eslint-disable-next-line no-control-regex
+const REVIEW_CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
+
+/** The LAST decisive `OPENGROUND_REVIEW: <VERDICT> … ::OG_REVIEW_END::` span in a
+ *  reviewer's raw PTY output → its {vote, note}. The VOTE TOKEN that opens the body
+ *  (MUST_FIX / CLEAN) is the discriminator: a span whose body does NOT start with one
+ *  (notably the prompt's own echoed `<VERDICT>` placeholder — see buildReviewPrompt's
+ *  ECHO SAFETY note) is SKIPPED, and scanning continues backward. So a reviewer that
+ *  emitted no verdict of its own scrapes to a NON-vote (null) — never to the echoed
+ *  example. A real must-fix NOTE may freely contain `<` (`i < n`, `List<T>`, `<div>`);
+ *  it is no longer rejected (that earlier guard silently flipped such verdicts to
+ *  clean). Exported for unit tests. */
+export const extractReviewVerdict = (raw: string): { vote: ReviewVote | null; note: string } => {
+  const text = raw.replace(REVIEW_OSC_RE, '').replace(REVIEW_SGR_RE, '').replace(REVIEW_CSI_OTHER_RE, ' ')
+  let from = text.length
+  for (;;) {
+    const start = text.lastIndexOf(REVIEW_MARKER, from - 1)
+    if (start < 0) return { vote: null, note: '' }
+    const end = text.indexOf(REVIEW_END, start + REVIEW_MARKER.length)
+    if (end >= 0) {
+      const body = text
+        .slice(start + REVIEW_MARKER.length, end)
+        .replace(REVIEW_CTRL_RE, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      // The vote token opens the body — as a WHOLE WORD (end-of-body or a non-word
+      // char follows). A body that starts with neither (the echoed `<VERDICT>`
+      // placeholder, or junk) is skipped; and a contract-violating body that merely
+      // begins with a vote-token PREFIX ("CLEANUP …", "MUST_FIXED …") is NOT read as a
+      // vote — it falls through to a non-vote rather than fail-open to clean.
+      const upper = body.toUpperCase()
+      const opensWith = (token: string): boolean =>
+        upper.startsWith(token) && (body.length === token.length || /\W/.test(body[token.length]))
+      if (opensWith(REVIEW_VOTE_MUSTFIX)) {
+        return { vote: 'must-fix', note: body.slice(REVIEW_VOTE_MUSTFIX.length).trim().slice(0, REVIEW_NOTE_MAX) }
+      }
+      if (opensWith(REVIEW_VOTE_CLEAN)) return { vote: 'clean', note: '' }
+    }
+    from = start
+    if (from <= 0) return { vote: null, note: '' }
+  }
+}
+
+const REVIEW_TIMEOUT_MS = 5 * 60_000
+const REVIEW_POLL_MS = 750
+const REVIEW_BUFFER = 64_000
+const reviewSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/** Materialize EXACTLY what integrate will push — a detached worktree at `tip`
+ *  rebased onto `targetRef` — run `fn(dir)` in it, and force-tear-it-down whatever
+ *  happens. Engine-owned dir (randomUUID) under the central worktrees boundary.
+ *  Mirrors makeVerify's worktree mechanics but kept SEPARATE so the review path
+ *  cannot destabilize the freshly-landed verify gate, and with NO node_modules
+ *  symlink (a reviewer reads code + `git diff`, it never builds). Outcome:
+ *   - {ok:true, value} — fn ran on the rebased tree.
+ *   - {ok:false, kind:'conflict'} — the rebase conflicted (caller defers to
+ *     integrate, which owns/stamps the conflict, exactly like verify).
+ *   - {ok:false, kind:'setup'}    — the worktree could not be created. */
+type RebasedOutcome<T> = { ok: true; value: T } | { ok: false; kind: 'setup' | 'conflict' }
+
+export const withRebasedWorktree = async <T>(
+  projectPath: string,
+  tip: string,
+  targetRef: string,
+  fn: (dir: string) => Promise<T>,
+): Promise<RebasedOutcome<T>> => {
+  let dir: string
+  try {
+    const uuid = await projectUUIDFromPath(projectPath)
+    dir = join(centralWorktreesDir(uuid), `.review-${randomUUID().replace(/-/g, '').slice(0, 12)}`)
+  } catch {
+    return { ok: false, kind: 'setup' }
+  }
+  if ((await gitOut(projectPath, ['worktree', 'add', '--detach', dir, tip])) === null) {
+    return { ok: false, kind: 'setup' }
+  }
+  try {
+    if ((await gitOut(dir, ['rebase', targetRef])) === null) {
+      await gitOut(dir, ['rebase', '--abort'])
+      return { ok: false, kind: 'conflict' }
+    }
+    return { ok: true, value: await fn(dir) }
+  } finally {
+    // fn ran a reviewer here via launchClaude (defaultRunReviewer), which seeds a
+    // ~/.claude.json folder-trust entry for this `.review-*` dir. This finally is the
+    // ONLY teardown for that dir (it bypasses removeSwarmWorktree), so drop the trust
+    // entry here too — otherwise every reviewed branch leaks one, the heaviest source
+    // of ~/.claude.json bloat. Pruned BEFORE the remove, while the dir still exists,
+    // so pathKeys resolves its realpath form as well (realpath-divergence robust).
+    removeClaudeFolderTrust(dir)
+    await gitOut(projectPath, ['worktree', 'remove', '--force', dir])
+    await gitOut(projectPath, ['worktree', 'prune'])
+  }
+}
+
+/** Run ONE reviewer to a verdict: a real subscription `claude` PTY in `dir`
+ *  (opus by default), marker-scraped, torn down the moment the verdict lands or the
+ *  budget / abort fires. Returns the raw PTY buffer (the caller extracts the
+ *  verdict). Mirrors generateProjectDescription's PTY-scrape loop. */
+const defaultRunReviewer = async (args: {
+  dir: string
+  trunkRef: string
+  index: number
+  signal: AbortSignal
+  timeoutMs: number
+  model: string
+  /** When set, this reviewer runs the specialized lens prompt + is named for it. */
+  lens?: ReviewLens
+}): Promise<string> => {
+  if (args.signal.aborted) return ''
+  // bypass = --dangerously-skip-permissions: no human is at the TTY to approve tool
+  // use, and the prompt forbids any mutation, so the read-only review runs unattended.
+  // appContext:false keeps the system prompt pristine (marker-scraped utility session,
+  // like generateDescription) so the OPENGROUND_REVIEW contract can't drift. No Remote
+  // Control: these are ephemeral, not roles the owner drives.
+  const ref = launchClaude({
+    cwd: args.dir,
+    agentSessionId: randomUUID(),
+    initialPrompt: buildReviewPrompt(args.trunkRef, args.lens),
+    permissionMode: 'bypass',
+    model: args.model,
+    name: args.lens ? `review-${args.lens.key}` : `review-${args.index}`,
+    appContext: false,
+  })
+  let buffer = ''
+  let exited = false
+  let aborted = false
+  const onAbort = () => {
+    aborted = true
+    try {
+      killTerminal(ref.terminalId)
+    } catch {
+      /* already gone */
+    }
+  }
+  args.signal.addEventListener('abort', onAbort, { once: true })
+  const sub = subscribeTerminal(
+    ref.terminalId,
+    (chunk) => {
+      buffer = (buffer + chunk).slice(-REVIEW_BUFFER)
+    },
+    () => {
+      exited = true
+    },
+  )
+  const deadline = Date.now() + args.timeoutMs
+  try {
+    while (Date.now() < deadline) {
+      await reviewSleep(REVIEW_POLL_MS)
+      if (aborted) return buffer
+      // A verdict marker landed → done (don't wait out the budget).
+      if (extractReviewVerdict(buffer).vote) return buffer
+      if (exited || sub?.info.finishedAt) break
+    }
+    return buffer
+  } finally {
+    args.signal.removeEventListener('abort', onAbort)
+    sub?.unsubscribe()
+    try {
+      killTerminal(ref.terminalId)
+    } catch {
+      /* best-effort teardown */
+    }
+  }
+}
+
+export interface AdversarialReviewOpts {
+  /** How many independent reviewers to launch in the HOMOGENEOUS majority panel.
+   *  Default {@link REVIEW_PANEL_SIZE} (3). Ignored when `lenses` is set (the lens
+   *  panel launches exactly one reviewer per lens). */
+  reviewers?: number
+  /** Specialized LENS panel (card 5f85d2f5): when set, launch ONE reviewer PER lens
+   *  — each with its focused prompt ({@link buildReviewPrompt}) — and decide via
+   *  {@link tallyLensReview} (weighted OR) instead of the homogeneous majority.
+   *  {@link defaultDeps} wires {@link DEFAULT_REVIEW_LENSES} here. */
+  lenses?: ReviewLens[]
+  /** Lens mode only: the must-fix weight at/above which the panel reworks. Default 1
+   *  ⇒ ANY single lens's must-fix sends back (条件2). */
+  reworkThreshold?: number
+  /** Per-reviewer wall-clock budget. Default {@link REVIEW_TIMEOUT_MS} (5 min). */
+  timeoutMs?: number
+  /** Reviewer model. Default {@link SWARM_LAUNCH_MODEL} (opus) — adversarial
+   *  fact-check is a real judgment task. */
+  model?: string
+  /** Run ONE reviewer in `dir` and resolve its raw PTY output. INJECTABLE so the
+   *  panel + tally logic is testable without spawning real claude (the default is
+   *  the subscription PTY). `signal` aborts a reviewer mid-flight on panel teardown.
+   *  `lens` is provided in lens mode so a fake can answer per-lens. */
+  runReviewer?: (args: { dir: string; trunkRef: string; index: number; signal: AbortSignal; lens?: ReviewLens }) => Promise<string>
+}
+
+/** Build the real adversarial-review dep ({@link IntegrationDeps.review}). It
+ *  materializes the to-be-landed tree (branch rebased onto the trunk — the SAME
+ *  view verify checks and integrate pushes), launches independent reviewers in it
+ *  CONCURRENTLY (each blind to the others), and tallies the result. Two modes:
+ *   - LENS panel (`opts.lenses` — card 5f85d2f5, what {@link defaultDeps} wires):
+ *     ONE reviewer per lens (correctness/security/perf/regression), each with its
+ *     focused prompt, decided by weighted OR ({@link tallyLensReview}) — ANY lens's
+ *     must-fix reworks (条件1/2), and each lens's verdict reaches the engine log via
+ *     `reason` (条件3).
+ *   - homogeneous panel (no `opts.lenses`): N identical reviewers, STRICT majority
+ *     ({@link tallyReview}).
+ *  Edge cases, all SAFE (never merge un-reviewed):
+ *   - `skipIfTip === tip` (a stuck worker re-reporting the same commit) → carry the
+ *     prior must-fix ({decision:'rework', skipped:true}) WITHOUT re-spawning the
+ *     panel (mirrors verify's memo — no re-burning N claude sessions).
+ *   - empty diff (already merged / nothing to land) → trivially 'integrate', no panel.
+ *   - rebase conflict → 'integrate' (defer to integrate, which owns/stamps it — same
+ *     as verify's deferral; review never resolves a conflict).
+ *   - worktree setup failure → 'defer' (transient; retry next pass, never merge). */
+export const makeAdversarialReview = (
+  opts: AdversarialReviewOpts = {},
+): NonNullable<IntegrationDeps['review']> => {
+  const lenses = opts.lenses && opts.lenses.length > 0 ? opts.lenses : null
+  const panel = lenses ? lenses.length : Math.max(1, opts.reviewers ?? REVIEW_PANEL_SIZE)
+  const reworkThreshold = opts.reworkThreshold ?? 1
+  const timeoutMs = opts.timeoutMs ?? REVIEW_TIMEOUT_MS
+  const model = opts.model ?? SWARM_LAUNCH_MODEL
+  const customRun = opts.runReviewer
+  return async (projectPath, branch, target, o) => {
+    const tip = o.tip
+    if (o.skipIfTip && o.skipIfTip === tip) {
+      return {
+        decision: 'rework',
+        verdicts: [],
+        mustFix: 0,
+        clean: 0,
+        skipped: true,
+        reason: 'unchanged since last adversarial-review must-fix',
+      }
+    }
+    const remote = 'origin'
+    const targetRef = `refs/remotes/${remote}/${target}`
+    const trunkRef = `${remote}/${target}` // human-friendly ref for the reviewer's `git diff`
+    // Distinguish a genuinely-empty diff from a git FAILURE — changedFilesVsTrunk
+    // collapses both to [], which would fail OPEN (a transient `git diff` error →
+    // "nothing to land" → integrate un-reviewed). Probe git directly: null = the diff
+    // could not be computed ⇒ DEFER (retry, never merge un-reviewed); '' = genuinely
+    // nothing to land (already merged) ⇒ integrate (integrate finalizes it as a no-op).
+    const diffOut = await gitOut(projectPath, ['diff', '--name-only', `${targetRef}...${tip}`])
+    if (diffOut === null) {
+      return { decision: 'defer', verdicts: [], mustFix: 0, clean: 0, reason: 'could not compute diff (deferred)' }
+    }
+    if (diffOut.trim() === '') {
+      return { decision: 'integrate', verdicts: [], mustFix: 0, clean: 0, reason: 'no diff to review (nothing to land)' }
+    }
+    const mat = await withRebasedWorktree(projectPath, tip, targetRef, async (dir) => {
+      // One controller for the whole panel: aborted in `finally` so any reviewer
+      // still lingering after the others resolve is torn down (Promise.all already
+      // awaited them, so this is teardown insurance, not an early-exit).
+      const ac = new AbortController()
+      try {
+        const raws = await Promise.all(
+          Array.from({ length: panel }, (_, i) => {
+            // Lens mode: reviewer i runs lens i (its focused prompt); else identical.
+            const lens = lenses ? lenses[i] : undefined
+            return (customRun
+              ? customRun({ dir, trunkRef, index: i + 1, signal: ac.signal, lens })
+              : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs, model, lens })
+            )
+              .then((raw) => extractReviewVerdict(raw))
+              // A reviewer that THREW (PTY spawn failed, etc.) is a non-vote, not a
+              // panel failure — the tally is computed from whoever did vote.
+              .catch(() => ({ vote: null as ReviewVote | null, note: '' }))
+          }),
+        )
+        return raws.map((v, i): ReviewerVerdict => ({
+          reviewer: i + 1,
+          vote: v.vote,
+          note: v.note,
+          // Tag the lens so the tally can weight it and the log can name it (条件3).
+          ...(lenses ? { lens: lenses[i].key } : {}),
+        }))
+      } finally {
+        try {
+          ac.abort()
+        } catch {
+          /* best-effort */
+        }
+      }
+    })
+    if (!mat.ok) {
+      if (mat.kind === 'conflict') {
+        return { decision: 'integrate', verdicts: [], mustFix: 0, clean: 0, reason: 'rebase conflict (deferred to integrate)' }
+      }
+      return { decision: 'defer', verdicts: [], mustFix: 0, clean: 0, reason: 'could not prepare review worktree (deferred)' }
+    }
+    return lenses ? tallyLensReview(mat.value, lenses, reworkThreshold) : tallyReview(mat.value, panel)
+  }
+}
 
 const defaultMoveToDone = async (projectPath: string, taskId: string): Promise<boolean> => {
   const res = await fetch(`${loopbackOrigin()}/api/project/tasks`, {
@@ -1617,7 +3222,17 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   fetchReview: defaultFetchReview,
   prepareTarget: defaultPrepareTarget,
   classify: classifyBranch,
-  verify: makeVerify(tscCheck),
+  // The quality-floor gate (card 4e7f2151): lint + tsc + test green on EVERY branch
+  // before it may auto-merge. tsc is the always-on primary; lint + the full test suite
+  // are always-on too (appliesTo ⇒ true); swarm-safety stays diff-gated (B2 contained).
+  // Order = cheapest-first / heaviest-last so a fast failure blocks before the full suite:
+  // tsc → lint → swarm-safety (swarm branches only) → test.
+  verify: makeVerify(tscCheck, [lintConditional, swarmSafetyConditional, testConditional]),
+  // Lens panel (card 5f85d2f5): correctness/security/perf/regression specialists,
+  // one reviewer each, so DISTINCT failure modes are covered (any lens's must-fix
+  // reworks). Pre-a14329dc homogeneous majority remains available via
+  // makeAdversarialReview() with no lenses.
+  review: makeAdversarialReview({ lenses: DEFAULT_REVIEW_LENSES }),
   integrate: defaultIntegrate,
   moveToDone: defaultMoveToDone,
   markConflict: defaultMarkConflict,
@@ -1625,6 +3240,16 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   killPty: killTerminal,
   instructRework: defaultInstructRework,
   worktreeExists: defaultWorktreeExists,
+  // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
+  // path uses, so the unattended background sweep never flips an engine `running` into a
+  // spawn it knows will fail (no retry storm when claude is missing / logged out).
+  preflight: claudeRunPreflight,
+  // Escalation safety valve: persist an in-app notification + raise an OS toast.
+  // Fire-and-forget with an internal catch so a notification fault never disturbs
+  // a pass (it runs at the very end of runEnginePass anyway).
+  notify: (n) => {
+    void createSwarmFatalNotification(n).catch(() => {})
+  },
 })
 
 // ── The monitor step (Card②) — advance + promote dispatched workers ──────────
@@ -1921,11 +3546,26 @@ const monitorWorkers = async (
       engine.nudges.delete(w.terminalId)
       engine.rateLimited.delete(w.terminalId)
       engine.permissionWaits.delete(w.terminalId)
+      const ranMin = Math.floor((now - startedMs) / 60_000)
+      const limitMin = Math.floor(MAX_EXEC_MS / 60_000)
       logLine(
         engine,
         'warn',
-        `worker runaway — alive ${Math.floor((now - startedMs) / 60_000)}m ≥ ${Math.floor(MAX_EXEC_MS / 60_000)}m execution limit: ${w.branch} (${shorten(w.taskTitle)})`,
+        `worker runaway — alive ${ranMin}m ≥ ${limitMin}m execution limit: ${w.branch} (${shorten(w.taskTitle)})`,
       )
+      // Escalation safety valve (exec-timeout): a worker overran the execution-time
+      // ceiling and is being force-reclaimed/parked — a human should know (a re-run
+      // would just overrun again). Enqueue the EDGE event; runEnginePass drains +
+      // pushes it exactly once after the pass settles.
+      engine.pendingFatal.push({
+        event: 'exec-timeout',
+        detail: `ワーカーが実行時間上限 ${limitMin}分 を超過（${ranMin}分稼働）→ 強制回収。`,
+        projectPath: engine.path,
+        taskId: card?.id,
+        branch: w.branch,
+        taskTitle: w.taskTitle,
+        logHint: '司令塔の engine log を確認してください（worker runaway の警告行）。',
+      })
       if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'runaway')) next.push(w)
       continue
     }
@@ -2171,23 +3811,58 @@ export const runDispatchPass = async (
   //    LIVE worker (a 'done' worker whose PTY still lingers still holds its slot —
   //    the integration stage frees it by tearing the worktree down); a dead
   //    worker kept only to retry a board write does not.
-  const slots = ORCHESTRATOR_MAX_WORKERS - engine.workers.filter((w) => deps.isAlive(w.terminalId)).length
+  const live = engine.workers.filter((w) => deps.isAlive(w.terminalId)).length
   // selectDispatch owns ALL dispatch gates (column / id / content-dup / same-file
   // serialization), so it takes the FULL board, not just the todo slice: it needs
   // the doing-column cards to know which conflict surfaces are already claimed.
-  const picks = selectDispatch(tasks, countedIds, slots)
+  // Run it UNCAPPED-to-MAX first to read the INDEPENDENT backlog (its gates fold
+  // same-file / duplicate / dep-blocked todos out), then DYNAMICALLY scale the
+  // target to that backlog instead of always filling to MAX (card ea369937).
+  const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
+  const target = computeTargetWorkers({ liveWorkers: live, dispatchableTodos: dispatchable.length })
+  // New spawns = how far below target we are. The engine only ever SPAWNS here; it
+  // SHRINKS passively (target < live ⇒ 0 new ⇒ live workers retire as PTYs exit —
+  // never killed to hit a lower target). Bounded by `target ≤ MAX`, so this can
+  // never breach the concurrency ceiling (暴走防止).
+  const slots = Math.max(0, target - live)
+  // Surface the scale DECISION in the journal (条件4), but only when the target
+  // CHANGES — not every 3s tick — so transitions are legible without churning the
+  // ring buffer. 'routine' keeps it in the full log while the Key view stays focused
+  // on dispatch/promote/integrate events.
+  const scaleSig = String(target)
+  if (scaleSig !== engine.lastScaleSig) {
+    engine.lastScaleSig = scaleSig
+    logLine(
+      engine,
+      'info',
+      `scale: target ${target} worker(s) — ${live} live + ${dispatchable.length} independent todo(s) ready (band ${ORCHESTRATOR_MIN_WORKERS}–${ORCHESTRATOR_MAX_WORKERS})`,
+      'routine',
+    )
+  }
+  // Picking with cap `slots` is exactly the first `slots` of the MAX-capped run
+  // (selectDispatch's greedy gate state is prefix-stable), so slice — one probe, no
+  // redundant second pass.
+  const picks = dispatchable.slice(0, slots)
   for (const card of picks) {
     if (!engine.running) return // a stop mid-pass halts promptly
     const title = card.title ?? ''
     const notes = typeof card.notes === 'string' ? card.notes : undefined
+    // LEARNING LOOP (card fdf714ef): if this SAME card was previously 差し戻し /
+    // rolled back, hand the recorded failure reason (reworkOrPark) to the fresh
+    // worker's /order so it doesn't repeat the RED verify / must-fix. Read here,
+    // CONSUMED (deleted) only after a successful spawn so a thrown spawn keeps it
+    // for next pass — and so a later, unrelated dispatch of the same id can never
+    // ride a stale reason.
+    const priorFailure = engine.reworkReasons.get(card.id)
 
     let spawn: SpawnSwarmWorkerResponse
     try {
-      spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title })
+      spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title, priorFailure })
     } catch (e) {
       logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
       continue
     }
+    if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
 
     // Count it BEFORE the column move: the PTY is already live, so even if the
     // move fails the worker must stay counted (the dispatchedIds guard then
@@ -2202,7 +3877,14 @@ export const runDispatchPass = async (
       startedAt: new Date().toISOString(),
       stage: 'starting',
     })
-    logLine(engine, 'info', `dispatch: ${shorten(title)} → ${spawn.branch}`, 'dispatch')
+    // The dispatch line records WHETHER the learning-loop context was injected (有/無),
+    // so a re-dispatch carrying the prior failure is visible in the engine log.
+    logLine(
+      engine,
+      'info',
+      `dispatch: ${shorten(title)} → ${spawn.branch}${priorFailure ? ' [再投入: 前回差し戻しの原因を /order に注入]' : ''}`,
+      'dispatch',
+    )
 
     try {
       if (!(await deps.moveToDoing(engine.path, card.id, spawn.branch))) {
@@ -2257,14 +3939,20 @@ export const runIntegratePass = async (
       typeof c.branch === 'string' && isSwarmBranch(c.branch),
   )
 
-  // Forget conflict + verify-fail memos for branches no longer in review (card
-  // moved/finished) — a fresh attempt at that branch should re-classify cleanly.
+  // Forget conflict + verify-fail + review-fail memos for branches no longer in
+  // review (card moved/finished) — a fresh attempt should re-classify cleanly.
   const present = new Set(swarmCards.map((c) => c.branch))
   for (const b of Array.from(engine.conflictedBranches)) {
     if (!present.has(b)) engine.conflictedBranches.delete(b)
   }
   for (const b of Array.from(engine.verifyFailed.keys())) {
     if (!present.has(b)) engine.verifyFailed.delete(b)
+  }
+  for (const b of Array.from(engine.reviewFailed.keys())) {
+    if (!present.has(b)) engine.reviewFailed.delete(b)
+  }
+  for (const b of Array.from(engine.reviewDeferred.keys())) {
+    if (!present.has(b)) engine.reviewDeferred.delete(b)
   }
 
   // A. Read-only readiness for the dashboard (both switch positions).
@@ -2296,6 +3984,18 @@ export const runIntegratePass = async (
     const count = (engine.reworks.get(card.id) ?? 0) + 1
     const w = engine.workers.find((x) => x.branch === branch)
 
+    // LEARNING LOOP (card fdf714ef): remember WHY this card was sent back BEFORE any
+    // branch decision, keyed by taskId (stable across the fresh branch a re-dispatch
+    // mints). Every rework/rollback path below flows through here, so this single
+    // write covers all of them (live-rework, dead→re-dispatch, budget→blocked). The
+    // NEXT dispatch of this SAME card (runDispatchPass) consumes it into the fresh
+    // worker's /order so the swarm doesn't repeat the same RED verify / must-fix.
+    // Overwritten every time so the memo is always the LATEST reason; pruned on
+    // done/vanish by pruneReworks. A LIVE worker is ALSO told the reason directly
+    // over its PTY (instructRework, below) — this memo is the durable copy that
+    // survives a worker crash + requeue, when the in-place instruction is lost.
+    engine.reworkReasons.set(card.id, reasonLine)
+
     // 上限超過 → 'blocked' 退避(無限バウンス遮断)。leftover worker は teardown(branch 維持)。
     if (count > MAX_REWORKS) {
       let parked = false
@@ -2311,6 +4011,7 @@ export const runIntegratePass = async (
       }
       engine.reworks.set(card.id, count) // count > MAX を保持 → detectAnomalies が surface
       engine.verifyFailed.delete(branch)
+      engine.reviewFailed.delete(branch)
       engine.conflictedBranches.delete(branch)
       engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
       if (w) {
@@ -2386,6 +4087,7 @@ export const runIntegratePass = async (
     }
     engine.reworks.set(card.id, count)
     engine.verifyFailed.delete(branch)
+    engine.reviewFailed.delete(branch)
     engine.conflictedBranches.delete(branch)
     engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
     clearKeptMove(engine, card.id)
@@ -2401,6 +4103,143 @@ export const runIntegratePass = async (
       engine,
       'warn',
       `差し戻し review→todo (${count}/${MAX_REWORKS}) 再 dispatch(worker 不在): ${branch} (${title}) — ${reasonLine}`,
+    )
+  }
+
+  // CONFLICT → worker rebase 委譲 (card 012a2848). 統合の rebase が競合したカードを review に
+  // 滞留させ人手を待つ(旧 conflictedBranches/human-resolve)のをやめ、司令塔が手でやっている
+  // 「担当 worker に『自分のブランチを rebase して解消しろ』と投げ返す」を自動化する。構造は
+  // reworkOrPark と同型(LIVE worker は同一ブランチ継続+PTY 指示、不在なら review→todo 再
+  // dispatch、上限超過で 'blocked' 退避)だが、(1)別予算 conflictReworks/MAX_CONFLICT_REWORKS で
+  // 数え(conflict は worker のコード問題でなく trunk が動いた結果)、(2)指示は
+  // buildConflictRebaseInstruction(swarmIntegrate) で「自分のブランチのみ rebase・push しない・
+  // force-push 厳禁」を明記する(条件2)。委譲した時点でカードは review を離れる(doing/todo)ので
+  // 二重統合されない(条件3)。worker が解消して commit→done を再報告→monitor が review へ再 promote
+  // →次の統合パスが再統合を試みる(条件4)。autoMerge armed のとき(B.)だけ呼ばれる。
+  const delegateConflict = async (
+    card: ProjectTask & { branch: string },
+    files: readonly string[],
+    trunk: string,
+  ): Promise<void> => {
+    if (!engine.running || !engine.autoMerge) return // owner stop/disarm during the (slow) integrate await
+    const branch = card.branch
+    const title = shorten(card.title ?? '')
+    const count = (engine.conflictReworks.get(card.id) ?? 0) + 1
+    const w = engine.workers.find((x) => x.branch === branch)
+    // The single source of the delegated instruction (condition 1+2): names the
+    // conflicting files + the rebase command + the never-(force-)push contract.
+    const reasonLine = buildConflictRebaseInstruction({ branch, target: trunk, files })
+    // LEARNING LOOP (shared with reworkOrPark, card fdf714ef): durable memo a
+    // dead-worker re-dispatch hands to the fresh worker's /order — so the conflict
+    // context survives a worker crash + requeue, when the in-place PTY hint is lost.
+    engine.reworkReasons.set(card.id, reasonLine)
+
+    // 上限超過 → 'blocked' 退避(無限投げ返し遮断)。stamp を残して「要人手の競合」を可視化。
+    if (count > MAX_CONFLICT_REWORKS) {
+      let parked = false
+      try {
+        parked = await deps.recoverCard(engine.path, card.id, 'blocked')
+      } catch {
+        parked = false
+      }
+      if (!parked) {
+        logLine(engine, 'warn', `conflict→blocked move kept (will retry): ${title}`)
+        return
+      }
+      engine.conflictReworks.set(card.id, count)
+      try {
+        await deps.markConflict(engine.path, card.id, true) // 要人手の競合として可視化
+      } catch {
+        /* best-effort — the card is parked regardless */
+      }
+      engine.conflictedBranches.delete(branch)
+      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+      if (w) {
+        try {
+          await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+        } catch {
+          /* best-effort teardown — branch KEPT for the human */
+        }
+        engine.workers = engine.workers.filter((x) => x !== w)
+      }
+      logLine(
+        engine,
+        'error',
+        `conflict 委譲上限(${MAX_CONFLICT_REWORKS})超過 — 'blocked' 退避(要人手): ${branch} (${title})`,
+        'conflict',
+      )
+      return
+    }
+
+    // 上限内・LIVE worker → 同一ブランチで rebase 解消させる(『戻して直す』)。force-push せず
+    // worker 自身の swarm/* ブランチを rebase するだけ; 統合(push)は engine が後で行う(条件2)。
+    const workerAlive = !!w && deps.isAlive(w.terminalId)
+    if (workerAlive && w) {
+      let moved = false
+      try {
+        moved = await deps.moveToDoing(engine.path, card.id, branch)
+      } catch {
+        moved = false
+      }
+      if (!moved) {
+        logLine(engine, 'warn', `conflict rework→doing move kept (will retry): ${title}`)
+        return
+      }
+      engine.conflictReworks.set(card.id, count)
+      engine.conflictedBranches.delete(branch)
+      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+      clearKeptMove(engine, card.id)
+      // promote 済み('done' 表示)の worker を「再作業中」に戻し、なぜ戻されたかを伝える。
+      // reworkAt は monitorWorkers の re-promote 抑制基準(心拍 FILE はまだ readyToMerge:true の
+      // ため、これが無いと次パスで即 re-promote→未解消のまま再統合→また conflict と空回り)。
+      w.stage = 'running'
+      w.reworkAt = new Date(now).toISOString()
+      try {
+        deps.instructRework(
+          w.terminalId,
+          `[統合rebase委譲 ${count}/${MAX_CONFLICT_REWORKS}] ${reasonLine} 解消後は swarm-beat.sh で done を再報告してください。`,
+        )
+      } catch {
+        /* best-effort PTY write */
+      }
+      logLine(
+        engine,
+        'warn',
+        `conflict → rebase委譲 review→doing (${count}/${MAX_CONFLICT_REWORKS}) 同一ブランチ継続: ${branch} (${title})`,
+        'conflict',
+      )
+      return
+    }
+
+    // worker 不在/死亡 → 同一継続不可。'todo' へ戻して新 worker に再 dispatch(reworkReasons が
+    // /order に conflict 文脈を注入 → 最新 trunk から作り直す)。死んだ worker は teardown(branch 維持)。
+    let moved = false
+    try {
+      moved = await deps.recoverCard(engine.path, card.id, 'todo')
+    } catch {
+      moved = false
+    }
+    if (!moved) {
+      logLine(engine, 'warn', `conflict rework→todo move kept (will retry): ${title}`)
+      return
+    }
+    engine.conflictReworks.set(card.id, count)
+    engine.conflictedBranches.delete(branch)
+    engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+    clearKeptMove(engine, card.id)
+    if (w) {
+      try {
+        await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+      } catch {
+        /* best-effort teardown */
+      }
+      engine.workers = engine.workers.filter((x) => x !== w)
+    }
+    logLine(
+      engine,
+      'warn',
+      `conflict → 再dispatch review→todo (${count}/${MAX_CONFLICT_REWORKS}) worker不在: ${branch} (${title})`,
+      'conflict',
     )
   }
 
@@ -2467,6 +4306,92 @@ export const runIntegratePass = async (
     // Verified green (or nothing to verify) — a previously-red branch was fixed.
     engine.verifyFailed.delete(card.branch)
 
+    // ADVERSARIAL REVIEW GATE (card a14329dc) — COMPLEMENT to the verify gate above.
+    // verify proved the tree is MECHANICALLY sound (tsc/safety green); now N
+    // INDEPENDENT reviewers (NONE the worker) adversarially fact-check the
+    // to-be-landed diff and a STRICT majority decides. Optional dep: defaultDeps
+    // wires the real claude panel; absent ⇒ this stage is skipped (pre-a14329dc
+    // behavior). Only runs when there is a real tip to land (verify can return a
+    // vacuous ok with tip:null — nothing to review; integrate handles it). Memoized
+    // by tip exactly like verify, so a stuck worker re-reporting the SAME commit
+    // re-reworks WITHOUT re-burning N claude sessions.
+    if (deps.review && verdict.tip) {
+      const reviewTip = verdict.tip
+      // Defer-exhausted on THIS exact tip → don't re-burn the panel (it kept reaching
+      // no majority). Keep the "needs a human" dot and leave the card in review; a NEW
+      // commit (different tip) clears this and re-arms the panel. Bounds the drain a
+      // systemic claude outage (every reviewer abstains) would otherwise cause.
+      const deferMemo = engine.reviewDeferred.get(card.branch)
+      if (deferMemo && deferMemo.tip === reviewTip && deferMemo.count >= MAX_REVIEW_DEFERS) {
+        const r = engine.reviews.find((x) => x.taskId === card.id)
+        if (r) r.status = 'conflict'
+        continue
+      }
+      const knownBadReviewTip = engine.reviewFailed.get(card.branch)
+      let review: ReviewResult
+      try {
+        review = await deps.review(engine.path, card.branch, target, {
+          tip: reviewTip,
+          ...(knownBadReviewTip ? { skipIfTip: knownBadReviewTip } : {}),
+        })
+      } catch (e) {
+        // An ERRORED review is NOT a green light: defer (leave in review, retry next
+        // pass) rather than fall through and merge un-reviewed.
+        logLine(engine, 'warn', `adversarial review errored (deferring): ${card.branch} — ${errMsg(e)}`)
+        continue
+      }
+      // The panel is slow (N claude sessions) — re-check the owner's stop/disarm
+      // that may have landed while we awaited, before mutating the card.
+      if (!engine.running || !engine.autoMerge) return
+      const tally = `must-fix ${review.mustFix} / clean ${review.clean}`
+      if (review.decision === 'rework') {
+        // Majority must-fix → 差し戻し (review→doing), NEVER merge (condition 2).
+        engine.reviewFailed.set(card.branch, reviewTip)
+        engine.reviewDeferred.delete(card.branch) // a decisive verdict ends any defer streak
+        const r = engine.reviews.find((x) => x.taskId === card.id)
+        if (r) r.status = 'conflict' // "needs a human" dot, like a verify-RED / conflict
+        logLine(
+          engine,
+          'warn',
+          `敵対レビュー多数決 → 差し戻し [${tally}]: ${card.branch} (${shorten(card.title ?? '')}) — ${review.reason}`,
+        )
+        await reworkOrPark(card, review.reason)
+        continue // never integrate work the panel flagged
+      }
+      if (review.decision === 'defer') {
+        // No majority (tie / reviewers failed to vote) — thin signal. Leave the card in
+        // review and retry next pass: never merge, never bump the 差し戻し count. Count
+        // consecutive defers on this tip; at the cap, stop re-spawning (handled above)
+        // and surface "needs a human". A NEW commit (different tip) resets the streak.
+        const count = deferMemo && deferMemo.tip === reviewTip ? deferMemo.count + 1 : 1
+        engine.reviewDeferred.set(card.branch, { tip: reviewTip, count })
+        if (count >= MAX_REVIEW_DEFERS) {
+          const r = engine.reviews.find((x) => x.taskId === card.id)
+          if (r) r.status = 'conflict' // needs-human; further panels are skipped above
+          logLine(
+            engine,
+            'warn',
+            `敵対レビュー: ${count}回連続で多数決つかず — needs-human 退避(再レビュー停止・新コミットで再開): ${card.branch} (${shorten(card.title ?? '')})`,
+          )
+        } else {
+          logLine(
+            engine,
+            'info',
+            `敵対レビュー多数決つかず → 保留 [${tally}] (${count}/${MAX_REVIEW_DEFERS}): ${card.branch} (${shorten(card.title ?? '')})`,
+          )
+        }
+        continue
+      }
+      // Majority clean (condition 3) → proceed to integrate. Forget any prior memos.
+      engine.reviewFailed.delete(card.branch)
+      engine.reviewDeferred.delete(card.branch)
+      logLine(
+        engine,
+        'info',
+        `敵対レビュー多数決 → clean [${tally}]: ${card.branch} (${shorten(card.title ?? '')})`,
+      )
+    }
+
     let outcome: IntegrateOutcome
     try {
       outcome = await deps.integrate(engine.path, card.branch, target)
@@ -2476,6 +4401,13 @@ export const runIntegratePass = async (
     }
 
     if (outcome.status === 'integrated') {
+      // A swarm branch just landed on the trunk. If this project IS OPEN GROUND's
+      // own source repo (the self-gating check inside requestEngineSelfUpdate), a
+      // self-improvement is now on main — ask the Electron main process to rebuild
+      // and cut the live engine over to its new self (electron/selfUpdate.js). A
+      // no-op everywhere else (other projects, dev/tsx, the shipped app), and it
+      // never throws, so the integration path is unaffected.
+      requestEngineSelfUpdate(engine.path)
       // Move the card FIRST; only sweep the worktree+branch once it is recorded
       // done, so a failed board write self-heals next pass (re-integrate sees the
       // branch already merged → integrated → retry the move) instead of stranding
@@ -2485,6 +4417,7 @@ export const runIntegratePass = async (
         engine.conflictedBranches.delete(card.branch)
         clearKeptMove(engine, card.id) // the done move landed — forget any stuck tracking
         engine.reworks.delete(card.id) // landed — reset the 差し戻し budget (success column)
+        engine.conflictReworks.delete(card.id) // landed — reset the conflict-委譲 budget too
         // Reliable flag CLEAR — the BACKSTOP for two cases the became-ff clear above
         // can miss: (a) the stamp survived a server restart that lost the in-memory
         // memo (so that block never ran), and (b) that block's markConflict(false)
@@ -2547,35 +4480,13 @@ export const runIntegratePass = async (
         logLine(engine, 'warn', `landed on ${target} but column move kept (will retry): ${shorten(card.title ?? '')}`)
       }
     } else if (outcome.status === 'conflict') {
-      engine.conflictedBranches.add(card.branch)
-      // Stamp the card (the persistent Board mark). The in-memory memo above
-      // already prevents re-rebase churn, so a kept stamp write isn't fatal —
-      // but log it: the owner would otherwise see no on-board "needs manual
-      // integration" flag. (The readiness snapshot below still shows it.)
-      let stamped = false
-      try {
-        stamped = await deps.markConflict(engine.path, card.id, true)
-      } catch {
-        /* logged just below */
-      }
-      // Reflect the freshly-discovered conflict in the readiness snapshot now
-      // (half A classified it before the attempt revealed the conflict).
-      const r = engine.reviews.find((x) => x.taskId === card.id)
-      if (r) r.status = 'conflict'
-      // Name WHERE it conflicts (the unmerged files swarmIntegrate captured) so the
-      // human resolving it knows what to open — capped so the log line stays legible.
-      const files = outcome.files ?? []
-      const filesNote = files.length
-        ? ` · conflicts in: ${files.slice(0, 6).join(', ')}${files.length > 6 ? ` (+${files.length - 6})` : ''}`
-        : ''
-      logLine(
-        engine,
-        'error',
-        `conflict — manual integration needed: ${card.branch} (${shorten(card.title ?? '')})` +
-          filesNote +
-          (stamped ? '' : ' · card stamp kept (will re-stamp next pass)'),
-        'conflict',
-      )
+      // CONFLICT → worker rebase 委譲 (card 012a2848). NOT a human-resolve park
+      // anymore: hand the conflict back to the branch's worker to rebase its OWN
+      // branch onto the moved trunk + resolve + commit, then the engine retries the
+      // integration (条件1+2+3+4). delegateConflict moves the card off review
+      // (doing/todo) so it is never double-integrated, bumps the SEPARATE conflict
+      // budget, and parks to 'blocked' once that budget is spent (loop guard).
+      await delegateConflict(card, outcome.files ?? [], target)
     } else if (outcome.status === 'error') {
       // Transient (push rejected by a moved trunk, network…) — retry next pass.
       logLine(engine, 'warn', `integration deferred: ${card.branch} — ${outcome.reason}`)
@@ -2767,6 +4678,118 @@ export const pruneReworks = (engine: ProjectEngine, tasks: readonly ProjectTask[
     const col = card ? columnOf(card) : null
     if (col === null || col === 'done') engine.reworks.delete(taskId)
   }
+  // LEARNING LOOP memo (card fdf714ef) shares reworks' lifecycle: drop the failure
+  // reason for a card that FINISHED ('done') or vanished, so a stale reason never
+  // lingers. A still-cycling card KEEPS it — 'todo' so a pending re-dispatch can
+  // still inject it (it is otherwise consumed at dispatch), 'doing'/'review' so a
+  // crash→requeue→re-dispatch still carries it. Mirrors the reworks prune exactly.
+  for (const taskId of Array.from(engine.reworkReasons.keys())) {
+    const card = byId.get(taskId)
+    const col = card ? columnOf(card) : null
+    if (col === null || col === 'done') engine.reworkReasons.delete(taskId)
+  }
+  // The conflict-委譲 budget (card 012a2848) shares reworks' lifecycle: drop it for a
+  // card that FINISHED ('done') or vanished so a stale conflict count never lingers; a
+  // still-cycling card (todo/doing/review) KEEPS it so the loop guard survives the hop.
+  for (const taskId of Array.from(engine.conflictReworks.keys())) {
+    const card = byId.get(taskId)
+    const col = card ? columnOf(card) : null
+    if (col === null || col === 'done') engine.conflictReworks.delete(taskId)
+  }
+}
+
+// ── Escalation safety valve (条件: 致命イベント→人へプッシュ通知) ─────────────────
+//
+// The unmanned loop runs while nobody watches; when something FATAL happens — one
+// the loop cannot self-heal — a human must be woken. fireFatalNotifications is the
+// SINGLE choke point (called at the end of every runEnginePass) that turns those
+// few cases into a push (in-app bell + OS toast via deps.notify). It is
+// deliberately NARROW so it never becomes noise (条件4: a normal dispatch/merge
+// never notifies):
+//
+//   • EDGE events (engine.pendingFatal) — one-shot occurrences enqueued at their
+//     site (today: 'exec-timeout', a worker reclaimed for overrunning MAX_EXEC_MS).
+//     Fired once, then drained.
+//   • STATE-derived events — re-derivable each pass, so deduped on the RISING EDGE
+//     via engine.notified: fire ONCE when the condition appears, forget it the
+//     moment it clears (a genuine recurrence re-fires, a persisting one never
+//     spams). Two cases:
+//       – 'rework-exhausted'  — a card parked in 'blocked' past its rework budget
+//         (read from this pass's anomalies).
+//       – 'all-workers-down'  — running, ZERO live workers, yet 'doing' swarm work
+//         remains (every worker crashed/stalled and the loop stalled).
+//
+// Pure of IO beyond the injected, best-effort `deps.notify` (each call try/caught),
+// so it can never disturb the pass. `tasks` is null when this pass's board read
+// failed — then only the EDGE queue drains (state can't be safely re-derived).
+// Exported for the unit test (drives it with a fake notify — no real notification IO).
+export const fireFatalNotifications = (
+  engine: ProjectEngine,
+  tasks: readonly ProjectTask[] | null,
+  // Only the two seams it actually uses (so the unit test needn't build the whole
+  // dep set) — runEnginePass's full deps satisfy this. `notify` is optional.
+  deps: Pick<OrchestratorDeps, 'isAlive'> & Pick<AnomalyDeps, 'notify'>,
+  _now: number,
+): void => {
+  const notify = deps.notify
+  const push = (n: SwarmFatalNotification): void => {
+    if (!notify) return
+    try {
+      notify(n)
+    } catch {
+      /* a single notification fault must never break the pass */
+    }
+  }
+
+  // 1. EDGE events — fire each exactly once, then drain (no dedup needed).
+  if (engine.pendingFatal.length > 0) {
+    const queued = engine.pendingFatal.splice(0, engine.pendingFatal.length)
+    for (const n of queued) push(n)
+  }
+
+  // 2. STATE-derived events — only with a fresh board (else keep last dedup state).
+  if (!tasks) return
+  const current = new Map<string, SwarmFatalNotification>()
+
+  // 2a. rework-exhausted — straight from this pass's anomalies.
+  for (const a of engine.anomalies) {
+    if (a.kind !== 'rework-exhausted') continue
+    current.set(`rework-exhausted:${a.ref}`, {
+      event: 'rework-exhausted',
+      detail: `差し戻し上限を超過し 'blocked' に退避しました（review→doing を ${a.attempts ?? '?'} 回バウンス）。`,
+      projectPath: engine.path,
+      taskId: a.ref,
+      branch: a.branch,
+      taskTitle: a.taskTitle,
+      logHint: "Board の 'blocked' 列のカードを確認し、手動で対応してください。",
+    })
+  }
+
+  // 2b. all-workers-down — running, zero live workers, yet 'doing' swarm work left.
+  const liveWorkers = engine.workers.filter((w) => deps.isAlive(w.terminalId))
+  if (engine.running && liveWorkers.length === 0) {
+    const doing = tasks.filter(
+      (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
+    )
+    if (doing.length > 0) {
+      current.set('all-workers-down', {
+        event: 'all-workers-down',
+        detail: `稼働中のワーカーが0になりました（doing ${doing.length}件が宙吊り — 全ワーカーが crash/stall で停止）。`,
+        projectPath: engine.path,
+        logHint: '司令塔ペインの engine log と Board の doing 列を確認してください。',
+      })
+    }
+  }
+
+  // Fire NEWLY-appeared conditions; forget cleared ones so a recurrence re-fires.
+  for (const [key, n] of Array.from(current)) {
+    if (engine.notified.has(key)) continue
+    engine.notified.add(key)
+    push(n)
+  }
+  for (const key of Array.from(engine.notified)) {
+    if (!current.has(key)) engine.notified.delete(key)
+  }
 }
 
 /** ONE full engine tick: dispatch, then (still running) integrate, then detect
@@ -2788,11 +4811,19 @@ export const runEnginePass = async (
   if (engine.passInFlight) return
   engine.passInFlight = true
   try {
-    await runDispatchPass(engine, deps)
+    // The dispatch pass (monitor → promote → recover → fill) shares the board + worker
+    // state with the owner's stop/resolve control plane; take the per-engine critical
+    // section so a control op can't interleave with the monitor's await window and have
+    // its card-park silently overwritten by a stale pass-start snapshot (see
+    // runExclusive). passInFlight still bars a SECOND pass from queueing here (it bails,
+    // it doesn't wait), so only control ops ever share this lock with a pass. The slow
+    // integrate pass below stays OUTSIDE the section on purpose (latency — see runExclusive).
+    await runExclusive(engine, () => runDispatchPass(engine, deps))
     if (engine.running) await runIntegratePass(engine, deps)
     if (engine.running) {
+      let tasks: ProjectTask[] | null = null
       try {
-        const tasks = await deps.fetchTasks(engine.path)
+        tasks = await deps.fetchTasks(engine.path)
         // Prune resolved stuck-moves BEFORE detection reads them, so a zombie that
         // a human (or a recovered write) already fixed never surfaces as an anomaly.
         pruneStuckMoves(engine, tasks)
@@ -2802,8 +4833,27 @@ export const runEnginePass = async (
         engine.anomalies = await detectAnomalies(engine, tasks, deps, Date.now())
       } catch {
         // A transient board read isn't itself an anomaly to surface — keep the last
-        // snapshot; the next pass refreshes it.
+        // snapshot; the next pass refreshes it. (tasks stays null → state-derived
+        // escalation is skipped this pass, but EDGE events still drain below.)
       }
+      // Escalation safety valve — the SINGLE choke point, run at the END of the pass
+      // and fully guarded, so a notification fault can never disturb dispatch /
+      // integrate / detect (and a NORMAL pass with no fatal event notifies nothing).
+      try {
+        fireFatalNotifications(engine, tasks, deps, Date.now())
+      } catch {
+        /* belt-and-suspenders: never let escalation break a pass */
+      }
+    }
+    // SELF-SUPPLY (card b3fbbfba): the engine proposes its OWN improvement cards
+    // into todo. A SEPARATE stage from anomaly detection above — it READS the
+    // just-computed engine.anomalies (plus its own tsc/lint/test/TODO scanners)
+    // but never touches detectAnomalies. No-op unless armed (default OFF); then
+    // throttled + capped + owner-approval-gated. NEVER throws into the tick.
+    if (engine.running) {
+      await runSelfSupplyPass(engine, (level, message) => logLine(engine, level, message, 'routine')).catch(
+        (e) => logLine(engine, 'warn', `self-supply: pass errored — ${errMsg(e)}`),
+      )
     }
   } finally {
     engine.passInFlight = false
@@ -2860,6 +4910,10 @@ export const startOrchestrator = async (
 
   const key = await canonicalize(projectPath)
   const engine = getOrCreateEngine(key)
+  // Owner re-engaged autonomy — clear any prior explicit-pause so the engine runs now
+  // AND so a later natural idle can auto-restart it again (maybeAutoStartDrain). The
+  // INVERSE of stopOrchestrator's manualStop=true; the two toggles are the consent.
+  engine.manualStop = false
   if (!engine.running) {
     engine.running = true
     // Reset the integration throttle so the first pass after a (re)start refreshes
@@ -2891,6 +4945,11 @@ export const stopOrchestrator = async (
   const key = await canonicalize(projectPath)
   const engine = store.engines.get(key)
   if (!engine) return emptyState()
+  // Owner EXPLICITLY paused — mark it so maybeAutoStartDrain won't auto-restart the
+  // engine on the next poll's idle-slot + todo (so OFF genuinely halts new dispatch,
+  // 条件2). Set even on an idempotent OFF (already stopped) so the pause intent sticks
+  // until a manual ON clears it. A DEFAULT-off engine (never paused) still auto-drains.
+  engine.manualStop = true
   if (engine.running) {
     engine.running = false
     if (engine.timer) {
@@ -2900,6 +4959,117 @@ export const stopOrchestrator = async (
     logLine(engine, 'info', 'autonomous drain OFF')
   }
   return stateOf(engine, deps.isAlive)
+}
+
+// ── Auto-start (card cf545637 — todo 自動 drain / "idle worker + todo" デッドロック根治) ──
+
+/** Auto-start the autonomous drain when there is dispatchable todo work AND a free
+ *  worker slot, even though the owner never toggled Autonomy ON. This is the root fix
+ *  for the "worker idle while todos remain" deadlock: a STOPPED engine schedules no
+ *  ticks (scheduleNext bails while !running), so a card added to todo with the toggle
+ *  OFF would otherwise sit forever beside idle capacity. The Swarm surface's DRAIN-TICK
+ *  (useSwarmEngine POSTs /api/swarm/orchestrator/drain-tick → {@link drainTickOrchestrator}
+ *  on its poll cadence) drives this, so MANAGING the Swarm surface wakes a needed engine
+ *  without a manual ON press. The read-only GET /api/swarm/orchestrator (which the
+ *  display-only Board worker-map ALSO polls) NEVER triggers it — a pure state read must
+ *  not spawn `claude` workers (that GET-with-side-effect was a review MUST_FIX).
+ *
+ *  Fires ONLY when ALL hold — so it never fights the existing flows (条件2/3):
+ *    • the engine is NOT already running (a running engine refills idle slots every
+ *      tick already; re-driving it would risk a twin dispatch), and not mid-pass,
+ *    • the owner has NOT explicitly paused it (manualStop — a manual OFF sets it, a
+ *      manual ON clears it; this is what makes OFF genuinely halt new dispatch, 条件2.
+ *      A DEFAULT-off engine, never paused, auto-drains — that is 条件1),
+ *    • ≥1 todo card passes EVERY dispatch gate right now (selectDispatch — a duplicate
+ *      / same-file / dep-blocked / unapproved-self-supply todo never trips it), AND
+ *    • ≥1 slot is free (live workers < the dynamic target) — so it can NEVER spawn past
+ *      ORCHESTRATOR_MAX_WORKERS, exactly like runDispatchPass (暴走防止 / 条件3).
+ *  An EMPTY (or fully-claimed) todo queue, or a full worker set, is a no-op — so OFF
+ *  with nothing dispatchable (or no capacity) stays OFF and the toggle keeps meaning.
+ *  Because the gate is "idle slot + todo", a stop/resolve that parks a card in
+ *  'blocked' (stopOrchestratorWorker / resolveOrchestratorReview) is NOT re-grabbed —
+ *  only a 'todo' card is, which is exactly the requeue those flows intend (条件2).
+ *
+ *  When it fires it engages the engine with the SAME state the manual ON toggle sets
+ *  (running=true + a fresh generation + the integration throttle reset), drains the
+ *  first batch INLINE so the queue starts moving within this call, then arms the normal
+ *  tick chain — so the full lifecycle (monitor → promote → integrate) runs and the
+ *  auto-dispatched worker is never orphaned. PREFLIGHTS `claude` (deps.preflight — injected,
+ *  default claudeRunPreflight) right before engaging: a missing / logged-out CLI returns
+ *  false WITHOUT flipping running, so the unattended background sweep can't spin a
+ *  spawn-fail retry storm across EVERY project (design note 4). A final re-check after the
+ *  preflight await preserves the twin-dispatch guard. Returns whether it auto-started. Never
+ *  throws — a board-read blip yields no auto-start this round (the next sweep / poll
+ *  retries). `now` is injected for deterministic tests. */
+export const maybeAutoStartDrain = async (
+  engine: ProjectEngine,
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
+  now: number = Date.now(),
+): Promise<boolean> => {
+  // No auto-start when: already draining / mid-pass (the running loop owns refills — don't
+  // double-drive), OR the owner explicitly paused (manualStop — OFF must stick, 条件2).
+  if (engine.running || engine.passInFlight || engine.manualStop) return false
+  let tasks: ProjectTask[]
+  try {
+    tasks = await deps.fetchTasks(engine.path)
+  } catch {
+    return false // a board blip is not the moment to auto-start; the next poll retries
+  }
+  // Re-check after the await — a concurrent poll (or a manual toggle) may have changed
+  // the engine in the meantime.
+  if (engine.running || engine.passInFlight || engine.manualStop) return false
+  // The SAME idle-capacity + independent-backlog math runDispatchPass uses, so the
+  // auto-start decision agrees exactly with what a running pass would dispatch.
+  const live = engine.workers.filter((w) => deps.isAlive(w.terminalId)).length
+  const countedIds = new Set(engine.workers.map((w) => w.taskId))
+  const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
+  const target = computeTargetWorkers({ liveWorkers: live, dispatchableTodos: dispatchable.length })
+  const slots = Math.max(0, target - live)
+  if (dispatchable.length === 0 || slots === 0) return false
+
+  // PREFLIGHT `claude` BEFORE engaging — a missing / logged-out CLI must NOT flip running
+  // to true, else the engine's chain would retry a failing spawn forever (design note 4 /
+  // the unattended background sweep would do this for EVERY project, every tick). Injected
+  // (deps.preflight) so it's hermetic in tests; absent ⇒ skipped (back-compat for the
+  // dispatch unit tests). Silent on a not-ready result — the sweep retries next tick, and
+  // the manual ON button surfaces the 503 for an owner who is watching.
+  if (deps.preflight && !(await deps.preflight()).ok) return false
+  // FINAL re-check AFTER the preflight await, then COMMIT synchronously (no await between
+  // this re-check and engine.running=true) — a concurrent caller that engaged the engine
+  // during our preflight await is caught here, preserving the twin-dispatch guard.
+  if (engine.running || engine.passInFlight || engine.manualStop) return false
+
+  // Conditions met — engage the engine. These three mutations ARE the manual ON toggle's
+  // loop-half (startOrchestrator), set SYNCHRONOUSLY here (no await before this commit since
+  // the re-check) so a concurrent caller's re-check above bails before a twin dispatch.
+  engine.running = true
+  engine.lastIntegrateAt = 0
+  const gen = (engine.generation += 1)
+  logLine(
+    engine,
+    'info',
+    `autonomous drain auto-started — ${dispatchable.length} independent todo(s) ready, ${slots} slot(s) free`,
+  )
+  // Drain the first batch inline so the queue starts moving within this call (the poll
+  // returns the post-dispatch state; the unit test asserts the dispatch), then arm the
+  // chain for the monitor/promote/integrate passes that follow. HOLD passInFlight across
+  // the inline dispatch (mirrors runEnginePass's twin-dispatch guard): runDispatchPass
+  // does NOT set it, so without this a manual stop→start injected during a slow spawn
+  // would kick a SECOND pass that reads the same pre-spawn worker set and dispatches the
+  // same card twice. The chain's runEnginePass then bails on passInFlight; clearing it in
+  // `finally` guarantees a throwing dispatch can't wedge the engine.
+  engine.passInFlight = true
+  try {
+    // Same control-plane serialization as runEnginePass — this auto-start inline
+    // dispatch IS a dispatch pass (its monitor walks any lingering workers), so take
+    // the per-engine critical section to stay mutually exclusive with a concurrent
+    // stop/resolve (see runExclusive).
+    await runExclusive(engine, () => runDispatchPass(engine, deps, now))
+  } finally {
+    engine.passInFlight = false
+  }
+  scheduleNext(engine, deps, gen)
+  return true
 }
 
 /** Stop ONE engine-owned worker by its PTY id (the owner clicked "stop"): tear
@@ -2918,43 +5088,53 @@ export const stopOrchestratorWorker = async (
   const key = await canonicalize(projectPath)
   const engine = store.engines.get(key)
   if (!engine) return emptyState()
-  const w = engine.workers.find((x) => x.terminalId === terminalId)
-  if (!w) return stateOf(engine, deps.isAlive) // unknown / already gone — idempotent
+  // Run UNDER the per-engine critical section: the worker lookup + teardown + card
+  // park + worker drop is a read→decide→write transaction on the SAME state a
+  // dispatch pass's monitor reads from a stale pass-start snapshot. Without the lock a
+  // stop landing in the monitor's await window parks the card in 'blocked' only for
+  // the still-looping monitor to overwrite it back to todo/review (the owner's halt
+  // undone); serializing makes the monitor see this drop + park, and this stop see the
+  // monitor's, never a half-updated mix (see runExclusive).
+  return runExclusive(engine, async () => {
+    const w = engine.workers.find((x) => x.terminalId === terminalId)
+    if (!w) return stateOf(engine, deps.isAlive) // unknown / already gone — idempotent
 
-  // Tear the worktree + PTY down FIRST (the zombie-eradication — idempotent, and
-  // the critical guarantee). Best-effort: a failure is logged, never blocks the stop.
-  let teardown: { removed: boolean; reason?: string } = { removed: false }
-  try {
-    teardown = await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId })
-  } catch {
-    /* reported via teardown.removed=false below */
-  }
-
-  // Park the card in 'blocked' if WE still own it (still in 'doing'). A USER stop
-  // is a deliberate halt — 'blocked' (not 'todo') stops the running engine from
-  // re-grabbing it on the very next tick. A card a human already moved / deleted
-  // is left as-is.
-  let parked: 'blocked' | 'kept' | 'untouched' = 'untouched'
-  try {
-    const card = (await deps.fetchTasks(key)).find((t) => t.id === w.taskId)
-    if (card && columnOf(card) === 'doing') {
-      parked = (await deps.recoverCard(key, w.taskId, 'blocked')) ? 'blocked' : 'kept'
+    // Tear the worktree + PTY down FIRST (the zombie-eradication — idempotent, and
+    // the critical guarantee). Best-effort: a failure is logged, never blocks the stop.
+    let teardown: { removed: boolean; reason?: string } = { removed: false }
+    try {
+      teardown = await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId })
+    } catch {
+      /* reported via teardown.removed=false below */
     }
-  } catch {
-    /* best-effort — the worker is still dropped below */
-  }
 
-  engine.recoveries.delete(w.taskId)
-  engine.reworks.delete(w.taskId) // owner halted this worker — drop its 差し戻し budget too
-  engine.workers = engine.workers.filter((x) => x.terminalId !== terminalId)
-  const note = parked === 'blocked' ? 'card → blocked' : parked === 'kept' ? 'card move kept' : 'card left as-is'
-  logLine(
-    engine,
-    'info',
-    `worker stopped by owner — ${note}: ${w.branch} (${shorten(w.taskTitle)})` +
-      (teardown.removed ? '' : ` · worktree kept (${teardown.reason ?? '?'})`),
-  )
-  return stateOf(engine, deps.isAlive)
+    // Park the card in 'blocked' if WE still own it (still in 'doing'). A USER stop
+    // is a deliberate halt — 'blocked' (not 'todo') stops the running engine from
+    // re-grabbing it on the very next tick. A card a human already moved / deleted
+    // is left as-is.
+    let parked: 'blocked' | 'kept' | 'untouched' = 'untouched'
+    try {
+      const card = (await deps.fetchTasks(key)).find((t) => t.id === w.taskId)
+      if (card && columnOf(card) === 'doing') {
+        parked = (await deps.recoverCard(key, w.taskId, 'blocked')) ? 'blocked' : 'kept'
+      }
+    } catch {
+      /* best-effort — the worker is still dropped below */
+    }
+
+    engine.recoveries.delete(w.taskId)
+    engine.reworks.delete(w.taskId) // owner halted this worker — drop its 差し戻し budget too
+    engine.conflictReworks.delete(w.taskId) // ...and its conflict-委譲 budget (card 012a2848)
+    engine.workers = engine.workers.filter((x) => x.terminalId !== terminalId)
+    const note = parked === 'blocked' ? 'card → blocked' : parked === 'kept' ? 'card move kept' : 'card left as-is'
+    logLine(
+      engine,
+      'info',
+      `worker stopped by owner — ${note}: ${w.branch} (${shorten(w.taskTitle)})` +
+        (teardown.removed ? '' : ` · worktree kept (${teardown.reason ?? '?'})`),
+    )
+    return stateOf(engine, deps.isAlive)
+  })
 }
 
 /** Resolve a STUCK review card on the owner's command — the human resolution path
@@ -2982,72 +5162,82 @@ export const resolveOrchestratorReview = async (
   const engine = store.engines.get(key)
   if (!engine) return emptyState()
 
-  // Act ONLY on a card actually in review (idempotent otherwise). Read fresh — the
-  // engine.reviews snapshot can lag a pass behind the board.
-  let card: ProjectTask | undefined
-  try {
-    card = (await deps.fetchTasks(key)).find((t) => t.id === taskId)
-  } catch {
-    return stateOf(engine, deps.isAlive)
-  }
-  if (!card || columnOf(card) !== 'review') return stateOf(engine, deps.isAlive)
-  const branch = typeof card.branch === 'string' ? card.branch : ''
-
-  // Move the card OUT of review FIRST — the critical, must-succeed step (it must
-  // not sit in review forever). A KEPT move changes NOTHING: the worker + memos
-  // stay intact and the owner simply retries, so a board-write blip never leaves
-  // the card half-resolved.
-  let moved = false
-  try {
-    moved = await deps.recoverCard(key, taskId, target)
-  } catch {
-    moved = false
-  }
-  if (!moved) {
-    logLine(engine, 'warn', `review resolve kept (will retry): ${shorten(card.title ?? '')} → ${target}`)
-    return stateOf(engine, deps.isAlive)
-  }
-
-  // Moved — tear down any worker still counted for this branch: its promoted 'done'
-  // PTY may linger and its worktree is stale scratch (cleanup never ran — we didn't
-  // integrate). Keeps the BRANCH (the human / next worker may want its commits) and
-  // — for a 'todo' requeue — frees the card to be re-dispatched (its id leaves the
-  // counted set, so selectDispatch's id gate no longer skips it).
-  const owned = branch ? engine.workers.filter((w) => w.branch === branch) : []
-  for (const w of owned) {
+  // Run UNDER the per-engine critical section: this read-fresh → move-out → teardown →
+  // clear-memos transaction shares the board + worker + reviews state with a dispatch
+  // pass's monitor (which promotes doing→review off a stale snapshot). Serializing
+  // keeps the owner's deliberate resolve from being interleaved-and-undone, and keeps
+  // it from racing the monitor's worker bookkeeping (see runExclusive). (The slow
+  // integrate pass is NOT in this section — a resolve racing an in-flight integrate of
+  // the SAME review card is a separate, far narrower pre-existing window; see runExclusive.)
+  return runExclusive(engine, async () => {
+    // Act ONLY on a card actually in review (idempotent otherwise). Read fresh — the
+    // engine.reviews snapshot can lag a pass behind the board.
+    let card: ProjectTask | undefined
     try {
-      await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId: w.terminalId })
+      card = (await deps.fetchTasks(key)).find((t) => t.id === taskId)
     } catch {
-      /* best-effort teardown — the card already left review, which is the point */
+      return stateOf(engine, deps.isAlive)
     }
-  }
-  if (owned.length) engine.workers = engine.workers.filter((w) => !owned.includes(w))
+    if (!card || columnOf(card) !== 'review') return stateOf(engine, deps.isAlive)
+    const branch = typeof card.branch === 'string' ? card.branch : ''
 
-  // Clear EVERY engine memo tied to this branch so a re-attempt re-classifies clean:
-  // the persistent conflict stamp (reliable CLEAR), the in-memory conflict + verify
-  // memos, the readiness snapshot row, and any recovery / stuck-move tracking.
-  if (branch) {
-    engine.conflictedBranches.delete(branch)
-    engine.verifyFailed.delete(branch)
-  }
-  if (card.integrationConflict) {
+    // Move the card OUT of review FIRST — the critical, must-succeed step (it must
+    // not sit in review forever). A KEPT move changes NOTHING: the worker + memos
+    // stay intact and the owner simply retries, so a board-write blip never leaves
+    // the card half-resolved.
+    let moved = false
     try {
-      await deps.markConflict(key, taskId, false)
+      moved = await deps.recoverCard(key, taskId, target)
     } catch {
-      /* best-effort — the card already left review; a kept clear is only cosmetic */
+      moved = false
     }
-  }
-  engine.reviews = engine.reviews.filter((r) => r.taskId !== taskId)
-  engine.recoveries.delete(taskId)
-  engine.reworks.delete(taskId) // owner's deliberate resolve = fresh 差し戻し budget
-  clearKeptMove(engine, taskId)
-  logLine(
-    engine,
-    'info',
-    `review resolved by owner — card → ${target}: ${branch || '(no branch)'} (${shorten(card.title ?? '')})`,
-    'integrate',
-  )
-  return stateOf(engine, deps.isAlive)
+    if (!moved) {
+      logLine(engine, 'warn', `review resolve kept (will retry): ${shorten(card.title ?? '')} → ${target}`)
+      return stateOf(engine, deps.isAlive)
+    }
+
+    // Moved — tear down any worker still counted for this branch: its promoted 'done'
+    // PTY may linger and its worktree is stale scratch (cleanup never ran — we didn't
+    // integrate). Keeps the BRANCH (the human / next worker may want its commits) and
+    // — for a 'todo' requeue — frees the card to be re-dispatched (its id leaves the
+    // counted set, so selectDispatch's id gate no longer skips it).
+    const owned = branch ? engine.workers.filter((w) => w.branch === branch) : []
+    for (const w of owned) {
+      try {
+        await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId: w.terminalId })
+      } catch {
+        /* best-effort teardown — the card already left review, which is the point */
+      }
+    }
+    if (owned.length) engine.workers = engine.workers.filter((w) => !owned.includes(w))
+
+    // Clear EVERY engine memo tied to this branch so a re-attempt re-classifies clean:
+    // the persistent conflict stamp (reliable CLEAR), the in-memory conflict + verify
+    // memos, the readiness snapshot row, and any recovery / stuck-move tracking.
+    if (branch) {
+      engine.conflictedBranches.delete(branch)
+      engine.verifyFailed.delete(branch)
+    }
+    if (card.integrationConflict) {
+      try {
+        await deps.markConflict(key, taskId, false)
+      } catch {
+        /* best-effort — the card already left review; a kept clear is only cosmetic */
+      }
+    }
+    engine.reviews = engine.reviews.filter((r) => r.taskId !== taskId)
+    engine.recoveries.delete(taskId)
+    engine.reworks.delete(taskId) // owner's deliberate resolve = fresh 差し戻し budget
+    engine.conflictReworks.delete(taskId) // ...and a fresh conflict-委譲 budget (card 012a2848)
+    clearKeptMove(engine, taskId)
+    logLine(
+      engine,
+      'info',
+      `review resolved by owner — card → ${target}: ${branch || '(no branch)'} (${shorten(card.title ?? '')})`,
+      'integrate',
+    )
+    return stateOf(engine, deps.isAlive)
+  })
 }
 
 /** Current engine state for a project (never started ⇒ a stopped empty state). */
@@ -3057,7 +5247,126 @@ export const getOrchestratorState = async (
 ): Promise<SwarmOrchestratorState> => {
   const key = await canonicalize(projectPath)
   const engine = store.engines.get(key)
-  return engine ? stateOf(engine, deps.isAlive) : emptyState()
+  if (!engine) return emptyState()
+  // Read the Board cards for the lead-time KPI (read-only — never mutates). A
+  // board blip just yields an empty lead time this poll; the counter-based rates
+  // are unaffected (they don't need the cards).
+  let tasks: ProjectTask[] = []
+  try {
+    tasks = await deps.fetchTasks(projectPath)
+  } catch {
+    tasks = []
+  }
+  return stateOf(engine, deps.isAlive, tasks)
+}
+
+/** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): auto-start
+ *  the drain when idle capacity meets a todo backlog (card cf545637), THEN return the
+ *  fresh state. A SEPARATE endpoint from the read-only {@link getOrchestratorState} ON
+ *  PURPOSE — the GET /api/swarm/orchestrator that BOTH the Swarm hook and the display-only
+ *  Board worker-map poll must stay IDEMPOTENT (a GET that spawned `claude` workers violated
+ *  the Board's "never touch the engine" contract — a review MUST_FIX). Only the Swarm
+ *  surface (useSwarmEngine) POSTs this, so opening the Board never auto-starts. Folds
+ *  {@link maybeAutoStartDrain} ahead of the read; uses getOrCreateEngine (not store.get) so
+ *  a never-started project still gets an engine that can auto-start — a fresh engine's
+ *  snapshot reads identically to emptyState(). The auto-start is best-effort: a fault must
+ *  never break the state. Owner-gated at the route. Default deps = the full real set (so the
+ *  kicked chain has its integration/anomaly half), exactly like the start path. */
+export const drainTickOrchestrator = async (
+  projectPath: string,
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+): Promise<SwarmOrchestratorState> => {
+  const key = await canonicalize(projectPath)
+  const engine = getOrCreateEngine(key)
+  await maybeAutoStartDrain(engine, deps).catch(() => {})
+  // Return the post-tick state. No lead-time board read here (unlike the GET poll's
+  // getOrchestratorState): the only caller (useSwarmEngine) fires this fire-and-forget and
+  // reads the full state — lead-time included — from the idempotent GET. Matches the
+  // start/stop/automerge action endpoints, which also return stateOf without tasks.
+  return stateOf(engine, deps.isAlive)
+}
+
+// ── Auto-drain background loop (card cf545637 — UI-INDEPENDENT server-side tick) ──
+// The drain-tick above only fires while the Swarm pane is mounted (useSwarmEngine), so a
+// todo added with NO swarm UI open (or none at all — headless) would not drain. This loop
+// is the COMPLETE deadlock fix: a slow server-side sweep that auto-starts ANY registered
+// project's stopped engine sitting on a todo backlog. It reuses maybeAutoStartDrain's
+// cap / manualStop / preflight / twin-dispatch guards verbatim, so it can neither
+// over-spawn, override an explicit OFF, nor double-drive an already-running engine.
+
+/** List the registered projects' paths for the background sweep. Reads the registry
+ *  (settings.projects); a read fault yields an empty sweep (best-effort). */
+const defaultListProjectPaths = async (): Promise<string[]> => {
+  const { projects } = await getSettings()
+  return (projects ?? []).map((p) => p.path)
+}
+
+/** ONE server-side AUTO-DRAIN sweep: walk the registered projects and
+ *  {@link maybeAutoStartDrain} each, so a todo backlog drains on an idle slot even with NO
+ *  UI open. An already-running engine is driven by its own chain and is a fast no-op here
+ *  (the running guard fires BEFORE any board read); a manually-paused one (manualStop) is
+ *  respected; the per-project cap bounds parallelism; a not-ready `claude` is skipped
+ *  (preflight) so a missing CLI can't spin a retry storm across every project. Best-effort
+ *  per project — one vanished / locked path never aborts the rest of the sweep; never
+ *  throws. Returns how many engines it auto-started this sweep. `listProjectPaths` + `deps`
+ *  are injected for hermetic tests (no real registry, no real spawn). */
+export const runAutoDrainScan = async (
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+  listProjectPaths: () => Promise<string[]> = defaultListProjectPaths,
+  now: number = Date.now(),
+): Promise<number> => {
+  let paths: string[]
+  try {
+    paths = await listProjectPaths()
+  } catch {
+    return 0 // a registry read blip — nothing to sweep this round
+  }
+  let started = 0
+  for (const path of paths) {
+    try {
+      const engine = getOrCreateEngine(await canonicalize(path))
+      if (await maybeAutoStartDrain(engine, deps, now)) started += 1
+    } catch {
+      /* best-effort — a vanished / locked project never aborts the rest of the sweep */
+    }
+  }
+  return started
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __openground_swarm_autodrain_timer: ReturnType<typeof setInterval> | null | undefined
+}
+
+/** Start the UI-INDEPENDENT auto-drain background loop: a slow sweep
+ *  ({@link runAutoDrainScan}) every {@link AUTO_DRAIN_SCAN_MS} so a todo backlog drains
+ *  with NO UI open. Wired ONCE at server boot (server/index.ts), so it NEVER runs in unit
+ *  tests (which mount the Hono app, not the entry). Idempotent + reload-safe: the timer
+ *  lives on globalThis, and a re-eval (tsx watch) CLEARS the old one before arming a fresh
+ *  closure rather than stacking a second loop. `unref`'d so the loop alone never keeps the
+ *  process alive (the HTTP listener already does). The first sweep is one interval AFTER
+ *  boot, so the server is already listening for the loopback board reads. */
+export const startAutoDrainLoop = (
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+  intervalMs: number = AUTO_DRAIN_SCAN_MS,
+): void => {
+  if (globalThis.__openground_swarm_autodrain_timer) {
+    clearInterval(globalThis.__openground_swarm_autodrain_timer)
+  }
+  const timer = setInterval(() => {
+    void runAutoDrainScan(deps).catch(() => {})
+  }, intervalMs)
+  // Don't let the sweep loop alone hold the process open (the HTTP listener already does).
+  ;(timer as { unref?: () => void }).unref?.()
+  globalThis.__openground_swarm_autodrain_timer = timer
+}
+
+/** Stop the auto-drain background loop (shutdown / test cleanup). Idempotent. */
+export const stopAutoDrainLoop = (): void => {
+  if (globalThis.__openground_swarm_autodrain_timer) {
+    clearInterval(globalThis.__openground_swarm_autodrain_timer)
+    globalThis.__openground_swarm_autodrain_timer = null
+  }
 }
 
 /** Arm / disarm auto-integration (Card③), idempotent. A SEPARATE switch from the
@@ -3077,6 +5386,28 @@ export const setAutoMerge = async (
     engine.autoMerge = enabled
     logLine(engine, 'info', enabled ? 'auto-integrate ON' : 'auto-integrate OFF')
     if (enabled) engine.lastIntegrateAt = 0 // act on the next tick, not 15s later
+  }
+  return stateOf(engine, deps.isAlive)
+}
+
+/** Arm / disarm SELF-SUPPLY (card b3fbbfba), idempotent. The owner-gated switch
+ *  for the engine proposing its OWN improvement cards. A SEPARATE switch from the
+ *  drain (start/stop) and from auto-integration — default OFF, in-memory only (a
+ *  restart re-arms OFF, fail-safe). Like autoMerge it only takes effect while the
+ *  engine is `running`; arming it zeroes the scan throttle so the next tick scans
+ *  promptly. Proposed cards are STILL owner-approval-gated before any dispatch —
+ *  arming this only lets the engine FILL todo, never auto-run what it proposed. */
+export const setSelfSupply = async (
+  projectPath: string,
+  enabled: boolean,
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+): Promise<SwarmOrchestratorState> => {
+  const key = await canonicalize(projectPath)
+  const engine = getOrCreateEngine(key)
+  if (engine.selfSupply.enabled !== enabled) {
+    engine.selfSupply.enabled = enabled
+    logLine(engine, 'info', enabled ? 'self-supply ON' : 'self-supply OFF')
+    if (enabled) engine.selfSupply.lastScanAt = 0 // scan on the next tick
   }
   return stateOf(engine, deps.isAlive)
 }

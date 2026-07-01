@@ -108,6 +108,44 @@ export interface EngineAnomaly {
   attempts?: number
 }
 
+/** KPI roll-up (the analytics layer) — mirrors the server's SwarmKpis. A `null`
+ *  rate / median = "no data yet" (rendered as a dash, never 0%/0). */
+export interface EngineKpis {
+  /** Completed-card lead time todo→done: median (ms) + paired count. */
+  leadTime: { medianMs: number | null; count: number }
+  /** Of resolved integration attempts, the fraction that hit a conflict. */
+  conflictRate: number | null
+  /** Of review outcomes, the fraction sent back for rework (差し戻し). */
+  reworkRate: number | null
+  /** Of dispatched workers, the fraction whose work landed. */
+  workerSuccessRate: number | null
+  /** Raw lifetime counters (the rate denominators), since this engine session. */
+  counts: {
+    dispatched: number
+    integrated: number
+    conflicted: number
+    reworked: number
+    crashed: number
+    stalled: number
+  }
+}
+
+/** Consumption snapshot (the BUDGET layer) — mirrors the server's
+ *  SwarmConsumption. The unattended loop's live load + session spend + its
+ *  ceiling/over-limit flag. */
+export interface EngineConsumption {
+  /** Live workers the engine is driving this instant (稼働 worker 数). */
+  activeWorkers: number
+  /** Combined in-flight wall-clock run time of those live workers, ms (累積実行時間). */
+  activeRunMs: number
+  /** Workers dispatched this engine session — the cumulative spend proxy (概算消費). */
+  dispatched: number
+  /** The configurable per-session dispatch ceiling the warning compares against. */
+  limit: number
+  /** dispatched >= limit — the loop crossed its consumption ceiling (the warning). */
+  overLimit: boolean
+}
+
 export interface SwarmEngineState {
   /** Autonomy — the drain+dispatch loop is scheduled (Card① start/stop). */
   running: boolean
@@ -125,6 +163,27 @@ export interface SwarmEngineState {
   log: EngineLogLine[]
   /** Concurrency ceiling the engine reports (0 until the route answers). */
   maxWorkers: number
+  /** KPI roll-up (the analytics layer) — see {@link EngineKpis}. */
+  kpis: EngineKpis
+  /** Consumption snapshot (the BUDGET layer) — see {@link EngineConsumption}. A
+   *  SEPARATE dashboard section from `kpis`. */
+  consumption: EngineConsumption
+}
+
+export const EMPTY_KPIS: EngineKpis = {
+  leadTime: { medianMs: null, count: 0 },
+  conflictRate: null,
+  reworkRate: null,
+  workerSuccessRate: null,
+  counts: { dispatched: 0, integrated: 0, conflicted: 0, reworked: 0, crashed: 0, stalled: 0 },
+}
+
+export const EMPTY_CONSUMPTION: EngineConsumption = {
+  activeWorkers: 0,
+  activeRunMs: 0,
+  dispatched: 0,
+  limit: 0,
+  overLimit: false,
 }
 
 export const DEFAULT_ENGINE: SwarmEngineState = {
@@ -135,6 +194,8 @@ export const DEFAULT_ENGINE: SwarmEngineState = {
   anomalies: [],
   log: [],
   maxWorkers: 0,
+  kpis: EMPTY_KPIS,
+  consumption: EMPTY_CONSUMPTION,
 }
 
 const KNOWN_LEVELS: ReadonlySet<string> = new Set(['info', 'warn', 'error'])
@@ -146,6 +207,57 @@ const KNOWN_ANOMALY_KINDS: ReadonlySet<string> = new Set([
   'orphan-doing', 'worktree-missing', 'worker-stale', 'move-stuck', 'rework-exhausted',
 ])
 const KNOWN_MOVE_INTENTS: ReadonlySet<string> = new Set(['review', 'done', 'recover'])
+
+/** Coerce the untrusted KPI roll-up — every field defended (a forged shape can
+ *  answer the route). A non-finite rate → null (a dash, never a fake 0%); a
+ *  median / count → a finite ≥0 number or its empty default. PURE — unit-tested
+ *  alongside sanitizeEngineState. */
+export const sanitizeKpis = (raw: unknown): EngineKpis => {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  // A rate is a fraction in [0,1] — CLAMP a finite value to that band (defence in
+  // depth: a buggy/forged server response that ever reports > 1 can't render as
+  // "150%"; the server's own land-vs-resolve discrimination is the primary guard).
+  const rate = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null
+  const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
+  const lt = o.leadTime && typeof o.leadTime === 'object' ? (o.leadTime as Record<string, unknown>) : {}
+  const c = o.counts && typeof o.counts === 'object' ? (o.counts as Record<string, unknown>) : {}
+  return {
+    leadTime: {
+      medianMs:
+        typeof lt.medianMs === 'number' && Number.isFinite(lt.medianMs) && lt.medianMs >= 0
+          ? lt.medianMs
+          : null,
+      count: count(lt.count),
+    },
+    conflictRate: rate(o.conflictRate),
+    reworkRate: rate(o.reworkRate),
+    workerSuccessRate: rate(o.workerSuccessRate),
+    counts: {
+      dispatched: count(c.dispatched),
+      integrated: count(c.integrated),
+      conflicted: count(c.conflicted),
+      reworked: count(c.reworked),
+      crashed: count(c.crashed),
+      stalled: count(c.stalled),
+    },
+  }
+}
+
+/** Coerce the untrusted consumption snapshot — every numeric field defended to a
+ *  finite ≥0 number (a forged shape can answer the route), `overLimit` a strict
+ *  boolean. PURE — unit-tested alongside sanitizeKpis. */
+export const sanitizeConsumption = (raw: unknown): EngineConsumption => {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
+  return {
+    activeWorkers: num(o.activeWorkers),
+    activeRunMs: num(o.activeRunMs),
+    dispatched: num(o.dispatched),
+    limit: num(o.limit),
+    overLimit: o.overLimit === true,
+  }
+}
 
 // The engine response is untrusted (on disk anything could answer the route), so
 // coerce every field and drop malformed rows rather than letting a bad shape
@@ -251,7 +363,86 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     anomalies,
     log,
     maxWorkers: typeof o.maxWorkers === 'number' && Number.isFinite(o.maxWorkers) ? o.maxWorkers : 0,
+    kpis: sanitizeKpis(o.kpis),
+    consumption: sanitizeConsumption(o.consumption),
   }
+}
+
+// ── Fatal-event notifications (条件3) ─────────────────────────────────────────
+// The escalation safety valve (card 6fe48c1f) PERSISTS every fatal event of the
+// unmanned loop as a notification, surfaced by GET /api/swarm/notifications. The
+// flow pane reads THESE — the AUTHORITATIVE source — for its "needs attention"
+// banner, so all five fatal kinds show: the three engine-side ones (rework-
+// exhausted / all-workers-down / exec-timeout) AND the two that come from the
+// Electron self-update cycle (rollback / canary-failed) and never touch the engine
+// state at all. Mirrors the server's SwarmFatalEvent / SwarmFatalNotification (a
+// LOCAL mirror keeps this front-end decoupled, like the engine-state mirror above).
+export type SwarmFatalEventKind =
+  | 'rework-exhausted'
+  | 'all-workers-down'
+  | 'exec-timeout'
+  | 'rollback'
+  | 'canary-failed'
+
+export interface SwarmFatalView {
+  /** Stable React key (the persisted notification id). */
+  id: string
+  event: SwarmFatalEventKind
+  /** Server-composed one-line summary of WHAT happened (Japanese specifics). */
+  detail: string
+  /** The `swarm/*` branch involved, when known (display-only). */
+  branch?: string
+  /** The card title involved, when known (display-only). */
+  taskTitle?: string
+  taskId?: string
+  /** A one-line pointer to where to dig in (engine log / Board column). */
+  logHint?: string
+  /** The project this fatal concerns — absent for app-global self-update events
+   *  (rollback / canary-failed), which aren't card-rooted. */
+  projectPath?: string
+  /** Epoch ms — newest-first ordering + the relative-time token. */
+  createdAt?: number
+}
+
+const KNOWN_FATAL_EVENTS: ReadonlySet<string> = new Set([
+  'rework-exhausted', 'all-workers-down', 'exec-timeout', 'rollback', 'canary-failed',
+])
+
+// The notifications file is untrusted on disk (hand-editable), so coerce every
+// field and drop malformed rows — the SAME defensive discipline as
+// sanitizeEngineState. Reads the AppNotificationsResponse shape
+// ({ notifications: [{ id, kind, createdAt, swarmFatal }] }), keeps only the
+// 'swarm-fatal' rows with a known event, newest-first.
+export const sanitizeFatalNotifications = (raw: unknown): SwarmFatalView[] => {
+  if (!raw || typeof raw !== 'object') return []
+  const arr = (raw as Record<string, unknown>).notifications
+  if (!Array.isArray(arr)) return []
+  const out: SwarmFatalView[] = []
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    if (o.kind !== 'swarm-fatal') continue
+    const f = o.swarmFatal
+    if (!f || typeof f !== 'object') continue
+    const sf = f as Record<string, unknown>
+    if (typeof sf.event !== 'string' || !KNOWN_FATAL_EVENTS.has(sf.event)) continue
+    const createdAt =
+      typeof o.createdAt === 'number' && Number.isFinite(o.createdAt) ? o.createdAt : undefined
+    out.push({
+      id: typeof o.id === 'string' && o.id ? o.id : `${sf.event}:${out.length}`,
+      event: sf.event as SwarmFatalEventKind,
+      detail: typeof sf.detail === 'string' ? sf.detail : '',
+      ...(typeof sf.branch === 'string' && sf.branch ? { branch: sf.branch } : {}),
+      ...(typeof sf.taskTitle === 'string' && sf.taskTitle ? { taskTitle: sf.taskTitle } : {}),
+      ...(typeof sf.taskId === 'string' && sf.taskId ? { taskId: sf.taskId } : {}),
+      ...(typeof sf.logHint === 'string' && sf.logHint ? { logHint: sf.logHint } : {}),
+      ...(typeof sf.projectPath === 'string' && sf.projectPath ? { projectPath: sf.projectPath } : {}),
+      ...(createdAt !== undefined ? { createdAt } : {}),
+    })
+  }
+  // Newest-first (the route already sorts, but don't trust on-disk order).
+  out.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+  return out
 }
 
 // ── Unified worker view (the single source both Swarm tabs render) ────────────
@@ -389,6 +580,10 @@ const ENGINE_POLL_MS = 5_000
 export interface UseSwarmEngine {
   /** Latest engine state (DEFAULT_ENGINE until the route answers). */
   engine: SwarmEngineState
+  /** Persisted fatal-event notifications for THIS project (条件3) — the escalation
+   *  safety valve's authoritative source, polled on the same cadence as `engine`.
+   *  Empty until the owner-only route answers (a 403 / 404 / throw → empty). */
+  fatalNotifications: SwarmFatalView[]
   /** Whether the orchestrator route answered at all (false = not built / offline:
    *  the dashboard switches dim instead of firing a POST that 404s). */
   available: boolean
@@ -419,6 +614,9 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   const { t } = useT()
 
   const [engine, setEngine] = useState<SwarmEngineState>(DEFAULT_ENGINE)
+  // Persisted fatal-event notifications for THIS project (条件3), polled alongside
+  // the engine state in the same poll loop below (one interval, two endpoints).
+  const [fatalNotifications, setFatalNotifications] = useState<SwarmFatalView[]>([])
   const [available, setAvailable] = useState(false)
   // A start/stop or auto-merge round-trip is in flight — disables both switches.
   const [busy, setBusy] = useState(false)
@@ -428,6 +626,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // instance across project switches, like the worker/supply state it resets).
   useEffect(() => {
     setEngine(DEFAULT_ENGINE)
+    setFatalNotifications([])
     setAvailable(false)
     setBusy(false)
     setError(null)
@@ -441,19 +640,57 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     let cancelled = false
     const poll = async () => {
       if (document.hidden) return
+      // 1) Engine orchestrator state (semantics unchanged — ok ⇒ available + state,
+      //    non-ok / throw ⇒ not available). No early return: the notifications fetch
+      //    below is INDEPENDENT and must run even when the engine route is offline.
       try {
         const res = await fetch(`/api/swarm/orchestrator?path=${encodeURIComponent(projectPath)}`)
-        if (cancelled) return
-        if (!res.ok) {
-          setAvailable(false)
-          return
+        if (!cancelled) {
+          if (!res.ok) {
+            setAvailable(false)
+          } else {
+            const state = sanitizeEngineState(await res.json())
+            if (!cancelled) {
+              setAvailable(true)
+              setEngine(state)
+            }
+          }
         }
-        const state = sanitizeEngineState(await res.json())
-        if (cancelled) return
-        setAvailable(true)
-        setEngine(state)
       } catch {
         if (!cancelled) setAvailable(false)
+      }
+      // 1b) DRAIN-TICK (card cf545637): kick the auto-start of the drain when this
+      //     project has an idle worker slot + a dispatchable todo. SCOPED to the Swarm
+      //     surface — ONLY this hook POSTs it, so the display-only Board worker-map (which
+      //     polls the GET above) never spawns. Fire-and-forget + owner-gated: a 403/404/
+      //     throw is harmless, and the server no-ops unless a STOPPED, non-paused engine
+      //     actually has work to drain (maybeAutoStartDrain returns immediately while it is
+      //     already running). The resulting running=true + workers surface on the next
+      //     read above. Skipped while a toggle is in flight (this runs inside the
+      //     busy-guarded poll), so it never fights a manual ON/OFF.
+      void fetch('/api/swarm/orchestrator/drain-tick', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: projectPath }),
+      }).catch(() => {})
+      // 2) Persisted fatal-event notifications for THIS project (条件3) — the
+      //    escalation valve's authoritative source. Owner-gated; a 403 / 404 / throw
+      //    ⇒ empty (never an error). App-global self-update fatals (rollback /
+      //    canary-failed) carry no projectPath, so they pass the filter and surface
+      //    in the loop view too; other projects' card-rooted fatals are filtered out.
+      try {
+        const res = await fetch('/api/swarm/notifications')
+        if (!cancelled) {
+          setFatalNotifications(
+            res.ok
+              ? sanitizeFatalNotifications(await res.json()).filter(
+                  (n) => !n.projectPath || n.projectPath === projectPath,
+                )
+              : [],
+          )
+        }
+      } catch {
+        if (!cancelled) setFatalNotifications([])
       }
     }
     // The effect re-runs when `busy` flips (it's a dep so the interval closure
@@ -609,6 +846,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
 
   return {
     engine,
+    fatalNotifications,
     available,
     busy,
     error,

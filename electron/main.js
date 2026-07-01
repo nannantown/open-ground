@@ -25,15 +25,26 @@
 // so dev only requires app === 'openground'. Prod requires the exact bootId,
 // exactly like the shell launcher's STEP 6.
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, shell, Notification } = require('electron')
 const path = require('path')
 const http = require('http')
-const { fork, execFileSync } = require('child_process')
+const net = require('net')
+const os = require('os')
+const { fork, spawn, execFileSync } = require('child_process')
 const crypto = require('crypto')
 const { readBakedAuthEnv } = require('./runtimeConfig')
 const { maybeResetCachesOnVersionChange } = require('./cacheReset')
 const { runStartupSequence } = require('./startup')
 const { buildServerForkEnv } = require('./forkEnv')
+const {
+  runSelfUpdateCycle,
+  performEngineSwitch,
+  performRollback,
+  killProcessTree,
+  gracefulGroupKill,
+  runRegressionSteps,
+} = require('./selfUpdate')
+const { hasLiveForkedChildren, applyDownloadedUpdate } = require('./autoUpdate')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -80,6 +91,132 @@ const BOOT_ID = crypto.randomUUID()
 // something coherent. Allow an explicit override.
 const PROJECT_DIR =
   process.env.OPENGROUND_PROJECT_DIR || app.getAppPath()
+
+// ---------------------------------------------------------------------------
+// Self-update (the in-app swarm engine replacing itself; electron/selfUpdate.js).
+//
+// When the in-app swarm lands a self-improvement on OPEN GROUND's OWN source, the
+// live engine is still its old self until it is rebuilt and re-forked. The forked
+// server signals us over IPC (src/lib/server/selfUpdateSignal.ts → this process)
+// and we run the unmanned cycle: rebuild → canary on a SEPARATE port → /api/health
+// → switch on the fixed port. See electron/selfUpdate.js for the safety contract.
+//
+// ARMED ONLY for a non-packaged electron:prod run — i.e. dogfooding the engine
+// from a source checkout, the only place where `npm run build` and a source repo
+// both exist. A shipped .app (app.isPackaged) is NEVER self-updated here: it has
+// no source to rebuild and updates through electron-updater instead (initAutoUpdater
+// below). OPENGROUND_SELF_UPDATE=1/0 force on/off for verification.
+//
+// SINGLE-INSTANCE LOCK is unaffected: the canary and the post-switch engine are
+// FORKED NODE SERVERS (ELECTRON_RUN_AS_NODE=1), not second Electron app instances,
+// so requestSingleInstanceLock() never sees them.
+const SELF_UPDATE_ARMED =
+  process.env.OPENGROUND_SELF_UPDATE === '0'
+    ? false
+    : process.env.OPENGROUND_SELF_UPDATE === '1'
+      ? true
+      : MODE === 'prod' && !app.isPackaged
+
+// MUST match SELF_UPDATE_MESSAGE in src/lib/server/selfUpdateSignal.ts (main.js
+// is plain JS Electron loads directly — it can't import the bundled .ts).
+const SELF_UPDATE_MESSAGE = 'openground:self-update'
+
+// Escalation safety valve (card 6fe48c1f). MUST match the literals in
+// src/lib/server/osNotify.ts. OS_NOTIFY_MESSAGE: the server asks us to show an
+// OS-native toast for a FATAL swarm event (server→main). CREATE_NOTIFICATION_MESSAGE:
+// we ask the server to create an in-app notification for a self-update rollback /
+// canary failure (main→server — events only Electron observes).
+const OS_NOTIFY_MESSAGE = 'openground:notify'
+const CREATE_NOTIFICATION_MESSAGE = 'openground:create-notification'
+
+// Self-update cycles that DID NOT switch (rebuild/canary/regression failure) in a
+// row — when this reaches the threshold we escalate "canary昇格失敗の連続" to the
+// human. Reset to 0 on a successful switch. (See onServerMessage.)
+let selfUpdateConsecutiveFailures = 0
+const CANARY_FAILURE_ALERT_THRESHOLD = 2
+
+// The canary listens on the first free port at/above this base. Deliberately
+// clear of the fixed port (47776) and the dev:alt range (47777+/5175+) so it
+// never fights a second dev instance.
+const CANARY_PORT_BASE = 47901
+// A fresh build is unproven, so the canary/switch health waits are SHORT (a broken
+// build should fail fast to the safe "stay on old" branch, not hang for 120s).
+const CANARY_HEALTH_TIMEOUT_MS = 45_000
+const SWITCH_HEALTH_TIMEOUT_MS = 45_000
+// `npm run build` ceiling — vite + esbuild; generous so a cold build never trips it.
+const BUILD_TIMEOUT_MS = 5 * 60_000
+
+// Rollback (task 402d34a0) — the regression gate + the known-good build backup.
+//
+// REGRESSION GATE (task 402d34a0 + c76cb3f3). Health (bootId echo) only proves the
+// new build STARTS — a self-modification can break the LOGIC while the build still
+// boots, so booting alone must never promote a build. After the canary proves the
+// build BOOTS, run the test suite against the freshly-built source and switch ONLY if
+// it is also CORRECT (condition 2: "回帰テスト赤"). Two steps run IN ORDER, fail-fast:
+//   1. unit — `npm test` (vitest run, the full ~450-test suite)
+//   2. e2e  — `npm run test:e2e` (playwright smoke: builds + boots a prod Hono on its
+//             OWN isolated port 47876 + tmp HOME, never the live 47776 / canary 47901)
+// RED on EITHER step → stay on old (we never touch the live engine), and the FAILING
+// STEP is named in the engine log (condition 4). Whole gate off with
+// OPENGROUND_SELF_UPDATE_SKIP_TESTS=1; each step's command is independently overridable
+// (OPENGROUND_SELF_UPDATE_TEST_CMD / OPENGROUND_SELF_UPDATE_E2E_CMD) so the verification
+// harness can inject fast deterministic pass/fail stand-ins.
+const REGRESSION_TIMEOUT_MS = 10 * 60_000
+const SELF_UPDATE_RUN_TESTS = process.env.OPENGROUND_SELF_UPDATE_SKIP_TESTS !== '1'
+const SELF_UPDATE_TEST_STEPS = [
+  {
+    name: 'unit',
+    cmd: (process.env.OPENGROUND_SELF_UPDATE_TEST_CMD || 'npm test').split(/\s+/).filter(Boolean),
+  },
+  {
+    name: 'e2e',
+    cmd: (process.env.OPENGROUND_SELF_UPDATE_E2E_CMD || 'npm run test:e2e').split(/\s+/).filter(Boolean),
+    // ★review-B M1: playwright puts its webServer (build → vite/esbuild → node on
+    // port 47876) in a SEPARATE process group. So a forced kill of this step must go
+    // through gracefulGroupKill (discover that group → SIGINT → escalate to SIGKILL),
+    // NEVER killProcessTree (which SIGKILLs only this step's own group) — else the
+    // webServer orphans, squats 47876, and the next e2e fails EADDRINUSE forever.
+    ownsServerGroup: true,
+  },
+]
+// Where the last known-good build is stashed for the duration of a cycle. OUT of the
+// repo (os.tmpdir) so it never shows in git status; recreated fresh each cycle. Holds
+// copies of server/dist + dist-web as they were while the live engine was healthy —
+// the payload the rollback restores when a switch leaves the engine down.
+const KNOWN_GOOD_BACKUP_DIR = path.join(os.tmpdir(), 'openground-self-update-lastgood')
+
+// True while a self-update cycle is running — the re-entrancy guard (a second
+// trigger mid-cycle is ignored). NOTE: this used to ALSO suppress the live engine's
+// fatal-on-death handler for the whole cycle, but that was too broad (a GENUINE
+// crash during the minutes-long rebuild/canary phases would be swallowed). The
+// narrower isSwitching below now owns that suppression (R3).
+let isSelfUpdating = false
+// True ONLY during the fixed-port cutover window — the intentional stop of the old
+// engine, the start of the new one, and any rollback that follows. THIS is what
+// suppresses the live engine's fatal-on-unexpected-death handler, so the deliberate
+// stop of the old engine at cutover never pops the "server died" dialog, while a
+// real crash OUTSIDE the cutover (during rebuild/canary) still surfaces as fatal (R3).
+let isSwitching = false
+// Rollback state (task 402d34a0). knownGoodSnapshot = the build stashed at cycle
+// start (the restore payload); liveEngineSha = the sha the running engine
+// corresponds to (rollback target, for logs/notification); activeCanaryHandle /
+// activeBuildChild = the in-flight children so before-quit can reap them mid-cycle (R4).
+let knownGoodSnapshot = null
+let liveEngineSha = null
+let activeCanaryHandle = null
+let activeBuildChild = null
+// The e2e (playwright) regression child, tracked SEPARATELY from activeBuildChild
+// because playwright launches its webServer (port 47876) in a SECOND process group.
+// killProcessTree SIGKILLs only the child's OWN group → that webServer orphans and
+// squats the port (task c76cb3f3 review-B M1). So every forced-kill path routes this
+// one through gracefulGroupKill, which DISCOVERS the webServer's group and SIGINTs it
+// directly (then SIGKILL-escalates) — SIGINT, not SIGTERM, is what makes playwright
+// tear the webServer down. At most one of activeBuildChild / activeE2eChild is set at a
+// time — the gate steps run serially.
+let activeE2eChild = null
+// The login-shell PATH, resolved once and reused for every fork + the build (the
+// ~560ms `zsh -lic` probe should not run per self-update fork).
+let cachedEnrichedPath = null
 
 // The login-shell PATH. A .app started from Finder/Dock has a stripped PATH;
 // the forked Hono server (and the node-pty children it spawns: zsh, claude,
@@ -258,16 +395,42 @@ if (!gotLock) {
     }
   })
 
-  // Tear down the forked server before the process exits. Async-safe via
-  // event.preventDefault() until the child is gone (or the grace elapses).
+  // Tear down EVERY forked child before the process exits. The live engine is the
+  // common case, but a self-update cycle can also have a canary (its own port) and
+  // an `npm run build` / regression child in flight — those would orphan if we quit
+  // mid-cycle (R4). isQuitting is set FIRST so the cycle's health waits bail and the
+  // rollback skips recovery. Async-safe via event.preventDefault() until the
+  // children are gone (or the grace elapses).
   app.on('before-quit', (event) => {
-    if (serverChild && !serverChild.killed) {
-      event.preventDefault()
-      isQuitting = true
-      shutdownServerChild().finally(() => {
-        app.quit()
-      })
-    }
+    // Shared with the "Restart now" auto-update path (electron/autoUpdate.js): the
+    // SAME predicate decides both "reap before quitting" here and "is teardown done
+    // so quitAndInstall won't be intercepted" there. Keeping one definition means
+    // the auto-update regression test (autoUpdate.test.ts) exercises this exact gate.
+    const hasChildren = hasLiveForkedChildren({
+      serverChild,
+      activeCanaryHandle,
+      activeBuildChild,
+      activeE2eChild,
+    })
+    if (!hasChildren) return
+    event.preventDefault()
+    isQuitting = true
+    // The build/vitest child shares npm's group and has no graceful protocol — SIGKILL
+    // its WHOLE group outright (killing only the parent orphans the fork pool → 100%+
+    // core saturation; detached spawn + group-kill reaps every worker, task 402d34a0
+    // MUST-FIX1).
+    killProcessTree(activeBuildChild)
+    // The e2e (playwright) child spawns its webServer in a SEPARATE group, so route it
+    // through gracefulGroupKill (discover that group → SIGINT → SIGKILL escalation) and
+    // WAIT for it before quitting — a plain group SIGKILL would orphan the webServer on
+    // port 47876 (review-B M1).
+    Promise.all([
+      gracefulGroupKill(activeE2eChild),
+      shutdownServerChild(),
+      activeCanaryHandle ? stopCanaryEngine(activeCanaryHandle) : Promise.resolve(),
+    ]).finally(() => {
+      app.quit()
+    })
   })
 }
 
@@ -506,7 +669,18 @@ function resolveWebRoot() {
 // child must run from a dir where those exist. We anchor it at the bundle's
 // app root (two levels up from server/dist/index.cjs).
 // ---------------------------------------------------------------------------
-async function spawnServerChild() {
+// Resolve (and memoize) the login-shell PATH. Async — the ~560ms `zsh -lic`
+// probe should run at most once, then be reused by every fork + the self-update
+// build, never re-run per canary/switch.
+async function getEnrichedPath() {
+  if (cachedEnrichedPath == null) cachedEnrichedPath = await resolveEnrichedPath()
+  return cachedEnrichedPath
+}
+
+// The app root (holds scripts/ + src/ + package.json): two dirs up from
+// server/dist/index.cjs. The forked server's cwd AND the self-update build's cwd
+// AND the OPENGROUND_SOURCE_ROOT we self-gate on. Throws if the bundle is absent.
+function getAppRoot() {
   const serverPath = resolveServerBundle()
   if (!serverPath) {
     throw new Error(
@@ -515,27 +689,74 @@ async function spawnServerChild() {
         'is shipped (asarUnpack) for the packaged app'
     )
   }
+  return path.resolve(path.dirname(serverPath), '..', '..')
+}
 
-  // server/dist/index.cjs → app root is two dirs up (../../).
+// ---------------------------------------------------------------------------
+// Fork the bundled Hono server. The LOW-LEVEL primitive shared by the initial
+// live engine, the self-update canary, and the post-switch engine. It only forks
+// + pipes stdout/stderr; the CALLER attaches the role-appropriate exit handler
+// (fatal for the live engine, benign for the canary) and tracks the child.
+//
+// `port`/`bootId` vary per role. `home` (OPENGROUND_HOME) isolates the canary on
+// a scratch dir so it never touches the real ~/.openground while the live engine
+// runs. `sourceRoot` (OPENGROUND_SOURCE_ROOT) is set ONLY for the live engine
+// when self-update is armed, so only the live engine can ever request a
+// self-update (the canary must never trigger another cycle).
+//
+// ELECTRON_RUN_AS_NODE=1 + the security-critical env layering come from the
+// unit-tested buildServerForkEnv (electron/forkEnv.js); OPENGROUND_HOME /
+// OPENGROUND_SOURCE_ROOT are spread AFTER it (neither touches the collab WS-URL
+// lock, so the token-relay invariant is preserved).
+// ---------------------------------------------------------------------------
+async function forkEngine({ port, bootId, sourceRoot, home, label }) {
+  const serverPath = resolveServerBundle()
+  if (!serverPath) {
+    throw new Error(
+      'could not locate server/dist/index.cjs — run `npm run build:server` ' +
+        '(or `npm run build`) before electron:prod, or check that server/dist ' +
+        'is shipped (asarUnpack) for the packaged app'
+    )
+  }
   const appRoot = path.resolve(path.dirname(serverPath), '..', '..')
   const webRoot = resolveWebRoot()
+  const enrichedPath = await getEnrichedPath()
+  const bakedAuthEnv = readBakedAuthEnv()
 
-  // Resolve the login-shell PATH right here, just before fork — async, so the
-  // ~560ms `zsh -lic` probe never blocked window creation earlier in startup.
-  const enrichedPath = await resolveEnrichedPath()
+  const child = fork(serverPath, [], {
+    cwd: appRoot,
+    detached: false, // tied to our lifetime; dies with the parent tree.
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    env: {
+      ...buildServerForkEnv({
+        bakedAuthEnv,
+        processEnv: process.env,
+        port,
+        host: HOST,
+        bootId,
+        projectDir: PROJECT_DIR,
+        webRoot,
+        enrichedPath,
+      }),
+      ...(sourceRoot ? { OPENGROUND_SOURCE_ROOT: sourceRoot } : {}),
+      ...(home ? { OPENGROUND_HOME: home } : {}),
+    },
+  })
 
-  // PUBLIC build-time config, baked into electron/runtime-config.json (see
-  // electron/runtimeConfig.js): app login (SUPABASE_URL / SUPABASE_ANON_KEY) AND
-  // realtime collab (OPENGROUND_REALTIME / OPENGROUND_COLLAB_WS_URL). A
-  // Finder/Dock-launched .app inherits a stripped env with these NOWHERE, so
-  // without this the forked server reports `/api/auth/config → { enabled:false }`
-  // (toolbar hides "Sign in") AND `/api/collab/config → { enabled:false }` (collab
-  // off for every shipped user) — the exact bug this fixes. We spread it BEFORE
-  // ...process.env so an explicit env var (an operator override) still wins for
-  // the overridable keys; in the normal packaged case process.env has none of
-  // them, so the baked values fill in. An absent/empty file yields {} → login +
-  // collab stay disabled (graceful degrade). The SERVICE_ROLE key and the collab
-  // HMAC ticket secret are NEVER baked (see REPORT.md / runtimeConfig.js guard).
+  const tag = label || 'hono'
+  child.stdout?.on('data', (d) => process.stdout.write(`[${tag}] ${d}`))
+  child.stderr?.on('data', (d) => process.stderr.write(`[${tag}] ${d}`))
+  return child
+}
+
+// Fork the LIVE engine on the fixed port: the initial launch AND the post-switch
+// engine both go through here. Attaches the fatal-on-unexpected-death handler and
+// the self-update IPC trigger listener, and records it as serverChild. When
+// self-update is armed we pass OPENGROUND_SOURCE_ROOT so this engine (and only
+// this engine) can request the next cycle.
+async function spawnLiveEngine({ bootId }) {
+  // PUBLIC build-time config (login + collab) — logged once so a dogfood run can
+  // confirm the baked config reached the fork. (Full rationale on forkEnv.js.)
   const bakedAuthEnv = readBakedAuthEnv()
   console.log(
     `[openground] app login: ${bakedAuthEnv.SUPABASE_URL ? 'enabled (baked config present)' : 'disabled (no baked config)'}`
@@ -544,37 +765,42 @@ async function spawnServerChild() {
     `[openground] realtime collab: ${bakedAuthEnv.OPENGROUND_REALTIME && bakedAuthEnv.OPENGROUND_COLLAB_WS_URL ? 'enabled (baked config present)' : 'disabled (no baked config)'}`
   )
 
-  // Env layering — baked PUBLIC config → process.env → fixed launch overrides
-  // (PORT/HOSTNAME/bootId/projectDir/webRoot) → the login-shell PATH → the BAKED
-  // collab WS URL re-applied LAST so a tampered OPENGROUND_COLLAB_WS_URL can't
-  // redirect the token relay (the security lock; OPENGROUND_REALTIME stays
-  // overridable). Assembled by the unit-tested buildServerForkEnv
-  // (electron/forkEnv.js, server/__tests__/forkEnv.test.ts) so the ordering is
-  // locked against silent regressions.
-  const child = fork(serverPath, [], {
-    cwd: appRoot,
-    detached: false, // tied to our lifetime; dies with the parent tree.
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-    env: buildServerForkEnv({
-      bakedAuthEnv,
-      processEnv: process.env,
-      port: FIXED_PORT,
-      host: HOST,
-      bootId: BOOT_ID,
-      projectDir: PROJECT_DIR,
-      webRoot,
-      enrichedPath,
-    }),
+  const child = await forkEngine({
+    port: FIXED_PORT,
+    bootId,
+    sourceRoot: SELF_UPDATE_ARMED ? getAppRoot() : undefined,
+    label: 'hono',
   })
-
-  child.stdout?.on('data', (d) => process.stdout.write(`[hono] ${d}`))
-  child.stderr?.on('data', (d) => process.stderr.write(`[hono] ${d}`))
 
   child.on('exit', (code, signal) => {
     serverChild = null
-    // An unexpected death (not during our own quit) is fatal — there is no
-    // server to talk to. Surface it rather than leave a blank window.
-    if (!isQuitting) {
+    // An unexpected death (not during our own quit, and not while we are
+    // deliberately tearing the old engine down for a self-update cutover) is
+    // fatal — there is no server to talk to. Surface it rather than leave a
+    // blank window. During a cutover, isSwitching suppresses this so the
+    // intentional stop of the OLD engine (and the teardown of a failed new engine
+    // during rollback) never pops the dialog — but a real crash during the
+    // rebuild/canary phases, when isSwitching is false, still surfaces as fatal (R3).
+    if (!isQuitting && !isSwitching) {
+      // app.exit(1) below does NOT fire before-quit, so synchronously reap any
+      // in-flight self-update children FIRST — otherwise a live-engine crash mid
+      // rebuild/regression would orphan the (detached) vitest fork pool and saturate
+      // the machine, the exact hazard MUST-FIX1's group-kill exists to prevent. No-op
+      // on a normal run (these refs are null unless a self-update is in flight).
+      killProcessTree(activeBuildChild)
+      // The e2e (playwright) child spawns its webServer in a separate group.
+      // gracefulGroupKill SYNCHRONOUSLY discovers that group and SIGINTs it here; the
+      // node webServer exits on SIGINT, so port 47876 frees even though app.exit below
+      // won't wait for the grace/escalation (a plain SIGKILL of only G1 would orphan it,
+      // review-B M1).
+      gracefulGroupKill(activeE2eChild)
+      if (activeCanaryHandle && activeCanaryHandle.child) {
+        try {
+          activeCanaryHandle.child.kill('SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
       dialog.showErrorBox(
         'OPEN GROUND',
         `The OPEN GROUND server exited unexpectedly (code=${code} signal=${signal}).`
@@ -583,21 +809,31 @@ async function spawnServerChild() {
     }
   })
 
+  // The forked server asks us to self-update over IPC after it lands a
+  // self-improvement on OPEN GROUND's own source (selfUpdateSignal.ts).
+  child.on('message', onServerMessage)
+
   serverChild = child
-  return child
+  return { child, port: FIXED_PORT, bootId }
 }
 
-// Graceful child teardown: SIGTERM, wait up to CHILD_SIGTERM_GRACE_MS, then
-// SIGKILL. Resolves once the child is gone (or we've force-killed it).
-function shutdownServerChild() {
+// Thin wrapper kept for start(): the initial live engine carries BOOT_ID.
+async function spawnServerChild() {
+  return spawnLiveEngine({ bootId: BOOT_ID })
+}
+
+// Graceful teardown for ANY forked child: SIGTERM, wait up to `graceMs`, then
+// SIGKILL. Resolves once the child is gone (or we've force-killed it). Shared by
+// the live-engine shutdown and the self-update canary teardown.
+function terminateChild(child, graceMs = CHILD_SIGTERM_GRACE_MS) {
   return new Promise((resolve) => {
-    const child = serverChild
     if (!child || child.killed || child.exitCode !== null) {
       resolve()
       return
     }
 
     let settled = false
+    let killTimer
     const done = () => {
       if (settled) return
       settled = true
@@ -614,15 +850,20 @@ function shutdownServerChild() {
       return
     }
 
-    const killTimer = setTimeout(() => {
+    killTimer = setTimeout(() => {
       try {
         child.kill('SIGKILL')
       } catch {
         /* already gone */
       }
       done()
-    }, CHILD_SIGTERM_GRACE_MS)
+    }, graceMs)
   })
+}
+
+// Stop the LIVE engine (serverChild). Used at quit AND as the switch's "stop old".
+function shutdownServerChild() {
+  return terminateChild(serverChild)
 }
 
 // ---------------------------------------------------------------------------
@@ -632,9 +873,10 @@ function shutdownServerChild() {
 // rejects. waitForReady() polls until the body satisfies the predicate or the
 // timeout elapses — the Electron equivalent of the shell launcher's STEP 6.
 // ---------------------------------------------------------------------------
-function pingHealth() {
+function pingHealth(port = FIXED_PORT) {
+  const url = `http://${HOST}:${port}/api/health`
   return new Promise((resolve, reject) => {
-    const req = http.get(HEALTH_URL, { timeout: HEALTH_REQUEST_TIMEOUT_MS }, (res) => {
+    const req = http.get(url, { timeout: HEALTH_REQUEST_TIMEOUT_MS }, (res) => {
       if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
         res.resume()
         reject(new Error(`health status ${res.statusCode}`))
@@ -660,20 +902,26 @@ function pingHealth() {
   })
 }
 
-// Poll /api/health until `predicate(body)` is true. In prod the predicate
-// requires bootId === BOOT_ID (proves the listener is our fork). In dev the
-// dev server was started separately so we only require app === 'openground'.
-function waitForReady(predicate) {
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS
+// Poll a server's /api/health until `predicate(body)` is true, then resolve with
+// the body; reject on timeout (or if `watchChild` dies first). `port` selects the
+// target (fixed port for the live engine, the canary's port for a canary).
+// `watchChild`, when given, lets us bail the instant a forked child we are waiting
+// on exits — the prod equivalent of the shell launcher's STEP 6. In dev no child
+// is passed (the backend is a separate process), so polling just runs to timeout.
+function waitForReady(
+  predicate,
+  { port = FIXED_PORT, watchChild = serverChild, timeoutMs = HEALTH_TIMEOUT_MS } = {},
+) {
+  const deadline = Date.now() + timeoutMs
   return new Promise((resolve, reject) => {
     const tick = async () => {
-      // If the prod child died while we were waiting, bail immediately.
-      if (MODE === 'prod' && (!serverChild || serverChild.exitCode !== null)) {
+      // If a child we are watching died while we were waiting, bail immediately.
+      if (watchChild && (watchChild.exitCode !== null || watchChild.killed)) {
         reject(new Error('server process exited before becoming ready'))
         return
       }
       try {
-        const body = await pingHealth()
+        const body = await pingHealth(port)
         if (predicate(body)) {
           resolve(body)
           return
@@ -682,13 +930,52 @@ function waitForReady(predicate) {
         /* not up yet — keep polling */
       }
       if (Date.now() >= deadline) {
-        reject(new Error(`server did not become ready within ${HEALTH_TIMEOUT_MS / 1000}s`))
+        reject(new Error(`server did not become ready within ${timeoutMs / 1000}s`))
         return
       }
       setTimeout(tick, HEALTH_POLL_INTERVAL_MS)
     }
     void tick()
   })
+}
+
+// Boolean health gate for the self-update cycle: resolve true iff /api/health on
+// `port` echoes `expectBootId` (proving the listener is the fork we just made)
+// within `timeoutMs`, else false. Never throws — the cycle branches on the bool,
+// and any failure (timeout, child death, bad JSON) means "not healthy → don't
+// switch", the safe side.
+async function pollHealthy({ port, expectBootId, watchChild, timeoutMs }) {
+  try {
+    await waitForReady(
+      (body) =>
+        !!body &&
+        body.app === 'openground' &&
+        (!expectBootId || body.bootId === expectBootId),
+      { port, watchChild, timeoutMs },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+// First free TCP port at/above `base` on the loopback host — the canary binds it.
+// Tries a bounded window so a pathological "everything taken" never loops forever.
+function findFreePort(base) {
+  const tryPort = (p) =>
+    new Promise((resolve) => {
+      const srv = net.createServer()
+      srv.once('error', () => resolve(false))
+      srv.once('listening', () => srv.close(() => resolve(true)))
+      srv.listen(p, HOST)
+    })
+  return (async () => {
+    for (let p = base; p < base + 50; p++) {
+      // eslint-disable-next-line no-await-in-loop
+      if (await tryPort(p)) return p
+    }
+    throw new Error(`no free port found in ${base}..${base + 50}`)
+  })()
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +1065,499 @@ function resetStaleCachesOnVersionChange() {
 }
 
 // ---------------------------------------------------------------------------
+// Self-update orchestration — the REAL side effects the pure cycle
+// (electron/selfUpdate.js) drives. Kept here, thin, over that unit-tested core:
+//   rebuild (npm run build) → canary on a free port → /api/health → switch.
+// Triggered by the forked server's IPC message (selfUpdateSignal.ts) after it
+// lands a self-improvement on OPEN GROUND's own source. See the SELF_UPDATE_ARMED
+// note up top for why this only ever runs in a non-packaged electron:prod run.
+// ---------------------------------------------------------------------------
+
+// One log channel for the whole cycle so condition (5) — "one unmanned cycle,
+// confirmed in the logs" — reads as a single, greppable [self-update] story.
+function selfUpdateLog(level, msg) {
+  const line = `[self-update] ${msg}`
+  if (level === 'error' || level === 'warn') console.error(line)
+  else console.log(line)
+}
+
+// Run `npm run build` in the source checkout. Resolves { ok, reason? } — never
+// rejects, so the cycle always branches cleanly (a failed build → stay on old).
+function runBuild() {
+  return new Promise((resolve) => {
+    let appRoot
+    try {
+      appRoot = getAppRoot()
+    } catch (err) {
+      resolve({ ok: false, reason: err && err.message ? err.message : 'no app root' })
+      return
+    }
+    getEnrichedPath()
+      .then((enrichedPath) => {
+        selfUpdateLog('info', `rebuild: running \`npm run build\` (cwd ${appRoot})`)
+        const child = spawn('npm', ['run', 'build'], {
+          cwd: appRoot,
+          env: { ...process.env, PATH: enrichedPath },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          // detached → own process group on POSIX, so a timeout/quit can SIGKILL the
+          // WHOLE tree (npm + vite/esbuild forks), not just npm (task 402d34a0 R4).
+          detached: process.platform !== 'win32',
+          shell: process.platform === 'win32', // npm is npm.cmd on Windows
+        })
+        // Track for before-quit reaping (R4): a quit mid-build must not orphan npm.
+        activeBuildChild = child
+        let settled = false
+        let timer
+        const settle = (v) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (activeBuildChild === child) activeBuildChild = null
+          resolve(v)
+        }
+        child.stdout?.on('data', (d) => process.stdout.write(`[build] ${d}`))
+        child.stderr?.on('data', (d) => process.stderr.write(`[build] ${d}`))
+        child.on('error', (err) =>
+          settle({ ok: false, reason: err && err.message ? err.message : 'spawn error' }),
+        )
+        child.on('exit', (code) =>
+          settle(code === 0 ? { ok: true } : { ok: false, reason: `build exited ${code}` }),
+        )
+        timer = setTimeout(() => {
+          killProcessTree(child)
+          settle({ ok: false, reason: `build timed out after ${BUILD_TIMEOUT_MS / 1000}s` })
+        }, BUILD_TIMEOUT_MS)
+      })
+      .catch((err) => resolve({ ok: false, reason: err && err.message ? err.message : 'path error' }))
+  })
+}
+
+// Fork the freshly-built engine as a CANARY on a free port, isolated on a scratch
+// OPENGROUND_HOME so it never disturbs the live engine's ~/.openground. No
+// OPENGROUND_SOURCE_ROOT → the canary can never itself request a self-update.
+async function spawnCanaryEngine() {
+  const port = await findFreePort(CANARY_PORT_BASE)
+  const bootId = crypto.randomUUID()
+  const home = path.join(os.tmpdir(), `openground-canary-${bootId}`)
+  try {
+    require('fs').mkdirSync(home, { recursive: true })
+  } catch {
+    /* best-effort — the server creates its home dirs too */
+  }
+  const child = await forkEngine({ port, bootId, home, label: 'hono:canary' })
+  // Benign exit handler: a canary death just means the new build didn't stay up;
+  // the health poll then reports unhealthy → safe "stay on old". NEVER fatal.
+  child.on('exit', (code, signal) => {
+    selfUpdateLog('info', `canary exited (code=${code} signal=${signal})`)
+  })
+  const handle = { child, port, bootId, home }
+  // Track for before-quit reaping (R4): a quit mid-cycle must not orphan the canary.
+  activeCanaryHandle = handle
+  return handle
+}
+
+// Tear a canary down and remove its scratch home (both best-effort).
+async function stopCanaryEngine(handle) {
+  if (!handle) return
+  // Clear the before-quit tracking ref the moment we begin teardown (R4).
+  if (activeCanaryHandle === handle) activeCanaryHandle = null
+  await terminateChild(handle.child)
+  if (handle.home) {
+    try {
+      require('fs').rmSync(handle.home, { recursive: true, force: true })
+    } catch {
+      /* best-effort — a tmp leftover is swept by the OS eventually */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rollback (task 402d34a0) — the REAL side effects of performRollback, plus the
+// known-good snapshot/restore and the regression gate. A switch stops the old
+// engine to free the fixed port, then forks the new build there; if the new engine
+// never comes up healthy the app would be bricked. These make the engine SURVIVE
+// that by snapshotting the healthy build (at boot + after each successful switch —
+// never at rebuild time, MUST-FIX2) and restoring it on a failed switch. Everything
+// here only runs on the armed self-update path.
+// ---------------------------------------------------------------------------
+
+// Best-effort git sha of the source checkout, for rollback observability (condition
+// 1: the known-good pointer is "commit sha + build artifact"). Synchronous with a
+// short timeout; only ever called on the armed path, never in a shipped run. Returns
+// 'unknown' on any failure (detached HEAD, no git, timeout).
+function currentHeadSha() {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: getAppRoot(),
+      encoding: 'utf8',
+      timeout: 3000,
+    })
+    return out.trim() || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+// Snapshot the CURRENT on-disk build (server/dist + dist-web) as the rollback restore
+// payload. CRITICAL (MUST-FIX2): only call this where on-disk is PROVABLY the build
+// the live healthy engine is running — i.e. at armed boot (engine just forked from
+// it, health OK) and right after a successful switch (new build just forked + proved
+// healthy). NEVER at rebuild time: after a rejected cycle the on-disk build is the
+// rejected one (left un-restored), so snapshotting then would stamp a broken build
+// good. THROWS on copy failure; callers treat that as best-effort (keep the previous
+// snapshot / log that rollback is unavailable) — they never abort a completed switch.
+function captureKnownGood() {
+  const fs = require('fs')
+  const appRoot = getAppRoot()
+  const serverDist = path.join(appRoot, 'server', 'dist')
+  const webRoot = path.join(appRoot, 'dist-web')
+  fs.rmSync(KNOWN_GOOD_BACKUP_DIR, { recursive: true, force: true })
+  fs.mkdirSync(KNOWN_GOOD_BACKUP_DIR, { recursive: true })
+  fs.cpSync(serverDist, path.join(KNOWN_GOOD_BACKUP_DIR, 'server-dist'), { recursive: true })
+  fs.cpSync(webRoot, path.join(KNOWN_GOOD_BACKUP_DIR, 'dist-web'), { recursive: true })
+  knownGoodSnapshot = { dir: KNOWN_GOOD_BACKUP_DIR, appRoot, sha: liveEngineSha || 'unknown' }
+  selfUpdateLog(
+    'info',
+    `known-good build snapshotted (sha ${knownGoodSnapshot.sha}) → ${KNOWN_GOOD_BACKUP_DIR}`,
+  )
+}
+
+// Restore the snapshotted known-good artifacts over the (broken) on-disk build, so
+// the re-forked engine runs the previous good self — and so a later relaunch also
+// forks the good build, not the broken one. THROWS on failure → performRollback
+// reports restore-failed.
+function restoreKnownGood() {
+  const fs = require('fs')
+  if (!knownGoodSnapshot) throw new Error('no known-good snapshot was taken')
+  const { dir, appRoot } = knownGoodSnapshot
+  const serverDist = path.join(appRoot, 'server', 'dist')
+  const webRoot = path.join(appRoot, 'dist-web')
+  fs.rmSync(serverDist, { recursive: true, force: true })
+  fs.cpSync(path.join(dir, 'server-dist'), serverDist, { recursive: true })
+  fs.rmSync(webRoot, { recursive: true, force: true })
+  fs.cpSync(path.join(dir, 'dist-web'), webRoot, { recursive: true })
+}
+
+// Spawn ONE regression step (a single test command) against the freshly-built source
+// checkout. detached so the child leads its own process group (task 402d34a0 MUST-FIX1):
+// vitest runs a FORK POOL and `npm run build` forks vite/esbuild — killing only the npm
+// PARENT would orphan those workers (100%+ core saturation), so the group lets us reap
+// the whole pool. The FORCED-KILL differs by step (review-B M1): vitest/build share
+// npm's group → killProcessTree (immediate SIGKILL); the e2e step's playwright spawns
+// its webServer in a SEPARATE group → gracefulGroupKill (discover that group → SIGINT →
+// SIGKILL escalation), else its webServer orphans + squats port 47876. Resolves
+// { ok, reason? } — never rejects, so runRegressionSteps always branches cleanly.
+// Output is line-prefixed with the step name so the log shows unit vs e2e (condition 4).
+function spawnTestStep(step) {
+  return new Promise((resolve) => {
+    let appRoot
+    try {
+      appRoot = getAppRoot()
+    } catch (err) {
+      resolve({ ok: false, reason: err && err.message ? err.message : 'no app root' })
+      return
+    }
+    const [cmd, ...cmdArgs] = step.cmd || []
+    if (!cmd) {
+      resolve({ ok: false, reason: 'empty command' })
+      return
+    }
+    getEnrichedPath()
+      .then((enrichedPath) => {
+        selfUpdateLog('info', `regression[${step.name}]: running \`${step.cmd.join(' ')}\` (cwd ${appRoot})`)
+        const child = spawn(cmd, cmdArgs, {
+          cwd: appRoot,
+          env: { ...process.env, PATH: enrichedPath },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+          shell: process.platform === 'win32', // npm is npm.cmd on Windows
+        })
+        // Track for before-quit / crash reaping (MUST-FIX1 + review-B M1): a quit or a
+        // live-engine crash mid-run must not orphan this child. The e2e (playwright)
+        // child owns a SEPARATE webServer group only IT reaps on SIGTERM, so it is
+        // tracked in activeE2eChild (force-killed via gracefulGroupKill); unit/build
+        // share npm's group and go in activeBuildChild (killProcessTree). Steps run
+        // serially → at most one is set. Assign-on-spawn / clear-on-settle.
+        const ownsServerGroup = !!step.ownsServerGroup
+        if (ownsServerGroup) activeE2eChild = child
+        else activeBuildChild = child
+        let settled = false
+        let timer
+        const settle = (v) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (activeBuildChild === child) activeBuildChild = null
+          if (activeE2eChild === child) activeE2eChild = null
+          resolve(v)
+        }
+        child.stdout?.on('data', (d) => process.stdout.write(`[regression:${step.name}] ${d}`))
+        child.stderr?.on('data', (d) => process.stderr.write(`[regression:${step.name}] ${d}`))
+        child.on('error', (err) =>
+          settle({ ok: false, reason: err && err.message ? err.message : 'spawn error' }),
+        )
+        child.on('exit', (code) =>
+          settle(code === 0 ? { ok: true } : { ok: false, reason: `exited ${code}` }),
+        )
+        timer = setTimeout(() => {
+          // Timed out → force-kill. playwright (ownsServerGroup) needs gracefulGroupKill
+          // (discover its separate webServer group → SIGINT → SIGKILL) else port 47876
+          // orphans (M1); vitest/build share npm's group → an immediate group SIGKILL is
+          // fine. Settle the gate as timed-out without awaiting the (best-effort) teardown.
+          if (ownsServerGroup) void gracefulGroupKill(child)
+          else killProcessTree(child)
+          settle({ ok: false, reason: `timed out after ${REGRESSION_TIMEOUT_MS / 1000}s` })
+        }, REGRESSION_TIMEOUT_MS)
+      })
+      .catch((err) => resolve({ ok: false, reason: err && err.message ? err.message : 'path error' }))
+  })
+}
+
+// The regression gate (task 402d34a0 + c76cb3f3): run the ordered test steps (unit →
+// e2e smoke) against the freshly-built engine, fail-fast, naming the red step. The
+// canary already proved the build BOOTS; this proves it is CORRECT before the switch.
+// Delegates the ordering / fail-fast / naming to the pure runRegressionSteps (unit-
+// tested in selfUpdate.test.ts) and injects the real per-step spawn. Resolves
+// { ok, reason? } — never rejects, so the cycle always branches cleanly (RED → stay
+// on old).
+function runSelfUpdateTests() {
+  return runRegressionSteps({
+    steps: SELF_UPDATE_TEST_STEPS,
+    runStep: spawnTestStep,
+    log: selfUpdateLog,
+  })
+}
+
+// User-facing notification of a rollback (condition 3: leave it in BOTH the engine
+// log AND a notification). Non-blocking native notification so the unmanned loop is
+// never stalled by a modal; the [self-update] log lines carry the full detail.
+function notifyRollback(info) {
+  const sha = String((info && info.goodSha) || 'unknown').slice(0, 7)
+  const ok = info && info.ok
+  showOsNotification(
+    ok ? 'OPEN GROUND — self-update rolled back' : 'OPEN GROUND — rollback failed',
+    ok
+      ? `A broken self-update was reverted to the last working build (${sha}). The app kept running.`
+      : `A self-update failed and the rollback could not recover (${(info && info.reason) || 'error'}). Relaunch may be needed.`,
+  )
+  // Escalation safety valve (in-app half): also record it in the Ground bell so the
+  // event persists past the transient OS toast. The server shows no second toast
+  // for this (createSwarmFatalNotification os:false on the inward bridge).
+  createInAppNotification({
+    event: 'rollback',
+    detail: ok
+      ? `壊れた self-update を直前の正常ビルド(${sha})へロールバックしました（アプリは稼働継続）。`
+      : `self-update のロールバックに失敗しました（${(info && info.reason) || 'error'}）。再起動が必要かもしれません。`,
+    logHint: '[self-update] のログ行を確認してください。',
+  })
+}
+
+// Show an OS-native toast. The single guarded entry point for every OS push (the
+// rollback notice and the server-driven swarm escalations both route through it).
+// Non-blocking, best-effort — a notification fault never disturbs the caller.
+function showOsNotification(title, body) {
+  try {
+    if (!Notification || !Notification.isSupported || !Notification.isSupported()) return
+    new Notification({ title: String(title || 'OPEN GROUND'), body: String(body || '') }).show()
+  } catch (err) {
+    selfUpdateLog('warn', `os-notify: could not post (${err && err.message ? err.message : err})`)
+  }
+}
+
+// Ask the forked server to CREATE an in-app notification (the Ground bell record)
+// for an event only Electron observes (self-update rollback / canary failure).
+// Best-effort: a dead/absent server child just drops it (the OS toast already fired).
+function createInAppNotification(notification) {
+  try {
+    if (serverChild && !serverChild.killed && typeof serverChild.send === 'function') {
+      serverChild.send({ type: CREATE_NOTIFICATION_MESSAGE, notification })
+    }
+  } catch (err) {
+    selfUpdateLog('warn', `in-app notify: send failed (${err && err.message ? err.message : err})`)
+  }
+}
+
+// The onSwitchFailure handler wired into performEngineSwitch — the heart of R1.
+// Restore the known-good build, re-fork the engine on the fixed port, prove its
+// health, reload the window. If even that fails there is no engine left, so surface
+// it like an initial-launch server failure (the operator must relaunch).
+async function rollbackToKnownGood(info) {
+  const stage = (info && info.stage) || 'unknown'
+  if (isQuitting) {
+    selfUpdateLog('warn', `rollback: app is quitting — skipping recovery (stage=${stage})`)
+    return
+  }
+  const result = await performRollback({
+    restoreArtifacts: async () => restoreKnownGood(),
+    startEngine: () => spawnLiveEngine({ bootId: crypto.randomUUID() }),
+    waitHealthy: ({ port, bootId, child }) =>
+      pollHealthy({ port, expectBootId: bootId, watchChild: child, timeoutMs: SWITCH_HEALTH_TIMEOUT_MS }),
+    reloadWindow: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.loadURL(BASE_URL)
+    },
+    notify: notifyRollback,
+    stage,
+    goodSha: knownGoodSnapshot && knownGoodSnapshot.sha,
+    log: selfUpdateLog,
+  })
+  if (!result.ok && !isQuitting) {
+    try {
+      dialog.showErrorBox(
+        'OPEN GROUND',
+        'A self-update failed AND the automatic rollback to the previous working ' +
+          `version could not bring the server back up (${result.reason}).\n\n` +
+          'Please relaunch OPEN GROUND.',
+      )
+    } catch {
+      /* a failed dialog must not mask the exit */
+    }
+    app.exit(1)
+  }
+}
+
+// Compose the REAL deps and run one cycle. The switch path is the separated
+// performEngineSwitch (electron/selfUpdate.js); onSwitchFailure is now wired to
+// rollbackToKnownGood (task 402d34a0), and isSwitching brackets the cutover so the
+// old engine's deliberate stop never reads as a fatal crash (R3).
+function runSelfUpdate() {
+  let canaryHandle = null
+  // The sha we are about to build & switch TO (best-effort). On a clean cutover it
+  // becomes the live engine's sha; a rollback discards it (we stay on the good sha).
+  const targetSha = currentHeadSha()
+  return runSelfUpdateCycle({
+    // NOTE (MUST-FIX2): the known-good snapshot is NOT taken here. Snapshotting at
+    // rebuild time captures whatever is on disk then — and after a previously
+    // rejected cycle (canary-unhealthy / regression-red leave the rejected build on
+    // disk, un-restored) that is a BROKEN build, which would then be wrongly stamped
+    // good and rolled back TO. The snapshot is taken only where on-disk is provably
+    // the live healthy engine: at armed boot (start) and via onSwitchSucceeded below.
+    rebuild: runBuild,
+    startCanary: async () => {
+      canaryHandle = await spawnCanaryEngine()
+      return canaryHandle
+    },
+    checkHealth: ({ port, bootId }) =>
+      pollHealthy({
+        port,
+        expectBootId: bootId,
+        watchChild: canaryHandle && canaryHandle.child,
+        timeoutMs: CANARY_HEALTH_TIMEOUT_MS,
+      }),
+    stopCanary: async () => {
+      const h = canaryHandle
+      canaryHandle = null
+      await stopCanaryEngine(h)
+    },
+    // Regression gate (condition 2): run on the new build before switching. Skipped
+    // when OPENGROUND_SELF_UPDATE_SKIP_TESTS=1 (the gate is then health-only).
+    runRegressionTests: SELF_UPDATE_RUN_TESTS ? runSelfUpdateTests : undefined,
+    performSwitch: async () => {
+      // Bracket the cutover (and any rollback inside it) so the live engine's
+      // fatal-on-death handler is suppressed for the INTENTIONAL stops only (R3).
+      isSwitching = true
+      try {
+        const result = await performEngineSwitch({
+          // Stop old → start new on the FIXED port → require its bootId echo →
+          // reload the window. onSwitchFailure recovers a switch that fails here.
+          stopOldEngine: shutdownServerChild,
+          startNewEngine: () => spawnLiveEngine({ bootId: crypto.randomUUID() }),
+          waitHealthy: ({ port, bootId, child }) =>
+            pollHealthy({
+              port,
+              expectBootId: bootId,
+              watchChild: child,
+              timeoutMs: SWITCH_HEALTH_TIMEOUT_MS,
+            }),
+          reloadWindow: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.loadURL(BASE_URL)
+          },
+          // R2: free the fixed port if the new engine spawned but never went healthy.
+          stopNewEngine: (child) => terminateChild(child),
+          // R1: recover instead of leaving the engine down.
+          onSwitchFailure: (failInfo) => rollbackToKnownGood(failInfo),
+          log: selfUpdateLog,
+        })
+        return result
+      } finally {
+        isSwitching = false
+      }
+    },
+    // MUST-FIX2: refresh the known-good snapshot ONLY after a successful switch — the
+    // one in-cycle moment on-disk == the live healthy engine (the new build was just
+    // forked from it and proved healthy). Now the live engine IS this build, so record
+    // its sha and snapshot it as the next rollback target. The cycle never fires this
+    // on a reject, so a rejected build can never be captured as known-good.
+    onSwitchSucceeded: () => {
+      liveEngineSha = targetSha
+      captureKnownGood()
+    },
+    log: selfUpdateLog,
+  })
+}
+
+// IPC trigger from the forked server (selfUpdateSignal.ts). Gated by SELF_UPDATE_
+// ARMED (defence-in-depth on top of the server-side self-gate) and single-flighted
+// by isSelfUpdating — a second merge mid-cycle is dropped (the next merge re-fires
+// against the then-current main). isSelfUpdating also suppresses the live engine's
+// fatal-on-death handler during the cutover (see spawnLiveEngine).
+function onServerMessage(msg) {
+  if (!msg || typeof msg !== 'object') return
+  // Escalation safety valve (OUTWARD half): the server asks us to show an OS toast
+  // for a FATAL swarm event. Different message type than self-update — handle first.
+  if (msg.type === OS_NOTIFY_MESSAGE) {
+    showOsNotification(msg.title, msg.body)
+    return
+  }
+  if (msg.type !== SELF_UPDATE_MESSAGE) return
+  if (!SELF_UPDATE_ARMED) {
+    selfUpdateLog('info', 'trigger received but self-update is not armed — ignoring')
+    return
+  }
+  if (isSelfUpdating) {
+    selfUpdateLog('info', 'trigger received while a cycle is in flight — ignoring (next merge re-fires)')
+    return
+  }
+  isSelfUpdating = true
+  selfUpdateLog('info', `self-improvement merged (${(msg && msg.projectPath) || 'source'}) — starting cycle`)
+  runSelfUpdate()
+    .then((result) => {
+      selfUpdateLog('info', `cycle result: ${JSON.stringify(result)}`)
+      handleSelfUpdateOutcome(result)
+    })
+    .catch((err) => {
+      selfUpdateLog('error', `cycle crashed: ${err && err.message ? err.message : err}`)
+      handleSelfUpdateOutcome({ switched: false, reason: 'cycle-crashed' })
+    })
+    .finally(() => {
+      isSelfUpdating = false
+    })
+}
+
+// Escalation safety valve: track CONSECUTIVE non-switching self-update cycles
+// (rebuild/canary/regression failures). A successful switch resets the streak; once
+// it reaches the threshold, push "canary昇格失敗の連続" to the human (OS toast +
+// Ground bell). The rollback path has its own notice (notifyRollback); this covers
+// the cycles that never even switched.
+function handleSelfUpdateOutcome(result) {
+  if (result && result.switched) {
+    selfUpdateConsecutiveFailures = 0
+    return
+  }
+  selfUpdateConsecutiveFailures += 1
+  if (selfUpdateConsecutiveFailures < CANARY_FAILURE_ALERT_THRESHOLD) return
+  const reason = (result && result.reason) || 'unknown'
+  showOsNotification(
+    'OPEN GROUND — Self-update canary failed',
+    `A self-update has failed to promote ${selfUpdateConsecutiveFailures} times in a row (${reason}). The running build is unchanged.`,
+  )
+  createInAppNotification({
+    event: 'canary-failed',
+    detail: `self-update が ${selfUpdateConsecutiveFailures} 回連続で昇格に失敗しました（${reason}）。稼働中のビルドは変更なし。`,
+    logHint: '[self-update] のログを確認してください。',
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration.
 // ---------------------------------------------------------------------------
 async function start() {
@@ -832,6 +1612,39 @@ async function start() {
   // (isPackaged=false) electron-updater would hit GitHub and log spurious
   // "cannot find update feed"/dev errors, so we never even require it there.
   initAutoUpdater()
+
+  // Self-update (in-app swarm self-improvement loop). Announce the armed state so
+  // a dogfood run can confirm at a glance that the engine WILL replace itself on
+  // the next self-improvement merge — and a shipped/dev run that the listener is
+  // deliberately dormant. The actual cycle fires from onServerMessage (IPC).
+  if (SELF_UPDATE_ARMED) {
+    // The engine is up and healthy → record the sha it corresponds to AND snapshot
+    // its build as the initial rollback target (condition 1 / MUST-FIX2). Right here,
+    // at a freshly-booted healthy engine, on-disk IS exactly what the live engine
+    // runs — the one safe moment besides a successful switch to capture known-good.
+    // Best-effort: a snapshot failure must never take the app down (rollback is then
+    // unavailable until the next successful switch, which is logged loudly).
+    liveEngineSha = currentHeadSha()
+    try {
+      captureKnownGood()
+    } catch (err) {
+      selfUpdateLog(
+        'warn',
+        `boot: known-good snapshot failed (${err && err.message ? err.message : err}) — ` +
+          `self-update rollback unavailable until the next successful switch`,
+      )
+    }
+    selfUpdateLog(
+      'info',
+      `armed — a swarm self-improvement merge will trigger rebuild → canary → unit+e2e tests → switch; ` +
+        `known-good rollback target sha ${liveEngineSha}`,
+    )
+  } else {
+    selfUpdateLog(
+      'info',
+      'dormant — not a non-packaged electron:prod run (set OPENGROUND_SELF_UPDATE=1 to force)',
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -905,16 +1718,20 @@ function initAutoUpdater() {
       })
       .then((res) => {
         if (res.response === 0) {
-          isQuitting = true
           // Tear the forked server down FIRST, then quitAndInstall. Otherwise the
-          // before-quit handler below preventDefault()s quitAndInstall's quit and
-          // replaces it with a plain app.quit() — the update downloads but is never
-          // applied, so "Restart now" appears to do nothing (observed 2026-06-25).
-          // Settling shutdownServerChild first leaves serverChild === null by the
-          // time quitAndInstall fires, so before-quit no longer intercepts it.
-          shutdownServerChild().finally(() => {
-            autoUpdater.quitAndInstall()
-          })
+          // before-quit handler preventDefault()s quitAndInstall's quit and replaces
+          // it with a plain app.quit() — the update downloads but is never applied, so
+          // "Restart now" appears to do nothing (observed 2026-06-25). Settling
+          // shutdownServerChild first leaves serverChild null/killed by the time
+          // quitAndInstall fires, so before-quit no longer intercepts it. The ordered
+          // sequence lives in electron/autoUpdate.js, locked by autoUpdate.test.ts.
+          applyDownloadedUpdate({
+            setQuitting: (v) => {
+              isQuitting = v
+            },
+            shutdownServerChild,
+            quitAndInstall: () => autoUpdater.quitAndInstall(),
+          }).catch(() => {})
         }
       })
       .catch(() => {})

@@ -127,22 +127,46 @@ export const deleteCanvasAsset = async (
 const GC_MIN_AGE_MS = 2 * 60 * 1000
 
 /** Garbage-collect image files no element references — run after every canvas
- *  write so removing an image element eventually reclaims disk. Never throws. */
+ *  write so removing/replacing an image eventually reclaims disk. Never throws,
+ *  so wiring it after a successful write can't turn that write into a failure.
+ *
+ *  A single file in this dir can be referenced TWO ways — both in the same
+ *  id-namespace, both uploaded through the same `POST /api/canvas/asset`:
+ *    • an `image` ELEMENT via `assetId` (paste / drop), and
+ *    • an image FILL on a `frame` / `shape` element via `fillImageId`
+ *      (Figma-style background — SelectionInspector's "Fill: Image").
+ *  Collect BOTH, from EVERY element regardless of type. Missing either reaps a
+ *  live asset as a false orphan → a silently broken image on the next render.
+ *  Over-collecting only keeps an asset a little longer; under-collecting DESTROYS
+ *  data, so this errs toward keeping. (`storageKey` is deliberately NOT included:
+ *  it is the remote collab/R2 object key, not a file in this local dir.) */
 export const pruneCanvasAssets = async (
   projectPath: string,
   canvasId: string,
   canvas: CanvasFile,
 ) => {
-  const dir = await assetsDir(projectPath, canvasId)
+  // A best-effort sweep that must never (a) throw out of a just-succeeded write
+  // nor (b) delete when the reference set is INDETERMINATE. A non-array
+  // `elements` (only reachable via a corrupt payload) means "references unknown"
+  // → bail WITHOUT deleting, rather than treat it as "nothing referenced" and
+  // reap every aged asset. Erring toward keeping is the only safe direction for
+  // an irreversible unlink.
+  if (!Array.isArray(canvas.elements)) return
+  const referenced = new Set<string>()
+  for (const el of canvas.elements) {
+    if (el.assetId) referenced.add(el.assetId)
+    if (el.fillImageId) referenced.add(el.fillImageId)
+  }
+  // `assetsDir` resolves the project UUID, which THROWS for an unregistered path
+  // (e.g. the project was deleted in the window between the write and this prune)
+  // — keep it inside the guard so prune still can't throw.
+  let dir: string
   let entries: string[]
   try {
+    dir = await assetsDir(projectPath, canvasId)
     entries = await readdir(dir)
   } catch {
     return
-  }
-  const referenced = new Set<string>()
-  for (const el of canvas.elements) {
-    if (el.type === 'image' && el.assetId) referenced.add(el.assetId)
   }
   const now = Date.now()
   await Promise.all(

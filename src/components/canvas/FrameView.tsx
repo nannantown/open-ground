@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { LayoutGrid } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
@@ -26,7 +26,7 @@ interface Props {
 // A grouping frame: a labelled rectangle drawn behind the cards. Only its
 // header bar is interactive (drag it to move the frame + everything inside);
 // the body is click-through so cards on top stay reachable.
-export const FrameView = ({
+export const FrameView = memo(({
   frame,
   selected,
   editing,
@@ -152,4 +152,4 @@ export const FrameView = ({
       </div>
     </div>
   )
-}
+})

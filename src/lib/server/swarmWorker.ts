@@ -32,6 +32,8 @@ import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { killTerminalsByCwd } from './terminal'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
+import { removeClaudeFolderTrust } from './claudeTrust'
+import { isExperimentEnabled } from './experiments'
 import { swarmLaunchDefaults } from './swarmLaunch'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
 
@@ -102,12 +104,25 @@ const flattenOneLine = (s: string): string =>
  *  goal must be a single slash-command argument, and a multi-line value risks
  *  being split or (if ever pasted instead) collapsed into a `[Pasted text]`
  *  chip, where `/order` is not parsed as a command. title + notes are joined
- *  (notes optional). Pure + exported for unit tests. */
-export const buildOrderInjection = (title: string, notes?: string): string => {
+ *  (notes optional). Pure + exported for unit tests.
+ *
+ *  LEARNING LOOP (card fdf714ef): when this SAME card was previously sent back
+ *  — a 差し戻し / rollback: a RED verify (which tsc/test failed) or an
+ *  adversarial-review must-fix — and is being RE-DISPATCHED to a FRESH worker,
+ *  `priorFailure` carries WHY it failed last time. It is appended as a clearly
+ *  LABELLED clause so the new worker doesn't repeat the same mistake. Still ONE
+ *  line (flattenOneLine strips control bytes + collapses newlines, so even a
+ *  multi-line tsc tail stays a single slash-command argument); omitted entirely
+ *  when there is no prior failure (a first dispatch is byte-for-byte unchanged). */
+export const buildOrderInjection = (title: string, notes?: string, priorFailure?: string): string => {
   const t = flattenOneLine(title || '')
   const n = flattenOneLine(notes || '')
   const goal = t && n ? `${t} — ${n}` : t || n
-  return ORDER_PREFIX + goal
+  const pf = flattenOneLine(priorFailure || '')
+  const learn = pf
+    ? ` 【前回の差し戻し理由・同じ失敗を繰り返さないこと】${pf}`
+    : ''
+  return ORDER_PREFIX + goal + learn
 }
 
 // NOTE on delivery: the /order goal is handed to claude as its POSITIONAL
@@ -220,7 +235,13 @@ export const createSwarmWorktree = async (
  *  remove the main checkout or another project's data. Any live PTY in the
  *  worktree is killed first. `force` (the kill/abandon case) passes
  *  `--force` so a dirty mid-implementation tree can still be torn down; without
- *  it git refuses a dirty/locked worktree (the safe default). */
+ *  it git refuses a dirty/locked worktree (the safe default).
+ *
+ *  On a CONFIRMED removal it also drops the worktree's ~/.claude.json folder-trust
+ *  entry (ensureClaudeFolderTrusted seeded one on every launchClaude in this dir):
+ *  without this, every ephemeral worker dir would pile up in claude's projects map
+ *  forever, slowing every claude start's read/write of that file. Not dropped on a
+ *  refused removal — the worktree is still live, and the next launch re-seeds it. */
 export const removeSwarmWorktree = async (
   projectPath: string,
   worktree: string,
@@ -237,9 +258,10 @@ export const removeSwarmWorktree = async (
     return { removed: false, reason: 'not a central worktree' }
   }
   // Idempotent: already gone on disk → treat as removed (still prune stale
-  // worktree bookkeeping in the project's repo).
+  // worktree bookkeeping in the project's repo + any lingering trust entry).
   if (!(await stat(worktree).then(() => true).catch(() => false))) {
     await git(projectPath, ['worktree', 'prune'])
+    removeClaudeFolderTrust(worktree)
     return { removed: true }
   }
   // Kill any live PTY in the worktree first, by the EXACT spawn-returned path —
@@ -267,9 +289,13 @@ export const removeSwarmWorktree = async (
     worktree,
   ])
   await git(projectPath, ['worktree', 'prune'])
-  return removed !== null
-    ? { removed: true }
-    : { removed: false, reason: opts.force ? 'git refused' : 'worktree dirty or locked' }
+  if (removed === null) {
+    return { removed: false, reason: opts.force ? 'git refused' : 'worktree dirty or locked' }
+  }
+  // Confirmed gone — drop its ~/.claude.json trust entry so ephemeral worktree
+  // paths don't accumulate in claude's projects map (see the doc note above).
+  removeClaudeFolderTrust(worktree)
+  return { removed: true }
 }
 
 /** Validate an EXISTING worktree for the RESTART path and read its branch. Same
@@ -319,6 +345,11 @@ export interface SpawnSwarmWorkerOpts {
    *  the project's central worktrees dir (resolveExistingSwarmWorktree); throws
    *  otherwise. Omitted (a fresh dispatch) = create a new worktree off the trunk. */
   worktree?: string
+  /** LEARNING LOOP (card fdf714ef): the reason this SAME card was previously
+   *  差し戻し / rolled back (RED verify / review must-fix). Appended to the /order
+   *  so a RE-DISPATCHED card's fresh worker doesn't repeat the failure. Omitted on
+   *  a first dispatch. See {@link buildOrderInjection}. */
+  priorFailure?: string
 }
 
 /** Build the LaunchClaudeOpts for a worker — pure + exported so the worker's
@@ -342,11 +373,28 @@ export interface SpawnSwarmWorkerOpts {
 export const workerLaunchOpts = (
   worktree: string,
   agentSessionId: string,
-  opts: { title: string; notes?: string; env?: Record<string, string>; cols?: number; rows?: number },
+  opts: {
+    title: string
+    notes?: string
+    priorFailure?: string
+    env?: Record<string, string>
+    cols?: number
+    rows?: number
+    // Owner-only sandbox experiment (resolved server-side in spawnSwarmWorker).
+    // A worker is the prime case: it's ALREADY bypass (unattended), so the
+    // sandbox adds OS-enforced containment to that prompt-free run rather than
+    // changing prompting. sandboxWritePaths carries the repo's shared .git so the
+    // worktree's `git commit`/`push` (objects/refs live in the main checkout) can
+    // still land inside the otherwise cwd-confined writes.
+    sandbox?: boolean
+    sandboxWritePaths?: string[]
+  },
 ): LaunchClaudeOpts => ({
   cwd: worktree,
   agentSessionId,
   appContext: false,
+  sandbox: opts.sandbox,
+  sandboxWritePaths: opts.sandboxWritePaths,
   ...swarmLaunchDefaults('worker'),
   // permissionMode LAST — AFTER the spread — so 'bypass' is UNCONDITIONAL: an
   // unattended worker must never wedge on a tool-approval / trust prompt with no
@@ -359,7 +407,7 @@ export const workerLaunchOpts = (
   env: opts.env,
   cols: opts.cols,
   rows: opts.rows,
-  initialPrompt: buildOrderInjection(opts.title, opts.notes),
+  initialPrompt: buildOrderInjection(opts.title, opts.notes, opts.priorFailure),
 })
 
 /** Create the worktree and launch ONE interactive claude PTY in it, handing the
@@ -377,7 +425,22 @@ export const spawnSwarmWorker = async (
     ? await resolveExistingSwarmWorktree(opts.projectPath, opts.worktree)
     : await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
   const agentSessionId = randomUUID()
-  const ref = launchClaude(workerLaunchOpts(worktree, agentSessionId, opts))
+  // Owner-only sandbox gate, resolved SERVER-side (owner role && the toggle) —
+  // never from the dispatch request. When open, the worker's already-bypass run
+  // is wrapped in a Seatbelt sandbox confined to its worktree; the repo's shared
+  // `.git` is granted write so `git commit`/`push` still works (a worktree's
+  // objects/refs live in the main checkout, outside the worktree cwd). macOS-only
+  // (launchClaude no-ops it elsewhere); the worker's symlinked node_modules is left
+  // fully READ-only — NO carve-out (a writable node_modules would let a sandboxed
+  // worker poison code, e.g. `.vite/deps`, the owner later runs UN-sandboxed).
+  const sandbox = await isExperimentEnabled('sandbox')
+  const ref = launchClaude(
+    workerLaunchOpts(worktree, agentSessionId, {
+      ...opts,
+      sandbox,
+      sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
+    }),
+  )
   return { terminalId: ref.terminalId, agentSessionId, worktree, branch }
 }
 

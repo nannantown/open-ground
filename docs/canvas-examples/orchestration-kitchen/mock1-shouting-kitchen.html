@@ -1,0 +1,223 @@
+<!-- OPEN GROUND — Canvas mock source (framework: html, theme: dark)
+     「叫ぶ厨房」Before = 配る (push). Self-contained: paints its own dark
+     background so it renders identically inlined in a Canvas mock iframe
+     (buildMockSrcdoc) AND opened standalone in a browser. Pure CSS/SVG —
+     no CDN, auto-play, infinite loop. -->
+<style>
+  .kx-stage {
+    position: absolute; inset: 0; overflow: hidden;
+    background:
+      radial-gradient(130% 80% at 78% 118%, rgba(178,58,44,0.20) 0%, rgba(178,58,44,0) 52%),
+      radial-gradient(120% 95% at 28% -8%, #1b1411 0%, #0b0c0e 58%);
+    color: #f3f3f3;
+    font-family: "Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,"Noto Sans JP",system-ui,-apple-system,sans-serif;
+    --ink:#f3f3f3; --muted:rgba(255,255,255,.62); --faint:rgba(255,255,255,.40);
+    --panel:rgba(255,255,255,.045); --line:rgba(255,255,255,.11);
+    --red:#df5d47; --red-deep:#b23a2c; --ochre:#d6a23e; --azure:#66a6d9;
+    -webkit-font-smoothing: antialiased;
+  }
+  .kx-stage * { box-sizing: border-box; }
+
+  /* ── header ───────────────────────────────────────────── */
+  .kx-head { position:absolute; left:30px; top:22px; right:30px; display:flex; align-items:flex-start; justify-content:space-between; }
+  .kx-tag { font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--faint); }
+  .kx-h1 { margin:4px 0 0; font-size:23px; font-weight:700; letter-spacing:.01em; }
+  .kx-h1 .en { color:var(--red); font-weight:700; }
+  .kx-sub { margin-top:5px; font-size:12.5px; color:var(--muted); max-width:460px; line-height:1.55; }
+  .kx-badge {
+    flex:none; font-size:10px; letter-spacing:.18em; text-transform:uppercase; font-weight:700;
+    color:#fff; background:var(--red-deep); padding:5px 11px; border-radius:3px;
+    box-shadow:0 0 0 1px rgba(223,93,71,.5), 0 6px 18px rgba(178,58,44,.35);
+  }
+
+  /* ── boss (店長 / 配る人) ──────────────────────────────── */
+  .kx-boss { position:absolute; left:54px; top:196px; width:140px; text-align:center; }
+  .kx-boss svg { display:block; margin:0 auto; filter:drop-shadow(0 8px 14px rgba(0,0,0,.45)); }
+  .kx-boss .nm { margin-top:4px; font-size:12px; font-weight:700; }
+  .kx-boss .role { font-size:10.5px; color:var(--muted); margin-top:1px; }
+  .kx-boss .shake { transform-origin:50% 80%; animation:kx-shout-shake 1.6s ease-in-out infinite; }
+  @keyframes kx-shout-shake { 0%,100%{transform:rotate(-2deg)} 50%{transform:rotate(2deg)} }
+
+  /* speech bubbles — pushed out, evaporate BEFORE reaching the cooks */
+  .kx-bubble {
+    position:absolute; left:172px; top:212px; padding:6px 12px; border-radius:13px 13px 13px 2px;
+    background:var(--red-deep); color:#fff; font-size:12.5px; font-weight:700; white-space:nowrap;
+    box-shadow:0 6px 16px rgba(178,58,44,.4); opacity:0; transform-origin:0% 100%;
+  }
+  .kx-bubble::after { content:""; position:absolute; left:8px; bottom:-5px; width:9px; height:9px; background:var(--red-deep); transform:rotate(45deg); }
+  .kx-b1{ animation:kx-fly 3.4s ease-in 0s   infinite; }
+  .kx-b2{ animation:kx-fly 3.4s ease-in 1.13s infinite; top:250px; }
+  .kx-b3{ animation:kx-fly 3.4s ease-in 2.26s infinite; top:182px; }
+  /* travels right, then DISSOLVES in the empty gap (~45%) — never lands */
+  @keyframes kx-fly {
+    0%   { opacity:0; transform:translate(0,0) scale(.5); }
+    10%  { opacity:1; transform:translate(14px,-6px) scale(1); }
+    34%  { opacity:.95; transform:translate(150px,-26px) scale(1); }
+    52%  { opacity:0;  transform:translate(232px,-44px) scale(.82); }
+    100% { opacity:0;  transform:translate(250px,-52px) scale(.7); }
+  }
+
+  /* the vanishing point — a puff that confirms the order was LOST mid-air */
+  .kx-void { position:absolute; left:402px; top:150px; width:120px; text-align:center; }
+  .kx-puff { position:relative; width:54px; height:54px; margin:0 auto; }
+  .kx-puff i { position:absolute; inset:0; border:1.5px dashed rgba(223,93,71,.7); border-radius:50%; opacity:0; }
+  .kx-puff i:nth-child(1){ animation:kx-puff 3.4s ease-out 0.55s infinite; }
+  .kx-puff i:nth-child(2){ animation:kx-puff 3.4s ease-out 1.68s infinite; }
+  .kx-puff i:nth-child(3){ animation:kx-puff 3.4s ease-out 2.81s infinite; }
+  @keyframes kx-puff { 0%{opacity:0;transform:scale(.3)} 18%{opacity:.9;transform:scale(.7)} 60%{opacity:0;transform:scale(1.5)} 100%{opacity:0} }
+  .kx-void .lbl { font-size:11px; font-weight:700; color:var(--red); letter-spacing:.04em; }
+  .kx-void .lbl .en { color:var(--faint); font-weight:600; }
+
+  /* ── cooks (料理人 / worker) — not listening, overloaded, idle ── */
+  .kx-cooks { position:absolute; right:36px; top:170px; display:flex; gap:14px; align-items:flex-end; }
+  .kx-cook { width:104px; text-align:center; position:relative; }
+  .kx-cook svg { display:block; margin:0 auto; filter:drop-shadow(0 8px 12px rgba(0,0,0,.4)); }
+  .kx-cook .nm { font-size:11px; color:var(--muted); margin-top:2px; }
+  .kx-q { position:absolute; top:-14px; left:50%; font-size:20px; font-weight:800; color:var(--ochre); animation:kx-bob 2.2s ease-in-out infinite; }
+  @keyframes kx-bob { 0%,100%{transform:translate(-50%,0);opacity:.55} 50%{transform:translate(-50%,-7px);opacity:1} }
+  .kx-cook.overload { animation:kx-wobble 0.9s ease-in-out infinite; transform-origin:50% 100%; }
+  @keyframes kx-wobble { 0%,100%{transform:rotate(-3deg)} 50%{transform:rotate(3deg)} }
+  .kx-stack { position:absolute; top:-26px; left:50%; transform:translateX(-50%); width:40px; }
+  .kx-stack b { display:block; height:6px; margin:2px auto; background:#cdb89a; border-radius:2px; box-shadow:inset 0 -1px 0 rgba(0,0,0,.25); }
+  .kx-stack b:nth-child(1){width:30px} .kx-stack b:nth-child(2){width:38px} .kx-stack b:nth-child(3){width:26px} .kx-stack b:nth-child(4){width:40px}
+
+  /* ── falling + shattering plates (取りこぼし) ───────────── */
+  .kx-floor { position:absolute; left:0; right:0; bottom:96px; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.12) 30%,rgba(255,255,255,.12) 70%,transparent); }
+  .kx-drop { position:absolute; bottom:96px; width:46px; height:30px; }
+  .kx-drop.d1{ left:330px } .kx-drop.d2{ left:430px } .kx-drop.d3{ left:512px }
+  .kx-plate { position:absolute; left:0; bottom:0; width:46px; height:14px; border-radius:50%;
+    background:radial-gradient(60% 120% at 50% 0%, #fbf7ee 0%, #d9cdb6 70%, #b9a988 100%);
+    box-shadow:0 2px 4px rgba(0,0,0,.4); animation:kx-fall 3s ease-in infinite; }
+  .kx-drop.d2 .kx-plate{ animation-delay:1s } .kx-drop.d3 .kx-plate{ animation-delay:2.05s }
+  @keyframes kx-fall {
+    0%   { opacity:0; transform:translateY(-300px) rotate(0deg); }
+    8%   { opacity:1; }
+    66%  { opacity:1; transform:translateY(-16px) rotate(38deg); }
+    74%  { transform:translateY(0) rotate(46deg) scaleY(.5); }      /* impact squash */
+    82%,100%{ opacity:0; transform:translateY(2px) rotate(48deg) scaleY(.35); }
+  }
+  .kx-shard { position:absolute; left:20px; bottom:4px; width:0; height:0; opacity:0;
+    border-left:5px solid transparent; border-right:5px solid transparent; border-bottom:9px solid #e9ddc6; }
+  .kx-drop .kx-shard{ animation:kx-shatter 3s ease-out infinite; }
+  .kx-drop.d2 .kx-shard{ animation-delay:1s } .kx-drop.d3 .kx-shard{ animation-delay:2.05s }
+  .kx-shard.s1{ --sx:-26px; --sr:-40deg } .kx-shard.s2{ --sx:-10px; --sr:20deg }
+  .kx-shard.s3{ --sx:12px;  --sr:-15deg } .kx-shard.s4{ --sx:28px;  --sr:50deg }
+  @keyframes kx-shatter {
+    0%,70% { opacity:0; transform:translate(0,0) rotate(0) scale(.4); }
+    76%    { opacity:1; transform:translate(calc(var(--sx)*.5),-10px) rotate(var(--sr)) scale(1); }
+    100%   { opacity:0; transform:translate(var(--sx),14px) rotate(calc(var(--sr)*1.6)) scale(.9); }
+  }
+
+  /* ── footer explainer + violated principles ─────────────── */
+  .kx-foot { position:absolute; left:30px; right:30px; bottom:22px; display:flex; gap:14px; align-items:center; }
+  .kx-foot .txt { font-size:12px; color:var(--muted); line-height:1.5; flex:1; }
+  .kx-foot .txt b { color:var(--ink); font-weight:700; }
+  .kx-miss { flex:none; display:flex; flex-direction:column; gap:6px; }
+  .kx-chip { font-size:10.5px; color:#f0c9c0; background:rgba(178,58,44,.16); border:1px solid rgba(223,93,71,.45); border-radius:20px; padding:3px 10px; white-space:nowrap; }
+  .kx-chip s { color:var(--red); text-decoration:none; font-weight:800; margin-right:4px; }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="kx-boss" viewBox="0 0 96 132">
+    <!-- toque -->
+    <ellipse cx="48" cy="24" rx="26" ry="16" fill="#efe9dc"/>
+    <ellipse cx="30" cy="29" rx="12" ry="10" fill="#efe9dc"/>
+    <ellipse cx="66" cy="29" rx="12" ry="10" fill="#efe9dc"/>
+    <rect x="26" y="33" width="44" height="10" rx="4" fill="currentColor"/>
+    <!-- head -->
+    <circle cx="48" cy="60" r="17" fill="#e3b98f"/>
+    <!-- shouting mouth -->
+    <ellipse cx="48" cy="67" rx="6" ry="7" fill="#5c2018"/>
+    <circle cx="41" cy="56" r="2" fill="#3a2a20"/><circle cx="55" cy="56" r="2" fill="#3a2a20"/>
+    <path d="M37 50 Q41 47 45 50" stroke="#3a2a20" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <path d="M51 50 Q55 47 59 50" stroke="#3a2a20" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <!-- sweat -->
+    <path d="M68 52 q4 6 0 10 q-4 -4 0 -10z" fill="#9ad0e8"/>
+    <!-- body -->
+    <path d="M24 86 Q48 74 72 86 L77 130 L19 130 Z" fill="#e7e3d8"/>
+    <rect x="42" y="86" width="12" height="44" fill="currentColor" opacity=".22"/>
+    <circle cx="48" cy="100" r="2.4" fill="currentColor"/><circle cx="48" cy="112" r="2.4" fill="currentColor"/>
+  </symbol>
+  <symbol id="kx-cook" viewBox="0 0 96 132">
+    <ellipse cx="48" cy="26" rx="24" ry="15" fill="#e6e0d2"/>
+    <ellipse cx="32" cy="31" rx="11" ry="9" fill="#e6e0d2"/>
+    <ellipse cx="64" cy="31" rx="11" ry="9" fill="#e6e0d2"/>
+    <rect x="27" y="35" width="42" height="9" rx="4" fill="currentColor"/>
+    <circle cx="48" cy="60" r="16" fill="#e3b98f"/>
+    <circle cx="42" cy="58" r="1.9" fill="#3a2a20"/><circle cx="54" cy="58" r="1.9" fill="#3a2a20"/>
+    <path d="M43 66 q5 3 10 0" stroke="#7a4f3a" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <path d="M25 86 Q48 75 71 86 L76 130 L20 130 Z" fill="#dfdacb"/>
+    <rect x="42" y="86" width="12" height="44" fill="currentColor" opacity=".18"/>
+  </symbol>
+</defs></svg>
+
+<div class="kx-stage">
+  <div class="kx-head">
+    <div>
+      <div class="kx-tag">Orchestration · Before</div>
+      <h1 class="kx-h1">叫ぶ厨房 — 配る <span class="en">(push)</span></h1>
+      <p class="kx-sub">店長が「これやって！」と叫んで仕事を<b style="color:#fff">配る</b>。手が空いているか聞かずに投げるので、聞いていない料理人には届かず、空中で消える。皿が落ちる＝<b style="color:#fff">取りこぼし</b>。</p>
+    </div>
+    <div class="kx-badge">Before</div>
+  </div>
+
+  <!-- boss shouting -->
+  <div class="kx-boss" style="color:var(--red-deep)">
+    <span class="shake"><svg width="92" height="124" viewBox="0 0 96 132"><use href="#kx-boss"/></svg></span>
+    <div class="nm">店長</div>
+    <div class="role">＝ 全部ひとりで決めて配る</div>
+  </div>
+
+  <!-- pushed orders, evaporating -->
+  <div class="kx-bubble kx-b1">これやって！</div>
+  <div class="kx-bubble kx-b2">急いで！</div>
+  <div class="kx-bubble kx-b3">まだ！？</div>
+
+  <!-- they never arrive -->
+  <div class="kx-void">
+    <div class="kx-puff"><i></i><i></i><i></i></div>
+    <div class="lbl">届かない<br><span class="en">order lost</span></div>
+  </div>
+
+  <!-- cooks: not listening -->
+  <div class="kx-cooks">
+    <div class="kx-cook overload">
+      <div class="kx-stack"><b></b><b></b><b></b><b></b></div>
+      <svg width="96" height="124" viewBox="0 0 96 132" style="color:#9a6e20"><use href="#kx-cook"/></svg>
+      <div class="nm">手一杯</div>
+    </div>
+    <div class="kx-cook">
+      <span class="kx-q">?</span>
+      <svg width="96" height="124" viewBox="0 0 96 132" style="color:#3a6b8c"><use href="#kx-cook"/></svg>
+      <div class="nm">気づかない</div>
+    </div>
+    <div class="kx-cook">
+      <span class="kx-q" style="animation-delay:.7s">?</span>
+      <svg width="96" height="124" viewBox="0 0 96 132" style="color:#5c6b3d"><use href="#kx-cook"/></svg>
+      <div class="nm">手すき（でも届かない）</div>
+    </div>
+  </div>
+
+  <!-- dropped + shattering plates -->
+  <div class="kx-floor"></div>
+  <div class="kx-drop d1">
+    <div class="kx-plate"></div>
+    <div class="kx-shard s1"></div><div class="kx-shard s2"></div><div class="kx-shard s3"></div><div class="kx-shard s4"></div>
+  </div>
+  <div class="kx-drop d2">
+    <div class="kx-plate"></div>
+    <div class="kx-shard s1"></div><div class="kx-shard s2"></div><div class="kx-shard s3"></div><div class="kx-shard s4"></div>
+  </div>
+  <div class="kx-drop d3">
+    <div class="kx-plate"></div>
+    <div class="kx-shard s1"></div><div class="kx-shard s2"></div><div class="kx-shard s3"></div><div class="kx-shard s4"></div>
+  </div>
+
+  <div class="kx-foot">
+    <div class="txt"><b>配る (push)</b> の限界：声が届く前提・全部ひとりが裁く前提。割り当てが宙に消え、誰の担当か曖昧になり、落ちた皿（失敗）に誰も気づかない。</div>
+    <div class="kx-miss">
+      <div class="kx-chip"><s>×</s>① 取りに行く（pull）が無い</div>
+      <div class="kx-chip"><s>×</s>③ 役割が分かれていない</div>
+    </div>
+  </div>
+</div>

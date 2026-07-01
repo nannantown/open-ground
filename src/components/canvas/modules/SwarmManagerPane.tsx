@@ -44,7 +44,7 @@
 // extra gating is needed here; the server /api/swarm/* routes are owner-only too.
 
 import { useCallback, useRef, useState } from 'react'
-import { Gauge, MessageSquare, Power, Send } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, Gauge, MessageSquare, Power, Send } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
@@ -109,6 +109,53 @@ const QUICK_COMMANDS: { key: string; command: string }[] = [
   { key: 'quickClean', command: '掃除' },
 ]
 
+// ── KPI formatting (the analytics layer's readout) ───────────────────────────
+// Compact human duration for the lead-time median (ms → "12m" / "1.5h"); a rate
+// (0..1) → integer percent, or an em dash when null ("no data yet" — never a
+// misleading 0%). Pure presentation helpers.
+const formatDuration = (ms: number): string => {
+  if (ms < 1000) return '<1s'
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  if (ms < 86_400_000) return `${(ms / 3_600_000).toFixed(1)}h`
+  return `${(ms / 86_400_000).toFixed(1)}d`
+}
+const formatPct = (rate: number | null): string =>
+  rate === null ? '—' : `${Math.round(Math.min(1, Math.max(0, rate)) * 100)}%` // clamp [0,1] — never "150%"
+
+// One STATIC stat row — a readout, not a control, so ui-interactive-states (the
+// 5-state contract) doesn't apply (there's nothing to hover/press/focus). Label
+// (subtle) + value (ink, tabular so digits don't jitter); `sub` is a faint
+// denominator/hint under the label. Paper ink tokens keep 4.5:1+ on bg-bg.
+// `valueTone='warn'` recolors the value to ochre-deep (#855E17, ≥4.5:1 on the
+// paper bg) for an over-budget figure — an ADDITIVE option; the default tone is
+// the existing ink value, so every current caller is unchanged.
+const KpiRow = ({
+  label,
+  value,
+  sub,
+  valueTone = 'default',
+}: {
+  label: string
+  value: string
+  sub?: string
+  valueTone?: 'default' | 'warn'
+}) => (
+  <div className="flex items-baseline justify-between gap-3 py-1">
+    <div className="min-w-0">
+      <div className="truncate text-[12px] text-ink-subtle">{label}</div>
+      {sub && <div className="truncate text-[10px] leading-tight text-ink-faint">{sub}</div>}
+    </div>
+    <div
+      className={`shrink-0 text-[13px] font-medium tabular-nums ${
+        valueTone === 'warn' ? 'text-ochre-deep' : 'text-ink'
+      }`}
+    >
+      {value}
+    </div>
+  </div>
+)
+
 export const SwarmManagerPane = ({
   session,
   sessionBusy,
@@ -169,6 +216,26 @@ export const SwarmManagerPane = ({
     : engine.running
       ? t('projectPanel.swarm.manager.engineRunning')
       : t('projectPanel.swarm.manager.engineStopped')
+
+  // KPI roll-up (the analytics layer). "Empty" = the engine has neither logged a
+  // counted event NOR completed a card this session → show the explainer instead
+  // of a wall of dashes/zeros.
+  const kpis = engine.kpis
+  const kpiEvents =
+    kpis.counts.dispatched +
+    kpis.counts.integrated +
+    kpis.counts.conflicted +
+    kpis.counts.reworked +
+    kpis.counts.crashed +
+    kpis.counts.stalled
+  const kpiEmpty = kpiEvents === 0 && kpis.leadTime.count === 0
+
+  // Consumption (the budget layer) — the unattended loop's live load + session
+  // spend. Run time shows a dash (not "<1s") when no worker is live, so an idle
+  // loop reads cleanly rather than implying a sub-second sliver of work.
+  const consumption = engine.consumption
+  const consumptionRunTime =
+    consumption.activeWorkers > 0 ? formatDuration(consumption.activeRunMs) : '—'
 
   return (
     // Two columns: the STAGE (commander conversation) and the DASHBOARD sidebar
@@ -288,6 +355,100 @@ export const SwarmManagerPane = ({
           </div>
 
           {error && <p className="mt-2.5 text-[11px] leading-relaxed text-accent">{error}</p>}
+        </div>
+
+        {/* ── KPI roll-up (the analytics layer) ─────────────────────────────────
+            A SEPARATE panel from the live Engine status above: lead time +
+            rework / conflict / worker-success rates — the "is the swarm getting
+            better?" data foundation. Static readout (no controls), so the
+            5-state interactive contract doesn't apply; paper ink tokens keep
+            contrast in dark + light. */}
+        <div className="shrink-0 border-t border-line-soft px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <BarChart3 size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+            <span className="label-cap text-ink-faint">{t('projectPanel.swarm.manager.kpiHeading')}</span>
+          </div>
+          {kpiEmpty ? (
+            <p className="text-[11px] leading-relaxed text-ink-subtle">
+              {t('projectPanel.swarm.manager.kpiEmpty')}
+            </p>
+          ) : (
+            <div className="flex flex-col">
+              <KpiRow
+                label={t('projectPanel.swarm.manager.kpiLeadTime')}
+                value={kpis.leadTime.medianMs === null ? '—' : formatDuration(kpis.leadTime.medianMs)}
+                sub={
+                  kpis.leadTime.count > 0
+                    ? t('projectPanel.swarm.manager.kpiLeadTimeHint', { count: kpis.leadTime.count })
+                    : undefined
+                }
+              />
+              <KpiRow
+                label={t('projectPanel.swarm.manager.kpiWorkerSuccess')}
+                value={formatPct(kpis.workerSuccessRate)}
+                sub={
+                  kpis.counts.dispatched > 0
+                    ? `${kpis.counts.integrated}/${kpis.counts.dispatched}`
+                    : undefined
+                }
+              />
+              <KpiRow
+                label={t('projectPanel.swarm.manager.kpiReworkRate')}
+                value={formatPct(kpis.reworkRate)}
+              />
+              <KpiRow
+                label={t('projectPanel.swarm.manager.kpiConflictRate')}
+                value={formatPct(kpis.conflictRate)}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* ── Consumption (the budget layer) ────────────────────────────────────
+            A SEPARATE panel from the KPI metrics above: the UNATTENDED loop's
+            live load (active workers + in-flight run time) and its session spend
+            (dispatched vs the configurable budget). Static readout — like KpiRow
+            it is a readout, not a control, so the 5-state interactive contract
+            doesn't apply (nothing to hover/press/focus). The over-budget warning
+            uses ochre-deep (#855E17, ≥4.5:1 on the paper bg) per the caution
+            palette — never raw ochre. */}
+        <div className="shrink-0 border-t border-line-soft px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <Activity size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+            <span className="label-cap text-ink-faint">
+              {t('projectPanel.swarm.manager.consumptionHeading')}
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <KpiRow
+              label={t('projectPanel.swarm.manager.consumptionActive')}
+              value={`${consumption.activeWorkers} / ${engine.maxWorkers}`}
+            />
+            <KpiRow
+              label={t('projectPanel.swarm.manager.consumptionRunTime')}
+              value={consumptionRunTime}
+            />
+            <KpiRow
+              label={t('projectPanel.swarm.manager.consumptionDispatched')}
+              value={`${consumption.dispatched} / ${consumption.limit}`}
+              sub={t('projectPanel.swarm.manager.consumptionDispatchedHint')}
+              valueTone={consumption.overLimit ? 'warn' : 'default'}
+            />
+          </div>
+          {consumption.overLimit && (
+            <p
+              role="alert"
+              className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-ochre-deep"
+            >
+              <AlertTriangle size={13} strokeWidth={2} className="mt-px shrink-0" aria-hidden />
+              <span>
+                {t('projectPanel.swarm.manager.consumptionOverLimit', {
+                  dispatched: consumption.dispatched,
+                  limit: consumption.limit,
+                })}
+              </span>
+            </p>
+          )}
         </div>
       </aside>
     </div>

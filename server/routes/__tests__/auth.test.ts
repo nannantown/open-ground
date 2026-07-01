@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { app } from '../../app'
+import { getMyMembership, clearMembershipCache } from '@/lib/server/projectMembers'
+import { writeSession } from '@/lib/server/authStore'
 
 // Tests for the env-gated optional app login (server/routes/auth.ts). The route
 // reads SUPABASE_URL / SUPABASE_ANON_KEY LAZILY per request, so we flip them
@@ -246,5 +248,153 @@ describe('auth — /signout clears the session', () => {
     const sess = await app.request('/api/auth/session')
     expect(sess.status).toBe(200)
     expect((await sess.json()).user).toBeNull()
+  })
+})
+
+describe('auth — /signout invalidates the in-memory membership cache', () => {
+  // SECURITY: the collab membership cache is keyed by user id, but a still-FRESH
+  // entry for the user who just signed out must not linger to be served to a
+  // DIFFERENT account that signs in on this machine within the 5-min TTL. The
+  // signout route now clears it. This isolates that wiring: re-signing in as the
+  // SAME id (so the user-key and session-gate guards can't mask the result), an
+  // OFFLINE re-resolve answers null ONLY if sign-out actually dropped the cache —
+  // a surviving fresh entry would still answer 'owner'.
+  it('a re-resolve after sign-out has no stale cache to serve', async () => {
+    configure()
+    clearMembershipCache()
+    const PID = '44444444-4444-4444-4444-444444444444'
+
+    await writeSession({
+      user: { id: 'user-out', email: 'out@e.co', provider: 'google' },
+      expiresAt: Date.now() + 3_600_000,
+      accessToken: 'tok',
+      refreshToken: 'r',
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify([{ project_id: PID, user_id: 'user-out', role: 'owner' }]),
+            { status: 200 },
+          ),
+      ),
+    )
+    expect((await getMyMembership(PID))?.role).toBe('owner') // resolved + cached
+
+    // Sign out via the route (remote-logout fetch is best-effort → 204).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })))
+    expect((await post('/api/auth/signout')).status).toBe(200)
+
+    // Re-sign in as the SAME id, now OFFLINE: nothing cached → null.
+    await writeSession({
+      user: { id: 'user-out', email: 'out@e.co', provider: 'google' },
+      expiresAt: Date.now() + 3_600_000,
+      accessToken: 'tok',
+      refreshToken: 'r',
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    )
+    expect(await getMyMembership(PID)).toBeNull()
+  })
+})
+
+describe('auth — /callback reflected-XSS hardening (BLOCKER fix)', () => {
+  // The callback reflects attacker-controllable `error` / `error_description`
+  // query params into HTML on the privileged loopback origin. Before the fix a
+  // top-level navigation to
+  //   /api/auth/callback?error_description=<img src=x onerror=…>
+  // executed script that could drive /api/* (file IO, claude PTY). These cases
+  // lock in: escaping, a nonce-based strict CSP, a length cap, and that the
+  // legitimate error flow still renders. (configure() so the handler passes the
+  // "is auth configured?" gate and reaches the error-reflection branch.)
+
+  it('escapes hostile error_description markup instead of reflecting it raw', async () => {
+    configure()
+    const payload = `<img src=x onerror="alert(1)"><script>alert(2)</script>`
+    const res = await app.request(
+      `/api/auth/callback?error_description=${encodeURIComponent(payload)}`,
+    )
+    // Failure page still renders (the user isn't dropped on a blank tab)…
+    expect(res.status).toBe(200)
+    const html = await res.text()
+    // …but no live markup survives — the raw tag/handler bytes are gone…
+    expect(html).not.toContain('<img src=x onerror')
+    expect(html).not.toContain('<script>alert(2)')
+    expect(html).not.toContain('onerror="alert(1)"')
+    // …and the payload appears ONLY in fully-escaped form (quotes included).
+    expect(html).toContain('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;')
+    expect(html).toContain('&lt;script&gt;alert(2)&lt;/script&gt;')
+  })
+
+  it('escapes the `error` param too (not just error_description)', async () => {
+    configure()
+    const res = await app.request(
+      `/api/auth/callback?error=${encodeURIComponent('<b>x</b>&y')}`,
+    )
+    const html = await res.text()
+    expect(html).not.toContain('<b>x</b>')
+    expect(html).toContain('&lt;b&gt;x&lt;/b&gt;&amp;y')
+  })
+
+  it('sends a strict nonce-based CSP whose nonce authorizes the page own inline script', async () => {
+    configure()
+    const res = await app.request('/api/auth/callback?error=access_denied')
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain("default-src 'none'")
+    // Nonce-based, NOT 'unsafe-inline' → the browser refuses injected <script>
+    // AND inline event handlers (onerror/onclick).
+    expect(csp).not.toContain("'unsafe-inline'")
+    const cspNonce = csp.match(/script-src 'nonce-([A-Za-z0-9_-]+)'/)?.[1]
+    expect(cspNonce).toBeTruthy()
+    // The page's own inline <script>/<style> carry the SAME nonce (so they run),
+    // while any injected, nonce-less script is blocked by the browser.
+    const html = await res.text()
+    expect(html).toContain(`<script nonce="${cspNonce}">`)
+    expect(html).toContain(`<style nonce="${cspNonce}">`)
+  })
+
+  it('uses a fresh per-response nonce (not a fixed secret)', async () => {
+    configure()
+    const nonceOf = (csp: string) =>
+      csp.match(/script-src 'nonce-([A-Za-z0-9_-]+)'/)?.[1]
+    const a = nonceOf(
+      (await app.request('/api/auth/callback?error=x')).headers.get(
+        'content-security-policy',
+      ) ?? '',
+    )
+    const b = nonceOf(
+      (await app.request('/api/auth/callback?error=x')).headers.get(
+        'content-security-policy',
+      ) ?? '',
+    )
+    expect(a).toBeTruthy()
+    expect(b).toBeTruthy()
+    expect(a).not.toBe(b)
+  })
+
+  it('caps an oversized error_description so it cannot bloat the response', async () => {
+    configure()
+    const huge = 'A'.repeat(5000)
+    const res = await app.request(
+      `/api/auth/callback?error_description=${encodeURIComponent(huge)}`,
+    )
+    const html = await res.text()
+    const reflected = html.match(/<p>(A+)<\/p>/)?.[1] ?? ''
+    expect(reflected.length).toBeGreaterThan(0)
+    expect(reflected.length).toBeLessThanOrEqual(200)
+  })
+
+  it('still renders a benign provider error readably (normal error flow intact)', async () => {
+    configure()
+    const res = await app.request('/api/auth/callback?error=access_denied')
+    expect(res.status).toBe(200)
+    const html = await res.text()
+    expect(html).toContain('Sign-in failed')
+    expect(html).toContain('access_denied')
   })
 })

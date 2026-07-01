@@ -15,6 +15,7 @@ import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import {
   ProjectDataConflictError,
+  mutateProjectData,
   readProjectData,
   writeProjectData,
   validateProjectPath,
@@ -81,7 +82,7 @@ import {
   readTaskAsset,
   writeTaskAsset,
 } from '@/lib/server/taskAssets'
-import { extForMime } from '@/lib/server/canvasImages'
+import { extForMime, isValidCanvasId } from '@/lib/server/canvasImages'
 import { validateName } from './_shared'
 import { requireProjectPath } from '../middleware/projectPath'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
@@ -362,8 +363,16 @@ export const projectRoutes = new Hono()
     const { apps } = (await c.req.json()) as { apps?: unknown }
     if (!Array.isArray(apps)) return c.json({ error: 'apps must be an array' }, 400)
     const cleaned = normalizeOpenApps(apps)
-    const s = await getSettings()
-    await setSettings({ ...s, openApps: cleaned })
+    // Patch ONLY openApps. setSettings re-reads `current` inside its single-
+    // flight lock and merges `{...current, ...patch}`, so a patch carrying just
+    // the changed key preserves a CONCURRENT write to any OTHER key. The bug
+    // (audit MAJOR) spread a full stale snapshot here — `{...s, openApps}` —
+    // which re-injected the read-time `projects` (and every other field) on
+    // write, reverting a project registered between this handler's read and
+    // write and DROPPING it from the validateProjectPath allowlist. Passing
+    // only `{ openApps }` restores the lost-update protection setSettings is
+    // designed to give (see store.ts setSettings).
+    await setSettings({ openApps: cleaned })
     return c.json({ apps: cleaned })
   })
   // ── /api/project/reveal ───────────────────────────────────────────────────
@@ -750,88 +759,123 @@ export const projectRoutes = new Hono()
   if (!body.path) return c.json({ error: 'path required' }, 400)
   if (!(await validateProjectPath(body.path))) return c.json({ error: 'path not allowed' }, 403)
 
-  const data = await readProjectData(body.path)
-
-  for (const raw of body.add ?? []) {
-    const title = raw.trim()
-    if (!title) continue
-    const task: ProjectTask = {
-      id: randomUUID(),
-      title,
-      done: false,
-      createdAt: new Date().toISOString(),
-      // Every task IS a Board card; readProjectData drops legacy non-board
-      // entries by "no boardColumn", so a new card must always carry one.
-      boardColumn: 'todo',
+  // Every mutation field is an array the loops below iterate. `body` is an
+  // unchecked `as TasksBody` over arbitrary JSON, so a confused caller can post
+  // `add: "Hi"` (a string) or `add: 5` (a number). `for (const x of body.add ?? [])`
+  // would then walk a string PER-CHARACTER — POST {add:'Hi'} silently creates two
+  // cards 'H' and 'i' — or throw on a non-iterable number/object, escaping as a
+  // 500 (markDone's `new Set(body.markDone)` has the same trap). Reject any
+  // present-but-non-array field up front with 400 instead of corrupting the board
+  // or 500-ing; a well-formed array (the only legitimate shape) passes through.
+  for (const field of [
+    'add',
+    'markDone',
+    'setColumn',
+    'setPrUrl',
+    'setBranch',
+    'setIntegrationConflict',
+  ] as const) {
+    const value = body[field]
+    if (value !== undefined && !Array.isArray(value)) {
+      return c.json({ error: `${field} must be an array` }, 400)
     }
-    data.tasks.push(task)
   }
 
-  if (body.markDone?.length) {
-    const ids = new Set(body.markDone)
-    data.tasks = data.tasks.map((t) =>
-      ids.has(t.id) ? { ...t, done: true, boardColumn: 'done' as BoardColumn } : t,
-    )
-  }
+  // Read-modify-write the whole task list INSIDE the per-project board lock so
+  // two concurrent posts (e.g. a worker's setBranch racing the commander
+  // engine's setColumn on the same project) can't lose each other's mutation.
+  // Reading here and CAS-writing separately races: both handlers read the same
+  // snapshot, the first write wins, the second fails CAS — which used to escape
+  // as a 500 and silently drop the loser's setColumn/setBranch/markDone.
+  // mutateProjectData serializes the loser behind the winner so BOTH land.
+  try {
+    const saved = await mutateProjectData(body.path, (data) => {
+      for (const raw of body.add ?? []) {
+        const title = raw.trim()
+        if (!title) continue
+        const task: ProjectTask = {
+          id: randomUUID(),
+          title,
+          done: false,
+          createdAt: new Date().toISOString(),
+          // Every task IS a Board card; readProjectData drops legacy non-board
+          // entries by "no boardColumn", so a new card must always carry one.
+          boardColumn: 'todo',
+        }
+        data.tasks.push(task)
+      }
 
-  for (const pr of body.setPrUrl ?? []) {
-    if (!pr || typeof pr.id !== 'string' || typeof pr.url !== 'string') continue
-    const url = pr.url.trim()
-    if (url === '') {
-      // Empty string clears a wrongly-recorded PR link.
-      data.tasks = data.tasks.map((t) =>
-        t.id === pr.id ? { ...t, prUrl: undefined } : t,
-      )
-      continue
+      if (body.markDone?.length) {
+        const ids = new Set(body.markDone)
+        data.tasks = data.tasks.map((t) =>
+          ids.has(t.id) ? { ...t, done: true, boardColumn: 'done' as BoardColumn } : t,
+        )
+      }
+
+      for (const pr of body.setPrUrl ?? []) {
+        if (!pr || typeof pr.id !== 'string' || typeof pr.url !== 'string') continue
+        const url = pr.url.trim()
+        if (url === '') {
+          // Empty string clears a wrongly-recorded PR link.
+          data.tasks = data.tasks.map((t) =>
+            t.id === pr.id ? { ...t, prUrl: undefined } : t,
+          )
+          continue
+        }
+        try {
+          const parsed = new URL(url)
+          if (!/^https?:$/.test(parsed.protocol) || url.length > 500) continue
+        } catch {
+          continue
+        }
+        data.tasks = data.tasks.map((t) => (t.id === pr.id ? { ...t, prUrl: url } : t))
+      }
+
+      for (const br of body.setBranch ?? []) {
+        if (!br || typeof br.id !== 'string' || typeof br.branch !== 'string') continue
+        const branch = br.branch.trim()
+        if (branch === '') {
+          // Empty string clears a wrongly-recorded branch.
+          data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch: undefined } : t))
+          continue
+        }
+        if (branch.length > 200 || !BRANCH_RE.test(branch)) continue
+        data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch } : t))
+      }
+
+      for (const mv of body.setColumn ?? []) {
+        if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) continue
+        data.tasks = data.tasks.map((t) =>
+          t.id === mv.id
+            ? {
+                ...t,
+                boardColumn: mv.column,
+                done: mv.column === 'done',
+                // Leaving review invalidates the commander engine's conflict stamp
+                // (Card③) — a rework or completion supersedes it, mirroring reviewedBy.
+                integrationConflict: mv.column === 'review' ? t.integrationConflict : undefined,
+              }
+            : t,
+        )
+      }
+
+      for (const ic of body.setIntegrationConflict ?? []) {
+        if (!ic || typeof ic.id !== 'string' || typeof ic.value !== 'boolean') continue
+        data.tasks = data.tasks.map((t) =>
+          t.id === ic.id ? { ...t, integrationConflict: ic.value || undefined } : t,
+        )
+      }
+    })
+    return c.json(saved)
+  } catch (e) {
+    // mutateProjectData reads inside the lock, so this only fires if a non-locked
+    // trusting writer interleaved. Return 409 (client reloads) instead of a 500,
+    // mirroring PUT /api/project — never drop the mutation as a silent 500.
+    if (e instanceof ProjectDataConflictError) {
+      return c.json({ error: 'conflict: project data changed since it was loaded', conflict: true }, 409)
     }
-    try {
-      const parsed = new URL(url)
-      if (!/^https?:$/.test(parsed.protocol) || url.length > 500) continue
-    } catch {
-      continue
-    }
-    data.tasks = data.tasks.map((t) => (t.id === pr.id ? { ...t, prUrl: url } : t))
+    throw e
   }
-
-  for (const br of body.setBranch ?? []) {
-    if (!br || typeof br.id !== 'string' || typeof br.branch !== 'string') continue
-    const branch = br.branch.trim()
-    if (branch === '') {
-      // Empty string clears a wrongly-recorded branch.
-      data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch: undefined } : t))
-      continue
-    }
-    if (branch.length > 200 || !BRANCH_RE.test(branch)) continue
-    data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch } : t))
-  }
-
-  for (const mv of body.setColumn ?? []) {
-    if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) continue
-    data.tasks = data.tasks.map((t) =>
-      t.id === mv.id
-        ? {
-            ...t,
-            boardColumn: mv.column,
-            done: mv.column === 'done',
-            // Leaving review invalidates the commander engine's conflict stamp
-            // (Card③) — a rework or completion supersedes it, mirroring reviewedBy.
-            integrationConflict: mv.column === 'review' ? t.integrationConflict : undefined,
-          }
-        : t,
-    )
-  }
-
-  for (const ic of body.setIntegrationConflict ?? []) {
-    if (!ic || typeof ic.id !== 'string' || typeof ic.value !== 'boolean') continue
-    data.tasks = data.tasks.map((t) =>
-      t.id === ic.id ? { ...t, integrationConflict: ic.value || undefined } : t,
-    )
-  }
-
-  const saved = await writeProjectData(body.path, data, {
-    expectUpdatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
-  })
-  return c.json(saved)
 })
   // ── /api/project/task-asset ───────────────────────────────────────────────
   // Board-card image attachments (B022). POST uploads base64 JSON (the same
@@ -925,6 +969,7 @@ export const projectRoutes = new Hono()
   if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
   const id = c.req.query('id')
   if (id) {
+    if (!isValidCanvasId(id)) return c.json({ error: 'invalid canvas id' }, 400)
     const canvas = await readCanvasFile(path, id)
     if (!canvas) return c.json({ error: 'canvas not found' }, 404)
     return c.json(canvas)
@@ -949,6 +994,7 @@ export const projectRoutes = new Hono()
   }
   if (action === 'delete') {
     if (!body.id) return c.json({ error: 'id required' }, 400)
+    if (!isValidCanvasId(body.id)) return c.json({ error: 'invalid canvas id' }, 400)
     const result = await deleteCanvas(body.path, body.id)
     return c.json(result)
   }
@@ -956,6 +1002,7 @@ export const projectRoutes = new Hono()
     if (!body.id || typeof body.name !== 'string') {
       return c.json({ error: 'id and name required' }, 400)
     }
+    if (!isValidCanvasId(body.id)) return c.json({ error: 'invalid canvas id' }, 400)
     const result = await renameCanvas(body.path, body.id, body.name)
     if (!result) return c.json({ error: 'rename failed' }, 400)
     return c.json(result)
@@ -969,6 +1016,7 @@ export const projectRoutes = new Hono()
   }
   if (action === 'active') {
     if (!body.id) return c.json({ error: 'id required' }, 400)
+    if (!isValidCanvasId(body.id)) return c.json({ error: 'invalid canvas id' }, 400)
     const result = await setActiveCanvas(body.path, body.id)
     return c.json(result)
   }
@@ -976,6 +1024,7 @@ export const projectRoutes = new Hono()
   // (saveCanvasFile — serialised with AI append/tweak via withCanvasFileLock).
   const canvas = body.canvas as CanvasFile | undefined
   if (!canvas?.id) return c.json({ error: 'canvas.id required' }, 400)
+  if (!isValidCanvasId(canvas.id)) return c.json({ error: 'invalid canvas id' }, 400)
   const outcome = await saveCanvasFile(body.path, canvas)
   if (!outcome.ok) {
     // Stale write: an AI job (or rename) advanced the canvas since the client

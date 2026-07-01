@@ -46,9 +46,14 @@ import {
   stopOrchestratorWorker,
   resolveOrchestratorReview,
   getOrchestratorState,
+  drainTickOrchestrator,
   setAutoMerge,
+  setSelfSupply,
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
+import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
+import { listSwarmNotifications } from '@/lib/server/swarmNotifications'
+import type { AppNotificationsResponse } from '@/lib/types'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
 // Board goal is a short observable completion condition; 8 KiB is a generous
@@ -274,12 +279,48 @@ export const swarmRoutes = new Hono()
   // Query: ?path= . Returns SwarmOrchestratorState { running, workers, log,
   // maxWorkers }. A project whose engine was never started reads back as a
   // stopped empty state. Owner-only + validated, like the rest of /api/swarm/*.
+  // PURE READ-ONLY (idempotent): this GET is polled by BOTH the Swarm hook AND the
+  // display-only Board worker-map (BoardModule), so it must NEVER mutate/spawn. The
+  // auto-start lives on the SEPARATE POST /drain-tick below (card cf545637); a GET
+  // that spawned workers was a review MUST_FIX (the Board's "never touch the engine"
+  // contract).
   .get('/api/swarm/orchestrator', async (c) => {
     if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
     const path = c.req.query('path') ?? ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await getOrchestratorState(path))
+  })
+  // --- POST /api/swarm/orchestrator/drain-tick — auto-start the drain ---------
+  // Body: { path }. The "idle worker + todo backlog" anti-deadlock tick (card
+  // cf545637): when the engine is stopped (and not owner-paused) but a todo is
+  // dispatchable into a free slot, it auto-starts the drain — so the owner need not
+  // press Autonomy ON. SCOPED to the Swarm surface: only useSwarmEngine POSTs this,
+  // so the display-only Board GET above stays a pure read. Idempotent when nothing is
+  // dispatchable (a no-op returning the current state). Returns SwarmOrchestratorState.
+  // Owner-only + validated, exactly like /start.
+  .post('/api/swarm/orchestrator/drain-tick', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await drainTickOrchestrator(path))
+  })
+  // --- GET /api/swarm/notifications — the FATAL swarm notifications (bell) ----
+  // The in-app half of the escalation safety valve: the server-persisted fatal
+  // events (newest-first) the Ground お知らせ bell renders. Machine-wide (not
+  // per-project), so no path. Owner-only — a non-owner gets 403 and the bell
+  // simply shows none (the client tolerates a non-ok fetch). Read-state is tracked
+  // by the SAME /api/notifications read endpoint as collab invites.
+  .get('/api/swarm/notifications', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    return c.json<AppNotificationsResponse>({ notifications: await listSwarmNotifications() })
   })
   // --- POST /api/swarm/orchestrator/start — turn autonomous drain ON ---------
   // Body: { path }. Starts the per-project drain+dispatch loop (idempotent). The
@@ -394,4 +435,47 @@ export const swarmRoutes = new Hono()
     if (!target) return c.json({ error: 'target must be blocked or todo' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await resolveOrchestratorReview(path, taskId, target))
+  })
+  // --- POST /api/swarm/orchestrator/selfsupply — arm/disarm self-supply (b3fbbfba) -
+  // Body: { path, enabled:boolean }. Toggles the engine proposing its OWN
+  // improvement cards (discovered from tsc/lint/test/anomalies/TODOs) into todo. A
+  // SEPARATE switch from autonomy (start/stop) and auto-integrate, default OFF.
+  // Even when ON, a proposed card is owner-approval-gated (see /approve below): the
+  // engine FILLS todo but never auto-dispatches what it proposed. Ignition waits
+  // for the rest of the safety net to land — until then this stays OFF.
+  // Owner-only + validated, like the rest of /api/swarm/*.
+  .post('/api/swarm/orchestrator/selfsupply', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
+    return c.json(await setSelfSupply(path, body.enabled))
+  })
+  // --- POST /api/swarm/orchestrator/selfsupply/approve — approve a proposed card --
+  // Body: { path, cardId }. The owner green-lights ONE self-supplied (engine-
+  // proposed) card for dispatch: sets selfSupplyApproved on the card so
+  // selectDispatch stops skipping it. The per-card runaway gate — a self-supplied
+  // card never spawns a worker until this runs. Idempotent (a non-self-supplied /
+  // already-approved / absent card is a no-op). Owner-only + validated.
+  .post('/api/swarm/orchestrator/selfsupply/approve', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    const cardId = typeof body?.cardId === 'string' ? body.cardId : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!cardId) return c.json({ error: 'cardId is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await approveSelfSupplyCard(path, cardId))
   })

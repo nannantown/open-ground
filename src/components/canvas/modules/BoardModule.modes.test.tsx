@@ -393,6 +393,48 @@ describe('BoardModule drawer — Draft mode', () => {
     expect(getByText('board.detail.dependsLabel')).toBeTruthy()
     expect(getByText('board.detail.dueLabel')).toBeTruthy()
   })
+
+  it('depends: warns when the card sits on a dependency CYCLE (B025 cycle→warn)', async () => {
+    // t1 ⇄ t2 — a 2-cycle. The swarm's ⑤ DEPENDS gate would hold BOTH forever
+    // (a silent deadlock), so the drawer for t1 surfaces the loop warning.
+    const cyclic = {
+      description: '',
+      tasks: [
+        makeTask({ id: 't1', dependsOn: ['t2'] }),
+        makeTask({ id: 't2', title: 'Other', dependsOn: ['t1'] }),
+      ],
+      notes: '',
+      updatedAt: '',
+    } as ProjectData
+    const { getByText, queryByText, getAllByText } = renderDrawer(cyclic)
+    await flush()
+    // The always-visible card-face ⚠ chip flags the looped cards up front, even
+    // before the Options block is opened (both t1 and t2 are on the loop). The
+    // chip text is "⚠︎ <label>", so match the label as a substring.
+    expect(getAllByText(/board\.card\.cycleChip/).length).toBeGreaterThanOrEqual(1)
+    // The fuller warning lives in the (collapsed-by-default) Options → Depends on
+    // block, surfaced the moment the editor opens it.
+    expect(queryByText('board.detail.dependsCycleWarn')).toBeNull()
+    fireEvent.click(getByText('board.detail.optionsLabel'))
+    expect(getByText('board.detail.dependsCycleWarn')).toBeTruthy()
+  })
+
+  it('depends: an ordinary (acyclic) prerequisite shows NO cycle warning (teeth)', async () => {
+    // t1 → t2, t2 depends on nothing — a plain prerequisite, not a loop.
+    const acyclic = {
+      description: '',
+      tasks: [makeTask({ id: 't1', dependsOn: ['t2'] }), makeTask({ id: 't2', title: 'Prereq' })],
+      notes: '',
+      updatedAt: '',
+    } as ProjectData
+    const { getByText, queryByText, queryAllByText } = renderDrawer(acyclic)
+    await flush()
+    // No card-face cycle chip either — an ordinary prerequisite isn't a deadlock.
+    expect(queryAllByText(/board\.card\.cycleChip/)).toHaveLength(0)
+    fireEvent.click(getByText('board.detail.optionsLabel'))
+    expect(getByText('board.detail.dependsLabel')).toBeTruthy() // section is open
+    expect(queryByText('board.detail.dependsCycleWarn')).toBeNull() // but no warning
+  })
 })
 
 describe('BoardModule drawer — Session mode', () => {

@@ -120,6 +120,54 @@ describe('getBranchChanges', () => {
     expect(byPath['main-only.txt']).toBeUndefined()
   })
 
+  it('committed: a non-ASCII (Japanese) path stays RAW, and file-diff resolves it', async () => {
+    const dir = await makeRepo('nonascii')
+    await git(dir, ['checkout', '-b', 'feat/jp'])
+    // ASCII content (robust assertion) under a non-ASCII filename (the bug surface).
+    await commit(dir, '日本語ファイル.md', '# heading\nhello world\n', 'add japanese-named file')
+
+    const res = await getBranchChanges(dir)
+    if (!res.isGit) throw new Error('expected git repo')
+    // (1) raw path in the committed list — NOT C-quoted ("\346\227\245…").
+    expect(res.committed).toHaveLength(1)
+    expect(res.committed[0].path.normalize('NFC')).toBe('日本語ファイル.md')
+    expect(res.committed[0]).toMatchObject({ additions: 2, deletions: 0 })
+
+    // (2) file-diff on the EXACT path the parser produced (what the UI sends)
+    //     returns a non-empty diff — pre-fix the quoted path missed → empty.
+    const diff = await getFileDiff(dir, res.committed[0].path, 'branch')
+    expect(diff.diff).not.toBe('')
+    expect(diff.diff).toContain('+hello world')
+  })
+
+  it('committed: a rename is keyed on its NEW path (no "→"), and file-diff resolves it', async () => {
+    const dir = await makeRepo('rename')
+    // Pin rename detection on regardless of the CI machine's global git config.
+    await git(dir, ['config', 'diff.renames', 'true'])
+    await commit(dir, 'orig.txt', 'l1\nl2\nl3\nl4\nl5\n', 'add orig on main')
+    await git(dir, ['checkout', '-b', 'feat/rename'])
+    await git(dir, ['mv', 'orig.txt', 'renamed.txt'])
+    await writeFile(join(dir, 'renamed.txt'), 'l1\nl2\nl3\nl4\nl5\nl6\n') // ~83% similar → still a rename
+    await git(dir, ['add', '-A'])
+    await git(dir, ['commit', '-m', 'rename orig to renamed'])
+
+    const res = await getBranchChanges(dir)
+    if (!res.isGit) throw new Error('expected git repo')
+    // (1) one rename row keyed on the postimage, raw — not "orig.txt → renamed.txt"
+    //     and not a delete(orig)+add(renamed) pair.
+    const paths = res.committed.map((f) => f.path)
+    expect(paths).toContain('renamed.txt')
+    expect(paths).not.toContain('orig.txt')
+    expect(paths.some((p) => p.includes('=>') || p.includes('→'))).toBe(false)
+
+    // (2) file-diff on that new path is non-empty (carries the added line).
+    const renamed = res.committed.find((f) => f.path === 'renamed.txt')
+    if (!renamed) throw new Error('expected renamed.txt in committed list')
+    const diff = await getFileDiff(dir, renamed.path, 'branch')
+    expect(diff.diff).not.toBe('')
+    expect(diff.diff).toContain('+l6')
+  })
+
   it('configured targetBranch wins over main', async () => {
     const dir = await makeRepo('configured')
     await git(dir, ['branch', 'develop'])

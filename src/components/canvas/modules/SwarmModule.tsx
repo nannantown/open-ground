@@ -31,7 +31,7 @@
 // SDK. This module never spawns claude itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Network, Inbox, Boxes, Gauge } from 'lucide-react'
+import { Network, Inbox, Boxes, Gauge, Workflow } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -49,6 +49,7 @@ import type {
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
+import { SwarmFlowPane } from './SwarmFlowPane'
 import { SwarmPowerBar } from './SwarmPowerBar'
 import { SwarmOnboarding } from './SwarmOnboarding'
 import { useSwarmEngine, mergeSwarmWorkers, planSwarmPower } from './useSwarmEngine'
@@ -229,7 +230,7 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
 // engine, and the worker tiles. (The old todo rail was removed — todos live on
 // the Board tab now, and workers start from the engine or the commander, not a
 // per-card hand dispatch here.)
-type MainView = 'supply' | 'manager' | 'workers'
+type MainView = 'supply' | 'manager' | 'workers' | 'flow'
 
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
@@ -267,6 +268,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // `engine.workers` is merged into the unified list below, feeding both views.
   const {
     engine,
+    fatalNotifications,
     available: engineAvailable,
     busy: engineBusy,
     error: engineError,
@@ -913,6 +915,21 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               </span>
             )}
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mainView === 'flow'}
+            onClick={() => setMainView('flow')}
+            className={[
+              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+              mainView === 'flow'
+                ? 'border-accent text-accent'
+                : 'border-transparent text-ink-muted hover:text-accent',
+            ].join(' ')}
+          >
+            <Workflow size={12} strokeWidth={2} />
+            {t('projectPanel.swarm.flow.tab')}
+          </button>
         </div>
 
         {mainView === 'supply' ? (
@@ -978,6 +995,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               onToggleAutoMerge={toggleAutoMerge}
             />
           </div>
+        ) : mainView === 'flow' ? (
+          // Flow: the live, read-only visualization of the autonomous loop
+          // (drain → dispatch → monitor → integrate) — each worker's stage +
+          // heartbeat, the integration queue, the event feed, and fatal events.
+          // Reads the SAME engine snapshot (no own fetch); purely presentational.
+          <SwarmFlowPane engine={engine} fatalNotifications={fatalNotifications} available={engineAvailable} />
         ) : allWorkers.length === 0 ? (
           <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
             <div className="max-w-sm">

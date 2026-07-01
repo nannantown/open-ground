@@ -193,6 +193,24 @@ export const projectPanel = {
     // launched in the primary checkout (no worktree, like supply). It shares the
     // tab with the engine controls + worker monitor + log.
     'projectPanel.swarm.manager.engineHeading': 'Engine',
+    // KPI roll-up (the analytics layer) — the commander dashboard's "is the swarm
+    // getting better?" panel: lead time + rework / conflict / worker-success rates.
+    'projectPanel.swarm.manager.kpiHeading': 'Metrics',
+    'projectPanel.swarm.manager.kpiLeadTime': 'Lead time',
+    'projectPanel.swarm.manager.kpiLeadTimeHint': 'Median todo→done · {count} completed',
+    'projectPanel.swarm.manager.kpiWorkerSuccess': 'Worker success',
+    'projectPanel.swarm.manager.kpiReworkRate': 'Rework rate',
+    'projectPanel.swarm.manager.kpiConflictRate': 'Conflict rate',
+    'projectPanel.swarm.manager.kpiEmpty': 'No completed work yet — metrics appear as the engine runs.',
+    // Consumption (the budget layer) — the unattended loop's live load + session
+    // spend + its ceiling. A SEPARATE section from the KPI metrics above.
+    'projectPanel.swarm.manager.consumptionHeading': 'Consumption',
+    'projectPanel.swarm.manager.consumptionActive': 'Active workers',
+    'projectPanel.swarm.manager.consumptionRunTime': 'Active run time',
+    'projectPanel.swarm.manager.consumptionDispatched': 'Dispatched · session',
+    'projectPanel.swarm.manager.consumptionDispatchedHint': 'Workers spawned since the engine started',
+    'projectPanel.swarm.manager.consumptionOverLimit':
+      'Over budget — the loop has dispatched {dispatched} / {limit} workers this session. Check it.',
     'projectPanel.swarm.manager.conversationTitle': 'Talk to the commander',
     'projectPanel.swarm.manager.conversationEmpty':
       'Start a `claude` commander running /manage in this project. Ask it for status, to integrate finished branches (fast-forward / rebase only), to clean up, or for advice. It runs in the primary checkout — no worktree — alongside the autonomous engine.',
@@ -207,6 +225,61 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       'The commander monitors workers and integrates finished branches — talk to it here.',
     'projectPanel.swarm.manager.backToCommander': 'Back to commander',
+    // Flow tab (条件: ループのリアルタイム可視化) — the dynamic, real-data version
+    // of the kitchen diagram (card 743ffdef): the drain → dispatch → monitor →
+    // integrate loop, each worker's fine stage + heartbeat, the integration queue,
+    // the live event feed, and fatal events. Read-only, off the engine poll. Review
+    // statuses, log-kind chips and anomaly labels REUSE the manager.* keys above.
+    'projectPanel.swarm.flow.tab': 'Flow',
+    'projectPanel.swarm.flow.title': 'The autonomous loop, live',
+    'projectPanel.swarm.flow.offline':
+      "The engine isn't available yet — its live loop will show here once it answers. Update OPEN GROUND if this persists.",
+    'projectPanel.swarm.flow.idle': 'The loop is idle',
+    'projectPanel.swarm.flow.idleHint':
+      'Nothing is in flight. Start the swarm with the switch above and the drain → dispatch → monitor → integrate loop animates here in real time.',
+    'projectPanel.swarm.flow.phaseDrain': 'Drain',
+    'projectPanel.swarm.flow.phaseDrainHint': "Pull the next card off the Board's To do queue.",
+    'projectPanel.swarm.flow.phaseDispatch': 'Dispatch',
+    'projectPanel.swarm.flow.phaseDispatchHint': 'Spawn one worker per card — each in its own isolated worktree.',
+    'projectPanel.swarm.flow.phaseMonitor': 'Monitor',
+    'projectPanel.swarm.flow.phaseMonitorHint': "Watch each worker's stage and heartbeat until it's merge-ready.",
+    'projectPanel.swarm.flow.phaseIntegrate': 'Integrate',
+    'projectPanel.swarm.flow.phaseIntegrateHint':
+      'Land merge-ready review branches on the trunk (fast-forward / rebase only).',
+    'projectPanel.swarm.flow.draining': 'Draining the Board',
+    'projectPanel.swarm.flow.notDraining': 'Paused — no new dispatch',
+    'projectPanel.swarm.flow.stageStarting': 'Starting',
+    'projectPanel.swarm.flow.stageAudit': 'Audit',
+    'projectPanel.swarm.flow.stageImplement': 'Implementing',
+    'projectPanel.swarm.flow.stageVerify': 'Verifying',
+    'projectPanel.swarm.flow.stageAwaiting': 'Merge-ready',
+    'projectPanel.swarm.flow.stageBlocked': 'Blocked',
+    'projectPanel.swarm.flow.heartbeat': 'Heartbeat',
+    'projectPanel.swarm.flow.liveFresh': 'Live',
+    'projectPanel.swarm.flow.liveAging': 'Quiet',
+    'projectPanel.swarm.flow.liveStale': 'Silent',
+    'projectPanel.swarm.flow.liveNone': 'No beat yet',
+    'projectPanel.swarm.flow.ago': '{age} ago',
+    'projectPanel.swarm.flow.workersHeading': 'Workers · live stage',
+    'projectPanel.swarm.flow.noWorkers': 'No workers in flight.',
+    'projectPanel.swarm.flow.reviewsHeading': 'Integration queue',
+    'projectPanel.swarm.flow.noReviews': 'Nothing waiting to integrate.',
+    'projectPanel.swarm.flow.eventsHeading': 'Live events',
+    'projectPanel.swarm.flow.noEvents': 'No events yet.',
+    'projectPanel.swarm.flow.workersLive': '{count} live',
+    'projectPanel.swarm.flow.reviewsWaiting': '{count} waiting',
+    'projectPanel.swarm.flow.merged': '{count} merged',
+    'projectPanel.swarm.flow.fatalHeading': 'Needs attention',
+    'projectPanel.swarm.flow.anomalyReworkExhausted': 'Card retried too many times — parked in Blocked',
+    // Fatal-event labels (条件3) — the five escalation events the safety valve
+    // (card 6fe48c1f) persists. Three come from the swarm engine, two from the
+    // Electron self-update cycle. The server `detail` (Japanese) rides as a
+    // secondary line; these label WHAT fired in the UI language.
+    'projectPanel.swarm.flow.fatalReworkExhausted': 'Card parked · rework limit',
+    'projectPanel.swarm.flow.fatalAllWorkersDown': 'All workers stopped',
+    'projectPanel.swarm.flow.fatalExecTimeout': 'Worker hit time limit',
+    'projectPanel.swarm.flow.fatalRollback': 'Self-update rolled back',
+    'projectPanel.swarm.flow.fatalCanaryFailed': 'Self-update canary failed',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -667,6 +740,24 @@ export const projectPanel = {
     // 相談を頼める対話型 `claude` を primary checkout に起動する（worktree なし・
     // supply と同型）。エンジン制御＋worker 監視＋ログと同じタブに同居する。
     'projectPanel.swarm.manager.engineHeading': 'エンジン',
+    // KPI 集計（分析レイヤ）— 司令官ダッシュボードの「swarm は良くなっているか」
+    // パネル: リードタイム＋差し戻し / コンフリクト / worker 成功率。
+    'projectPanel.swarm.manager.kpiHeading': 'メトリクス',
+    'projectPanel.swarm.manager.kpiLeadTime': 'リードタイム',
+    'projectPanel.swarm.manager.kpiLeadTimeHint': 'todo→done 中央値 ・ 完了 {count} 件',
+    'projectPanel.swarm.manager.kpiWorkerSuccess': 'worker 成功率',
+    'projectPanel.swarm.manager.kpiReworkRate': '差し戻し率',
+    'projectPanel.swarm.manager.kpiConflictRate': 'コンフリクト率',
+    'projectPanel.swarm.manager.kpiEmpty': 'まだ完了タスクがありません — エンジン稼働とともに集計されます。',
+    // 消費（バジェットレイヤ）— 無人ループの稼働負荷＋セッション消費＋上限。上の
+    // KPI メトリクスとは別セクション。
+    'projectPanel.swarm.manager.consumptionHeading': '消費',
+    'projectPanel.swarm.manager.consumptionActive': '稼働 worker',
+    'projectPanel.swarm.manager.consumptionRunTime': '実行中の合計時間',
+    'projectPanel.swarm.manager.consumptionDispatched': '累計起動 ・ セッション',
+    'projectPanel.swarm.manager.consumptionDispatchedHint': 'エンジン起動以降に spawn した worker 数',
+    'projectPanel.swarm.manager.consumptionOverLimit':
+      '上限超過 — ループはこのセッションで {dispatched} / {limit} 件の worker を起動しました。確認してください。',
     'projectPanel.swarm.manager.conversationTitle': '司令官と対話する',
     'projectPanel.swarm.manager.conversationEmpty':
       'このプロジェクトで /manage を実行する `claude` 司令官を起動します。状況確認・完了ブランチの統合（早送り/rebase のみ）・掃除・相談を頼めます。primary checkout で動き（worktree なし）、上の自律エンジンと並行して働きます。',
@@ -680,6 +771,61 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       '司令官は worker を監視し、完了ブランチを統合します。ここで対話してください。',
     'projectPanel.swarm.manager.backToCommander': '司令官に戻る',
+    // Flow タブ（条件: ループのリアルタイム可視化）— 厨房図解（カード 743ffdef）の
+    // 動的・実データ版。drain → dispatch → monitor → integrate のループ、各 worker の
+    // 細かい段階＋心拍、統合キュー、ライブイベント、致命イベントを engine poll から
+    // 読み取って表示（読み取り専用）。review 状態・ログ種別・anomaly ラベルは上の
+    // manager.* キーを再利用。
+    'projectPanel.swarm.flow.tab': 'フロー',
+    'projectPanel.swarm.flow.title': '自律ループをリアルタイム表示',
+    'projectPanel.swarm.flow.offline':
+      'エンジンはまだ利用できません — 応答できるようになると、ここにライブのループが表示されます。続く場合は OPEN GROUND を更新してください。',
+    'projectPanel.swarm.flow.idle': 'ループは停止中',
+    'projectPanel.swarm.flow.idleHint':
+      '進行中の作業はありません。上のスイッチで Swarm を開始すると、drain → dispatch → monitor → integrate のループがここでリアルタイムに動きます。',
+    'projectPanel.swarm.flow.phaseDrain': '引く',
+    'projectPanel.swarm.flow.phaseDrainHint': 'Board の todo キューから次のカードを引きます。',
+    'projectPanel.swarm.flow.phaseDispatch': '振る',
+    'projectPanel.swarm.flow.phaseDispatchHint': 'カードごとに worker を1体起動 — それぞれ隔離 worktree で。',
+    'projectPanel.swarm.flow.phaseMonitor': '見守る',
+    'projectPanel.swarm.flow.phaseMonitorHint': '各 worker の段階と心拍を、統合可になるまで見守ります。',
+    'projectPanel.swarm.flow.phaseIntegrate': '統合',
+    'projectPanel.swarm.flow.phaseIntegrateHint':
+      '統合可のレビューブランチを trunk へ着地（fast-forward / rebase のみ）。',
+    'projectPanel.swarm.flow.draining': 'Board を引いています',
+    'projectPanel.swarm.flow.notDraining': '一時停止 — 新規 dispatch なし',
+    'projectPanel.swarm.flow.stageStarting': '起動中',
+    'projectPanel.swarm.flow.stageAudit': '監査',
+    'projectPanel.swarm.flow.stageImplement': '実装中',
+    'projectPanel.swarm.flow.stageVerify': '検証中',
+    'projectPanel.swarm.flow.stageAwaiting': '統合待ち',
+    'projectPanel.swarm.flow.stageBlocked': '詰まり',
+    'projectPanel.swarm.flow.heartbeat': '心拍',
+    'projectPanel.swarm.flow.liveFresh': '生存',
+    'projectPanel.swarm.flow.liveAging': '静か',
+    'projectPanel.swarm.flow.liveStale': '無音',
+    'projectPanel.swarm.flow.liveNone': '心拍なし',
+    'projectPanel.swarm.flow.ago': '{age} 前',
+    'projectPanel.swarm.flow.workersHeading': 'ワーカー・現在の段階',
+    'projectPanel.swarm.flow.noWorkers': '進行中の worker はいません。',
+    'projectPanel.swarm.flow.reviewsHeading': '統合キュー',
+    'projectPanel.swarm.flow.noReviews': '統合待ちはありません。',
+    'projectPanel.swarm.flow.eventsHeading': 'ライブイベント',
+    'projectPanel.swarm.flow.noEvents': 'まだイベントはありません。',
+    'projectPanel.swarm.flow.workersLive': '{count} 体稼働',
+    'projectPanel.swarm.flow.reviewsWaiting': '{count} 件待ち',
+    'projectPanel.swarm.flow.merged': '{count} 件統合',
+    'projectPanel.swarm.flow.fatalHeading': '要注意',
+    'projectPanel.swarm.flow.anomalyReworkExhausted': 'リトライ上限超過 — blocked に退避',
+    // 致命イベントのラベル（条件3）— 安全弁（カード 6fe48c1f）が永続化する5つの
+    // エスカレーションイベント。3つは swarm エンジン由来、2つは Electron 自己更新
+    // サイクル由来。サーバの detail（日本語）は副行に出し、ここでは何が起きたかを
+    // UI 言語で示す。
+    'projectPanel.swarm.flow.fatalReworkExhausted': 'カード退避 · 差し戻し上限',
+    'projectPanel.swarm.flow.fatalAllWorkersDown': '全ワーカー停止',
+    'projectPanel.swarm.flow.fatalExecTimeout': 'ワーカーが時間上限に到達',
+    'projectPanel.swarm.flow.fatalRollback': '自己更新をロールバック',
+    'projectPanel.swarm.flow.fatalCanaryFailed': '自己更新カナリア失敗',
     // Sidebar resizer
     // Chat header
     // Delete confirm

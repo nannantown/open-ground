@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -8,6 +8,12 @@ import {
   __resetMigrationCacheForTests,
   setProjectDisplayName,
 } from '@/lib/server/registry'
+import { readProjectData, writeProjectData } from '@/lib/server/projectData'
+
+// Spy-wrap the project-data module so one test can force writeProjectData to fail
+// (exercising /api/projects/new's orphan-folder rollback) while every other test
+// keeps the real implementation (passthrough spy).
+vi.mock('@/lib/server/projectData', { spy: true })
 
 // Exercises the registry routes (import / remove / new / delete boundary)
 // against the real Hono app, with OPENGROUND_HOME pointed at a throwaway dir
@@ -29,6 +35,7 @@ beforeEach(async () => {
   __resetMigrationCacheForTests()
 })
 afterEach(async () => {
+  vi.restoreAllMocks()
   await rm(home, { recursive: true, force: true })
   await rm(scratch, { recursive: true, force: true })
 })
@@ -112,6 +119,51 @@ describe('POST /api/projects/new', () => {
   it('rejects a name with a slash (400)', async () => {
     const res = await app.request('/api/projects/new', json({ name: 'a/b', workspace: scratch }))
     expect(res.status).toBe(400)
+  })
+
+  it('creates with a description and persists it to the central data + registry', async () => {
+    const res = await app.request(
+      '/api/projects/new',
+      json({ name: 'described', workspace: scratch, description: 'Track my tasks' }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.id).toBeTruthy()
+    // folder created on disk AND registered — no orphan (the bug this fixes left
+    // the folder unregistered because writeProjectData threw before the register).
+    expect((await stat(join(scratch, 'described'))).isDirectory()).toBe(true)
+    const settings = await getSettings()
+    expect(settings.projects).toHaveLength(1)
+    // description persisted to the project's CENTRAL data — the source scan.ts
+    // reads to render the card body (descriptionForLang(data)).
+    const data = await readProjectData(join(scratch, 'described'))
+    expect(data.description).toBe('Track my tasks')
+    // …and mirrored onto the registry entry (scan.ts's missing-card fallback).
+    expect(settings.projects?.[0]?.description).toBe('Track my tasks')
+  })
+
+  it('leaves no orphan folder when the central-data write fails after registration', async () => {
+    // Force the post-registration writeProjectData to throw, exercising the
+    // rollback: the folder we created AND the registry entry must both be undone,
+    // so a 409-blocking orphan can't linger and a same-name retry still works.
+    vi.mocked(writeProjectData).mockRejectedValueOnce(new Error('simulated disk failure'))
+
+    const res = await app.request(
+      '/api/projects/new',
+      json({ name: 'doomed', workspace: scratch, description: 'will roll back' }),
+    )
+    expect(res.status).toBe(500)
+    // no orphan folder left on disk
+    await expect(stat(join(scratch, 'doomed'))).rejects.toMatchObject({ code: 'ENOENT' })
+    // registry rolled back — nothing stranded under a dead folder
+    expect((await getSettings()).projects ?? []).toHaveLength(0)
+    // …and because the orphan was cleaned up, a same-name create now succeeds
+    // (the original bug failed here with a 409 "already exists" forever).
+    const retry = await app.request(
+      '/api/projects/new',
+      json({ name: 'doomed', workspace: scratch }),
+    )
+    expect(retry.status).toBe(200)
   })
 })
 

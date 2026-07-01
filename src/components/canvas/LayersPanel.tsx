@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowRight,
@@ -83,7 +83,7 @@ const findRowNode = (root: ParentNode | null, id: string): HTMLElement | null =>
 // canvas — one pointer model everywhere, and no stale-state race between
 // dragstart/dragover. Press-and-move past a small threshold starts a drag;
 // press-and-release in place is a click.
-export const LayersPanel = ({
+export const LayersPanel = memo(({
   elements,
   selectedIds,
   onSelect,
@@ -659,7 +659,7 @@ export const LayersPanel = ({
       )}
     </div>
   )
-}
+})
 
 // Type glyph for a row. A frame with auto layout shows its stacking direction
 // (Figma's → / ↓) instead of the generic frame icon; everything else uses the

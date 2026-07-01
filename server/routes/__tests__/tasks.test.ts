@@ -202,3 +202,118 @@ describe('POST /api/project/tasks — setBranch validation', () => {
     }
   })
 })
+
+describe('POST /api/project/tasks — concurrent writes never lose a mutation', () => {
+  // Repro of the data-loss bug (audit MAJOR): two+ sessions POST to the SAME
+  // project at once (e.g. a worker setBranch while the commander engine
+  // setColumn). The handler read-modify-writes under a compare-and-swap; without
+  // lock-scoped RMW the late writers' snapshot is stale, so writeProjectData
+  // throws ProjectDataConflictError — which escaped this route as a 500 and
+  // silently dropped that setColumn/setBranch/markDone. Every mutation must now
+  // land (the loser serializes behind the winner under the board lock), never a
+  // 500, never a lost update.
+
+  it('distinct mutations from two concurrent posts both land', async () => {
+    const dir = await makeRegisteredDir('concurrent-pair')
+    const a = await addTask(dir, 'card A')
+    const b = await addTask(dir, 'card B')
+
+    const [r1, r2] = await Promise.all([
+      app.request('/api/project/tasks', json({ path: dir, setBranch: [{ id: a.id, branch: 'task/a' }] })),
+      app.request('/api/project/tasks', json({ path: dir, setColumn: [{ id: b.id, column: 'review' }] })),
+    ])
+    expect(r1.status).toBe(200)
+    expect(r2.status).toBe(200)
+
+    expect((await getTask(dir, a.id))?.branch).toBe('task/a')
+    expect((await getTask(dir, b.id))?.boardColumn).toBe('review')
+  })
+
+  it('many concurrent column moves on distinct cards all persist (no lost update, no 500)', async () => {
+    const dir = await makeRegisteredDir('concurrent-many')
+    const N = 16
+    const tasks: ProjectTask[] = []
+    for (let i = 0; i < N; i++) tasks.push(await addTask(dir, `card-${i}`))
+
+    // Fire every move at once: each handler reads the same snapshot, mutates a
+    // different card, then writes under the CAS. Late writers would lose their
+    // move (and 500) without lock-scoped read-modify-write.
+    const results = await Promise.all(
+      tasks.map((t) =>
+        app.request('/api/project/tasks', json({ path: dir, setColumn: [{ id: t.id, column: 'review' }] })),
+      ),
+    )
+    for (const r of results) expect(r.status).toBe(200)
+    for (const t of tasks) {
+      expect((await getTask(dir, t.id))?.boardColumn).toBe('review')
+    }
+  })
+})
+
+describe('POST /api/project/tasks — non-array fields are rejected, never iterated', () => {
+  // Repro of the audit-minor bug: `body` is an unchecked `as TasksBody` over raw
+  // JSON, and every mutation field feeds a `for...of` (or `new Set`). A STRING
+  // add was walked PER-CHARACTER — POST {add:'Hello'} silently created cards
+  // H/e/l/l/o — while a NUMBER/OBJECT/BOOLEAN add/markDone/setColumn is
+  // non-iterable → TypeError → app.onError 500. Each present-but-non-array field
+  // must now 400 up front, corrupting nothing and never 500-ing.
+
+  const countTasks = async (path: string): Promise<number> => {
+    const res = await app.request(`/api/project?path=${encodeURIComponent(path)}`)
+    expect(res.status).toBe(200)
+    return ((await res.json()).tasks as ProjectTask[]).length
+  }
+
+  it('string add is rejected (400) and creates NO per-character cards', async () => {
+    const dir = await makeRegisteredDir('nonarray-add-string')
+    const res = await app.request('/api/project/tasks', json({ path: dir, add: 'Hello' }))
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toMatch(/add/)
+    expect(await countTasks(dir)).toBe(0) // not 5 (H/e/l/l/o)
+  })
+
+  it('number / object / boolean add is rejected (400), never a 500', async () => {
+    const dir = await makeRegisteredDir('nonarray-add-misc')
+    for (const bad of [5, {}, { 0: 'x' }, true]) {
+      const res = await app.request('/api/project/tasks', json({ path: dir, add: bad }))
+      expect(res.status).toBe(400) // never 500 (TypeError on a non-iterable)
+    }
+    expect(await countTasks(dir)).toBe(0)
+  })
+
+  it('non-array markDone is rejected (400) and never marks the real card done', async () => {
+    const dir = await makeRegisteredDir('nonarray-markdone')
+    const task = await addTask(dir, 'stays open')
+    // 'abc' → old code did `new Set("abc")` = {a,b,c} (chars as ids); {length:3}
+    // → `new Set({length:3})` threw → 500. Both must now 400 instead.
+    for (const bad of [5, 'abc', {}, { length: 3 }]) {
+      const res = await app.request('/api/project/tasks', json({ path: dir, markDone: bad }))
+      expect(res.status).toBe(400)
+    }
+    expect((await getTask(dir, task.id))?.done).toBe(false)
+  })
+
+  it('non-array setColumn / setPrUrl / setBranch / setIntegrationConflict are rejected (400)', async () => {
+    const dir = await makeRegisteredDir('nonarray-rest')
+    for (const field of ['setColumn', 'setPrUrl', 'setBranch', 'setIntegrationConflict'] as const) {
+      for (const bad of [5, {}, 'oops']) {
+        const res = await app.request('/api/project/tasks', json({ path: dir, [field]: bad }))
+        expect(res.status).toBe(400)
+        expect((await res.json()).error).toMatch(new RegExp(field))
+      }
+    }
+  })
+
+  it('well-formed arrays still pass through after a rejected non-array', async () => {
+    const dir = await makeRegisteredDir('nonarray-control')
+    // A bogus request changes nothing...
+    expect((await app.request('/api/project/tasks', json({ path: dir, add: 'nope' }))).status).toBe(400)
+    expect(await countTasks(dir)).toBe(0)
+    // ...and the normal array path is unaffected (condition 3: arrays as before).
+    const task = await addTask(dir, 'real card')
+    expect(task.boardColumn).toBe('todo')
+    const done = await app.request('/api/project/tasks', json({ path: dir, markDone: [task.id] }))
+    expect(done.status).toBe(200)
+    expect((await getTask(dir, task.id))?.done).toBe(true)
+  })
+})

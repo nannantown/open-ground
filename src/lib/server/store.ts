@@ -30,7 +30,19 @@ const readJson = async <T>(path: string, fallback: T): Promise<T> => {
   await ensureOpenGroundHome()
   try {
     const raw = await readFile(path, 'utf8')
-    return { ...fallback, ...JSON.parse(raw) }
+    const parsed: unknown = JSON.parse(raw)
+    // Only spread a PLAIN object. A hand-corrupted config that parses to a
+    // non-object (a bare string/number/array/null) would otherwise pollute the
+    // result with char/numeric keys — e.g. `{...fallback, ...'oops'}` becomes
+    // `{0:'o',1:'o',2:'p',3:'s', ...fallback}` (proven), and an array spread
+    // injects numeric keys. Every config file (settings/canvas/notifications)
+    // is an object, so this never rejects VALID data — it only refuses garbage,
+    // returning the typed fallback instead of a polluted shape downstream code
+    // (scan.ts reading settings.projects, etc.) would choke on.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return fallback
+    }
+    return { ...fallback, ...(parsed as Record<string, unknown>) }
   } catch {
     return fallback
   }
@@ -41,7 +53,26 @@ const writeJson = async (path: string, data: unknown) => {
   await atomicWriteJson(path, data)
 }
 
-export const getSettings = () => readJson<Settings>(settingsFile(), DEFAULT_SETTINGS)
+export const getSettings = async (): Promise<Settings> => {
+  const s = await readJson<Settings>(settingsFile(), DEFAULT_SETTINGS)
+  // Coerce array-typed fields back to arrays. readJson already rejects a
+  // non-OBJECT top level, but a hand-corrupted settings.json with a per-field
+  // type error (e.g. {"projects":"oops"}) would still slip through and CRASH an
+  // iterator at boot — scan.ts does `(settings.projects ?? []).filter(...)`, and
+  // `?? []` does NOT save a non-null non-array (a string has no .filter). Drop a
+  // malformed field to its default rather than wedge the whole cockpit. Valid
+  // settings are unaffected.
+  return {
+    ...s,
+    projects: Array.isArray(s.projects)
+      ? s.projects.filter((e): e is (typeof s.projects)[number] => e != null && typeof e === 'object' && !Array.isArray(e))
+      : [],
+    openApps: Array.isArray(s.openApps) ? s.openApps : [],
+    excludePatterns: Array.isArray(s.excludePatterns)
+      ? s.excludePatterns
+      : DEFAULT_SETTINGS.excludePatterns,
+  }
+}
 // Merge so a partial save from one UI (e.g. the Settings panel) does not
 // clobber fields owned by another (e.g. the project panel's openApps).
 //
@@ -64,6 +95,59 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
   // can't wedge every subsequent settings save.
   settingsChain = run.catch(() => {})
   return run
+}
+
+// The Settings keys an UNTRUSTED HTTP body (POST /api/settings) is allowed to
+// write. This is an EXPLICIT ALLOWLIST: the body is narrowed to these keys
+// before the merge, so a forged / CSRF request can NEVER reach the security-
+// boundary or migration-owned fields through that route. Crucially `projects` —
+// the validateProjectPath allowlist — is absent, so it cannot be widened to an
+// arbitrary path (/etc, $HOME, …) by simply POSTing it; `projects` is mutated
+// ONLY by trusted server code (registry.ts, ensureProjectsMigrated, and the
+// /api/projects/{new,import,remove,relocate} routes).
+//
+// Deliberately NOT listed (blocked from this route):
+//   projects            — THE security boundary (validateProjectPath allowlist)
+//   projectsRoot        — deprecated legacy-migration input (a path)
+//   projectsMigratedAt  — one-shot legacy-migration sentinel (server-owned)
+//   shareEvacuatedAt    — one-shot share-evacuation sentinel (server-owned)
+//   archiveDirName      — deprecated migration input
+//   excludePatterns     — deprecated migration input
+//
+// `defaultWorkspace` IS allowed: the Settings panel autosaves it (it is the
+// "where Create-new folders go" field, edited alongside displayName) and it is
+// NOT a validateProjectPath boundary — it never lands on the allowlist (only
+// `projects` does). Cross-origin forgery of this route is independently blocked
+// by the CSRF / Origin guard in server/app.ts. When you add a new USER-PREFERENCE
+// Settings field, add its key here too or POST /api/settings will silently drop it.
+const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
+  'language',
+  'displayName',
+  'defaultWorkspace',
+  'openApps',
+  'defaultEditor',
+  'experiments',
+]
+
+// Persist a settings patch that ORIGINATES FROM AN UNTRUSTED HTTP CLIENT
+// (POST /api/settings). Unlike setSettings — a general internal merge that
+// trusted callers (registry.ts, the migration, project create) use to write ANY
+// field — this first narrows the body to USER_SETTINGS_KEYS, so the route can
+// never widen the validateProjectPath allowlist or rewrite migration sentinels.
+// A non-object body (string / array / null) writes nothing. Returns the keys
+// actually applied (for tests / observability).
+export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]> => {
+  const safe: Partial<Settings> = {}
+  if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    const src = body as Record<string, unknown>
+    for (const key of USER_SETTINGS_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(src, key)) {
+        ;(safe as Record<string, unknown>)[key] = src[key]
+      }
+    }
+  }
+  await setSettings(safe)
+  return Object.keys(safe) as (keyof Settings)[]
 }
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)

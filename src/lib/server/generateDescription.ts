@@ -158,13 +158,20 @@ export const generateProjectDescription = async (
     // Marker-scraped utility session: keep its system prompt pristine so the
     // OPENGROUND_DESC output contract can't drift toward "add a board card".
     appContext: false,
+    // Auto-triggered, non-sandboxed, bypass: ignore user-scope ~/.claude.json
+    // mcpServers so a sandboxed claude that planted a malicious one can't get it
+    // auto-spawned here outside the sandbox (sandbox experiment hardening).
+    strictMcpConfig: true,
+    // No user-visible pane: never light the Ground card's "claude working"
+    // beacon for a background describe run (excluded by listActiveTerminals).
+    hidden: true,
   })
 
   let buffer = ''
   let exited = false
   // An explicit cancel kills the PTY mid-flight (the ONLY thing that stops a
   // run now that it's a navigation-safe job — a dropped HTTP connection does
-  // not). Same shape as canvasAi.ts's runFileTaskOnce abort handling.
+  // not). Same shape as canvasAi.ts's runFileTask abort handling.
   let aborted = false
   const onAbort = () => {
     aborted = true

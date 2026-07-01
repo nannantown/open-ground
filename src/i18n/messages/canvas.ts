@@ -20,6 +20,12 @@ export const canvas = {
     'canvas.generate.hint': 'This can take 30–60 seconds…',
     'canvas.generate.cancel': 'Cancel generation',
     'canvas.generate.error': 'Generation failed. Try again.',
+    // The server was restarted (full process swap) while the run was in flight,
+    // so its in-memory job — and result — was lost. Distinct from a plain
+    // failure so the user knows it was interrupted, not rejected; the prompt is
+    // kept so they can retry with one click.
+    'canvas.generate.interrupted':
+      'Generation was interrupted by a server restart. Try again.',
     'canvas.generate.claudeMissing':
       'claude CLI not found — install Claude Code to use this.',
     // Generation progress (live elapsed-seconds counter) — a whole claude
@@ -204,6 +210,8 @@ export const canvas = {
     'canvas.generate.close': '閉じる',
     'canvas.generate.hint': '数十秒かかります…',
     'canvas.generate.error': '生成に失敗しました。もう一度お試しください。',
+    'canvas.generate.interrupted':
+      'サーバの再起動で生成が中断されました。もう一度お試しください。',
     'canvas.generate.claudeMissing':
       'claude CLI が見つかりません — Claude Code をインストールしてください。',
     // Generation progress (live elapsed-seconds counter) — a whole claude

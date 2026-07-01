@@ -1,8 +1,12 @@
 import { spawn as ptySpawn } from 'node-pty'
 import { existsSync, watch as fsWatch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
-import { join, resolve as pathResolve } from 'path'
-import { claudeConnection } from './claudeConnection'
+import { join } from 'path'
+import {
+  claudeConnection,
+  resolvedClaudeBin,
+  absoluteClaudeOnPath,
+} from './claudeConnection'
 
 // The Claude Code interactive `/usage` view is the canonical source for the
 // numbers OPEN GROUND's HUD wants to show — it matches what the user sees on
@@ -11,9 +15,21 @@ import { claudeConnection } from './claudeConnection'
 // node-pty: spawn claude, wait for boot, type /usage, capture the rendered
 // output, parse, kill.
 //
-// Cost is ~9 seconds of wall time per fetch, so the result is cached for 5
-// minutes — well below the rate-limit window so the freshness lag is
-// meaningless for the user's "am I close to the cap?" decision.
+// Cost is ~9 seconds of wall time per fetch. A successful scrape is cached; the
+// activity watcher below is the *primary* freshness trigger (re-scrape ~30s
+// after Claude writes), with a 30-min TTL backstop for idle sessions. That lag
+// is well below the rate-limit window, so it's meaningless for the user's "am I
+// close to the cap?" decision. A FAILED scrape is never cached, so the next
+// poll retries instead of pinning a stale "couldn't read" forever.
+
+/** Why a CLI scrape produced no usable %, so the HUD can show an explicit
+ *  reason (or fall back to the local-jsonl estimate) instead of a silent "—":
+ *  - `ok`            — scraped a session %, numbers are live.
+ *  - `signed-out`    — claude is installed but not signed in (no spawn made).
+ *  - `not-installed` — no runnable `claude` binary found (no spawn made).
+ *  - `scrape-failed` — spawn/boot/timeout error, or the /usage TUI format
+ *                      changed so the regex matched nothing. */
+export type CliUsageStatus = 'ok' | 'signed-out' | 'not-installed' | 'scrape-failed'
 
 export interface CliUsageSlot {
   pct: number
@@ -26,9 +42,21 @@ export interface CliUsageSlot {
 export interface CliUsage {
   session: CliUsageSlot | null
   weekAll: CliUsageSlot | null
-  weekSonnet: CliUsageSlot | null
   capturedAt: string
+  /** Outcome of the most recent fetch attempt — drives the HUD's
+   *  reason-or-fallback when `session` is null (see {@link CliUsageStatus}). */
+  status: CliUsageStatus
 }
+
+// One construction point for the "no live %" results, so the route, the cache,
+// and the parser all agree on the shape (null slots + a reason). Exported for
+// the /api/usage route's defensive catch.
+export const emptyCliUsage = (status: CliUsageStatus): CliUsage => ({
+  session: null,
+  weekAll: null,
+  capturedAt: new Date().toISOString(),
+  status,
+})
 
 // Upper bound on cache age. The watcher below is the *primary* refresh
 // trigger; this TTL just makes sure idle OPEN GROUND sessions eventually re-fetch
@@ -43,9 +71,11 @@ const INVALIDATE_DEBOUNCE_MS = 30 * 1000
 // Cross hot-reload by hanging state off globalThis — Next dev reloads the
 // module on every change, but the FSWatcher resource and cache should survive.
 interface UsageCliState {
+  // Only a *successful* ('ok') scrape is ever stored here; null = nothing
+  // cached yet. Failures are returned uncached so the next poll retries.
   cache: CliUsage | null
   cacheAt: number
-  inflight: Promise<CliUsage | null> | null
+  inflight: Promise<CliUsage> | null
   watcher: FSWatcher | null
   invalidateTimer: ReturnType<typeof setTimeout> | null
 }
@@ -115,10 +145,9 @@ const findSection = (header: string, clean: string): CliUsageSlot | null => {
   const pct = Number(m[1])
   if (!Number.isFinite(pct)) return null
   // Normalise "ResetsMay25at3pm(Asia/Tokyo)" → "May 25 at 3pm (Asia/Tokyo)".
-  // The TUI's space loss hits us here too; inject spaces around the
-  // recognizable shapes so the result reads like the original /usage line.
+  // The TUI's space loss hits us here too; inject a space at every digit↔letter
+  // boundary so the result reads like the original /usage line.
   const resetsAt = m[2]
-    .replace(/(\d)(am|pm)/i, '$1$2')
     .replace(/([a-z])(\d)/gi, '$1 $2')
     .replace(/(\d)([a-z])/gi, '$1 $2')
     .replace(/\s*\(\s*/, ' (')
@@ -127,29 +156,30 @@ const findSection = (header: string, clean: string): CliUsageSlot | null => {
   return { pct, resetsAt }
 }
 
-const parseUsageOutput = (raw: string): CliUsage => {
+// Exported for unit testing against captured `/usage` fixtures — the TUI scrape
+// is the gauge's authoritative %, and its space-losing regex is fragile, so we
+// pin it against real output. Not called outside this module otherwise.
+export const parseUsageOutput = (raw: string): CliUsage => {
   const clean = stripAnsi(raw)
+  const session = findSection('Current session', clean)
   return {
-    session: findSection('Current session', clean),
+    session,
     weekAll: findSection('Current week (all models)', clean),
-    weekSonnet: findSection('Current week (Sonnet only)', clean),
     capturedAt: new Date().toISOString(),
+    // A usable session % is the gauge's headline; its absence means the TUI
+    // format changed (or the render was truncated) — surface that as a failure
+    // so the HUD shows a reason, not a silent "—".
+    status: session ? 'ok' : 'scrape-failed',
   }
 }
 
-const findClaudeBinary = (): string | null => {
-  // The user's symlink (`~/.local/bin/claude`) and the homebrew default cover
-  // the install paths we've seen in the wild.
-  const candidates = [
-    pathResolve(homedir(), '.local/bin/claude'),
-    '/opt/homebrew/bin/claude',
-    '/usr/local/bin/claude',
-  ]
-  for (const p of candidates) {
-    if (existsSync(p)) return p
-  }
-  return null
-}
+// Resolve the `claude` binary the same robust way the connection probe does:
+// the EXACT absolute path that probe just validated (resolvedClaudeBin, set by
+// the claudeConnection() call right before this in fetchClaudeUsageCli), then a
+// full PATH walk + the per-OS well-known install targets (absoluteClaudeOnPath).
+// This replaces a fixed 3-path list that missed nvm/volta/Windows installs.
+const findClaudeBinary = (): string | null =>
+  resolvedClaudeBin() ?? absoluteClaudeOnPath()
 
 const pickCwd = async (): Promise<string> => {
   // Trusted-folder dialog fires in unfamiliar dirs and locks the TUI until
@@ -159,13 +189,13 @@ const pickCwd = async (): Promise<string> => {
   return process.cwd()
 }
 
-const drive = (claudeBin: string, cwd: string): Promise<CliUsage | null> =>
+const drive = (claudeBin: string, cwd: string): Promise<CliUsage> =>
   new Promise((resolveFn) => {
     let buf = ''
     let resolved = false
     let proc: ReturnType<typeof ptySpawn> | null = null
 
-    const finish = (val: CliUsage | null) => {
+    const finish = (val: CliUsage) => {
       if (resolved) return
       resolved = true
       try {
@@ -173,6 +203,10 @@ const drive = (claudeBin: string, cwd: string): Promise<CliUsage | null> =>
       } catch {}
       resolveFn(val)
     }
+    // Any non-success exit path (spawn throw, early exit, timeout) resolves to
+    // an explicit scrape-failed reason — never a bare null — so the HUD can say
+    // "couldn't read /usage" and fall back to the local estimate.
+    const fail = () => finish(emptyCliUsage('scrape-failed'))
 
     try {
       proc = ptySpawn(claudeBin, [], {
@@ -183,7 +217,7 @@ const drive = (claudeBin: string, cwd: string): Promise<CliUsage | null> =>
         env: process.env as { [k: string]: string },
       })
     } catch {
-      finish(null)
+      fail()
       return
     }
 
@@ -195,16 +229,14 @@ const drive = (claudeBin: string, cwd: string): Promise<CliUsage | null> =>
       const clean = stripAnsi(buf)
       const pctCount = (clean.match(/\d+\s*%\s*used/g) || []).length
       if (pctCount >= 3) {
-        // One short beat for the trailing breakdown text, then parse.
-        setTimeout(() => {
-          const parsed = parseUsageOutput(buf)
-          if (parsed.session) finish(parsed)
-          else finish(null)
-        }, 800)
+        // One short beat for the trailing breakdown text, then parse. The parse
+        // result already carries status 'ok' / 'scrape-failed' (the latter if
+        // the TUI format shifted and the session row didn't match).
+        setTimeout(() => finish(parseUsageOutput(buf)), 800)
       }
     })
 
-    proc.onExit(() => finish(null))
+    proc.onExit(() => fail())
 
     // Boot grace, then a stray Enter to dismiss any trust dialog (the default
     // is "Yes, I trust this folder", so Enter is the no-op-or-confirm key).
@@ -222,31 +254,37 @@ const drive = (claudeBin: string, cwd: string): Promise<CliUsage | null> =>
     }, 4500)
 
     // Hard timeout — bail and let the caller fall back to local-jsonl numbers.
-    setTimeout(() => finish(null), 15000)
+    setTimeout(fail, 15000)
   })
 
-export const fetchClaudeUsageCli = async (): Promise<CliUsage | null> => {
+export const fetchClaudeUsageCli = async (): Promise<CliUsage> => {
   // Lazy-start the activity watcher on first fetch — keeps module init free
   // of side effects.
   ensureActivityWatcher()
   const now = Date.now()
+  // A cache hit is always live 'ok' numbers — only successes are stored.
   if (state.cache && now - state.cacheAt < CACHE_TTL_MS) return state.cache
   if (state.inflight) return state.inflight
 
-  state.inflight = (async () => {
+  state.inflight = (async (): Promise<CliUsage> => {
     // Never spawn a signed-out interactive `claude`: with no args it drops to
     // claude's own sign-in screen and opens an OAuth browser — the exact loop
     // the run-route gate (claudeRunPreflight) was added to stop, and this 60s
-    // HUD poll would re-trigger it. Usage is optional, so signed-out simply
-    // falls back to the local-jsonl estimate. (claudeConnection caches ~10s;
-    // loggedIn implies installed.)
+    // HUD poll would re-trigger it. Usage is optional, so signed-out / not
+    // installed report an explicit reason and the HUD falls back to the
+    // local-jsonl estimate. (claudeConnection caches ~10s; loggedIn implies
+    // installed.)
     const conn = await claudeConnection()
-    if (!conn.loggedIn) return null
+    if (!conn.loggedIn) {
+      return emptyCliUsage(conn.installed ? 'signed-out' : 'not-installed')
+    }
     const claudeBin = findClaudeBinary()
-    if (!claudeBin) return null
+    if (!claudeBin) return emptyCliUsage('not-installed')
     const cwd = await pickCwd()
     const result = await drive(claudeBin, cwd)
-    if (result) {
+    // Cache successes only — a failed scrape stays uncached so the next poll
+    // retries instead of pinning the failure for the whole TTL.
+    if (result.status === 'ok') {
       state.cache = result
       state.cacheAt = Date.now()
     }

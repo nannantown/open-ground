@@ -27,6 +27,14 @@ import { authRoutes } from './routes/auth'
 import { customModulesRoutes } from './routes/customModules'
 import { moduleSubmissionsRoutes } from './routes/moduleSubmissions'
 import { collabRoutes } from './routes/collab'
+import { youCorpusRoutes } from './routes/youCorpus'
+import { originIsLocal, hostIsLocal } from './loopback'
+
+// ── CSRF / cross-origin guard helpers ──────────────────────────────────────
+// The loopback predicates live in ./loopback so route modules (e.g.
+// routes/youCorpus.ts, which guards its sensitive GETs against DNS rebinding)
+// can reuse the EXACT same check without importing this file (app ↔ route cycle).
+// See ./loopback for the full threat-model note.
 
 export const createApp = () => {
   const app = new Hono()
@@ -34,6 +42,33 @@ export const createApp = () => {
   // Request logging — mirrors the visibility `next dev` gave us in the
   // terminal. Cheap, and the launcher tails server.log so this is useful.
   app.use('*', logger())
+
+  // ── CSRF / cross-origin guard ────────────────────────────────────────────
+  // Registered BEFORE every sub-router so it runs first. Only STATE-CHANGING
+  // methods are guarded: a cross-origin GET response is unreadable without CORS
+  // headers (we set none) and EventSource (the terminal SSE stream) is a GET
+  // that cannot set headers. For POST/PUT/PATCH/DELETE we reject when an Origin
+  // header is present and not loopback (the CSRF case), and — defense against
+  // DNS-rebinding, where Origin may be absent — when the Host header is present
+  // and not loopback. Requests with NO Origin AND a loopback/absent Host (the
+  // local non-browser clients) pass untouched. See the helper note above.
+  app.use('*', async (c, next) => {
+    const m = c.req.method
+    if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') {
+      const origin = c.req.header('origin')
+      if (origin !== undefined && !originIsLocal(origin)) {
+        return c.json({ error: 'cross-origin request rejected' }, 403)
+      }
+      const host = c.req.header('host')
+      if (host !== undefined && !hostIsLocal(host)) {
+        return c.json({ error: 'invalid host' }, 403)
+      }
+    }
+    // `return next()` (not bare `await next()`): every branch must return a value
+    // under noImplicitReturns — the guard branches return a Response, so the
+    // pass-through must return next()'s promise too. There is no post-next logic.
+    return next()
+  })
 
   // Centralized error handler. Route handlers may `throw` (or let
   // src/lib/server helpers throw); everything funnels here so we emit a
@@ -83,6 +118,7 @@ export const createApp = () => {
     .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', moduleSubmissionsRoutes) // J — module submission review queue (env-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)
+    .route('/', youCorpusRoutes) // L — proxy judgment corpus (you-corpus; local personal state)
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall
   // through to the SPA static handler below (which would return index.html

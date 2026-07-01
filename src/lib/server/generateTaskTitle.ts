@@ -118,6 +118,12 @@ const runOnce = async (
     name: 'title',
     // Marker-scraped utility session — keep the system prompt pristine.
     appContext: false,
+    // Auto-triggered, non-sandboxed, bypass: ignore user-scope ~/.claude.json
+    // mcpServers (sandbox experiment hardening — see strictMcpConfig opt).
+    strictMcpConfig: true,
+    // No user-visible pane: never light the Ground card's "claude working"
+    // beacon for a background auto-title run (excluded by listActiveTerminals).
+    hidden: true,
   })
   let buffer = ''
   let exited = false

@@ -36,6 +36,20 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 })
 
+// A job starts 'queued' and flips to 'running' once it wins its turn on its
+// project's serialization chain (one microtask after startJob). Poll the job
+// endpoint until it reaches the wanted status so the lifecycle assertions below
+// don't race that transition.
+const waitForJobStatus = async (id: string, status: string, ms = 2000): Promise<void> => {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const res = await app.request(`/api/canvas/ai/job/${id}`)
+    if (res.status === 200 && (await res.json()).status === status) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  throw new Error(`timed out waiting for job ${id} → ${status}`)
+}
+
 describe('canvas AI routes', () => {
   let projectPath: string
   beforeEach(async () => {
@@ -145,6 +159,8 @@ describe('canvas AI routes', () => {
       },
     )
 
+    // Wait for the job to win its turn and start running (it begins 'queued').
+    await waitForJobStatus(id, 'running')
     const active = await (await app.request('/api/canvas/ai/active')).json()
     expect(active.jobs.some((j: { id: string }) => j.id === id)).toBe(true)
 

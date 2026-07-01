@@ -8,6 +8,7 @@ import {
   cancelPendingInvite,
   acceptInvite,
   ensureOwnProject,
+  findOrCreateOwnProject,
   clearMembershipCache,
   listMyProjects,
   listProjectMembers,
@@ -312,6 +313,68 @@ describe('getMyMembership — env override (skips the network)', () => {
     await signInAs('p@example.com')
     expect((await getMyMembership(PROJECT))?.role).toBe('member')
     expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+// SECURITY: membership is a per-USER fact. The cache must be scoped by the
+// signed-in user AND a sign-out must not leave a fresh entry that a DIFFERENT
+// account can read on the same machine within the TTL. (Repro before the fix:
+// A resolves membership → memberCache[PROJECT] = A's row, fresh 5m → A signs out
+// → B signs in → B's getMyMembership(PROJECT) returns A's cached membership and
+// passes the collab access gate.) These pin both guards: user-scoped keying and
+// the session gate at the top of getMyMembership.
+describe('getMyMembership — user-scoped cache + sign-out (account-switch safety)', () => {
+  it('a different account does NOT inherit the previous user’s cached membership', async () => {
+    stubAnonEnv()
+    // User A resolves + caches an OWNER membership for PROJECT.
+    stubFetch([{ project_id: PROJECT, user_id: 'user-a', role: 'owner' }])
+    await signInAs('a@example.com', 'user-a')
+    expect((await getMyMembership(PROJECT))?.role).toBe('owner')
+
+    // A signs out; B signs in on the same machine — the cache is deliberately
+    // NOT cleared here, and the remote lookup is now OFFLINE, so the only thing
+    // that could grant B access is a stale cache entry. With a collabProjectId-
+    // only key (the bug) B inherits A's owner membership; user-scoped keying
+    // must resolve null instead.
+    await clearSession()
+    await signInAs('b@example.com', 'user-b')
+    stubFetch('reject')
+    expect(await getMyMembership(PROJECT)).toBeNull()
+  })
+
+  it('a signed-out caller resolves null from a still-fresh positive cache, with NO network', async () => {
+    stubAnonEnv()
+    stubFetch([{ project_id: PROJECT, role: 'member' }])
+    await signInAs('a@example.com', 'user-a')
+    expect((await getMyMembership(PROJECT))?.role).toBe('member') // cached fresh
+
+    // Sign out WITHOUT touching the cache. The session gate at the top of
+    // getMyMembership must short-circuit to null before the (still-fresh) cache
+    // or the network is ever consulted.
+    await clearSession()
+    const spy = stubFetch([{ project_id: PROJECT, role: 'owner' }])
+    expect(await getMyMembership(PROJECT)).toBeNull()
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('clearMembershipCache(id) drops EVERY user’s entry for that project', async () => {
+    stubAnonEnv()
+    // Two different users cache a membership for the same PROJECT.
+    stubFetch([{ project_id: PROJECT, user_id: 'user-a', role: 'owner' }])
+    await signInAs('a@example.com', 'user-a')
+    expect((await getMyMembership(PROJECT))?.role).toBe('owner')
+    await clearSession()
+    stubFetch([{ project_id: PROJECT, user_id: 'user-b', role: 'member' }])
+    await signInAs('b@example.com', 'user-b')
+    expect((await getMyMembership(PROJECT))?.role).toBe('member')
+
+    // A roster-changing write invalidates the project for ALL cached viewers, so
+    // each user re-resolves against the network rather than a stale entry. With
+    // a compound key, clearing by collabProjectId must match both users' keys.
+    clearMembershipCache(PROJECT)
+    const reB = stubFetch([{ project_id: PROJECT, user_id: 'user-b', role: 'owner' }])
+    expect((await getMyMembership(PROJECT))?.role).toBe('owner') // B re-fetched
+    expect(reB).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -1028,5 +1091,102 @@ describe('acceptInvite — the invitee accepts their own pending invite (RPC)', 
     expect(await acceptInvite(PROJECT)).toEqual({ ok: false })
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('boom') }))
     expect(await acceptInvite(PROJECT)).toEqual({ ok: false })
+  })
+})
+
+// The duplicate-project / split-collab-room fix. findOrCreateOwnProject is called
+// once PER collab scope (board + every open canvas) the instant a project opens,
+// all concurrently for the SAME folder. Before the fix each missed the find and
+// INSERTed, minting duplicate og_projects rows; a later limit-1 find then handed
+// DIFFERENT ids to different scopes/members → the room silently split. The fix:
+// single-flight the concurrent resolves + a deterministic find + a unique index
+// (migration 0014) backstop. These assert convergence with Supabase mocked.
+describe('findOrCreateOwnProject — concurrent resolves converge to ONE row', () => {
+  const PATH = '/Users/me/projects/demo'
+
+  it('N simultaneous opens mint ONE project row and every caller gets the same id', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com', 'owner-uid')
+
+    let finds = 0
+    let creates = 0
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST') {
+        creates++
+        // Each INSERT echoes a DISTINCT id — so if single-flight failed and every
+        // caller created its own row, the results below would SPLIT (and creates
+        // would be 6, not 1). This makes the regression directly observable.
+        return new Response(JSON.stringify([{ id: `proj-${creates}` }]), { status: 201 })
+      }
+      finds++
+      return new Response(JSON.stringify([]), { status: 200 }) // find: no row yet
+    })
+    vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch)
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => findOrCreateOwnProject(PATH)),
+    )
+
+    // Convergence: every concurrent caller resolved to the SAME single id…
+    expect(new Set(results)).toEqual(new Set(['proj-1']))
+    // …because exactly ONE find + ONE create ran (the other 5 shared the promise).
+    expect(creates).toBe(1)
+    expect(finds).toBe(1)
+  })
+
+  it('reuses an existing row with a DETERMINISTIC (oldest-wins) find, no create', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com', 'owner-uid')
+    let createCalled = false
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST') {
+        createCalled = true
+        return new Response(JSON.stringify([{ id: 'should-not-create' }]), { status: 201 })
+      }
+      return new Response(JSON.stringify([{ id: 'existing-proj' }]), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch)
+
+    expect(await findOrCreateOwnProject(PATH)).toBe('existing-proj')
+    expect(createCalled).toBe(false)
+    // The find pins a deterministic order so duplicates (legacy / cross-process)
+    // still converge on the oldest row, matching migration 0014's survivor pick.
+    const [findUrl] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect(findUrl).toContain('order=created_at.asc,id.asc')
+    expect(findUrl).toContain('limit=1')
+  })
+
+  it('a create CONFLICT (409 from the unique index) re-finds and returns the winner', async () => {
+    stubAnonEnv()
+    await signInAs('owner@example.com', 'owner-uid')
+    let finds = 0
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST') {
+        // A concurrent / cross-process insert won the race; our INSERT hits the
+        // unique (owner_id, name) index → 409.
+        return new Response('duplicate key value violates unique constraint', { status: 409 })
+      }
+      finds++
+      // 1st find: miss (row not yet visible to us). 2nd find (post-409): the winner.
+      return new Response(
+        JSON.stringify(finds === 1 ? [] : [{ id: 'winner-proj' }]),
+        { status: 200 },
+      )
+    })
+    vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch)
+
+    expect(await findOrCreateOwnProject(PATH)).toBe('winner-proj')
+    expect(finds).toBe(2) // initial miss, then re-find the winner after the 409
+  })
+
+  it('unconfigured / signed out → null, no fetch (non-destructive guard)', async () => {
+    const fetchSpy = stubFetch([])
+    await signInAs('owner@example.com', 'owner-uid') // signed in but unconfigured
+    expect(await findOrCreateOwnProject(PATH)).toBeNull()
+    stubAnonEnv()
+    await clearSession() // configured but signed out
+    expect(await findOrCreateOwnProject(PATH)).toBeNull()
+    expect(await findOrCreateOwnProject('')).toBeNull() // blank path
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

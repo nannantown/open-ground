@@ -1,4 +1,4 @@
-import { UserPlus } from 'lucide-react'
+import { UserPlus, AlertTriangle } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { Btn } from '@/components/ui/Btn'
 import type { AppNotification } from '@/lib/types'
@@ -47,8 +47,9 @@ export const NotificationPanel = ({
   )
 }
 
-// One notification row. Switches on `kind` — today only 'collab-invite'. Returns
-// null for an unknown kind so a forward-compat payload can never crash the panel.
+// One notification row. Switches on `kind` ('collab-invite' | 'swarm-fatal').
+// Returns null for an unknown kind so a forward-compat payload can never crash the
+// panel.
 const NotificationRow = ({
   n,
   onAction,
@@ -57,6 +58,33 @@ const NotificationRow = ({
   onAction: (n: AppNotification) => void
 }) => {
   const { t } = useT()
+
+  // Fatal swarm event (escalation safety valve) — informational: WHAT happened, the
+  // card/branch it concerns, and the engine-log 導線. No primary action (the OS toast
+  // already woke the user; the row is the durable record); rendered with the alert
+  // accent + a distinct icon so it never reads as a routine invite.
+  if (n.kind === 'swarm-fatal' && n.swarmFatal) {
+    const f = n.swarmFatal
+    const ctx = [f.taskTitle ? `「${f.taskTitle}」` : '', f.branch].filter(Boolean).join(' · ')
+    return (
+      <div className="flex items-start gap-2.5 px-3.5 py-2.5">
+        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <AlertTriangle size={13} strokeWidth={1.75} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="break-words text-[12px] leading-relaxed text-ink">{f.detail}</p>
+          {ctx && (
+            <p className="mt-0.5 break-words font-mono text-[11px] leading-relaxed text-ink-faint">
+              {ctx}
+            </p>
+          )}
+          {f.logHint && (
+            <p className="mt-1 break-words text-[11px] leading-relaxed text-ink-faint">{f.logHint}</p>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   if (n.kind === 'collab-invite' && n.collabInvite) {
     const inviter = n.collabInvite.inviterEmail || t('notifications.someone')

@@ -114,6 +114,29 @@ describe('buildOrderInjection', () => {
   it('handles an empty goal gracefully', () => {
     expect(buildOrderInjection('', '')).toBe('/order ゴール: ')
   })
+
+  it('appends the LEARNING-LOOP clause when a prior 差し戻し reason is given (card fdf714ef)', () => {
+    const out = buildOrderInjection('Logout button', 'in the header', 'tsc: error TS2345 not assignable')
+    // The goal is preserved AND the prior-failure cause is appended, labelled.
+    expect(out).toContain('/order ゴール: Logout button — in the header')
+    expect(out).toContain('前回の差し戻し理由・同じ失敗を繰り返さないこと')
+    expect(out).toContain('TS2345 not assignable')
+  })
+
+  it('keeps the prior-failure clause SINGLE-LINE (multi-line tsc tail flattened, /order stays one arg)', () => {
+    const out = buildOrderInjection('T', undefined, 'line one\nerror TS1\n\nerror TS2\twith tab')
+    expect(out).not.toMatch(/[\n\r\t]/)
+    expect(out).toContain('line one error TS1 error TS2 with tab')
+  })
+
+  it('omits the clause entirely for a first dispatch (no prior failure) — byte-for-byte unchanged', () => {
+    // Absent / empty / whitespace-only priorFailure ⇒ identical to the 2-arg form.
+    const plain = buildOrderInjection('T', 'n')
+    expect(buildOrderInjection('T', 'n', undefined)).toBe(plain)
+    expect(buildOrderInjection('T', 'n', '')).toBe(plain)
+    expect(buildOrderInjection('T', 'n', '   ')).toBe(plain)
+    expect(plain).not.toContain('前回の差し戻し理由')
+  })
 })
 
 describe('workerLaunchOpts (worker launch contract)', () => {
@@ -179,5 +202,16 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(o.cols).toBe(120)
     expect(o.rows).toBe(40)
     expect(o.initialPrompt).toBe('/order ゴール: Title — and notes')
+  })
+
+  it('threads a prior 差し戻し reason into the /order prompt (LEARNING LOOP, card fdf714ef)', () => {
+    const o = workerLaunchOpts('/wt', 'sid-4', {
+      title: 'Title',
+      notes: 'and notes',
+      priorFailure: 'tsc: error TS2345 not assignable',
+    })
+    expect(o.initialPrompt).toContain('/order ゴール: Title — and notes')
+    expect(o.initialPrompt).toContain('前回の差し戻し理由')
+    expect(o.initialPrompt).toContain('TS2345')
   })
 })

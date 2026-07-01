@@ -46,6 +46,14 @@ export interface TerminalInfo {
   // prompt etc.) is detected on the settled headless screen. A menu means
   // claude is blocked on the human even if it just painted output.
   menuOpen?: boolean
+  // True for a headless UTILITY session: a real `claude` PTY spawned only to
+  // marker-scrape its output (auto-title / auto-description — see launchClaude's
+  // `hidden` opt), with NO user-visible pane. Such a session is EXCLUDED from the
+  // Ground beacon surface (listActiveTerminals) so a background titling/describe
+  // run never flashes "claude working" on a card; it stays a live cwd for
+  // listActiveTerminalCwds (the worktree-cleanup liveness guard). Defaults to
+  // false — every user-launched pane (terminal routes, Board 実行, swarm roles).
+  hidden?: boolean
 }
 
 type Listener = (chunk: string) => void
@@ -100,10 +108,28 @@ const readScreen = (term: HeadlessTerminal): string => {
   return rows.join('\n')
 }
 
-// Debounced menu detection: runs MENU_DETECT_DEBOUNCE_MS after the last write,
-// so we read a settled frame, and stamps the result on info.menuOpen.
-const scheduleMenuDetect = (s: PtySession): void => {
+// Refresh the menu verdict from a fresh PTY output chunk. The two directions of
+// the verdict carry very different risk, so they're handled asymmetrically:
+//
+//  - CLEAR is EAGER (synchronous, every chunk). Fresh output means the screen is
+//    actively repainting, which means claude is WORKING — a real prompt sits on
+//    a STATIC screen and emits nothing while it waits on the human. So the moment
+//    output flows we drop any stale menuOpen=true at once. Without this eager
+//    clear, a post-approval work burst (chunks arriving faster than
+//    MENU_DETECT_DEBOUNCE_MS) keeps resetting the trailing debounce below so it
+//    NEVER fires, leaving menuOpen pinned to the pre-approval `true`; claudeStatus
+//    short-circuits that to 'waiting', so the beacon stays stuck on "waiting" for
+//    the whole burst even though claude is plainly working. The clear is
+//    self-correcting: if a menu really is up, the settled-frame detect restores it.
+//
+//  - SET stays gated on a SETTLED frame (the debounce). We assert a menu EXISTS
+//    only after MENU_DETECT_DEBOUNCE_MS of quiet, so the headless screen we scan is
+//    a finished repaint, not a half-drawn frame detectMenu could misread.
+//
+// Exported for unit tests; production wires it through pty.onData (an e2e path).
+export const scheduleMenuDetect = (s: PtySession): void => {
   if (!s.headless) return
+  s.info.menuOpen = false
   if (s.menuTimer) clearTimeout(s.menuTimer)
   s.menuTimer = setTimeout(() => {
     s.menuTimer = null
@@ -120,6 +146,10 @@ interface TerminalState {
 declare global {
   // eslint-disable-next-line no-var
   var __openground_terminal: TerminalState | undefined
+  // Handle of the server-side sweep loop (startTerminalSweepLoop). On globalThis
+  // so a `tsx watch` reload re-arms ONE loop instead of stacking a second.
+  // eslint-disable-next-line no-var
+  var __openground_terminal_sweep_timer: ReturnType<typeof setInterval> | null | undefined
 }
 
 const state: TerminalState =
@@ -204,6 +234,9 @@ export const createTerminal = (opts: {
   shell?: string
   tag?: 'shell' | 'claude'
   agentSessionId?: string
+  // Headless utility session (no user-visible pane) — excluded from the Ground
+  // beacon. See TerminalInfo.hidden / launchClaude's `hidden` opt.
+  hidden?: boolean
 }): TerminalInfo => {
   const pty = loadPty()
   const id = randomUUID()
@@ -231,6 +264,7 @@ export const createTerminal = (opts: {
     startedAt: new Date().toISOString(),
     tag: opts.tag ?? 'shell',
     ...(opts.agentSessionId ? { agentSessionId: opts.agentSessionId } : {}),
+    ...(opts.hidden ? { hidden: true } : {}),
   }
 
   // Claude panes get a headless screen model for menu detection; plain shells
@@ -335,11 +369,16 @@ export const getTerminalScreen = (id: string): string | null => {
   return s.buffer ? s.buffer.slice(-4000) : null
 }
 
-/** Cwds of terminals whose PTY is still alive — feeds the Ground's
- *  "terminal active" card indicator. A session records `finishedAt` in its
- *  onExit handler and then lingers in the map for ~30s so the client can
- *  drain the buffer; those exited-but-lingering sessions are excluded here.
- *  Deduped (a project can hold several panes) and unordered. */
+/** Cwds of EVERY terminal whose PTY is still alive — the LIVENESS primitive.
+ *  worktreeCleanup reads it to never reap a worktree with a live PTY in it, so it
+ *  deliberately INCLUDES hidden utility sessions (a background titling/describe
+ *  run is a real process whose tree must not vanish under it). A session records
+ *  `finishedAt` in its onExit handler and then lingers in the map for ~30s so the
+ *  client can drain the buffer; those exited-but-lingering sessions are excluded
+ *  here. Deduped (a project can hold several panes) and unordered.
+ *  NOTE: the user-facing beacon surface (listActiveTerminals) filters hidden
+ *  sessions out separately — this primitive must NOT, or the cleanup safety guard
+ *  would lose sight of a live hidden session. */
 export const listActiveTerminalCwds = (): string[] => {
   const out = new Set<string>()
   sessions.forEach((s) => {
@@ -363,18 +402,27 @@ export const claudeStatus = (info: TerminalInfo, now: number): ClaudeBeaconStatu
   return 'waiting'
 }
 
-/** Full payload of GET /api/terminal/active: the legacy `cwds` list (any live
- *  PTY — shells included) plus every live claude pane's id + cwd + verdict.
- *  No dedup here — Board cards need their own pane's status by PTY id; the
- *  Ground's per-project beacon aggregates client-side (working wins). */
+/** Full payload of GET /api/terminal/active: the `cwds` list (any live USER PTY —
+ *  shells included) plus every live USER claude pane's id + cwd + verdict. Both
+ *  EXCLUDE hidden utility sessions (auto-title / auto-description): they're real
+ *  claude PTYs the user never opened a pane for, so surfacing them would flash a
+ *  spurious "claude working" beacon on a Ground card. (The worktree-cleanup
+ *  liveness guard still sees them via listActiveTerminalCwds.) No dedup on the
+ *  claude list — Board cards need their own pane's status by PTY id; the Ground's
+ *  per-project beacon aggregates client-side (working wins). The `cwds` list is
+ *  deduped. */
 export const listActiveTerminals = (): ActiveTerminalsResponse => {
   const now = Date.now()
   const claude: ActiveTerminalsResponse['claude'] = []
+  const cwds = new Set<string>()
   sessions.forEach((s) => {
-    if (s.info.finishedAt || s.info.tag !== 'claude') return
-    claude.push({ id: s.info.id, cwd: s.info.cwd, status: claudeStatus(s.info, now) })
+    if (s.info.finishedAt || s.info.hidden) return
+    cwds.add(s.info.cwd)
+    if (s.info.tag === 'claude') {
+      claude.push({ id: s.info.id, cwd: s.info.cwd, status: claudeStatus(s.info, now) })
+    }
   })
-  return { cwds: listActiveTerminalCwds(), claude }
+  return { cwds: Array.from(cwds), claude }
 }
 
 export const writeInput = (id: string, data: string): boolean => {
@@ -502,6 +550,57 @@ export const sweepTerminalPool = (opts: SweepTerminalPoolOpts = {}): TerminalPoo
     swept.push(id)
   }
   return { swept, kept }
+}
+
+// How often the server-side loop runs sweepTerminalPool. Comfortably below the
+// human-perceptible "why is this card STILL showing a terminal?" window, and the
+// sweep itself is cheap (one Map scan + signal-0 liveness probes), so a tight-ish
+// cadence costs almost nothing. Larger than nothing-to-do is fine — the 30s onExit
+// delete timer is the happy path; this loop only mops up what a reload lost.
+export const TERMINAL_SWEEP_INTERVAL_MS = 30_000
+
+/** Start the UI-INDEPENDENT terminal-pool sweep loop: {@link sweepTerminalPool}
+ *  every `intervalMs`, so dead pool entries are reaped even with NO swarm running
+ *  and NO UI open (a plain-terminal user gets the same cleanup). It clears two
+ *  things the happy-path 30s onExit timer can't:
+ *    • a reload-orphaned EXITED entry — the globalThis sessions Map survives a
+ *      `tsx watch` reload but the pending 30s `setTimeout` does not, so the entry
+ *      would linger forever (a slow memory leak);
+ *    • an ORPHAN — a PTY killed out-of-band whose node-pty `onExit` never fired,
+ *      so `finishedAt` stays unset and GET /api/terminal/active reports its cwd
+ *      forever: a PHANTOM beacon pinned on a Ground card. The sweep's dead-pid
+ *      probe reconciles it (stamps the exit, drops it) and the beacon clears.
+ *  Wired ONCE at server boot (server/index.ts) — unit tests mount the Hono app,
+ *  not the entry, so this never auto-runs there. Idempotent + reload-safe (mirrors
+ *  startAutoDrainLoop): the timer lives on globalThis and a re-eval CLEARS the old
+ *  one before arming a fresh closure instead of stacking a second loop. `unref`'d
+ *  so the loop alone never keeps the process alive (the HTTP listener already
+ *  does). `opts` is forwarded to every sweep — production passes none (real
+ *  defaults); tests inject an `isAlive` probe. Do NOT pin `opts.now` here: the
+ *  loop wants the live clock so each tick re-measures the linger window. */
+export const startTerminalSweepLoop = (
+  intervalMs: number = TERMINAL_SWEEP_INTERVAL_MS,
+  opts: SweepTerminalPoolOpts = {},
+): void => {
+  if (globalThis.__openground_terminal_sweep_timer) {
+    clearInterval(globalThis.__openground_terminal_sweep_timer)
+  }
+  const timer = setInterval(() => {
+    // A sweep must never crash the loop — it only ever reaps, never throws on a
+    // well-formed pool, but defend the interval anyway.
+    try { sweepTerminalPool(opts) } catch { /* keep the loop alive */ }
+  }, intervalMs)
+  // Don't let the sweep loop alone hold the process open (the HTTP listener already does).
+  ;(timer as { unref?: () => void }).unref?.()
+  globalThis.__openground_terminal_sweep_timer = timer
+}
+
+/** Stop the terminal-pool sweep loop (shutdown / test cleanup). Idempotent. */
+export const stopTerminalSweepLoop = (): void => {
+  if (globalThis.__openground_terminal_sweep_timer) {
+    clearInterval(globalThis.__openground_terminal_sweep_timer)
+    globalThis.__openground_terminal_sweep_timer = null
+  }
 }
 
 export const subscribeTerminal = (

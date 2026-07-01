@@ -1,10 +1,14 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import {
   ORCHESTRATOR_MAX_WORKERS,
+  ORCHESTRATOR_MIN_WORKERS,
   STALE_HEARTBEAT_MS,
   RECOVER_MAX_REQUEUE,
   MOVE_STUCK_MAX_RETRIES,
   MAX_REWORKS,
+  MAX_CONFLICT_REWORKS,
+  MAX_REVIEW_DEFERS,
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
   STALL_ECHO_GUARD_MS,
@@ -17,20 +21,41 @@ import {
   isReviewCard,
   sortTodos,
   selectDispatch,
+  computeTargetWorkers,
   declaredFiles,
   contentKey,
   classifyWorker,
   classifyStall,
   lastActivityMs,
   detectAnomalies,
+  fireFatalNotifications,
   pruneStuckMoves,
   pruneReworks,
   recoveryColumn,
   runDispatchPass,
   runIntegratePass,
   runEnginePass,
+  stopOrchestrator,
   stopOrchestratorWorker,
   resolveOrchestratorReview,
+  tallyReview,
+  extractReviewVerdict,
+  buildReviewPrompt,
+  REVIEW_PANEL_SIZE,
+  classifyMetricEvent,
+  computeLeadTimeStats,
+  computeSwarmKpis,
+  computeSwarmConsumption,
+  DISPATCH_BUDGET,
+  medianOf,
+  emptyMetricsCounters,
+  getOrchestratorState,
+  drainTickOrchestrator,
+  maybeAutoStartDrain,
+  runAutoDrainScan,
+  startAutoDrainLoop,
+  stopAutoDrainLoop,
+  REWORK_LOG_MARKER,
   __resetOrchestratorForTests,
   __seedEngineForTests,
   type OrchestratorDeps,
@@ -39,9 +64,18 @@ import {
   type HeartbeatSign,
   type ProjectEngine,
   type WorkerProbe,
+  type ReviewResult,
+  type ReviewDecision,
+  type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
-import type { OrchestratorWorker, ProjectTask, SpawnSwarmWorkerResponse } from '../types'
+import type {
+  OrchestratorLogLine,
+  OrchestratorWorker,
+  ProjectTask,
+  SpawnSwarmWorkerResponse,
+  SwarmFatalNotification,
+} from '../types'
 import type { IntegrateOutcome, ReviewReadiness } from './swarmIntegrate'
 
 // The commander engine's drain+dispatch+monitor logic, exercised with FAKE deps
@@ -91,15 +125,23 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   reviews: [],
   conflictedBranches: new Set(),
   verifyFailed: new Map(),
+  reviewFailed: new Map(),
+  reviewDeferred: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
   reworks: new Map(),
+  reworkReasons: new Map(),
+  conflictReworks: new Map(),
   stuckMoves: new Map(),
   nudges: new Map(),
   rateLimited: new Map(),
   permissionWaits: new Map(),
   log: [],
   anomalies: [],
+  selfSupply: initSelfSupplyRuntime(),
+  notified: new Set(),
+  pendingFatal: [],
+  metrics: emptyMetricsCounters(),
   ...over,
 })
 
@@ -122,7 +164,7 @@ const makeDeps = (init: {
   outputs?: Map<string, number> // terminalId → PTY lastOutputAt epoch ms (absent → null)
   screens?: Map<string, string> // terminalId → current screen text (absent → null = 'normal')
 }): OrchestratorDeps & {
-  spawned: { taskId: string }[]
+  spawned: { taskId: string; priorFailure?: string }[]
   moves: { taskId: string; branch: string }[]
   reviews: { taskId: string; branch: string }[]
   recovered: { taskId: string; column: 'todo' | 'blocked' }[]
@@ -141,7 +183,7 @@ const makeDeps = (init: {
   const heartbeats = init.heartbeats ?? new Map<string, HeartbeatSign>()
   const outputs = init.outputs ?? new Map<string, number>()
   const screens = init.screens ?? new Map<string, string>()
-  const spawned: { taskId: string }[] = []
+  const spawned: { taskId: string; priorFailure?: string }[] = []
   const moves: { taskId: string; branch: string }[] = []
   const reviews: { taskId: string; branch: string }[] = []
   const recovered: { taskId: string; column: 'todo' | 'blocked' }[] = []
@@ -165,7 +207,7 @@ const makeDeps = (init: {
       const taskId = t?.id ?? `?${opts.title}`
       if (spawnFails.has(taskId)) throw new Error('spawn boom')
       n += 1
-      spawned.push({ taskId })
+      spawned.push({ taskId, priorFailure: opts.priorFailure })
       const res: SpawnSwarmWorkerResponse = {
         terminalId: `pty-${taskId}-${n}`,
         agentSessionId: `sess-${n}`,
@@ -252,6 +294,9 @@ describe('isTodoCard', () => {
 })
 
 describe('sortTodos', () => {
+  // A time only minutes after the fixtures' createdAt, so aging is 0 and these
+  // cases test the priority/boardOrder/createdAt ordering in isolation.
+  const FRESH = Date.parse('2026-06-23T00:10:00Z')
   it('orders by boardOrder ascending, then ordered-before-unordered, then createdAt', () => {
     const cards = [
       card('u2', { boardOrder: undefined, createdAt: '2026-06-23T00:00:02Z' }),
@@ -259,13 +304,49 @@ describe('sortTodos', () => {
       card('u1', { boardOrder: undefined, createdAt: '2026-06-23T00:00:01Z' }),
       card('o1', { boardOrder: 1 }),
     ]
-    expect(sortTodos(cards).map((c) => c.id)).toEqual(['o1', 'o5', 'u1', 'u2'])
+    // No priorities set ⇒ all 'normal' ⇒ the boardOrder/createdAt tail decides.
+    expect(sortTodos(cards, FRESH).map((c) => c.id)).toEqual(['o1', 'o5', 'u1', 'u2'])
   })
   it('does not mutate its input', () => {
     const cards = [card('o5', { boardOrder: 5 }), card('o1', { boardOrder: 1 })]
     const before = cards.map((c) => c.id)
-    sortTodos(cards)
+    sortTodos(cards, FRESH)
     expect(cards.map((c) => c.id)).toEqual(before)
+  })
+  it('dispatches higher priority FIRST, overriding boardOrder (急ぎを先に)', () => {
+    const cards = [
+      card('low', { priority: 'low', boardOrder: 0 }),
+      card('urgent', { priority: 'urgent', boardOrder: 9 }),
+      card('normal', { boardOrder: 1 }), // absent priority ⇒ normal
+      card('high', { priority: 'high', boardOrder: 2 }),
+    ]
+    expect(sortTodos(cards, FRESH).map((c) => c.id)).toEqual([
+      'urgent',
+      'high',
+      'normal',
+      'low',
+    ])
+  })
+  it('uses boardOrder as the tiebreak WITHIN one priority bucket', () => {
+    const cards = [
+      card('b', { priority: 'high', boardOrder: 5 }),
+      card('a', { priority: 'high', boardOrder: 1 }),
+    ]
+    expect(sortTodos(cards, FRESH).map((c) => c.id)).toEqual(['a', 'b'])
+  })
+  it('keeps the higher-priority card ahead BEFORE the stale one ages (control)', () => {
+    const stale = card('stale', { priority: 'low', createdAt: '2026-06-23T00:00:00Z' })
+    const fresh = card('fresh', { priority: 'high', createdAt: '2026-06-23T00:00:00Z' })
+    const now = Date.parse('2026-06-23T01:00:00Z') // 1h < aging step ⇒ no boost yet
+    expect(sortTodos([stale, fresh], now).map((c) => c.id)).toEqual(['fresh', 'stale'])
+  })
+  it('AGES a long-waiting low card above a fresh high card (放置を防ぐ)', () => {
+    const stale = card('stale', { priority: 'low', createdAt: '2026-06-23T00:00:00Z' })
+    const fresh = card('fresh', { priority: 'high', createdAt: '2026-06-23T12:00:00Z' })
+    // At 12:00 the low card has waited 12h (+3 aging ⇒ rank 0+3=3) while the high
+    // card is brand new (rank 2+0=2) — so the aged card is dispatched first.
+    const now = Date.parse('2026-06-23T12:00:00Z')
+    expect(sortTodos([fresh, stale], now).map((c) => c.id)).toEqual(['stale', 'fresh'])
   })
 })
 
@@ -351,6 +432,15 @@ describe('selectDispatch', () => {
   })
   it('excludes already-dispatched ids', () => {
     expect(selectDispatch(cards, new Set(['o0']), 2).map((c) => c.id)).toEqual(['o1', 'o2'])
+  })
+  it('dispatch order reflects priority (an urgent card jumps a lower boardOrder)', () => {
+    // Goes through selectDispatch → sortTodos (real wall-clock now): the fixtures
+    // share the same age so aging is uniform and priority is the deciding factor.
+    const prioritized = [
+      card('plain', { boardOrder: 0 }), // normal
+      card('rush', { priority: 'urgent', boardOrder: 9 }),
+    ]
+    expect(selectDispatch(prioritized, new Set(), 1).map((c) => c.id)).toEqual(['rush'])
   })
   it('returns nothing when there are no slots', () => {
     expect(selectDispatch(cards, new Set(), 0)).toEqual([])
@@ -452,6 +542,70 @@ describe('selectDispatch', () => {
     const tasks = [card('dependent', { dependsOn: ['ghost-deleted-id'], boardOrder: 0 })]
     // The prereq id isn't on the board at all → treated as satisfied, not a forever-hold.
     expect(selectDispatch(tasks, new Set(), 10).map((c) => c.id)).toEqual(['dependent'])
+  })
+})
+
+describe('computeTargetWorkers — dynamic worker scaling (card ea369937)', () => {
+  it('多: many independent todos drive the target up to MAX (枠を使い切る)', () => {
+    // A backlog as deep as the ceiling ⇒ ride all the way up to it.
+    expect(
+      computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: ORCHESTRATOR_MAX_WORKERS }),
+    ).toBe(ORCHESTRATOR_MAX_WORKERS)
+  })
+
+  it('少: a single independent todo keeps the target at MIN, never the cap (並列度を絞る)', () => {
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 1 })).toBe(ORCHESTRATOR_MIN_WORKERS)
+    // The band must be real (min strictly below max) or "scaling" is a no-op.
+    expect(ORCHESTRATOR_MIN_WORKERS).toBeLessThan(ORCHESTRATOR_MAX_WORKERS)
+  })
+
+  it('上限頭打ち: a flood of todos never targets past MAX (暴走防止)', () => {
+    // 100 independent todos must still pin to MAX, not 100.
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 100 })).toBe(
+      ORCHESTRATOR_MAX_WORKERS,
+    )
+    // Already-at-cap workers + more backlog ⇒ still capped (the total never exceeds MAX).
+    expect(
+      computeTargetWorkers({ liveWorkers: ORCHESTRATOR_MAX_WORKERS, dispatchableTodos: 50 }),
+    ).toBe(ORCHESTRATOR_MAX_WORKERS)
+  })
+
+  it('ramps monotonically across the band as the backlog grows, then pins at max', () => {
+    const seq = [0, 1, 2, 3, 4, 5, 6].map((d) =>
+      computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: d, min: 1, max: 4 }),
+    )
+    // idle(0) → track demand 1..4 → pinned at max(4) for any deeper backlog.
+    expect(seq).toEqual([0, 1, 2, 3, 4, 4, 4])
+  })
+
+  it('idle: an empty queue with no live worker targets 0 — the floor never spins up an empty board', () => {
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 0 })).toBe(0)
+    // Even a high custom floor does NOT fabricate work on an empty board.
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 0, min: 3, max: 6 })).toBe(0)
+  })
+
+  it('live workers count toward demand — a drained queue holds at the running count, not 0/MAX', () => {
+    // 2 mid-flight workers, queue now empty ⇒ target tracks the 2 live (passive shrink target).
+    expect(computeTargetWorkers({ liveWorkers: 2, dispatchableTodos: 0 })).toBe(2)
+    // demand = live + dispatchable, clamped.
+    expect(computeTargetWorkers({ liveWorkers: 2, dispatchableTodos: 1 })).toBe(3)
+  })
+
+  it('honors a custom MIN floor — the clamp-UP genuinely bites once work exists', () => {
+    // With min=3, even one independent todo targets the floor of 3.
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 1, min: 3, max: 6 })).toBe(3)
+  })
+
+  it('an INVERTED band (min > max) still never breaches the hard ceiling', () => {
+    // Operator footgun min=10/max=2: the target must stay ≤ max(2), never 10.
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 100, min: 10, max: 2 })).toBe(2)
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 1, min: 10, max: 2 })).toBe(2)
+  })
+
+  it('clamps malformed (negative / fractional) signals to a sane integer target', () => {
+    expect(computeTargetWorkers({ liveWorkers: -5, dispatchableTodos: -3 })).toBe(0) // negatives → 0 demand
+    expect(computeTargetWorkers({ liveWorkers: 0, dispatchableTodos: 2.9 })).toBe(2) // floored
+    expect(computeTargetWorkers({ liveWorkers: 1.6, dispatchableTodos: 1.6 })).toBe(2) // floor(1.6)+floor(1.6)
   })
 })
 
@@ -700,6 +854,350 @@ describe('isRunaway — the hard execution-time ceiling', () => {
     expect(isRunaway(Number.NaN, NOW, 90 * 60_000)).toBe(false)
     expect(isRunaway(0, NOW, 90 * 60_000)).toBe(false)
     expect(isRunaway(NOW + 1000, NOW, 90 * 60_000)).toBe(false)
+  })
+})
+
+// ── maybeAutoStartDrain / drainTickOrchestrator — auto-start without a manual ON ──
+// Card cf545637: a STOPPED engine ticks nothing, so a todo added with Autonomy OFF
+// would sit forever beside idle workers. The auto-start engages the engine exactly
+// when (and only when) there is dispatchable work AND a free slot — never past the cap,
+// never while already running, never for a non-todo (blocked/review) card.
+
+describe('auto-start the autonomous drain (card cf545637)', () => {
+  // Full deps = the dispatch-recording makeDeps + an inert integration/anomaly half.
+  // The kicked chain's later passes never fire in a unit test (the TICK_MS timer is
+  // cleared before it elapses), so the integration half only needs to satisfy the type.
+  // IntegrationDeps re-declares some OrchestratorDeps members, so the whole thing is one
+  // annotated literal (contextual typing narrows classify/verify/integrate — mirrors the
+  // runEnginePass test's full-deps shape); the makeDeps recording handles (which the
+  // annotation drops) are re-attached so tests can assert deps.spawned / deps.board.
+  const fullDeps = (init: Parameters<typeof makeDeps>[0]) => {
+    const base = makeDeps(init)
+    const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = {
+      ...base,
+      fetchReview: async () => [],
+      prepareTarget: async () => 'main',
+      classify: async () => 'ff',
+      verify: async () => ({ ok: true, tip: null }),
+      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+      moveToDone: async () => true,
+      markConflict: async () => true,
+      cleanup: async () => ({ removed: true }),
+      killPty: () => {},
+      instructRework: () => {},
+      worktreeExists: async () => true,
+      preflight: async () => ({ ok: true }), // claude ready by default; a test overrides to ok:false
+    }
+    return Object.assign(deps, {
+      spawned: base.spawned,
+      moves: base.moves,
+      reviews: base.reviews,
+      recovered: base.recovered,
+      tornDown: base.tornDown,
+      nudged: base.nudged,
+      board: base.board,
+    })
+  }
+  // Disarm the chain the auto-start arms (a real TICK_MS setTimeout) so it never fires
+  // after the test — bare newEngine() engines aren't in the store, so __reset can't
+  // reach their timers.
+  const disarm = (e: ProjectEngine) => {
+    e.running = false
+    if (e.timer) {
+      clearTimeout(e.timer)
+      e.timer = null
+    }
+  }
+
+  describe('maybeAutoStartDrain', () => {
+    it('auto-starts + dispatches a queued todo while Autonomy is OFF (条件1)', async () => {
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(true)
+      expect(engine.running).toBe(true) // engaged itself — no manual ON press
+      expect(deps.spawned.map((s) => s.taskId)).toEqual(['a'])
+      expect(deps.moves.map((m) => m.taskId)).toEqual(['a']) // card todo→doing
+      expect(deps.board.get('a')?.boardColumn).toBe('doing')
+      expect(engine.workers).toHaveLength(1)
+      disarm(engine)
+    })
+
+    it('is a no-op while already running — never double-drives the loop (条件2)', async () => {
+      const engine = newEngine({ running: true })
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(deps.spawned).toHaveLength(0) // the running tick owns dispatch, not this
+    })
+
+    it('is a no-op when the queue has nothing dispatchable — OFF stays OFF', async () => {
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [] }) // empty board
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(engine.running).toBe(false)
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('does NOT auto-start when every worker slot is full — respects the cap (条件3)', async () => {
+      // MAX live workers already + more todos waiting ⇒ zero free slots ⇒ no auto-start.
+      const liveWorkers = Array.from({ length: ORCHESTRATOR_MAX_WORKERS }, (_, i) =>
+        worker({ terminalId: `pty-w${i}-1`, branch: `swarm/w${i}`, taskId: `w${i}` }),
+      )
+      const engine = newEngine({ running: false, workers: liveWorkers })
+      const deps = fullDeps({ cards: [card('a'), card('b')] }) // todos waiting
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(engine.running).toBe(false)
+      expect(deps.spawned).toHaveLength(0) // never spawns past the ceiling
+    })
+
+    it('caps the auto-start dispatch at ORCHESTRATOR_MAX_WORKERS (条件3)', async () => {
+      const cards = Array.from({ length: ORCHESTRATOR_MAX_WORKERS + 3 }, (_, i) =>
+        card(`c${i}`, { boardOrder: i }),
+      )
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(true)
+      expect(deps.spawned).toHaveLength(ORCHESTRATOR_MAX_WORKERS) // not MAX+3
+      expect(engine.workers).toHaveLength(ORCHESTRATOR_MAX_WORKERS)
+      disarm(engine)
+    })
+
+    it('arms the tick chain so the lifecycle continues after auto-start', async () => {
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [card('a')] })
+      await maybeAutoStartDrain(engine, deps)
+      expect(engine.timer).not.toBeNull() // scheduleNext armed the next pass
+      disarm(engine)
+    })
+
+    it('does not re-grab a card parked in blocked — stop/resolve flow intact (条件2)', async () => {
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [card('a', { boardColumn: 'blocked' })] })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false) // blocked isn't a todo ⇒ nothing to drain
+      expect(engine.running).toBe(false)
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('still refills only the FREE slots when some workers are already live (条件3)', async () => {
+      // 2 live workers, MAX free-slot headroom ⇒ auto-start tops up to the cap, no more.
+      const liveWorkers = [
+        worker({ terminalId: 'pty-w0-1', branch: 'swarm/w0', taskId: 'w0' }),
+        worker({ terminalId: 'pty-w1-1', branch: 'swarm/w1', taskId: 'w1' }),
+      ]
+      const cards = Array.from({ length: ORCHESTRATOR_MAX_WORKERS }, (_, i) =>
+        card(`c${i}`, { boardOrder: i }),
+      )
+      const engine = newEngine({ running: false, workers: liveWorkers })
+      const deps = fullDeps({ cards })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(true)
+      // target = clamp(2 live + MAX todos, min, MAX) = MAX ⇒ free slots = MAX - 2.
+      expect(deps.spawned).toHaveLength(ORCHESTRATOR_MAX_WORKERS - 2)
+      disarm(engine)
+    })
+  })
+
+  describe('maybeAutoStartDrain — explicit pause + twin-dispatch guard', () => {
+    beforeEach(() => __resetOrchestratorForTests())
+    afterEach(() => __resetOrchestratorForTests())
+
+    it('skips auto-start when claude preflight is NOT ready — no retry storm (design note 4)', async () => {
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [card('a')] })
+      deps.preflight = async () => ({ ok: false }) // claude missing / logged out
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(engine.running).toBe(false) // never flips running into a known-failing spawn
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('final re-check AFTER the preflight await catches a concurrent engage (twin-dispatch)', async () => {
+      // The preflight is the LAST await before the synchronous running=true commit, so a
+      // rival caller (another drain-tick / sweep) that engaged the engine DURING our preflight
+      // await must be caught by the re-check that follows it — else we double-dispatch.
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [card('a')] })
+      deps.preflight = async () => {
+        engine.running = true // a rival committed running=true while we awaited preflight
+        return { ok: true }
+      }
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false) // the post-preflight re-check bails — drop it and this fails
+      expect(deps.spawned).toHaveLength(0) // no second dispatch over the rival's engage
+    })
+
+    it('does NOT auto-start when the owner explicitly paused (manualStop) — 条件2', async () => {
+      const engine = newEngine({ running: false, manualStop: true })
+      const deps = fullDeps({ cards: [card('a')] }) // dispatchable + idle slot, but paused
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(engine.running).toBe(false) // OFF stays OFF until a manual ON
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('bails while a pass is already in flight (passInFlight) — mid-pass guard', async () => {
+      const engine = newEngine({ running: false, passInFlight: true })
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('HOLDS passInFlight across the inline dispatch so a concurrent kick bails (finding A)', async () => {
+      // runDispatchPass does NOT set passInFlight, so maybeAutoStartDrain must — assert it
+      // is set WHILE spawnWorker runs (the slow window a manual stop→start could otherwise
+      // slip a SECOND dispatch into, double-spawning the same card).
+      const engine = newEngine({ running: false })
+      const deps = fullDeps({ cards: [card('a')] })
+      const realSpawn = deps.spawnWorker
+      let inFlightDuringSpawn = false
+      deps.spawnWorker = async (opts) => {
+        inFlightDuringSpawn = engine.passInFlight === true
+        return realSpawn(opts)
+      }
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(true)
+      expect(inFlightDuringSpawn).toBe(true) // guarded during the slow spawn window
+      expect(engine.passInFlight).toBe(false) // cleared after the pass settles
+      disarm(engine)
+    })
+
+    it('stopOrchestrator sets manualStop so a later poll will not auto-restart', async () => {
+      const key = await canonicalize('/proj-manualstop-wire')
+      const engine = newEngine({ path: key, running: true })
+      __seedEngineForTests(engine)
+      await stopOrchestrator('/proj-manualstop-wire', makeDeps({ cards: [] }))
+      expect(engine.manualStop).toBe(true)
+      expect(engine.running).toBe(false)
+      // The pause now suppresses auto-start even with a todo + a free slot present.
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(false)
+      expect(deps.spawned).toHaveLength(0)
+    })
+  })
+
+  describe('drainTickOrchestrator vs getOrchestratorState — tick auto-starts, GET is read-only', () => {
+    beforeEach(() => __resetOrchestratorForTests())
+    afterEach(() => __resetOrchestratorForTests()) // clear the armed chain timer
+
+    it('drainTickOrchestrator auto-starts + dispatches a queued todo (条件1, e2e)', async () => {
+      const deps = fullDeps({ cards: [card('a')] })
+      const state = await drainTickOrchestrator('/proj-autostart-tick', deps)
+      expect(state.running).toBe(true) // the drain-tick engaged the engine itself
+      expect(deps.spawned.map((s) => s.taskId)).toEqual(['a'])
+      expect(deps.board.get('a')?.boardColumn).toBe('doing')
+    })
+
+    it('drainTickOrchestrator leaves a stopped engine stopped when the queue is empty', async () => {
+      const deps = fullDeps({ cards: [] })
+      const state = await drainTickOrchestrator('/proj-autostart-empty', deps)
+      expect(state.running).toBe(false)
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('getOrchestratorState is PURE READ-ONLY — a dispatchable todo NEVER spawns (Board GET contract)', async () => {
+      // The display-only Board worker-map (BoardModule) polls this SAME GET, so it must
+      // never mutate/spawn — the MUST_FIX this split addresses. Seed a stopped engine with
+      // a dispatchable todo + an idle slot (the exact setup that auto-starts via the tick
+      // above) and assert the GET path leaves it untouched.
+      const key = await canonicalize('/proj-readonly-get')
+      const engine = newEngine({ path: key, running: false })
+      __seedEngineForTests(engine)
+      const deps = fullDeps({ cards: [card('a')] })
+      const state = await getOrchestratorState('/proj-readonly-get', deps)
+      expect(state.running).toBe(false) // NOT auto-started by a read
+      expect(engine.running).toBe(false)
+      expect(deps.spawned).toHaveLength(0) // NO worker spawned
+      expect(deps.board.get('a')?.boardColumn).toBe('todo') // card untouched
+    })
+  })
+
+  describe('runAutoDrainScan — server-side UI-independent sweep (条件1/2/3/5)', () => {
+    beforeEach(() => __resetOrchestratorForTests())
+    afterEach(() => {
+      __resetOrchestratorForTests() // clear any armed chain timers
+      stopAutoDrainLoop() // and the background loop, if a test started it (defensive)
+    })
+
+    it('auto-starts a stopped project with a todo — NO UI open (条件1/5)', async () => {
+      const key = await canonicalize('/proj-scan-a')
+      const engine = newEngine({ path: key, running: false })
+      __seedEngineForTests(engine)
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await runAutoDrainScan(deps, async () => ['/proj-scan-a'])
+      expect(started).toBe(1)
+      expect(engine.running).toBe(true) // engaged with no UI / no manual ON
+      expect(deps.spawned.map((s) => s.taskId)).toEqual(['a'])
+      expect(deps.board.get('a')?.boardColumn).toBe('doing')
+    })
+
+    it('respects manualStop — a paused project is NOT auto-started by the sweep (条件3/5)', async () => {
+      const key = await canonicalize('/proj-scan-paused')
+      const engine = newEngine({ path: key, running: false, manualStop: true })
+      __seedEngineForTests(engine)
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await runAutoDrainScan(deps, async () => ['/proj-scan-paused'])
+      expect(started).toBe(0)
+      expect(engine.running).toBe(false) // explicit OFF honored by the background sweep too
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('no-ops a running project — no double-start over its own chain (条件2)', async () => {
+      const key = await canonicalize('/proj-scan-running')
+      const engine = newEngine({ path: key, running: true })
+      __seedEngineForTests(engine)
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await runAutoDrainScan(deps, async () => ['/proj-scan-running'])
+      expect(started).toBe(0)
+      expect(deps.spawned).toHaveLength(0) // the running engine's chain owns dispatch
+    })
+
+    it('sweeps multiple projects, auto-starting only the eligible ones', async () => {
+      const kPaused = await canonicalize('/proj-multi-paused')
+      const kReady = await canonicalize('/proj-multi-ready')
+      __seedEngineForTests(newEngine({ path: kPaused, running: false, manualStop: true }))
+      __seedEngineForTests(newEngine({ path: kReady, running: false }))
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await runAutoDrainScan(deps, async () => [
+        '/proj-multi-paused',
+        '/proj-multi-ready',
+      ])
+      expect(started).toBe(1) // only the non-paused project engages
+    })
+
+    it('a registry read fault yields an empty sweep (best-effort, never throws)', async () => {
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await runAutoDrainScan(deps, async () => {
+        throw new Error('registry blip')
+      })
+      expect(started).toBe(0)
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('startAutoDrainLoop is idempotent + stopAutoDrainLoop clears (no stacked loops)', () => {
+      stopAutoDrainLoop() // clean slate
+      const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+      startAutoDrainLoop(fullDeps({ cards: [] }), 600_000) // long interval — never fires here
+      const first = globalThis.__openground_swarm_autodrain_timer
+      expect(first).toBeTruthy()
+      startAutoDrainLoop(fullDeps({ cards: [] }), 600_000) // re-arm: CLEARS the old, doesn't stack
+      const second = globalThis.__openground_swarm_autodrain_timer
+      expect(second).toBeTruthy()
+      expect(second).not.toBe(first)
+      // Teeth: the prior timer was ACTUALLY cleared on re-arm (not merely overwritten +
+      // leaked) — drop the clearInterval in startAutoDrainLoop and this assertion fails.
+      expect(clearSpy).toHaveBeenCalledWith(first)
+      stopAutoDrainLoop()
+      expect(globalThis.__openground_swarm_autodrain_timer ?? null).toBeNull()
+      expect(clearSpy).toHaveBeenCalledWith(second) // stop cleared the live one too
+      clearSpy.mockRestore()
+    })
   })
 })
 
@@ -979,6 +1477,70 @@ describe('runDispatchPass — drain + dispatch', () => {
     expect(engine.log.some((l) => l.level === 'warn' && l.message.startsWith('board read failed'))).toBe(
       true,
     )
+  })
+})
+
+// ── runDispatchPass — dynamic worker scaling (card ea369937) ──────────────────
+
+describe('runDispatchPass — dynamic worker scaling (card ea369937)', () => {
+  const scaleLines = (engine: ProjectEngine) =>
+    engine.log.filter((l) => l.message.startsWith('scale:'))
+
+  it('少: a shallow independent backlog scales to its size (near MIN), well below MAX, and logs it', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardOrder: 0 }), card('b', { boardOrder: 1 })] })
+    await runDispatchPass(engine, deps)
+    // Two independent todos ⇒ exactly two workers, not the MAX(6) cap.
+    expect(deps.spawned).toHaveLength(2)
+    expect(deps.spawned.length).toBeLessThan(ORCHESTRATOR_MAX_WORKERS)
+    // The scale DECISION is in the journal (条件4), naming the computed target.
+    expect(scaleLines(engine)).toHaveLength(1)
+    expect(scaleLines(engine)[0].message).toContain('target 2 worker')
+  })
+
+  it('多 + 上限頭打ち: a deep backlog scales to — and never past — MAX, logging the decision', async () => {
+    const cards = Array.from({ length: ORCHESTRATOR_MAX_WORKERS + 3 }, (_, i) =>
+      card(`c${i}`, { boardOrder: i }),
+    )
+    const engine = newEngine()
+    const deps = makeDeps({ cards })
+    await runDispatchPass(engine, deps)
+    // MAX+3 independent todos, yet the engine pins at MAX (暴走防止 — never exceeds).
+    expect(deps.spawned).toHaveLength(ORCHESTRATOR_MAX_WORKERS)
+    expect(engine.workers.filter((w) => deps.isAlive(w.terminalId))).toHaveLength(
+      ORCHESTRATOR_MAX_WORKERS,
+    )
+    expect(scaleLines(engine)).toHaveLength(1)
+    expect(scaleLines(engine)[0].message).toContain(`target ${ORCHESTRATOR_MAX_WORKERS} worker`)
+  })
+
+  it('logs the scale decision once per CHANGE (not every tick) and holds steady — no extra spawn — when unchanged', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardOrder: 0 }), card('b', { boardOrder: 1 })] })
+    await runDispatchPass(engine, deps) // target 2 → spawn 2, cards → doing
+    await runDispatchPass(engine, deps) // live 2 + 0 dispatchable ⇒ target still 2 ⇒ no new line, no spawn
+    expect(deps.spawned).toHaveLength(2)
+    expect(scaleLines(engine)).toHaveLength(1) // de-duped: only the transition was logged
+  })
+
+  it('scales UP and logs a FRESH decision when the independent backlog grows', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardOrder: 0 })] })
+    await runDispatchPass(engine, deps) // 1 todo → target 1, spawn 1
+    expect(deps.spawned).toHaveLength(1)
+    // The queue deepens: MAX more independent todos arrive.
+    for (let i = 0; i < ORCHESTRATOR_MAX_WORKERS; i++) {
+      deps.board.set(`n${i}`, card(`n${i}`, { boardOrder: 10 + i }))
+    }
+    await runDispatchPass(engine, deps)
+    // Now riding the cap, with a SECOND, distinct scale line recording the climb.
+    expect(engine.workers.filter((w) => deps.isAlive(w.terminalId))).toHaveLength(
+      ORCHESTRATOR_MAX_WORKERS,
+    )
+    const lines = scaleLines(engine)
+    expect(lines).toHaveLength(2)
+    expect(lines[0].message).toContain('target 1 worker')
+    expect(lines[1].message).toContain(`target ${ORCHESTRATOR_MAX_WORKERS} worker`)
   })
 })
 
@@ -1679,6 +2241,13 @@ const makeIntDeps = (init: {
   // reports for the memo key (default `tip-<branch>`, stable so skipIfTip matches);
   // mutate an entry between passes to model a fix (tip changes ⇒ re-verify).
   verifyResults?: Record<string, { ok: boolean; tip?: string | null; reason?: string }>
+  // 敵対レビュー(card a14329dc)テスト用: per-branch の ReviewResult。EITHER reviewResults
+  // OR reviewDefault が与えられたときだけ fake `review` dep を配線する(無指定なら review は
+  // undefined のまま = レビュー段スキップ = 既存テストは不変)。reviewDefault は reviewResults
+  // に無い branch の既定 decision。skipIfTip が tip に一致したら {decision:'rework',skipped:true}
+  // を返し、makeAdversarialReview の memo 短絡を再現する。
+  reviewResults?: Record<string, ReviewResult>
+  reviewDefault?: ReviewDecision
   // 差し戻し(rework)テスト用: dead = isAlive=false を返す terminalId(→ 'todo' 再 dispatch
   // 経路を駆動); moveToDoingFails / recoverFails は最初の review→doing / recover 書込を false に。
   dead?: Set<string>
@@ -1691,6 +2260,7 @@ const makeIntDeps = (init: {
   killed: string[]
   marks: { taskId: string; value: boolean }[]
   verified: { branch: string; skipIfTip?: string }[]
+  reviewed: { branch: string; tip: string; skipIfTip?: string }[]
   reworkedToDoing: { taskId: string; branch: string }[]
   recovered: { taskId: string; column: 'todo' | 'blocked' }[]
   tornDown: string[]
@@ -1707,6 +2277,7 @@ const makeIntDeps = (init: {
   const killed: string[] = []
   const marks: { taskId: string; value: boolean }[] = []
   const verified: { branch: string; skipIfTip?: string }[] = []
+  const reviewed: { branch: string; tip: string; skipIfTip?: string }[] = []
   const reworkedToDoing: { taskId: string; branch: string }[] = []
   const recovered: { taskId: string; column: 'todo' | 'blocked' }[] = []
   const tornDown: string[] = []
@@ -1717,6 +2288,22 @@ const makeIntDeps = (init: {
   const dropReview = (taskId: string) => {
     const i = reviews.findIndex((c) => c.id === taskId)
     if (i >= 0) reviews.splice(i, 1)
+  }
+  // Fake adversarial-review dep — attached ONLY when reviewResults/reviewDefault is
+  // configured (else `review` stays undefined ⇒ runIntegratePass skips the stage,
+  // so every pre-existing integrate test is byte-for-byte unaffected). Records each
+  // call (branch/tip/skipIfTip) and honors the skipIfTip memo short-circuit.
+  const reviewConfigured = init.reviewResults !== undefined || init.reviewDefault !== undefined
+  const reviewResults = init.reviewResults ?? {}
+  const reviewDefault: ReviewDecision = init.reviewDefault ?? 'integrate'
+  const reviewDep: NonNullable<IntegrationDeps['review']> = async (_p, branch, _t, opts) => {
+    reviewed.push({ branch, tip: opts.tip, skipIfTip: opts.skipIfTip })
+    if (opts.skipIfTip && opts.skipIfTip === opts.tip) {
+      return { decision: 'rework', verdicts: [], mustFix: 0, clean: 0, skipped: true, reason: 'unchanged review' }
+    }
+    const r = reviewResults[branch]
+    if (r) return r
+    return { decision: reviewDefault, verdicts: [], mustFix: 0, clean: reviewDefault === 'integrate' ? 3 : 0, reason: `fake review ${reviewDefault}` }
   }
   return {
     reworkedToDoing,
@@ -1729,6 +2316,8 @@ const makeIntDeps = (init: {
     killed,
     marks,
     verified,
+    reviewed,
+    ...(reviewConfigured ? { review: reviewDep } : {}),
     fetchReview: async () => [...reviews],
     prepareTarget: async () => (init.target === undefined ? 'main' : init.target),
     classify: async (_p, branch) => readiness[branch] ?? 'ff',
@@ -1904,27 +2493,118 @@ describe('runIntegratePass — landing (autoMerge ON)', () => {
 })
 
 describe('runIntegratePass — conflict handling', () => {
-  it('marks a conflicting card, leaves it in review, and does not re-rebase it next pass', async () => {
-    const engine = newEngine({ autoMerge: true })
+  // CONFLICT → worker rebase 委譲 (card 012a2848): a fresh rebase conflict is no longer
+  // parked for a human — it is delegated to the branch's worker to rebase its OWN branch
+  // + resolve + commit, then the engine retries. Mirrors the verify-rework tests above.
+  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
+    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
+
+  it('delegates a fresh conflict to the LIVE worker (review→doing) for a rebase — never parks for a human', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      outcomes: { 'swarm/a': { status: 'conflict', files: ['src/x.ts'] } },
+    })
+    await runIntegratePass(engine, deps)
+    // Did NOT land; sent review→doing on the SAME branch (the worker rebases in place).
+    expect(deps.integrated).toEqual(['swarm/a']) // the conflict came FROM a real integrate attempt
+    expect(deps.moved).toHaveLength(0) // moveToDone never called — nothing landed
+    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(deps.recovered).toHaveLength(0) // not todo/blocked — continued in place
+    // SEPARATE conflict budget bumped (NOT the verify rework budget).
+    expect(engine.conflictReworks.get('a')).toBe(1)
+    expect(engine.reworks.size).toBe(0)
+    // Worker put back to 'running' and told to rebase its own branch (never force-push).
+    expect(engine.workers[0].stage).toBe('running')
+    expect(deps.instructed).toHaveLength(1)
+    expect(deps.instructed[0].terminalId).toBe('pty-a')
+    expect(deps.instructed[0].message).toContain('git rebase origin/main')
+    expect(deps.instructed[0].message).toContain('src/x.ts')
+    expect(deps.instructed[0].message).toContain('force-push')
+    expect(deps.tornDown).toHaveLength(0) // live worker kept (not torn down)
+    // The durable /order memo carries the conflict context for a later re-dispatch.
+    expect(engine.reworkReasons.get('a')).toContain('git rebase origin/main')
+    // Card left review → never double-integrated while the worker resolves (条件3).
+    expect(engine.reviews.find((r) => r.taskId === 'a')).toBeUndefined()
+  })
+
+  it('re-dispatches a fresh conflict (review→todo) when the worker is gone — /order carries the conflict context', async () => {
+    const engine = newEngine({ autoMerge: true }) // no live worker for the branch
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      outcomes: { 'swarm/a': { status: 'conflict', files: ['src/x.ts'] } },
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.reworkedToDoing).toHaveLength(0) // no live worker to continue in place
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // re-queued for a fresh worker
+    expect(deps.instructed).toHaveLength(0) // nothing alive to instruct
+    expect(engine.conflictReworks.get('a')).toBe(1)
+    // The fresh worker's /order will be handed the conflict-resolution context.
+    expect(engine.reworkReasons.get('a')).toContain('git rebase origin/main')
+    expect(engine.reworkReasons.get('a')).toContain('force-push')
+  })
+
+  it('PARKS the card in blocked once MAX_CONFLICT_REWORKS is spent — conflict loop guard', async () => {
+    const engine = newEngine({
+      autoMerge: true,
+      workers: [doneWorker('swarm/a', 'a')],
+      conflictReworks: new Map([['a', MAX_CONFLICT_REWORKS]]), // at the cap → this pass overflows it
+    })
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
       outcomes: { 'swarm/a': { status: 'conflict' } },
-      readiness: { 'swarm/a': 'rebase' }, // still diverged on the retry probe
     })
     await runIntegratePass(engine, deps)
-    expect(deps.marks).toEqual([{ taskId: 'a', value: true }])
-    expect(deps.moved).toHaveLength(0)
-    expect(engine.conflictedBranches.has('swarm/a')).toBe(true)
-    expect(engine.reviews.map((r) => r.status)).toEqual(['conflict'])
-    expect(engine.log.find((l) => l.message.startsWith('conflict'))?.kind).toBe('conflict')
-    expect(engine.log.some((l) => l.level === 'error' && l.message.startsWith('conflict'))).toBe(true)
+    expect(deps.reworkedToDoing).toHaveLength(0) // NOT delegated again
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // parked for a human
+    expect(deps.marks).toContainEqual({ taskId: 'a', value: true }) // stamped so the board shows the conflict
+    expect(deps.tornDown).toEqual(['pty-a']) // worker torn down (branch kept for the human)
+    expect(engine.conflictReworks.get('a')).toBe(MAX_CONFLICT_REWORKS + 1)
+    expect(engine.workers).toHaveLength(0)
+    expect(engine.log.some((l) => l.kind === 'conflict' && l.level === 'error')).toBe(true)
+  })
 
-    // Next pass (throttle reset): the known-conflict branch is NOT re-integrated.
-    engine.lastIntegrateAt = 0
-    const before = deps.integrated.length
+  it('the conflict budget is INDEPENDENT of the verify rework budget (a maxed verify budget still delegates)', async () => {
+    // A card already at the verify-rework cap must STILL get its conflict delegated (a
+    // conflict is not the worker's code being wrong) — the two counters never cross.
+    const engine = newEngine({
+      autoMerge: true,
+      workers: [doneWorker('swarm/a', 'a')],
+      reworks: new Map([['a', MAX_REWORKS]]), // verify budget already spent
+    })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      outcomes: { 'swarm/a': { status: 'conflict' } },
+    })
     await runIntegratePass(engine, deps)
-    expect(deps.integrated.length).toBe(before)
-    expect(engine.reviews.map((r) => r.status)).toEqual(['conflict'])
+    expect(deps.recovered).toHaveLength(0) // NOT parked — the conflict budget is fresh
+    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }]) // delegated
+    expect(engine.conflictReworks.get('a')).toBe(1)
+    expect(engine.reworks.get('a')).toBe(MAX_REWORKS) // verify budget untouched by a conflict
+  })
+
+  it('a delegated conflict LANDS once the worker resolves it, resetting the conflict budget (条件4)', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      outcomes: { 'swarm/a': { status: 'conflict' } },
+    })
+    // Pass 1 — conflict → delegated to the live worker (card → doing).
+    await runIntegratePass(engine, deps)
+    expect(engine.conflictReworks.get('a')).toBe(1)
+    expect(deps.moved).toHaveLength(0)
+
+    // The worker rebases + resolves + re-reports: the branch is now cleanly landable,
+    // and the monitor re-promoted it to review. Model that for pass 2.
+    deps.integrate = async (_p, branch) => {
+      deps.integrated.push(branch)
+      return { status: 'integrated', mode: 'rebase' }
+    }
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
+    engine.lastIntegrateAt = 0 // clear the throttle
+    await runIntegratePass(engine, deps)
+    expect(deps.moved).toEqual(['a']) // landed → review→done
+    expect(engine.conflictReworks.has('a')).toBe(false) // budget reset on a successful land
   })
 
   it('retries a previously-conflicting branch once it becomes fast-forwardable', async () => {
@@ -2263,6 +2943,61 @@ describe('runIntegratePass — rework 差し戻し (review→doing)', () => {
   })
 })
 
+// ── Learning loop — 差し戻し原因を次の再dispatchの /order に注入 (card fdf714ef) ──────
+// The whole point: a 差し戻し/rollback shouldn't repeat. The integrate pass RECORDS
+// why a card was sent back; the NEXT dispatch of that SAME card HANDS the reason to
+// the fresh worker's /order (so it doesn't repeat the RED verify / must-fix) and the
+// engine log records that the context was injected. Reproduced end-to-end (HOME-free,
+// fully faked) by chaining runIntegratePass → runDispatchPass on one engine.
+describe('learning loop — rework reason injected into the re-dispatch /order (card fdf714ef)', () => {
+  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
+    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
+
+  it('records the rework cause, then injects it into the re-dispatched card /order + logs it', async () => {
+    // 1) 差し戻し: verify RED + DEAD worker ⇒ review→todo 再 dispatch 経路。原因を engine state に記録。
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const intDeps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'tsc: error TS2345 foo not assignable to bar' } },
+      dead: new Set(['pty-a']),
+    })
+    await runIntegratePass(engine, intDeps)
+    // 条件1: 差し戻しの原因が engine state に記録された。
+    expect(engine.reworkReasons.get('a')).toContain('TS2345')
+    expect(intDeps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // 再 dispatch 待ちで todo へ
+    expect(engine.workers).toHaveLength(0) // dead worker は撤去
+
+    // 2) 再 dispatch: カードは todo に戻っている。runDispatchPass が前回原因を /order に注入。
+    const dispDeps = makeDeps({ cards: [card('a', { boardColumn: 'todo' })] })
+    await runDispatchPass(engine, dispDeps)
+    // 条件2: 同カードの再 dispatch で spawnWorker(=/order) に前回失敗原因が渡る。
+    expect(dispDeps.spawned).toHaveLength(1)
+    expect(dispDeps.spawned[0].taskId).toBe('a')
+    expect(dispDeps.spawned[0].priorFailure).toContain('TS2345')
+    // 条件3: 文脈注入の有無が engine log に残る。
+    expect(engine.log.some((l) => l.message.includes('前回差し戻しの原因を /order に注入'))).toBe(true)
+    // 消費される: 次の(無関係な)再 dispatch が古い原因を再注入しないよう memo は消える。
+    expect(engine.reworkReasons.has('a')).toBe(false)
+  })
+
+  it('a FIRST dispatch (no prior 差し戻し) injects nothing — no priorFailure, no inject log', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'todo' })] })
+    await runDispatchPass(engine, deps)
+    expect(deps.spawned).toHaveLength(1)
+    expect(deps.spawned[0].priorFailure).toBeUndefined()
+    expect(engine.log.some((l) => l.message.includes('前回差し戻しの原因'))).toBe(false)
+  })
+
+  it('keeps the memo when the re-dispatch spawn THROWS — retried (not consumed) next pass', async () => {
+    const engine = newEngine({ reworkReasons: new Map([['a', 'tsc: error TS9999 boom']]) })
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'todo' })], spawnFails: new Set(['a']) })
+    await runDispatchPass(engine, deps)
+    expect(deps.spawned).toHaveLength(0) // spawn threw
+    expect(engine.reworkReasons.get('a')).toContain('TS9999') // NOT consumed — survives for the retry
+  })
+})
+
 describe('pruneReworks', () => {
   it('clears only at done|deleted; KEEPS todo (engine re-dispatch), doing/review (mid-cycle), blocked (parked)', () => {
     const engine = newEngine({
@@ -2289,6 +3024,372 @@ describe('pruneReworks', () => {
     expect(engine.reworks.get('v')).toBe(1)
     expect(engine.reworks.get('b')).toBe(MAX_REWORKS + 1)
     expect(engine.reworks.has('gone')).toBe(false)
+  })
+
+  it('prunes the LEARNING-LOOP reasons (card fdf714ef) on the SAME rule as the counter', () => {
+    const engine = newEngine({
+      reworkReasons: new Map([
+        ['t', 'tsc red'], // → todo: KEPT — a pending re-dispatch must still inject it
+        ['d', 'tsc red'], // → done: cleared (success)
+        ['g', 'tsc red'], // → doing: kept (crash→requeue still carries it)
+        ['v', 'tsc red'], // → review: kept (mid-cycle)
+        ['gone', 'tsc red'], // deleted card: cleared
+      ]),
+    })
+    const tasks = [
+      card('t', { boardColumn: 'todo' }),
+      card('d', { boardColumn: 'done', done: true }),
+      card('g', { boardColumn: 'doing' }),
+      card('v', { boardColumn: 'review' }),
+    ]
+    pruneReworks(engine, tasks)
+    expect(engine.reworkReasons.get('t')).toBe('tsc red') // KEPT for the pending re-dispatch
+    expect(engine.reworkReasons.has('d')).toBe(false)
+    expect(engine.reworkReasons.get('g')).toBe('tsc red')
+    expect(engine.reworkReasons.get('v')).toBe('tsc red')
+    expect(engine.reworkReasons.has('gone')).toBe(false)
+  })
+})
+
+// ── Adversarial review — majority vote (card a14329dc) ─────────────────────────
+// The PURE tally that decides the panel's verdict. STRICT majority of the FULL
+// panel; ties / non-votes DEFER (never a silent merge, never a 差し戻し bump).
+describe('tallyReview — adversarial-review majority vote', () => {
+  const v = (vote: ReviewerVerdict['vote'], note = ''): ReviewerVerdict => ({ reviewer: 0, vote, note })
+
+  it('majority must-fix → rework (condition 2), carrying the first must-fix note', () => {
+    const r = tallyReview([v('must-fix', 'off-by-one'), v('must-fix'), v('clean')], 3)
+    expect(r.decision).toBe('rework')
+    expect(r.mustFix).toBe(2)
+    expect(r.clean).toBe(1)
+    expect(r.reason).toContain('off-by-one')
+  })
+
+  it('unanimous must-fix → rework', () => {
+    expect(tallyReview([v('must-fix'), v('must-fix'), v('must-fix')], 3).decision).toBe('rework')
+  })
+
+  it('all clean → integrate (condition 3)', () => {
+    const r = tallyReview([v('clean'), v('clean'), v('clean')], 3)
+    expect(r.decision).toBe('integrate')
+    expect(r.clean).toBe(3)
+  })
+
+  it('minority must-fix (1 of 3) is OUTVOTED → integrate', () => {
+    expect(tallyReview([v('must-fix', 'nit'), v('clean'), v('clean')], 3).decision).toBe('integrate')
+  })
+
+  it('a tie among decisive votes (1-1, one abstention) → defer — thin signal, never merge', () => {
+    const r = tallyReview([v('must-fix'), v('clean'), v(null)], 3)
+    expect(r.decision).toBe('defer')
+    expect(r.mustFix).toBe(1)
+    expect(r.clean).toBe(1)
+  })
+
+  it('all reviewers abstained (no parseable verdict) → defer, not a merge', () => {
+    expect(tallyReview([v(null), v(null), v(null)], 3).decision).toBe('defer')
+  })
+
+  it('a lone clean vote (2 abstentions) does NOT reach majority → defer (a non-vote cannot lower the bar)', () => {
+    // panelSize 3 ⇒ majority 2; only ONE decisive (clean) vote ⇒ no majority ⇒ defer.
+    expect(tallyReview([v('clean'), v(null), v(null)], 3).decision).toBe('defer')
+  })
+
+  it('majority is computed over the FULL panel size, not the votes cast', () => {
+    // Two must-fix out of a panel of 3 ⇒ majority (2) reached even with a missing vote.
+    expect(tallyReview([v('must-fix'), v('must-fix'), v(null)], 3).decision).toBe('rework')
+  })
+})
+
+describe('extractReviewVerdict — verdict marker scrape', () => {
+  it('parses a CLEAN marker', () => {
+    expect(extractReviewVerdict(`blah\n${'OPENGROUND_REVIEW:'} CLEAN ::OG_REVIEW_END::`)).toEqual({
+      vote: 'clean',
+      note: '',
+    })
+  })
+
+  it('parses a MUST_FIX marker + its note', () => {
+    const raw = 'reading files…\nOPENGROUND_REVIEW: MUST_FIX deletes the safety net ::OG_REVIEW_END::'
+    expect(extractReviewVerdict(raw)).toEqual({ vote: 'must-fix', note: 'deletes the safety net' })
+  })
+
+  it('survives ANSI / cursor-position noise the TUI emits (no word fusing)', () => {
+    // CSI cursor-forward between words must become a space, not vanish.
+    const raw = '\x1b[2J\x1b[32mOPENGROUND_REVIEW:\x1b[0m MUST_FIX race\x1b[5C condition ::OG_REVIEW_END::'
+    const r = extractReviewVerdict(raw)
+    expect(r.vote).toBe('must-fix')
+    expect(r.note).toContain('race')
+    expect(r.note).toContain('condition')
+  })
+
+  it('takes the LAST verdict when the stream has several (the final answer)', () => {
+    const raw =
+      'OPENGROUND_REVIEW: MUST_FIX first ::OG_REVIEW_END:: … rethought …\nOPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
+    expect(extractReviewVerdict(raw).vote).toBe('clean')
+  })
+
+  it('REGRESSION: a real MUST_FIX note containing "<" is parsed (not flipped to clean/null)', () => {
+    // The old `!body.includes('<')` guard silently dropped exactly the must-fix notes an
+    // adversarial reviewer is MOST likely to write — comparisons / generics / JSX.
+    for (const note of ['the loop uses i < n but must be i <= n', 'returns List<T> unsorted', 'unclosed <div> in the mock']) {
+      const r = extractReviewVerdict(`reasoning…\nOPENGROUND_REVIEW: MUST_FIX ${note} ::OG_REVIEW_END::`)
+      expect(r.vote).toBe('must-fix')
+      expect(r.note).toBe(note)
+    }
+  })
+
+  it('SKIPS the prompt’s echoed `<VERDICT>` placeholder (its body is not a vote token)', () => {
+    // The echoed example line has body "<VERDICT>" → starts with neither MUST_FIX nor
+    // CLEAN → skipped → a non-vote (NOT a false clean).
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: <VERDICT> ::OG_REVIEW_END::')).toEqual({ vote: null, note: '' })
+  })
+
+  it('SAFETY: a buffer with ONLY the echoed prompt (reviewer abstained) is a non-vote, never clean', () => {
+    // A reviewer that hangs / times out emits no verdict of its own — its buffer is just
+    // the echoed prompt. That MUST scrape to null (→ defer), never to a clean vote.
+    expect(extractReviewVerdict(buildReviewPrompt('origin/main')).vote).toBeNull()
+  })
+
+  it('the vote token must be a WHOLE WORD — a CLEAN/MUST_FIX *prefix* never fails open to a vote', () => {
+    // A contract-violating body that merely begins with a vote-token prefix is NOT a
+    // vote (the dangerous direction — "CLEANUP" → clean — is the one we must never take).
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEANUP the dead code ::OG_REVIEW_END::').vote).toBeNull()
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEANED already ::OG_REVIEW_END::').vote).toBeNull()
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: MUST_FIXED earlier ::OG_REVIEW_END::').vote).toBeNull()
+    // But the real tokens — alone, or followed by a space/punctuation — still parse.
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::').vote).toBe('clean')
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEAN. ::OG_REVIEW_END::').vote).toBe('clean')
+    expect(extractReviewVerdict('OPENGROUND_REVIEW: MUST_FIX bug ::OG_REVIEW_END::').vote).toBe('must-fix')
+  })
+
+  it('no marker at all → a non-vote (vote:null)', () => {
+    expect(extractReviewVerdict('the model rambled but never emitted a verdict')).toEqual({ vote: null, note: '' })
+  })
+})
+
+describe('buildReviewPrompt — the reviewer contract', () => {
+  it('embeds the trunk ref + the verdict marker template and the two vote words (read-only)', () => {
+    const p = buildReviewPrompt('origin/main')
+    expect(p).toContain('git diff origin/main...HEAD')
+    expect(p).toContain('OPENGROUND_REVIEW: <VERDICT> ::OG_REVIEW_END::') // the template line
+    expect(p).toContain('MUST_FIX')
+    expect(p).toContain('CLEAN')
+    expect(p).toContain('::OG_REVIEW_END::')
+    expect(p).toMatch(/independent adversarial code reviewer/i)
+    expect(p).toMatch(/READ-ONLY/i)
+  })
+
+  it('ECHO-SAFE: the prompt has NO line that scrapes to a real vote (the abstention safeguard)', () => {
+    // The whole point of the <VERDICT> template: the prompt's only verdict-shaped span
+    // is the placeholder, which is NOT a vote token. So a reviewer that emits nothing
+    // (its buffer = just the echoed prompt) scrapes to a non-vote, never a false clean.
+    expect(extractReviewVerdict(buildReviewPrompt('origin/main')).vote).toBeNull()
+    // Belt-and-suspenders: no bare echoed vote line.
+    expect(buildReviewPrompt('origin/main')).not.toContain('OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::')
+    expect(buildReviewPrompt('origin/main')).not.toContain('OPENGROUND_REVIEW: MUST_FIX ')
+  })
+})
+
+// ── runIntegratePass — adversarial review gate (card a14329dc) ─────────────────
+// The COMPLEMENT to the verify gate: after verify is GREEN, an INDEPENDENT panel
+// fact-checks the diff and a STRICT majority decides. Driven with a FAKE `review`
+// dep (the real claude panel is covered by tallyReview / extractReviewVerdict above
+// + the REAL-git integration test) to prove the ROUTING the goal specifies:
+// majority must-fix → 差し戻し (never merge); all clean → land; no majority → defer.
+describe('runIntegratePass — adversarial review gate (a14329dc)', () => {
+  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
+    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
+
+  const mustFixResult = (note = 'real bug'): ReviewResult => ({
+    decision: 'rework',
+    verdicts: [],
+    mustFix: 2,
+    clean: 1,
+    reason: `敵対レビュー多数決: 2/${REVIEW_PANEL_SIZE} が must-fix 判定 — ${note}`,
+  })
+  const cleanResult = (): ReviewResult => ({
+    decision: 'integrate',
+    verdicts: [],
+    mustFix: 0,
+    clean: 3,
+    reason: '敵対レビュー多数決: 3/3 clean',
+  })
+  const deferResult = (): ReviewResult => ({
+    decision: 'defer',
+    verdicts: [],
+    mustFix: 1,
+    clean: 1,
+    reason: '敵対レビュー多数決つかず',
+  })
+
+  it('(1)+(2) majority must-fix → 差し戻し review→doing, NEVER integrated, logged', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': mustFixResult('off-by-one in loop') },
+    })
+    await runIntegratePass(engine, deps)
+    // Composition order: verify ran GREEN first, THEN the panel reviewed.
+    expect(deps.verified).toHaveLength(1)
+    expect(deps.reviewed).toHaveLength(1)
+    expect(deps.reviewed[0]).toMatchObject({ branch: 'swarm/a', tip: 'tip-swarm/a' })
+    // Majority must-fix → NOT merged; sent back review→doing (戻して直す) with the reason.
+    expect(deps.integrated).toHaveLength(0)
+    expect(deps.moved).toHaveLength(0)
+    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(engine.reworks.get('a')).toBe(1)
+    expect(engine.reviewFailed.get('swarm/a')).toBe('tip-swarm/a') // memoized for the skip path
+    expect(deps.instructed[0]?.message).toContain('off-by-one in loop')
+    // Observability (condition 4): the verdict + tally is in the engine log.
+    expect(engine.log.some((l) => l.message.includes('敵対レビュー多数決 → 差し戻し'))).toBe(true)
+    expect(engine.log.some((l) => l.message.includes('must-fix 2 / clean 1'))).toBe(true)
+  })
+
+  it('(3) all clean → integrated (lands), logged green', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': cleanResult() },
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.reviewed).toHaveLength(1)
+    expect(deps.integrated).toEqual(['swarm/a']) // majority clean → landed
+    expect(deps.moved).toEqual(['a'])
+    expect(deps.reworkedToDoing).toHaveLength(0)
+    expect(engine.reworks.has('a')).toBe(false)
+    expect(engine.reviewFailed.has('swarm/a')).toBe(false)
+    expect(engine.log.some((l) => l.message.includes('敵対レビュー多数決 → clean'))).toBe(true)
+  })
+
+  it('no majority (defer) → stays in review: NOT integrated, NOT reworked, not memoized', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': deferResult() },
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toHaveLength(0) // never merge on thin signal
+    expect(deps.reworkedToDoing).toHaveLength(0) // not sent back…
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.reworks.has('a')).toBe(false) // …so the 差し戻し budget is untouched
+    expect(engine.reviewFailed.has('swarm/a')).toBe(false) // transient — retried fresh next pass
+    expect(engine.log.some((l) => l.message.includes('敵対レビュー多数決つかず → 保留'))).toBe(true)
+  })
+
+  it('the panel runs ONLY after verify is green — a verify-RED card never reaches it', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      verifyResults: { 'swarm/a': { ok: false, reason: 'tsc red' } },
+      reviewDefault: 'integrate', // would PASS if reached — proving it is NOT reached
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.verified).toHaveLength(1)
+    expect(deps.reviewed).toHaveLength(0) // verify RED short-circuits BEFORE the panel
+    expect(deps.integrated).toHaveLength(0) // 差し戻し on the verify gate
+    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+  })
+
+  it('back-compat: NO review dep wired → integrate runs straight after verify (stage skipped)', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }) // no reviewResults/reviewDefault
+    expect(deps.review).toBeUndefined()
+    await runIntegratePass(engine, deps)
+    expect(deps.reviewed).toHaveLength(0)
+    expect(deps.integrated).toEqual(['swarm/a']) // lands exactly as before a14329dc
+    expect(deps.moved).toEqual(['a'])
+  })
+
+  it('memo: an unchanged must-fix tip re-reworks WITHOUT a fresh panel (skipIfTip), escalating to blocked', async () => {
+    // A LIVE worker keeps bouncing back un-fixed (same tip). Pass 1 reviews must-fix +
+    // memoizes; passes 2-3 carry it via skipIfTip (panel SKIPPED — no re-burning claude)
+    // and re-rework until MAX_REWORKS overflows → parked in 'blocked'.
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': mustFixResult() },
+    })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // un-fixed worker re-appears in review
+
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(1)
+    expect(engine.reviewFailed.get('swarm/a')).toBe('tip-swarm/a')
+    expect(deps.reviewed.filter((r) => r.skipIfTip === undefined)).toHaveLength(1) // 1st: real panel
+
+    engine.lastIntegrateAt = 0 // reset throttle
+    await runIntegratePass(engine, deps)
+    expect(engine.reworks.get('a')).toBe(2)
+    // 2nd review call carried skipIfTip = the memoized tip (panel short-circuited).
+    expect(deps.reviewed.at(-1)?.skipIfTip).toBe('tip-swarm/a')
+
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toHaveLength(0) // never merged across the whole bounce
+    expect(deps.recovered.at(-1)).toEqual({ taskId: 'a', column: 'blocked' }) // budget spent → parked
+    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1)
+    expect(engine.reviewFailed.has('swarm/a')).toBe(false) // cleared on park
+  })
+
+  it('owner DISARM during the (slow) panel: the card is not mutated', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
+    // A review that flips autoMerge OFF mid-await, then reports must-fix.
+    deps.review = async () => {
+      engine.autoMerge = false
+      return mustFixResult()
+    }
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toHaveLength(0)
+    expect(deps.reworkedToDoing).toHaveLength(0) // disarm landed → no 差し戻し write
+    expect(engine.reworks.has('a')).toBe(false)
+  })
+
+  it('an ERRORED panel defers (leaves the card in review) — never merges un-reviewed', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
+    deps.review = async () => {
+      throw new Error('panel spawn failed')
+    }
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toHaveLength(0) // not merged
+    expect(deps.reworkedToDoing).toHaveLength(0) // not a worker fault → not sent back
+    expect(engine.reworks.has('a')).toBe(false)
+    expect(engine.log.some((l) => l.message.includes('adversarial review errored'))).toBe(true)
+  })
+
+  it('persistent defer is BOUNDED — after MAX_REVIEW_DEFERS the panel stops re-spawning + needs-human; a new tip re-arms', async () => {
+    // A genuinely ambiguous diff (or a systemic claude outage where every reviewer
+    // abstains) defers every pass. Unbounded, that re-burns N claude sessions forever.
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': deferResult() },
+    })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // ambiguous card keeps re-appearing
+
+    for (let i = 0; i < MAX_REVIEW_DEFERS; i++) {
+      engine.lastIntegrateAt = 0
+      await runIntegratePass(engine, deps)
+    }
+    expect(deps.reviewed).toHaveLength(MAX_REVIEW_DEFERS) // a REAL panel ran each pass so far
+    expect(deps.integrated).toHaveLength(0) // never merged on no-majority
+    expect(engine.reviewDeferred.get('swarm/a')?.count).toBe(MAX_REVIEW_DEFERS)
+    expect(engine.reviews.find((r) => r.taskId === 'a')?.status).toBe('conflict') // needs-human dot
+    expect(engine.log.some((l) => l.message.includes('needs-human 退避'))).toBe(true)
+
+    // Next pass: defer-exhausted on THIS tip → panel is SKIPPED (no fresh claude burn).
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(deps.reviewed).toHaveLength(MAX_REVIEW_DEFERS) // NOT incremented — panel skipped
+    expect(deps.integrated).toHaveLength(0)
+
+    // A NEW commit (different verified tip) clears the streak → the panel re-arms.
+    deps.verify = async () => ({ ok: true, tip: 'tip-fixed' })
+    deps.review = async () => cleanResult()
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toContain('swarm/a') // re-reviewed clean on the new tip → landed
   })
 })
 
@@ -2384,6 +3485,130 @@ describe('runEnginePass — never overlaps itself', () => {
     expect(spawned).toEqual(['task a']) // dispatched exactly once, not twice
     expect(engine.workers).toHaveLength(1)
     expect(engine.passInFlight).toBe(false) // cleared after the pass settled
+  })
+})
+
+// ── runEnginePass ⇄ control plane (stop) — mutual exclusion (runExclusive) ──────
+// Audit MAJOR fix: a dispatch pass's monitor reads the board + workers ONCE at pass
+// start; a stop landing in the monitor's await window (countCommitsAhead/readHeartbeat)
+// used to park its card in 'blocked' only for the still-looping monitor to overwrite it
+// from the STALE snapshot (recoverLost → 'todo', or promote → 'review' when commitsAhead>0).
+// The per-engine critical section serializes the two, so the owner's explicit halt holds.
+
+describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives the monitor race', () => {
+  beforeEach(() => __resetOrchestratorForTests())
+
+  it('serializes a stop fired during the monitor probe window, keeping its card BLOCKED (not re-homed)', async () => {
+    const key = await canonicalize('/proj-stop-vs-monitor')
+    // Two DOING workers. The monitor probes A FIRST; we suspend it inside A's
+    // countCommitsAhead await (the documented race window) and fire stop(B) there. B
+    // carries commitsAhead>0 — the exact bait that, on a stale pass-start snapshot with
+    // a dead-judged B, would promote→review (or recoverLost→todo) over the owner's park.
+    const fresh = new Date().toISOString()
+    const engine = newEngine({
+      path: key,
+      running: true,
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt: fresh }),
+        worker({ terminalId: 'pty-b-1', branch: 'swarm/b', worktree: '/wt/b', taskId: 'b', taskTitle: 'task b', startedAt: fresh }),
+      ],
+    })
+    __seedEngineForTests(engine)
+
+    const board = new Map<string, ProjectTask>(
+      [card('a', { boardColumn: 'doing', branch: 'swarm/a' }), card('b', { boardColumn: 'doing', branch: 'swarm/b' })].map(
+        (c) => [c.id, { ...c }] as const,
+      ),
+    )
+    const recovered: { taskId: string; column: string }[] = []
+    const promoted: string[] = []
+    const tornDown: string[] = []
+    let reachProbe: () => void = () => {}
+    const reachedProbe = new Promise<void>((r) => (reachProbe = r))
+    let releaseProbe: () => void = () => {}
+    const probeGate = new Promise<void>((r) => (releaseProbe = r))
+    let firstProbe = true
+    const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = {
+      fetchTasks: async () => Array.from(board.values()).map((c) => ({ ...c })),
+      spawnWorker: async () => ({ terminalId: 'pty-x', agentSessionId: 's', worktree: '/wt/x', branch: 'swarm/x' }),
+      moveToDoing: async () => true,
+      moveToReview: async (_p, taskId, branch) => {
+        promoted.push(taskId)
+        const c = board.get(taskId)
+        if (c) {
+          c.boardColumn = 'review'
+          if (branch) c.branch = branch
+        }
+        return true
+      },
+      countCommitsAhead: async (_p, branch) => {
+        if (firstProbe) {
+          firstProbe = false
+          reachProbe() // signal: the monitor is now parked in A's probe window (holds the lock)
+          await probeGate // SUSPEND mid-pass — the await window the bug needs
+        }
+        return branch === 'swarm/b' ? 3 : 0 // B has integrable commits (the promote bait)
+      },
+      readHeartbeat: async () => null, // no readyToMerge sign ⇒ an ALIVE worker never promotes
+      recoverCard: async (_p, taskId, column) => {
+        recovered.push({ taskId, column })
+        const c = board.get(taskId)
+        if (c) {
+          c.boardColumn = column
+          c.done = false
+        }
+        return true
+      },
+      recoverWorker: async ({ terminalId }) => {
+        tornDown.push(terminalId)
+        return { removed: true }
+      },
+      isAlive: (id) => !tornDown.includes(id), // a torn-down PTY reads dead
+      lastOutputAt: () => Date.now(), // both workers streaming ⇒ never stall-reclaimed
+      nudge: () => true,
+      recentOutput: () => null,
+      // Integration half — present but inert (autoMerge OFF, no review cards).
+      fetchReview: async () => [],
+      prepareTarget: async () => 'main',
+      classify: async () => 'ff',
+      verify: async () => ({ ok: true, tip: null }),
+      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+      moveToDone: async () => true,
+      markConflict: async () => true,
+      cleanup: async () => ({ removed: true }),
+      killPty: () => {},
+      instructRework: () => {},
+      worktreeExists: async () => true,
+    }
+
+    // Kick the pass — it takes the critical section synchronously (engine.lock is set
+    // before its first await), then suspends inside A's gated probe.
+    const passP = runEnginePass(engine, deps)
+    await reachedProbe // the pass now OWNS the section, parked in the probe window
+    // Fire the owner's stop for B WHILE the pass holds the section — it must QUEUE.
+    const stopP = stopOrchestratorWorker('/proj-stop-vs-monitor', 'pty-b-1', deps)
+    // Macrotasks >> the in-memory canonicalize+lookup, so stop has reached runExclusive
+    // and is BLOCKED on the lock. PROOF of serialization: its recoverCard/teardown have
+    // NOT run — B is untouched while the pass owns the section. (Without the fix, stop
+    // would already have parked + torn down B here, and the resumed monitor would then
+    // promote the dead-judged B to review over that park.)
+    await new Promise((r) => setTimeout(r, 15))
+    expect(board.get('b')?.boardColumn).toBe('doing')
+    expect(tornDown).not.toContain('pty-b-1')
+
+    // Release the probe → the pass finishes the monitor (B still ALIVE ⇒ never promoted),
+    // then the queued stop runs and parks B in blocked.
+    releaseProbe()
+    await Promise.all([passP, stopP])
+
+    // (1) The owner's blocked park SURVIVED — the monitor never overwrote it.
+    expect(board.get('b')?.boardColumn).toBe('blocked')
+    expect(promoted).not.toContain('b') // never dead-judged ⇒ never promoted to review
+    expect(recovered).toEqual([{ taskId: 'b', column: 'blocked' }]) // ONLY stop's park, no todo requeue
+    expect(tornDown).toContain('pty-b-1') // B's PTY torn down by stop
+    expect(engine.workers.map((w) => w.terminalId)).toEqual(['pty-a-1']) // B dropped, A still counted
+    expect(board.get('a')?.boardColumn).toBe('doing') // A keeps draining, untouched
+    expect(engine.passInFlight).toBe(false)
   })
 })
 
@@ -2632,16 +3857,20 @@ describe('runIntegratePass — reliable conflict-flag clear on land', () => {
     expect(deps.marks).toHaveLength(0) // no wasted markConflict write on the happy path
   })
 
-  it('names the conflicted files in the log so a human knows where to resolve', async () => {
-    const engine = newEngine({ autoMerge: true })
+  it('names the conflicted files in the delegated rebase instruction so the worker knows where to resolve', async () => {
+    // Card 012a2848: the conflict files are now surfaced in the WORKER instruction
+    // (the /order memo a re-dispatch carries), not a "manual integration" log line.
+    const engine = newEngine({ autoMerge: true }) // no live worker → todo re-dispatch path
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
       outcomes: { 'swarm/a': { status: 'conflict', files: ['src/x.ts', 'src/y.ts'] } },
-      readiness: { 'swarm/a': 'rebase' },
     })
     await runIntegratePass(engine, deps)
-    const line = engine.log.find((l) => l.kind === 'conflict')
-    expect(line?.message).toContain('conflicts in: src/x.ts, src/y.ts')
+    const memo = engine.reworkReasons.get('a')
+    expect(memo).toContain('src/x.ts')
+    expect(memo).toContain('src/y.ts')
+    // It is recorded as a 'conflict'-kind event (so the KPI conflicted counter is bumped).
+    expect(engine.log.some((l) => l.kind === 'conflict')).toBe(true)
   })
 })
 
@@ -2881,5 +4110,591 @@ describe('resolveOrchestratorReview', () => {
     const state = await resolveOrchestratorReview('/proj-never', 'a', 'blocked', deps)
     expect(state.running).toBe(false)
     expect(state.reviews).toHaveLength(0)
+  })
+
+  // ── KPI guard (card a2ea85b9 review-A MUST-FIX) ─────────────────────────────
+  // resolveOrchestratorReview logs a kind:'integrate' line — but it's a PARK/REQUEUE,
+  // not a land. The analytics counter must NOT treat it as an integration, or the
+  // worker-success / conflict / rework rates corrupt. Asserted end-to-end: the real
+  // logLine fires (a kind:integrate line lands in the journal) yet integrated stays 0.
+  it('does NOT bump metrics.integrated when the owner PARKS a card to blocked', async () => {
+    const key = await canonicalize('/proj-resolve-metrics-blocked')
+    const engine = newEngine({
+      path: key,
+      conflictedBranches: new Set(['swarm/a']),
+      reviews: [{ taskId: 'a', branch: 'swarm/a', taskTitle: 'task a', status: 'conflict' }],
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a' })],
+    })
+    __seedEngineForTests(engine)
+    const deps = resolveDeps([card('a', { boardColumn: 'review', branch: 'swarm/a', integrationConflict: true })])
+
+    await resolveOrchestratorReview('/proj-resolve-metrics-blocked', 'a', 'blocked', deps)
+
+    expect(deps.board.get('a')?.boardColumn).toBe('blocked') // the resolve DID land…
+    // …and it DID log a kind:'integrate' journal line (the owner-resolve entry)…
+    expect(engine.log.some((l) => l.kind === 'integrate' && l.message.includes('resolved by owner'))).toBe(true)
+    // …yet that NON-land line must NOT count as a worker integration (the MUST-FIX).
+    expect(engine.metrics.integrated).toBe(0)
+  })
+
+  it('does NOT bump metrics.integrated when the owner REQUEUES a card to todo', async () => {
+    const key = await canonicalize('/proj-resolve-metrics-todo')
+    const engine = newEngine({
+      path: key,
+      conflictedBranches: new Set(['swarm/a']),
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a' })],
+    })
+    __seedEngineForTests(engine)
+    const deps = resolveDeps([card('a', { boardColumn: 'review', branch: 'swarm/a', integrationConflict: true })])
+
+    await resolveOrchestratorReview('/proj-resolve-metrics-todo', 'a', 'todo', deps)
+
+    expect(deps.board.get('a')?.boardColumn).toBe('todo')
+    expect(engine.metrics.integrated).toBe(0)
+  })
+})
+
+// ── fireFatalNotifications (条件1,4,5 — escalation safety valve) ──────────────────
+// The choke point that turns a FATAL unmanned-loop event into a human push. Driven
+// with a FAKE notify (no real notification IO), so it asserts the observable
+// contract: WHICH events fire, that a normal pass is silent (no noise), and that a
+// persisting condition notifies once (rising-edge dedup) while a recurrence re-fires.
+describe('fireFatalNotifications — fatal events push, normal passes are silent', () => {
+  const run = (
+    engine: ProjectEngine,
+    tasks: ProjectTask[] | null,
+    opts: { alive?: Set<string>; withNotify?: boolean } = {},
+  ): SwarmFatalNotification[] => {
+    const alive = opts.alive ?? new Set<string>()
+    const fired: SwarmFatalNotification[] = []
+    const deps = {
+      isAlive: (id: string) => alive.has(id),
+      notify: opts.withNotify === false ? undefined : (n: SwarmFatalNotification) => fired.push(n),
+    }
+    fireFatalNotifications(engine, tasks, deps, 0)
+    return fired
+  }
+
+  it('does NOT notify on a normal pass (no fatal condition) — 条件4 no noise', () => {
+    const engine = newEngine({ running: true, workers: [worker({ terminalId: 'p1', taskId: 'a' })] })
+    const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
+    expect(run(engine, tasks, { alive: new Set(['p1']) })).toEqual([])
+  })
+
+  it('notifies on a rework-exhausted anomaly (card parked in blocked)', () => {
+    const engine = newEngine({
+      running: true,
+      anomalies: [
+        { kind: 'rework-exhausted', ref: 'a', branch: 'swarm/a', taskTitle: 'fix', attempts: 3 },
+      ],
+    })
+    const fired = run(engine, [card('a', { boardColumn: 'blocked' })])
+    expect(fired).toHaveLength(1)
+    expect(fired[0].event).toBe('rework-exhausted')
+    expect(fired[0].taskId).toBe('a')
+    expect(fired[0].branch).toBe('swarm/a')
+    expect(fired[0].detail).toContain('差し戻し')
+    expect(fired[0].logHint).toBeTruthy() // 導線 present (条件3)
+  })
+
+  it('notifies all-workers-down: running, zero live workers, doing work remains', () => {
+    const engine = newEngine({
+      running: true,
+      workers: [worker({ terminalId: 'dead', taskId: 'a', branch: 'swarm/a' })],
+    })
+    const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
+    const fired = run(engine, tasks, { alive: new Set() }) // 'dead' is not alive
+    expect(fired.map((f) => f.event)).toEqual(['all-workers-down'])
+    expect(fired[0].logHint).toBeTruthy()
+  })
+
+  it('does NOT fire all-workers-down while a worker is still alive', () => {
+    const engine = newEngine({
+      running: true,
+      workers: [worker({ terminalId: 'p1', taskId: 'a', branch: 'swarm/a' })],
+    })
+    const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
+    expect(run(engine, tasks, { alive: new Set(['p1']) })).toEqual([])
+  })
+
+  it('does NOT fire all-workers-down with no doing work in flight', () => {
+    const engine = newEngine({ running: true, workers: [] })
+    const tasks = [card('a', { boardColumn: 'todo', branch: 'swarm/a' })]
+    expect(run(engine, tasks, { alive: new Set() })).toEqual([])
+  })
+
+  it('does NOT fire all-workers-down when the engine is stopped', () => {
+    const engine = newEngine({ running: false, workers: [] })
+    const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
+    expect(run(engine, tasks, { alive: new Set() })).toEqual([])
+  })
+
+  it('drains a queued EDGE event (exec-timeout) exactly once', () => {
+    const engine = newEngine({
+      running: true,
+      pendingFatal: [
+        {
+          event: 'exec-timeout',
+          detail: 'overran',
+          branch: 'swarm/a',
+          taskId: 'a',
+          taskTitle: 'big',
+          logHint: 'log',
+        },
+      ],
+    })
+    const fired1 = run(engine, [], { alive: new Set() })
+    expect(fired1.map((f) => f.event)).toEqual(['exec-timeout'])
+    expect(engine.pendingFatal).toHaveLength(0) // drained
+    expect(run(engine, [], { alive: new Set() })).toEqual([]) // nothing left
+  })
+
+  it('rising-edge dedup: a persisting condition notifies ONCE, not every pass', () => {
+    const anomalies = [
+      { kind: 'rework-exhausted' as const, ref: 'a', branch: 'swarm/a', taskTitle: 'fix', attempts: 3 },
+    ]
+    const engine = newEngine({ running: true, anomalies })
+    const tasks = [card('a', { boardColumn: 'blocked' })]
+    expect(run(engine, tasks)).toHaveLength(1) // first appearance fires
+    expect(run(engine, tasks)).toEqual([]) // still present → silent
+    expect(run(engine, tasks)).toEqual([])
+  })
+
+  it('re-notifies after the condition clears and recurs (edge reset)', () => {
+    const anomalies = [
+      { kind: 'rework-exhausted' as const, ref: 'a', branch: 'swarm/a', taskTitle: 'fix', attempts: 3 },
+    ]
+    const engine = newEngine({ running: true, anomalies })
+    const tasks = [card('a', { boardColumn: 'blocked' })]
+    expect(run(engine, tasks)).toHaveLength(1) // fires
+    engine.anomalies = [] // human resolved it → condition cleared
+    expect(run(engine, tasks)).toEqual([]) // and the dedup key is forgotten
+    engine.anomalies = anomalies // it recurs
+    expect(run(engine, tasks)).toHaveLength(1) // fires again
+  })
+
+  it('only rework-exhausted is fatal — other anomaly kinds never notify (条件4)', () => {
+    const engine = newEngine({
+      running: true,
+      anomalies: [
+        { kind: 'worker-stale', ref: 'swarm/a', branch: 'swarm/a', staleMinutes: 99 },
+        { kind: 'move-stuck', ref: 'b', branch: 'swarm/b', intent: 'review', attempts: 9 },
+        { kind: 'orphan-doing', ref: 'c', branch: 'swarm/c' },
+        { kind: 'worktree-missing', ref: 'swarm/d', branch: 'swarm/d' },
+      ],
+    })
+    expect(run(engine, [])).toEqual([])
+  })
+
+  it('skips state-derived events when the board read failed (tasks null), still drains edges', () => {
+    const engine = newEngine({
+      running: true,
+      anomalies: [{ kind: 'rework-exhausted', ref: 'a', attempts: 3 }],
+      pendingFatal: [{ event: 'exec-timeout', detail: 'overran' }],
+    })
+    const fired = run(engine, null, { alive: new Set() })
+    expect(fired.map((f) => f.event)).toEqual(['exec-timeout']) // edge only; state-derived skipped
+  })
+
+  it('never throws when notify is unset (best-effort) and still drains + advances dedup', () => {
+    const engine = newEngine({
+      running: true,
+      anomalies: [{ kind: 'rework-exhausted', ref: 'a', attempts: 3 }],
+      pendingFatal: [{ event: 'exec-timeout', detail: 'x' }],
+    })
+    expect(() =>
+      run(engine, [card('a', { boardColumn: 'blocked' })], { withNotify: false }),
+    ).not.toThrow()
+    expect(engine.pendingFatal).toHaveLength(0) // drained even without a sink
+    expect(engine.notified.has('rework-exhausted:a')).toBe(true) // rising-edge bookkeeping advanced
+  })
+})
+
+// ── KPI aggregation (the analytics layer — card a2ea85b9) ─────────────────────
+// The data foundation for "is the swarm getting better?". All PURE (no IO, no
+// clock — timestamps are passed in), so HOME isolation is moot, but the suite
+// runs under the same HOME-isolated harness as the rest of the file.
+//   • classifyMetricEvent — journal line → which non-lossy counter it bumps.
+//   • computeLeadTimeStats — done cards × integrate journal lines → todo→done.
+//   • computeSwarmKpis     — counters + cards + journal → the dashboard rates.
+describe('KPI: classifyMetricEvent (line → counter)', () => {
+  it('maps each structured kind to its counter', () => {
+    expect(classifyMetricEvent({ kind: 'dispatch', level: 'info', message: 'x' })).toBe('dispatched')
+    expect(classifyMetricEvent({ kind: 'promote', level: 'info', message: 'x' })).toBe('promoted')
+    // integrate is guarded by the land-shaped message (see the dedicated test below).
+    expect(
+      classifyMetricEvent({ kind: 'integrate', level: 'info', message: 'integrated (ff): task → origin/main' }),
+    ).toBe('integrated')
+    expect(classifyMetricEvent({ kind: 'conflict', level: 'error', message: 'x' })).toBe('conflicted')
+    expect(classifyMetricEvent({ kind: 'crash', level: 'warn', message: 'x' })).toBe('crashed')
+    expect(classifyMetricEvent({ kind: 'stall', level: 'warn', message: 'x' })).toBe('stalled')
+  })
+
+  it('counts kind:integrate ONLY for a real land, NOT an owner-resolve park/requeue (MUST-FIX)', () => {
+    // The auto-land line (defaultMoveToDone) is the ONLY true integration → counted.
+    expect(
+      classifyMetricEvent({ kind: 'integrate', level: 'info', message: 'integrated (rebase): my task → origin/main' }),
+    ).toBe('integrated')
+    // resolveOrchestratorReview ALSO logs kind:'integrate', but it is a PARK (→blocked)
+    // or REQUEUE (→todo), NOT a land — its message is not land-shaped, so it must NOT
+    // count as integrated. Counting it corrupts every rate (worker-success can exceed
+    // 100%, a conflict→resolve double-counts both conflictRate terms, reworkRate's
+    // denominator inflates). These are the verbatim owner-resolve messages.
+    expect(
+      classifyMetricEvent({
+        kind: 'integrate',
+        level: 'info',
+        message: 'review resolved by owner — card → blocked: swarm/x (my task)',
+      }),
+    ).toBeNull()
+    expect(
+      classifyMetricEvent({
+        kind: 'integrate',
+        level: 'info',
+        message: 'review resolved by owner — card → todo: swarm/x (my task)',
+      }),
+    ).toBeNull()
+    // A kind:integrate with a blank/garbage message also doesn't count (fail-closed).
+    expect(classifyMetricEvent({ kind: 'integrate', level: 'info', message: 'x' })).toBeNull()
+  })
+
+  it('splits dispatch by level — error ⇒ dispatchFailed, else dispatched', () => {
+    expect(
+      classifyMetricEvent({ kind: 'dispatch', level: 'error', message: 'dispatch failed: task — boom' }),
+    ).toBe('dispatchFailed')
+    expect(
+      classifyMetricEvent({ kind: 'dispatch', level: 'info', message: 'dispatch: task → swarm/x' }),
+    ).toBe('dispatched')
+  })
+
+  it('recognises BOTH rework SUCCESS lines by the marker (rework carries no kind)', () => {
+    // The verbatim lines the integrate stage emits (live-continue + re-dispatch).
+    expect(
+      classifyMetricEvent({
+        level: 'warn',
+        message: '差し戻し review→doing (1/2) 同一ブランチ継続: swarm/x (task) — verify RED',
+      }),
+    ).toBe('reworked')
+    expect(
+      classifyMetricEvent({
+        level: 'warn',
+        message: '差し戻し review→todo (2/2) 再 dispatch(worker 不在): swarm/x (task) — …',
+      }),
+    ).toBe('reworked')
+    expect(REWORK_LOG_MARKER).toBe('差し戻し review→')
+  })
+
+  it('does NOT count the rework-exhausted PARK line as a rework round', () => {
+    expect(
+      classifyMetricEvent({
+        level: 'error',
+        message: "差し戻し上限(2)超過 — 'blocked' 退避(要人手): swarm/x (task) — verify RED",
+      }),
+    ).toBeNull()
+  })
+
+  it('maps routine / cleanup / uncategorised lines to null (counted toward nothing)', () => {
+    expect(classifyMetricEvent({ kind: 'routine', level: 'info', message: 'slot freed' })).toBeNull()
+    expect(classifyMetricEvent({ kind: 'cleanup', level: 'warn', message: 'worktree kept' })).toBeNull()
+    expect(classifyMetricEvent({ level: 'info', message: 'auto-integrate ON' })).toBeNull()
+  })
+})
+
+describe('KPI: medianOf', () => {
+  it('is null for an empty list', () => {
+    expect(medianOf([])).toBeNull()
+  })
+  it('is the middle value for an odd count', () => {
+    expect(medianOf([30, 10, 20])).toBe(20)
+  })
+  it('is the rounded mean of the two middle values for an even count', () => {
+    expect(medianOf([10, 20, 30, 40])).toBe(25)
+    expect(medianOf([10, 21, 30, 41])).toBe(26) // (21+30)/2 = 25.5 → 26
+  })
+})
+
+describe('KPI: computeLeadTimeStats (todo→done pairing)', () => {
+  const done = (title: string, createdAt: string): ProjectTask => ({
+    id: title,
+    title,
+    done: true,
+    createdAt,
+    boardColumn: 'done',
+  })
+  const integrated = (title: string, at: string): OrchestratorLogLine => ({
+    at,
+    level: 'info',
+    kind: 'integrate',
+    message: `integrated (ff): ${title} → origin/main`,
+  })
+
+  it('pairs a done card with its integrate line by (deterministic) shortened title', () => {
+    const r = computeLeadTimeStats(
+      [done('alpha', '2026-06-23T00:00:00Z')],
+      [integrated('alpha', '2026-06-23T00:10:00Z')],
+    )
+    expect(r.count).toBe(1)
+    expect(r.medianMs).toBe(10 * 60_000)
+  })
+
+  it('takes the median across several completions', () => {
+    const tasks = [
+      done('a', '2026-06-23T00:00:00Z'),
+      done('b', '2026-06-23T00:00:00Z'),
+      done('c', '2026-06-23T00:00:00Z'),
+    ]
+    const log = [
+      integrated('a', '2026-06-23T00:01:00Z'), // 1m
+      integrated('b', '2026-06-23T00:05:00Z'), // 5m
+      integrated('c', '2026-06-23T00:09:00Z'), // 9m
+    ]
+    expect(computeLeadTimeStats(tasks, log).medianMs).toBe(5 * 60_000)
+  })
+
+  it('skips a done card with no matching integrate line', () => {
+    const r = computeLeadTimeStats([done('x', '2026-06-23T00:00:00Z')], [])
+    expect(r).toEqual({ medianMs: null, count: 0 })
+  })
+
+  it('ignores non-done cards even if an integrate line exists', () => {
+    const review: ProjectTask = {
+      id: 'r',
+      title: 'rev',
+      done: false,
+      createdAt: '2026-06-23T00:00:00Z',
+      boardColumn: 'review',
+    }
+    expect(computeLeadTimeStats([review], [integrated('rev', '2026-06-23T00:10:00Z')]).count).toBe(0)
+  })
+
+  it('ignores non-integrate journal lines (a promote with the same title)', () => {
+    const log: OrchestratorLogLine[] = [
+      { at: '2026-06-23T00:10:00Z', level: 'info', kind: 'promote', message: 'promoted to review: a → swarm/a' },
+    ]
+    expect(computeLeadTimeStats([done('a', '2026-06-23T00:00:00Z')], log).count).toBe(0)
+  })
+
+  it('skips a negative span (clock skew — integrate logged before createdAt)', () => {
+    expect(
+      computeLeadTimeStats(
+        [done('a', '2026-06-23T01:00:00Z')],
+        [integrated('a', '2026-06-23T00:00:00Z')],
+      ).count,
+    ).toBe(0)
+  })
+
+  it('skips a card with an unparseable createdAt', () => {
+    expect(
+      computeLeadTimeStats([done('a', 'not-a-date')], [integrated('a', '2026-06-23T00:10:00Z')]).count,
+    ).toBe(0)
+  })
+
+  it('uses the LATEST integrate line on a title collision (a re-landed title)', () => {
+    const log = [
+      integrated('a', '2026-06-23T00:02:00Z'),
+      integrated('a', '2026-06-23T00:08:00Z'), // later wins
+    ]
+    expect(computeLeadTimeStats([done('a', '2026-06-23T00:00:00Z')], log).medianMs).toBe(8 * 60_000)
+  })
+
+  it('treats undefined boardColumn + done:true as done (back-compat)', () => {
+    const t: ProjectTask = { id: 'a', title: 'a', done: true, createdAt: '2026-06-23T00:00:00Z' }
+    expect(computeLeadTimeStats([t], [integrated('a', '2026-06-23T00:03:00Z')]).medianMs).toBe(3 * 60_000)
+  })
+})
+
+describe('KPI: computeSwarmKpis (counters + cards + journal → rates)', () => {
+  const counters = (over: Partial<ReturnType<typeof emptyMetricsCounters>> = {}) => ({
+    ...emptyMetricsCounters(),
+    ...over,
+  })
+
+  it('worker success = integrated / dispatched', () => {
+    const k = computeSwarmKpis({ counters: counters({ dispatched: 4, integrated: 3 }), tasks: [], log: [] })
+    expect(k.workerSuccessRate).toBeCloseTo(0.75)
+  })
+
+  it('conflict rate = conflicted / (integrated + conflicted)', () => {
+    const k = computeSwarmKpis({ counters: counters({ integrated: 3, conflicted: 1 }), tasks: [], log: [] })
+    expect(k.conflictRate).toBeCloseTo(0.25)
+  })
+
+  it('rework rate = reworked / (reworked + integrated)', () => {
+    const k = computeSwarmKpis({ counters: counters({ integrated: 4, reworked: 1 }), tasks: [], log: [] })
+    expect(k.reworkRate).toBeCloseTo(0.2)
+  })
+
+  it('a rate is null when its denominator is 0 — "no data yet", never a fake 0%', () => {
+    const k = computeSwarmKpis({ counters: emptyMetricsCounters(), tasks: [], log: [] })
+    expect(k.workerSuccessRate).toBeNull()
+    expect(k.conflictRate).toBeNull()
+    expect(k.reworkRate).toBeNull()
+    expect(k.leadTime).toEqual({ medianMs: null, count: 0 })
+  })
+
+  it('folds the lead-time stats from the cards + journal', () => {
+    const tasks: ProjectTask[] = [
+      { id: 'a', title: 'a', done: true, createdAt: '2026-06-23T00:00:00Z', boardColumn: 'done' },
+    ]
+    const log: OrchestratorLogLine[] = [
+      { at: '2026-06-23T00:06:00Z', level: 'info', kind: 'integrate', message: 'integrated (rebase): a → origin/main' },
+    ]
+    const k = computeSwarmKpis({ counters: counters({ dispatched: 1, integrated: 1 }), tasks, log })
+    expect(k.leadTime).toEqual({ medianMs: 6 * 60_000, count: 1 })
+    expect(k.workerSuccessRate).toBe(1)
+  })
+
+  it('passes the raw counters through verbatim (the rate denominators)', () => {
+    const k = computeSwarmKpis({
+      counters: counters({ dispatched: 5, integrated: 3, conflicted: 1, reworked: 2, crashed: 1, stalled: 1 }),
+      tasks: [],
+      log: [],
+    })
+    expect(k.counts).toEqual({ dispatched: 5, integrated: 3, conflicted: 1, reworked: 2, crashed: 1, stalled: 1 })
+  })
+})
+
+describe('KPI: logLine instrumentation wires the counters end-to-end', () => {
+  it('a real dispatch pass bumps engine.metrics.dispatched through the logLine chokepoint', async () => {
+    const engine = newEngine({ running: true })
+    const deps = makeDeps({ cards: [card('a')] })
+    expect(engine.metrics.dispatched).toBe(0)
+    await runDispatchPass(engine, deps)
+    // The dispatch logged a 'dispatch' journal line, which logLine taps into the
+    // counter — proving the analytics layer rides the existing event stream with
+    // no event-site hook (the same engine the dispatch tests above exercise).
+    expect(engine.metrics.dispatched).toBe(1)
+  })
+})
+
+// ── Consumption metering (the BUDGET layer, card 3f0fd4fa) ────────────────────
+// computeSwarmConsumption is PURE (live workers + lifetime counter + injected
+// clock → the snapshot the UI shows + the over-budget warning), so HOME isolation
+// is moot for the unit tests, but the suite runs under the same HOME-isolated
+// harness as the rest of the file. The end-to-end block drives the real
+// getOrchestratorState read path (HOME redirected by setup-home.ts).
+describe('Consumption: computeSwarmConsumption (pure)', () => {
+  const counters = (over: Partial<ReturnType<typeof emptyMetricsCounters>> = {}) => ({
+    ...emptyMetricsCounters(),
+    ...over,
+  })
+  const NOW = Date.parse('2026-06-29T12:00:00Z')
+
+  it('counts live workers and sums their in-flight run time (Σ now − startedAt)', () => {
+    const c = computeSwarmConsumption({
+      liveWorkers: [
+        { startedAt: '2026-06-29T11:59:00Z' }, // 1m
+        { startedAt: '2026-06-29T11:55:00Z' }, // 5m
+      ],
+      counters: counters({ dispatched: 2 }),
+      limit: 50,
+      now: NOW,
+    })
+    expect(c.activeWorkers).toBe(2)
+    expect(c.activeRunMs).toBe(6 * 60_000) // 1m + 5m combined
+  })
+
+  it('reads the session dispatch total off the non-lossy counter (the spend proxy)', () => {
+    const c = computeSwarmConsumption({
+      liveWorkers: [],
+      counters: counters({ dispatched: 12 }),
+      limit: 50,
+      now: NOW,
+    })
+    expect(c.dispatched).toBe(12)
+    expect(c.activeWorkers).toBe(0)
+    expect(c.activeRunMs).toBe(0)
+  })
+
+  it('flags overLimit once dispatched reaches the budget (>=), never below', () => {
+    const at = (d: number) =>
+      computeSwarmConsumption({ liveWorkers: [], counters: counters({ dispatched: d }), limit: 5, now: NOW })
+    expect(at(4).overLimit).toBe(false)
+    expect(at(5).overLimit).toBe(true) // exactly at the ceiling warns
+    expect(at(6).overLimit).toBe(true)
+  })
+
+  it('never flags overLimit when the limit is 0 (disabled — no false alarm)', () => {
+    const c = computeSwarmConsumption({
+      liveWorkers: [],
+      counters: counters({ dispatched: 99 }),
+      limit: 0,
+      now: NOW,
+    })
+    expect(c.overLimit).toBe(false)
+  })
+
+  it('skips an unparseable startedAt and clamps clock skew to 0 (never negative)', () => {
+    const c = computeSwarmConsumption({
+      liveWorkers: [
+        { startedAt: 'not-a-date' }, // unparseable → ignored for run time
+        { startedAt: '2026-06-29T13:00:00Z' }, // 1h in the FUTURE → clamped to 0
+        { startedAt: '2026-06-29T11:30:00Z' }, // 30m in the past
+      ],
+      counters: counters(),
+      limit: 50,
+      now: NOW,
+    })
+    expect(c.activeWorkers).toBe(3) // all three still COUNT as live workers
+    expect(c.activeRunMs).toBe(30 * 60_000) // only the valid past one contributes; no negative
+  })
+
+  it('defaults `now` to wall-clock when omitted (the live caller path)', () => {
+    const c = computeSwarmConsumption({
+      liveWorkers: [{ startedAt: new Date(Date.now() - 60_000).toISOString() }],
+      counters: counters(),
+      limit: 50,
+    })
+    // ~1 minute of in-flight time, with a generous upper bound for test jitter.
+    expect(c.activeRunMs).toBeGreaterThanOrEqual(60_000)
+    expect(c.activeRunMs).toBeLessThan(120_000)
+  })
+
+  it('passes the limit through verbatim (the displayed ceiling)', () => {
+    expect(
+      computeSwarmConsumption({ liveWorkers: [], counters: counters(), limit: 42, now: NOW }).limit,
+    ).toBe(42)
+  })
+})
+
+describe('Consumption: getOrchestratorState surfaces the snapshot end-to-end', () => {
+  beforeEach(() => __resetOrchestratorForTests())
+
+  it('counts only LIVE workers and carries the session dispatch total + budget', async () => {
+    const key = await canonicalize('/proj-consumption-e2e')
+    const engine = newEngine({
+      path: key,
+      workers: [
+        worker({ terminalId: 'pty-w1-1', taskId: 'w1', startedAt: '2020-01-01T00:00:00Z' }),
+        worker({ terminalId: 'pty-w2-1', taskId: 'w2', startedAt: '2020-01-01T00:00:00Z' }), // dead → filtered
+      ],
+      metrics: { ...emptyMetricsCounters(), dispatched: 7 },
+    })
+    __seedEngineForTests(engine)
+    const deps = makeDeps({ cards: [], dead: new Set(['w2']) })
+
+    const state = await getOrchestratorState('/proj-consumption-e2e', deps)
+
+    // Only the live worker counts — the dead one is filtered, exactly like `workers`.
+    expect(state.consumption.activeWorkers).toBe(1)
+    expect(state.workers.map((w) => w.terminalId)).toEqual(['pty-w1-1'])
+    // In-flight run time is a finite, positive number (real wall clock here).
+    expect(Number.isFinite(state.consumption.activeRunMs)).toBe(true)
+    expect(state.consumption.activeRunMs).toBeGreaterThan(0)
+    // Session dispatch total rides the non-lossy counter; the budget is the env ceiling.
+    expect(state.consumption.dispatched).toBe(7)
+    expect(state.consumption.limit).toBe(DISPATCH_BUDGET)
+    expect(state.consumption.overLimit).toBe(false) // 7 < default budget
+  })
+
+  it('a never-started engine reports an empty consumption snapshot carrying the budget', async () => {
+    const state = await getOrchestratorState('/proj-consumption-never', makeDeps({ cards: [] }))
+    expect(state.consumption).toEqual({
+      activeWorkers: 0,
+      activeRunMs: 0,
+      dispatched: 0,
+      limit: DISPATCH_BUDGET,
+      overLimit: false,
+    })
   })
 })

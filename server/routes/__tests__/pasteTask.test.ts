@@ -313,3 +313,46 @@ describe('POST /api/terminal/:id/paste-task — the paste write', () => {
     expect(written).toContain('before[201~\rafter')
   })
 })
+
+describe('POST /api/terminal/:id/paste-task — PTY-to-project binding', () => {
+  it("rejects pasting project A's task into a PTY running in project B → 403 (cross-project)", async () => {
+    // Both projects are registered (so each path passes validateProjectPath);
+    // B is the victim PTY. The exploit: compose A's task prompt (A's worktree
+    // protocol + an A-pointing markDone curl) and paste it into B's claude.
+    const dirA = await makeRegisteredDir('cross-a')
+    const dirB = await makeRegisteredDir('cross-b')
+    const task = await addTask(dirA, 'A-only task', 'do A things')
+    const writes: string[] = []
+    fakePty('pty-in-b', dirB, writes) // a LIVE claude PTY whose cwd is project B
+
+    const res = await app.request(
+      '/api/terminal/pty-in-b/paste-task',
+      json({ path: dirA, taskId: task.id }),
+    )
+    // 403 even though B itself is a registered project: B's cwd is in-registry
+    // (so validateProjectPath(B) is true), but its project UUID ≠ A's, so the
+    // worktrees-sibling escape hatch does not apply.
+    expect(res.status).toBe(403)
+    expect((await res.json()).error).toMatch(/does not belong/i)
+    // Critically: NOT ONE byte reached B's PTY.
+    expect(writes).toEqual([])
+  })
+
+  it('still accepts a PTY whose cwd is a subdirectory of the path (in-scope, e.g. nested launch)', async () => {
+    // Same-project nesting must keep working — the binding allows cwd === path
+    // OR cwd under path (startsWith), so a claude launched in a subfolder of
+    // the project is a legitimate paste target (regression guard for (2)).
+    const dir = await makeRegisteredDir('nested')
+    const task = await addTask(dir, 'Nested card', 'n')
+    const writes: string[] = []
+    fakePty('pty-sub', join(dir, 'packages', 'web'), writes)
+
+    const res = await app.request(
+      '/api/terminal/pty-sub/paste-task',
+      json({ path: dir, taskId: task.id }),
+    )
+    expect(res.status).toBe(200)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toContain('# Task: Nested card')
+  })
+})

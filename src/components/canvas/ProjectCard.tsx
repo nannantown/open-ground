@@ -3,6 +3,7 @@ import {
   FolderClosed,
   Users,
 } from 'lucide-react'
+import { memo } from 'react'
 import type { ClaudeBeaconStatus, ProjectMeta } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 
@@ -41,7 +42,7 @@ const coordFromId = (id: string) => {
 // `invite` design token. Local cards pass shared falsy and are unchanged. The
 // synthetic meta's empty git/task fields still hide the git icon and open-task
 // stamp; the shared caption rides in the description slot.
-export const ProjectCard = ({
+export const ProjectCard = memo(({
   project,
   onPointerDown,
   selected,
@@ -188,4 +189,4 @@ export const ProjectCard = ({
       </div>
     </div>
   )
-}
+})

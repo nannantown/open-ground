@@ -94,8 +94,12 @@ export interface Settings {
 /** Owner-only experiment ids — hidden features gated behind the owner role AND
  *  a per-experiment settings toggle (default off). They never ship in release
  *  notes or the in-app manual; the registry hides their modules entirely until
- *  the gate is open. `swarm` = the in-app swarm orchestration surface. */
-export type ExperimentId = 'swarm'
+ *  the gate is open. `swarm` = the in-app swarm orchestration surface;
+ *  `sandbox` = wrap OPEN GROUND-launched `claude` in a macOS Seatbelt sandbox
+ *  (cwd-confined writes + credential read-denies) and run it prompt-free
+ *  (permission bypass) — the OS sandbox is the safety net (macOS only; see
+ *  src/lib/server/sandbox.ts + docs/SANDBOX_EXPERIMENT.md). */
+export type ExperimentId = 'swarm' | 'sandbox'
 
 /** Resolved open/closed state for every experiment, keyed by id. TRUE only when
  *  the user is the owner AND has turned that experiment on. */
@@ -148,7 +152,12 @@ export interface ReleaseNotesResponse {
  *  whether or not anyone is watching), and the client polls the job for
  *  progress + result. Engine: src/lib/server/canvasAi.ts. */
 export type CanvasAiJobKind = 'generate' | 'tweak'
-export type CanvasAiJobStatus = 'running' | 'done' | 'error'
+/** A Canvas AI job's lifecycle. 'queued' = accepted but waiting its turn behind
+ *  another run in the SAME project (no claude session yet, so it's OFF the global
+ *  beacon and still cancellable); 'running' = a claude session is live; then a
+ *  terminal 'done' / 'error'. Runs in DIFFERENT projects never queue behind each
+ *  other (the engine serializes per project). */
+export type CanvasAiJobStatus = 'queued' | 'running' | 'done' | 'error'
 
 /** POST /api/canvas/ai/generate — start a "design as elements" job: claude
  *  authors NATIVE canvas elements (frame/shape/text/sticky), not code, so the
@@ -184,8 +193,9 @@ export interface CanvasAiStartResponse {
   jobId: string
 }
 /** One RUNNING job, as GET /api/canvas/ai/active lists them — feeds the global
- *  "Claude is designing" beacon (App polls it like the terminal beacon). Done /
- *  errored jobs are excluded. */
+ *  "Claude is designing" beacon (App polls it like the terminal beacon). Queued
+ *  (waiting their turn), done, and errored jobs are excluded — only a live claude
+ *  session lights the beacon. */
 export interface CanvasAiActiveJob {
   id: string
   kind: CanvasAiJobKind
@@ -308,14 +318,17 @@ export interface ClaudeUsage {
   /** Model of the most recent assistant message — what the HUD labels the gauge with. */
   currentModel: string | null
   /** Authoritative numbers parsed from `claude /usage`. Matches what the user
-   *  sees in the CLI's settings dialog and on claude.ai. Null when the CLI
-   *  scrape hasn't succeeded yet; the HUD falls back to the local-jsonl
-   *  estimate above when so. */
+   *  sees in the CLI's settings dialog and on claude.ai. This is the ONLY
+   *  source of the gauge's displayed % (the local `tokens` above are absolute
+   *  counts — there's no public cap to turn them into a cap-relative %). When
+   *  `session` is null, `status` says WHY (signed out / not installed / scrape
+   *  failed) so the HUD shows an explicit reason + the local estimate instead
+   *  of a silent "—". `null`/absent only before the first fetch resolves. */
   cli?: {
     session: { pct: number; resetsAt: string } | null
     weekAll: { pct: number; resetsAt: string } | null
-    weekSonnet: { pct: number; resetsAt: string } | null
     capturedAt: string
+    status: 'ok' | 'signed-out' | 'not-installed' | 'scrape-failed'
   } | null
 }
 
@@ -1094,6 +1107,68 @@ export interface OrchestratorAnomaly {
   attempts?: number
 }
 
+/** KPI roll-up the commander dashboard renders (the ANALYTICS layer, distinct
+ *  from the live observability of `workers`/`reviews`/`log`/`anomalies` above):
+ *  the data foundation for "is the swarm getting better?". Rates are derived from
+ *  the engine's NON-LOSSY lifetime event counters (since this engine session
+ *  started — in-memory, so a restart resets them); the lead time is paired from
+ *  recent journal completions, so it reflects the journal window. A `null` rate /
+ *  median means "no data yet" (the UI shows a dash, never 0%/0). */
+export interface SwarmKpis {
+  /** Completed-card lead time todo→done: median over recently-completed cards
+   *  (a `done` card paired to its `integrate` journal event), in milliseconds,
+   *  plus how many cards were paired. `medianMs` is null until at least one
+   *  completion is pairable. Window-limited to the journal's retained events. */
+  leadTime: { medianMs: number | null; count: number }
+  /** Of resolved auto-integration attempts (landed + conflicted), the fraction
+   *  that hit a rebase conflict needing a human. null until the first attempt. */
+  conflictRate: number | null
+  /** Of review outcomes (landed + sent back), the fraction sent back for rework
+   *  (差し戻し). null until the first review outcome. */
+  reworkRate: number | null
+  /** Of dispatched workers, the fraction whose work landed on the trunk
+   *  (integrated). null until the first dispatch. */
+  workerSuccessRate: number | null
+  /** Raw lifetime counters (the rate denominators, also shown so "2/3" reads
+   *  plainly). Since this engine session started. */
+  counts: {
+    dispatched: number
+    integrated: number
+    conflicted: number
+    reworked: number
+    crashed: number
+    stalled: number
+  }
+}
+
+/** Consumption snapshot of the UNATTENDED loop (the BUDGET layer, distinct from
+ *  the KPI analytics above): "how much is the loop SPENDING right now, and has it
+ *  crossed a ceiling I should look at?". READ-ONLY of state the engine already
+ *  maintains — it adds no new event hooks. The commander dashboard renders it in
+ *  its own section and warns the owner when `overLimit`. */
+export interface SwarmConsumption {
+  /** Live workers the engine is driving this instant (稼働 worker 数) — the same
+   *  set as {@link SwarmOrchestratorState.workers}, counted. */
+  activeWorkers: number
+  /** Combined wall-clock run time of those live workers right now: Σ(now −
+   *  startedAt) in ms (累積実行時間 — the in-flight worker-time). Clock skew /
+   *  unparseable stamps contribute 0, never a negative. */
+  activeRunMs: number
+  /** Workers the loop has dispatched this engine SESSION (read off the non-lossy
+   *  lifetime counter) — the cumulative consumption proxy (概算消費): each is one
+   *  `claude` session against the subscription. Per-worker time is already bounded
+   *  by the runaway ceiling, so the spawned-worker count is the honest stand-in
+   *  for total session spend. Resets when the engine process restarts. */
+  dispatched: number
+  /** The configurable per-session dispatch ceiling (上限) the warning compares
+   *  against — operator-tunable via env (OPENGROUND_SWARM_DISPATCH_BUDGET). */
+  limit: number
+  /** `dispatched >= limit` (with a positive limit) — the loop has crossed the
+   *  consumption ceiling; the UI warns the owner to check it. A soft nudge, never
+   *  a hard stop (the engine keeps running). */
+  overLimit: boolean
+}
+
 /** GET/POST /api/swarm/orchestrator{,/start,/stop,/automerge} — the commander
  *  engine's state for ONE project: whether the autonomous drain loop is running,
  *  whether auto-integration is armed, the workers it counts against the cap, the
@@ -1111,6 +1186,12 @@ export interface SwarmOrchestratorState {
    *  done. Only ever acts while `running` — turning the engine off stops
    *  integration too. */
   autoMerge: boolean
+  /** True while SELF-SUPPLY (card b3fbbfba) is armed: the engine proposes its own
+   *  improvement cards (discovered from tsc/lint/test/anomalies/TODOs) into todo.
+   *  A SEPARATE switch from `running`/`autoMerge`, default OFF (in-memory, so a
+   *  restart re-arms OFF — fail-safe). Even when ON, a proposed card is
+   *  approval-gated: it never dispatches until the owner approves it. */
+  selfSupply: boolean
   /** Workers the engine dispatched and still counts as live (≤ maxWorkers). */
   workers: OrchestratorWorker[]
   /** Review-column swarm cards and their integration readiness (read-only,
@@ -1125,6 +1206,14 @@ export interface SwarmOrchestratorState {
   anomalies: OrchestratorAnomaly[]
   /** The concurrency ceiling — the engine never has more live workers than this. */
   maxWorkers: number
+  /** KPI roll-up (the analytics layer) — lead time, rework / conflict /
+   *  worker-success rates + their raw counters. See {@link SwarmKpis}. */
+  kpis: SwarmKpis
+  /** Consumption snapshot of the unattended loop (the BUDGET layer) — live worker
+   *  count, in-flight run time, session dispatch total + its ceiling/over-limit
+   *  flag. A SEPARATE section from `kpis` in the dashboard. See
+   *  {@link SwarmConsumption}. */
+  consumption: SwarmConsumption
 }
 
 // ── swarm janitor (residual-cleanup) ─────────────────────────────────────────
@@ -1223,6 +1312,16 @@ export interface ProjectTask {
    *  Independent of the tasks[] array order so dragging on the board doesn't
    *  scramble the Chats list. Undefined sorts after ordered cards by createdAt. */
   boardOrder?: number
+  /** In-app swarm DISPATCH priority (selectDispatch → sortTodos): the engine
+   *  pulls 'urgent' before 'high' before 'normal' (the default when absent)
+   *  before 'low'. A card lingering in the todo column ALSO climbs over time
+   *  (AGING — see src/lib/boardPriority.ts) so nothing starves. Set + shown in
+   *  the Board drawer + a card chip. Shared data.
+   *  (Schema 3-point set: this field (types.ts) + ProjectTaskSchema (schemas.ts).
+   *  Omit it from the zod schema and it is silently stripped on the tasks.json
+   *  read→write round-trip — the collab layer (ydoc.ts) is field-agnostic, so it
+   *  needs no change.) */
+  priority?: TaskPriority
   /** The pull request opened for this task (completionFlow 'pr'): claude
    *  records it via POST /api/project/tasks {setPrUrl} when it opens the PR.
    *  Rendered as a link on the card and in the detail drawer. Shared data. */
@@ -1263,7 +1362,28 @@ export interface ProjectTask {
    *  of the review column (a rework / completion invalidates the stamp). Shared
    *  data. */
   integrationConflict?: boolean
+  /** Set by the commander engine's SELF-SUPPLY stage (card b3fbbfba) when the
+   *  engine proposed this card on its own (a discovered improvement point — a
+   *  type/lint error, a failed test, a state anomaly, a TODO). Its presence both
+   *  marks provenance AND carries the STABLE dedup key (so the engine never
+   *  re-proposes the same finding while an open card for it exists). A card with
+   *  this set is GATED: selectDispatch skips it until `selfSupplyApproved` is
+   *  true. Shared data. (3点セット: types.ts / schemas.ts ProjectTaskSchema /
+   *  here.) */
+  selfSupplyKey?: string
+  /** Owner approval for a self-supplied card (the per-card dispatch gate, the
+   *  primary runaway defense): false/absent ⇒ selectDispatch holds it as an inert
+   *  proposal; true ⇒ the engine may dispatch it like any todo card. Set only by
+   *  the owner-gated POST /api/swarm/orchestrator/selfsupply/approve. Meaningless
+   *  without `selfSupplyKey`. Shared data. */
+  selfSupplyApproved?: boolean
 }
+
+/** Board card dispatch priority (in-app swarm). Absent ⇒ treated as 'normal'.
+ *  Listed most-urgent-first — the order the UI priority picker renders. */
+export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low'
+
+export const TASK_PRIORITIES: readonly TaskPriority[] = ['urgent', 'high', 'normal', 'low']
 
 /** Claude CLI effort levels (`claude --effort <level>`). */
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -1639,16 +1759,61 @@ export interface CollabAcceptResponse {
   accepted?: number
 }
 
-/** The kind discriminator for an in-app notification (Ground お知らせ). Only
- *  'collab-invite' exists today; the bell is built so more kinds can be added. */
-export type NotificationKind = 'collab-invite'
+/** The kind discriminator for an in-app notification (Ground お知らせ).
+ *  'collab-invite' is an account/collab notification; 'swarm-fatal' is the
+ *  escalation safety valve — a FATAL event of the in-app swarm's unmanned loop
+ *  the engine surfaced so a human watching nothing still gets woken. The bell is
+ *  built so more kinds can be added. */
+export type NotificationKind = 'collab-invite' | 'swarm-fatal'
+
+/** Which FATAL event of the unmanned swarm/self-improvement loop fired. These are
+ *  the cases the autonomy loop CANNOT self-heal — the ones worth waking a human:
+ *   • 'rework-exhausted'  — a card bounced review→doing past its budget and was
+ *                            parked in 'blocked' (the loop gave up auto-fixing it).
+ *   • 'all-workers-down'  — the engine is running with work in flight ('doing')
+ *                            but ZERO live workers (every worker crashed/stalled).
+ *   • 'exec-timeout'      — a worker overran the execution-time ceiling
+ *                            (MAX_EXEC_MS) and was force-reclaimed/parked.
+ *   • 'rollback'          — a broken self-update build was auto-rolled back.
+ *   • 'canary-failed'     — the self-update canary failed to promote repeatedly.
+ *  ('rework-exhausted' | 'all-workers-down' | 'exec-timeout' come from the swarm
+ *  engine; 'rollback' | 'canary-failed' come from the Electron self-update cycle.) */
+export type SwarmFatalEvent =
+  | 'rework-exhausted'
+  | 'all-workers-down'
+  | 'exec-timeout'
+  | 'rollback'
+  | 'canary-failed'
+
+/** The payload of a 'swarm-fatal' notification — carries WHAT happened, WHICH
+ *  card/branch it concerns, and a POINTER to the engine log so the notification
+ *  leads somewhere actionable (the three things the escalation must contain). */
+export interface SwarmFatalNotification {
+  /** Which fatal event — see {@link SwarmFatalEvent}. */
+  event: SwarmFatalEvent
+  /** Human-readable one-line summary of WHAT happened. */
+  detail: string
+  /** The project whose unmanned loop fired this (canonical path), when known —
+   *  lets the bell row open the right project's commander/Board. */
+  projectPath?: string
+  /** The Board card involved, when card-rooted (display + open-target). */
+  taskId?: string
+  /** The `swarm/*` branch involved, when known (display-only). */
+  branch?: string
+  /** The card title involved, when known (display-only). */
+  taskTitle?: string
+  /** Where to dig in — a one-line pointer to the engine log / commander pane, so
+   *  the notification is a 導線 (not a dead end). */
+  logHint?: string
+}
 
 /** One in-app notification shown in the Ground お知らせ bell/panel. Composed on
- *  the CLIENT from a notification source (today: {@link CollabInviteForMe}) so the
- *  panel can render a kind-specific row + action. `id` is the STABLE read-state
- *  key (persisted server-side via /api/notifications) — e.g.
- *  `collab-invite:<collabProjectId>` — so opening the panel marks it read and a
- *  re-login doesn't resurface it as unread. */
+ *  the CLIENT from a notification source (today: {@link CollabInviteForMe} via
+ *  polling, or a server-persisted {@link SwarmFatalNotification}) so the panel can
+ *  render a kind-specific row + action. `id` is the STABLE read-state key
+ *  (persisted server-side via /api/notifications) — e.g.
+ *  `collab-invite:<collabProjectId>` or `swarm-fatal:<event>:<ref>:<createdAt>` —
+ *  so opening the panel marks it read and a re-login doesn't resurface it. */
 export interface AppNotification {
   id: string
   kind: NotificationKind
@@ -1656,6 +1821,16 @@ export interface AppNotification {
   createdAt?: number
   /** Present when kind === 'collab-invite'. */
   collabInvite?: CollabInviteForMe
+  /** Present when kind === 'swarm-fatal'. */
+  swarmFatal?: SwarmFatalNotification
+}
+
+/** GET /api/swarm/notifications — the server-persisted FATAL swarm notifications
+ *  (newest-first), the in-app half of the escalation safety valve. Owner-only
+ *  (same gate as the rest of /api/swarm/*); a non-owner gets 403 and the bell
+ *  simply shows none. */
+export interface AppNotificationsResponse {
+  notifications: AppNotification[]
 }
 
 /** GET /api/notifications — the persisted set of notification ids the user has
@@ -1957,4 +2132,59 @@ export interface ModuleSubmissionsResponse {
 /** POST /api/module-submissions/:id/approve — the new published marketplace id. */
 export interface ApproveSubmissionResponse {
   remoteId: string
+}
+
+// ─── Proxy judgment corpus ("you-corpus") ────────────────────────────────────
+// The autonomous-overseer proxy's externalised JUDGMENT AXIS (Phase 0). A single
+// injectable file assembled from CONCEPT.md + the OPEN GROUND auto-memory +
+// hand-added judgments. PERSONAL data — lives only under ~/.openground, never
+// git-shared. Engine: src/lib/server/youCorpus.ts; routes: server/routes/youCorpus.ts.
+
+/** One hand-added judgment — the growing, "new decision" source of the corpus.
+ *  Stored as a JSON array in ~/.openground/you-corpus-additions.json and rendered
+ *  into the single you-corpus.md. */
+export interface ManualJudgment {
+  id: string
+  text: string
+  tags?: string[]
+  context?: string
+  addedAt: string
+}
+
+/** Lightweight result of assembling/appending (POST /api/you-corpus/rebuild and
+ *  the meta half of POST /api/you-corpus/append). */
+export interface YouCorpusMeta {
+  /** Absolute path of the assembled file (~/.openground/you-corpus.md). */
+  path: string
+  assembledAt: string
+  sizeBytes: number
+  /** Count of auto-memory notes ingested (excludes the MEMORY.md index). */
+  memoryCount: number
+  manualCount: number
+  conceptIncluded: boolean
+  businessVisionIncluded: boolean
+}
+
+/** GET /api/you-corpus — status of the assembled corpus + which sources are
+ *  currently available (so the UI/CLI can show what would feed a rebuild). */
+export interface YouCorpusStatus {
+  path: string
+  exists: boolean
+  sizeBytes: number
+  /** mtime of the assembled file, or null when it has never been assembled. */
+  assembledAt: string | null
+  manualCount: number
+  /** Resolved auto-memory dir (null when it could not be resolved). */
+  memoryDir: string | null
+  memoryDirExists: boolean
+  memoryCount: number
+  conceptPath: string | null
+  conceptExists: boolean
+  businessVisionExists: boolean
+}
+
+/** POST /api/you-corpus/append — the stored judgment + the refreshed meta. */
+export interface YouCorpusAppendResponse {
+  judgment: ManualJudgment
+  meta: YouCorpusMeta
 }

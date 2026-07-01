@@ -1,5 +1,5 @@
-import { mkdtempSync, writeFileSync, rm } from 'fs'
-import { tmpdir } from 'os'
+import { mkdtempSync, writeFileSync, rm, realpathSync } from 'fs'
+import { tmpdir, homedir } from 'os'
 import { join } from 'path'
 import {
   createTerminal,
@@ -9,6 +9,7 @@ import {
 } from './terminal'
 import { ensureClaudeFolderTrusted } from './claudeTrust'
 import { resolvedClaudeBin } from './claudeConnection'
+import { buildSandboxProfile, wrapWithSandboxExec } from './sandbox'
 import { CLAUDE_EFFORTS, type ClaudeEffort, type ProjectLaunchPrefs } from '../types'
 
 // Launches `claude` interactively inside a PTY hosted by OPEN GROUND.
@@ -69,6 +70,24 @@ export interface LaunchClaudeOpts {
   // via --append-system-prompt. Set false for utility sessions whose output is
   // marker-scraped and must not drift (generateDescription).
   appContext?: boolean
+  // Pass `--strict-mcp-config` so claude loads ONLY explicitly-passed MCP config
+  // and IGNORES the user-scope `~/.claude.json` `mcpServers` (+ project `.mcp.json`).
+  // Set TRUE on OG's NON-sandboxed, auto-triggered utility sessions
+  // (generateDescription / generateTaskTitle / canvasAi / generateSkill): they run
+  // bypass with no sandbox, so if a *sandboxed* claude had planted a malicious
+  // user-scope MCP server in ~/.claude.json (a file claude rewrites, so the
+  // sandbox can't deny writing it), an auto-triggered utility run would otherwise
+  // spawn it OUTSIDE the sandbox = RCE. These utility runs never need MCP, so
+  // strict-mode closes that trigger at zero cost. (Left OFF for the user's own
+  // interactive terminal, which may legitimately use their MCP servers.)
+  strictMcpConfig?: boolean
+  // Mark this as a HEADLESS UTILITY session: a real claude PTY whose output is
+  // marker-scraped, with NO user-visible pane (auto-title / auto-description).
+  // Carried onto the pool entry (TerminalInfo.hidden) so listActiveTerminals
+  // excludes it — a background titling/describe run must NEVER flash the Ground's
+  // "claude working" beacon on a card. Default false: every user-launched pane
+  // (the terminal routes, Board 実行, the swarm roles) stays visible as before.
+  hidden?: boolean
   // Extra environment variables to inject into THIS claude invocation's command
   // line, scoped to the one command (exactly like OPENGROUND_OWNED=1). The
   // in-app swarm WORKER passes NONE — so the swarm PreToolUse guard, which fires
@@ -78,6 +97,21 @@ export interface LaunchClaudeOpts {
   // be POSIX env-name shaped (others are dropped in buildLaunchCommand); values
   // are shell-quoted for the host shell. NEVER sourced from an API request body.
   env?: Record<string, string>
+  // Owner-only `experiments.sandbox` (macOS only): wrap this claude in a Seatbelt
+  // sandbox (sandbox-exec) confined to `cwd`, and run it permission-`bypass` so it
+  // acts prompt-free WITHIN that OS-enforced boundary (see sandbox.ts +
+  // docs/SANDBOX_EXPERIMENT.md). The CALLER resolves the gate server-side
+  // (resolveExperiments — owner && the toggle) and passes the boolean; this layer
+  // never reads roles/settings itself, and silently ignores the flag off-darwin.
+  // Default false → byte-identical to the pre-sandbox launch line.
+  sandbox?: boolean
+  // Extra absolute subpaths the sandbox profile must grant WRITE beyond `cwd`.
+  // The swarm worker passes ONLY its repo's shared `.git` (it lives OUTSIDE the
+  // worktree cwd, so without this `git commit`/`push` would be denied; hooks/config
+  // + intermediate gitdirs are re-denied in the profile). node_modules is NOT
+  // passed — it's a symlink to the main checkout and stays fully READ-only.
+  // Ignored unless `sandbox` is on.
+  sandboxWritePaths?: string[]
   cols?: number
   rows?: number
 }
@@ -207,6 +241,7 @@ export const buildClaudeArgv = (
     | 'effort'
     | 'name'
     | 'remoteControl'
+    | 'strictMcpConfig'
   >,
   promptFilePath: string | null,
   contextFilePath: string | null = null,
@@ -258,6 +293,11 @@ export const buildClaudeArgv = (
   if (opts.model) args.push('--model', q(opts.model))
   if (opts.effort) args.push('--effort', q(opts.effort))
   if (opts.name) args.push('--name', q(opts.name))
+  // `--strict-mcp-config` is a bare boolean flag (no value), so it can't swallow
+  // the positional prompt — safe among the flags. Ignores user-scope ~/.claude.json
+  // mcpServers + project .mcp.json, closing the planted-MCP auto-trigger on OG's
+  // non-sandboxed utility sessions (see strictMcpConfig opt above).
+  if (opts.strictMcpConfig) args.push('--strict-mcp-config')
   // Remote Control: start the session controllable from claude.ai / mobile under
   // an explicit name. claude's `--remote-control [name]` takes an OPTIONAL value,
   // so the name MUST be explicit + non-empty — a bare flag would consume the
@@ -326,6 +366,57 @@ export const buildLaunchCommand = (
   return `${prefix ? prefix + ' ' : ''}OPENGROUND_OWNED=1 ${argv.join(' ')} ; exit\n`
 }
 
+// Assemble + write the Seatbelt profile for a sandboxed launch and return the
+// temp profile path. `sandbox-exec -f` reads it once at exec time (the policy is
+// then in the kernel), so it's cleaned up on the same 60s timer as the prompt /
+// context temp files. Resolves cwd to its REAL path (Seatbelt matches resolved
+// paths). A worker worktree's node_modules (a symlink to the main checkout) is
+// left fully READ-only — see the NOTE below — so the only cross-tree write
+// carve-outs are the caller-supplied ones (the worker's shared .git, so
+// `git commit`/`push` can land; .git/hooks + .git/config stay denied within it).
+const writeSandboxProfile = (cwd: string, extraWritePaths: string[]): string => {
+  let realCwd = cwd
+  try {
+    realCwd = realpathSync(cwd)
+  } catch {
+    // cwd not on disk yet — fall back to the given path (best-effort).
+  }
+  const extra = new Set<string>()
+  for (const p of extraWritePaths) {
+    try {
+      extra.add(realpathSync(p))
+    } catch {
+      extra.add(p)
+    }
+  }
+  // A worker worktree's node_modules is a SYMLINK to the MAIN checkout's
+  // node_modules. We deliberately carve out NONE of it — not .bin, not .cache,
+  // and NOT .vite: `npm run build` + `npm test` run with it fully READ-only
+  // (verified — they read the existing cache and write any transient cache to
+  // TMPDIR/cwd, never into <main>/node_modules), and making ANY of it writable
+  // would let a sandboxed worker poison code the owner later runs UN-sandboxed in
+  // main = full-privilege escape. That includes vite's .vite/deps slices: the dev
+  // server serves them to the browser and runs them in the dev/Electron origin,
+  // and vite REUSES them on a metadata-hash match WITHOUT re-verifying each
+  // slice's bytes — so an in-place overwrite executes as-is. (The interactive
+  // case, where node_modules is a real dir inside cwd, stays writable via cwd.)
+  const profile = buildSandboxProfile({
+    cwd: realCwd,
+    home: homedir(),
+    extraWriteSubpaths: Array.from(extra),
+  })
+  const profilePath = join(
+    mkdtempSync(join(tmpdir(), 'openground-sandbox-')),
+    'profile.sb',
+  )
+  writeFileSync(profilePath, profile)
+  const f = profilePath
+  setTimeout(() => {
+    rm(f, { force: true }, () => {})
+  }, 60_000)
+  return profilePath
+}
+
 export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // Pre-accept claude's "trust this folder?" gate for this cwd (see
   // claudeTrust.ts). Without it, claude 2.1.167's blocking trust prompt wedges
@@ -338,6 +429,9 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
     rows: opts.rows ?? 32,
     tag: 'claude',
     agentSessionId: opts.agentSessionId,
+    // Hidden utility sessions (auto-title / auto-description) stay off the Ground
+    // beacon — carried onto the pool entry so listActiveTerminals can filter them.
+    ...(opts.hidden ? { hidden: true } : {}),
   })
 
   // Route the positional prompt through a temp file (see buildClaudeArgv §2):
@@ -366,14 +460,33 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // the distributed-build gap that silently broke auto title/description. Every
   // spawn route pre-flights claudeConnection() right before this, so the cached
   // absolute path is fresh; null falls through to the bare name in buildClaudeArgv.
-  const args = buildClaudeArgv(opts, promptFilePath, contextFilePath, resolvedClaudeBin())
+  // Owner-only sandbox experiment (macOS only). When on, claude runs in
+  // permission-`bypass` (the OS sandbox is the safety net, so it acts prompt-free
+  // within the boundary — the "激減") and the whole argv is wrapped in
+  // `sandbox-exec -f <profile>` confining writes to cwd. The flag is resolved
+  // server-side by the caller (isExperimentEnabled); off-darwin it's a no-op.
+  // An EXPLICIT 'plan' mode is preserved (read-only planning is intentional — the
+  // sandbox shouldn't silently turn it into free execution); every other mode
+  // flips to bypass, which is where the prompt reduction is felt.
+  const sandboxed = opts.sandbox === true && process.platform === 'darwin'
+  const args = buildClaudeArgv(
+    sandboxed && opts.permissionMode !== 'plan'
+      ? { ...opts, permissionMode: 'bypass' }
+      : opts,
+    promptFilePath,
+    contextFilePath,
+    resolvedClaudeBin(),
+  )
+  const launchArgs = sandboxed
+    ? wrapWithSandboxExec(args, writeSandboxProfile(opts.cwd, opts.sandboxWritePaths ?? []))
+    : args
 
   // One command line: mark this invocation OPEN GROUND-owned, inject any caller
   // env (the swarm manager port — workers pass none), run claude, and `; exit`
   // the wrapping shell when it quits so the PTY-exit listener fires the
   // cancelled / finished transition. Shell-specific framing (POSIX env-prefix
   // vs PowerShell `$env:` + call operator) lives in buildLaunchCommand.
-  writeInput(info.id, buildLaunchCommand(args, process.platform, opts.env ?? {}))
+  writeInput(info.id, buildLaunchCommand(launchArgs, process.platform, opts.env ?? {}))
 
   return {
     terminalId: info.id,

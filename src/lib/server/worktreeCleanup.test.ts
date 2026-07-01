@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { mkdtemp, mkdir, rm, realpath, writeFile, stat } from 'fs/promises'
+import { mkdtemp, mkdir, rm, realpath, writeFile, stat, symlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -12,7 +12,14 @@ import {
 } from './worktreeCleanup'
 import { centralWorktreesDir } from './paths'
 import { canonicalize } from './canonicalize'
+import { listActiveTerminalCwds } from './terminal'
 import { registerTestProject } from '../../test/registerProject'
+
+// The live-PTY guard reads the terminal pool. Mock it so the engine tests drive
+// the live-cwd list directly (no real node-pty spawn) and default it to []
+// (empty pool) so every pre-existing test behaves exactly as before.
+vi.mock('./terminal', () => ({ listActiveTerminalCwds: vi.fn(() => [] as string[]) }))
+const liveCwdsMock = vi.mocked(listActiveTerminalCwds)
 
 // Engine tests against REAL git repos + REAL worktrees (gitBranches
 // flavor): the repo lives in a tmpdir and is REGISTERED via the test registry
@@ -32,6 +39,7 @@ let scratch: string
 let savedEnv: Record<string, string | undefined>
 
 beforeEach(async () => {
+  liveCwdsMock.mockReturnValue([]) // empty pool unless a test opts in
   scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-wtclean-')))
   savedEnv = {
     HOME: process.env.HOME,
@@ -206,5 +214,83 @@ describe('cleanProjectWorktrees', () => {
   it('no central worktrees → { removed: [], skippedDirty: [] }', async () => {
     const { dir } = await makeProject()
     expect(await cleanProjectWorktrees(dir)).toEqual({ removed: [], skippedDirty: [] })
+  })
+})
+
+// ── Live-PTY guard ────────────────────────────────────────────────────────────
+// A clean worktree that a running claude PTY occupies must NEVER be removed.
+// The pool stores each PTY's RAW spawn cwd (terminal.ts keeps opts.cwd verbatim),
+// so its normalization form can differ from the canonicalized worktree dir. The
+// regression these lock: liveCwds are canonicalized to the same form before the
+// match, so a symlink-only difference can't make a live worktree look removable.
+
+describe('cleanProjectWorktrees — live PTY guard', () => {
+  it('protects a clean worktree a live PTY occupies even when the pool reports a non-canonical (symlinked) cwd', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+
+    // Reproduce the bug's preconditions: an alias of the central dir via a
+    // symlink, so `<alias>/task-a` is a DIFFERENT string than the canonical
+    // worktree dir yet resolves to it — exactly what a raw spawn cwd looks like
+    // when HOME (or /var) is symlinked. The old code compared this raw form
+    // against the canonical wt.dir, missed, and removed the live worktree.
+    const aliasRoot = join(scratch, 'central-alias')
+    await symlink(central, aliasRoot)
+    const aliasCwd = join(aliasRoot, 'task-a')
+    expect(aliasCwd).not.toBe(clean) // different string …
+    expect(await canonicalize(aliasCwd)).toBe(clean) // … same real path
+    liveCwdsMock.mockReturnValue([aliasCwd])
+
+    const result = await cleanProjectWorktrees(dir)
+    expect(result.removed).toEqual([])
+    expect(result.skippedDirty).toEqual([clean])
+    expect(await exists(clean)).toBe(true) // survived — not pulled out from under the session
+  })
+
+  it('protects a worktree when a live PTY sits in a SUBDIRECTORY of it (sep-terminated prefix)', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    const subdir = join(clean, 'src', 'nested')
+    await mkdir(subdir, { recursive: true })
+    liveCwdsMock.mockReturnValue([subdir]) // already canonical here; prefix branch
+
+    const result = await cleanProjectWorktrees(dir)
+    expect(result.removed).toEqual([])
+    expect(result.skippedDirty).toEqual([clean])
+    expect(await exists(clean)).toBe(true)
+  })
+
+  it('still removes the same clean worktree when the pool is empty (negative control — removal path intact)', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    liveCwdsMock.mockReturnValue([])
+
+    const result = await cleanProjectWorktrees(dir)
+    expect(result.removed).toEqual([clean])
+    expect(await exists(clean)).toBe(false)
+  })
+
+  it('removes a clean worktree when the only live PTY is an UNRELATED dir (guard is not always-on)', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    // A live session somewhere else (e.g. another project / the main tree) must
+    // not spuriously protect this worktree — proves isLive still discriminates.
+    liveCwdsMock.mockReturnValue([join(scratch, 'somewhere-else')])
+
+    const result = await cleanProjectWorktrees(dir)
+    expect(result.removed).toEqual([clean])
+    expect(await exists(clean)).toBe(false)
+  })
+
+  it('a sibling worktree whose path is a prefix-without-sep of a live cwd is NOT protected (no -evil match)', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    // Live cwd = "<clean>-live": shares the string prefix but is a different
+    // worktree. The sep-terminated check must not treat `clean` as live.
+    liveCwdsMock.mockReturnValue([clean + '-live'])
+
+    const result = await cleanProjectWorktrees(dir)
+    expect(result.removed).toEqual([clean])
+    expect(await exists(clean)).toBe(false)
   })
 })

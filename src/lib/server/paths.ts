@@ -20,6 +20,20 @@ export const authFile = () => join(openGroundHome(), 'auth.json')
 // re-login (server-side, not localStorage). The notification CONTENT comes from
 // per-kind sources (today: GET /api/collab/invites); this only tracks read/unread.
 export const notificationsFile = () => join(openGroundHome(), 'notifications.json')
+// The server-persisted FATAL swarm notifications (the in-app half of the
+// escalation safety valve). Kept in its OWN file (not notifications.json, which
+// holds only the read-state id set): these are notification CONTENT records the
+// bell renders, capped to the newest few. See src/lib/server/swarmNotifications.ts.
+export const swarmNotificationsFile = () => join(openGroundHome(), 'swarm-notifications.json')
+// The proxy's externalised JUDGMENT AXIS ("あなたの判断軸"). A single,
+// self-describing markdown file assembled from CONCEPT.md + the OPEN GROUND
+// auto-memory + hand-added judgments, written 0600 — it can be injected at proxy
+// startup. PERSONAL data: it lives ONLY here under the app home, never inside a
+// git repo (and is defensively gitignored). The growing hand-added judgments are
+// kept beside it as a JSON array. See src/lib/server/youCorpus.ts and
+// docs/YOU_CORPUS_PLAN.md.
+export const youCorpusFile = () => join(openGroundHome(), 'you-corpus.md')
+export const youCorpusAdditionsFile = () => join(openGroundHome(), 'you-corpus-additions.json')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental

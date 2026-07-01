@@ -1,9 +1,36 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { RotateCcw, RefreshCw } from 'lucide-react'
 import type { ClaudeUsage } from '@/lib/types'
+import { usageLevel, type UsageLevel } from '@/lib/usageThresholds'
 import { useT } from '@/i18n/I18nContext'
 
 const POLL_MS = 60_000
+
+// Gauge-fill colour per severity level: green until 80%, amber at 80%, red at
+// 100% (the "80%で黄・100%で赤" spec, centralised in usageThresholds).
+const FILL: Record<UsageLevel, string> = {
+  idle: 'bg-line-strong',
+  ok: 'bg-moss',
+  warn: 'bg-ochre',
+  over: 'bg-accent',
+}
+// Text tone tracks the same level, but 'ok' stays neutral (ink-muted) rather
+// than green so the chip reads calm until usage actually approaches the cap.
+const TEXT: Record<UsageLevel, string> = {
+  idle: 'text-ink-faint',
+  ok: 'text-ink-muted',
+  warn: 'text-ochre',
+  over: 'text-accent',
+}
+
+// When the cap-relative % is unavailable, the server says WHY via cli.status;
+// these map each failure mode to its translated reason so the HUD shows an
+// explicit explanation instead of a silent "—". (Keys: src/i18n/messages/misc.)
+const REASON_KEY: Record<'signed-out' | 'not-installed' | 'scrape-failed', string> = {
+  'signed-out': 'misc.usage.reason.signedOut',
+  'not-installed': 'misc.usage.reason.notInstalled',
+  'scrape-failed': 'misc.usage.reason.scrapeFailed',
+}
 
 export const UsageHud = () => {
   const { t } = useT()
@@ -65,24 +92,49 @@ export const UsageHud = () => {
     setRefreshing(false)
   }
 
-  // Headline % is the CLI scrape ONLY (accurate). The local estimate is rough
-  // for Claude Code, so it lives only in the hover tooltip.
+  // The displayed % is the CLI `/usage` scrape ONLY — it's the cap-relative
+  // number that matches claude.ai. The local-jsonl `usage.tokens` are absolute
+  // counts (no public cap to divide by), so they can't drive a %; today the
+  // only local field the HUD consumes is `currentModel` (the gauge's label).
   const cliSession = usage?.cli?.session ?? null
   const cliWeek = usage?.cli?.weekAll ?? null
   const pct = cliSession?.pct ?? null
   const ratio = pct != null ? Math.min(1, pct / 100) : 0
   const model = usage?.currentModel ? shortModel(usage.currentModel) : null
 
-  const fillTone =
-    pct == null ? 'bg-line-strong' : pct >= 95 ? 'bg-accent' : pct >= 80 ? 'bg-ochre' : 'bg-moss'
-  const textTone =
-    pct == null
-      ? 'text-ink-faint'
-      : pct >= 95
-        ? 'text-accent'
-        : pct >= 80
-          ? 'text-ochre'
-          : 'text-ink-muted'
+  // When there's no live % (signed out / not installed / scrape failed / format
+  // change), surface an explicit reason and the local-jsonl token total as a
+  // real fallback value — so the gauge is never a silent "—" with no story. The
+  // generic "reading…" only stands in before the very first fetch resolves.
+  const cliStatus = usage?.cli?.status ?? null
+  const localTotal = usage?.tokens?.total ?? 0
+  const localWindowH = usage?.windowHours ?? 5
+  const reason =
+    pct != null
+      ? ''
+      : cliStatus && cliStatus !== 'ok'
+        ? t(REASON_KEY[cliStatus])
+        : t('misc.usage.waiting')
+  const localEstimate =
+    pct == null && localTotal > 0
+      ? t('misc.usage.localEstimate', {
+          tokens: compactTokens(localTotal),
+          hours: localWindowH,
+        })
+      : ''
+
+  // The 5-hour session gauge and the weekly gauge share one threshold mapping
+  // (usageThresholds): green < 80, amber ≥ 80, red ≥ 100.
+  const sessionLevel = usageLevel(pct)
+  const fillTone = FILL[sessionLevel]
+  const textTone = TEXT[sessionLevel]
+
+  const weekPct = cliWeek?.pct ?? null
+  const weekLevel = usageLevel(weekPct)
+  const weekRatio = weekPct != null ? Math.min(1, weekPct / 100) : 0
+  const weekResetShort = cliWeek?.resetsAt
+    ? cliWeek.resetsAt.replace(/\s*\([^)]*\)\s*$/, '')
+    : ''
 
   const resetClock = cliSession?.resetsAt ?? null
   const resetClockShort = resetClock ? resetClock.replace(/\s*\([^)]*\)\s*$/, '') : ''
@@ -94,9 +146,10 @@ export const UsageHud = () => {
   const ago = formatAgo(usage?.cli?.capturedAt ?? null, t)
 
   const tooltip = [
-    cliSession ? t('misc.usage.live') : t('misc.usage.waiting'),
+    cliSession ? t('misc.usage.live') : reason,
     pct != null && resetClock ? `${pct}% · ${t('misc.usage.resetsAt', { time: resetClock })}` : '',
     cliWeek ? `${t('misc.usage.week')}: ${cliWeek.pct}%` : '',
+    localEstimate,
   ]
     .filter(Boolean)
     .join('\n')
@@ -118,6 +171,22 @@ export const UsageHud = () => {
           />
         </div>
         <span className={`${textTone} font-medium`}>{pct != null ? `${pct}%` : '—'}</span>
+        {pct != null && weekPct != null && (
+          /* Weekly consumption at a glance (the 5h gauge is the bar; this is the
+             second window). Gated on `pct != null` — the SAME gate the popover's
+             week gauge sits behind — so the two surfaces never disagree: when the
+             session row fails to parse (scrape-failed → pct null) but the week row
+             survives, the popover shows a reason instead of a week gauge, so the
+             chip hides this badge too rather than flash a lone week % the popover
+             can't corroborate. Hidden on narrow widths regardless. */
+          <span
+            className={`hidden md:inline-flex items-center gap-1 whitespace-nowrap ${TEXT[weekLevel]}`}
+            title={t('misc.usage.week')}
+          >
+            <span className="text-ink-faint">{t('misc.usage.weekShort')}</span>
+            {weekPct}%
+          </span>
+        )}
         {chipReset && (
           /* Narrow window: drop the reset clock from the chip (still in the
              tooltip and the popover) so the gauge + % always fit. */
@@ -153,14 +222,34 @@ export const UsageHud = () => {
                 </p>
               )}
               {cliWeek && (
-                <div className="mt-3 flex items-baseline justify-between border-t border-line-soft pt-2.5">
-                  <span className="text-[12px] text-ink-muted">{t('misc.usage.week')}</span>
-                  <span className="text-[12px] tabular-nums text-ink">{cliWeek.pct}%</span>
+                <div className="mt-3 border-t border-line-soft pt-2.5">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[12px] text-ink-muted">{t('misc.usage.week')}</span>
+                    <span className={`text-[14px] font-medium tabular-nums ${TEXT[weekLevel]}`}>
+                      {cliWeek.pct}%
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-1.5 w-full rounded-full bg-line-soft overflow-hidden">
+                    <div
+                      className={`h-full ${FILL[weekLevel]}`}
+                      style={{ width: `${Math.max(2, weekRatio * 100)}%` }}
+                    />
+                  </div>
+                  {weekResetShort && (
+                    <p className="mt-2 text-[11px] text-ink-subtle">
+                      {t('misc.usage.resetsAt', { time: weekResetShort })}
+                    </p>
+                  )}
                 </div>
               )}
             </>
           ) : (
-            <p className="text-[12px] leading-relaxed text-ink-subtle">{t('misc.usage.waiting')}</p>
+            <div className="space-y-1.5">
+              <p className="text-[12px] leading-relaxed text-ink-subtle">{reason}</p>
+              {localEstimate && (
+                <p className="text-[11px] leading-relaxed text-ink-faint">{localEstimate}</p>
+              )}
+            </div>
           )}
 
           <div className="mt-3 flex items-center justify-between gap-2 border-t border-line-soft pt-2.5">
@@ -230,6 +319,14 @@ const parseCliReset = (label: string): string | null => {
   const trimmed = label.replace(/\s*\([^)]+\)\s*$/, '').replace(/\s+at\s+/, ' ')
   const ms = Date.parse(trimmed)
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null
+}
+
+// "1.2M" / "845k" / "320" — compact absolute token count for the local-estimate
+// fallback shown when the cap-relative % is unavailable.
+const compactTokens = (n: number): string => {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`
+  return String(Math.round(n))
 }
 
 // "claude-opus-4-8" → "Opus 4.8"; "claude-haiku-4-5-20251001" → "Haiku 4.5"

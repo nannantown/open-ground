@@ -11,7 +11,13 @@ import { describe, it, expect } from 'vitest'
 import {
   mergeSwarmWorkers,
   sanitizeEngineState,
+  sanitizeKpis,
+  sanitizeConsumption,
+  sanitizeFatalNotifications,
   planSwarmPower,
+  EMPTY_KPIS,
+  EMPTY_CONSUMPTION,
+  DEFAULT_ENGINE,
   type EngineWorker,
   type ManualWorkerInput,
   type ManagerWorkerStage,
@@ -202,6 +208,61 @@ describe('sanitizeEngineState — engine workers survive the poll → merge path
     expect(sanitizeEngineState(null).anomalies).toEqual([])
     expect(sanitizeEngineState({ anomalies: 'boom' }).anomalies).toEqual([])
   })
+
+  it('defaults kpis to the empty roll-up on a garbage / missing response', () => {
+    expect(sanitizeEngineState(null).kpis).toEqual(EMPTY_KPIS)
+    expect(sanitizeEngineState({}).kpis).toEqual(EMPTY_KPIS)
+    expect(sanitizeKpis('boom')).toEqual(EMPTY_KPIS)
+  })
+
+  it('CLAMPS a forged rate into [0,1] (defence in depth — never renders "150%")', () => {
+    const k = sanitizeKpis({
+      conflictRate: 1.7, // a buggy/forged > 1 …
+      reworkRate: -0.4, // … or < 0
+      workerSuccessRate: 0.83, // a valid one passes through
+      leadTime: { medianMs: 1000, count: 2 },
+      counts: { dispatched: 5, integrated: 6, conflicted: 1, reworked: 1, crashed: 0, stalled: 0 },
+    })
+    expect(k.conflictRate).toBe(1)
+    expect(k.reworkRate).toBe(0)
+    expect(k.workerSuccessRate).toBeCloseTo(0.83)
+  })
+
+  it('keeps a null rate null (no data) and a negative count at 0', () => {
+    const k = sanitizeKpis({ conflictRate: null, leadTime: { medianMs: null, count: -3 } })
+    expect(k.conflictRate).toBeNull()
+    expect(k.leadTime).toEqual({ medianMs: null, count: 0 })
+  })
+
+  // Consumption snapshot (the BUDGET layer) — same defensive coercion as kpis.
+  it('defaults consumption to the empty snapshot on a garbage / missing response', () => {
+    expect(sanitizeEngineState(null).consumption).toEqual(EMPTY_CONSUMPTION)
+    expect(sanitizeEngineState({}).consumption).toEqual(EMPTY_CONSUMPTION)
+    expect(sanitizeConsumption('boom')).toEqual(EMPTY_CONSUMPTION)
+    expect(DEFAULT_ENGINE.consumption).toEqual(EMPTY_CONSUMPTION)
+  })
+
+  it('passes a well-formed consumption snapshot through, coercing overLimit to a strict boolean', () => {
+    const c = sanitizeConsumption({
+      activeWorkers: 2,
+      activeRunMs: 90_000,
+      dispatched: 51,
+      limit: 50,
+      overLimit: true,
+    })
+    expect(c).toEqual({ activeWorkers: 2, activeRunMs: 90_000, dispatched: 51, limit: 50, overLimit: true })
+  })
+
+  it('floors every numeric field to a finite ≥0 number and overLimit to false unless strictly true', () => {
+    const c = sanitizeConsumption({
+      activeWorkers: -3, // negative → 0
+      activeRunMs: Number.NaN, // non-finite → 0
+      dispatched: 'lots', // wrong type → 0
+      limit: 50,
+      overLimit: 'yes', // truthy-but-not-true → false (never a forged alarm)
+    })
+    expect(c).toEqual({ activeWorkers: 0, activeRunMs: 0, dispatched: 0, limit: 50, overLimit: false })
+  })
 })
 
 // The single master power switch's contract (条件: 単一の開始/停止スイッチ). ON
@@ -264,5 +325,72 @@ describe('planSwarmPower — the master Start/Stop switch contract', () => {
       launchSupply: false,
       launchManager: false,
     })
+  })
+})
+
+// The fatal-notifications sanitizer guards the flow pane's "needs attention" banner
+// (条件3) against an untrusted on-disk notifications file — the same defensive
+// discipline as sanitizeEngineState.
+describe('sanitizeFatalNotifications — the fatal-event source (条件3)', () => {
+  const wrap = (notifications: unknown) => ({ notifications })
+
+  it('keeps swarm-fatal rows with a known event, mapping the fields', () => {
+    const out = sanitizeFatalNotifications(
+      wrap([
+        {
+          id: 'swarm-fatal:all-workers-down:x:1',
+          kind: 'swarm-fatal',
+          createdAt: 1000,
+          swarmFatal: {
+            event: 'all-workers-down',
+            detail: '全ワーカー停止',
+            branch: 'swarm/w5',
+            projectPath: '/proj',
+          },
+        },
+      ]),
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      id: 'swarm-fatal:all-workers-down:x:1',
+      event: 'all-workers-down',
+      detail: '全ワーカー停止',
+      branch: 'swarm/w5',
+      projectPath: '/proj',
+      createdAt: 1000,
+    })
+  })
+
+  it('drops non-swarm-fatal kinds, unknown events, and malformed rows', () => {
+    const out = sanitizeFatalNotifications(
+      wrap([
+        { id: 'a', kind: 'collab-invite', collabInvite: {} }, // wrong kind
+        { id: 'b', kind: 'swarm-fatal', swarmFatal: { event: 'made-up', detail: 'x' } }, // unknown event
+        { id: 'c', kind: 'swarm-fatal' }, // no swarmFatal payload
+        null,
+        'nope',
+      ]),
+    )
+    expect(out).toEqual([])
+  })
+
+  it('accepts every one of the five known events', () => {
+    const events = ['rework-exhausted', 'all-workers-down', 'exec-timeout', 'rollback', 'canary-failed']
+    const out = sanitizeFatalNotifications(
+      wrap(events.map((event, i) => ({ id: `n${i}`, kind: 'swarm-fatal', createdAt: i, swarmFatal: { event } }))),
+    )
+    expect(out.map((n) => n.event).sort()).toEqual([...events].sort())
+  })
+
+  it('sorts newest-first and tolerates a non-array / non-object input', () => {
+    const out = sanitizeFatalNotifications(
+      wrap([
+        { id: 'old', kind: 'swarm-fatal', createdAt: 100, swarmFatal: { event: 'rollback' } },
+        { id: 'new', kind: 'swarm-fatal', createdAt: 900, swarmFatal: { event: 'exec-timeout' } },
+      ]),
+    )
+    expect(out.map((n) => n.id)).toEqual(['new', 'old'])
+    expect(sanitizeFatalNotifications(null)).toEqual([])
+    expect(sanitizeFatalNotifications({ notifications: 'nope' })).toEqual([])
   })
 })

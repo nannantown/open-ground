@@ -8,6 +8,7 @@ import { deriveCardFields, wantsAutoTitle, provisionalTitle } from '@/lib/cardTi
 import { buildReviewPrompt } from '@/lib/reviewPrompt'
 import {
   CLAUDE_EFFORTS,
+  TASK_PRIORITIES,
   type ActiveTerminalsResponse,
   type BoardColumn,
   type ClaudeBeaconStatus,
@@ -20,12 +21,13 @@ import {
   type TaskAttachment,
   type TaskRunSettings,
 } from '@/lib/types'
+import { PRIORITY_META } from '@/lib/boardPriority'
 import { useT } from '@/i18n/I18nContext'
 import { sanitizeEngineState, type EngineWorker } from '@/components/canvas/modules/useSwarmEngine'
 import { SwarmWorkerPane, type WorkerStatus } from '@/components/canvas/modules/SwarmWorkerPane'
 import { deriveWorkerActivity, type BoardCardWorker } from '@/lib/boardWorker'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
-import { dependencyCandidates } from '@/lib/boardDeps'
+import { dependencyCandidates, dependencyCycleIds } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
 
 /** Result of a task-terminal launch attempt (ProjectPanel.launchTaskTerminal).
@@ -1275,6 +1277,16 @@ export const BoardModule = ({
             )
           })()}
         </div>
+        {/* Cycle warning (B025): a card on a dependency loop (A→B→…→A) can never
+            have its prerequisites land, so the swarm's ⑤ DEPENDS gate would hold
+            it forever. Surfaced the moment the loop is created so the owner can
+            break it — purely informational, the field itself is untouched. */}
+        {dependencyCycleIds(data.tasks).has(task.id) && (
+          <p className="mt-1.5 flex items-start gap-1 text-[11px] text-accent">
+            <span aria-hidden>⚠︎</span>
+            <span>{t('board.detail.dependsCycleWarn')}</span>
+          </p>
+        )}
       </div>
       {/* Due date (B026) — a soft deadline chip, no sorting / no alerts. The
           native date input has no IME path, so a controlled value is safe. */}
@@ -1300,6 +1312,41 @@ export const BoardModule = ({
               ✕
             </button>
           )}
+        </div>
+      </div>
+      {/* Priority (in-app swarm dispatch order) — a 4-step picker. The engine
+          pulls higher priority first; a card left waiting in todo also climbs on
+          its own (aging). 'normal' is the default, stored as no value so a plain
+          card carries nothing. */}
+      <div className="shrink-0">
+        <label
+          className="mb-1 block label-cap text-ink-faint"
+          title={t('board.detail.priorityHint')}
+        >
+          {t('board.detail.priorityLabel')}
+        </label>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {TASK_PRIORITIES.map(p => {
+            const active = (task.priority ?? 'normal') === p
+            return (
+              <button
+                key={p}
+                type="button"
+                aria-pressed={active}
+                onClick={() =>
+                  patchTask(task, { priority: p === 'normal' ? undefined : p })
+                }
+                className={[
+                  'shrink-0 rounded-sm border px-2.5 py-1 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+                  active
+                    ? PRIORITY_META[p].pillSelectedClass
+                    : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink',
+                ].join(' ')}
+              >
+                {t(PRIORITY_META[p].labelKey)}
+              </button>
+            )
+          })}
         </div>
       </div>
         </div>
@@ -1408,6 +1455,57 @@ export const BoardModule = ({
     return drawerWorker?.stage === 'starting' ? 'starting' : 'waiting'
   })()
 
+  // ── Stable callbacks handed to BoardTab (and through it to the memoized
+  //    BoardCard) ─────────────────────────────────────────────────────────────
+  // These were inline arrows recreated on every render. A memoized card skips
+  // its (expensive) subtree only when EVERY prop it receives is referentially
+  // stable, so the card-facing callbacks must keep identity across renders.
+  // `dataRef` lets the create-card handler read the latest tasks WITHOUT
+  // depending on `data` (which gets a fresh identity on every persist).
+  // resolveSessionStatus / resolveWorkerForTask intentionally DO change identity
+  // when their underlying maps change — BoardTab re-resolves the per-card
+  // primitives then, and only the cards whose values actually changed re-render.
+  const handleOpenTask = useCallback((id: string) => onOpenDetail(id), [onOpenDetail])
+  const handleCreateTask = useCallback(
+    (column: BoardColumn): string => {
+      const task: ProjectTask = {
+        id: newId(),
+        title: '',
+        done: false,
+        createdAt: new Date().toISOString(),
+        boardColumn: column,
+      }
+      persistLocal({ ...dataRef.current, tasks: [...dataRef.current.tasks, task] })
+      return task.id
+    },
+    [persistLocal],
+  )
+  const resolveSessionStatus = useCallback(
+    (taskId: string): ClaudeBeaconStatus | null => {
+      const ptyId = liveTerminalId(taskId)
+      if (!ptyId) return null
+      // A just-launched pane the poll hasn't seen yet is painting its banner
+      // right now — 'working' is the truthful default.
+      return claudeStatusByPty.get(ptyId) ?? 'working'
+    },
+    [liveTerminalId, claudeStatusByPty],
+  )
+  const resolveWorkerForTask = useCallback(
+    (taskId: string): BoardCardWorker | null => {
+      const w = workersByTask.get(taskId)
+      if (!w) return null
+      const live = claudeStatusByPty.get(w.terminalId)
+      const view: BoardCardWorker = {
+        branch: w.branch,
+        activity: deriveWorkerActivity(w.stage, live),
+        ...(w.phase ? { phase: w.phase } : {}),
+        ...(w.note ? { note: w.note } : {}),
+      }
+      return view
+    },
+    [workersByTask, claudeStatusByPty],
+  )
+
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1420,53 +1518,27 @@ export const BoardModule = ({
             presence={collab}
             openTaskId={detailId}
             // Board self-contained (P1): open the card's conversation in an
-            // in-tab drawer.
-            onOpenTask={id => onOpenDetail(id)}
+            // in-tab drawer. (Stable callbacks defined above so the memoized
+            // BoardCard can skip untouched cards.)
+            onOpenTask={handleOpenTask}
             // Board self-contained (Phase A): author plan cards right here.
             // "Add a card" creates the card immediately with an EMPTY title and
             // returns its id; the Board then OPENS ITS DETAIL DRAWER so the user
             // types the title in a roomy field (an untouched card is discarded on
             // close — see isUntouchedEmpty).
-            onCreateTask={(column: BoardColumn) => {
-              const task: ProjectTask = {
-                id: newId(),
-                title: '',
-                done: false,
-                createdAt: new Date().toISOString(),
-                boardColumn: column,
-              }
-              persistLocal({ ...data, tasks: [...data.tasks, task] })
-              return task.id
-            }}
+            onCreateTask={handleCreateTask}
             projectMissing={project.missing}
             hasGit={project.hasGit}
             projectId={project.id}
             // Merged-branch detection (B018): the poll needs the project path.
             projectPath={project.path}
             displayName={displayName}
-            sessionStatus={taskId => {
-              const ptyId = liveTerminalId(taskId)
-              if (!ptyId) return null
-              // A just-launched pane the poll hasn't seen yet is painting its
-              // banner right now — 'working' is the truthful default.
-              return claudeStatusByPty.get(ptyId) ?? 'working'
-            }}
+            sessionStatus={resolveSessionStatus}
             // Swarm worker on a doing card (条件①②④) — read-only, owner-gated
             // upstream. Combine the orchestrator's reported worker (which/branch/
             // stage/heartbeat) with the live PTY beacon (working/waiting) into the
             // card's render-ready worker view; null when no worker owns the card.
-            workerForTask={taskId => {
-              const w = workersByTask.get(taskId)
-              if (!w) return null
-              const live = claudeStatusByPty.get(w.terminalId)
-              const view: BoardCardWorker = {
-                branch: w.branch,
-                activity: deriveWorkerActivity(w.stage, live),
-                ...(w.phase ? { phase: w.phase } : {}),
-                ...(w.note ? { note: w.note } : {}),
-              }
-              return view
-            }}
+            workerForTask={resolveWorkerForTask}
             onOpenProjectSettings={onOpenProjectSettings}
           />
         </div>

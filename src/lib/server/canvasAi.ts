@@ -48,7 +48,8 @@ import type {
   CanvasElement,
   TweakScreenRequest,
 } from '@/lib/types'
-import { appendCanvasElements, updateCanvasElementSource } from './canvasData'
+import { appendCanvasElements, hashElementSource, updateCanvasElementSource } from './canvasData'
+import { claudeRunPreflight } from './claudePreflight'
 import { launchClaude } from './claudeTerminal'
 import { killTerminal, subscribeTerminal } from './terminal'
 
@@ -129,10 +130,32 @@ export interface FileTaskOpts {
   signal?: AbortSignal
 }
 
-const runFileTaskOnce = async (opts: FileTaskOpts): Promise<string> => {
+/** Run one file-handoff claude task: spawn a claude PTY session in the handoff
+ *  cwd, watch its output for the completion marker, then read the result file.
+ *  This just RUNS — it does NOT serialize. Canvas AI runs are serialized PER
+ *  PROJECT in the job layer (see startJob's per-project chain): two runs in the
+ *  SAME project queue behind each other (a run is a whole claude session — for
+ *  quota) while runs in DIFFERENT projects go in parallel (the multiplexer
+ *  premise — run AI in project A, work in project B). */
+export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   // A queued task whose requester already hung up must not burn a claude
   // session out of the user's subscription window.
+  if (opts.signal?.aborted) throw new Error('canvas AI task aborted')
+  // RUN-GATE RE-CHECK (TOCTOU): the POST route pre-flighted the run gate
+  // (claudeRunPreflight) before creating the job, but a Canvas AI run is a JOB
+  // that can sit QUEUED behind another run in the SAME project for seconds–
+  // minutes before it wins its turn and reaches here (see startJob's per-project
+  // chain). If the user signed OUT of claude in that window, spawning now would
+  // start a SIGNED-OUT claude that opens its OWN OAuth browser — the exact thing
+  // the preflight gate exists to prevent. Re-run the SAME gate right before the
+  // spawn (claudeConnection caches ~10s, so this is nearly free) and fail the
+  // task instead of spawning. (Mirrors swarmOrchestrator's defaultSpawnWorker,
+  // which preflights right before each worker spawn for the same reason.)
+  const pre = await claudeRunPreflight()
+  if (!pre.ok) throw new Error(pre.body.error || 'claude not ready')
+  // The preflight is async, so a cancel may have landed while it ran — re-check
+  // to keep the "an aborted task never spawns" contract (FileTaskOpts.signal).
   if (opts.signal?.aborted) throw new Error('canvas AI task aborted')
   // bypass (= --dangerously-skip-permissions): no human is at the TTY to
   // approve the file write the task exists to perform. appContext false: a
@@ -145,6 +168,10 @@ const runFileTaskOnce = async (opts: FileTaskOpts): Promise<string> => {
     model: CANVAS_AI_MODEL,
     name: 'canvas-ai',
     appContext: false,
+    // Non-sandboxed, bypass: ignore user-scope ~/.claude.json mcpServers so a
+    // sandboxed claude can't plant one that this auto-run spawns outside the
+    // sandbox (sandbox experiment hardening — see strictMcpConfig opt).
+    strictMcpConfig: true,
   })
 
   let buffer = ''
@@ -199,22 +226,6 @@ const runFileTaskOnce = async (opts: FileTaskOpts): Promise<string> => {
       // best-effort teardown
     }
   }
-}
-
-// Global serialization chain (globalThis: survives tsx watch reloads, same
-// pattern as the terminal pool / generateTaskTitle). Failures don't break it.
-const g = globalThis as typeof globalThis & {
-  __openground_canvas_ai_chain?: Promise<unknown>
-}
-
-/** Run one file-handoff claude task. Concurrent calls run one at a time —
- *  each task is a whole PTY-hosted claude session and fanning them out would
- *  burn the user's subscription window. */
-export const runFileTask = (opts: FileTaskOpts): Promise<string> => {
-  const prev = g.__openground_canvas_ai_chain ?? Promise.resolve()
-  const run = prev.catch(() => {}).then(() => runFileTaskOnce(opts))
-  g.__openground_canvas_ai_chain = run.catch(() => {})
-  return run
 }
 
 /** A unique handoff file under os.tmpdir() (its own mkdtemp dir, never inside
@@ -647,10 +658,15 @@ export const tweakScreenSource = async (
 // the job for progress + result.
 //
 // Stored on globalThis so the registry survives `tsx watch` reloads in dev —
-// same pattern as the terminal pool and the serialization chain above.
-// SERIALIZATION is preserved: the actual claude run still flows through
-// generateCanvasElements/tweakScreenSource → runFileTask → __openground_canvas_ai_chain
-// (one session at a time, for quota); jobs only change WHO can kill it.
+// same pattern as the terminal pool and the per-project chains below.
+// SERIALIZATION lives HERE, in the job layer (startJob): each run is enqueued on
+// its PROJECT's chain, so runs in the SAME project execute one at a time (quota)
+// while runs in DIFFERENT projects go in parallel (a run in project A never
+// head-of-line-blocks one in project B). A run still flows through
+// generateCanvasElements/tweakScreenSource → runFileTask, which now just RUNS (it
+// no longer serializes); the job layer owns BOTH the queue and who can kill it,
+// so a job's visible status can't drift out of sync with the chain (the old
+// global-chain design left a queued job showing 'running' — the bug this fixes).
 
 interface CanvasAiJobInternal {
   id: string
@@ -692,8 +708,26 @@ const scheduleJobSweep = (id: string): void => {
   ;(timer as unknown as { unref?: () => void }).unref?.()
 }
 
-/** Spawn a job: run `work` on the job's OWN AbortController (never a request
- *  signal), record its result/status, and return the job id immediately. */
+// Per-project serialization chains (keyed by project path). A Canvas AI run is a
+// whole claude PTY session, so runs for the SAME project execute ONE AT A TIME
+// (fanning them out within a project would burn the user's subscription window
+// and could race two writers on one canvas); runs for DIFFERENT projects run in
+// PARALLEL. Stored on globalThis so the chains survive `tsx watch` reloads —
+// same pattern as the job registry + terminal pool.
+const chainGlobal = globalThis as typeof globalThis & {
+  __openground_canvas_ai_chains?: Map<string, Promise<unknown>>
+}
+const aiChains: Map<string, Promise<unknown>> =
+  chainGlobal.__openground_canvas_ai_chains ??
+  (chainGlobal.__openground_canvas_ai_chains = new Map())
+
+/** Spawn a job: enqueue it on its PROJECT's serialization chain and return the
+ *  job id immediately. The job starts 'queued' (NOT 'running') and flips to
+ *  'running' only when it wins its turn and a claude session is about to spawn —
+ *  so a job parked behind another run in the SAME project stays 'queued' (off the
+ *  beacon, still cancellable), while a run in a DIFFERENT project isn't blocked
+ *  at all. The run executes on the job's OWN AbortController (never a request
+ *  signal): only an explicit cancel kills it. */
 const startJob = (
   meta: {
     kind: CanvasAiJobKind
@@ -713,14 +747,24 @@ const startJob = (
     projectPath: meta.projectPath,
     canvasId: meta.canvasId,
     elementId: meta.elementId,
-    status: 'running',
+    status: 'queued',
     startedAt: Date.now(),
     controller,
   }
   jobs.set(id, job)
-  // Fire-and-forget by design: the route returns {jobId} right away and the run
-  // is NOT awaited by — nor bound to — the HTTP connection.
-  void (async () => {
+
+  // Chain this run after any in-flight run for the SAME project. Fire-and-forget:
+  // the route returns {jobId} right away and the run is NOT bound to the HTTP
+  // connection. Every link is .catch-guarded so one failed run never stalls the
+  // chain behind it.
+  const key = meta.projectPath
+  const prev = aiChains.get(key) ?? Promise.resolve()
+  const run = prev.catch(() => {}).then(async () => {
+    // Our turn on the chain. If a cancel landed while we were queued, the job is
+    // already terminal (cancelCanvasAiJob moves queued → error) — don't spawn a
+    // claude session for it; just let the chain advance to the next run.
+    if (job.status !== 'queued') return
+    job.status = 'running'
     try {
       const result = await work(controller.signal)
       job.elements = result.elements
@@ -738,7 +782,15 @@ const startJob = (
       job.finishedAt = Date.now()
       scheduleJobSweep(id)
     }
-  })()
+  })
+  // Keep a rejection-proof tail so the next run chains cleanly, and drop the key
+  // once this run is the tail (identity check ⇒ race-free) so the map doesn't
+  // retain a settled promise per project forever.
+  const guarded = run.catch(() => {})
+  aiChains.set(key, guarded)
+  void guarded.finally(() => {
+    if (aiChains.get(key) === guarded) aiChains.delete(key)
+  })
   return id
 }
 
@@ -778,6 +830,24 @@ export interface TweakJobDeps {
   persist?: typeof updateCanvasElementSource
 }
 
+/** A completed tweak whose target element was EDITED during the run ends with
+ *  this error message (see startTweakJob). The element's source no longer
+ *  matches the snapshot claude rewrote, so persisting the now-stale rewrite would
+ *  silently destroy the user's edit; instead the job fails, the edit is kept, and
+ *  the client can re-run the tweak. Exported so tests can pin the behaviour. */
+export const TWEAK_CONFLICT_MESSAGE =
+  'the screen was edited during the tweak — your edit was kept; re-run the tweak to apply the change'
+
+/** A tweak whose target element (or the canvas holding it) was DELETED during the
+ *  run ends with this error message (see startTweakJob). The rewrite has nowhere to
+ *  land, so updateCanvasElementSource returns `false` and NOTHING reaches disk;
+ *  reporting status=done with a `source` the client would apply would be a false
+ *  success (zero writes claimed as applied). Instead the job fails — mirroring the
+ *  generate side, where appendCanvasElements throws 'canvas no longer exists' when
+ *  its canvas is gone. Exported so tests can pin the behaviour. */
+export const TWEAK_TARGET_REMOVED_MESSAGE =
+  'the target was removed during the tweak — there was nothing to apply'
+
 /** Start a tweak-screen job. Returns the job id immediately; on completion the
  *  rewritten source is written onto the target element server-side (unless
  *  claude judged the instruction already satisfied). */
@@ -805,7 +875,29 @@ export const startTweakJob = (
       // Honour a cancel that landed after claude finished but before persist (see
       // startGenerateJob) — a cancelled tweak must not overwrite the element.
       if (signal.aborted) throw new Error('canvas AI task aborted')
-      if (!unchanged) await persist(args.projectPath, args.canvasId, args.elementId, source)
+      if (!unchanged) {
+        // The rewrite is of the SNAPSHOT taken when the run started — req.source.
+        // Guard the write on that snapshot's hash so a manual edit made DURING the
+        // (30s–3min) run isn't silently clobbered: updateCanvasElementSource only
+        // overwrites while the on-disk element still hashes to it, else returns
+        // 'conflict'. Surface that as a job error so the client keeps the edit and
+        // the user can re-run the tweak. A 'false' return = the target element (or
+        // its canvas) was DELETED mid-run, so the rewrite reached disk NOWHERE —
+        // fail the job too (TWEAK_TARGET_REMOVED_MESSAGE) instead of returning
+        // done+source, which would be a false success: a "done" carrying a source
+        // the client applies when zero bytes were persisted. This mirrors the
+        // generate side, where appendCanvasElements throws when its canvas is gone.
+        const baseHash = hashElementSource(args.req.source)
+        const result = await persist(
+          args.projectPath,
+          args.canvasId,
+          args.elementId,
+          source,
+          baseHash,
+        )
+        if (result === 'conflict') throw new Error(TWEAK_CONFLICT_MESSAGE)
+        if (result === false) throw new Error(TWEAK_TARGET_REMOVED_MESSAGE)
+      }
       return { source, unchanged }
     },
   )
@@ -835,7 +927,10 @@ export const getCanvasAiJobState = (
 }
 
 /** Every RUNNING job (GET /api/canvas/ai/active — feeds the global beacon).
- *  Done / errored jobs are excluded. `now` injected for tests. */
+ *  Queued (waiting their turn behind another run in the same project), done, and
+ *  errored jobs are excluded — only a LIVE claude session lights the beacon, so a
+ *  job still queued never falsely shows "Claude is designing". `now` injected for
+ *  tests. */
 export const listActiveCanvasAiJobs = (now: number = Date.now()): CanvasAiActiveJob[] => {
   const out: CanvasAiActiveJob[] = []
   jobs.forEach((j) => {
@@ -858,7 +953,22 @@ export const listActiveCanvasAiJobs = (now: number = Date.now()): CanvasAiActive
 export const cancelCanvasAiJob = (id: string): boolean => {
   const j = jobs.get(id)
   if (!j) return false
+  // A job still QUEUED hasn't started its claude session — it's parked behind
+  // another run in the same project. End it NOW so the cancel takes effect
+  // immediately (the beacon stays clear, the client stops polling) instead of
+  // waiting for the head-of-line run to finish; when its turn comes on the chain
+  // the run step sees it's no longer 'queued' and skips it, so no session is ever
+  // spawned. (This is what made cancel feel broken before: a queued job's abort
+  // only landed once the blocking run released the global chain.)
+  if (j.status === 'queued') {
+    j.status = 'error'
+    j.error = 'cancelled'
+    j.finishedAt = Date.now()
+    scheduleJobSweep(id)
+  }
   try {
+    // Aborting a RUNNING job kills its claude session (the abort listener in
+    // runFileTask); a no-op on a queued/finished one.
     j.controller.abort()
   } catch {
     // already torn down

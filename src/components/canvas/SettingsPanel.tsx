@@ -59,6 +59,58 @@ interface Props {
 // (Language, Feedback). The setup prerequisite (Claude CLI) is taught in
 // onboarding; the knobs with working defaults (workspace, a CLI re-check)
 // live under Advanced so the surface stays calm.
+// One owner-only experiment switch (segmented Off / On). Extracted so every
+// experiment row shares the EXACT same interactive states (hover / pressed /
+// focus-visible) instead of each re-declaring them — add a row by adding a
+// caller, never by copying the button markup. Persists immediately via
+// `onChange` (a discrete switch, not debounced text).
+const ExperimentToggle = ({
+  label,
+  value,
+  onChange,
+  offLabel,
+  onLabel,
+}: {
+  label: string
+  value: boolean
+  onChange: (next: boolean) => void
+  offLabel: string
+  onLabel: string
+}) => (
+  <div className="flex items-center justify-between gap-3">
+    <span className="text-[13px] text-ink">{label}</span>
+    <div
+      role="group"
+      aria-label={label}
+      className="inline-flex items-center gap-0 border border-line rounded-[3px] p-0.5"
+    >
+      {([
+        [false, offLabel],
+        [true, onLabel],
+      ] as [boolean, string][]).map(([v, l]) => {
+        const active = value === v
+        return (
+          <button
+            key={String(v)}
+            type="button"
+            onClick={() => onChange(v)}
+            aria-pressed={active}
+            className={[
+              'h-7 min-w-[44px] px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+              'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+              active
+                ? 'bg-accent text-bg-card border-accent'
+                : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
+            ].join(' ')}
+          >
+            {l}
+          </button>
+        )
+      })}
+    </div>
+  </div>
+)
+
 export const SettingsPanel = ({
   open,
   settings,
@@ -75,9 +127,10 @@ export const SettingsPanel = ({
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
   const [displayName, setDisplayName] = useState(settings.displayName ?? '')
-  // Owner-only experiment toggle (swarm). Local state for instant feedback;
-  // persisted immediately on toggle (below) and re-seeded from settings on open.
+  // Owner-only experiment toggles. Local state for instant feedback; persisted
+  // immediately on toggle (below) and re-seeded from settings on open.
   const [swarmExp, setSwarmExp] = useState(settings.experiments?.swarm === true)
+  const [sandboxExp, setSandboxExp] = useState(settings.experiments?.sandbox === true)
   // Non-persisted placeholder for the Display name input: the user's global
   // git identity, served by GET /api/settings as `suggestedDisplayName`.
   const [suggestedName, setSuggestedName] = useState<string | null>(null)
@@ -135,6 +188,7 @@ export const SettingsPanel = ({
     setDefaultWorkspace(settings.defaultWorkspace ?? '')
     setDisplayName(settings.displayName ?? '')
     setSwarmExp(settings.experiments?.swarm === true)
+    setSandboxExp(settings.experiments?.sandbox === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -152,6 +206,18 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       experiments: { ...s.experiments, swarm: next },
+    })
+  }
+
+  const setSandbox = (next: boolean) => {
+    if (next === sandboxExp) return
+    setSandboxExp(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      experiments: { ...s.experiments, sandbox: next },
     })
   }
 
@@ -410,37 +476,21 @@ export const SettingsPanel = ({
                     heading={t('settings.experiments.heading')}
                     hint={t('settings.experiments.hint')}
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-[13px] text-ink">{t('settings.experiments.swarm')}</span>
-                      <div
-                        role="group"
-                        aria-label={t('settings.experiments.swarm')}
-                        className="inline-flex items-center gap-0 border border-line rounded-[3px] p-0.5"
-                      >
-                        {([
-                          [false, t('settings.experiments.off')],
-                          [true, t('settings.experiments.on')],
-                        ] as [boolean, string][]).map(([value, label]) => {
-                          const active = swarmExp === value
-                          return (
-                            <button
-                              key={String(value)}
-                              type="button"
-                              onClick={() => setSwarm(value)}
-                              aria-pressed={active}
-                              className={[
-                                'h-7 min-w-[44px] px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
-                                'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-                                active
-                                  ? 'bg-accent text-bg-card border-accent'
-                                  : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
-                              ].join(' ')}
-                            >
-                              {label}
-                            </button>
-                          )
-                        })}
-                      </div>
+                    <div className="flex flex-col gap-3">
+                      <ExperimentToggle
+                        label={t('settings.experiments.swarm')}
+                        value={swarmExp}
+                        onChange={setSwarm}
+                        offLabel={t('settings.experiments.off')}
+                        onLabel={t('settings.experiments.on')}
+                      />
+                      <ExperimentToggle
+                        label={t('settings.experiments.sandbox')}
+                        value={sandboxExp}
+                        onChange={setSandbox}
+                        offLabel={t('settings.experiments.off')}
+                        onLabel={t('settings.experiments.on')}
+                      />
                     </div>
                   </Section>
                 )}

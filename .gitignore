@@ -75,6 +75,17 @@ next-env.d.ts
 # OPEN GROUND's own per-project data (local user state)
 /.openground/
 
+# Proxy judgment corpus ("you-corpus") — the externalised decision axis. It is
+# PERSONAL data that lives only under ~/.openground (never in-repo). These
+# unanchored patterns are DEFENSIVE: if a misconfigured CLI ever writes a corpus
+# into the work tree, it must never be committed.
+you-corpus.md
+you-corpus-additions.json
+# corruption-recovery backups (the FULL prior judgment history) — must never be
+# committed if OPENGROUND_HOME is ever misconfigured into the repo. Specific
+# (not `you-corpus*`) so it can't shadow the tracked scripts/you-corpus.ts.
+you-corpus-additions.json.corrupt-*
+
 # MCP server config — contains a Supabase Personal Access Token (account-level
 # secret). NEVER commit this; it is a per-developer local file.
 /.mcp.json
