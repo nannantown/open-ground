@@ -56,6 +56,16 @@ export interface Settings {
    *  legacy in-repo `.openground/` data is copied back to the central store, so
    *  the (now-removed) feature never reads the repo again. */
   shareEvacuatedAt?: string
+  /** Canonicalized project paths whose owner turned Swarm **Autonomy ON** and
+   *  never turned it OFF. This is the ONLY autonomy state that survives a
+   *  restart — and it is a REMINDER, not an auto-resume: the engine itself is
+   *  in-memory and always relaunches OFF (fail-safe, so a crash / auto-update /
+   *  reboot never silently re-spawns workers). On the next launch the Swarm tab
+   *  reads this to show a passive "autonomy was on — resume?" prompt; nothing
+   *  runs until the owner clicks it. Server-owned (added by `startOrchestrator`,
+   *  cleared by `stopOrchestrator`) — deliberately NOT in USER_SETTINGS_KEYS, so
+   *  the untrusted POST /api/settings route can never write it. */
+  swarmAutonomyOn?: string[]
   /** @deprecated Legacy single-root model. Kept only so back-compat parse +
    *  the one-shot migration scan can still read it. No longer auto-scanned. */
   projectsRoot: string | null
@@ -1214,6 +1224,15 @@ export interface SwarmOrchestratorState {
    *  flag. A SEPARATE section from `kpis` in the dashboard. See
    *  {@link SwarmConsumption}. */
   consumption: SwarmConsumption
+  /** True when the owner turned Autonomy ON for this project in a PRIOR session
+   *  and never turned it OFF (persisted in `Settings.swarmAutonomyOn`). The
+   *  engine is NEVER auto-resumed on restart — it always relaunches `running:false`
+   *  (fail-safe) — so the Swarm UI reads this to show a passive "autonomy was on
+   *  last session — resume?" reminder. Surfaced even before an engine exists this
+   *  session (right after a restart). Cleared by an explicit OFF (resume or
+   *  dismiss). Independent of `running`; the reminder shows only while
+   *  `!running && autonomyRemembered`. */
+  autonomyRemembered: boolean
 }
 
 // ── swarm janitor (residual-cleanup) ─────────────────────────────────────────

@@ -111,6 +111,8 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 //   projectsRoot        — deprecated legacy-migration input (a path)
 //   projectsMigratedAt  — one-shot legacy-migration sentinel (server-owned)
 //   shareEvacuatedAt    — one-shot share-evacuation sentinel (server-owned)
+//   swarmAutonomyOn     — server-owned (startOrchestrator/stopOrchestrator only);
+//                         a forged body must never mark a project "autonomy on"
 //   archiveDirName      — deprecated migration input
 //   excludePatterns     — deprecated migration input
 //
@@ -148,6 +150,50 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   }
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]
+}
+
+// ─── Swarm autonomy "remembered ON" set (Settings.swarmAutonomyOn) ────────────
+// The ONLY autonomy state that survives a restart — a REMINDER, never an
+// auto-resume (the engine is in-memory and always relaunches OFF). Added when the
+// owner turns Autonomy ON for a project, removed on an explicit OFF (resume or
+// dismiss). Read-modify-write is routed through the SAME single-flight
+// `settingsChain` as setSettings / markNotificationsRead: each call re-reads
+// inside the lock, so toggling two projects at once can't lose a key. Keys are
+// canonicalized project paths (the swarm engine's own key), passed in by the
+// caller. Every read guards `Array.isArray` — a hand-corrupted non-array field
+// degrades to "nothing remembered" (the SAFE direction: at worst a missing
+// reminder, never a spurious run).
+export const rememberSwarmAutonomy = async (key: string): Promise<void> => {
+  if (!key) return
+  const run = settingsChain.then(async () => {
+    const current = await getSettings()
+    const existing = Array.isArray(current.swarmAutonomyOn) ? current.swarmAutonomyOn : []
+    if (existing.includes(key)) return
+    await writeJson(settingsFile(), { ...current, swarmAutonomyOn: [...existing, key] })
+  })
+  settingsChain = run.catch(() => {})
+  return run
+}
+
+export const forgetSwarmAutonomy = async (key: string): Promise<void> => {
+  if (!key) return
+  const run = settingsChain.then(async () => {
+    const current = await getSettings()
+    const existing = Array.isArray(current.swarmAutonomyOn) ? current.swarmAutonomyOn : []
+    if (!existing.includes(key)) return
+    await writeJson(settingsFile(), {
+      ...current,
+      swarmAutonomyOn: existing.filter((k) => k !== key),
+    })
+  })
+  settingsChain = run.catch(() => {})
+  return run
+}
+
+export const isSwarmAutonomyRemembered = async (key: string): Promise<boolean> => {
+  if (!key) return false
+  const { swarmAutonomyOn } = await getSettings()
+  return Array.isArray(swarmAutonomyOn) && swarmAutonomyOn.includes(key)
 }
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)

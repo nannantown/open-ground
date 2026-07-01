@@ -55,6 +55,8 @@ import {
   runAutoDrainScan,
   startAutoDrainLoop,
   stopAutoDrainLoop,
+  startOrchestrator,
+  bootAutoDrainEnabled,
   REWORK_LOG_MARKER,
   __resetOrchestratorForTests,
   __seedEngineForTests,
@@ -69,6 +71,7 @@ import {
   type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
+import { rememberSwarmAutonomy, forgetSwarmAutonomy, isSwarmAutonomyRemembered } from './store'
 import type {
   OrchestratorLogLine,
   OrchestratorWorker,
@@ -77,6 +80,16 @@ import type {
   SwarmFatalNotification,
 } from '../types'
 import type { IntegrateOutcome, ReviewReadiness } from './swarmIntegrate'
+
+// startOrchestrator gates on the REAL claudeRunPreflight (not an injected dep), which
+// refuses to arm without a logged-in claude CLI — non-hermetic. Stub it OK so the
+// autonomy-persistence tests can exercise the ON path. Inert elsewhere: the drain /
+// auto-start tests inject their own preflight via fullDeps, and startOrchestrator is
+// the only caller of the real one in this suite.
+vi.mock('./claudePreflight', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./claudePreflight')>()
+  return { ...actual, claudeRunPreflight: async () => ({ ok: true }) }
+})
 
 // The commander engine's drain+dispatch+monitor logic, exercised with FAKE deps
 // (no timers, no globalThis, no PTYs, no git). The pure helpers (isTodoCard /
@@ -1118,6 +1131,77 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       expect(engine.running).toBe(false)
       expect(deps.spawned).toHaveLength(0) // NO worker spawned
       expect(deps.board.get('a')?.boardColumn).toBe('todo') // card untouched
+    })
+  })
+
+  describe('autonomy restart reminder — relaunch OFF + a persisted "resume?" marker (itemA)', () => {
+    beforeEach(() => __resetOrchestratorForTests())
+    afterEach(async () => {
+      __resetOrchestratorForTests() // clear any armed chain timer (startOrchestrator arms one)
+      // settings.json is shared across this file's tests (one isolated tmp HOME), so
+      // forget every key we touched — a leaked marker would flip a later test's baseline.
+      for (const p of [
+        '/proj-remember-start',
+        '/proj-dismiss-after-restart',
+        '/proj-seeded-remember',
+        '/proj-store-helpers',
+      ]) {
+        await forgetSwarmAutonomy(await canonicalize(p))
+      }
+    })
+
+    it('startOrchestrator (Autonomy ON) PERSISTS the marker so a restart can remind', async () => {
+      const key = await canonicalize('/proj-remember-start')
+      expect(await isSwarmAutonomyRemembered(key)).toBe(false) // clean baseline
+      await startOrchestrator('/proj-remember-start', fullDeps({ cards: [] }))
+      expect(await isSwarmAutonomyRemembered(key)).toBe(true) // the owner's intent is now durable
+    })
+
+    it('after a RESTART (engine gone) getOrchestratorState surfaces the marker but running stays OFF (fail-safe, no auto-resume)', async () => {
+      const key = await canonicalize('/proj-seeded-remember')
+      // A prior session persisted the intent; the in-memory engine died on relaunch,
+      // so store.engines has NO entry — the exact moment the reminder must surface.
+      await rememberSwarmAutonomy(key)
+      const state = await getOrchestratorState('/proj-seeded-remember', fullDeps({ cards: [card('a')] }))
+      expect(state.running).toBe(false) // NEVER auto-resumed — the whole point
+      expect(state.autonomyRemembered).toBe(true) // ...but the UI gets its "resume?" signal
+    })
+
+    it('stopOrchestrator (explicit OFF / dismiss) CLEARS the marker even when no engine exists this session', async () => {
+      const key = await canonicalize('/proj-dismiss-after-restart')
+      await rememberSwarmAutonomy(key) // pretend a prior session left it on
+      expect(await isSwarmAutonomyRemembered(key)).toBe(true)
+      // Post-restart there is no engine in the store; the clear must happen anyway,
+      // BEFORE the `if (!engine)` early-return — otherwise "dismiss" would be a no-op.
+      const state = await stopOrchestrator('/proj-dismiss-after-restart', makeDeps({ cards: [] }))
+      expect(await isSwarmAutonomyRemembered(key)).toBe(false)
+      expect(state.autonomyRemembered).toBe(false)
+      expect(state.running).toBe(false)
+    })
+
+    it('store helpers: remember is idempotent, forget removes, empty/unknown key is never remembered', async () => {
+      const key = await canonicalize('/proj-store-helpers')
+      expect(await isSwarmAutonomyRemembered(key)).toBe(false)
+      await rememberSwarmAutonomy(key)
+      await rememberSwarmAutonomy(key) // idempotent — no duplicate entry
+      expect(await isSwarmAutonomyRemembered(key)).toBe(true)
+      await forgetSwarmAutonomy(key)
+      expect(await isSwarmAutonomyRemembered(key)).toBe(false)
+      expect(await isSwarmAutonomyRemembered('')).toBe(false) // guards the empty key
+    })
+  })
+
+  describe('bootAutoDrainEnabled — boot auto-drain is STRICT OPT-IN, default OFF (item1 / eadb25e6)', () => {
+    it('is OFF when OPENGROUND_SWARM_AUTODRAIN is unset — the default that keeps a plain launch idle', () => {
+      expect(bootAutoDrainEnabled({})).toBe(false)
+    })
+    it('is ON only for the exact string "1"', () => {
+      expect(bootAutoDrainEnabled({ OPENGROUND_SWARM_AUTODRAIN: '1' })).toBe(true)
+    })
+    it('stays OFF for any other value (0 / true / yes / empty / on / 2)', () => {
+      for (const v of ['0', 'true', 'yes', '', 'on', '2']) {
+        expect(bootAutoDrainEnabled({ OPENGROUND_SWARM_AUTODRAIN: v })).toBe(false)
+      }
     })
   })
 

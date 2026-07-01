@@ -14,7 +14,7 @@ import { app } from './app'
 import { pruneOldAttachments, pruneOldRunFiles, RAW_RETENTION_DAYS } from '@/lib/server/retention'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
-import { startAutoDrainLoop } from '@/lib/server/swarmOrchestrator'
+import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
 
 const PORT = Number(process.env.PORT) || 47776
@@ -86,8 +86,11 @@ void (async () => {
 // OPENGROUND_SWARM_AUTODRAIN=1, or turn a SINGLE project's drain on at runtime from the
 // Swarm UI (POST /api/swarm/orchestrator/start, owner-only → startOrchestrator(path)).
 // No opt-in ⇒ no background drain, so a fresh install or a plain relaunch stays completely
-// idle until the user explicitly asks for the swarm.
-if (process.env.OPENGROUND_SWARM_AUTODRAIN === '1') {
+// idle until the user explicitly asks for the swarm. The predicate is the exported
+// `bootAutoDrainEnabled` (pinned by a regression test to "unset ⇒ off"): it is the only
+// process-wide, role-INDEPENDENT spawn switch, so its default is what protects a
+// non-owner user from any launch-time auto-run.
+if (bootAutoDrainEnabled()) {
   startAutoDrainLoop()
 }
 

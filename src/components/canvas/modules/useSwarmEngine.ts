@@ -168,6 +168,12 @@ export interface SwarmEngineState {
   /** Consumption snapshot (the BUDGET layer) — see {@link EngineConsumption}. A
    *  SEPARATE dashboard section from `kpis`. */
   consumption: EngineConsumption
+  /** Persisted "autonomy was ON last session" reminder (server
+   *  `Settings.swarmAutonomyOn`). The engine always relaunches OFF — this is NOT
+   *  an auto-resume — so the UI shows a one-click "resume?" prompt while
+   *  `!running && autonomyRemembered`. Surfaced even before an engine exists this
+   *  session (right after a restart). */
+  autonomyRemembered: boolean
 }
 
 export const EMPTY_KPIS: EngineKpis = {
@@ -196,6 +202,7 @@ export const DEFAULT_ENGINE: SwarmEngineState = {
   maxWorkers: 0,
   kpis: EMPTY_KPIS,
   consumption: EMPTY_CONSUMPTION,
+  autonomyRemembered: false,
 }
 
 const KNOWN_LEVELS: ReadonlySet<string> = new Set(['info', 'warn', 'error'])
@@ -365,6 +372,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     maxWorkers: typeof o.maxWorkers === 'number' && Number.isFinite(o.maxWorkers) ? o.maxWorkers : 0,
     kpis: sanitizeKpis(o.kpis),
     consumption: sanitizeConsumption(o.consumption),
+    autonomyRemembered: o.autonomyRemembered === true,
   }
 }
 
@@ -593,6 +601,10 @@ export interface UseSwarmEngine {
   error: string | null
   /** Autonomy switch (Card①) — start/stop the drain+dispatch loop. */
   toggleAutonomy: (next: boolean) => void
+  /** Dismiss the restart "autonomy was on — resume?" reminder without resuming:
+   *  clears the persisted marker (POST stop → forgetSwarmAutonomy). Distinct from
+   *  toggleAutonomy(false), which no-ops when the engine is already stopped. */
+  dismissAutonomyReminder: () => void
   /** Auto-integrate switch (Card③) — arm/disarm the engine's own landing. */
   toggleAutoMerge: (next: boolean) => void
   /** Stop ONE engine-dispatched worker by its PTY id: the server tears down its
@@ -756,6 +768,31 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     [busy, engine.running, callEngine, t],
   )
 
+  // Dismiss the restart reminder — the owner chose NOT to resume. POSTs 'stop'
+  // (which clears the persisted marker via forgetSwarmAutonomy on the server)
+  // UNCONDITIONALLY: toggleAutonomy short-circuits a no-op stop (next === running,
+  // both false while the banner is up), but here it is the SERVER MARKER that must
+  // change, not `running`. The banner is gated on autonomyRemembered, so flip that
+  // off optimistically and adopt the server's (marker-cleared) state.
+  const dismissAutonomyReminder = useCallback(async () => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setEngine((s) => ({ ...s, autonomyRemembered: false }))
+    try {
+      const fresh = await callEngine('stop', {})
+      setEngine(fresh)
+      setAvailable(true)
+    } catch (e) {
+      setEngine((s) => ({ ...s, autonomyRemembered: true })) // revert — still remembered
+      setError(
+        t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }, [busy, callEngine, t])
+
   // Auto-integrate switch — Card③. Same optimistic-then-confirm shape as autonomy;
   // an old server without the route 404s, so we revert and show the engine-failure
   // note (the switch stays present + default OFF).
@@ -851,6 +888,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     busy,
     error,
     toggleAutonomy: (next) => void toggleAutonomy(next),
+    dismissAutonomyReminder: () => void dismissAutonomyReminder(),
     toggleAutoMerge: (next) => void toggleAutoMerge(next),
     stopWorker: (terminalId) => void stopWorker(terminalId),
     resolveReview: (taskId, target) => void resolveReview(taskId, target),

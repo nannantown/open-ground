@@ -31,7 +31,7 @@
 // SDK. This module never spawns claude itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Network, Inbox, Boxes, Gauge, Workflow } from 'lucide-react'
+import { Network, Inbox, Boxes, Gauge, Workflow, X, Power } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -273,6 +273,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     busy: engineBusy,
     error: engineError,
     toggleAutonomy,
+    dismissAutonomyReminder,
     toggleAutoMerge,
   } = useSwarmEngine(project.path)
 
@@ -833,6 +834,37 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         <p className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-[11px] leading-relaxed text-accent">
           {error}
         </p>
+      )}
+
+      {/* Restart reminder (autonomyRemembered) — the engine is in-memory and always
+          relaunches OFF; if the owner had autonomy ON last session, offer a one-click
+          resume (never auto-resumed). Dismiss clears the persisted marker (toggleAutonomy
+          false → forgetSwarmAutonomy). Shown only while !running && autonomyRemembered. */}
+      {engine.autonomyRemembered && !engine.running && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
+          <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted">
+            {t('projectPanel.swarm.autonomyReminder')}
+          </span>
+          <button
+            type="button"
+            onClick={() => toggleAutonomy(true)}
+            disabled={engineBusy || !engineAvailable}
+            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <Power size={12} strokeWidth={2.25} aria-hidden />
+            {t('projectPanel.swarm.autonomyReminder.resume')}
+          </button>
+          <button
+            type="button"
+            onClick={() => dismissAutonomyReminder()}
+            disabled={engineBusy}
+            aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            title={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X size={12} strokeWidth={2} />
+          </button>
+        </div>
       )}
 
       {/* ── Tab surface: supply desk ⇆ commander ⇆ worker tiles ───────────── */}

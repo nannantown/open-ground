@@ -69,7 +69,12 @@ import { canonicalize } from './canonicalize'
 import { openGroundHome } from './paths'
 import { getTerminal, getTerminalScreen, killTerminal, subscribeTerminal, writeInput } from './terminal'
 import { claudeRunPreflight } from './claudePreflight'
-import { getSettings } from './store'
+import {
+  getSettings,
+  rememberSwarmAutonomy,
+  forgetSwarmAutonomy,
+  isSwarmAutonomyRemembered,
+} from './store'
 import { launchClaude } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
@@ -1463,6 +1468,7 @@ const emptyState = (): SwarmOrchestratorState => ({
   maxWorkers: ORCHESTRATOR_MAX_WORKERS,
   kpis: emptyKpis(),
   consumption: emptyConsumption(),
+  autonomyRemembered: false,
 })
 
 /** Public state snapshot. Reports only *live* workers (a dead PTY is filtered
@@ -1476,6 +1482,10 @@ const stateOf = (
   engine: ProjectEngine,
   isAlive: (id: string) => boolean,
   tasks: readonly ProjectTask[] = [],
+  // The persisted "autonomy was on last session" reminder flag — resolved async by
+  // the caller (getOrchestratorState reads Settings.swarmAutonomyOn). Defaulted false
+  // for the toggle endpoints, whose responses the 5s poll immediately supersedes.
+  autonomyRemembered = false,
 ): SwarmOrchestratorState => {
   // Resolve the live worker set ONCE — both the reported `workers` array and the
   // consumption snapshot (activeWorkers / activeRunMs) read from it.
@@ -1492,6 +1502,7 @@ const stateOf = (
     maxWorkers: ORCHESTRATOR_MAX_WORKERS,
     kpis: computeSwarmKpis({ counters, tasks, log: engine.log }),
     consumption: computeSwarmConsumption({ liveWorkers: live, counters, limit: DISPATCH_BUDGET }),
+    autonomyRemembered,
   }
 }
 
@@ -4914,6 +4925,11 @@ export const startOrchestrator = async (
   // AND so a later natural idle can auto-restart it again (maybeAutoStartDrain). The
   // INVERSE of stopOrchestrator's manualStop=true; the two toggles are the consent.
   engine.manualStop = false
+  // Persist the owner's intent so a restart can REMIND (never auto-resume): the
+  // engine above is in-memory and always relaunches OFF, but Settings.swarmAutonomyOn
+  // survives, and next launch the Swarm UI reads it to offer a one-click resume.
+  // Idempotent; cleared by stopOrchestrator (explicit OFF / dismiss).
+  await rememberSwarmAutonomy(key)
   if (!engine.running) {
     engine.running = true
     // Reset the integration throttle so the first pass after a (re)start refreshes
@@ -4931,7 +4947,9 @@ export const startOrchestrator = async (
       .catch(() => {})
       .finally(() => scheduleNext(engine, deps, gen))
   }
-  return stateOf(engine, deps.isAlive)
+  // autonomyRemembered:true — the marker was just written above (harmless while
+  // running, since the UI shows the reminder only while !running).
+  return stateOf(engine, deps.isAlive, [], true)
 }
 
 /** Turn the autonomous drain OFF (idempotent). Cancels the pending pass and
@@ -4943,6 +4961,11 @@ export const stopOrchestrator = async (
   deps: OrchestratorDeps = defaultDeps(),
 ): Promise<SwarmOrchestratorState> => {
   const key = await canonicalize(projectPath)
+  // Clear the persisted reminder FIRST — an explicit OFF (or a "dismiss" of the
+  // restart reminder) must forget the owner's intent even when store.engines has
+  // no entry for this key yet (the common case right after a relaunch: the engine
+  // is in-memory and gone, but Settings.swarmAutonomyOn still carries the marker).
+  await forgetSwarmAutonomy(key)
   const engine = store.engines.get(key)
   if (!engine) return emptyState()
   // Owner EXPLICITLY paused — mark it so maybeAutoStartDrain won't auto-restart the
@@ -4958,7 +4981,8 @@ export const stopOrchestrator = async (
     }
     logLine(engine, 'info', 'autonomous drain OFF')
   }
-  return stateOf(engine, deps.isAlive)
+  // autonomyRemembered:false — the marker was just cleared above.
+  return stateOf(engine, deps.isAlive, [], false)
 }
 
 // ── Auto-start (card cf545637 — todo 自動 drain / "idle worker + todo" デッドロック根治) ──
@@ -5246,8 +5270,14 @@ export const getOrchestratorState = async (
   deps: OrchestratorDeps = defaultDeps(),
 ): Promise<SwarmOrchestratorState> => {
   const key = await canonicalize(projectPath)
+  // The persisted "autonomy was on last session" reminder. Read BEFORE the engine
+  // lookup so it surfaces even when no engine exists yet this session — which is
+  // exactly the state right after a relaunch (engine in-memory ⇒ gone), the moment
+  // the reminder matters most. The engine always relaunches OFF; this flag is what
+  // lets the UI offer a one-click resume instead of silently auto-running.
+  const remembered = await isSwarmAutonomyRemembered(key)
   const engine = store.engines.get(key)
-  if (!engine) return emptyState()
+  if (!engine) return { ...emptyState(), autonomyRemembered: remembered }
   // Read the Board cards for the lead-time KPI (read-only — never mutates). A
   // board blip just yields an empty lead time this poll; the counter-based rates
   // are unaffected (they don't need the cards).
@@ -5257,7 +5287,7 @@ export const getOrchestratorState = async (
   } catch {
     tasks = []
   }
-  return stateOf(engine, deps.isAlive, tasks)
+  return stateOf(engine, deps.isAlive, tasks, remembered)
 }
 
 /** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the
@@ -5338,6 +5368,20 @@ declare global {
   // eslint-disable-next-line no-var
   var __openground_swarm_autodrain_timer: ReturnType<typeof setInterval> | null | undefined
 }
+
+/** Whether the UI-INDEPENDENT boot-time auto-drain loop ({@link startAutoDrainLoop})
+ *  may arm. **STRICT OPT-IN — default OFF** (release blocker eadb25e6): merely
+ *  launching the app must NEVER auto-spawn workers across every registered project.
+ *  ONLY an explicit `OPENGROUND_SWARM_AUTODRAIN=1` enables the global loop; unset /
+ *  '0' / 'true' / anything-but-'1' ⇒ false ⇒ a fresh install or a plain relaunch
+ *  stays completely idle until the owner turns a SINGLE project's drain on from the
+ *  Swarm UI. This is the one process-wide, role-INDEPENDENT spawn switch, so the gate
+ *  is a pure exported predicate with a regression test pinning "unset ⇒ off" (the
+ *  single line whose default protects every non-owner user). server/index.ts is the
+ *  only caller. */
+export const bootAutoDrainEnabled = (
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => env.OPENGROUND_SWARM_AUTODRAIN === '1'
 
 /** Start the UI-INDEPENDENT auto-drain background loop: a slow sweep
  *  ({@link runAutoDrainScan}) every {@link AUTO_DRAIN_SCAN_MS} so a todo backlog drains

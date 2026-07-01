@@ -135,12 +135,15 @@ and spawns `claude` as a child process, so it must run locally.
 - **Layer 2 — per-project tabs**: **Terminal / Canvas / Board** (see
   `src/components/canvas/moduleRegistry.tsx` — the single source of truth
   for the tab set). Terminal is tiled `claude` PTY panes; Board is a
-  kanban whose card drawer auto-launches a PLAIN claude terminal (slot
-  keyed by taskId) when opened — no prompt is sent; the task's title +
-  content reach the session only when the user clicks "Insert task into
-  input" (`POST /api/terminal/:id/paste-task`), which pastes them UNSENT
-  (bracketed paste, no trailing newline) so the user reviews and presses
-  Enter. (There is no per-card ▶ run button anymore.) Canvas is the design /
+  kanban. Opening a card NO LONGER auto-launches anything (the drawer
+  auto-launch died 2026-06-12, `BoardModule.tsx`); a task's `claude`
+  session starts ONLY when the user clicks the card drawer's explicit
+  **実行 (Run)** button, which launches `claude` with the composed task
+  prompt AUTO-SENT (honouring the card's `run` flow / model / effort).
+  Separately, "Insert task into input"
+  (`POST /api/terminal/:id/paste-task`) pastes a task's title + content
+  UNSENT (bracketed paste, no trailing newline) into a live session so
+  the user reviews and presses Enter. Canvas is the design /
   brainstorm surface — multiple Canvases per project (Chrome-style tabs),
   each with sticky / text / frame / mock / comment elements. Mock
   elements render live React (or HTML) in a sandboxed iframe — same

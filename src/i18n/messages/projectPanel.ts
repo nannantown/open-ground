@@ -43,6 +43,12 @@ export const projectPanel = {
     'projectPanel.swarm.power.workers': '{count} workers',
     'projectPanel.swarm.power.hint':
       'Start the engine, commander, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
+    // Restart reminder (autonomyRemembered) — autonomy is NEVER auto-resumed on
+    // relaunch; if it was on last session the banner offers a one-click resume.
+    'projectPanel.swarm.autonomyReminder':
+      'Autonomy was on for this project last session. It relaunched OFF — nothing is running.',
+    'projectPanel.swarm.autonomyReminder.resume': 'Resume',
+    'projectPanel.swarm.autonomyReminder.dismiss': 'Dismiss',
     // OFF / first-run onboarding (SwarmOnboarding) — the SINGLE centered screen
     // shown while the swarm is fully idle (engine stopped + no supply / commander
     // / worker sessions). It explains the three roles and how a request flows
@@ -594,6 +600,12 @@ export const projectPanel = {
     'projectPanel.swarm.power.workers': 'ワーカー {count}',
     'projectPanel.swarm.power.hint':
       'エンジン・司令官・補給官をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
+    // 再起動リマインダー（autonomyRemembered）— 再起動で自律は自動再開しない。前回 ON
+    // だった場合だけ、ワンクリック再開のバナーを出す。
+    'projectPanel.swarm.autonomyReminder':
+      '前回このプロジェクトで自律ドレインが ON でした。再起動で OFF になっています（何も動いていません）。',
+    'projectPanel.swarm.autonomyReminder.resume': '再開',
+    'projectPanel.swarm.autonomyReminder.dismiss': '閉じる',
     // OFF・初回オンボーディング（SwarmOnboarding）— swarm が完全に待機状態（エンジン
     // 停止かつ補給官／司令官／worker セッションなし）のとき中央に出す1枚。3つの役割
     // と、要望がそこをどう流れるかを「開始」前に説明する。役割の名称は上の supply /

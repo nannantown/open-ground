@@ -173,6 +173,17 @@ describe('sanitizeEngineState — engine workers survive the poll → merge path
     expect(mergeSwarmWorkers([], sanitizeEngineState(undefined).workers)).toEqual([])
   })
 
+  it('parses autonomyRemembered STRICTLY — true only for boolean true (the restart-reminder gate)', () => {
+    // The banner shows while !running && autonomyRemembered, so a forged / absent /
+    // garbage value must fold to FALSE — the fail-safe direction (no spurious reminder).
+    expect(sanitizeEngineState({ autonomyRemembered: true }).autonomyRemembered).toBe(true)
+    expect(sanitizeEngineState({ autonomyRemembered: false }).autonomyRemembered).toBe(false)
+    expect(sanitizeEngineState({ autonomyRemembered: 'yes' }).autonomyRemembered).toBe(false)
+    expect(sanitizeEngineState({ autonomyRemembered: 1 }).autonomyRemembered).toBe(false)
+    expect(sanitizeEngineState({}).autonomyRemembered).toBe(false) // absent ⇒ off
+    expect(sanitizeEngineState('boom').autonomyRemembered).toBe(false) // garbage ⇒ off
+  })
+
   it('preserves known structured log kinds and drops unknown ones', () => {
     const state = sanitizeEngineState({
       log: [
