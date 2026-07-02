@@ -16,8 +16,8 @@ import { CLAUDE_EFFORTS, DEFAULT_EXECUTION_MODE } from '../types'
 // default", never emit a broken `--effort` argv.
 
 describe('swarmLaunch (shared swarm launch defaults)', () => {
-  it('launches at opus / max', () => {
-    expect(SWARM_LAUNCH_MODEL).toBe('opus')
+  it('launches at the top tier (fable) / max', () => {
+    expect(SWARM_LAUNCH_MODEL).toBe('fable')
     expect(SWARM_LAUNCH_EFFORT).toBe('max')
   })
 
@@ -27,7 +27,7 @@ describe('swarmLaunch (shared swarm launch defaults)', () => {
 
   it('swarmLaunchDefaults(name) spreads model + effort + the Remote Control name', () => {
     expect(swarmLaunchDefaults('worker')).toEqual({
-      model: 'opus',
+      model: 'fable',
       effort: 'max',
       remoteControl: 'worker',
     })
@@ -74,9 +74,9 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(DEFAULT_EXECUTION_MODE).toBe('optimize') // the shipped default
   })
 
-  it('max mode = the historical opus/max for every role (NO regression)', () => {
+  it('max mode = the top tier (fable)/max for every role', () => {
     for (const role of ['worker', 'supply', 'manager'] as const) {
-      expect(resolveSwarmModelEffort('max', role)).toEqual({ model: 'opus', effort: 'max' })
+      expect(resolveSwarmModelEffort('max', role)).toEqual({ model: 'fable', effort: 'max' })
     }
   })
 
@@ -86,17 +86,17 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(resolveSwarmModelEffort('economy', 'manager')).toEqual({ model: 'sonnet', effort: 'medium' })
   })
 
-  it('optimize keeps CAPABILITY for the commander (quality-critical), sonnet for supply', () => {
+  it('optimize keeps top-tier CAPABILITY for the commander (quality-critical), sonnet for supply', () => {
     // The manager's integration/safety-review DECISION stays opus even in optimize —
     // savings there come from fewer review bodies, not a weaker model.
-    expect(resolveSwarmModelEffort('optimize', 'manager').model).toBe('opus')
+    expect(resolveSwarmModelEffort('optimize', 'manager').model).toBe('fable')
     expect(resolveSwarmModelEffort('optimize', 'supply').model).toBe('sonnet')
   })
 
-  it('optimize routes WORKERS by card weight — heavy stays opus, chores drop to sonnet', () => {
+  it('optimize routes WORKERS by card weight — heavy gets the top tier, chores drop to sonnet', () => {
     const heavy = { title: 'sandbox guard for auth token deletion', notes: 'security-critical' }
     const light = { title: '[follow-up] fix a typo in a comment', notes: 'nit' }
-    expect(resolveSwarmModelEffort('optimize', 'worker', heavy)).toEqual({ model: 'opus', effort: 'max' })
+    expect(resolveSwarmModelEffort('optimize', 'worker', heavy)).toEqual({ model: 'fable', effort: 'max' })
     expect(resolveSwarmModelEffort('optimize', 'worker', light)).toEqual({ model: 'sonnet', effort: 'low' })
     // Unknown / no card ⇒ the SAFE middle (sonnet/medium), never a silent under-power.
     expect(resolveSwarmModelEffort('optimize', 'worker')).toEqual({ model: 'sonnet', effort: 'medium' })

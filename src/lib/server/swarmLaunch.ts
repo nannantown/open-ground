@@ -2,7 +2,8 @@
 // worker / future 司令官 commander) shares, so the three stay in lockstep
 // instead of each role hard-coding — and silently drifting on — its own model /
 // effort. Mirrors the shell swarm launchers (swarm-supply.sh / swarm-new.sh),
-// which all run `--model opus --effort max`.
+// which run the top tier (`--effort max`; the tmux scripts still say opus — the in-app
+// tier is SWARM_LAUNCH_MODEL and upgrades in one place).
 //
 // effort is guarded against CLAUDE_EFFORTS so a rename here can never emit a
 // broken `--effort` argv — the same discipline launchOptsFromPrefs and the old
@@ -18,8 +19,13 @@ import {
   DEFAULT_EXECUTION_MODE,
 } from '../types'
 
-/** Model every swarm role launches at — opus (full capability). */
-export const SWARM_LAUNCH_MODEL = 'opus'
+/** The TOP-TIER model — what "full capability" means today. Fable 5 superseded
+ *  Opus 4.8 as the newest flagship (alias verified against the CLI: `--model
+ *  fable` accepted, bogus aliases rejected). Used by max-output mode, optimize's
+ *  quality-critical slots (commander / heavy cards), the engine's adversarial
+ *  reviewer default, and the no-mode back-compat default. ONE constant so the
+ *  next model generation is a one-line bump. */
+export const SWARM_LAUNCH_MODEL = 'fable'
 
 /** The effort literal the swarm runs at. Kept as a raw string so the
  *  CLAUDE_EFFORTS membership check below is a REAL guard: a typo'd rename
@@ -87,7 +93,7 @@ const guardEffort = (e: string): ClaudeEffort | undefined =>
  *  itself burn the budget this feature exists to save. */
 export type CardWeight = 'heavy' | 'medium' | 'light'
 
-// Signals that a card is high-stakes → keep full capability (Opus/max). Safety +
+// Signals that a card is high-stakes → keep full capability (top tier/max). Safety +
 // architecture + release-blocking work, in EN and JA.
 const HEAVY_SIGNALS =
   /(\bsandbox\b|\bguard\b|\bauth\b|認証|\bdelete\b|削除|\bbilling\b|課金|\bsecurity\b|セキュリティ|\bMAJOR\b|release[\s-]?block|リリースブロッカ|\bSPIKE\b|\bmigration\b|マイグレ|敵対レビュー|サンドボックス)/i
@@ -109,14 +115,14 @@ export const classifyCardWeight = (card: { title?: string; notes?: string }): Ca
  *  in `optimize` route by card weight; the engine roles (supply/manager) key off
  *  the mode alone. Principle (card 68d8e00f): cut redundancy/volume, but keep
  *  CAPABILITY where a judgment's quality matters — so a HEAVY optimize card stays
- *  Opus/max, and even economy roles keep `medium` effort (they reason across
+ *  top-tier/max, and even economy roles keep `medium` effort (they reason across
  *  integration) while economy workers drop to `low`. */
 export const resolveSwarmModelEffort = (
   mode: ExecutionMode,
   role: 'worker' | 'supply' | 'manager',
   card?: { title?: string; notes?: string },
 ): { model: string; effort?: ClaudeEffort } => {
-  if (mode === 'max') return { model: 'opus', effort: guardEffort('max') }
+  if (mode === 'max') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
   if (mode === 'economy') {
     // Aggressive: everything on sonnet. The owner chose to minimise burn — accept a
     // slightly lighter commander. Workers drop to low effort; roles keep medium.
@@ -124,13 +130,15 @@ export const resolveSwarmModelEffort = (
   }
   // optimize — keep CAPABILITY where the judgment's quality matters, cut VOLUME/model
   // elsewhere. The commander's integration / safety-review DECISION is quality-critical,
-  // so it stays on opus (savings there come from fewer review bodies, not a weaker model).
-  if (role === 'manager') return { model: 'opus', effort: guardEffort('high') }
+  // so it stays on the top-tier model (savings there come from fewer review bodies,
+  // not a weaker model).
+  if (role === 'manager') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('high') }
   // The supply officer only translates intent into cards — sonnet is plenty.
   if (role === 'supply') return { model: 'sonnet', effort: guardEffort('medium') }
-  // Workers route by card weight: heavy/safety work keeps opus, chores drop to sonnet.
+  // Workers route by card weight: heavy/safety work gets the top-tier model,
+  // chores drop to sonnet.
   const w = card ? classifyCardWeight(card) : 'medium'
-  if (w === 'heavy') return { model: 'opus', effort: guardEffort('max') }
+  if (w === 'heavy') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
   if (w === 'light') return { model: 'sonnet', effort: guardEffort('low') }
   return { model: 'sonnet', effort: guardEffort('medium') }
 }

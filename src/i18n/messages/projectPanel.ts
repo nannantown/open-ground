@@ -53,13 +53,13 @@ export const projectPanel = {
     'projectPanel.swarm.mode.label': 'Mode',
     'projectPanel.swarm.mode.max': 'Max',
     'projectPanel.swarm.mode.max.hint':
-      'Every role on Opus / max effort, heavy parallelism — peak quality, peak spend. For crunch time.',
+      'Every role on the top-tier model (Fable 5) / max effort, heavy parallelism — peak quality, peak spend. For crunch time.',
     'projectPanel.swarm.mode.economy': 'Economy',
     'projectPanel.swarm.mode.economy.hint':
       'Sonnet, low/medium effort, fewer parallel workers — minimise the weekly-budget burn.',
     'projectPanel.swarm.mode.optimize': 'Optimize',
     'projectPanel.swarm.mode.optimize.hint':
-      'Per-card weight decides — heavy/safety work stays Opus, chores drop to Sonnet. The smart default.',
+      'Per-card weight decides — heavy/safety work gets the top tier (Fable 5), chores drop to Sonnet. The smart default.',
     // OFF / first-run onboarding (SwarmOnboarding) — the SINGLE centered screen
     // shown while the swarm is fully idle (engine stopped + no supply / commander
     // / worker sessions). It explains the three roles and how a request flows
@@ -621,13 +621,13 @@ export const projectPanel = {
     'projectPanel.swarm.mode.label': 'モード',
     'projectPanel.swarm.mode.max': '最大出力',
     'projectPanel.swarm.mode.max.hint':
-      '全ロール opus / max effort・重並列。最高品質・最高コスト。ここぞの時に。',
+      '全ロール最上位モデル(Fable 5) / max effort・重並列。最高品質・最高コスト。ここぞの時に。',
     'projectPanel.swarm.mode.economy': '節約',
     'projectPanel.swarm.mode.economy.hint':
       'sonnet・低〜中effort・並列控えめ。週次枠の消費を最小化。',
     'projectPanel.swarm.mode.optimize': '最適化',
     'projectPanel.swarm.mode.optimize.hint':
-      'カードの重みで自動割当 — 安全系/重い仕事は opus、雑務は sonnet。賢い既定（推奨）。',
+      'カードの重みで自動割当 — 安全系/重い仕事は最上位(Fable 5)、雑務は sonnet。賢い既定（推奨）。',
     // OFF・初回オンボーディング（SwarmOnboarding）— swarm が完全に待機状態（エンジン
     // 停止かつ補給官／司令官／worker セッションなし）のとき中央に出す1枚。3つの役割
     // と、要望がそこをどう流れるかを「開始」前に説明する。役割の名称は上の supply /

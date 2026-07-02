@@ -1,3 +1,4 @@
+import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
 import { supplyLaunchOpts, SUPPLY_INJECTION } from './swarmSupply'
 
@@ -32,8 +33,8 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.appContext).toBe(true)
   })
 
-  it('runs at opus / max (mirrors swarm-supply.sh)', () => {
-    expect(base.model).toBe('opus')
+  it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max', () => {
+    expect(base.model).toBe(SWARM_LAUNCH_MODEL)
     expect(base.effort).toBe('max')
   })
 

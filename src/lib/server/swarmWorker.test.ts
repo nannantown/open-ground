@@ -1,3 +1,4 @@
+import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
 import {
   swarmBranchName,
@@ -167,11 +168,11 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(base.initialPrompt).toBe('/order ゴール: Add logout')
   })
 
-  it('runs at opus / max (shared swarm launch default — parity with supply)', () => {
+  it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max — parity with supply', () => {
     // The shell worker (swarm-new.sh) runs `--model opus --effort max`; the
     // in-app worker must match so a dispatched worker isn't silently the CLI
     // default model. Sourced from swarmLaunch.ts so all 3 roles stay in lockstep.
-    expect(base.model).toBe('opus')
+    expect(base.model).toBe(SWARM_LAUNCH_MODEL)
     expect(base.effort).toBe('max')
   })
 

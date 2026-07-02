@@ -3042,7 +3042,7 @@ export interface AdversarialReviewOpts {
   reworkThreshold?: number
   /** Per-reviewer wall-clock budget. Default {@link REVIEW_TIMEOUT_MS} (5 min). */
   timeoutMs?: number
-  /** Reviewer model. Default {@link SWARM_LAUNCH_MODEL} (opus) — adversarial
+  /** Reviewer model. Default {@link SWARM_LAUNCH_MODEL} (the top tier, Fable 5) — adversarial
    *  fact-check is a real judgment task. */
   model?: string
   /** Run ONE reviewer in `dir` and resolve its raw PTY output. INJECTABLE so the

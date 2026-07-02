@@ -1,3 +1,4 @@
+import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
 import { managerLaunchOpts, MANAGER_INJECTION } from './swarmManager'
 
@@ -36,8 +37,8 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.appContext).toBe(true)
   })
 
-  it('runs at opus / max (mirrors the shell manager launcher)', () => {
-    expect(base.model).toBe('opus')
+  it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max', () => {
+    expect(base.model).toBe(SWARM_LAUNCH_MODEL)
     expect(base.effort).toBe('max')
   })
 
