@@ -8,13 +8,13 @@ import { ORIGIN_SEED, readCollectionFlat, reconcileCollectionFlat, setKey } from
 // boardDocToProjectData. notes + task order are whole-value LWW (NOT char-merge);
 // see docs/COLLAB_PLAN.md for why.
 export const BOARD_ROOT = 'og'
-const TASK_PREFIX = 't:'
-const K_DESCRIPTION = 'm:description'
-const K_DESCRIPTION_JA = 'm:descriptionJa'
-const K_DESCRIPTION_EN = 'm:descriptionEn'
-const K_CONFIG = 'm:config'
-const K_NOTES = 'm:notes'
-const K_ORDER = 'm:order'
+export const TASK_PREFIX = 't:'
+export const K_DESCRIPTION = 'm:description'
+export const K_DESCRIPTION_JA = 'm:descriptionJa'
+export const K_DESCRIPTION_EN = 'm:descriptionEn'
+export const K_CONFIG = 'm:config'
+export const K_NOTES = 'm:notes'
+export const K_ORDER = 'm:order'
 // The SHARED canvas index ([{id,name}]) lives on the board doc so a folder-less
 // member can discover the project's canvases. CRITICAL: it has a DIFFERENT writer
 // than the rest of the board — the owner's Canvas tab publishes it via

@@ -779,6 +779,41 @@ export const findOrCreateOwnProject = async (
   }
 }
 
+/** FIND-ONLY variant of {@link findOrCreateOwnProject}: resolve the caller's own
+ *  collabProjectId for a canonical path. NEVER creates a row — this is the
+ *  predicate the server-side board mirror (collabMirror.ts) gates on, and a
+ *  board write on a never-shared project must not mint og_projects rows as a
+ *  side effect. TRI-STATE, preserving findOwnProjectByHash's contract:
+ *    string    — the project IS shared (cacheable),
+ *    null      — DEFINITELY no row / signed out / unconfigured (cacheable),
+ *    undefined — the LOOKUP FAILED (network/5xx): the caller must retry, NOT
+ *                conclude "not shared" — folding this to null once let a single
+ *                Supabase blip silently drop a shared project's mirrors for a
+ *                whole cache-TTL window (review must-fix). */
+export const findOwnProjectIdByPath = async (
+  canonicalPath: string,
+): Promise<string | null | undefined> => {
+  if (!canonicalPath) return null
+  // Deliberately NOT ownerAuth(): that helper folds "a session exists but the
+  // token refresh FAILED (offline / auth blip)" into the same null as "signed
+  // out", and callers of THIS function cache null as "definitely not shared" —
+  // an offline stretch longer than the access-token lifetime would then consume
+  // pending mirrors as not-shared and the original revert bug resurfaces
+  // (review must-fix). Disambiguate the three cases explicitly:
+  const config = readAuthConfig()
+  if (!config) return null // unconfigured — DEFINITE (cacheable)
+  const session = await readSession()
+  const ownerId = session?.user.id
+  if (!ownerId) return null // genuinely signed out — DEFINITE (cacheable)
+  const token = await getFreshAccessToken()
+  if (!token) return undefined // session exists, refresh failed — TRANSIENT (retry)
+  return findOwnProjectByHash(
+    { url: config.url, anonKey: config.anonKey, token },
+    ownerId,
+    ownerProjectNameKey(ownerId, canonicalPath),
+  )
+}
+
 // Add (or re-add) member emails to a project the caller OWNS. Owner INSERT under
 // RLS (0005) — a non-owner is a silent RLS no-op. Idempotent: each email is a
 // PLAIN per-row insert and a 409 unique-violation (already a member) is treated

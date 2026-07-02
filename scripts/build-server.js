@@ -35,7 +35,12 @@ esbuild
     // src/lib/server/terminal.ts hits the real installed module on disk.
     // fsevents is an optional native dep (chokidar → screenWatcher on macOS);
     // like node-pty it ships a .node binding that can't be bundled.
-    external: ['node-pty', 'fsevents'],
+    // bufferutil / utf-8-validate are `ws`'s OPTIONAL native accelerators,
+    // required inside try/catch — mark them external so bundling `ws` (the
+    // collabMirror WebSocket polyfill for Electron's Node 20, which lacks a
+    // global WebSocket) doesn't fail on the unresolvable optional requires;
+    // at runtime the try/catch falls back to the pure-JS paths.
+    external: ['node-pty', 'fsevents', 'bufferutil', 'utf-8-validate'],
     // `@/*` → `src/*` (mirrors tsconfig paths) so server/routes/*.ts imports of
     // '@/lib/server/*' resolve during bundling.
     alias: {

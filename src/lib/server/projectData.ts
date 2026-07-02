@@ -267,6 +267,18 @@ const writeCasGuarded = async (
   return next
 }
 
+// Fire-and-forget mirror of a successful board write into the project's collab
+// Y.Doc (bug c2e4c57c: while shared, the doc is the board's authority — a write
+// it never learns about is REVERTED on the next client (re)connect, which is how
+// swarm/API moves kept rolling back). Dynamic import keeps yjs + the transport
+// out of this module's static graph; a no-op unless the project is actually
+// collab-shared (find-only lookup, cached). NEVER blocks or fails the save.
+const queueBoardMirrorSafe = (projectPath: string, saved: ProjectData): void => {
+  void import('./collabMirror')
+    .then((m) => m.queueBoardMirror(projectPath, saved))
+    .catch(() => {})
+}
+
 export const writeProjectData = async (
   projectPath: string,
   data: ProjectData,
@@ -289,7 +301,9 @@ export const writeProjectData = async (
   // Lock on the RESOLVED central dir (not projectPath) so two CAS writes issued
   // under different spellings of the same project serialize instead of racing —
   // see withBoardLock's note. `dir` is projectDataDir's UUID-derived output.
-  return opts?.expectUpdatedAt !== undefined ? withBoardLock(dir, write) : write()
+  const saved = await (opts?.expectUpdatedAt !== undefined ? withBoardLock(dir, write) : write())
+  queueBoardMirrorSafe(projectPath, saved)
+  return saved
 }
 
 /** Atomic server-side read-modify-write of a project's central board data. The
@@ -322,7 +336,7 @@ export const mutateProjectData = async (
   // Lock on the RESOLVED central dir (not projectPath) — spelling-independent,
   // so a read-modify-write under one spelling can't interleave with a CAS write
   // under another spelling of the same project. See withBoardLock's note.
-  return withBoardLock(dir, async () => {
+  const saved = await withBoardLock(dir, async () => {
     const data = await readProjectData(projectPath)
     const next = (await mutate(data)) ?? data
     // The CAS token is the stamp we just read INSIDE the lock: other locked
@@ -335,6 +349,8 @@ export const mutateProjectData = async (
       typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
     )
   })
+  queueBoardMirrorSafe(projectPath, saved)
+  return saved
 }
 
 export const taskCounts = (data: ProjectData) => {
