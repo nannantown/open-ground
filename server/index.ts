@@ -12,10 +12,12 @@
 import { serve } from '@hono/node-server'
 import { app } from './app'
 import { pruneOldAttachments, pruneOldRunFiles, RAW_RETENTION_DAYS } from '@/lib/server/retention'
+import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/server/swarmEscalations'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
 import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
+import { installHooks } from '@/lib/server/hooksInstall'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
@@ -62,13 +64,44 @@ void (async () => {
     for (const p of settings.projects ?? []) {
       removedFiles += await pruneOldAttachments(p.path).catch(() => 0)
     }
-    if (removedRuns || removedFiles) {
+    // Escalations inbox (C1): RESOLVED records only — an unanswered ('open')
+    // escalation is never pruned regardless of age (fail-closed, §8).
+    const removedEscalations = await pruneResolvedEscalations().catch(() => 0)
+    if (removedRuns || removedFiles || removedEscalations) {
       console.log(
-        `[openground:hono] retention(${RAW_RETENTION_DAYS}d): pruned ${removedRuns} run files, ${removedFiles} attachments`,
+        `[openground:hono] retention(${RAW_RETENTION_DAYS}d): pruned ${removedRuns} run files, ${removedFiles} attachments; ` +
+          `escalations(${ESCALATION_RETENTION_DAYS}d): pruned ${removedEscalations} resolved`,
       )
     }
   } catch (e) {
     console.error('[openground:hono] retention sweep failed', e)
+  }
+})()
+
+// HOOK INSTALL — idempotently wire OPEN GROUND's Claude Code hooks into the
+// user's ~/.claude/settings.json at boot. This is the ONLY automatic caller
+// (the /api/observer/install-hooks route exists for manual re-install, but
+// nothing invokes it), so without this the hooks are never installed:
+//   - the observer's SessionStart/Stop/PostToolUse markers (openground-hook.js), and
+//   - the A3 PreToolUse DETERMINISTIC DENY VETO (openground-guard.js) — the one
+//     block that survives `--dangerously-skip-permissions`. A hook that isn't in
+//     settings.json is a hook Claude Code never runs, and a MISSING PreToolUse
+//     guard fails OPEN (Claude Code treats a non-exit-2 hook as non-blocking), so
+//     an unwired guard means a bypass swarm worker runs with NO deterministic
+//     veto. Installing at boot makes the veto present by default (the sandbox
+//     experiment L3 is owner-only/off, so on a default install L4 is the layer).
+// Fire-and-forget after boot (never blocks/crashes startup); installHooks copies
+// the guard to the sandbox-write-denied ~/.openground/guard/ and upserts the
+// PreToolUse entries idempotently, preserving any user-authored hooks. Runs ONLY
+// in this real-server entry (unit tests mount the Hono app, not this file).
+void (async () => {
+  try {
+    const r = await installHooks()
+    const touched = [...r.installed, ...r.refreshed]
+    if (touched.length) console.log(`[openground:hono] hooks installed/refreshed: ${touched.join(', ')}`)
+    if (r.errors.length) console.error(`[openground:hono] hook install errors: ${r.errors.join('; ')}`)
+  } catch (e) {
+    console.error('[openground:hono] hook install failed', e)
   }
 })()
 

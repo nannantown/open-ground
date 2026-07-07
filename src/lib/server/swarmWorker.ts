@@ -400,6 +400,23 @@ export const workerLaunchOpts = (
   appContext: false,
   sandbox: opts.sandbox,
   sandboxWritePaths: opts.sandboxWritePaths,
+  // A3/L4: arm the deterministic PreToolUse deny veto for EVERY worker,
+  // sandbox experiment on or off — the worker runs bypass (no permission
+  // prompts), so the exit-2 hook is the one deterministic veto left. Write
+  // confinement = the worktree; the shared .git is NOT a write root (git
+  // works through its own binary, which the guard's Bash rules govern —
+  // a root there would only legitimize raw redirects into .git).
+  guard: { writeRoots: [worktree] },
+  // A3/L4 completeness: a bypass worker must NOT inherit the user-scope MCP
+  // servers (~/.claude.json / project .mcp.json). The PreToolUse guard vetoes
+  // Bash + the file-write tools, but MCP tools (mcp__*) sit OUTSIDE that set —
+  // a filesystem/shell MCP, supabase execute_sql, or chrome javascript_tool
+  // would be an unguarded RCE path straight past the veto. `--strict-mcp-config`
+  // makes claude load ONLY explicitly-passed MCP config (none here), so those
+  // tools don't exist in a worker at all — closing the gap at the source rather
+  // than trying to enumerate every mcp__* into the hook matcher. Same rationale
+  // as OG's other auto-triggered/bypass utility sessions. (Commander MUST-FIX 2.)
+  strictMcpConfig: true,
   ...swarmLaunchDefaults('worker', me),
   // permissionMode LAST — AFTER the spread — so 'bypass' is UNCONDITIONAL: an
   // unattended worker must never wedge on a tool-approval / trust prompt with no

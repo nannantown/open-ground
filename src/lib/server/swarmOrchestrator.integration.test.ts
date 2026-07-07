@@ -58,6 +58,7 @@ import {
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
+import { initOverseerRuntime } from './swarmOverseer'
 import type { ProjectTask } from '../types'
 
 // Every test here drives REAL git: init / clone / commit / branch / rebase / push
@@ -250,6 +251,7 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
   log: [],
   anomalies: [],
   selfSupply: initSelfSupplyRuntime(),
+  overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],
   metrics: emptyMetricsCounters(),
@@ -678,6 +680,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     const { proj } = await setupRepo()
     const { col, boardDeps } = makeBoard([todoCard('a')])
     const nudged: string[] = []
+    const escalated: string[] = []
     // A spawn that creates a REAL `swarm/*` worktree off origin/main; the worker
     // stays ALIVE the whole time (isAlive true) but produces NO heartbeat and NO PTY
     // output — the alive-but-unresponsive STALL the crash path can never catch.
@@ -694,6 +697,12 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       lastOutputAt: () => null, // never emits output → silent on BOTH channels
       nudge: (id) => {
         nudged.push(id)
+        return true
+      },
+      // Fake (no real ESC write / no real 3s delay) so the escalation step stays
+      // deterministic and fast in this integration test.
+      escalate: async (id) => {
+        escalated.push(id)
         return true
       },
       killPty: () => {},
@@ -716,8 +725,14 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     await runDispatchPass(engine, deps, t0 + STALL_SILENCE_MS + STALL_NUDGE_COOLDOWN_MS + 2)
     expect(nudged).toHaveLength(2)
     expect(await exists(worktree)).toBe(true)
-    // Pass 4 — budget spent, still silent → RECLAIM: the REAL worktree is force-removed.
+    // Pass 4 — nudge budget spent, still silent → ESCALATE (ESC+continue), one shot,
+    // NOT a reclaim yet (the worktree survives).
     await runDispatchPass(engine, deps, t0 + STALL_SILENCE_MS + 2 * STALL_NUDGE_COOLDOWN_MS + 3)
+    expect(escalated).toHaveLength(1)
+    expect(await exists(worktree)).toBe(true)
+    // Pass 5 — cooldown elapsed since the escalation, STILL silent → RECLAIM: the
+    // REAL worktree is force-removed.
+    await runDispatchPass(engine, deps, t0 + STALL_SILENCE_MS + 3 * STALL_NUDGE_COOLDOWN_MS + 4)
     expect(await exists(worktree)).toBe(false) // ← zombie worktree GONE from disk
     expect(col('a')).toBe('todo') // ← requeued for one retry, not stranded in doing
     expect(engine.workers).toHaveLength(0) // slot freed

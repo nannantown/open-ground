@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
+import { initOverseerRuntime } from './swarmOverseer'
 import {
   ORCHESTRATOR_MAX_WORKERS,
   ORCHESTRATOR_MIN_WORKERS,
@@ -15,6 +16,7 @@ import {
   MAX_EXEC_MS,
   RATE_LIMIT_GRACE_MS,
   PERMISSION_WAIT_GRACE_MS,
+  QUESTION_GRACE_MS,
   classifyOutput,
   isRunaway,
   isTodoCard,
@@ -26,6 +28,7 @@ import {
   contentKey,
   classifyWorker,
   classifyStall,
+  defaultEscalate,
   lastActivityMs,
   detectAnomalies,
   fireFatalNotifications,
@@ -36,6 +39,9 @@ import {
   runIntegratePass,
   runEnginePass,
   stopOrchestrator,
+  setOverseer,
+  setAutoMerge,
+  setSelfSupply,
   stopOrchestratorWorker,
   resolveOrchestratorReview,
   tallyReview,
@@ -85,6 +91,7 @@ import type {
   SwarmFatalNotification,
 } from '../types'
 import type { IntegrateOutcome, ReviewReadiness } from './swarmIntegrate'
+import type { OpenEscalationInput } from './swarmEscalations'
 
 // startOrchestrator gates on the REAL claudeRunPreflight (not an injected dep), which
 // refuses to arm without a logged-in claude CLI — non-hermetic. Stub it OK so the
@@ -165,6 +172,7 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   log: [],
   anomalies: [],
   selfSupply: initSelfSupplyRuntime(),
+  overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],
   metrics: emptyMetricsCounters(),
@@ -189,6 +197,7 @@ const makeDeps = (init: {
   //   recover still succeeds) — models a requeue that won't land so the engine escalates (blocked退避)
   outputs?: Map<string, number> // terminalId → PTY lastOutputAt epoch ms (absent → null)
   screens?: Map<string, string> // terminalId → current screen text (absent → null = 'normal')
+  raiseFails?: boolean // make deps.raiseQuestion throw (fs/notify fault)
 }): OrchestratorDeps & {
   spawned: { taskId: string; priorFailure?: string }[]
   moves: { taskId: string; branch: string }[]
@@ -196,6 +205,8 @@ const makeDeps = (init: {
   recovered: { taskId: string; column: 'todo' | 'blocked' }[]
   tornDown: { terminalId: string; worktree: string }[]
   nudged: string[] // terminalIds nudged (Enter), in order
+  escalated: { terminalId: string; taskTitle: string }[] // ESC+continue escalations, in order
+  raised: OpenEscalationInput[] // questions raised to the T3 inbox, in order
   board: Map<string, ProjectTask>
 } => {
   const board = new Map<string, ProjectTask>(init.cards.map((c) => [c.id, { ...c }]))
@@ -215,6 +226,8 @@ const makeDeps = (init: {
   const recovered: { taskId: string; column: 'todo' | 'blocked' }[] = []
   const tornDown: { terminalId: string; worktree: string }[] = []
   const nudged: string[] = []
+  const escalated: { terminalId: string; taskTitle: string }[] = []
+  const raised: OpenEscalationInput[] = []
   const idOf = (branch: string) => branch.replace(/^swarm\//, '')
   let n = 0
   return {
@@ -224,6 +237,8 @@ const makeDeps = (init: {
     recovered,
     tornDown,
     nudged,
+    escalated,
+    raised,
     board,
     fetchTasks: async () => Array.from(board.values()).map((c) => ({ ...c })),
     spawnWorker: async (opts) => {
@@ -297,10 +312,23 @@ const makeDeps = (init: {
       nudged.push(terminalId)
       return true
     },
+    // Record the ESC+continue escalation; like `nudge` above the fake worker stays
+    // silent unless the test mutates outputs/heartbeats between passes.
+    escalate: async (terminalId, taskTitle) => {
+      escalated.push({ terminalId, taskTitle })
+      return true
+    },
     // Current screen text, keyed by terminalId (absent → null, which classifyOutput
-    // reads as 'normal' = ordinary work). Drives the rate-limit / permission-wait
-    // classification.
+    // reads as 'normal' = ordinary work). Drives the rate-limit / permission-wait /
+    // question classification.
     recentOutput: (terminalId) => screens.get(terminalId) ?? null,
+    // Record a raised free-text question (C3 THROTTLED path). Throws when
+    // raiseFails is set, so the "forget key + retry next pass" path is tested.
+    raiseQuestion: async (inputIn: OpenEscalationInput) => {
+      if (init.raiseFails) throw new Error('raise boom')
+      raised.push(inputIn)
+      return { escalation: { id: `esc-${raised.length}` }, deduped: false }
+    },
   }
 }
 
@@ -753,7 +781,7 @@ describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
   const NOW = Date.parse('2026-06-25T12:00:00Z')
   const oldStart = NOW - 60 * 60_000 // dispatched an hour ago (a real, finite floor)
   // A worker silent on both channels: no heartbeat, no output, only an old startedAt.
-  const silentInput = (nudge?: { count: number; lastNudgeAt: number }) => ({
+  const silentInput = (nudge?: { count: number; lastNudgeAt: number; escalated?: boolean }) => ({
     heartbeatAtMs: null,
     lastOutputAtMs: null,
     startedAtMs: oldStart,
@@ -774,8 +802,33 @@ describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
   it('NUDGES again once the cooldown elapsed and budget remains', () => {
     expect(classifyStall(silentInput({ count: 1, lastNudgeAt: NOW - P.cooldownMs - 1 }), NOW, P).action).toBe('nudge')
   })
-  it('RECLAIMS a worker still silent after the nudge budget is spent', () => {
-    expect(classifyStall(silentInput({ count: 2, lastNudgeAt: NOW - P.cooldownMs - 1 }), NOW, P).action).toBe('reclaim')
+  it('ESCALATES (ESC+continue) a worker still silent after the nudge budget is spent, exactly once', () => {
+    expect(classifyStall(silentInput({ count: 2, lastNudgeAt: NOW - P.cooldownMs - 1 }), NOW, P).action).toBe('escalate')
+  })
+  it('WAITS out the cooldown after an escalation before reclaiming', () => {
+    expect(
+      classifyStall(silentInput({ count: 2, lastNudgeAt: NOW - 60_000, escalated: true }), NOW, P).action,
+    ).toBe('none')
+  })
+  it('RECLAIMS a worker still silent after the ESC+continue escalation ALSO failed', () => {
+    expect(
+      classifyStall(silentInput({ count: 2, lastNudgeAt: NOW - P.cooldownMs - 1, escalated: true }), NOW, P).action,
+    ).toBe('reclaim')
+  })
+  it('treats a post-escalation HEARTBEAT as recovery — no reclaim, progressed=true', () => {
+    const lastNudgeAt = NOW - P.cooldownMs - 1
+    const r = classifyStall(
+      {
+        heartbeatAtMs: lastNudgeAt + 1000,
+        lastOutputAtMs: null,
+        startedAtMs: oldStart,
+        nudge: { count: 2, lastNudgeAt, escalated: true },
+      },
+      NOW,
+      P,
+    )
+    expect(r.action).toBe('none')
+    expect(r.progressed).toBe(true)
   })
   it('treats a post-nudge HEARTBEAT as recovery — no reclaim, progressed=true', () => {
     const lastNudgeAt = NOW - P.cooldownMs - 1
@@ -802,15 +855,111 @@ describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
   })
   it('DISCOUNTS the Enter echo: output within echoGuardMs of the nudge is neither life nor progress', () => {
     // The only "output" is a repaint 1s after the nudge → discounted. The worker is
-    // still silent and the budget is spent → it RECLAIMS (the echo cannot save it).
+    // still silent and the nudge budget is spent → it ESCALATES (the echo cannot
+    // save it, but reclaim is not yet due — the ESC+continue step comes first).
     const lastNudgeAt = NOW - P.cooldownMs - 1
     const r = classifyStall(
       { heartbeatAtMs: null, lastOutputAtMs: lastNudgeAt + 1000, startedAtMs: oldStart, nudge: { count: 2, lastNudgeAt } },
       NOW,
       P,
     )
+    expect(r.action).toBe('escalate')
+    expect(r.progressed).toBe(false)
+  })
+  it('DISCOUNTS the escalation echo too: still silent + already-escalated ⇒ RECLAIMS', () => {
+    const lastNudgeAt = NOW - P.cooldownMs - 1
+    const r = classifyStall(
+      {
+        heartbeatAtMs: null,
+        lastOutputAtMs: lastNudgeAt + 1000,
+        startedAtMs: oldStart,
+        nudge: { count: 2, lastNudgeAt, escalated: true },
+      },
+      NOW,
+      P,
+    )
     expect(r.action).toBe('reclaim')
     expect(r.progressed).toBe(false)
+  })
+})
+
+describe('defaultEscalate — ESC + continue-instruction (stall escalation)', () => {
+  it('writes ESC, waits STALL_ESCALATE_DELAY_MS, then a one-line continue instruction + CR', async () => {
+    const writes: string[] = []
+    const waits: number[] = []
+    const ok = await defaultEscalate('pty-a-1', 'my task', {
+      write: (id, data) => {
+        writes.push(`${id}:${data}`)
+        return true
+      },
+      sleep: async (ms) => {
+        waits.push(ms)
+      },
+    })
+    expect(ok).toBe(true)
+    expect(writes).toHaveLength(2)
+    expect(writes[0]).toBe('pty-a-1:\x1b') // the interrupt
+    expect(writes[1]).toMatch(/^pty-a-1:.*my task.*\r$/) // continue instruction, CR-terminated
+    expect(writes[1]).toContain('my task のゴールを続行')
+    expect(waits).toEqual([3_000])
+  })
+  it('returns false without waiting/writing the follow-up when the ESC write fails (PTY gone)', async () => {
+    const writes: string[] = []
+    let slept = false
+    const ok = await defaultEscalate('pty-gone', 'x', {
+      write: () => false,
+      sleep: async () => {
+        slept = true
+      },
+    })
+    expect(ok).toBe(false)
+    expect(writes).toHaveLength(0)
+    expect(slept).toBe(false)
+  })
+  it('returns false when only the follow-up write fails (ESC landed, worker died mid-escalation)', async () => {
+    let calls = 0
+    const ok = await defaultEscalate('pty-a-1', 'x', {
+      write: () => {
+        calls += 1
+        return calls === 1 // ESC succeeds, the follow-up fails
+      },
+      sleep: async () => {},
+    })
+    expect(ok).toBe(false)
+  })
+  it('STRIPS embedded ESC/control bytes from an attacker-reachable taskTitle before it reaches the raw PTY write', async () => {
+    // taskTitle is card-derived (attacker-reachable in git-shared mode). Unlike
+    // pastePrompt's bracketed-paste conduit, this write auto-submits with a
+    // trailing CR — an embedded ESC/CSI sequence here would be MORE dangerous,
+    // not less, so it must never survive into the write.
+    const writes: string[] = []
+    const malicious = 'evil\x1b[201~\x9bmore'
+    await defaultEscalate('pty-a-1', malicious, {
+      write: (id, data) => {
+        writes.push(data)
+        return true
+      },
+      sleep: async () => {},
+    })
+    const followUp = writes[1]
+    expect(followUp).not.toContain('\x1b')
+    expect(followUp).not.toContain('\x9b')
+    // Only the control BYTES are dropped — the printable text around them (the
+    // ESC sequence's visible payload) survives untouched, just inert as text now.
+    expect(followUp).toContain('evil[201~more')
+  })
+  it('collapses an embedded newline in taskTitle to a space (never a bare submit mid-line)', async () => {
+    const writes: string[] = []
+    await defaultEscalate('pty-a-1', 'line one\nline two', {
+      write: (id, data) => {
+        writes.push(data)
+        return true
+      },
+      sleep: async () => {},
+    })
+    const followUp = writes[1]
+    expect(followUp?.split('\n')).toHaveLength(1) // the whole message is one line
+    expect(followUp).toContain('line one line two')
   })
 })
 
@@ -864,6 +1013,33 @@ describe('classifyOutput — why a worker is (not) progressing, from its screen'
     expect(classifyOutput('export const RATE_LIMIT_GRACE_MS = 20 * 60_000')).toBe('normal')
     expect(classifyOutput('// handle the rateLimit / quota wait branch')).toBe('normal')
     expect(classifyOutput('if (output === "rate-limited") hold(worker)')).toBe('normal')
+  })
+
+  it('detects a free-text QUESTION at an idle input box (C3)', () => {
+    const RULE = '─'.repeat(80)
+    const screen = [
+      '⏺ どの方針で進めますか？',
+      RULE,
+      '❯ ',
+      RULE,
+      '  ? for shortcuts · ← for agents',
+    ].join('\n')
+    expect(classifyOutput(screen)).toBe('question')
+  })
+
+  it('rate-limit / permission win over question when both could match (precedence)', () => {
+    const RULE = '─'.repeat(80)
+    const withBox = (top: string) => [top, RULE, '❯ ', RULE, '  ? for shortcuts'].join('\n')
+    // A rate-limit runtime line present alongside an idle box → rate-limited, not question.
+    expect(classifyOutput(withBox('Claude usage limit reached — どうしますか？'))).toBe('rate-limited')
+    // The trust dialog → permission-wait, not question.
+    expect(classifyOutput(withBox('Do you trust the files in this folder?'))).toBe('permission-wait')
+  })
+
+  it('does NOT classify a WORKING screen (esc to interrupt) as a question', () => {
+    const RULE = '─'.repeat(80)
+    const screen = ['⏺ 進めますか？', RULE, '❯ ', RULE, '  esc to interrupt'].join('\n')
+    expect(classifyOutput(screen)).toBe('normal')
   })
 })
 
@@ -921,6 +1097,7 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       recovered: base.recovered,
       tornDown: base.tornDown,
       nudged: base.nudged,
+      escalated: base.escalated,
       board: base.board,
     })
   }
@@ -1105,6 +1282,78 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       const started = await maybeAutoStartDrain(engine, deps)
       expect(started).toBe(false)
       expect(deps.spawned).toHaveLength(0)
+    })
+  })
+
+  // OVERSEER (EPIC C / C-core) — the THIRD toggle's D1 semantics: default OFF,
+  // asymmetric clear on an explicit autonomy OFF, and NEVER ignited by an auto-drain.
+  // (Restart-OFF is the in-memory globalThis store itself — a fresh engine is OFF, the
+  // "default OFF" test below; a real relaunch just re-mints the store.)
+  describe('overseer toggle — D1 semantics (default OFF / stop clears / auto-drain never ignites)', () => {
+    it('is OFF by default and toggles idempotently (owner POST only)', async () => {
+      const key = await canonicalize('/proj-overseer-toggle')
+      const engine = newEngine({ path: key, running: true })
+      __seedEngineForTests(engine)
+      expect(engine.overseer.enabled).toBe(false) // default OFF (D1)
+
+      const on = await setOverseer('/proj-overseer-toggle', true, fullDeps({ cards: [] }))
+      expect(engine.overseer.enabled).toBe(true)
+      expect(on.overseer).toBe(true) // surfaced in the public state
+
+      const off = await setOverseer('/proj-overseer-toggle', false, fullDeps({ cards: [] }))
+      expect(engine.overseer.enabled).toBe(false)
+      expect(off.overseer).toBe(false)
+      disarm(engine)
+    })
+
+    it('REFUSES to arm the overseer on a STOPPED engine (autonomy must be ON — §5:243)', async () => {
+      // Closes the D1/K1 gap the adversarial review surfaced: if arming a fresh stopped
+      // engine were allowed, a later auto-drain re-ignition would activate a pre-armed
+      // overseer (riding a machine-driven restart). Arming requires running.
+      const key = await canonicalize('/proj-overseer-armstopped')
+      const engine = newEngine({ path: key, running: false })
+      __seedEngineForTests(engine)
+      const state = await setOverseer('/proj-overseer-armstopped', true, fullDeps({ cards: [] }))
+      expect(engine.overseer.enabled).toBe(false) // arm ignored — engine not running
+      expect(state.overseer).toBe(false)
+      // And now a subsequent auto-drain (which engages the stopped engine) still finds
+      // it DISARMED — the pre-armed-then-auto-ignited path is unreachable.
+      const deps = fullDeps({ cards: [card('a')] })
+      await maybeAutoStartDrain(engine, deps)
+      expect(engine.running).toBe(true)
+      expect(engine.overseer.enabled).toBe(false)
+      disarm(engine)
+    })
+
+    it('stopOrchestrator CLEARS overseer.enabled but LEAVES autoMerge/selfSupply (the D1 asymmetry)', async () => {
+      const key = await canonicalize('/proj-overseer-stopclear')
+      const engine = newEngine({ path: key, running: true })
+      engine.autoMerge = true
+      engine.selfSupply.enabled = true
+      engine.overseer.enabled = true
+      __seedEngineForTests(engine)
+
+      await stopOrchestrator('/proj-overseer-stopclear', makeDeps({ cards: [] }))
+
+      // The most-dangerous stage is disarmed by an explicit OFF …
+      expect(engine.overseer.enabled).toBe(false)
+      // … while the two benign switches survive (they re-act on the next start).
+      expect(engine.autoMerge).toBe(true)
+      expect(engine.selfSupply.enabled).toBe(true)
+    })
+
+    it('maybeAutoStartDrain (auto-drain re-ignition) NEVER sets overseer.enabled', async () => {
+      // The 0.11.12 auto-drain-default-ON class of bug must never reach the overseer:
+      // an auto-drain engages the engine (running:true) but the overseer stays OFF —
+      // `enabled` only ever becomes true through the owner POST (setOverseer above).
+      const engine = newEngine({ running: false })
+      expect(engine.overseer.enabled).toBe(false)
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await maybeAutoStartDrain(engine, deps)
+      expect(started).toBe(true) // the drain engaged …
+      expect(engine.running).toBe(true)
+      expect(engine.overseer.enabled).toBe(false) // … but the overseer did NOT wake
+      disarm(engine)
     })
   })
 
@@ -1449,6 +1698,7 @@ describe('runDispatchPass — drain + dispatch', () => {
       recoverWorker: async () => ({ removed: true }),
       lastOutputAt: () => null,
       nudge: () => true,
+      escalate: async () => true,
       recentOutput: () => null,
     }
     await runDispatchPass(engine, deps)
@@ -1571,6 +1821,7 @@ describe('runDispatchPass — drain + dispatch', () => {
       recoverWorker: async () => ({ removed: true }),
       lastOutputAt: () => null,
       nudge: () => true,
+      escalate: async () => true,
       recentOutput: () => null,
     }
     await runDispatchPass(engine, deps)
@@ -1941,7 +2192,7 @@ describe('runDispatchPass — monitor: stall self-healing', () => {
     expect(stall?.level).toBe('warn')
   })
 
-  it('escalates nudge→nudge→RECLAIM, tearing down the worktree + re-homing the card (no zombie)', async () => {
+  it('escalates nudge→nudge→ESC+continue→RECLAIM, tearing down the worktree + re-homing the card (no zombie)', async () => {
     const engine = newEngine({
       workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt })],
     })
@@ -1954,8 +2205,18 @@ describe('runDispatchPass — monitor: stall self-healing', () => {
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + STALL_NUDGE_COOLDOWN_MS + 2)
     expect(deps.nudged).toHaveLength(2)
     expect(deps.tornDown).toHaveLength(0) // still only nudging
-    // Pass 3 — budget spent, still silent → RECLAIM.
+    // Pass 3 — nudge budget spent, cooldown elapsed, still silent → ESCALATE (ESC+continue),
+    // tried exactly once — NOT a reclaim yet.
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2 * STALL_NUDGE_COOLDOWN_MS + 3)
+    expect(deps.escalated).toEqual([{ terminalId: 'pty-a-1', taskTitle: 'task a' }])
+    expect(deps.tornDown).toHaveLength(0) // the ESC+continue escalation gets its own chance first
+    expect(engine.nudges.get('pty-a-1')?.escalated).toBe(true)
+    const escalate = engine.log.find((l) => l.message.includes('escalating (ESC+continue)'))
+    expect(escalate?.kind).toBe('stall')
+    expect(escalate?.level).toBe('warn')
+    // Pass 4 — cooldown elapsed since the escalation, STILL silent → RECLAIM.
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 3 * STALL_NUDGE_COOLDOWN_MS + 4)
+    expect(deps.escalated).toHaveLength(1) // escalation is one-shot — never retried
 
     expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }]) // worktree + PTY torn down
     expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // card back on the board (one retry)
@@ -1965,6 +2226,31 @@ describe('runDispatchPass — monitor: stall self-healing', () => {
     const reclaim = engine.log.find((l) => l.message.startsWith('worker stalled — reclaimed — card → todo'))
     expect(reclaim?.kind).toBe('stall')
     expect(reclaim?.level).toBe('warn')
+  })
+
+  it('clears the nudge/escalate budget when the ESC+continue escalation revives the worker', async () => {
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', taskId: 'a', taskTitle: 'task a', startedAt })],
+    })
+    const heartbeats = new Map<string, HeartbeatSign>()
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], heartbeats })
+
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1) // nudge #1
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + STALL_NUDGE_COOLDOWN_MS + 2) // nudge #2
+    const escalateAt = T0 + STALL_SILENCE_MS + 2 * STALL_NUDGE_COOLDOWN_MS + 3
+    await runDispatchPass(engine, deps, escalateAt) // budget spent → ESCALATE
+    expect(deps.escalated).toHaveLength(1)
+    expect(engine.nudges.get('pty-a-1')?.escalated).toBe(true)
+
+    // The worker wakes: a heartbeat lands AFTER the escalation (an echo never could).
+    heartbeats.set('a', { ready: false, blocked: false, at: new Date(escalateAt + 5000).toISOString() })
+    await runDispatchPass(engine, deps, escalateAt + STALL_NUDGE_COOLDOWN_MS + 1)
+
+    expect(engine.nudges.has('pty-a-1')).toBe(false) // budget (nudge + escalate) cleared — it recovered
+    expect(deps.tornDown).toHaveLength(0) // never reclaimed
+    expect(deps.escalated).toHaveLength(1) // escalation was not retried
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.log.some((l) => l.message.startsWith('worker recovered after nudge'))).toBe(true)
   })
 
   it('does NOT touch a worker still streaming PTY output (alive between heartbeats)', async () => {
@@ -2037,10 +2323,12 @@ describe('runDispatchPass — monitor: stall self-healing', () => {
       workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt })],
     })
     const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })] })
-    // Drive straight to reclaim (two nudges + cooldown, then spent).
+    // Drive straight to reclaim (two nudges + the one-shot ESC+continue escalation
+    // + cooldown, then spent).
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + STALL_NUDGE_COOLDOWN_MS + 2)
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2 * STALL_NUDGE_COOLDOWN_MS + 3)
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 3 * STALL_NUDGE_COOLDOWN_MS + 4)
     expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }])
     expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // escalated to a human, not requeued
     expect(deps.board.get('a')?.boardColumn).toBe('blocked')
@@ -2247,6 +2535,184 @@ describe('runDispatchPass — monitor: permission/trust prompt (silence-gated)',
     expect(engine.nudges.get('pty-a-1')?.count).toBe(1)
     const log = engine.log.find((l) => l.message.startsWith('worker stalled'))
     expect(log?.kind).toBe('stall')
+  })
+})
+
+// ── runDispatchPass — monitor: free-text QUESTION (C3) ──────────────────────────
+// A worker whose `claude` asked the owner a free-text question and now idles at an
+// empty input box is HELD (never nudged/reclaimed — a bare Enter is pointless and a
+// respawn re-asks) and its question is raised ONCE to the T3 inbox (the S4 THROTTLED
+// degradation until C-core's brain pass). The dangerous direction is a false POSITIVE
+// (injecting into a live PTY), so the negative controls here are load-bearing.
+
+describe('runDispatchPass — monitor: free-text question (C3)', () => {
+  const T0 = Date.parse('2026-06-25T00:00:00Z')
+  const startedAt = new Date(T0).toISOString()
+  const RULE = '─'.repeat(100)
+  const w1 = () =>
+    worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt })
+  // A live-faithful idle question frame (see swarmQuestions.test.ts for provenance).
+  const questionScreen = [
+    '⏺ 質問がひとつあります。',
+    '  どのデータベースを使いますか？',
+    '✻ Brewed for 7s',
+    RULE,
+    '❯ ',
+    RULE,
+    '  ? for shortcuts · ← for agents',
+  ].join('\n')
+
+  it('HOLDS a questioning worker — never nudged, never reclaimed — and raises it ONCE', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', questionScreen]]),
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.nudged).toHaveLength(0) // Enter is pointless at an empty box
+    expect(deps.tornDown).toHaveLength(0) // work preserved; never reclaimed
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.workers).toHaveLength(1) // still held
+    expect(deps.raised).toHaveLength(1)
+    expect(deps.raised[0].question).toContain('どのデータベースを使いますか？')
+    expect(deps.raised[0].terminalId).toBe('pty-a-1')
+    expect(deps.raised[0].branch).toBe('swarm/a')
+    expect(deps.raised[0].taskId).toBe('a')
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(true)
+    const log = engine.log.find((l) => l.message.startsWith('worker asked a free-text question'))
+    expect(log?.level).toBe('warn')
+
+    // A second pass on the SAME question does not re-raise (idempotent).
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2)
+    expect(deps.raised).toHaveLength(1)
+  })
+
+  it('raises anew when the worker asks a DIFFERENT question (fresh receiptKey)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const screens = new Map([['pty-a-1', questionScreen]])
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], screens })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.raised).toHaveLength(1)
+    // The worker now asks something else.
+    screens.set(
+      'pty-a-1',
+      ['⏺ 別の確認です。', '  この API は公開して良いですか？', RULE, '❯ ', RULE, '  ? for shortcuts'].join('\n'),
+    )
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2)
+    expect(deps.raised).toHaveLength(2)
+    expect(deps.raised[1].question).toContain('公開して良いですか？')
+  })
+
+  it('MF1 (overseer OFF): raises a blocked worker\'s question HERE — with no armed overseer S4 nothing else raises it, so the old unconditional suppression DROPPED it', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    // engine.overseer.enabled defaults false (initOverseerRuntime) → no S4 to defer to
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', questionScreen]]),
+      heartbeats: new Map([['a', { ready: false, blocked: true, phase: 'blocked' }]]),
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.raised).toHaveLength(1) // overseer off → raise here or the question is lost
+    expect(deps.nudged).toHaveLength(0) // still held, not nudged
+    expect(engine.workers).toHaveLength(1)
+  })
+
+  it('MF1 (overseer ON): the engine arm does NOT raise a blocked worker\'s question — the armed overseer S4 owns that raise (its receiptKey is the heartbeat text vs this arm\'s scraped question, so raising in BOTH would double-open the inbox)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    engine.overseer.enabled = true // arm the overseer → S4 (tick loop) owns blocked-worker raises
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', questionScreen]]),
+      heartbeats: new Map([['a', { ready: false, blocked: true, phase: 'blocked' }]]),
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.raised).toHaveLength(0) // engine arm defers to S4 (run by the tick loop, not this pass)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(false) // the arm suppressed its own raise
+    expect(engine.workers).toHaveLength(1) // still held
+  })
+
+  it('MF2: PARKS a held question in blocked once it exceeds QUESTION_GRACE_MS (no 90-min slot squat on an unanswered / courtesy question)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', questionScreen]]),
+    })
+    // first sight: raise + HOLD (stamp the question grace clock) — NOT parked yet
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.raised).toHaveLength(1)
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.workers).toHaveLength(1)
+    // still idling at the question past the grace window ⇒ PARK in 'blocked'
+    // (the raised question persists in the inbox; the slot is freed).
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1 + QUESTION_GRACE_MS + 1)
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+  })
+
+  it('re-raises next pass when the raise itself fails (key forgotten, not stuck)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', questionScreen]]),
+      raiseFails: true,
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(false) // forgotten for retry
+    expect(engine.workers).toHaveLength(1) // the hold is unaffected by the raise fault
+    const log = engine.log.find((l) => l.message.startsWith('question raise failed'))
+    expect(log?.level).toBe('warn')
+  })
+
+  it('a STREAMING worker whose output merely ends in "?" is NOT classified (silence gate)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const now = T0 + STALL_SILENCE_MS + 1
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 500]]), // actively emitting → NOT silent
+      screens: new Map([['pty-a-1', questionScreen]]),
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.raised).toHaveLength(0) // never classified while working
+    expect(deps.nudged).toHaveLength(0)
+    expect(engine.workers[0].stage).toBe('running')
+  })
+
+  it('clears the questionRaised key once the worker resumes (screen reads normal)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const screens = new Map([['pty-a-1', questionScreen]])
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], screens })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(true)
+    // Worker resumed: ordinary work on screen, still silent → normal stall path.
+    screens.set('pty-a-1', 'Editing src/app.tsx — running tests…')
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(false)
+  })
+
+  it('prunes the questionRaised entry when the worker LEAVES the live set (no lifetime leak)', async () => {
+    // The departed-worker sweep must forget questionRaised exactly like the
+    // sibling maps — terminalIds are unique per spawn, so an un-pruned entry
+    // would accumulate for the engine's lifetime (the perf must-fix).
+    const dead = new Set<string>()
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], screens: new Map([['pty-a-1', questionScreen]]), dead })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(true)
+    // The PTY dies (crash) → the worker is recovered out of the live set next pass.
+    dead.add('a')
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2)
+    expect(engine.workers.some((w) => w.terminalId === 'pty-a-1')).toBe(false) // departed
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(false) // and its entry is gone
+  })
+
+  it('prunes the questionRaised entry when a questioning worker overruns MAX_EXEC_MS (runaway)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], screens: new Map([['pty-a-1', questionScreen]]) })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(true)
+    // Runaway: wall-clock past MAX_EXEC_MS → torn down and removed from the live set.
+    await runDispatchPass(engine, deps, T0 + MAX_EXEC_MS + 1)
+    expect(engine.workers.some((w) => w.terminalId === 'pty-a-1')).toBe(false)
+    expect(engine.questionRaised?.has('pty-a-1')).toBe(false)
   })
 })
 
@@ -3564,6 +4030,7 @@ describe('runEnginePass — never overlaps itself', () => {
       isAlive: () => true,
       lastOutputAt: () => null,
       nudge: () => true,
+      escalate: async () => true,
       recentOutput: () => null,
       // Integration half — present but inert (autoMerge OFF, no review cards).
       fetchReview: async () => [],
@@ -3666,6 +4133,7 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       isAlive: (id) => !tornDown.includes(id), // a torn-down PTY reads dead
       lastOutputAt: () => Date.now(), // both workers streaming ⇒ never stall-reclaimed
       nudge: () => true,
+      escalate: async () => true,
       recentOutput: () => null,
       // Integration half — present but inert (autoMerge OFF, no review cards).
       fetchReview: async () => [],

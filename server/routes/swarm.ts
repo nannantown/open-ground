@@ -49,11 +49,33 @@ import {
   drainTickOrchestrator,
   setAutoMerge,
   setSelfSupply,
+  setOverseer,
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
 import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
+import { isExperimentEnabled } from '@/lib/server/experiments'
 import { listSwarmNotifications } from '@/lib/server/swarmNotifications'
-import type { AppNotificationsResponse } from '@/lib/types'
+import {
+  listEscalations,
+  openEscalation,
+  answerEscalation,
+  dismissEscalation,
+  EscalationNotFoundError,
+  EscalationStateError,
+  MAX_ESCALATION_QUESTION,
+  MAX_ESCALATION_CONTEXT,
+  MAX_ESCALATION_ANSWER,
+  MAX_ESCALATION_SHORT_FIELD,
+} from '@/lib/server/swarmEscalations'
+import type {
+  AppNotificationsResponse,
+  EscalationsResponse,
+  EscalationOpenResponse,
+  EscalationAnswerResponse,
+  EscalationDismissResponse,
+  EscalationProxyDraft,
+  EscalationWhy,
+} from '@/lib/types'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
 // Board goal is a short observable completion condition; 8 KiB is a generous
@@ -458,6 +480,36 @@ export const swarmRoutes = new Hono()
     if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
     return c.json(await setSelfSupply(path, body.enabled))
   })
+  // --- POST /api/swarm/orchestrator/overseer — arm/disarm the OVERSEER (EPIC C) ----
+  // Body: { path, enabled:boolean }. Toggles the autonomous proxy-you BRAINSTEM (the
+  // THIRD toggle — D1): it watches the swarm and, on judgment edges, wakes a one-off
+  // brain (fire-and-forget) or raises to the human inbox. SEPARATE from autonomy
+  // (start/stop) / autoMerge / selfSupply, default OFF, in-memory (a restart re-arms
+  // OFF — K2). ASYMMETRIC: an explicit autonomy OFF CLEARS it (the owner re-arms every
+  // session). Owner-only + validated, like the rest of /api/swarm/* (K3). GET carries
+  // no mutation (K8); this POST is the only path that sets `enabled` true.
+  // L3: warn when arming WITHOUT the sandbox experiment — the recommended containment
+  // for the brain's one-off PTY (a structural READ-ONLY design + budget still hold;
+  // the warning nudges the owner to enable the kernel-level layer too).
+  .post('/api/swarm/orchestrator/overseer', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
+    const state = await setOverseer(path, body.enabled)
+    // Surface the L3 sandbox-off warning to the UI when ARMING without the sandbox
+    // experiment (macOS-only; non-darwin has no kernel sandbox — the warning still
+    // signals the reduced containment honestly).
+    const sandboxWarning = body.enabled && !(await isExperimentEnabled('sandbox'))
+    return c.json({ ...state, sandboxWarning })
+  })
   // --- POST /api/swarm/orchestrator/selfsupply/approve — approve a proposed card --
   // Body: { path, cardId }. The owner green-lights ONE self-supplied (engine-
   // proposed) card for dispatch: sets selfSupplyApproved on the card so
@@ -478,4 +530,150 @@ export const swarmRoutes = new Hono()
     if (!cardId) return c.json({ error: 'cardId is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await approveSelfSupplyCard(path, cardId))
+  })
+  // ─── Escalations inbox (C1 — docs/OVERSEER_DESIGN.md §8) ───────────────────
+  // The HUMAN VALVE: questions the swarm could not (or must not) answer land
+  // here and wait for the real user. All owner-gated (the routes sweep in
+  // swarmSafety.routes.test.ts covers them automatically); the persisted record
+  // is the source of truth — the bell/OS toast are best-effort side channels.
+  //
+  // --- GET /api/swarm/escalations — the inbox (newest-first) -----------------
+  // Query: ?path= (optional) filters to one project (validated when present);
+  // ?status= (optional) filters to one lifecycle state — the SwarmModule panel
+  // polls ?status=open every 10s, so resolved history (and its expanded PTY
+  // captures) doesn't ride every poll. PURE READ (K8).
+  .get('/api/swarm/escalations', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    const path = c.req.query('path') ?? ''
+    if (path && !(await validateProjectPath(path))) {
+      return c.json({ error: 'path not allowed' }, 403)
+    }
+    const statuses = ['open', 'answered', 'injected', 'dismissed'] as const
+    const status = statuses.find((s) => s === c.req.query('status'))
+    return c.json<EscalationsResponse>({
+      escalations: await listEscalations({
+        ...(path ? { projectPath: path } : {}),
+        ...(status ? { status } : {}),
+      }),
+    })
+  })
+  // --- POST /api/swarm/escalations/open — raise a question to the user -------
+  // Body: { path, question, context, whyEscalated, receiptKey?, taskId?,
+  //         branch?, terminalId?, proxyDraft? }. Idempotent on receiptKey while
+  // an 'open' record exists (returns {deduped:true} + the existing record).
+  // Until C-core lands this is the manual/verification entry point; the
+  // overseer will call openEscalation() in-process.
+  .post('/api/swarm/escalations/open', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const question = typeof body?.question === 'string' ? body.question.trim() : ''
+    const context = typeof body?.context === 'string' ? body.context.trim() : ''
+    if (!question) return c.json({ error: 'question is required' }, 400)
+    if (!context) return c.json({ error: 'context is required' }, 400)
+    if (question.length > MAX_ESCALATION_QUESTION) return c.json({ error: 'question too large' }, 400)
+    if (context.length > MAX_ESCALATION_CONTEXT) return c.json({ error: 'context too large' }, 400)
+    const whys: EscalationWhy[] = ['irreversible', 'insufficient-info', 'policy']
+    const whyEscalated = whys.find((w) => w === body?.whyEscalated)
+    if (!whyEscalated) {
+      return c.json({ error: 'whyEscalated must be irreversible | insufficient-info | policy' }, 400)
+    }
+    // proxyDraft is optional but, when present, must be WELL-FORMED — silently
+    // dropping a malformed draft would hide the proxy's provisional answer from
+    // the owner (fail-loud beats fail-quiet on the decision surface).
+    let proxyDraft: EscalationProxyDraft | undefined
+    if (body?.proxyDraft !== undefined) {
+      const d = body.proxyDraft
+      const confidences = ['high', 'medium', 'low']
+      if (
+        !d ||
+        typeof d !== 'object' ||
+        typeof d.answer !== 'string' ||
+        !confidences.includes(d.confidence) ||
+        typeof d.isAbstention !== 'boolean'
+      ) {
+        return c.json({ error: 'proxyDraft is malformed' }, 400)
+      }
+      if (d.answer.length > MAX_ESCALATION_ANSWER) {
+        return c.json({ error: 'proxyDraft.answer too large' }, 400)
+      }
+      proxyDraft = { answer: d.answer, confidence: d.confidence, isAbstention: d.isAbstention }
+    }
+    // Id-like fields ride an UNCAPPED persisted file — bound them here too
+    // (the module clamps defensively as well).
+    for (const k of ['receiptKey', 'taskId', 'branch', 'terminalId'] as const) {
+      if (typeof body?.[k] === 'string' && body[k].length > MAX_ESCALATION_SHORT_FIELD) {
+        return c.json({ error: `${k} too large` }, 400)
+      }
+    }
+    try {
+      const res = await openEscalation({
+        projectPath: path,
+        question,
+        context,
+        whyEscalated,
+        receiptKey: typeof body?.receiptKey === 'string' ? body.receiptKey : undefined,
+        taskId: typeof body?.taskId === 'string' ? body.taskId : undefined,
+        branch: typeof body?.branch === 'string' ? body.branch : undefined,
+        terminalId: typeof body?.terminalId === 'string' ? body.terminalId : undefined,
+        proxyDraft,
+      })
+      return c.json<EscalationOpenResponse>(res)
+    } catch (e: any) {
+      return c.json({ error: `failed to open escalation: ${e?.message ?? e}` }, 500)
+    }
+  })
+  // --- POST /api/swarm/escalations/answer — the owner's decision --------------
+  // Body: { id, answer }. Persists the answer, writes the Q→A back to you-corpus
+  // memory (owner answers only), then delivers: injects into the LIVE worker PTY
+  // or queues for the card's next dispatch. Re-answering an answered record is
+  // an idempotent no-op; answering a dismissed one is 409.
+  .post('/api/swarm/escalations/answer', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const id = typeof body?.id === 'string' ? body.id : ''
+    const answer = typeof body?.answer === 'string' ? body.answer.trim() : ''
+    if (!id) return c.json({ error: 'id is required' }, 400)
+    if (!answer) return c.json({ error: 'answer is required' }, 400)
+    if (answer.length > MAX_ESCALATION_ANSWER) return c.json({ error: 'answer too large' }, 400)
+    try {
+      const res = await answerEscalation(id, answer)
+      return c.json<EscalationAnswerResponse>(res)
+    } catch (e: any) {
+      if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
+      if (e instanceof EscalationStateError) return c.json({ error: e.message }, 409)
+      return c.json({ error: `failed to answer escalation: ${e?.message ?? e}` }, 500)
+    }
+  })
+  // --- POST /api/swarm/escalations/dismiss — close unanswered -----------------
+  // Body: { id }. Nothing is injected, nothing is learned. Idempotent on
+  // already-resolved records.
+  .post('/api/swarm/escalations/dismiss', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const id = typeof body?.id === 'string' ? body.id : ''
+    if (!id) return c.json({ error: 'id is required' }, 400)
+    try {
+      return c.json<EscalationDismissResponse>({ escalation: await dismissEscalation(id) })
+    } catch (e: any) {
+      if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
+      return c.json({ error: `failed to dismiss escalation: ${e?.message ?? e}` }, 500)
+    }
   })

@@ -219,6 +219,12 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
     // could otherwise probe. Authoring happens in the NON-sandboxed
     // /api/terminal/custom-module session, unaffected by this deny.
     '.*/\\.openground/custom-modules(/.*)?$',
+    // The PreToolUse deny veto's INSTALLED copy (A3/L4 — hooksInstall.ts wires
+    // ~/.openground/guard/openground-guard.js into settings.json). The veto is
+    // exactly what a contained claude must not rewrite; its settings.json
+    // wiring is already denied above, this denies the script body too. Entry-
+    // anchored like the others (vs symlink-swap).
+    '.*/\\.openground/guard(/.*)?$',
   ]
 
   const lines: string[] = [

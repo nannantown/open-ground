@@ -154,6 +154,22 @@ export const readCanvasFile = async (
   }
 }
 
+// Fire-and-forget mirror of a successful canvas write into that canvas's collab
+// Y.Doc (the canvas twin of board bug c2e4c57c: while shared, the doc is the
+// canvas's authority — a server-side write it never learns about, e.g. a Canvas
+// AI job's completion, is REVERTED on the next client (re)connect). Dynamic
+// import keeps yjs + the transport out of this module's static graph; a no-op
+// unless the project is actually collab-shared (find-only lookup, cached).
+// NEVER blocks or fails the save. Same pattern as projectData's
+// queueBoardMirrorSafe. Ordering note: the mirror stamps writes in queue-call
+// order, and dynamic-import .then callbacks run FIFO, so two same-canvas writes
+// (serialised by withCanvasFileLock) can't reach the mirror inverted.
+const queueCanvasMirrorSafe = (projectPath: string, saved: CanvasFile): void => {
+  void import('./canvasCollabMirror')
+    .then((m) => m.queueCanvasMirror(projectPath, saved))
+    .catch(() => {})
+}
+
 // Low-level canvas writer. ALWAYS bumps `rev` (the OCC version) off whatever
 // rev the passed object carries, so every write — client save, AI append, AI
 // tweak, rename, create — advances the revision. It is deliberately UNLOCKED:
@@ -177,6 +193,11 @@ export const writeCanvasFile = async (
   // very latest canvas save, which the next debounced save overwrites anyway.
   // (Contrast tasks.json, which IS fsync'd — see writeProjectData.)
   await atomicWriteJson(await canvasFilePath(projectPath,canvas.id), next)
+  // Every canvas write path converges HERE (this is the canvas analogue of
+  // projectData's writeCasGuarded choke point), so hooking the collab mirror
+  // after the successful disk write covers client saves, AI append/tweak,
+  // rename, create and the delete-replacement seed alike.
+  queueCanvasMirrorSafe(projectPath, next)
   return next
 }
 
@@ -358,6 +379,25 @@ export const deleteCanvas = (
     await withCanvasFileLock(projectPath, id, async () => {
       try {
         await unlink(await canvasFilePath(projectPath, id))
+      } catch {}
+      // Cascade the collab-mirror state INSIDE the same lock, so it is strictly
+      // ordered against the ghost-canvas upsert door (a straggler client save
+      // re-creating this id runs through this SAME lock): by the time such a
+      // ghost write can happen, both mirror halves below are gone and its
+      // re-mirror gets cold-start seen semantics (delete NOTHING) — otherwise a
+      // stale seen-set would classify this canvas's elements as deletable and
+      // delete them from a DO room a member may still be viewing. Order
+      // matters: forget the LIVE entry first (its in-memory seen-set is the
+      // same hazard within this process, and once the entry is dropped the
+      // core's liveness guard stops any in-flight drain from re-persisting the
+      // sidecar), THEN unlink the persisted sidecar (the cross-restart copy of
+      // the same hazard, plus permanent accumulation — ids never recur).
+      // Best-effort; dynamic import for the same bundle-graph reason as the
+      // mirror hook above.
+      try {
+        const { forgetCanvasMirror, deleteCanvasMirrorSeen } = await import('./canvasCollabMirror')
+        await forgetCanvasMirror(projectPath, id)
+        await deleteCanvasMirrorSeen(projectPath, id)
       } catch {}
     })
     // Cascade: drop the canvas's image-asset directory so we never accumulate

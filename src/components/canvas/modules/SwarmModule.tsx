@@ -50,6 +50,7 @@ import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { SwarmFlowPane } from './SwarmFlowPane'
+import { SwarmEscalationsPane } from './SwarmEscalationsPane'
 import { SwarmPowerBar } from './SwarmPowerBar'
 import { ExecutionModeToggle } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
@@ -276,6 +277,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     toggleAutonomy,
     dismissAutonomyReminder,
     toggleAutoMerge,
+    toggleOverseer,
+    sandboxWarning: engineSandboxWarning,
   } = useSwarmEngine(project.path)
 
   // PTY ids ever seen alive by the active poll. If an id was seen and then drops
@@ -871,6 +874,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         </div>
       )}
 
+      {/* ── Escalations inbox (C1): the swarm's questions awaiting THE OWNER. ──
+          Rendered ABOVE the tab surface so an open question stays visible no
+          matter which view is active — and even in the pre-start onboarding
+          state (a leftover question from the last run must not hide). The pane
+          renders null while the inbox is empty, so this costs nothing in the
+          common case. Fail-closed lives server-side; visibility lives here. */}
+      <SwarmEscalationsPane projectPath={project.path} />
+
       {/* ── Tab surface: supply desk ⇆ commander ⇆ worker tiles ───────────── */}
       {/* No bg on this wrapper: the empty/CTA states below are PAPER surfaces
           (bg-bg) so the paper ink tokens keep 4.5:1+ contrast. The dark terminal
@@ -1029,6 +1040,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               busy={engineBusy}
               error={engineError}
               onToggleAutoMerge={toggleAutoMerge}
+              onToggleOverseer={toggleOverseer}
+              sandboxWarning={engineSandboxWarning}
             />
           </div>
         ) : mainView === 'flow' ? (

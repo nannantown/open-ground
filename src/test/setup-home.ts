@@ -49,6 +49,16 @@ for (const key of [
   // reads, so clear them too (incl. the admin allowlist) for a hermetic baseline.
   'SUPABASE_SUBMISSIONS_TABLE',
   'MODULE_ADMIN_EMAILS',
+  // Realtime collab (server/routes/collab*.ts + ticket.ts readCollabWsUrl) —
+  // same lazy reads, different leak source: a claude session launched FROM
+  // INSIDE the OPEN GROUND app (in-app swarm workers, the manager's review
+  // runs) inherits the Electron server's live collab env, so every "503 when
+  // collab is disabled (no env)" case fails there while passing in a plain
+  // terminal (observed 2026-07-02: three collabAsset/collabInvite cases red on
+  // a worker AND on the reviewing manager, green under env -u). Enabled-path
+  // tests stub these per case; vi.unstubAllEnvs() restores "unset".
+  'OPENGROUND_REALTIME',
+  'OPENGROUND_COLLAB_WS_URL',
 ]) {
   delete process.env[key]
 }

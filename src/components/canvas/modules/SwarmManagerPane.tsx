@@ -88,6 +88,13 @@ interface Props {
    *  dashboard to the module-level master power switch (SwarmPowerBar), so the
    *  engine has a SINGLE start/stop control; this pane keeps only Auto-integrate. */
   onToggleAutoMerge: (next: boolean) => void
+  /** Overseer switch (EPIC C / C-core) — the THIRD toggle. ASYMMETRIC: an explicit
+   *  autonomy OFF clears it, so the owner re-arms it every session (surfaced in its
+   *  hint). Default OFF. */
+  onToggleOverseer: (next: boolean) => void
+  /** The overseer was armed WITHOUT the sandbox experiment (L3) — show a reduced-
+   *  containment note under the switch. */
+  sandboxWarning: boolean
 }
 
 // Commander-session status dot — the SAME beacon vocabulary as the supply tile
@@ -168,6 +175,8 @@ export const SwarmManagerPane = ({
   busy,
   error,
   onToggleAutoMerge,
+  onToggleOverseer,
+  sandboxWarning,
 }: Props) => {
   const { t } = useT()
 
@@ -352,6 +361,26 @@ export const SwarmManagerPane = ({
               onToggle={(v) => onToggleAutoMerge(v)}
               t={t}
             />
+            {/* Overseer (EPIC C / C-core) — the THIRD toggle. Its hint states the D1
+                asymmetry: an explicit autonomy OFF disarms it, so it is re-armed each
+                session (no auto-resume). Disabled while the engine is stopped — the
+                overseer is a STAGE of the running tick and the server refuses to arm a
+                stopped engine (§5:243 "autonomy ON 中の engine にのみ有効"), so the switch
+                reflects that precondition rather than letting a click silently no-op. */}
+            <ControlRow
+              label={t('projectPanel.swarm.manager.overseer')}
+              hint={t('projectPanel.swarm.manager.overseerHint')}
+              value={engine.overseer}
+              disabled={busy || !available || !engine.running}
+              ariaLabel={t('projectPanel.swarm.manager.overseer')}
+              onToggle={(v) => onToggleOverseer(v)}
+              t={t}
+            />
+            {engine.overseer && sandboxWarning ? (
+              <p className="text-[10px] leading-snug text-amber-500/90" role="note">
+                {t('projectPanel.swarm.manager.overseerSandboxWarning')}
+              </p>
+            ) : null}
           </div>
 
           {error && <p className="mt-2.5 text-[11px] leading-relaxed text-accent">{error}</p>}

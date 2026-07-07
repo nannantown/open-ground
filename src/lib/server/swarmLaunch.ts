@@ -18,13 +18,30 @@ import {
   EXECUTION_MODES,
   DEFAULT_EXECUTION_MODE,
 } from '../types'
+// The [Quota] foundation (swarmQuota) is the tier AWARENESS layer this file reads
+// (never writes): the ladder + which tiers are cooling. Importing it here is what
+// turns the launch model from a fixed top-tier constant into "the highest tier
+// with headroom" (see resolveAvailableTier). One-way dep — swarmQuota imports
+// nothing back (it's the pure foundation).
+import {
+  MODEL_TIER_LADDER,
+  isTierCooling,
+  highestAvailableTier,
+  type ModelTier,
+} from './swarmQuota'
 
 /** The TOP-TIER model — what "full capability" means today. Fable 5 superseded
  *  Opus 4.8 as the newest flagship (alias verified against the CLI: `--model
  *  fable` accepted, bogus aliases rejected). Used by max-output mode, optimize's
  *  quality-critical slots (commander / heavy cards), the engine's adversarial
  *  reviewer default, and the no-mode back-compat default. ONE constant so the
- *  next model generation is a one-line bump. */
+ *  next model generation is a one-line bump.
+ *
+ *  This is the TOP of {@link MODEL_TIER_LADDER} (=== `MODEL_TIER_LADDER[0]`): the
+ *  launch model is no longer this constant *directly* but the highest ladder tier
+ *  with quota headroom (see {@link resolveAvailableTier}) — normally fable, but
+ *  opus when fable is cooling, etc. The constant stays the single "what is the top
+ *  tier" definition the ladder's head and the non-launch defaults share. */
 export const SWARM_LAUNCH_MODEL = 'fable'
 
 /** The effort literal the swarm runs at. Kept as a raw string so the
@@ -111,15 +128,19 @@ export const classifyCardWeight = (card: { title?: string; notes?: string }): Ca
   return 'medium'
 }
 
-/** Resolve the model + effort a swarm role should launch at under `mode`. Workers
- *  in `optimize` route by card weight; the engine roles (supply/manager) key off
- *  the mode alone. Principle (card 68d8e00f): cut redundancy/volume, but keep
- *  CAPABILITY where a judgment's quality matters — so a HEAVY optimize card stays
- *  top-tier/max, and even economy roles keep `medium` effort (they reason across
- *  integration) while economy workers drop to `low`. */
-export const resolveSwarmModelEffort = (
+/** The DESIRED model + effort a swarm role would launch at under `mode`, BEFORE
+ *  the quota fallback ({@link resolveSwarmModelEffort} maps the model through
+ *  {@link resolveAvailableTier}). Workers in `optimize` route by card weight; the
+ *  engine roles (supply/manager/overseer) key off the mode alone. Principle
+ *  (card 68d8e00f): cut redundancy/volume, but keep CAPABILITY where a judgment's
+ *  quality matters — so a HEAVY optimize card stays top-tier/max, and even economy
+ *  roles keep `medium` effort (they reason across integration) while economy
+ *  workers drop to `low`. The `overseer` (proxy-you brain, EPIC C) is a judgment席
+ *  on par with the manager — its answer-as-owner decision is quality-critical, so
+ *  it tracks the manager tier. */
+const desiredModelEffort = (
   mode: ExecutionMode,
-  role: 'worker' | 'supply' | 'manager',
+  role: 'worker' | 'supply' | 'manager' | 'overseer',
   card?: { title?: string; notes?: string },
 ): { model: string; effort?: ClaudeEffort } => {
   if (mode === 'max') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
@@ -132,7 +153,9 @@ export const resolveSwarmModelEffort = (
   // elsewhere. The commander's integration / safety-review DECISION is quality-critical,
   // so it stays on the top-tier model (savings there come from fewer review bodies,
   // not a weaker model).
-  if (role === 'manager') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('high') }
+  // The commander AND the proxy-you overseer both make quality-critical judgment
+  // calls — keep them on the top-tier model at high effort (manager と同格・D4).
+  if (role === 'manager' || role === 'overseer') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('high') }
   // The supply officer only translates intent into cards — sonnet is plenty.
   if (role === 'supply') return { model: 'sonnet', effort: guardEffort('medium') }
   // Workers route by card weight: heavy/safety work gets the top-tier model,
@@ -141,6 +164,69 @@ export const resolveSwarmModelEffort = (
   if (w === 'heavy') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
   if (w === 'light') return { model: 'sonnet', effort: guardEffort('low') }
   return { model: 'sonnet', effort: guardEffort('medium') }
+}
+
+/** Map a DESIRED model tier to the one a worker should ACTUALLY launch on, given
+ *  which tiers are cooling at `now` (the [Quota] foundation's table, swarmQuota).
+ *  The fallback steps DOWN the ladder (fable→opus→sonnet→haiku): a slot that
+ *  wanted the top tier (max mode / heavy card / commander) gets the highest tier
+ *  with headroom, and a slot that deliberately chose a cheaper tier (economy /
+ *  optimize chore) keeps it unless it too is cooling, then drops further. Only
+ *  when EVERY tier at-or-below `desired` is dry does it look UP to the best
+ *  available ({@link highestAvailableTier}) — a launch must never land on a
+ *  known-cooling tier while another still has headroom; keeping the swarm MOVING
+ *  is the incident this card fixes. If literally every tier is cooling, `desired`
+ *  is returned unchanged: picking a model is this resolver's only job — the
+ *  wait-until-reset decision belongs to the engine (swarmQuota.allCoolingUntil),
+ *  not here.
+ *
+ *  With nothing cooling this is the IDENTITY on `desired`, so the execution-mode
+ *  matrix below is exactly today's behavior until a real quota wall appears (the
+ *  3-choice tests stay green). An unknown model string (not on the ladder) is
+ *  treated as the ladder head — walk the whole thing — a safe "best available"
+ *  default rather than a throw. */
+export const resolveAvailableTier = (desired: string, now: number): string => {
+  const startIdx = MODEL_TIER_LADDER.indexOf(desired as ModelTier)
+  const from = startIdx < 0 ? 0 : startIdx
+  for (let i = from; i < MODEL_TIER_LADDER.length; i++) {
+    if (!isTierCooling(MODEL_TIER_LADDER[i], now)) return MODEL_TIER_LADDER[i]
+  }
+  return highestAvailableTier(now) ?? desired
+}
+
+// ─── EXECUTION MODE × QUOTA FALLBACK ─────────────────────────────────────────
+// How the launch tier is chosen once a tier is cooling. resolveSwarmModelEffort
+// takes the mode's DESIRED tier (desiredModelEffort, logic UNCHANGED) then maps it
+// through resolveAvailableTier, which only ever steps DOWN the ladder:
+//
+//   mode      desired tier (unchanged)               under a quota wall
+//   ────────  ─────────────────────────────────────  ─────────────────────────────
+//   max       top (fable) for EVERY role             highest tier with headroom
+//                                                     (fable→opus→sonnet→haiku)
+//   optimize  fable: commander / overseer / heavy    each desired tier resolved
+//             sonnet: supply / chore workers         among what's available (down)
+//   economy   sonnet everywhere (workers low)        sonnet, else next tier below
+//
+// So the user-confirmed behavior — "when the top tier's quota is spent, drop one
+// tier" — falls out of `max` and optimize's fable slots: they all resolve to the
+// same highest-available tier together (no per-card出し分け). economy/optimize's
+// deliberately-cheaper picks are preserved, just resolved among what's available.
+// effort is NEVER touched by the fallback — only the model tier follows the quota.
+
+/** Resolve the model + effort a swarm role launches at under `mode`, WITH the live
+ *  quota fallback applied to the model (effort is passed through untouched). `now`
+ *  defaults to the wall clock so every call site re-resolves the CURRENT cooling
+ *  state AT launch — the worker / manager / supply spawn paths need no extra
+ *  wiring — and is injectable for deterministic tests. See the table above for the
+ *  execution-mode × fallback matrix. */
+export const resolveSwarmModelEffort = (
+  mode: ExecutionMode,
+  role: 'worker' | 'supply' | 'manager' | 'overseer',
+  card?: { title?: string; notes?: string },
+  now: number = Date.now(),
+): { model: string; effort?: ClaudeEffort } => {
+  const desired = desiredModelEffort(mode, role, card)
+  return { ...desired, model: resolveAvailableTier(desired.model, now) }
 }
 
 /** The live-worker ceiling for a mode — economy runs fewer parallel workers (each

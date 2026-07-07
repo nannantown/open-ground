@@ -25,6 +25,16 @@ export const notificationsFile = () => join(openGroundHome(), 'notifications.jso
 // holds only the read-state id set): these are notification CONTENT records the
 // bell renders, capped to the newest few. See src/lib/server/swarmNotifications.ts.
 export const swarmNotificationsFile = () => join(openGroundHome(), 'swarm-notifications.json')
+// The Escalations inbox (C1, docs/OVERSEER_DESIGN.md §8): questions the swarm
+// raised to the REAL user (irreversible / insufficient-info), waiting for their
+// answer. UNCAPPED — an unanswered irreversible decision must never scroll off
+// (fail-closed); resolved records are pruned by the boot retention sweep
+// instead. See src/lib/server/swarmEscalations.ts.
+export const escalationsFile = () => join(openGroundHome(), 'escalations.json')
+// PTY-tail captures attached to escalations ("what the worker's screen showed
+// when it got stuck") — one small text file per escalation, referenced by the
+// record's screenshotRef and unlinked when the record is pruned.
+export const escalationShotsDir = () => join(openGroundHome(), 'escalation-shots')
 // The proxy's externalised JUDGMENT AXIS ("あなたの判断軸"). A single,
 // self-describing markdown file assembled from CONCEPT.md + the OPEN GROUND
 // auto-memory + hand-added judgments, written 0600 — it can be injected at proxy

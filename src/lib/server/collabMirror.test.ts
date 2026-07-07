@@ -168,6 +168,21 @@ describe('collabMirror — server-side board writes reach the collab doc (c2e4c5
     expect(docTasks(fake.doc).map((t) => t.id)).toEqual(['new'])
   })
 
+  it('an EMPTY updatedAt is unstamped — mirrored, never dropped (pre-core queue-guard truth table)', async () => {
+    const fake = makeFake()
+    mirror = createBoardMirror(fake.deps)
+    mirror.queue('/proj', data([task('a')], '2026-07-02T01:00:00.000Z'))
+    await mirror.settle('/proj')
+    // '' is falsy in the original guard (`stamp && lastStamp && …`): it must
+    // bypass the ordering drop AND must not poison lastStamp for later writes.
+    mirror.queue('/proj', data([task('b')], ''))
+    await mirror.settle('/proj')
+    expect(docTasks(fake.doc).map((t) => t.id)).toEqual(['b'])
+    mirror.queue('/proj', data([task('c')], '2026-07-02T02:00:00.000Z'))
+    await mirror.settle('/proj')
+    expect(docTasks(fake.doc).map((t) => t.id)).toEqual(['c'])
+  })
+
   it('coalesces a burst: one connection, the LAST write wins', async () => {
     let release: (() => void) | null = null
     const gate = new Promise<void>((r) => { release = r })

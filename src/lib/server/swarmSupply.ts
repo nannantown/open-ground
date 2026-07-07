@@ -16,13 +16,14 @@
 // This mirrors `swarm-supply.sh` exactly:
 //   exec env SWARM_MANAGER=1 claude --model opus --effort max \
 //        --dangerously-skip-permissions --remote-control supply "/supply"
-//   - SWARM_MANAGER=1 — supply runs bypass IN THE REAL CHECKOUT, so (unlike a
-//     worker, which is contained in a throwaway worktree and passes NO env) it
-//     opts INTO the swarm PreToolUse guard, which blocks any stray destructive
-//     git. This is the exact purpose of launchClaude's `env` port.
+//   - SWARM_MANAGER=1 — TAGS the session as the supply officer (for tooling / the
+//     /supply skill). Under WORKER-ONLY guard scoping (2026-07) this is NOT a guard
+//     opt-in: like the commander, the supply desk is a TRUSTED session (it only
+//     READS the repo + writes the recoverable Board), so the PreToolUse veto —
+//     which polices only the confined worker — does not apply to it.
 //   - bypass (--dangerously-skip-permissions) — the desk writes Board cards
 //     unattended-style so the conversation isn't interrupted by a tool-approval
-//     prompt on every `swarm-board.sh add`; the guard above is the safety net.
+//     prompt on every `swarm-board.sh add`; its safety net is the human, not the veto.
 //   - opus / max — the supply officer is a PM translating intent into precise,
 //     observable tasks; it runs at full capability (mirrors the shell launcher).
 //   - /supply as claude's POSITIONAL prompt — claude runs the skill on startup,
@@ -56,9 +57,10 @@ export interface SpawnSwarmSupplyOpts {
  *     repo + writes the Board, it never branches.
  *   - permissionMode:'bypass' — so board writes aren't gated by a tool-approval
  *     prompt on every turn (mirrors swarm-supply.sh's --dangerously-skip-…).
- *   - env { SWARM_MANAGER:'1' } — supply runs bypass in the REAL checkout, so it
- *     opts INTO the swarm guard (which blocks stray destructive git). The WORKER
- *     deliberately passes none (contained worktree); supply must NOT (real tree).
+ *   - env { SWARM_MANAGER:'1' } — TAGS the session as the supply officer for
+ *     tooling / the /supply skill. Under worker-only guard scoping this is NOT a
+ *     guard opt-in: the trusted supply desk is unpoliced (the veto polices only the
+ *     confined worker, which passes OPENGROUND_GUARD=1 + write roots instead).
  *   - appContext:true — supply's whole job is writing Board cards, so the
  *     app-context card (board API + "track on the Board, not an internal todo")
  *     is exactly on-mission (the worker turns it off for leanness; supply keeps it).
@@ -78,6 +80,12 @@ export const supplyLaunchOpts = (
   agentSessionId,
   permissionMode: 'bypass',
   appContext: true,
+  // Supply is NOT policed by the PreToolUse veto (worker-only scoping), so
+  // strictMcpConfig is no longer a veto-pairing requirement here. Kept as
+  // DEFENSE-IN-DEPTH: the supply desk boots with only its explicit MCP config
+  // (none) instead of inheriting user-scope MCP servers. (The confined WORKER
+  // still REQUIRES strictMcpConfig — mcp__* tools bypass ITS veto.)
+  strictMcpConfig: true,
   ...swarmLaunchDefaults('supply', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,

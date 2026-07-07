@@ -135,6 +135,11 @@ export const projectPanel = {
     'projectPanel.swarm.manager.autoMerge': 'Auto-integrate',
     'projectPanel.swarm.manager.autoMergeHint':
       'Let the engine land review cards on the trunk itself — fast-forward / rebase only, never forced; conflicts are left for you. It does NOT run tests or review the diff first — for verified merges, drive them through the commander conversation (/manage) instead. Off by default.',
+    'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
+    'projectPanel.swarm.manager.overseerHint':
+      'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. UNLIKE auto-integrate, turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). Best run with the sandbox experiment on.',
+    'projectPanel.swarm.manager.overseerSandboxWarning':
+      '⚠ Sandbox experiment is OFF — the overseer’s brain runs without the kernel-level containment layer. Its read-only design and budget still hold, but enabling the sandbox is recommended.',
     'projectPanel.swarm.manager.on': 'On',
     'projectPanel.swarm.manager.off': 'Off',
     'projectPanel.swarm.manager.engineRunning': 'Engine running',
@@ -297,6 +302,24 @@ export const projectPanel = {
     'projectPanel.swarm.flow.fatalExecTimeout': 'Worker hit time limit',
     'projectPanel.swarm.flow.fatalRollback': 'Self-update rolled back',
     'projectPanel.swarm.flow.fatalCanaryFailed': 'Self-update canary failed',
+    // Escalations inbox (C1) — questions the swarm raised to YOU, waiting for
+    // your answer. Fail-closed: nothing proceeds until you decide.
+    'projectPanel.swarm.esc.title': 'Escalations — waiting for your answer',
+    'projectPanel.swarm.esc.whyIrreversible': 'Irreversible',
+    'projectPanel.swarm.esc.whyInsufficientInfo': 'Needs your knowledge',
+    'projectPanel.swarm.esc.whyPolicy': 'Policy',
+    'projectPanel.swarm.esc.proxyDraft': 'Proxy draft · confidence {confidence}',
+    'projectPanel.swarm.esc.abstention': 'The proxy abstained — it lacks your context here.',
+    'projectPanel.swarm.esc.useDraft': 'Use draft',
+    'projectPanel.swarm.esc.screenshot': "Worker's screen at the time",
+    'projectPanel.swarm.esc.answerPlaceholder': 'Your answer…',
+    'projectPanel.swarm.esc.answerSend': 'Answer & resume',
+    'projectPanel.swarm.esc.dismiss': 'Dismiss',
+    'projectPanel.swarm.esc.deliveryInjected': 'Answer injected into the live worker — it resumes now.',
+    'projectPanel.swarm.esc.deliveryQueued': "Worker is gone — recorded; while the swarm is running, the card's next dispatch carries this answer.",
+    'projectPanel.swarm.esc.deliverySkipped': 'Recorded. Nothing live to deliver to.',
+    'projectPanel.swarm.esc.memoryWritten': 'Learned — written back to your corpus.',
+    'projectPanel.swarm.esc.actionFailed': 'Escalation action failed: {error}',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -701,6 +724,11 @@ export const projectPanel = {
     'projectPanel.swarm.manager.autoMerge': '自動統合',
     'projectPanel.swarm.manager.autoMergeHint':
       'review のカードをエンジンが本流へ自動で取り込みます（早送り/rebase のみ・強制プッシュはしません）。衝突は手動に残します。テストやレビューは回しません — 検証込みのマージは司令官との対話（/manage）に任せてください。既定はオフ。',
+    'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
+    'projectPanel.swarm.manager.overseerHint':
+      'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。自動統合と違い、autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。sandbox 実験と併用推奨。',
+    'projectPanel.swarm.manager.overseerSandboxWarning':
+      '⚠ sandbox 実験がオフです — 監督の大脳はカーネルレベルの封じ込めなしで動きます。読み取り専用設計と予算上限は有効ですが、sandbox の有効化を推奨します。',
     'projectPanel.swarm.manager.on': 'オン',
     'projectPanel.swarm.manager.off': 'オフ',
     'projectPanel.swarm.manager.engineRunning': 'エンジン稼働中',
@@ -860,6 +888,24 @@ export const projectPanel = {
     'projectPanel.swarm.flow.fatalExecTimeout': 'ワーカーが時間上限に到達',
     'projectPanel.swarm.flow.fatalRollback': '自己更新をロールバック',
     'projectPanel.swarm.flow.fatalCanaryFailed': '自己更新カナリア失敗',
+    // エスカレーション受信箱（C1）— swarm があなたに上げた質問の回答待ち。
+    // fail-closed: あなたが決めるまで何も先に進まない。
+    'projectPanel.swarm.esc.title': 'エスカレーション — あなたの回答待ち',
+    'projectPanel.swarm.esc.whyIrreversible': '不可逆',
+    'projectPanel.swarm.esc.whyInsufficientInfo': '情報不足',
+    'projectPanel.swarm.esc.whyPolicy': 'ポリシー',
+    'projectPanel.swarm.esc.proxyDraft': 'proxy の暫定回答 · 確信度 {confidence}',
+    'projectPanel.swarm.esc.abstention': 'proxy は回答を保留しました（あなたの情報が不足）。',
+    'projectPanel.swarm.esc.useDraft': '暫定回答を使う',
+    'projectPanel.swarm.esc.screenshot': 'その時の worker 画面',
+    'projectPanel.swarm.esc.answerPlaceholder': '回答を入力…',
+    'projectPanel.swarm.esc.answerSend': '回答して再開',
+    'projectPanel.swarm.esc.dismiss': '見送る',
+    'projectPanel.swarm.esc.deliveryInjected': '回答を実行中の worker に注入しました — 作業が再開します。',
+    'projectPanel.swarm.esc.deliveryQueued': 'worker 不在 — 回答は記録済み。swarm 稼働中なら同じカードの次回 dispatch に同梱されます。',
+    'projectPanel.swarm.esc.deliverySkipped': '記録しました（配達先の worker/カードなし）。',
+    'projectPanel.swarm.esc.memoryWritten': '記憶に追記しました（you-corpus）。',
+    'projectPanel.swarm.esc.actionFailed': 'エスカレーション操作に失敗: {error}',
     // Sidebar resizer
     // Chat header
     // Delete confirm

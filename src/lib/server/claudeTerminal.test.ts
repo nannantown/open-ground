@@ -150,6 +150,26 @@ describe('buildClaudeArgv (launch argv order/quoting contract)', () => {
   it('omits --strict-mcp-config by default (the user terminal keeps its MCP servers)', () => {
     expect(buildClaudeArgv(base, '/tmp/prompt.txt')).not.toContain('--strict-mcp-config')
   })
+
+  it('emits --disallowed-tools as ONE comma-joined quoted token, bounded by --session-id', () => {
+    const argv = buildClaudeArgv(
+      { ...base, disallowedTools: ['WebFetch', 'WebSearch', 'Bash'] },
+      '/tmp/p.txt',
+    )
+    const i = argv.indexOf('--disallowed-tools')
+    expect(i).toBeGreaterThanOrEqual(0)
+    // The list rides ONE token (comma form), so this variadic flag can never
+    // swallow the positional prompt — and a value-taking flag still bounds it.
+    expect(argv[i + 1]).toBe("'WebFetch,WebSearch,Bash'")
+    expect(argv[i + 2]).toBe('--session-id')
+    expect(argv[argv.length - 1]).toBe(`"$(cat '/tmp/p.txt')"`)
+  })
+
+  it('omits --disallowed-tools by default and for an empty/blank list (worker/supply/user launches unchanged)', () => {
+    expect(buildClaudeArgv(base, '/tmp/prompt.txt')).not.toContain('--disallowed-tools')
+    expect(buildClaudeArgv({ ...base, disallowedTools: [] }, null)).not.toContain('--disallowed-tools')
+    expect(buildClaudeArgv({ ...base, disallowedTools: ['  ', ''] }, null)).not.toContain('--disallowed-tools')
+  })
 })
 
 describe('buildClaudeArgv on Windows (platform=win32 — PowerShell framing)', () => {

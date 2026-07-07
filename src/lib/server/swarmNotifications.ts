@@ -16,7 +16,13 @@ import { readFile } from 'fs/promises'
 import { ensureOpenGroundHome, swarmNotificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import { sendOsNotification, CREATE_NOTIFICATION_MESSAGE, type OsNotification } from './osNotify'
-import type { AppNotification, SwarmFatalNotification, SwarmFatalEvent } from '../types'
+import type {
+  AppNotification,
+  SwarmFatalNotification,
+  SwarmFatalEvent,
+  SwarmInfoNotification,
+  SwarmInfoEvent,
+} from '../types'
 
 /** Keep only the newest few — these are urgent one-offs, not a log. A small cap
  *  bounds the file and the bell list; older fatal events scroll off (the engine
@@ -127,6 +133,64 @@ export const createSwarmFatalNotification = async (
   const app = buildFatalAppNotification(n, createdAt)
   await appendSwarmNotification(app)
   if (opts?.os !== false) sendOsNotification(formatFatalNotification(n))
+  return app
+}
+
+// ─── INFO-grade notifications (the overseer/escalation lane, C1) ─────────────
+// Same persisted-bell + OS-toast plumbing as the fatal path above, calmer tone:
+// nothing broke, someone just needs to look. First consumer: the Escalations
+// inbox ('escalation-open'); the other events are reserved for the overseer
+// brainstem (S7/S9/S11 of docs/OVERSEER_DESIGN.md §6).
+
+const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
+  'escalation-open': 'Swarm — a question needs your answer',
+  'escalation-reminder': 'Swarm — a question is still waiting',
+  'review-idle': 'Swarm — review cards await integration',
+  'overseer-throttled': 'Swarm — overseer throttled (usage cap)',
+}
+
+/** The OS toast (title + body) for an info event — same shape as the fatal one. */
+export const formatInfoNotification = (n: SwarmInfoNotification): OsNotification => {
+  const ref = n.taskTitle ? `「${n.taskTitle}」` : ''
+  const branch = n.branch ? ` (${n.branch})` : ''
+  return {
+    title: `OPEN GROUND — ${INFO_EVENT_LABEL[n.event] ?? 'Swarm info'}`,
+    body: `${n.detail}${ref}${branch}`,
+  }
+}
+
+/** Stable-per-occurrence read-state id (mirrors fatalNotificationId): dedup of a
+ *  RE-FIRING ongoing state is the CALLER's responsibility (the escalation inbox
+ *  dedups via receiptKey; the overseer dedups via its seen map). */
+const infoNotificationId = (n: SwarmInfoNotification, createdAt: number): string => {
+  const ref = n.escalationId || n.taskId || n.branch || n.projectPath || 'global'
+  return `swarm-info:${n.event}:${ref}:${createdAt}`
+}
+
+/** Build the {@link AppNotification} record for an info event. */
+export const buildInfoAppNotification = (
+  n: SwarmInfoNotification,
+  createdAt: number,
+): AppNotification => ({
+  id: infoNotificationId(n, createdAt),
+  kind: 'swarm-info',
+  createdAt,
+  swarmInfo: n,
+})
+
+/**
+ * Fire one INFO swarm notification: persist the in-app record (bell) AND raise
+ * an OS toast. The info-grade sibling of {@link createSwarmFatalNotification} —
+ * same cap, same read-state plumbing.
+ */
+export const createSwarmInfoNotification = async (
+  n: SwarmInfoNotification,
+  opts?: { os?: boolean; now?: number },
+): Promise<AppNotification> => {
+  const createdAt = opts?.now ?? Date.now()
+  const app = buildInfoAppNotification(n, createdAt)
+  await appendSwarmNotification(app)
+  if (opts?.os !== false) sendOsNotification(formatInfoNotification(n))
   return app
 }
 

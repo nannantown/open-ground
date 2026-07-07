@@ -30,6 +30,14 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.env).toEqual({ SWARM_MANAGER: '1' })
   })
 
+  it('blocks MCP inheritance (strictMcpConfig) — the guard only vetoes Bash+Write, so mcp__* must not exist', () => {
+    // A bypass session in the REAL checkout must NOT inherit the user's MCP
+    // servers: mcp__* tools sit outside the PreToolUse veto, so a filesystem/
+    // shell/data MCP would be an unguarded RCE past the guard. (Commander
+    // focused-review MUST-FIX — pairs the guard with strictMcpConfig.)
+    expect(base.strictMcpConfig).toBe(true)
+  })
+
   it('keeps the app-context card ON (the commander drives the Board — on-mission)', () => {
     // The worker turns appContext OFF for leanness; the commander moves Board
     // cards (todo → review → done) through the app API, so the board-API usage

@@ -1,4 +1,4 @@
-import { UserPlus, AlertTriangle } from 'lucide-react'
+import { UserPlus, AlertTriangle, Inbox } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { Btn } from '@/components/ui/Btn'
 import type { AppNotification } from '@/lib/types'
@@ -80,6 +80,31 @@ const NotificationRow = ({
           )}
           {f.logHint && (
             <p className="mt-1 break-words text-[11px] leading-relaxed text-ink-faint">{f.logHint}</p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // Info-grade swarm event (the overseer/escalation lane, C1) — same durable-
+  // record role as swarm-fatal, calmer presentation (ink icon, not the alert
+  // accent): nothing broke, a question is waiting. The Escalations inbox panel
+  // in the project's Swarm tab is where the answer happens; this row is the
+  // machine-wide "something is waiting" pointer.
+  if (n.kind === 'swarm-info' && n.swarmInfo) {
+    const i = n.swarmInfo
+    const ctx = [i.taskTitle ? `「${i.taskTitle}」` : '', i.branch].filter(Boolean).join(' · ')
+    return (
+      <div className="flex items-start gap-2.5 px-3.5 py-2.5">
+        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-bg-inset text-ink-muted">
+          <Inbox size={13} strokeWidth={1.75} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="break-words text-[12px] leading-relaxed text-ink">{i.detail}</p>
+          {ctx && (
+            <p className="mt-0.5 break-words font-mono text-[11px] leading-relaxed text-ink-faint">
+              {ctx}
+            </p>
           )}
         </div>
       </div>

@@ -15,23 +15,24 @@
 //
 // Like the SUPPLY officer (swarmSupply.ts) and UNLIKE a WORKER (swarmWorker.ts),
 // the commander conversation gets NO worktree: it operates on the primary
-// checkout. It DOES run git (it integrates branches), so it runs bypass but opts
-// INTO the swarm PreToolUse guard (SWARM_MANAGER=1) — the same real-tree safety
-// net supply uses, which blocks any stray destructive git (force-push, etc.).
-// There is nothing to tear down on stop; stopping it is a plain PTY kill (the
-// terminal DELETE route).
+// checkout. It runs bypass and — under WORKER-ONLY guard scoping (2026-07) — is
+// NOT policed by the PreToolUse veto: the commander is the human-in-the-loop
+// integration desk, a TRUSTED session the user talks to, so it runs with the same
+// freedom as a plain claude (the veto polices only the confined, unattended worker
+// — see scripts/openground-guard.js). SWARM_MANAGER=1 now only TAGS the session as
+// the commander for tooling/skills, not as a guard opt-in. There is nothing to
+// tear down on stop; stopping it is a plain PTY kill (the terminal DELETE route).
 //
 // This mirrors the shell `manager` launcher exactly:
 //   exec env SWARM_MANAGER=1 claude --model opus --effort max \
 //        --dangerously-skip-permissions --remote-control manager "/manage"
-//   - SWARM_MANAGER=1 — the commander runs bypass IN THE REAL CHECKOUT, so
-//     (unlike a worker, contained in a throwaway worktree and passing NO env) it
-//     opts INTO the swarm guard. This is the exact purpose of launchClaude's
-//     `env` port.
+//   - SWARM_MANAGER=1 — TAGS the session as the swarm commander (for tooling /
+//     the /manage skill). Under worker-only guard scoping it is NOT a guard
+//     opt-in: the trusted commander is not policed by the PreToolUse veto.
 //   - bypass (--dangerously-skip-permissions) — the commander runs git
 //     (status / merge / branch -d) and Board moves unattended-style so the
-//     conversation isn't interrupted by a tool-approval prompt each turn; the
-//     guard above is the safety net (it blocks force-push / dangerous git).
+//     conversation isn't interrupted by a tool-approval prompt each turn; its
+//     safety net is the human in the loop, not the veto.
 //   - opus / max — the commander reasons about integration order, conflicts and
 //     worker state at full capability (mirrors the shell launcher).
 //   - /manage as claude's POSITIONAL prompt — claude runs the skill on startup,
@@ -66,10 +67,10 @@ export interface SpawnSwarmManagerOpts {
  *     the repo, moves Board cards and integrates `swarm/*` branches on the trunk.
  *   - permissionMode:'bypass' — so its git + Board moves aren't gated by a
  *     tool-approval prompt on every turn (mirrors the shell `--dangerously-skip-…`).
- *   - env { SWARM_MANAGER:'1' } — the commander runs bypass in the REAL checkout,
- *     so it opts INTO the swarm guard (which blocks stray destructive git, e.g.
- *     force-push). The WORKER deliberately passes none (contained worktree); the
- *     commander, like supply, must NOT (real tree).
+ *   - env { SWARM_MANAGER:'1' } — TAGS the session as the swarm commander for
+ *     tooling / the /manage skill. Under worker-only guard scoping this is NOT a
+ *     guard opt-in: the trusted commander is unpoliced (the veto polices only the
+ *     confined worker, which passes OPENGROUND_GUARD=1 + write roots instead).
  *   - appContext:true — the commander drives the Board (drain todo → review →
  *     done) through the app's HTTP API, so the app-context card is on-mission
  *     (same as supply; the worker turns it off for leanness).
@@ -89,6 +90,13 @@ export const managerLaunchOpts = (
   agentSessionId,
   permissionMode: 'bypass',
   appContext: true,
+  // The manager is NOT policed by the PreToolUse veto (worker-only scoping), so
+  // strictMcpConfig is no longer a veto-pairing requirement here. Kept as
+  // DEFENSE-IN-DEPTH: the commander boots with only its explicit MCP config (none)
+  // instead of inheriting whatever user-scope MCP servers happen to be present,
+  // keeping the engine-driven commander deterministic. (The confined WORKER still
+  // REQUIRES strictMcpConfig — mcp__* tools bypass ITS veto; see swarmWorker.ts.)
+  strictMcpConfig: true,
   ...swarmLaunchDefaults('manager', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,

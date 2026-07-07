@@ -102,6 +102,18 @@ import {
   runSelfSupplyPass,
   type SelfSupplyRuntime,
 } from './swarmSelfSupply'
+import { detectFreeTextQuestion } from './swarmQuestions'
+import {
+  defaultReceiptKey,
+  openEscalation,
+  type OpenEscalationInput,
+} from './swarmEscalations'
+import {
+  runOverseerPass,
+  initOverseerRuntime,
+  defaultOverseerDeps,
+  type OverseerRuntime,
+} from './swarmOverseer'
 import type {
   OrchestratorAnomaly,
   OrchestratorLogLine,
@@ -249,6 +261,12 @@ export const STALL_MAX_NUDGES = 2
  *  few tens of seconds cleanly separates a single repaint from sustained work. */
 export const STALL_ECHO_GUARD_MS = 30_000
 
+/** Delay between the ESC interrupt and the follow-up continue-instruction the
+ *  stall ESCALATION sends — long enough for `claude` to unwind the interrupted
+ *  request before the next line lands. Matches the manually-verified field
+ *  recovery (2026-07-02): ESC, ~3s settle, then a short continue instruction + CR. */
+export const STALL_ESCALATE_DELAY_MS = 3_000
+
 /** Read a minutes-valued tunable from the environment, clamped to a sane band,
  *  falling back to `defMin` when unset / unparseable. The "定数化・調整可"
  *  (constant-ised AND adjustable) contract for the non-progress thresholds: the
@@ -314,6 +332,18 @@ export const RATE_LIMIT_GRACE_MS = Math.min(
  *  trust dialog the worker proceeds within seconds; still stuck after this means
  *  bypass is genuinely broken and a human is needed. */
 export const PERMISSION_WAIT_GRACE_MS = 2 * 60_000
+
+/** FREE-TEXT QUESTION GRACE — how long a worker that idles at a detected free-text
+ *  question is HELD (so the owner's escalation answer can W16-inject into the live
+ *  worker) before the engine PARKS it in 'blocked'. Bounds the hold: an unanswered
+ *  real question, or a courtesy/rhetorical "?" false-positive, must not squat the
+ *  slot until the 90-min runaway ceiling. Generous (the owner may be away) but far
+ *  under MAX_EXEC_MS; the question stays in the escalations inbox after parking, and
+ *  'blocked' is the human lane (no auto-respawn re-asking). Adjustable via env. */
+export const QUESTION_GRACE_MS = Math.min(
+  envMinutesMs('OPENGROUND_SWARM_QUESTION_GRACE_MIN', 30, 5, 360),
+  MAX_EXEC_MS - 60_000,
+)
 
 /** CONSUMPTION BUDGET — the per-session dispatch ceiling the UNATTENDED loop
  *  WARNS at (card 3f0fd4fa). Once the engine has dispatched this many workers
@@ -818,6 +848,11 @@ export interface HeartbeatSign {
   ready: boolean
   /** It explicitly reported a blocker / a blocked phase. */
   blocked: boolean
+  /** The RAW `blockers` text the worker wrote (swarm-beat.sh's blocker arg), when
+   *  non-empty — the free-text a blocked worker is stuck on. The `blocked` boolean
+   *  above already folds it in; this carries the TEXT so the overseer (S4) can read
+   *  the actual question the worker is asking. Read-only / absent when empty. */
+  blockers?: string
   /** Self-reported phase (audit / implement / verify / …), display-only. */
   phase?: string
   /** One-line summary of what it is doing, display-only. */
@@ -874,7 +909,7 @@ export const classifyWorker = (
  *  'runaway' = blew the execution-time ceiling; 'rate-limit' = waited on a
  *  usage/quota limit past its grace; 'permission' = a startup prompt bypass
  *  couldn't clear. (Card 4880e9c6.) */
-export type WorkerRecoveryReason = 'crash' | 'stall' | 'runaway' | 'rate-limit' | 'permission'
+export type WorkerRecoveryReason = 'crash' | 'stall' | 'runaway' | 'rate-limit' | 'permission' | 'question'
 
 /** Where a LOST/RECLAIMED worker's card goes — called when its PTY is dead and
  *  {@link classifyWorker} did NOT promote it (a crash/kill, a self-declared block,
@@ -906,7 +941,7 @@ export const recoveryColumn = (
   reason: WorkerRecoveryReason = 'crash',
 ): 'todo' | 'blocked' => {
   if (reason === 'rate-limit') return 'todo'
-  if (reason === 'runaway' || reason === 'permission') return 'blocked'
+  if (reason === 'runaway' || reason === 'permission' || reason === 'question') return 'blocked'
   if (probe.heartbeat?.ready === true) return 'blocked'
   if (probe.heartbeat?.blocked === true) return 'blocked'
   if (requeues >= maxRequeues) return 'blocked'
@@ -953,21 +988,33 @@ export interface StallParams {
  *    • silent, never nudged ⇒ 'nudge' (send Enter — the cheap un-stick).
  *    • silent, nudged but still inside `cooldownMs` ⇒ 'none' (let it take effect).
  *    • silent, nudged, cooldown elapsed, budget remains ⇒ 'nudge' again.
- *    • silent, nudges spent, cooldown elapsed ⇒ 'reclaim' (tear down + re-home).
+ *    • silent, nudges spent, cooldown elapsed, not yet escalated ⇒ 'escalate'
+ *      (ESC + a short continue-instruction — tried exactly ONCE before reclaiming).
+ *    • silent, already escalated, cooldown elapsed ⇒ 'reclaim' (tear down + re-home).
+ *
+ *  The 'escalate' step exists because a field test (2026-07-02) found bare-Enter
+ *  nudges sometimes fail to un-stick a worker wedged mid-response-generation: 3 of
+ *  4 wedged Fable/max workers only recovered after ESC (interrupting the in-flight
+ *  request) followed by a short continue instruction. It rides the SAME cooldown /
+ *  echo-guard machinery as a nudge (below) — an escalate bumps `lastNudgeAt` just
+ *  like a nudge does, so its own PTY echo is discounted identically, and it is
+ *  tried exactly once (`escalated` bookkeeping) before falling through to reclaim.
  *
  *  ECHO HANDLING (the load-bearing subtlety): a bare Enter makes a `claude` TUI
  *  repaint, stamping PTY output. So output landing within `echoGuardMs` AFTER our
- *  own nudge is DISCOUNTED — it counts as life for NEITHER the silence gate NOR
- *  the recovery signal. Otherwise the nudge's own echo would keep a wedged worker
- *  looking "alive" (dodging reclaim) and would falsely reset its budget.
+ *  own nudge (or escalate) is DISCOUNTED — it counts as life for NEITHER the
+ *  silence gate NOR the recovery signal. Otherwise the nudge's own echo would keep
+ *  a wedged worker looking "alive" (dodging reclaim) and would falsely reset its
+ *  budget.
  *
- *  `progressed` = REAL recovery since the last nudge, by EITHER channel: a fresh
- *  heartbeat (an echo can't write one — /order phases do), OR sustained output PAST
- *  the echo guard (a one-shot repaint can't). Both are needed because heartbeats
- *  are SPARSE (only at phase boundaries): a worker the nudge genuinely revived
- *  often resumes streaming output for many minutes before it next beats, and that
- *  real progress MUST clear the budget — else its next, independent stall would
- *  reclaim with zero nudges. The caller clears the nudge counter when `progressed`. */
+ *  `progressed` = REAL recovery since the last nudge/escalate, by EITHER channel: a
+ *  fresh heartbeat (an echo can't write one — /order phases do), OR sustained output
+ *  PAST the echo guard (a one-shot repaint can't). Both are needed because
+ *  heartbeats are SPARSE (only at phase boundaries): a worker the nudge genuinely
+ *  revived often resumes streaming output for many minutes before it next beats,
+ *  and that real progress MUST clear the budget — else its next, independent stall
+ *  would reclaim with zero nudges. The caller clears the whole nudge/escalate
+ *  bookkeeping when `progressed`. */
 export const classifyStall = (
   input: {
     /** Heartbeat epoch ms, or null if it never beat. */
@@ -977,16 +1024,18 @@ export const classifyStall = (
     /** Dispatch epoch ms — the activity floor (a just-spawned worker isn't silent). */
     startedAtMs: number
     /** Prior nudge bookkeeping, or undefined if never nudged. */
-    nudge: { count: number; lastNudgeAt: number } | undefined
+    nudge: { count: number; lastNudgeAt: number; escalated?: boolean } | undefined
   },
   now: number,
   p: StallParams,
-): { action: 'none' | 'nudge' | 'reclaim'; progressed: boolean; silentMs: number } => {
+): { action: 'none' | 'nudge' | 'escalate' | 'reclaim'; progressed: boolean; silentMs: number } => {
   const count = input.nudge?.count ?? 0
   const lastNudgeAt = input.nudge?.lastNudgeAt ?? 0
+  const escalated = input.nudge?.escalated ?? false
 
-  // Discount the Enter echo: output within echoGuardMs after our nudge is the TUI
-  // repaint, not life. Kept output is either pre-nudge or sustained past the guard.
+  // Discount the Enter echo: output within echoGuardMs after our nudge/escalate is
+  // the TUI repaint, not life. Kept output is either pre-nudge or sustained past
+  // the guard.
   const realOutput =
     input.lastOutputAtMs !== null && count > 0 && input.lastOutputAtMs <= lastNudgeAt + p.echoGuardMs
       ? null
@@ -997,8 +1046,9 @@ export const classifyStall = (
     input.startedAtMs,
   )
   const silentMs = Math.max(0, now - activity)
-  // Real recovery since the nudge — a fresh heartbeat OR real (post-echo-guard)
-  // output strictly after it. Either clears the budget; an echo can fake neither.
+  // Real recovery since the nudge/escalate — a fresh heartbeat OR real
+  // (post-echo-guard) output strictly after it. Either clears the budget; an echo
+  // can fake neither.
   const progressed =
     count > 0 &&
     ((input.heartbeatAtMs !== null && input.heartbeatAtMs > lastNudgeAt) ||
@@ -1007,8 +1057,13 @@ export const classifyStall = (
   if (silentMs < p.stallMs) return { action: 'none', progressed, silentMs } // alive
   if (count > 0) {
     if (progressed) return { action: 'none', progressed: true, silentMs } // recovered; re-stall handled fresh next pass
-    if (now - lastNudgeAt < p.cooldownMs) return { action: 'none', progressed: false, silentMs } // give the nudge time
-    if (count >= p.maxNudges) return { action: 'reclaim', progressed: false, silentMs } // nudges spent, still silent
+    if (now - lastNudgeAt < p.cooldownMs) return { action: 'none', progressed: false, silentMs } // give the nudge/escalate time
+    if (count >= p.maxNudges) {
+      // Nudge budget spent — try the ESC+continue escalation exactly once before
+      // giving up on the cheap paths and reclaiming.
+      if (!escalated) return { action: 'escalate', progressed: false, silentMs }
+      return { action: 'reclaim', progressed: false, silentMs } // escalation ALSO failed, still silent
+    }
   }
   return { action: 'nudge', progressed: false, silentMs }
 }
@@ -1063,20 +1118,28 @@ export const PERMISSION_PROMPT_PATTERNS: readonly RegExp[] = [
 /** Classify a worker's current screen into WHY it might not be progressing:
  *    • 'permission-wait' — a startup trust/permission dialog is blocking it.
  *    • 'rate-limited'    — it is waiting on a usage/quota/overload limit.
- *    • 'normal'          — neither; ordinary work (the silence-based stall path
- *                          then applies if it has also gone quiet).
+ *    • 'question'        — claude asked a FREE-TEXT question and idles at an
+ *                          empty input box awaiting the owner (C3; detector in
+ *                          swarmQuestions.ts — menu frames stay the permission
+ *                          arm's business, so this can never shadow them).
+ *    • 'normal'          — none of those; ordinary work (the silence-based
+ *                          stall path then applies if it has also gone quiet).
  *  Permission is checked first: at boot it blocks ALL progress and is the more
- *  urgent unblock. PURE (the only input is the text) — the TIMING gates (startup
- *  window, grace clocks) live in the monitor, so this stays trivially testable.
+ *  urgent unblock. The question check runs LAST so both existing arms keep
+ *  exactly their pre-C3 precedence, and on the RAW screen (its signature is
+ *  row-structural — normalizeScreen would flatten it away). PURE (the only
+ *  input is the text) — the TIMING gates (startup window, grace clocks) live
+ *  in the monitor, so this stays trivially testable.
  *  A null/empty screen ⇒ 'normal' (no signal — never invent a wait). */
 export const classifyOutput = (
   screen: string | null,
-): 'rate-limited' | 'permission-wait' | 'normal' => {
+): 'rate-limited' | 'permission-wait' | 'question' | 'normal' => {
   if (!screen) return 'normal'
   const text = normalizeScreen(screen)
   if (!text) return 'normal'
   if (PERMISSION_PROMPT_PATTERNS.some((re) => re.test(text))) return 'permission-wait'
   if (RATE_LIMIT_PATTERNS.some((re) => re.test(text))) return 'rate-limited'
+  if (detectFreeTextQuestion(screen)) return 'question'
   return 'normal'
 }
 
@@ -1223,12 +1286,15 @@ export interface ProjectEngine {
    *  situation, so a resolved zombie never lingers. In-memory only. */
   stuckMoves: Map<string, StuckMove>
   /** Per-worker (keyed by terminalId) Enter-nudge bookkeeping for STALL recovery:
-   *  how many times we've nudged this silent-but-alive worker and when last.
-   *  Bumped on each nudge, cleared on real recovery (a post-nudge heartbeat) or
-   *  when the worker leaves the live set (reclaimed / promoted-and-exited). Keyed
-   *  by terminalId — not taskId — so a re-dispatched card's fresh worker gets a
-   *  fresh budget. In-memory only. (Card stall self-healing.) */
-  nudges: Map<string, { count: number; lastNudgeAt: number }>
+   *  how many times we've nudged this silent-but-alive worker and when last, plus
+   *  whether the one-shot ESC+continue ESCALATION (past the nudge budget) has
+   *  already been tried. Bumped on each nudge / set on escalate, cleared on real
+   *  recovery (a post-nudge heartbeat) or when the worker leaves the live set
+   *  (reclaimed / promoted-and-exited). Keyed by terminalId — not taskId — so a
+   *  re-dispatched card's fresh worker gets a fresh budget. In-memory only.
+   *  (Card stall self-healing; escalation added 2026-07 after a field test showed
+   *  a bare Enter alone can leave a worker wedged — see {@link classifyStall}.) */
+  nudges: Map<string, { count: number; lastNudgeAt: number; escalated?: boolean }>
   /** Per-worker (keyed by terminalId) RATE-LIMIT bookkeeping: when we first saw
    *  this worker waiting on a usage/quota/overload limit (`since`, epoch ms). Set
    *  the pass its screen first reads as rate-limited, cleared the moment its
@@ -1243,6 +1309,22 @@ export interface ProjectEngine {
    *  the live set. Drives the auto-accept → park-if-persists path. In-memory only.
    *  (Card 4880e9c6.) */
   permissionWaits: Map<string, { since: number; accepted: boolean }>
+  /** Per-worker (keyed by terminalId) FREE-TEXT-QUESTION bookkeeping (C3): the
+   *  escalation receiptKey of the question last raised to the T3 inbox for this
+   *  worker — so one question is raised once (openEscalation is idempotent too;
+   *  this just spares the per-pass capture/notify I/O), while a NEW question
+   *  from the same worker (different key) raises anew. Cleared when the screen
+   *  reads normal again or the worker leaves the live set. Optional for engines
+   *  minted by an older build (backfilled on start). In-memory only. */
+  questionRaised?: Map<string, string>
+  /** Per-worker (keyed by terminalId) FREE-TEXT-QUESTION hold clock (C3 MF2):
+   *  `since` (epoch ms) the worker was first seen idling at a detected question.
+   *  Drives the "hold for QUESTION_GRACE_MS so the owner's answer can W16-inject,
+   *  then PARK in 'blocked'" bound — so an unanswered / false-positive question
+   *  doesn't squat the slot until the runaway ceiling. Cleared when the screen
+   *  reads normal or the worker leaves the live set. Optional (older-build
+   *  backfill). In-memory only. */
+  questionWaits?: Map<string, { since: number }>
   /** Drain/dispatch/integrate journal (ring buffer, oldest-first). */
   log: OrchestratorLogLine[]
   /** State inconsistencies detected on the latest pass (read-only — see
@@ -1253,6 +1335,14 @@ export interface ProjectEngine {
    *  while this is enabled (and even then they are owner-approval-gated). In-memory
    *  only (a restart re-arms OFF — fail-safe). See {@link SelfSupplyRuntime}. */
   selfSupply: SelfSupplyRuntime
+  /** OVERSEER (EPIC C / C-core) state — the autonomous proxy-you watcher's runtime:
+   *  the third arm-able stage (D1), armed flag + edge-dedup (seen) + dwell (watch) +
+   *  brain budget + fire-and-forget mailbox. Default OFF, in-memory ONLY (a restart
+   *  re-arms OFF — K2). ASYMMETRIC to autoMerge/selfSupply: an explicit autonomy OFF
+   *  (stopOrchestrator) CLEARS `overseer.enabled`, and an auto-drain re-ignition never
+   *  sets it (only the owner POST does — D1). Optional for an engine minted by an
+   *  older build (backfilled on retrieval). See {@link OverseerRuntime}. */
+  overseer: OverseerRuntime
   /** Identity keys of FATAL events already pushed to the human (the escalation
    *  safety valve's RISING-EDGE dedup): a state-derived fatal condition
    *  (rework-exhausted / all-workers-down) notifies ONCE on enter and is removed
@@ -1319,9 +1409,12 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       nudges: new Map(),
       rateLimited: new Map(),
       permissionWaits: new Map(),
+      questionRaised: new Map(),
+      questionWaits: new Map(),
       log: [],
       anomalies: [],
       selfSupply: initSelfSupplyRuntime(),
+      overseer: initOverseerRuntime(),
       notified: new Set(),
       pendingFatal: [],
       metrics: emptyMetricsCounters(),
@@ -1352,12 +1445,93 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.nudges ??= new Map()
     engine.rateLimited ??= new Map()
     engine.permissionWaits ??= new Map()
+    engine.questionRaised ??= new Map()
+    engine.questionWaits ??= new Map()
     engine.selfSupply ??= initSelfSupplyRuntime()
+    engine.overseer ??= initOverseerRuntime()
     engine.notified ??= new Set()
     engine.pendingFatal ??= []
     engine.metrics ??= emptyMetricsCounters()
   }
   return engine
+}
+
+/** Marks an owner-answer line inside the rework-reason slot, so the rework
+ *  conduit's overwrites can recognise and PRESERVE it (see
+ *  {@link mergeReworkReason}) and the /order reader sees its provenance. */
+export const ESCALATION_ANSWER_MARKER = '【本人からの回答(escalation)】'
+
+/** Separator between segments inside the rework-reason slot. A CONTROL byte
+ *  (US, 0x1f) — deliberately NOT a content-bearing string like ' / ', which an
+ *  owner answer legitimately contains (paths `src/a / src/b`, options
+ *  `A / B`): splitting on that would fragment the answer and silently drop the
+ *  marker-less tail. Segments can never contain this byte (the escalation
+ *  conduit strips control bytes from its input; mergeReworkReason flattens the
+ *  mechanical reason) and the /order consumer folds it to a plain space
+ *  (buildOrderInjection → flattenOneLine), so the joined line stays readable. */
+export const REWORK_REASON_SEP = '\x1f'
+
+// Same control-byte flattening as swarmWorker's flattenOneLine — keeps every
+// slot segment separator-free by construction.
+// eslint-disable-next-line no-control-regex
+const SLOT_CONTROL_BYTES = /[\x00-\x1f\x7f]/g
+
+/** Overwrite semantics for the rework-reason slot that never lose an owner
+ *  answer: the slot's mechanical rework reason IS meant to be replaced by the
+ *  newest one (accumulating stale reasons was never the contract), but any
+ *  escalation-answer segments (C1) queued in the same slot outrank machinery
+ *  and must survive — INTACT — until a dispatch consumes them. Pure + exported
+ *  for tests. */
+export const mergeReworkReason = (existing: string | undefined, reasonLine: string): string => {
+  // Flatten the incoming mechanical reason so it can't smuggle the separator
+  // (verify tails etc. may carry raw control bytes).
+  const fresh = reasonLine.replace(SLOT_CONTROL_BYTES, ' ')
+  const answers =
+    existing
+      ?.split(REWORK_REASON_SEP)
+      .filter((s) => s.includes(ESCALATION_ANSWER_MARKER) && !fresh.includes(s)) ?? []
+  return [...answers, fresh].join(REWORK_REASON_SEP)
+}
+
+/** C1 escalation → next-dispatch conduit (docs/OVERSEER_DESIGN.md §8): when the
+ *  owner answers an escalation whose worker is GONE, the answer rides the SAME
+ *  learning-loop slot as rework reasons ({@link ProjectEngine.reworkReasons} →
+ *  `priorFailure` → the fresh worker's /order), so the re-dispatched card starts
+ *  with the owner's decision instead of re-asking. In-memory like the rest of
+ *  the engine (a restart drops it — the escalation record itself stays
+ *  'answered' in the inbox, so nothing is silently lost).
+ *
+ *  Two rules keep the slot coherent under concurrency:
+ *   • the write happens INSIDE the engine critical section — the dispatch pass
+ *     reads → spawns (await) → DELETES this slot under {@link runExclusive}, so
+ *     a lock-free set landing mid-pass would be wiped by that delete without
+ *     ever being read;
+ *   • the line is clamped (the /order goal is one argv-bound slash-command
+ *     line — the full answer lives on the escalation record) and marker-
+ *     prefixed so {@link mergeReworkReason} can preserve it across later
+ *     mechanical rework overwrites. */
+export const recordEscalationAnswerForNextDispatch = async (
+  projectPath: string,
+  taskId: string,
+  line: string,
+): Promise<void> => {
+  // Control bytes → space FIRST (so the segment can never contain
+  // REWORK_REASON_SEP), then whitespace-fold + clamp.
+  const text = line.replace(SLOT_CONTROL_BYTES, ' ').replace(/\s+/g, ' ').trim().slice(0, 2000)
+  if (!text) return
+  const engine = getOrCreateEngine(await canonicalize(projectPath))
+  const marked = text.includes(ESCALATION_ANSWER_MARKER)
+    ? text
+    : `${ESCALATION_ANSWER_MARKER} ${text}`
+  await runExclusive(engine, async () => {
+    const existing = engine.reworkReasons.get(taskId)
+    // A re-delivery retry re-records the SAME answer — don't stack duplicates.
+    if (existing?.split(REWORK_REASON_SEP).includes(marked)) return
+    engine.reworkReasons.set(
+      taskId,
+      existing ? `${existing}${REWORK_REASON_SEP}${marked}` : marked,
+    )
+  })
 }
 
 /** Per-engine CRITICAL SECTION — serialize the autonomous tick's board-mutating
@@ -1462,6 +1636,7 @@ const emptyState = (): SwarmOrchestratorState => ({
   running: false,
   autoMerge: false,
   selfSupply: false,
+  overseer: false,
   workers: [],
   reviews: [],
   log: [],
@@ -1496,6 +1671,7 @@ const stateOf = (
     running: engine.running,
     autoMerge: engine.autoMerge,
     selfSupply: engine.selfSupply.enabled,
+    overseer: engine.overseer.enabled,
     workers: live,
     reviews: [...engine.reviews],
     log: [...engine.log],
@@ -1572,12 +1748,27 @@ export interface OrchestratorDeps {
    *  'bypass' (no permission menus), so a stray Enter cannot approve anything.
    *  (Stall recovery.) */
   nudge: (terminalId: string) => boolean
+  /** ESCALATE a worker that stayed silent past the whole nudge budget: ESC
+   *  (interrupt) then, after a short settle, a one-line continue instruction
+   *  naming `taskTitle` — tried exactly ONCE (see {@link classifyStall}) before a
+   *  still-silent worker is reclaimed. Returns false when the PTY is gone or
+   *  either write failed. (Stall recovery escalation, 2026-07.) */
+  escalate: (terminalId: string, taskTitle: string) => Promise<boolean>
   /** The worker PTY's CURRENT visible screen as plain text (the headless `claude`
    *  TUI frame), or null when unknown. Read-only. The orchestrator classifies it
    *  (classifyOutput) to tell WHY a non-promoting worker isn't progressing — a
    *  usage/rate-limit WAIT or a startup permission prompt — rather than treating
    *  every quiet worker as a stall. (Card 4880e9c6 — 進まない分類.) */
   recentOutput: (terminalId: string) => string | null
+  /** Raise a worker's FREE-TEXT question to the escalations inbox (C3). Until
+   *  C-core lands its budgeted brain pass, this is the §6 S4 THROTTLED
+   *  degradation: the bare question goes straight to T3 — openEscalation is
+   *  LLM-free and receiptKey-idempotent, and the owner's answer re-enters the
+   *  worker through answerEscalation → injectAnswerIntoWorker (W16). OPTIONAL:
+   *  absent ⇒ the question arm only HOLDS the worker (no raise) — existing
+   *  fake-deps tests keep compiling/behaving. Default (defaultDeps):
+   *  openEscalation. */
+  raiseQuestion?: (input: OpenEscalationInput) => Promise<unknown>
   /** Preflight `claude` before an AUTO-START engages the engine — `{ok:false}` when the
    *  CLI is missing / logged out. {@link maybeAutoStartDrain} consults it so it never flips
    *  `running` true into a spawn it knows will fail (which would make the chain — and the
@@ -1866,6 +2057,9 @@ const defaultReadHeartbeat = async (
       // blocked judgement UNCHANGED — same `phase === 'blocked' || blockers` rule.
       ready,
       blocked: !ready && (phase === 'blocked' || blockers.length > 0),
+      // Carry the raw blockers TEXT (not just the boolean) so the overseer's S4 can
+      // read the actual question a blocked worker is stuck on. Omitted when empty.
+      ...(blockers ? { blockers } : {}),
       ...(phase ? { phase } : {}),
       ...(note ? { note } : {}),
       ...(at ? { at } : {}),
@@ -1974,6 +2168,44 @@ const defaultLastOutputAt = (terminalId: string): number | null =>
 /** Send a bare Enter (CR) to a worker's PTY — the stall nudge. writeInput returns
  *  false when the session is gone/finished (nothing to wake). */
 const defaultNudge = (terminalId: string): boolean => writeInput(terminalId, '\r')
+
+// Control bytes that must never reach the raw PTY write below: taskTitle is
+// card-derived and attacker-reachable in git-shared mode (a teammate writes the
+// card JSON) — the same threat pastePrompt.ts's ESC strip closes for the paste
+// conduit. This write is NOT bracketed-paste (it auto-submits with a trailing
+// CR), so an embedded ESC/CSI here is MORE dangerous, not less: it would reach
+// `claude`'s TUI as a raw, auto-submitted control sequence. \s already folds any
+// embedded \r/\n into a single space below, so only ESC/C0/C1 need stripping here.
+// eslint-disable-next-line no-control-regex
+const ESCALATE_CONTROL_BYTES = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u0080-\u009f]/g
+
+/** ESC + continue-instruction — the stall ESCALATION tried once after the cheap
+ *  Enter-nudge budget is spent and the worker is STILL silent. A bare Enter can't
+ *  cancel a request `claude` is already mid-generation on; our OWN ESC (chr 27)
+ *  interrupts it, and — after {@link STALL_ESCALATE_DELAY_MS} lets that settle —
+ *  a short instruction (naming the card so the worker knows which goal to
+ *  resume) submits with a trailing CR, mirroring the manually-verified field
+ *  recovery (2026-07-02: 3 of 4 wedged Fable/max workers recovered immediately
+ *  via this exact sequence). Runs over the raw PTY write path (terminal.ts), NOT
+ *  pastePrompt's bracketed-paste conduit, so this function's OWN ESC byte is
+ *  never itself stripped by that unrelated sanitizer — but `taskTitle` (untrusted
+ *  card data) IS stripped of control bytes here before it reaches the PTY (see
+ *  {@link ESCALATE_CONTROL_BYTES}). Returns true only when BOTH writes landed on
+ *  a live PTY; `sleep` is DI'd (default: real timer) so a unit test can skip the
+ *  real delay. */
+export const defaultEscalate = async (
+  terminalId: string,
+  taskTitle: string,
+  deps?: { write?: typeof writeInput; sleep?: (ms: number) => Promise<void> },
+): Promise<boolean> => {
+  const write = deps?.write ?? writeInput
+  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  if (!write(terminalId, '\x1b')) return false
+  await sleep(STALL_ESCALATE_DELAY_MS)
+  const safeTitle = taskTitle.replace(ESCALATE_CONTROL_BYTES, '').replace(/\s+/g, ' ').trim()
+  const line = `続けてください。${safeTitle} のゴールを続行。完了条件: 実装+テスト緑+コミット。`
+  return write(terminalId, `${line}\r`)
+}
 
 /** The worker PTY's current visible screen (headless `claude` TUI frame), or null
  *  — the source classifyOutput inspects to spot a rate-limit wait / permission
@@ -3230,7 +3462,9 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   recoverWorker: defaultRecoverWorker,
   lastOutputAt: defaultLastOutputAt,
   nudge: defaultNudge,
+  escalate: defaultEscalate,
   recentOutput: defaultRecentOutput,
+  raiseQuestion: openEscalation,
   fetchReview: defaultFetchReview,
   prepareTarget: defaultPrepareTarget,
   classify: classifyBranch,
@@ -3335,7 +3569,9 @@ const monitorWorkers = async (
             ? 'rate/usage-limited too long — requeued'
             : reason === 'permission'
               ? 'permission/trust prompt unresolved — parked'
-              : 'lost'
+              : reason === 'question'
+                ? 'free-text question unanswered too long — parked'
+                : 'lost'
     let teardown: { removed: boolean; reason?: string } = { removed: false }
     try {
       teardown = await deps.recoverWorker({
@@ -3558,6 +3794,8 @@ const monitorWorkers = async (
       engine.nudges.delete(w.terminalId)
       engine.rateLimited.delete(w.terminalId)
       engine.permissionWaits.delete(w.terminalId)
+      engine.questionRaised?.delete(w.terminalId)
+      engine.questionWaits?.delete(w.terminalId)
       const ranMin = Math.floor((now - startedMs) / 60_000)
       const limitMin = Math.floor(MAX_EXEC_MS / 60_000)
       logLine(
@@ -3684,6 +3922,85 @@ const monitorWorkers = async (
         next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
         continue
       }
+
+      // FREE-TEXT QUESTION (C3) — silent because claude ASKED THE OWNER
+      // something and idles at an empty input box (the state the A1 sandbox
+      // leaves once permission menus are gone). Never nudge — a bare Enter is
+      // pointless at an empty box and, on a misread frame, could take a menu
+      // default. HOLD the slot so the owner's answer can W16-inject into the LIVE
+      // worker (answerEscalation → injection), and raise the bare question to the
+      // T3 escalations inbox — the §6 S4 THROTTLED degradation until C-core's
+      // budgeted brain pass takes over (handleWorkerQuestion is C-core's library,
+      // NOT called here: no LLM may burn outside C-core's budget/single-flight).
+      // MF1: the old `heartbeat?.blocked ? null` suppression UNCONDITIONALLY deferred
+      // a blocked worker's question to "S4 owns the raise" — but the OVERSEER S4
+      // (swarmOverseer.ts) only exists when the overseer is ARMED, so with it OFF a
+      // blocked worker's question was silently DROPPED. Fix: suppress here ONLY when
+      // the overseer is enabled (then S4 raises it, from the heartbeat blockers). Do
+      // NOT rely on receiptKey dedup across the two: S4's key is the heartbeat text,
+      // this arm's is the TUI-scraped question — they differ, so raising in BOTH
+      // would double-open the inbox. Overseer OFF ⇒ raise here (don't drop it).
+      // MF2: BOUND the hold (below) — held past QUESTION_GRACE_MS ⇒ PARK in
+      // 'blocked'. An unanswered real question, or a courtesy/rhetorical "?"
+      // false-positive, must not squat the slot until the 90-min runaway ceiling.
+      if (output === 'question') {
+        engine.rateLimited.delete(w.terminalId)
+        engine.permissionWaits.delete(w.terminalId)
+        engine.nudges.delete(w.terminalId)
+        // Lazy backfill (beside ensureEngine's): a plain engine literal from an
+        // older build / a test fixture must still get once-per-question raising.
+        engine.questionRaised ??= new Map()
+        engine.questionWaits ??= new Map()
+        const q = heartbeat?.blocked && engine.overseer?.enabled ? null : detectFreeTextQuestion(screen)
+        if (q && deps.raiseQuestion) {
+          const receiptKey = defaultReceiptKey({
+            projectPath: engine.path,
+            taskId: card?.id,
+            question: q.question,
+          })
+          if (engine.questionRaised.get(w.terminalId) !== receiptKey) {
+            engine.questionRaised.set(w.terminalId, receiptKey)
+            try {
+              await deps.raiseQuestion({
+                projectPath: engine.path,
+                question: q.question,
+                context: `worker ${w.branch} (${w.taskTitle}) の claude が入力待ちで停止中に画面から検出した質問。`,
+                whyEscalated: 'policy',
+                receiptKey,
+                ...(card?.id ? { taskId: card.id } : {}),
+                branch: w.branch,
+                terminalId: w.terminalId,
+              })
+              logLine(
+                engine,
+                'warn',
+                `worker asked a free-text question — raised to the escalations inbox: ${w.branch} (${shorten(q.question)})`,
+              )
+            } catch (e) {
+              // Raise failed (fs/notify hiccup) → forget the key so the next
+              // pass retries; the hold itself is unaffected.
+              engine.questionRaised?.delete(w.terminalId)
+              logLine(engine, 'warn', `question raise failed (will retry next pass): ${errMsg(e)}`)
+            }
+          }
+        }
+        // MF2: BOUND the hold. Stamp on first sight; once held past
+        // QUESTION_GRACE_MS, PARK in 'blocked' (recoverLost 'question') to free the
+        // slot — the raised question persists in the escalations inbox, and
+        // 'blocked' is the human lane (no auto-respawn re-asking). Mirrors the
+        // rate-limit / permission grace arms.
+        const qw = engine.questionWaits.get(w.terminalId)
+        if (!qw) {
+          engine.questionWaits.set(w.terminalId, { since: now })
+        } else if (now - qw.since >= QUESTION_GRACE_MS) {
+          engine.questionWaits.delete(w.terminalId)
+          engine.questionRaised?.delete(w.terminalId)
+          if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'question')) next.push(w)
+          continue
+        }
+        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        continue
+      }
     }
 
     // Reached here ⇒ NOT silent, OR silent with a 'normal' screen ⇒ neither a
@@ -3694,12 +4011,35 @@ const monitorWorkers = async (
     // simply kept. Unchanged from the pre-card stall self-healing (c9fe657).
     engine.rateLimited.delete(w.terminalId)
     engine.permissionWaits.delete(w.terminalId)
+    engine.questionRaised?.delete(w.terminalId)
+    engine.questionWaits?.delete(w.terminalId)
     if (stall.action === 'reclaim') {
       engine.nudges.delete(w.terminalId)
       // A silent worker is reclaimed like a crash: recoveryColumn (via recoverLost)
       // sends a bare hang to 'todo' (one retry) or 'blocked' (budget spent), never
       // to review — a stall NEVER fakes progress.
       if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'stall')) next.push(w)
+      continue
+    }
+    if (stall.action === 'escalate') {
+      // The cheap Enter-nudge budget is spent and the worker is STILL silent — try
+      // the ESC+continue escalation exactly once (classifyStall's `escalated` gate)
+      // before falling through to reclaim on the pass after this one.
+      let sent = false
+      try {
+        sent = await deps.escalate(w.terminalId, w.taskTitle)
+      } catch {
+        sent = false
+      }
+      engine.nudges.set(w.terminalId, { count: STALL_MAX_NUDGES, lastNudgeAt: now, escalated: true })
+      logLine(
+        engine,
+        'warn',
+        `worker stalled ${Math.floor(stall.silentMs / 60_000)}m — nudge budget spent, escalating (ESC+continue)` +
+          `${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
+        'stall',
+      )
+      next.push(withHeartbeat({ ...w, stage }, heartbeat))
       continue
     }
     if (stall.action === 'nudge') {
@@ -3741,11 +4081,15 @@ const monitorWorkers = async (
     if (col === null || col === 'done' || col === 'review') engine.recoveries.delete(id)
   }
 
-  // Forget per-worker bookkeeping (nudge budget + rate-limit / permission-wait
-  // tracking) for workers no longer in the live set (reclaimed, promoted-and-
-  // exited, crashed) — all keyed by terminalId, so a worker that survives this
-  // pass keeps its state while a departed one's is dropped. Prevents a stale entry
-  // from ever outliving its worker (and from leaking onto a future spawn's id).
+  // Forget per-worker bookkeeping (nudge budget + rate-limit / permission-wait /
+  // question-raised tracking) for workers no longer in the live set (reclaimed,
+  // promoted-and-exited, crashed, runaway) — all keyed by terminalId, so a worker
+  // that survives this pass keeps its state while a departed one's is dropped. This
+  // catch-all is what GUARANTEES no map leaks an entry for the engine's lifetime,
+  // regardless of the departure path (the eager per-branch deletes above are just
+  // the fast path for the common cases). terminalId is unique per spawn, so a stale
+  // entry would never be reused either — pruning here keeps every map bounded by the
+  // LIVE worker count, not the all-time spawn count.
   const liveTerminalIds = new Set(next.map((w) => w.terminalId))
   for (const id of Array.from(engine.nudges.keys())) {
     if (!liveTerminalIds.has(id)) engine.nudges.delete(id)
@@ -3755,6 +4099,16 @@ const monitorWorkers = async (
   }
   for (const id of Array.from(engine.permissionWaits.keys())) {
     if (!liveTerminalIds.has(id)) engine.permissionWaits.delete(id)
+  }
+  if (engine.questionRaised) {
+    for (const id of Array.from(engine.questionRaised.keys())) {
+      if (!liveTerminalIds.has(id)) engine.questionRaised.delete(id)
+    }
+  }
+  if (engine.questionWaits) {
+    for (const id of Array.from(engine.questionWaits.keys())) {
+      if (!liveTerminalIds.has(id)) engine.questionWaits.delete(id)
+    }
   }
 
   engine.workers = next
@@ -4008,11 +4362,13 @@ export const runIntegratePass = async (
     // write covers all of them (live-rework, dead→re-dispatch, budget→blocked). The
     // NEXT dispatch of this SAME card (runDispatchPass) consumes it into the fresh
     // worker's /order so the swarm doesn't repeat the same RED verify / must-fix.
-    // Overwritten every time so the memo is always the LATEST reason; pruned on
-    // done/vanish by pruneReworks. A LIVE worker is ALSO told the reason directly
-    // over its PTY (instructRework, below) — this memo is the durable copy that
-    // survives a worker crash + requeue, when the in-place instruction is lost.
-    engine.reworkReasons.set(card.id, reasonLine)
+    // Overwritten every time so the memo is always the LATEST reason — but any
+    // queued owner-answer segments (C1 escalations) are preserved across the
+    // overwrite (mergeReworkReason); pruned on done/vanish by pruneReworks. A
+    // LIVE worker is ALSO told the reason directly over its PTY (instructRework,
+    // below) — this memo is the durable copy that survives a worker crash +
+    // requeue, when the in-place instruction is lost.
+    engine.reworkReasons.set(card.id, mergeReworkReason(engine.reworkReasons.get(card.id), reasonLine))
 
     // 上限超過 → 'blocked' 退避(無限バウンス遮断)。leftover worker は teardown(branch 維持)。
     if (count > MAX_REWORKS) {
@@ -4149,8 +4505,9 @@ export const runIntegratePass = async (
     const reasonLine = buildConflictRebaseInstruction({ branch, target: trunk, files })
     // LEARNING LOOP (shared with reworkOrPark, card fdf714ef): durable memo a
     // dead-worker re-dispatch hands to the fresh worker's /order — so the conflict
-    // context survives a worker crash + requeue, when the in-place PTY hint is lost.
-    engine.reworkReasons.set(card.id, reasonLine)
+    // context survives a worker crash + requeue, when the in-place PTY hint is
+    // lost. Queued owner answers (C1) survive the overwrite (mergeReworkReason).
+    engine.reworkReasons.set(card.id, mergeReworkReason(engine.reworkReasons.get(card.id), reasonLine))
 
     // 上限超過 → 'blocked' 退避(無限投げ返し遮断)。stamp を残して「要人手の競合」を可視化。
     if (count > MAX_CONFLICT_REWORKS) {
@@ -4862,6 +5219,18 @@ export const runEnginePass = async (
       } catch {
         /* belt-and-suspenders: never let escalation break a pass */
       }
+      // OVERSEER (EPIC C / C-core): the autonomous proxy-you BRAINSTEM rides this tick
+      // (never its own driver — K1). Reads the just-computed anomalies / notified / the
+      // `tasks` snapshot (M3 — no 3rd board read) / worker heartbeats + a cached usage %,
+      // and on rising edges wakes the proxy brain FIRE-AND-FORGET (never awaits it — D2)
+      // or raises to the human. No-op unless the owner armed it (default OFF — D1). Placed
+      // AFTER fireFatalNotifications so it reads the FRESH `notified` set (S2). NEVER throws.
+      await runOverseerPass(
+        engine,
+        tasks,
+        (level, message) => logLine(engine, level, message, 'routine'),
+        defaultOverseerDeps({ isAlive: deps.isAlive, readHeartbeat: deps.readHeartbeat }),
+      ).catch((e) => logLine(engine, 'warn', `overseer: pass errored — ${errMsg(e)}`))
     }
     // SELF-SUPPLY (card b3fbbfba): the engine proposes its OWN improvement cards
     // into todo. A SEPARATE stage from anomaly detection above — it READS the
@@ -4980,6 +5349,17 @@ export const stopOrchestrator = async (
   // 条件2). Set even on an idempotent OFF (already stopped) so the pause intent sticks
   // until a manual ON clears it. A DEFAULT-off engine (never paused) still auto-drains.
   engine.manualStop = true
+  // OVERSEER ASYMMETRY (D1): an explicit autonomy OFF also DISARMS the overseer — the
+  // most-dangerous stage never survives a stop (unlike autoMerge/selfSupply, which are
+  // temporarily inert while stopped but re-arm on the next start). Combined with
+  // in-memory OFF-on-restart (K2), this is why an auto-drain re-ignition can NEVER wake
+  // the overseer: `enabled` only becomes true through the owner POST, and both an
+  // explicit OFF (here) and a restart have already dropped it false. Abort any brain in
+  // flight so it does not linger past the OFF.
+  if (engine.overseer) {
+    engine.overseer.enabled = false
+    engine.overseer.brainAbort?.abort()
+  }
   if (engine.running) {
     engine.running = false
     if (engine.timer) {
@@ -5466,6 +5846,40 @@ export const setSelfSupply = async (
     engine.selfSupply.enabled = enabled
     logLine(engine, 'info', enabled ? 'self-supply ON' : 'self-supply OFF')
     if (enabled) engine.selfSupply.lastScanAt = 0 // scan on the next tick
+  }
+  return stateOf(engine, deps.isAlive)
+}
+
+/** Arm / disarm the OVERSEER (EPIC C / C-core), idempotent — the owner-gated THIRD
+ *  toggle (D1). SEPARATE from the drain (start/stop), autoMerge, and selfSupply;
+ *  default OFF, in-memory ONLY (a restart re-arms OFF — K2). It only ACTS while the
+ *  engine is `running` (the brainstem is a stage of the running tick). Unlike the
+ *  other switches, an explicit autonomy OFF (stopOrchestrator) CLEARS it — so it is
+ *  the one toggle the owner must re-arm every session (never auto-resumed, no
+ *  persisted reminder — D1). Disarming aborts any brain in flight. */
+export const setOverseer = async (
+  projectPath: string,
+  enabled: boolean,
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+): Promise<SwarmOrchestratorState> => {
+  const key = await canonicalize(projectPath)
+  const engine = getOrCreateEngine(key)
+  // ARMING requires a RUNNING engine (§5:243 "autonomy ON 中の engine にのみ有効").
+  // Refusing here — not merely dimming the UI — is what STRUCTURALLY closes the D1/K1
+  // gap: without it an owner could arm a fresh STOPPED engine, and a later auto-drain
+  // re-ignition (maybeAutoStartDrain, opt-in) would activate that pre-armed overseer on
+  // the next tick — the overseer riding a machine-driven restart, exactly the asymmetry
+  // D1 forbids. With this gate `enabled` can only become true WHILE running, and both an
+  // explicit autonomy OFF (stopOrchestrator) and a restart drop it — so an auto-drain
+  // can never find a pre-armed engine. DISARMING (enabled:false) is always allowed.
+  if (enabled && !engine.running) {
+    logLine(engine, 'warn', 'overseer arm ignored — autonomy is OFF (turn the engine ON first)')
+    return stateOf(engine, deps.isAlive)
+  }
+  if (engine.overseer.enabled !== enabled) {
+    engine.overseer.enabled = enabled
+    logLine(engine, 'info', enabled ? 'overseer ON' : 'overseer OFF')
+    if (!enabled) engine.overseer.brainAbort?.abort() // stop a brain mid-flight
   }
   return stateOf(engine, deps.isAlive)
 }

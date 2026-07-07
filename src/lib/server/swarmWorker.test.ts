@@ -150,6 +150,23 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(base.agentSessionId).toBe('sid-1')
   })
 
+  it('arms the A3/L4 deterministic veto (guard) AND blocks MCP inheritance (strictMcpConfig)', () => {
+    // The bypass worker gets the PreToolUse deny veto confined to its worktree...
+    expect(base.guard).toEqual({ writeRoots: ['/wt'] })
+    // ...and MUST NOT inherit the user's MCP servers — mcp__* tools sit outside
+    // the veto, so a filesystem/shell/data MCP would be an unguarded RCE path.
+    // --strict-mcp-config (loads only explicit MCP config = none) closes it.
+    // (Commander MUST-FIX 2.)
+    expect(base.strictMcpConfig).toBe(true)
+    for (const o of [
+      workerLaunchOpts('/wt2', 'sid-a', { title: 't' }),
+      workerLaunchOpts('/wt3', 'sid-b', { title: 't', notes: 'n', env: { SWARM_MANAGER: '1' } }),
+    ]) {
+      expect(o.strictMcpConfig).toBe(true)
+      expect(o.guard).toEqual({ writeRoots: [o.cwd] })
+    }
+  })
+
   it('keeps bypass UNCONDITIONAL — set AFTER the swarmLaunchDefaults spread (Card 4880e9c6)', () => {
     // "bypass徹底": an unattended worker must NEVER wedge on a permission/trust
     // prompt. permissionMode is the last key written (after the defaults spread),

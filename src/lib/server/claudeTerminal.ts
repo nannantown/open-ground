@@ -81,6 +81,16 @@ export interface LaunchClaudeOpts {
   // strict-mode closes that trigger at zero cost. (Left OFF for the user's own
   // interactive terminal, which may legitimately use their MCP servers.)
   strictMcpConfig?: boolean
+  // Deny-list of TOOL names for THIS claude invocation (`--disallowed-tools`).
+  // Enforced by claude's own permission layer, where deny rules take precedence
+  // over every mode — including `--dangerously-skip-permissions` (bypass) — so
+  // the listed tools are structurally unusable, not merely un-prompted. Opt-in
+  // per launch and empty by default: ONLY containment-critical utility sessions
+  // pass it (the overseer brain denies WebFetch/WebSearch/Bash/Task so a prompt-
+  // injected brain has no network-egress tool — nor a sub-agent to launch one —
+  // to exfiltrate the you-corpus with); workers / supply / the user's own
+  // terminals pass nothing and their launch line stays byte-identical.
+  disallowedTools?: string[]
   // Mark this as a HEADLESS UTILITY session: a real claude PTY whose output is
   // marker-scraped, with NO user-visible pane (auto-title / auto-description).
   // Carried onto the pool entry (TerminalInfo.hidden) so listActiveTerminals
@@ -112,6 +122,17 @@ export interface LaunchClaudeOpts {
   // passed — it's a symlink to the main checkout and stays fully READ-only.
   // Ignored unless `sandbox` is on.
   sandboxWritePaths?: string[]
+  // Arm the DETERMINISTIC PreToolUse deny veto (A3/L4) for this session:
+  // injects OPENGROUND_GUARD=1 (+ OPENGROUND_GUARD_WRITE_ROOTS from writeRoots)
+  // so the openground-guard.js hook (wired globally by hooksInstall.ts, an
+  // instant no-op without the env) enforces exit-2 denies — the ONE veto
+  // `--dangerously-skip-permissions` cannot override. INDEPENDENT of `sandbox`:
+  // L4 must hold when the L3 experiment is off, and under sandbox the hook
+  // (a child of claude) simply runs inside the same Seatbelt boundary.
+  // writeRoots confines Write/Edit + Bash writes to these absolute roots
+  // (+ temp dirs); the swarm worker passes its worktree. Empty array = no
+  // write confinement, denylist rules only (the manager shape).
+  guard?: { writeRoots: string[] }
   cols?: number
   rows?: number
 }
@@ -242,6 +263,7 @@ export const buildClaudeArgv = (
     | 'name'
     | 'remoteControl'
     | 'strictMcpConfig'
+    | 'disallowedTools'
   >,
   promptFilePath: string | null,
   contextFilePath: string | null = null,
@@ -275,6 +297,13 @@ export const buildClaudeArgv = (
   // the `--session-id`/`--resume` flag that always follows — see rule 1 above).
   const addDirs = typeof opts.addDir === 'string' ? [opts.addDir] : opts.addDir ?? []
   if (addDirs.length) args.push('--add-dir', ...addDirs.map(q))
+  // `--disallowed-tools` is VARIADIC like --add-dir (space- or comma-separated
+  // tool names), so it carries the same swallows-the-positional-prompt hazard
+  // (rule 1 above). Two belts: the list is joined into ONE comma-separated,
+  // quoted token, AND it sits here before `--session-id`/`--resume` so a flag
+  // that takes a value always bounds it.
+  const disallowed = (opts.disallowedTools ?? []).map((t) => t.trim()).filter(Boolean)
+  if (disallowed.length) args.push('--disallowed-tools', q(disallowed.join(',')))
   if (opts.resume) {
     args.push('--resume', opts.agentSessionId)
   } else {
@@ -486,7 +515,18 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // the wrapping shell when it quits so the PTY-exit listener fires the
   // cancelled / finished transition. Shell-specific framing (POSIX env-prefix
   // vs PowerShell `$env:` + call operator) lives in buildLaunchCommand.
-  writeInput(info.id, buildLaunchCommand(launchArgs, process.platform, opts.env ?? {}))
+  // The guard vars are spread LAST so a caller-supplied env key can never
+  // shadow the veto's gate.
+  const launchEnv: Record<string, string> = {
+    ...(opts.env ?? {}),
+    ...(opts.guard
+      ? {
+          OPENGROUND_GUARD: '1',
+          OPENGROUND_GUARD_WRITE_ROOTS: opts.guard.writeRoots.join(':'),
+        }
+      : {}),
+  }
+  writeInput(info.id, buildLaunchCommand(launchArgs, process.platform, launchEnv))
 
   return {
     terminalId: info.id,

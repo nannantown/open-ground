@@ -1206,6 +1206,12 @@ export interface SwarmOrchestratorState {
    *  restart re-arms OFF — fail-safe). Even when ON, a proposed card is
    *  approval-gated: it never dispatches until the owner approves it. */
   selfSupply: boolean
+  /** True while the OVERSEER (EPIC C / C-core) is armed: the autonomous proxy-you
+   *  brainstem watches the swarm and, on judgment edges, wakes a one-off brain or
+   *  raises to the human inbox. The THIRD toggle, default OFF, in-memory (a restart
+   *  re-arms OFF). ASYMMETRIC to autoMerge/selfSupply: an explicit autonomy OFF
+   *  CLEARS it (the owner re-arms it every session — no persisted reminder). */
+  overseer: boolean
   /** Workers the engine dispatched and still counts as live (≤ maxWorkers). */
   workers: OrchestratorWorker[]
   /** Review-column swarm cards and their integration readiness (read-only,
@@ -1795,9 +1801,11 @@ export interface CollabAcceptResponse {
 /** The kind discriminator for an in-app notification (Ground お知らせ).
  *  'collab-invite' is an account/collab notification; 'swarm-fatal' is the
  *  escalation safety valve — a FATAL event of the in-app swarm's unmanned loop
- *  the engine surfaced so a human watching nothing still gets woken. The bell is
- *  built so more kinds can be added. */
-export type NotificationKind = 'collab-invite' | 'swarm-fatal'
+ *  the engine surfaced so a human watching nothing still gets woken;
+ *  'swarm-info' is the INFO-grade sibling (the overseer/escalation lane —
+ *  see {@link SwarmInfoNotification}). The bell is built so more kinds can be
+ *  added. */
+export type NotificationKind = 'collab-invite' | 'swarm-fatal' | 'swarm-info'
 
 /** Which FATAL event of the unmanned swarm/self-improvement loop fired. These are
  *  the cases the autonomy loop CANNOT self-heal — the ones worth waking a human:
@@ -1840,13 +1848,52 @@ export interface SwarmFatalNotification {
   logHint?: string
 }
 
+/** Which INFO-grade (non-fatal) swarm event fired. Unlike {@link SwarmFatalEvent}
+ *  these never mean the unmanned loop broke — they are the overseer/escalation
+ *  lane's "a human should look" channel (docs/OVERSEER_DESIGN.md §6/§8):
+ *   • 'escalation-open'     — a question landed in the Escalations inbox and
+ *                              waits for the owner's answer (C1).
+ *   • 'escalation-reminder' — an open escalation sat unanswered; re-notify ONLY
+ *                              (S11 — it never auto-progresses, fail-closed).
+ *   • 'review-idle'         — mergeable review cards are piling up (S7).
+ *   • 'overseer-throttled'  — the overseer degraded on the usage cap (S9/T3').
+ *  ('escalation-open' fires from swarmEscalations.ts today; the other three are
+ *  reserved for the overseer brainstem (C-core) so this union is additive.) */
+export type SwarmInfoEvent =
+  | 'escalation-open'
+  | 'escalation-reminder'
+  | 'review-idle'
+  | 'overseer-throttled'
+
+/** The payload of a 'swarm-info' notification — the info-grade sibling of
+ *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,
+ *  calmer tone (nothing broke; someone just needs to look). */
+export interface SwarmInfoNotification {
+  /** Which info event — see {@link SwarmInfoEvent}. */
+  event: SwarmInfoEvent
+  /** Human-readable one-line summary of WHAT wants attention. */
+  detail: string
+  /** The project it concerns (canonical path), when known. */
+  projectPath?: string
+  /** The Board card involved, when card-rooted (display + open-target). */
+  taskId?: string
+  /** The `swarm/*` branch involved, when known (display-only). */
+  branch?: string
+  /** The card title involved, when known (display-only). */
+  taskTitle?: string
+  /** The Escalations-inbox record this points at (escalation-open/-reminder) —
+   *  the 導線 to the SwarmModule inbox panel. */
+  escalationId?: string
+}
+
 /** One in-app notification shown in the Ground お知らせ bell/panel. Composed on
  *  the CLIENT from a notification source (today: {@link CollabInviteForMe} via
- *  polling, or a server-persisted {@link SwarmFatalNotification}) so the panel can
- *  render a kind-specific row + action. `id` is the STABLE read-state key
- *  (persisted server-side via /api/notifications) — e.g.
- *  `collab-invite:<collabProjectId>` or `swarm-fatal:<event>:<ref>:<createdAt>` —
- *  so opening the panel marks it read and a re-login doesn't resurface it. */
+ *  polling, or a server-persisted {@link SwarmFatalNotification} /
+ *  {@link SwarmInfoNotification}) so the panel can render a kind-specific row +
+ *  action. `id` is the STABLE read-state key (persisted server-side via
+ *  /api/notifications) — e.g. `collab-invite:<collabProjectId>` or
+ *  `swarm-fatal:<event>:<ref>:<createdAt>` — so opening the panel marks it read
+ *  and a re-login doesn't resurface it. */
 export interface AppNotification {
   id: string
   kind: NotificationKind
@@ -1856,6 +1903,8 @@ export interface AppNotification {
   collabInvite?: CollabInviteForMe
   /** Present when kind === 'swarm-fatal'. */
   swarmFatal?: SwarmFatalNotification
+  /** Present when kind === 'swarm-info'. */
+  swarmInfo?: SwarmInfoNotification
 }
 
 /** GET /api/swarm/notifications — the server-persisted FATAL swarm notifications
@@ -1864,6 +1913,125 @@ export interface AppNotification {
  *  simply shows none. */
 export interface AppNotificationsResponse {
   notifications: AppNotification[]
+}
+
+// ─── Escalations inbox (C1 — docs/OVERSEER_DESIGN.md §8) ────────────────────
+
+/** Why an escalation was raised to the REAL user instead of being auto-answered
+ *  by the proxy (the K6/K7 valves):
+ *   • 'irreversible'      — the act can't be undone (billing / publish / delete /
+ *                            deploy / credentials), so it goes up REGARDLESS of
+ *                            the proxy's confidence.
+ *   • 'insufficient-info' — the proxy's corpus is too thin to answer (calibrated
+ *                            abstention — declared up front, never confabulated).
+ *   • 'policy'            — an explicit rule says a human decides this. */
+export type EscalationWhy = 'irreversible' | 'insufficient-info' | 'policy'
+
+/** Escalation lifecycle. 'open' → (owner answers) → 'answered' → (the answer is
+ *  delivered into the blocked worker's PTY) → 'injected'; or 'open' →
+ *  'dismissed' (the owner closes it without answering — nothing is injected,
+ *  nothing is written to memory). There is NO transition out of 'open' the
+ *  system takes on its own: an unanswered escalation stays open forever
+ *  (fail-closed — the whole point of the inbox). */
+export type EscalationStatus = 'open' | 'answered' | 'injected' | 'dismissed'
+
+/** The proxy's provisional answer (C2), shown next to the question so the owner
+ *  confirms-or-corrects instead of composing from scratch. Absent when the
+ *  proxy was skipped (e.g. the overseer's THROTTLED direct-to-inbox path). */
+export interface EscalationProxyDraft {
+  answer: string
+  confidence: 'high' | 'medium' | 'low'
+  /** The proxy declared "the corpus is too thin here" UP FRONT (calibrated
+   *  abstention, K7) rather than guessing. */
+  isAbstention: boolean
+}
+
+/** One record of the Escalations inbox (~/.openground/escalations.json —
+ *  machine-wide; the project rides in `projectPath`): a question the swarm could
+ *  not (or must not) answer for the user, waiting for the REAL user's answer.
+ *  Persisted UNCAPPED — an unanswered irreversible decision must never scroll
+ *  off; resolved records are pruned by the boot retention sweep instead. */
+export interface Escalation {
+  id: string
+  /** Idempotency key: while an 'open' record with this key exists, re-raising
+   *  the same question is a no-op returning the existing record — so an
+   *  overseer restart (edge-dedup reset) can never grow the inbox. */
+  receiptKey: string
+  /** ISO timestamp the question was raised. */
+  createdAt: string
+  /** The project it belongs to (canonical path). */
+  projectPath: string
+  /** Coordinates of the BLOCKED worker awaiting this answer, when worker-rooted:
+   *  the Board card, its swarm branch, and its live PTY (the injection target). */
+  taskId?: string
+  branch?: string
+  terminalId?: string
+  /** The question shown to the user — one screen, decidable at a glance. */
+  question: string
+  /** Why this is being asked + what is at stake (the decision's context). */
+  context: string
+  /** Path to the PTY-tail capture taken when the escalation was raised (what the
+   *  worker's screen showed) — a small text file under
+   *  ~/.openground/escalation-shots/, unlinked when the record is pruned. */
+  screenshotRef?: string
+  /** The proxy's provisional answer + confidence (C2), when it ran. */
+  proxyDraft?: EscalationProxyDraft
+  /** Which valve raised this — see {@link EscalationWhy}. */
+  whyEscalated: EscalationWhy
+  status: EscalationStatus
+  /** The owner's actual answer (set on 'answered'; the ONLY text that is ever
+   *  written back to you-corpus memory). */
+  answer?: string
+  answeredAt?: string
+  /** Set when the answer was successfully delivered into the worker's PTY. */
+  injectedAt?: string
+  /** Set when the owner dismissed the question unanswered. */
+  dismissedAt?: string
+}
+
+/** One inbox row as served by GET /api/swarm/escalations: the record plus the
+ *  PTY-tail capture text expanded server-side (so the client needs no extra
+ *  asset route). */
+export interface EscalationView extends Escalation {
+  /** Contents of {@link Escalation.screenshotRef}, when present and readable. */
+  screenshot?: string
+}
+
+/** GET /api/swarm/escalations[?path=…] — the inbox, newest-first. Owner-only. */
+export interface EscalationsResponse {
+  escalations: EscalationView[]
+}
+
+/** POST /api/swarm/escalations/open — raise a question to the user. `deduped`
+ *  is true when an 'open' record with the same receiptKey already existed (the
+ *  existing record is returned; nothing was appended, no notification fired). */
+export interface EscalationOpenResponse {
+  escalation: Escalation
+  deduped: boolean
+}
+
+/** How the owner's answer reached the blocked worker:
+ *   • 'injected' — pasted into the LIVE worker PTY (bracketed paste + Enter).
+ *   • 'queued'   — the worker is gone; the answer is queued for the card's NEXT
+ *                  dispatch (rides the same learning-loop slot as rework
+ *                  reasons, so the fresh worker's /order carries it).
+ *   • 'skipped'  — nothing to deliver to (no live PTY and no card), or this
+ *                  call changed nothing (idempotent re-answer). The record —
+ *                  and the memory write-back — still stand. */
+export type EscalationDelivery = 'injected' | 'queued' | 'skipped'
+
+/** POST /api/swarm/escalations/answer {id, answer}. `memoryWritten` reports the
+ *  you-corpus write-back (owner Q→A only) — best-effort: a memory failure never
+ *  blocks unblocking the worker. */
+export interface EscalationAnswerResponse {
+  escalation: Escalation
+  delivery: EscalationDelivery
+  memoryWritten: boolean
+}
+
+/** POST /api/swarm/escalations/dismiss {id}. */
+export interface EscalationDismissResponse {
+  escalation: Escalation
 }
 
 /** GET /api/notifications — the persisted set of notification ids the user has

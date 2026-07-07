@@ -27,6 +27,12 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.env).toEqual({ SWARM_MANAGER: '1' })
   })
 
+  it('blocks MCP inheritance (strictMcpConfig) — mcp__* tools sit outside the veto', () => {
+    // Same as the worker/manager: a bypass session in the REAL checkout must not
+    // inherit user MCP servers (RCE past the veto). (Commander MUST-FIX.)
+    expect(base.strictMcpConfig).toBe(true)
+  })
+
   it('keeps the app-context card ON (supply writes Board cards — on-mission)', () => {
     // The worker turns appContext OFF for leanness; supply's whole job is
     // writing the Board, so the board-API usage card is exactly on-mission.

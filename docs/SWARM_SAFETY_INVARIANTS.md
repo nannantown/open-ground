@@ -79,6 +79,56 @@ failure) + the module's "NO automatic conflict resolution" contract.
 *Negative control:* a merge that **continues through the conflict** (`-X theirs` +
 push) silently overwrites the trunk's edit — what test D1 prevents.
 
+### E — The PreToolUse deny veto blocks destructive commands deterministically (A3 / safety layer L4)
+`scripts/openground-guard.js` is the ONE veto that survives
+`--dangerously-skip-permissions`. Under **worker-only scoping** (2026-07) it
+polices exactly ONE kind of session: the confined, unattended **worker / overseer**
+(`OPENGROUND_GUARD=1` + write roots). For that session it exits **2** (block) on a
+destructive tool call; for **every other** session — including the trusted swarm
+**manager / supply** (`SWARM_MANAGER=1`) and any plain claude — it exits **0** (a
+byte-for-byte `{}` no-op). Policing the unconfined manager was unbounded
+whack-a-mole (a Turing-complete shell has no finite carve-out — every adversarial
+round leaked in the manager path); the manager is a trusted human-in-the-loop desk,
+so it is not policed, which closes that whole class by design. Claude Code treats
+**only exit 2** as a block — exit 1 is a *non-blocking* hook error that lets the
+tool through — so the guard **never** exits 1 and **fails closed** (exit 2) on any
+input it cannot parse. It denies the A3 classes — recursive `rm` outside the write
+roots, `git` force-push in every spelling (`-f`/`--force`/`--force-with-lease`/
+`+refspec`/`--mirror`/`:ref`/`--delete`), history nukes (`reset --hard`, `clean -f`,
+`filter-branch`, `update-ref -d`, `branch -D`, `stash drop/pop`, `checkout -f/--`,
+`restore .`, `reflog expire`, `gc --prune=now`), and writes outside the roots
+(redirections, `tee`/`cp`/`mv`/`dd`/`sed -i`/`perl -i`/`tar -x -C`/`unzip -d`, and
+the `Write`/`Edit`/`NotebookEdit` file paths) — plus the substrate (the guard's own
+installed copy, the `settings.json` hook wiring, `~/.claude/swarm-*.sh`, `CLAUDE.md`)
+in the worker session. It defeats the evasion routes the official docs warn a
+naive argument-regex misses: command-position variables/substitutions, `eval`/
+`source`, `sh -c`/`bash -c`, an interpreter reading its program from **stdin** in
+any form — pipe (`curl … | sh`, `base64 -d | bash`), heredoc (`python3 <<EOF`),
+here-string (`node <<< …`) or input redirect — alias/function definitions, `sudo`,
+`xargs` into a destructive verb (targets from stdin), `find -exec <destructive>`
+over a dangerous start point, inline-code flags (`node -e`/`python -c`/`perl -pe`),
+`git -c alias.*=…`/`--exec-path`/`ext::` transport injection, and quoting/ANSI-C
+obfuscation — all via a real POSIX-shell
+lexer that reasons about STRUCTURE (an `rm -rf /` inside a commit message is a
+quoted *word*, never a command). Wired globally by `hooksInstall.ts` (which copies
+the guard to the sandbox-write-denied `~/.openground/guard/` and adds a per-tool
+`PreToolUse` entry); armed per-worker by `swarmWorker.ts` via
+`launchClaude({guard:{writeRoots:[worktree]}})`. Independent of the L3 sandbox — L4
+holds when the experiment is off, and runs *inside* the Seatbelt boundary when it's
+on.
+*Code:* `scripts/openground-guard.js` (`evaluate` / `analyzeBash` / `analyzeGit` /
+`makePathPolicy`); wiring in `hooksInstall.ts` + `sandbox.ts` + `claudeTerminal.ts`
++ `swarmWorker.ts`.
+*Honest scope:* not a sandbox — a payload staged *inside* the write roots then run
+from a live process (`node planted.js`), and a stream editor's own script commands
+(`sed 'w /path'`/`e`), are L3's job (OS-enforced), documented in the guard header.
+*Negative control:* with the worker gate env **absent** — including a manager
+(`SWARM_MANAGER=1`) session, which is now a full no-op — the same `rm -rf /` /
+force-push exit **0** (the veto is worker-scoped; only `OPENGROUND_GUARD=1` arms the
+teeth); the
+end-to-end tests spawn the real script and assert the process **exit code** (2 vs
+0), so a regression to exit 1/0 on a dangerous command goes red.
+
 ---
 
 ## Supporting invariants (asserted by the pre-existing swarm tests)

@@ -7,10 +7,13 @@ import { ORIGIN_SEED, readCollectionFlat, reconcileCollectionFlat, setKey } from
 // element field) + name + element order (z-order, whole-array LWW). Personal/
 // ephemeral state (viewport, chats, activeId, sidebar, id, timestamps) rides
 // `base`. See docs/COLLAB_PLAN.md.
+// The flat-key constants are exported for the server-side canvas mirror
+// (canvasCollabMirror.ts), which must write the exact same key encoding this
+// module reads back.
 export const CANVAS_ROOT = 'og'
-const EL_PREFIX = 'e:'
-const K_NAME = 'm:name'
-const K_ORDER = 'm:order'
+export const EL_PREFIX = 'e:'
+export const K_NAME = 'm:name'
+export const K_ORDER = 'm:order'
 
 /** Authoritatively make `doc` reflect `file`'s shared state. Idempotent;
  *  converges across independently-seeded peer docs. */

@@ -152,6 +152,10 @@ export interface SwarmEngineState {
   /** Auto-integrate — the engine lands completed review cards itself (Card③).
    *  A separate switch from `running`, default OFF. */
   autoMerge: boolean
+  /** Overseer — the autonomous proxy-you brainstem (EPIC C). The THIRD toggle,
+   *  default OFF, in-memory. ASYMMETRIC to autoMerge: an explicit autonomy OFF
+   *  CLEARS it, so the owner re-arms it every session (no persisted reminder — D1). */
+  overseer: boolean
   /** Workers the engine itself dispatched and still counts as live. */
   workers: EngineWorker[]
   /** Review-column swarm cards + their integration readiness (read-only). */
@@ -195,6 +199,7 @@ export const EMPTY_CONSUMPTION: EngineConsumption = {
 export const DEFAULT_ENGINE: SwarmEngineState = {
   running: false,
   autoMerge: false,
+  overseer: false,
   workers: [],
   reviews: [],
   anomalies: [],
@@ -365,6 +370,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
   return {
     running: o.running === true,
     autoMerge: o.autoMerge === true,
+    overseer: o.overseer === true,
     workers,
     reviews,
     anomalies,
@@ -599,6 +605,9 @@ export interface UseSwarmEngine {
   busy: boolean
   /** Last engine-action failure, already localized. */
   error: string | null
+  /** The overseer was armed WITHOUT the sandbox experiment (L3) — the manager pane
+   *  shows a reduced-containment note. False whenever the overseer is off. */
+  sandboxWarning: boolean
   /** Autonomy switch (Card①) — start/stop the drain+dispatch loop. */
   toggleAutonomy: (next: boolean) => void
   /** Dismiss the restart "autonomy was on — resume?" reminder without resuming:
@@ -607,6 +616,9 @@ export interface UseSwarmEngine {
   dismissAutonomyReminder: () => void
   /** Auto-integrate switch (Card③) — arm/disarm the engine's own landing. */
   toggleAutoMerge: (next: boolean) => void
+  /** Overseer switch (EPIC C / C-core) — arm/disarm the autonomous proxy-you
+   *  brainstem. Reads back `sandboxWarning` when arming without the sandbox (L3). */
+  toggleOverseer: (next: boolean) => void
   /** Stop ONE engine-dispatched worker by its PTY id: the server tears down its
    *  worktree + PTY and parks its card in 'blocked', then this adopts the fresh
    *  state. A no-op while another engine round-trip is in flight. */
@@ -633,6 +645,10 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // A start/stop or auto-merge round-trip is in flight — disables both switches.
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // L3: the overseer was armed WITHOUT the sandbox experiment — the UI shows a
+  // reduced-containment note. Set from the overseer toggle response; cleared when the
+  // overseer is off. Advisory only (the structural READ-ONLY design + budget hold).
+  const [sandboxWarning, setSandboxWarning] = useState(false)
 
   // Reset when the hook is reused for another project (SwarmModule keeps one
   // instance across project switches, like the worker/supply state it resets).
@@ -725,11 +741,11 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     }
   }, [projectPath, busy])
 
-  // POST an engine action and adopt the authoritative state it returns. All three
-  // (start / stop / automerge) return the full SwarmOrchestratorState; an old
-  // server without the route 404s and the caller surfaces "not available".
+  // POST an engine action and adopt the authoritative state it returns. All
+  // (start / stop / automerge / overseer) return the full SwarmOrchestratorState; an
+  // old server without the route 404s and the caller surfaces "not available".
   const callEngine = useCallback(
-    async (action: 'start' | 'stop' | 'automerge', extra: Record<string, unknown>) => {
+    async (action: 'start' | 'stop' | 'automerge' | 'overseer', extra: Record<string, unknown>) => {
       const res = await fetch(`/api/swarm/orchestrator/${action}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -818,6 +834,42 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     [busy, engine.autoMerge, callEngine, t],
   )
 
+  // Overseer switch — the THIRD toggle (EPIC C / C-core). Same optimistic-then-confirm
+  // shape. Its own fetch (not callEngine) so it can read the `sandboxWarning` the route
+  // adds when arming WITHOUT the sandbox experiment (L3). Default OFF; an explicit
+  // autonomy OFF clears it server-side (D1), so the next state poll drops it back.
+  const toggleOverseer = useCallback(
+    async (next: boolean) => {
+      if (busy || next === engine.overseer) return
+      setBusy(true)
+      setError(null)
+      setEngine((s) => ({ ...s, overseer: next }))
+      try {
+        const res = await fetch('/api/swarm/orchestrator/overseer', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: projectPath, enabled: next }),
+        })
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string }
+          throw new Error(body?.error || `HTTP ${res.status}`)
+        }
+        const raw = (await res.json()) as { sandboxWarning?: boolean }
+        setEngine(sanitizeEngineState(raw))
+        setSandboxWarning(next && raw.sandboxWarning === true)
+        setAvailable(true)
+      } catch (e) {
+        setEngine((s) => ({ ...s, overseer: !next }))
+        setError(
+          t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
+        )
+      } finally {
+        setBusy(false)
+      }
+    },
+    [busy, engine.overseer, projectPath, t],
+  )
+
   // Stop ONE engine worker (the owner clicked "stop" on its row). No optimistic
   // flip — the worker simply drops out of the authoritative state the POST
   // returns. Same busy/error bookkeeping as the switches so the dashboard disables
@@ -887,9 +939,11 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     available,
     busy,
     error,
+    sandboxWarning,
     toggleAutonomy: (next) => void toggleAutonomy(next),
     dismissAutonomyReminder: () => void dismissAutonomyReminder(),
     toggleAutoMerge: (next) => void toggleAutoMerge(next),
+    toggleOverseer: (next) => void toggleOverseer(next),
     stopWorker: (terminalId) => void stopWorker(terminalId),
     resolveReview: (taskId, target) => void resolveReview(taskId, target),
   }

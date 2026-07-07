@@ -1,14 +1,22 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
   SWARM_LAUNCH_MODEL,
   SWARM_LAUNCH_EFFORT,
   swarmLaunchDefaults,
   resolveSwarmModelEffort,
+  resolveAvailableTier,
   classifyCardWeight,
   execModeMaxWorkers,
   asExecutionMode,
 } from './swarmLaunch'
 import { CLAUDE_EFFORTS, DEFAULT_EXECUTION_MODE } from '../types'
+import { MODEL_TIER_LADDER, markCoolingUntil, __resetQuotaForTest } from './swarmQuota'
+
+// The quota cooling table is a process-wide globalThis singleton; reset it before
+// EVERY test so the existing (pre-quota) assertions see an empty table — nothing
+// cooling ⇒ resolveAvailableTier is the identity, so today's model/effort matrix is
+// unchanged — and the fallback cases below stay order-independent.
+beforeEach(() => __resetQuotaForTest())
 
 // The ONE place supply / worker / (future) commander source their model+effort,
 // so all three stay in lockstep at opus/max. The CLAUDE_EFFORTS guard is the
@@ -75,7 +83,7 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
   })
 
   it('max mode = the top tier (fable)/max for every role', () => {
-    for (const role of ['worker', 'supply', 'manager'] as const) {
+    for (const role of ['worker', 'supply', 'manager', 'overseer'] as const) {
       expect(resolveSwarmModelEffort('max', role)).toEqual({ model: 'fable', effort: 'max' })
     }
   })
@@ -84,6 +92,8 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(resolveSwarmModelEffort('economy', 'worker')).toEqual({ model: 'sonnet', effort: 'low' })
     expect(resolveSwarmModelEffort('economy', 'supply')).toEqual({ model: 'sonnet', effort: 'medium' })
     expect(resolveSwarmModelEffort('economy', 'manager')).toEqual({ model: 'sonnet', effort: 'medium' })
+    // The proxy-you overseer is an engine role — sonnet/medium, not a worker's low.
+    expect(resolveSwarmModelEffort('economy', 'overseer')).toEqual({ model: 'sonnet', effort: 'medium' })
   })
 
   it('optimize keeps top-tier CAPABILITY for the commander (quality-critical), sonnet for supply', () => {
@@ -91,6 +101,8 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     // savings there come from fewer review bodies, not a weaker model.
     expect(resolveSwarmModelEffort('optimize', 'manager').model).toBe('fable')
     expect(resolveSwarmModelEffort('optimize', 'supply').model).toBe('sonnet')
+    // The overseer's answer-as-owner is a judgment席 on par with the manager (D4).
+    expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'fable', effort: 'high' })
   })
 
   it('optimize routes WORKERS by card weight — heavy gets the top tier, chores drop to sonnet', () => {
@@ -120,5 +132,143 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(execModeMaxWorkers('optimize', 6)).toBe(4) // middling
     expect(execModeMaxWorkers('economy', 1)).toBe(1) // never below 1
     expect(execModeMaxWorkers('optimize', 3)).toBe(3) // clamped to a small hardMax
+  })
+})
+
+// ─── Quota fallback (this card) — launch tier auto-follows the [Quota] foundation ─
+// Cooling states are injected via swarmQuota.markCoolingUntil + a fixed `now`, so
+// these are deterministic (no wall clock). The top-level beforeEach clears the
+// table between cases. Done ①②③ map to the max-mode drops fable→opus→sonnet→haiku.
+
+describe('quota fallback — launch tier follows the foundation (Done ①②③)', () => {
+  const NOW = 1_700_000_000_000
+  const HOUR = 3_600_000
+  const cool = (tier: (typeof MODEL_TIER_LADDER)[number]) => markCoolingUntil(tier, NOW + HOUR)
+
+  it('SWARM_LAUNCH_MODEL is the head of the ladder (one top-tier definition)', () => {
+    expect(SWARM_LAUNCH_MODEL).toBe(MODEL_TIER_LADDER[0])
+    expect(MODEL_TIER_LADDER[0]).toBe('fable')
+  })
+
+  it('all tiers available ⇒ max launches fable, as before (Done ③)', () => {
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('fable')
+  })
+
+  it('fable cooling ⇒ worker launches opus, effort untouched (Done ①)', () => {
+    cool('fable')
+    const me = resolveSwarmModelEffort('max', 'worker', undefined, NOW)
+    expect(me.model).toBe('opus')
+    expect(me.effort).toBe('max') // the fallback moves the tier, never the effort
+  })
+
+  it('fable+opus cooling ⇒ worker launches sonnet (Done ②)', () => {
+    cool('fable')
+    cool('opus')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('sonnet')
+  })
+
+  it('fable+opus+sonnet cooling ⇒ worker launches haiku (bottom of the ladder)', () => {
+    cool('fable')
+    cool('opus')
+    cool('sonnet')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('haiku')
+  })
+
+  it('every tier cooling ⇒ desired tier unchanged (the engine owns the wait, not the resolver)', () => {
+    for (const t of MODEL_TIER_LADDER) cool(t)
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('fable')
+  })
+
+  it('cooling is time-boxed: past the reset the top tier is available again (Done ② recovery)', () => {
+    cool('fable')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('opus')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW + HOUR + 1).model).toBe('fable')
+  })
+
+  it('optimize heavy card also desires the top tier ⇒ drops to opus when fable cooling', () => {
+    cool('fable')
+    const heavy = { title: 'sandbox guard for auth', notes: 'security-critical' }
+    expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW).model).toBe('opus')
+  })
+
+  it('the manager (top-tier judgment席) follows the fallback too', () => {
+    cool('fable')
+    expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW).model).toBe('opus')
+    expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW).effort).toBe('high')
+  })
+
+  it('the overseer (proxy-you judgment席, desires fable) drops to opus with effort intact', () => {
+    cool('fable')
+    // Both model (fable→opus, DOWN) and effort (high, unchanged) — covers the
+    // non-worker fallback path + effort preservation in the down direction (⑤).
+    expect(resolveSwarmModelEffort('optimize', 'overseer', undefined, NOW)).toEqual({
+      model: 'opus',
+      effort: 'high',
+    })
+  })
+
+  it('economy keeps its chosen sonnet while sonnet has headroom (fable/opus cooling is irrelevant)', () => {
+    cool('fable')
+    cool('opus')
+    expect(resolveSwarmModelEffort('economy', 'worker', undefined, NOW)).toEqual({
+      model: 'sonnet',
+      effort: 'low',
+    })
+  })
+
+  it('economy sonnet cooling ⇒ steps DOWN to haiku, effort still economy-low', () => {
+    cool('sonnet')
+    const me = resolveSwarmModelEffort('economy', 'worker', undefined, NOW)
+    expect(me.model).toBe('haiku')
+    expect(me.effort).toBe('low')
+  })
+
+  it('economy sonnet+haiku cooling ⇒ last-resort UP to the best available, effort intact (keep moving)', () => {
+    cool('sonnet')
+    cool('haiku') // fable/opus still have headroom
+    // effort stays economy-low even when the tier escalates UP — the fallback moves
+    // ONLY the model (⑤). Best available above the dry sonnet/haiku is fable.
+    expect(resolveSwarmModelEffort('economy', 'worker', undefined, NOW)).toEqual({
+      model: 'fable',
+      effort: 'low',
+    })
+  })
+})
+
+describe('resolveAvailableTier (the ladder walk-down primitive)', () => {
+  const NOW = 1_700_000_000_000
+  const HOUR = 3_600_000
+
+  it('is the identity when nothing is cooling', () => {
+    for (const t of MODEL_TIER_LADDER) expect(resolveAvailableTier(t, NOW)).toBe(t)
+  })
+
+  it('walks DOWN from the desired tier to the first with headroom', () => {
+    markCoolingUntil('fable', NOW + HOUR)
+    expect(resolveAvailableTier('fable', NOW)).toBe('opus')
+    markCoolingUntil('opus', NOW + HOUR)
+    expect(resolveAvailableTier('fable', NOW)).toBe('sonnet')
+  })
+
+  it('never steps ABOVE the desired tier while an at-or-below tier is free', () => {
+    markCoolingUntil('fable', NOW + HOUR) // fable dry, but sonnet is fine
+    expect(resolveAvailableTier('sonnet', NOW)).toBe('sonnet')
+  })
+
+  it('only when the desired tier AND everything below is dry does it look UP', () => {
+    markCoolingUntil('sonnet', NOW + HOUR)
+    markCoolingUntil('haiku', NOW + HOUR)
+    expect(resolveAvailableTier('sonnet', NOW)).toBe('fable') // best available, above
+  })
+
+  it('returns the desired tier unchanged when every tier is cooling', () => {
+    for (const t of MODEL_TIER_LADDER) markCoolingUntil(t, NOW + HOUR)
+    expect(resolveAvailableTier('sonnet', NOW)).toBe('sonnet')
+  })
+
+  it('treats an unknown model string as the ladder head (safe best-available default)', () => {
+    expect(resolveAvailableTier('gpt-nonsense', NOW)).toBe('fable')
+    markCoolingUntil('fable', NOW + HOUR)
+    expect(resolveAvailableTier('gpt-nonsense', NOW)).toBe('opus')
   })
 })

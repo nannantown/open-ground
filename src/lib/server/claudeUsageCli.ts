@@ -97,6 +97,25 @@ export const invalidateUsageCache = () => {
   state.cacheAt = 0
 }
 
+// SYNCHRONOUS cache-only peek — the overseer's M8 sub-cycle (OVERSEER_DESIGN §4)
+// reads the last SUCCESSFUL scrape without ever awaiting a ~9s spawn. Returns null
+// when nothing is cached OR the cache is past its TTL (a scrape is due but must be
+// fired detached, not awaited inside the 3s engine tick). Only successes are ever
+// stored (see fetchClaudeUsageCli), so a hit is always live 'ok' numbers.
+export const peekCachedUsage = (): CliUsage | null => {
+  if (!state.cache) return null
+  if (Date.now() - state.cacheAt >= CACHE_TTL_MS) return null
+  return state.cache
+}
+
+// Fire a usage refresh in the BACKGROUND (never awaited) — the M8 detached-refresh
+// the overseer runs when its cache peek misses. Swallows every error; the next peek
+// picks up the result. fetchClaudeUsageCli already single-flights (state.inflight)
+// and only caches successes, so repeated calls never stack scrapes.
+export const refreshUsageCacheDetached = (): void => {
+  void fetchClaudeUsageCli().catch(() => {})
+}
+
 // Subscribe to writes inside ~/.claude/projects. Claude writes one jsonl
 // append per assistant message, so any change here means token usage just
 // happened. We debounce 30s after the last write so a long streaming run
