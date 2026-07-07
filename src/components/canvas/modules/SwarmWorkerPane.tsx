@@ -19,8 +19,12 @@ import { useT } from '@/i18n/I18nContext'
 export type WorkerStatus = 'working' | 'waiting' | 'starting' | 'exited'
 
 interface Props {
-  /** PTY id the B API assigned when it launched `claude` in the worktree. */
-  terminalId: string
+  /** PTY id the B API assigned when it launched `claude` in the worktree.
+   *  Absent for a DEAD worker (server truth: a heartbeat file exists but no
+   *  live PTY does) — the tile then shows a static "no session" body instead
+   *  of mounting a terminal, with its OWN restart affordance (there's no PTY
+   *  id left to probe/reconnect via ClaudeTerminalPane). */
+  terminalId?: string
   /** swarm/* branch the worker works on (also recorded on the Board card). */
   branch: string
   /** The dispatched card's title — shown in the header tooltip for context. */
@@ -157,14 +161,33 @@ export const SwarmWorkerPane = ({
 
       {/* The PTY itself — reused verbatim. onExit bubbles the close up so the
           module flips the worker to 'exited' (our header shows it; the pane's
-          own exit strip stays hidden under chrome={false} until then). */}
+          own exit strip stays hidden under chrome={false} until then). A DEAD
+          worker (server truth: no live PTY — terminalId absent) has nothing to
+          mount a terminal against, so it gets a static placeholder with its OWN
+          restart button instead of ClaudeTerminalPane's overlay. */}
       <div className="min-h-0 flex-1">
-        <ClaudeTerminalPane
-          terminalId={terminalId}
-          chrome={false}
-          onExit={() => onExit()}
-          onRestart={onRestart}
-        />
+        {terminalId ? (
+          <ClaudeTerminalPane
+            terminalId={terminalId}
+            chrome={false}
+            onExit={() => onExit()}
+            onRestart={onRestart}
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-2 bg-[#1a1a1a] px-4 text-center">
+            <span className="text-[11px] text-ink-faint">{t('projectPanel.swarm.sessionEnded')}</span>
+            {onRestart && (
+              <button
+                type="button"
+                onClick={() => void onRestart()}
+                disabled={busy}
+                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+              >
+                {busy ? t('projectPanel.swarm.restarting') : t('projectPanel.swarm.restart')}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

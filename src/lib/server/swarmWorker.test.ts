@@ -7,6 +7,7 @@ import {
   buildOrderInjection,
   workerLaunchOpts,
   SWARM_BASE_REF_PREFERENCE,
+  WORKER_ORDER_RULES,
 } from './swarmWorker'
 
 // The git-touching parts (createSwarmWorktree / removeSwarmWorktree /
@@ -77,21 +78,21 @@ describe('pickBaseRef', () => {
 })
 
 describe('buildOrderInjection', () => {
-  it('prefixes the slash command and the ゴール: label', () => {
+  it('prefixes the slash command and the ゴール: label (worker rules appended)', () => {
     expect(buildOrderInjection('Add a logout button')).toBe(
-      '/order ゴール: Add a logout button',
+      '/order ゴール: Add a logout button' + WORKER_ORDER_RULES,
     )
   })
 
   it('joins title and notes with an em dash', () => {
     expect(buildOrderInjection('Logout button', 'in the header, top-right')).toBe(
-      '/order ゴール: Logout button — in the header, top-right',
+      '/order ゴール: Logout button — in the header, top-right' + WORKER_ORDER_RULES,
     )
   })
 
   it('flattens newlines/tabs to single spaces (single-line so /order is a command)', () => {
     const out = buildOrderInjection('line one\nline two', 'a\tb\n\nc')
-    expect(out).toBe('/order ゴール: line one line two — a b c')
+    expect(out).toBe('/order ゴール: line one line two — a b c' + WORKER_ORDER_RULES)
     expect(out).not.toMatch(/[\n\r\t]/)
   })
 
@@ -104,16 +105,31 @@ describe('buildOrderInjection', () => {
     expect(out).not.toMatch(/[\x00-\x1f\x7f]/)
     // Control bytes become spaces (neutralized — the ESC can no longer open a
     // control sequence), then whitespace collapses: 'evil␛[201~␍title' → 'evil [201~ title'.
-    expect(out).toBe('/order ゴール: evil [201~ title — x y z')
+    expect(out).toBe('/order ゴール: evil [201~ title — x y z' + WORKER_ORDER_RULES)
   })
 
   it('handles notes-only (empty title) without a dangling dash', () => {
-    expect(buildOrderInjection('', 'just notes')).toBe('/order ゴール: just notes')
-    expect(buildOrderInjection('   ', 'just notes')).toBe('/order ゴール: just notes')
+    expect(buildOrderInjection('', 'just notes')).toBe('/order ゴール: just notes' + WORKER_ORDER_RULES)
+    expect(buildOrderInjection('   ', 'just notes')).toBe('/order ゴール: just notes' + WORKER_ORDER_RULES)
   })
 
   it('handles an empty goal gracefully', () => {
-    expect(buildOrderInjection('', '')).toBe('/order ゴール: ')
+    expect(buildOrderInjection('', '')).toBe('/order ゴール: ' + WORKER_ORDER_RULES)
+  })
+
+  it('burns the worker discipline into EVERY order — push ban, §6 stop-at-ready, heartbeats (2e7beb2)', () => {
+    // The exact contract: single-line, and it names the three behaviors the
+    // 2e7beb2 worker violated — pushing, skipping §6 (stop at ready, commander
+    // integrates), and never beating a heartbeat.
+    expect(WORKER_ORDER_RULES).not.toMatch(/[\n\r\t]/)
+    expect(WORKER_ORDER_RULES).toContain('git push は全形態禁止')
+    expect(WORKER_ORDER_RULES).toContain('司令塔用なので実行しない')
+    expect(WORKER_ORDER_RULES).toContain('done true で「停止」')
+    expect(WORKER_ORDER_RULES).toContain('swarm-beat.sh')
+    expect(WORKER_ORDER_RULES).toContain('30 分無心拍は anomaly')
+    // ...and it rides every spawn prompt, learning-loop dispatches included.
+    expect(buildOrderInjection('T', 'n').endsWith(WORKER_ORDER_RULES)).toBe(true)
+    expect(buildOrderInjection('T', 'n', 'prior fail').endsWith(WORKER_ORDER_RULES)).toBe(true)
   })
 
   it('appends the LEARNING-LOOP clause when a prior 差し戻し reason is given (card fdf714ef)', () => {
@@ -182,7 +198,7 @@ describe('workerLaunchOpts (worker launch contract)', () => {
   })
 
   it('delivers the goal as a positional /order prompt (claude submits it itself)', () => {
-    expect(base.initialPrompt).toBe('/order ゴール: Add logout')
+    expect(base.initialPrompt).toBe('/order ゴール: Add logout' + WORKER_ORDER_RULES)
   })
 
   it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max — parity with supply', () => {
@@ -219,7 +235,7 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     })
     expect(o.cols).toBe(120)
     expect(o.rows).toBe(40)
-    expect(o.initialPrompt).toBe('/order ゴール: Title — and notes')
+    expect(o.initialPrompt).toBe('/order ゴール: Title — and notes' + WORKER_ORDER_RULES)
   })
 
   it('threads a prior 差し戻し reason into the /order prompt (LEARNING LOOP, card fdf714ef)', () => {

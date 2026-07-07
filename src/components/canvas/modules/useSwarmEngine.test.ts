@@ -1,15 +1,15 @@
 // @vitest-environment jsdom
 //
-// Regression guard for the single-source worker fix (card 70874f): the worker
-// tab and the manager monitor must show the SAME worker set — manual workers
-// PLUS the engine's own workers — deduped by PTY id. The bug was the worker tab
-// rendering ONLY the manual localStorage registry, so it sat empty while the
-// autonomous engine had live workers. These tests lock the pure merge that both
-// tabs now derive from, and assert the two tabs' projections agree.
+// Regression guard for the single-source worker list (card 70874f, reworked
+// server-truth in 2e7beb2): the worker tab and the manager monitor render the
+// SAME worker set, unified SERVER-side by GET /api/swarm/workers (that unify
+// logic is tested in src/lib/server/swarmWorkerRegistry.test.ts). What the
+// client owns — and what these tests lock — is the defensive sanitize layer
+// over every untrusted route response the one poll loop consumes.
 
 import { describe, it, expect } from 'vitest'
 import {
-  mergeSwarmWorkers,
+  sanitizeSwarmWorkers,
   sanitizeEngineState,
   sanitizeKpis,
   sanitizeConsumption,
@@ -18,136 +18,74 @@ import {
   EMPTY_KPIS,
   EMPTY_CONSUMPTION,
   DEFAULT_ENGINE,
-  type EngineWorker,
-  type ManualWorkerInput,
-  type ManagerWorkerStage,
 } from './useSwarmEngine'
 
-const manual = (over: Partial<ManualWorkerInput> & { terminalId: string }): ManualWorkerInput => ({
-  branch: `swarm/${over.terminalId}`,
-  worktree: `/wt/${over.terminalId}`,
-  taskId: `task-${over.terminalId}`,
-  taskTitle: `Manual ${over.terminalId}`,
-  ...over,
-})
+// The server-truth worker list (GET /api/swarm/workers) is the single source the
+// Swarm worker tab renders. Which workers exist is the SERVER's call
+// (swarmWorkerRegistry has its own tests); this layer only guards the render
+// against an untrusted response shape — coerce every field, drop a row that
+// can't be identified, never throw.
+describe('sanitizeSwarmWorkers — the server-truth worker list survives the poll', () => {
+  const full = {
+    worktree: '/wt/w1',
+    branch: 'swarm/w1',
+    terminalId: 'term-1',
+    taskId: 'task-1',
+    taskTitle: 'T1',
+    startedAt: '2026-07-07T00:00:00.000Z',
+    stage: 'running',
+    phase: 'implement',
+    note: 'wiring',
+    heartbeatAt: '2026-07-07T00:01:00.000Z',
+    ready: true,
+    blocked: true,
+    blockers: 'waiting on X',
+  }
 
-const engineWorker = (over: Partial<EngineWorker> & { terminalId: string }): EngineWorker => ({
-  branch: `swarm/${over.terminalId}`,
-  taskId: `task-${over.terminalId}`,
-  taskTitle: `Engine ${over.terminalId}`,
-  startedAt: '2026-06-24T00:00:00.000Z',
-  stage: 'running',
-  ...over,
-})
-
-// Mirror of how SwarmModule projects the unified list into the worker TAB tiles
-// (it maps the views straight through) and into the manager MONITOR rows. Both
-// derive from the SAME mergeSwarmWorkers output — these helpers just take the id
-// set each view would key its tiles/rows on, so we can assert they agree.
-const workerTabIds = (m: ReturnType<typeof mergeSwarmWorkers>) => m.map((w) => w.terminalId)
-const managerMonitorIds = (m: ReturnType<typeof mergeSwarmWorkers>) =>
-  m.map((w) => ({
-    terminalId: w.terminalId,
-    taskTitle: w.taskTitle,
-    branch: w.branch,
-    stage: (w.source === 'manual' ? 'running' : (w.engineStage ?? 'running')) as ManagerWorkerStage,
-  })).map((r) => r.terminalId)
-
-describe('mergeSwarmWorkers — the single worker source for both Swarm tabs', () => {
-  it('includes engine-spawned workers (worker tab is no longer blind to them)', () => {
-    const merged = mergeSwarmWorkers([], [engineWorker({ terminalId: 'eng-1' })])
-    expect(merged).toHaveLength(1)
-    expect(merged[0]).toMatchObject({ terminalId: 'eng-1', source: 'engine', engineStage: 'running' })
-    // The empty-state bug: a non-empty engine set must yield a non-empty list.
-    expect(merged.length).toBeGreaterThan(0)
+  it('passes a well-formed row through, field by field', () => {
+    expect(sanitizeSwarmWorkers({ workers: [full] })).toEqual([full])
   })
 
-  it('unifies manual + engine workers, manual first then engine', () => {
-    const merged = mergeSwarmWorkers(
-      [manual({ terminalId: 'man-1' }), manual({ terminalId: 'man-2' })],
-      [engineWorker({ terminalId: 'eng-1' }), engineWorker({ terminalId: 'eng-2' })],
-    )
-    expect(merged.map((w) => w.terminalId)).toEqual(['man-1', 'man-2', 'eng-1', 'eng-2'])
-    expect(merged.map((w) => w.source)).toEqual(['manual', 'manual', 'engine', 'engine'])
-  })
-
-  it('dedupes by PTY id — the manual entry wins (it owns the worktree)', () => {
-    const merged = mergeSwarmWorkers(
-      [manual({ terminalId: 'shared', worktree: '/wt/real' })],
-      [engineWorker({ terminalId: 'shared', taskTitle: 'engine dup' })],
-    )
-    expect(merged).toHaveLength(1)
-    expect(merged[0]).toMatchObject({ terminalId: 'shared', source: 'manual', worktree: '/wt/real' })
-  })
-
-  it('carries the worktree for manual workers and omits it for engine workers', () => {
-    const merged = mergeSwarmWorkers(
-      [manual({ terminalId: 'man-1', worktree: '/wt/man-1' })],
-      [engineWorker({ terminalId: 'eng-1' })],
-    )
-    expect(merged.find((w) => w.terminalId === 'man-1')?.worktree).toBe('/wt/man-1')
-    expect(merged.find((w) => w.terminalId === 'eng-1')?.worktree).toBeUndefined()
-  })
-
-  it('drops a forged duplicate manual id (untrusted localStorage), keeping the first', () => {
-    const merged = mergeSwarmWorkers(
-      [manual({ terminalId: 'dup', branch: 'first' }), manual({ terminalId: 'dup', branch: 'second' })],
-      [],
-    )
-    expect(merged).toHaveLength(1)
-    expect(merged[0].branch).toBe('first')
-  })
-
-  it('preserves the engine-reported stage (folds an absent stage to running)', () => {
-    const merged = mergeSwarmWorkers(
-      [],
-      [
-        engineWorker({ terminalId: 'eng-done', stage: 'done' }),
-        engineWorker({ terminalId: 'eng-bare', stage: undefined }),
+  it('drops a row with no identifiable worktree/branch, keeping the survivors', () => {
+    const out = sanitizeSwarmWorkers({
+      workers: [
+        { ...full, worktree: undefined }, // no worktree → unidentifiable
+        { ...full, branch: '' }, // empty branch → unidentifiable
+        'nope', // not an object
+        null,
+        { worktree: '/wt/ok', branch: 'swarm/ok' }, // minimal valid row survives
       ],
-    )
-    expect(merged.find((w) => w.terminalId === 'eng-done')?.engineStage).toBe('done')
-    // The view records the raw (possibly absent) stage; SwarmModule folds the
-    // absent case to 'running' when it projects the manager row.
-    expect(merged.find((w) => w.terminalId === 'eng-bare')?.engineStage).toBeUndefined()
+    })
+    expect(out).toEqual([{ worktree: '/wt/ok', branch: 'swarm/ok' }])
   })
 
-  it('both tabs render the SAME worker set (the empty-state inconsistency is gone)', () => {
-    const merged = mergeSwarmWorkers(
-      [manual({ terminalId: 'man-1' })],
-      [engineWorker({ terminalId: 'eng-1' }), engineWorker({ terminalId: 'eng-2' })],
-    )
-    const tab = workerTabIds(merged)
-    const monitor = managerMonitorIds(merged)
-    // Identical sets, in the same order — the worker tab and manager monitor key
-    // their tiles/rows on the same ids. Engine workers appear in BOTH.
-    expect(tab).toEqual(monitor)
-    expect(tab).toContain('eng-1')
-    expect(tab).toContain('eng-2')
-    expect(monitor).toContain('eng-1')
+  it('a garbage response degrades to the empty list (no throw)', () => {
+    expect(sanitizeSwarmWorkers(null)).toEqual([])
+    expect(sanitizeSwarmWorkers('boom')).toEqual([])
+    expect(sanitizeSwarmWorkers({})).toEqual([])
+    expect(sanitizeSwarmWorkers({ workers: 'nope' })).toEqual([])
   })
 
-  it('empty in, empty out (no spurious rows)', () => {
-    expect(mergeSwarmWorkers([], [])).toEqual([])
-  })
-
-  it('carries the engine worker phase/note through the merge (engine source only)', () => {
-    const merged = mergeSwarmWorkers(
-      [],
-      [engineWorker({ terminalId: 'eng-1', phase: 'implement', note: 'wiring' })],
-    )
-    expect(merged[0]).toMatchObject({ source: 'engine', phase: 'implement', note: 'wiring' })
-  })
-
-  it('omits phase/note for manual workers (the engine reads no heartbeat for them)', () => {
-    const merged = mergeSwarmWorkers([manual({ terminalId: 'man-1' })], [])
-    expect(merged[0].phase).toBeUndefined()
-    expect(merged[0].note).toBeUndefined()
+  it('coerces forged fields — unknown stage dropped, ready/blocked strictly true', () => {
+    const out = sanitizeSwarmWorkers({
+      workers: [
+        {
+          worktree: '/wt/w1',
+          branch: 'swarm/w1',
+          stage: 'exploded', // not starting|running|done → dropped
+          ready: 'yes', // truthy-but-not-true → dropped (never a forged ready)
+          blocked: 1, // same
+          note: '', // empty optional string → dropped
+          terminalId: 42, // wrong type → dropped
+        },
+      ],
+    })
+    expect(out).toEqual([{ worktree: '/wt/w1', branch: 'swarm/w1' }])
   })
 })
 
-describe('sanitizeEngineState — engine workers survive the poll → merge path', () => {
-  it('parses engine workers from a raw orchestrator response and feeds the merge', () => {
+describe('sanitizeEngineState — engine workers survive the poll', () => {
+  it('parses engine workers from a raw orchestrator response, dropping malformed rows', () => {
     const raw = {
       running: true,
       autoMerge: false,
@@ -161,16 +99,13 @@ describe('sanitizeEngineState — engine workers survive the poll → merge path
     }
     const state = sanitizeEngineState(raw)
     expect(state.workers.map((w) => w.terminalId)).toEqual(['eng-1'])
-    // End-to-end: the sanitized engine workers merge into the unified list.
-    const merged = mergeSwarmWorkers([], state.workers)
-    expect(merged.map((w) => w.terminalId)).toEqual(['eng-1'])
-    expect(merged[0].source).toBe('engine')
+    expect(state.workers[0]).toMatchObject({ branch: 'swarm/eng-1', taskTitle: 'T1', stage: 'running' })
   })
 
   it('a garbage response degrades to the empty default (no throw)', () => {
     expect(sanitizeEngineState(null).workers).toEqual([])
     expect(sanitizeEngineState('boom').workers).toEqual([])
-    expect(mergeSwarmWorkers([], sanitizeEngineState(undefined).workers)).toEqual([])
+    expect(sanitizeEngineState(undefined).workers).toEqual([])
   })
 
   it('parses autonomyRemembered STRICTLY — true only for boolean true (the restart-reminder gate)', () => {

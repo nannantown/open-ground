@@ -4315,6 +4315,84 @@ describe('detectAnomalies — state inconsistency detection', () => {
     expect(await detectAnomalies(engine, [], depsWith(new Set(['swarm/dn'])), NOW)).toEqual([])
   })
 
+  it('flags a dark-but-ACTIVE worker — streaming output, zero beats since dispatch (no-heartbeat, the 2e7beb2 shape)', async () => {
+    // Fresh PTY output keeps it off worker-stale (streaming = alive to the
+    // engine) — yet it has NEVER beaten. This is exactly how the 2e7beb2 worker
+    // ran: full speed, invisible to the commander's heartbeat view, straight to
+    // an (then-unguarded) self-integration. The flag surfaces it within 30 min.
+    const old = at(NOW - STALE_HEARTBEAT_MS - 5 * 60_000) // dispatched 35 min ago, never beat
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-nb-1', branch: 'swarm/nb', taskId: 'nb', taskTitle: 'task nb', startedAt: old, stage: 'running' })],
+    })
+    const deps: OrchestratorDeps & AnomalyDeps = {
+      ...makeDeps({ cards: [], outputs: new Map([['pty-nb-1', NOW - 1000]]) }), // output 1s ago
+      isAlive: () => true,
+      worktreeExists: async () => true,
+    }
+    const out = await detectAnomalies(engine, [], deps, NOW)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ kind: 'no-heartbeat', ref: 'swarm/nb', branch: 'swarm/nb', taskTitle: 'task nb' })
+    expect(out[0].staleMinutes).toBeGreaterThanOrEqual(35)
+  })
+
+  it('reports worker-stale OR no-heartbeat per worker, never both (total silence subsumes never-beat)', async () => {
+    // Zero beats AND zero output AND old dispatch: both conditions hold, but
+    // one anomaly per worker is enough to act on — the stale flag (likely hung)
+    // wins; no-heartbeat is for the dark-but-ACTIVE case only.
+    const old = at(NOW - STALE_HEARTBEAT_MS - 60_000)
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-nb2-1', branch: 'swarm/nb2', taskId: 'nb2', taskTitle: 'task nb2', startedAt: old, stage: 'running' })],
+    })
+    expect((await detectAnomalies(engine, [], depsWith(new Set(['swarm/nb2'])), NOW)).map((a) => a.kind)).toEqual([
+      'worker-stale',
+    ])
+  })
+
+  it('does NOT flag a beat-less worker inside the 30-min grace window (no-heartbeat)', async () => {
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-nb3-1', branch: 'swarm/nb3', taskId: 'nb3', taskTitle: 'task nb3', startedAt: at(NOW - STALE_HEARTBEAT_MS + 60_000), stage: 'running' })],
+    })
+    const deps: OrchestratorDeps & AnomalyDeps = {
+      ...makeDeps({ cards: [], outputs: new Map([['pty-nb3-1', NOW - 1000]]) }),
+      isAlive: () => true,
+      worktreeExists: async () => true,
+    }
+    expect(await detectAnomalies(engine, [], deps, NOW)).toEqual([])
+  })
+
+  it('does NOT flag no-heartbeat once a SINGLE beat was recorded (however old — that is worker-stale territory)', async () => {
+    // One recorded beat means the protocol was followed; an old beat with fresh
+    // output is the stall monitor's / worker-stale's concern, not this flag's.
+    // (Same scenario as the fresh-output stale test above, pinned for the NEW kind.)
+    const old = at(NOW - STALE_HEARTBEAT_MS - 60_000)
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-nb4-1', branch: 'swarm/nb4', taskId: 'nb4', taskTitle: 'task nb4', startedAt: old, heartbeatAt: old, stage: 'running' })],
+    })
+    const deps: OrchestratorDeps & AnomalyDeps = {
+      ...makeDeps({ cards: [], outputs: new Map([['pty-nb4-1', NOW - 1000]]) }),
+      isAlive: () => true,
+      worktreeExists: async () => true,
+    }
+    expect(await detectAnomalies(engine, [], deps, NOW)).toEqual([])
+  })
+
+  it('does NOT flag a rate-limited / permission-waiting / done worker as no-heartbeat (WAIT is not a violation)', async () => {
+    const old = at(NOW - STALE_HEARTBEAT_MS - 60_000)
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-nb5-1', branch: 'swarm/nb5', taskId: 'nb5', taskTitle: 'task nb5', startedAt: old, stage: 'running' }),
+        worker({ terminalId: 'pty-nb6-1', branch: 'swarm/nb6', taskId: 'nb6', taskTitle: 'task nb6', startedAt: old, stage: 'done' }),
+      ],
+      rateLimited: new Map([['pty-nb5-1', { since: NOW - 5 * 60_000 }]]),
+    })
+    const deps: OrchestratorDeps & AnomalyDeps = {
+      ...makeDeps({ cards: [], outputs: new Map([['pty-nb5-1', NOW - 1000], ['pty-nb6-1', NOW - 1000]]) }),
+      isAlive: () => true,
+      worktreeExists: async () => true,
+    }
+    expect(await detectAnomalies(engine, [], deps, NOW)).toEqual([])
+  })
+
   it('ignores a dead worker (the monitor prunes it — not an anomaly here)', async () => {
     const engine = newEngine({
       workers: [worker({ terminalId: 'pty-x-1', branch: 'swarm/x', taskId: 'x', taskTitle: 'task x', startedAt: at(NOW) })],

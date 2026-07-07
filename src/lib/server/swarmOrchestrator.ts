@@ -4899,7 +4899,13 @@ export const STALE_HEARTBEAT_MS = 30 * 60_000
  *                        vanished but the card never advanced). A doing card whose
  *                        worktree still EXISTS is skipped — a MANUAL worker (which
  *                        the engine doesn't count) still owns it, so it is never a
- *                        false orphan. */
+ *                        false orphan.
+ *   • no-heartbeat     — a counted+alive, NON-done worker that has NEVER beaten a
+ *                        heartbeat ≥30 min after dispatch, REGARDLESS of PTY
+ *                        output. Complements worker-stale, whose output channel
+ *                        deliberately clears it: a dark-but-ACTIVE worker (the
+ *                        2e7beb2 bypass shape) never trips stale, so this is the
+ *                        flag that surfaces it. */
 export const detectAnomalies = async (
   engine: ProjectEngine,
   tasks: readonly ProjectTask[],
@@ -4951,6 +4957,27 @@ export const detectAnomalies = async (
         branch: w.branch,
         taskTitle: w.taskTitle,
         staleMinutes: Math.floor((now - since) / 60_000),
+      })
+      continue // one anomaly per worker — total silence subsumes never-beat
+    }
+    // no-heartbeat — the 2e7beb2 shape: a worker whose PTY output keeps it off
+    // the stale check (streaming = alive to the engine) but which has NEVER
+    // beaten a heartbeat since dispatch. Not hung — a PROTOCOL violation: it is
+    // running full speed while invisible to the commander's heartbeat view (the
+    // 2e7beb2 worker pushed main exactly like this, zero beats end to end). The
+    // guard's blanket push ban is the hard stop; this read-only flag is the
+    // observability, so a dark-but-active worker is surfaced within 30 min
+    // instead of at integration time. Only a MISSING heartbeatAt counts — one
+    // recorded beat (however old) means the protocol was followed and staleness
+    // is the stall monitor's / worker-stale's business, not this flag's.
+    const startedMs = w.startedAt ? Date.parse(w.startedAt) : Number.NaN
+    if (!w.heartbeatAt && Number.isFinite(startedMs) && now - startedMs >= STALE_HEARTBEAT_MS) {
+      out.push({
+        kind: 'no-heartbeat',
+        ref: w.branch,
+        branch: w.branch,
+        taskTitle: w.taskTitle,
+        staleMinutes: Math.floor((now - startedMs) / 60_000),
       })
     }
   }

@@ -253,6 +253,24 @@ describe('owner gate — the in-app swarm is owner-only', () => {
     expect(res.status).toBe(403)
   })
 
+  it('GET /api/swarm/workers → 403 when signed out', async () => {
+    await clearSession()
+    const res = await app.request('/api/swarm/workers')
+    expect(res.status).toBe(403)
+  })
+
+  it('GET /api/swarm/workers → 403 for a signed-in non-owner (tester)', async () => {
+    await signInAs(TESTER)
+    const res = await app.request('/api/swarm/workers')
+    expect(res.status).toBe(403)
+  })
+
+  it('GET /api/swarm/workers → owner passes the gate (reaches validation: 400)', async () => {
+    await signInAs(OWNER)
+    const res = await app.request('/api/swarm/workers')
+    expect(res.status).toBe(400)
+  })
+
   it('POST /api/swarm/orchestrator/start → 403 when signed out', async () => {
     await clearSession()
     const res = await app.request('/api/swarm/orchestrator/start', json({}))
@@ -439,6 +457,34 @@ describe('GET /api/swarm/orchestrator (state — owner)', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as SwarmOrchestratorState
     expect(body.running).toBe(false)
+  })
+})
+
+describe('GET /api/swarm/workers (server-truth worker list — owner)', () => {
+  // The full cross-referenced happy path (a live PTY / heartbeat file / engine
+  // record actually merging) needs a real git worktree + terminal pool, so it's
+  // covered by swarmWorkerRegistry.test.ts's injected-deps unit tests. Here we
+  // prove the OWNER-reachable validation + the no-workers-yet shape over the
+  // real Hono app, mirroring the orchestrator route's own test shape above.
+  it('400 when path is missing', async () => {
+    const res = await app.request('/api/swarm/workers')
+    expect(res.status).toBe(400)
+  })
+
+  it('403 when the path is not a registered project (the allowlist holds)', async () => {
+    const dir = join(scratch, 'unregistered')
+    await mkdir(dir, { recursive: true })
+    const res = await app.request(`/api/swarm/workers?path=${encodeURIComponent(dir)}`)
+    expect(res.status).toBe(403)
+  })
+
+  it('a registered project with no live workers reads back an empty list', async () => {
+    const dir = join(scratch, 'app')
+    await register(dir)
+    const res = await app.request(`/api/swarm/workers?path=${encodeURIComponent(dir)}`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { workers: unknown[] }
+    expect(body.workers).toEqual([])
   })
 })
 

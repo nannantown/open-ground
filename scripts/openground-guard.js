@@ -36,10 +36,18 @@
 // WHAT IT DENIES (the A3 classes + the evasion routes into them):
 //   • rm -rf on absolute/home/parent paths (workers: any path outside their
 //     write roots; relative rm after an out-of-roots cd counts as outside)
-//   • git force-push in all its spellings (-f/--force/--force-with-lease/
-//     +refspec/--mirror), remote-ref deletion, history nukes (reset --hard,
-//     clean -f, filter-branch, update-ref -d, branch -D, stash drop/clear/pop,
-//     checkout -f/--, restore of the worktree, reflog expire / gc --prune=now)
+//   • git push — ALL of it, plain/FF included, any remote, any refspec (plus
+//     the plumbing spellings send-pack / http-push and git-svn's dcommit).
+//     Integration is the COMMANDER's job: a worker commits locally, beats
+//     ready, and stops. The old force-only vetting (inherited from the
+//     manager-era guard, where a plain FF push was the manager's legitimate
+//     integration step) left `git push origin HEAD:main` open — the 2e7beb2
+//     bypass, where a heartbeat-less worker integrated itself past the
+//     commander's re-verify + adversarial review. Blanket subcommand denial
+//     leaves no flag/quoting/computed-word surface to evade. History nukes
+//     stay denied as before (reset --hard, clean -f, filter-branch,
+//     update-ref -d, branch -D, stash drop/clear/pop, checkout -f/--,
+//     restore of the worktree, reflog expire / gc --prune=now)
 //   • writes outside the session's write roots (Write/Edit/NotebookEdit file
 //     paths, Bash redirections and write-verbs like tee/cp/mv/dd) when
 //     OPENGROUND_GUARD_WRITE_ROOTS is set — plus, ALWAYS, writes to the guard's
@@ -1761,82 +1769,38 @@ function analyzeGit(args, ctx, getCwdState) {
   if (sub === undefined) return ALLOW
   if (sub === null) return denyV('computed git subcommand — not analyzable')
   const rest = texts.slice(i + 1)
-  const restWords = args.slice(i + 1)
 
   const DANGEROUS_NULL = () => rest.some((t) => t === null)
 
   switch (sub) {
-    case 'push': {
-      // value-taking flags to skip when locating remote/refspecs
-      const valueFlags = new Set(['-o', '--push-option', '--receive-pack', '--exec'])
-      let repoOverride = null
-      const positionals = [] // { text: string|null, word }
-      let deleteMode = false
-      for (let j = 0; j < rest.length; j += 1) {
-        const t = rest[j]
-        const w = restWords[j]
-        if (t === null) { positionals.push({ text: null, word: w }); continue } // computed — vetted by position below
-        if (t === '--force' || t === '--force-with-lease' || t === '--force-if-includes' || t.startsWith('--force-with-lease=')) {
-          return denyV('git force-push')
-        }
-        if (/^-[a-zA-Z]+$/.test(t) && t.includes('f')) return denyV('git force-push (-f)')
-        if (t === '--mirror') return denyV('git push --mirror')
-        // `--receive-pack=<prog>` / `--exec=<prog>` names a program to run on the
-        // remote — a code-exec surface (only honoured by ssh/local remotes, but
-        // deny for defense-in-depth regardless). (Commander round-3 NIT.)
-        if (t === '--receive-pack' || t === '--exec' || t.startsWith('--receive-pack=') || t.startsWith('--exec=')) {
-          return denyV('git push --receive-pack/--exec names a remote program to run — not allowed')
-        }
-        if (t === '--delete' || t === '-d') { deleteMode = true; continue }
-        if (t.startsWith('--repo=')) { repoOverride = t.slice(7); continue }
-        if (t === '--repo') { repoOverride = rest[j + 1] ?? null; j += 1; continue }
-        if (valueFlags.has(t)) { j += 1; continue }
-        if (t.startsWith('-')) continue
-        positionals.push({ text: t, word: w })
+    case 'push': case 'send-pack': case 'http-push': {
+      // WORKERS NEVER PUSH — every shape, every remote, every refspec, plain
+      // FF included (send-pack / http-push are the plumbing spellings of the
+      // same outbound write). A policed session is a confined worker whose
+      // contract is "commit locally, beat ready, STOP — the commander
+      // re-verifies, adversarially reviews, and integrates". The shape
+      // analysis that used to live here (force/--mirror/--delete/:ref vetting
+      // + an origin/openground remote allowlist) was inherited from the
+      // MANAGER-era guard, where a plain FF push was the manager's legitimate
+      // integration step; rescoped to the worker-only veto it left `git push
+      // origin HEAD:main` wide open — the 2e7beb2 bypass, where a worker with
+      // zero heartbeats integrated itself past the commander's re-verify and
+      // adversarial review. Blanket-denying the subcommand needs no argument
+      // analysis at all, so there is no flag/quoting/computed-word surface
+      // left to evade. Reads (fetch/pull/status/log/rebase/merge-base) and
+      // local mechanics (add/commit/merge on the worker's own branch) are
+      // untouched.
+      return denyV('git push is forbidden in a worker session — ALL pushes, plain/FF included (integration is the commander\'s job): commit locally, then `swarm-beat.sh done true` and STOP')
+    }
+    case 'svn': {
+      // git-svn's `dcommit`/`branch`/`tag` WRITE to the upstream SVN repo —
+      // the same outbound-integration class as `git push`. Reads (fetch /
+      // rebase / log / info) stay allowed. Exotic on a dev Mac, but one line
+      // closes it for good.
+      if (rest.some((t) => t === 'dcommit' || t === 'branch' || t === 'tag')) {
+        return denyV('git svn dcommit/branch/tag writes to the upstream repo — integration is the commander\'s job')
       }
-      // The REMOTE (first positional, or --repo) must be LITERAL — a computed
-      // destination is unanalyzable (could be any remote) → deny. Distinguish a
-      // COMPUTED remote (deny) from NO remote (`git push` with no args = default).
-      let remote
-      if (repoOverride !== null) remote = repoOverride
-      else if (positionals.length === 0) remote = ''
-      else if (positionals[0].text === null) return denyV('git push to a computed remote — not analyzable')
-      else remote = positionals[0].text
-      const refspecs = positionals.slice(repoOverride !== null ? 0 : 1)
-      // A COMPUTED refspec is DENIED outright. We can't see a shell variable's
-      // VALUE, so a `SNAP='+HEAD'; git push openground "$SNAP:main"` would expand
-      // to a FORCE push (`+HEAD:main`) to the public main that a literal-tail
-      // check can't catch. The release runbook uses a LITERAL inline sha
-      // (`git push openground <sha>:main`), which the literal path below allows —
-      // so there is no need to accept a computed source, and denying it removes
-      // the +-in-variable hole structurally. (Commander focused-review MUST-FIX 1,
-      // reverting the earlier computed-FF exception.)
-      for (const e of refspecs) {
-        if (e.text === null) return denyV('git push with a computed refspec — not analyzable (use a literal `<sha>:main` / `vX.Y.Z`)')
-        if (e.text.startsWith('+')) return denyV('git force-push (+refspec)')
-        if (e.text.startsWith(':')) {
-          const ref = e.text.slice(1)
-          const swarmRef = /^(refs\/heads\/|refs\/)?swarm\//.test(ref)
-          if (!(isManager && swarmRef)) return denyV(`git push :ref deletion of '${ref}'${isManager ? ' (managers may delete swarm/* only)' : ''}`)
-        }
-      }
-      if (deleteMode) {
-        const dref = refspecs[0]?.text ?? ''
-        const swarmRef = /^(refs\/heads\/|refs\/)?swarm\//.test(dref)
-        if (!(isManager && swarmRef)) return denyV(`git push --delete of '${dref || '?'}'${isManager ? ' (managers may delete swarm/* only)' : ''}`)
-      }
-      // remote policy: origin (or default) is fine; `openground` only for the
-      // two release-runbook shapes, manager only; anything else denied.
-      if (remote === '' || remote === 'origin') return ALLOW
-      if (remote === 'openground') {
-        if (!isManager) return denyV('git push to the public distribution remote is manager-only')
-        const shapeOk = refspecs.length > 0 && refspecs.every((e) =>
-          /^v[0-9]+\.[0-9]+\.[0-9]+/.test(e.text) || /:(refs\/heads\/)?main$/.test(e.text),
-        )
-        if (!shapeOk) return denyV(`git push to 'openground' is release-only — 'vX.Y.Z' tag or '<sha>:main' FF`)
-        return ALLOW
-      }
-      return denyV(`git push to a non-origin remote ('${remote}')`)
+      return ALLOW
     }
     case 'reset': {
       if (rest.some((t) => t === '--hard' || t === '--keep' || t === '--merge')) {

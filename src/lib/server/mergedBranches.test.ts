@@ -85,6 +85,41 @@ describe('checkMergedBranches', () => {
     })
   })
 
+  it('classifies a REBASE-merged branch (SHA differs from main) as merged via patch-id fallback', async () => {
+    const repo = await makeRepo('repo-rebased')
+    await git(repo, ['checkout', '-b', 'swarm/feat'])
+    await commit(repo, 'feat1.txt', 'feat one')
+    await commit(repo, 'feat2.txt', 'feat two')
+    await git(repo, ['checkout', 'main'])
+    // main diverges so the eventual rebase actually replays (new SHAs), not a no-op FF.
+    await commit(repo, 'main-progress.txt', 'main moved on')
+    // Simulate the manager rebasing swarm/feat onto main and landing it — the
+    // branch itself is left at its ORIGINAL (pre-rebase) commits, exactly like
+    // a real rebase-and-push workflow where the source branch isn't force-updated.
+    await git(repo, ['checkout', '-b', '_rebased', 'swarm/feat'])
+    await git(repo, ['rebase', 'main'])
+    await git(repo, ['checkout', 'main'])
+    await git(repo, ['merge', '--ff-only', '_rebased'])
+
+    // merge-base --is-ancestor must NOT see swarm/feat as an ancestor (different SHAs).
+    await expect(
+      execFile('git', ['merge-base', '--is-ancestor', 'swarm/feat', 'main'], { cwd: repo }),
+    ).rejects.toThrow()
+
+    const result = await checkMergedBranches(repo, ['swarm/feat'])
+    expect(result['swarm/feat']).toBe('merged')
+  })
+
+  it('keeps a branch with a commit absent from main as open (patch-id fallback does not over-merge)', async () => {
+    const repo = await makeRepo('repo-still-open')
+    await commit(repo, 'main-progress.txt', 'main moved on')
+    await git(repo, ['checkout', '-b', 'swarm/wip'])
+    await commit(repo, 'wip.txt', 'not yet merged anywhere')
+
+    const result = await checkMergedBranches(repo, ['swarm/wip'])
+    expect(result['swarm/wip']).toBe('open')
+  })
+
   it('a branch pointing AT main tip counts as merged (fresh branch, no commits)', async () => {
     const repo = await makeRepo('repo-same')
     await git(repo, ['branch', 'task/fresh'])

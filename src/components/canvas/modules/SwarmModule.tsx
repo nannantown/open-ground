@@ -45,6 +45,7 @@ import type {
   SpawnSwarmManagerResponse,
   SpawnSwarmSupplyResponse,
   SpawnSwarmWorkerResponse,
+  SwarmWorkerRecord,
 } from '@/lib/types'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
@@ -54,31 +55,7 @@ import { SwarmEscalationsPane } from './SwarmEscalationsPane'
 import { SwarmPowerBar } from './SwarmPowerBar'
 import { ExecutionModeToggle } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
-import { useSwarmEngine, mergeSwarmWorkers, planSwarmPower } from './useSwarmEngine'
-
-// A dispatched worker, as remembered client-side. The PTY (terminalId) lives
-// server-side and survives this tab unmounting; we persist the metadata that
-// the server doesn't hand back via any GET (branch / worktree / which card) so
-// a tab switch or reload reattaches the same tiles. Same localStorage-as-source
-// pattern EmbeddedClaudeTerminal uses for its single PTY id.
-interface SwarmWorker {
-  terminalId: string
-  branch: string
-  worktree: string
-  taskId?: string
-  taskTitle: string
-  startedAt: string
-}
-
-// MAX_WORKERS bounds how many manual worker entries we RESTORE from localStorage
-// — a sanity cap against a forged/oversized registry, NOT a live spawn limit.
-// Manual hand-dispatch was removed (the "to-do rail + dispatch" panel is gone):
-// workers are now started by the autonomous engine (the master power switch in
-// the header bar) or the commander session, so nothing in THIS file adds to the
-// registry except a restart (which swaps a dead entry's PTY id, not a new spawn).
-// The rendered grid is NOT capped: restored-manual + engine workers together can
-// exceed it, and every worker must still show.
-const MAX_WORKERS = 6
+import { useSwarmEngine, planSwarmPower } from './useSwarmEngine'
 
 // Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
 // to fill the area when there are few (1 worker → full width) but never shrinks
@@ -94,50 +71,6 @@ const MIN_TILE_WIDTH = 360
 // grid's per-row minimum (minmax(220px, 1fr)), so this restores the exact
 // short-window escape hatch the grid had — symmetric with the horizontal one.
 const MIN_TILE_HEIGHT = 220
-
-// ── localStorage worker registry (keyed by the stable project UUID) ──────────
-const workersKey = (projectId: string) => `openground.swarm.workers.${projectId}`
-
-/** Load + SANITISE the persisted worker list. localStorage is untrusted input
- *  (a user/extension can forge any JSON), so we coerce every field and drop
- *  malformed entries rather than letting a bad shape crash the render. */
-const loadWorkers = (projectId: string): SwarmWorker[] => {
-  try {
-    const raw = localStorage.getItem(workersKey(projectId))
-    if (!raw) return []
-    const arr: unknown = JSON.parse(raw)
-    if (!Array.isArray(arr)) return []
-    return arr
-      .filter((w): w is Record<string, unknown> => {
-        if (!w || typeof w !== 'object') return false
-        const o = w as Record<string, unknown>
-        return (
-          typeof o.terminalId === 'string' &&
-          typeof o.branch === 'string' &&
-          typeof o.worktree === 'string'
-        )
-      })
-      .map((w) => ({
-        terminalId: String(w.terminalId),
-        branch: String(w.branch),
-        worktree: String(w.worktree),
-        taskId: typeof w.taskId === 'string' ? w.taskId : undefined,
-        taskTitle: typeof w.taskTitle === 'string' ? w.taskTitle : '',
-        startedAt: typeof w.startedAt === 'string' ? w.startedAt : '',
-      }))
-      .slice(0, MAX_WORKERS)
-  } catch {
-    return []
-  }
-}
-
-const saveWorkers = (projectId: string, workers: SwarmWorker[]) => {
-  try {
-    localStorage.setItem(workersKey(projectId), JSON.stringify(workers))
-  } catch {
-    /* quota / disabled storage — the in-memory state is still authoritative */
-  }
-}
 
 // The single supply (補給官) session, remembered client-side. Like a worker the
 // PTY (terminalId) lives server-side and survives this tab unmounting; we
@@ -237,16 +170,27 @@ type MainView = 'supply' | 'manager' | 'workers' | 'flow'
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
 
-  const [workers, setWorkers] = useState<SwarmWorker[]>(() => loadWorkers(project.id))
   // PTY id → live status from GET /api/terminal/active (working|waiting).
   const [statusByPty, setStatusByPty] = useState<ReadonlyMap<string, ClaudeBeaconStatus>>(new Map())
   // PTY ids whose stream has closed (ClaudeTerminalPane.onExit / dead probe).
   const [exitedIds, setExitedIds] = useState<ReadonlySet<string>>(new Set())
-  // PTY id → reason a soft terminate KEPT the worktree (dirty/locked).
-  const [retained, setRetained] = useState<ReadonlyMap<string, string>>(new Map())
-  // PTY ids with a terminate/force-remove in flight — a Set (not a single id) so
-  // tearing one worker down doesn't block terminating another concurrently.
-  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set())
+  // worktree → reason a soft terminate KEPT that worktree (dirty/locked). Keyed
+  // by worktree (not terminalId) since a DEAD worker (server truth: no live PTY)
+  // still needs to show/act on this — see the server-truth worker list below.
+  const [retainedByWorktree, setRetainedByWorktree] = useState<ReadonlyMap<string, string>>(
+    new Map(),
+  )
+  // worktrees with a terminate/force-remove/restart in flight — a Set (not a
+  // single value) so tearing one worker down doesn't block acting on another.
+  const [busyWorktrees, setBusyWorktrees] = useState<ReadonlySet<string>>(new Set())
+  // worktree → OPTIMISTIC new terminalId right after a successful restart, so the
+  // tile re-mounts its terminal immediately instead of waiting up to 5s for the
+  // next GET /api/swarm/workers poll to confirm it. Cleared once the poll agrees.
+  const [pendingRestarts, setPendingRestarts] = useState<ReadonlyMap<string, string>>(new Map())
+  // worktrees whose CONFIRMED removal (terminate) we've already acted on — hides
+  // the tile immediately instead of waiting for the next poll. Cleared once the
+  // poll agrees the worktree is really gone.
+  const [removedWorktrees, setRemovedWorktrees] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
 
   // The single supply (補給官) session + which face of the main area is shown.
@@ -264,13 +208,16 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [managerBusy, setManagerBusy] = useState(false)
 
   // The autonomous engine's state — polled ONCE here (the shared hook) so BOTH
-  // the worker tab and the manager dashboard read the same snapshot. This is the
-  // single-source fix: the worker tab used to render only the manual localStorage
-  // registry and so showed an empty state while the engine had live workers. Now
-  // `engine.workers` is merged into the unified list below, feeding both views.
+  // the worker tab and the manager dashboard read the same snapshot. `realWorkers`
+  // is the SERVER-TRUTH worker list (GET /api/swarm/workers): live PTYs + the
+  // engine's own roster + heartbeat files, already unified server-side — see
+  // src/lib/server/swarmWorkerRegistry.ts. This replaces the old localStorage
+  // manual registry + engine merge, which missed a worker started by a direct
+  // `POST /api/swarm/worker` (curl/SDK) outside both of those name-based sources.
   const {
     engine,
     fatalNotifications,
+    realWorkers,
     available: engineAvailable,
     busy: engineBusy,
     error: engineError,
@@ -290,18 +237,51 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // Reset per-project view state when the panel is reused for another project
   // (ProjectPanel keeps one SwarmModule instance across project switches).
   useEffect(() => {
-    setWorkers(loadWorkers(project.id))
     setSupply(loadSupply(project.id))
     setManager(loadManager(project.id))
     setManagerBusy(false)
     setMainView('supply')
     setSupplyBusy(false)
     setExitedIds(new Set())
-    setRetained(new Map())
+    setRetainedByWorktree(new Map())
     setError(null)
-    setBusyIds(new Set())
+    setBusyWorktrees(new Set())
+    setPendingRestarts(new Map())
+    setRemovedWorktrees(new Set())
     seenRef.current = new Set()
   }, [project.id])
+
+  // Reconcile the optimistic restart/terminate overlays against the latest
+  // server-truth poll: once GET /api/swarm/workers confirms a restart's new
+  // terminalId (or that a terminated worktree is really gone), drop the
+  // now-redundant optimistic entry so the overlay never permanently diverges
+  // from the server if a poll is ever missed.
+  useEffect(() => {
+    if (pendingRestarts.size === 0 && removedWorktrees.size === 0) return
+    const byWorktree = new Map(realWorkers.map((w) => [w.worktree, w]))
+    setPendingRestarts((prev) => {
+      let changed = false
+      const next = new Map(prev)
+      for (const [worktree, pendingId] of Array.from(prev)) {
+        if (byWorktree.get(worktree)?.terminalId === pendingId) {
+          next.delete(worktree)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    setRemovedWorktrees((prev) => {
+      let changed = false
+      const next = new Set(prev)
+      for (const worktree of Array.from(prev)) {
+        if (!byWorktree.has(worktree)) {
+          next.delete(worktree)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [realWorkers, pendingRestarts, removedWorktrees])
 
   // Live worker status — same power etiquette as the Ground beacon (App.tsx)
   // and the Board (BoardModule): poll every 5s, skip while hidden, re-poll on
@@ -368,34 +348,37 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // anyway (the PTY is dead) and reports the reason for manual cleanup. Whenever
   // the worker is dropped, its card goes back to 'todo' so it's re-queued (the
   // autonomous engine, or a fresh worker, can pick it up again — hand-dispatch
-  // from here was removed). Manual (restored / restarted) workers only.
+  // from here was removed). Manual (non-engine-owned) workers only — a worktree
+  // may or may not have a live terminalId (a heartbeat-only DEAD worker has
+  // none), so the PTY kill is best-effort/skipped rather than required.
   const terminate = useCallback(
-    async (worker: SwarmWorker, opts?: { force?: boolean }) => {
-      if (busyIds.has(worker.terminalId)) return
+    async (worker: SwarmWorkerRecord, opts?: { force?: boolean }) => {
+      if (busyWorktrees.has(worker.worktree)) return
       const force = opts?.force ?? false
-      setBusyIds((prev) => new Set(prev).add(worker.terminalId))
+      setBusyWorktrees((prev) => new Set(prev).add(worker.worktree))
       setError(null)
 
       const drop = () => {
-        setWorkers((prev) => {
-          const next = prev.filter((w) => w.terminalId !== worker.terminalId)
-          saveWorkers(project.id, next)
-          return next
-        })
-        // Don't let exitedIds grow unbounded — the worker is gone.
-        setExitedIds((prev) => {
-          if (!prev.has(worker.terminalId)) return prev
-          const s = new Set(prev)
-          s.delete(worker.terminalId)
-          return s
-        })
-        setRetained((prev) => {
-          if (!prev.has(worker.terminalId)) return prev
+        // Hide the tile immediately (confirmed removal) — the next server-truth
+        // poll will agree the worktree is gone, at which point the reconcile
+        // effect above drops this optimistic entry.
+        setRemovedWorktrees((prev) => new Set(prev).add(worker.worktree))
+        if (worker.terminalId) {
+          const id = worker.terminalId
+          setExitedIds((prev) => {
+            if (!prev.has(id)) return prev
+            const s = new Set(prev)
+            s.delete(id)
+            return s
+          })
+          seenRef.current.delete(id)
+        }
+        setRetainedByWorktree((prev) => {
+          if (!prev.has(worker.worktree)) return prev
           const m = new Map(prev)
-          m.delete(worker.terminalId)
+          m.delete(worker.worktree)
           return m
         })
-        seenRef.current.delete(worker.terminalId)
       }
       const restoreCardToTodo = async () => {
         if (!worker.taskId) return
@@ -425,10 +408,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       }
 
       try {
-        // Kill the PTY first (best-effort — it may already be gone).
-        await api.api.terminal[':id']
-          .$delete({ param: { id: worker.terminalId } })
-          .catch(() => {})
+        // Kill the PTY first (best-effort — it may already be gone, or this
+        // worker may already have none: a heartbeat-only dead worker).
+        if (worker.terminalId) {
+          await api.api.terminal[':id']
+            .$delete({ param: { id: worker.terminalId } })
+            .catch(() => {})
+        }
 
         let removed = false
         let reason: string | undefined
@@ -459,18 +445,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           await restoreCardToTodo()
         } else {
           // Soft remove kept a dirty/locked tree — keep the tile, offer force.
-          setRetained((prev) => new Map(prev).set(worker.terminalId, reason || 'retained'))
+          setRetainedByWorktree((prev) => new Map(prev).set(worker.worktree, reason || 'retained'))
         }
       } finally {
-        setBusyIds((prev) => {
-          if (!prev.has(worker.terminalId)) return prev
+        setBusyWorktrees((prev) => {
+          if (!prev.has(worker.worktree)) return prev
           const s = new Set(prev)
-          s.delete(worker.terminalId)
+          s.delete(worker.worktree)
           return s
         })
       }
     },
-    [busyIds, project.path, project.id, t],
+    [busyWorktrees, project.path, t],
   )
 
   // Launch the single supply (補給官) session: POST /api/swarm/supply spawns a
@@ -702,14 +688,15 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // A worker restart REUSES the existing worktree (passed back to /api/swarm/worker
   // as `worktree`), so the same swarm/* branch + its in-progress work is preserved
   // and NO orphan worktree / twin branch is created — claude just re-boots in place
-  // and re-runs its /order goal. We swap the worker entry's terminalId (branch /
-  // worktree stay) and clear the dead id's bookkeeping. Manual workers only — an
-  // engine worker's lifecycle is the orchestrator's (read-only here).
+  // and re-runs its /order goal. We optimistically record the fresh terminalId
+  // (pendingRestarts) so the tile re-mounts before the next poll, and clear the
+  // dead id's bookkeeping. Manual (non-engine-owned) workers only — an engine
+  // worker's lifecycle is the orchestrator's (read-only here).
   const restartWorker = useCallback(
-    async (worker: SwarmWorker) => {
-      if (busyIds.has(worker.terminalId)) return
+    async (worker: SwarmWorkerRecord) => {
+      if (busyWorktrees.has(worker.worktree)) return
       const old = worker.terminalId
-      setBusyIds((prev) => new Set(prev).add(old))
+      setBusyWorktrees((prev) => new Set(prev).add(worker.worktree))
       setError(null)
       try {
         // Best-effort kill the old PTY first (see restartSupply). The worktree is
@@ -722,8 +709,11 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           body: JSON.stringify({
             path: project.path,
             // Goal source: the Board card when we have one (live title/notes),
-            // else the remembered title (a curl-spawned worker without a card).
-            ...(worker.taskId ? { taskId: worker.taskId } : { title: worker.taskTitle }),
+            // else the worker's remembered one-liner/branch (a curl-spawned
+            // worker without a card — there is no title to recover otherwise).
+            ...(worker.taskId
+              ? { taskId: worker.taskId }
+              : { title: worker.taskTitle || worker.note || worker.branch }),
             // Reuse the SAME worktree — relaunch in place, don't fork a new tree.
             worktree: worker.worktree,
           }),
@@ -733,21 +723,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           throw new Error(body?.error || `HTTP ${res.status}`)
         }
         const spawn = (await res.json()) as SpawnSwarmWorkerResponse
-        setWorkers((prev) => {
-          const next = prev.map((w) =>
-            w.terminalId === old
-              ? {
-                  ...w,
-                  terminalId: spawn.terminalId,
-                  branch: spawn.branch,
-                  worktree: spawn.worktree,
-                  startedAt: new Date().toISOString(),
-                }
-              : w,
-          )
-          saveWorkers(project.id, next)
-          return next
-        })
+        setPendingRestarts((prev) => new Map(prev).set(worker.worktree, spawn.terminalId))
         forgetPty(old, spawn.terminalId)
       } catch (e) {
         setError(
@@ -756,15 +732,15 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           }),
         )
       } finally {
-        setBusyIds((prev) => {
-          if (!prev.has(old)) return prev
+        setBusyWorktrees((prev) => {
+          if (!prev.has(worker.worktree)) return prev
           const s = new Set(prev)
-          s.delete(old)
+          s.delete(worker.worktree)
           return s
         })
       }
     },
-    [busyIds, project.path, project.id, forgetPty, t],
+    [busyWorktrees, project.path, forgetPty, t],
   )
 
   // ── The SINGLE master power switch (条件: 単一の開始/停止スイッチ) ────────────
@@ -794,15 +770,19 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   )
 
   // ── The SINGLE worker source both tabs render ────────────────────────────
-  // Fold the manual registry and the engine's own workers into ONE deduped list
-  // (PTY id; manual wins). The worker TAB maps this for its tiles and the manager
-  // DASHBOARD gets the same set projected to its row shape — so the two views can
-  // never disagree and the worker tab is never empty while the engine has workers.
-  const allWorkers = mergeSwarmWorkers(workers, engine.workers)
-
-  // Lookup back to the full manual SwarmWorker (worktree + taskId) for the tile's
-  // terminate path — engine workers have no entry here (read-only tiles).
-  const manualByPty = new Map(workers.map((w) => [w.terminalId, w]))
+  // realWorkers (GET /api/swarm/workers) is the server-truth roster — every
+  // worker, however it was started, shows up here. `stage` is set ONLY on an
+  // engine-tracked worker (see swarmWorkerRegistry.ts) — its presence is what
+  // makes a tile read-only, exactly as the old `source: 'engine'` did.
+  // Filter confirmed-removed worktrees and overlay an in-flight restart's fresh
+  // terminalId (both optimistic — see the reconcile effect above), so the tab
+  // reflects an action immediately instead of waiting up to 5s for the next poll.
+  const allWorkers = realWorkers
+    .filter((w) => !removedWorktrees.has(w.worktree))
+    .map((w) => {
+      const pendingId = pendingRestarts.get(w.worktree)
+      return pendingId && pendingId !== w.terminalId ? { ...w, terminalId: pendingId } : w
+    })
 
   // OFF / first-run: the swarm is FULLY idle — the engine isn't running and no
   // supply / commander / worker session exists. In that state we replace the tab
@@ -1075,13 +1055,15 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           // its minimum so only the horizontal bar ever shows.
           <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
             {allWorkers.map((w) => {
-              // Manual workers are terminable (they own their worktree); engine
-              // workers are read-only here (the engine owns their lifecycle).
-              // Look the full manual entry up for the terminate path.
-              const manual = w.source === 'manual' ? manualByPty.get(w.terminalId) : undefined
+              // Engine-tracked workers (stage present — see swarmWorkerRegistry.ts)
+              // are read-only here (the orchestrator owns their lifecycle); every
+              // other worker — engine-dispatch-independent: curl-direct or a UI
+              // restart — is terminable/restartable, matching the old
+              // 'manual'/'engine' distinction but keyed off server truth now.
+              const isEngine = w.stage !== undefined
               return (
                 <div
-                  key={w.terminalId}
+                  key={w.worktree}
                   className="h-full overflow-hidden"
                   // Grow to fill when few, but never shrink below MIN_TILE_WIDTH ×
                   // MIN_TILE_HEIGHT; the explicit min-width also overrides flex's
@@ -1095,15 +1077,15 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                   <SwarmWorkerPane
                     terminalId={w.terminalId}
                     branch={w.branch}
-                    taskTitle={w.taskTitle}
-                    status={statusOfPty(w.terminalId)}
-                    source={w.source}
-                    retainedReason={manual ? retained.get(w.terminalId) : undefined}
-                    busy={manual ? busyIds.has(w.terminalId) : false}
-                    onExit={() => handleExit(w.terminalId)}
-                    onRestart={manual ? () => void restartWorker(manual) : undefined}
-                    onTerminate={manual ? () => void terminate(manual) : undefined}
-                    onForceRemove={manual ? () => void terminate(manual, { force: true }) : undefined}
+                    taskTitle={w.taskTitle ?? w.note ?? ''}
+                    status={w.terminalId ? statusOfPty(w.terminalId) : 'exited'}
+                    source={isEngine ? 'engine' : 'manual'}
+                    retainedReason={!isEngine ? retainedByWorktree.get(w.worktree) : undefined}
+                    busy={!isEngine ? busyWorktrees.has(w.worktree) : false}
+                    onExit={() => w.terminalId && handleExit(w.terminalId)}
+                    onRestart={!isEngine ? () => void restartWorker(w) : undefined}
+                    onTerminate={!isEngine ? () => void terminate(w) : undefined}
+                    onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
                   />
                 </div>
               )

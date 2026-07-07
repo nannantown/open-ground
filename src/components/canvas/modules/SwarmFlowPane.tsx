@@ -138,6 +138,7 @@ const ANOMALY_LABEL: Record<EngineAnomaly['kind'], MessageKey> = {
   'orphan-doing': 'projectPanel.swarm.manager.anomalyOrphanDoing',
   'worktree-missing': 'projectPanel.swarm.manager.anomalyWorktreeMissing',
   'worker-stale': 'projectPanel.swarm.manager.anomalyWorkerStale',
+  'no-heartbeat': 'projectPanel.swarm.flow.anomalyNoHeartbeat',
   'move-stuck': 'projectPanel.swarm.manager.anomalyMoveStuck',
   'rework-exhausted': 'projectPanel.swarm.flow.anomalyReworkExhausted',
 }
@@ -560,7 +561,7 @@ const FatalRow = ({ fatal, nowMs, t }: { fatal: FlowFatal; nowMs: number; t: TFn
 const anomalyText = (a: EngineAnomaly, t: TFn): string => {
   const base = t(ANOMALY_LABEL[a.kind])
   const branch = a.branch ? ` · ${a.branch}` : ''
-  if (a.kind === 'worker-stale' && typeof a.staleMinutes === 'number') {
+  if ((a.kind === 'worker-stale' || a.kind === 'no-heartbeat') && typeof a.staleMinutes === 'number') {
     return `${base} (${t('projectPanel.swarm.manager.anomalyStaleFor', { min: a.staleMinutes })})${branch}`
   }
   if (a.kind === 'move-stuck' && a.intent) {

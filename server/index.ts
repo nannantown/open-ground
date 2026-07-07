@@ -11,7 +11,7 @@
 
 import { serve } from '@hono/node-server'
 import { app } from './app'
-import { pruneOldAttachments, pruneOldRunFiles, RAW_RETENTION_DAYS } from '@/lib/server/retention'
+import { pruneOldAttachments, pruneOldRunFiles, sweepCrossRepoResidue, RAW_RETENTION_DAYS } from '@/lib/server/retention'
 import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/server/swarmEscalations'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
@@ -71,6 +71,23 @@ void (async () => {
       console.log(
         `[openground:hono] retention(${RAW_RETENTION_DAYS}d): pruned ${removedRuns} run files, ${removedFiles} attachments; ` +
           `escalations(${ESCALATION_RETENTION_DAYS}d): pruned ${removedEscalations} resolved`,
+      )
+    }
+    // Cross-repo residue sweep — ghost heartbeats / orphan central worktrees /
+    // unregistered data dirs. Repo-agnostic on purpose: the per-repo janitor
+    // only runs while a cockpit is open in that repo, so leftovers in repos the
+    // user stopped opening would otherwise linger forever.
+    const residue = await sweepCrossRepoResidue().catch(() => null)
+    if (
+      residue &&
+      (residue.heartbeats.removedFiles.length ||
+        residue.heartbeats.removedDirs.length ||
+        residue.worktrees.removed.length)
+    ) {
+      console.log(
+        `[openground:hono] residue sweep: removed ${residue.heartbeats.removedFiles.length} ghost heartbeat(s), ` +
+          `${residue.heartbeats.removedDirs.length} empty heartbeat dir(s), ` +
+          `${residue.worktrees.removed.length} orphan worktree dir(s)`,
       )
     }
   } catch (e) {

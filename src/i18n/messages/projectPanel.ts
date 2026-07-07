@@ -293,6 +293,7 @@ export const projectPanel = {
     'projectPanel.swarm.flow.merged': '{count} merged',
     'projectPanel.swarm.flow.fatalHeading': 'Needs attention',
     'projectPanel.swarm.flow.anomalyReworkExhausted': 'Card retried too many times — parked in Blocked',
+    'projectPanel.swarm.flow.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
     // Fatal-event labels (条件3) — the five escalation events the safety valve
     // (card 6fe48c1f) persists. Three come from the swarm engine, two from the
     // Electron self-update cycle. The server `detail` (Japanese) rides as a
@@ -879,6 +880,7 @@ export const projectPanel = {
     'projectPanel.swarm.flow.merged': '{count} 件統合',
     'projectPanel.swarm.flow.fatalHeading': '要注意',
     'projectPanel.swarm.flow.anomalyReworkExhausted': 'リトライ上限超過 — blocked に退避',
+    'projectPanel.swarm.flow.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
     // 致命イベントのラベル（条件3）— 安全弁（カード 6fe48c1f）が永続化する5つの
     // エスカレーションイベント。3つは swarm エンジン由来、2つは Electron 自己更新
     // サイクル由来。サーバの detail（日本語）は副行に出し、ここでは何が起きたかを

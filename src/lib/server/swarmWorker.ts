@@ -116,6 +116,19 @@ const flattenOneLine = (s: string): string =>
  *  line (flattenOneLine strips control bytes + collapses newlines, so even a
  *  multi-line tsc tail stays a single slash-command argument); omitted entirely
  *  when there is no prior failure (a first dispatch is byte-for-byte unchanged). */
+/** Worker discipline, burned into EVERY spawn prompt — defense-in-depth over
+ *  the guard's exit-2 veto (which now blanket-denies `git push` for policed
+ *  sessions). 2e7beb2 was a worker following the /order skill's §4 integration
+ *  steps ("FF 可 → git push origin <branch>:main" — written for the COMMANDER)
+ *  instead of §6's worker rules, with zero heartbeats — so the order itself
+ *  now states the worker contract explicitly: no push of any shape, commit +
+ *  beat ready + STOP, integration belongs to the commander, and heartbeats are
+ *  mandatory (30 min of none is flagged as an anomaly). Single line, same
+ *  slash-command-argument constraint as the goal text. Exported so tests pin
+ *  the exact contract. */
+export const WORKER_ORDER_RULES =
+  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。実装→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。'
+
 export const buildOrderInjection = (title: string, notes?: string, priorFailure?: string): string => {
   const t = flattenOneLine(title || '')
   const n = flattenOneLine(notes || '')
@@ -124,7 +137,7 @@ export const buildOrderInjection = (title: string, notes?: string, priorFailure?
   const learn = pf
     ? ` 【前回の差し戻し理由・同じ失敗を繰り返さないこと】${pf}`
     : ''
-  return ORDER_PREFIX + goal + learn
+  return ORDER_PREFIX + goal + learn + WORKER_ORDER_RULES
 }
 
 // NOTE on delivery: the /order goal is handed to claude as its POSITIONAL

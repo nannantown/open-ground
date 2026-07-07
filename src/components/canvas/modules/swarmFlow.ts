@@ -6,7 +6,7 @@
 //
 // WHY a separate module (not inlined in the pane): keeping the stage / liveness /
 // fatal mappings React-free makes them unit-testable without a DOM — the same
-// split useSwarmEngine already uses for its pure mergeSwarmWorkers / planSwarmPower.
+// split useSwarmEngine already uses for its pure planSwarmPower.
 // The pane is then a thin render over these.
 //
 // FATAL EVENTS (条件3): the escalation safety valve (card 6fe48c1f, NOW merged)

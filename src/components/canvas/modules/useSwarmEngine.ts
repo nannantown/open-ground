@@ -1,16 +1,16 @@
 // useSwarmEngine — the SINGLE source of the commander engine's state for the
 // Swarm surface. It owns the one orchestrator poll + the start/stop/automerge
-// actions, and exposes a PURE merge (`mergeSwarmWorkers`) that folds the manual
-// worker registry and the engine's own workers into ONE deduped list.
+// actions, and polls the SERVER-TRUTH worker list (`realWorkers`, from
+// GET /api/swarm/workers) that both Swarm sub-views render.
 //
 // WHY this lives here, not inside SwarmManagerPane: both Swarm sub-views need the
-// engine's workers — the manager dashboard (its monitor) AND the worker tab (its
-// tiles). Polling + merging in the manager pane left the worker tab blind to
-// engine-spawned workers (it only knew the localStorage registry), so the worker
-// tab showed an empty state while the engine had live workers. Hoisting the poll
-// to SwarmModule (which calls this hook ONCE) and passing the merged list down to
-// BOTH views makes the two tabs a single source of truth — no second poll, no
-// second merge, deduped by PTY id. The orchestrator route is unchanged.
+// workers — the manager dashboard (its monitor) AND the worker tab (its tiles).
+// Polling in the manager pane left the worker tab blind to engine-spawned
+// workers, so the poll is hoisted to SwarmModule (which calls this hook ONCE) and
+// the list passed down to BOTH views — a single source of truth, no second poll.
+// The list is unified SERVER-side (src/lib/server/swarmWorkerRegistry.ts: live
+// PTYs + the engine roster + heartbeat files), so a worker started ANY way shows
+// up — the client-side manual-registry merge this hook used to own is gone.
 //
 // The hook DEGRADES GRACEFULLY when the orchestrator route isn't there (a 404 →
 // available:false + DEFAULT_ENGINE, never a scary error) — the same contract the
@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
+import type { SwarmWorkerRecord } from '@/lib/types'
 
 // ── Engine contract (mirrors the server's SwarmOrchestratorState) ─────────────
 // Kept as a LOCAL mirror (not imported from src/lib/types.ts) on purpose: the
@@ -89,6 +90,7 @@ export type EngineAnomalyKind =
   | 'orphan-doing'
   | 'worktree-missing'
   | 'worker-stale'
+  | 'no-heartbeat'
   | 'move-stuck'
   | 'rework-exhausted'
 
@@ -98,7 +100,8 @@ export interface EngineAnomaly {
   ref: string
   branch?: string
   taskTitle?: string
-  /** 'worker-stale' only — minutes since the last heartbeat (display-only). */
+  /** 'worker-stale' — minutes since the last heartbeat; 'no-heartbeat' —
+   *  minutes since dispatch with zero beats (display-only). */
   staleMinutes?: number
   /** 'move-stuck' only — WHICH column move is stuck ('review' = a finished worker
    *  stuck in doing, 'done' = a landed branch stuck in review, 'recover' = a lost
@@ -459,74 +462,39 @@ export const sanitizeFatalNotifications = (raw: unknown): SwarmFatalView[] => {
   return out
 }
 
-// ── Unified worker view (the single source both Swarm tabs render) ────────────
-// The manual registry entry SwarmModule persists in localStorage. Kept minimal —
-// just the fields the merge needs (the full SwarmWorker adds startedAt).
-export interface ManualWorkerInput {
-  terminalId: string
-  branch: string
-  worktree: string
-  taskId?: string
-  taskTitle: string
-}
+const KNOWN_ORCH_STAGES: ReadonlySet<string> = new Set(['starting', 'running', 'done'])
 
-/** One worker as BOTH Swarm tabs see it. `source` distinguishes a manually
- *  dispatched worker (terminable from the worker tab — it owns the worktree)
- *  from one the autonomous engine spawned (read-only here; the engine owns its
- *  lifecycle, exactly as the manager monitor already treated it). */
-export interface SwarmWorkerView {
-  terminalId: string
-  branch: string
-  taskTitle: string
-  source: 'manual' | 'engine'
-  /** Manual workers only — the worktree path the terminate path tears down.
-   *  Engine workers don't expose it (the engine tears its own down). */
-  worktree?: string
-  taskId?: string
-  /** The engine's reported stage (engine source only). Manual workers derive
-   *  their stage from the live PTY poll at render — see SwarmModule. */
-  engineStage?: ManagerWorkerStage
-  /** Heartbeat passthrough (engine source only, display-only, 条件3) — the
-   *  worker's self-reported phase + one-line summary. Absent for manual workers
-   *  (the engine doesn't read their heartbeat) and until a worker beats. */
-  phase?: string
-  note?: string
-}
-
-/** Fold the manual registry and the engine's own workers into ONE list, deduped
- *  by PTY id (manual wins on a collision — it carries the worktree the terminate
- *  path needs). Manual workers come first (the order the user dispatched them),
- *  then engine workers the manual registry doesn't know. PURE — no React, no
- *  fetch — so the single-source invariant is unit-testable (see the test). */
-export const mergeSwarmWorkers = (
-  manual: readonly ManualWorkerInput[],
-  engineWorkers: readonly EngineWorker[],
-): SwarmWorkerView[] => {
-  const out: SwarmWorkerView[] = []
-  const seen = new Set<string>()
-  for (const w of manual) {
-    if (seen.has(w.terminalId)) continue // a forged dup id in localStorage — keep first
-    seen.add(w.terminalId)
+// GET /api/swarm/workers is the SERVER-TRUTH worker list (project_swarm_worker_registry):
+// live PTYs + the engine's own roster + heartbeat files, already unified server-side —
+// see src/lib/server/swarmWorkerRegistry.ts. Untrusted like every other route response,
+// so coerce every field and drop a row with no identifiable worktree/branch rather than
+// letting a bad shape crash the render.
+export const sanitizeSwarmWorkers = (raw: unknown): SwarmWorkerRecord[] => {
+  if (!raw || typeof raw !== 'object') return []
+  const arr = (raw as Record<string, unknown>).workers
+  if (!Array.isArray(arr)) return []
+  const out: SwarmWorkerRecord[] = []
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    if (typeof o.worktree !== 'string' || !o.worktree) continue
+    if (typeof o.branch !== 'string' || !o.branch) continue
     out.push({
-      terminalId: w.terminalId,
-      branch: w.branch,
-      taskTitle: w.taskTitle,
-      source: 'manual',
-      worktree: w.worktree,
-      taskId: w.taskId,
-    })
-  }
-  for (const ew of engineWorkers) {
-    if (seen.has(ew.terminalId)) continue // manual wins on a PTY-id collision
-    seen.add(ew.terminalId)
-    out.push({
-      terminalId: ew.terminalId,
-      branch: ew.branch,
-      taskTitle: ew.taskTitle,
-      source: 'engine',
-      engineStage: ew.stage,
-      ...(ew.phase ? { phase: ew.phase } : {}),
-      ...(ew.note ? { note: ew.note } : {}),
+      worktree: o.worktree,
+      branch: o.branch,
+      ...(typeof o.terminalId === 'string' && o.terminalId ? { terminalId: o.terminalId } : {}),
+      ...(typeof o.taskId === 'string' && o.taskId ? { taskId: o.taskId } : {}),
+      ...(typeof o.taskTitle === 'string' && o.taskTitle ? { taskTitle: o.taskTitle } : {}),
+      ...(typeof o.startedAt === 'string' && o.startedAt ? { startedAt: o.startedAt } : {}),
+      ...(typeof o.stage === 'string' && KNOWN_ORCH_STAGES.has(o.stage)
+        ? { stage: o.stage as SwarmWorkerRecord['stage'] }
+        : {}),
+      ...(typeof o.phase === 'string' && o.phase ? { phase: o.phase } : {}),
+      ...(typeof o.note === 'string' && o.note ? { note: o.note } : {}),
+      ...(typeof o.heartbeatAt === 'string' && o.heartbeatAt ? { heartbeatAt: o.heartbeatAt } : {}),
+      ...(o.ready === true ? { ready: true } : {}),
+      ...(o.blocked === true ? { blocked: true } : {}),
+      ...(typeof o.blockers === 'string' && o.blockers ? { blockers: o.blockers } : {}),
     })
   }
   return out
@@ -598,6 +566,11 @@ export interface UseSwarmEngine {
    *  safety valve's authoritative source, polled on the same cadence as `engine`.
    *  Empty until the owner-only route answers (a 403 / 404 / throw → empty). */
   fatalNotifications: SwarmFatalView[]
+  /** The SERVER-TRUTH worker list (GET /api/swarm/workers, polled on the same
+   *  cadence) — the single source the Swarm worker tab renders, so a worker
+   *  started ANY way (engine dispatch, the Board 実行 button, or a direct
+   *  `POST /api/swarm/worker`) shows up. Empty until the route answers. */
+  realWorkers: SwarmWorkerRecord[]
   /** Whether the orchestrator route answered at all (false = not built / offline:
    *  the dashboard switches dim instead of firing a POST that 404s). */
   available: boolean
@@ -641,6 +614,9 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // Persisted fatal-event notifications for THIS project (条件3), polled alongside
   // the engine state in the same poll loop below (one interval, two endpoints).
   const [fatalNotifications, setFatalNotifications] = useState<SwarmFatalView[]>([])
+  // The server-truth worker list, polled alongside the engine state (one
+  // interval, three endpoints) so the worker tab never needs a second poll.
+  const [realWorkers, setRealWorkers] = useState<SwarmWorkerRecord[]>([])
   const [available, setAvailable] = useState(false)
   // A start/stop or auto-merge round-trip is in flight — disables both switches.
   const [busy, setBusy] = useState(false)
@@ -655,6 +631,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   useEffect(() => {
     setEngine(DEFAULT_ENGINE)
     setFatalNotifications([])
+    setRealWorkers([])
     setAvailable(false)
     setBusy(false)
     setError(null)
@@ -719,6 +696,16 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
         }
       } catch {
         if (!cancelled) setFatalNotifications([])
+      }
+      // 3) The SERVER-TRUTH worker list (GET /api/swarm/workers) — independent of
+      //    the two fetches above, same owner-gated / non-ok-degrades-to-empty
+      //    contract. Polled here (not a second interval) so the worker tab and
+      //    the manager dashboard share this one snapshot too.
+      try {
+        const res = await fetch(`/api/swarm/workers?path=${encodeURIComponent(projectPath)}`)
+        if (!cancelled) setRealWorkers(res.ok ? sanitizeSwarmWorkers(await res.json()) : [])
+      } catch {
+        if (!cancelled) setRealWorkers([])
       }
     }
     // The effect re-runs when `busy` flips (it's a dep so the interval closure
@@ -936,6 +923,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   return {
     engine,
     fatalNotifications,
+    realWorkers,
     available,
     busy,
     error,

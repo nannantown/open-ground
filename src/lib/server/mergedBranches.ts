@@ -55,8 +55,33 @@ const tipRefOf = async (cwd: string, branch: string): Promise<string | null> => 
   return null
 }
 
-/** merge-base --is-ancestor verdict. Exit 0 = ancestor (merged), exit 1 =
- *  not an ancestor (open); anything else (bad ref, no git) = unknown. */
+/** Fallback for a branch that landed via REBASE or SQUASH: its commits get new
+ *  SHAs, so `merge-base --is-ancestor` (identity-based) says "not an ancestor"
+ *  forever even though every change already landed. `git cherry <target> <tip>`
+ *  compares by PATCH-ID instead — a '+' line is a commit whose patch is absent
+ *  from target; zero '+' lines means every commit in tip already exists (as an
+ *  equivalent patch) in target. Returns false (never guess merged) if the
+ *  command itself fails. */
+const noUnmergedPatches = async (
+  cwd: string,
+  tip: string,
+  target: string,
+): Promise<boolean> => {
+  try {
+    const { stdout } = await execFile('git', ['cherry', target, tip], { cwd, ...GIT_OPTS })
+    return stdout
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .every((l) => !l.startsWith('+'))
+  } catch {
+    return false
+  }
+}
+
+/** merge-base --is-ancestor verdict, with a patch-id fallback for rebase/squash
+ *  branches. Exit 0 = ancestor (merged), exit 1 = not an ancestor — then tried
+ *  against `noUnmergedPatches` before settling on 'open'; anything else (bad
+ *  ref, no git) = unknown. */
 const isAncestor = async (
   cwd: string,
   tip: string,
@@ -67,7 +92,8 @@ const isAncestor = async (
     return 'merged'
   } catch (e: unknown) {
     const code = (e as { code?: unknown })?.code
-    return code === 1 ? 'open' : 'unknown'
+    if (code !== 1) return 'unknown'
+    return (await noUnmergedPatches(cwd, tip, target)) ? 'merged' : 'open'
   }
 }
 

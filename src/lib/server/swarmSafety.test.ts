@@ -405,8 +405,9 @@ describe('INVARIANT B — removeSwarmWorktree never deletes outside the central 
 // INVARIANT E — the PreToolUse guard (scripts/openground-guard.js, A3/L4) is
 // the ONE deterministic veto --dangerously-skip-permissions cannot override:
 // in a guarded session (OPENGROUND_GUARD=1 / SWARM_MANAGER=1) the destructive
-// classes — rm -rf outside the write roots, git force-push in every spelling,
-// writes outside the roots — and every recognizable evasion route into them
+// classes — rm -rf outside the write roots, git push in EVERY shape (a worker
+// never integrates — 2e7beb2), writes outside the roots — and every
+// recognizable evasion route into them
 // (computed commands, eval/sh -c, alias definitions, pipe-to-interpreter,
 // unparseable input) exit 2. exit 1 is NEVER produced: Claude Code treats 1 as
 // a non-blocking hook error and would let the tool call through (the trap the
@@ -463,6 +464,16 @@ describe('INVARIANT E — PreToolUse guard: deterministic exit-2 veto (A3/L4)', 
       [workerEnv, bash('rm -fr /etc/hosts'), 'deny', 'rm -fr (flag order)'],
       [workerEnv, bash('rm --recursive --force /tmp2'), 'deny', 'rm --recursive outside'],
       [workerEnv, bash('cd /etc && rm -rf conf.d'), 'deny', 'cd outside + relative rm -rf'],
+      // git push — a WORKER never pushes, ANY shape (2e7beb2: a heartbeat-less
+      // worker ran `git push origin HEAD:main` and integrated itself past the
+      // commander's re-verify; the old force-only vetting allowed every plain
+      // push to origin). Integration is the commander's job — the worker
+      // commits locally, beats ready, stops.
+      [workerEnv, bash('git push origin HEAD:main'), 'deny', 'plain FF push to main (the 2e7beb2 bypass)'],
+      [workerEnv, bash('git push origin main'), 'deny', 'plain push to main'],
+      [workerEnv, bash('git push'), 'deny', 'bare push (default remote)'],
+      [workerEnv, bash('git push origin swarm/a3-x'), 'deny', 'push even of the worker\'s own swarm branch'],
+      [workerEnv, bash('git push origin HEAD:swarm/a3-x'), 'deny', 'src:dst push to swarm/*'],
       [workerEnv, bash('git push --force origin main'), 'deny', 'push --force'],
       [workerEnv, bash('git push -f origin main'), 'deny', 'push -f'],
       [workerEnv, bash('git push --force-with-lease origin main'), 'deny', 'force-with-lease'],
@@ -472,7 +483,13 @@ describe('INVARIANT E — PreToolUse guard: deterministic exit-2 veto (A3/L4)', 
       [workerEnv, bash('git push origin :main'), 'deny', ':ref deletion'],
       [workerEnv, bash('git push origin --delete main'), 'deny', '--delete ref'],
       [workerEnv, bash('git push evil-remote main'), 'deny', 'non-origin remote'],
+      [workerEnv, bash('git push openground v1.2.3'), 'deny', 'release-shape push (manager-only op)'],
       [workerEnv, bash('git -C /other/repo push --force'), 'deny', 'git -C … push --force'],
+      [workerEnv, bash('git -C /other/repo push origin main'), 'deny', 'git -C … plain push'],
+      [workerEnv, bash('git send-pack origin main'), 'deny', 'send-pack (push plumbing)'],
+      [workerEnv, bash('git http-push https://x/r main'), 'deny', 'http-push (push plumbing)'],
+      [workerEnv, bash('git svn dcommit'), 'deny', 'git-svn dcommit (outbound write)'],
+      [workerEnv, bash('npm test && git push origin HEAD:main'), 'deny', 'push chained after tests'],
       [workerEnv, bash('git reset --hard HEAD~3'), 'deny', 'reset --hard'],
       [workerEnv, bash('git clean -fdx'), 'deny', 'clean -fdx'],
       [workerEnv, bash('git checkout -- .'), 'deny', 'checkout -- .'],
@@ -523,9 +540,11 @@ describe('INVARIANT E — PreToolUse guard: deterministic exit-2 veto (A3/L4)', 
       [workerEnv, bash('git commit -m "never rm -rf / in prod"'), 'allow', 'commit msg mentions rm -rf'],
       [workerEnv, bash('git commit -m "$(date)"'), 'allow', 'commit with harmless $()'],
       [workerEnv, bash('echo "git push --force is forbidden"'), 'allow', 'echo mentions force-push'],
-      [workerEnv, bash('git push origin swarm/a3-x'), 'allow', 'plain push to swarm branch'],
-      [workerEnv, bash('git push origin HEAD:swarm/a3-x'), 'allow', 'src:dst push'],
+      // (plain `git push origin swarm/*` was allowed here pre-2e7beb2 — a worker
+      // now NEVER pushes; those spellings moved to the E1 deny table.)
       [workerEnv, bash('git fetch origin main && git rebase origin/main'), 'allow', 'fetch+rebase'],
+      [workerEnv, bash('git pull --rebase origin main'), 'allow', 'pull --rebase (read+local)'],
+      [workerEnv, bash('git svn fetch'), 'allow', 'git-svn fetch (read)'],
       [workerEnv, bash('git merge-base --is-ancestor origin/main HEAD'), 'allow', 'merge-base'],
       [workerEnv, bash('git checkout -b swarm/x origin/main'), 'allow', 'checkout -b'],
       [workerEnv, bash('git restore --staged a.ts'), 'allow', 'restore --staged'],
@@ -669,6 +688,12 @@ describe('INVARIANT E — PreToolUse guard: deterministic exit-2 veto (A3/L4)', 
 
     const forcePush = runGuard(bash('git push --force origin main'), workerEnv)
     expect(forcePush.code).toBe(2)
+
+    // The 2e7beb2 bypass shape — a PLAIN FF push must exit 2 for a worker too
+    // (the process contract, not just the in-process verdict).
+    const plainPush = runGuard(bash('git push origin HEAD:main'), workerEnv)
+    expect(plainPush.code).toBe(2)
+    expect(plainPush.stderr).toMatch(/forbidden in a worker session/)
 
     const allowed = runGuard(bash('npm test'), workerEnv)
     expect(allowed.code).toBe(0)
@@ -862,17 +887,18 @@ describe('INVARIANT E — PreToolUse guard: deterministic exit-2 veto (A3/L4)', 
   it('E16 — a WORKER cannot push to the public distribution remote in ANY shape (release is the human commander\'s job; the manager is an unpoliced no-op — see E18)', () => {
     // Under worker-only scoping the release-runbook SHAPE enforcement moved off the
     // guard: the manager that runs releases is trusted + unpoliced (E18), so the
-    // guard no longer arbitrates its refspecs. What the guard DOES still guarantee
-    // is that a confined WORKER can never touch the public distribution remote —
-    // every push to `openground` is denied before any shape check.
+    // guard no longer arbitrates its refspecs. Since the 2e7beb2 fix a worker
+    // cannot push AT ALL (E1), which subsumes the openground-remote cases below —
+    // kept as belt-and-braces pins so a future re-scoping of the blanket ban
+    // could never silently reopen the public distribution remote.
     table([
       [workerEnv, bash('git push openground abc123def:main'), 'deny', 'worker: sha FF to openground'],
       [workerEnv, bash('git push openground v1.2.3'), 'deny', 'worker: release tag to openground'],
       [workerEnv, bash('git push openground abc:main'), 'deny', 'worker: any push to openground'],
       [workerEnv, bash('git push --force openground abc:main'), 'deny', 'worker: force to openground'],
       [workerEnv, bash('git push openground "$SNAP:main"'), 'deny', 'worker: computed refspec to openground'],
-      // a worker's normal push to its OWN swarm branch on origin stays allowed
-      [workerEnv, bash('git push origin HEAD:swarm/w1-x'), 'allow', 'worker: push its swarm branch to origin'],
+      // (pre-2e7beb2 a worker could push its own swarm/* branch to origin;
+      // that spelling now lives in the E1 deny table with the rest.)
     ])
   })
 

@@ -1012,6 +1012,53 @@ export interface OrchestratorWorker {
   reworkAt?: string
 }
 
+/** One row of GET /api/swarm/workers — the SERVER-TRUTH worker list. Built by
+ *  cross-referencing three sources the server itself owns (live PTYs in the
+ *  terminal pool, the commander engine's own dispatch records, and the
+ *  heartbeat files `swarm-beat.sh` writes) so a worker started ANY way —
+ *  engine dispatch, the Board 実行 button, or a direct
+ *  `POST /api/swarm/worker` (curl / an external caller) — shows up the same
+ *  way. Identity is the worktree path (one worker per isolated worktree);
+ *  `terminalId` is present only while its `claude` PTY is still alive, so its
+ *  absence is exactly the "dead worker" case the restart affordance targets. */
+export interface SwarmWorkerRecord {
+  /** Absolute path of the worker's isolated worktree — the stable identity. */
+  worktree: string
+  /** The `swarm/*` branch checked out there. */
+  branch: string
+  /** The worker's `claude` PTY id, present only while that PTY is alive. */
+  terminalId?: string
+  /** The Board card this worker drains, when known (engine-dispatched, or a
+   *  curl caller that passed `taskId`). */
+  taskId?: string
+  /** The card title at dispatch time, when known — display-only. */
+  taskTitle?: string
+  /** ISO timestamp the engine dispatched it — absent for a worker the engine
+   *  never tracked in memory (a curl-direct spawn). */
+  startedAt?: string
+  /** Coarse lifecycle stage — present ONLY for a worker the commander engine
+   *  is actively tracking; its absence marks a worker outside engine
+   *  ownership (curl-direct or a UI restart), which is what makes it
+   *  terminable/restartable from the Swarm worker tab. */
+  stage?: OrchestratorWorkerStage
+  /** The worker's self-reported heartbeat phase (swarm-beat.sh), display-only. */
+  phase?: string
+  /** The worker's one-line heartbeat summary, display-only. */
+  note?: string
+  /** ISO timestamp of the worker's latest heartbeat, display-only. */
+  heartbeatAt?: string
+  /** It declared itself integration-ready (heartbeat readyToMerge). */
+  ready?: boolean
+  /** It explicitly reported a blocker / a blocked phase. */
+  blocked?: boolean
+  /** The raw blockers text, when non-empty. */
+  blockers?: string
+}
+
+export interface SwarmWorkersResponse {
+  workers: SwarmWorkerRecord[]
+}
+
 /** One human-readable line of the commander engine's drain/dispatch journal —
  *  rendered by the (separate) Swarm UI card so the owner can watch the engine
  *  reason about the queue. A ring buffer capped server-side. */
@@ -1081,6 +1128,14 @@ export interface OrchestratorReview {
  *                         may run but its work tree is gone.
  *   - 'worker-stale'    — a counted, still-alive worker has not beat its
  *                         heartbeat for a long time (likely stuck / hung).
+ *   - 'no-heartbeat'    — a counted, alive worker STREAMING output (so never
+ *                         'worker-stale', which respects PTY activity) that has
+ *                         NEVER beaten a heartbeat since dispatch. Not hung — a
+ *                         PROTOCOL violation: running full speed while invisible
+ *                         to the commander's heartbeat view. The 2e7beb2 bypass
+ *                         ran exactly like this (zero beats, then pushed main);
+ *                         the guard's push ban is the hard stop, this is the
+ *                         observability that a worker went dark-but-active.
  *   - 'move-stuck'      — a Board COLUMN MOVE kept failing (the write was rejected
  *                         / errored) past the retry budget, so the work happened
  *                         but the card couldn't follow it: a worker finished but
@@ -1095,6 +1150,7 @@ export type OrchestratorAnomalyKind =
   | 'orphan-doing'
   | 'worktree-missing'
   | 'worker-stale'
+  | 'no-heartbeat'
   | 'move-stuck'
   | 'rework-exhausted'
 
@@ -1108,8 +1164,9 @@ export interface OrchestratorAnomaly {
   branch?: string
   /** The card title involved, when known (display-only). */
   taskTitle?: string
-  /** For 'worker-stale': minutes since the last heartbeat (display-only, so the
-   *  pane can say "no heartbeat for N min" without a second clock). */
+  /** For 'worker-stale': minutes since the last heartbeat; for 'no-heartbeat':
+   *  minutes since dispatch with zero beats (display-only, so the pane can say
+   *  "no heartbeat for N min" without a second clock). */
   staleMinutes?: number
   /** For 'move-stuck': WHICH column move is stuck, so the pane can say exactly
    *  what zombied ('review' = stuck in doing, 'done' = stuck in review, 'recover'

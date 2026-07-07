@@ -18,6 +18,9 @@
 //                                   plain PTY kill.
 // POST /api/swarm/worktree/remove — tear a worker worktree down (kill/complete).
 // GET  /api/swarm/orchestrator    — the COMMANDER engine's state for a project.
+// GET  /api/swarm/workers         — the SERVER-TRUTH worker list (live PTYs +
+//                                   engine roster + heartbeat files unified) —
+//                                   see src/lib/server/swarmWorkerRegistry.ts.
 // POST /api/swarm/orchestrator/start — turn the autonomous drain+dispatch ON.
 // POST /api/swarm/orchestrator/stop  — turn it OFF (manual spawn untouched).
 //
@@ -38,6 +41,7 @@ import { getCustomTabRole } from '@/lib/server/roles'
 import { readProjectData, writeProjectData, validateProjectPath } from '@/lib/server/projectData'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
+import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
 import {
@@ -312,6 +316,21 @@ export const swarmRoutes = new Hono()
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await getOrchestratorState(path))
+  })
+  // --- GET /api/swarm/workers — the SERVER-TRUTH worker list -----------------
+  // Query: ?path= . Returns SwarmWorkersResponse { workers: SwarmWorkerRecord[] }.
+  // Unifies live PTYs, the engine's own roster, and heartbeat files so a worker
+  // started ANY way — engine dispatch, the Board 実行 button, or a direct
+  // `POST /api/swarm/worker` (curl/SDK) — shows up here, closing the registry
+  // gap the two other name-based sources (localStorage / engine-only roster)
+  // each missed. PURE READ-ONLY, polled by the Swarm worker tab. Owner-only +
+  // validated, like the rest of /api/swarm/*.
+  .get('/api/swarm/workers', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    const path = c.req.query('path') ?? ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json({ workers: await listSwarmWorkers(path) })
   })
   // --- POST /api/swarm/orchestrator/drain-tick — auto-start the drain ---------
   // Body: { path }. The "idle worker + todo backlog" anti-deadlock tick (card
