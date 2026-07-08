@@ -36,11 +36,12 @@
 
 import { randomUUID } from 'crypto'
 import { mkdtemp, mkdir, rm } from 'fs/promises'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { launchClaude } from './claudeTerminal'
 import { killTerminal, subscribeTerminal } from './terminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
-import { isExperimentEnabled } from './experiments'
+import { ensureBrainEgressProxy } from './egressProxy'
 import { youCorpusFile, openGroundHome } from './paths'
 import { SWARM_LAUNCH_MODEL, SWARM_LAUNCH_EFFORT } from './swarmLaunch'
 import {
@@ -347,13 +348,23 @@ export const buildOverseerAnswerPrompt = (args: {
  *  SEPARATE code path that may not inherit this session's deny list — leaving it
  *  open would reopen egress via Task → sub-agent → Bash/WebFetch. Without this a
  *  prompt-injected brain — running `bypass` with the private you-corpus in
- *  context, inside an `(allow network-outbound)` sandbox — could exfiltrate the
- *  owner's judgment corpus; "read / decide / never act" must hold against NETWORK
- *  egress too, not just filesystem writes. A denylist is inherently incomplete (a
- *  future tool could reopen egress); the DURABLE close is the sandbox network deny
- *  (the docs/SANDBOX_EXPERIMENT.md egress-proxy follow-up) — this list is the
- *  structural stop-gap that holds for the shipped tool set today. */
+ *  context — could exfiltrate the owner's judgment corpus; "read / decide /
+ *  never act" must hold against NETWORK egress too, not just filesystem writes.
+ *  A denylist is inherently incomplete (a future tool could reopen egress), so on
+ *  macOS the DURABLE close now sits UNDER it: the brain PTY is always sandboxed
+ *  with `network:'loopback'` + the allowlist egress proxy (see makeOverseerBrain),
+ *  so every off-machine destination is kernel-denied regardless of tool set. This
+ *  list stays armed as defense-in-depth there, and remains the ONLY egress gate
+ *  off-darwin (the graceful fallback). */
 export const OVERSEER_BRAIN_DISALLOWED_TOOLS: readonly string[] = ['WebFetch', 'WebSearch', 'Bash', 'Task']
+
+/** Is the STRUCTURAL egress close available on this host? macOS only, and
+ *  `/usr/bin/sandbox-exec` must exist (deprecated by Apple but present on every
+ *  current macOS — its unannounced removal is the one future this probes for;
+ *  absence degrades to the permission-layer stop-gap, never a broken launch).
+ *  `platform` is injectable for tests; production reads the real one. */
+export const brainSandboxAvailable = (platform: NodeJS.Platform = process.platform): boolean =>
+  platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -372,15 +383,36 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  *  even when prompt-injected), `hidden` (no card
  *  beacon — generateDescription precedent), and a pristine system prompt
  *  (appContext:false). The scratch dir +
- *  its ~/.claude.json trust entry are torn down in `finally`. */
+ *  its ~/.claude.json trust entry are torn down in `finally`.
+ *
+ *  `sandboxAvailable` / `egressProxyPort` are TEST SEAMS (the launch test pins
+ *  both branches deterministically on any host); production uses the real probe
+ *  + the singleton allowlist proxy. */
 export const makeOverseerBrain = (
-  opts: { model?: string; effort?: ClaudeEffort; timeoutMs?: number } = {},
+  opts: {
+    model?: string
+    effort?: ClaudeEffort
+    timeoutMs?: number
+    sandboxAvailable?: boolean
+    egressProxyPort?: () => Promise<number>
+  } = {},
 ): BrainRunner => {
   const model = opts.model ?? SWARM_LAUNCH_MODEL
   const effort = opts.effort ?? SWARM_LAUNCH_EFFORT
   const timeoutMs = opts.timeoutMs ?? OVERSEER_BRAIN_TIMEOUT_MS
+  const sandboxed = opts.sandboxAvailable ?? brainSandboxAvailable()
+  const proxyPortOf = opts.egressProxyPort ?? (async () => (await ensureBrainEgressProxy()).port)
   return async ({ prompt, signal }) => {
     if (signal?.aborted) return ''
+    // EGRESS close, resolved BEFORE any resource is created: on macOS the brain is
+    // ALWAYS sandboxed (NOT experiment-gated like the worker/interactive paths —
+    // the corpus-holding brain doesn't wait for an opt-in) with network:'loopback',
+    // so its claude reaches Anthropic ONLY through this host-side allowlist CONNECT
+    // proxy (HTTPS_PROXY below). No proxy → NO launch: the throw fails the runner
+    // CLOSED (answerAsOwner escalates to the owner) — an un-proxied PTY inside the
+    // loopback profile could only hang out its 5-minute budget.
+    let proxyPort: number | null = null
+    if (sandboxed) proxyPort = await proxyPortOf()
     // Scratch under the app home (central data area) — NOT os.tmpdir(): keeps it
     // in retention's reach and off macOS's /var/folders realpath (a future sandbox
     // pitfall). mkdtemp needs the parent to exist.
@@ -393,13 +425,14 @@ export const makeOverseerBrain = (
     // every swarm worker, swarmWorker.ts:409): the deterministic PreToolUse deny veto
     // confines Write/Edit/Bash-writes to the scratch dir and blocks rm -rf / force-push /
     // out-of-scratch writes — the ONE veto `--dangerously-skip-permissions` cannot
-    // override. When the owner turns the sandbox experiment ON (macOS), L3 adds the
-    // kernel Seatbelt boundary on top (writes confined to `cwd`=scratch; global READ
-    // stays allowed so the corpus path Read still works — sandbox.ts:251 / design Q8).
-    // Without this the route's L3 warning pointed at an inert remedy (enabling the
-    // experiment did nothing to the brain). strictMcpConfig (below) closes the MCP-RCE
-    // path the write-guard doesn't cover.
-    const sandbox = await isExperimentEnabled('sandbox').catch(() => false)
+    // override. On macOS, L3 (the kernel Seatbelt boundary) is armed UNCONDITIONALLY
+    // too — brainSandboxAvailable, not the owner experiment: writes confined to
+    // `cwd`=scratch (global READ stays allowed so the corpus path Read still works —
+    // sandbox.ts / design Q8) AND network:'loopback' kernel-denies every off-machine
+    // destination, the durable egress close the deny list above can't provide alone.
+    // Off-darwin (or without sandbox-exec) this degrades gracefully to the
+    // permission-layer stop-gap — the pre-close behaviour. strictMcpConfig (below)
+    // closes the MCP-RCE path the write-guard doesn't cover.
     let terminalId: string | null = null
     let sub: { unsubscribe: () => void } | null = null
     let buffer = ''
@@ -427,15 +460,32 @@ export const makeOverseerBrain = (
         agentSessionId: randomUUID(),
         initialPrompt: prompt,
         permissionMode: 'bypass',
-        // L4 (always) + L3 (when the owner armed the experiment) — see the note above.
-        // guard writeRoots = scratch only: the brain has no repo/.git to write (it only
+        // L4 (always) + L3 (always on macOS) — see the note above. guard
+        // writeRoots = scratch only: the brain has no repo/.git to write (it only
         // reads the corpus + emits the verdict line), so ANY write outside scratch is a
-        // deny. sandboxWritePaths stays empty for the same reason (cwp=scratch is the
+        // deny. sandboxWritePaths stays empty for the same reason (cwd=scratch is the
         // only write target the Seatbelt profile needs to grant).
         guard: { writeRoots: [scratch] },
-        sandbox,
+        sandbox: sandboxed,
+        // The egress close: every off-machine destination kernel-denied; claude's
+        // own API traffic rides HTTPS_PROXY → the loopback allowlist proxy
+        // (anthropic.com / claude.ai only). HTTP_PROXY rides along for any
+        // cleartext fallback claude might attempt, and NO_PROXY is EXPLICITLY
+        // emptied so an inherited `NO_PROXY=*` can't make claude dodge the proxy
+        // and EPERM against the kernel wall.
+        ...(sandboxed && proxyPort !== null
+          ? {
+              sandboxNetwork: 'loopback' as const,
+              env: {
+                HTTPS_PROXY: `http://127.0.0.1:${proxyPort}`,
+                HTTP_PROXY: `http://127.0.0.1:${proxyPort}`,
+                NO_PROXY: '',
+              },
+            }
+          : {}),
         // No egress tool for the corpus-holding brain (see the constant above):
-        // deny-listed at the permission layer, which bypass cannot override.
+        // deny-listed at the permission layer, which bypass cannot override —
+        // defense-in-depth under the sandbox close, the ONLY gate off-darwin.
         disallowedTools: [...OVERSEER_BRAIN_DISALLOWED_TOOLS],
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),

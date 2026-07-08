@@ -9,6 +9,12 @@
 //     prompt-injected brain holding the private you-corpus has NO tool that can
 //     exfiltrate it. Deny-listing rides claude's permission layer, which wins
 //     even under `--dangerously-skip-permissions`.
+//   • The DURABLE egress close (macOS): the brain launch is ALWAYS sandboxed —
+//     sandbox:true + sandboxNetwork:'loopback' + HTTPS_PROXY at the host-side
+//     allowlist proxy — NOT gated on the owner experiment. Off-darwin (or
+//     without sandbox-exec) it degrades gracefully to the deny-list stop-gap.
+//     Both branches are pinned via the sandboxAvailable/egressProxyPort seams
+//     (deterministic on any host — no real proxy, no real /usr/bin probe).
 //   • The pre-existing containment stays armed: strictMcpConfig / bypass /
 //     hidden / appContext:false / the L4 write-guard on the scratch dir.
 //   • The SAME opts fed to the REAL buildClaudeArgv produce a --disallowed-tools
@@ -24,7 +30,6 @@ const mocks = vi.hoisted(() => ({
   killTerminal: vi.fn(() => true),
   subscribeTerminal: vi.fn(),
   removeClaudeFolderTrust: vi.fn(),
-  isExperimentEnabled: vi.fn(async () => false),
 }))
 
 vi.mock('./claudeTerminal', () => ({ launchClaude: mocks.launchClaude }))
@@ -33,7 +38,6 @@ vi.mock('./terminal', () => ({
   subscribeTerminal: mocks.subscribeTerminal,
 }))
 vi.mock('./claudeTrust', () => ({ removeClaudeFolderTrust: mocks.removeClaudeFolderTrust }))
-vi.mock('./experiments', () => ({ isExperimentEnabled: mocks.isExperimentEnabled }))
 vi.mock('./paths', async () => {
   const { mkdtempSync } = await import('fs')
   const { tmpdir } = await import('os')
@@ -45,7 +49,11 @@ vi.mock('./paths', async () => {
   }
 })
 
-import { makeOverseerBrain, OVERSEER_BRAIN_DISALLOWED_TOOLS } from './swarmOverseerBrain'
+import {
+  makeOverseerBrain,
+  brainSandboxAvailable,
+  OVERSEER_BRAIN_DISALLOWED_TOOLS,
+} from './swarmOverseerBrain'
 import type { LaunchClaudeOpts } from './claudeTerminal'
 
 const launchedOpts = (): LaunchClaudeOpts => {
@@ -61,11 +69,10 @@ describe('makeOverseerBrain — launch containment wiring (D4 + the no-egress de
     // finishedAt set → were the poll loop ever entered it would exit at once;
     // with timeoutMs:1 the deadline expires before the first poll anyway.
     mocks.subscribeTerminal.mockReturnValue({ unsubscribe: vi.fn(), info: { finishedAt: 1 } })
-    mocks.isExperimentEnabled.mockResolvedValue(false)
   })
 
   it('denies WebFetch/WebSearch/Bash and keeps every existing containment flag armed', async () => {
-    const runner = makeOverseerBrain({ timeoutMs: 1 })
+    const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
     await runner({ prompt: 'p', projectPath: '/proj' })
     const opts = launchedOpts()
     // MF2 — the corpus-holding brain gets NO network-egress tool, nor a Task
@@ -82,7 +89,7 @@ describe('makeOverseerBrain — launch containment wiring (D4 + the no-egress de
   })
 
   it('those exact opts reach the claude argv as --disallowed-tools with WebFetch AND WebSearch', async () => {
-    const runner = makeOverseerBrain({ timeoutMs: 1 })
+    const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
     await runner({ prompt: 'p', projectPath: '/proj' })
     const opts = launchedOpts()
     // Feed the REAL argv builder (not the mock) the very opts the brain launched
@@ -101,12 +108,62 @@ describe('makeOverseerBrain — launch containment wiring (D4 + the no-egress de
     expect(argv).toContain('--dangerously-skip-permissions')
   })
 
+  it('macOS: the brain launch is ALWAYS sandboxed — loopback network + HTTPS_PROXY at the allowlist proxy', async () => {
+    const runner = makeOverseerBrain({
+      timeoutMs: 1,
+      sandboxAvailable: true,
+      egressProxyPort: async () => 39_999,
+    })
+    await runner({ prompt: 'p', projectPath: '/proj' })
+    const opts = launchedOpts()
+    // The durable egress close (structural, not experiment-gated): kernel-denied
+    // off-machine outbound; the ONE hole is the loopback allowlist proxy.
+    expect(opts.sandbox).toBe(true)
+    expect(opts.sandboxNetwork).toBe('loopback')
+    expect(opts.env?.HTTPS_PROXY).toBe('http://127.0.0.1:39999')
+    expect(opts.env?.HTTP_PROXY).toBe('http://127.0.0.1:39999')
+    expect(opts.env?.NO_PROXY).toBe('') // an inherited NO_PROXY=* must not dodge the proxy
+    // The permission-layer deny list stays armed UNDER the sandbox (defense-in-depth).
+    expect(opts.disallowedTools).toEqual([...OVERSEER_BRAIN_DISALLOWED_TOOLS])
+  })
+
+  it('off-darwin / no sandbox-exec: graceful fallback to the permission-layer stop-gap', async () => {
+    const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
+    await runner({ prompt: 'p', projectPath: '/proj' })
+    const opts = launchedOpts()
+    expect(opts.sandbox).toBe(false)
+    expect(opts.sandboxNetwork).toBeUndefined()
+    expect(opts.env).toBeUndefined()
+    expect(opts.disallowedTools).toEqual([...OVERSEER_BRAIN_DISALLOWED_TOOLS])
+  })
+
+  it('fail-closed: a proxy that cannot start aborts the launch — no un-proxied loopback PTY', async () => {
+    const runner = makeOverseerBrain({
+      timeoutMs: 1,
+      sandboxAvailable: true,
+      egressProxyPort: async () => {
+        throw new Error('proxy could not bind')
+      },
+    })
+    // The runner rejects → answerAsOwner catches → escalates to the owner
+    // (insufficient-info). It must NOT fall back to an un-sandboxed launch.
+    await expect(runner({ prompt: 'p', projectPath: '/proj' })).rejects.toThrow('proxy could not bind')
+    expect(mocks.launchClaude).not.toHaveBeenCalled()
+  })
+
   it('an abort BEFORE launch never spawns a PTY (and still resolves)', async () => {
     const ac = new AbortController()
     ac.abort()
-    const runner = makeOverseerBrain({ timeoutMs: 1 })
+    const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
     const out = await runner({ prompt: 'p', projectPath: '/proj', signal: ac.signal })
     expect(out).toBe('')
     expect(mocks.launchClaude).not.toHaveBeenCalled()
+  })
+})
+
+describe('brainSandboxAvailable', () => {
+  it('is false off-darwin regardless of the filesystem', () => {
+    expect(brainSandboxAvailable('linux')).toBe(false)
+    expect(brainSandboxAvailable('win32')).toBe(false)
   })
 })

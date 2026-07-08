@@ -1,7 +1,9 @@
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, Sparkles } from 'lucide-react'
 import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
+import { CustomFrameHost, destroyFramesForProject } from '@/components/canvas/modules/CustomFrameHost'
+import { usePlayback } from '@/lib/playback/playbackStore'
 import { Toolbar } from '@/components/canvas/Toolbar'
 import { ToolPalette } from '@/components/canvas/ToolPalette'
 import { SettingsPanel } from '@/components/canvas/SettingsPanel'
@@ -781,6 +783,30 @@ export default function App() {
   // file reads the same.
   const visibleProjects = projects
 
+  // Audio playing somewhere (a custom tab's embedded app — the Songs tab) →
+  // the matching Ground card wears a "Playing" EQ stamp. The embedded app
+  // self-reports which project the audio belongs to (projectName); matched
+  // against the card's display name OR its folder basename, so a cosmetic
+  // rename doesn't break the badge. The playback snapshot's identity only
+  // changes on start/stop/track change, so this memo is quiet in steady state.
+  const playback = usePlayback()
+  const playbackByProjectId = useMemo(() => {
+    const m = new Map<string, { title: string | null }>()
+    if (playback.size === 0) return m
+    const infos = Array.from(playback.values())
+    for (const p of projects) {
+      const basename = p.path.split(/[\\/]/).filter(Boolean).pop()
+      for (const info of infos) {
+        if (!info.projectName) continue
+        if (info.projectName === p.name || info.projectName === basename) {
+          m.set(p.id, { title: info.title })
+          break
+        }
+      }
+    }
+    return m
+  }, [playback, projects])
+
   // Canvas-wide keyboard shortcuts: undo/redo, duplicate, select-all,
   // deselect, enter-to-edit and arrow-key nudging.
   useEffect(() => {
@@ -932,6 +958,10 @@ export default function App() {
       alert(t('misc.ground.removeFailed', { error: e.error ?? res.statusText }))
       return
     }
+    // Same invariant as the panel's delete flow: letting go of a project
+    // (however you do it) tears down the hosted custom-tab frames it owns, so
+    // audio started there can't keep playing from a card that no longer exists.
+    destroyFramesForProject(project.path)
     setSelectedIds([])
     await load()
   }
@@ -1042,6 +1072,7 @@ export default function App() {
       <InfiniteCanvas
         projects={visibleProjects}
         claudeStatuses={claudeStatusById}
+        playbackByProject={playbackByProjectId}
         // Ground member flow: pass shared cards ONLY when collab is enabled, so
         // the default build renders zero shared cards (undefined → none).
         sharedProjects={collabEnabled ? sharedProjects : undefined}
@@ -1168,6 +1199,11 @@ export default function App() {
           return undefined
         }}
       />
+      {/* Persistent host for custom-tab iframes — mounted ONCE, unconditionally
+          (a remount would reload every hosted frame and cut any audio). It
+          renders nothing until a custom tab is opened; a frame whose embedded
+          app is playing audio survives tab/project switches here, hidden. */}
+      <CustomFrameHost />
       {/* Realtime collab — the join dialog (member flow), opened by an invite
           deep link. Gated on collabEnabled, so the default build never mounts it.
           The shared panel is a folder-less overlay (its own doc source); it

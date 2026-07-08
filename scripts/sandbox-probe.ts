@@ -13,11 +13,13 @@
  * real ~/.ssh / ~/.claude / ~/.openground are never read or written, even if a
  * containment rule were wrong. Exits 0 iff every probe matched its expectation.
  */
-import { execFileSync } from 'child_process'
+import { execFileSync, execFile } from 'child_process'
+import { promisify } from 'util'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, realpathSync, symlinkSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { buildSandboxProfile } from '../src/lib/server/sandbox'
+import { createEgressProxy, BRAIN_EGRESS_ALLOW_HOSTS } from '../src/lib/server/egressProxy'
 
 if (process.platform !== 'darwin') {
   console.error('sandbox-probe: macOS only (sandbox-exec); skipping.')
@@ -67,6 +69,7 @@ writeFileSync(join(mainNm, 'somepkg', 'index.js'), 'module.exports=1') // build 
 writeFileSync(join(mainNm, '.vite', 'deps', 'dep.js'), 'export default 1') // dev-server serves this
 symlinkSync(mainNm, join(cwd, 'node_modules'))
 const profilePath = join(root, 'profile.sb')
+const brainProfilePath = join(root, 'brain-profile.sb')
 
 const cleanup = () => {
   try {
@@ -74,11 +77,25 @@ const cleanup = () => {
   } catch {}
 }
 
-try {
+const main = async (): Promise<never> => {
   // The profile the worker/interactive launch would use for THIS cwd, built for
   // the FAKE home. (.git + node_modules sit inside cwd here, so no extra write
   // carve-outs are needed; the worker's cross-tree .git case is sandbox.test.ts.)
   writeFileSync(profilePath, buildSandboxProfile({ cwd, home: HOME }))
+  // The OVERSEER-BRAIN profile: same home/cwd shape but network:'loopback' — the
+  // egress-close battery below proves off-machine outbound is KERNEL-denied while
+  // the loopback allowlist proxy remains reachable (docs/SANDBOX_EXPERIMENT.md
+  // egress-proxy follow-up; wired in swarmOverseerBrain.makeOverseerBrain).
+  writeFileSync(brainProfilePath, buildSandboxProfile({ cwd, home: HOME, network: 'loopback' }))
+  // The REAL allowlist CONNECT proxy (running UNsandboxed, as it does in the app)
+  // — the brain probes tunnel through it exactly like the brain's claude would.
+  const egress = await createEgressProxy({ allowHosts: BRAIN_EGRESS_ALLOW_HOSTS })
+  const proxyEnv = {
+    HTTPS_PROXY: `http://127.0.0.1:${egress.port}`,
+    https_proxy: `http://127.0.0.1:${egress.port}`,
+    NO_PROXY: '',
+    no_proxy: '',
+  }
 
   // A committable git repo + an in-cwd bare remote (configured UNsandboxed) so the
   // git-commit and git-push probes exercise real .git writes under the sandbox.
@@ -109,19 +126,31 @@ try {
     expect: Expect
     cmd: string[]
     optional?: boolean
+    /** Which profile to run under (default: the worker/interactive one). */
+    profile?: string
+    /** Extra env for the sandboxed command (the brain probes carry HTTPS_PROXY). */
+    env?: Record<string, string>
   }
-  const sandboxed = (argv: string[]): { code: number; out: string } => {
+  // ASYNC (execFile, not execFileSync) — the egress proxy above lives in THIS
+  // process, and a synchronous child wait would block the event loop, leaving the
+  // proxy unable to answer the very CONNECT the probe is making (the TCP connect
+  // itself would still succeed — kernel backlog — masking the hang as a timeout).
+  const pExecFile = promisify(execFile)
+  const sandboxed = async (
+    argv: string[],
+    profile: string = profilePath,
+    extraEnv?: Record<string, string>,
+  ): Promise<{ code: number; out: string }> => {
     try {
-      const out = execFileSync('sandbox-exec', ['-f', profilePath, ...argv], {
-        stdio: 'pipe',
+      const { stdout } = await pExecFile('sandbox-exec', ['-f', profile, ...argv], {
         timeout: 30_000,
-        env: { ...process.env, HOME }, // sandboxed cmd sees the FAKE home
+        env: { ...process.env, HOME, ...(extraEnv ?? {}) }, // sandboxed cmd sees the FAKE home
       })
-      return { code: 0, out: out.toString() }
+      return { code: 0, out: String(stdout) }
     } catch (e) {
-      const err = e as { status?: number; stdout?: unknown }
+      const err = e as { code?: number | string; stdout?: unknown }
       return {
-        code: typeof err.status === 'number' ? err.status : 1,
+        code: typeof err.code === 'number' ? err.code : 1,
         out: String(err.stdout ?? ''),
       }
     }
@@ -208,13 +237,41 @@ try {
     { name: 'BIND 0.0.0.0 (public listener)', expect: 'deny', cmd: ['node', '-e', `const s=require('net').createServer();s.on('error',()=>process.exit(7));s.listen(0,'0.0.0.0',()=>process.exit(0))`] },
     { name: 'BIND 127.0.0.1 (loopback listener — also denied)', expect: 'deny', cmd: ['node', '-e', `const s=require('net').createServer();s.on('error',()=>process.exit(7));s.listen(0,'127.0.0.1',()=>{s.close();process.exit(0)})`] },
     { name: 'claude --version (startup smoke)', expect: 'allow', optional: true, cmd: ['sh', '-c', 'command -v claude >/dev/null && claude --version'] },
+
+    // ── OVERSEER-BRAIN profile (network:'loopback') — the egress close ────────
+    // Direct off-machine outbound must be KERNEL-denied (EPERM → exit 7): by IP
+    // (no DNS in the path — deterministic) — the exfil a prompt-injected brain
+    // would attempt if a future tool reopened what --disallowed-tools closes.
+    { name: 'BRAIN: OUTBOUND → 1.1.1.1:443 (external, direct)', expect: 'deny', profile: brainProfilePath, cmd: ['node', '-e', `const s=require('net').connect(443,'1.1.1.1');s.on('connect',()=>process.exit(0));s.on('error',e=>process.exit((e.code==='EPERM'||e.code==='EACCES')?7:0))`] },
+    // DNS still resolves (libinfo rides mach IPC / a local unix socket, both
+    // allowed) — resolution without connectability is the designed pairing.
+    { name: 'BRAIN: DNS lookup api.anthropic.com (resolution path open)', expect: 'allow', profile: brainProfilePath, cmd: ['node', '-e', `require('dns').lookup('api.anthropic.com',(e)=>process.exit(e?7:0))`] },
+    // The ONE hole: loopback — the allowlist proxy is reachable…
+    { name: 'BRAIN: OUTBOUND → 127.0.0.1 (the egress proxy)', expect: 'allow', profile: brainProfilePath, cmd: ['node', '-e', `const s=require('net').connect(${egress.port},'127.0.0.1');s.on('connect',()=>{s.destroy();process.exit(0)});s.on('error',()=>process.exit(7))`] },
+    // …and through it, ONLY the allowlist passes: a real TLS round-trip to
+    // api.anthropic.com via CONNECT succeeds (any HTTP status — reaching the
+    // server is the point), while a non-allowlisted host gets the proxy's 403.
+    { name: 'BRAIN: https api.anthropic.com via allowlist proxy', expect: 'allow', profile: brainProfilePath, env: proxyEnv, cmd: ['sh', '-c', 'curl -sS -o /dev/null --max-time 20 https://api.anthropic.com/'] },
+    { name: 'BRAIN: https example.com via proxy (403 — not allowlisted)', expect: 'deny', profile: brainProfilePath, env: proxyEnv, cmd: ['sh', '-c', 'curl -sS -o /dev/null --max-time 20 https://example.com/'] },
+    // Listeners stay denied under the brain profile too (no backdoor).
+    { name: 'BRAIN: BIND 127.0.0.1 (listener still denied)', expect: 'deny', profile: brainProfilePath, cmd: ['node', '-e', `const s=require('net').createServer();s.on('error',()=>process.exit(7));s.listen(0,'127.0.0.1',()=>{s.close();process.exit(0)})`] },
+    { name: 'BRAIN: claude --version (startup smoke, loopback profile)', expect: 'allow', optional: true, profile: brainProfilePath, cmd: ['sh', '-c', 'command -v claude >/dev/null && claude --version'] },
   ]
 
-  // ── compile check ─────────────────────────────────────────────────────────
-  const compile = sandboxed(['true'])
+  // ── compile check (both profiles) ─────────────────────────────────────────
+  const compile = await sandboxed(['true'])
   if (compile.code !== 0) {
     console.error('✗ profile FAILED to compile under sandbox-exec:\n' + compile.out)
     console.error('\n--- profile ---\n' + buildSandboxProfile({ cwd, home: HOME }))
+    await egress.close()
+    cleanup()
+    process.exit(2)
+  }
+  const compileBrain = await sandboxed(['true'], brainProfilePath)
+  if (compileBrain.code !== 0) {
+    console.error('✗ BRAIN profile FAILED to compile under sandbox-exec:\n' + compileBrain.out)
+    console.error('\n--- brain profile ---\n' + buildSandboxProfile({ cwd, home: HOME, network: 'loopback' }))
+    await egress.close()
     cleanup()
     process.exit(2)
   }
@@ -224,7 +281,7 @@ try {
   let skipped = 0
   const rows: string[] = []
   for (const p of probes) {
-    const { code, out } = sandboxed(p.cmd)
+    const { code, out } = await sandboxed(p.cmd, p.profile ?? profilePath, p.env)
     if (p.optional && code !== 0 && /not found|command not/.test(out)) {
       rows.push(`  —  SKIP  ${p.name} (tool absent)`)
       skipped++
@@ -240,10 +297,13 @@ try {
   console.log(rows.join('\n'))
   console.log('='.repeat(64))
   console.log(`${probes.length - failed - skipped} passed · ${failed} failed · ${skipped} skipped`)
+  await egress.close()
   cleanup()
   process.exit(failed === 0 ? 0 : 1)
-} catch (e) {
+}
+
+main().catch((e) => {
   cleanup()
   console.error('sandbox-probe: unexpected error', e)
   process.exit(2)
-}
+})

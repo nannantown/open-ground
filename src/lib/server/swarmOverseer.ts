@@ -185,6 +185,13 @@ export interface OverseerRuntime {
   /** Aborts the in-flight brain (owner OFF / teardown). The brain runner kills its PTY
    *  on abort (makeOverseerBrain). Present only while assessInFlight. */
   brainAbort?: AbortController
+  /** The in-flight brain call's mailbox coordinates (present only while
+   *  assessInFlight). The watchdog needs them: a NEVER-SETTLING flight runs no
+   *  .then/.finally, so nothing would land in the mailbox for it — while its S4
+   *  `seen` fingerprint stays set, reading the SAME question as "already handled"
+   *  forever. On a force-release the watchdog synthesizes `{...brainInFlight,
+   *  answer:null}` into the mailbox so the question still fail-closes to the owner. */
+  brainInFlight?: Omit<OverseerBrainResult, 'answer'>
   /** Fire-and-forget brain results awaiting routing next pass (the mailbox). */
   brainResults: OverseerBrainResult[]
   /** Edge dedup: signalKey → fingerprint. A signal re-fires only when the fp moves. */
@@ -467,6 +474,17 @@ export const runOverseerPass = async (
     // finally, so this only ever fires on a genuine hang.
     if (ov.assessInFlight && now - ov.lastBrainAt > config.brainTimeoutMs + config.brainStuckSlackMs) {
       ov.brainAbort?.abort()
+      // A hung flight may NEVER settle — its .then/.finally never run, so no result
+      // will ever land in the mailbox, while its S4 `seen` fingerprint stays set and
+      // reads the SAME question as "already handled" forever (a silent drop, not just
+      // a stuck flight). Synthesize the null result HERE so this pass's drain below
+      // still routes the question to the owner (insufficient-info escalation). A
+      // LATE stale settle pushing a second result is harmless: the escalate side is
+      // receiptKey-idempotent, and a late real answer reaching the worker is a gain.
+      if (ov.brainInFlight) {
+        ov.brainResults.push({ ...ov.brainInFlight, answer: null })
+        ov.brainInFlight = undefined
+      }
       ov.assessInFlight = false
       ov.brainAbort = undefined
       log('warn', 'overseer: brain exceeded timeout+slack — force-released the single-flight')
@@ -684,6 +702,9 @@ const detectWorkerQuestions = async (
     const controller = new AbortController()
     ov.brainAbort = controller
     const coords = { taskId: w.taskId, branch: w.branch, terminalId: w.terminalId }
+    // Park the mailbox coordinates for the watchdog: only IT can deliver this
+    // question if the flight never settles (see the force-release above).
+    ov.brainInFlight = { signalKey, question: blockerText, context, ...coords }
     log('info', `overseer: S4 → waking the proxy brain for a worker question: ${w.branch} (${shorten(blockerText)})`)
     // FIRE-AND-FORGET (D2): NEVER awaited. The result lands in the mailbox for the
     // next pass to route. answerAsOwner never throws, but guard the chain anyway.
@@ -713,6 +734,7 @@ const detectWorkerQuestions = async (
         if (ov.brainAbort === controller) {
           ov.assessInFlight = false
           ov.brainAbort = undefined
+          ov.brainInFlight = undefined
         }
       })
     // ONE brain per pass (single-flight) — stop scanning; other blocked workers wait.

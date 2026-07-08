@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Archive, Trash2, X } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
+import { destroyFramesForProject } from '@/components/canvas/modules/CustomFrameHost'
 import type { ProjectMeta } from '@/lib/types'
 
 interface Props {
@@ -41,6 +42,12 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
           body: JSON.stringify({ path: p.path }),
         })
         if (!res.ok) failed.push(p.name)
+        // Letting go of a project — bulk Remove AND Delete both do — tears
+        // down the hosted custom-tab frames it owns (same invariant as the
+        // panel delete / single remove paths), so audio started there can't
+        // keep playing hidden. Per-project on SUCCESS only: a failed one is
+        // still registered, its frames still legitimate.
+        else destroyFramesForProject(p.path)
       } catch {
         failed.push(p.name)
       }

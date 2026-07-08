@@ -114,6 +114,9 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 //   shareEvacuatedAt    — one-shot share-evacuation sentinel (server-owned)
 //   swarmAutonomyOn     — server-owned (startOrchestrator/stopOrchestrator only);
 //                         a forged body must never mark a project "autonomy on"
+//   swarmManualStop     — server-owned (stopOrchestrator/startOrchestrator only);
+//                         a forged body must never fake or erase the owner's
+//                         "stopped by hand" record
 //   archiveDirName      — deprecated migration input
 //   excludePatterns     — deprecated migration input
 //
@@ -196,6 +199,53 @@ export const isSwarmAutonomyRemembered = async (key: string): Promise<boolean> =
   if (!key) return false
   const { swarmAutonomyOn } = await getSettings()
   return Array.isArray(swarmAutonomyOn) && swarmAutonomyOn.includes(key)
+}
+
+// ─── Swarm "stopped by hand" set (Settings.swarmManualStop) ───────────────────
+// The persisted half of the engine's in-memory `manualStop` flag: the fact "the
+// owner explicitly paused this project's engine" must survive a restart so it
+// stays OBSERVABLE from outside (a commander / another session asking "is this
+// engine deliberately stopped?" — the 0707 twin-dispatch root cause was exactly
+// this being invisible), and so the opt-in auto-drain sweep keeps respecting the
+// pause after the in-memory flag dies with the process. A RECORD, never an
+// auto-resume: its only engine-side effect is MORE stopping (auto-start
+// suppression); nothing ever runs because of it. Added on an explicit Autonomy
+// OFF (stopOrchestrator), removed on an explicit ON (startOrchestrator). Same
+// single-flight `settingsChain` + Array.isArray discipline as swarmAutonomyOn
+// above; a hand-corrupted field degrades to "no record" — at worst the sweep
+// treats the project as never-paused, which the strict-opt-in AUTODRAIN gate
+// already bounds.
+export const rememberSwarmManualStop = async (key: string): Promise<void> => {
+  if (!key) return
+  const run = settingsChain.then(async () => {
+    const current = await getSettings()
+    const existing = Array.isArray(current.swarmManualStop) ? current.swarmManualStop : []
+    if (existing.includes(key)) return
+    await writeJson(settingsFile(), { ...current, swarmManualStop: [...existing, key] })
+  })
+  settingsChain = run.catch(() => {})
+  return run
+}
+
+export const forgetSwarmManualStop = async (key: string): Promise<void> => {
+  if (!key) return
+  const run = settingsChain.then(async () => {
+    const current = await getSettings()
+    const existing = Array.isArray(current.swarmManualStop) ? current.swarmManualStop : []
+    if (!existing.includes(key)) return
+    await writeJson(settingsFile(), {
+      ...current,
+      swarmManualStop: existing.filter((k) => k !== key),
+    })
+  })
+  settingsChain = run.catch(() => {})
+  return run
+}
+
+export const isSwarmManualStopPersisted = async (key: string): Promise<boolean> => {
+  if (!key) return false
+  const { swarmManualStop } = await getSettings()
+  return Array.isArray(swarmManualStop) && swarmManualStop.includes(key)
 }
 
 // ─── Swarm execution mode (token budget) ─────────────────────────────────────

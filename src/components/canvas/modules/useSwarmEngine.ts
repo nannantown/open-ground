@@ -152,6 +152,12 @@ export interface EngineConsumption {
 export interface SwarmEngineState {
   /** Autonomy — the drain+dispatch loop is scheduled (Card① start/stop). */
   running: boolean
+  /** The owner EXPLICITLY paused the engine (Autonomy OFF) and hasn't turned it
+   *  back ON. Server-composed: the engine's in-memory flag OR the persisted
+   *  `Settings.swarmManualStop` record, so it stays true across a server restart
+   *  — the UI can tell a DELIBERATE stop from a never-started engine. Display
+   *  only; an explicit Start always clears it. */
+  manualStop: boolean
   /** Auto-integrate — the engine lands completed review cards itself (Card③).
    *  A separate switch from `running`, default OFF. */
   autoMerge: boolean
@@ -201,6 +207,7 @@ export const EMPTY_CONSUMPTION: EngineConsumption = {
 
 export const DEFAULT_ENGINE: SwarmEngineState = {
   running: false,
+  manualStop: false,
   autoMerge: false,
   overseer: false,
   workers: [],
@@ -372,6 +379,9 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
 
   return {
     running: o.running === true,
+    // Strict boolean like `running`: a forged / absent value folds to FALSE — the
+    // fail-safe direction (no spurious "stopped by hand" badge).
+    manualStop: o.manualStop === true,
     autoMerge: o.autoMerge === true,
     overseer: o.overseer === true,
     workers,
@@ -664,15 +674,14 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
       } catch {
         if (!cancelled) setAvailable(false)
       }
-      // 1b) DRAIN-TICK (card cf545637): kick the auto-start of the drain when this
-      //     project has an idle worker slot + a dispatchable todo. SCOPED to the Swarm
-      //     surface — ONLY this hook POSTs it, so the display-only Board worker-map (which
-      //     polls the GET above) never spawns. Fire-and-forget + owner-gated: a 403/404/
-      //     throw is harmless, and the server no-ops unless a STOPPED, non-paused engine
-      //     actually has work to drain (maybeAutoStartDrain returns immediately while it is
-      //     already running). The resulting running=true + workers surface on the next
-      //     read above. Skipped while a toggle is in flight (this runs inside the
-      //     busy-guarded poll), so it never fights a manual ON/OFF.
+      // 1b) DRAIN-TICK: since card eadb25e6 the server side is a PURE idempotent state
+      //     read — it no longer auto-starts a stopped engine (autonomy is strict opt-in
+      //     via the Start toggle → POST /orchestrator/start; merely having this pane
+      //     open must not spin up workers). The POST is kept for back-compat with older
+      //     servers and as the seam a future consent-carrying tick would ride.
+      //     Fire-and-forget + owner-gated: a 403/404/throw is harmless. Skipped while a
+      //     toggle is in flight (this runs inside the busy-guarded poll), so it never
+      //     fights a manual ON/OFF.
       void fetch('/api/swarm/orchestrator/drain-tick', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

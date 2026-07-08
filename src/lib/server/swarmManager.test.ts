@@ -6,7 +6,7 @@ import { managerLaunchOpts, MANAGER_INJECTION } from './swarmManager'
 // curl-verified on the real machine. Here we pin the PURE launch contract —
 // the exact LaunchClaudeOpts the commander conversation runs with — which
 // encodes the security-relevant decisions (bypass IN THE REAL CHECKOUT but
-// guarded by SWARM_MANAGER=1; the /manage skill as the positional prompt).
+// guarded by SWARM_MANAGER=1; the /og-manage skill as the positional prompt).
 // Mirrors swarmSupply.test.ts: the commander is the supply officer's sibling —
 // same no-worktree, real-tree, guarded-bypass shape, different skill + role.
 
@@ -57,9 +57,14 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.remoteControl).toBe('manager')
   })
 
-  it('delivers /manage as the positional prompt (claude runs the skill on startup)', () => {
-    expect(base.initialPrompt).toBe('/manage')
-    expect(MANAGER_INJECTION).toBe('/manage')
+  it('delivers /og-manage (the tmux-free commander skill) as the positional prompt', () => {
+    // NOT the shell cockpit's /manage: that skill drives tmux panes
+    // (swarm-pane.sh dispatch / respawn / swarm-watch), none of which exist
+    // inside the app's PTY. The in-app commander runs the app-native sibling,
+    // which speaks the app's own HTTP API (POST /api/swarm/worker, GET
+    // /api/swarm/workers, …) and never mentions tmux.
+    expect(base.initialPrompt).toBe('/og-manage')
+    expect(MANAGER_INJECTION).toBe('/og-manage')
   })
 
   it('forwards cols/rows when given', () => {

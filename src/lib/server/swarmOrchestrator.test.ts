@@ -77,10 +77,14 @@ import {
   type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
+import { markCoolingUntil, isTierCooling, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
 import {
   rememberSwarmAutonomy,
   forgetSwarmAutonomy,
   isSwarmAutonomyRemembered,
+  rememberSwarmManualStop,
+  forgetSwarmManualStop,
+  isSwarmManualStopPersisted,
   setSettings,
 } from './store'
 import type {
@@ -101,6 +105,17 @@ import type { OpenEscalationInput } from './swarmEscalations'
 vi.mock('./claudePreflight', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./claudePreflight')>()
   return { ...actual, claudeRunPreflight: async () => ({ ok: true }) }
+})
+
+// The A5 usage sensor's SYNC cache peek, made injectable for the quota-sensor
+// tests (the pct>=100 gate on its resetsAt). Default null = nothing cached —
+// exactly what the real peek returns in this test process — so every other test
+// is untouched. vi.hoisted because vi.mock factories are hoisted above module
+// lets.
+const a5Mock = vi.hoisted(() => ({ current: null as import('./claudeUsageCli').CliUsage | null }))
+vi.mock('./claudeUsageCli', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./claudeUsageCli')>()
+  return { ...actual, peekCachedUsage: () => a5Mock.current }
 })
 
 // These engine tests exercise dispatch at FULL capacity (cap = ORCHESTRATOR_MAX_WORKERS).
@@ -126,6 +141,19 @@ beforeAll(async () => {
 // exercised live.
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
+
+/** Always-succeeds fake for IntegrationDeps.acquireLock — the cross-process
+ *  integration lock (swarmIntegrationLock.ts) is exercised against a REAL git
+ *  repo in swarmOrchestrator.integration.test.ts; the unit tests here run
+ *  against a fake `/proj` path (no real git repo), so they inject this stub to
+ *  keep the pre-existing integrate-loop behavior unchanged. The lock's own
+ *  skip-on-contention behavior is covered separately below (see "integration
+ *  lock (cross-process)"). */
+const alwaysAcquireLock: IntegrationDeps['acquireLock'] = async () => ({
+  ok: true,
+  holder: { pid: 1, acquiredAt: '1970-01-01T00:00:00.000Z', label: 'test' },
+  release: async () => {},
+})
 
 const card = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
   id,
@@ -198,6 +226,7 @@ const makeDeps = (init: {
   outputs?: Map<string, number> // terminalId → PTY lastOutputAt epoch ms (absent → null)
   screens?: Map<string, string> // terminalId → current screen text (absent → null = 'normal')
   raiseFails?: boolean // make deps.raiseQuestion throw (fs/notify fault)
+  spawnModel?: string // model alias the fake spawn reports launching with (quota attribution)
 }): OrchestratorDeps & {
   spawned: { taskId: string; priorFailure?: string }[]
   moves: { taskId: string; branch: string }[]
@@ -254,6 +283,7 @@ const makeDeps = (init: {
         agentSessionId: `sess-${n}`,
         worktree: `/wt/${taskId}`,
         branch: `swarm/${taskId}`,
+        ...(init.spawnModel ? { model: init.spawnModel } : {}),
       }
       return res
     },
@@ -1082,6 +1112,7 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
       integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+      acquireLock: alwaysAcquireLock,
       moveToDone: async () => true,
       markConflict: async () => true,
       cleanup: async () => ({ removed: true }),
@@ -1450,6 +1481,123 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       await forgetSwarmAutonomy(key)
       expect(await isSwarmAutonomyRemembered(key)).toBe(false)
       expect(await isSwarmAutonomyRemembered('')).toBe(false) // guards the empty key
+    })
+  })
+
+  // manualStop VISIBILITY + PERSISTENCE (0707 twin-dispatch root cause): "the owner
+  // stopped this by hand" must be machine-readable from OUTSIDE (a commander /
+  // another session polling the state API), and must survive a server restart —
+  // as a RECORD + an auto-start suppressor only, never an auto-resume.
+  describe('manualStop — externally observable + persisted across a restart (never auto-resumes)', () => {
+    beforeEach(() => __resetOrchestratorForTests())
+    afterEach(async () => {
+      __resetOrchestratorForTests() // clear any armed chain timer (startOrchestrator arms one)
+      // settings.json is shared across this file's tests (one isolated tmp HOME) —
+      // forget every persisted key we touched so nothing leaks into later baselines.
+      for (const p of [
+        '/proj-mstop-visible',
+        '/proj-mstop-restart',
+        '/proj-mstop-sweep',
+        '/proj-mstop-restart-on',
+        '/proj-mstop-tick',
+        '/proj-mstop-helpers',
+      ]) {
+        const k = await canonicalize(p)
+        await forgetSwarmManualStop(k)
+        await forgetSwarmAutonomy(k)
+      }
+    })
+
+    it('stopOrchestrator makes manualStop machine-readable on the state API — flag AND persisted record (①)', async () => {
+      const key = await canonicalize('/proj-mstop-visible')
+      const engine = newEngine({ path: key, running: true })
+      __seedEngineForTests(engine)
+
+      const stopped = await stopOrchestrator('/proj-mstop-visible', makeDeps({ cards: [] }))
+      // The stop's own response already carries the machine-readable pause…
+      expect(stopped.manualStop).toBe(true)
+      expect(stopped.manualStopPersisted).toBe(true)
+      // …and so does the poll GET (what an outside observer actually reads).
+      const state = await getOrchestratorState('/proj-mstop-visible', fullDeps({ cards: [] }))
+      expect(state.running).toBe(false)
+      expect(state.manualStop).toBe(true)
+      expect(state.manualStopPersisted).toBe(true)
+      expect(await isSwarmManualStopPersisted(key)).toBe(true) // the durable half on disk
+    })
+
+    it('survives a RESTART (engine gone): the persisted record still reads back, and running stays OFF (②③)', async () => {
+      const key = await canonicalize('/proj-mstop-restart')
+      __seedEngineForTests(newEngine({ path: key, running: true }))
+      await stopOrchestrator('/proj-mstop-restart', makeDeps({ cards: [] }))
+
+      // Process-restart equivalent: the in-memory engine store is wiped (a fresh
+      // process re-mints it empty); settings.json survives on the isolated HOME.
+      __resetOrchestratorForTests()
+
+      const state = await getOrchestratorState('/proj-mstop-restart', fullDeps({ cards: [card('a')] }))
+      expect(state.running).toBe(false) // NEVER auto-resumed (and never auto-anything)
+      expect(state.manualStop).toBe(true) // the deliberate stop is still visible…
+      expect(state.manualStopPersisted).toBe(true) // …and attributed to the durable record
+      // The read was PURE (K8): no engine was revived into a running state, no spawn.
+      const again = await getOrchestratorState('/proj-mstop-restart', fullDeps({ cards: [card('a')] }))
+      expect(again.running).toBe(false)
+    })
+
+    it('after a restart the AUTODRAIN sweep still respects the persisted pause — fresh engine, in-memory flag gone (③)', async () => {
+      const key = await canonicalize('/proj-mstop-sweep')
+      __seedEngineForTests(newEngine({ path: key, running: true }))
+      await stopOrchestrator('/proj-mstop-sweep', makeDeps({ cards: [] }))
+      __resetOrchestratorForTests() // restart: the manualStop FLAG dies with the engine
+
+      // The opt-in background sweep re-mints a fresh engine (manualStop:false in
+      // memory) over a dispatchable todo + a free slot — exactly the state that
+      // auto-starts a never-paused project. The persisted record must hold it OFF.
+      const deps = fullDeps({ cards: [card('a')] })
+      const started = await runAutoDrainScan(deps, async () => ['/proj-mstop-sweep'])
+      expect(started).toBe(0)
+      expect(deps.spawned).toHaveLength(0) // no worker ignited off the wiped flag
+      const state = await getOrchestratorState('/proj-mstop-sweep', deps)
+      expect(state.running).toBe(false)
+    })
+
+    it('an explicit Autonomy ON clears the persisted record — consent always re-opens (even after a restart)', async () => {
+      const key = await canonicalize('/proj-mstop-restart-on')
+      __seedEngineForTests(newEngine({ path: key, running: true }))
+      await stopOrchestrator('/proj-mstop-restart-on', makeDeps({ cards: [] }))
+      __resetOrchestratorForTests() // restart — only the record survives
+      expect(await isSwarmManualStopPersisted(key)).toBe(true)
+
+      const state = await startOrchestrator('/proj-mstop-restart-on', fullDeps({ cards: [] }))
+      expect(state.running).toBe(true) // the owner's explicit ON outranks the record
+      expect(state.manualStop).toBe(false)
+      expect(state.manualStopPersisted).toBe(false)
+      expect(await isSwarmManualStopPersisted(key)).toBe(false) // cleared on disk too
+      __resetOrchestratorForTests() // disarm the chain startOrchestrator armed
+    })
+
+    it('drainTickOrchestrator (the Swarm poll) surfaces the persisted pause like the GET — and still never starts', async () => {
+      const key = await canonicalize('/proj-mstop-tick')
+      __seedEngineForTests(newEngine({ path: key, running: true }))
+      await stopOrchestrator('/proj-mstop-tick', makeDeps({ cards: [] }))
+      __resetOrchestratorForTests() // restart
+
+      const deps = fullDeps({ cards: [card('a')] })
+      const state = await drainTickOrchestrator('/proj-mstop-tick', deps)
+      expect(state.running).toBe(false) // the tick is a pure read (eadb25e6)
+      expect(state.manualStop).toBe(true) // …that agrees with the GET on the pause
+      expect(state.manualStopPersisted).toBe(true)
+      expect(deps.spawned).toHaveLength(0)
+    })
+
+    it('store helpers: remember is idempotent, forget removes, empty key never persists (②)', async () => {
+      const key = await canonicalize('/proj-mstop-helpers')
+      expect(await isSwarmManualStopPersisted(key)).toBe(false)
+      await rememberSwarmManualStop(key)
+      await rememberSwarmManualStop(key) // idempotent — no duplicate entry
+      expect(await isSwarmManualStopPersisted(key)).toBe(true)
+      await forgetSwarmManualStop(key)
+      expect(await isSwarmManualStopPersisted(key)).toBe(false)
+      expect(await isSwarmManualStopPersisted('')).toBe(false) // guards the empty key
     })
   })
 
@@ -1828,6 +1976,291 @@ describe('runDispatchPass — drain + dispatch', () => {
     expect(engine.log.some((l) => l.level === 'warn' && l.message.startsWith('board read failed'))).toBe(
       true,
     )
+  })
+})
+
+// ── runDispatchPass — quota park (card 0add9d30, churn stop) ──────────────────
+// swarmQuota's cooling table is a globalThis singleton (shared across this whole
+// test file), so every case resets it — mirroring swarmQuota.test.ts's own
+// discipline — to stay order-independent.
+
+describe('runDispatchPass — quota park (card 0add9d30)', () => {
+  beforeEach(() => __resetQuotaForTest())
+  afterEach(() => __resetQuotaForTest())
+
+  it('① holds ALL new dispatch (zero spawns) while every tier is cooling', async () => {
+    const now = 1_000_000
+    // Every ladder tier cooling until well past `now`.
+    for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, now + 5 * 60_000)
+
+    const cards = Array.from({ length: 3 }, (_, i) => card(`c${i}`, { boardOrder: i }))
+    const engine = newEngine()
+    const deps = makeDeps({ cards })
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.spawned).toHaveLength(0)
+    expect(engine.workers).toHaveLength(0)
+    // Cards are left untouched in 'todo' — no card mutation on park entry.
+    expect(deps.board.get('c0')?.boardColumn).toBe('todo')
+    expect(engine.log.some((l) => l.message.startsWith('quota park:') && l.level === 'warn')).toBe(
+      true,
+    )
+    // parkUntil mirrors the earliest reset (all tiers marked with the same until here).
+    expect(engine.parkUntil).toBe(now + 5 * 60_000)
+  })
+
+  it('② the FIRST tick past the earliest reset auto-re-dispatches (no human action)', async () => {
+    const now = 1_000_000
+    const until = now + 5 * 60_000
+    for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, until)
+
+    const cards = Array.from({ length: 2 }, (_, i) => card(`c${i}`, { boardOrder: i }))
+    const engine = newEngine()
+    const deps = makeDeps({ cards })
+
+    await runDispatchPass(engine, deps, now) // parked, 0 spawns
+    expect(deps.spawned).toHaveLength(0)
+
+    await runDispatchPass(engine, deps, until - 1) // still cooling (strictly before until)
+    expect(deps.spawned).toHaveLength(0)
+
+    await runDispatchPass(engine, deps, until + 1) // reset has passed — resumes
+    expect(deps.spawned.map((s) => s.taskId)).toEqual(['c0', 'c1'])
+    expect(engine.parkUntil).toBeUndefined()
+    expect(engine.log.some((l) => l.message.startsWith('quota park lifted'))).toBe(true)
+  })
+
+  it('③ ANY single tier with headroom skips park entirely (fallback launches instead)', async () => {
+    const now = 1_000_000
+    // Top tier cooling, but sonnet/haiku still open — allCoolingUntil() is null.
+    markCoolingUntil('fable', now + 5 * 60_000)
+    markCoolingUntil('opus', now + 5 * 60_000)
+
+    const cards = [card('c0', { boardOrder: 0 })]
+    const engine = newEngine()
+    const deps = makeDeps({ cards })
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.spawned).toHaveLength(1)
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.parkUntil).toBeUndefined()
+    expect(engine.log.some((l) => l.message.startsWith('quota park:'))).toBe(false)
+  })
+
+  it('④ Autonomy OFF (running:false) never parks or dispatches — the top-of-function gate wins', async () => {
+    const now = 1_000_000
+    for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, now + 5 * 60_000)
+
+    const cards = [card('c0', { boardOrder: 0 })]
+    const engine = newEngine({ running: false })
+    const deps = makeDeps({ cards })
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.spawned).toHaveLength(0)
+    expect(engine.parkUntil).toBeUndefined() // never even evaluated — running gate returns first
+    expect(engine.log).toHaveLength(0)
+  })
+})
+
+// ── runDispatchPass — quota SENSOR wiring (markRateLimited 本番配線) ────────────
+// The park tests above seed the cooling table BY HAND; these prove the table is
+// fed by the engine itself: the monitor's rate-limit sighting (mock PTY screens)
+// is the production markRateLimited call, attributing the sighting to the tier
+// the worker launched on (OrchestratorWorker.model, recorded at dispatch). The
+// E2E case walks the whole loop this card set exists for — sighting → cooling →
+// park → lazy-expiry auto-resume — with no hand-seeded cooling anywhere.
+
+describe('runDispatchPass — quota sensor wiring (sighting → cooling → park → resume)', () => {
+  const T0 = Date.parse('2026-07-08T00:00:00Z')
+  const startedAt = new Date(T0).toISOString()
+  beforeEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+  afterEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+
+  it('dispatch records the spawn-resolved model on the worker (the attribution the sensor reads)', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a')], spawnModel: 'sonnet' })
+    await runDispatchPass(engine, deps, T0)
+    expect(deps.spawned.map((s) => s.taskId)).toEqual(['a'])
+    expect(engine.workers[0]?.model).toBe('sonnet')
+  })
+
+  it('a sighting on a tier-recorded worker marks THAT tier cooling until the PTY-worded reset', async () => {
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached — resets in 30 minutes']]),
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    // The production write landed: fable cools until the PTY-worded reset (t1+30min),
+    // not the flat grace — extractPtyResetUntil got the actual screen text.
+    expect(isTierCooling('fable', t1 + 29 * 60_000)).toBe(true)
+    expect(isTierCooling('fable', t1 + 30 * 60_000 + 1)).toBe(false)
+    // Only the sighted worker's launch tier — nothing else is guessed at.
+    expect(isTierCooling('opus', t1 + 1)).toBe(false)
+    expect(isTierCooling('sonnet', t1 + 1)).toBe(false)
+    // The hold log names the attribution so the journal shows WHY dispatch will shift.
+    expect(engine.log.some((l) => l.message.includes('tier fable cooling until'))).toBe(true)
+  })
+
+  it('a sighting with NO reset wording on screen falls back to RATE_LIMIT_GRACE_MS cooling', async () => {
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'opus' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached']]), // bare — no "resets…" phrase
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    // No PTY wording and no A5 cache in this process ⇒ resolveCoolingUntil's grace floor.
+    expect(isTierCooling('opus', t1 + RATE_LIMIT_GRACE_MS - 1)).toBe(true)
+    expect(isTierCooling('opus', t1 + RATE_LIMIT_GRACE_MS + 1)).toBe(false)
+  })
+
+  it('MF-2: a transient blip with a NOT-exhausted A5 cache cools only the grace window (pct gate)', async () => {
+    // A5 is a standing display — resetsAt exists even at 42% usage. A transient
+    // 529 blip must NOT inherit the session window's reset (up to ~5h away).
+    a5Mock.current = {
+      session: { pct: 42, resetsAt: 'in 4 hours' },
+      weekAll: { pct: 10, resetsAt: 'in 6 days' },
+      capturedAt: new Date(T0).toISOString(),
+      status: 'ok',
+    }
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'opus' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'API Error: 529 Overloaded']]), // transient — no reset wording
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    // Neither slot is spent (pct<100) ⇒ the A5 resetsAt is IGNORED — grace floor only.
+    expect(isTierCooling('opus', t1 + RATE_LIMIT_GRACE_MS - 1)).toBe(true)
+    expect(isTierCooling('opus', t1 + RATE_LIMIT_GRACE_MS + 1)).toBe(false)
+  })
+
+  it('MF-2: a SPENT session slot (pct>=100) IS trusted as the cooling horizon', async () => {
+    a5Mock.current = {
+      session: { pct: 100, resetsAt: 'in 45 minutes' },
+      weekAll: { pct: 30, resetsAt: 'in 6 days' },
+      capturedAt: new Date(T0).toISOString(),
+      status: 'ok',
+    }
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'opus' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached']]), // no PTY reset wording → A5 is next
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    // Session genuinely spent ⇒ its reset (45min, past the 20min grace) is the horizon.
+    expect(isTierCooling('opus', t1 + 44 * 60_000)).toBe(true)
+    expect(isTierCooling('opus', t1 + 45 * 60_000 + 1)).toBe(false)
+  })
+
+  it('MF-2: weekly slot spent while the session is healthy → the WEEKLY reset is the horizon', async () => {
+    a5Mock.current = {
+      session: { pct: 42, resetsAt: 'in 3 hours' }, // healthy — its reset must NOT be used
+      weekAll: { pct: 100, resetsAt: 'in 40 hours' },
+      capturedAt: new Date(T0).toISOString(),
+      status: 'ok',
+    }
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached']]),
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    expect(isTierCooling('fable', t1 + 39 * 3_600_000)).toBe(true)
+    expect(isTierCooling('fable', t1 + 40 * 3_600_000 + 1)).toBe(false)
+  })
+
+  it('a sighting on a worker with NO recorded model holds it but marks NOTHING (never cool by guess)', async () => {
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached']]),
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(true) // held exactly as before
+    for (const tier of MODEL_TIER_LADDER) expect(isTierCooling(tier, t1 + 1)).toBe(false)
+    expect(engine.log.some((l) => l.message.includes('cooling until'))).toBe(false)
+  })
+
+  it('E2E: sightings across every tier → park (zero spawns) → auto-resume once the reset passes', async () => {
+    const ids = ['a', 'b', 'c', 'd']
+    const engine = newEngine({
+      workers: MODEL_TIER_LADDER.map((tier, i) =>
+        worker({
+          terminalId: `pty-${tier}-1`,
+          branch: `swarm/${ids[i]}`,
+          worktree: `/wt/${ids[i]}`,
+          taskId: ids[i],
+          taskTitle: `task ${ids[i]}`,
+          startedAt,
+          model: tier,
+        }),
+      ),
+    })
+    const deps = makeDeps({
+      cards: [
+        ...ids.map((id) => card(id, { boardColumn: 'doing' })),
+        card('e', { boardOrder: 99 }), // a waiting todo — the park's observable subject
+      ],
+      screens: new Map(
+        MODEL_TIER_LADDER.map((tier) => [`pty-${tier}-1`, 'Claude usage limit reached · resets in 30 minutes']),
+      ),
+    })
+
+    // Pass 1: four sightings land (each marks its own launch tier — nothing seeded
+    // by hand), and the SAME pass's dispatch step parks: todo 'e' is not spawned.
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, t1)
+    for (const tier of MODEL_TIER_LADDER) expect(isTierCooling(tier, t1 + 1)).toBe(true)
+    expect(deps.spawned).toHaveLength(0)
+    expect(engine.parkUntil).toBe(t1 + 30 * 60_000) // earliest reset = the shared PTY-worded one
+    expect(engine.log.some((l) => l.message.startsWith('quota park:') && l.level === 'warn')).toBe(true)
+
+    // Pass 2, first tick past the PTY-worded reset: lazy expiry frees every tier —
+    // the park lifts and dispatch resumes on its own (no human action, no cleanup
+    // step). The four held workers are also past RATE_LIMIT_GRACE_MS by now, so
+    // the same pass requeues them (slot recovery) — but 'e' was the snapshot's only
+    // todo, so the resumed dispatch spawns exactly it.
+    const t2 = t1 + 30 * 60_000 + 1000
+    await runDispatchPass(engine, deps, t2)
+    expect(engine.parkUntil).toBeUndefined()
+    expect(engine.log.some((l) => l.message.startsWith('quota park lifted'))).toBe(true)
+    expect(deps.spawned.map((s) => s.taskId)).toEqual(['e'])
   })
 })
 
@@ -2819,6 +3252,10 @@ const makeIntDeps = (init: {
   dead?: Set<string>
   moveToDoingFails?: Set<string>
   recoverFails?: Set<string>
+  // Cross-process integration lock (0706 二重司令塔事故フォロー) fake: defaults to
+  // always-succeeds (pre-existing tests are unaffected); a test overrides with a
+  // fake that returns ok:false to exercise the skip-this-pass path.
+  acquireLock?: IntegrationDeps['acquireLock']
 }): IntegrationDeps & {
   integrated: string[]
   moved: string[]
@@ -2901,6 +3338,7 @@ const makeIntDeps = (init: {
       integrated.push(branch)
       return outcomes[branch] ?? { status: 'integrated', mode: 'ff' }
     },
+    acquireLock: init.acquireLock ?? alwaysAcquireLock,
     moveToDone: async (_p, taskId) => {
       if (moveToDoneFails.has(taskId)) return false
       moved.push(taskId)
@@ -3227,6 +3665,197 @@ describe('runIntegratePass — throttle', () => {
     const before = deps.integrated.length
     await runIntegratePass(engine, deps)
     expect(deps.integrated.length).toBe(before)
+  })
+})
+
+// ── runIntegratePass — cross-process integration lock (0706 二重司令塔事故フォロー) ──
+// Observable: a SEPARATE process (a tmux 司令塔 holding the repo-scoped file lock
+// via scripts/swarm-lock.js) must make the in-app engine skip a card's integration
+// — never land it under contention — and say so explicitly in the engine log
+// (never silent). 差し戻し(1/3) MUST-FIX: the lock is acquired PER CARD, immediately
+// before `integrate()` — NOT once for the whole pass — because the pass also runs
+// verify/tsc + a multi-minute adversarial-review panel per card, which could push a
+// whole-pass hold past DEFAULT_STALE_MS and let a second process steal a still-live
+// lock (reproducing the 0706 race this lock exists to prevent).
+
+describe('runIntegratePass — cross-process integration lock', () => {
+  it('skips a card (not the whole pass) when the lock is held elsewhere, and logs it', async () => {
+    const engine = newEngine({ autoMerge: true })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b')],
+      acquireLock: async () => ({
+        ok: false,
+        reason: 'held',
+        holder: { pid: 4242, acquiredAt: '2026-07-08T00:00:00.000Z', label: 'tmux-cli' },
+      }),
+    })
+    await runIntegratePass(engine, deps)
+
+    // Neither card landed.
+    expect(deps.integrated).toEqual([])
+    expect(deps.moved).toEqual([])
+
+    // The skip is explicit in the engine log (never silent contention), once per card.
+    const lines = engine.log.filter((l) => l.message.includes('integration lock'))
+    expect(lines).toHaveLength(2)
+    expect(lines.every((l) => l.level === 'warn')).toBe(true)
+    expect(lines.some((l) => l.message.includes('4242') && l.message.includes('swarm/a'))).toBe(true)
+    expect(lines.some((l) => l.message.includes('4242') && l.message.includes('swarm/b'))).toBe(true)
+  })
+
+  it('proceeds to integrate normally once the lock is free again', async () => {
+    const engine = newEngine({ autoMerge: true, lastIntegrateAt: 0 })
+    let held = true
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      acquireLock: async () =>
+        held
+          ? { ok: false, reason: 'held', holder: { pid: 1, acquiredAt: '1970-01-01T00:00:00.000Z' } }
+          : {
+              ok: true,
+              holder: { pid: process.pid, acquiredAt: new Date().toISOString() },
+              release: async () => {},
+            },
+    })
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toEqual([])
+
+    held = false
+    engine.lastIntegrateAt = 0 // bypass the throttle for the test's second tick
+    await runIntegratePass(engine, deps)
+    expect(deps.integrated).toEqual(['swarm/a'])
+  })
+
+  it('releases the lock even when integrate() itself throws', async () => {
+    const engine = newEngine({ autoMerge: true })
+    let released = false
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      acquireLock: async () => ({
+        ok: true,
+        holder: { pid: process.pid, acquiredAt: new Date().toISOString() },
+        release: async () => {
+          released = true
+        },
+      }),
+    })
+    let integrateCalled = false
+    deps.integrate = async () => {
+      integrateCalled = true
+      throw new Error('boom')
+    }
+    await runIntegratePass(engine, deps)
+    expect(integrateCalled).toBe(true)
+    expect(released).toBe(true)
+  })
+
+  it('MUST-FIX regression: the lock is NOT held during verify/review — only acquired right before integrate()', async () => {
+    // Records the ORDER acquireLock / verify / review / integrate fire in, for
+    // ONE card, so a long verify+review (the multi-minute adversarial panel in
+    // production) provably happens BEFORE the lock is ever taken — never while
+    // held. This is the structural fix for the 差し戻し(1/3) finding: the OLD
+    // (pass-scoped) design acquired the lock BEFORE verify/review, so a slow
+    // pass could hold it past staleMs and get stolen mid-integrate.
+    const order: string[] = []
+    const engine = newEngine({ autoMerge: true })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewDefault: 'integrate',
+      acquireLock: async () => {
+        order.push('acquireLock')
+        return {
+          ok: true,
+          holder: { pid: process.pid, acquiredAt: new Date().toISOString() },
+          release: async () => {
+            order.push('release')
+          },
+        }
+      },
+    })
+    const realVerify = deps.verify
+    deps.verify = async (...args) => {
+      order.push('verify:start')
+      // Simulate a slow tsc/lint/test pass (elapsed real time, no lock held).
+      await new Promise((r) => setTimeout(r, 5))
+      order.push('verify:end')
+      return realVerify(...args)
+    }
+    const realReview = deps.review
+    deps.review = async (...args) => {
+      order.push('review:start')
+      // Simulate a multi-minute adversarial-review panel (elapsed real time).
+      await new Promise((r) => setTimeout(r, 5))
+      order.push('review:end')
+      return realReview!(...args)
+    }
+    const realIntegrate = deps.integrate
+    deps.integrate = async (...args) => {
+      order.push('integrate:start')
+      const res = await realIntegrate(...args)
+      order.push('integrate:end')
+      return res
+    }
+
+    await runIntegratePass(engine, deps)
+
+    expect(deps.integrated).toEqual(['swarm/a'])
+    // verify and review run to completion strictly BEFORE acquireLock — the lock
+    // is never held during the slow stages.
+    expect(order).toEqual([
+      'verify:start',
+      'verify:end',
+      'review:start',
+      'review:end',
+      'acquireLock',
+      'integrate:start',
+      'integrate:end',
+      'release',
+    ])
+  })
+
+  it('MUST-FIX regression (fake clock): a second process can safely acquire while THIS engine is between cards (verify/review), and the engine still lands its own card without a double-hold', async () => {
+    // Fake clock: elapsed "wall time" advances past DEFAULT_STALE_MS (10 min)
+    // during verify — a competing process (e.g. scripts/swarm-lock.js) checks in
+    // during that window and correctly sees the lock FREE (never acquires it
+    // falsely, and never contends with the engine, because the engine isn't
+    // holding it then). When the engine reaches integrate(), IT acquires the
+    // lock — proving no window exists where the lock is held long enough for a
+    // competitor to observe (and reclaim) a stale-but-still-relevant hold.
+    let clockMs = 0
+    const held = { by: null as null | 'engine' | 'external' }
+    const engine = newEngine({ autoMerge: true })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewDefault: 'integrate',
+      acquireLock: async () => {
+        if (held.by !== null) return { ok: false, reason: 'held', holder: { pid: 1, acquiredAt: '' } }
+        held.by = 'engine'
+        return {
+          ok: true,
+          holder: { pid: process.pid, acquiredAt: new Date(clockMs).toISOString() },
+          release: async () => {
+            held.by = null
+          },
+        }
+      },
+    })
+    const realVerify = deps.verify
+    deps.verify = async (...args) => {
+      // 11 minutes of "wall time" elapse during verify — well past a 10-minute
+      // staleMs — while the engine holds NO lock at all.
+      clockMs += 11 * 60_000
+      // A competing external process checks in mid-verify: sees the lock FREE
+      // (correct — the engine isn't holding it), and does NOT need to steal
+      // anything (nothing to steal). It immediately releases (simulating a
+      // read-only status check, or a quick unrelated hold-and-release).
+      expect(held.by).toBeNull()
+      return realVerify(...args)
+    }
+
+    await runIntegratePass(engine, deps)
+
+    expect(deps.integrated).toEqual(['swarm/a'])
+    expect(held.by).toBeNull() // released after landing — nothing left dangling
   })
 })
 
@@ -3764,6 +4393,11 @@ describe('buildReviewPrompt — the reviewer contract', () => {
 // + the REAL-git integration test) to prove the ROUTING the goal specifies:
 // majority must-fix → 差し戻し (never merge); all clean → land; no majority → defer.
 describe('runIntegratePass — adversarial review gate (a14329dc)', () => {
+  // The quota cooling table is a globalThis singleton — the park pre-gate tests
+  // below write it, so every case resets it to stay order-independent.
+  beforeEach(() => __resetQuotaForTest())
+  afterEach(() => __resetQuotaForTest())
+
   const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
     worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
 
@@ -3957,6 +4591,66 @@ describe('runIntegratePass — adversarial review gate (a14329dc)', () => {
     await runIntegratePass(engine, deps)
     expect(deps.integrated).toContain('swarm/a') // re-reviewed clean on the new tip → landed
   })
+
+  it('MF-1: a quota park never consumes the defer streak — and review auto-resumes after the reset, no human', async () => {
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': cleanResult() },
+    })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
+    // Every tier cooling — the state a full quota wall leaves behind.
+    for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, Date.now() + 10 * 60_000)
+
+    // WELL past MAX_REVIEW_DEFERS ticks while parked. Before the fix, ~3 ticks
+    // (~45s) burned the streak → needs-human 'conflict' + the defer-exhausted
+    // memo kept the panel off FOREVER (even after the park lifted).
+    for (let i = 0; i < MAX_REVIEW_DEFERS + 2; i++) {
+      engine.lastIntegrateAt = 0
+      await runIntegratePass(engine, deps)
+    }
+    expect(deps.reviewed).toHaveLength(0) // pre-gate: the panel dep is never even called
+    expect(engine.reviewDeferred.has('swarm/a')).toBe(false) // streak untouched
+    expect(engine.reviews.find((r) => r.taskId === 'a')?.status).not.toBe('conflict') // no needs-human flip
+    expect(engine.log.some((l) => l.message.includes('needs-human'))).toBe(false)
+    expect(deps.integrated).toHaveLength(0) // and of course nothing merged un-reviewed
+
+    // The reset passes (cooling table empties) → the very next tick reviews and
+    // lands, with no human action and no new commit.
+    __resetQuotaForTest()
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    expect(deps.reviewed).toHaveLength(1) // panel re-spawned as if nothing happened
+    expect(deps.integrated).toEqual(['swarm/a'])
+  })
+
+  it('MF-1 backstop: a review dep answering skippedForPark:true is kept OUT of the defer streak (verify-window race)', async () => {
+    // The park can BEGIN while a card's multi-minute verify runs — the pre-gate
+    // (evaluated before deps.review) passed, but the dep itself park-gated. That
+    // answer is an engine hold, not a panel verdict: no streak, no needs-human.
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const parkSkip: ReviewResult = {
+      decision: 'defer',
+      verdicts: [],
+      mustFix: 0,
+      clean: 0,
+      skippedForPark: true,
+      reason: 'quota park: every model tier is cooling — review deferred',
+    }
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': parkSkip },
+    })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
+    for (let i = 0; i < MAX_REVIEW_DEFERS + 1; i++) {
+      engine.lastIntegrateAt = 0
+      await runIntegratePass(engine, deps)
+    }
+    expect(deps.reviewed).toHaveLength(MAX_REVIEW_DEFERS + 1) // the dep WAS called (no park in the table)
+    expect(engine.reviewDeferred.has('swarm/a')).toBe(false) // …but the streak never moved
+    expect(engine.reviews.find((r) => r.taskId === 'a')?.status).not.toBe('conflict')
+    expect(deps.integrated).toHaveLength(0) // still never merges un-reviewed
+  })
 })
 
 describe('monitorWorkers — re-promote suppression after a 差し戻し (reworkAt)', () => {
@@ -4038,6 +4732,7 @@ describe('runEnginePass — never overlaps itself', () => {
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
       integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+      acquireLock: alwaysAcquireLock,
       moveToDone: async () => true,
       markConflict: async () => true,
       cleanup: async () => ({ removed: true }),
@@ -4141,6 +4836,7 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
       integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+      acquireLock: alwaysAcquireLock,
       moveToDone: async () => true,
       markConflict: async () => true,
       cleanup: async () => ({ removed: true }),

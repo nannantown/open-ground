@@ -39,6 +39,9 @@ export const projectPanel = {
     'projectPanel.swarm.power.stop': 'Stop',
     'projectPanel.swarm.power.running': 'Running',
     'projectPanel.swarm.power.stopped': 'Stopped',
+    // Deliberate owner pause (manualStop — persisted server-side, survives
+    // restarts), distinct from a merely never-started "Stopped".
+    'projectPanel.swarm.power.manualStop': 'Stopped by hand',
     'projectPanel.swarm.power.offline': 'Not available yet',
     'projectPanel.swarm.power.workers': '{count} workers',
     'projectPanel.swarm.power.hint':
@@ -137,9 +140,9 @@ export const projectPanel = {
       'Let the engine land review cards on the trunk itself — fast-forward / rebase only, never forced; conflicts are left for you. It does NOT run tests or review the diff first — for verified merges, drive them through the commander conversation (/manage) instead. Off by default.',
     'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
     'projectPanel.swarm.manager.overseerHint':
-      'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. UNLIKE auto-integrate, turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). Best run with the sandbox experiment on.',
+      'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. UNLIKE auto-integrate, turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
     'projectPanel.swarm.manager.overseerSandboxWarning':
-      '⚠ Sandbox experiment is OFF — the overseer’s brain runs without the kernel-level containment layer. Its read-only design and budget still hold, but enabling the sandbox is recommended.',
+      '⚠ Kernel-level containment is unavailable on this host (macOS sandbox-exec required) — the overseer’s brain runs with the permission-layer safeguards only. Its read-only design and budget still hold.',
     'projectPanel.swarm.manager.on': 'On',
     'projectPanel.swarm.manager.off': 'Off',
     'projectPanel.swarm.manager.engineRunning': 'Engine running',
@@ -270,6 +273,8 @@ export const projectPanel = {
       'Land merge-ready review branches on the trunk (fast-forward / rebase only).',
     'projectPanel.swarm.flow.draining': 'Draining the Board',
     'projectPanel.swarm.flow.notDraining': 'Paused — no new dispatch',
+    // Deliberate owner stop (manualStop — persisted, survives restarts).
+    'projectPanel.swarm.flow.manualStopped': 'Stopped by hand — no new dispatch',
     'projectPanel.swarm.flow.stageStarting': 'Starting',
     'projectPanel.swarm.flow.stageAudit': 'Audit',
     'projectPanel.swarm.flow.stageImplement': 'Implementing',
@@ -631,6 +636,8 @@ export const projectPanel = {
     'projectPanel.swarm.power.stop': '停止',
     'projectPanel.swarm.power.running': '稼働中',
     'projectPanel.swarm.power.stopped': '停止中',
+    // 手動停止(manualStop — サーバ側で永続化・再起動を跨いで維持)。単なる未起動の「停止中」と区別。
+    'projectPanel.swarm.power.manualStop': '手動停止中',
     'projectPanel.swarm.power.offline': '未配備',
     'projectPanel.swarm.power.workers': 'ワーカー {count}',
     'projectPanel.swarm.power.hint':
@@ -727,9 +734,9 @@ export const projectPanel = {
       'review のカードをエンジンが本流へ自動で取り込みます（早送り/rebase のみ・強制プッシュはしません）。衝突は手動に残します。テストやレビューは回しません — 検証込みのマージは司令官との対話（/manage）に任せてください。既定はオフ。',
     'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
     'projectPanel.swarm.manager.overseerHint':
-      'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。自動統合と違い、autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。sandbox 実験と併用推奨。',
+      'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。自動統合と違い、autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
     'projectPanel.swarm.manager.overseerSandboxWarning':
-      '⚠ sandbox 実験がオフです — 監督の大脳はカーネルレベルの封じ込めなしで動きます。読み取り専用設計と予算上限は有効ですが、sandbox の有効化を推奨します。',
+      '⚠ この環境ではカーネルレベルの封じ込め（macOS の sandbox-exec）が利用できません — 監督の大脳は permission 層の防壁のみで動きます。読み取り専用設計と予算上限は有効です。',
     'projectPanel.swarm.manager.on': 'オン',
     'projectPanel.swarm.manager.off': 'オフ',
     'projectPanel.swarm.manager.engineRunning': 'エンジン稼働中',
@@ -857,6 +864,8 @@ export const projectPanel = {
       '統合可のレビューブランチを trunk へ着地（fast-forward / rebase のみ）。',
     'projectPanel.swarm.flow.draining': 'Board を引いています',
     'projectPanel.swarm.flow.notDraining': '一時停止 — 新規 dispatch なし',
+    // 手動停止(manualStop — 永続化・再起動を跨いで維持)。
+    'projectPanel.swarm.flow.manualStopped': '手動停止中 — 新規 dispatch なし',
     'projectPanel.swarm.flow.stageStarting': '起動中',
     'projectPanel.swarm.flow.stageAudit': '監査',
     'projectPanel.swarm.flow.stageImplement': '実装中',

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   Archive,
@@ -88,12 +89,19 @@ import {
 } from '@/components/canvas/moduleRegistry'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
+import { usePlayback } from '@/lib/playback/playbackStore'
+import { PlaybackEq } from '@/components/canvas/PlaybackEq'
 import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
 import { attachCustomTab, detachCustomTab } from '@/lib/modules/customTabAttach'
 import { disableNativeModule, enableNativeModule } from '@/lib/modules/nativeEnable'
 import { useCustomModules } from '@/lib/modules/useCustomModules'
 import { CustomModuleView } from '@/components/canvas/modules/CustomModuleView'
 import { customModuleStorageId } from '@/components/canvas/modules/CustomModuleView'
+import {
+  destroyFrame,
+  destroyFrameIfProject,
+  destroyFramesForProject,
+} from '@/components/canvas/modules/CustomFrameHost'
 import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
 import { CustomTabPickerDialog } from '@/components/canvas/modules/CustomTabPickerDialog'
@@ -344,6 +352,22 @@ const OwnedProjectBody = ({
   const [installedEditors, setInstalledEditors] = useState<OpenApp[]>([])
   const [defaultEditor, setDefaultEditor] = useState<OpenApp | null>(null)
   const [canPickEditor, setCanPickEditor] = useState(false)
+  // The header dropdowns (editor / branch) render through a body portal at
+  // overlay-modal z, NOT as in-panel absolute children: a hosted custom-tab
+  // iframe (CustomFrameHost, z 45) draws OVER the whole panel stacking context
+  // (z 40), so any in-panel z — however high — would sit under it. Portaling
+  // to <body> at 50 keeps the menus above the frame. Position is measured from
+  // the trigger when the menu opens (fixed coords; the menus close on resize).
+  const editorBtnRef = useRef<HTMLButtonElement | null>(null)
+  const [editorMenuPos, setEditorMenuPos] = useState<{ left: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!editorMenuOpen) {
+      setEditorMenuPos(null)
+      return
+    }
+    const r = editorBtnRef.current?.getBoundingClientRect()
+    if (r) setEditorMenuPos({ left: r.left, top: r.bottom + 4 })
+  }, [editorMenuOpen])
   useEffect(() => {
     fetch('/api/project/editors')
       .then(
@@ -361,13 +385,21 @@ const OwnedProjectBody = ({
       })
       .catch(() => {})
   }, [])
-  // Outside-click closes the menu. The menu's own container stops mousedown
-  // propagation (see the JSX), so clicks inside it never reach this listener.
+  // Outside-click closes the menu. Both the trigger container AND the portaled
+  // menu stop mousedown propagation (see the JSX) — React portal events bubble
+  // through the REACT tree and a synthetic stopPropagation halts the native
+  // event too, so clicks inside either never reach this window listener. Also
+  // closes on resize: the portaled menu is fixed at coords measured on open,
+  // which a resize would leave stale.
   useEffect(() => {
     if (!editorMenuOpen) return
     const close = () => setEditorMenuOpen(false)
     window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
+    window.addEventListener('resize', close)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('resize', close)
+    }
   }, [editorMenuOpen])
 
   // Open the folder in an editor. `editor` undefined → the server uses the
@@ -465,6 +497,18 @@ const OwnedProjectBody = ({
   const [activeBranches, setActiveBranches] =
     useState<ActiveBranchesResponse | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
+  // Body-portaled like the editor menu (see editorMenuPos) — same hosted-frame
+  // stacking reason, same measured-on-open fixed positioning.
+  const branchBtnRef = useRef<HTMLButtonElement | null>(null)
+  const [branchMenuPos, setBranchMenuPos] = useState<{ left: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!branchMenuOpen) {
+      setBranchMenuPos(null)
+      return
+    }
+    const r = branchBtnRef.current?.getBoundingClientRect()
+    if (r) setBranchMenuPos({ left: r.left, top: r.bottom + 4 })
+  }, [branchMenuOpen])
   useEffect(() => {
     setBranchInfo(null)
     setBranchModalOpen(false)
@@ -514,13 +558,19 @@ const OwnedProjectBody = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchMenuOpen, project?.path, project?.missing])
 
-  // Outside-click closes the branch dropdown. The dropdown stops mousedown
-  // propagation (see JSX), so clicks inside never reach this listener.
+  // Outside-click closes the branch dropdown. The trigger container and the
+  // portaled dropdown both stop mousedown propagation (see JSX), so clicks
+  // inside never reach this listener. Resize closes too (fixed coords are
+  // measured on open — see the editor menu's note).
   useEffect(() => {
     if (!branchMenuOpen) return
     const close = () => setBranchMenuOpen(false)
     window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
+    window.addEventListener('resize', close)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('resize', close)
+    }
   }, [branchMenuOpen])
 
   const regenerateDescription = useCallback(async () => {
@@ -981,9 +1031,14 @@ const OwnedProjectBody = ({
       if (!base) return
       const moduleId = customModuleIdFromTab(tabId as `custom:${string}`)
       persist({ ...base, ...detachCustomTab(base, moduleId) })
+      // Detaching says "I'm done with this tab HERE" — tear down its hosted
+      // frame too, so audio it was playing stops instead of living on as a
+      // hidden keep-alive nobody meant to keep. Project-guarded: the same
+      // module playing from ANOTHER project's tab isn't ours to kill.
+      if (project?.path) destroyFrameIfProject(moduleId, project.path)
       // The dangling-view fallback effect moves the view off the detached id.
     },
-    [persist],
+    [persist, project?.path],
   )
   // Show/hide a built-in module in THIS project's row (disabledModules). Hiding
   // the LAST remaining tab is blocked by the callers (picker + tab menu); the
@@ -1040,6 +1095,9 @@ const OwnedProjectBody = ({
         // Server killed any PTY cwd'd in the module dir; drop the cached
         // dock bindings too — nothing could ever reclaim them post-delete.
         killEmbeddedTerminals(customModuleStorageId(moduleId))
+        // And the hosted iframe (kills any audio it was playing) — a deleted
+        // module must not keep running as a hidden keep-alive frame.
+        destroyFrame(moduleId)
       } finally {
         // Refresh drops the module from the library (and thus from every
         // project's row); the dangling-view fallback effect then moves the
@@ -1751,6 +1809,12 @@ const OwnedProjectBody = ({
         setDeleting(false)
         return
       }
+      // Tear down every hosted frame this project owns — audio started from a
+      // now-deleted project must not keep playing hidden. Keyed by the frame's
+      // own projectPath (not the attach list), so a module that's ALSO live
+      // from another project keeps that other session untouched. (Modules stay
+      // in the library; a frame respawns fresh when opened elsewhere.)
+      destroyFramesForProject(project.path)
       onDeleted?.(project.path)
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : 'Delete failed.')
@@ -1800,6 +1864,7 @@ const OwnedProjectBody = ({
               onMouseDown={(e) => e.stopPropagation()}
             >
               <button
+                ref={editorBtnRef}
                 onClick={handleEditorButton}
                 disabled={project.missing}
                 title={t('projectPanel.openInEditor')}
@@ -1821,10 +1886,16 @@ const OwnedProjectBody = ({
                   />
                 )}
               </button>
-              {editorMenuOpen && (
+              {editorMenuOpen && editorMenuPos && createPortal(
+                // Body portal at overlay-modal z — must beat a hosted custom-
+                // tab iframe (z 45), which any in-panel z cannot (the panel is
+                // one z-40 stacking context). stopPropagation keeps inside
+                // clicks from reaching the window outside-click closer.
                 <div
                   role="menu"
-                  className="absolute left-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  style={{ left: editorMenuPos.left, top: editorMenuPos.top }}
+                  className="fixed z-overlay-modal w-60 overflow-hidden rounded-md border border-line bg-bg-card py-1 shadow-lg"
                 >
                   <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
                     {t('projectPanel.openInEditor')}
@@ -1890,7 +1961,8 @@ const OwnedProjectBody = ({
                       {t('projectPanel.editorClearDefault')}
                     </button>
                   )}
-                </div>
+                </div>,
+                document.body,
               )}
             </div>
             {/* Branch chip — only for git projects: current branch, a dot when
@@ -1901,6 +1973,7 @@ const OwnedProjectBody = ({
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 <button
+                  ref={branchBtnRef}
                   onClick={() => setBranchMenuOpen((v) => !v)}
                   disabled={project.missing}
                   title={t('projectPanel.branchMenuTitle')}
@@ -1931,10 +2004,14 @@ const OwnedProjectBody = ({
                     }`}
                   />
                 </button>
-                {branchMenuOpen && (
+                {branchMenuOpen && branchMenuPos && createPortal(
+                  // Body portal at overlay-modal z — same hosted custom-tab
+                  // iframe stacking reason as the editor menu above.
                   <div
                     role="menu"
-                    className="absolute left-0 top-full z-50 mt-1 max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    style={{ left: branchMenuPos.left, top: branchMenuPos.top }}
+                    className="fixed z-overlay-modal max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
                   >
                     <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
                       {t('projectPanel.branchMenuTitle')}
@@ -2000,7 +2077,8 @@ const OwnedProjectBody = ({
                     >
                       {t('projectPanel.branchChangesTitle')}
                     </button>
-                  </div>
+                  </div>,
+                  document.body,
                 )}
               </div>
             )}
@@ -2381,6 +2459,7 @@ const OwnedProjectBody = ({
           <CustomModuleView
             key={activeCustomModule.id}
             module={activeCustomModule}
+            projectPath={project.path}
             role={customRole}
             setup={customSetupId === activeCustomModule.id}
             onSetupConsumed={() => setCustomSetupId(null)}
@@ -3138,6 +3217,11 @@ const ViewTabs = ({
   }, [customTabs, gate])
   const tabs = order.map(id => byId.get(id)).filter((m): m is TabDef => !!m)
 
+  // Which custom tabs are audibly playing (the Songs tab's embedded player) —
+  // drives the EQ-bars badge on the tab. Snapshot identity only moves on
+  // start/stop/track change, so this re-renders the row rarely.
+  const playback = usePlayback()
+
   // Right-click menu on a custom tab (detach from this project's row —
   // non-destructive, single click, no confirm). Fixed-positioned at the
   // cursor; dismissed by the backdrop, Escape, or completing the action.
@@ -3191,6 +3275,11 @@ const ViewTabs = ({
       {tabs.map((m, i) => {
         const active = m.id === view
         const dimmed = dragFrom === i
+        // Audio-playing badge for a custom tab (e.g. the Songs tab): EQ bars
+        // while its embedded app reports playback; the tooltip names the track.
+        const tabPlayback = isCustomTabId(m.id)
+          ? playback.get(customModuleIdFromTab(m.id))
+          : undefined
         // Accent insertion bar: before this tab when it's the drop slot, or
         // after the last tab when dropping at the end.
         // Show the insertion bar only where a drop would actually move the tab.
@@ -3254,6 +3343,14 @@ const ViewTabs = ({
             )}
             {m.icon}
             <span>{m.label}</span>
+            {tabPlayback && (
+              <span
+                title={tabPlayback.title ?? 'Playing'}
+                className="text-accent"
+              >
+                <PlaybackEq size={9} />
+              </span>
+            )}
             {(badges?.[m.id] ?? 0) > 0 && (
               <span
                 title={t('projectPanel.reviewWaitingTitle')}
@@ -3285,13 +3382,17 @@ const ViewTabs = ({
       {/* The marketplace no longer sits as a bare text entry in the tab row.
           It moved into the "+" picker (「マーケットで探す」) and Project settings,
           so the tab row stays tabs-only (docs/CUSTOM_TABS_PLAN.md). */}
-      {tabMenu && menuAction && (
+      {tabMenu && menuAction && createPortal(
+        // Body portal at overlay-modal z: the menu must open ABOVE a hosted
+        // custom-tab iframe (CustomFrameHost, z 45), which any z inside the
+        // panel's own stacking context cannot. Coordinates are already client-
+        // space (the context-click position), so nothing else changes.
         <>
           {/* Invisible backdrop: any click outside the menu dismisses it
               (a right-click outside dismisses too, without opening the
               browser menu over our UI). */}
           <div
-            className="fixed inset-0 z-40"
+            className="fixed inset-0 z-overlay-modal"
             onMouseDown={() => setTabMenu(null)}
             onContextMenu={e => {
               e.preventDefault()
@@ -3300,7 +3401,7 @@ const ViewTabs = ({
           />
           <div
             role="menu"
-            className="fixed z-50 min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
+            className="fixed z-overlay-modal min-w-[168px] overflow-hidden rounded-[6px] border border-line bg-bg-card py-1 shadow-card-hover"
             style={{ left: tabMenu.x, top: tabMenu.y }}
           >
             {/* One action, fired on the first click — both detach and hide are
@@ -3326,7 +3427,8 @@ const ViewTabs = ({
               </span>
             </button>
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   )
@@ -3363,22 +3465,46 @@ const MoreMenu = ({
   const { t } = useT()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  // Body-portaled at overlay-modal z, like the header editor/branch menus —
+  // a hosted custom-tab iframe (z 45) covers any in-panel z, so the menu must
+  // leave the panel's stacking context. Right-aligned to the trigger, measured
+  // when it opens.
+  const [menuPos, setMenuPos] = useState<{ right: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuPos(null)
+      return
+    }
+    const r = ref.current?.getBoundingClientRect()
+    if (r) setMenuPos({ right: window.innerWidth - r.right, top: r.bottom + 4 })
+  }, [open])
   useEffect(() => {
     if (!open) return
     const close = (e: MouseEvent) => {
+      // Trigger clicks toggle via the IconButton; menu clicks stop propagation
+      // in the portal (below) — so anything that lands here is truly outside.
       if (ref.current?.contains(e.target as Node)) return
       setOpen(false)
     }
+    const closeNow = () => setOpen(false)
     window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
+    window.addEventListener('resize', closeNow)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('resize', closeNow)
+    }
   }, [open])
   return (
     <div ref={ref} className="relative" onMouseDown={e => e.stopPropagation()}>
       <IconButton title={t('projectPanel.moreActions')} onClick={() => setOpen(v => !v)}>
         <MoreHorizontal size={15} strokeWidth={1.75} />
       </IconButton>
-      {open && (
-        <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-[2px] border border-line bg-bg-card py-1 shadow-card-hover">
+      {open && menuPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          style={{ right: menuPos.right, top: menuPos.top }}
+          className="fixed z-overlay-modal w-56 rounded-[2px] border border-line bg-bg-card py-1 shadow-card-hover"
+        >
           {/* Project settings (text-only item, like the share entries). */}
           <button
             disabled={projectSettingsDisabled}
@@ -3412,7 +3538,8 @@ const MoreMenu = ({
             <Trash2 size={12} strokeWidth={1.75} />
             {t('projectPanel.deleteProjectMenu')}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

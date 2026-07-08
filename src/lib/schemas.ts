@@ -147,6 +147,12 @@ export const ProjectTaskSchema = z.object({
   selfSupplyKey: z.string().optional().catch(undefined),
   // .catch(undefined): junk → undefined → falsy → the gate stays CLOSED (safe).
   selfSupplyApproved: z.boolean().optional().catch(undefined),
+  // 差し戻しループガードのカウンタ — POST /api/project/tasks {rework} が bump し、
+  // done/todo着地で自動リセットする (types.ts参照)。.int().nonnegative(): a
+  // hand-edited negative/fractional value could otherwise defeat the loop guard
+  // (e.g. -99 never crosses maxReworks). .catch(undefined): junk → field drops,
+  // card survives (同じ drop-the-field-never-the-card 契約)。
+  reworkCount: z.number().int().nonnegative().optional().catch(undefined),
 })
 
 export const ProjectDataSchema = z.object({

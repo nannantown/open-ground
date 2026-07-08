@@ -1,0 +1,38 @@
+--- a/index.html
++++ b/index.html
+@@ -1641,6 +1641,35 @@
+ audio.addEventListener('ended', () => { setPlayIcon(false); cancelAnimationFrame(rafId); });
+ audio.addEventListener('seeked', syncFrame);
+ 
++/* ─── OPEN GROUND 再生状態ブリッジ ───
++   Songs タブ（OPEN GROUND の sandbox iframe）に入っているとき、再生/停止と
++   曲名をホストへ知らせる（タブや ground カードの「再生中」インジケーター用）。
++   sandbox の入れ子で opaque origin になるため targetOrigin は '*'。宛先は
++   window.top（OPEN GROUND 本体）— 中間の sandbox ラッパーは素通しでよい。
++   単体でブラウザ表示している時は top === self への送信になるだけで無害。
++   ホスト側は無心拍 15 秒で自動消灯するので、再生中は 5 秒ごとに再送する。 */
++function announcePlayback() {
++  const playing = !audio.paused && !audio.ended;
++  try {
++    window.top.postMessage({
++      type: 'og-playback',
++      app: 'nene-songs',
++      projectName: 'NENE',
++      playing,
++      title: current ? current.title : null,
++    }, '*');
++  } catch (e) { /* ホスト不在（単体表示）などは黙って無視 */ }
++}
++audio.addEventListener('play', announcePlayback);
++audio.addEventListener('pause', announcePlayback);
++audio.addEventListener('ended', announcePlayback);
++/* 再生が異常終了/リセットされた時も消灯を届ける（error=デコード失敗等、
++   emptied=removeAttribute('src')・load() での破棄。paused=true になるので
++   announce は playing:false を送る） */
++audio.addEventListener('error', announcePlayback);
++audio.addEventListener('emptied', announcePlayback);
++setInterval(() => { if (!audio.paused && !audio.ended) announcePlayback(); }, 5000);
++
+ els.btnPlay.addEventListener('click', togglePlay);
+ els.btnBack.addEventListener('click', () => { audio.currentTime = Math.max(0, audio.currentTime - 5); syncFrame(); });
+ els.btnFwd.addEventListener('click', () => { audio.currentTime = Math.min(current ? current.duration : 0, audio.currentTime + 5); syncFrame(); });

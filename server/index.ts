@@ -18,6 +18,7 @@ import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
 import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
 import { installHooks } from '@/lib/server/hooksInstall'
+import { installOgManageSkill } from '@/lib/server/ogManageSkill'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
@@ -119,6 +120,20 @@ void (async () => {
     if (r.errors.length) console.error(`[openground:hono] hook install errors: ${r.errors.join('; ')}`)
   } catch (e) {
     console.error('[openground:hono] hook install failed', e)
+  }
+  // The og-manage skill (the tmux-free in-app commander protocol) — same
+  // boot-time idempotent install as the hooks above: the commander PTY
+  // (POST /api/swarm/manager) hands claude `/og-manage`, which only resolves
+  // if ~/.claude/skills/og-manage/SKILL.md exists. A user-authored file
+  // (marker removed) is never overwritten; errors are logged, never fatal.
+  try {
+    const s = await installOgManageSkill()
+    if (s.outcome === 'installed' || s.outcome === 'refreshed') {
+      console.log(`[openground:hono] og-manage skill ${s.outcome}: ${s.path}`)
+    }
+    if (s.outcome === 'error') console.error(`[openground:hono] og-manage skill install: ${s.error}`)
+  } catch (e) {
+    console.error('[openground:hono] og-manage skill install failed', e)
   }
 })()
 

@@ -91,6 +91,11 @@ const config: Config = {
         'overlay-hint': '8', // empty-Ground hint — below every overlay
         'overlay-local': '20', // surface inside the project module's stacking context
         'overlay-panel': '40', // the owner project full-screen module panel
+        // Hosted custom-tab iframes (CustomFrameHost): drawn OVER the panel's
+        // tab body (the panel is one stacking context, so any in-panel z would
+        // sit below it) but UNDER app modals — panel popups that must beat the
+        // frame are portaled to <body> at overlay-modal.
+        'overlay-frame': '45',
         'overlay-modal': '50', // app-level centred modal (opens above the panel)
         'overlay-top': '60', // top-most full-screen surface (manual)
         'overlay-gate': '70', // first-run gate above everything (onboarding)

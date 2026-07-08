@@ -122,6 +122,13 @@ export interface LaunchClaudeOpts {
   // passed — it's a symlink to the main checkout and stays fully READ-only.
   // Ignored unless `sandbox` is on.
   sandboxWritePaths?: string[]
+  // Sandbox network egress policy (sandbox.ts). Default 'all' (the historical
+  // profile: outbound open, no listeners) — workers / the interactive terminal
+  // are unchanged. 'loopback' kernel-denies every off-machine destination; the
+  // caller pairs it with an `env` HTTPS_PROXY pointing at the host-side
+  // allowlist CONNECT proxy (egressProxy.ts) — the overseer brain's egress
+  // close. Ignored unless `sandbox` is on.
+  sandboxNetwork?: 'all' | 'loopback'
   // Arm the DETERMINISTIC PreToolUse deny veto (A3/L4) for this session:
   // injects OPENGROUND_GUARD=1 (+ OPENGROUND_GUARD_WRITE_ROOTS from writeRoots)
   // so the openground-guard.js hook (wired globally by hooksInstall.ts, an
@@ -403,7 +410,11 @@ export const buildLaunchCommand = (
 // left fully READ-only — see the NOTE below — so the only cross-tree write
 // carve-outs are the caller-supplied ones (the worker's shared .git, so
 // `git commit`/`push` can land; .git/hooks + .git/config stay denied within it).
-const writeSandboxProfile = (cwd: string, extraWritePaths: string[]): string => {
+const writeSandboxProfile = (
+  cwd: string,
+  extraWritePaths: string[],
+  network?: 'all' | 'loopback',
+): string => {
   let realCwd = cwd
   try {
     realCwd = realpathSync(cwd)
@@ -433,6 +444,7 @@ const writeSandboxProfile = (cwd: string, extraWritePaths: string[]): string => 
     cwd: realCwd,
     home: homedir(),
     extraWriteSubpaths: Array.from(extra),
+    ...(network ? { network } : {}),
   })
   const profilePath = join(
     mkdtempSync(join(tmpdir(), 'openground-sandbox-')),
@@ -507,7 +519,10 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
     resolvedClaudeBin(),
   )
   const launchArgs = sandboxed
-    ? wrapWithSandboxExec(args, writeSandboxProfile(opts.cwd, opts.sandboxWritePaths ?? []))
+    ? wrapWithSandboxExec(
+        args,
+        writeSandboxProfile(opts.cwd, opts.sandboxWritePaths ?? [], opts.sandboxNetwork),
+      )
     : args
 
   // One command line: mark this invocation OPEN GROUND-owned, inject any caller

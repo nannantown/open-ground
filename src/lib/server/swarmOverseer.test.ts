@@ -552,6 +552,44 @@ describe('overseer — fire-and-forget (D2)', () => {
     expect(engine.overseer.assessInFlight).toBe(false)
     expect(engine.overseer.brainAbort).toBeUndefined()
   })
+
+  it('a never-settling LAUNCHED brain is not a silent drop: the watchdog synthesizes its mailbox result so the question reaches the inbox', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine({ workers: [worker()] })
+    const logs: string[] = []
+    const deps = makeDeps(calls, {
+      now: c.now,
+      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どうする？' }),
+      answerAsOwner: (q) => {
+        calls.answerAsOwner.push({ question: q.question })
+        return new Promise<OwnerAnswer>(() => {}) // never settles
+      },
+    })
+
+    // Pass 1: the brain launches THROUGH detectWorkerQuestions — unlike the seeded
+    // watchdog test above, seen[S4:term-1] is now SET. That is what made the pre-fix
+    // drop SILENT: no .then/.finally ever ran (mailbox stayed empty), and the same
+    // question read as "already handled" forever — never answered, never escalated.
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(engine.overseer.assessInFlight).toBe(true)
+    expect(calls.answerAsOwner).toHaveLength(1)
+
+    // Past timeout+slack: the watchdog force-releases AND synthesizes the null
+    // result; the SAME pass's mailbox drain routes it to the inbox (fail-closed).
+    c.advance(OVERSEER_THRESHOLDS.brainTimeoutMs + OVERSEER_THRESHOLDS.brainStuckSlackMs + 1)
+    await runOverseerPass(engine, [], (_l, m) => logs.push(m), deps)
+    expect(logs.some((m) => m.includes('force-released'))).toBe(true)
+    expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0].whyEscalated).toBe('insufficient-info')
+    expect(calls.openEscalation[0].question).toBe('どうする？')
+    expect(calls.openEscalation[0].terminalId).toBe('term-1')
+    // The SAME question does NOT relaunch the brain (seen holds — the question was
+    // escalated, not lost), and the runtime is fully released for the next flight.
+    expect(calls.answerAsOwner).toHaveLength(1)
+    expect(engine.overseer.assessInFlight).toBe(false)
+    expect(engine.overseer.brainInFlight).toBeUndefined()
+  })
 })
 
 // ── S11/S3/S10 — sub-cycle seen-keys must survive non-subcycle prunes ──────────

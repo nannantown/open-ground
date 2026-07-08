@@ -66,6 +66,18 @@ export interface Settings {
    *  cleared by `stopOrchestrator`) — deliberately NOT in USER_SETTINGS_KEYS, so
    *  the untrusted POST /api/settings route can never write it. */
   swarmAutonomyOn?: string[]
+  /** Canonicalized project paths whose owner EXPLICITLY paused the Swarm engine
+   *  (Autonomy OFF) and never turned it back ON. The persisted half of the
+   *  engine's in-memory `manualStop` flag, so "the owner stopped this by hand"
+   *  survives a server restart and stays OBSERVABLE from outside (the 0707
+   *  twin-dispatch root cause was exactly this state being invisible). It is a
+   *  RECORD, never an auto-resume — and its effect is only ever MORE stopping:
+   *  the opt-in auto-drain sweep (OPENGROUND_SWARM_AUTODRAIN=1) skips a listed
+   *  project even after a restart wipes the in-memory flag. Server-owned (added
+   *  by `stopOrchestrator`, cleared by `startOrchestrator`) — deliberately NOT
+   *  in USER_SETTINGS_KEYS, so the untrusted POST /api/settings route can never
+   *  write it. */
+  swarmManualStop?: string[]
   /** @deprecated Legacy single-root model. Kept only so back-compat parse +
    *  the one-shot migration scan can still read it. No longer auto-scanned. */
   projectsRoot: string | null
@@ -921,6 +933,12 @@ export interface SpawnSwarmWorkerResponse {
   agentSessionId: string
   worktree: string
   branch: string
+  /** The CLI `--model` alias this worker's `claude` was actually launched with
+   *  (mode-resolved THROUGH the quota fallback — see resolveSwarmModelEffort).
+   *  The engine records it on its {@link OrchestratorWorker} so a later
+   *  rate-limit sighting can mark the RIGHT tier cooling (swarmQuota). Optional:
+   *  older callers/fakes without it simply leave the sighting unattributed. */
+  model?: string
 }
 
 /** POST /api/swarm/worktree/remove — whether the worktree was torn down, with
@@ -985,6 +1003,12 @@ export interface OrchestratorWorker {
   taskTitle: string
   /** ISO timestamp the engine dispatched it. */
   startedAt: string
+  /** The CLI `--model` alias the worker launched with (from
+   *  {@link SpawnSwarmWorkerResponse.model}) — the tier a rate-limit sighting
+   *  on this worker attributes to the quota cooling table (swarmQuota). Absent
+   *  on workers spawned before this was recorded; such a sighting still HOLDS
+   *  the worker, it just can't mark a tier. */
+  model?: string
   /** Coarse lifecycle stage, recomputed every monitor pass — see
    *  {@link OrchestratorWorkerStage}. The state API surfaces it; the Swarm
    *  commander pane renders a per-worker dot from it. */
@@ -1250,6 +1274,23 @@ export interface SwarmOrchestratorState {
    *  engine never dispatches (manual POST /api/swarm/worker is untouched) AND
    *  never integrates — the global stop. */
   running: boolean
+  /** True while the owner has EXPLICITLY paused the engine (Autonomy OFF) and
+   *  not turned it back ON — the machine-readable "stopped by hand" signal a
+   *  commander / another session reads to tell a DELIBERATE stop from a
+   *  never-started engine (the 0707 twin-dispatch root cause was this state
+   *  being invisible from outside). The OR of the engine's in-memory flag and
+   *  the persisted record below, so it stays true across a server restart
+   *  (when the in-memory engine — and its flag — is gone). While set, the
+   *  opt-in auto-drain sweep never restarts the engine; an explicit Autonomy
+   *  ON always clears it. */
+  manualStop: boolean
+  /** The PERSISTED half of `manualStop` (`Settings.swarmManualStop`) — the
+   *  on-disk fact "the owner stopped this project by hand", written by
+   *  `stopOrchestrator`, cleared by `startOrchestrator`, surviving restarts.
+   *  Surfaced separately so a caller can tell a this-session pause
+   *  (`manualStop` true via the in-memory flag) from the durable record. A
+   *  record only — it never auto-resumes (or auto-stops) anything by itself. */
+  manualStopPersisted: boolean
   /** True while auto-integration (Card③) is armed: a SEPARATE switch from
    *  `running`, default OFF. When OFF the engine only CLASSIFIES review cards
    *  (the `reviews` readiness below) and shows "統合可"; when ON it lands the
@@ -1300,6 +1341,15 @@ export interface SwarmOrchestratorState {
    *  dismiss). Independent of `running`; the reminder shows only while
    *  `!running && autonomyRemembered`. */
   autonomyRemembered: boolean
+  /** QUOTA PARK (card 0add9d30) — epoch ms of the earliest model-tier reset while
+   *  EVERY tier is cooling (swarmQuota.allCoolingUntil), or absent when at least
+   *  one tier has headroom. While set, the engine holds ALL new dispatch (no
+   *  worker spawn) and the integrate pass defers its reviewer panel, instead of
+   *  churning into the same exhausted wall — already-running workers are
+   *  unaffected. Today the park is visible through the engine JOURNAL (`log`
+   *  carries a warn line on park enter and an info line on lift) and through
+   *  this field on the status API; no dedicated UI renders it yet. */
+  parkUntil?: number
 }
 
 // ── swarm janitor (residual-cleanup) ─────────────────────────────────────────
@@ -1463,6 +1513,14 @@ export interface ProjectTask {
    *  the owner-gated POST /api/swarm/orchestrator/selfsupply/approve. Meaningless
    *  without `selfSupplyKey`. Shared data. */
   selfSupplyApproved?: boolean
+  /** 差し戻し(review→doing)ループガードのカウンタ — POST /api/project/tasks
+   *  {rework:[{id}]} が review→doing に移す度+1し、maxReworks(既定3)を超えたら
+   *  moveをdoingでなくblockedへ差し替える。~/.claude/swarm-board.sh reworkと同一
+   *  セマンティクス(そちらは独自の心拍ディレクトリ内カウンタファイルを使うため、
+   *  このフィールドとは別管理・干渉しない)。done/todo着地で自動リセット(このカードが
+   *  再利用されても差し戻し回数が持ち越されないように — 3点セット: types.ts /
+   *  ProjectTaskSchema / server/routes/project.ts rework loop + setColumn done/todo)。 */
+  reworkCount?: number
 }
 
 /** Board card dispatch priority (in-app swarm). Absent ⇒ treated as 'normal'.

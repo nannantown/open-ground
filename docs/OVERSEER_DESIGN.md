@@ -365,7 +365,7 @@ lockstep。80/100 は usageThresholds.ts の単一正典を再利用（新閾値
 | W10 | owner-gate（getCustomTabRole / swarmSafety.routes.test.ts sweep） | /api/swarm 全 14 ルート | 監督の新ルート（overseer toggle・escalations CRUD）を **/api/swarm/* 配下に mount** → sweep が自動適用（K3） | **なし**（レールに乗るだけ） |
 | W11 | `makeAdversarialReview`:3074（runReviewer DI 済み） | マージ前 4 lens panel | 変更しない。将来: 大脳の重要判断を複数 lens 化する時の既製 factory | **なし** |
 | W12 | selfUpdate（selfUpdateSignal.ts / electron/selfUpdate.js） | 統合着地→自己入替 | 変更しない。監督は M6 で結果を観測するだけ。**OPENGROUND_SOURCE_ROOT を監督の子プロセスに漏らさない**（無限サイクル防止の不変条件） | **なし** |
-| W13 | sandbox（sandbox.ts / isExperimentEnabled('sandbox')） | worker と interactive claude の 2 経路を包囲。**owner-only 実験・既定 OFF** | 大脳 one-off にも同じ分岐を適用（write は scratch dir のみ）。**既定 OFF 構成では L3 は不在**（§9 の正直な注記参照） | **小**（起動 opts に 1 分岐） |
+| W13 | sandbox（sandbox.ts / isExperimentEnabled('sandbox')） | worker と interactive claude の 2 経路を包囲。**owner-only 実験・既定 OFF** | 大脳 one-off は**実験 gate 不問で darwin 常時 sandbox**（`brainSandboxAvailable`・write は scratch dir のみ・**network:'loopback' + allowlist egress proxy** で外部送信は Anthropic のみ — 2026-07-08 恒久化、docs/SANDBOX_EXPERIMENT.md「Overseer-brain egress close」）。非 darwin / sandbox-exec 不在時のみ permission 層 stop-gap に degrade | **済** |
 | W14 | usage（claudeUsageCli / usageThresholds） | UsageHud 60s poll | S8/S9（M8 の読み方規律で）。`usageLevel()` 再利用・新閾値を作らない | **なし** |
 | W15 | UI（SwarmModule / useSwarmEngine） | swarm タブは experiment:'swarm' | 監督トグル+受信箱パネルは SwarmModule 内（新 experiment id 不要）。「autonomy 再 ON でも監督は OFF」の表示（D1） | **中**（C1/C-core の一部） |
 | W16 | 質問注入（pastePrompt.ts の bracketed paste / writeInput） | paste-task・rework 指示注入で実績 | C1 の回答注入と C3 の proxy 回答注入が**共有ヘルパとして 1 回だけ実装**（C1 が所有・C3 は流用 — 二重実装しない） | **小** |
@@ -489,7 +489,7 @@ interface Escalation {
 |---|---|---|
 | L1 起動 | autonomy 明示 ON 相乗り + overseer トグル既定 OFF + 明示 OFF/再起動で enabled クリア + auto-drain では起きない（D1・K1/K2） | 設計 |
 | L2 認可 | owner-gate 全ルート（K3・sweep 自動）+ role 既定 'none' | 出荷済みレールに乗る |
-| L3 封じ込め | sandbox（A1・カーネル代替）。**owner-only 実験・既定 OFF — OFF 構成では L3 は不在**であり、大脳の封じ込めは D4 の構造（scratch cwd・strictMcpConfig・プロンプト READ-ONLY 指示）と L4/L5/L7 が担う。sandbox ON を監督運用の推奨前提とし、OFF での overseer ON には起動時警告を出す（C-core） | A1 出荷済み・適用は W13 |
+| L3 封じ込め | sandbox（A1・カーネル代替）。**大脳は darwin では実験 gate 不問で常時 ON**（network:'loopback' + allowlist egress proxy — 外部送信経路は構造封鎖、2026-07-08 恒久化）。worker/interactive は従来どおり owner-only 実験。**L3 が不在なのは非 darwin / sandbox-exec 消滅時のみ**で、その時の大脳は D4 の構造（scratch cwd・strictMcpConfig・プロンプト READ-ONLY 指示）+ --disallowed-tools + L4/L5/L7 が担い、overseer ON に起動時警告を出す（brainSandboxAvailable — C-core） | 出荷済み（W13） |
 | L4 決定論 veto | PreToolUse exit-2 deny（A3・bypassPermissions を貫通する唯一の veto）。rm -rf / force-push / worktree 外書込 | A3 実装中（並走・C3 の前提でもある → §10） |
 | L5 可逆性ゲート | C4 クラシファイア（不明→不可逆・fail-closed）を A3 / C2 / 監督 T3 弁が共通参照 | C4 カード |
 | L6 git 安全網 | 不変条件 A–D + 品質フロア 4 ゲート + swarm glob の tamper guard（監督コード自身に適用・D3） | 出荷済み |

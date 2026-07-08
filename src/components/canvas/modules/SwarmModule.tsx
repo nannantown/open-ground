@@ -806,6 +806,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           Its status spells out running/stopped + the live worker count (条件4). */}
       <SwarmPowerBar
         running={engine.running}
+        manualStop={engine.manualStop}
         available={engineAvailable}
         busy={engineBusy}
         workerCount={allWorkers.length}

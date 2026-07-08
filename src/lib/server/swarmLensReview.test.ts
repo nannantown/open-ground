@@ -32,6 +32,7 @@ import {
   type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
+import { markCoolingUntil, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
 
 // ── pure unit: the weighted-OR lens tally ──────────────────────────────────────
 describe('tallyLensReview — lens-panel weighted-OR decision (card 5f85d2f5)', () => {
@@ -214,6 +215,7 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
   })
   afterEach(async () => {
     __resetOrchestratorForTests()
+    __resetQuotaForTest() // the cooling table is a globalThis singleton — never leak across cases
     await rm(home, { recursive: true, force: true })
     await rm(scratch, { recursive: true, force: true })
   })
@@ -259,6 +261,26 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
     })
     const r = await review(proj, branch, 'main', { tip })
     expect(r.decision).toBe('integrate')
+  }, 30_000)
+
+  it('quota park (every tier cooling) defers WITHOUT spawning a single reviewer', async () => {
+    const proj = await setupRepo()
+    const { branch, tip } = await branchWithCommit(proj)
+    // Every ladder tier cooling well past now — the state the dispatch park holds in.
+    for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, Date.now() + 10 * 60_000)
+    const seen: string[] = []
+    const review = makeAdversarialReview({
+      lenses: DEFAULT_REVIEW_LENSES,
+      runReviewer: async ({ lens }) => {
+        seen.push(lens!.key)
+        return 'OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
+      },
+    })
+    const r = await review(proj, branch, 'main', { tip })
+    expect(r.decision).toBe('defer') // retry next pass — defer never merges un-reviewed
+    expect(r.skippedForPark).toBe(true) // engine hold, NOT a verdict — callers keep it out of the defer streak
+    expect(r.reason).toContain('quota park')
+    expect(seen).toHaveLength(0) // not ONE reviewer burned into the exhausted wall
   }, 30_000)
 
   it('an abstaining lens (no parseable verdict) → defer — never merges an un-reviewed dimension', async () => {

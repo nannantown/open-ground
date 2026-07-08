@@ -93,8 +93,11 @@ so it is not policed, which closes that whole class by design. Claude Code treat
 **only exit 2** as a block — exit 1 is a *non-blocking* hook error that lets the
 tool through — so the guard **never** exits 1 and **fails closed** (exit 2) on any
 input it cannot parse. It denies the A3 classes — recursive `rm` outside the write
-roots, `git` force-push in every spelling (`-f`/`--force`/`--force-with-lease`/
-`+refspec`/`--mirror`/`:ref`/`--delete`), history nukes (`reset --hard`, `clean -f`,
+roots, `git push` in EVERY shape for the policed worker (plain/FF included — the
+2e7beb2 lesson; the plumbing spellings `send-pack`/`http-push`, `git svn`'s
+outbound writes, and the dash-form binaries `git-push`/`git-send-pack`/
+`git-http-push`/`git-svn` — callable by absolute libexec path — are routed to the
+same deny), history nukes (`reset --hard`, `clean -f`,
 `filter-branch`, `update-ref -d`, `branch -D`, `stash drop/pop`, `checkout -f/--`,
 `restore .`, `reflog expire`, `gc --prune=now`), and writes outside the roots
 (redirections, `tee`/`cp`/`mv`/`dd`/`sed -i`/`perl -i`/`tar -x -C`/`unzip -d`, and
@@ -122,6 +125,24 @@ on.
 *Honest scope:* not a sandbox — a payload staged *inside* the write roots then run
 from a live process (`node planted.js`), and a stream editor's own script commands
 (`sed 'w /path'`/`e`), are L3's job (OS-enforced), documented in the guard header.
+*Known residuals of the push ban (documented in the guard header too):*
+(1) a **pre-existing** user/system gitconfig alias (`[alias] p = push` → `git p`)
+is statically unresolvable and stays ALLOW — every *in-session* route into it is
+closed (`git config alias.*`, inline `git -c alias.*=…`/`--config-env`,
+`--exec-path` are all denied), so it takes an alias the user already shipped
+before spawn; neutralizing those via `GIT_CONFIG_GLOBAL=/dev/null` (+
+`GIT_CONFIG_SYSTEM`) was considered and rejected — it strips `user.name`/`email`
+and credential helpers, breaking the worker's core commit/fetch flow.
+(2) `git apply` / `patch` can rewrite the repo's **tracked** guard source
+(`scripts/openground-guard.js` sits inside the write roots; the substrate
+basename rule covers Write/Edit/shell writes/`git mv|rm`, not content-level patch
+application) — the **installed** copy (`~/.openground/guard/`) stays write-denied,
+so this cannot disarm the live veto; it is a plant-and-wait-for-deploy channel,
+closed at integration time by the commander's re-verify + adversarial review +
+the swarm-code merge gate below, not at L4.
+(3) the tmux-era worker (`~/.claude/swarm-guard.sh` toolkit) remains
+**prompt-discipline-only** — the machine-enforced push ban polices the in-app
+worker (`OPENGROUND_GUARD=1`).
 *Negative control:* with the worker gate env **absent** — including a manager
 (`SWARM_MANAGER=1`) session, which is now a full no-op — the same `rm -rf /` /
 force-push exit **0** (the veto is worker-scoped; only `OPENGROUND_GUARD=1` arms the

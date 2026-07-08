@@ -17,6 +17,9 @@
  * |          |    | module and shares its `relative` stacking context (the      |
  * |          |    | member panel, the panel's own sub-dialogs/confirms)         |
  * | `panel`  | 40 | the owner project full-screen module panel itself          |
+ * | (frame)  | 45 | hosted custom-tab iframes (CustomFrameHost) — over the      |
+ * |          |    | panel's tab body, under modals. Not an Overlay surface, so  |
+ * |          |    | no token here; the utility is `z-overlay-frame` (tailwind). |
  * | `modal`  | 50 | an app-level centred modal — opens ABOVE the panel         |
  * | `top`    | 60 | a top-most full-screen surface (the manual)                |
  * | `gate`   | 70 | a first-run gate that must sit above everything (onboarding) |

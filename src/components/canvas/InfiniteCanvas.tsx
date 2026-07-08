@@ -93,6 +93,11 @@ interface Props {
    *  with no entry shows no beacon (plain shells don't count). The per-project
    *  Canvas tab renders no project cards, so it leaves this undefined. */
   claudeStatuses?: ReadonlyMap<string, ClaudeBeaconStatus>
+  /** Ground-only: projects whose audio is currently playing somewhere in the
+   *  app (a custom tab's embedded player — the Songs tab). The matching card
+   *  wears a "Playing" EQ stamp; the value carries the track title for its
+   *  tooltip. Undefined/empty → no stamps. */
+  playbackByProject?: ReadonlyMap<string, { title: string | null }>
   /** Ground member flow (collab enabled only): projects shared WITH the user
    *  (owned:false), rendered as read-only "Shared" cards intermixed with the
    *  owned cards. Positioned by collabProjectId in `canvas.positions` (same map
@@ -430,6 +435,7 @@ interface FrameLeafCb {
 export const InfiniteCanvas = ({
   projects,
   claudeStatuses,
+  playbackByProject,
   sharedProjects,
   onOpenShared,
   canvas,
@@ -3790,6 +3796,7 @@ export const InfiniteCanvas = ({
                 onPointerDown={cardPointerDown(p.id)}
                 selected={selectedSet.has(p.id)}
                 claudeStatus={claudeStatuses?.get(p.id)}
+                playback={playbackByProject?.get(p.id)}
               />
             </div>
           )

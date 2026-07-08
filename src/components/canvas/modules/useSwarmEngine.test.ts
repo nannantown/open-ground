@@ -119,6 +119,19 @@ describe('sanitizeEngineState — engine workers survive the poll', () => {
     expect(sanitizeEngineState('boom').autonomyRemembered).toBe(false) // garbage ⇒ off
   })
 
+  it('parses manualStop STRICTLY — true only for boolean true (the "stopped by hand" badge gate)', () => {
+    // The power bar / flow pane show "stopped by hand" off this flag, so a forged /
+    // absent / garbage value must fold to FALSE (no spurious deliberate-stop badge) —
+    // and an OLD server that predates the field reads back as a plain stop.
+    expect(sanitizeEngineState({ manualStop: true }).manualStop).toBe(true)
+    expect(sanitizeEngineState({ manualStop: false }).manualStop).toBe(false)
+    expect(sanitizeEngineState({ manualStop: 'yes' }).manualStop).toBe(false)
+    expect(sanitizeEngineState({ manualStop: 1 }).manualStop).toBe(false)
+    expect(sanitizeEngineState({}).manualStop).toBe(false) // absent (old server) ⇒ off
+    expect(sanitizeEngineState('boom').manualStop).toBe(false) // garbage ⇒ off
+    expect(DEFAULT_ENGINE.manualStop).toBe(false) // the offline default carries no badge
+  })
+
   it('preserves known structured log kinds and drops unknown ones', () => {
     const state = sanitizeEngineState({
       log: [

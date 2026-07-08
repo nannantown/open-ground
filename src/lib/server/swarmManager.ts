@@ -3,9 +3,11 @@
 // (司令官)" CONVERSATION primitive of the OPEN GROUND swarm port (docs /
 // auto-memory project_inapp_swarm_port): the owner's INTEGRATION DESK. Given a
 // registered project it launches ONE interactive `claude` PTY in the project's
-// PRIMARY checkout running the `/manage` skill, which monitors the workers,
-// answers "状況 / マージ / 掃除 / 相談", and integrates finished `swarm/*`
-// branches (FF / rebase only, never forced) — all in conversation with the user.
+// PRIMARY checkout running the `/og-manage` skill — the tmux-free commander
+// protocol — which monitors the workers, answers "状況 / マージ / 掃除 / 相談",
+// and integrates finished `swarm/*` branches (FF / rebase only, never forced)
+// — all in conversation with the user, driving the app's own HTTP API (never
+// tmux; the shell cockpit's `/manage` skill stays tmux-land, untouched).
 //
 // This is the human-in-the-loop counterpart to the AUTONOMOUS engine
 // (swarmOrchestrator, behind /api/swarm/orchestrator): the engine is the
@@ -23,11 +25,13 @@
 // the commander for tooling/skills, not as a guard opt-in. There is nothing to
 // tear down on stop; stopping it is a plain PTY kill (the terminal DELETE route).
 //
-// This mirrors the shell `manager` launcher exactly:
-//   exec env SWARM_MANAGER=1 claude --model opus --effort max \
-//        --dangerously-skip-permissions --remote-control manager "/manage"
+// This mirrors the shell `manager` launcher's FLAGS exactly — but hands claude
+// the app-native skill instead of the cockpit one:
+//   shell:  exec env SWARM_MANAGER=1 claude --model opus --effort max \
+//               --dangerously-skip-permissions --remote-control manager "/manage"
+//   in-app: same flags, positional prompt = "/og-manage"
 //   - SWARM_MANAGER=1 — TAGS the session as the swarm commander (for tooling /
-//     the /manage skill). Under worker-only guard scoping it is NOT a guard
+//     the commander skill). Under worker-only guard scoping it is NOT a guard
 //     opt-in: the trusted commander is not policed by the PreToolUse veto.
 //   - bypass (--dangerously-skip-permissions) — the commander runs git
 //     (status / merge / branch -d) and Board moves unattended-style so the
@@ -35,23 +39,34 @@
 //     safety net is the human in the loop, not the veto.
 //   - opus / max — the commander reasons about integration order, conflicts and
 //     worker state at full capability (mirrors the shell launcher).
-//   - /manage as claude's POSITIONAL prompt — claude runs the skill on startup,
-//     then stays interactive for the conversation. (A TUI-injected slash command
-//     would not submit — the same delivery fix swarmSupply/swarmWorker document.)
+//   - /og-manage as claude's POSITIONAL prompt — claude runs the skill on
+//     startup, then stays interactive for the conversation. (A TUI-injected
+//     slash command would not submit — the delivery fix swarmSupply/swarmWorker
+//     document.) The skill difference is the point: /manage assumes a tmux
+//     cockpit (swarm-pane.sh dispatch, respawn, swarm-watch), none of which
+//     exist inside the app's PTY; /og-manage speaks the app's HTTP API instead.
 // Subscription-only: launchClaude drives the user's `claude` CLI, never
 // `claude -p` / the SDK.
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { installOgManageSkill } from './ogManageSkill'
 import { getExecutionMode } from './store'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
 /** The skill the commander session runs, handed to claude as its positional
  *  prompt (claude submits it on startup; a TUI-injected slash command would
- *  not). The role is the `manager` (Remote Control label) running `/manage`. */
-export const MANAGER_INJECTION = '/manage'
+ *  not). The role is the `manager` (Remote Control label) running `/og-manage`
+ *  — the tmux-FREE commander protocol (~/.claude/skills/og-manage/): its eyes
+ *  are GET /api/swarm/workers + git, it dispatches via POST /api/swarm/worker,
+ *  and it never mentions or runs tmux. The shell cockpit's `/manage` (tmux
+ *  panes, swarm-pane.sh dispatch) stays untouched for the terminal cockpit —
+ *  an in-app commander running THAT skill would advise tmux commands that
+ *  cannot work inside the app's PTY, which is exactly why this injection
+ *  points at the app-native sibling instead. */
+export const MANAGER_INJECTION = '/og-manage'
 
 export interface SpawnSwarmManagerOpts {
   /** The registered project to command — the commander PTY's cwd (its primary
@@ -78,7 +93,8 @@ export interface SpawnSwarmManagerOpts {
  *     swarm launch default (swarmLaunch.ts), mirroring the shell commander's
  *     `--model opus --effort max … --remote-control manager`. effort is
  *     CLAUDE_EFFORTS-guarded there; the Remote Control session is named 'manager'.
- *   - initialPrompt — `/manage` positional (claude runs the skill on startup). */
+ *   - initialPrompt — `/og-manage` positional (claude runs the tmux-free
+ *     commander skill on startup). */
 export const managerLaunchOpts = (
   cwd: string,
   agentSessionId: string,
@@ -105,7 +121,7 @@ export const managerLaunchOpts = (
 })
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
- *  the `/manage` skill (handed positionally so claude submits it on startup).
+ *  the `/og-manage` skill (handed positionally so claude submits it on startup).
  *  Subscription-only (launchClaude — never `claude -p`/the SDK). Returns as soon
  *  as the PTY is up; claude boots and invokes /manage on its own. No worktree is
  *  created, so there is nothing to clean up on stop — the caller just kills the
@@ -114,6 +130,14 @@ export const spawnSwarmManager = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
   const agentSessionId = randomUUID()
+  // Self-repair the /og-manage skill RIGHT BEFORE launch (idempotent, best-
+  // effort): the boot-time install covers the normal path, but a skill deleted
+  // mid-session — or a dev server that booted before the skill shipped — would
+  // otherwise hand claude a slash command that resolves to nothing. A
+  // user-authored file (managed-by marker removed) is still never overwritten,
+  // and a failure never blocks the spawn (the commander then just reports the
+  // missing skill conversationally).
+  await installOgManageSkill().catch(() => {})
   // Token budget (card 68d8e00f): economy runs the commander on sonnet; optimize keeps
   // it on opus (its integration / safety-review judgment is quality-critical).
   const me = resolveSwarmModelEffort(await getExecutionMode(), 'manager')

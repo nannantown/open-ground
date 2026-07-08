@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import type {
@@ -8,6 +8,12 @@ import type {
 } from '@/lib/types'
 import { buildScreenSrcdoc } from '@/lib/screenSrcdoc'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
+import {
+  attachFrameAnchor,
+  detachFrameAnchor,
+  setFrameSource,
+  useCustomFrames,
+} from '@/components/canvas/modules/CustomFrameHost'
 
 // Renders a custom tab (docs/CUSTOM_TABS_PLAN.md): the module's source.tsx /
 // source.html runs inside the SAME sandboxed-iframe pipeline a Canvas screen
@@ -15,6 +21,14 @@ import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 // sandbox="allow-scripts" so the component can't reach the host page). While
 // visible we poll the source's mtime and rebuild the srcDoc on change — that's
 // the hot-reload loop the dock's claude session drives by saving source.tsx.
+//
+// The iframe itself is NOT rendered here: it lives in CustomFrameHost (mounted
+// once at App level) and is drawn over the anchor div this view provides, so a
+// tab whose embedded app is playing audio can outlive this view (tab/project
+// switches) without the iframe ever unmounting — see CustomFrameHost. This
+// view stays the source-fetch / hot-reload driver, which also means the poll
+// runs ONLY while the tab is visible: a hidden keep-alive frame keeps its last
+// srcDoc untouched (a rebuild would reload the iframe and cut the audio).
 //
 // Editing lives in the SAME right-edge TerminalDock Canvas and Board use — the
 // collapsed rail expands into tabbed claude PTYs — except its sessions are
@@ -39,12 +53,17 @@ export const customModuleStorageId = (moduleId: string) =>
 
 export const CustomModuleView = ({
   module,
+  projectPath,
   role,
   setup,
   onSetupConsumed,
   onChanged,
 }: {
   module: CustomModuleDef
+  /** The project whose tab row hosts this view — stamped onto the hosted
+   *  frame so letting go of the project (delete / remove / bulk) can tear
+   *  down exactly the frames it owns (destroyFramesForProject). */
+  projectPath: string
   role: CustomTabRole
   /** True right after this module was created: open the dock, spawn claude
    *  and paste the brush-up prompt (unsent). Consumed once. */
@@ -135,6 +154,31 @@ export const CustomModuleView = ({
         : buildScreenSrcdoc(src.source, module.framework, 'dark'),
     [src, module.framework],
   )
+
+  // ── Hosted-frame plumbing (CustomFrameHost) ──
+  // Bind the module's persistent iframe to this tab body for as long as the
+  // tab is visible; on unmount the host decides keep-alive (audio playing) vs
+  // destroy (the old lifecycle). useLayoutEffect so the anchor is bound before
+  // paint — a re-surfacing keep-alive frame snaps into place with no flash.
+  const anchorRef = useRef<HTMLDivElement | null>(null)
+  useLayoutEffect(() => {
+    const el = anchorRef.current
+    if (!el) return
+    attachFrameAnchor(module.id, el, module.label, projectPath)
+    return () => detachFrameAnchor(module.id)
+  }, [module.id, module.label, projectPath])
+
+  // Feed the (re)built srcDoc to the hosted frame. Same-string feeds are
+  // no-ops in the store, so re-opening an unchanged tab never reloads the
+  // iframe — only an actual source edit does.
+  useEffect(() => {
+    if (srcDoc !== null) setFrameSource(module.id, srcDoc, module.label)
+  }, [srcDoc, module.id, module.label])
+
+  // Whether the hosted frame is already rendering content — if so, skip the
+  // loading placeholder entirely (e.g. re-entering a tab that kept playing).
+  const hostedFrames = useCustomFrames()
+  const frameLive = hostedFrames.get(module.id)?.srcDoc != null
 
   // Spawner the dock uses instead of claude-in-project: the server resolves
   // the cwd from the moduleId (POST /api/terminal/custom-module) — no path
@@ -316,22 +360,17 @@ export const CustomModuleView = ({
           </div>
         )}
         <div className="min-h-0 flex-1 bg-bg-deep">
-          {srcDoc !== null ? (
-            // Same sandbox as Canvas screens/mocks: scripts only, no
-            // same-origin — the custom component can't touch the host page.
-            <iframe
-              title={module.label}
-              sandbox="allow-scripts"
-              srcDoc={srcDoc}
-              className="h-full w-full border-0"
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center px-8 text-center text-[12px] text-ink-faint">
-              {loadFailed
-                ? t('customTabs.sourceLoadFailed')
-                : t('customTabs.sourceLoading')}
-            </div>
-          )}
+          {/* The hosted iframe (CustomFrameHost) draws itself over this anchor
+              while the tab is visible; the div only supplies the geometry. */}
+          <div ref={anchorRef} className="relative h-full w-full">
+            {!frameLive && (
+              <div className="flex h-full items-center justify-center px-8 text-center text-[12px] text-ink-faint">
+                {loadFailed
+                  ? t('customTabs.sourceLoadFailed')
+                  : t('customTabs.sourceLoading')}
+              </div>
+            )}
+          </div>
         </div>
       </div>
       {canAuthor && (

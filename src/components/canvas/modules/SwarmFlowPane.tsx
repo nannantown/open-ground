@@ -224,7 +224,11 @@ export const SwarmFlowPane = ({ engine, fatalNotifications, available }: Props) 
               <span className="truncate text-[11px] text-ink-muted">
                 {engine.running
                   ? t('projectPanel.swarm.flow.draining')
-                  : t('projectPanel.swarm.flow.notDraining')}
+                  : engine.manualStop
+                    ? // A DELIBERATE owner stop (survives restarts server-side) — not
+                      // merely "paused": the owner turned this off by hand.
+                      t('projectPanel.swarm.flow.manualStopped')
+                    : t('projectPanel.swarm.flow.notDraining')}
               </span>
             </div>
           </PhaseCard>

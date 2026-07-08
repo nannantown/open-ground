@@ -6,6 +6,7 @@ import {
 import { memo } from 'react'
 import type { ClaudeBeaconStatus, ProjectMeta } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
+import { PlaybackEq } from '@/components/canvas/PlaybackEq'
 
 interface Props {
   project: ProjectMeta
@@ -16,6 +17,10 @@ interface Props {
    *  bar + stamp, 'waiting' → amber "Waiting" (claude is sitting on you).
    *  Undefined = no claude session (plain shells show nothing). */
   claudeStatus?: ClaudeBeaconStatus
+  /** Audio from this project is playing somewhere in the app (the Songs
+   *  custom tab's embedded player) → a "Playing" EQ stamp on the bottom
+   *  margin; `title` names the track in the tooltip. Undefined = silent. */
+  playback?: { title: string | null }
   /** This card is a project shared WITH the user (collab member flow, folder-
    *  less). Marks it with the dedicated `invite` accent — a left band, a tinted
    *  ring, a Users icon and a "Shared" badge — so it reads at a glance as
@@ -48,6 +53,7 @@ export const ProjectCard = memo(({
   selected,
   active,
   claudeStatus,
+  playback,
   shared,
 }: Props) => {
   const { t } = useT()
@@ -124,6 +130,20 @@ export const ProjectCard = memo(({
         <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap text-[var(--beacon-waiting)]">
           <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
           <span>Waiting</span>
+        </div>
+      )}
+
+      {/* audio-playing stamp — same surveyor's-marking grammar as the claude
+          stamps, but on the BOTTOM margin so it never collides with them (a
+          project can be Running and Playing at once). EQ bars animate while
+          the app's Songs player is audible; the tooltip names the track. */}
+      {playback && (
+        <div
+          title={playback.title ?? undefined}
+          className="absolute -bottom-[7px] right-3 flex items-center gap-1.5 bg-bg-card px-1.5 label-cap text-accent"
+        >
+          <PlaybackEq size={8} />
+          <span>Playing</span>
         </div>
       )}
 

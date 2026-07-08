@@ -57,7 +57,7 @@ import {
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
 import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
-import { isExperimentEnabled } from '@/lib/server/experiments'
+import { brainSandboxAvailable } from '@/lib/server/swarmOverseerBrain'
 import { listSwarmNotifications } from '@/lib/server/swarmNotifications'
 import {
   listEscalations,
@@ -302,14 +302,16 @@ export const swarmRoutes = new Hono()
     }
   })
   // --- GET /api/swarm/orchestrator — the commander engine's state ------------
-  // Query: ?path= . Returns SwarmOrchestratorState { running, workers, log,
-  // maxWorkers }. A project whose engine was never started reads back as a
-  // stopped empty state. Owner-only + validated, like the rest of /api/swarm/*.
-  // PURE READ-ONLY (idempotent): this GET is polled by BOTH the Swarm hook AND the
-  // display-only Board worker-map (BoardModule), so it must NEVER mutate/spawn. The
-  // auto-start lives on the SEPARATE POST /drain-tick below (card cf545637); a GET
-  // that spawned workers was a review MUST_FIX (the Board's "never touch the engine"
-  // contract).
+  // Query: ?path= . Returns SwarmOrchestratorState { running, manualStop (+ its
+  // persisted half manualStopPersisted — the durable "owner stopped this by hand"
+  // record that survives a restart), workers, log, maxWorkers, … }. A project
+  // whose engine was never started reads back as a stopped empty state. Owner-only
+  // + validated, like the rest of /api/swarm/*.
+  // PURE READ-ONLY (idempotent, K8): this GET is polled by BOTH the Swarm hook AND
+  // the display-only Board worker-map (BoardModule), so it must NEVER mutate/spawn
+  // — a GET that spawned workers was a review MUST_FIX (the Board's "never touch
+  // the engine" contract). Autonomy is STRICT opt-in via POST /orchestrator/start
+  // (the old drain-tick auto-start was removed — card eadb25e6).
   .get('/api/swarm/orchestrator', async (c) => {
     if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
     const path = c.req.query('path') ?? ''
@@ -332,14 +334,14 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json({ workers: await listSwarmWorkers(path) })
   })
-  // --- POST /api/swarm/orchestrator/drain-tick — auto-start the drain ---------
-  // Body: { path }. The "idle worker + todo backlog" anti-deadlock tick (card
-  // cf545637): when the engine is stopped (and not owner-paused) but a todo is
-  // dispatchable into a free slot, it auto-starts the drain — so the owner need not
-  // press Autonomy ON. SCOPED to the Swarm surface: only useSwarmEngine POSTs this,
-  // so the display-only Board GET above stays a pure read. Idempotent when nothing is
-  // dispatchable (a no-op returning the current state). Returns SwarmOrchestratorState.
-  // Owner-only + validated, exactly like /start.
+  // --- POST /api/swarm/orchestrator/drain-tick — the Swarm surface's tick -----
+  // Body: { path }. A pure idempotent state read of the (possibly never-started)
+  // engine: since card eadb25e6 (release blocker) it NO LONGER auto-starts a stopped
+  // engine — merely having the Swarm pane open (incl. one restored on app launch)
+  // must not spin up workers, so autonomy is STRICT opt-in via POST /start. Kept as
+  // a POST separate from the GET above for back-compat with the useSwarmEngine poll
+  // that drives it (and as the seam where a future consent-carrying tick would go).
+  // Returns SwarmOrchestratorState. Owner-only + validated, exactly like /start.
   .post('/api/swarm/orchestrator/drain-tick', async (c) => {
     if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
     let body: any
@@ -507,9 +509,11 @@ export const swarmRoutes = new Hono()
   // OFF — K2). ASYMMETRIC: an explicit autonomy OFF CLEARS it (the owner re-arms every
   // session). Owner-only + validated, like the rest of /api/swarm/* (K3). GET carries
   // no mutation (K8); this POST is the only path that sets `enabled` true.
-  // L3: warn when arming WITHOUT the sandbox experiment — the recommended containment
-  // for the brain's one-off PTY (a structural READ-ONLY design + budget still hold;
-  // the warning nudges the owner to enable the kernel-level layer too).
+  // L3: the brain's one-off PTY is ALWAYS kernel-sandboxed on macOS (network
+  // loopback + the allowlist egress proxy — swarmOverseerBrain, NOT gated on the
+  // owner experiment), so the warning fires only where that close is UNAVAILABLE
+  // (off-darwin / sandbox-exec gone): there the brain runs on the permission-layer
+  // stop-gap alone (a structural READ-ONLY design + budget still hold).
   .post('/api/swarm/orchestrator/overseer', async (c) => {
     if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
     let body: any
@@ -523,10 +527,11 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
     const state = await setOverseer(path, body.enabled)
-    // Surface the L3 sandbox-off warning to the UI when ARMING without the sandbox
-    // experiment (macOS-only; non-darwin has no kernel sandbox — the warning still
-    // signals the reduced containment honestly).
-    const sandboxWarning = body.enabled && !(await isExperimentEnabled('sandbox'))
+    // Surface the L3 warning to the UI when ARMING on a host where the brain's
+    // structural egress close cannot exist (non-darwin, or sandbox-exec removed) —
+    // it signals the reduced containment honestly. On macOS the brain is always
+    // sandboxed regardless of the owner experiment, so no warning fires there.
+    const sandboxWarning = body.enabled && !brainSandboxAvailable()
     return c.json({ ...state, sandboxWarning })
   })
   // --- POST /api/swarm/orchestrator/selfsupply/approve — approve a proposed card --

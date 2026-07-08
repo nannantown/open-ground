@@ -240,9 +240,13 @@ list; under-claiming here is the point).
   could `git credential fill`/`security` a stored token even though the keychain
   *files* are read-denied. Denying securityd would also break https push, so this
   is an accepted trade-off, not a closed hole.
-- **Outbound is host-blind.** Seatbelt can't allow-list domains; once a secret is
-  obtained, `(allow network-outbound)` permits exfil. Domain egress filtering
-  needs the proxy/`srt` follow-up.
+- **Outbound is host-blind** (under the default `network:'all'` profile).
+  Seatbelt can't allow-list domains; once a secret is obtained,
+  `(allow network-outbound)` permits exfil. Domain egress filtering needs a
+  local proxy — which is exactly what the **overseer-brain egress close**
+  (below) now implements for the ONE launch path that holds the private
+  you-corpus; the worker/interactive paths remain host-blind (their claude needs
+  git/npm/arbitrary-host reachability).
 - **HOME tool-cache poisoning.** The writable HOME caches `~/.npm`/`~/.cache`/
   `~/Library/Caches` are needed for `npm install` + non-node toolchains. A payload
   could overwrite a cached executable there (e.g. a `~/Library/Caches/ms-playwright`
@@ -288,6 +292,55 @@ list; under-claiming here is the point).
 
 ---
 
+## Overseer-brain egress close (`network:'loopback'` + allowlist proxy)
+
+The one launch path with the private **you-corpus in context** — the overseer
+brain (`swarmOverseerBrain.makeOverseerBrain`) — is now sandboxed
+**unconditionally on macOS** (NOT gated on this experiment; the experiment still
+gates the worker/interactive paths) with a **tighter network line**:
+
+- `buildSandboxProfile({ network: 'loopback' })` allows outbound ONLY to
+  loopback + local unix sockets; every off-machine destination falls to
+  `(deny default)` and is **kernel-refused** (EPERM). DNS still resolves
+  (libinfo rides mach IPC), but nothing off-machine connects.
+- The brain's claude reaches Anthropic exclusively through a host-side
+  **allowlist CONNECT proxy** on 127.0.0.1 (`egressProxy.ts`, `HTTPS_PROXY`
+  injected into the launch): `anthropic.com` / `claude.ai` (suffix-matched,
+  port 443) pass; everything else — telemetry (datadoghq), content bridges,
+  any exfil target — gets a logged 403. The DOMAIN decision happens OUTSIDE
+  the sandbox.
+- The `--disallowed-tools` deny list (WebFetch/WebSearch/Bash/Task) stays armed
+  as defense-in-depth; off-darwin (or if Apple removes sandbox-exec —
+  `brainSandboxAvailable`) it degrades gracefully back to that stop-gap alone.
+- **Keychain carve-in (loopback-only):** claude's subscription credential lives
+  in the login keychain, and Security.framework **reads the keychain db files
+  from the client process** — with the `~/Library/Keychains` read-deny the
+  confined claude is "Not logged in" (real-kernel verified: a sandboxed
+  `security find-generic-password` fails with the deny, succeeds without).
+  Under `network:'loopback'` that deny is dropped: the db is encrypted at rest
+  and every off-machine byte still has to pass the allowlist proxy — there is
+  no exfil destination. The `'all'` (worker/interactive) profile keeps the deny.
+
+Verified on the real kernel (`scripts/sandbox-probe.ts`, BRAIN battery — 66/66
+with the main battery, 2026-07-08):
+
+```
+  ✓  want=deny  got=deny  BRAIN: OUTBOUND → 1.1.1.1:443 (external, direct)
+  ✓  want=allow got=allow BRAIN: DNS lookup api.anthropic.com (resolution path open)
+  ✓  want=allow got=allow BRAIN: OUTBOUND → 127.0.0.1 (the egress proxy)
+  ✓  want=allow got=allow BRAIN: https api.anthropic.com via allowlist proxy
+  ✓  want=deny  got=deny  BRAIN: https example.com via proxy (403 — not allowlisted)
+  ✓  want=deny  got=deny  BRAIN: BIND 127.0.0.1 (listener still denied)
+  ✓  want=allow got=allow BRAIN: claude --version (startup smoke, loopback profile)
+```
+
+And live (`scripts/overseer-brain-smoke.ts` — one real haiku-tier PTY,
+2026-07-08): the sandboxed+proxied brain answered a corpus-grounded question in
+11s (`ANSWER HIGH`), while its Datadog/content-bridge CONNECTs were 403'd —
+the closed egress demonstrably does not break the one legitimate path.
+
+---
+
 ## Remaining manual QA
 
 The probe battery proves the *profile* (incl. a no-bill `claude --version`
@@ -298,12 +351,26 @@ experiment, since PTY tty ioctls under Seatbelt are the least-certain corner
 (the profile allows `file-ioctl` on `/dev`, but only a live session confirms the
 TUI is happy).
 
+**Known blocker for that QA, discovered via the brain smoke (2026-07-08):** the
+worker/interactive (`network:'all'`) profile still read-denies
+`~/Library/Keychains`, and claude reads its subscription credential through
+those files — so a sandboxed worker/interactive claude will likely start **"Not
+logged in"**. The brain path fixed this for itself (loopback profiles drop that
+deny — see above); whether to carve the keychain into the `'all'` profile too is
+a separate owner decision with a different trade-off (its outbound is open, so
+the file-deny still trims a real exfil surface).
+
 ---
 
 ## Files
 
-- `src/lib/server/sandbox.ts` — `buildSandboxProfile` (pure SBPL builder) +
-  `wrapWithSandboxExec`.
+- `src/lib/server/sandbox.ts` — `buildSandboxProfile` (pure SBPL builder, incl.
+  the `network:'loopback'` egress-close mode) + `wrapWithSandboxExec`.
+- `src/lib/server/egressProxy.ts` — the loopback allowlist CONNECT proxy the
+  brain's claude rides (`ensureBrainEgressProxy`); `egressProxy.test.ts`.
+- `src/lib/server/swarmOverseerBrain.ts` — `makeOverseerBrain` wires the brain
+  launch: always-sandboxed on macOS, `sandboxNetwork:'loopback'`, `HTTPS_PROXY`;
+  `scripts/overseer-brain-smoke.ts` is its live smoke.
 - `src/lib/server/claudeTerminal.ts` — `launchClaude` applies it: writes the
   profile to a temp file, wraps the argv, forces `bypass`.
 - `src/lib/server/experiments.ts` · `useExperiments.ts` · `types.ts` — the

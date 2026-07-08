@@ -37,14 +37,20 @@
 //   • rm -rf on absolute/home/parent paths (workers: any path outside their
 //     write roots; relative rm after an out-of-roots cd counts as outside)
 //   • git push — ALL of it, plain/FF included, any remote, any refspec (plus
-//     the plumbing spellings send-pack / http-push and git-svn's dcommit).
-//     Integration is the COMMANDER's job: a worker commits locally, beats
-//     ready, and stops. The old force-only vetting (inherited from the
+//     the plumbing spellings send-pack / http-push, git-svn's dcommit, and the
+//     DASH-FORM binaries — git-push / git-send-pack / git-http-push / git-svn,
+//     callable by absolute libexec path with no `git` driver word — which are
+//     routed back through the same git analysis, so both spellings get one
+//     verdict). Integration is the COMMANDER's job: a worker commits locally,
+//     beats ready, and stops. The old force-only vetting (inherited from the
 //     manager-era guard, where a plain FF push was the manager's legitimate
 //     integration step) left `git push origin HEAD:main` open — the 2e7beb2
 //     bypass, where a heartbeat-less worker integrated itself past the
 //     commander's re-verify + adversarial review. Blanket subcommand denial
-//     leaves no flag/quoting/computed-word surface to evade. History nukes
+//     leaves no flag/quoting/computed-word surface to evade on the ARGUMENT
+//     side; the one KNOWN residual on the NAME side is a PRE-EXISTING
+//     user/system gitconfig alias (`git p` with `[alias] p = push`) — see
+//     Known residuals below. History nukes
 //     stay denied as before (reset --hard, clean -f, filter-branch,
 //     update-ref -d, branch -D, stash drop/clear/pop, checkout -f/--,
 //     restore of the worktree, reflog expire / gc --prune=now)
@@ -130,6 +136,29 @@
 //    / `| "cmd"` are denied when the path/command is literal, and the FILE
 //    ARGUMENTS of in-place editors (sed -i / perl -i / ruby -i) deny a computed
 //    target symmetric with rm.
+//  • GITCONFIG ALIASES that PRE-DATE the session: `git p` where the user's own
+//    global/system gitconfig already defines `[alias] p = push` reaches push
+//    without the literal subcommand ever appearing on the command line —
+//    statically unresolvable (vetting it would mean reading gitconfig at veto
+//    time — TOCTOU — and blanket-denying unknown subcommands would break every
+//    READ alias: `git st`, `git co`, …). Every IN-SESSION route into this is
+//    closed — defining one (`git config alias.*`), inlining one (`git -c
+//    alias.*=…` / `--config-env`), and `--exec-path` relocation are all denied
+//    — so exploiting it requires an alias the USER already shipped on the
+//    machine before spawn. Neutralizing those via GIT_CONFIG_GLOBAL=/dev/null
+//    (+ GIT_CONFIG_SYSTEM) in the worker env was considered and REJECTED: it
+//    also strips user.name/email (breaking the worker's whole commit flow —
+//    its core contract) and credential helpers (breaking fetch/pull), a
+//    legitimate-path regression bought for a user-authored corner case.
+//  • TRACKED-SOURCE STAGING: `git apply` / `patch` / `git checkout <ref> --
+//    <path>` can rewrite the REPO's tracked copy of this file
+//    (scripts/openground-guard.js) — it sits inside the write roots, and the
+//    substrate basename rule covers Write/Edit/shell writes/git mv|rm, not
+//    content-level patch application. The INSTALLED copy (~/.openground/guard/)
+//    stays write-denied, so this cannot disarm the LIVE veto — it is a
+//    plant-and-wait-for-deploy channel, and it is closed at integration time
+//    (the commander's re-verify + adversarial review + the swarm-code merge
+//    gate), not at L4.
 // A worker that needs to rewrite a file uses the Edit tool or a script the guard
 // can see.
 //
@@ -1133,6 +1162,23 @@ function analyzeSimple(sc, ctx, getCwdState, setCwdState, pushCwd = () => {}, po
     }
   }
 
+  // git's DASH-FORM binaries: every `git <sub>` is equally callable as
+  // `git-<sub>` — the spellings live in git's libexec/git-core and run fine by
+  // absolute path (`/usr/libexec/git-core/git-push origin main`), no PATH edit
+  // needed. cmd0 is a BASENAME, so that call used to read as an unknown command
+  // `git-push` and fall through to the default ALLOW, sidestepping analyzeGit
+  // (the blanket push ban above all). Re-enter analyzeGit with the subcommand
+  // restored: dash-form and driver-form then yield IDENTICAL verdicts —
+  // git-push / git-send-pack / git-http-push hit the push ban, git-svn's
+  // dcommit/branch/tag vetting sees its args, the destructive-flag rules
+  // (git-reset --hard, git-branch -D, …) keep working, and read spellings
+  // (git-status, git-log) stay allowed exactly like their driver forms.
+  // Third-party git-* tools (git-lfs, git-flow) resolve to an unknown
+  // subcommand → default ALLOW, the same verdict as `git lfs` / `git flow`.
+  if (cmd0.startsWith('git-') && cmd0.length > 4) {
+    return analyzeGit([{ t: 'word', parts: [{ k: 'lit', s: cmd0.slice(4) }] }, ...args], ctx, getCwdState)
+  }
+
   switch (cmd0) {
     case 'eval':
       return denyV('eval executes computed text — write the command directly')
@@ -1787,9 +1833,13 @@ function analyzeGit(args, ctx, getCwdState) {
       // zero heartbeats integrated itself past the commander's re-verify and
       // adversarial review. Blanket-denying the subcommand needs no argument
       // analysis at all, so there is no flag/quoting/computed-word surface
-      // left to evade. Reads (fetch/pull/status/log/rebase/merge-base) and
-      // local mechanics (add/commit/merge on the worker's own branch) are
-      // untouched.
+      // left to evade on the argument side; the NAME side is covered by the
+      // dash-form route in analyzeSimple (git-push / git-send-pack /
+      // git-http-push / git-svn by absolute libexec path re-enter this
+      // switch), leaving ONE known residual — a pre-existing user gitconfig
+      // alias (`git p`), documented in the header's Known residuals. Reads
+      // (fetch/pull/status/log/rebase/merge-base) and local mechanics
+      // (add/commit/merge on the worker's own branch) are untouched.
       return denyV('git push is forbidden in a worker session — ALL pushes, plain/FF included (integration is the commander\'s job): commit locally, then `swarm-beat.sh done true` and STOP')
     }
     case 'svn': {

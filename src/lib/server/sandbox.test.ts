@@ -153,6 +153,43 @@ describe('buildSandboxProfile', () => {
     expect(profile).not.toContain('(allow network*)')
   })
 
+  it("network:'loopback' — outbound ONLY to loopback + unix sockets, NO bare outbound allow, still no listeners", () => {
+    // The overseer-brain egress close: every off-machine destination must fall to
+    // (deny default). A bare `(allow network-outbound)` ANYWHERE would reopen it
+    // (SBPL last-match-wins) — pin its absence, not just the loopback lines'
+    // presence. (The kernel-level proof — 1.1.1.1:443 EPERMs while 127.0.0.1
+    // connects — lives in scripts/sandbox-probe.ts.)
+    const p = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u', network: 'loopback' })
+    expect(p).toContain('(allow network-outbound (remote ip "localhost:*"))')
+    expect(p).toContain('(allow network-outbound (remote unix-socket))')
+    expect(p).not.toContain('(allow network-outbound)\n')
+    expect(p).not.toContain('(allow network-inbound)')
+    expect(p).not.toContain('network-bind')
+    expect(p).not.toContain('(allow network*)')
+  })
+
+  it("network:'loopback' — the login-keychain READ deny is dropped (claude's credential), all other credential denies stay", () => {
+    // Security.framework reads the keychain db FILES from the client process, so
+    // the deny leaves the confined claude "Not logged in" (real-kernel verified).
+    // With egress closed to the allowlist proxy there is no exfil destination, so
+    // 'loopback' trades the file deny for a working login. 'all' keeps it.
+    const p = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u', network: 'loopback' })
+    expect(p).not.toContain('(deny file-read* (subpath "/home/u/Library/Keychains"))')
+    expect(profile).toContain('(deny file-read* (subpath "/home/u/Library/Keychains"))') // 'all' unchanged
+    // The rest of the credential wall is untouched under 'loopback':
+    for (const kept of ['/home/u/.ssh', '/home/u/.aws', '/home/u/.gnupg']) {
+      expect(p).toContain(`(deny file-read* (subpath "${kept}"))`)
+    }
+    expect(p).toContain('(deny file-read* (literal "/home/u/.netrc"))')
+  })
+
+  it("network:'all' and omitted both keep the historical open-outbound line (worker profile unchanged)", () => {
+    const all = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u', network: 'all' })
+    expect(all).toContain('(allow network-outbound)\n')
+    expect(profile).toContain('(allow network-outbound)\n') // omitted = same default
+    expect(all).not.toContain('(remote ip "localhost:*")')
+  })
+
   it('escapes a double-quote in a path so it cannot break out of the SBPL literal', () => {
     const p = buildSandboxProfile({ cwd: '/a"b', home: '/home/u' })
     expect(p).toContain('(allow file-write* (subpath "/a\\"b"))')

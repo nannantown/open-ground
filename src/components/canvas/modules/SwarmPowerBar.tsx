@@ -28,6 +28,11 @@ import { useT } from '@/i18n/I18nContext'
 interface Props {
   /** The engine is running (drain+dispatch loop scheduled) — the switch's ON state. */
   running: boolean
+  /** The owner EXPLICITLY stopped the engine (server-composed: in-memory flag OR the
+   *  persisted record, so it survives restarts). While set (and not running) the
+   *  status reads "stopped by hand" instead of the plain "stopped" — a deliberate
+   *  pause is distinguishable from a never-started engine at a glance. */
+  manualStop: boolean
   /** The orchestrator route answered (false dims the switch — nothing to power). */
   available: boolean
   /** A power round-trip is in flight (disables the switch during the engine call). */
@@ -38,19 +43,23 @@ interface Props {
   onToggle: (next: boolean) => void
 }
 
-export const SwarmPowerBar = ({ running, available, busy, workerCount, onToggle }: Props) => {
+export const SwarmPowerBar = ({ running, manualStop, available, busy, workerCount, onToggle }: Props) => {
   const { t } = useT()
 
   // State at a glance (条件: 稼働中/停止中・何体動いているか). running pops in MOSS
   // — a calm "go" green, NOT the app's alarming accent red — so the live state is
   // unmistakable; stopped / offline stay inert grey. ink-faint is the inert grey
-  // that still clears 3:1 on paper (unlike the near-invisible line-strong).
+  // that still clears 3:1 on paper (unlike the near-invisible line-strong). A
+  // deliberate owner pause (manualStop — survives restarts server-side) reads
+  // "stopped by hand", distinct from a merely never-started engine.
   const live = available && running
   const statusLabel = !available
     ? t('projectPanel.swarm.power.offline')
     : running
       ? t('projectPanel.swarm.power.running')
-      : t('projectPanel.swarm.power.stopped')
+      : manualStop
+        ? t('projectPanel.swarm.power.manualStop')
+        : t('projectPanel.swarm.power.stopped')
   const disabled = busy || !available
 
   return (

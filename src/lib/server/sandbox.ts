@@ -47,6 +47,18 @@ export interface SandboxProfileInput {
    *  checkout and is left fully READ-only (build/test work read-only). This is a
    *  tight carve-out — a worker can't scribble on the main checkout's source. */
   extraWriteSubpaths?: string[]
+  /** Network egress policy. 'all' (the default — the historical worker/interactive
+   *  profile): outbound open, every listener denied. 'loopback': outbound is
+   *  allowed ONLY to loopback + local unix sockets — every off-machine destination
+   *  falls to (deny default) and is KERNEL-refused (EPERM). 'loopback' is the
+   *  egress-proxy pattern (docs/SANDBOX_EXPERIMENT.md follow-up): the confined
+   *  claude reaches Anthropic exclusively through a host-side allowlist CONNECT
+   *  proxy on 127.0.0.1 (HTTPS_PROXY), so what leaves the machine is decided
+   *  OUTSIDE the sandbox. The overseer brain uses this — it holds the private
+   *  you-corpus, so its direct egress is structurally closed, not permission-
+   *  layer-closed. (Verified on the real kernel: remote-ip localhost allows,
+   *  1.1.1.1:443 EPERMs, DNS still resolves via mDNSResponder mach IPC.) */
+  network?: 'all' | 'loopback'
 }
 
 // Escape a string for an SBPL double-quoted string literal: backslash first,
@@ -129,7 +141,17 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
     join(home, '.azure'), // Azure CLI tokens
     join(home, '.wrangler'), // Cloudflare wrangler (legacy token location)
     join(home, '.config/.wrangler'), // Cloudflare wrangler (current token location)
-    join(home, 'Library/Keychains'),
+    // The login-keychain FILES — but NOT under 'loopback': claude's subscription
+    // credential lives in the login keychain, and Security.framework READS the
+    // keychain db files from the CLIENT process (verified on the real kernel: a
+    // sandboxed `security find-generic-password` fails with this deny and
+    // succeeds without it — the securityd mach IPC alone is NOT the whole path),
+    // so keeping the deny leaves the confined claude "Not logged in". Under
+    // 'loopback' the deny also buys ~nothing: the db is encrypted at rest and
+    // every off-machine byte still has to pass the host-side allowlist proxy —
+    // there is no exfil destination. Under 'all' (worker/interactive) outbound
+    // is open, so the file-level deny stays as the historical exfil-surface trim.
+    ...(input.network === 'loopback' ? [] : [join(home, 'Library/Keychains')]),
   ]
   const denyReadLiterals = [
     join(home, '.netrc'),
@@ -282,16 +304,29 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
     lines.push(`(deny file-write* (regex #"${re}"))`)
   }
 
-  // Network: OUTBOUND is allowed (claude → Anthropic over 443, git/npm, and the
-  // app-context curl to 127.0.0.1 — loopback outbound verified). We open NO
-  // listener: bind/inbound fall through to (deny default), so a contained agent
-  // can't stand up a server, public OR loopback (no backdoor; no dev server).
-  // Seatbelt's `(local ip …)` bind filter does not reliably scope a listen to
-  // loopback (empirically even `*:*` fails to grant node's listen), so "no
-  // listeners at all" is the honest, enforceable line. Outbound is host-blind —
-  // domain-level egress filtering needs a local proxy (claude's own settings.json
-  // `network.allowedDomains`, or the srt runtime), a deliberate follow-up.
-  lines.push('(allow network-outbound)')
+  // Network. We open NO listener in either mode: bind/inbound fall through to
+  // (deny default), so a contained agent can't stand up a server, public OR
+  // loopback (no backdoor; no dev server). Seatbelt's `(local ip …)` bind filter
+  // does not reliably scope a listen to loopback (empirically even `*:*` fails to
+  // grant node's listen), so "no listeners at all" is the honest, enforceable line.
+  if (input.network === 'loopback') {
+    // 'loopback' — outbound ONLY to the local machine; everything off-machine is
+    // KERNEL-refused. Local unix sockets are allowed too (they are IPC, not
+    // egress — and libinfo's DNS path may ride /var/run/mDNSResponder as a unix
+    // socket on some macOS versions; resolution is harmless when every off-machine
+    // connect is denied anyway). The confined claude reaches Anthropic exclusively
+    // through the host-side allowlist CONNECT proxy on 127.0.0.1 (HTTPS_PROXY) —
+    // sandbox.test.ts pins that NO bare `(allow network-outbound)` is emitted here.
+    lines.push('(allow network-outbound (remote unix-socket))')
+    lines.push('(allow network-outbound (remote ip "localhost:*"))')
+  } else {
+    // 'all' (default) — OUTBOUND is allowed (claude → Anthropic over 443, git/npm,
+    // and the app-context curl to 127.0.0.1 — loopback outbound verified).
+    // Outbound is host-blind — domain-level egress filtering needs a local proxy
+    // (the 'loopback' mode above / claude's own settings.json
+    // `network.allowedDomains`, or the srt runtime).
+    lines.push('(allow network-outbound)')
+  }
 
   // Trailing newline so the file is well-formed for `sandbox-exec -f`.
   return lines.join('\n') + '\n'

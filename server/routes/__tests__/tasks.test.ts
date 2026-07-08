@@ -250,6 +250,235 @@ describe('POST /api/project/tasks — concurrent writes never lose a mutation', 
   })
 })
 
+describe('POST /api/project/tasks — per-item results for id-targeted batches', () => {
+  // Incident 0707: an unmatched (shortened/stale) id silently no-op'd inside a
+  // 200 response — the caller had no way to tell "applied" from "ignored"
+  // without re-reading the board. setColumn/setBranch/setIntegrationConflict
+  // now report per-item ok/error so a mismatch is machine-detectable without
+  // failing the whole batch (partial success stays possible).
+
+  it('setColumn: unmatched id reports ok:false, matched id reports ok:true, matched id still applies', async () => {
+    const dir = await makeRegisteredDir('results-setColumn')
+    const task = await addTask(dir, 'Real card')
+    const res = await app.request(
+      '/api/project/tasks',
+      json({
+        path: dir,
+        setColumn: [
+          { id: task.id, column: 'review' },
+          { id: 'not-a-real-id', column: 'review' },
+        ],
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results.setColumn).toEqual([
+      { id: task.id, ok: true },
+      { id: 'not-a-real-id', ok: false, error: 'unknown task id' },
+    ])
+    expect((await getTask(dir, task.id))?.boardColumn).toBe('review')
+  })
+
+  it('setBranch: unmatched id and invalid branch both report ok:false with distinct reasons', async () => {
+    const dir = await makeRegisteredDir('results-setBranch')
+    const task = await addTask(dir, 'Branch results card')
+    const res = await app.request(
+      '/api/project/tasks',
+      json({
+        path: dir,
+        setBranch: [
+          { id: task.id, branch: 'task/ok-branch' },
+          { id: task.id, branch: 'has space' },
+          { id: 'ghost-id', branch: 'task/whatever' },
+        ],
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results.setBranch).toEqual([
+      { id: task.id, ok: true },
+      { id: task.id, ok: false, error: 'invalid branch name' },
+      { id: 'ghost-id', ok: false, error: 'unknown task id' },
+    ])
+    expect((await getTask(dir, task.id))?.branch).toBe('task/ok-branch')
+  })
+
+  it('setIntegrationConflict: unmatched id reports ok:false; matched id applies and reports ok:true', async () => {
+    const dir = await makeRegisteredDir('results-setIntegrationConflict')
+    const task = await addTask(dir, 'Conflict results card')
+    const res = await app.request(
+      '/api/project/tasks',
+      json({
+        path: dir,
+        setIntegrationConflict: [
+          { id: task.id, value: true },
+          { id: 'missing-id', value: true },
+        ],
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results.setIntegrationConflict).toEqual([
+      { id: task.id, ok: true },
+      { id: 'missing-id', ok: false, error: 'unknown task id' },
+    ])
+    expect((await getTask(dir, task.id))?.integrationConflict).toBe(true)
+  })
+
+  it('a batch with only some fields set only reports results for those fields', async () => {
+    const dir = await makeRegisteredDir('results-partial-fields')
+    const task = await addTask(dir, 'Only setColumn card')
+    const res = await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setColumn: [{ id: task.id, column: 'doing' }] }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results.setColumn).toEqual([{ id: task.id, ok: true }])
+    expect(body.results.setBranch).toBeUndefined()
+    expect(body.results.setIntegrationConflict).toBeUndefined()
+  })
+
+  it('plain add/markDone-only calls carry no results key at all (fully non-regressing)', async () => {
+    const dir = await makeRegisteredDir('results-no-key')
+    const res = await app.request('/api/project/tasks', json({ path: dir, add: ['A new card'] }))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results).toBeUndefined()
+    expect(Array.isArray(body.tasks)).toBe(true)
+  })
+})
+
+describe('POST /api/project/tasks — rework (差し戻し loop-guard)', () => {
+  // API equivalent of ~/.claude/swarm-board.sh's `rework` subcommand: review→doing
+  // move + per-card counter bump in one call, parking in 'blocked' once the bump
+  // pushes the count past maxReworks (default 3) — for OG-only environments
+  // without that script (card [og-manage] rework counterのAPI化).
+
+  it('moves the card to doing and reports the bumped count', async () => {
+    const dir = await makeRegisteredDir('rework-basic')
+    const task = await addTask(dir, 'Needs fixes')
+    await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setColumn: [{ id: task.id, column: 'review' }] }),
+    )
+    const res = await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'doing', count: 1 }])
+    const after = await getTask(dir, task.id)
+    expect(after?.boardColumn).toBe('doing')
+    expect(after?.done).toBe(false)
+    expect(after?.reworkCount).toBe(1)
+  })
+
+  it('parks in blocked once the count exceeds maxReworks (default 3)', async () => {
+    const dir = await makeRegisteredDir('rework-limit')
+    const task = await addTask(dir, 'Chronically broken')
+
+    for (let i = 1; i <= 3; i++) {
+      const res = await app.request(
+        '/api/project/tasks',
+        json({ path: dir, rework: [{ id: task.id }] }),
+      )
+      const body = await res.json()
+      expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'doing', count: i }])
+    }
+    // The 4th round-trip (count=4) exceeds the default max of 3 → evacuate to blocked.
+    const res = await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+    const body = await res.json()
+    expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'blocked', count: 4 }])
+    const after = await getTask(dir, task.id)
+    expect(after?.boardColumn).toBe('blocked')
+    expect(after?.reworkCount).toBe(4)
+  })
+
+  it('honours a custom maxReworks override', async () => {
+    const dir = await makeRegisteredDir('rework-custom-max')
+    const task = await addTask(dir, 'Custom limit')
+    await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id, maxReworks: 1 }] }))
+    const res = await app.request(
+      '/api/project/tasks',
+      json({ path: dir, rework: [{ id: task.id, maxReworks: 1 }] }),
+    )
+    const body = await res.json()
+    expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'blocked', count: 2 }])
+  })
+
+  it('landing on done or todo resets the counter (fresh reuse is not pre-tripped)', async () => {
+    const dir = await makeRegisteredDir('rework-reset')
+    const task = await addTask(dir, 'Reset me')
+    await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+    expect((await getTask(dir, task.id))?.reworkCount).toBe(1)
+
+    await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setColumn: [{ id: task.id, column: 'done' }] }),
+    )
+    expect((await getTask(dir, task.id))?.reworkCount).toBeUndefined()
+
+    // A later rework round starts counting from zero again, not from where it left off.
+    const res = await app.request(
+      '/api/project/tasks',
+      json({ path: dir, setColumn: [{ id: task.id, column: 'review' }] }),
+    )
+    expect(res.status).toBe(200)
+    const rw = await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+    const body = await rw.json()
+    expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'doing', count: 1 }])
+  })
+
+  it('markDone (the run-flow on-finish done landing) also resets the counter', async () => {
+    // markDone is a first-class "done" landing (BoardModule's run-flow
+    // on-finish curl) alongside setColumn{column:'done'} — the loop guard must
+    // reset there too, not just via the explicit setColumn path.
+    const dir = await makeRegisteredDir('rework-reset-markdone')
+    const task = await addTask(dir, 'Reset via markDone')
+    await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+    expect((await getTask(dir, task.id))?.reworkCount).toBe(1)
+
+    await app.request('/api/project/tasks', json({ path: dir, markDone: [task.id] }))
+    const after = await getTask(dir, task.id)
+    expect(after?.done).toBe(true)
+    expect(after?.boardColumn).toBe('done')
+    expect(after?.reworkCount).toBeUndefined()
+  })
+
+  it('unknown id reports ok:false and does not throw', async () => {
+    const dir = await makeRegisteredDir('rework-missing')
+    const res = await app.request(
+      '/api/project/tasks',
+      json({ path: dir, rework: [{ id: 'ghost-id' }] }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.results.rework).toEqual([{ id: 'ghost-id', ok: false, error: 'unknown task id' }])
+  })
+
+  it('a non-integer / negative maxReworks is rejected without applying the move', async () => {
+    const dir = await makeRegisteredDir('rework-bad-max')
+    const task = await addTask(dir, 'Guarded max')
+    for (const bad of [-1, 1.5, 'three' as unknown as number]) {
+      const res = await app.request(
+        '/api/project/tasks',
+        json({ path: dir, rework: [{ id: task.id, maxReworks: bad }] }),
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.results.rework[0].ok).toBe(false)
+    }
+    expect((await getTask(dir, task.id))?.boardColumn).toBe('todo')
+    expect((await getTask(dir, task.id))?.reworkCount).toBeUndefined()
+  })
+
+  it('non-array rework is rejected (400), never 500', async () => {
+    const dir = await makeRegisteredDir('rework-nonarray')
+    const res = await app.request('/api/project/tasks', json({ path: dir, rework: 'oops' }))
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toMatch(/rework/)
+  })
+})
+
 describe('POST /api/project/tasks — non-array fields are rejected, never iterated', () => {
   // Repro of the audit-minor bug: `body` is an unchecked `as TasksBody` over raw
   // JSON, and every mutation field feeds a `for...of` (or `new Set`). A STRING
@@ -295,7 +524,7 @@ describe('POST /api/project/tasks — non-array fields are rejected, never itera
 
   it('non-array setColumn / setPrUrl / setBranch / setIntegrationConflict are rejected (400)', async () => {
     const dir = await makeRegisteredDir('nonarray-rest')
-    for (const field of ['setColumn', 'setPrUrl', 'setBranch', 'setIntegrationConflict'] as const) {
+    for (const field of ['setColumn', 'setPrUrl', 'setBranch', 'setIntegrationConflict', 'rework'] as const) {
       for (const bad of [5, {}, 'oops']) {
         const res = await app.request('/api/project/tasks', json({ path: dir, [field]: bad }))
         expect(res.status).toBe(400)

@@ -75,10 +75,25 @@ import {
   rememberSwarmAutonomy,
   forgetSwarmAutonomy,
   isSwarmAutonomyRemembered,
+  rememberSwarmManualStop,
+  forgetSwarmManualStop,
+  isSwarmManualStopPersisted,
 } from './store'
 import { launchClaude } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
-import { SWARM_LAUNCH_MODEL, execModeMaxWorkers } from './swarmLaunch'
+import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTier } from './swarmLaunch'
+// [Quota] the engine is BOTH sides of the quota loop now: the rate-limit
+// sighting in monitorWorkers is the swarm's SENSOR (markRateLimited — the one
+// production write into the cooling table, attributing the sighting to the tier
+// the worker launched on), and runDispatchPass / the reviewer panel are the
+// ACTUATORS (allCoolingUntil park gate). MODEL_TIER_LADDER narrows the recorded
+// launch model to a known tier; an off-ladder / unrecorded model holds the
+// worker exactly as before but marks nothing (never poison a tier by guess).
+import { allCoolingUntil, markRateLimited, MODEL_TIER_LADDER } from './swarmQuota'
+// A5 usage sensor, SYNC cache peek only (never awaited, never refreshed here) —
+// the second-priority reset-time source markRateLimited resolves against when
+// the worker's own screen wording didn't carry one.
+import { peekCachedUsage } from './claudeUsageCli'
 import {
   spawnSwarmWorker,
   removeSwarmWorktree,
@@ -97,6 +112,7 @@ import {
   type IntegrateOutcome,
 } from './swarmIntegrate'
 import { requestEngineSelfUpdate } from './selfUpdateSignal'
+import { acquireIntegrationLock, type AcquireIntegrationLockResult } from './swarmIntegrationLock'
 import {
   initSelfSupplyRuntime,
   runSelfSupplyPass,
@@ -1179,7 +1195,11 @@ export interface ProjectEngine {
    *  genuinely halts new dispatch (条件2) even though a DEFAULT-off engine auto-drains
    *  on an idle-slot + todo backlog (条件1). Cleared by a manual ON (startOrchestrator),
    *  so the two toggle actions are the auto-drain consent. Optional (absent ⇒ NOT
-   *  paused: a fresh / legacy engine auto-drains). In-memory only. */
+   *  paused: a fresh / legacy engine auto-drains). This flag is the in-memory HALF: the
+   *  stop/start toggles mirror it to `Settings.swarmManualStop` (the persisted record —
+   *  see isSwarmManualStopPersisted), which maybeAutoStartDrain ALSO consults so the
+   *  pause survives a restart, and which the state API surfaces so "stopped by hand"
+   *  is machine-readable from outside (the 0707 twin-dispatch root cause). */
   manualStop?: boolean
   /** Auto-integration armed (Card③) — a SEPARATE switch from `running`, default
    *  OFF. Only ever acts while `running` (turning the engine off = global stop). */
@@ -1365,6 +1385,12 @@ export interface ProjectEngine {
    *  (上がった/下がった) instead of a 3s heartbeat that would churn the 200-line ring
    *  buffer. Optional (a fresh engine has no prior decision). In-memory only. */
   lastScaleSig?: string
+  /** QUOTA PARK (card 0add9d30) — epoch ms of the earliest tier reset while EVERY
+   *  model tier is cooling (swarmQuota.allCoolingUntil), mirrored here ONLY so
+   *  {@link runDispatchPass} can detect the ENTER/LIFT edges (log once, not every
+   *  3s tick) — the table itself lives in swarmQuota, this is not a second source
+   *  of truth. Absent ⇒ not parked. In-memory only. */
+  parkUntil?: number
 }
 
 interface OrchestratorStore {
@@ -1634,6 +1660,8 @@ const clearKeptMove = (engine: ProjectEngine, taskId: string): void => {
 
 const emptyState = (): SwarmOrchestratorState => ({
   running: false,
+  manualStop: false,
+  manualStopPersisted: false,
   autoMerge: false,
   selfSupply: false,
   overseer: false,
@@ -1662,6 +1690,11 @@ const stateOf = (
   // the caller (getOrchestratorState reads Settings.swarmAutonomyOn). Defaulted false
   // for the toggle endpoints, whose responses the 5s poll immediately supersedes.
   autonomyRemembered = false,
+  // The persisted "stopped by hand" record (Settings.swarmManualStop) — resolved async
+  // by the poll callers (getOrchestratorState / drainTickOrchestrator) and passed as a
+  // literal by start/stop (which just wrote it). Defaulted false for the remaining
+  // toggle endpoints, exactly like autonomyRemembered above.
+  manualStopPersisted = false,
 ): SwarmOrchestratorState => {
   // Resolve the live worker set ONCE — both the reported `workers` array and the
   // consumption snapshot (activeWorkers / activeRunMs) read from it.
@@ -1669,6 +1702,10 @@ const stateOf = (
   const counters = engine.metrics ?? emptyMetricsCounters()
   return {
     running: engine.running,
+    // The OR of the in-memory flag and the persisted record, so "stopped by hand"
+    // reads true across a restart (fresh engine ⇒ flag false, record still true).
+    manualStop: engine.manualStop === true || manualStopPersisted,
+    manualStopPersisted,
     autoMerge: engine.autoMerge,
     selfSupply: engine.selfSupply.enabled,
     overseer: engine.overseer.enabled,
@@ -1680,6 +1717,7 @@ const stateOf = (
     kpis: computeSwarmKpis({ counters, tasks, log: engine.log }),
     consumption: computeSwarmConsumption({ liveWorkers: live, counters, limit: DISPATCH_BUDGET }),
     autonomyRemembered,
+    ...(engine.parkUntil != null ? { parkUntil: engine.parkUntil } : {}),
   }
 }
 
@@ -1849,6 +1887,19 @@ export interface IntegrationDeps {
   ) => Promise<ReviewResult>
   /** Land one branch on the trunk (FF / rebase / conflict). Never forces. */
   integrate: (projectPath: string, branch: string, target: string) => Promise<IntegrateOutcome>
+  /** Acquire the CROSS-PROCESS integration lock for this repo (0706 二重司令塔
+   *  事故フォロー) — guards against a separate `claude` process (a tmux 司令塔
+   *  driving the same repo by hand, via scripts/swarm-lock.js) rebasing/pushing
+   *  the same branch onto the same trunk at the same moment this engine is
+   *  mid-integrate. Called PER CARD, immediately before `integrate()` — NOT
+   *  once for the whole pass — because a pass also runs verify/tsc and a
+   *  multi-minute adversarial-review panel per card, which can hold a
+   *  whole-pass lock past its staleness window and let a second process steal
+   *  it (the exact race this lock exists to prevent). On failure, only THIS
+   *  card's integration is skipped this pass (never the whole pass). Default:
+   *  {@link acquireIntegrationLock}. Injectable so tests exercise the skip path
+   *  without a real git repo at `engine.path`. */
+  acquireLock: (projectPath: string) => Promise<AcquireIntegrationLockResult>
   /** Move a card review→done. False on a kept write (retry next pass). */
   moveToDone: (projectPath: string, taskId: string) => Promise<boolean>
   /** Stamp / clear a card's "needs manual integration" flag. */
@@ -2906,6 +2957,15 @@ export interface ReviewResult {
   /** The panel was SKIPPED (unchanged tip already reviewed must-fix) — the decision
    *  was carried over WITHOUT spawning reviewers (mirrors verify's `skipped`). */
   skipped?: boolean
+  /** The panel was SKIPPED because every model tier is cooling (quota park) — an
+   *  ENGINE hold, not a panel verdict. Callers MUST NOT count this toward the
+   *  defer streak (MAX_REVIEW_DEFERS) — doing so would flip the card to
+   *  needs-human and, via the defer-exhausted memo, never re-spawn the panel
+   *  even after the park lifts. runIntegratePass normally pre-gates before
+   *  calling review at all; this flag is the safety net for the window where
+   *  the park began while the (multi-minute) verify stage was running, and for
+   *  direct consumers of makeAdversarialReview. */
+  skippedForPark?: boolean
 }
 
 /** Default panel size — three independent reviewers (odd ⇒ no ties when all vote;
@@ -3339,19 +3399,44 @@ export const makeAdversarialReview = (
     if (diffOut.trim() === '') {
       return { decision: 'integrate', verdicts: [], mustFix: 0, clean: 0, reason: 'no diff to review (nothing to land)' }
     }
+    // QUOTA PARK: every model tier cooling ⇒ a reviewer `claude` spawned now
+    // would hit the same wall the workers did — defer (retry next pass; defer
+    // never merges un-reviewed), same actuator as runDispatchPass's park gate.
+    // Sits AFTER the spawn-free early returns above (skipIfTip carry / empty
+    // diff stay useful during a park) and BEFORE any worktree/PTY cost.
+    // `skippedForPark` marks this as an ENGINE hold, not a panel verdict, so
+    // the caller keeps it out of the MAX_REVIEW_DEFERS streak (see ReviewResult).
+    const parkedUntil = allCoolingUntil(Date.now())
+    if (parkedUntil != null) {
+      return {
+        decision: 'defer',
+        verdicts: [],
+        mustFix: 0,
+        clean: 0,
+        skippedForPark: true,
+        reason: `quota park: every model tier is cooling until ${new Date(parkedUntil).toISOString()} — review deferred`,
+      }
+    }
     const mat = await withRebasedWorktree(projectPath, tip, targetRef, async (dir) => {
       // One controller for the whole panel: aborted in `finally` so any reviewer
       // still lingering after the others resolve is torn down (Promise.all already
       // awaited them, so this is teardown insurance, not an early-exit).
       const ac = new AbortController()
       try {
+        // Resolve the reviewer tier THROUGH the quota table at spawn time, like
+        // worker launches do (resolveSwarmModelEffort): with only SOME tiers
+        // cooling (no park — the gate above didn't fire), a fable-pinned panel
+        // would spawn straight into the cooled top tier, every reviewer would
+        // abstain, and the defer streak would burn to needs-human. Identity when
+        // nothing is cooling.
+        const panelModel = resolveAvailableTier(model, Date.now())
         const raws = await Promise.all(
           Array.from({ length: panel }, (_, i) => {
             // Lens mode: reviewer i runs lens i (its focused prompt); else identical.
             const lens = lenses ? lenses[i] : undefined
             return (customRun
               ? customRun({ dir, trunkRef, index: i + 1, signal: ac.signal, lens })
-              : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs, model, lens })
+              : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs, model: panelModel, lens })
             )
               .then((raw) => extractReviewVerdict(raw))
               // A reviewer that THREW (PTY spawn failed, etc.) is a non-vote, not a
@@ -3480,6 +3565,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // makeAdversarialReview() with no lenses.
   review: makeAdversarialReview({ lenses: DEFAULT_REVIEW_LENSES }),
   integrate: defaultIntegrate,
+  acquireLock: (p) => acquireIntegrationLock(p, { label: 'engine' }),
   moveToDone: defaultMoveToDone,
   markConflict: defaultMarkConflict,
   cleanup: defaultCleanup,
@@ -3876,10 +3962,45 @@ const monitorWorkers = async (
         const rl = engine.rateLimited.get(w.terminalId)
         if (!rl) {
           engine.rateLimited.set(w.terminalId, { since: now })
+          // QUOTA SENSOR (the one production write into swarmQuota's cooling
+          // table): attribute this sighting to the tier the worker launched on,
+          // so dispatch drops a tier — or parks when every tier is dry — instead
+          // of re-spawning into the same wall. Reset time resolves worker screen
+          // → A5 cache → RATE_LIMIT_GRACE_MS (resolveCoolingUntil). A worker
+          // with no recorded/on-ladder model is held exactly as before — it
+          // marks nothing (never cool a tier by guess).
+          const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
+          let cooling = ''
+          if (tier) {
+            const a5 = peekCachedUsage()
+            // A5's resetsAt is a STANDING display — the current window's end,
+            // shown even at 3% usage — so it is only trusted as a cooling
+            // horizon when that slot is actually SPENT (pct >= 100). Without
+            // the gate, RATE_LIMIT_PATTERNS matching a transient 429/5xx blip
+            // would cool a healthy tier until the session reset (up to ~5h) —
+            // a full park once cascaded — instead of the 20min grace (must-fix
+            // 差し戻し 0708). When BOTH slots are spent, the session's (sooner)
+            // reset wins: a too-early resume just re-marks on the next
+            // sighting, while over-trusting the weekly reset could park for
+            // days.
+            const a5ResetsAt =
+              a5?.session && a5.session.pct >= 100
+                ? a5.session.resetsAt
+                : a5?.weekAll && a5.weekAll.pct >= 100
+                  ? a5.weekAll.resetsAt
+                  : null
+            const until = markRateLimited(tier, {
+              ptyText: screen,
+              a5ResetsAt,
+              graceMs: RATE_LIMIT_GRACE_MS,
+              now,
+            })
+            cooling = ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
+          }
           logLine(
             engine,
             'warn',
-            `worker rate/usage-limited — holding (no nudge; requeue after ${Math.floor(RATE_LIMIT_GRACE_MS / 60_000)}m): ${w.branch} (${shorten(w.taskTitle)})`,
+            `worker rate/usage-limited — holding (no nudge; requeue after ${Math.floor(RATE_LIMIT_GRACE_MS / 60_000)}m)${cooling}: ${w.branch} (${shorten(w.taskTitle)})`,
           )
         } else if (now - rl.since >= RATE_LIMIT_GRACE_MS) {
           engine.rateLimited.delete(w.terminalId)
@@ -4173,6 +4294,35 @@ export const runDispatchPass = async (
     }
   }
 
+  // 3b. QUOTA PARK (card 0add9d30 — churn stop): when EVERY model tier is
+  // cooling (swarmQuota.allCoolingUntil non-null), hold ALL new dispatch until
+  // the earliest reset instead of spawning a fresh worker into the same
+  // exhausted wall every tick. Existing workers (already counted, already
+  // running) and the monitor/reconcile steps above are UNAFFECTED — this only
+  // gates step 4 below. A parked todo card is simply left in 'todo' (no card
+  // mutation); the moment a tier frees, this returns null and step 4 resumes
+  // exactly where selectDispatch left it. Autonomy OFF already returns before
+  // this point (top-of-function `if (!engine.running) return`), so park never
+  // fires while the engine is off. Logged only on the ENTER/LIFT edge (not
+  // every 3s tick) so the journal stays legible.
+  const parkUntil = allCoolingUntil(now)
+  if (parkUntil != null) {
+    if (engine.parkUntil !== parkUntil) {
+      engine.parkUntil = parkUntil
+      logLine(
+        engine,
+        'warn',
+        `quota park: every model tier is cooling — holding new dispatch until ${new Date(parkUntil).toISOString()}`,
+        'dispatch',
+      )
+    }
+    return
+  }
+  if (engine.parkUntil != null) {
+    engine.parkUntil = undefined
+    logLine(engine, 'info', 'quota park lifted — a tier has headroom, resuming dispatch', 'dispatch')
+  }
+
   // 4. Fill open slots with the next queue-order todos. A slot is occupied by any
   //    LIVE worker (a 'done' worker whose PTY still lingers still holds its slot —
   //    the integration stage frees it by tearing the worktree down); a dead
@@ -4248,6 +4398,9 @@ export const runDispatchPass = async (
       taskTitle: title,
       startedAt: new Date().toISOString(),
       stage: 'starting',
+      // Launch tier, for the monitor's rate-limit sighting → cooling-table
+      // attribution (absent from older fakes/callers — then nothing is marked).
+      ...(spawn.model ? { model: spawn.model } : {}),
     })
     // The dispatch line records WHETHER the learning-loop context was injected (有/無),
     // so a re-dispatch carrying the prior failure is visible in the engine log.
@@ -4691,6 +4844,18 @@ export const runIntegratePass = async (
     // by tip exactly like verify, so a stuck worker re-reporting the SAME commit
     // re-reworks WITHOUT re-burning N claude sessions.
     if (deps.review && verdict.tip) {
+      // QUOTA PARK pre-gate (must-fix 差し戻し 0708): while EVERY tier is cooling,
+      // don't call the review dep at all — the card simply WAITS in review and the
+      // first tick past the earliest reset re-enters here as if nothing happened.
+      // Deliberately BEFORE the defer-streak machinery and WITHOUT touching
+      // reviewDeferred: a park is an engine hold, not a panel verdict, and counting
+      // it would burn MAX_REVIEW_DEFERS in ~3 ticks (~45s), flip the card to
+      // needs-human, and — via the defer-exhausted memo below — never re-spawn the
+      // panel even after the park lifts. No per-tick log either: the dispatch pass
+      // already logs the park's enter/lift edges. Evaluated fresh per card (not the
+      // tick-top `now`) — verify above can run for minutes, so the park state may
+      // have changed since the tick began.
+      if (allCoolingUntil(Date.now()) != null) continue
       const reviewTip = verdict.tip
       // Defer-exhausted on THIS exact tip → don't re-burn the panel (it kept reaching
       // no majority). Keep the "needs a human" dot and leave the card in review; a NEW
@@ -4734,6 +4899,11 @@ export const runIntegratePass = async (
         continue // never integrate work the panel flagged
       }
       if (review.decision === 'defer') {
+        // Quota-park skip that slipped past the pre-gate above (the park began
+        // while this card's multi-minute verify/panel await was in flight, or a
+        // custom review dep park-gates itself) — an ENGINE hold, not a panel
+        // verdict: leave the card in review WITHOUT consuming the defer streak.
+        if (review.skippedForPark) continue
         // No majority (tie / reviewers failed to vote) — thin signal. Leave the card in
         // review and retry next pass: never merge, never bump the 差し戻し count. Count
         // consecutive defers on this tip; at the cap, stop re-spawning (handled above)
@@ -4767,12 +4937,37 @@ export const runIntegratePass = async (
       )
     }
 
+    // Cross-process integration lock (0706 二重司令塔事故フォロー; tightened after
+    // 差し戻し(1/3) MUST-FIX) — a tmux 司令塔 (a SEPARATE `claude` process driving
+    // this same repo by hand, via scripts/swarm-lock.js) may rebase/push the SAME
+    // branch onto the SAME trunk at the SAME moment this engine is mid-integrate.
+    // engine.passInFlight only bars a second pass WITHIN this process; it does
+    // nothing against a separate process. Acquired HERE — immediately before the
+    // git mutation, per CARD, not once for the whole pass — because the pass also
+    // runs verify/tsc and a multi-minute adversarial-review panel per card, which
+    // can push a whole-pass hold well past DEFAULT_STALE_MS (10 min); a lock held
+    // that long would itself look stale and let a second process steal it — the
+    // exact 0706 race this lock exists to prevent. Scoped to just deps.integrate()
+    // (the only step that actually rebases/pushes), the hold is seconds, safely
+    // under staleMs. On contention, skip only THIS card (not the whole pass) and
+    // say so explicitly in the engine log; the next tick retries.
+    const integrationLock = await deps.acquireLock(engine.path)
+    if (!integrationLock.ok) {
+      const who =
+        integrationLock.reason === 'held' && integrationLock.holder
+          ? `pid ${integrationLock.holder.pid}${integrationLock.holder.label ? ` (${integrationLock.holder.label})` : ''}`
+          : 'unavailable'
+      logLine(engine, 'warn', `integration lock held by ${who} — skipping integration: ${card.branch}`, 'integrate')
+      continue
+    }
     let outcome: IntegrateOutcome
     try {
       outcome = await deps.integrate(engine.path, card.branch, target)
     } catch (e) {
       logLine(engine, 'warn', `integration deferred: ${card.branch} — ${errMsg(e)}`)
       continue
+    } finally {
+      await integrationLock.release()
     }
 
     if (outcome.status === 'integrated') {
@@ -5328,6 +5523,9 @@ export const startOrchestrator = async (
   // AND so a later natural idle can auto-restart it again (maybeAutoStartDrain). The
   // INVERSE of stopOrchestrator's manualStop=true; the two toggles are the consent.
   engine.manualStop = false
+  // ...and clear its PERSISTED half too: an explicit ON always outranks the durable
+  // "stopped by hand" record, so the pause never outlives the owner's consent.
+  await forgetSwarmManualStop(key)
   // Persist the owner's intent so a restart can REMIND (never auto-resume): the
   // engine above is in-memory and always relaunches OFF, but Settings.swarmAutonomyOn
   // survives, and next launch the Swarm UI reads it to offer a one-click resume.
@@ -5351,8 +5549,9 @@ export const startOrchestrator = async (
       .finally(() => scheduleNext(engine, deps, gen))
   }
   // autonomyRemembered:true — the marker was just written above (harmless while
-  // running, since the UI shows the reminder only while !running).
-  return stateOf(engine, deps.isAlive, [], true)
+  // running, since the UI shows the reminder only while !running); manualStopPersisted:
+  // false — the record was just cleared above.
+  return stateOf(engine, deps.isAlive, [], true, false)
 }
 
 /** Turn the autonomous drain OFF (idempotent). Cancels the pending pass and
@@ -5369,8 +5568,14 @@ export const stopOrchestrator = async (
   // no entry for this key yet (the common case right after a relaunch: the engine
   // is in-memory and gone, but Settings.swarmAutonomyOn still carries the marker).
   await forgetSwarmAutonomy(key)
+  // Persist the "stopped by hand" record — ALSO before the engine-existence check,
+  // so the fact survives a restart (fresh process, no engine yet) and stays
+  // machine-readable from outside (the 0707 twin-dispatch root cause). A record,
+  // never an auto-resume: its only engine-side reader (maybeAutoStartDrain) uses it
+  // to SUPPRESS an auto-start, nothing ever runs because of it.
+  await rememberSwarmManualStop(key)
   const engine = store.engines.get(key)
-  if (!engine) return emptyState()
+  if (!engine) return { ...emptyState(), manualStop: true, manualStopPersisted: true }
   // Owner EXPLICITLY paused — mark it so maybeAutoStartDrain won't auto-restart the
   // engine on the next poll's idle-slot + todo (so OFF genuinely halts new dispatch,
   // 条件2). Set even on an idempotent OFF (already stopped) so the pause intent sticks
@@ -5395,8 +5600,9 @@ export const stopOrchestrator = async (
     }
     logLine(engine, 'info', 'autonomous drain OFF')
   }
-  // autonomyRemembered:false — the marker was just cleared above.
-  return stateOf(engine, deps.isAlive, [], false)
+  // autonomyRemembered:false — the marker was just cleared above; manualStopPersisted:
+  // true — the record was just written above.
+  return stateOf(engine, deps.isAlive, [], false, true)
 }
 
 // ── Auto-start (card cf545637 — todo 自動 drain / "idle worker + todo" デッドロック根治) ──
@@ -5447,6 +5653,11 @@ export const maybeAutoStartDrain = async (
   // No auto-start when: already draining / mid-pass (the running loop owns refills — don't
   // double-drive), OR the owner explicitly paused (manualStop — OFF must stick, 条件2).
   if (engine.running || engine.passInFlight || engine.manualStop) return false
+  // The PERSISTED half of the owner's pause (Settings.swarmManualStop): the in-memory
+  // flag dies with the process, so without this check a restart would let the opt-in
+  // AUTODRAIN sweep re-ignite an engine the owner deliberately stopped by hand. An
+  // explicit ON (startOrchestrator) clears the record, so consent always re-opens it.
+  if (await isSwarmManualStopPersisted(engine.path)) return false
   let tasks: ProjectTask[]
   try {
     tasks = await deps.fetchTasks(engine.path)
@@ -5696,8 +5907,14 @@ export const getOrchestratorState = async (
   // the reminder matters most. The engine always relaunches OFF; this flag is what
   // lets the UI offer a one-click resume instead of silently auto-running.
   const remembered = await isSwarmAutonomyRemembered(key)
+  // The persisted "stopped by hand" record — read the same way (pure read, K8) so a
+  // deliberate pause stays machine-readable even after a restart wiped the in-memory
+  // engine (the 0707 twin-dispatch root cause: this state was invisible from outside).
+  const stopped = await isSwarmManualStopPersisted(key)
   const engine = store.engines.get(key)
-  if (!engine) return { ...emptyState(), autonomyRemembered: remembered }
+  if (!engine) {
+    return { ...emptyState(), autonomyRemembered: remembered, manualStop: stopped, manualStopPersisted: stopped }
+  }
   // Read the Board cards for the lead-time KPI (read-only — never mutates). A
   // board blip just yields an empty lead time this poll; the counter-based rates
   // are unaffected (they don't need the cards).
@@ -5707,7 +5924,7 @@ export const getOrchestratorState = async (
   } catch {
     tasks = []
   }
-  return stateOf(engine, deps.isAlive, tasks, remembered)
+  return stateOf(engine, deps.isAlive, tasks, remembered, stopped)
 }
 
 /** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the
@@ -5734,7 +5951,9 @@ export const drainTickOrchestrator = async (
   // already-running engine drives itself via its scheduled chain, so this tick is a pure
   // idempotent state read. (maybeAutoStartDrain still backs the global background loop, which
   // is itself opt-in behind OPENGROUND_SWARM_AUTODRAIN=1.)
-  return stateOf(engine, deps.isAlive)
+  // Same pure read as getOrchestratorState: surface the persisted "stopped by hand"
+  // record so the Swarm hook's poll agrees with the GET (this tick answers the same UI).
+  return stateOf(engine, deps.isAlive, [], false, await isSwarmManualStopPersisted(key))
 }
 
 // ── Auto-drain background loop (card cf545637 — UI-INDEPENDENT server-side tick) ──

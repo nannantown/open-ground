@@ -217,6 +217,12 @@ interface TasksBody {
    *  The commander engine (Card③) sets it when a rebase conflicts; it is also
    *  cleared automatically whenever a card leaves the review column. */
   setIntegrationConflict?: { id: string; value: boolean }[]
+  /** 差し戻し(review→doing) in one call: bumps the card's reworkCount and moves
+   *  it to 'doing' — unless the bump pushes the count PAST maxReworks (default
+   *  3), in which case it is parked in 'blocked' instead (無限ループ退避). Same
+   *  semantics as ~/.claude/swarm-board.sh's `rework` subcommand, exposed as a
+   *  plain API call for OG-only environments that don't have that script. */
+  rework?: { id: string; maxReworks?: number }[]
 }
 
 // Conservative git branch-name shape: word char first, then word chars, dots,
@@ -226,6 +232,29 @@ interface TasksBody {
 const BRANCH_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/
 
 const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'review', 'done', 'blocked']
+
+/** Per-item outcome for a setColumn/setBranch/setIntegrationConflict entry —
+ *  lets a caller tell "applied" apart from "id didn't match any card / value
+ *  rejected" without polling the board afterwards. A batch never fails as a
+ *  whole for one bad id (incident 0707: a shortened/stale id silently no-op'd
+ *  inside a 200 response, so a worker's own move looked successful when it
+ *  wasn't); this is the machine-readable signal that replaces that silence. */
+interface TaskMutationResult {
+  id: string
+  ok: boolean
+  error?: string
+}
+
+/** Outcome of one `rework` entry — extends TaskMutationResult with the info a
+ *  caller needs to branch on (mirroring swarm-board.sh rework's stdout: "→
+ *  doing" vs "→ blocked"), so it doesn't have to re-read the card to find out
+ *  whether the round-trip limit was hit. */
+interface ReworkResult extends TaskMutationResult {
+  /** Column the card landed in ('doing' normally, 'blocked' past maxReworks). */
+  column?: 'doing' | 'blocked'
+  /** reworkCount AFTER this call's increment. */
+  count?: number
+}
 
 // ── The chain ────────────────────────────────────────────────────────────────
 // All routes are method-chained off the router instance so hc<AppType> on the
@@ -774,6 +803,7 @@ export const projectRoutes = new Hono()
     'setPrUrl',
     'setBranch',
     'setIntegrationConflict',
+    'rework',
   ] as const) {
     const value = body[field]
     if (value !== undefined && !Array.isArray(value)) {
@@ -788,6 +818,14 @@ export const projectRoutes = new Hono()
   // snapshot, the first write wins, the second fails CAS — which used to escape
   // as a 500 and silently drop the loser's setColumn/setBranch/markDone.
   // mutateProjectData serializes the loser behind the winner so BOTH land.
+  // Per-item results for the three "target an existing card by id" batches —
+  // populated inside the mutate closure below, returned alongside `saved` so a
+  // caller can tell exactly which ids landed and which were rejected/unknown.
+  const setColumnResults: TaskMutationResult[] = []
+  const setBranchResults: TaskMutationResult[] = []
+  const setIntegrationConflictResults: TaskMutationResult[] = []
+  const reworkResults: ReworkResult[] = []
+
   try {
     const saved = await mutateProjectData(body.path, (data) => {
       for (const raw of body.add ?? []) {
@@ -808,7 +846,13 @@ export const projectRoutes = new Hono()
       if (body.markDone?.length) {
         const ids = new Set(body.markDone)
         data.tasks = data.tasks.map((t) =>
-          ids.has(t.id) ? { ...t, done: true, boardColumn: 'done' as BoardColumn } : t,
+          ids.has(t.id)
+            ? // A fresh-start/success landing clears the 差し戻し loop-guard counter
+              // (same as the setColumn 'done'/'todo' case below) — markDone is a
+              // first-class done landing (BoardModule's run-flow on-finish curl),
+              // not just a manual setColumn to 'done'.
+              { ...t, done: true, boardColumn: 'done' as BoardColumn, reworkCount: undefined }
+            : t,
         )
       }
 
@@ -832,19 +876,44 @@ export const projectRoutes = new Hono()
       }
 
       for (const br of body.setBranch ?? []) {
-        if (!br || typeof br.id !== 'string' || typeof br.branch !== 'string') continue
+        const id = br && typeof br.id === 'string' ? br.id : ''
+        if (!br || typeof br.id !== 'string' || typeof br.branch !== 'string') {
+          setBranchResults.push({ id, ok: false, error: 'invalid item' })
+          continue
+        }
         const branch = br.branch.trim()
         if (branch === '') {
           // Empty string clears a wrongly-recorded branch.
+          if (!data.tasks.some((t) => t.id === id)) {
+            setBranchResults.push({ id, ok: false, error: 'unknown task id' })
+            continue
+          }
           data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch: undefined } : t))
+          setBranchResults.push({ id, ok: true })
           continue
         }
-        if (branch.length > 200 || !BRANCH_RE.test(branch)) continue
+        if (branch.length > 200 || !BRANCH_RE.test(branch)) {
+          setBranchResults.push({ id, ok: false, error: 'invalid branch name' })
+          continue
+        }
+        if (!data.tasks.some((t) => t.id === id)) {
+          setBranchResults.push({ id, ok: false, error: 'unknown task id' })
+          continue
+        }
         data.tasks = data.tasks.map((t) => (t.id === br.id ? { ...t, branch } : t))
+        setBranchResults.push({ id, ok: true })
       }
 
       for (const mv of body.setColumn ?? []) {
-        if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) continue
+        const id = mv && typeof mv.id === 'string' ? mv.id : ''
+        if (!mv || typeof mv.id !== 'string' || !BOARD_COLUMNS.includes(mv.column)) {
+          setColumnResults.push({ id, ok: false, error: 'invalid item' })
+          continue
+        }
+        if (!data.tasks.some((t) => t.id === id)) {
+          setColumnResults.push({ id, ok: false, error: 'unknown task id' })
+          continue
+        }
         data.tasks = data.tasks.map((t) =>
           t.id === mv.id
             ? {
@@ -854,19 +923,81 @@ export const projectRoutes = new Hono()
                 // Leaving review invalidates the commander engine's conflict stamp
                 // (Card③) — a rework or completion supersedes it, mirroring reviewedBy.
                 integrationConflict: mv.column === 'review' ? t.integrationConflict : undefined,
+                // A fresh-start/success landing clears the 差し戻し loop-guard counter
+                // (same semantics as swarm-board.sh's _move_card) — a later reuse of
+                // this card id isn't pre-tripped by a past round of rework.
+                reworkCount:
+                  mv.column === 'done' || mv.column === 'todo' ? undefined : t.reworkCount,
               }
             : t,
         )
+        setColumnResults.push({ id, ok: true })
       }
 
       for (const ic of body.setIntegrationConflict ?? []) {
-        if (!ic || typeof ic.id !== 'string' || typeof ic.value !== 'boolean') continue
+        const id = ic && typeof ic.id === 'string' ? ic.id : ''
+        if (!ic || typeof ic.id !== 'string' || typeof ic.value !== 'boolean') {
+          setIntegrationConflictResults.push({ id, ok: false, error: 'invalid item' })
+          continue
+        }
+        if (!data.tasks.some((t) => t.id === id)) {
+          setIntegrationConflictResults.push({ id, ok: false, error: 'unknown task id' })
+          continue
+        }
         data.tasks = data.tasks.map((t) =>
           t.id === ic.id ? { ...t, integrationConflict: ic.value || undefined } : t,
         )
+        setIntegrationConflictResults.push({ id, ok: true })
+      }
+
+      // 差し戻し(review→doing) in one call — bump the loop-guard counter, park
+      // in 'blocked' instead of 'doing' once the bump pushes it past maxReworks
+      // (default 3). Mirrors swarm-board.sh's rework subcommand so an OG-only
+      // environment (no ~/.claude/swarm-board.sh) has an equivalent single call.
+      for (const rw of body.rework ?? []) {
+        const id = rw && typeof rw.id === 'string' ? rw.id : ''
+        if (!rw || typeof rw.id !== 'string') {
+          reworkResults.push({ id, ok: false, error: 'invalid item' })
+          continue
+        }
+        const max = rw.maxReworks === undefined ? 3 : rw.maxReworks
+        if (typeof max !== 'number' || !Number.isInteger(max) || max < 0) {
+          reworkResults.push({ id, ok: false, error: 'maxReworks must be a non-negative integer' })
+          continue
+        }
+        const task = data.tasks.find((t) => t.id === id)
+        if (!task) {
+          reworkResults.push({ id, ok: false, error: 'unknown task id' })
+          continue
+        }
+        const count = (task.reworkCount ?? 0) + 1
+        const column: 'doing' | 'blocked' = count > max ? 'blocked' : 'doing'
+        data.tasks = data.tasks.map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                boardColumn: column,
+                done: false,
+                reworkCount: count,
+                integrationConflict: undefined,
+              }
+            : t,
+        )
+        reworkResults.push({ id, ok: true, column, count })
       }
     })
-    return c.json(saved)
+    // `results` only carries keys the caller actually sent — a request that
+    // never touched setBranch gets no setBranch key, so an existing consumer
+    // that spreads/serializes the whole body sees nothing new for the fields
+    // it didn't use. Spread onto `saved` (never replacing it) so every
+    // existing reader of the plain ProjectData shape (`.tasks`, `.updatedAt`,
+    // …) is unaffected — this is purely additive.
+    const results: Record<string, TaskMutationResult[]> = {}
+    if (body.setColumn) results.setColumn = setColumnResults
+    if (body.setBranch) results.setBranch = setBranchResults
+    if (body.setIntegrationConflict) results.setIntegrationConflict = setIntegrationConflictResults
+    if (body.rework) results.rework = reworkResults
+    return c.json(Object.keys(results).length ? { ...saved, results } : saved)
   } catch (e) {
     // mutateProjectData reads inside the lock, so this only fires if a non-locked
     // trusting writer interleaved. Return 409 (client reloads) instead of a 500,

@@ -489,7 +489,9 @@ export const spawnSwarmWorker = async (
       me,
     ),
   )
-  return { terminalId: ref.terminalId, agentSessionId, worktree, branch }
+  // `model` rides back so the orchestrator can attribute a later rate-limit
+  // sighting on this worker to the RIGHT quota tier (swarmQuota cooling table).
+  return { terminalId: ref.terminalId, agentSessionId, worktree, branch, model: me.model }
 }
 
 /** Wall-clock stamp `MMDD-HHMMSS` for branch uniqueness. Isolated in one helper
