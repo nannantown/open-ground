@@ -142,6 +142,82 @@ describe('POST /api/projects/new', () => {
     expect(settings.projects?.[0]?.description).toBe('Track my tasks')
   })
 
+  it('rejects creating inside a registered project (400) and rolls the mkdir back', async () => {
+    // audit-856daefb repro: Import piyo, then "Create new" with piyo itself as
+    // the workspace. Before the guard, /piyo/sub registered fine — and because
+    // projectUUIDFromPath returns the FIRST isAtOrUnder match, every central
+    // read/write for the child landed in the PARENT's uuid (silent cross-wiring
+    // of the two boards).
+    const piyo = join(scratch, 'piyo')
+    await mkdir(piyo)
+    expect((await app.request('/api/projects/import', json({ path: piyo }))).status).toBe(200)
+
+    const res = await app.request('/api/projects/new', json({ name: 'sub', workspace: piyo }))
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toMatch(/overlap/i)
+    // the mkdir was rolled back — no orphan folder inside the parent…
+    await expect(stat(join(piyo, 'sub'))).rejects.toMatchObject({ code: 'ENOENT' })
+    // …the registry still holds only the parent…
+    const settings = await getSettings()
+    expect(settings.projects).toHaveLength(1)
+    // …and the rejected spot was NOT remembered as the default workspace.
+    expect(settings.defaultWorkspace).not.toBe(piyo)
+  })
+
+  it('rejects creating in a sub-folder of a registered project too', async () => {
+    const piyo = join(scratch, 'piyo')
+    const inner = join(piyo, 'nested', 'deep')
+    await mkdir(inner, { recursive: true })
+    expect((await app.request('/api/projects/import', json({ path: piyo }))).status).toBe(200)
+
+    const res = await app.request('/api/projects/new', json({ name: 'sub', workspace: inner }))
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toMatch(/overlap/i)
+    await expect(stat(join(inner, 'sub'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('a rejected nested create never touches the parent project’s central data', async () => {
+    // The misroute's damage was writeProjectData(child) landing in the parent's
+    // tasks.json. With the guard the rejection happens BEFORE any data write —
+    // the parent's central data must come through byte-identical.
+    const parent = join(scratch, 'parent')
+    await mkdir(parent)
+    await app.request('/api/projects/import', json({ path: parent }))
+    const before = {
+      description: 'parent data',
+      tasks: [],
+      notes: 'keep me',
+      updatedAt: new Date().toISOString(),
+    }
+    await writeProjectData(parent, before)
+
+    const res = await app.request(
+      '/api/projects/new',
+      json({ name: 'sub', workspace: parent, description: 'child desc that must not leak' }),
+    )
+    expect(res.status).toBe(400)
+    const after = await readProjectData(parent)
+    expect(after.description).toBe('parent data')
+    expect(after.notes).toBe('keep me')
+  })
+
+  it('recreating a missing project in place reconnects the SAME entry (200, same id)', async () => {
+    // Exact-path idempotency (addProjectEntry behaviour, kept): the folder of a
+    // registered project vanished outside OPEN GROUND; "Create new" at the very
+    // same spot must reconnect the existing entry (uuid → central data + canvas
+    // position), not reject it as overlap or mint a second entry.
+    const dir = join(scratch, 'phoenix')
+    await mkdir(dir)
+    const imported = await app.request('/api/projects/import', json({ path: dir }))
+    const { id: originalId } = (await imported.json()) as { id: string }
+    await rm(dir, { recursive: true, force: true }) // project goes missing
+
+    const res = await app.request('/api/projects/new', json({ name: 'phoenix', workspace: scratch }))
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { id: string }).id).toBe(originalId)
+    expect((await getSettings()).projects).toHaveLength(1)
+  })
+
   it('leaves no orphan folder when the central-data write fails after registration', async () => {
     // Force the post-registration writeProjectData to throw, exercising the
     // rollback: the folder we created AND the registry entry must both be undone,

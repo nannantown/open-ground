@@ -36,6 +36,7 @@ export const misc = {
     'misc.ground.removeFailed': 'Remove failed: {error}',
     'misc.ground.importFailed': 'Import failed: {error}',
     'misc.ground.locateFailed': 'Locate failed: {error}',
+    'misc.ground.saveSettingsFailed': 'Settings could not be saved: {error}',
     // Terminal SSE connection status (TerminalPane / ClaudeTerminalPane). When
     // the output stream drops, the browser auto-reconnects and the next `init`
     // repaints — but a silent frozen screen reads as a hang, so we surface a
@@ -79,6 +80,7 @@ export const misc = {
     'misc.ground.removeFailed': 'Ground から外せませんでした: {error}',
     'misc.ground.importFailed': 'インポートに失敗しました: {error}',
     'misc.ground.locateFailed': 'フォルダの指定に失敗しました: {error}',
+    'misc.ground.saveSettingsFailed': '設定を保存できませんでした: {error}',
     // Terminal SSE connection status (TerminalPane / ClaudeTerminalPane)
     'misc.terminal.reconnecting': '再接続中…',
     'misc.terminal.connectionLost': '接続が切れました',

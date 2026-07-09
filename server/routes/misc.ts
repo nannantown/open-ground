@@ -30,7 +30,7 @@ import { scanProjects } from '@/lib/server/scan'
 import { writeProjectData } from '@/lib/server/projectData'
 import {
   ensureProjectsMigrated,
-  addProjectEntry,
+  addCreatedProjectEntry,
   addImportedProjectEntry,
   removeProjectEntry,
 } from '@/lib/server/registry'
@@ -201,14 +201,32 @@ export const miscRoutes = new Hono()
       // Register the new folder BEFORE writing its central data. writeProjectData
       // routes through projectDataDir → projectUUIDFromPath(target), which THROWS
       // unless `target` is already a registered project — so a write here before
-      // addProjectEntry would 500 and strand the folder we just made: unregistered
+      // the register would 500 and strand the folder we just made: unregistered
       // on disk (invisible on the canvas) yet stat-able, so the next same-name
-      // attempt fails the 409 "already exists" check forever. Remember the
-      // workspace as part of this register step so a follow-up canvas/tasks save
-      // can't race the security boundary either.
-      if (ws !== settings.defaultWorkspace) await setSettings({ defaultWorkspace: ws })
-      const entry = await addProjectEntry(target, desc || undefined)
+      // attempt fails the 409 "already exists" check forever.
+      // addCreatedProjectEntry runs the same overlap/dangerous-target guard as
+      // /import inside the registry lock: without it, a project created inside
+      // an existing one would resolve to the OUTER project's UUID for all its
+      // central data (projectUUIDFromPath returns the first isAtOrUnder match),
+      // silently cross-wiring the two boards.
+      const result = await addCreatedProjectEntry(target, desc || undefined)
+      if ('rejection' in result) {
+        // Undo the mkdir so the rejected spot isn't left holding an empty,
+        // unregistered folder (which would 409 a corrected retry of the same
+        // name). Deliberately NOT remembering the workspace — it just proved
+        // to be a bad location.
+        await rmdir(target).catch(() => {})
+        const msg =
+          result.rejection === 'overlap'
+            ? 'That location overlaps a project already on your canvas.'
+            : 'Pick a spot inside a normal folder, not your whole drive or home folder.'
+        return c.json({ error: msg }, 400)
+      }
+      const entry = result.entry
       registered = true
+      // Remember the workspace as part of this register step so a follow-up
+      // canvas/tasks save can't race the security boundary either.
+      if (ws !== settings.defaultWorkspace) await setSettings({ defaultWorkspace: ws })
       if (desc) {
         await writeProjectData(target, {
           description: desc,

@@ -36,11 +36,15 @@
 // ladder — none dropped. fable is the top tier (newest flagship, = swarmLaunch's
 // SWARM_LAUNCH_MODEL); haiku is the cheapest floor.
 
+import type { SwarmModelTier, SwarmQuotaTier } from '../types'
+
 /** A model tier, by the CLI `--model` alias the swarm launches with. Ordered
  *  best → cheapest by {@link MODEL_TIER_LADDER}; the cooling table is keyed by
  *  these. Same string shape as swarmLaunch's model constants so a tier value can
- *  be handed straight to `--model`. */
-export type ModelTier = 'fable' | 'opus' | 'sonnet' | 'haiku'
+ *  be handed straight to `--model`. Defined once in the shared client/server
+ *  contract (`SwarmModelTier`) so the quota ROUTE's payload and this table can
+ *  never drift apart; re-exported under the module's own name. */
+export type ModelTier = SwarmModelTier
 
 /** The tier ladder, best (index 0) → cheapest. highestAvailableTier walks this
  *  in order and returns the first tier that is not cooling, so "drop one tier"
@@ -221,6 +225,26 @@ export const markRateLimited = (
   return until
 }
 
+/** Longest a tier may be cooled BY HAND (7 days). The manual-cooling route
+ *  (`POST /api/swarm/quota/cool`) exists so the owner can steer a swarm away
+ *  from a dry tier without stopping the engine — a packaged `.app` can't be
+ *  source-patched — but an unbounded `until` would silently retire a tier for
+ *  good. A week is longer than any real reset window (the weekly quota) and
+ *  short enough that a forgotten cool self-heals. */
+export const MAX_MANUAL_COOLING_MS = 7 * 24 * 3_600_000
+
+/** Undo a cooling mark: `tier` is available again immediately. The owner's
+ *  escape hatch when a mark was wrong (a transient 5xx read as exhaustion) —
+ *  and the inverse of the manual cool. Absent tier ⇒ no-op (idempotent). */
+export const clearCooling = (tier: ModelTier): void => {
+  state.cooling.delete(tier)
+}
+
+/** Narrow an untrusted string (a request body) to a ladder tier. The routes'
+ *  fail-closed guard: an unknown alias is rejected, never cooled by guess. */
+export const isModelTier = (v: unknown): v is ModelTier =>
+  typeof v === 'string' && (MODEL_TIER_LADDER as readonly string[]).includes(v)
+
 // ── Pure read API (Done ①–③) — reads the table, never mutates it ─────────────
 
 /** True iff `tier` is cooling at `now` — it has a stored reset time still in the
@@ -255,6 +279,18 @@ export const allCoolingUntil = (now: number): number | null => {
   }
   return earliest
 }
+
+/** The whole ladder's cooling state at `now`, best→cheapest — what the quota
+ *  route hands the owner so they can SEE which tiers are dry and until when.
+ *  Honors the same lazy expiry as {@link isTierCooling}: an elapsed mark reads
+ *  as available (`cooling:false`, `until:null`), so a stale row can never look
+ *  like a live one. Read-only. */
+export const coolingSnapshot = (now: number): SwarmQuotaTier[] =>
+  MODEL_TIER_LADDER.map((tier) => {
+    const stored = state.cooling.get(tier)
+    const cooling = stored != null && stored > now
+    return { tier, cooling, until: cooling ? stored : null }
+  })
 
 /** Test-only: clear the cooling table. The table lives on globalThis (shared
  *  across a process), so a unit suite must reset it between cases to stay

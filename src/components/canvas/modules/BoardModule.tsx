@@ -393,7 +393,14 @@ export const BoardModule = ({
   const persistLocal = useCallback(
     (next: ProjectData) => {
       persist(next)
-      collabRef.current?.seed(next)
+      // Seeding a doc that has not SYNCED writes every key as an independent op,
+      // concurrent with the room's real state — Y.Map then resolves each collision
+      // by clientID, i.e. a coin flip, and our snapshot can beat a newer room. The
+      // server's own mirror waits for sync for exactly this reason (openScopedDoc:
+      // "a blind write into an unsynced doc would look like an independent seed").
+      // Our edit is on disk regardless; the seed below re-runs the moment the
+      // binding reports synced.
+      if (collabRef.current?.synced) collabRef.current.seed(next)
     },
     [persist],
   )
@@ -403,8 +410,22 @@ export const BoardModule = ({
   // persistLocal re-seeds idempotently → no loop.
   useEffect(() => {
     if (!collab) return
-    collab.seed(dataRef.current)
-    return collab.onRemote(() => persistLocal(collab.extract(dataRef.current)))
+    // Seed only once the doc has synced (see persistLocal). The binding is a NEW
+    // object when `synced` flips, so this effect re-runs and seeds then. Remote
+    // adoption is subscribed either way — a room that never reports synced must
+    // still not silently stop taking peer edits.
+    if (collab.synced) collab.seed(dataRef.current)
+    return collab.onRemote(() => {
+      const base = dataRef.current
+      const next = collab.extract(base)
+      // Identity ⇒ the adoption gate refused: the doc has not yet seen our
+      // latest disk write, so its task list is behind (74ec0b0d — this is how a
+      // `done` card silently returned to `review`). Persisting it would roll the
+      // board back. Skip; the server mirror brings the doc forward and its
+      // update re-enters here.
+      if (next === base) return
+      persistLocal(next)
+    })
   }, [collab, persistLocal])
 
   const patchTask = (task: ProjectTask, patch: Partial<ProjectTask>) =>

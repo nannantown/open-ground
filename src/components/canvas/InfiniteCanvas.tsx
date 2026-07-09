@@ -2768,26 +2768,13 @@ export const InfiniteCanvas = ({
               lockedForMarquee.has(el.id)
             )
               continue
-            // Text reads its persisted measured/authoritative box (textBox);
-            // every other type falls back to its per-type default size.
-            const tb = el.type === 'text' ? textBox(el) : null
-            const ew =
-              el.type === 'sticky' || el.type === 'mock'
-                ? el.width ?? (el.type === 'mock' ? MOCK_DEFAULT_W : STICKY_DEFAULT)
-                : el.type === 'shape'
-                  ? el.width ?? SHAPE_DEFAULT_W
-                  : el.type === 'comment'
-                    ? COMMENT_W
-                    : tb?.w ?? TEXT_W
-            const eh =
-              el.type === 'sticky' || el.type === 'mock'
-                ? el.height ?? (el.type === 'mock' ? MOCK_DEFAULT_H : STICKY_DEFAULT)
-                : el.type === 'shape'
-                  ? el.height ?? SHAPE_DEFAULT_H
-                  : el.type === 'comment'
-                    ? COMMENT_H
-                    : tb?.h ?? TEXT_H
-            if (overlaps(el.x, el.y, ew, eh)) hit.push(el.id)
+            // Hit-test the element's real bounding box. fullBounds is the
+            // single source of truth for per-type footprints (text = measured
+            // textBox, screen = 1280×800, image = its stored size) — every
+            // marquee-eligible type must resolve through it, or its box
+            // silently degrades to a wrong per-type default.
+            const b = fullBounds(el)
+            if (overlaps(b.x, b.y, b.w, b.h)) hit.push(el.id)
           }
           // A marquee that grazes any group member pulls in the whole group, so
           // the selection stays a coherent unit (matches click selection).

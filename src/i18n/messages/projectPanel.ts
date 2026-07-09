@@ -250,64 +250,28 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       'The commander monitors workers and integrates finished branches — talk to it here.',
     'projectPanel.swarm.manager.backToCommander': 'Back to commander',
-    // Flow tab (条件: ループのリアルタイム可視化) — the dynamic, real-data version
-    // of the kitchen diagram (card 743ffdef): the drain → dispatch → monitor →
-    // integrate loop, each worker's fine stage + heartbeat, the integration queue,
-    // the live event feed, and fatal events. Read-only, off the engine poll. Review
-    // statuses, log-kind chips and anomaly labels REUSE the manager.* keys above.
-    'projectPanel.swarm.flow.tab': 'Flow',
-    'projectPanel.swarm.flow.title': 'The autonomous loop, live',
-    'projectPanel.swarm.flow.offline':
-      "The engine isn't available yet — its live loop will show here once it answers. Update OPEN GROUND if this persists.",
-    'projectPanel.swarm.flow.idle': 'The loop is idle',
-    'projectPanel.swarm.flow.idleHint':
-      'Nothing is in flight. Start the swarm with the switch above and the drain → dispatch → monitor → integrate loop animates here in real time.',
-    'projectPanel.swarm.flow.phaseDrain': 'Drain',
-    'projectPanel.swarm.flow.phaseDrainHint': "Pull the next card off the Board's To do queue.",
-    'projectPanel.swarm.flow.phaseDispatch': 'Dispatch',
-    'projectPanel.swarm.flow.phaseDispatchHint': 'Spawn one worker per card — each in its own isolated worktree.',
-    'projectPanel.swarm.flow.phaseMonitor': 'Monitor',
-    'projectPanel.swarm.flow.phaseMonitorHint': "Watch each worker's stage and heartbeat until it's merge-ready.",
-    'projectPanel.swarm.flow.phaseIntegrate': 'Integrate',
-    'projectPanel.swarm.flow.phaseIntegrateHint':
-      'Land merge-ready review branches on the trunk (fast-forward / rebase only).',
-    'projectPanel.swarm.flow.draining': 'Draining the Board',
-    'projectPanel.swarm.flow.notDraining': 'Paused — no new dispatch',
-    // Deliberate owner stop (manualStop — persisted, survives restarts).
-    'projectPanel.swarm.flow.manualStopped': 'Stopped by hand — no new dispatch',
-    'projectPanel.swarm.flow.stageStarting': 'Starting',
-    'projectPanel.swarm.flow.stageAudit': 'Audit',
-    'projectPanel.swarm.flow.stageImplement': 'Implementing',
-    'projectPanel.swarm.flow.stageVerify': 'Verifying',
-    'projectPanel.swarm.flow.stageAwaiting': 'Merge-ready',
-    'projectPanel.swarm.flow.stageBlocked': 'Blocked',
-    'projectPanel.swarm.flow.heartbeat': 'Heartbeat',
-    'projectPanel.swarm.flow.liveFresh': 'Live',
-    'projectPanel.swarm.flow.liveAging': 'Quiet',
-    'projectPanel.swarm.flow.liveStale': 'Silent',
-    'projectPanel.swarm.flow.liveNone': 'No beat yet',
-    'projectPanel.swarm.flow.ago': '{age} ago',
-    'projectPanel.swarm.flow.workersHeading': 'Workers · live stage',
-    'projectPanel.swarm.flow.noWorkers': 'No workers in flight.',
-    'projectPanel.swarm.flow.reviewsHeading': 'Integration queue',
-    'projectPanel.swarm.flow.noReviews': 'Nothing waiting to integrate.',
-    'projectPanel.swarm.flow.eventsHeading': 'Live events',
-    'projectPanel.swarm.flow.noEvents': 'No events yet.',
-    'projectPanel.swarm.flow.workersLive': '{count} live',
-    'projectPanel.swarm.flow.reviewsWaiting': '{count} waiting',
-    'projectPanel.swarm.flow.merged': '{count} merged',
-    'projectPanel.swarm.flow.fatalHeading': 'Needs attention',
-    'projectPanel.swarm.flow.anomalyReworkExhausted': 'Card retried too many times — parked in Blocked',
-    'projectPanel.swarm.flow.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
-    // Fatal-event labels (条件3) — the five escalation events the safety valve
+    // Overseer tab (監督) — where the swarm's messages to the owner live: the
+    // escalation inbox (esc.* below) + the needs-attention feed (fatal events +
+    // engine anomalies, carried over from the removed Flow tab). Read when
+    // opened — never pinned over the other sub-views; the tab badge carries the
+    // open-question count. Anomaly labels REUSE the manager.* keys above.
+    'projectPanel.swarm.overseer.tab': 'Overseer',
+    'projectPanel.swarm.overseer.alertsHeading': 'Needs attention',
+    'projectPanel.swarm.overseer.emptyTitle': 'Nothing needs you',
+    'projectPanel.swarm.overseer.emptyBody':
+      "Questions the swarm escalates to you and fatal events land here. Arm the overseer from the Commander tab's Overseer switch while the swarm runs.",
+    'projectPanel.swarm.overseer.ago': '{age} ago',
+    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'Card retried too many times — parked in Blocked',
+    'projectPanel.swarm.overseer.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
+    // Fatal-event labels — the five escalation events the safety valve
     // (card 6fe48c1f) persists. Three come from the swarm engine, two from the
     // Electron self-update cycle. The server `detail` (Japanese) rides as a
     // secondary line; these label WHAT fired in the UI language.
-    'projectPanel.swarm.flow.fatalReworkExhausted': 'Card parked · rework limit',
-    'projectPanel.swarm.flow.fatalAllWorkersDown': 'All workers stopped',
-    'projectPanel.swarm.flow.fatalExecTimeout': 'Worker hit time limit',
-    'projectPanel.swarm.flow.fatalRollback': 'Self-update rolled back',
-    'projectPanel.swarm.flow.fatalCanaryFailed': 'Self-update canary failed',
+    'projectPanel.swarm.overseer.fatalReworkExhausted': 'Card parked · rework limit',
+    'projectPanel.swarm.overseer.fatalAllWorkersDown': 'All workers stopped',
+    'projectPanel.swarm.overseer.fatalExecTimeout': 'Worker hit time limit',
+    'projectPanel.swarm.overseer.fatalRollback': 'Self-update rolled back',
+    'projectPanel.swarm.overseer.fatalCanaryFailed': 'Self-update canary failed',
     // Escalations inbox (C1) — questions the swarm raised to YOU, waiting for
     // your answer. Fail-closed: nothing proceeds until you decide.
     'projectPanel.swarm.esc.title': 'Escalations — waiting for your answer',
@@ -841,64 +805,28 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       '司令官は worker を監視し、完了ブランチを統合します。ここで対話してください。',
     'projectPanel.swarm.manager.backToCommander': '司令官に戻る',
-    // Flow タブ（条件: ループのリアルタイム可視化）— 厨房図解（カード 743ffdef）の
-    // 動的・実データ版。drain → dispatch → monitor → integrate のループ、各 worker の
-    // 細かい段階＋心拍、統合キュー、ライブイベント、致命イベントを engine poll から
-    // 読み取って表示（読み取り専用）。review 状態・ログ種別・anomaly ラベルは上の
+    // 監督タブ — swarm からあなたへのメッセージが集まる場所: エスカレーション
+    // 受信箱（下の esc.*）＋要注意フィード（致命イベント＋エンジン anomaly —
+    // 削除した Flow タブから移設）。開いた時に読む — 他のサブビューには
+    // 覆い被せず、タブバッジが未回答数を運ぶ。anomaly ラベルは上の
     // manager.* キーを再利用。
-    'projectPanel.swarm.flow.tab': 'フロー',
-    'projectPanel.swarm.flow.title': '自律ループをリアルタイム表示',
-    'projectPanel.swarm.flow.offline':
-      'エンジンはまだ利用できません — 応答できるようになると、ここにライブのループが表示されます。続く場合は OPEN GROUND を更新してください。',
-    'projectPanel.swarm.flow.idle': 'ループは停止中',
-    'projectPanel.swarm.flow.idleHint':
-      '進行中の作業はありません。上のスイッチで Swarm を開始すると、drain → dispatch → monitor → integrate のループがここでリアルタイムに動きます。',
-    'projectPanel.swarm.flow.phaseDrain': '引く',
-    'projectPanel.swarm.flow.phaseDrainHint': 'Board の todo キューから次のカードを引きます。',
-    'projectPanel.swarm.flow.phaseDispatch': '振る',
-    'projectPanel.swarm.flow.phaseDispatchHint': 'カードごとに worker を1体起動 — それぞれ隔離 worktree で。',
-    'projectPanel.swarm.flow.phaseMonitor': '見守る',
-    'projectPanel.swarm.flow.phaseMonitorHint': '各 worker の段階と心拍を、統合可になるまで見守ります。',
-    'projectPanel.swarm.flow.phaseIntegrate': '統合',
-    'projectPanel.swarm.flow.phaseIntegrateHint':
-      '統合可のレビューブランチを trunk へ着地（fast-forward / rebase のみ）。',
-    'projectPanel.swarm.flow.draining': 'Board を引いています',
-    'projectPanel.swarm.flow.notDraining': '一時停止 — 新規 dispatch なし',
-    // 手動停止(manualStop — 永続化・再起動を跨いで維持)。
-    'projectPanel.swarm.flow.manualStopped': '手動停止中 — 新規 dispatch なし',
-    'projectPanel.swarm.flow.stageStarting': '起動中',
-    'projectPanel.swarm.flow.stageAudit': '監査',
-    'projectPanel.swarm.flow.stageImplement': '実装中',
-    'projectPanel.swarm.flow.stageVerify': '検証中',
-    'projectPanel.swarm.flow.stageAwaiting': '統合待ち',
-    'projectPanel.swarm.flow.stageBlocked': '詰まり',
-    'projectPanel.swarm.flow.heartbeat': '心拍',
-    'projectPanel.swarm.flow.liveFresh': '生存',
-    'projectPanel.swarm.flow.liveAging': '静か',
-    'projectPanel.swarm.flow.liveStale': '無音',
-    'projectPanel.swarm.flow.liveNone': '心拍なし',
-    'projectPanel.swarm.flow.ago': '{age} 前',
-    'projectPanel.swarm.flow.workersHeading': 'ワーカー・現在の段階',
-    'projectPanel.swarm.flow.noWorkers': '進行中の worker はいません。',
-    'projectPanel.swarm.flow.reviewsHeading': '統合キュー',
-    'projectPanel.swarm.flow.noReviews': '統合待ちはありません。',
-    'projectPanel.swarm.flow.eventsHeading': 'ライブイベント',
-    'projectPanel.swarm.flow.noEvents': 'まだイベントはありません。',
-    'projectPanel.swarm.flow.workersLive': '{count} 体稼働',
-    'projectPanel.swarm.flow.reviewsWaiting': '{count} 件待ち',
-    'projectPanel.swarm.flow.merged': '{count} 件統合',
-    'projectPanel.swarm.flow.fatalHeading': '要注意',
-    'projectPanel.swarm.flow.anomalyReworkExhausted': 'リトライ上限超過 — blocked に退避',
-    'projectPanel.swarm.flow.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
-    // 致命イベントのラベル（条件3）— 安全弁（カード 6fe48c1f）が永続化する5つの
+    'projectPanel.swarm.overseer.tab': '監督',
+    'projectPanel.swarm.overseer.alertsHeading': '要注意',
+    'projectPanel.swarm.overseer.emptyTitle': 'いま対応が要るものはありません',
+    'projectPanel.swarm.overseer.emptyBody':
+      'swarm があなたに上げた質問と致命イベントがここに届きます。稼働中の監督（あなたの代理）は司令官タブの「監督」スイッチでオンにします。',
+    'projectPanel.swarm.overseer.ago': '{age} 前',
+    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'リトライ上限超過 — blocked に退避',
+    'projectPanel.swarm.overseer.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
+    // 致命イベントのラベル — 安全弁（カード 6fe48c1f）が永続化する5つの
     // エスカレーションイベント。3つは swarm エンジン由来、2つは Electron 自己更新
     // サイクル由来。サーバの detail（日本語）は副行に出し、ここでは何が起きたかを
     // UI 言語で示す。
-    'projectPanel.swarm.flow.fatalReworkExhausted': 'カード退避 · 差し戻し上限',
-    'projectPanel.swarm.flow.fatalAllWorkersDown': '全ワーカー停止',
-    'projectPanel.swarm.flow.fatalExecTimeout': 'ワーカーが時間上限に到達',
-    'projectPanel.swarm.flow.fatalRollback': '自己更新をロールバック',
-    'projectPanel.swarm.flow.fatalCanaryFailed': '自己更新カナリア失敗',
+    'projectPanel.swarm.overseer.fatalReworkExhausted': 'カード退避 · 差し戻し上限',
+    'projectPanel.swarm.overseer.fatalAllWorkersDown': '全ワーカー停止',
+    'projectPanel.swarm.overseer.fatalExecTimeout': 'ワーカーが時間上限に到達',
+    'projectPanel.swarm.overseer.fatalRollback': '自己更新をロールバック',
+    'projectPanel.swarm.overseer.fatalCanaryFailed': '自己更新カナリア失敗',
     // エスカレーション受信箱（C1）— swarm があなたに上げた質問の回答待ち。
     // fail-closed: あなたが決めるまで何も先に進まない。
     'projectPanel.swarm.esc.title': 'エスカレーション — あなたの回答待ち',

@@ -2149,6 +2149,35 @@ export interface EscalationDismissResponse {
   escalation: Escalation
 }
 
+// ─── Model-quota control plane (swarmQuota's cooling table) ─────────────────
+
+/** A model tier the swarm launches on, by CLI `--model` alias — best→cheapest.
+ *  The single definition: `swarmQuota.ModelTier` aliases this, so the cooling
+ *  table's keys and the quota route's payload cannot drift. */
+export type SwarmModelTier = 'fable' | 'opus' | 'sonnet' | 'haiku'
+
+/** One ladder row of the cooling table. `until` is the epoch ms the tier frees
+ *  up, and is non-null EXACTLY when `cooling` (an elapsed mark reads as
+ *  available — the table expires lazily). */
+export interface SwarmQuotaTier {
+  tier: SwarmModelTier
+  cooling: boolean
+  until: number | null
+}
+
+/** GET /api/swarm/quota, and the echo of POST /api/swarm/quota/cool|uncool. */
+export interface SwarmQuotaResponse {
+  /** Server clock the snapshot was taken at (the cooling flags are relative to it). */
+  now: number
+  tiers: SwarmQuotaTier[]
+  /** The tier the NEXT top-tier launch resolves to (highest with headroom), or
+   *  null when every tier is cooling — then the engine parks until
+   *  {@link SwarmQuotaResponse.allCoolingUntil}. */
+  launchTier: SwarmModelTier | null
+  /** Earliest reset among the tiers iff ALL are cooling; null otherwise. */
+  allCoolingUntil: number | null
+}
+
 /** GET /api/notifications — the persisted set of notification ids the user has
  *  already SEEN (home-cache: ~/.openground/notifications.json), so unread state
  *  survives a re-login (NOT localStorage). POST /api/notifications/read {ids}

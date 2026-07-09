@@ -232,9 +232,40 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('select')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The Ground canvas state the debounced save has NOT persisted yet. Set by
+  // scheduleSave, cleared ONLY once a POST /api/canvas actually lands (2xx).
+  // Non-null therefore means "the screen is ahead of the server": load() must
+  // flush it before fetching, and must not clobber the local canvas with the
+  // (older) server snapshot while it stays set.
+  const pendingCanvasSave = useRef<CanvasState | null>(null)
+
+  // Persist the pending canvas edit NOW, cancelling the debounce timer. On
+  // success the marker clears only if no newer edit arrived while the POST was
+  // in flight; on failure (network error / non-2xx) it stays set, so the edit
+  // survives to the next flush attempt and load()'s reconcile guard keeps the
+  // local canvas on screen instead of adopting the stale server one.
+  const flushCanvasSave = useCallback(async () => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    const pending = pendingCanvasSave.current
+    if (!pending) return
+    try {
+      const res = await api.api.canvas.$post({ json: pending })
+      if (res.ok && pendingCanvasSave.current === pending) pendingCanvasSave.current = null
+    } catch {
+      // Kept pending — retried on the next flush (next edit's timer or load()).
+    }
+  }, [])
 
   const load = useCallback(async (): Promise<ProjectsResponse | null> => {
-    if (saveTimer.current) clearTimeout(saveTimer.current)
+    // FLUSH (never discard) any pending debounced canvas save before fetching.
+    // This used to be a bare clearTimeout, which cancelled the unsent save and
+    // let the setCanvas below clobber a sub-400ms-old edit (sticky text typed
+    // right before ⌘R / a focus re-scan) with the older server state. Flushing
+    // first means the fetch below returns a snapshot that already includes it.
+    await flushCanvasSave()
     // Ground member flow: fetch the projects shared WITH the user (owned:false)
     // in parallel — but ONLY when collab is enabled. With collab off this is a
     // resolved-empty promise (no network at all), so everything below is the
@@ -258,10 +289,17 @@ export default function App() {
     const canvas = { ...data.canvas, positions }
     setProjects(data.projects)
     setSettings(data.settings)
-    setCanvas(canvas)
+    // If an edit landed while we were fetching (or the flush above failed),
+    // the server snapshot is stale: keep the local canvas — its save is still
+    // pending — and only lay out any cards it doesn't know yet.
+    setCanvas((cur) =>
+      cur && pendingCanvasSave.current
+        ? { ...cur, positions: autoLayout(layoutInput, cur.positions) }
+        : canvas,
+    )
     setSharedProjects(shared)
     return { ...data, canvas }
-  }, [collabEnabled])
+  }, [collabEnabled, flushCanvasSave])
 
   // Open a Ground shared card (member flow) — the SAME path CollabSharedDialog's
   // onOpen uses: clear any Ground selection (so the member body and the owned
@@ -719,12 +757,17 @@ export default function App() {
     }
   }, [])
 
-  const scheduleSave = useCallback((c: CanvasState) => {
-    if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(() => {
-      api.api.canvas.$post({ json: c })
-    }, 400)
-  }, [])
+  const scheduleSave = useCallback(
+    (c: CanvasState) => {
+      pendingCanvasSave.current = c
+      if (saveTimer.current) clearTimeout(saveTimer.current)
+      saveTimer.current = setTimeout(() => {
+        saveTimer.current = null
+        void flushCanvasSave()
+      }, 400)
+    },
+    [flushCanvasSave],
+  )
 
   const onCanvasChange = useCallback(
     (c: CanvasState) => {
@@ -941,7 +984,15 @@ export default function App() {
   // Persist settings WITHOUT closing the panel — SettingsPanel autosaves
   // (debounced) while open; closing is only the X button / overlay click.
   const saveSettings = async (s: Settings) => {
-    await api.api.settings.$post({ json: s })
+    const res = await api.api.settings.$post({ json: s })
+    if (!res.ok) {
+      // Don't load() on failure — that would refetch the OLD settings and
+      // silently roll back the toggle the user just changed, with no
+      // indication anything went wrong.
+      const e = (await res.json().catch(() => ({}))) as { error?: string }
+      alert(t('misc.ground.saveSettingsFailed', { error: e.error ?? res.statusText }))
+      return
+    }
     await load()
     // Re-resolve the experiment gate: toggling an experiment in Settings must
     // show/hide its module right away, not on the next window focus.

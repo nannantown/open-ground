@@ -13,6 +13,8 @@
 // answers 503 (never a crash, never a hardcoded secret). Env is read lazily per
 // request (the feedback readConfig pattern) so tests can vi.stubEnv per case.
 
+import { createHash } from 'crypto'
+
 import type { CustomModuleDef, CustomModuleFramework, MarketplaceModule } from '../types'
 
 export interface ModulesMarketConfig {
@@ -106,13 +108,73 @@ export interface PublishResult {
   publishedAt: string
 }
 
+// --- deterministic publish ids (approve idempotency) --------------------------
+//
+// The approve route must be able to re-run publish after a crash/retry without
+// inserting a second marketplace row, which needs a stable row id it can derive
+// again. The submission id itself must NEVER be that id: a submitter holding
+// the anon key can INSERT a queue row with an id of their choosing, so using it
+// verbatim would let them aim the publish at an EXISTING og_custom_modules row
+// and (with an upsert) overwrite a module that isn't theirs.
+//
+// So the id is derived server-side: sha256(namespace ‖ submissionId), laid out
+// as a UUID. The submitter still influences the input, but cannot steer the
+// output onto a chosen target row — that would take a preimage of a specific
+// 128-bit digest. Paired with publishModule's INSERT-only path (no UPDATE when
+// rowId is set), an approve can never modify a marketplace row it didn't create.
+const PUBLISH_ID_NAMESPACE = 'openground:module-submission:v1:'
+
+export const marketplaceRowIdForSubmission = (submissionId: string): string => {
+  const digest = createHash('sha256')
+    .update(PUBLISH_ID_NAMESPACE)
+    .update(submissionId)
+    .digest()
+  const bytes = Uint8Array.prototype.slice.call(digest, 0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x80 // RFC 9562 version 8 (custom)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80 // RFC 9562 variant
+  const hex = Buffer.from(bytes).toString('hex')
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join('-')
+}
+
+// Read back a row we lost the INSERT race for (409). Selects no source — the
+// caller only needs the publish coordinates.
+const readPublishedRow = async (
+  config: ModulesMarketConfig,
+  rowId: string,
+): Promise<PublishResult> => {
+  const res = await supabaseFetch(
+    config,
+    `?id=eq.${encodeURIComponent(rowId)}&select=id,version,published_at&limit=1`,
+  )
+  await ensureOk(res, 'publish-replay')
+  const rows = (await res.json()) as unknown
+  const row = Array.isArray(rows) ? (rows as ModuleRow[])[0] : undefined
+  if (!row?.id) throw new MarketError('publish-replay', 502, 'conflicting row vanished')
+  return { remoteId: row.id, version: row.version ?? 1, publishedAt: row.published_at }
+}
+
 // First publish: INSERT (Prefer: return=representation so we get the row id
 // back). Re-publish: UPDATE the existing row by remoteId, version+1. Throws
 // MarketError / fetch errors for the route to translate into a 502.
+//
+// opts.rowId (approve passes marketplaceRowIdForSubmission(sub.id)) makes the
+// INSERT "publish exactly once": the row carries that explicit primary key, so
+// a replayed publish — a double-click, or a retry after the INSERT landed but
+// the follow-up markSubmission failed — hits the PK and comes back 409, which
+// we resolve by READING the existing row. There is deliberately no upsert: an
+// approve never UPDATEs a marketplace row, so it cannot clobber one.
+// Callers without a rowId keep the plain generated-id INSERT.
 export const publishModule = async (
   config: ModulesMarketConfig,
   def: CustomModuleDef,
   source: string,
+  opts: { rowId?: string } = {},
 ): Promise<PublishResult> => {
   if (def.remoteId) {
     const nextVersion = (def.version ?? 1) + 1
@@ -147,6 +209,7 @@ export const publishModule = async (
       Prefer: 'return=representation',
     },
     body: JSON.stringify({
+      ...(opts.rowId ? { id: opts.rowId } : {}),
       name: def.label,
       description: def.description,
       framework: def.framework,
@@ -154,6 +217,9 @@ export const publishModule = async (
       version: 1,
     }),
   })
+  // Publish-once: the PK conflict means this exact submission already published
+  // (retry / concurrent approve). Replay its coordinates; never overwrite it.
+  if (opts.rowId && res.status === 409) return readPublishedRow(config, opts.rowId)
   await ensureOk(res, 'insert')
   const rows = (await res.json()) as ModuleRow[]
   const row = Array.isArray(rows) ? rows[0] : undefined

@@ -10,13 +10,19 @@ import type {
 } from '@/lib/types'
 
 // The Escalations inbox panel (C1 — docs/OVERSEER_DESIGN.md §8, Q5): the HUMAN
-// VALVE of the unmanned swarm, rendered INSIDE the Swarm tab. Lists the OPEN
-// questions the swarm raised to the owner — {question, stakes, the proxy's
-// provisional answer, the worker's screen at the time} — and lets the owner
-// answer (→ injected into the blocked worker / queued for its next dispatch,
-// and written back to you-corpus memory) or dismiss. Renders NOTHING while the
-// inbox is empty, so it costs no space in the common case. Polls the pure GET
-// on a slow cadence; all mutation goes through the owner-gated POST routes.
+// VALVE of the unmanned swarm. Lists the OPEN questions the swarm raised to the
+// owner — {question, stakes, the proxy's provisional answer, the worker's screen
+// at the time} — and lets the owner answer (→ injected into the blocked worker /
+// queued for its next dispatch, and written back to you-corpus memory) or
+// dismiss. It used to be PINNED ABOVE the Swarm tab strip (a banner that stacked
+// up over every sub-view); it now renders INSIDE the Overseer tab
+// (SwarmOverseerPane) — read where the owner chooses to look, like the commander
+// and worker views — and reports its open count up via `onOpenCountChange` so
+// the tab label can carry the badge. Renders NOTHING while the inbox is empty
+// (the Overseer pane owns the empty state). Polls the pure GET on a slow
+// cadence; all mutation goes through the owner-gated POST routes. SwarmModule
+// keeps this pane MOUNTED (hidden when another sub-view is active) so the poll —
+// and therefore the badge — stays live no matter which view is open.
 const POLL_MS = 10_000
 
 const WHY_KEY: Record<EscalationWhy, string> = {
@@ -25,7 +31,16 @@ const WHY_KEY: Record<EscalationWhy, string> = {
   policy: 'projectPanel.swarm.esc.whyPolicy',
 }
 
-export const SwarmEscalationsPane = ({ projectPath }: { projectPath: string }) => {
+export const SwarmEscalationsPane = ({
+  projectPath,
+  onOpenCountChange,
+}: {
+  projectPath: string
+  /** Reports the OPEN-question count on every poll/action — SwarmModule shows it
+   *  as the Overseer tab badge (the pane itself may be hidden). Optional so the
+   *  pane stays usable standalone. */
+  onOpenCountChange?: (count: number) => void
+}) => {
   const { t } = useT()
   const [items, setItems] = useState<EscalationView[]>([])
   // Per-escalation draft answers. Only ever written by the textarea itself
@@ -123,14 +138,26 @@ export const SwarmEscalationsPane = ({ projectPath }: { projectPath: string }) =
   )
 
   const open = items.filter((e) => e.status === 'open')
+
+  // Surface the open count to the tab badge on every change (poll, answer,
+  // dismiss, project switch) — the pane may be hidden while another sub-view is
+  // active, so the badge is how a new question gets noticed.
+  useEffect(() => {
+    onOpenCountChange?.(open.length)
+  }, [open.length, onOpenCountChange])
+
   // Invisible while empty — but keep showing the last action's outcome line
   // (the "answered → injected" feedback) until the next action or poll cycle.
+  // The Overseer pane owns the inbox-empty state.
   if (open.length === 0 && !notice && !error) return null
 
   return (
+    // A flat section INSIDE the Overseer tab (the old pinned-banner card chrome —
+    // accent border, shadow, 45% height cap — went with the pinning; the tab is a
+    // normal scroll surface now).
     <section
       aria-label={t('projectPanel.swarm.esc.title')}
-      className="mx-3 mt-3 max-h-[45%] shrink-0 overflow-y-auto rounded-[3px] border border-accent/40 bg-bg-card shadow-card"
+      className="shrink-0 overflow-hidden rounded-[4px] border border-line bg-bg-card"
     >
       <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2">
         <Inbox size={13} strokeWidth={2} className="shrink-0 text-accent" aria-hidden />

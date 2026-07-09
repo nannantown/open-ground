@@ -120,11 +120,15 @@ const scanSkillsDir = async (
     return [] // no skills dir → no skills
   }
 
-  // A skill is a directory holding a SKILL.md; skip files and dotfiles. Inspect
-  // in a STABLE order so the MAX_SKILLS cap takes a deterministic prefix
-  // (readdir order is filesystem-dependent).
+  // A skill is a directory holding a SKILL.md; skip files and dotfiles. Accept
+  // symlinks too: readdir Dirents report a symlink-to-dir as isDirectory()=false,
+  // and dotfiles users legitimately bring whole skill dirs in as symlinks. A
+  // symlink to anything else is harmless — realpath(<entry>/SKILL.md) below fails
+  // with ENOTDIR and the entry is skipped; the containment + isFile() guards run
+  // on the resolved target as usual. Inspect in a STABLE order so the MAX_SKILLS
+  // cap takes a deterministic prefix (readdir order is filesystem-dependent).
   const dirs = entries
-    .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+    .filter((e) => (e.isDirectory() || e.isSymbolicLink()) && !e.name.startsWith('.'))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 
   const out: ProjectSkill[] = []

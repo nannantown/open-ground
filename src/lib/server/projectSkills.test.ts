@@ -151,6 +151,46 @@ describe('listProjectSkills', () => {
     expect((await listProjectSkills(proj)).map((s) => s.id)).toEqual(['good'])
   })
 
+  it('lists a skill whose DIRECTORY is a symlink to elsewhere in the project', async () => {
+    // The skill dir itself is a symlink (Dirent.isDirectory()=false) pointing
+    // inside the project → containment holds, the skill must be listed.
+    const realDir = join(proj, 'shared-skills', 'linked')
+    await mkdir(realDir, { recursive: true })
+    await writeFile(join(realDir, 'SKILL.md'), '---\nname: Linked Dir\n---')
+    await mkdir(join(proj, '.claude', 'skills'), { recursive: true })
+    await symlink(realDir, join(proj, '.claude', 'skills', 'linked'))
+    expect((await listProjectSkills(proj)).map((s) => s.name)).toEqual(['Linked Dir'])
+  })
+
+  it('still refuses a skill DIRECTORY symlinked OUTSIDE the project', async () => {
+    // Loosening the readdir filter must NOT loosen containment: a whole-dir
+    // symlink escaping the project resolves outside and is refused.
+    const outside = await mkdtemp(join(tmpdir(), 'og-outside-'))
+    try {
+      await writeFile(join(outside, 'SKILL.md'), '---\nname: STOLEN\n---')
+      await mkdir(join(proj, '.claude', 'skills'), { recursive: true })
+      await symlink(outside, join(proj, '.claude', 'skills', 'evil-dir'))
+      await writeSkill('good', '---\nname: Good\n---')
+      const skills = await listProjectSkills(proj)
+      expect(skills.map((s) => s.id)).toEqual(['good'])
+      expect(skills.some((s) => s.name === 'STOLEN')).toBe(false)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('skips symlinks to a file and dangling symlinks without breaking the scan', async () => {
+    const skillsDir = join(proj, '.claude', 'skills')
+    await mkdir(skillsDir, { recursive: true })
+    // symlink to a regular file → <link>/SKILL.md can't resolve → skipped
+    await writeFile(join(proj, 'notes.md'), 'hi')
+    await symlink(join(proj, 'notes.md'), join(skillsDir, 'file-link'))
+    // dangling symlink → realpath fails → skipped
+    await symlink(join(proj, 'no-such-target'), join(skillsDir, 'dangling'))
+    await writeSkill('good', '---\nname: Good\n---')
+    expect((await listProjectSkills(proj)).map((s) => s.id)).toEqual(['good'])
+  })
+
   it('skips a FIFO SKILL.md without hanging (threadpool-DoS guard)', async () => {
     const dir = join(proj, '.claude', 'skills', 'pipe')
     await mkdir(dir, { recursive: true })
@@ -212,6 +252,30 @@ describe('listGlobalSkills', () => {
       await mkdir(dir, { recursive: true })
       await symlink(join(store, 'real.md'), join(dir, 'SKILL.md'))
       expect((await listGlobalSkills(home)).map((s) => s.name)).toEqual(['Dotfile Skill'])
+    } finally {
+      await rm(store, { recursive: true, force: true })
+    }
+  })
+
+  it('lists a skill whose whole DIRECTORY is a symlink from a dotfiles repo', async () => {
+    // Audit 856daefb repro: ln -s ~/dotfiles/claude-skills/myskill
+    // ~/.claude/skills/myskill. The Dirent for the symlink has
+    // isDirectory()=false, so an isDirectory()-only filter dropped it and only
+    // the real dir survived. Both must be listed.
+    const store = await mkdtemp(join(tmpdir(), 'og-dotfiles-'))
+    try {
+      const realDir = join(store, 'claude-skills', 'linkedskill')
+      await mkdir(realDir, { recursive: true })
+      await writeFile(join(realDir, 'SKILL.md'), '---\nname: Linked Skill\ndescription: via dotfiles\n---')
+      await mkdir(join(home, '.claude', 'skills'), { recursive: true })
+      await symlink(realDir, join(home, '.claude', 'skills', 'linkedskill'))
+      await writeGlobalSkill('realskill', '---\nname: Real Skill\n---')
+
+      const skills = await listGlobalSkills(home)
+      expect(skills.map((s) => s.id).sort()).toEqual(['linkedskill', 'realskill'])
+      const linked = skills.find((s) => s.id === 'linkedskill')
+      expect(linked?.name).toBe('Linked Skill')
+      expect(linked?.file).toBe('~/.claude/skills/linkedskill/SKILL.md')
     } finally {
       await rm(store, { recursive: true, force: true })
     }

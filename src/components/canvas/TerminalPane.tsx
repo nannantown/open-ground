@@ -231,6 +231,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
         allowProposedApi: true,
         scrollback: 5000,
         convertEol: false,
+        // xterm's wheel handler moves the viewport by whole rows with no
+        // interpolation by default (smoothScrollDuration: 0) — every wheel
+        // tick snaps straight to its target line instead of easing there,
+        // which reads as choppy on a trackpad's high-frequency deltaY
+        // stream. This animates the jump over the given duration instead.
+        smoothScrollDuration: 125,
       })
       fit = new FitAddon()
       term.loadAddon(fit)

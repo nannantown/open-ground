@@ -72,6 +72,8 @@ import {
   K_CONFIG,
   K_NOTES,
   K_ORDER,
+  boardSeedIsStale,
+  writeBoardDiskStamp,
 } from '../collab/boardDoc'
 import { ORIGIN_SEED, setKey } from '../collab/ydoc'
 import { createCollabMirror, openScopedDoc } from './collabMirrorCore'
@@ -139,12 +141,22 @@ export const mirrorBoardPreserving = (
   deletable: ReadonlySet<string>,
 ): void => {
   const map = doc.getMap<unknown>(BOARD_ROOT)
+  // Same rule as the client's seed (boardDoc.seedIsStale): never write board
+  // content carrying a disk stamp OLDER than the one the doc already reflects.
+  // The drain re-applies its last payload on retry, and an out-of-band direct
+  // write to tasks.json (swarm-board.sh's app-down fallback) mirrors nothing —
+  // so a retry can arrive after the doc has already learned a newer disk state.
+  if (boardSeedIsStale(doc, data.updatedAt)) return
   doc.transact(() => {
     setKey(map, K_DESCRIPTION, data.description)
     setKey(map, K_DESCRIPTION_JA, data.descriptionJa)
     setKey(map, K_DESCRIPTION_EN, data.descriptionEn)
     setKey(map, K_CONFIG, data.config)
     setKey(map, K_NOTES, data.notes ?? '')
+    // The doc now reflects THIS disk state — record it (74ec0b0d). Until this
+    // lands, the owner's client refuses to write the doc back to disk, so a
+    // mirror that is retrying can never let a stale doc revert a newer board.
+    writeBoardDiskStamp(map, data.updatedAt)
 
     // Desired flat keys for the DISK cards (same encoding rules as
     // reconcileCollectionFlat: skip unencodable ids, the id field, ':' fields,

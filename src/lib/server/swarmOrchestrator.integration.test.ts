@@ -57,6 +57,7 @@ import {
   type VerifyCheck,
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
+import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import type { ProjectTask } from '../types'
@@ -1368,6 +1369,59 @@ describe('makeAdversarialReview — REAL panel orchestration (injected reviewers
     expect(r.decision).toBe('defer')
     expect(r.mustFix).toBe(0)
     expect(r.clean).toBe(0)
+  })
+
+  // The reviewer arm of the quota sensor (2026-07-09). The monitor only watches
+  // WORKER screens, so before this a panel that walked into the wall first cooled
+  // nothing: three abstentions → "多数決つかず [must-fix 0 / clean 0]" → the defer
+  // streak burned to needs-human → the next panel spawned on the same dry tier.
+  describe('a reviewer that hits the model limit', () => {
+    // Verbatim CLI notice — the same fixture the classifier pins.
+    const LIMITED =
+      "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+    beforeEach(() => __resetQuotaForTest())
+    afterEach(() => __resetQuotaForTest())
+
+    it('cools the panel tier and defers as an ENGINE park (not a review failure)', async () => {
+      const { proj } = await setupRepo()
+      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
+      const res = await spawn({ projectPath: proj, title: 'card q', hint: 'q' })
+      await git(proj, ['fetch', 'origin', 'main'])
+      const tip = await tipOf(proj, res.branch)
+      expect(isTierCooling('fable', Date.now())).toBe(false)
+
+      const review = makeAdversarialReview({ reviewers: 3, model: 'fable', runReviewer: async () => LIMITED })
+      const r = await review(proj, res.branch, 'main', { tip })
+
+      expect(r.decision).toBe('defer') // never merge un-reviewed
+      // An exhausted panel is an engine hold, so it must NOT burn MAX_REVIEW_DEFERS.
+      expect(r.skippedForPark).toBe(true)
+      expect(r.reason).toContain('fable')
+      // The sighting landed in the cooling table ⇒ the next panel AND every worker
+      // dispatch now resolve one rung down the ladder.
+      expect(isTierCooling('fable', Date.now())).toBe(true)
+      expect(isTierCooling('opus', Date.now())).toBe(false)
+    })
+
+    it('does NOT cool when the reviewer VOTED while quoting the limit wording (e.g. reviewing this patch)', async () => {
+      const { proj } = await setupRepo()
+      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
+      const res = await spawn({ projectPath: proj, title: 'card r', hint: 'r' })
+      await git(proj, ['fetch', 'origin', 'main'])
+      const tip = await tipOf(proj, res.branch)
+
+      const review = makeAdversarialReview({
+        reviewers: 3,
+        model: 'fable',
+        runReviewer: async () => `the diff adds the pattern for "${LIMITED}"\n${CLEAN}`,
+      })
+      const r = await review(proj, res.branch, 'main', { tip })
+
+      // A real verdict was cast — the transcript merely mentions the notice.
+      expect(r.decision).toBe('integrate')
+      expect(r.clean).toBe(3)
+      expect(isTierCooling('fable', Date.now())).toBe(false)
+    })
   })
 
   it('empty diff (tip already at trunk) → integrate WITHOUT spawning the panel', async () => {

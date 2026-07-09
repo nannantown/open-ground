@@ -320,6 +320,45 @@ export const addImportedProjectEntry = async (
   })
 }
 
+export type CreateResult =
+  | { entry: ProjectEntry }
+  | { rejection: Exclude<ImportRejection, null> }
+
+/** Register a folder POST /api/projects/new just mkdir'd. Runs the SAME
+ *  overlap/dangerous-target guard as Import, and like Import the check runs
+ *  INSIDE the registry lock with the write — so a /new racing an import (or
+ *  another /new) of a nesting path can't slip past. Without this guard a
+ *  project created inside an existing one would silently share the outer
+ *  entry's UUID for all central data (projectUUIDFromPath returns the first
+ *  isAtOrUnder match), cross-wiring the two boards.
+ *
+ *  Exact-path re-registration stays idempotent like addProjectEntry (checked
+ *  BEFORE the guard, which would call it overlap): mkdir succeeded, so an
+ *  entry at the same canonical path can only be a missing project whose folder
+ *  was recreated in place — returning it reconnects the card to its central
+ *  data instead of rejecting. */
+export const addCreatedProjectEntry = async (
+  path: string,
+  description?: string,
+): Promise<CreateResult> => {
+  const canon = await canonicalize(path)
+  return withRegistryLock(async () => {
+    const projects = await canonProjects()
+    const existing = projects.find((e) => e.path === canon)
+    if (existing) return { entry: existing }
+    const danger = await isDangerousImportTarget(canon, projects)
+    if (danger) return { rejection: danger }
+    const entry: ProjectEntry = {
+      id: randomUUID(),
+      path: canon,
+      addedAt: now(),
+      ...(description ? { description } : {}),
+    }
+    await setSettings({ projects: [...projects, entry] })
+    return { entry }
+  })
+}
+
 export type RelocateResult =
   | { entry: ProjectEntry }
   | { rejection: 'not-found' | 'duplicate' | Exclude<ImportRejection, null> }

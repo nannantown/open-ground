@@ -206,3 +206,201 @@ app-down 分岐) は変更不要 — `_central_write_jq` の戻り値だけを�
   “非協調な後勝ち”を防ぐ機構を持たないため、**将来collab経路が有効化された
   場合の追加リスク**として記録しておく（該当時は `mirrorBoardPreserving` の
   呼び出し順序保証・キュー直列化の要件を別途設計する必要がある）。
+
+---
+
+# 続報 (2026-07-09): 上の結論は誤り。真因は collab の doc→disk 経路だった
+
+0.11.20 で同じカード `74ec0b0d` が再び 2 回 `done → review` へ巻き戻った
+（01:19 finalize → 〜02:02 巻き戻り、02:04 再 finalize → 02:16〜02:29 に再巻き戻り。
+いずれも setColumn は生API・フルUUID・読み戻し検証済み）。
+
+## 前提が間違っていた — collab は稼働している
+
+上の調査は「リアルタイム collab (Yjs) は稼働していない」を除外条件の 2 番目に
+置いていた。稼働中のアプリに実測で問い合わせると、そうではなかった:
+
+```
+GET /api/collab/config                     → {"enabled":true}
+GET /api/collab/project?path=<OPEN GROUND> → {"collabProjectId":"31719b6b-…","member":true,"label":"OG Team"}
+```
+
+さらに `~/.openground/projects/3de870a679fa/collab-mirror-seen.json` は
+`74ec0b0d…` を含む 186 件の id を持ち、02:44 の finalize と同時刻に更新されて
+いた。この sidecar は `mirrorOnce` が `pid !== null`（＝共有中）で doc への
+書き込みに成功したときにしか保存されない。**サーバ側 mirror は実際に動いており、
+このプロジェクトは collab 共有中だった。**
+
+「git-shared ではない」（`.openground/openground.json` 無し）と
+「collab 共有中」は別物で、前者の確認が後者の除外に流用されていた。
+
+## 真因 — doc が disk より古い間に doc→disk が無条件で走る
+
+owner にとって disk（中央 `tasks.json`）が権威で、doc はその射影である。
+両者を結ぶ経路は 2 本:
+
+- **disk → doc**: `projectData.ts` の全書き込みが `queueBoardMirror` を fire-and-forget
+  で呼ぶ（`collabMirror.ts`）。失敗時は 5s/30s/120s とバックオフして無限リトライ。
+- **doc → disk**: `BoardModule.tsx` の `collab.onRemote(() => persistLocal(collab.extract(…)))`。
+  `boardDocToProjectData` は **タスク一覧を doc から丸ごと** 取る
+  (`readCollectionFlat`)。この persist は `dataRef.current.updatedAt`、すなわち
+  **新鮮な CAS トークン**を積むので、store の compare-and-swap では止まらない。
+
+doc が disk より古くなる窓は現実に存在する:
+
+1. mirror が失敗してリトライ中（バックオフの間ずっと）。
+2. `swarm-board.sh` の app-down 直接ファイル書込（上の 0708 調査で特定した経路）は
+   サーバを通らないので **mirror が一度も走らない** → doc は永久に古い。
+3. クライアントの楽観 seed: `persistLocal` は PUT の成否に関わらず `seed(next)` する。
+   409 で拒否された draft も doc に入る。
+
+その窓の中で **カードと無関係な remote update が 1 つ届くだけ**で、クライアントは
+doc の古いタスク一覧を disk に書き戻す。引き金は単一クライアントでも起きる:
+`ProjectCanvas` が board scope の **2 本目の binding**（別 Y.Doc・同じ room）を張り、
+`writeBoardCanvasIndex` を publish するので、**ユーザーが Canvas タブを開くだけ**で
+BoardModule の doc から見れば remote update になる。
+
+これで観測事実がすべて説明できる: engine の log に `promoted to review` が無い、
+`reviews[]` から消えた後でも 2 回目が起きる、外部操作をしていないのに戻る、
+巻き戻りのタイミングが不規則。**書き手は engine でも swarm-board.sh でもなく、
+自分のブラウザだった。**
+
+## 現行犯 — room と tasks.json を同時監視して捕まえた (03:54〜03:58 UTC)
+
+推論を止めて、`scripts/dump-board-room.mjs` / `scripts/watch-board-room.mjs`（読み取り専用の
+診断プローブ）で room を、`fs.watch` で中央 `tasks.json` を同時に観測した。
+
+```
+03:54:05  tasks.json  done            (司令官が setColumn で再finalize)
+03:54:07  mirror 成功 (collab-mirror-seen.json 更新)
+03:55:35  room を読む  → boardColumn = "review"   ← disk は done なのに doc は review
+03:56:20  tasks.json  done → review               ← 巻き戻り(現行犯)
+03:56:42  tasks.json  review (updatedAt だけ更新)  ← クライアントの persist ループ
+03:56:45  tasks.json  review (同上)
+03:58:31  setColumn done を1回叩く → disk done
+03:58:33  room が review → done へ (author = mirror の clientID 2616927931)
+03:58:33〜04:01:35  room=done の間、巻き戻りゼロ
+04:02:46  全クライアント切断後に再接続 → room は再び "review"
+          (author が新しい clientID 3490019879 / 4248540463 = 新規の書き込み)
+```
+
+読み取れること:
+
+- **room の値がそのまま disk に書き戻される**（03:56:20）。room を done に直すと巻き戻りは止まる
+  （03:58:33〜04:01:35）。因果は疑いようがない。
+- **mirror は正常**（03:58:33 に room を直した）。Durable Object の永続化取りこぼしでもない。
+- それでも room は `review` に戻る。04:02:46 の author は**新しい clientID** ＝ 誰かが
+  書き直している。接続していたのはアプリだけ。
+
+## 毒を入れているのはアプリの「楽観 seed」
+
+`BoardModule.persistLocal` は `persist(next)` の直後に、**PUT の結果を待たずに**
+`collab.seed(next)` を実行する。`persist` は 350ms デバウンス後に PUT し、
+`updatedAt` が古ければサーバは **409 で拒否**して、クライアントは fresh を adopt する。
+——だが `seed(next)` はもう終わっている。**store が拒否したスナップショットが、
+権威である doc には焼き付いている。**
+
+これで一周する:
+
+1. mirror が doc を `done` にする
+2. アプリが古いスナップショット（`review`）を楽観 seed → doc は `review`
+3. その PUT は 409 → アプリは fresh(`done`) を adopt（＝ CAS トークンは最新になる）
+4. 次の remote update が来ると `onRemote → extract(doc)` が `review` を返し、
+   **新鮮な CAS トークン**を積んで PUT → **disk が review に落ちる**
+5. 司令官が done に直す → 1 に戻る
+
+engine も `swarm-board.sh` も無関係。CAS は「トークンが古い書き込み」しか防げず、
+この書き込みのトークンは常に最新なのですり抜ける。司令官の容疑 1 と容疑 3 は
+**同じ一本の経路の入口と出口**だった。
+
+## 修正 — doc に「どの disk 状態を焼いたか」を持たせ、追いつくまで採用しない
+
+`m:diskStamp`（その doc の board 内容が導出された disk の `updatedAt`）を導入し、
+**規律を 2 本**にした。
+
+**(1) 採用ゲート（doc → disk）** — `boardDocToProjectData` は doc が base の disk 状態を
+見ていなければ **`base` をそのまま（同一参照で）返す**。`BoardModule` は identity で
+「採用なし」を判定して persist ごとスキップする。これは未 seed の room が空のタスク一覧で
+board を消す事故（c2e4c57c）も同時に塞ぐ。
+
+**(2) 陳腐化 seed の拒否（→ doc）** — doc が既に反映している disk 状態より
+**証明可能に古い**スナップショットは、**内容ごと書き込みを拒否**する（`seedIsStale`）。
+これが無いと (1) は無力だった: 楽観 seed は内容を `review` に汚染する一方、stamp は単調なので
+`done` のまま残り、**ゲートは開いたまま**になる。stamp の意味は「この内容はその disk 状態から
+導出された」なので、内容と stamp は必ず一緒に動かねばならない。
+サーバ mirror にも同じ規律を課した（リトライが、直接ファイル書込に追い越された payload を
+再適用しうるため）。
+
+補足:
+
+- stamp を書くのは **disk 真実を主張する 2 人だけ**: サーバ mirror (`mirrorBoardPreserving`)
+  と owner の authoritative seed (`projectDataToBoardDoc`)。member（`updatedAt: ''`）は
+  disk 真実を持たないので、stamp を書かず、拒否もされない（ただのピア編集）。
+- **単調**（`writeBoardDiskStamp`）。拒否 (2) とセットで初めて健全になる。
+- **stamp は点でなく区間**。`swarm-board.sh` は秒精度で書くので、`…T01:19:00Z` は
+  「01:19:00.000〜01:19:00.999 のどこか」を意味する。ミリ秒 stamp は点。
+  `docSeesDisk` は「doc の**最早**時刻が disk の**最遅**時刻に届くか」を問う
+  （＝証明できるときだけ開く）。`seedIsStale` は「seed の**最遅**時刻が doc の**最早**
+  時刻より前か」を問う（＝証明できるときだけ拒む）。どちらも区間が重なれば安全側に倒れる。
+  辞書順比較もバイト比較も不可（`…T01:19:00Z` > `…T01:19:00.500Z` と逆転する）。
+- `binding.synced` まで seed を遅らせる。未同期 doc への seed は全キーが room と
+  **並行 op** になり、Y.Map の衝突解決（clientID 比較＝実質コイントス）で
+  こちらの古い値が room の新しい値に勝ちうる。サーバの `openScopedDoc` は
+  同じ理由で sync を待っている。採用（`onRemote`）の購読は従来どおり即時に行うので、
+  `synced` が来ないまま（＝古いトランスポート）でも peer の編集は取り込める。
+
+副作用として mirror は **書き込みごとに必ず 1 update を出す**ようになった
+（stamp を書かないと gate が二度と開かない）。従来の「同一内容の再ミラーはゼロ更新」
+というループ遮断が使えなくなるので、**遮断をクライアント側の正しい位置へ移した**:
+`boardDocToProjectData` は doc の共有フィールドが base と一致すれば（echo）
+やはり `base` を返す。比較は `jsonEqual`（構造比較）で、doc から組み直した
+タスクのキー順の違いを「変更」と誤認しない。
+
+## 検証
+
+- 回帰テスト `src/lib/collab/__tests__/boardDocDiskStamp.test.ts`（12 本）。
+  実インシデントをそのまま再現する `THE REPRO` と、上の現行犯トレースを再現する
+  `THE POISON` を含む。**歯の確認済み**: ゲートの 1 行を外すと 3 本が落ち、
+  `adopted` が `review` を持つ doc 由来のオブジェクトになる。陳腐化 seed の拒否を
+  外すと `THE POISON` が落ちる（`expected 'review' to be 'done'`）。
+- `src/lib/server/collabMirror.test.ts` に stamp の書き込み・古い payload の拒否・
+  移設後のループ遮断（content キーは 1 つも変わらず、クライアントは何も採用しない）を追加。
+- 診断プローブ `scripts/dump-board-room.mjs` / `scripts/watch-board-room.mjs` を同梱
+  （読み取り専用。room の実値・キーごとの著者 clientID・接続ピアを出す）。
+  次に「Board が勝手に戻る」類を見たら、まずこれで room と disk を突き合わせること。
+- 完了ゲート: `npx tsc --noEmit` 0 error / `npm test` 243 files・3580 tests 緑 /
+  変更ファイルの eslint 0。
+
+## 0708 のパッチ案について
+
+`_central_write_jq` の mutex + CAS 再チェックは、シェルとサーバの間の lost-update
+という**別の実在する危険**への正しい対処であり、依然として適用する価値がある
+（ガード保護下のため適用は司令塔/オーナー）。ただし今回観測された 2 回の巻き戻りは
+setColumn が生API で行われており、その writer ではなかった。
+
+なお `swarm-board.sh` は `now | todateiso8601` で **秒精度**の `updatedAt` を書く。
+これはサーバのミリ秒 stamp と**同一秒内で数値順が実時間順と逆転**する
+（実 01:19:00.85 の書込が `…00.000Z` になり、先行するサーバの `…00.800Z` より小さい）。
+初版の gate は stamp を値として比べていたため、この同一秒衝突で
+**ゲートが誤って開き、巻き戻りが残っていた**（統合前の敵対レビューが probe で実証）。
+現在は stamp を「その stamp が指しうる instant の**区間**」として比べ、
+`docSeesDisk` は doc が disk を**証明できるときだけ**開く。したがって
+「mirror を通らなかった直接書込」で doc が古くなるケース（上の窓 2）も、
+秒精度の書き手が居る場合を含めて巻き戻りの原因としては無効化される。
+（初版のコード注釈と本節にあった「巻き戻りは不可能」「窓 2 も無効化する」という
+断言は、この同一秒ケースで破れていた。訂正済み。）
+
+## 残る既知の弱点（本修正のスコープ外・別カード候補）
+
+- `persistLocal` は依然として **PUT の結果を待たずに** seed する。陳腐化 seed は拒否
+  されるようになったので毒は入らないが、本来は「サーバが確認した disk 状態」だけを
+  焼くべき。`persist` の結果（保存成功 / 409 adopt）を `BoardModule` へ配線するのが筋。
+- owner の seed は `reconcileCollectionFlat`（authoritative）なので、mirror の
+  preserving 設計と非対称に、doc-only の member カードを消す。既存挙動であり
+  今回は触れていない。
+- mirror が**恒久的に**壊れている（サインアウト・ws URL 欠落など）と、owner が
+  一度保存した時点で gate が閉じたままになり、peer の編集を採用しなくなる
+  （board タブを開き直せば seed が stamp を進めて再開する）。**安全側の縮退**であり、
+  修正前の「自分の disk を黙って巻き戻す」より望ましい。恒久対策は
+  「PUT 成功後にその `updatedAt` で doc を stamp し直す」だが、
+  `persist` の結果を `BoardModule` へ配線する必要があるので別カードとする。

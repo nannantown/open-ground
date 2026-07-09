@@ -201,19 +201,31 @@ describe('collabMirror — server-side board writes reach the collab doc (c2e4c5
     expect(docTasks(fake.doc).map((t) => t.id)).toEqual(['c'])
   })
 
-  it('re-mirroring identical content emits ZERO doc updates (the echo/loop guard)', async () => {
+  it('re-mirroring identical content changes no CONTENT key (the echo/loop guard)', async () => {
     const fake = makeFake()
     mirror = createBoardMirror(fake.deps)
     const payload = data([task('a')])
     mirror.queue('/proj', payload)
     await mirror.settle('/proj')
-    let updates = 0
-    fake.doc.on('update', () => { updates += 1 })
-    // the client applying doc→disk re-triggers the hook with identical board
-    // content — this must not broadcast anything, or the echo would loop.
+    const before = new Map(fake.doc.getMap<unknown>('og').entries())
+    // The client applying doc→disk re-triggers the hook with identical board
+    // content. Only the disk stamp may move (74ec0b0d — every write must stamp,
+    // or the client's adoption gate never re-opens); no board content is
+    // rewritten, and the client answers the stamp with nothing (boardDoc's echo
+    // check returns base identity), so the echo cannot loop.
     mirror.queue('/proj', { ...payload, updatedAt: '2026-07-02T04:00:00.000Z' })
     await mirror.settle('/proj')
-    expect(updates).toBe(0)
+    const after = fake.doc.getMap<unknown>('og')
+    for (const key of Array.from(after.keys())) {
+      if (key === 'm:diskStamp') continue
+      expect(after.get(key)).toEqual(before.get(key))
+    }
+    expect(Array.from(after.keys()).sort()).toEqual(
+      Array.from(before.keys()).sort(), // no key added or dropped
+    )
+    // The echo is invisible to the client: nothing to adopt ⇒ nothing to persist.
+    const base = { ...payload, updatedAt: '2026-07-02T04:00:00.000Z' }
+    expect(boardDocToProjectData(fake.doc, base)).toBe(base)
   })
 
   it('a failed connect retries with backoff and eventually lands the LATEST state', async () => {
@@ -297,5 +309,28 @@ describe('mirrorBoardPreserving — the write primitive', () => {
     doc.getMap<unknown>('og').set('t:garbage', 'x') // no ':field' part
     mirrorBoardPreserving(doc, data([task('a')]), new Set(['garbag'])) // truncated-id trap
     expect(doc.getMap<unknown>('og').get('t:garbage')).toBe('x') // untouched
+  })
+
+  // 74ec0b0d: the mirror is what lets the owner's client trust the doc enough to
+  // write it back to disk. Stamping the disk state it just mirrored is that
+  // permission — without it the client gates adoption forever (safe, but stuck).
+  it('stamps the disk state it just mirrored (the owner’s adoption gate)', () => {
+    const doc = new Y.Doc()
+    mirrorBoardPreserving(doc, data([task('a')], '2026-07-02T03:00:00.000Z'), new Set())
+    expect(doc.getMap<unknown>('og').get('m:diskStamp')).toBe('2026-07-02T03:00:00.000Z')
+  })
+
+  // Same rule the client's seed obeys: content and stamp move together, or not at
+  // all. The drain re-applies its last payload on retry, and a direct write to
+  // tasks.json mirrors nothing — so an older payload CAN arrive after the doc has
+  // learned a newer disk state. Writing its content under the newer (monotonic)
+  // stamp would tell the owner's client "this doc is current" about stale cards.
+  it('REFUSES a payload older than the disk state the doc already reflects', () => {
+    const doc = new Y.Doc()
+    mirrorBoardPreserving(doc, data([task('a', { boardColumn: 'done' })], '2026-07-02T03:00:00.000Z'), new Set())
+    mirrorBoardPreserving(doc, data([task('a', { boardColumn: 'review' })], '2026-07-02T01:00:00.000Z'), new Set())
+    const map = doc.getMap<unknown>('og')
+    expect(map.get('t:a:boardColumn')).toBe('done') // content not regressed
+    expect(map.get('m:diskStamp')).toBe('2026-07-02T03:00:00.000Z')
   })
 })

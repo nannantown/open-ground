@@ -8,6 +8,7 @@ import { getSettings, setSettings, getCanvas, setCanvas } from './store'
 import {
   ensureProjectsMigrated,
   addProjectEntry,
+  addCreatedProjectEntry,
   removeProjectEntry,
   updateProjectEntryPath,
   isDangerousImportTarget,
@@ -159,6 +160,52 @@ describe('registry CRUD', () => {
     const persisted = (await getSettings()).projects ?? []
     expect(persisted).toHaveLength(5)
     expect(new Set(persisted.map((e) => e.path))).toEqual(new Set(dirs))
+  })
+})
+
+describe('addCreatedProjectEntry (the /projects/new register step)', () => {
+  beforeEach(async () => {
+    await setSettings({ projectsMigratedAt: new Date().toISOString(), projects: [] })
+  })
+
+  it('registers a fresh unrelated folder', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-reg-new-')))
+    const result = await addCreatedProjectEntry(dir, 'hi')
+    expect('entry' in result).toBe(true)
+    if ('entry' in result) {
+      expect(result.entry.path).toBe(dir)
+      expect(result.entry.description).toBe('hi')
+    }
+  })
+
+  it('rejects a folder inside a registered project (audit-856daefb misroute repro)', async () => {
+    // Before the guard this registered /parent/sub as its own entry, but
+    // projectUUIDFromPath(sub) still returned PARENT's uuid (first isAtOrUnder
+    // match) — the child's central reads/writes landed in the parent's data.
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'og-reg-par-')))
+    await addProjectEntry(parent)
+    const result = await addCreatedProjectEntry(join(parent, 'sub'))
+    expect(result).toEqual({ rejection: 'overlap' })
+    expect((await getSettings()).projects).toHaveLength(1) // registry untouched
+  })
+
+  it('rejects a folder that would contain a registered project (ancestor side)', async () => {
+    const outer = await realpath(await mkdtemp(join(tmpdir(), 'og-reg-out-')))
+    const inner = join(outer, 'a', 'b')
+    await mkdir(inner, { recursive: true })
+    await addProjectEntry(inner)
+    const result = await addCreatedProjectEntry(join(outer, 'a'))
+    expect(result).toEqual({ rejection: 'overlap' })
+  })
+
+  it('is idempotent for the exact registered path (missing project recreated in place)', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-reg-same-')))
+    const first = await addCreatedProjectEntry(dir)
+    const again = await addCreatedProjectEntry(dir)
+    expect('entry' in first && 'entry' in again && again.entry.id).toBe(
+      'entry' in first ? first.entry.id : '(no entry)',
+    )
+    expect((await getSettings()).projects).toHaveLength(1)
   })
 })
 

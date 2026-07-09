@@ -89,7 +89,7 @@ import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTier } from './
 // ACTUATORS (allCoolingUntil park gate). MODEL_TIER_LADDER narrows the recorded
 // launch model to a known tier; an off-ladder / unrecorded model holds the
 // worker exactly as before but marks nothing (never poison a tier by guess).
-import { allCoolingUntil, markRateLimited, MODEL_TIER_LADDER } from './swarmQuota'
+import { allCoolingUntil, markRateLimited, isModelTier, MODEL_TIER_LADDER } from './swarmQuota'
 // A5 usage sensor, SYNC cache peek only (never awaited, never refreshed here) —
 // the second-priority reset-time source markRateLimited resolves against when
 // the worker's own screen wording didn't carry one.
@@ -1116,6 +1116,29 @@ export const RATE_LIMIT_PATTERNS: readonly RegExp[] = [
   /\b(?:429|529)\b[^.]{0,40}\boverloaded\b/,
   /too many requests/,
   /retrying in \d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes)\b/,
+  // The CLI's PER-MODEL exhaustion notice, verbatim off a worker's session on
+  // 2026-07-09: "You've reached your Fable 5 limit. Run /usage-credits to
+  // continue or switch models with /model." NONE of the patterns above see it —
+  // a model-named limit is not the string "usage limit" — so the quota sensor
+  // never fired, fable never cooled, and dispatch kept re-launching workers and
+  // reviewers into the dry tier (stalls + empty review panels). Each of the
+  // notice's three independent phrases gets its own pattern, because a TUI wraps
+  // the sentence at the box edge and only one fragment may survive on screen.
+  // The wording is pinned by a verbatim regression fixture in the test suite.
+  /reached your .{0,40}\blimit\b/, // "You've reached your Fable 5 limit."
+  // A limit ANNOUNCEMENT, qualified by what ran out. The qualifier is the whole
+  // point: a bare /limit reached/ also fires on "connection limit reached", a
+  // "buffer limit reached" log line, and `throw new Error(...)` in source — text
+  // an ordinary worker prints — which would cool a HEALTHY tier for 20 minutes.
+  // The alternation covers a numbered window (5-hour, 4.8), and the usage /
+  // model / session / weekly / your qualifiers the CLI actually uses.
+  /\b(?:\d+[\w.-]*|usage|model|session|weekly|your)\s+limit reached\b/,
+  /switch models with \/model\b/, // the notice's remedy line
+  // …and its other remedy line. `run ` is load-bearing (a bare /usage-credits/
+  // would fire on prose and on this file); normalizeScreen lowercases AFTER its
+  // escape strip, so the CLI's capital "Run" reaches this pattern — see the
+  // isolation test that drives this pattern alone.
+  /\brun \/usage-credits\b/,
 ]
 
 /** Markers of a permission / trust prompt blocking a worker. DELIBERATELY NARROW
@@ -1130,6 +1153,38 @@ export const PERMISSION_PROMPT_PATTERNS: readonly RegExp[] = [
   /do you trust the files in this (?:folder|directory)/,
   /do you want to (?:proceed|trust|allow) .{0,40}\?/, // claude's trust/allow confirmation line
 ]
+
+/** {@link RATE_LIMIT_PATTERNS} against ALREADY-normalized text (the classifier
+ *  below has one in hand and must not normalize twice). */
+const matchesRateLimit = (normalized: string): boolean =>
+  RATE_LIMIT_PATTERNS.some((re) => re.test(normalized))
+
+/** Does raw `text` carry a rate/usage-limit marker? The shared predicate behind
+ *  BOTH quota sensors: the monitor's worker-screen classifier below, and the
+ *  adversarial reviewer's transcript check (a headless reviewer has no PTY
+ *  screen, only its output). Normalizes first, so ANSI-laden text matches. */
+export const isRateLimitText = (text: string | null | undefined): boolean => {
+  if (!text) return false
+  const norm = normalizeScreen(text)
+  return !!norm && matchesRateLimit(norm)
+}
+
+/** The reset time A5 (the CLI usage sensor) offers as a cooling horizon, or null.
+ *
+ *  A5's `resetsAt` is a STANDING display — the current window's end, shown even
+ *  at 3% usage — so it is only trusted when that slot is actually SPENT
+ *  (pct >= 100). Without the gate, a RATE_LIMIT_PATTERNS match on a transient
+ *  429/5xx blip would cool a healthy tier until the session reset (up to ~5h) —
+ *  a full park once cascaded — instead of the 20min grace (must-fix 差し戻し
+ *  0708). When BOTH slots are spent the session's (sooner) reset wins: a
+ *  too-early resume just re-marks on the next sighting, while over-trusting the
+ *  weekly reset could park for days. Read-only peek (honors K8). */
+const a5CoolingHint = (): string | null => {
+  const a5 = peekCachedUsage()
+  if (a5?.session && a5.session.pct >= 100) return a5.session.resetsAt
+  if (a5?.weekAll && a5.weekAll.pct >= 100) return a5.weekAll.resetsAt
+  return null
+}
 
 /** Classify a worker's current screen into WHY it might not be progressing:
  *    • 'permission-wait' — a startup trust/permission dialog is blocking it.
@@ -1154,7 +1209,7 @@ export const classifyOutput = (
   const text = normalizeScreen(screen)
   if (!text) return 'normal'
   if (PERMISSION_PROMPT_PATTERNS.some((re) => re.test(text))) return 'permission-wait'
-  if (RATE_LIMIT_PATTERNS.some((re) => re.test(text))) return 'rate-limited'
+  if (matchesRateLimit(text)) return 'rate-limited'
   if (detectFreeTextQuestion(screen)) return 'question'
   return 'normal'
 }
@@ -3438,19 +3493,32 @@ export const makeAdversarialReview = (
               ? customRun({ dir, trunkRef, index: i + 1, signal: ac.signal, lens })
               : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs, model: panelModel, lens })
             )
-              .then((raw) => extractReviewVerdict(raw))
+              .then((raw) => ({ raw, ...extractReviewVerdict(raw) }))
               // A reviewer that THREW (PTY spawn failed, etc.) is a non-vote, not a
               // panel failure — the tally is computed from whoever did vote.
-              .catch(() => ({ vote: null as ReviewVote | null, note: '' }))
+              .catch(() => ({ raw: '', vote: null as ReviewVote | null, note: '' }))
           }),
         )
-        return raws.map((v, i): ReviewerVerdict => ({
-          reviewer: i + 1,
-          vote: v.vote,
-          note: v.note,
-          // Tag the lens so the tally can weight it and the log can name it (条件3).
-          ...(lenses ? { lens: lenses[i].key } : {}),
-        }))
+        // QUOTA SENSOR (reviewer arm). The monitor's sensor only ever watches
+        // WORKER screens, so a panel that walks into the wall first cools
+        // nothing: every reviewer abstains, the tally reads "多数決つかず
+        // [must-fix 0 / clean 0]", the defer streak burns to needs-human, and
+        // the NEXT panel spawns on the same dry tier. Attribute it here instead.
+        // Gated on `vote === null`: a reviewer that actually voted has reviewed
+        // the diff, and its note may legitimately QUOTE limit wording (e.g. this
+        // very patch) — only an ABSTENTION whose transcript is the limit notice
+        // is a sighting.
+        const limitedRaw = raws.find((v) => v.vote === null && isRateLimitText(v.raw))?.raw
+        return {
+          verdicts: raws.map((v, i): ReviewerVerdict => ({
+            reviewer: i + 1,
+            vote: v.vote,
+            note: v.note,
+            // Tag the lens so the tally can weight it and the log can name it (条件3).
+            ...(lenses ? { lens: lenses[i].key } : {}),
+          })),
+          ...(limitedRaw !== undefined ? { limited: { raw: limitedRaw, tier: panelModel } } : {}),
+        }
       } finally {
         try {
           ac.abort()
@@ -3465,7 +3533,30 @@ export const makeAdversarialReview = (
       }
       return { decision: 'defer', verdicts: [], mustFix: 0, clean: 0, reason: 'could not prepare review worktree (deferred)' }
     }
-    return lenses ? tallyLensReview(mat.value, lenses, reworkThreshold) : tallyReview(mat.value, panel)
+    // A reviewer hit the tier's limit ⇒ cool that tier (so the next panel — and
+    // every worker dispatch — steps down the ladder) and DEFER as an engine hold:
+    // `skippedForPark` keeps this out of the MAX_REVIEW_DEFERS streak, because an
+    // exhausted panel is not the card failing review. Never merge un-reviewed.
+    if (mat.value.limited && isModelTier(mat.value.limited.tier)) {
+      const { raw, tier } = mat.value.limited
+      const until = markRateLimited(tier, {
+        ptyText: raw,
+        a5ResetsAt: a5CoolingHint(),
+        graceMs: RATE_LIMIT_GRACE_MS,
+        now: Date.now(),
+      })
+      return {
+        decision: 'defer',
+        verdicts: [],
+        mustFix: 0,
+        clean: 0,
+        skippedForPark: true,
+        reason: `reviewer hit the ${tier} usage limit — tier cooling until ${new Date(until).toISOString()}; review deferred`,
+      }
+    }
+    return lenses
+      ? tallyLensReview(mat.value.verdicts, lenses, reworkThreshold)
+      : tallyReview(mat.value.verdicts, panel)
   }
 }
 
@@ -3972,26 +4063,9 @@ const monitorWorkers = async (
           const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
           let cooling = ''
           if (tier) {
-            const a5 = peekCachedUsage()
-            // A5's resetsAt is a STANDING display — the current window's end,
-            // shown even at 3% usage — so it is only trusted as a cooling
-            // horizon when that slot is actually SPENT (pct >= 100). Without
-            // the gate, RATE_LIMIT_PATTERNS matching a transient 429/5xx blip
-            // would cool a healthy tier until the session reset (up to ~5h) —
-            // a full park once cascaded — instead of the 20min grace (must-fix
-            // 差し戻し 0708). When BOTH slots are spent, the session's (sooner)
-            // reset wins: a too-early resume just re-marks on the next
-            // sighting, while over-trusting the weekly reset could park for
-            // days.
-            const a5ResetsAt =
-              a5?.session && a5.session.pct >= 100
-                ? a5.session.resetsAt
-                : a5?.weekAll && a5.weekAll.pct >= 100
-                  ? a5.weekAll.resetsAt
-                  : null
             const until = markRateLimited(tier, {
               ptyText: screen,
-              a5ResetsAt,
+              a5ResetsAt: a5CoolingHint(),
               graceMs: RATE_LIMIT_GRACE_MS,
               now,
             })

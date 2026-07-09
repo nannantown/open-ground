@@ -78,6 +78,7 @@ import {
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
 import { markCoolingUntil, isTierCooling, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
+import { resolveSwarmModelEffort } from './swarmLaunch'
 import {
   rememberSwarmAutonomy,
   forgetSwarmAutonomy,
@@ -1018,6 +1019,64 @@ describe('classifyOutput — why a worker is (not) progressing, from its screen'
 
   it('sees through ANSI/cursor escapes (the headless frame or raw-buffer fallback)', () => {
     expect(classifyOutput(`${ESC}[31mClaude usage limit reached${ESC}[0m`)).toBe('rate-limited')
+  })
+
+  // REGRESSION FIXTURE — the CLI's ACTUAL exhaustion wording, kept verbatim.
+  // On 2026-07-09 the top line below was the last thing a worker printed before
+  // going silent for 22 minutes: none of the then-current patterns matched it
+  // ("Fable 5 limit" ≠ "usage limit"), so fable never cooled and the engine kept
+  // dispatching workers and reviewers into the dry tier. The CLI's wording is
+  // ours to track, not to guess — when it changes again, THIS list is the thing
+  // to update, and a failure here is the early warning.
+  it.each([
+    // 1. verbatim from a worker's claude session JSONL (2026-07-09)
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.",
+    // 2. the same notice for another tier — the pattern must not be fable-specific
+    "You've reached your Opus 4.8 limit. Run /usage-credits to continue or switch models with /model.",
+    // 3. the status-line form
+    'Claude usage limit reached · resets 3pm (Asia/Tokyo)',
+    // 4. the session-window form (no "usage", no "your")
+    '5-hour limit reached ∙ resets 3pm',
+    // 5. the notice as a TUI wraps it — the first sentence has scrolled off the
+    //    box and only the remedy lines are still on screen
+    ['│ Run /usage-credits to continue or  │', '│ switch models with /model.         │'].join('\n'),
+  ])('REGRESSION: the real CLI limit notice is rate-limited — %s', (screen) => {
+    expect(classifyOutput(screen)).toBe('rate-limited')
+  })
+
+  // A limit ANNOUNCEMENT is qualified by what ran out. A bare /limit reached/
+  // also fires on these — ordinary text a worker prints, and this very file's
+  // source — and a false sighting cools a HEALTHY tier for 20 minutes. Caught in
+  // pre-release review (0709), before the dogfooding swarm could trip on it.
+  it.each([
+    'connection limit reached',
+    'buffer limit reached',
+    "throw new Error('limit reached')",
+    String.raw`swarmOrchestrator.ts:1129:  /\blimit reached\b/,`, // a grep hit / test log
+  ])('an UNQUALIFIED "limit reached" is ordinary output, not a limit — %s', (screen) => {
+    expect(classifyOutput(screen)).toBe('normal')
+  })
+
+  it.each([
+    '5-hour limit reached ∙ resets 3pm', // numbered session window
+    'Fable 5 limit reached', // numbered model
+    'Opus 4.8 limit reached', // …with a dotted version
+    'Weekly limit reached',
+    'Session limit reached',
+  ])('…while a QUALIFIED one is a real limit — %s', (screen) => {
+    expect(classifyOutput(screen)).toBe('rate-limited')
+  })
+
+  it('the /usage-credits remedy line is live — capital "Run" and all', () => {
+    // No other RATE_LIMIT_PATTERN can match this string, so it drives
+    // /\brun \/usage-credits\b/ ALONE. normalizeScreen strips ESC-PREFIXED escape
+    // sequences and only then lowercases, so the CLI's capital "Run" survives to
+    // reach the pattern (a review read the strip as unconditional and called this
+    // pattern dead; `od -c` on the source and this test both say otherwise).
+    expect(classifyOutput('Run /usage-credits to continue')).toBe('rate-limited')
+    // The `run ` prefix is why the pattern can't be loosened to the bare slug: a
+    // mention in prose / docs / this file must stay ordinary output.
+    expect(classifyOutput('see /usage-credits for details')).toBe('normal')
   })
 
   it('detects the literal trust / permission dialog (narrow on purpose)', () => {
@@ -2111,6 +2170,45 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
     expect(isTierCooling('sonnet', t1 + 1)).toBe(false)
     // The hold log names the attribution so the journal shows WHY dispatch will shift.
     expect(engine.log.some((l) => l.message.includes('tier fable cooling until'))).toBe(true)
+  })
+
+  // The 2026-07-09 incident, end to end on the production seam. The screen is the
+  // CLI's verbatim per-model notice; the assertion chain is exactly the causal
+  // chain that was broken: classify → markRateLimited(fable) → the tier dispatch
+  // ACTUALLY launches on (resolveSwarmModelEffort — what spawnSwarmWorker calls)
+  // steps down to opus. Before the fix the notice classified 'normal', the worker
+  // was Enter-nudged into silence, and every later launch stayed on fable.
+  it('REGRESSION (2026-07-09): the real Fable-limit notice cools fable and the next launch resolves to opus', async () => {
+    const FABLE_LIMIT_NOTICE =
+      "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+
+    // Baseline: nothing cooling ⇒ a top-tier slot launches on fable.
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, t1).model).toBe('fable')
+
+    await runDispatchPass(engine, deps, t1)
+
+    // The notice was seen, attributed to the worker's launch tier, and cooled it.
+    expect(isTierCooling('fable', t1 + 1)).toBe(true)
+    // No reset wording in the notice ⇒ the flat grace window.
+    expect(isTierCooling('fable', t1 + RATE_LIMIT_GRACE_MS - 1)).toBe(true)
+    expect(isTierCooling('fable', t1 + RATE_LIMIT_GRACE_MS + 1)).toBe(false)
+    // Done ①: the NEXT dispatch (worker or adversarial reviewer) launches on opus.
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, t1 + 1).model).toBe('opus')
+    // …while the limited worker is HELD, not Enter-nudged (Enter can't lift a limit,
+    // which is why the real one sat silent for 22 minutes) and not reclaimed.
+    expect(deps.nudged).toEqual([])
+    expect(deps.recovered).toEqual([])
+    expect(engine.workers.map((w) => w.terminalId)).toEqual(['pty-a-1'])
   })
 
   it('a sighting with NO reset wording on screen falls back to RATE_LIMIT_GRACE_MS cooling', async () => {

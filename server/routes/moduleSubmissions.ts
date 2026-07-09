@@ -33,6 +33,7 @@ import {
 } from '@/lib/server/customModulesSubmissions'
 import {
   MarketError,
+  marketplaceRowIdForSubmission,
   publishModule,
   readPublishConfig,
 } from '@/lib/server/customModulesMarket'
@@ -167,9 +168,19 @@ export const moduleSubmissionsRoutes = new Hono()
   })
   // --- POST /api/module-submissions/:id/approve — publish + mark approved -----
   // The ONLY path that writes the public og_custom_modules table, and it goes
-  // through the existing service-role publishModule (an INSERT — a fresh
-  // marketplace row), so the public marketplace only ever holds owner-approved
-  // source. Then the submission row is stamped approved + linked to the new id.
+  // through the existing service-role publishModule, so the public marketplace
+  // only ever holds owner-approved source. Then the submission row is stamped
+  // approved + linked to the new id.
+  //
+  // IDEMPOTENT: publish + mark are two writes with no transaction, so a retry
+  // (mark failed → row still pending in the inbox) or a double-click must not
+  // INSERT a second marketplace row. Two layers guarantee that:
+  //   1. an already-published row replays its remoteId without re-publishing;
+  //   2. the publish targets a DERIVED marketplace row id (a digest of the
+  //      submission id — never the submission id itself, which a submitter can
+  //      choose) and INSERTs only, so a concurrent approve of a still-pending
+  //      row loses the PK race and replays instead of duplicating, and no
+  //      approve can ever overwrite a marketplace row it didn't create.
   .post('/api/module-submissions/:id/approve', async (c) => {
     const config = readSubmissionAdminConfig()
     if (!config) return c.json({ error: 'submission review not configured' }, 503)
@@ -182,7 +193,14 @@ export const moduleSubmissionsRoutes = new Hono()
     try {
       const sub = await getSubmission(config, id)
       if (!sub) return c.json({ error: 'not found' }, 404)
-      // Build a CustomModuleDef for publishModule (no remoteId → it INSERTs).
+      // Already fully approved → idempotent replay of the existing result.
+      if (sub.published_remote_id) return c.json({ remoteId: sub.published_remote_id })
+      // Rejected (or approved yet missing its remote id — hand-edited rows):
+      // silently publishing a resolved submission would be wrong; refuse.
+      if (sub.status !== 'pending') {
+        return c.json({ error: `submission already ${sub.status}` }, 409)
+      }
+      // Build a CustomModuleDef for publishModule (no remoteId → INSERT path).
       const def: CustomModuleDef = {
         id: sub.id,
         label: sub.name,
@@ -192,7 +210,9 @@ export const moduleSubmissionsRoutes = new Hono()
         createdAt: sub.created_at,
         updatedAt: sub.created_at,
       }
-      const result = await publishModule(pubConfig, def, sub.source ?? '')
+      const result = await publishModule(pubConfig, def, sub.source ?? '', {
+        rowId: marketplaceRowIdForSubmission(sub.id),
+      })
       await markSubmission(config, id, {
         status: 'approved',
         publishedRemoteId: result.remoteId,

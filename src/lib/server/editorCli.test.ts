@@ -1,10 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
+import { tmpdir } from 'os'
 import {
   EDITOR_CANDIDATES,
   __resetEditorCacheForTests,
   buildEditorSpawn,
   editorLaunchTarget,
   knownEditorLocations,
+  openInEditor,
   parseEditorCmd,
   resolveEditorArgv,
 } from './editorCli'
@@ -78,6 +80,34 @@ describe('resolveEditorArgv env override', () => {
     // Whatever detection finds on this machine, a blank override must never
     // produce an empty argv (that would spawn(undefined)).
     expect(argv === null || argv.length > 0).toBe(true)
+  })
+})
+
+// Launch-failure propagation (audit 856daefb): the env override is trusted
+// as-is, so a bad OPENGROUND_EDITOR_CMD used to spawn into a swallowed async
+// 'error' and the route answered {ok:true} with no editor. openInEditor now
+// awaits the spawn's initial 'spawn'/'error', so ENOENT rejects instead of
+// silently "succeeding". POSIX-only: on Windows the spawn rides a shell, where
+// a missing command fails inside the shell without a spawn 'error'.
+describe.skipIf(process.platform === 'win32')('openInEditor spawn-failure propagation', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    __resetEditorCacheForTests()
+  })
+
+  it('env override pointing at a missing binary → rejects (no silent {ok:true})', async () => {
+    vi.stubEnv('OPENGROUND_EDITOR_CMD', '/no/such/dir/editor-xyz --flag')
+    await expect(openInEditor(tmpdir())).rejects.toThrow(/ENOENT/)
+  })
+
+  it('env override naming a command invisible on PATH → rejects', async () => {
+    vi.stubEnv('OPENGROUND_EDITOR_CMD', 'openground-no-such-editor-cmd-xyz')
+    await expect(openInEditor(tmpdir())).rejects.toThrow(/ENOENT/)
+  })
+
+  it('env override pointing at a real binary still resolves', async () => {
+    vi.stubEnv('OPENGROUND_EDITOR_CMD', '/bin/echo')
+    await expect(openInEditor(tmpdir())).resolves.toBeUndefined()
   })
 })
 

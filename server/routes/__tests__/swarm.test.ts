@@ -6,8 +6,9 @@ import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import { __resetOrchestratorForTests } from '@/lib/server/swarmOrchestrator'
+import { __resetQuotaForTest } from '@/lib/server/swarmQuota'
 import { createSwarmFatalNotification } from '@/lib/server/swarmNotifications'
-import type { SwarmOrchestratorState, AppNotificationsResponse } from '@/lib/types'
+import type { SwarmOrchestratorState, AppNotificationsResponse, SwarmQuotaResponse } from '@/lib/types'
 
 // POST /api/swarm/worker + /worktree/remove against the real Hono app, with
 // OPENGROUND_HOME on a throwaway dir so the registry (the validateProjectPath
@@ -536,5 +537,109 @@ describe('GET /api/swarm/notifications — fatal swarm notifications (owner-only
     expect(res.status).toBe(200)
     const body = (await res.json()) as AppNotificationsResponse
     expect(body.notifications).toEqual([])
+  })
+})
+
+// ── Model-quota control plane ────────────────────────────────────────────────
+// The owner's manual steering wheel over swarmQuota's cooling table. It exists
+// because the automatic sensor can be wrong or late (2026-07-09: the CLI's
+// per-model limit notice went unmatched, so fable never cooled and the engine
+// kept dispatching into the dry tier) and a packaged .app cannot be
+// source-patched — the operator must be able to avoid a tier WITHOUT stopping
+// the engine. Owner-gating is swept for every /api/swarm route in
+// swarmSafety.routes.test.ts; here we prove the behaviour.
+
+describe('/api/swarm/quota — the model-tier cooling table', () => {
+  beforeEach(() => __resetQuotaForTest())
+  afterEach(() => __resetQuotaForTest())
+
+  it('GET reports every ladder tier, none cooling, launching on the top tier', async () => {
+    const res = await app.request('/api/swarm/quota')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as SwarmQuotaResponse
+    expect(body.tiers.map((t) => t.tier)).toEqual(['fable', 'opus', 'sonnet', 'haiku'])
+    expect(body.tiers.every((t) => !t.cooling && t.until === null)).toBe(true)
+    expect(body.launchTier).toBe('fable')
+    expect(body.allCoolingUntil).toBeNull()
+  })
+
+  it('cooling fable by hand drops the next launch to opus, and GET agrees', async () => {
+    const res = await app.request('/api/swarm/quota/cool', json({ tier: 'fable', minutes: 30 }))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as SwarmQuotaResponse
+    expect(body.launchTier).toBe('opus')
+    const fable = body.tiers.find((t) => t.tier === 'fable')
+    expect(fable?.cooling).toBe(true)
+    expect(fable?.until).toBeGreaterThan(body.now)
+    // The engine reads the SAME table — a later GET sees the mark.
+    const after = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+    expect(after.launchTier).toBe('opus')
+    expect(after.tiers.find((t) => t.tier === 'opus')?.cooling).toBe(false)
+  })
+
+  it('accepts an absolute untilMs as well as minutes', async () => {
+    const until = Date.now() + 45 * 60_000
+    const res = await app.request('/api/swarm/quota/cool', json({ tier: 'opus', untilMs: until }))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as SwarmQuotaResponse
+    expect(body.tiers.find((t) => t.tier === 'opus')?.until).toBe(until)
+    expect(body.launchTier).toBe('fable') // only opus was cooled
+  })
+
+  it('cooling every tier parks the swarm and reports the earliest reset', async () => {
+    for (const tier of ['fable', 'opus', 'sonnet', 'haiku']) {
+      const minutes = tier === 'sonnet' ? 10 : 60
+      expect((await app.request('/api/swarm/quota/cool', json({ tier, minutes }))).status).toBe(200)
+    }
+    const body = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+    expect(body.launchTier).toBeNull()
+    // sonnet frees up first (10 min), so that is when the swarm can resume.
+    expect(body.allCoolingUntil).toBeGreaterThan(body.now)
+    expect(body.allCoolingUntil! - body.now).toBeLessThan(11 * 60_000)
+  })
+
+  it('uncool releases a tier (and is idempotent)', async () => {
+    await app.request('/api/swarm/quota/cool', json({ tier: 'fable', minutes: 30 }))
+    const res = await app.request('/api/swarm/quota/uncool', json({ tier: 'fable' }))
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as SwarmQuotaResponse).launchTier).toBe('fable')
+    const again = await app.request('/api/swarm/quota/uncool', json({ tier: 'fable' }))
+    expect(again.status).toBe(200)
+    expect(((await again.json()) as SwarmQuotaResponse).launchTier).toBe('fable')
+  })
+
+  it('400 on an alias that is not on the ladder (fail-closed — never cool by guess)', async () => {
+    for (const path of ['/api/swarm/quota/cool', '/api/swarm/quota/uncool']) {
+      const res = await app.request(path, json({ tier: 'gpt-5', minutes: 30 }))
+      expect(res.status).toBe(400)
+    }
+    // …and the table is untouched.
+    const body = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+    expect(body.launchTier).toBe('fable')
+  })
+
+  it('400 when neither untilMs nor minutes is given', async () => {
+    const res = await app.request('/api/swarm/quota/cool', json({ tier: 'fable' }))
+    expect(res.status).toBe(400)
+  })
+
+  it('400 on an until in the past, or beyond the 7-day cap', async () => {
+    const past = await app.request('/api/swarm/quota/cool', json({ tier: 'fable', minutes: -5 }))
+    expect(past.status).toBe(400)
+    const far = await app.request(
+      '/api/swarm/quota/cool',
+      json({ tier: 'fable', untilMs: Date.now() + 8 * 24 * 3_600_000 }),
+    )
+    expect(far.status).toBe(400)
+    // Neither attempt cooled anything.
+    const body = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+    expect(body.tiers.every((t) => !t.cooling)).toBe(true)
+  })
+
+  it('403 for a non-owner — the control plane is owner-only', async () => {
+    await signInAs(TESTER)
+    expect((await app.request('/api/swarm/quota')).status).toBe(403)
+    expect((await app.request('/api/swarm/quota/cool', json({ tier: 'fable', minutes: 30 }))).status).toBe(403)
+    expect((await app.request('/api/swarm/quota/uncool', json({ tier: 'fable' }))).status).toBe(403)
   })
 })

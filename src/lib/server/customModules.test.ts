@@ -105,6 +105,12 @@ describe('readModuleSource', () => {
     expect(await readModuleSource('../traversal')).toBeNull()
     expect(await readModuleSource('123e4567-e89b-42d3-a456-426614174000')).toBeNull()
   })
+
+  it('null when the source file vanished under a known module', async () => {
+    const def = await createModule({ label: 'V', description: '' })
+    await rm(customModuleSourceFile(def.id, 'react'))
+    expect(await readModuleSource(def.id)).toBeNull()
+  })
 })
 
 describe('updateModule', () => {

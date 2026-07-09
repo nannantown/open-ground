@@ -10,6 +10,10 @@ import {
   isTierCooling,
   highestAvailableTier,
   allCoolingUntil,
+  clearCooling,
+  coolingSnapshot,
+  isModelTier,
+  MAX_MANUAL_COOLING_MS,
   __resetQuotaForTest,
 } from './swarmQuota'
 
@@ -265,5 +269,84 @@ describe('markCoolingUntil — newest signal wins', () => {
     markCoolingUntil('opus', NOW + 5 * MIN)
     markCoolingUntil('opus', NOW + 20 * MIN)
     expect(isTierCooling('opus', NOW + 10 * MIN)).toBe(true) // uses the 20-min until
+  })
+})
+
+// ── The MANUAL override surface (POST /api/swarm/quota/cool|uncool) ──────────
+// Together these are what lets an operator steer a packaged app away from a dry
+// tier without stopping the engine: SEE the table (coolingSnapshot), cool a tier
+// (markCoolingUntil, already covered above), release one (clearCooling), and
+// reject an alias that is not on the ladder (isModelTier).
+
+describe('clearCooling — the operator releases a tier', () => {
+  it('makes a cooling tier available again immediately', () => {
+    markCoolingUntil('fable', NOW + HOUR)
+    expect(highestAvailableTier(NOW)).toBe('opus')
+    clearCooling('fable')
+    expect(isTierCooling('fable', NOW)).toBe(false)
+    expect(highestAvailableTier(NOW)).toBe('fable')
+  })
+
+  it('is idempotent on an already-available tier', () => {
+    expect(() => clearCooling('haiku')).not.toThrow()
+    clearCooling('haiku')
+    expect(isTierCooling('haiku', NOW)).toBe(false)
+  })
+
+  it('touches ONLY the named tier', () => {
+    markCoolingUntil('fable', NOW + HOUR)
+    markCoolingUntil('opus', NOW + HOUR)
+    clearCooling('fable')
+    expect(isTierCooling('opus', NOW)).toBe(true)
+  })
+})
+
+describe('coolingSnapshot — the whole ladder at one instant', () => {
+  it('lists every tier best→cheapest, none cooling on a clean table', () => {
+    expect(coolingSnapshot(NOW)).toEqual(
+      MODEL_TIER_LADDER.map((tier) => ({ tier, cooling: false, until: null })),
+    )
+  })
+
+  it('reports until only for a tier that is STILL cooling (lazy expiry)', () => {
+    markCoolingUntil('fable', NOW + HOUR)
+    markCoolingUntil('opus', NOW - MIN) // elapsed — reads as available
+    const rows = coolingSnapshot(NOW)
+    expect(rows.find((r) => r.tier === 'fable')).toEqual({
+      tier: 'fable',
+      cooling: true,
+      until: NOW + HOUR,
+    })
+    // A stale mark must never look live — same rule isTierCooling applies.
+    expect(rows.find((r) => r.tier === 'opus')).toEqual({ tier: 'opus', cooling: false, until: null })
+  })
+
+  it('is a pure read — snapshotting does not mutate the table', () => {
+    markCoolingUntil('fable', NOW + HOUR)
+    coolingSnapshot(NOW + 2 * HOUR) // past fable's until
+    expect(isTierCooling('fable', NOW + MIN)).toBe(true) // still there, just expired later
+  })
+})
+
+describe('isModelTier — the routes fail-closed on an unknown alias', () => {
+  it('accepts exactly the ladder', () => {
+    for (const tier of MODEL_TIER_LADDER) expect(isModelTier(tier)).toBe(true)
+  })
+
+  it('rejects anything else (never cool a tier by guess)', () => {
+    expect(isModelTier('gpt-5')).toBe(false)
+    expect(isModelTier('FABLE')).toBe(false) // case-sensitive: it is a CLI alias
+    expect(isModelTier('')).toBe(false)
+    expect(isModelTier(undefined)).toBe(false)
+    expect(isModelTier(null)).toBe(false)
+    expect(isModelTier(0)).toBe(false)
+    expect(isModelTier(['fable'])).toBe(false)
+  })
+})
+
+describe('MAX_MANUAL_COOLING_MS — a hand cool cannot retire a tier forever', () => {
+  it('is one week — longer than any real reset window, short enough to self-heal', () => {
+    expect(MAX_MANUAL_COOLING_MS).toBe(7 * 24 * HOUR)
+    expect(MAX_MANUAL_COOLING_MS).toBeGreaterThan(DEFAULT_COOLING_GRACE_MS)
   })
 })

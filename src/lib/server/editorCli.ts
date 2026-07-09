@@ -203,22 +203,42 @@ export const buildEditorSpawn = (
 }
 
 /** Spawn the editor on the project dir, detached (the editor outlives us and
- *  we never wait on it). */
-const spawnDetached = (argv: string[], projectPath: string): void => {
+ *  we never wait on it — only on the launch itself). Resolves once the process
+ *  has actually spawned; rejects on the initial 'error' (ENOENT etc.), which is
+ *  where a bad OPENGROUND_EDITOR_CMD (trusted, never probed) or a binary that
+ *  vanished inside the detection-cache window surfaces — instead of the old
+ *  swallow-everything that made the route answer {ok:true} with no editor.
+ *  On Windows the spawn goes through a shell, so a missing command fails inside
+ *  the shell without an 'error' here — this guard is POSIX-strength only. */
+const spawnDetached = (argv: string[], projectPath: string): Promise<void> => {
   const { command, args, options } = buildEditorSpawn(argv, projectPath)
-  const child = spawn(command, args, options)
-  // The binary was probed moments ago, but it can still vanish in between —
-  // swallow the async 'error' so it can't crash the server process.
-  child.on('error', () => {})
-  child.unref()
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, options)
+    let settled = false
+    child.once('spawn', () => {
+      if (settled) return
+      settled = true
+      child.unref()
+      resolve()
+    })
+    // Permanent listener: a late 'error' after a successful spawn (rare) must
+    // still be swallowed so it can't crash the server process.
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    })
+  })
 }
 
 /** Open `projectPath` in the best available editor. Throws
- *  EditorNotFoundError when every strategy missed. */
+ *  EditorNotFoundError when every strategy missed, and propagates the spawn
+ *  error when the resolved editor failed to launch (the route maps it to 500
+ *  so the UI can say "couldn't open" instead of silently succeeding). */
 export const openInEditor = async (projectPath: string): Promise<void> => {
   const argv = await resolveEditorArgv()
   if (argv) {
-    spawnDetached(argv, projectPath)
+    await spawnDetached(argv, projectPath)
     return
   }
   // macOS last resort: the .app may exist without its CLI shim installed.

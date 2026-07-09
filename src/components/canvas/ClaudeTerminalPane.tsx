@@ -198,6 +198,10 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
         // per terminal and that stacks up across simultaneous panes.
         scrollback: 10000,
         convertEol: false,
+        // See TerminalPane.tsx — xterm snaps the viewport per wheel tick with
+        // no interpolation by default; this animates it instead so trackpad
+        // scrolling reads as smooth rather than choppy.
+        smoothScrollDuration: 125,
       })
       fit = new FitAddon()
       term.loadAddon(fit)

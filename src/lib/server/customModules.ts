@@ -15,7 +15,7 @@
 // module-level single-flight chain (the store.ts setSettings pattern) so two
 // concurrent mutations can't lose updates.
 
-import { readFile, mkdir, rm, stat } from 'fs/promises'
+import { readFile, mkdir, rm, open } from 'fs/promises'
 import { randomUUID } from 'crypto'
 import {
   customModulesIndexFile,
@@ -150,6 +150,11 @@ export const createModule = async (input: CreateModuleInput): Promise<CustomModu
 
 // Read the module's source + mtime (feeds the iframe and the hot-reload poll).
 // null when the id is invalid, unknown, or the source file vanished.
+// Both values MUST come from one open fd: path-based readFile+stat are two
+// independent syscalls, so an atomicWriteText rename landing between them
+// yields {old source, new mtime} — and the client adopts a poll body only
+// when mtimeMs moved, so that mismatched pair would pin the stale source
+// until the next edit (audit 856daefb).
 export const readModuleSource = async (
   id: string,
 ): Promise<CustomModuleSourceResponse | null> => {
@@ -157,8 +162,14 @@ export const readModuleSource = async (
   if (!def) return null
   const path = customModuleSourceFile(id, def.framework)
   try {
-    const [source, st] = await Promise.all([readFile(path, 'utf8'), stat(path)])
-    return { source, mtimeMs: st.mtimeMs }
+    const handle = await open(path, 'r')
+    try {
+      const source = await handle.readFile({ encoding: 'utf8' })
+      const st = await handle.stat()
+      return { source, mtimeMs: st.mtimeMs }
+    } finally {
+      await handle.close().catch(() => {})
+    }
   } catch {
     return null
   }

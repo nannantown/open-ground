@@ -23,6 +23,12 @@
 //                                   see src/lib/server/swarmWorkerRegistry.ts.
 // POST /api/swarm/orchestrator/start — turn the autonomous drain+dispatch ON.
 // POST /api/swarm/orchestrator/stop  — turn it OFF (manual spawn untouched).
+// GET  /api/swarm/quota           — the model-tier cooling table (swarmQuota).
+// POST /api/swarm/quota/cool      — cool a tier BY HAND so launches drop a rung
+//                                   (the manual override for when the automatic
+//                                   rate-limit sensor is wrong or late — no
+//                                   engine stop, no source patch needed).
+// POST /api/swarm/quota/uncool    — release a cooled tier again.
 //
 // Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts +
 // swarmOrchestrator.ts. OWNER-ONLY:
@@ -71,6 +77,16 @@ import {
   MAX_ESCALATION_ANSWER,
   MAX_ESCALATION_SHORT_FIELD,
 } from '@/lib/server/swarmEscalations'
+import {
+  coolingSnapshot,
+  markCoolingUntil,
+  clearCooling,
+  isModelTier,
+  highestAvailableTier,
+  allCoolingUntil,
+  MAX_MANUAL_COOLING_MS,
+  MODEL_TIER_LADDER,
+} from '@/lib/server/swarmQuota'
 import type {
   AppNotificationsResponse,
   EscalationsResponse,
@@ -79,12 +95,23 @@ import type {
   EscalationDismissResponse,
   EscalationProxyDraft,
   EscalationWhy,
+  SwarmQuotaResponse,
 } from '@/lib/types'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
 // Board goal is a short observable completion condition; 8 KiB is a generous
 // ceiling that still keeps the single PTY write trivial.
 const MAX_GOAL = 8 * 1024
+
+/** The cooling table as the owner sees it, at one instant. Snapshot + the two
+ *  derived answers dispatch itself asks (which tier a launch resolves to; when
+ *  the swarm un-parks if none is left). Read-only — no clock is stored. */
+const quotaSnapshot = (now: number): SwarmQuotaResponse => ({
+  now,
+  tiers: coolingSnapshot(now),
+  launchTier: highestAvailableTier(now),
+  allCoolingUntil: allCoolingUntil(now),
+})
 
 export const swarmRoutes = new Hono()
   // --- POST /api/swarm/worker — spawn an in-app worker ----------------------
@@ -700,4 +727,70 @@ export const swarmRoutes = new Hono()
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
       return c.json({ error: `failed to dismiss escalation: ${e?.message ?? e}` }, 500)
     }
+  })
+  // --- GET /api/swarm/quota — which model tiers are cooling -------------------
+  // The cooling table swarmQuota keeps in memory, plus the two answers dispatch
+  // derives from it (launchTier / allCoolingUntil). Process-wide, not
+  // per-project — a quota belongs to the `claude` subscription, not a repo — so
+  // there is no `path` and no validateProjectPath.
+  .get('/api/swarm/quota', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now()))
+  })
+  // --- POST /api/swarm/quota/cool — cool a tier BY HAND -----------------------
+  // Body: { tier, untilMs } or { tier, minutes }. The operator's steering wheel
+  // when the automatic sensor is wrong or late: mark a tier dry and every
+  // subsequent launch (worker, reviewer, commander) resolves one rung down the
+  // ladder — WITHOUT stopping the engine, and without a source patch, which a
+  // packaged .app cannot take. Same table, same lazy expiry as the sensor's own
+  // marks, so a manual cool self-heals at `until`.
+  // Fail-closed: an unknown alias is rejected rather than cooled by guess, and
+  // `until` must sit in (now, now + MAX_MANUAL_COOLING_MS] so a fat-fingered
+  // epoch cannot retire a tier forever.
+  .post('/api/swarm/quota/cool', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const tier = body?.tier
+    if (!isModelTier(tier)) {
+      return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}` }, 400)
+    }
+    const now = Date.now()
+    let until: number
+    if (typeof body?.untilMs === 'number' && Number.isFinite(body.untilMs)) {
+      until = body.untilMs
+    } else if (typeof body?.minutes === 'number' && Number.isFinite(body.minutes)) {
+      until = now + body.minutes * 60_000
+    } else {
+      return c.json({ error: 'untilMs or minutes is required' }, 400)
+    }
+    if (until <= now) return c.json({ error: 'until must be in the future' }, 400)
+    if (until > now + MAX_MANUAL_COOLING_MS) {
+      return c.json({ error: `until must be within ${MAX_MANUAL_COOLING_MS}ms of now` }, 400)
+    }
+    markCoolingUntil(tier, until)
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(now))
+  })
+  // --- POST /api/swarm/quota/uncool — release a tier --------------------------
+  // Body: { tier }. Undo a cool (manual or sensor-made) so the tier is available
+  // on the next launch. Idempotent: releasing an already-available tier is a
+  // no-op that still returns the snapshot.
+  .post('/api/swarm/quota/uncool', async (c) => {
+    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const tier = body?.tier
+    if (!isModelTier(tier)) {
+      return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}` }, 400)
+    }
+    clearCooling(tier)
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now()))
   })

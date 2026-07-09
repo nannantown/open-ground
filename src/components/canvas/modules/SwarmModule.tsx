@@ -31,7 +31,7 @@
 // SDK. This module never spawns claude itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Network, Inbox, Boxes, Gauge, Workflow, X, Power } from 'lucide-react'
+import { Network, Inbox, Boxes, Gauge, ShieldCheck, X, Power, type LucideIcon } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -50,10 +50,9 @@ import type {
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
-import { SwarmFlowPane } from './SwarmFlowPane'
-import { SwarmEscalationsPane } from './SwarmEscalationsPane'
-import { SwarmPowerBar } from './SwarmPowerBar'
-import { ExecutionModeToggle } from './ExecutionModeToggle'
+import { SwarmOverseerPane } from './SwarmOverseerPane'
+import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
+import { ExecutionModeMenu } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
 import { useSwarmEngine, planSwarmPower } from './useSwarmEngine'
 
@@ -160,12 +159,14 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
   }
 }
 
-// The three faces of the main area, switched by the tab row: the supply
+// The four faces of the main area, switched by the tab row: the supply
 // conversation desk, the commander (司令官) dashboard that drives the autonomous
-// engine, and the worker tiles. (The old todo rail was removed — todos live on
-// the Board tab now, and workers start from the engine or the commander, not a
-// per-card hand dispatch here.)
-type MainView = 'supply' | 'manager' | 'workers' | 'flow'
+// engine, the worker tiles, and the overseer (監督) inbox — the swarm's
+// questions + needs-attention feed, read when opened (never pinned over the
+// other views). (The old todo rail was removed — todos live on the Board tab
+// now; the old Flow visualization tab was removed too — its needs-attention
+// content lives on the overseer tab.)
+type MainView = 'supply' | 'manager' | 'workers' | 'overseer'
 
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
@@ -206,6 +207,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // round-trip is in flight.
   const [manager, setManager] = useState<SwarmManager | null>(() => loadManager(project.id))
   const [managerBusy, setManagerBusy] = useState(false)
+
+  // OPEN escalation count, reported up by the overseer pane's inbox poll (the
+  // pane stays mounted-but-hidden while another view is active, so this stays
+  // live). Drives the overseer tab badge AND keeps the pre-start onboarding from
+  // hiding a leftover question (see swarmIdle below).
+  const [escCount, setEscCount] = useState(0)
 
   // The autonomous engine's state — polled ONCE here (the shared hook) so BOTH
   // the worker tab and the manager dashboard read the same snapshot. `realWorkers`
@@ -248,6 +255,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setBusyWorktrees(new Set())
     setPendingRestarts(new Map())
     setRemovedWorktrees(new Set())
+    setEscCount(0)
     seenRef.current = new Set()
   }, [project.id])
 
@@ -784,37 +792,119 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       return pendingId && pendingId !== w.terminalId ? { ...w, terminalId: pendingId } : w
     })
 
-  // OFF / first-run: the swarm is FULLY idle — the engine isn't running and no
-  // supply / commander / worker session exists. In that state we replace the tab
-  // surface with the central onboarding (条件1/5) so a first-time owner sees the
-  // three roles + the work-flow + what Start does BEFORE pressing it. The master
-  // power bar stays above it (its Start, and the onboarding's, run the SAME
-  // powerSwarm composition). The moment anything comes up, the normal tabs return.
-  const swarmIdle = !engine.running && !supply && !manager && allWorkers.length === 0
+  // OFF / first-run: the swarm is FULLY idle — the engine isn't running, no
+  // supply / commander / worker session exists, AND no escalation is awaiting an
+  // answer. In that state we replace the tab surface with the central onboarding
+  // (条件1/5) so a first-time owner sees the three roles + the work-flow + what
+  // Start does BEFORE pressing it. The header row stays above it (its Start, and
+  // the onboarding's, run the SAME powerSwarm composition). The moment anything
+  // comes up, the normal tabs return. escCount is part of the guard because a
+  // LEFTOVER question from the last run must not hide behind the onboarding —
+  // the tab surface (with the overseer badge) must win.
+  const swarmIdle =
+    !engine.running && !supply && !manager && allWorkers.length === 0 && escCount === 0
+
+  // The sub-view tab strip — data-driven so the two badges (live workers /
+  // open questions) stay declarative. It renders ON the header row (one line
+  // instead of the old three stacked strips: power bar + mode row + tab row).
+  const tabs: {
+    view: MainView
+    icon: LucideIcon
+    label: string
+    badge?: number
+    badgeTone?: 'accent' | 'line'
+  }[] = [
+    { view: 'supply', icon: Inbox, label: t('projectPanel.swarm.supply.tab') },
+    { view: 'manager', icon: Gauge, label: t('projectPanel.swarm.manager.tab') },
+    {
+      view: 'workers',
+      icon: Boxes,
+      label: t('projectPanel.swarm.workersTab'),
+      badge: allWorkers.length > 0 ? allWorkers.length : undefined,
+      badgeTone: 'line',
+    },
+    {
+      view: 'overseer',
+      icon: ShieldCheck,
+      label: t('projectPanel.swarm.overseer.tab'),
+      // An open question needs the OWNER's action — the accent badge is what
+      // makes it noticeable now that the inbox is no longer pinned over the tabs.
+      badge: escCount > 0 ? escCount : undefined,
+      badgeTone: 'accent',
+    },
+  ]
 
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
     // panel was removed — browsing todos now lives on the Board tab (一本化), and
-    // workers are started by the autonomous engine (the master power switch above)
-    // or the commander session, NOT by a per-card hand "dispatch" here (条件1/2/3).
-    // This wrapper is now a vertical stack: the power bar + an error banner +
-    // the full-height tab surface below them.
+    // workers are started by the autonomous engine (the master power switch on
+    // the header row) or the commander session, NOT by a per-card hand "dispatch"
+    // here (条件1/2/3). This wrapper is a vertical stack: ONE header row (status ·
+    // sub-view tabs · mode menu · master switch) + an error banner + the
+    // full-height tab surface below.
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {/* The SINGLE master power switch (条件1) — start/stop the whole swarm from
-          one control, visible above every sub-view. ON starts the engine +
-          launches commander & supply (idempotent); OFF halts new dispatch only.
-          Its status spells out running/stopped + the live worker count (条件4). */}
-      <SwarmPowerBar
-        running={engine.running}
-        manualStop={engine.manualStop}
-        available={engineAvailable}
-        busy={engineBusy}
-        workerCount={allWorkers.length}
-        onToggle={powerSwarm}
-      />
-      {/* Token budget (card 68d8e00f): one switch sets the model/effort/parallelism every
-          swarm launch (worker / supply / commander) uses — max / economy / optimize. */}
-      <ExecutionModeToggle />
+      {/* ── The ONE header row ──────────────────────────────────────────────
+          Everything the old three stacked strips carried, on a single fixed-
+          height line so the terminal area below gets the vertical space back:
+          the live status pill (running/stopped · N workers), the sub-view tabs
+          (hidden while the pre-start onboarding is the surface), the execution-
+          mode dropdown (rare operation → an options menu, not an always-on
+          row), and the master Stop|Start switch (条件1 — ON starts the engine +
+          launches commander & supply, idempotent; OFF halts new dispatch only). */}
+      <div className="flex h-[38px] shrink-0 items-center gap-3 border-b border-line bg-bg pl-3 pr-2">
+        <SwarmPowerStatus
+          running={engine.running}
+          manualStop={engine.manualStop}
+          available={engineAvailable}
+          workerCount={allWorkers.length}
+        />
+        {swarmIdle ? (
+          <div className="min-w-0 flex-1" aria-hidden />
+        ) : (
+          <div
+            role="tablist"
+            aria-label={t('projectPanel.swarm.title')}
+            className="flex min-w-0 flex-1 items-center gap-4 self-stretch overflow-x-auto"
+          >
+            {tabs.map(({ view, icon: Icon, label, badge, badgeTone }) => (
+              <button
+                key={view}
+                type="button"
+                role="tab"
+                aria-selected={mainView === view}
+                onClick={() => setMainView(view)}
+                className={[
+                  '-mb-px flex shrink-0 items-center gap-1.5 self-stretch border-b-2 px-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+                  mainView === view
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-ink-muted hover:text-accent',
+                ].join(' ')}
+              >
+                <Icon size={12} strokeWidth={2} />
+                {label}
+                {badge !== undefined && (
+                  <span
+                    className={
+                      badgeTone === 'accent'
+                        ? 'rounded-full bg-accent-soft px-1.5 text-[9px] font-medium leading-[14px] text-accent'
+                        : 'rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint'
+                    }
+                  >
+                    {badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+        <ExecutionModeMenu />
+        <SwarmPowerSwitch
+          running={engine.running}
+          available={engineAvailable}
+          busy={engineBusy}
+          onToggle={powerSwarm}
+        />
+      </div>
       {/* A transient action error (worker terminate / restart, supply・commander
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}
@@ -855,13 +945,28 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         </div>
       )}
 
-      {/* ── Escalations inbox (C1): the swarm's questions awaiting THE OWNER. ──
-          Rendered ABOVE the tab surface so an open question stays visible no
-          matter which view is active — and even in the pre-start onboarding
-          state (a leftover question from the last run must not hide). The pane
-          renders null while the inbox is empty, so this costs nothing in the
-          common case. Fail-closed lives server-side; visibility lives here. */}
-      <SwarmEscalationsPane projectPath={project.path} />
+      {/* ── Overseer pane (C1): the swarm's questions + needs-attention feed. ──
+          ALWAYS mounted (hidden unless its tab is active): its inbox poll feeds
+          the overseer tab badge AND the swarmIdle escape above — a leftover
+          question from the last run must not hide behind the onboarding. The
+          old pinned-above-the-tabs banner is gone: like the commander and
+          worker views, this is read when its tab is opened. Fail-closed lives
+          server-side; visibility lives here. */}
+      <div
+        className={
+          !swarmIdle && mainView === 'overseer'
+            ? 'flex min-h-0 min-w-0 flex-1 flex-col'
+            : 'hidden'
+        }
+      >
+        <SwarmOverseerPane
+          projectPath={project.path}
+          engine={engine}
+          fatalNotifications={fatalNotifications}
+          openCount={escCount}
+          onOpenCountChange={setEscCount}
+        />
+      </div>
 
       {/* ── Tab surface: supply desk ⇆ commander ⇆ worker tiles ───────────── */}
       {/* No bg on this wrapper: the empty/CTA states below are PAPER surfaces
@@ -883,83 +988,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           available={engineAvailable}
           error={engineError}
         />
-      ) : (
+      ) : mainView === 'overseer' ? null : (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Toggle: supply (補給官) ⇆ commander (司令官) ⇆ workers. Underline tabs,
-            the same vocabulary as the project tab row, on a PAPER strip (bg-bg)
-            regardless of the content below so the ink tokens always have contrast. */}
-        <div
-          role="tablist"
-          aria-label={t('projectPanel.swarm.title')}
-          className="flex shrink-0 items-center gap-4 border-b border-line-soft bg-bg px-3"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mainView === 'supply'}
-            onClick={() => setMainView('supply')}
-            className={[
-              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-              mainView === 'supply'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-ink-muted hover:text-accent',
-            ].join(' ')}
-          >
-            <Inbox size={12} strokeWidth={2} />
-            {t('projectPanel.swarm.supply.tab')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mainView === 'manager'}
-            onClick={() => setMainView('manager')}
-            className={[
-              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-              mainView === 'manager'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-ink-muted hover:text-accent',
-            ].join(' ')}
-          >
-            <Gauge size={12} strokeWidth={2} />
-            {t('projectPanel.swarm.manager.tab')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mainView === 'workers'}
-            onClick={() => setMainView('workers')}
-            className={[
-              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-              mainView === 'workers'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-ink-muted hover:text-accent',
-            ].join(' ')}
-          >
-            <Boxes size={12} strokeWidth={2} />
-            {t('projectPanel.swarm.workersTab')}
-            {allWorkers.length > 0 && (
-              <span className="rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint">
-                {allWorkers.length}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mainView === 'flow'}
-            onClick={() => setMainView('flow')}
-            className={[
-              '-mb-px flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-              mainView === 'flow'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-ink-muted hover:text-accent',
-            ].join(' ')}
-          >
-            <Workflow size={12} strokeWidth={2} />
-            {t('projectPanel.swarm.flow.tab')}
-          </button>
-        </div>
-
         {mainView === 'supply' ? (
           supply ? (
             // The live supply session — a single reused ClaudeTerminalPane.
@@ -1025,12 +1055,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               sandboxWarning={engineSandboxWarning}
             />
           </div>
-        ) : mainView === 'flow' ? (
-          // Flow: the live, read-only visualization of the autonomous loop
-          // (drain → dispatch → monitor → integrate) — each worker's stage +
-          // heartbeat, the integration queue, the event feed, and fatal events.
-          // Reads the SAME engine snapshot (no own fetch); purely presentational.
-          <SwarmFlowPane engine={engine} fatalNotifications={fatalNotifications} available={engineAvailable} />
         ) : allWorkers.length === 0 ? (
           <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
             <div className="max-w-sm">
