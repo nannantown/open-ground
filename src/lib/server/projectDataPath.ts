@@ -63,6 +63,38 @@ export const projectUUIDFromPath = async (projectPath: string): Promise<string> 
   )
 }
 
+// Batch form of {@link projectUUIDFromPath} for read-only callers that must
+// attribute MANY paths at once — the Ground beacon resolves every live claude
+// PTY's cwd on a 5s poll. Reads the registry ONCE and canonicalizes each root
+// once (projectUUIDFromPath re-reads settings.json and re-realpaths every entry
+// per call), and maps an unowned path to `null` instead of throwing: a beacon
+// poll routinely sees free shells in ~/ and must not 500 on them.
+//
+// Ownership follows exactly the same rule as projectUUIDFromPath (registry root
+// or that entry's central worktrees dir, both canonical, UUID taken only from
+// the registry) — it shares `isAtOrUnder` so the two can't drift. It is NOT a
+// security boundary: keep using projectUUIDFromPath / isValidProjectPath there.
+export const projectUUIDsForPaths = async (
+  paths: readonly string[],
+): Promise<Map<string, string | null>> => {
+  await ensureProjectsMigrated()
+  const settings = await getSettings()
+  const roots = await Promise.all(
+    (settings.projects ?? []).map(async (e) => ({
+      id: e.id,
+      root: await canonicalize(e.path),
+      worktrees: await canonicalize(centralWorktreesDir(e.id)),
+    })),
+  )
+  const out = new Map<string, string | null>()
+  for (const p of Array.from(new Set(paths))) {
+    const target = await canonicalize(p)
+    const hit = roots.find((r) => isAtOrUnder(target, r.root) || isAtOrUnder(target, r.worktrees))
+    out.set(p, hit?.id ?? null)
+  }
+  return out
+}
+
 // Boolean form of {@link projectUUIDFromPath} for the security boundary. Accepts
 // a registered project root/descendant OR a central worktree path; rejects
 // everything else — crucially the bare central data root

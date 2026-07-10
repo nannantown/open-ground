@@ -2,7 +2,12 @@ import { readFile } from 'fs/promises'
 import { ensureOpenGroundHome, settingsFile, canvasFile, notificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import { asExecutionMode } from './swarmLaunch'
-import type { Settings, CanvasState, ExecutionMode } from '../types'
+import {
+  anyTierAllowed,
+  normalizeAllowedModels,
+  setAllowedModelTiersCache,
+} from './swarmAllowedModels'
+import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
   projects: [],
@@ -63,6 +68,14 @@ export const getSettings = async (): Promise<Settings> => {
   // `?? []` does NOT save a non-null non-array (a string has no .filter). Drop a
   // malformed field to its default rather than wedge the whole cockpit. Valid
   // settings are unaffected.
+  //
+  // Mirror the swarm's model hard mask into its globalThis cache on EVERY read:
+  // the launch-tier resolver (swarmLaunch.resolveAvailableTier) is synchronous
+  // and is reached from spawn paths that cannot all await a settings read, so it
+  // needs a last-known value. Writes go through setSettings, which re-reads here
+  // inside the single-flight chain — so a toggle is mirrored the moment it lands.
+  // The cache is derived, never authoritative (settings.json is).
+  setAllowedModelTiersCache(s.swarmAllowedModels)
   return {
     ...s,
     projects: Array.isArray(s.projects)
@@ -90,7 +103,12 @@ let settingsChain: Promise<unknown> = Promise.resolve()
 export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
   const run = settingsChain.then(async () => {
     const current = await getSettings()
-    await writeJson(settingsFile(), { ...current, ...patch })
+    const merged = { ...current, ...patch }
+    await writeJson(settingsFile(), merged)
+    // Re-mirror the model mask from the value we just PERSISTED (getSettings above
+    // mirrored the pre-patch one). Without this a freshly-toggled tier would stay
+    // spawnable for every sync reader until the next settings read.
+    setAllowedModelTiersCache(merged.swarmAllowedModels)
   })
   // Keep the chain advancing even if one write throws, so a single failure
   // can't wedge every subsequent settings save.
@@ -134,6 +152,7 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'defaultEditor',
   'experiments',
   'executionMode',
+  'swarmAllowedModels',
 ]
 
 // Persist a settings patch that ORIGINATES FROM AN UNTRUSTED HTTP CLIENT
@@ -153,9 +172,28 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
       }
     }
   }
+  // The model hard mask is stored NORMALIZED (a full four-tier map) so every
+  // reader sees the same shape, and an ALL-OFF patch is REFUSED: a swarm with no
+  // enabled tier can only park, and a UI bug / bad script must not be able to
+  // brick every launch path through this route. The key is then simply not
+  // applied — the previous mask survives, and the caller sees it missing from
+  // the returned key list. (The UI blocks the last toggle for the same reason.)
+  if (Object.prototype.hasOwnProperty.call(safe, 'swarmAllowedModels')) {
+    const mask = normalizeAllowedModels(safe.swarmAllowedModels)
+    if (anyTierAllowed(mask)) safe.swarmAllowedModels = mask
+    else delete safe.swarmAllowedModels
+  }
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]
 }
+
+// ─── Swarm model hard mask (Settings.swarmAllowedModels) ─────────────────────
+// The persisted "使用可能モデル" switches every claude spawn path consults before
+// picking a tier. Read it here (never straight from getSettings) so the read also
+// refreshes the globalThis mirror the synchronous resolver falls back on, and so a
+// hand-corrupted field degrades to "everything usable" in exactly one place.
+export const getAllowedModelTiers = async (): Promise<SwarmAllowedModels> =>
+  normalizeAllowedModels((await getSettings()).swarmAllowedModels)
 
 // ─── Swarm autonomy "remembered ON" set (Settings.swarmAutonomyOn) ────────────
 // The ONLY autonomy state that survives a restart — a REMINDER, never an

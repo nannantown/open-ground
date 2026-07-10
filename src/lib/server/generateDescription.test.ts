@@ -111,6 +111,62 @@ describe('buildDescribePrompt', () => {
     expect(p).toContain('.openground/')
     expect(p).toMatch(/read-only/i)
   })
+
+  // The extractor rejects EVERY candidate containing '<' (placeholder guard), so
+  // the prompt owns the other half of that contract: it must tell the model not
+  // to write angle brackets — exactly as buildTitlePrompt does. Without this
+  // line, describing an HTML/JSX project yielded answers like
+  // "A <canvas> rendering library", which the extractor dropped on the floor.
+  it('forbids angle brackets in the answer — the other half of the extractor guard', () => {
+    expect(buildDescribePrompt()).toMatch(/no angle brackets/i)
+  })
+
+  it('tells the model to substitute the `<…>` placeholders, brackets and all', () => {
+    const p = buildDescribePrompt()
+    // The placeholders it echoes are precisely what the extractor guard catches…
+    expect(extractDescMarker(p, DESC_MARKER_EN)).toBeNull()
+    expect(extractDescMarker(p, DESC_MARKER_JA)).toBeNull()
+    // …so the prompt must say to replace them rather than echo them back.
+    expect(p).toMatch(/replace each/i)
+  })
+})
+
+// Regression — audit 856daefb: a natural description containing '<' is rejected
+// by design (it is indistinguishable from an elided echo of the prompt's own
+// placeholder). When that hit only ONE language, `pair.en && pair.ja` never went
+// true, so generateProjectDescription sat until its 120s deadline and then
+// persisted a half-empty pair. The guard stays; the prompt (asserted above) is
+// what keeps a real answer from ever tripping it.
+describe('angle brackets: extractor guard ↔ prompt rule', () => {
+  const withAngles = [
+    `${DESC_MARKER_EN} A <canvas> rendering library. ${DESC_END}`,
+    `${DESC_MARKER_JA} <canvas> 描画ライブラリ。 ${DESC_END}`,
+  ].join('\n')
+
+  it('drops a candidate whose text contains an angle bracket', () => {
+    expect(extractMarkerPair(withAngles)).toEqual({ en: null, ja: null })
+  })
+
+  it('a one-sided angle bracket leaves the pair incomplete (the timeout bug)', () => {
+    const oneSided = [
+      `${DESC_MARKER_EN} A <canvas> rendering library. ${DESC_END}`,
+      `${DESC_MARKER_JA} 描画ライブラリ。 ${DESC_END}`,
+    ].join('\n')
+    const pair = extractMarkerPair(oneSided)
+    expect(pair.en).toBeNull()
+    expect(pair.ja).toBe('描画ライブラリ。')
+  })
+
+  it('the bracket-free wording the prompt asks for is accepted on both sides', () => {
+    const clean = [
+      `${DESC_MARKER_EN} A canvas rendering library. ${DESC_END}`,
+      `${DESC_MARKER_JA} canvas 描画ライブラリ。 ${DESC_END}`,
+    ].join('\n')
+    expect(extractMarkerPair(clean)).toEqual({
+      en: 'A canvas rendering library.',
+      ja: 'canvas 描画ライブラリ。',
+    })
+  })
 })
 
 // ── describe job registry ─────────────────────────────────────────────────────

@@ -55,14 +55,22 @@ export const projectPanel = {
     // Execution mode (token budget) — one switch for every swarm launch (card 68d8e00f).
     'projectPanel.swarm.mode.label': 'Mode',
     'projectPanel.swarm.mode.max': 'Max',
+    // {top}/{light} are the tiers these modes ACTUALLY resolve to under the
+    // usable-models switches below — never a model the swarm may not launch.
     'projectPanel.swarm.mode.max.hint':
-      'Every role on the top-tier model (Fable 5) / max effort, heavy parallelism — peak quality, peak spend. For crunch time.',
+      'Every role on the top usable model ({top}) / max effort, heavy parallelism — peak quality, peak spend. For crunch time.',
     'projectPanel.swarm.mode.economy': 'Economy',
     'projectPanel.swarm.mode.economy.hint':
-      'Sonnet, low/medium effort, fewer parallel workers — minimise the weekly-budget burn.',
+      '{light}, low/medium effort, fewer parallel workers — minimise the weekly-budget burn.',
     'projectPanel.swarm.mode.optimize': 'Optimize',
     'projectPanel.swarm.mode.optimize.hint':
-      'Per-card weight decides — heavy/safety work gets the top tier (Fable 5), chores drop to Sonnet. The smart default.',
+      'Per-card weight decides — heavy/safety work gets the top tier ({top}), chores drop to {light}. The smart default.',
+    // Usable models — the owner's PERMANENT per-tier switch (hard mask). Not the
+    // transient quota cooling: an OFF tier never comes back on its own.
+    'projectPanel.swarm.models.label': 'Usable models',
+    'projectPanel.swarm.models.hint':
+      'No swarm role ever launches on a model switched off here — it survives restarts, unlike a rate-limit cooldown.',
+    'projectPanel.swarm.models.last': 'At least one model must stay on',
     // OFF / first-run onboarding (SwarmOnboarding) — the SINGLE centered screen
     // shown while the swarm is fully idle (engine stopped + no supply / commander
     // / worker sessions). It explains the three roles and how a request flows
@@ -615,14 +623,22 @@ export const projectPanel = {
     // 実行モード（トークン節約）— swarm 起動全体に効く1スイッチ（card 68d8e00f）。
     'projectPanel.swarm.mode.label': 'モード',
     'projectPanel.swarm.mode.max': '最大出力',
+    // {top}/{light} は下の「使用可能モデル」を踏まえて実際に起動する tier。OFF にした
+    // モデル名は出さない（「最大出力 = Fable」と嘘をつかない）。
     'projectPanel.swarm.mode.max.hint':
-      '全ロール最上位モデル(Fable 5) / max effort・重並列。最高品質・最高コスト。ここぞの時に。',
+      '全ロール最上位モデル({top}) / max effort・重並列。最高品質・最高コスト。ここぞの時に。',
     'projectPanel.swarm.mode.economy': '節約',
     'projectPanel.swarm.mode.economy.hint':
-      'sonnet・低〜中effort・並列控えめ。週次枠の消費を最小化。',
+      '{light}・低〜中effort・並列控えめ。週次枠の消費を最小化。',
     'projectPanel.swarm.mode.optimize': '最適化',
     'projectPanel.swarm.mode.optimize.hint':
-      'カードの重みで自動割当 — 安全系/重い仕事は最上位(Fable 5)、雑務は sonnet。賢い既定（推奨）。',
+      'カードの重みで自動割当 — 安全系/重い仕事は最上位({top})、雑務は {light}。賢い既定（推奨）。',
+    // 使用可能モデル — 恒久的な per-tier スイッチ（hard mask）。一時的な quota 冷却とは
+    // 別レイヤーで、OFF にした tier は期限で復活しない。
+    'projectPanel.swarm.models.label': '使用可能モデル',
+    'projectPanel.swarm.models.hint':
+      'OFF にしたモデルには swarm のどの役割も起動しません。rate limit の冷却と違い、再起動しても残ります。',
+    'projectPanel.swarm.models.last': '最低1つは ON にしてください',
     // OFF・初回オンボーディング（SwarmOnboarding）— swarm が完全に待機状態（エンジン
     // 停止かつ補給官／司令官／worker セッションなし）のとき中央に出す1枚。3つの役割
     // と、要望がそこをどう流れるかを「開始」前に説明する。役割の名称は上の supply /

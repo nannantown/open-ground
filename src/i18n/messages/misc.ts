@@ -37,6 +37,13 @@ export const misc = {
     'misc.ground.importFailed': 'Import failed: {error}',
     'misc.ground.locateFailed': 'Locate failed: {error}',
     'misc.ground.saveSettingsFailed': 'Settings could not be saved: {error}',
+    // Ground bootstrap failure (GET /api/projects non-2xx / unreachable). Shown
+    // in place of the blank canvas so the app is never a silent white screen.
+    'misc.ground.loadFailed': "Couldn't load your projects.",
+    'misc.ground.loadFailedBody':
+      'The OPEN GROUND server returned an error. It may still be starting up.',
+    'misc.ground.retry': 'Retry',
+    'misc.ground.retrying': 'Retrying…',
     // Terminal SSE connection status (TerminalPane / ClaudeTerminalPane). When
     // the output stream drops, the browser auto-reconnects and the next `init`
     // repaints — but a silent frozen screen reads as a hang, so we surface a
@@ -81,6 +88,11 @@ export const misc = {
     'misc.ground.importFailed': 'インポートに失敗しました: {error}',
     'misc.ground.locateFailed': 'フォルダの指定に失敗しました: {error}',
     'misc.ground.saveSettingsFailed': '設定を保存できませんでした: {error}',
+    'misc.ground.loadFailed': 'プロジェクトを読み込めませんでした。',
+    'misc.ground.loadFailedBody':
+      'OPEN GROUND サーバーがエラーを返しました。まだ起動中の可能性があります。',
+    'misc.ground.retry': '再試行',
+    'misc.ground.retrying': '再試行中…',
     // Terminal SSE connection status (TerminalPane / ClaudeTerminalPane)
     'misc.terminal.reconnecting': '再接続中…',
     'misc.terminal.connectionLost': '接続が切れました',

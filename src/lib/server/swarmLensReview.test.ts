@@ -33,6 +33,7 @@ import {
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
 import { markCoolingUntil, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
+import { setSettings } from './store'
 
 // ── pure unit: the weighted-OR lens tally ──────────────────────────────────────
 describe('tallyLensReview — lens-panel weighted-OR decision (card 5f85d2f5)', () => {
@@ -281,6 +282,60 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
     expect(r.skippedForPark).toBe(true) // engine hold, NOT a verdict — callers keep it out of the defer streak
     expect(r.reason).toContain('quota park')
     expect(seen).toHaveLength(0) // not ONE reviewer burned into the exhausted wall
+  }, 30_000)
+
+  // The panel defaults to SWARM_LAUNCH_MODEL (fable). Before the hard mask it was
+  // the "half-lung" of this feature: workers respected a retired tier, reviewers
+  // did not — every reviewer abstained and the defer streak burned to needs-human
+  // (the 0a7c641 symptom). These pin the panel to the same mask.
+  it('a switched-OFF top tier moves the panel DOWN the ladder (not into the retired tier)', async () => {
+    const proj = await setupRepo()
+    const { branch, tip } = await branchWithCommit(proj)
+    await setSettings({ swarmAllowedModels: { fable: false } })
+    try {
+      const models: string[] = []
+      const review = makeAdversarialReview({
+        lenses: DEFAULT_REVIEW_LENSES,
+        // `model` is the tier the panel resolved for this spawn — the real runner
+        // launches claude on it, so asserting here is asserting the launch.
+        runReviewer: async ({ model }) => {
+          models.push(model)
+          return 'OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
+        },
+      })
+      const r = await review(proj, branch, 'main', { tip })
+      expect(r.decision).toBe('integrate') // it RAN — fable being off is not a park
+      expect(models).toHaveLength(DEFAULT_REVIEW_LENSES.length)
+      expect(new Set(models)).toEqual(new Set(['opus'])) // never the retired fable
+    } finally {
+      await setSettings({ swarmAllowedModels: undefined })
+    }
+  }, 30_000)
+
+  it('every tier switched OFF defers WITHOUT spawning a reviewer, and says a human must act', async () => {
+    const proj = await setupRepo()
+    const { branch, tip } = await branchWithCommit(proj)
+    await setSettings({
+      swarmAllowedModels: { fable: false, opus: false, sonnet: false, haiku: false },
+    })
+    try {
+      const seen: string[] = []
+      const review = makeAdversarialReview({
+        lenses: DEFAULT_REVIEW_LENSES,
+        runReviewer: async ({ lens }) => {
+          seen.push(lens!.key)
+          return 'OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
+        },
+      })
+      const r = await review(proj, branch, 'main', { tip })
+      expect(r.decision).toBe('defer')
+      expect(r.skippedForPark).toBe(true)
+      expect(r.reason).toContain('no model tier is enabled')
+      expect(r.reason).not.toContain('cooling') // there is no reset to wait for
+      expect(seen).toHaveLength(0)
+    } finally {
+      await setSettings({ swarmAllowedModels: undefined })
+    }
   }, 30_000)
 
   it('an abstaining lens (no parseable verdict) → defer — never merges an un-reviewed dimension', async () => {

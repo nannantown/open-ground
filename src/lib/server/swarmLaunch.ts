@@ -23,12 +23,19 @@ import {
 // turns the launch model from a fixed top-tier constant into "the highest tier
 // with headroom" (see resolveAvailableTier). One-way dep — swarmQuota imports
 // nothing back (it's the pure foundation).
+import { MODEL_TIER_LADDER, type ModelTier } from './swarmQuota'
+// The [Allowed] policy layer (swarmAllowedModels) is the SECOND, independent veto
+// this file reads: the owner's permanent per-tier ON/OFF switch. Cooling expires;
+// this does not. Both must pass for a tier to be launched on — `isTierSpawnable`
+// is the single predicate that ANDs them, so no ladder walk can forget one.
 import {
-  MODEL_TIER_LADDER,
-  isTierCooling,
-  highestAvailableTier,
-  type ModelTier,
-} from './swarmQuota'
+  allowedModelTiers,
+  highestAllowedTier,
+  highestSpawnableTier,
+  isTierAllowed,
+  isTierSpawnable,
+} from './swarmAllowedModels'
+import type { SwarmAllowedModels } from '../types'
 
 /** The TOP-TIER model — what "full capability" means today. Fable 5 superseded
  *  Opus 4.8 as the newest flagship (alias verified against the CLI: `--model
@@ -167,31 +174,49 @@ const desiredModelEffort = (
 }
 
 /** Map a DESIRED model tier to the one a worker should ACTUALLY launch on, given
- *  which tiers are cooling at `now` (the [Quota] foundation's table, swarmQuota).
- *  The fallback steps DOWN the ladder (fable→opus→sonnet→haiku): a slot that
- *  wanted the top tier (max mode / heavy card / commander) gets the highest tier
- *  with headroom, and a slot that deliberately chose a cheaper tier (economy /
- *  optimize chore) keeps it unless it too is cooling, then drops further. Only
- *  when EVERY tier at-or-below `desired` is dry does it look UP to the best
- *  available ({@link highestAvailableTier}) — a launch must never land on a
- *  known-cooling tier while another still has headroom; keeping the swarm MOVING
- *  is the incident this card fixes. If literally every tier is cooling, `desired`
- *  is returned unchanged: picking a model is this resolver's only job — the
- *  wait-until-reset decision belongs to the engine (swarmQuota.allCoolingUntil),
- *  not here.
+ *  the two independent vetoes at `now`: which tiers are COOLING (the [Quota]
+ *  foundation's table, swarmQuota) and which the owner has switched OFF (the
+ *  [Allowed] hard mask, swarmAllowedModels — pass the freshly-read map when you
+ *  can await settings; the globalThis mirror is the default).
  *
- *  With nothing cooling this is the IDENTITY on `desired`, so the execution-mode
- *  matrix below is exactly today's behavior until a real quota wall appears (the
- *  3-choice tests stay green). An unknown model string (not on the ladder) is
- *  treated as the ladder head — walk the whole thing — a safe "best available"
- *  default rather than a throw. */
-export const resolveAvailableTier = (desired: string, now: number): string => {
+ *  The fallback steps DOWN the ladder (fable→opus→sonnet→haiku): a slot that
+ *  wanted the top tier (max mode / heavy card / commander) gets the highest
+ *  spawnable tier, and a slot that deliberately chose a cheaper tier (economy /
+ *  optimize chore) keeps it unless it too is unusable, then drops further. Only
+ *  when EVERY tier at-or-below `desired` is unusable does it look UP to the best
+ *  spawnable one ({@link highestSpawnableTier}) — a launch must never land on a
+ *  known-dry tier while another still has headroom.
+ *
+ *  FAIL-CLOSED on the mask. When nothing is spawnable the resolver still has to
+ *  name a model (the wait-until-reset decision belongs to the engine — see
+ *  swarmAllowedModels.spawnBlock — not here), and it picks:
+ *    • `desired`, iff that tier is ALLOWED (every tier merely cooling ⇒ today's
+ *      behavior, unchanged: the engine parks and nothing is spawned anyway);
+ *    • else the best ALLOWED tier — a switched-OFF tier is never returned, even
+ *      as a last resort. That is the bug this card closes: the old
+ *      `?? desired` handed the caller the very tier the owner had disabled.
+ *    • else `null` — the owner switched EVERY tier off. There is no model to
+ *      launch on, so the caller must not spawn (NoAllowedModelTierError / park).
+ *
+ *  With nothing cooling and nothing switched off this is the IDENTITY on
+ *  `desired`, so the execution-mode matrix below is exactly today's behavior. An
+ *  unknown model string (not on the ladder) is treated as the ladder head — walk
+ *  the whole thing — a safe "best available" default rather than a throw. */
+export const resolveAvailableTier = (
+  desired: string,
+  now: number,
+  allowed: SwarmAllowedModels = allowedModelTiers(),
+): string | null => {
   const startIdx = MODEL_TIER_LADDER.indexOf(desired as ModelTier)
   const from = startIdx < 0 ? 0 : startIdx
   for (let i = from; i < MODEL_TIER_LADDER.length; i++) {
-    if (!isTierCooling(MODEL_TIER_LADDER[i], now)) return MODEL_TIER_LADDER[i]
+    if (isTierSpawnable(MODEL_TIER_LADDER[i], now, allowed)) return MODEL_TIER_LADDER[i]
   }
-  return highestAvailableTier(now) ?? desired
+  const best = highestSpawnableTier(now, allowed)
+  if (best) return best
+  // Nothing has headroom. Keep `desired` only while the owner still allows it.
+  if (startIdx >= 0 && isTierAllowed(desired as ModelTier, allowed)) return desired
+  return highestAllowedTier(allowed)
 }
 
 // ─── EXECUTION MODE × QUOTA FALLBACK ─────────────────────────────────────────
@@ -212,21 +237,33 @@ export const resolveAvailableTier = (desired: string, now: number): string => {
 // same highest-available tier together (no per-card出し分け). economy/optimize's
 // deliberately-cheaper picks are preserved, just resolved among what's available.
 // effort is NEVER touched by the fallback — only the model tier follows the quota.
+//
+// The owner's hard mask (Settings.swarmAllowedModels) narrows the ladder BEFORE
+// any of this: a switched-OFF tier is simply not a candidate, in any mode. So a
+// swarm with fable OFF runs `max` on opus — and the mode's UI copy says so
+// (ExecutionModeToggle drops disabled tiers from the hint) rather than promising
+// a model the engine will never launch.
 
 /** Resolve the model + effort a swarm role launches at under `mode`, WITH the live
- *  quota fallback applied to the model (effort is passed through untouched). `now`
- *  defaults to the wall clock so every call site re-resolves the CURRENT cooling
- *  state AT launch — the worker / manager / supply spawn paths need no extra
- *  wiring — and is injectable for deterministic tests. See the table above for the
- *  execution-mode × fallback matrix. */
+ *  quota fallback AND the owner's hard mask applied to the model (effort is passed
+ *  through untouched). `now` defaults to the wall clock so every call site
+ *  re-resolves the CURRENT state AT launch — and is injectable for deterministic
+ *  tests. `allowed` defaults to the globalThis mirror of Settings; every spawn path
+ *  that can await settings passes the freshly-read map.
+ *
+ *  Returns `null` when the owner has switched EVERY tier OFF: there is no model to
+ *  launch on, so the caller MUST NOT spawn (it throws NoAllowedModelTierError, or
+ *  the engine parks + escalates). See the table above for the mode × fallback matrix. */
 export const resolveSwarmModelEffort = (
   mode: ExecutionMode,
   role: 'worker' | 'supply' | 'manager' | 'overseer',
   card?: { title?: string; notes?: string },
   now: number = Date.now(),
-): { model: string; effort?: ClaudeEffort } => {
+  allowed: SwarmAllowedModels = allowedModelTiers(),
+): { model: string; effort?: ClaudeEffort } | null => {
   const desired = desiredModelEffort(mode, role, card)
-  return { ...desired, model: resolveAvailableTier(desired.model, now) }
+  const model = resolveAvailableTier(desired.model, now, allowed)
+  return model ? { ...desired, model } : null
 }
 
 /** The live-worker ceiling for a mode — economy runs fewer parallel workers (each

@@ -42,11 +42,11 @@ afterEach(async () => {
   await rm(scratch, { recursive: true, force: true })
 })
 
-/** git init -b main + one commit, so refs/heads exists. */
-async function makeRepo(name: string): Promise<string> {
+/** git init -b <branch> + one commit, so refs/heads exists. */
+async function makeRepo(name: string, branch = 'main'): Promise<string> {
   const dir = join(scratch, name)
   await mkdir(dir)
-  await git(dir, ['init', '-b', 'main'])
+  await git(dir, ['init', '-b', branch])
   await writeFile(join(dir, 'README.md'), '# fixture\n')
   await git(dir, ['add', '.'])
   await git(dir, ['commit', '-m', 'init'])
@@ -158,6 +158,36 @@ describe('checkMergedBranches', () => {
 
     const result = await checkMergedBranches(repo, ['task/y'])
     expect(result['task/y']).toBe('merged')
+  })
+
+  it('probes main → master when there is no origin/HEAD (master-default local repo)', async () => {
+    const repo = await makeRepo('repo-master', 'master')
+    // Purely local `git init -b master`: no remote, so no refs/remotes/origin/HEAD
+    // to read the default branch from — 'main' must not be assumed.
+    await git(repo, ['checkout', '-b', 'task/landed'])
+    await commit(repo, 'landed.txt', 'landed work')
+    await git(repo, ['checkout', 'master'])
+    await git(repo, ['merge', '--no-ff', 'task/landed', '-m', 'merge landed'])
+    await git(repo, ['checkout', '-b', 'task/open'])
+    await commit(repo, 'open.txt', 'open work')
+    await git(repo, ['checkout', 'master'])
+
+    const result = await checkMergedBranches(repo, ['task/landed', 'task/open'])
+    expect(result).toEqual({ 'task/landed': 'merged', 'task/open': 'open' })
+  })
+
+  it('prefers main over master when both exist and origin/HEAD is absent', async () => {
+    const repo = await makeRepo('repo-both')
+    // A stale 'master' lingers beside the real 'main' trunk; landed work sits on
+    // main only, so picking master would misjudge it as open.
+    await git(repo, ['branch', 'master'])
+    await git(repo, ['checkout', '-b', 'task/landed'])
+    await commit(repo, 'landed.txt', 'landed work')
+    await git(repo, ['checkout', 'main'])
+    await git(repo, ['merge', '--no-ff', 'task/landed', '-m', 'merge landed'])
+
+    const result = await checkMergedBranches(repo, ['task/landed'])
+    expect(result['task/landed']).toBe('merged')
   })
 
   it('finds a branch tip that exists ONLY as a remote-tracking ref', async () => {

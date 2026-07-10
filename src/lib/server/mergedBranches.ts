@@ -6,7 +6,8 @@
 //   merged(b)  ⟺  merge-base --is-ancestor <tip of b> <target ref>
 //
 // Target resolution: the caller-supplied targetBranch (the project's shared
-// config) wins; otherwise origin/HEAD's symbolic target; otherwise 'main'.
+// config) wins; otherwise origin/HEAD's symbolic target; otherwise the first of
+// main / master that exists (same ladder as branchChanges.resolveTarget).
 // One best-effort `git fetch origin <target>` freshens the judgment (offline
 // still works against the last-known remote ref). Every ref lookup prefers
 // the LOCAL branch tip and falls back to origin/<name> — on a reviewer's
@@ -45,6 +46,20 @@ const git = async (cwd: string, args: string[]): Promise<string | null> => {
 /** Does this FULL ref (refs/heads/x or refs/remotes/origin/x) exist? */
 const refExists = async (cwd: string, ref: string): Promise<boolean> =>
   (await git(cwd, ['show-ref', '--verify', '--quiet', ref])) !== null
+
+/** No origin/HEAD to read (a purely local `git init -b master`, a remote that
+ *  never advertised its default): probe the conventional trunk names in order
+ *  and take the first whose ref exists — the same main → master ladder
+ *  branchChanges.resolveTarget climbs. 'main' stays the last-ditch answer when
+ *  neither exists, so the fetch below can still materialise
+ *  refs/remotes/origin/main on a repo that has never fetched it. */
+const detectDefaultTarget = async (cwd: string): Promise<string> => {
+  for (const name of ['main', 'master']) {
+    if (await refExists(cwd, `refs/heads/${name}`)) return name
+    if (await refExists(cwd, `refs/remotes/origin/${name}`)) return name
+  }
+  return 'main'
+}
 
 /** The full ref holding `branch`'s tip — local first, then origin — or null. */
 const tipRefOf = async (cwd: string, branch: string): Promise<string | null> => {
@@ -119,14 +134,14 @@ export const checkMergedBranches = async (
       return result // unjudgeable target → everything stays unknown
     }
   } else {
-    // origin/HEAD → "refs/remotes/origin/<default>"; fall back to 'main'.
+    // origin/HEAD → "refs/remotes/origin/<default>"; without it, probe main/master.
     const head = await git(projectPath, [
       'symbolic-ref',
       '--quiet',
       'refs/remotes/origin/HEAD',
     ])
     const m = head?.trim().match(/^refs\/remotes\/origin\/(.+)$/)
-    target = m ? m[1] : 'main'
+    target = m ? m[1] : await detectDefaultTarget(projectPath)
   }
 
   // Freshen the target once — best-effort (no remote / offline is fine; the

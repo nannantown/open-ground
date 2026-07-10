@@ -44,7 +44,12 @@
 
 import { Hono } from 'hono'
 import { getCustomTabRole } from '@/lib/server/roles'
-import { readProjectData, writeProjectData, validateProjectPath } from '@/lib/server/projectData'
+import {
+  readProjectData,
+  mutateProjectData,
+  validateProjectPath,
+  ProjectDataConflictError,
+} from '@/lib/server/projectData'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
@@ -54,6 +59,7 @@ import {
   startOrchestrator,
   stopOrchestrator,
   stopOrchestratorWorker,
+  isCardDispatchInFlight,
   resolveOrchestratorReview,
   getOrchestratorState,
   drainTickOrchestrator,
@@ -82,11 +88,13 @@ import {
   markCoolingUntil,
   clearCooling,
   isModelTier,
-  highestAvailableTier,
   allCoolingUntil,
   MAX_MANUAL_COOLING_MS,
   MODEL_TIER_LADDER,
 } from '@/lib/server/swarmQuota'
+import { highestSpawnableTier } from '@/lib/server/swarmAllowedModels'
+import { getAllowedModelTiers } from '@/lib/server/store'
+import type { SwarmAllowedModels } from '@/lib/types'
 import type {
   AppNotificationsResponse,
   EscalationsResponse,
@@ -96,6 +104,7 @@ import type {
   EscalationProxyDraft,
   EscalationWhy,
   SwarmQuotaResponse,
+  SpawnSwarmWorkerResponse,
 } from '@/lib/types'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
@@ -105,13 +114,111 @@ const MAX_GOAL = 8 * 1024
 
 /** The cooling table as the owner sees it, at one instant. Snapshot + the two
  *  derived answers dispatch itself asks (which tier a launch resolves to; when
- *  the swarm un-parks if none is left). Read-only — no clock is stored. */
-const quotaSnapshot = (now: number): SwarmQuotaResponse => ({
+ *  the swarm un-parks if none is left). Read-only — no clock is stored.
+ *
+ *  `tiers` / `allCoolingUntil` report the COOLING table verbatim — unchanged, and
+ *  deliberately blind to the owner's model mask (this endpoint is the cooling
+ *  control plane; /cool and /uncool keep operating on exactly what it shows).
+ *  `launchTier` is the one DERIVED claim about a launch, so it honors the mask:
+ *  reporting a switched-OFF tier as "what launches next" would be a lie the engine
+ *  never acts on (it resolves through swarmAllowedModels). Null when nothing is
+ *  spawnable — every enabled tier cooling, or every tier switched off. */
+const quotaSnapshot = (now: number, allowed: SwarmAllowedModels): SwarmQuotaResponse => ({
   now,
   tiers: coolingSnapshot(now),
-  launchTier: highestAvailableTier(now),
+  launchTier: highestSpawnableTier(now, allowed),
   allCoolingUntil: allCoolingUntil(now),
 })
+
+/** The board column a card sits in, with the pre-Board back-compat default. */
+const columnOf = (card: { boardColumn?: string; done?: boolean }): string =>
+  card.boardColumn ?? (card.done ? 'done' : 'todo')
+
+/** What the pre-spawn claim found. `claimed` ⇒ this request now OWNS the card
+ *  (it moved todo→doing); `busy` ⇒ another dispatch already owns it; `free` ⇒ a
+ *  column nothing contends for (blocked / done — the engine never dispatches
+ *  those), left exactly where it is; `missing` ⇒ the card vanished mid-request. */
+type ClaimOutcome =
+  | { kind: 'claimed' }
+  | { kind: 'busy'; column: string }
+  | { kind: 'free'; column: string }
+  | { kind: 'missing' }
+
+/** CLAIM a card for dispatch — the todo→doing compare-and-swap that must land
+ *  BEFORE the worker is spawned.
+ *
+ *  Ordering is the whole point: `spawnSwarmWorker` creates a worktree (a git
+ *  fetch + checkout — hundreds of ms, sometimes seconds), and for that entire
+ *  window a claim-afterwards leaves the card sitting in `todo`, invisible to the
+ *  autonomous engine's countedIds. Its next runDispatchPass therefore re-selects
+ *  the SAME card and spawns a SECOND worker: two `swarm/*` branches on one card,
+ *  one of which is guaranteed to conflict at integration. Claiming first shuts
+ *  that window — `selectDispatch` only ever picks todo cards.
+ *
+ *  The read-modify-write runs inside the project's board lock
+ *  ({@link mutateProjectData}), so the compare and the swap are atomic against
+ *  the engine's own concurrent board writes. Throws only on a hard store failure
+ *  (the caller refuses to spawn rather than risk the twin). */
+const claimCardForDispatch = async (projectPath: string, taskId: string): Promise<ClaimOutcome> => {
+  /** doing/review ⇒ some branch already exists for this card; anything else
+   *  (blocked / done) is a column no dispatcher contends for. */
+  const settle = (column: string): ClaimOutcome =>
+    column === 'doing' || column === 'review' ? { kind: 'busy', column } : { kind: 'free', column }
+
+  // Cheap pre-read: only a card that reads `todo` is worth the locked
+  // read-modify-write below, which always writes. The lock re-checks anyway, so
+  // a card that flips in between still resolves correctly — this just spares the
+  // restart / blocked paths a no-op write.
+  const pre = (await readProjectData(projectPath)).tasks.find((t) => t.id === taskId)
+  if (!pre) return { kind: 'missing' }
+  if (columnOf(pre) !== 'todo') return settle(columnOf(pre))
+
+  let outcome: ClaimOutcome = { kind: 'missing' }
+  await mutateProjectData(projectPath, (data) => {
+    const card = data.tasks.find((t) => t.id === taskId)
+    if (!card) return
+    const column = columnOf(card)
+    if (column !== 'todo') {
+      outcome = settle(column)
+      return
+    }
+    card.boardColumn = 'doing'
+    card.done = false
+    outcome = { kind: 'claimed' }
+  })
+  return outcome
+}
+
+/** Give a claimed card back when the spawn it was claimed for FAILED — otherwise
+ *  a doomed spawn would park the card in `doing` with no worker behind it, where
+ *  neither the engine (it only dispatches todo) nor the owner would ever see it
+ *  move. Only reverts a card still sitting in `doing` (never overrides a column
+ *  someone else set meanwhile). Best-effort: the 500 the caller returns is the
+ *  real signal. */
+const releaseCardClaim = async (projectPath: string, taskId: string): Promise<void> => {
+  await mutateProjectData(projectPath, (data) => {
+    const card = data.tasks.find((t) => t.id === taskId)
+    if (card && columnOf(card) === 'doing') {
+      card.boardColumn = 'todo'
+      card.done = false
+    }
+  })
+}
+
+/** Record the branch the (now live) worker checked out on its card — the handle
+ *  the review/integration stage reads. Runs AFTER the spawn because the branch
+ *  name is minted inside it; the card is already `doing` by then, so no dispatch
+ *  can slip in between. Best-effort — the worker is live either way. */
+const recordCardBranch = async (
+  projectPath: string,
+  taskId: string,
+  branch: string,
+): Promise<void> => {
+  await mutateProjectData(projectPath, (data) => {
+    const card = data.tasks.find((t) => t.id === taskId)
+    if (card) card.branch = branch
+  })
+}
 
 export const swarmRoutes = new Hono()
   // --- POST /api/swarm/worker — spawn an in-app worker ----------------------
@@ -123,6 +230,14 @@ export const swarmRoutes = new Hono()
   //               Validated under the central worktrees dir by spawnSwarmWorker
   //               (resolveExistingSwarmWorktree), so a crafted path can't escape.
   // One of taskId | title is required.
+  //
+  // TWIN-DISPATCH: a card is CLAIMED (todo→doing, CAS under the board lock) BEFORE
+  // the worktree/PTY spawn — and a card the autonomous engine already owns (live
+  // worker, or mid-spawn: isCardDispatchInFlight) is refused with 409 instead of
+  // getting a second worker. Claiming afterwards left the card `todo` for the whole
+  // multi-second spawn, which is exactly when the engine's next runDispatchPass
+  // re-selected it and spawned a rival branch. A failed spawn hands the claim back.
+  // A RESTART is exempt (it re-enters an existing branch; it mints none).
   .post('/api/swarm/worker', async (c) => {
     // OWNER-ONLY gate (runs first, before body parse / path validation): the
     // in-app swarm spawns claude PTYs + git worktrees, so the control plane is
@@ -178,9 +293,61 @@ export const swarmRoutes = new Hono()
     // under this project's central worktrees dir by spawnSwarmWorker
     // (resolveExistingSwarmWorktree) — a crafted path throws there, not escapes.
     const worktree = typeof body?.worktree === 'string' && body.worktree ? body.worktree : undefined
+    // A RESTART re-enters an EXISTING worktree + branch, so it mints no second
+    // branch and cannot twin-dispatch — its card is legitimately already `doing`.
+    // Only a FRESH dispatch has to win the card first.
+    const isRestart = worktree !== undefined
+
+    // ── TWIN-DISPATCH GUARD (claim BEFORE spawn) ──────────────────────────────
+    // Both halves close the same hazard from opposite sides: the autonomous
+    // engine and this route each spawn workers, and neither sees the other's
+    // in-flight spawn. The board column is the shared mutual-exclusion token.
+    let claimed = false
+    if (taskId) {
+      // (a) The engine got there first — it is mid-spawn for this card, or its
+      //     worker is already live (a lagging todo→doing move can hide that from
+      //     the board). Refuse rather than mint a rival branch.
+      if (!isRestart && (await isCardDispatchInFlight(path, taskId))) {
+        return c.json({ error: 'task already dispatched' }, 409)
+      }
+      // (b) Take the card now, while the spawn (worktree + PTY) has NOT started:
+      //     once it reads `doing`, selectDispatch skips it forever after.
+      let outcome: ClaimOutcome
+      try {
+        outcome = await claimCardForDispatch(path, taskId)
+      } catch (e: any) {
+        // A refused/failed claim means we do NOT own the card — never spawn on it.
+        // A CAS refusal is someone else writing the board (409); anything else is
+        // the store failing under us (500).
+        const conflict = e instanceof ProjectDataConflictError
+        return c.json({ error: `failed to claim task: ${e?.message ?? e}` }, conflict ? 409 : 500)
+      }
+      if (outcome.kind === 'missing') return c.json({ error: 'task not found' }, 404)
+      if (outcome.kind === 'busy' && !isRestart) {
+        return c.json({ error: `task already dispatched (${outcome.column})` }, 409)
+      }
+      claimed = outcome.kind === 'claimed'
+      // (c) Re-check UNDER the claim. Gate (a) read the engine BEFORE the CAS, so the
+      //     engine could have reserved this card in between (runDispatchPass reserves
+      //     every pick before its first spawn) and already be spawning on it — while
+      //     the board still read `todo`, letting our CAS "win" a card that was not
+      //     free. Only this second read, taken after the claim, can see that. Hand the
+      //     card back and refuse: the engine's worker is the one that exists. Reverting
+      //     to `todo` is the safe direction — if the engine's spawn lands, its own
+      //     todo→doing move (or the reconcile pass, which retries the move for any
+      //     counted worker still sitting in todo) restores `doing`; if that spawn threw,
+      //     the card is freely dispatchable again instead of stranded in `doing` with no
+      //     worker behind it.
+      if (claimed && !isRestart && (await isCardDispatchInFlight(path, taskId))) {
+        await releaseCardClaim(path, taskId).catch(() => {})
+        return c.json({ error: 'task already dispatched' }, 409)
+      }
+    }
+
+    let res: SpawnSwarmWorkerResponse
     try {
       // WORKER: no env passed → the SWARM_MANAGER=1 guard stays inert (pass).
-      const res = await spawnSwarmWorker({
+      res = await spawnSwarmWorker({
         projectPath: path,
         title,
         notes,
@@ -189,39 +356,16 @@ export const swarmRoutes = new Hono()
         cols,
         rows,
       })
-      // CLAIM the card (todo→doing, recording its branch) so the autonomous
-      // orchestrator engine doesn't ALSO grab this still-todo card on its next
-      // pass and spawn a SECOND worker for it (twin-dispatch). Mirrors the engine's
-      // own todo→doing move. Best-effort + only for a card still in `todo`: a
-      // re-dispatch of a doing/review card is left where it is, and a kept CAS
-      // write just leaves the card in todo (no worse than before this guard).
-      if (taskId) {
-        try {
-          const fresh = await readProjectData(path)
-          const cardNow = fresh.tasks.find((t) => t.id === taskId)
-          const columnNow = cardNow?.boardColumn ?? (cardNow?.done ? 'done' : 'todo')
-          if (cardNow && columnNow === 'todo') {
-            await writeProjectData(
-              path,
-              {
-                ...fresh,
-                tasks: fresh.tasks.map((t) =>
-                  t.id === taskId
-                    ? { ...t, boardColumn: 'doing' as const, done: false, branch: res.branch }
-                    : t,
-                ),
-              },
-              { expectUpdatedAt: typeof fresh.updatedAt === 'string' ? fresh.updatedAt : undefined },
-            )
-          }
-        } catch {
-          /* best-effort claim — the worker is already live; a kept write is fine */
-        }
-      }
-      return c.json(res)
     } catch (e: any) {
+      // The claim outlived the spawn it was for — hand the card back to `todo`
+      // so it is re-dispatchable instead of stranded in `doing` worker-less.
+      if (claimed) await releaseCardClaim(path, taskId).catch(() => {})
       return c.json({ error: `failed to spawn worker: ${e?.message ?? e}` }, 500)
     }
+    // The branch only exists once the worktree does, so it lands in a second
+    // write — safe now, because the card is already `doing` and off the queue.
+    if (claimed) await recordCardBranch(path, taskId, res.branch).catch(() => {})
+    return c.json(res)
   })
   // --- POST /api/swarm/supply — spawn the in-app supply officer (補給官) ------
   // Body: { path, cols?, rows? }. Launches ONE interactive claude PTY in the
@@ -735,7 +879,7 @@ export const swarmRoutes = new Hono()
   // there is no `path` and no validateProjectPath.
   .get('/api/swarm/quota', async (c) => {
     if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
-    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now()))
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now(), await getAllowedModelTiers()))
   })
   // --- POST /api/swarm/quota/cool — cool a tier BY HAND -----------------------
   // Body: { tier, untilMs } or { tier, minutes }. The operator's steering wheel
@@ -773,7 +917,7 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `until must be within ${MAX_MANUAL_COOLING_MS}ms of now` }, 400)
     }
     markCoolingUntil(tier, until)
-    return c.json<SwarmQuotaResponse>(quotaSnapshot(now))
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(now, await getAllowedModelTiers()))
   })
   // --- POST /api/swarm/quota/uncool — release a tier --------------------------
   // Body: { tier }. Undo a cool (manual or sensor-made) so the tier is available
@@ -792,5 +936,5 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}` }, 400)
     }
     clearCooling(tier)
-    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now()))
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now(), await getAllowedModelTiers()))
   })

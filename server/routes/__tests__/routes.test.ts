@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
+import { mkdtemp, mkdir } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { app } from '../../app'
+import { centralWorktreesDir } from '@/lib/server/paths'
+import { registerTestProject } from '@/test/registerProject'
+import type { ActiveTerminalsResponse } from '@/lib/types'
 
 // Integration tests for the Hono backend. Hono apps can be invoked in-process
 // via `app.request(path, init)` (no TCP bind, no supertest), so these exercise
@@ -211,6 +217,53 @@ describe('Hono routes — dynamic params & 404 guard', () => {
     expect(body.cwds).toEqual([])
     expect(Array.isArray(body.claude)).toBe(true)
     expect(body.claude).toEqual([])
+  })
+
+  it('GET /api/terminal/active stamps projectId on a worker PTY in a CENTRAL worktree', async () => {
+    // The Ground beacon bug: a swarm worker's cwd is its worktree under
+    // ~/.openground/projects/<uuid>/worktrees/, OUTSIDE the project folder, so a
+    // client matching cwd against the project path could never attribute it and
+    // the card reported the idle repo-root pane's `waiting`. The route must hand
+    // the client the owning project's registry id.
+    const dir = await mkdtemp(join(tmpdir(), 'og-route-wt-'))
+    const uuid = await registerTestProject(dir)
+    const worktree = join(centralWorktreesDir(uuid), 'swarm-fix')
+    await mkdir(worktree, { recursive: true })
+
+    const seam = globalThis as { __openground_terminal?: { sessions: Map<string, unknown> } }
+    const sessions = seam.__openground_terminal!.sessions
+    const fake = (id: string, cwd: string) => ({
+      info: {
+        id,
+        cwd,
+        shell: '/bin/zsh',
+        cols: 100,
+        rows: 30,
+        startedAt: new Date().toISOString(),
+        tag: 'claude' as const,
+        lastOutputAt: Date.now(),
+      },
+      pty: {},
+      buffer: '',
+      listeners: new Set(),
+      exitListeners: new Set(),
+    })
+    sessions.set('worker', fake('worker', worktree))
+    sessions.set('root', fake('root', dir))
+    try {
+      const res = await app.request('/api/terminal/active')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as ActiveTerminalsResponse
+      const byId = new Map(body.claude.map((a) => [a.id, a]))
+      expect(byId.get('worker')?.projectId).toBe(uuid)
+      expect(byId.get('root')?.projectId).toBe(uuid)
+      // Both panes are freshly painting, so both read `working` — the beacon
+      // aggregation (aggregateClaudeBeacons) then collapses them per project.
+      expect(byId.get('worker')?.status).toBe('working')
+    } finally {
+      sessions.delete('worker')
+      sessions.delete('root')
+    }
   })
 
   it('GET /api/terminal/:id (unknown id) → 404', async () => {

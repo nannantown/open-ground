@@ -7,6 +7,7 @@ import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import { __resetOrchestratorForTests } from '@/lib/server/swarmOrchestrator'
 import { __resetQuotaForTest } from '@/lib/server/swarmQuota'
+import { setSettings } from '@/lib/server/store'
 import { createSwarmFatalNotification } from '@/lib/server/swarmNotifications'
 import type { SwarmOrchestratorState, AppNotificationsResponse, SwarmQuotaResponse } from '@/lib/types'
 
@@ -621,6 +622,46 @@ describe('/api/swarm/quota — the model-tier cooling table', () => {
   it('400 when neither untilMs nor minutes is given', async () => {
     const res = await app.request('/api/swarm/quota/cool', json({ tier: 'fable' }))
     expect(res.status).toBe(400)
+  })
+
+  // The owner's model hard mask is a SEPARATE layer. It must not touch the cooling
+  // table this endpoint reports, but `launchTier` — the one claim about a LAUNCH —
+  // must honor it, or an operator debugging "why is nothing spawning" reads
+  // `launchTier: fable` for a tier the engine will never touch.
+  describe('with the model hard mask (Settings.swarmAllowedModels)', () => {
+    afterEach(() => setSettings({ swarmAllowedModels: undefined }))
+
+    it('launchTier skips a switched-OFF tier; the cooling table is untouched', async () => {
+      await setSettings({ swarmAllowedModels: { fable: false } })
+      const body = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+      expect(body.launchTier).toBe('opus')
+      // fable is DISABLED, not cooling — the table says so verbatim.
+      expect(body.tiers.find((t) => t.tier === 'fable')).toEqual({
+        tier: 'fable',
+        cooling: false,
+        until: null,
+      })
+      expect(body.allCoolingUntil).toBeNull()
+    })
+
+    it('every tier OFF ⇒ launchTier null while allCoolingUntil stays null (no reset exists)', async () => {
+      await setSettings({
+        swarmAllowedModels: { fable: false, opus: false, sonnet: false, haiku: false },
+      })
+      const body = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+      expect(body.launchTier).toBeNull()
+      expect(body.allCoolingUntil).toBeNull() // nothing is COOLING — the mask is not a cool
+    })
+
+    it('uncool does not resurrect a disabled tier (the two vetoes stay independent)', async () => {
+      await setSettings({ swarmAllowedModels: { fable: false } })
+      await app.request('/api/swarm/quota/cool', json({ tier: 'fable', minutes: 30 }))
+      const res = await app.request('/api/swarm/quota/uncool', json({ tier: 'fable' }))
+      const body = (await res.json()) as SwarmQuotaResponse
+      // The cool is gone (cooling semantics unchanged) — but fable stays unusable.
+      expect(body.tiers.find((t) => t.tier === 'fable')?.cooling).toBe(false)
+      expect(body.launchTier).toBe('opus')
+    })
   })
 
   it('400 on an until in the past, or beyond the 7-day cap', async () => {

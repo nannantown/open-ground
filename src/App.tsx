@@ -21,8 +21,10 @@ import { Onboarding } from '@/components/Onboarding'
 import { BulkActionBar } from '@/components/canvas/BulkActionBar'
 import { ElementBar } from '@/components/canvas/ElementBar'
 import { EmptyState } from '@/components/canvas/EmptyState'
+import { GroundLoadError } from '@/components/canvas/GroundLoadError'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
+import { aggregateClaudeBeacons } from '@/lib/groundBeacon'
 import { autoLayout, frameLabelFor } from '@/lib/layout'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
@@ -121,6 +123,10 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [canvas, setCanvas] = useState<CanvasState | null>(null)
+  // Why load() last failed. Only reachable as UI before the first successful
+  // load, where it replaces the blank Ground with an error + Retry.
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [retryingLoad, setRetryingLoad] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -270,35 +276,54 @@ export default function App() {
     // in parallel — but ONLY when collab is enabled. With collab off this is a
     // resolved-empty promise (no network at all), so everything below is the
     // owned-only path and the Ground stays byte-for-byte unchanged.
-    const [res, shared] = await Promise.all([
-      api.api.projects.$get({}, { init: { cache: 'no-store' } }),
-      collabEnabled
-        ? fetch('/api/collab/projects')
-            .then((r) => (r.ok ? (r.json() as Promise<CollabProjectsListResponse>) : null))
-            .then((j) => (j?.projects ?? []).filter((p) => !p.owned))
-            .catch(() => [] as CollabProjectListItem[])
-        : Promise.resolve([] as CollabProjectListItem[]),
-    ])
-    const data = (await res.json()) as ProjectsResponse
-    // Lay out owned + shared cards through one call so the shared cards (keyed
-    // by collabProjectId) get non-overlapping grid slots after the owned ones.
-    // When `shared` is empty the input is the owned list itself (same reference),
-    // so autoLayout's result is identical to the owned-only build.
-    const layoutInput = shared.length ? [...data.projects, ...shared] : data.projects
-    const positions = autoLayout(layoutInput, data.canvas.positions)
-    const canvas = { ...data.canvas, positions }
-    setProjects(data.projects)
-    setSettings(data.settings)
-    // If an edit landed while we were fetching (or the flush above failed),
-    // the server snapshot is stale: keep the local canvas — its save is still
-    // pending — and only lay out any cards it doesn't know yet.
-    setCanvas((cur) =>
-      cur && pendingCanvasSave.current
-        ? { ...cur, positions: autoLayout(layoutInput, cur.positions) }
-        : canvas,
-    )
-    setSharedProjects(shared)
-    return { ...data, canvas }
+    try {
+      const [res, shared] = await Promise.all([
+        api.api.projects.$get({}, { init: { cache: 'no-store' } }),
+        collabEnabled
+          ? fetch('/api/collab/projects')
+              .then((r) => (r.ok ? (r.json() as Promise<CollabProjectsListResponse>) : null))
+              .then((j) => (j?.projects ?? []).filter((p) => !p.owned))
+              .catch(() => [] as CollabProjectListItem[])
+          : Promise.resolve([] as CollabProjectListItem[]),
+      ])
+      // res.ok guard — the SAME contract as ProjectPanel's initial load. A
+      // non-2xx body is an `{ error }` envelope, NOT ProjectsResponse: adopting
+      // it left data.canvas undefined, so autoLayout below threw, the restore
+      // effect's uncaught rejection swallowed it, and settings/canvas stayed
+      // null → the blank `bg-bg` div forever, with no error and no Retry.
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as unknown as { error?: string }
+        throw new Error(body.error ?? `GET /api/projects failed (${res.status})`)
+      }
+      const data = (await res.json()) as ProjectsResponse
+      // Lay out owned + shared cards through one call so the shared cards (keyed
+      // by collabProjectId) get non-overlapping grid slots after the owned ones.
+      // When `shared` is empty the input is the owned list itself (same reference),
+      // so autoLayout's result is identical to the owned-only build.
+      const layoutInput = shared.length ? [...data.projects, ...shared] : data.projects
+      const positions = autoLayout(layoutInput, data.canvas.positions)
+      const canvas = { ...data.canvas, positions }
+      setProjects(data.projects)
+      setSettings(data.settings)
+      // If an edit landed while we were fetching (or the flush above failed),
+      // the server snapshot is stale: keep the local canvas — its save is still
+      // pending — and only lay out any cards it doesn't know yet.
+      setCanvas((cur) =>
+        cur && pendingCanvasSave.current
+          ? { ...cur, positions: autoLayout(layoutInput, cur.positions) }
+          : canvas,
+      )
+      setSharedProjects(shared)
+      setLoadError(null)
+      return { ...data, canvas }
+    } catch (e) {
+      // Every caller already handles the null (`loaded?.projects`), and several
+      // call load() as a floating promise — so failures are recorded in state
+      // rather than rethrown. Before the first successful load this drives the
+      // Retry screen; afterwards the Ground stays painted on a refresh miss.
+      setLoadError(e instanceof Error ? e.message : String(e))
+      return null
+    }
   }, [collabEnabled, flushCanvasSave])
 
   // Open a Ground shared card (member flow) — the SAME path CollabSharedDialog's
@@ -391,23 +416,40 @@ export default function App() {
   // saved project that's gone (deleted / renamed / archived-and-hidden) falls
   // back to Ground. The panel tab is restored inside ProjectPanel itself.
   const didRestore = useRef(false)
+  const loadAndRestore = useCallback(
+    () =>
+      load()
+        .then((data) => {
+          // A failed load must NOT burn the one-shot: Retry has to be able to
+          // restore the last-open project once the server comes back.
+          if (didRestore.current || !data) return
+          didRestore.current = true
+          const { projectId } = loadPersistedView()
+          if (projectId && data.projects.some((p) => p.id === projectId)) {
+            // Don't clobber a selection the user may have made while the first
+            // scan was still in flight — only restore onto an empty Ground.
+            setSelectedIds((cur) => (cur.length === 0 ? [projectId] : cur))
+          } else if (projectId) {
+            // Saved project is gone (deleted / renamed / archived-and-hidden):
+            // drop the stale id so it stops being read on every future reload.
+            savePersistedView({ projectId: undefined })
+          }
+        })
+        // load() funnels its own failures into loadError, so this only catches
+        // a throw from the restore body itself. Either way: never an unhandled
+        // rejection, which is what hid the blank-Ground bug for so long.
+        .catch(() => {}),
+    [load],
+  )
   useEffect(() => {
-    load().then((data) => {
-      if (didRestore.current) return
-      didRestore.current = true
-      if (!data) return
-      const { projectId } = loadPersistedView()
-      if (projectId && data.projects.some((p) => p.id === projectId)) {
-        // Don't clobber a selection the user may have made while the first
-        // scan was still in flight — only restore onto an empty Ground.
-        setSelectedIds((cur) => (cur.length === 0 ? [projectId] : cur))
-      } else if (projectId) {
-        // Saved project is gone (deleted / renamed / archived-and-hidden):
-        // drop the stale id so it stops being read on every future reload.
-        savePersistedView({ projectId: undefined })
-      }
-    })
-  }, [load])
+    void loadAndRestore()
+  }, [loadAndRestore])
+
+  // Retry from the bootstrap-error screen (GroundLoadError). Same path as mount.
+  const retryLoad = useCallback(() => {
+    setRetryingLoad(true)
+    void loadAndRestore().finally(() => setRetryingLoad(false))
+  }, [loadAndRestore])
 
   // Persist the open project so a reload re-opens it. Exactly one selected
   // project is a real "location"; zero (Ground) or a multi-select isn't, so
@@ -661,10 +703,11 @@ export default function App() {
 
   // Poll which projects have a live claude session (every 5s, skipped while
   // the tab is hidden; an immediate re-poll on focus covers the return).
-  // Terminals are always spawned with cwd = the registered project path, so
-  // plain equality matches — "or under" covers the edge case of a subdir cwd.
-  // Best-effort: a failed poll keeps the last known state rather than
-  // flashing beacons off.
+  // Attribution + the working-wins collapse live in aggregateClaudeBeacons —
+  // a session belongs to the project the SERVER says owns its cwd, which is how
+  // a swarm worker running in a central worktree (outside the project folder)
+  // reaches its card. Best-effort: a failed poll keeps the last known state
+  // rather than flashing beacons off.
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
@@ -676,17 +719,7 @@ export default function App() {
         if (cancelled) return
         // A server predating the refined payload omits `claude` — treat that
         // as "no claude sessions" so cards show no beacon.
-        const claude = data.claude ?? []
-        // cwd→project; working wins when a project holds both a working and
-        // a waiting pane.
-        const nextStatus = new Map<string, ClaudeBeaconStatus>()
-        for (const p of projects) {
-          for (const a of claude) {
-            if (a.cwd !== p.path && !a.cwd.startsWith(p.path + '/')) continue
-            nextStatus.set(p.id, a.status)
-            if (a.status === 'working') break
-          }
-        }
+        const nextStatus = aggregateClaudeBeacons(projects, data.claude ?? [])
         // Keep the previous Map identity when nothing changed so the canvas
         // doesn't re-render every 5 seconds.
         setClaudeStatusById((prev) =>
@@ -1083,6 +1116,13 @@ export default function App() {
   }
 
   if (!settings || !canvas) {
+    // The bootstrap fetch failed and nothing has ever painted: say so and offer
+    // a way out. Without this the user sits on an indistinguishable blank
+    // canvas until the server recovers (⌘R and the focus re-scan are silent).
+    if (loadError) {
+      return <GroundLoadError detail={loadError} retrying={retryingLoad} onRetry={retryLoad} />
+    }
+    // First load still in flight — a bare backdrop, not a spinner flash.
     return <div className="h-screen w-screen bg-bg" />
   }
 

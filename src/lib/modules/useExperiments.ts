@@ -41,6 +41,16 @@ export function useExperiments(): ExperimentsState {
     }
   }, [])
 
+  // Holds the last flags object handed out, so a refresh that resolves to the
+  // same values (the common case — the focus-triggered re-check almost never
+  // actually changes anything) reuses the SAME reference instead of minting a
+  // new one. Consumers (e.g. ProjectPanel's moduleGate) can then depend on the
+  // `flags` object itself and have it stay stable across no-op polls, rather
+  // than hand-picking individual keys to watch — which silently stops tracking
+  // a newly added ExperimentId until someone remembers to extend the dep list.
+  const flagsRef = useRef(flags)
+  flagsRef.current = flags
+
   const refresh = useCallback(async () => {
     try {
       const r = await fetch('/api/experiments', { cache: 'no-store' })
@@ -50,10 +60,15 @@ export function useExperiments(): ExperimentsState {
       setEligible(!!body.eligible)
       // Take only known flag keys, coerced to booleans — never trust the wire to
       // be exactly NO_FLAGS' shape.
-      setFlags({
+      const next: ExperimentFlags = {
         swarm: body.flags?.swarm === true,
         sandbox: body.flags?.sandbox === true,
-      })
+      }
+      const prev = flagsRef.current
+      const unchanged = (Object.keys(next) as (keyof ExperimentFlags)[]).every(
+        (k) => prev[k] === next[k],
+      )
+      if (!unchanged) setFlags(next)
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known gate quietly.

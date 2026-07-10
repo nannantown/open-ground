@@ -22,10 +22,12 @@ import {
 } from '@/lib/server/projectData'
 import {
   updateProjectEntryPath,
+  findProjectEntryByPath,
   removeProjectEntry,
   relocateProjectEntry,
   setProjectDisplayName,
 } from '@/lib/server/registry'
+import { canonicalize } from '@/lib/server/canonicalize'
 import { projectCentralDir } from '@/lib/server/paths'
 import {
   getSettings,
@@ -692,11 +694,21 @@ export const projectRoutes = new Hono()
   }
 })
   // ── /api/project/delete ───────────────────────────────────────────────────
-  // POST { path } → move folder to the OS trash AND unregister it. Only a
-  // registered project (or a path under one) may be deleted — the registry is
-  // the allowlist, enforced via validateProjectPath. The trash step is
-  // platform-branched (buildTrashCommand): macOS Finder Trash, Windows Recycle
-  // Bin, Linux freedesktop trash — so delete works off macOS, not just on it.
+  // POST { path } → move a project's folder to the OS trash AND unregister it.
+  // ONLY a registered project ROOT may be deleted. validateProjectPath is the
+  // allowlist but it answers the weaker question "is this at or under some
+  // registered project?" — true for `<root>/src`, `<root>/.git`, and every
+  // central worktree path. Deleting trashes whatever it is handed, so it gates
+  // on the strictly stronger findProjectEntryByPath (exact canonical root
+  // match) instead; a descendant now 403s with nothing trashed. Before this the
+  // subpath was trashed while removeProjectEntry's exact-match lookup returned
+  // null, so the registry, the canvas card and the central data dir all
+  // survived — and the route still answered ok:true, i.e. "deleted" while the
+  // card stayed and the folder was gutted.
+  //
+  // The trash step is platform-branched (buildTrashCommand): macOS Finder
+  // Trash, Windows Recycle Bin, Linux freedesktop trash — so delete works off
+  // macOS, not just on it.
   .post('/api/project/delete', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const path = typeof body?.path === 'string' ? body.path : ''
@@ -704,7 +716,15 @@ export const projectRoutes = new Hono()
   if (!(await validateProjectPath(path))) {
     return c.json({ error: 'path not allowed' }, 403)
   }
-  const target = resolve(path)
+  const entry = await findProjectEntryByPath(path)
+  if (!entry) {
+    return c.json({ error: 'only a registered project root can be deleted' }, 403)
+  }
+  // Trash the canonical root, not resolve(path): resolve() keeps symlinks, so a
+  // symlink pointing at the root would send the LINK to the trash and leave the
+  // real folder — while everything downstream (which canonicalizes) believed
+  // the project was gone.
+  const target = await canonicalize(path)
   const { cmd, args } = buildTrashCommand(process.platform, target)
 
   try {
@@ -720,6 +740,13 @@ export const projectRoutes = new Hono()
   // central data dir. The folder is already gone, so any in-flight run is dead;
   // without this the per-project store (~/.openground/projects/<id>/) would
   // orphan forever under a dead uuid (Export isn't built, so it's unrecoverable).
+  //
+  // Keyed on removeProjectEntry's RESULT, never on the entry we looked up before
+  // trashing: the trash step is unlocked and can take 30s, and a relocate/rename
+  // landing in that window re-points the entry BY ID at a surviving folder. Then
+  // the by-path removal correctly no-ops — and reaping `entry.id`'s central dir
+  // anyway would destroy the Board + Canvas of a project that is still on screen.
+  // An orphaned central dir is the safe side of that trade.
   const removed = await removeProjectEntry(target)
   if (removed) {
     const canvas = await getCanvas()

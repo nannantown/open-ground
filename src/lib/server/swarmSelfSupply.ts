@@ -26,6 +26,28 @@
 //   and the pass NEVER throws into the engine tick (every scanner is guarded; a
 //   board-read/write failure logs and yields, re-proposing next scan).
 //
+// OFF-TICK (why the engine does not await a scan)
+//   A scan spawns tsc + eslint + vitest sequentially — minutes of wall clock. The
+//   engine tick holds `passInFlight` for its whole body, so awaiting the scan there
+//   FROZE dispatch / monitor / integrate — i.e. stall, runaway and crash detection —
+//   for the length of the scan. The orchestrator therefore fires the pass and returns
+//   ({@link kickSelfSupplyPass}); the scan runs beside the tick, not inside it. That
+//   makes overlap possible (a tick arrives while the previous scan is still spawning
+//   tools), so `selfSupply.scanInFlight` is a check-and-set re-entrancy guard taken
+//   SYNCHRONOUSLY before the pass's first await — the same shape as the engine's own
+//   `passInFlight`. The throttle alone could not hold that window: `lastScanAt` is
+//   only stamped after the board read.
+//
+// SUBPROCESSES (why the scanners go through runGateProcess)
+//   `vitest run` uses the default FORK pool, and `execFile`'s `timeout` SIGTERMs only
+//   the direct pid — so a wedged suite hitting the 240s cap left its fork workers
+//   ORPHANED, each spinning a core to machine saturation (feedback_vitest_no_midrun_kill;
+//   the very hazard the merge gate already defends against). Every scanner therefore
+//   spawns through {@link runGateProcess}: detached (own process group) + a negative-pid
+//   SIGKILL of the WHOLE group on every exit path. runGateProcess REJECTS on a non-zero
+//   exit — which is exactly when tsc/eslint/vitest carry the payload we parse — so
+//   runCapture reads `stdout` back off the rejection.
+//
 // DISCOVERY SOURCES (発見ソース)
 //   - anomalies — orphan-doing / worktree-missing / worker-stale / move-stuck /
 //                 rework-exhausted, read straight off engine.anomalies (already
@@ -50,13 +72,10 @@
 //   CAS conflict holds every card for the next scan (nothing half-lands).
 
 import { randomUUID } from 'crypto'
-import { execFile as execFileCb } from 'child_process'
-import { promisify } from 'util'
 import { join } from 'path'
+import { runGateProcess } from './gateProcess'
 import { readProjectData, writeProjectData } from './projectData'
 import type { OrchestratorAnomaly, ProjectData, ProjectTask } from '../types'
-
-const execFile = promisify(execFileCb)
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -92,6 +111,12 @@ export interface SelfSupplyRuntime {
   dayKey: string
   /** Cards proposed so far in `dayKey` — the maxPerDay gate. */
   dayCount: number
+  /** A scan is running RIGHT NOW, beside the engine tick that fired it. The
+   *  re-entrancy guard for the off-tick pass: set synchronously before the pass's
+   *  first await, cleared in its `finally`. Without it a tick arriving during the
+   *  scan's minutes of tool spawns would start a SECOND scan (the `lastScanAt`
+   *  throttle can't hold that window — it is only stamped after the board read). */
+  scanInFlight: boolean
 }
 
 export const initSelfSupplyRuntime = (): SelfSupplyRuntime => ({
@@ -99,6 +124,7 @@ export const initSelfSupplyRuntime = (): SelfSupplyRuntime => ({
   lastScanAt: 0,
   dayKey: '',
   dayCount: 0,
+  scanInFlight: false,
 })
 
 // ── Findings ─────────────────────────────────────────────────────────────────
@@ -369,21 +395,31 @@ export interface SelfSupplyDeps {
   scanTodoComments: (projectPath: string) => Promise<SelfSupplyFinding[]>
 }
 
-/** Run a tool and capture its stdout EVEN on a non-zero exit — tsc/eslint/vitest
- *  exit non-zero precisely WHEN they find problems, and that output is the
- *  payload we parse. A missing binary / timeout / kill yields '' → no findings
- *  (never throws). */
-const runCapture = async (
+/** Run a scanner tool and capture its stdout EVEN on a non-zero exit — tsc/eslint/vitest
+ *  exit non-zero precisely WHEN they find problems, and that output is the payload we
+ *  parse. A missing binary / timeout / kill yields '' → no findings (never throws).
+ *
+ *  Spawns through {@link runGateProcess}, NOT execFile: `vitest run` forks a worker pool,
+ *  and execFile's `timeout` SIGTERMs only the direct pid, orphaning every fork to spin a
+ *  core (feedback_vitest_no_midrun_kill). runGateProcess detaches the child into its own
+ *  process group and SIGKILLs the whole group on every exit path — timeout included — so a
+ *  wedged scan is reaped, not left saturating the machine. Its rejection carries `stdout`,
+ *  which is what keeps the non-zero-exit payload readable here.
+ *
+ *  Exported as the seam the reproduction test drives (a wedged tool that forks a worker
+ *  must leave no live fork behind). */
+export const runCapture = async (
   cwd: string,
   file: string,
   args: string[],
   timeoutMs = 120_000,
 ): Promise<string> => {
   try {
-    const { stdout } = await execFile(file, args, {
+    const { stdout } = await runGateProcess(file, args, {
       cwd,
       timeout: timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env },
     })
     return stdout
   } catch (e) {
@@ -468,24 +504,17 @@ const buildCard = (finding: SelfSupplyFinding, nowMs: number): ProjectTask => ({
   selfSupplyApproved: false,
 })
 
-/** ONE self-supply scan. No-op (scanned:false) when disarmed or throttled. When
- *  it scans: gathers findings from every source, dedups against open cards,
- *  applies the per-pass + per-day caps, appends the survivors to todo as
- *  approval-gated cards in ONE CAS write, and logs every fire + every
- *  suppression. NEVER throws — a board failure logs + yields (re-proposed next
- *  scan). */
-export const runSelfSupplyPass = async (
+/** The scan body — reached only once every gate ({@link runSelfSupplyPass}'s arm /
+ *  in-flight / throttle checks) has opened. Split out so the guards stay
+ *  synchronous and the `scanInFlight` release is one `finally`. */
+const scanAndCard = async (
   engine: SelfSupplyEngine,
-  log: SelfSupplyLog = NOOP_LOG,
-  deps: SelfSupplyDeps = defaultSelfSupplyDeps(),
-  config: SelfSupplyConfig = DEFAULT_SELF_SUPPLY_CONFIG,
+  now: number,
+  log: SelfSupplyLog,
+  deps: SelfSupplyDeps,
+  config: SelfSupplyConfig,
 ): Promise<SelfSupplyOutcome> => {
-  const empty: SelfSupplyOutcome = { scanned: false, proposed: [], suppressed: [] }
   const ss = engine.selfSupply
-  if (!ss.enabled) return empty // guard 1: OFF by default
-
-  const now = deps.now()
-  if (config.intervalMs > 0 && now - ss.lastScanAt < config.intervalMs) return empty // guard 4: throttle
 
   // Read the board first (cheap) — needed for dedup AND it is the write target. A
   // transient read failure is not an anomaly to surface AND must NOT burn the
@@ -571,6 +600,60 @@ export const runSelfSupplyPass = async (
   }
 
   return { scanned: true, proposed, suppressed }
+}
+
+/** ONE self-supply scan. No-op (scanned:false) when disarmed, already scanning, or
+ *  throttled. When it scans: gathers findings from every source, dedups against open
+ *  cards, applies the per-pass + per-day caps, appends the survivors to todo as
+ *  approval-gated cards in ONE CAS write, and logs every fire + every suppression.
+ *  NEVER throws — a board failure logs + yields (re-proposed next scan).
+ *
+ *  Runs OFF the engine tick ({@link kickSelfSupplyPass}), so the three guards below are
+ *  taken SYNCHRONOUSLY — before the first await — and `scanInFlight` is released in a
+ *  `finally`. Awaiting this directly (as the tests do) is still correct; it just
+ *  serializes what the engine now overlaps. */
+export const runSelfSupplyPass = async (
+  engine: SelfSupplyEngine,
+  log: SelfSupplyLog = NOOP_LOG,
+  deps: SelfSupplyDeps = defaultSelfSupplyDeps(),
+  config: SelfSupplyConfig = DEFAULT_SELF_SUPPLY_CONFIG,
+): Promise<SelfSupplyOutcome> => {
+  const empty: SelfSupplyOutcome = { scanned: false, proposed: [], suppressed: [] }
+  const ss = engine.selfSupply
+  if (!ss.enabled) return empty // guard 1: OFF by default
+  if (ss.scanInFlight) return empty // off-tick re-entrancy: one scan at a time
+
+  const now = deps.now()
+  if (config.intervalMs > 0 && now - ss.lastScanAt < config.intervalMs) return empty // guard 4: throttle
+
+  ss.scanInFlight = true
+  try {
+    return await scanAndCard(engine, now, log, deps, config)
+  } finally {
+    ss.scanInFlight = false
+  }
+}
+
+/** Fire a self-supply scan BESIDE the engine tick and return immediately — the
+ *  orchestrator's entry point. The scan spawns tsc + eslint + vitest (minutes of wall
+ *  clock); awaiting it inside `runEnginePass` held `passInFlight` for that whole span,
+ *  freezing dispatch, the monitor (stall / runaway / crash detection) and integrate.
+ *  Fire-and-forget keeps the 3s tick honest; `runSelfSupplyPass`'s `scanInFlight` guard
+ *  keeps the overlapping ticks from starting a second scan, and the `.catch` here means
+ *  a scan fault surfaces in the journal instead of as an unhandled rejection.
+ *
+ *  A scan already in flight when the engine stops simply finishes: every card it lands
+ *  is an inert, owner-approval-gated proposal, and runGateProcess reaps its subprocess
+ *  group on the way out. */
+export const kickSelfSupplyPass = (
+  engine: SelfSupplyEngine,
+  log: SelfSupplyLog = NOOP_LOG,
+  deps: SelfSupplyDeps = defaultSelfSupplyDeps(),
+  config: SelfSupplyConfig = DEFAULT_SELF_SUPPLY_CONFIG,
+): void => {
+  void runSelfSupplyPass(engine, log, deps, config).catch((e) =>
+    log('warn', `self-supply: pass errored — ${e instanceof Error ? e.message : String(e)}`),
+  )
 }
 
 // ── Owner approval (the per-card dispatch gate, guard 2) ──────────────────────

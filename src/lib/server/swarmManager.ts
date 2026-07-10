@@ -51,8 +51,9 @@
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { installOgManageSkill } from './ogManageSkill'
-import { getExecutionMode } from './store'
+import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
@@ -139,8 +140,17 @@ export const spawnSwarmManager = async (
   // missing skill conversationally).
   await installOgManageSkill().catch(() => {})
   // Token budget (card 68d8e00f): economy runs the commander on sonnet; optimize keeps
-  // it on opus (its integration / safety-review judgment is quality-critical).
-  const me = resolveSwarmModelEffort(await getExecutionMode(), 'manager')
+  // it on the top tier (its integration / safety-review judgment is quality-critical).
+  // Null ⇒ the owner switched every tier OFF: no model, no spawn (fail-CLOSED — the
+  // commander is a claude PTY like any other and honors the same hard mask).
+  const me = resolveSwarmModelEffort(
+    await getExecutionMode(),
+    'manager',
+    undefined,
+    Date.now(),
+    await getAllowedModelTiers(),
+  )
+  if (!me) throw new NoAllowedModelTierError()
   const ref = launchClaude(
     managerLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }, me),
   )

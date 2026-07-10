@@ -36,7 +36,7 @@
 // ladder — none dropped. fable is the top tier (newest flagship, = swarmLaunch's
 // SWARM_LAUNCH_MODEL); haiku is the cheapest floor.
 
-import type { SwarmModelTier, SwarmQuotaTier } from '../types'
+import { SWARM_MODEL_TIERS, type SwarmModelTier, type SwarmQuotaTier } from '../types'
 
 /** A model tier, by the CLI `--model` alias the swarm launches with. Ordered
  *  best → cheapest by {@link MODEL_TIER_LADDER}; the cooling table is keyed by
@@ -49,8 +49,10 @@ export type ModelTier = SwarmModelTier
 /** The tier ladder, best (index 0) → cheapest. highestAvailableTier walks this
  *  in order and returns the first tier that is not cooling, so "drop one tier"
  *  is just "the next entry". All four aliases are CLI-verified (see file head).
- *  fable === swarmLaunch.SWARM_LAUNCH_MODEL — the single top-tier constant. */
-export const MODEL_TIER_LADDER: readonly ModelTier[] = ['fable', 'opus', 'sonnet', 'haiku']
+ *  fable === swarmLaunch.SWARM_LAUNCH_MODEL — the single top-tier constant.
+ *  Aliases the shared `SWARM_MODEL_TIERS` (types.ts) so the ladder, the quota
+ *  payload and the client's per-tier ON/OFF toggles cannot drift. */
+export const MODEL_TIER_LADDER: readonly ModelTier[] = SWARM_MODEL_TIERS
 
 /** Fallback cooling window when no concrete reset time is known — mirrors
  *  swarmOrchestrator.RATE_LIMIT_GRACE_MS (20 min). Duplicated as a local default

@@ -60,18 +60,24 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
-import { execFile as execFileCb, spawn } from 'child_process'
+import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { readFile, stat, symlink } from 'fs/promises'
 import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
+// The fork-pool group reaper. It lives in a leaf module (not here) because
+// swarmSelfSupply — which this module imports — needs the same reaper for its
+// vitest/eslint scanners, and a back-import would close a cycle. Re-exported
+// below so existing importers of `runGateProcess` keep their path.
+import { runGateProcess } from './gateProcess'
 import { openGroundHome } from './paths'
 import { getTerminal, getTerminalScreen, killTerminal, subscribeTerminal, writeInput } from './terminal'
 import { claudeRunPreflight } from './claudePreflight'
 import {
   getSettings,
   getExecutionMode,
+  getAllowedModelTiers,
   rememberSwarmAutonomy,
   forgetSwarmAutonomy,
   isSwarmAutonomyRemembered,
@@ -86,10 +92,16 @@ import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTier } from './
 // sighting in monitorWorkers is the swarm's SENSOR (markRateLimited — the one
 // production write into the cooling table, attributing the sighting to the tier
 // the worker launched on), and runDispatchPass / the reviewer panel are the
-// ACTUATORS (allCoolingUntil park gate). MODEL_TIER_LADDER narrows the recorded
+// ACTUATORS (the spawnBlock park gate). MODEL_TIER_LADDER narrows the recorded
 // launch model to a known tier; an off-ladder / unrecorded model holds the
 // worker exactly as before but marks nothing (never poison a tier by guess).
-import { allCoolingUntil, markRateLimited, isModelTier, MODEL_TIER_LADDER } from './swarmQuota'
+import { markRateLimited, isModelTier, MODEL_TIER_LADDER } from './swarmQuota'
+// [Allowed] the owner's PERMANENT per-tier ON/OFF switch — the second, independent
+// veto. `spawnBlock` ANDs it with the cooling table and is the ONE gate both
+// actuators (dispatch + reviewer panel) consult, so a tier the owner retired can
+// never be launched on by either. Unlike a cool it has no reset, so a swarm parked
+// on 'none-allowed' escalates to a human instead of waiting for a clock.
+import { spawnBlock, type SpawnBlock } from './swarmAllowedModels'
 // A5 usage sensor, SYNC cache peek only (never awaited, never refreshed here) —
 // the second-priority reset-time source markRateLimited resolves against when
 // the worker's own screen wording didn't carry one.
@@ -115,7 +127,8 @@ import { requestEngineSelfUpdate } from './selfUpdateSignal'
 import { acquireIntegrationLock, type AcquireIntegrationLockResult } from './swarmIntegrationLock'
 import {
   initSelfSupplyRuntime,
-  runSelfSupplyPass,
+  kickSelfSupplyPass,
+  type SelfSupplyDeps,
   type SelfSupplyRuntime,
 } from './swarmSelfSupply'
 import { detectFreeTextQuestion } from './swarmQuestions'
@@ -1159,14 +1172,52 @@ export const PERMISSION_PROMPT_PATTERNS: readonly RegExp[] = [
 const matchesRateLimit = (normalized: string): boolean =>
   RATE_LIMIT_PATTERNS.some((re) => re.test(normalized))
 
-/** Does raw `text` carry a rate/usage-limit marker? The shared predicate behind
- *  BOTH quota sensors: the monitor's worker-screen classifier below, and the
- *  adversarial reviewer's transcript check (a headless reviewer has no PTY
- *  screen, only its output). Normalizes first, so ANSI-laden text matches. */
-export const isRateLimitText = (text: string | null | undefined): boolean => {
+/** How much text may trail the limit wording and still count as "the session died
+ *  right there" ({@link endsInRateLimit}). Sized for the CLI's chrome — the input
+ *  box + hint line claude repaints under its last message — and nothing more. */
+export const RATE_LIMIT_TAIL_MAX = 800
+
+/** Does `text` END in a rate/usage-limit notice — i.e. is the limit wording the
+ *  LAST thing this `claude` said, with only chrome after it?
+ *
+ *  The reviewer arm's quota sensor (makeAdversarialReview) needs this rather than
+ *  a bare "does the transcript CONTAIN limit wording" test, because a reviewer's
+ *  transcript is 64KB of whatever it read: review the rate-limit code itself (this
+ *  very file, swarmQuota.ts) and the notice's verbatim wording is QUOTED in the
+ *  diff and in the reviewer's own prose. Containment cannot tell a quote from the
+ *  real thing; POSITION can. When `claude` actually walks into the wall the notice
+ *  is its terminal utterance — it stops there, and only the input box follows. A
+ *  reviewer that merely quoted the wording goes on working: hundreds to thousands
+ *  more characters of reading and reasoning trail the quote (each repaint pushes
+ *  the earlier one further from the tail), so the last match sits far from the end.
+ *
+ *  Distance is measured from the END of the LAST match across all
+ *  {@link RATE_LIMIT_PATTERNS}, on the normalized text, and must be within
+ *  {@link RATE_LIMIT_TAIL_MAX}. Pure.
+ *
+ *  Deliberately NOT used for the worker arm: a worker's PTY *screen* is a live
+ *  snapshot, not a transcript, and {@link classifyOutput} rightly matches anywhere
+ *  in it. And when this check misses a real notice that has scrolled away, the
+ *  cost is bounded — the panel just defers, and the worker sensor (which reads the
+ *  live screen, where the notice still sits) cools the tier on the next dispatch. */
+export const endsInRateLimit = (
+  text: string | null | undefined,
+  tailMax: number = RATE_LIMIT_TAIL_MAX,
+): boolean => {
   if (!text) return false
   const norm = normalizeScreen(text)
-  return !!norm && matchesRateLimit(norm)
+  if (!norm) return false
+  let lastEnd = -1
+  for (const re of RATE_LIMIT_PATTERNS) {
+    // Scan for the LAST occurrence: a fresh global clone per call, so neither the
+    // shared pattern's `lastIndex` nor this scan's leaks between callers.
+    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
+    for (let m = scan.exec(norm); m; m = scan.exec(norm)) {
+      lastEnd = Math.max(lastEnd, m.index + m[0].length)
+      if (m[0].length === 0) scan.lastIndex++ // no pattern is zero-width; never spin if one becomes so
+    }
+  }
+  return lastEnd >= 0 && norm.length - lastEnd <= tailMax
 }
 
 /** The reset time A5 (the CLI usage sensor) offers as a cooling horizon, or null.
@@ -1440,12 +1491,30 @@ export interface ProjectEngine {
    *  (上がった/下がった) instead of a 3s heartbeat that would churn the 200-line ring
    *  buffer. Optional (a fresh engine has no prior decision). In-memory only. */
   lastScaleSig?: string
-  /** QUOTA PARK (card 0add9d30) — epoch ms of the earliest tier reset while EVERY
-   *  model tier is cooling (swarmQuota.allCoolingUntil), mirrored here ONLY so
-   *  {@link runDispatchPass} can detect the ENTER/LIFT edges (log once, not every
-   *  3s tick) — the table itself lives in swarmQuota, this is not a second source
-   *  of truth. Absent ⇒ not parked. In-memory only. */
+  /** QUOTA PARK (card 0add9d30) — epoch ms of the earliest reset while every
+   *  ENABLED model tier is cooling (swarmAllowedModels.spawnBlock), mirrored here
+   *  ONLY so the dashboard can show the deadline — the table itself lives in
+   *  swarmQuota, this is not a second source of truth. Absent ⇒ not parked, OR
+   *  parked with no deadline (every tier switched OFF — see {@link spawnBlockSig}).
+   *  In-memory only. */
   parkUntil?: number
+  /** The SPAWN PARK's enter-edge signature (`'none-allowed'` | `'cooling:<ms>'`) —
+   *  what {@link runDispatchPass} compares to log the hold once (and escalate a
+   *  none-allowed hold once) instead of every 3s tick. Absent ⇒ not held. Covers
+   *  BOTH park kinds, where {@link parkUntil} can only express the cooling one
+   *  (an all-tiers-disabled hold has no deadline). In-memory only. */
+  spawnBlockSig?: string
+  /** Card ids the engine is RIGHT NOW spawning a worker for — reserved BEFORE
+   *  {@link OrchestratorDeps.spawnWorker} and released once that card's todo→doing
+   *  move has settled (or the spawn threw). The window it covers: a worktree spawn
+   *  takes hundreds of ms during which the card is still `todo` on the board and
+   *  not yet in {@link workers}, so a CONCURRENT manual dispatch
+   *  (`POST /api/swarm/worker`) would see a free card and spawn a TWIN worker on
+   *  the same card (two branches, a guaranteed integration conflict). The manual
+   *  route consults it through {@link isCardDispatchInFlight}. Engine-vs-engine
+   *  needs no such reservation — passes are serialized by runExclusive. Optional
+   *  (an engine minted by an older build backfills it on retrieval). In-memory only. */
+  pendingDispatch?: Set<string>
 }
 
 interface OrchestratorStore {
@@ -1499,6 +1568,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       notified: new Set(),
       pendingFatal: [],
       metrics: emptyMetricsCounters(),
+      pendingDispatch: new Set(),
     }
     store.engines.set(key, engine)
   } else {
@@ -1533,8 +1603,34 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.notified ??= new Set()
     engine.pendingFatal ??= []
     engine.metrics ??= emptyMetricsCounters()
+    engine.pendingDispatch ??= new Set()
   }
   return engine
+}
+
+/** Is the autonomous engine ALREADY dispatching (or already running) a worker for
+ *  this card? The mutual-exclusion probe the MANUAL dispatch route
+ *  (`POST /api/swarm/worker`) asks before it claims a card, so the two dispatch
+ *  paths can never put TWO workers (two `swarm/*` branches) on one card:
+ *
+ *    • `pendingDispatch` — the engine picked the card and is mid-spawn: the board
+ *      still reads `todo` and {@link ProjectEngine.workers} is still empty for it.
+ *    • `workers` — the engine's live roster, which also covers the case where the
+ *      spawn landed but the card's todo→doing move was KEPT (a rejected write is
+ *      retried next pass, so the board can lag behind the roster).
+ *
+ *  PURE READ — never mutates, never creates an engine (a project whose engine was
+ *  never started answers false). The reverse direction is closed by the board
+ *  itself: once the manual route's CAS claim moves the card to `doing`,
+ *  {@link selectDispatch} no longer sees a todo card. */
+export const isCardDispatchInFlight = async (
+  projectPath: string,
+  taskId: string,
+): Promise<boolean> => {
+  const engine = store.engines.get(await canonicalize(projectPath))
+  if (!engine) return false
+  if (engine.pendingDispatch?.has(taskId)) return true
+  return engine.workers.some((w) => w.taskId === taskId)
 }
 
 /** Marks an owner-answer line inside the rework-reason slot, so the rework
@@ -1869,6 +1965,14 @@ export interface OrchestratorDeps {
    *  dispatch unit tests omit it; the manual ON path has its OWN claudeRunPreflight that
    *  throws a 503). Default (defaultDeps): claudeRunPreflight. */
   preflight?: () => Promise<{ ok: boolean }>
+}
+
+/** The self-supply stage's injectable surface. One OPTIONAL member: omitted in
+ *  production (the stage builds its REAL tsc/lint/vitest scanners itself), supplied
+ *  by tests — which must never spawn those tools, and which need a scanner they can
+ *  hold open to prove the tick does not wait for one. */
+export interface SelfSupplyPassDeps {
+  selfSupplyDeps?: SelfSupplyDeps
 }
 
 /** The anomaly-detection stage's injectable surface — split from the others so
@@ -2496,128 +2600,10 @@ export const SWARM_SAFETY_TESTS: readonly string[] = [
   'server/routes/__tests__/swarmSafety.routes.test.ts',
 ]
 
-/** A child-process runner for the merge-GATE checks that spawn a tool which itself FORKS a
- *  worker pool — the two vitest suites and eslint. It differs from {@link execFile} in exactly
- *  one way that matters: the child is spawned DETACHED (its own process-group leader) and, on
- *  EVERY exit path (timeout, spawn error, OR a normal close), the WHOLE group is SIGKILLed via a
- *  negative-pid signal — reaping the tool AND its forks together.
- *
- *  WHY: vitest with no explicit pool uses the default FORK pool (child_process workers).
- *  execFile's `timeout` SIGTERMs ONLY the direct pid, so on a wedged-suite timeout — precisely
- *  when the suite is stuck and the forks are live — the fork workers ORPHAN, each spinning a
- *  core to machine saturation. That is this repo's own documented hazard
- *  (feedback_vitest_no_midrun_kill: killing only the parent orphans the forks worker), and the
- *  very orphan the engine's self-update path already group-kills (electron/selfUpdate.js
- *  killProcessTree). A negative-pid SIGKILL reaches the group leader and every fork in it. The
- *  forks share the leader's group (vitest/eslint never re-group the way playwright's webServer
- *  does), so an IMMEDIATE group SIGKILL — not the SIGINT-then-escalate gracefulGroupKill — is the
- *  correct reaper here. We do NOT `unref()` the child: the engine still awaits it; `detached`
- *  only changes its process group, not the parent's wait.
- *
- *  FAIL-CLOSED is preserved exactly: resolves `{ stdout, stderr }` on a clean exit 0, and REJECTS
- *  with an Error carrying `stdout`/`stderr` (so the existing `errMsg`/tail catch keeps working) on
- *  non-zero exit, spawn error, OR timeout — so each check turns a timeout into RED, never a silent
- *  pass. (tscCheck and the git helper keep using execFile: a single process with no worker pool
- *  has no fork to orphan, so the negative-pid machinery would buy nothing.) */
-export const runGateProcess = (
-  bin: string,
-  args: readonly string[],
-  opts: { cwd: string; timeout: number; maxBuffer: number; env: NodeJS.ProcessEnv },
-): Promise<{ stdout: string; stderr: string }> =>
-  new Promise((resolvePromise, rejectPromise) => {
-    // detached → the child leads its own process group (pgid == pid on POSIX), so a later kill
-    // of -pid reaches the WHOLE group (the child + its vitest/eslint forks).
-    const child = spawn(bin, [...args], { cwd: opts.cwd, env: opts.env, detached: true })
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    let timedOut = false
-    // A const holder (not a reassigned `let`) so the timeout handle is referenced by
-    // `settle` AND assigned below without any forward reference between the two.
-    const timerRef: { id?: ReturnType<typeof setTimeout> } = {}
-
-    // SIGKILL the child's whole process group; on POSIX a negative pid hits every member
-    // (forks included). A group already gone (ESRCH — e.g. just after a clean exit) is a
-    // harmless no-op; non-POSIX / non-leader falls back to a direct child kill.
-    const reapGroup = () => {
-      if (process.platform !== 'win32' && typeof child.pid === 'number') {
-        try {
-          process.kill(-child.pid, 'SIGKILL')
-          return
-        } catch {
-          /* not a group leader / already gone — fall through to a direct kill */
-        }
-      }
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* already gone */
-      }
-    }
-
-    const settle = (emit: () => void) => {
-      if (settled) return
-      settled = true
-      if (timerRef.id) clearTimeout(timerRef.id)
-      // Reap on the way out on EVERY path. After a clean close vitest has already reaped its
-      // own forks (this is then a no-op), but the defensive group kill guarantees no straggler
-      // fork survives the gate regardless of how the run ended.
-      reapGroup()
-      emit()
-    }
-
-    // Cap captured output like execFile's maxBuffer (guard against a runaway suite eating
-    // memory) but keep DRAINING the pipes so the child never blocks on a full buffer; the
-    // captured prefix is enough for the RED tail.
-    const append = (cur: string, chunk: string): string =>
-      cur.length >= opts.maxBuffer ? cur : (cur + chunk).slice(0, opts.maxBuffer)
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout = append(stdout, String(chunk))
-    })
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, String(chunk))
-    })
-
-    timerRef.id = setTimeout(() => {
-      timedOut = true
-      settle(() => {
-        const e = new Error(`${basename(bin)} timed out after ${opts.timeout}ms`) as Error & {
-          stdout?: string
-          stderr?: string
-          killed?: boolean
-        }
-        e.stdout = stdout
-        e.stderr = stderr
-        e.killed = true
-        rejectPromise(e)
-      })
-    }, opts.timeout)
-
-    child.on('error', (err: Error) => {
-      settle(() => {
-        const e = err as Error & { stdout?: string; stderr?: string }
-        e.stdout = stdout
-        e.stderr = stderr
-        rejectPromise(e)
-      })
-    })
-    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
-      if (timedOut) return // the timer already settled (and reaped) this run
-      settle(() => {
-        if (code === 0) {
-          resolvePromise({ stdout, stderr })
-          return
-        }
-        const e = new Error(
-          `${basename(bin)} exited ${code != null ? `with code ${code}` : `via signal ${signal ?? 'unknown'}`}`,
-        ) as Error & { stdout?: string; stderr?: string; code?: number | null }
-        e.stdout = stdout
-        e.stderr = stderr
-        e.code = code
-        rejectPromise(e)
-      })
-    })
-  })
+// The gate's fork-pool-safe runner now lives in ./gateProcess (swarmSelfSupply needs it
+// too, and importing it from here would close a cycle). Re-exported so the merge gate's
+// existing importers — and its integration test — keep addressing it through this module.
+export { runGateProcess }
 
 /** A {@link VerifyCheck} that runs the swarm safety suite. Gated to swarm-touching
  *  branches by {@link swarmSafetyConditional}. `applicable` is an EXISTENCE test for
@@ -3395,8 +3381,17 @@ export interface AdversarialReviewOpts {
   /** Run ONE reviewer in `dir` and resolve its raw PTY output. INJECTABLE so the
    *  panel + tally logic is testable without spawning real claude (the default is
    *  the subscription PTY). `signal` aborts a reviewer mid-flight on panel teardown.
-   *  `lens` is provided in lens mode so a fake can answer per-lens. */
-  runReviewer?: (args: { dir: string; trunkRef: string; index: number; signal: AbortSignal; lens?: ReviewLens }) => Promise<string>
+   *  `lens` is provided in lens mode so a fake can answer per-lens. `model` is the
+   *  tier the panel RESOLVED for this spawn (through cooling + the owner's hard
+   *  mask) — the real runner launches on it, and a fake can assert on it. */
+  runReviewer?: (args: {
+    dir: string
+    trunkRef: string
+    index: number
+    signal: AbortSignal
+    lens?: ReviewLens
+    model: string
+  }) => Promise<string>
 }
 
 /** Build the real adversarial-review dep ({@link IntegrationDeps.review}). It
@@ -3418,6 +3413,16 @@ export interface AdversarialReviewOpts {
  *   - rebase conflict → 'integrate' (defer to integrate, which owns/stamps it — same
  *     as verify's deferral; review never resolves a conflict).
  *   - worktree setup failure → 'defer' (transient; retry next pass, never merge). */
+/** One human-readable line for a {@link SpawnBlock}, shared by the engine journal
+ *  and the reviewer panel's defer reason so both name the hold the same way. The
+ *  two kinds read very differently on purpose: an `all-cooling` park LIFTS on its
+ *  own at `until`, while `none-allowed` never does — only the owner re-enabling a
+ *  tier ends it, so the copy says so instead of implying a wait. */
+export const describeSpawnBlock = (block: SpawnBlock, suffix: string): string =>
+  block.kind === 'none-allowed'
+    ? `no model tier is enabled (Settings ▸ 使用可能モデル) — ${suffix}; nothing will run until a tier is switched back on`
+    : `quota park: every enabled model tier is cooling until ${new Date(block.until).toISOString()} — ${suffix}`
+
 export const makeAdversarialReview = (
   opts: AdversarialReviewOpts = {},
 ): NonNullable<IntegrationDeps['review']> => {
@@ -3454,22 +3459,44 @@ export const makeAdversarialReview = (
     if (diffOut.trim() === '') {
       return { decision: 'integrate', verdicts: [], mustFix: 0, clean: 0, reason: 'no diff to review (nothing to land)' }
     }
-    // QUOTA PARK: every model tier cooling ⇒ a reviewer `claude` spawned now
-    // would hit the same wall the workers did — defer (retry next pass; defer
-    // never merges un-reviewed), same actuator as runDispatchPass's park gate.
-    // Sits AFTER the spawn-free early returns above (skipIfTip carry / empty
-    // diff stay useful during a park) and BEFORE any worktree/PTY cost.
-    // `skippedForPark` marks this as an ENGINE hold, not a panel verdict, so
-    // the caller keeps it out of the MAX_REVIEW_DEFERS streak (see ReviewResult).
-    const parkedUntil = allCoolingUntil(Date.now())
-    if (parkedUntil != null) {
+    // SPAWN PARK: no tier is both enabled and cooled-down ⇒ a reviewer `claude`
+    // spawned now would hit the same wall the workers did (or has no model at
+    // all) — defer (retry next pass; defer never merges un-reviewed), same
+    // actuator as runDispatchPass's park gate. Sits AFTER the spawn-free early
+    // returns above (skipIfTip carry / empty diff stay useful during a park) and
+    // BEFORE any worktree/PTY cost. `skippedForPark` marks this as an ENGINE
+    // hold, not a panel verdict, so the caller keeps it out of the
+    // MAX_REVIEW_DEFERS streak (see ReviewResult).
+    const allowed = await getAllowedModelTiers()
+    const block = spawnBlock(Date.now(), allowed)
+    if (block) {
       return {
         decision: 'defer',
         verdicts: [],
         mustFix: 0,
         clean: 0,
         skippedForPark: true,
-        reason: `quota park: every model tier is cooling until ${new Date(parkedUntil).toISOString()} — review deferred`,
+        reason: describeSpawnBlock(block, 'review deferred'),
+      }
+    }
+    // Resolve the reviewer tier THROUGH the quota table AND the owner's hard mask,
+    // like worker launches do (resolveSwarmModelEffort): with only SOME tiers dry
+    // (no park — the gate above didn't fire), a fable-pinned panel would spawn
+    // straight into the cooled/disabled top tier, every reviewer would abstain, and
+    // the defer streak would burn to needs-human (the symptom observed at 0a7c641).
+    // Identity when every tier is enabled and nothing is cooling. The null branch is
+    // unreachable behind `spawnBlock` — kept as a defer (never a throw, never a
+    // silent fall-back onto the disabled tier) so this stays fail-CLOSED by
+    // construction rather than by the gate above happening to run first.
+    const panelModel = resolveAvailableTier(model, Date.now(), allowed)
+    if (!panelModel) {
+      return {
+        decision: 'defer',
+        verdicts: [],
+        mustFix: 0,
+        clean: 0,
+        skippedForPark: true,
+        reason: describeSpawnBlock({ kind: 'none-allowed' }, 'review deferred'),
       }
     }
     const mat = await withRebasedWorktree(projectPath, tip, targetRef, async (dir) => {
@@ -3478,19 +3505,12 @@ export const makeAdversarialReview = (
       // awaited them, so this is teardown insurance, not an early-exit).
       const ac = new AbortController()
       try {
-        // Resolve the reviewer tier THROUGH the quota table at spawn time, like
-        // worker launches do (resolveSwarmModelEffort): with only SOME tiers
-        // cooling (no park — the gate above didn't fire), a fable-pinned panel
-        // would spawn straight into the cooled top tier, every reviewer would
-        // abstain, and the defer streak would burn to needs-human. Identity when
-        // nothing is cooling.
-        const panelModel = resolveAvailableTier(model, Date.now())
         const raws = await Promise.all(
           Array.from({ length: panel }, (_, i) => {
             // Lens mode: reviewer i runs lens i (its focused prompt); else identical.
             const lens = lenses ? lenses[i] : undefined
             return (customRun
-              ? customRun({ dir, trunkRef, index: i + 1, signal: ac.signal, lens })
+              ? customRun({ dir, trunkRef, index: i + 1, signal: ac.signal, lens, model: panelModel })
               : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs, model: panelModel, lens })
             )
               .then((raw) => ({ raw, ...extractReviewVerdict(raw) }))
@@ -3504,11 +3524,21 @@ export const makeAdversarialReview = (
         // nothing: every reviewer abstains, the tally reads "多数決つかず
         // [must-fix 0 / clean 0]", the defer streak burns to needs-human, and
         // the NEXT panel spawns on the same dry tier. Attribute it here instead.
-        // Gated on `vote === null`: a reviewer that actually voted has reviewed
-        // the diff, and its note may legitimately QUOTE limit wording (e.g. this
-        // very patch) — only an ABSTENTION whose transcript is the limit notice
-        // is a sighting.
-        const limitedRaw = raws.find((v) => v.vote === null && isRateLimitText(v.raw))?.raw
+        //
+        // Two INDEPENDENT conditions must hold before a healthy tier is cooled —
+        // an abstention that merely CONTAINS limit wording is not evidence, since
+        // reviewing the rate-limit code itself (this file, swarmQuota.ts) puts the
+        // verbatim notice in the diff, and a reviewer that quotes it while missing
+        // its verdict marker would otherwise cool a live tier for 20 minutes:
+        //   1. NOBODY on the panel voted. Every reviewer here ran on the SAME tier,
+        //      concurrently — so one completed verdict is positive proof that tier
+        //      still serves sessions. (If a reviewer raced in just before the wall,
+        //      we simply don't cool this pass: the next panel finds the tier dry.)
+        //   2. The abstention ENDS in the notice ({@link endsInRateLimit}) — the
+        //      limit was that session's terminal utterance, not something it read
+        //      and then kept working past.
+        const anyVoted = raws.some((v) => v.vote !== null)
+        const limitedRaw = anyVoted ? undefined : raws.find((v) => endsInRateLimit(v.raw))?.raw
         return {
           verdicts: raws.map((v, i): ReviewerVerdict => ({
             reviewer: i + 1,
@@ -4309,6 +4339,36 @@ const monitorWorkers = async (
   engine.workers = next
 }
 
+/** Tell a human that the swarm has no model left to run on. A `none-allowed` hold
+ *  is the ONE park with no clock behind it: every tier is switched OFF in Settings,
+ *  so waiting achieves nothing and the engine would otherwise sit silent forever.
+ *  Raised on the ENTER edge only (the caller's `spawnBlockSig`), idempotent on its
+ *  receiptKey while open, and best-effort — a failed raise clears the signature so
+ *  the next pass retries, exactly like the worker-question raise. */
+const raiseNoAllowedModelTier = async (
+  engine: ProjectEngine,
+  deps: OrchestratorDeps,
+): Promise<void> => {
+  if (!deps.raiseQuestion) return
+  const question =
+    'Swarm cannot launch: every model tier is switched OFF (Settings ▸ 使用可能モデル). Which tier should be re-enabled?'
+  try {
+    await deps.raiseQuestion({
+      projectPath: engine.path,
+      question,
+      context:
+        'すべてのモデル tier が使用可能モデル設定で OFF になっているため、worker / 司令官 / 補給官 / ' +
+        'レビュアーのいずれも起動できず、dispatch を停止しています。cooling と違い期限で自然回復しません — ' +
+        '最低1つの tier を ON に戻すまで swarm は動きません。',
+      whyEscalated: 'policy',
+      receiptKey: defaultReceiptKey({ projectPath: engine.path, question }),
+    })
+  } catch (e) {
+    engine.spawnBlockSig = undefined // retry the raise on the next pass
+    logLine(engine, 'warn', `no-model escalation failed (will retry next pass): ${errMsg(e)}`)
+  }
+}
+
 // ── The drain pass (the heart — exported for the unit test) ──────────────────
 
 /** ONE pass. Idempotent-ish and side-effect-bounded:
@@ -4368,33 +4428,42 @@ export const runDispatchPass = async (
     }
   }
 
-  // 3b. QUOTA PARK (card 0add9d30 — churn stop): when EVERY model tier is
-  // cooling (swarmQuota.allCoolingUntil non-null), hold ALL new dispatch until
-  // the earliest reset instead of spawning a fresh worker into the same
-  // exhausted wall every tick. Existing workers (already counted, already
-  // running) and the monitor/reconcile steps above are UNAFFECTED — this only
-  // gates step 4 below. A parked todo card is simply left in 'todo' (no card
-  // mutation); the moment a tier frees, this returns null and step 4 resumes
-  // exactly where selectDispatch left it. Autonomy OFF already returns before
-  // this point (top-of-function `if (!engine.running) return`), so park never
-  // fires while the engine is off. Logged only on the ENTER/LIFT edge (not
-  // every 3s tick) so the journal stays legible.
-  const parkUntil = allCoolingUntil(now)
-  if (parkUntil != null) {
-    if (engine.parkUntil !== parkUntil) {
-      engine.parkUntil = parkUntil
-      logLine(
-        engine,
-        'warn',
-        `quota park: every model tier is cooling — holding new dispatch until ${new Date(parkUntil).toISOString()}`,
-        'dispatch',
-      )
+  // 3b. SPAWN PARK (card 0add9d30 — churn stop; extended with the owner's model
+  // mask): when no tier is BOTH enabled and cooled-down, hold ALL new dispatch
+  // instead of spawning a fresh worker into the same exhausted wall every tick.
+  // Two kinds, one gate (swarmAllowedModels.spawnBlock):
+  //   • all-cooling  — every ENABLED tier is cooling; park until the earliest
+  //                    reset. Self-lifting, exactly as before (a tier the owner
+  //                    disabled is no longer counted as headroom, so switching
+  //                    fable OFF makes "opus+sonnet+haiku cooling" a full park).
+  //   • none-allowed — the owner switched every tier OFF. There is NO reset to
+  //                    wait for, so beyond the journal line the engine ESCALATES:
+  //                    only a human re-enabling a tier can end this.
+  // Existing workers (already counted, already running) and the monitor/reconcile
+  // steps above are UNAFFECTED — this only gates step 4 below. A parked todo card
+  // is simply left in 'todo' (no card mutation); the moment a tier is spawnable,
+  // this returns null and step 4 resumes exactly where selectDispatch left it.
+  // Autonomy OFF already returns before this point (top-of-function `if
+  // (!engine.running) return`), so park never fires while the engine is off.
+  // Logged (and escalated) only on the ENTER edge, keyed by `spawnBlockSig` — not
+  // every 3s tick — so the journal stays legible.
+  const block = spawnBlock(now, await getAllowedModelTiers())
+  if (block) {
+    const sig = block.kind === 'none-allowed' ? 'none-allowed' : `cooling:${block.until}`
+    // `parkUntil` stays the COOLING deadline (what the dashboard reads): a
+    // none-allowed hold has no deadline, so it clears rather than fakes one.
+    engine.parkUntil = block.kind === 'all-cooling' ? block.until : undefined
+    if (engine.spawnBlockSig !== sig) {
+      engine.spawnBlockSig = sig
+      logLine(engine, 'warn', describeSpawnBlock(block, 'holding new dispatch'), 'dispatch')
+      if (block.kind === 'none-allowed') await raiseNoAllowedModelTier(engine, deps)
     }
     return
   }
-  if (engine.parkUntil != null) {
+  if (engine.spawnBlockSig != null) {
+    engine.spawnBlockSig = undefined
     engine.parkUntil = undefined
-    logLine(engine, 'info', 'quota park lifted — a tier has headroom, resuming dispatch', 'dispatch')
+    logLine(engine, 'info', 'quota park lifted — a tier is usable, resuming dispatch', 'dispatch')
   }
 
   // 4. Fill open slots with the next queue-order todos. A slot is occupied by any
@@ -4439,59 +4508,105 @@ export const runDispatchPass = async (
   // (selectDispatch's greedy gate state is prefix-stable), so slice — one probe, no
   // redundant second pass.
   const picks = dispatchable.slice(0, slots)
-  for (const card of picks) {
-    if (!engine.running) return // a stop mid-pass halts promptly
-    const title = card.title ?? ''
-    const notes = typeof card.notes === 'string' ? card.notes : undefined
-    // LEARNING LOOP (card fdf714ef): if this SAME card was previously 差し戻し /
-    // rolled back, hand the recorded failure reason (reworkOrPark) to the fresh
-    // worker's /order so it doesn't repeat the RED verify / must-fix. Read here,
-    // CONSUMED (deleted) only after a successful spawn so a thrown spawn keeps it
-    // for next pass — and so a later, unrelated dispatch of the same id can never
-    // ride a stale reason.
-    const priorFailure = engine.reworkReasons.get(card.id)
 
-    let spawn: SpawnSwarmWorkerResponse
-    try {
-      spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title, priorFailure })
-    } catch (e) {
-      logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
-      continue
-    }
-    if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
+  // RESERVE EVERY pick BEFORE the FIRST spawn. Reserving inside the loop instead
+  // (one card at a time) left picks[1..] unreserved for the whole of picks[0]'s
+  // spawn — hundreds of ms — during which a manual dispatch
+  // (POST /api/swarm/worker) reads isCardDispatchInFlight() === false, claims one
+  // of them and spawns on it. The loop would then reach that card and spawn a TWIN
+  // worker. The reservation is what the manual route asks about, so it has to cover
+  // every card this pass intends to spawn, from before the first spawn starts.
+  // Only ids WE added are released below — never another holder's reservation.
+  const pending = (engine.pendingDispatch ??= new Set())
+  const reserved = picks.filter((card) => !pending.has(card.id)).map((card) => card.id)
+  for (const id of reserved) pending.add(id)
 
-    // Count it BEFORE the column move: the PTY is already live, so even if the
-    // move fails the worker must stay counted (the dispatchedIds guard then
-    // blocks a re-dispatch, and step 3 reconciles the move next pass). It enters
-    // at stage 'starting' — the next monitor pass advances it.
-    engine.workers.push({
-      terminalId: spawn.terminalId,
-      branch: spawn.branch,
-      worktree: spawn.worktree,
-      taskId: card.id,
-      taskTitle: title,
-      startedAt: new Date().toISOString(),
-      stage: 'starting',
-      // Launch tier, for the monitor's rate-limit sighting → cooling-table
-      // attribution (absent from older fakes/callers — then nothing is marked).
-      ...(spawn.model ? { model: spawn.model } : {}),
-    })
-    // The dispatch line records WHETHER the learning-loop context was injected (有/無),
-    // so a re-dispatch carrying the prior failure is visible in the engine log.
-    logLine(
-      engine,
-      'info',
-      `dispatch: ${shorten(title)} → ${spawn.branch}${priorFailure ? ' [再投入: 前回差し戻しの原因を /order に注入]' : ''}`,
-      'dispatch',
-    )
+  try {
+    for (const card of picks) {
+      if (!engine.running) return // a stop mid-pass halts promptly (finally releases)
+      const title = card.title ?? ''
+      const notes = typeof card.notes === 'string' ? card.notes : undefined
+      // LEARNING LOOP (card fdf714ef): if this SAME card was previously 差し戻し /
+      // rolled back, hand the recorded failure reason (reworkOrPark) to the fresh
+      // worker's /order so it doesn't repeat the RED verify / must-fix. Read here,
+      // CONSUMED (deleted) only after a successful spawn so a thrown spawn keeps it
+      // for next pass — and so a later, unrelated dispatch of the same id can never
+      // ride a stale reason.
+      const priorFailure = engine.reworkReasons.get(card.id)
 
-    try {
-      if (!(await deps.moveToDoing(engine.path, card.id, spawn.branch))) {
-        logLine(engine, 'warn', `column move kept (will retry): ${shorten(title)}`)
+      // RE-VERIFY the card RIGHT BEFORE spawning it. The reservation above shuts the
+      // manual route out from here on, but a claim that landed BEFORE we reserved
+      // (the route's CAS moved it todo→doing while we were reading the board or
+      // spawning an earlier pick) is only visible in the board. `picks` is a snapshot
+      // taken before the first spawn; spawning off it unconditionally is what put a
+      // second worker on an already-claimed card. A stale pick is skipped, not fatal.
+      let fresh: ProjectTask | undefined
+      try {
+        fresh = (await deps.fetchTasks(engine.path)).find((t) => t.id === card.id)
+      } catch (e) {
+        logLine(engine, 'warn', `dispatch re-check failed, skipping: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
+        continue
       }
-    } catch (e) {
-      logLine(engine, 'warn', `column move kept (will retry): ${shorten(title)} — ${errMsg(e)}`)
+      if (!fresh || !isTodoCard(fresh)) {
+        logLine(
+          engine,
+          'warn',
+          `dispatch skipped — card no longer todo (claimed elsewhere): ${shorten(title)}`,
+          'dispatch',
+        )
+        continue
+      }
+
+      let spawn: SpawnSwarmWorkerResponse
+      try {
+        spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title, priorFailure })
+      } catch (e) {
+        logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
+        continue
+      }
+      if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
+
+      // Count it BEFORE the column move: the PTY is already live, so even if the
+      // move fails the worker must stay counted (the dispatchedIds guard then
+      // blocks a re-dispatch, and step 3 reconciles the move next pass). It enters
+      // at stage 'starting' — the next monitor pass advances it.
+      engine.workers.push({
+        terminalId: spawn.terminalId,
+        branch: spawn.branch,
+        worktree: spawn.worktree,
+        taskId: card.id,
+        taskTitle: title,
+        startedAt: new Date().toISOString(),
+        stage: 'starting',
+        // Launch tier, for the monitor's rate-limit sighting → cooling-table
+        // attribution (absent from older fakes/callers — then nothing is marked).
+        ...(spawn.model ? { model: spawn.model } : {}),
+      })
+      // The dispatch line records WHETHER the learning-loop context was injected (有/無),
+      // so a re-dispatch carrying the prior failure is visible in the engine log.
+      logLine(
+        engine,
+        'info',
+        `dispatch: ${shorten(title)} → ${spawn.branch}${priorFailure ? ' [再投入: 前回差し戻しの原因を /order に注入]' : ''}`,
+        'dispatch',
+      )
+
+      try {
+        if (!(await deps.moveToDoing(engine.path, card.id, spawn.branch))) {
+          logLine(engine, 'warn', `column move kept (will retry): ${shorten(title)}`)
+        }
+      } catch (e) {
+        logLine(engine, 'warn', `column move kept (will retry): ${shorten(title)} — ${errMsg(e)}`)
+      }
     }
+  } finally {
+    // Release EVERY id this pass reserved, on every exit path — a normal finish, a
+    // `return` when the engine stops mid-pass, or a throw. Once a card's move has
+    // settled it reads `doing` on the board; if the move was KEPT the worker still
+    // sits in engine.workers — either way the twin guard (isCardDispatchInFlight)
+    // keeps holding it without the reservation. A card we skipped or whose spawn
+    // threw goes back to being freely dispatchable, which is correct.
+    for (const id of reserved) pending.delete(id)
   }
 }
 
@@ -4918,18 +5033,18 @@ export const runIntegratePass = async (
     // by tip exactly like verify, so a stuck worker re-reporting the SAME commit
     // re-reworks WITHOUT re-burning N claude sessions.
     if (deps.review && verdict.tip) {
-      // QUOTA PARK pre-gate (must-fix 差し戻し 0708): while EVERY tier is cooling,
-      // don't call the review dep at all — the card simply WAITS in review and the
-      // first tick past the earliest reset re-enters here as if nothing happened.
-      // Deliberately BEFORE the defer-streak machinery and WITHOUT touching
-      // reviewDeferred: a park is an engine hold, not a panel verdict, and counting
-      // it would burn MAX_REVIEW_DEFERS in ~3 ticks (~45s), flip the card to
-      // needs-human, and — via the defer-exhausted memo below — never re-spawn the
-      // panel even after the park lifts. No per-tick log either: the dispatch pass
-      // already logs the park's enter/lift edges. Evaluated fresh per card (not the
-      // tick-top `now`) — verify above can run for minutes, so the park state may
-      // have changed since the tick began.
-      if (allCoolingUntil(Date.now()) != null) continue
+      // SPAWN PARK pre-gate (must-fix 差し戻し 0708): while no tier is usable — every
+      // ENABLED tier cooling, or every tier switched OFF — don't call the review dep
+      // at all; the card simply WAITS in review and the first tick with a usable tier
+      // re-enters here as if nothing happened. Deliberately BEFORE the defer-streak
+      // machinery and WITHOUT touching reviewDeferred: a park is an engine hold, not a
+      // panel verdict, and counting it would burn MAX_REVIEW_DEFERS in ~3 ticks (~45s),
+      // flip the card to needs-human, and — via the defer-exhausted memo below — never
+      // re-spawn the panel even after the park lifts. No per-tick log either: the
+      // dispatch pass already logs the park's enter/lift edges. Evaluated fresh per
+      // card (not the tick-top `now`) — verify above can run for minutes, so the park
+      // state may have changed since the tick began.
+      if (spawnBlock(Date.now(), await getAllowedModelTiers()) != null) continue
       const reviewTip = verdict.tip
       // Defer-exhausted on THIS exact tip → don't re-burn the panel (it kept reaching
       // no majority). Keep the "needs a human" dot and leave the card in review; a NEW
@@ -5477,7 +5592,7 @@ export const fireFatalNotifications = (
  *  `finally`, so a throwing pass can't wedge the engine. */
 export const runEnginePass = async (
   engine: ProjectEngine,
-  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps,
 ): Promise<void> => {
   if (engine.passInFlight) return
   engine.passInFlight = true
@@ -5533,9 +5648,18 @@ export const runEnginePass = async (
     // just-computed engine.anomalies (plus its own tsc/lint/test/TODO scanners)
     // but never touches detectAnomalies. No-op unless armed (default OFF); then
     // throttled + capped + owner-approval-gated. NEVER throws into the tick.
+    //
+    // FIRE-AND-FORGET, never awaited: an armed scan spawns tsc + eslint + vitest
+    // sequentially (up to ~8 minutes), and `passInFlight` is held for this whole
+    // body — so awaiting it froze dispatch AND the monitor (stall / runaway / crash
+    // detection) and integrate for the length of the scan. The scan now runs beside
+    // the tick; kickSelfSupplyPass owns the re-entrancy guard (one scan at a time)
+    // and the `.catch` that keeps a fault in the journal.
     if (engine.running) {
-      await runSelfSupplyPass(engine, (level, message) => logLine(engine, level, message, 'routine')).catch(
-        (e) => logLine(engine, 'warn', `self-supply: pass errored — ${errMsg(e)}`),
+      kickSelfSupplyPass(
+        engine,
+        (level, message) => logLine(engine, level, message, 'routine'),
+        deps.selfSupplyDeps,
       )
     }
   } finally {

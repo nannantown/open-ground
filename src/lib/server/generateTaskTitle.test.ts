@@ -69,6 +69,13 @@ describe('buildTitlePrompt', () => {
     expect(p).toContain('Same language')
   })
 
+  // extractTitle rejects every candidate containing '<', so the prompt must ban
+  // angle brackets or a legitimate title is silently dropped. Same contract as
+  // buildDescribePrompt — keep both halves in sync.
+  it('forbids angle brackets in the answer — the other half of the extractor guard', () => {
+    expect(buildTitlePrompt('x')).toMatch(/no angle brackets/i)
+  })
+
   it('caps over-long content instead of shipping it whole', () => {
     const p = buildTitlePrompt('y'.repeat(10_000))
     expect(p.length).toBeLessThan(4_000)

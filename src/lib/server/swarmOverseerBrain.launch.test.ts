@@ -54,6 +54,10 @@ import {
   brainSandboxAvailable,
   OVERSEER_BRAIN_DISALLOWED_TOOLS,
 } from './swarmOverseerBrain'
+import {
+  setAllowedModelTiersCache,
+  __resetAllowedModelsForTest,
+} from './swarmAllowedModels'
 import type { LaunchClaudeOpts } from './claudeTerminal'
 
 const launchedOpts = (): LaunchClaudeOpts => {
@@ -158,6 +162,42 @@ describe('makeOverseerBrain — launch containment wiring (D4 + the no-egress de
     const out = await runner({ prompt: 'p', projectPath: '/proj', signal: ac.signal })
     expect(out).toBe('')
     expect(mocks.launchClaude).not.toHaveBeenCalled()
+  })
+
+  // The cerebrum is a claude spawn like any other, so it obeys the owner's model
+  // hard mask. Left un-masked it was the third "half-lung" (with the reviewer panel
+  // and the worker ladder): a brain pinned to a retired top tier answers nothing.
+  describe('model hard mask (Settings.swarmAllowedModels)', () => {
+    beforeEach(() => __resetAllowedModelsForTest())
+
+    it('launches on the DEFAULT top tier when every tier is enabled', async () => {
+      const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
+      await runner({ prompt: 'p', projectPath: '/proj' })
+      expect(launchedOpts().model).toBe('fable')
+    })
+
+    it('steps DOWN the ladder when the top tier is switched OFF', async () => {
+      setAllowedModelTiersCache({ fable: false })
+      const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
+      await runner({ prompt: 'p', projectPath: '/proj' })
+      expect(launchedOpts().model).toBe('opus')
+    })
+
+    it('honors the mask even against an EXPLICIT model the caller asked for', async () => {
+      setAllowedModelTiersCache({ fable: false, opus: false })
+      const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false, model: 'fable' })
+      await runner({ prompt: 'p', projectPath: '/proj' })
+      expect(launchedOpts().model).toBe('sonnet')
+    })
+
+    it('fails CLOSED with every tier OFF — no PTY, no scratch, the runner rejects', async () => {
+      setAllowedModelTiersCache({ fable: false, opus: false, sonnet: false, haiku: false })
+      const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
+      await expect(runner({ prompt: 'p', projectPath: '/proj' })).rejects.toThrow(
+        /no model tier is enabled/,
+      )
+      expect(mocks.launchClaude).not.toHaveBeenCalled()
+    })
   })
 })
 

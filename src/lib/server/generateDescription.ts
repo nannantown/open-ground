@@ -18,7 +18,11 @@
 // The end token bounds each description against TUI repaint junk AND lets a
 // PTY line-wrap inside the text be collapsed back to spaces. Candidates
 // containing '<' are rejected so the prompt's own echoed placeholder can never
-// match. The PTY is torn down the moment both pairs land.
+// match — so the prompt must ALSO forbid angle brackets in the answer itself
+// (same rule as buildTitlePrompt). Without that half, a natural sentence like
+// "A <canvas> rendering library" is silently dropped: the pair never completes,
+// the run burns its whole timeout and that language is lost.
+// The PTY is torn down the moment both pairs land.
 //
 // Model is pinned to haiku: description-writing is light summarization over a
 // quick read-only skim — the cheap model returns in seconds where the default
@@ -76,6 +80,10 @@ export const buildDescribePrompt = (): string =>
     `${DESC_MARKER_EN} <ONE short sentence in English — what the project is> ${DESC_END}`,
     `${DESC_MARKER_JA} <日本語で短い1文 — プロジェクトが何か> ${DESC_END}`,
     '- Put only the description text between the marker and the end token; no JSON, no quotes.',
+    '- Replace each `<…>` above (angle brackets included) with the actual sentence.',
+    '  No markdown, and no angle brackets anywhere in the description itself — a',
+    '  description containing one is discarded. Write "a canvas rendering library",',
+    '  never "a <canvas> rendering library".',
     '- HARD LIMIT: one sentence, max ~80 characters English / 40字 Japanese. It is',
     '  shown on a single truncating UI line — front-load the essence.',
   ].join('\n')
@@ -100,6 +108,10 @@ const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
  *  and capped, or null. Marker-pair-only — no prose fallback (a wrong
  *  description is worse than none), and any candidate containing '<' is
  *  rejected: that's the prompt's own echoed placeholder, not a model answer.
+ *  The reject is blanket rather than a `^<…>$` shape test because the TUI may
+ *  elide the echoed placeholder mid-string, leaving no closing '>' — the
+ *  matching half of the contract is buildDescribePrompt forbidding angle
+ *  brackets in the answer, so no real description trips this.
  *  Exported for unit tests. */
 export const extractDescMarker = (raw: string, marker: string): string | null => {
   const text = raw.replace(OSC_RE, '').replace(SGR_RE, '').replace(CSI_OTHER_RE, ' ')

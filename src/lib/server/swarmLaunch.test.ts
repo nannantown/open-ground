@@ -9,14 +9,26 @@ import {
   execModeMaxWorkers,
   asExecutionMode,
 } from './swarmLaunch'
-import { CLAUDE_EFFORTS, DEFAULT_EXECUTION_MODE } from '../types'
+import {
+  CLAUDE_EFFORTS,
+  DEFAULT_EXECUTION_MODE,
+  DEFAULT_SWARM_ALLOWED_MODELS,
+  EXECUTION_MODES,
+  type SwarmAllowedModels,
+  type SwarmModelTier,
+} from '../types'
 import { MODEL_TIER_LADDER, markCoolingUntil, __resetQuotaForTest } from './swarmQuota'
+import { __resetAllowedModelsForTest } from './swarmAllowedModels'
 
-// The quota cooling table is a process-wide globalThis singleton; reset it before
-// EVERY test so the existing (pre-quota) assertions see an empty table — nothing
-// cooling ⇒ resolveAvailableTier is the identity, so today's model/effort matrix is
-// unchanged — and the fallback cases below stay order-independent.
-beforeEach(() => __resetQuotaForTest())
+// The quota cooling table and the allowed-models mirror are process-wide
+// globalThis singletons; reset BOTH before EVERY test so the existing (pre-quota)
+// assertions see an empty table + an all-usable mask — nothing cooling and nothing
+// disabled ⇒ resolveAvailableTier is the identity, so today's model/effort matrix
+// is unchanged — and the fallback cases below stay order-independent.
+beforeEach(() => {
+  __resetQuotaForTest()
+  __resetAllowedModelsForTest()
+})
 
 // The ONE place supply / worker / (future) commander source their model+effort,
 // so all three stay in lockstep at opus/max. The CLAUDE_EFFORTS guard is the
@@ -99,8 +111,8 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
   it('optimize keeps top-tier CAPABILITY for the commander (quality-critical), sonnet for supply', () => {
     // The manager's integration/safety-review DECISION stays opus even in optimize —
     // savings there come from fewer review bodies, not a weaker model.
-    expect(resolveSwarmModelEffort('optimize', 'manager').model).toBe('fable')
-    expect(resolveSwarmModelEffort('optimize', 'supply').model).toBe('sonnet')
+    expect(resolveSwarmModelEffort('optimize', 'manager')!.model).toBe('fable')
+    expect(resolveSwarmModelEffort('optimize', 'supply')!.model).toBe('sonnet')
     // The overseer's answer-as-owner is a judgment席 on par with the manager (D4).
     expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'fable', effort: 'high' })
   })
@@ -151,12 +163,12 @@ describe('quota fallback — launch tier follows the foundation (Done ①②③)
   })
 
   it('all tiers available ⇒ max launches fable, as before (Done ③)', () => {
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('fable')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW)!.model).toBe('fable')
   })
 
   it('fable cooling ⇒ worker launches opus, effort untouched (Done ①)', () => {
     cool('fable')
-    const me = resolveSwarmModelEffort('max', 'worker', undefined, NOW)
+    const me = resolveSwarmModelEffort('max', 'worker', undefined, NOW)!
     expect(me.model).toBe('opus')
     expect(me.effort).toBe('max') // the fallback moves the tier, never the effort
   })
@@ -164,37 +176,37 @@ describe('quota fallback — launch tier follows the foundation (Done ①②③)
   it('fable+opus cooling ⇒ worker launches sonnet (Done ②)', () => {
     cool('fable')
     cool('opus')
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('sonnet')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW)!.model).toBe('sonnet')
   })
 
   it('fable+opus+sonnet cooling ⇒ worker launches haiku (bottom of the ladder)', () => {
     cool('fable')
     cool('opus')
     cool('sonnet')
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('haiku')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW)!.model).toBe('haiku')
   })
 
   it('every tier cooling ⇒ desired tier unchanged (the engine owns the wait, not the resolver)', () => {
     for (const t of MODEL_TIER_LADDER) cool(t)
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('fable')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW)!.model).toBe('fable')
   })
 
   it('cooling is time-boxed: past the reset the top tier is available again (Done ② recovery)', () => {
     cool('fable')
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW).model).toBe('opus')
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW + HOUR + 1).model).toBe('fable')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW)!.model).toBe('opus')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW + HOUR + 1)!.model).toBe('fable')
   })
 
   it('optimize heavy card also desires the top tier ⇒ drops to opus when fable cooling', () => {
     cool('fable')
     const heavy = { title: 'sandbox guard for auth', notes: 'security-critical' }
-    expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW).model).toBe('opus')
+    expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW)!.model).toBe('opus')
   })
 
   it('the manager (top-tier judgment席) follows the fallback too', () => {
     cool('fable')
-    expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW).model).toBe('opus')
-    expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW).effort).toBe('high')
+    expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW)!.model).toBe('opus')
+    expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW)!.effort).toBe('high')
   })
 
   it('the overseer (proxy-you judgment席, desires fable) drops to opus with effort intact', () => {
@@ -218,7 +230,7 @@ describe('quota fallback — launch tier follows the foundation (Done ①②③)
 
   it('economy sonnet cooling ⇒ steps DOWN to haiku, effort still economy-low', () => {
     cool('sonnet')
-    const me = resolveSwarmModelEffort('economy', 'worker', undefined, NOW)
+    const me = resolveSwarmModelEffort('economy', 'worker', undefined, NOW)!
     expect(me.model).toBe('haiku')
     expect(me.effort).toBe('low')
   })
@@ -270,5 +282,92 @@ describe('resolveAvailableTier (the ladder walk-down primitive)', () => {
     expect(resolveAvailableTier('gpt-nonsense', NOW)).toBe('fable')
     markCoolingUntil('fable', NOW + HOUR)
     expect(resolveAvailableTier('gpt-nonsense', NOW)).toBe('opus')
+  })
+})
+
+// ─── The owner's HARD MASK (Settings.swarmAllowedModels) ─────────────────────
+// A switched-OFF tier must be unreachable from EVERY launch path, in every mode,
+// cooling or not — and unlike a cool it never expires. The incident: the old
+// `?? desired` fallback handed the caller back the very tier the owner had
+// disabled once everything else was dry.
+
+describe('hard mask — a switched-OFF tier is never launched on', () => {
+  const NOW = 1_700_000_000_000
+  const HOUR = 3_600_000
+  const off = (...tiers: readonly SwarmModelTier[]): SwarmAllowedModels => {
+    const m = { ...DEFAULT_SWARM_ALLOWED_MODELS }
+    for (const t of tiers) m[t] = false
+    return m
+  }
+  const ALL_OFF = off('fable', 'opus', 'sonnet', 'haiku')
+
+  it('the ladder walk SKIPS a disabled tier exactly like a cooling one', () => {
+    expect(resolveAvailableTier('fable', NOW, off('fable'))).toBe('opus')
+    expect(resolveAvailableTier('fable', NOW, off('fable', 'opus'))).toBe('sonnet')
+  })
+
+  it('the two vetoes compose: fable OFF + opus cooling ⇒ sonnet', () => {
+    markCoolingUntil('opus', NOW + HOUR)
+    expect(resolveAvailableTier('fable', NOW, off('fable'))).toBe('sonnet')
+  })
+
+  it('a disabled tier is never the last-resort "look UP" answer', () => {
+    markCoolingUntil('sonnet', NOW + HOUR)
+    markCoolingUntil('haiku', NOW + HOUR)
+    // Everything at-or-below sonnet is dry; fable is disabled ⇒ opus, not fable.
+    expect(resolveAvailableTier('sonnet', NOW, off('fable'))).toBe('opus')
+  })
+
+  it('FAIL-CLOSED: with every tier cooling, a DISABLED desired tier is not returned', () => {
+    for (const t of MODEL_TIER_LADDER) markCoolingUntil(t, NOW + HOUR)
+    // The old code returned `desired` here — the exact bug (a disabled fable).
+    expect(resolveAvailableTier('fable', NOW, off('fable'))).toBe('opus')
+    // …while an ENABLED desired tier still comes back unchanged (the engine parks).
+    expect(resolveAvailableTier('sonnet', NOW, off('fable'))).toBe('sonnet')
+  })
+
+  it('every tier OFF ⇒ null: there is no model to launch on', () => {
+    expect(resolveAvailableTier('fable', NOW, ALL_OFF)).toBeNull()
+    expect(resolveAvailableTier('gpt-nonsense', NOW, ALL_OFF)).toBeNull()
+    for (const role of ['worker', 'supply', 'manager', 'overseer'] as const) {
+      for (const mode of EXECUTION_MODES) {
+        expect(resolveSwarmModelEffort(mode, role, undefined, NOW, ALL_OFF)).toBeNull()
+      }
+    }
+  })
+
+  it('does NOT expire: a year later a disabled tier is still disabled', () => {
+    expect(resolveAvailableTier('fable', NOW + 365 * 24 * HOUR, off('fable'))).toBe('opus')
+  })
+
+  it('max mode with fable OFF launches every role on opus, effort untouched', () => {
+    for (const role of ['worker', 'supply', 'manager', 'overseer'] as const) {
+      expect(resolveSwarmModelEffort('max', role, undefined, NOW, off('fable'))).toEqual({
+        model: 'opus',
+        effort: 'max',
+      })
+    }
+  })
+
+  it('optimize: a heavy card cannot reach a disabled top tier; chores skip a disabled sonnet', () => {
+    const heavy = { title: 'sandbox guard for auth', notes: 'security-critical' }
+    expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW, off('fable'))!.model).toBe('opus')
+    // sonnet OFF ⇒ the chore steps DOWN to haiku (never up onto the top tier by accident).
+    expect(resolveSwarmModelEffort('optimize', 'worker', undefined, NOW, off('sonnet'))!.model).toBe(
+      'haiku',
+    )
+  })
+
+  it('economy with sonnet+haiku OFF climbs to the best ENABLED tier, effort still low', () => {
+    expect(resolveSwarmModelEffort('economy', 'worker', undefined, NOW, off('sonnet', 'haiku'))).toEqual(
+      { model: 'fable', effort: 'low' },
+    )
+  })
+
+  it('the mask alone never re-enables a cooling tier (both vetoes stay independent)', () => {
+    markCoolingUntil('opus', NOW + HOUR)
+    // fable OFF, opus cooling ⇒ sonnet. Turning fable back ON returns fable.
+    expect(resolveAvailableTier('fable', NOW, off('fable'))).toBe('sonnet')
+    expect(resolveAvailableTier('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS)).toBe('fable')
   })
 })

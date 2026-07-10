@@ -105,6 +105,14 @@ export interface Settings {
    *  {@link DEFAULT_EXECUTION_MODE} ('optimize'). Sets the model/effort/parallelism
    *  every in-app swarm role launches at, with one toggle. User-settable. */
   executionMode?: ExecutionMode
+  /** Which model tiers the swarm may launch on at all ("使用可能モデル") — the
+   *  owner's PERMANENT hard mask, sitting beside {@link executionMode} because it
+   *  bounds what every mode can pick. Absent / partial ⇒ the missing tiers are
+   *  usable ({@link DEFAULT_SWARM_ALLOWED_MODELS}). Unlike the in-memory cooling
+   *  table (swarmQuota) this survives a restart / self-update, so "fable is spent
+   *  for the week" stays told. At least one tier must stay ON — `setUserSettings`
+   *  refuses an all-OFF patch (a swarm with no model can only park). User-settable. */
+  swarmAllowedModels?: Partial<SwarmAllowedModels>
   /** UI + prompt language. OPEN GROUND is English-first: unset means English.
    *  'ja' switches the UI strings AND the prompts sent to the spawned Claude
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
@@ -1677,6 +1685,13 @@ export interface ClaudeActivity {
   id: string
   cwd: string
   status: ClaudeBeaconStatus
+  /** Registry UUID of the project that OWNS this cwd, resolved server-side.
+   *  A swarm worker's cwd is its isolated worktree under
+   *  ~/.openground/projects/<uuid>/worktrees/ — OUTSIDE the project folder — so
+   *  a client that only compares cwd against the project path cannot attribute
+   *  it. Absent when no registered project owns the cwd (a free shell in ~/),
+   *  and on a server predating this field. */
+  projectId?: string
 }
 
 /** Response of GET /api/terminal/active. `cwds` keeps the original "any PTY
@@ -2151,10 +2166,54 @@ export interface EscalationDismissResponse {
 
 // ─── Model-quota control plane (swarmQuota's cooling table) ─────────────────
 
+/** The model tiers the swarm may launch on, by CLI `--model` alias, ordered
+ *  best→cheapest. The single definition shared by the server's cooling ladder
+ *  (`swarmQuota.MODEL_TIER_LADDER`), the quota route's payload, and the client's
+ *  "usable models" toggles — so none of them can drift apart. */
+export const SWARM_MODEL_TIERS = ['fable', 'opus', 'sonnet', 'haiku'] as const
+
 /** A model tier the swarm launches on, by CLI `--model` alias — best→cheapest.
  *  The single definition: `swarmQuota.ModelTier` aliases this, so the cooling
  *  table's keys and the quota route's payload cannot drift. */
-export type SwarmModelTier = 'fable' | 'opus' | 'sonnet' | 'haiku'
+export type SwarmModelTier = (typeof SWARM_MODEL_TIERS)[number]
+
+/** The owner's PERMANENT per-tier allow switch ("使用可能モデル"): `false` means
+ *  no swarm `claude` may ever spawn on that tier. A different layer from the
+ *  cooling table (swarmQuota): cooling is a SENSOR reading — temporary, expires
+ *  on its own — while this is an operating POLICY the owner sets by hand and
+ *  that survives restarts / self-updates. They are independent: either one alone
+ *  forbids a tier, and lifting a cool never re-enables a disallowed tier. */
+export type SwarmAllowedModels = Record<SwarmModelTier, boolean>
+
+/** Default: every tier usable. An absent / hand-corrupted settings field reads
+ *  as this (a missing switch must never silently retire a model). */
+export const DEFAULT_SWARM_ALLOWED_MODELS: SwarmAllowedModels = {
+  fable: true,
+  opus: true,
+  sonnet: true,
+  haiku: true,
+}
+
+/** The tier a `desired` tier degrades to under the owner's mask ALONE — cooling
+ *  ignored. Walks the ladder down from `desired`, then (if everything below is
+ *  off) up to the best enabled tier; null iff every tier is off.
+ *
+ *  This is the COPY-facing half of the server's launch resolver: the Settings UI
+ *  needs to say which model a mode will actually use ("最大出力 = opus" once fable
+ *  is switched off) without leaking the transient cooling state into a permanent
+ *  policy screen. `swarmLaunch.resolveAvailableTier` is the SAME walk with
+ *  "not cooling" ANDed into the predicate — a test pins the two together with an
+ *  empty cooling table, so they cannot drift. */
+export const effectiveAllowedTier = (
+  desired: SwarmModelTier,
+  allowed: SwarmAllowedModels,
+): SwarmModelTier | null => {
+  const from = Math.max(0, SWARM_MODEL_TIERS.indexOf(desired))
+  for (let i = from; i < SWARM_MODEL_TIERS.length; i++) {
+    if (allowed[SWARM_MODEL_TIERS[i]]) return SWARM_MODEL_TIERS[i]
+  }
+  return SWARM_MODEL_TIERS.find((t) => allowed[t]) ?? null
+}
 
 /** One ladder row of the cooling table. `until` is the epoch ms the tier frees
  *  up, and is non-null EXACTLY when `cooling` (an elapsed mark reads as
@@ -2170,11 +2229,17 @@ export interface SwarmQuotaResponse {
   /** Server clock the snapshot was taken at (the cooling flags are relative to it). */
   now: number
   tiers: SwarmQuotaTier[]
-  /** The tier the NEXT top-tier launch resolves to (highest with headroom), or
-   *  null when every tier is cooling — then the engine parks until
-   *  {@link SwarmQuotaResponse.allCoolingUntil}. */
+  /** The tier the NEXT top-tier launch resolves to: the highest tier that is both
+   *  ENABLED ({@link Settings.swarmAllowedModels}) and has headroom. Null when
+   *  nothing is spawnable — every enabled tier cooling (the engine parks until
+   *  {@link SwarmQuotaResponse.allCoolingUntil}) or every tier switched off (no
+   *  reset exists; the engine escalates). The only field here that honors the
+   *  mask — `tiers` / `allCoolingUntil` report the raw cooling table. */
   launchTier: SwarmModelTier | null
-  /** Earliest reset among the tiers iff ALL are cooling; null otherwise. */
+  /** Earliest reset among the tiers iff ALL are cooling; null otherwise. Pure
+   *  cooling — a switched-OFF tier still counts as "not cooling" here, because
+   *  this is the cooling table's own answer (the engine's park gate is the mask-
+   *  aware one). */
   allCoolingUntil: number | null
 }
 

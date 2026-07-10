@@ -35,7 +35,8 @@
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
-import { getExecutionMode } from './store'
+import { NoAllowedModelTierError } from './swarmAllowedModels'
+import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmSupplyResponse } from '../types'
 
@@ -104,7 +105,16 @@ export const spawnSwarmSupply = async (
 ): Promise<SpawnSwarmSupplyResponse> => {
   const agentSessionId = randomUUID()
   // Token budget (card 68d8e00f): economy/optimize run the supply officer on sonnet.
-  const me = resolveSwarmModelEffort(await getExecutionMode(), 'supply')
+  // Null ⇒ every tier switched OFF: no model, no spawn (the same hard mask every
+  // other swarm role obeys — fail-CLOSED).
+  const me = resolveSwarmModelEffort(
+    await getExecutionMode(),
+    'supply',
+    undefined,
+    Date.now(),
+    await getAllowedModelTiers(),
+  )
+  if (!me) throw new NoAllowedModelTierError()
   const ref = launchClaude(
     supplyLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }, me),
   )

@@ -18,6 +18,8 @@ import {
   PERMISSION_WAIT_GRACE_MS,
   QUESTION_GRACE_MS,
   classifyOutput,
+  endsInRateLimit,
+  RATE_LIMIT_TAIL_MAX,
   isRunaway,
   isTodoCard,
   isReviewCard,
@@ -66,9 +68,11 @@ import {
   REWORK_LOG_MARKER,
   __resetOrchestratorForTests,
   __seedEngineForTests,
+  isCardDispatchInFlight,
   type OrchestratorDeps,
   type IntegrationDeps,
   type AnomalyDeps,
+  type SelfSupplyPassDeps,
   type HeartbeatSign,
   type ProjectEngine,
   type WorkerProbe,
@@ -78,6 +82,7 @@ import {
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
 import { markCoolingUntil, isTierCooling, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
+import { __resetAllowedModelsForTest } from './swarmAllowedModels'
 import { resolveSwarmModelEffort } from './swarmLaunch'
 import {
   rememberSwarmAutonomy,
@@ -1132,6 +1137,57 @@ describe('classifyOutput — why a worker is (not) progressing, from its screen'
   })
 })
 
+// The reviewer arm's quota sensor reads a 64KB TRANSCRIPT, not a live screen: a
+// reviewer of the rate-limit code (swarmQuota.ts, this file) necessarily prints the
+// notice's verbatim wording while reading the diff. Containment therefore proves
+// nothing — position does. endsInRateLimit asks whether the limit was the session's
+// LAST utterance (it died there) rather than something it read and worked past.
+describe('endsInRateLimit — quoting the limit notice vs dying at it', () => {
+  const ESC = '\x1b'
+  const NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+
+  it('is true for the bare notice — nothing follows it', () => {
+    expect(endsInRateLimit(NOTICE)).toBe(true)
+  })
+
+  it('is true when only the CLI chrome trails it (the box claude repaints under its last line)', () => {
+    const RULE = '─'.repeat(80)
+    expect(endsInRateLimit([NOTICE, RULE, '❯ ', RULE, '  ? for shortcuts'].join('\n'))).toBe(true)
+  })
+
+  it('is true through ANSI escapes — the transcript is raw PTY, not clean text', () => {
+    expect(endsInRateLimit(`${ESC}[31m${NOTICE}${ESC}[0m`)).toBe(true)
+  })
+
+  it('is FALSE when a reviewer quoted the notice and kept working past it', () => {
+    // Exactly what a reviewer of THIS patch prints: the fixture, then its analysis.
+    const transcript = [
+      `+  // the CLI's exhaustion notice, verbatim: "${NOTICE}"`,
+      String.raw`+  /reached your .{0,40}\blimit\b/,`,
+      ...Array.from(
+        { length: 12 },
+        (_, i) => `Hunk ${i + 1}: the guard holds and the pattern list stays anchored; nothing regresses.`,
+      ),
+    ].join('\n')
+    // Containment (what the worker arm rightly uses on a LIVE screen) fires here…
+    expect(classifyOutput(transcript)).toBe('rate-limited')
+    // …and is exactly why the reviewer arm may not use it: position says "quoted".
+    expect(endsInRateLimit(transcript)).toBe(false)
+  })
+
+  it('is FALSE once more than the tail budget trails the wording', () => {
+    expect(endsInRateLimit(`${NOTICE} ${'x'.repeat(RATE_LIMIT_TAIL_MAX)}`)).toBe(false)
+    expect(endsInRateLimit(`${NOTICE} ${'x'.repeat(RATE_LIMIT_TAIL_MAX - 2)}`)).toBe(true)
+  })
+
+  it('is FALSE with no limit wording at all, and on empty input', () => {
+    expect(endsInRateLimit('reviewed the diff; no findings')).toBe(false)
+    expect(endsInRateLimit('')).toBe(false)
+    expect(endsInRateLimit(null)).toBe(false)
+  })
+})
+
 describe('isRunaway — the hard execution-time ceiling', () => {
   const NOW = Date.parse('2026-06-25T12:00:00Z')
   it('is true once maxExecMs has elapsed since dispatch', () => {
@@ -1915,13 +1971,13 @@ describe('runDispatchPass — drain + dispatch', () => {
   })
 
   it('does not re-dispatch a card an EXTERNAL dispatcher already claimed to doing (manual+engine twin)', async () => {
-    // The manual route (POST /api/swarm/worker) claims its card todo→doing after
+    // The manual route (POST /api/swarm/worker) claims its card todo→doing BEFORE
     // spawning, so a manually-dispatched card has a live worker the engine does NOT
     // count in engine.workers. The claimed COLUMN is the cross-dispatcher signal:
     // the engine must never spawn a SECOND worker for a card already in doing, even
     // though it has no worker of its own for it. (The deterministic manual+engine
     // twin — a still-todo manual card the engine keeps re-grabbing — is closed by
-    // the route doing this claim; here we prove the engine honors it.)
+    // the route claiming first; here we prove the engine honors that claim.)
     const engine = newEngine()
     const deps = makeDeps({
       cards: [
@@ -1933,6 +1989,59 @@ describe('runDispatchPass — drain + dispatch', () => {
     expect(deps.spawned.map((s) => s.taskId)).toEqual(['free']) // only the unclaimed todo
     expect(engine.workers.map((w) => w.taskId)).toEqual(['free'])
     expect(deps.board.get('claimed')?.boardColumn).toBe('doing') // untouched
+  })
+
+  // The mirror image of the test above: while the ENGINE is mid-spawn its card is
+  // still `todo` on the board AND still absent from engine.workers, so nothing the
+  // manual route can read would stop it — except the reservation the pass takes
+  // before it spawns. isCardDispatchInFlight is what the route asks (audit 856daefb).
+  describe('reserves the card across its own spawn window (pendingDispatch)', () => {
+    beforeEach(() => __resetOrchestratorForTests())
+    afterEach(() => __resetOrchestratorForTests())
+
+    it('answers in-flight for the WHOLE spawn, then keeps holding via the roster', async () => {
+      const engine = newEngine({ path: '/proj' })
+      __seedEngineForTests(engine)
+      const deps = makeDeps({ cards: [card('a')] })
+      const realSpawn = deps.spawnWorker
+      const midSpawn: boolean[] = []
+      deps.spawnWorker = async (opts) => {
+        midSpawn.push(await isCardDispatchInFlight('/proj', 'a'))
+        return realSpawn(opts)
+      }
+
+      expect(await isCardDispatchInFlight('/proj', 'a')).toBe(false) // nothing yet
+      await runDispatchPass(engine, deps)
+
+      expect(midSpawn).toEqual([true]) // a concurrent manual POST would get 409
+      expect(engine.pendingDispatch?.size).toBe(0) // reservation released…
+      expect(await isCardDispatchInFlight('/proj', 'a')).toBe(true) // …the roster holds it
+    })
+
+    it('releases the reservation when the spawn THROWS — no card left permanently taken', async () => {
+      const engine = newEngine({ path: '/proj' })
+      __seedEngineForTests(engine)
+      const deps = makeDeps({ cards: [card('a')], spawnFails: new Set(['a']) })
+      await runDispatchPass(engine, deps)
+
+      expect(engine.workers).toHaveLength(0)
+      expect(engine.pendingDispatch?.size).toBe(0)
+      expect(await isCardDispatchInFlight('/proj', 'a')).toBe(false) // re-dispatchable
+    })
+
+    it('still answers in-flight when the todo→doing move was KEPT (board lags the roster)', async () => {
+      const engine = newEngine({ path: '/proj' })
+      __seedEngineForTests(engine)
+      const deps = makeDeps({ cards: [card('a')], moveFails: new Set(['a']) })
+      await runDispatchPass(engine, deps)
+
+      expect(deps.board.get('a')?.boardColumn).toBe('todo') // the board never flipped
+      expect(await isCardDispatchInFlight('/proj', 'a')).toBe(true) // …but the worker is live
+    })
+
+    it('answers false for a project whose engine was never started (creates none)', async () => {
+      expect(await isCardDispatchInFlight('/never-started', 'a')).toBe(false)
+    })
   })
 
   it('keeps the worker but logs when the column move fails, then reconciles next pass', async () => {
@@ -2043,6 +2152,16 @@ describe('runDispatchPass — drain + dispatch', () => {
 // test file), so every case resets it — mirroring swarmQuota.test.ts's own
 // discipline — to stay order-independent.
 
+/** Persist the owner's model hard mask the way the Settings UI does. The engine
+ *  re-reads it from settings.json every pass (isolated test HOME), so the mirror
+ *  cannot be short-circuited — which is the point: the mask must survive a
+ *  restart, and a test that pokes globalThis would prove nothing about that. */
+const setMask = (mask: Partial<Record<'fable' | 'opus' | 'sonnet' | 'haiku', boolean>>) =>
+  setSettings({ swarmAllowedModels: mask })
+/** Back to "no switch set" — an absent key serializes away, so the next read sees
+ *  the every-tier-usable default (leaks between cases would be order-dependent). */
+const clearMask = () => setSettings({ swarmAllowedModels: undefined })
+
 describe('runDispatchPass — quota park (card 0add9d30)', () => {
   beforeEach(() => __resetQuotaForTest())
   afterEach(() => __resetQuotaForTest())
@@ -2119,6 +2238,107 @@ describe('runDispatchPass — quota park (card 0add9d30)', () => {
     expect(engine.parkUntil).toBeUndefined() // never even evaluated — running gate returns first
     expect(engine.log).toHaveLength(0)
   })
+
+  it('⑤ a DISABLED tier is not headroom: fable OFF + the other three cooling ⇒ park', async () => {
+    const now = 1_000_000
+    for (const tier of ['opus', 'sonnet', 'haiku'] as const) markCoolingUntil(tier, now + 5 * 60_000)
+    // Cooling alone would say "fable is free" and dispatch straight into the tier
+    // the owner retired. The mask removes it from the ladder entirely.
+    await setMask({ fable: false })
+    try {
+      const engine = newEngine()
+      const deps = makeDeps({ cards: [card('c0', { boardOrder: 0 })] })
+      await runDispatchPass(engine, deps, now)
+
+      expect(deps.spawned).toHaveLength(0)
+      expect(engine.parkUntil).toBe(now + 5 * 60_000) // the earliest ENABLED tier's reset
+      expect(engine.log.some((l) => l.message.startsWith('quota park:'))).toBe(true)
+    } finally {
+      await clearMask()
+    }
+  })
+})
+
+// ── runDispatchPass — the model HARD MASK (Settings.swarmAllowedModels) ───────
+// Driven through the REAL persistence path (setSettings → settings.json in the
+// isolated test HOME → the globalThis mirror store.getSettings refreshes), so
+// these cases also pin the "survives a restart" half of the contract: the engine
+// reads the mask fresh every pass rather than trusting a process-lifetime flag.
+
+describe('runDispatchPass — every tier switched OFF (none-allowed hold)', () => {
+  beforeEach(() => {
+    __resetQuotaForTest()
+    __resetAllowedModelsForTest()
+  })
+  afterEach(async () => {
+    __resetQuotaForTest()
+    __resetAllowedModelsForTest()
+    await clearMask()
+  })
+
+  const allOff = () => setMask({ fable: false, opus: false, sonnet: false, haiku: false })
+
+  it('spawns nothing, leaves the cards in todo, and says so WITHOUT promising a reset', async () => {
+    const now = 1_000_000
+    await allOff()
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('c0', { boardOrder: 0 }), card('c1', { boardOrder: 1 })] })
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.spawned).toHaveLength(0)
+    expect(deps.board.get('c0')?.boardColumn).toBe('todo')
+    // No deadline: a none-allowed hold has nothing to wait for.
+    expect(engine.parkUntil).toBeUndefined()
+    const warn = engine.log.find((l) => l.level === 'warn')
+    expect(warn?.message).toContain('no model tier is enabled')
+    expect(warn?.message).not.toContain('cooling')
+  })
+
+  it('ESCALATES to a human — once, on the enter edge, not every tick', async () => {
+    const now = 1_000_000
+    await allOff()
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('c0', { boardOrder: 0 })] })
+
+    await runDispatchPass(engine, deps, now)
+    await runDispatchPass(engine, deps, now + 3_000)
+    await runDispatchPass(engine, deps, now + 6_000)
+
+    expect(deps.raised).toHaveLength(1)
+    expect(deps.raised[0].projectPath).toBe(engine.path)
+    expect(deps.raised[0].whyEscalated).toBe('policy')
+    expect(deps.raised[0].question).toContain('switched OFF')
+    // …and only one warn line, not one per tick.
+    expect(engine.log.filter((l) => l.level === 'warn')).toHaveLength(1)
+  })
+
+  it('a FAILED raise is retried on the next pass (the hold itself is unaffected)', async () => {
+    const now = 1_000_000
+    await allOff()
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('c0', { boardOrder: 0 })], raiseFails: true })
+
+    await runDispatchPass(engine, deps, now)
+    expect(deps.raised).toHaveLength(0)
+    expect(engine.spawnBlockSig).toBeUndefined() // forgotten ⇒ next pass re-raises
+    expect(deps.spawned).toHaveLength(0)
+  })
+
+  it('does NOT lift with time — only re-enabling a tier resumes dispatch', async () => {
+    const now = 1_000_000
+    await allOff()
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('c0', { boardOrder: 0 })] })
+
+    await runDispatchPass(engine, deps, now)
+    await runDispatchPass(engine, deps, now + 365 * 24 * 3_600_000)
+    expect(deps.spawned).toHaveLength(0)
+
+    await setMask({ fable: false, opus: true }) // the owner turns opus back on
+    await runDispatchPass(engine, deps, now + 365 * 24 * 3_600_000 + 1)
+    expect(deps.spawned.map((s) => s.taskId)).toEqual(['c0'])
+    expect(engine.log.some((l) => l.message.startsWith('quota park lifted'))).toBe(true)
+  })
 })
 
 // ── runDispatchPass — quota SENSOR wiring (markRateLimited 本番配線) ────────────
@@ -2193,7 +2413,7 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
     const t1 = T0 + STALL_SILENCE_MS + 1
 
     // Baseline: nothing cooling ⇒ a top-tier slot launches on fable.
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, t1).model).toBe('fable')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, t1)!.model).toBe('fable')
 
     await runDispatchPass(engine, deps, t1)
 
@@ -2203,7 +2423,7 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
     expect(isTierCooling('fable', t1 + RATE_LIMIT_GRACE_MS - 1)).toBe(true)
     expect(isTierCooling('fable', t1 + RATE_LIMIT_GRACE_MS + 1)).toBe(false)
     // Done ①: the NEXT dispatch (worker or adversarial reviewer) launches on opus.
-    expect(resolveSwarmModelEffort('max', 'worker', undefined, t1 + 1).model).toBe('opus')
+    expect(resolveSwarmModelEffort('max', 'worker', undefined, t1 + 1)!.model).toBe('opus')
     // …while the limited worker is HELD, not Enter-nudged (Enter can't lift a limit,
     // which is why the real one sat silent for 22 minutes) and not reclaimed.
     expect(deps.nudged).toEqual([])
@@ -4845,6 +5065,103 @@ describe('runEnginePass — never overlaps itself', () => {
     expect(spawned).toEqual(['task a']) // dispatched exactly once, not twice
     expect(engine.workers).toHaveLength(1)
     expect(engine.passInFlight).toBe(false) // cleared after the pass settled
+  })
+})
+
+// ── runEnginePass ⇄ self-supply — the scan runs OFF the tick (audit 856daefb) ──
+// The self-supply scan spawns tsc(120s) + eslint(120s) + vitest(240s) SEQUENTIALLY.
+// It used to be awaited here, inside the passInFlight window — so for up to ~8 minutes
+// the engine did no dispatch, no integrate, and (the dangerous part) no monitor: the
+// stall / runaway / crash detection that recovers a wedged worker was simply not
+// running. The pass is now fired and left to run beside the tick.
+
+describe('runEnginePass — never blocks on the self-supply scan', () => {
+  /** Poll `pred` until true (or the cap elapses) — returns the instant the state lands. */
+  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (pred()) return true
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    return pred()
+  }
+
+  it('returns while a scan is still spawning tools, and the NEXT tick still monitors', async () => {
+    const engine = newEngine({ selfSupply: { ...initSelfSupplyRuntime(), enabled: true } })
+    let fetches = 0
+    let scanEntered = false
+    let releaseScan: () => void = () => {}
+    const scanGate = new Promise<void>((r) => (releaseScan = r))
+    const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps = {
+      fetchTasks: async () => {
+        fetches++
+        return []
+      },
+      spawnWorker: async () => ({
+        terminalId: 'pty',
+        agentSessionId: 's',
+        worktree: '/wt',
+        branch: 'swarm/a',
+      }),
+      moveToDoing: async () => true,
+      moveToReview: async () => true,
+      countCommitsAhead: async () => 0,
+      readHeartbeat: async () => null,
+      recoverCard: async () => true,
+      recoverWorker: async () => ({ removed: true }),
+      isAlive: () => true,
+      lastOutputAt: () => null,
+      nudge: () => true,
+      escalate: async () => true,
+      recentOutput: () => null,
+      fetchReview: async () => [],
+      prepareTarget: async () => 'main',
+      classify: async () => 'ff',
+      verify: async () => ({ ok: true, tip: null }),
+      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+      acquireLock: alwaysAcquireLock,
+      moveToDone: async () => true,
+      markConflict: async () => true,
+      cleanup: async () => ({ removed: true }),
+      killPty: () => {},
+      instructRework: () => {},
+      worktreeExists: async () => true,
+      // The scan stand-in: parked in its first scanner until the test releases it. The
+      // REAL scanners spawn tsc/eslint/vitest — a test must never do that.
+      selfSupplyDeps: {
+        now: () => Date.now(),
+        board: {
+          read: async () => ({ description: '', tasks: [], notes: '', updatedAt: 't0' }),
+          write: async (_p, d) => d,
+        },
+        scanTypeErrors: async () => {
+          scanEntered = true
+          await scanGate
+          return []
+        },
+        scanLintErrors: async () => [],
+        scanTestFailures: async () => [],
+        scanTodoComments: async () => [],
+      },
+    }
+
+    try {
+      // Would hang here (until the test's own timeout) if the tick awaited the scan.
+      await runEnginePass(engine, deps)
+      expect(engine.passInFlight).toBe(false) // the tick let go…
+      await waitUntil(() => scanEntered)
+      expect(engine.selfSupply.scanInFlight).toBe(true) // …while the scan runs beside it
+
+      // The next tick monitors normally instead of being frozen behind the scan — the
+      // observable that matters: stall/runaway/crash detection keeps running.
+      const before = fetches
+      await runEnginePass(engine, deps)
+      expect(fetches).toBeGreaterThan(before)
+      expect(engine.selfSupply.scanInFlight).toBe(true) // still the SAME scan, not a second
+    } finally {
+      releaseScan()
+    }
+    expect(await waitUntil(() => !engine.selfSupply.scanInFlight)).toBe(true)
   })
 })
 

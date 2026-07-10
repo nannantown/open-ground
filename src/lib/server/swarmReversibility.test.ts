@@ -225,6 +225,24 @@ describe('classifyReversibility — bash/tool read-only vs unknown (fail-closed)
   })
 })
 
+// CPU time consumed by THIS process, not wall clock. The ReDoS test below must
+// measure the ALGORITHM, and wall clock also measures the machine: when several
+// swarm workers run vitest at once the CPU is saturated, a descheduled worker
+// stalls for hundreds of ms, and an absolute wall-clock budget flips the test
+// red on healthy code (observed 2026-07-09). process.cpuUsage() does not
+// advance while the process is off-CPU, so it is load-independent.
+const cpuMs = (): number => {
+  const { user, system } = process.cpuUsage()
+  return (user + system) / 1000
+}
+
+// Measured cost of the worst hostile pattern on an idle machine: ~19ms CPU.
+// A quadratic regression over 200KB is ~4e10 steps — tens of seconds, not
+// hundreds of ms. So the linear/quadratic gap spans three orders of magnitude
+// and the budget sits far from BOTH edges: 25× the real cost, still ~20× under
+// any true blow-up. Only the collapse this test exists to catch trips it.
+const REDOS_CPU_BUDGET_MS = 500
+
 describe('classifyReversibility — over-escalation baseline + perf', () => {
   it('leaves plain advice/design questions reversible', () => {
     for (const text of [
@@ -252,9 +270,9 @@ describe('classifyReversibility — over-escalation baseline + perf', () => {
       'x'.repeat(200_000),
     ]
     for (const text of hostile) {
-      const t0 = Date.now()
+      const t0 = cpuMs()
       classifyReversibility({ kind: 'question', text })
-      expect(Date.now() - t0).toBeLessThan(200)
+      expect(cpuMs() - t0).toBeLessThan(REDOS_CPU_BUDGET_MS)
     }
   })
 })

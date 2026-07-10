@@ -35,7 +35,8 @@ import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
-import { getExecutionMode } from './store'
+import { NoAllowedModelTierError } from './swarmAllowedModels'
+import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
 
@@ -454,6 +455,22 @@ export const workerLaunchOpts = (
 export const spawnSwarmWorker = async (
   opts: SpawnSwarmWorkerOpts,
 ): Promise<SpawnSwarmWorkerResponse> => {
+  // Token budget (card 68d8e00f): the mode (+ this card's weight, in optimize) picks
+  // the worker's model/effort. economy ⇒ sonnet/low, max ⇒ fable/max, optimize ⇒ heavy
+  // cards fable, chores sonnet. A per-card explicit override still wins via the Board
+  // 実行 button's task.run; unattended orchestrator dispatch has none, so it rides the mode.
+  //
+  // Resolved BEFORE the worktree is created: with every tier switched OFF there is
+  // no model to launch on, and failing here leaves no orphan worktree/branch behind
+  // (fail-CLOSED — the hard mask must never be worked around by "just spawn anyway").
+  const me = resolveSwarmModelEffort(
+    await getExecutionMode(),
+    'worker',
+    { title: opts.title, notes: opts.notes },
+    Date.now(),
+    await getAllowedModelTiers(),
+  )
+  if (!me) throw new NoAllowedModelTierError()
   // RESTART (opts.worktree) relaunches IN the existing worktree — same swarm/*
   // branch + work preserved; a fresh dispatch creates a new isolated worktree.
   const { worktree, branch } = opts.worktree
@@ -469,14 +486,6 @@ export const spawnSwarmWorker = async (
   // fully READ-only — NO carve-out (a writable node_modules would let a sandboxed
   // worker poison code, e.g. `.vite/deps`, the owner later runs UN-sandboxed).
   const sandbox = await isExperimentEnabled('sandbox')
-  // Token budget (card 68d8e00f): the mode (+ this card's weight, in optimize) picks
-  // the worker's model/effort. economy ⇒ sonnet/low, max ⇒ opus/max, optimize ⇒ heavy
-  // cards opus, chores sonnet. A per-card explicit override still wins via the Board
-  // 実行 button's task.run; unattended orchestrator dispatch has none, so it rides the mode.
-  const me = resolveSwarmModelEffort(await getExecutionMode(), 'worker', {
-    title: opts.title,
-    notes: opts.notes,
-  })
   const ref = launchClaude(
     workerLaunchOpts(
       worktree,

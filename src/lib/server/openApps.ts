@@ -15,7 +15,8 @@ export const normalizeOpenApps = (raw: unknown): OpenApp[] => {
 const normalizeOne = (a: unknown): OpenApp | null => {
   if (typeof a === 'string') {
     const name = a.trim()
-    return name ? { name, mode: 'open' } : null
+    if (!name || name.length > 80) return null
+    return { name, mode: 'open' }
   }
   if (a && typeof a === 'object' && typeof (a as any).name === 'string') {
     const o = a as any

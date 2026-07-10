@@ -43,7 +43,8 @@ import { killTerminal, subscribeTerminal } from './terminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { ensureBrainEgressProxy } from './egressProxy'
 import { youCorpusFile, openGroundHome } from './paths'
-import { SWARM_LAUNCH_MODEL, SWARM_LAUNCH_EFFORT } from './swarmLaunch'
+import { SWARM_LAUNCH_MODEL, SWARM_LAUNCH_EFFORT, resolveAvailableTier } from './swarmLaunch'
+import { NoAllowedModelTierError } from './swarmAllowedModels'
 import {
   classifyReversibility,
   requiresOwnerApproval,
@@ -404,6 +405,20 @@ export const makeOverseerBrain = (
   const proxyPortOf = opts.egressProxyPort ?? (async () => (await ensureBrainEgressProxy()).port)
   return async ({ prompt, signal }) => {
     if (signal?.aborted) return ''
+    // HARD MASK (Settings.swarmAllowedModels), resolved AT SPAWN like every other
+    // claude path (worker launch / reviewer panel): the cerebrum defaults to the top
+    // tier, so a fable that the owner has switched OFF — or that is cooling — must
+    // move this launch down the ladder here rather than seat the brain on a dry
+    // model and have it answer nothing. Null ⇒ no tier is enabled at all: throw, and
+    // the runner fails CLOSED (answerAsOwner escalates to the owner) — the same
+    // contract as the missing-egress-proxy throw below.
+    //
+    // Read from the globalThis mirror (resolveAvailableTier's default) rather than
+    // the settings FILE: the brain is a sandboxed, network-closed one-off and has no
+    // business touching fs here, and its only caller (defaultOverseerDeps) re-reads
+    // settings — refreshing the mirror — immediately before building this runner.
+    const tier = resolveAvailableTier(model, Date.now())
+    if (!tier) throw new NoAllowedModelTierError()
     // EGRESS close, resolved BEFORE any resource is created: on macOS the brain is
     // ALWAYS sandboxed (NOT experiment-gated like the worker/interactive paths —
     // the corpus-holding brain doesn't wait for an opt-in) with network:'loopback',
@@ -487,7 +502,7 @@ export const makeOverseerBrain = (
         // deny-listed at the permission layer, which bypass cannot override —
         // defense-in-depth under the sandbox close, the ONLY gate off-darwin.
         disallowedTools: [...OVERSEER_BRAIN_DISALLOWED_TOOLS],
-        ...(model ? { model } : {}),
+        model: tier,
         ...(effort ? { effort } : {}),
         name: 'overseer',
         appContext: false,

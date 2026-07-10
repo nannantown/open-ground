@@ -23,6 +23,7 @@ import { centralWorktreesDir, customModuleDir } from '@/lib/server/paths'
 import { getCustomTabRole } from '@/lib/server/roles'
 import { getModule } from '@/lib/server/customModules'
 import { projectDataDir, projectUUIDFromPath } from '@/lib/server/projectDataPath'
+import { attachProjectIds } from '@/lib/server/terminalProjects'
 import { Hono } from 'hono'
 import { readProjectData, validateProjectPath } from '@/lib/server/projectData'
 import {
@@ -324,7 +325,11 @@ export const terminalRoutes = new Hono()
   // time), never anything derived from the request. Declared BEFORE the
   // dynamic /api/terminal/:id route so the static `active` segment is never
   // captured as an id.
-  .get('/api/terminal/active', (c) => c.json(listActiveTerminals()))
+  //
+  // attachProjectIds stamps each claude pane with the registry UUID that owns
+  // its cwd, so the Ground can attribute a swarm worker running in a CENTRAL
+  // worktree (outside the project folder) to its parent card.
+  .get('/api/terminal/active', async (c) => c.json(await attachProjectIds(listActiveTerminals())))
   // --- GET /api/terminal/:id — fetch terminal info ---
   .get('/api/terminal/:id', (c) => {
     const info = getTerminal(c.req.param('id'))

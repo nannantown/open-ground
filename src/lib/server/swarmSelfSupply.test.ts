@@ -11,12 +11,17 @@
 //   (5) every fire + suppression lands in the engine journal (the log sink).
 //   (6) the real readProjectData/writeProjectData round-trip persists the gate
 //       fields (isolated HOME) — if the schema dropped them the gate would fail open.
+//   (7) a scanner subprocess that FORKS leaves no orphan when its run is reaped, and
+//       a scan never blocks the engine tick (audit 856daefb).
 //
-// The pure parsers are unit-tested with sample tool output (no subprocess); the
-// carding pipeline is driven with synthetic findings + an in-memory board.
+// The pure parsers are unit-tested with sample tool output; the carding pipeline is
+// driven with synthetic findings + an in-memory board. The only subprocesses are the
+// two cheap `sh` stand-ins in the runCapture suite — the real tsc/lint/vitest scanners
+// are never spawned (self-supply is OFF everywhere in the test suite).
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath } from 'fs/promises'
+import { existsSync, mkdtempSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { addProjectEntry, __resetMigrationCacheForTests } from './registry'
@@ -24,6 +29,8 @@ import { readProjectData } from './projectData'
 import { selectDispatch } from './swarmOrchestrator'
 import {
   runSelfSupplyPass,
+  kickSelfSupplyPass,
+  runCapture,
   approveSelfSupplyCard,
   anomalyFindings,
   parseTscFindings,
@@ -106,6 +113,17 @@ const collectLog = () => {
 const NOOP: SelfSupplyLog = () => {}
 const CFG: SelfSupplyConfig = { maxPerPass: 5, maxPerDay: 10, intervalMs: 0 }
 
+/** Poll `pred` until true (or the cap elapses) — a condition wait, so it returns the
+ *  instant the state lands and only the slow-under-load ceiling is generous. */
+const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (pred()) return true
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  return pred()
+}
+
 // ── Guards: disarmed + throttled are no-ops ───────────────────────────────────
 
 describe('self-supply gating (disarmed / throttled)', () => {
@@ -120,7 +138,9 @@ describe('self-supply gating (disarmed / throttled)', () => {
 
   it('does NOTHING inside the throttle window (no re-scan every tick)', async () => {
     const { board, state } = memBoard()
-    const e = engine({ selfSupply: { enabled: true, lastScanAt: T0, dayKey: '', dayCount: 0 } })
+    const e = engine({
+      selfSupply: { enabled: true, lastScanAt: T0, dayKey: '', dayCount: 0, scanInFlight: false },
+    })
     const out = await runSelfSupplyPass(e, NOOP, mkDeps(board, [finding(1)], T0 + 500), {
       maxPerPass: 5,
       maxPerDay: 5,
@@ -439,5 +459,221 @@ describe('self-supply — real board (isolated HOME)', () => {
     const data3 = await readProjectData(proj)
     expect(data3.tasks[0].selfSupplyApproved).toBe(true)
     expect(selectDispatch(data3.tasks, new Set(), 5).map((c) => c.id)).toEqual([card.id])
+  })
+})
+
+// ── runCapture — the scanner subprocess runner (audit 856daefb) ────────────────
+// The scanners spawn the project's OWN tsc / eslint / vitest. `vitest run` uses the
+// default FORK pool, and execFile's `timeout` SIGTERMs only the direct pid — so a
+// wedged suite hitting the 240s cap used to leave its fork workers ORPHANED, each
+// spinning a core to machine saturation (feedback_vitest_no_midrun_kill; the hazard
+// the merge gate's runGateProcess already documents). runCapture now goes through
+// runGateProcess: detached child (its own process group) + a negative-pid SIGKILL of
+// the WHOLE group on every exit path.
+//
+// The stand-in tool is `sh -c 'sleep & …'`: a non-interactive shell has no job
+// control, so the backgrounded `sleep` stays in the shell's process group — exactly
+// the shape of a vitest fork worker. Its survival after the run settles is the whole
+// assertion: with the old plain execFile it lives on (orphan), with the group reaper
+// it dies. `sh` + `sleep` start in milliseconds, so the short timeouts below have
+// ~100× headroom even on a saturated machine (no cold-start race, unlike `node -e`).
+
+describe('runCapture — reaps the scanner tool AND its forked workers (no orphans)', () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0) // signal 0 = existence probe, kills nothing
+      return true
+    } catch {
+      return false
+    }
+  }
+  const waitFor = async (pred: () => boolean, ms: number): Promise<boolean> => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (pred()) return true
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    return pred()
+  }
+  /** Fork a worker into our own group, publish its pid, then wedge forever. */
+  const WEDGE_AND_FORK = 'sleep 1000 & echo $! > "$WORKER_PIDFILE"; sleep 1000'
+  /** Fork a worker, then exit non-zero WITH a payload on stdout (the tsc/eslint shape). */
+  const FORK_THEN_FAIL = 'sleep 1000 & echo $! > "$WORKER_PIDFILE"; echo "the payload"; exit 1'
+
+  const readPid = (pidFile: string): number => Number(readFileSync(pidFile, 'utf8').trim())
+  const pidLanded = (pidFile: string): boolean =>
+    existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== ''
+
+  // POSIX-only: the negative-pid group signal (and `sh`/`sleep`) are POSIX.
+  it.skipIf(process.platform === 'win32')(
+    'a wedged tool times out: the run yields "" (never throws) and its forked worker is DEAD',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'og-ss-reap-'))
+      const pidFile = join(dir, 'worker.pid')
+      process.env.WORKER_PIDFILE = pidFile
+      let workerPid = -1
+      try {
+        // 3000ms: the wedge NEVER exits, so the timeout path is the only way out. The
+        // fork registers within milliseconds, far inside the window.
+        const run = runCapture(dir, 'sh', ['-c', WEDGE_AND_FORK], 3000)
+        expect(await waitFor(() => pidLanded(pidFile), 8000)).toBe(true)
+        workerPid = readPid(pidFile)
+        expect(workerPid).toBeGreaterThan(0)
+        expect(alive(workerPid)).toBe(true) // the fork is live while the tool wedges
+
+        // A killed scan yields no findings — runCapture swallows the timeout, it never
+        // throws into the pass.
+        await expect(run).resolves.toBe('')
+
+        // The proof: the FORKED worker died with the tool. A parent-only SIGTERM (what
+        // plain execFile's timeout does) would leave it spinning here.
+        expect(await waitFor(() => !alive(workerPid), 8000)).toBe(true)
+      } finally {
+        delete process.env.WORKER_PIDFILE
+        if (workerPid > 0 && alive(workerPid)) {
+          try {
+            process.kill(workerPid, 'SIGKILL') // never leak a spinner out of the suite
+          } catch {
+            /* already gone */
+          }
+        }
+      }
+    },
+    20_000,
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'a NON-ZERO exit still yields stdout (the tsc/eslint/vitest payload) and reaps the fork',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'og-ss-payload-'))
+      const pidFile = join(dir, 'worker.pid')
+      process.env.WORKER_PIDFILE = pidFile
+      let workerPid = -1
+      try {
+        // The tools exit non-zero PRECISELY when they find problems — runGateProcess
+        // rejects there, so runCapture must read the payload back off the rejection.
+        // Losing this would silently zero out every finding.
+        const out = await runCapture(dir, 'sh', ['-c', FORK_THEN_FAIL], 8000)
+        expect(out).toContain('the payload')
+
+        expect(await waitFor(() => pidLanded(pidFile), 8000)).toBe(true)
+        workerPid = readPid(pidFile)
+        // Clean exit reaps the group too: a straggler fork never outlives its scan.
+        expect(await waitFor(() => !alive(workerPid), 8000)).toBe(true)
+      } finally {
+        delete process.env.WORKER_PIDFILE
+        if (workerPid > 0 && alive(workerPid)) {
+          try {
+            process.kill(workerPid, 'SIGKILL')
+          } catch {
+            /* already gone */
+          }
+        }
+      }
+    },
+    20_000,
+  )
+
+  it('a missing binary yields "" — a broken scanner is no findings, never a throw', async () => {
+    await expect(runCapture(tmpdir(), 'og-no-such-binary-xyz', ['--version'], 5000)).resolves.toBe('')
+  })
+})
+
+// ── Off-tick: the scan runs BESIDE the engine tick, one at a time ──────────────
+// Audit 856daefb: the scan (tsc 120s + eslint 120s + vitest 240s, sequential) was
+// awaited inside runEnginePass, which holds passInFlight — so dispatch, the monitor
+// (stall / runaway / crash detection) and integrate froze for minutes. It is now
+// fire-and-forget, which makes overlap possible: a later tick can arrive mid-scan.
+// scanInFlight is the check-and-set guard that keeps exactly one scan alive.
+
+describe('self-supply off-tick execution (kickSelfSupplyPass + scanInFlight)', () => {
+  /** Deps whose todo scanner blocks until the test releases it. */
+  const gatedDeps = (board: SelfSupplyBoard) => {
+    let release: () => void = () => {}
+    let entered = 0
+    const gate = new Promise<void>((r) => (release = r))
+    const deps: SelfSupplyDeps = {
+      ...mkDeps(board),
+      scanTodoComments: async () => {
+        entered++
+        await gate
+        return [finding(1)]
+      },
+    }
+    return { deps, release: () => release(), entries: () => entered }
+  }
+
+  it('kickSelfSupplyPass returns IMMEDIATELY — the tick never waits for the scanners', async () => {
+    const { board, state } = memBoard()
+    const e = engine()
+    const { deps, release } = gatedDeps(board)
+
+    // If the kick awaited the scan this line would hang on the gated scanner.
+    kickSelfSupplyPass(e, NOOP, deps, CFG)
+    expect(e.selfSupply.scanInFlight).toBe(true) // scan is live, beside us
+    expect(state.data.tasks).toHaveLength(0) // …and has not carded yet
+
+    release()
+    expect(await waitUntil(() => !e.selfSupply.scanInFlight)).toBe(true)
+    expect(state.data.tasks).toHaveLength(1) // the off-tick scan still lands its card
+  })
+
+  it('a tick arriving mid-scan does NOT start a second scan (scanInFlight re-entrancy)', async () => {
+    const { board, state } = memBoard()
+    const e = engine()
+    const { deps, release, entries } = gatedDeps(board)
+
+    const first = runSelfSupplyPass(e, NOOP, deps, CFG)
+    expect(await waitUntil(() => entries() === 1)).toBe(true) // scan 1 is parked in the scanner
+
+    // Scan 2 fires from the next tick, 3s later. intervalMs is 0 here, so ONLY
+    // scanInFlight can stop it — the throttle cannot (lastScanAt is stamped after the
+    // board read, i.e. inside scan 1's await window).
+    const second = await runSelfSupplyPass(e, NOOP, deps, CFG)
+    expect(second.scanned).toBe(false)
+    expect(entries()).toBe(1) // the scanner ran once, not twice
+
+    release()
+    expect((await first).proposed).toHaveLength(1)
+    expect(state.data.tasks).toHaveLength(1) // one card, not a double-carded duplicate
+    expect(e.selfSupply.scanInFlight).toBe(false) // released in `finally`
+  })
+
+  it('a failing scan releases scanInFlight — a fault never wedges self-supply shut', async () => {
+    const { board, state } = memBoard()
+    const e = engine()
+    const { lines, log } = collectLog()
+    const failing: SelfSupplyBoard = {
+      read: async () => {
+        throw new Error('boom')
+      },
+      write: board.write,
+    }
+    kickSelfSupplyPass(e, log, { ...mkDeps(board), board: failing }, CFG)
+    expect(await waitUntil(() => !e.selfSupply.scanInFlight)).toBe(true)
+    expect(lines.some((l) => l.level === 'warn' && /board read failed/.test(l.message))).toBe(true)
+
+    // Not wedged: the NEXT kick scans and cards normally (the fault was transient).
+    kickSelfSupplyPass(e, log, mkDeps(board, [finding(1)]), CFG)
+    expect(await waitUntil(() => state.data.tasks.length === 1)).toBe(true)
+  })
+
+  it('a throwing dep is caught by the kick — a fault is journaled, not an unhandled rejection', async () => {
+    const { board } = memBoard()
+    const e = engine()
+    const { lines, log } = collectLog()
+    // `now()` runs OUTSIDE the pass's try/finally (it precedes the scanInFlight set), so a
+    // throw there escapes runSelfSupplyPass — exactly the class of fault the kick's
+    // `.catch` exists for. Fire-and-forget without it would surface as an unhandled
+    // rejection and, in Electron, could take the server process down.
+    const hostile: SelfSupplyDeps = {
+      ...mkDeps(board),
+      now: () => {
+        throw new Error('broken clock')
+      },
+    }
+    kickSelfSupplyPass(e, log, hostile, CFG)
+    expect(await waitUntil(() => lines.some((l) => /pass errored/.test(l.message)))).toBe(true)
+    expect(e.selfSupply.scanInFlight).toBe(false)
   })
 })

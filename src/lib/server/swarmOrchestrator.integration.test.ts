@@ -1422,6 +1422,68 @@ describe('makeAdversarialReview — REAL panel orchestration (injected reviewers
       expect(r.clean).toBe(3)
       expect(isTierCooling('fable', Date.now())).toBe(false)
     })
+
+    // The precision hole this pair pins shut: "abstained × the transcript CONTAINS
+    // limit wording" was the whole test, so a reviewer reading the rate-limit code
+    // (swarmQuota.ts / this arm) quoted the notice, fumbled its verdict marker, and
+    // cooled a perfectly healthy tier for 20 minutes. Quoting is now separated from
+    // dying by two independent conditions — see the sensor's comment.
+    it('does NOT cool when EVERY reviewer abstained but only QUOTED the wording mid-transcript', async () => {
+      const { proj } = await setupRepo()
+      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
+      const res = await spawn({ projectPath: proj, title: 'card q2', hint: 'q2' })
+      await git(proj, ['fetch', 'origin', 'main'])
+      const tip = await tipOf(proj, res.branch)
+
+      // What a reviewer of THIS patch actually prints: the diff's verbatim fixture,
+      // then a page of analysis, then a verdict line whose end token never lands
+      // (⇒ abstention). The notice is quoted, but the session lived on past it.
+      const QUOTING_ABSTAINER = [
+        'Reading the diff against origin/main…',
+        `+  // The CLI's PER-MODEL exhaustion notice, verbatim: "${LIMITED}"`,
+        '+  /reached your .{0,40}\\blimit\\b/,',
+        ...Array.from(
+          { length: 12 },
+          (_, i) =>
+            `Hunk ${i + 1}: the guard holds for the empty-string case and the pattern list stays anchored, so nothing regresses here.`,
+        ),
+        'OPENGROUND_REVIEW: CLEAN', // marker opened, never closed → no verdict scraped
+      ].join('\n')
+
+      const review = makeAdversarialReview({ reviewers: 3, model: 'fable', runReviewer: async () => QUOTING_ABSTAINER })
+      const r = await review(proj, res.branch, 'main', { tip })
+
+      // A healthy tier stays healthy — the swarm keeps its top model.
+      expect(isTierCooling('fable', Date.now())).toBe(false)
+      // Un-decided panel ⇒ an ordinary defer that DOES belong to the review streak
+      // (it is the panel failing, not the engine holding for quota).
+      expect(r.decision).toBe('defer')
+      expect(r.skippedForPark).toBeFalsy()
+      expect(r.reason).toContain('多数決つかず')
+    })
+
+    it('does NOT cool when one reviewer died at the wall but ANOTHER on the same tier voted', async () => {
+      const { proj } = await setupRepo()
+      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
+      const res = await spawn({ projectPath: proj, title: 'card q3', hint: 'q3' })
+      await git(proj, ['fetch', 'origin', 'main'])
+      const tip = await tipOf(proj, res.branch)
+
+      // Reviewer 1's transcript ENDS in the notice — on its own that is a sighting.
+      // But reviewers 2+3 completed full reviews on the SAME tier, concurrently:
+      // positive proof it still serves sessions. Cooling waits for a panel that
+      // nobody got through (the next one, if the tier really is going dry).
+      const review = makeAdversarialReview({
+        reviewers: 3,
+        model: 'fable',
+        runReviewer: async (a) => byIndex({ 1: LIMITED })(a),
+      })
+      const r = await review(proj, res.branch, 'main', { tip })
+
+      expect(isTierCooling('fable', Date.now())).toBe(false)
+      expect(r.decision).toBe('integrate') // 2 of 3 clean — a real majority
+      expect(r.clean).toBe(2)
+    })
   })
 
   it('empty diff (tip already at trunk) → integrate WITHOUT spawning the panel', async () => {

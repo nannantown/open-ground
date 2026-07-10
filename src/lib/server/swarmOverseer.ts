@@ -2,7 +2,9 @@
 // that binds the shipped C1 inbox / C2 proxy-you brain / C4 reversibility gate into
 // one budgeted, edge-triggered watcher riding the engine's own 3s tick
 // (OVERSEER_DESIGN §5/§6/§10 C-core). It NEVER spawns its own driver (K1): it is a
-// stage of runEnginePass, exactly like runSelfSupplyPass.
+// stage of runEnginePass, like self-supply. Unlike self-supply — which is FIRED and
+// left to run beside the tick because its scanners spawn tsc/lint/vitest for minutes
+// (kickSelfSupplyPass) — this pass is cheap, pure logic, so the tick still awaits it.
 //
 // WHAT IT IS (three layers, this file is the BRAINSTEM):
 //   • 脳幹 (here) — a PURE-logic periodic pass. It READS already-computed engine
@@ -74,7 +76,7 @@ import { peekCachedUsage, refreshUsageCacheDetached } from './claudeUsageCli'
 import { runSwarmJanitor } from './swarmJanitor'
 import { createSwarmInfoNotification, listSwarmNotifications } from './swarmNotifications'
 import { resolveSwarmModelEffort } from './swarmLaunch'
-import { getSettings } from './store'
+import { getSettings, getAllowedModelTiers } from './store'
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
@@ -307,8 +309,15 @@ export const defaultOverseerDeps = (io: {
     const mode = await getSettings()
       .then((s) => s.executionMode ?? 'optimize')
       .catch(() => 'optimize' as const)
-    const { model, effort } = resolveSwarmModelEffort(mode, 'overseer')
-    return realAnswerAsOwner(q, { runBrain: makeOverseerBrain({ model, effort }), signal })
+    // Null ⇒ every tier switched OFF. Pass nothing and let makeOverseerBrain's own
+    // spawn-time mask check throw — the runner failing CLOSED is exactly how the
+    // brain already handles "cannot launch safely" (答えは出さず owner へ escalate),
+    // so there is no second refusal path to keep in sync.
+    const me = resolveSwarmModelEffort(mode, 'overseer', undefined, Date.now(), await getAllowedModelTiers())
+    return realAnswerAsOwner(q, {
+      runBrain: makeOverseerBrain({ model: me?.model, effort: me?.effort }),
+      signal,
+    })
   },
   openEscalation: realOpenEscalation,
   canInjectInto: (terminalId, projectPath) => defaultCanInjectInto(terminalId, projectPath),

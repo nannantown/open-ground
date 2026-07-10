@@ -123,6 +123,57 @@ describe('store.setUserSettings — unit (allowlist narrowing)', () => {
   })
 })
 
+// The swarm's model hard mask is a USER preference (the route may write it), but
+// it governs every claude spawn — so the route normalizes it and refuses the one
+// value that can brick the swarm: all four tiers OFF.
+describe('store.setUserSettings — swarmAllowedModels (the model hard mask)', () => {
+  it('persists a partial mask NORMALIZED to the full four-tier map', async () => {
+    const applied = await setUserSettings({ swarmAllowedModels: { fable: false } })
+    expect(applied).toContain('swarmAllowedModels')
+    expect((await getSettings()).swarmAllowedModels).toEqual({
+      fable: false,
+      opus: true,
+      sonnet: true,
+      haiku: true,
+    })
+  })
+
+  it('survives a re-read (it is the persisted, restart-proof half of the quota story)', async () => {
+    await setUserSettings({ swarmAllowedModels: { fable: false, opus: false } })
+    const again = await getSettings()
+    expect(again.swarmAllowedModels).toEqual({
+      fable: false,
+      opus: false,
+      sonnet: true,
+      haiku: true,
+    })
+  })
+
+  it('REFUSES an all-OFF mask — the previous mask survives, the key is not applied', async () => {
+    await setUserSettings({ swarmAllowedModels: { fable: false } })
+    const applied = await setUserSettings({
+      swarmAllowedModels: { fable: false, opus: false, sonnet: false, haiku: false },
+    })
+    expect(applied).not.toContain('swarmAllowedModels')
+    expect((await getSettings()).swarmAllowedModels).toEqual({
+      fable: false,
+      opus: true,
+      sonnet: true,
+      haiku: true,
+    })
+  })
+
+  it('a garbage value degrades to every tier usable rather than retiring a model', async () => {
+    await setUserSettings({ swarmAllowedModels: 'oops' as unknown as Record<string, boolean> })
+    expect((await getSettings()).swarmAllowedModels).toEqual({
+      fable: true,
+      opus: true,
+      sonnet: true,
+      haiku: true,
+    })
+  })
+})
+
 describe('CSRF / cross-origin guard (server/app.ts)', () => {
   it('rejects a mutating POST from a foreign Origin (403)', async () => {
     const res = await app.request(

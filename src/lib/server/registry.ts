@@ -196,6 +196,29 @@ export const addProjectEntry = async (
   })
 }
 
+/** Look up the registry entry whose canonical path EXACTLY equals `path` — i.e.
+ *  `path` IS a registered project root, not merely somewhere beneath one. Pure
+ *  read (no lock, no mutation), returns null on miss.
+ *
+ *  This is the predicate a destructive, path-taking route needs.
+ *  `validateProjectPath` only proves "at or under SOME registered project (or
+ *  its central worktrees dir)", which is the right rule for reading/writing a
+ *  project's data but NOT for "delete this project": a descendant such as
+ *  `<root>/src` passes it. Callers that act on the project as a whole must gate
+ *  on this instead. Entry paths are stored canonical, but each is
+ *  re-canonicalized defensively (a hand-edited settings.json could hold a
+ *  symlinked path) — mirroring projectUUIDFromPath. */
+export const findProjectEntryByPath = async (
+  path: string,
+): Promise<ProjectEntry | null> => {
+  await ensureProjectsMigrated()
+  const canon = await canonicalize(path)
+  for (const e of await canonProjects()) {
+    if ((await canonicalize(e.path)) === canon) return e
+  }
+  return null
+}
+
 /** Unregister a folder (no disk change). Returns the removed entry (so the
  *  caller can drop its canvas position) or null if it wasn't registered. */
 export const removeProjectEntry = async (

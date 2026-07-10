@@ -115,6 +115,11 @@ import { MarketplaceDialog } from '@/components/canvas/modules/MarketplaceDialog
 type PanelView = string
 const isMvpVisibleTab = isModuleIdEnabled
 
+// Module-level constant so the `experiments` fallback (used when the prop is
+// undefined, e.g. a non-owner render) is referentially stable across renders —
+// see moduleGate's useMemo below, which depends on `experiments` by identity.
+const NO_EXPERIMENT_FLAGS: ExperimentFlags = { swarm: false, sandbox: false }
+
 // The single right-click action a tab in the row offers: 'detach' a custom tab
 // (non-destructive, the module stays in the library) or 'disable' a built-in
 // (hide it from this project via disabledModules). The row's menu derives its
@@ -906,12 +911,14 @@ const OwnedProjectBody = ({
   // until its gate is open, so this Set is empty for everyone but the owner with
   // the toggle on — keeping the registry filter below a no-op in the common case.
   const moduleGate = useMemo<ModuleGate>(
-    () => gateFromFlags(experiments ?? { swarm: false, sandbox: false }),
-    // One key per experiment — extend when a new ExperimentId is added so the
-    // gate recomputes when that flag flips. (Stable across identity-only changes.)
-    // `sandbox` is intentionally absent: it gates no tab module (it only changes
-    // how launchClaude spawns), so it never affects this module gate.
-    [experiments?.swarm],
+    () => gateFromFlags(experiments ?? NO_EXPERIMENT_FLAGS),
+    // Depend on the `experiments` object itself, not individual flag keys — so
+    // a future ExperimentId needs no matching edit here to be tracked.
+    // useExperiments() hands out a referentially-stable `flags` object that
+    // only changes identity when a value actually flips (see
+    // src/lib/modules/useExperiments.ts), so this doesn't recompute on every
+    // no-op focus re-check the way depending on the raw object always would.
+    [experiments],
   )
   // The enabled built-in module ids in registry (default) order — gated
   // experiments included only when `moduleGate` opens them — then with this
