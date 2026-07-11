@@ -247,6 +247,42 @@ export const listEscalations = async (opts?: {
   )
 }
 
+/** STRICT receipt read for the overseer's S3/S10 fatal check: every receiptKey
+ *  ever persisted for one project, whatever the record's status (open records
+ *  would dedup anyway; answered/DISMISSED are exactly the ones whose receipt
+ *  must outlive a restart). readTolerant is WRONG for that consumer: it folds
+ *  every failure (EACCES/EMFILE/EIO, corrupt JSON) into [], which a fail-closed
+ *  caller cannot tell from "no receipts" — and raising on that empty set would
+ *  re-post already-dismissed fatals (the exact bug the receipt check exists to
+ *  prevent). Same contract as {@link readForWrite}: ONLY ENOENT means
+ *  "legitimately empty"; every other failure THROWS so the caller defers.
+ *  Pure read — a corrupt file is left in place (the next WRITE owns the
+ *  `.corrupt` quarantine); elements are matched on shape (receiptKey +
+ *  projectPath), not {@link isEscalation}, so a record this build can't fully
+ *  recognise (newer enum values after a rollback) still counts as receipted —
+ *  the fail-closed direction. */
+export const listEscalationReceiptKeys = async (projectPath: string): Promise<Set<string>> => {
+  const canon = await canonicalize(projectPath)
+  await ensureOpenGroundHome()
+  let raw: string
+  try {
+    raw = await readFile(escalationsFile(), 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return new Set()
+    throw e
+  }
+  const parsed: unknown = JSON.parse(raw) // corrupt JSON THROWS — never reads as empty
+  const items = (parsed as Partial<EscalationsState>)?.items
+  if (!Array.isArray(items)) throw new Error('escalations file is not {items: []}')
+  const keys = new Set<string>()
+  for (const it of items) {
+    if (!it || typeof it !== 'object') continue
+    const e = it as { receiptKey?: unknown; projectPath?: unknown }
+    if (typeof e.receiptKey === 'string' && e.projectPath === canon) keys.add(e.receiptKey)
+  }
+  return keys
+}
+
 // ─── Open (raise a question) ──────────────────────────────────────────────────
 
 export interface OpenEscalationInput {

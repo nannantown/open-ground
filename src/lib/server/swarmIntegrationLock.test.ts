@@ -91,7 +91,14 @@ describe('acquireIntegrationLock', () => {
   })
 
   it('release() only removes the lock if it still names our pid', async () => {
-    const first = await acquireIntegrationLock(project, { pid: 111, now: 0, staleMs: 5_000 })
+    // The first holder's pid must be ALIVE here and now — so use our own. An
+    // arbitrary low pid (this used to be 111) happens to exist on a long-lived
+    // dev Mac but NOT on a fresh CI runner, where the liveness probe sees it
+    // dead and the very next acquire stale-reclaims instantly (the 0.11.20+
+    // CI red) — breaking the "still fresh → held" step this scenario needs.
+    // The stale reclaim below still fires deterministically: it comes from AGE
+    // (now ≫ staleMs), which reclaims even a live holder.
+    const first = await acquireIntegrationLock(project, { pid: process.pid, now: 0, staleMs: 5_000 })
     expect(first.ok).toBe(true)
     if (!first.ok) return
 

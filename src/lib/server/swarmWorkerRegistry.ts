@@ -170,11 +170,19 @@ export const listSwarmWorkers = async (
 
   const byWorktree = new Map<string, SwarmWorkerRecord>()
 
-  // 1) Engine-tracked workers — richest fields (taskId/taskTitle/startedAt/stage),
-  //    already carry phase/note/heartbeatAt from the engine's own heartbeat read.
+  // 1) Engine-tracked workers — richest fields (taskId/taskTitle/startedAt/stage).
+  //    phase/note come from the engine's own last-folded heartbeat read (only
+  //    refreshed when the monitor re-probes a 'doing' worker — see withHeartbeat()
+  //    in swarmOrchestrator.ts). heartbeatAt is different: we ALSO read heartbeats
+  //    fresh off disk right here (`hb`, from deps.readHeartbeats() above), so prefer
+  //    that live value over the engine's possibly-stale fold — otherwise a worker
+  //    whose card isn't being actively re-probed (e.g. sitting in review/done) can
+  //    show a heartbeat frozen at whatever the monitor last folded, hours behind the
+  //    real disk timestamp (misdiagnosed as dead — see docs/commander/02-worker-lifecycle.md §4).
   for (const w of engineState?.workers ?? []) {
     const terminalId = liveCwdToTerminalId.get(w.worktree)
     const hb = heartbeats.get(w.worktree)
+    const heartbeatAt = hb?.updatedAt ?? w.heartbeatAt
     byWorktree.set(w.worktree, {
       worktree: w.worktree,
       branch: w.branch,
@@ -185,7 +193,7 @@ export const listSwarmWorkers = async (
       stage: w.stage,
       ...(w.phase ? { phase: w.phase } : {}),
       ...(w.note ? { note: w.note } : {}),
-      ...(w.heartbeatAt ? { heartbeatAt: w.heartbeatAt } : {}),
+      ...(heartbeatAt ? { heartbeatAt } : {}),
       ...(hb?.readyToMerge ? { ready: true } : {}),
       ...(hb && !hb.readyToMerge && (hb.phase === 'blocked' || !!hb.blockers)
         ? { blocked: true }

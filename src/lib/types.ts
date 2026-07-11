@@ -1144,6 +1144,13 @@ export interface OrchestratorReview {
   taskTitle: string
   /** How it relates to the trunk — see {@link OrchestratorReviewStatus}. */
   status: OrchestratorReviewStatus
+  /** Set when the adversarial-review panel froze this card to needs-human after
+   *  consecutive no-majority passes: the streak's accumulated abstention tallies
+   *  (`lens(cause)×N, …` — e.g. `correctness(timeout)×3, regression(timeout)×3`),
+   *  so the human resolving the freeze sees WHICH lens abstained WHY how often
+   *  instead of a bare 「多数決つかず」. In-memory (engine) state — resets with
+   *  the defer streak (a new commit) and on engine restart. */
+  abstainSummary?: string
 }
 
 /** A STATE INCONSISTENCY the commander engine detected between its own worker

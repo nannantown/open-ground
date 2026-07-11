@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -820,12 +820,27 @@ describe('killProcessTree', () => {
         env: { ...process.env, GC_PIDFILE: gcPidFile },
       })
 
+      // Zombie-aware: kill-0 alone also succeeds for an exited-but-unreaped
+      // process (see the gracefulGroupKill describe below for the full story —
+      // on CI runners the orphaned grandchild can sit as a zombie, which is
+      // "dead" for this test's purposes: it proves the group SIGKILL landed).
       const isAlive = (pid: number) => {
         try {
           process.kill(pid, 0)
-          return true
         } catch {
           return false
+        }
+        try {
+          const stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+            encoding: 'utf8',
+          }).trim()
+          return stat !== '' && !stat.toUpperCase().startsWith('Z')
+        } catch (e) {
+          // ps exited non-zero (status is a number) → the pid vanished between
+          // the probes. ps failing to even SPAWN (EMFILE/EAGAIN under extreme
+          // load: no status) must NOT invent a death — fall back to the kill-0
+          // verdict (alive), which already succeeded above.
+          return typeof (e as { status?: unknown }).status !== 'number'
         }
       }
       // Condition wait: returns the instant `pred` holds; `ms` is only a CEILING.
@@ -1182,12 +1197,30 @@ describe('gracefulGroupKill', () => {
   })
 
   // ---- The M1 proof: a REAL two-group process tree (no mocks) ----
+  // Zombie-aware liveness: `process.kill(pid, 0)` alone ALSO succeeds for a
+  // zombie — a process that has already exited (sockets closed, nothing
+  // executing) but still awaits its reaper's waitpid. gracefulGroupKill signals
+  // P's group BEFORE C's, so C usually dies an orphan; GitHub's Linux runners
+  // re-parent it to a reaper that leaves it a zombie past this probe (the
+  // 0.11.20+ CI red on "port is FREED"), while macOS reaps orphans
+  // near-instantly — which is why kill-0 alone stayed green locally. These
+  // assertions mean "really died" / "really survived", so read the REAL state
+  // and count Z (= exited) as dead.
   const isAlive = (pid: number) => {
     try {
       process.kill(pid, 0)
-      return true
     } catch {
       return false
+    }
+    try {
+      const stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim()
+      return stat !== '' && !stat.toUpperCase().startsWith('Z')
+    } catch (e) {
+      // ps exited non-zero (status is a number) → the pid vanished between the
+      // probes. ps failing to even SPAWN (EMFILE/EAGAIN under extreme load: no
+      // status) must NOT invent a death — fall back to the kill-0 verdict
+      // (alive), which already succeeded above.
+      return typeof (e as { status?: unknown }).status !== 'number'
     }
   }
   // Condition wait (see the note on the killtree helper above): `ms` is a CEILING,

@@ -32,6 +32,20 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 - 最初に1回だけ確認: `curl -s $OG/api/health` が `{"app":"openground",…}` を返すこと。
   返らなければ「アプリ非稼働 = 司令塔機能は使えない」と明言して止まる(見えてるフリをしない)。
 - swarm 系 API は **owner ログイン必須**(403 が返るならアプリ側でサインインしてもらう)。
+- **診断の正典**: cwd に `docs/commander/` があるプロジェクト(OPEN GROUND 本体)では、異常・停滞・
+  誤診しやすい症状を診断する**前に** `docs/commander/00-INDEX.md` を引く(症状→章の直行表・
+  検証コマンド集・信じてよい表示の一覧。実失敗4件から生まれた誤診対策)。理想状態とのギャップは
+  `docs/commander/TARGET-STATE.md` が正典。swarm コアを変えた統合を扱うときは docs/commander の
+  追随(TARGET-STATE §6 — 現物が正、食い違いは文書を直す)まで確認する。
+- **文書鮮度チェック(00-INDEX §6-1・セッション開始時に1回)**: cwd に `docs/commander/` があるなら、
+  診断に取りかかる前に 00-INDEX.md 冒頭の「対象コミット」と origin/main tip の乖離を確認する:
+  ```bash
+  git -C <repo> fetch origin main && git -C <repo> log --oneline -1 origin/main
+  git -C <repo> diff --stat <00-INDEX冒頭の対象コミット>..origin/main -- src/ server/
+  ```
+  空(またはテストのみ)なら各章の file:line はまだ有効。swarm コアの `.ts` が出たら、参照する章の
+  記述より現物(コード)を優先し、疑わしい章は現物で裏取りする。手順の詳細・具体コマンドは
+  `docs/commander/00-INDEX.md` §6 を参照(コミットハッシュは都度変わるので固定値をここに転記しない)。
 
 ## 役割分担(誰が何をするか)
 

@@ -68,6 +68,7 @@ import {
   defaultCanInjectInto,
   buildAnswerInjection,
   listEscalations as realListEscalations,
+  listEscalationReceiptKeys,
   type OpenEscalationInput,
 } from './swarmEscalations'
 import type { Escalation, EscalationView } from '../types'
@@ -104,6 +105,12 @@ export interface OverseerThresholds {
   usagePollMs: number
   /** M11 — the escalations/fatals sub-cycle (inbox staleness + edge-fatal file read). */
   escalationsPollMs: number
+  /** S3/S10 — how far back the durable fatal store is considered "recent". Fatals
+   *  older than this NEVER open an escalation, no matter how often the overseer is
+   *  re-armed — the store itself keeps up to 50 records with no expiry
+   *  (SWARM_NOTIFICATIONS_CAP), so without this window a re-arm would replay
+   *  week-old exec-timeouts of long-dead workers as "new". */
+  fatalWindowMs: number
   /** W6 — how often OBSERVING fires the residual-cleanup janitor (T0'). */
   janitorMs: number
   /** M8 — cap on the exponential backoff after a usage refresh keeps missing. */
@@ -123,6 +130,7 @@ export const OVERSEER_THRESHOLDS: OverseerThresholds = {
   inboxStaleMs: 6 * 60 * 60_000, // 6h
   usagePollMs: 60_000, // 60s
   escalationsPollMs: 60_000, // 60s
+  fatalWindowMs: 24 * 60 * 60_000, // 24h — only fatals this fresh may open an escalation
   janitorMs: 15 * 60_000, // 15min
   usageBackoffMaxMs: 15 * 60_000, // 15min
   brainStuckSlackMs: 60_000, // 1min past the 5min timeout
@@ -264,6 +272,18 @@ export interface OverseerEngine {
 export type OverseerLog = (level: 'info' | 'warn', message: string) => void
 const NOOP_LOG: OverseerLog = () => {}
 
+/** One durable fatal paired with its notification-store append time. The
+ *  createdAt is the OCCURRENCE's identity: the payload ({@link SwarmFatalNotification})
+ *  itself carries no timestamp, and the same card can legitimately fail twice —
+ *  each append gets its own createdAt, so keying on it makes every real
+ *  occurrence raise exactly once while a re-read of the same stored record
+ *  never raises twice. */
+export interface TimedSwarmFatal {
+  fatal: SwarmFatalNotification
+  /** Epoch ms the notification store appended this record. */
+  createdAt: number
+}
+
 export interface OverseerDeps {
   now: () => number
   /** From the orchestrator's own deps (it already reads these each pass). */
@@ -284,11 +304,22 @@ export interface OverseerDeps {
   peekUsagePct: () => number | null
   /** M8 — fire a background usage refresh (never awaited). */
   refreshUsage: () => void
-  /** M11/S11 — the escalations inbox (open-record staleness). */
+  /** M11/S11 — the escalations inbox (open-record staleness). TOLERANT read
+   *  (failure ≈ empty) — fine for the info-grade reminder, NOT for the S3/S10
+   *  receipt check below. */
   listEscalations: (opts?: { projectPath?: string; status?: EscalationStatus }) => Promise<EscalationView[]>
+  /** S3/S10 persistent-receipt check — every receiptKey ever persisted for the
+   *  project, any status. The contract is STRICT: only ENOENT reads as an empty
+   *  set; a corrupt/unreadable ledger must THROW (never fold to empty) so the
+   *  caller can DEFER raising — a tolerant empty here silently re-posts
+   *  dismissed fatals (the original bug's second half). */
+  listReceiptKeys: (projectPath: string) => Promise<ReadonlySet<string>>
   /** M6 — recent fatal notifications (exec-timeout S3 / rollback+canary S10; the
-   *  edge fatals fireFatalNotifications already drained from pendingFatal). */
-  recentFatals: () => Promise<SwarmFatalNotification[]>
+   *  edge fatals fireFatalNotifications already drained from pendingFatal).
+   *  RECENT is a contract, not a name: only records appended at/after `sinceMs`
+   *  may be returned (the durable store never expires its cap-50 records, so an
+   *  unwindowed read replays week-old fatals forever — the S3 re-post bug). */
+  recentFatals: (sinceMs: number) => Promise<TimedSwarmFatal[]>
   /** W6 T0' — the residual-cleanup janitor. force/deleteRemote are NEVER passed from
    *  the autonomous loop (user-explicit only — swarmJanitor's own contract). */
   runJanitor: (projectPath: string) => Promise<unknown>
@@ -335,9 +366,17 @@ export const defaultOverseerDeps = (io: {
   },
   refreshUsage: refreshUsageCacheDetached,
   listEscalations: realListEscalations,
-  recentFatals: async () => {
+  listReceiptKeys: listEscalationReceiptKeys,
+  recentFatals: async (sinceMs) => {
     const all = await listSwarmNotifications().catch(() => [])
-    return all.flatMap((n) => (n.kind === 'swarm-fatal' && n.swarmFatal ? [n.swarmFatal] : []))
+    // A record with no createdAt cannot prove it is recent — treat it as old
+    // (excluded). Every store append stamps createdAt, so this only guards
+    // hand-edited/legacy rows.
+    return all.flatMap((n) =>
+      n.kind === 'swarm-fatal' && n.swarmFatal && (n.createdAt ?? 0) >= sinceMs
+        ? [{ fatal: n.swarmFatal, createdAt: n.createdAt ?? 0 }]
+        : [],
+    )
   },
   runJanitor: (projectPath) => runSwarmJanitor(projectPath), // NO force / deleteRemote
 })
@@ -539,7 +578,7 @@ export const runOverseerPass = async (
     //    tick; S3/S10 (edge fatals drained from pendingFatal) re-read the durable fatal
     //    store on the sub-cycle. All raise to the inbox (T3) on the rising edge.
     await detectStateAnomalies(engine, ov, log, deps, now, fired, activeSeen)
-    if (doSubcycle) await detectEdgeFatals(engine, ov, log, deps, now, fired, activeSeen)
+    if (doSubcycle) await detectEdgeFatals(engine, ov, log, deps, now, config, fired, activeSeen)
 
     // 3. Worker free-text questions (S4) — the brain-ignition path (T1) or, when
     //    THROTTLED, a bare raise (T3 direct).
@@ -818,15 +857,20 @@ const detectEdgeFatals = async (
   log: OverseerLog,
   deps: OverseerDeps,
   now: number,
+  config: OverseerThresholds,
   fired: OverseerSignalId[],
   activeSeen: Set<string>,
 ): Promise<void> => {
   // S3 exec-timeout / S10 rollback+canary-failed — EDGE fatals fireFatalNotifications
   // already drained from pendingFatal, so re-read them from the durable notification
-  // store (M6). Deduped by seen (event + ref + detail).
-  let fatals: SwarmFatalNotification[]
+  // store (M6), WINDOWED to fatalWindowMs: the store never expires its records, so an
+  // unwindowed read would replay every stored fatal as "new" on each re-arm/restart
+  // (ov.seen is in-memory — a restart resets it; the window + the persistent receipt
+  // check below are what make that reset safe).
+  const windowStart = now - config.fatalWindowMs
+  let fatals: TimedSwarmFatal[]
   try {
-    fatals = await deps.recentFatals()
+    fatals = await deps.recentFatals(windowStart)
   } catch {
     // Fatal-store read FAILED — indistinguishable from 'no fatals' if we let the
     // every-pass prune drop S3/S10 keys, so a transient blip would re-raise an
@@ -836,39 +880,80 @@ const detectEdgeFatals = async (
     return
   }
   const canon = engine.path
-  for (const f of fatals) {
+  // The occurrence key is id:event:ref:createdAt. createdAt (the store's append
+  // time) is the occurrence's identity: the same card failing again later is a NEW
+  // record with a NEW createdAt (raises once), while re-reading the SAME record —
+  // every sub-cycle, or after a restart — keeps the same key (never re-raises).
+  // It also subsumes the old detail-in-key churn fix (two same-ref records now
+  // differ by createdAt, each getting its own 1-shot slot) without detail's
+  // unbounded length leaking into the 512-char receiptKey clamp.
+  interface FatalCandidate {
+    id: OverseerSignalId
+    f: SwarmFatalNotification
+    ref: string
+    signalKey: string
+    receiptKey: string
+  }
+  const fresh: FatalCandidate[] = []
+  const fp = '1' // 1-shot: the key already encodes the occurrence; raise once until pruned
+  for (const { fatal: f, createdAt } of fatals) {
+    // Defense-in-depth: re-enforce the window locally so an out-of-contract
+    // recentFatals (or a stale test fake) can never act past it.
+    if (createdAt < windowStart) continue
     if (f.projectPath && f.projectPath !== canon) continue
     let id: OverseerSignalId | null = null
     if (f.event === 'exec-timeout') id = 'S3'
     else if (f.event === 'rollback' || f.event === 'canary-failed') id = 'S10'
     if (!id) continue
     const ref = f.taskId ?? f.branch ?? f.event
-    // detail is PART of the key (not just the fp): two fatals sharing an
-    // id:event:ref but differing in detail — the same card timing out twice at
-    // different run-minutes, or two taskId-less rollbacks (ref collapses to the
-    // event) — are DISTINCT occurrences. Keying on detail too gives each its own
-    // 1-shot seen slot, so a sub-cycle can't ping-pong-raise both every ~60s (the
-    // old single fp slot the two records overwrote in turn — the churn MF1 leaves open).
-    const signalKey = `${id}:${f.event}:${ref}:${f.detail}`
-    const fp = '1' // 1-shot: the key already encodes the occurrence; raise once until pruned
+    const signalKey = `${id}:${f.event}:${ref}:${createdAt}`
     activeSeen.add(signalKey)
     if (ov.seen.get(signalKey) === fp) continue
+    fresh.push({ id, f, ref, signalKey, receiptKey: `${id}:${canon}:${ref}:${createdAt}` })
+  }
+  if (fresh.length === 0) return
+
+  // PERSISTENT receipt check: ov.seen alone cannot survive a restart/re-arm, but the
+  // escalation a raise created does. A record with the same receiptKey — whatever its
+  // status: open (dedup would no-op anyway), answered, or DISMISSED — proves this
+  // occurrence already reached the owner; dismissing it must stick forever, not just
+  // until the next restart (the "dismiss doesn't stop the re-post" half of the bug).
+  // The dep is the STRICT reader (listEscalationReceiptKeys), NOT the tolerant
+  // listEscalations: the tolerant read folds a corrupt/unreadable ledger into [],
+  // which this catch can never see — the guard would be fail-open in the real wiring.
+  let receipted: ReadonlySet<string>
+  try {
+    receipted = await deps.listReceiptKeys(canon)
+  } catch {
+    // Receipt ledger unreadable/corrupt — raising blind could re-post a dismissed
+    // fatal (the exact bug). Skip raising this sub-cycle; seen stays unset for the
+    // fresh keys, so the next sub-cycle re-evaluates them once the ledger reads again.
+    return
+  }
+
+  for (const c of fresh) {
+    if (receipted.has(c.receiptKey)) {
+      // Already receipted on disk — mark seen so later sub-cycles skip the ledger
+      // read for this occurrence, and raise nothing.
+      ov.seen.set(c.signalKey, fp)
+      continue
+    }
     const ok = await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
       question:
-        id === 'S3'
-          ? `カード "${f.taskTitle ?? ref}" が実行時間上限を超えました。分割して再依頼しますか、それとも見送りますか？`
-          : `エンジン自己入替が失敗し旧版で動作中です（${f.event}）。どう対応しますか？`,
-      context: f.detail,
+        c.id === 'S3'
+          ? `カード "${c.f.taskTitle ?? c.ref}" が実行時間上限を超えました。分割して再依頼しますか、それとも見送りますか？`
+          : `エンジン自己入替が失敗し旧版で動作中です（${c.f.event}）。どう対応しますか？`,
+      context: c.f.detail,
       whyEscalated: 'policy',
-      receiptKey: `${id}:${engine.path}:${ref}:${f.detail}`,
-      taskId: f.taskId,
-      branch: f.branch,
+      receiptKey: c.receiptKey,
+      taskId: c.f.taskId,
+      branch: c.f.branch,
     })
     if (ok) {
-      ov.seen.set(signalKey, fp)
-      fired.push(id)
-      log('warn', `overseer: ${id} ${f.event} → inbox: ${shorten(f.detail)}`)
+      ov.seen.set(c.signalKey, fp)
+      fired.push(c.id)
+      log('warn', `overseer: ${c.id} ${c.f.event} → inbox: ${shorten(c.f.detail)}`)
     }
   }
 }

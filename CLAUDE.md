@@ -109,6 +109,15 @@ the kind of "my changes disappeared" confusion described in the project history.
 
 If you find yourself about to run `git stash`, commit instead.
 
+## Swarm / 司令塔まわりの正典
+
+swarm エンジン(`src/lib/server/swarmOrchestrator.ts` / `swarmOverseer.ts` /
+`swarmEscalations.ts` ほか)や司令塔運用を**診断・改修する前に
+`docs/commander/00-INDEX.md` を読む**(症状→章の直行表・検証コマンド集・
+信じてよい表示の一覧)。理想の稼働形とギャップは `docs/commander/TARGET-STATE.md`
+が正典。swarm コアのコードを変更したら、同じ変更で docs/commander/ の該当章を
+追随させる(TARGET-STATE §6 — 現物が正、食い違いは文書側を直す)。
+
 ## What this is
 
 OPEN GROUND is a **local, single-user tool** — a **cockpit for Claude Code**.

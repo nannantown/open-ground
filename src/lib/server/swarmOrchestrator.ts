@@ -352,6 +352,44 @@ export const RATE_LIMIT_GRACE_MS = Math.min(
   MAX_EXEC_MS - 60_000,
 )
 
+/** QUOTA-DETECTION FAST PATH (the 21-minute detection lag, 2026-07-09): three
+ *  workers hit "You've reached your Fable 5 limit." FOUR SECONDS after spawn, yet
+ *  the tier only cooled 21m30s later — the sighting sat behind (a) the 10-min
+ *  silence gate (built for HUNG workers, blind to instantly-rejected ones) and
+ *  (b) lastOutputAt counting a decorative TUI repaint (a "Plugin updated" toast)
+ *  as activity, pushing the gate back 6m40s per repaint. The three constants
+ *  below drive the fix in monitorWorkers: sample the screen after a SHORT output
+ *  lull, track how long a rate-limit notice has HELD the screen in real time
+ *  (engine.limitScreen), clamp the stall clock to that onset so chrome repaints
+ *  can't reset it, and confirm an at-spawn rejection without waiting the full
+ *  stall gate. */
+
+/** How long the PTY output must lull before the monitor samples a worker's
+ *  screen for a rate-limit notice. Far under STALL_SILENCE_MS — the whole point
+ *  — but long enough that a BUSY worker (output streaming) is never scraped
+ *  each pass (the per-pass-TUI-scrape cost the silence gate was protecting
+ *  against). A worker whose screen is already being tracked (engine.limitScreen
+ *  / engine.rateLimited) is re-sampled every pass regardless, so a lifted limit
+ *  is noticed promptly. */
+export const RATE_LIMIT_SCRAPE_QUIET_MS = 45_000
+
+/** How soon after dispatch a rate-limit notice must FIRST be sighted for the
+ *  early confirmation below to apply — "the worker walked into the wall at
+ *  spawn". An instantly-rejected worker shows the notice within seconds (plus
+ *  one scrape-quiet window before the monitor samples); a worker that did real
+ *  work first shows it minutes later and takes the ordinary (clamped) stall
+ *  gate instead. This onset window is what keeps the early path away from a
+ *  worker merely EDITING rate-limit wording (this very file's fixtures): that
+ *  happens deep into a session, never in the first two minutes. */
+export const RATE_LIMIT_EARLY_ONSET_MS = 2 * 60_000
+
+/** How long the at-spawn notice must HOLD the screen before the early path
+ *  confirms rate-limited (with zero commits and no heartbeat since the notice).
+ *  Short — the card's contract is sighting-to-cooling under two minutes
+ *  (scrape-quiet + this + a tick ≈ 95s) — but enough that one transient frame
+ *  (a flash mid-boot) never cools a healthy tier. */
+export const RATE_LIMIT_EARLY_CONFIRM_MS = 45_000
+
 /** PERMISSION-WAIT GRACE — how long after auto-accepting a startup permission /
  *  trust prompt the engine waits for the worker to move on before parking it in
  *  'blocked'. Workers launch with permissionMode:'bypass'
@@ -1318,6 +1356,18 @@ export interface ProjectEngine {
    *  twice. runEnginePass check-and-sets this synchronously at entry, so the second
    *  pass bails before it can spawn. In-memory only. */
   passInFlight: boolean
+  /** True while an INTEGRATE pass is mid-flight — its own re-entrancy guard, now
+   *  that the (slow: per-card tsc/vitest verify + a diff-scaled adversarial
+   *  review panel, minutes to ~20m) integrate stage runs BESIDE the tick instead
+   *  of inside the passInFlight window. Holding passInFlight across it starved
+   *  the monitor: every 3s tick bailed for the whole verify, so a worker that
+   *  hit a rate limit mid-verify wasn't even LOOKED at until the vitest run
+   *  finished (the measured 21-minute detection lag's third leg — and with the
+   *  diff-scaled panel budget the blackout could reach 20 minutes). Guarded by
+   *  kickIntegratePass (check-and-set synchronously, cleared in finally), so
+   *  integrate passes still never overlap EACH OTHER. Optional (older-build /
+   *  test-literal backfill). In-memory only. */
+  integrateInFlight?: boolean
   /** Per-engine CRITICAL-SECTION tail — the FIFO promise chain {@link runExclusive}
    *  serializes the board-mutating dispatch pass against the owner's control-plane
    *  mutations (stop/resolve), so a stop/resolve can never INTERLEAVE with the
@@ -1358,12 +1408,16 @@ export interface ProjectEngine {
    *  re-reviews and can land. Pruned when the branch leaves review. In-memory only. */
   reviewFailed: Map<string, string>
   /** Branches whose adversarial review keeps reaching NO majority (defer), keyed
-   *  branch → {tip, consecutive-defer count}. After {@link MAX_REVIEW_DEFERS} defers on
-   *  the SAME tip the panel is no longer re-spawned (it would just re-burn N claude
-   *  sessions every pass — e.g. a systemic claude outage makes all reviewers abstain
-   *  forever) — the card is surfaced "needs a human" and held until a NEW commit
-   *  (different tip) resets the count. Pruned when the branch leaves review. In-memory only. */
-  reviewDeferred: Map<string, { tip: string; count: number }>
+   *  branch → {tip, consecutive-defer count, per-lens abstention tallies}. After
+   *  {@link MAX_REVIEW_DEFERS} defers on the SAME tip the panel is no longer
+   *  re-spawned (it would just re-burn N claude sessions every pass — e.g. a
+   *  systemic claude outage makes all reviewers abstain forever) — the card is
+   *  surfaced "needs a human" and held until a NEW commit (different tip) resets
+   *  the count. `abstains` accumulates `lens(cause)` → times-seen across the
+   *  streak, so the needs-human hand-off can say WHO abstained WHY how often
+   *  (完了条件3) instead of a bare 「多数決つかず」. Pruned when the branch
+   *  leaves review. In-memory only. */
+  reviewDeferred: Map<string, { tip: string; count: number; abstains: Record<string, number> }>
   /** Wall-clock (ms) of the last integration pass — the INTEGRATE_TICK_MS gate. */
   lastIntegrateAt: number
   /** How many times each card (taskId) has been RE-QUEUED after a lost worker —
@@ -1428,6 +1482,18 @@ export interface ProjectEngine {
    *  "hold, don't nudge, requeue only after RATE_LIMIT_GRACE_MS" path — NOT the
    *  stall clock. In-memory only. (Card 4880e9c6 — 進まない分類.) */
   rateLimited: Map<string, { since: number }>
+  /** Per-worker (keyed by terminalId) LIMIT-SCREEN clock (quota-detection fast
+   *  path): the epoch ms a rate-limit notice was FIRST sighted holding this
+   *  worker's screen. Unlike `rateLimited.since` (stamped only once the worker
+   *  is CONFIRMED limited) this tracks the raw sighting, so the monitor can
+   *  (a) measure how long the notice has held the screen in REAL time — immune
+   *  to decorative TUI repaints (toasts) resetting lastOutputAt — and (b)
+   *  confirm an at-spawn rejection early (RATE_LIMIT_EARLY_*). Set when a
+   *  sampled screen reads rate-limited, cleared the moment a sampled screen
+   *  reads anything else (the notice scrolled away ⇒ real work resumed) or the
+   *  worker leaves the live set. Optional (older-build backfill). In-memory
+   *  only. */
+  limitScreen?: Map<string, number>
   /** Per-worker (keyed by terminalId) PERMISSION-WAIT bookkeeping for a startup
    *  trust/permission prompt that slipped past bypass: `since` (epoch ms first
    *  seen) and whether the auto-accept Enter was delivered. Set on first sight in
@@ -1595,6 +1661,8 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.stuckMoves ??= new Map()
     engine.nudges ??= new Map()
     engine.rateLimited ??= new Map()
+    engine.limitScreen ??= new Map()
+    engine.integrateInFlight ??= false
     engine.permissionWaits ??= new Map()
     engine.questionRaised ??= new Map()
     engine.questionWaits ??= new Map()
@@ -1734,14 +1802,17 @@ export const recordEscalationAnswerForNextDispatch = async (
  *  the NEXT link chain off this section's settlement (success OR failure) so one
  *  thrown section never poisons the queue (every caller guards itself anyway). The
  *  returned promise settles with `fn`'s OWN result, so a caller still sees its real
- *  return/throw. NOT re-entrant — only the route-driven control plane and the tick
- *  enter it, never one nested inside the other (verified: no internal call site).
- *  The SLOW integrate pass is intentionally NOT wrapped: it can await a multi-minute
- *  adversarial-review panel, and blocking an owner's stop/resolve click on that would
- *  be a worse regression than the far narrower resolve-vs-integrate window it leaves
- *  open (a SEPARATE, pre-existing race on review-column cards — not the doing-column
- *  bug fixed here — which integrate's own post-review running/autoMerge re-check
- *  already partly covers). */
+ *  return/throw. NOT re-entrant — the route-driven control plane, the tick, and the
+ *  integrate pass's write sections enter it, never one nested inside another
+ *  (verified: no section body calls back into runExclusive).
+ *  The SLOW integrate awaits (per-card tsc/vitest verify + the multi-minute
+ *  adversarial-review panel) are intentionally NOT wrapped — blocking an owner's
+ *  stop/resolve click on those would be a worse regression. Since the integrate
+ *  pass now runs BESIDE the tick (kickIntegratePass — no longer serialized against
+ *  the monitor by passInFlight), its board/worker WRITE sections (reworkOrPark /
+ *  delegateConflict / the integrated-land block) DO take this section, so the
+ *  monitor, the control plane, and integrate's mutations all serialize; only the
+ *  slow read/verify stages overlap the tick. */
 const runExclusive = <T>(engine: ProjectEngine, fn: () => Promise<T>): Promise<T> => {
   const prior = engine.lock ?? Promise.resolve()
   // Run our section once the prior holder settles — whether it fulfilled OR rejected
@@ -2018,13 +2089,17 @@ export interface IntegrationDeps {
    *  remote trunk / an already-merged or conflicting branch returns `ok:true` with
    *  a reason — the gate never FALSE-blocks work it cannot meaningfully verify, and
    *  defers a real conflict to `integrate` (which stamps it). `opts.skipIfTip`:
-   *  when the branch's tip equals it, return `skipped` without running the check. */
+   *  when the branch's tip equals it, return `skipped` without running the check.
+   *  `docsWarning`: a READ-ONLY soft-warn (TARGET-STATE §6) — set when the branch's
+   *  diff touches swarm code ({@link touchesSwarmPaths}) but leaves docs/commander/
+   *  untouched. It NEVER affects `ok` (never blocks the merge) — the caller only
+   *  journals it. */
   verify: (
     projectPath: string,
     branch: string,
     target: string,
     opts?: { skipIfTip?: string },
-  ) => Promise<{ ok: boolean; tip: string | null; reason?: string; skipped?: boolean }>
+  ) => Promise<{ ok: boolean; tip: string | null; reason?: string; skipped?: boolean; docsWarning?: string }>
   /** Independent ADVERSARIAL REVIEW of the to-be-landed tree, run AFTER `verify`
    *  is green and BEFORE `integrate` — the COMPLEMENT to the (mechanical) verify
    *  gate (card a14329dc). N fresh `claude` reviewers — NONE of them the worker —
@@ -2864,16 +2939,25 @@ export const makeVerify =
     //    through with no worktree (a non-TS, non-swarm change blocks nobody).
     const checks: { label: string; run: VerifyCheck['run'] }[] = []
     if (await check.applicable(projectPath)) checks.push({ label: 'tsc', run: check.run })
-    if (conditional.length) {
-      const changed = await changedFilesVsTrunk(projectPath, tip, targetRef)
-      for (const c of conditional) {
-        if (c.appliesTo(changed) && (await c.check.applicable(projectPath))) {
-          checks.push({ label: c.label, run: c.check.run })
-        }
+    // Computed unconditionally (not just when `conditional.length`) so the
+    // docs-freshness soft-warn below fires even for a bare makeVerify(tsc)
+    // (no conditional checks wired) — it is orthogonal to which checks run.
+    const changed = await changedFilesVsTrunk(projectPath, tip, targetRef)
+    for (const c of conditional) {
+      if (c.appliesTo(changed) && (await c.check.applicable(projectPath))) {
+        checks.push({ label: c.label, run: c.check.run })
       }
     }
+    // READ-ONLY soft-warn (TARGET-STATE §6, card: docs追随の仕組み化) — a branch
+    // that touches swarm code but leaves docs/commander/ untouched likely needs a
+    // docs update. NEVER blocks: computed here (both docsWarning-bearing return
+    // paths below carry it), never folded into `ok`.
+    const docsWarning =
+      touchesSwarmPaths(changed) && !changed.some((f) => f.startsWith('docs/commander/'))
+        ? `swarm code changed without a docs/commander/ update (see docs/commander/TARGET-STATE.md §6)`
+        : undefined
     if (checks.length === 0) {
-      return { ok: true, tip, reason: 'no applicable check (nothing to verify)' }
+      return { ok: true, tip, reason: 'no applicable check (nothing to verify)', docsWarning }
     }
 
     // Materialize EXACTLY what integrate will push: a detached worktree at the tip,
@@ -2915,7 +2999,7 @@ export const makeVerify =
         const r = await c.run(dir)
         if (!r.ok) return { ok: false, tip, reason: `${c.label}: ${r.output}` }
       }
-      return { ok: true, tip }
+      return { ok: true, tip, docsWarning }
     } finally {
       await gitOut(projectPath, ['worktree', 'remove', '--force', dir])
       await gitOut(projectPath, ['worktree', 'prune'])
@@ -2965,6 +3049,24 @@ export interface ReviewLens {
   focus: string
 }
 
+/** WHY a reviewer produced no vote. Every non-vote used to collapse into a bare
+ *  `vote:null` — the timeout, the dead PTY, and the unparseable output all became
+ *  an indistinguishable "abstain", so a needs-human freeze gave the operator
+ *  nothing to fix (card f3f1e5c6). Attributed per-reviewer so the tally summary —
+ *  and therefore the engine log — names the cause:
+ *   - 'timeout'      — the reviewer ran out of its wall-clock budget before
+ *                      emitting a verdict marker (the dominant cause on large
+ *                      diffs — see {@link computeReviewTimeoutMs}).
+ *   - 'limit'        — the session's terminal utterance was the subscription
+ *                      rate-limit notice ({@link endsInRateLimit}).
+ *   - 'spawn-failed' — the PTY produced NO output at all (claude never really
+ *                      started).
+ *   - 'no-marker'    — the session ended on its own, produced output, but never
+ *                      a parseable `OPENGROUND_REVIEW` marker.
+ *   - 'aborted'      — the panel tore the reviewer down (engine stop / teardown).
+ *   - 'error'        — the runner itself threw (spawn exception etc.). */
+export type AbstainCause = 'timeout' | 'limit' | 'spawn-failed' | 'no-marker' | 'aborted' | 'error'
+
 export interface ReviewerVerdict {
   /** 1-based reviewer index (surfaced in the log). */
   reviewer: number
@@ -2977,6 +3079,10 @@ export interface ReviewerVerdict {
    *  tallyLensReview}); undefined for the homogeneous majority panel
    *  ({@link tallyReview}). Surfaced per-lens in the engine log (条件3). */
   lens?: ReviewLensKey
+  /** WHY this reviewer abstained — set EXACTLY when `vote` is null, so the
+   *  engine log can say `lens=abstain(timeout)` instead of a bare abstain
+   *  (棄権理由の可視化・完了条件1). */
+  abstainCause?: AbstainCause
 }
 
 /** What the panel's majority vote resolved to:
@@ -3050,6 +3156,26 @@ export const DEFAULT_REVIEW_LENSES: ReviewLens[] = [
  *    - neither            → 'defer'      (多数決つかず: 同票 / 棄権過多 — 保留して
  *      次パスで再評価。マージもせず 差し戻しカウントも進めない)。
  *  Pure + exported for unit tests. `majority = floor(panelSize/2)+1` (2 for 3). */
+/** One `label=abstain(cause)` fragment per NON-vote — the shared "why did this
+ *  reviewer not vote" wording for both tallies' reasons, so every defer the
+ *  engine logs names each abstention's cause (完了条件1: `lens=abstain` で
+ *  終わらせない). '' when everybody voted. */
+const describeAbstentions = (verdicts: ReviewerVerdict[]): string =>
+  verdicts
+    .filter((v) => v.vote === null)
+    .map((v) => `${v.lens ?? `r${v.reviewer}`}=abstain(${v.abstainCause ?? 'unknown'})`)
+    .join(', ')
+
+/** A defer streak's ACCUMULATED abstention tallies (`lens(cause)` → times seen,
+ *  {@link SwarmEngine.reviewDeferred}) as one human-readable fragment —
+ *  `correctness(timeout)×3, regression(timeout)×3` — for the needs-human hand-off
+ *  (完了条件3). 'なし' for a streak of pure ties (nobody abstained). Exported for
+ *  unit tests. */
+export const describeAbstainTallies = (abstains: Record<string, number>): string => {
+  const parts = Object.entries(abstains).map(([key, n]) => `${key}×${n}`)
+  return parts.length > 0 ? parts.join(', ') : 'なし'
+}
+
 export const tallyReview = (verdicts: ReviewerVerdict[], panelSize: number): ReviewResult => {
   const mustFix = verdicts.filter((v) => v.vote === 'must-fix').length
   const clean = verdicts.filter((v) => v.vote === 'clean').length
@@ -3067,12 +3193,13 @@ export const tallyReview = (verdicts: ReviewerVerdict[], panelSize: number): Rev
   if (clean >= majority) {
     return { decision: 'integrate', verdicts, mustFix, clean, reason: `敵対レビュー多数決: ${clean}/${panelSize} clean` }
   }
+  const abstainDetail = describeAbstentions(verdicts)
   return {
     decision: 'defer',
     verdicts,
     mustFix,
     clean,
-    reason: `敵対レビュー多数決つかず (must-fix ${mustFix} / clean ${clean} / 全${panelSize}) — 保留して次パスで再評価`,
+    reason: `敵対レビュー多数決つかず (must-fix ${mustFix} / clean ${clean} / 全${panelSize})${abstainDetail ? ` [${abstainDetail}]` : ''} — 保留して次パスで再評価`,
   }
 }
 
@@ -3110,7 +3237,9 @@ export const tallyLensReview = (
       const label = v.lens ?? `r${v.reviewer}`
       if (v.vote === 'must-fix') return `${label}=must-fix${v.note ? `(${v.note})` : ''}`
       if (v.vote === 'clean') return `${label}=clean`
-      return `${label}=abstain`
+      // Name WHY the lens abstained (完了条件1) — a bare "abstain" told the
+      // operator nothing when the defer streak froze a card to needs-human.
+      return `${label}=abstain(${v.abstainCause ?? 'unknown'})`
     })
     .join(', ')
   if (mustFixWeight >= reworkThreshold) {
@@ -3242,6 +3371,53 @@ const REVIEW_POLL_MS = 750
 const REVIEW_BUFFER = 64_000
 const reviewSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** Per-reviewer budget scaling — the ROOT-CAUSE fix for the lens-abstention
+ *  freeze (card f3f1e5c6, 実測 2026-07-09): the budget was a FLAT 5 minutes
+ *  regardless of diff size, and a reviewer must actually READ the diff before it
+ *  can vote. Measured on one engine build (e583723) with an identical panel, the
+ *  outcome separated monotonically on diff size — every diff ≤ 22,020 bytes got
+ *  4/4 votes, every diff ≥ 33,891 bytes got exactly the 2 fast lenses and froze
+ *  the card at needs-human after 3 defers. Anything self-repairing the engine
+ *  (this file) exceeds 30KB, so the engine could never land its own fixes.
+ *  The budget therefore grows with what the panel is asked to read:
+ *  +10s per KB of diff above the flat floor, hard-capped at 20 minutes
+ *  (a 34KB diff ⇒ ~10.7min, a 122KB diff ⇒ the cap). Reviewers run
+ *  CONCURRENTLY, so the wall-clock cost is the slowest reviewer, not the sum. */
+const REVIEW_TIMEOUT_PER_KB_MS = 10_000
+const REVIEW_TIMEOUT_MAX_MS = 20 * 60_000
+
+/** The per-reviewer wall-clock budget for a diff of `diffBytes`: `baseMs` as the
+ *  floor, +{@link REVIEW_TIMEOUT_PER_KB_MS} per KB, capped at
+ *  {@link REVIEW_TIMEOUT_MAX_MS}. `diffBytes === null` means the diff could not
+ *  be sized (git failed / output overflow) — budget as if LARGE (the cap), because
+ *  a too-short budget re-creates the permanent freeze while a too-long one merely
+ *  waits. An explicit `baseMs` above the cap wins (the caller asked for it).
+ *  Pure + exported for unit tests. */
+export const computeReviewTimeoutMs = (baseMs: number, diffBytes: number | null): number => {
+  const scaled =
+    diffBytes === null
+      ? REVIEW_TIMEOUT_MAX_MS
+      : baseMs + Math.ceil(Math.max(0, diffBytes) / 1024) * REVIEW_TIMEOUT_PER_KB_MS
+  return Math.max(baseMs, Math.min(REVIEW_TIMEOUT_MAX_MS, scaled))
+}
+
+/** Attribute WHY a reviewer produced no parseable verdict (完了条件1). `ended`
+ *  is what the RUNNER observed (its loop's exit edge: budget expiry / panel
+ *  abort); the raw transcript refines it:
+ *   1. a transcript ENDING in the subscription rate-limit notice is 'limit'
+ *      regardless of how the loop exited — the limit was that session's terminal
+ *      utterance (same discriminator the panel's quota sensor uses);
+ *   2. else the runner's edge ('timeout' / 'aborted') stands;
+ *   3. else the PTY ended on its own: NO output at all ⇒ 'spawn-failed'
+ *      (claude never really started), output but no marker ⇒ 'no-marker'.
+ *  Pure + exported for unit tests. */
+export const classifyAbstainCause = (raw: string, ended?: 'timeout' | 'aborted'): AbstainCause => {
+  if (endsInRateLimit(raw)) return 'limit'
+  if (ended) return ended
+  if (raw.trim() === '') return 'spawn-failed'
+  return 'no-marker'
+}
+
 /** Materialize EXACTLY what integrate will push — a detached worktree at `tip`
  *  rebased onto `targetRef` — run `fn(dir)` in it, and force-tear-it-down whatever
  *  happens. Engine-owned dir (randomUUID) under the central worktrees boundary.
@@ -3292,7 +3468,10 @@ export const withRebasedWorktree = async <T>(
 /** Run ONE reviewer to a verdict: a real subscription `claude` PTY in `dir`
  *  (opus by default), marker-scraped, torn down the moment the verdict lands or the
  *  budget / abort fires. Returns the raw PTY buffer (the caller extracts the
- *  verdict). Mirrors generateProjectDescription's PTY-scrape loop. */
+ *  verdict) plus the loop's exit EDGE (`ended`) when the reviewer was cut off —
+ *  'timeout' (budget expired) / 'aborted' (panel teardown) — so an abstention can
+ *  be attributed ({@link classifyAbstainCause}) instead of collapsing into a bare
+ *  vote:null. Mirrors generateProjectDescription's PTY-scrape loop. */
 const defaultRunReviewer = async (args: {
   dir: string
   trunkRef: string
@@ -3302,8 +3481,8 @@ const defaultRunReviewer = async (args: {
   model: string
   /** When set, this reviewer runs the specialized lens prompt + is named for it. */
   lens?: ReviewLens
-}): Promise<string> => {
-  if (args.signal.aborted) return ''
+}): Promise<{ raw: string; ended?: 'timeout' | 'aborted' }> => {
+  if (args.signal.aborted) return { raw: '', ended: 'aborted' }
   // bypass = --dangerously-skip-permissions: no human is at the TTY to approve tool
   // use, and the prompt forbids any mutation, so the read-only review runs unattended.
   // appContext:false keeps the system prompt pristine (marker-scraped utility session,
@@ -3343,12 +3522,14 @@ const defaultRunReviewer = async (args: {
   try {
     while (Date.now() < deadline) {
       await reviewSleep(REVIEW_POLL_MS)
-      if (aborted) return buffer
+      if (aborted) return { raw: buffer, ended: 'aborted' }
       // A verdict marker landed → done (don't wait out the budget).
-      if (extractReviewVerdict(buffer).vote) return buffer
-      if (exited || sub?.info.finishedAt) break
+      if (extractReviewVerdict(buffer).vote) return { raw: buffer }
+      // PTY ended on its own — no edge to report; the transcript says whether it
+      // ever started (spawn-failed) or just never voted (no-marker).
+      if (exited || sub?.info.finishedAt) return { raw: buffer }
     }
-    return buffer
+    return { raw: buffer, ended: 'timeout' }
   } finally {
     args.signal.removeEventListener('abort', onAbort)
     sub?.unsubscribe()
@@ -3383,7 +3564,11 @@ export interface AdversarialReviewOpts {
    *  the subscription PTY). `signal` aborts a reviewer mid-flight on panel teardown.
    *  `lens` is provided in lens mode so a fake can answer per-lens. `model` is the
    *  tier the panel RESOLVED for this spawn (through cooling + the owner's hard
-   *  mask) — the real runner launches on it, and a fake can assert on it. */
+   *  mask) — the real runner launches on it, and a fake can assert on it.
+   *  Resolve either the raw transcript (string — the pre-abstain-attribution
+   *  contract, still fully supported) or `{raw, ended?}` where `ended` names the
+   *  cut-off edge ('timeout' / 'aborted') so an abstention is attributed
+   *  ({@link classifyAbstainCause}) instead of logging as a bare abstain. */
   runReviewer?: (args: {
     dir: string
     trunkRef: string
@@ -3391,7 +3576,7 @@ export interface AdversarialReviewOpts {
     signal: AbortSignal
     lens?: ReviewLens
     model: string
-  }) => Promise<string>
+  }) => Promise<string | { raw: string; ended?: 'timeout' | 'aborted' }>
 }
 
 /** Build the real adversarial-review dep ({@link IntegrationDeps.review}). It
@@ -3459,6 +3644,25 @@ export const makeAdversarialReview = (
     if (diffOut.trim() === '') {
       return { decision: 'integrate', verdicts: [], mustFix: 0, clean: 0, reason: 'no diff to review (nothing to land)' }
     }
+    // Size the actual diff TEXT the reviewers must read and scale their budget on
+    // it (the root-cause fix — see computeReviewTimeoutMs). Own execFile call, not
+    // gitOut: a >1MB diff overflows execFile's default maxBuffer and gitOut would
+    // report the diff "unsizable" for exactly the diffs that most need the bigger
+    // budget. Sizing failure ⇒ null ⇒ budget as if large (fail toward waiting,
+    // never toward the freeze).
+    let diffBytes: number | null = null
+    try {
+      const { stdout } = await execFile('git', ['diff', `${targetRef}...${tip}`], {
+        cwd: projectPath,
+        timeout: 30_000,
+        maxBuffer: 32 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      })
+      diffBytes = Buffer.byteLength(stdout, 'utf8')
+    } catch {
+      /* unsizable — keep null */
+    }
+    const perReviewerTimeoutMs = computeReviewTimeoutMs(timeoutMs, diffBytes)
     // SPAWN PARK: no tier is both enabled and cooled-down ⇒ a reviewer `claude`
     // spawned now would hit the same wall the workers did (or has no model at
     // all) — defer (retry next pass; defer never merges un-reviewed), same
@@ -3511,12 +3715,21 @@ export const makeAdversarialReview = (
             const lens = lenses ? lenses[i] : undefined
             return (customRun
               ? customRun({ dir, trunkRef, index: i + 1, signal: ac.signal, lens, model: panelModel })
-              : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs, model: panelModel, lens })
+              : defaultRunReviewer({ dir, trunkRef, index: i + 1, signal: ac.signal, timeoutMs: perReviewerTimeoutMs, model: panelModel, lens })
             )
-              .then((raw) => ({ raw, ...extractReviewVerdict(raw) }))
+              .then((out): { raw: string; vote: ReviewVote | null; note: string; abstainCause?: AbstainCause } => {
+                const { raw, ended } = typeof out === 'string' ? { raw: out, ended: undefined } : out
+                const verdict = extractReviewVerdict(raw)
+                // A non-vote is ATTRIBUTED here, where both the transcript and the
+                // runner's exit edge are still in hand (完了条件1) — one line past
+                // this point only the cause label survives.
+                return verdict.vote === null
+                  ? { raw, ...verdict, abstainCause: classifyAbstainCause(raw, ended) }
+                  : { raw, ...verdict }
+              })
               // A reviewer that THREW (PTY spawn failed, etc.) is a non-vote, not a
               // panel failure — the tally is computed from whoever did vote.
-              .catch(() => ({ raw: '', vote: null as ReviewVote | null, note: '' }))
+              .catch(() => ({ raw: '', vote: null as ReviewVote | null, note: '', abstainCause: 'error' as AbstainCause }))
           }),
         )
         // QUOTA SENSOR (reviewer arm). The monitor's sensor only ever watches
@@ -3546,6 +3759,8 @@ export const makeAdversarialReview = (
             note: v.note,
             // Tag the lens so the tally can weight it and the log can name it (条件3).
             ...(lenses ? { lens: lenses[i].key } : {}),
+            // Carry the abstention's cause into the verdict the tally summarizes.
+            ...(v.abstainCause !== undefined ? { abstainCause: v.abstainCause } : {}),
           })),
           ...(limitedRaw !== undefined ? { limited: { raw: limitedRaw, tier: panelModel } } : {}),
         }
@@ -3584,9 +3799,20 @@ export const makeAdversarialReview = (
         reason: `reviewer hit the ${tier} usage limit — tier cooling until ${new Date(until).toISOString()}; review deferred`,
       }
     }
-    return lenses
+    const tallied = lenses
       ? tallyLensReview(mat.value.verdicts, lenses, reworkThreshold)
       : tallyReview(mat.value.verdicts, panel)
+    // A defer carrying abstentions gets the sizing context appended — the log line
+    // then reads "WHO abstained WHY (diff 36KB / budget 11min)", everything the
+    // operator needs to see whether the budget, the model, or the diff is at fault.
+    if (tallied.decision === 'defer' && tallied.verdicts.some((v) => v.vote === null)) {
+      const kb = diffBytes === null ? '?' : String(Math.ceil(diffBytes / 1024))
+      return {
+        ...tallied,
+        reason: `${tallied.reason} (diff ${kb}KB / budget ${Math.round(perReviewerTimeoutMs / 60_000)}min/reviewer)`,
+      }
+    }
+    return tallied
   }
 }
 
@@ -4000,6 +4226,7 @@ const monitorWorkers = async (
     if (isRunaway(startedMs, now, MAX_EXEC_MS)) {
       engine.nudges.delete(w.terminalId)
       engine.rateLimited.delete(w.terminalId)
+      engine.limitScreen?.delete(w.terminalId)
       engine.permissionWaits.delete(w.terminalId)
       engine.questionRaised?.delete(w.terminalId)
       engine.questionWaits?.delete(w.terminalId)
@@ -4039,10 +4266,57 @@ const monitorWorkers = async (
       /* unknown → no output signal; heartbeat + startedAt still apply */
     }
     const hbMs = heartbeat?.at ? Date.parse(heartbeat.at) : Number.NaN
+
+    // ── LIMIT-SCREEN CLOCK (quota-detection fast path — the 21-minute lag fix) ──
+    // Sample the screen once the PTY output has merely LULLED (45s), not only
+    // after the full 10-min silence gate, and remember WHEN a rate-limit notice
+    // first appeared (engine.limitScreen). Two properties fall out:
+    //  • Decorative repaints can't defer detection: while the notice HOLDS the
+    //    screen, later PTY output (a "Plugin updated" toast, a status-line
+    //    repaint) is chrome ON the limit screen, not work — so the stall clock
+    //    below is clamped to the notice's onset. If real work resumes, either a
+    //    heartbeat lands (activity by the other channel) or new output scrolls
+    //    the notice off screen (a sampled screen reads normal ⇒ clock cleared).
+    //  • An at-spawn rejection is confirmed in ~1.5 min (the early path below)
+    //    instead of 10+, so the tier cools while its slots can still be re-aimed.
+    // A busy worker (output flowing, nothing tracked) is still never scraped —
+    // the lull gate keeps the per-pass TUI-scrape cost where it was; a tracked
+    // worker is re-sampled every pass so a lifted limit is noticed promptly.
+    engine.limitScreen ??= new Map() // lazy backfill (older-build engine / test literal)
+    const outQuietMs =
+      now - Math.max(lastOut ?? Number.NEGATIVE_INFINITY, Number.isFinite(startedMs) ? startedMs : 0)
+    const sampleScreen =
+      outQuietMs >= RATE_LIMIT_SCRAPE_QUIET_MS ||
+      engine.limitScreen.has(w.terminalId) ||
+      engine.rateLimited.has(w.terminalId)
+    let screen: string | null = null
+    if (sampleScreen) {
+      try {
+        screen = deps.recentOutput(w.terminalId)
+      } catch {
+        /* unknown → classifyOutput('normal') → ordinary stall handling below */
+      }
+    }
+    const output = classifyOutput(screen)
+    if (sampleScreen) {
+      if (output === 'rate-limited') {
+        if (!engine.limitScreen.has(w.terminalId)) engine.limitScreen.set(w.terminalId, now)
+      } else {
+        engine.limitScreen.delete(w.terminalId)
+      }
+    }
+    const limitSince = engine.limitScreen.get(w.terminalId) ?? null
+
+    // Clamp the stall clock's output channel to the notice's onset: output that
+    // lands WHILE the limit notice holds the screen is a decorative repaint, not
+    // activity (the measured failure: one toast pushed detection back 6m40s).
+    // Heartbeats are NOT clamped — a worker that beats is working, whatever its
+    // screen shows, and stays out of every branch below via silentMs.
+    const stallLastOut = limitSince !== null && lastOut !== null && lastOut > limitSince ? limitSince : lastOut
     const stall = classifyStall(
       {
         heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
-        lastOutputAtMs: lastOut,
+        lastOutputAtMs: stallLastOut,
         startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
         nudge: engine.nudges.get(w.terminalId),
       },
@@ -4055,66 +4329,90 @@ const monitorWorkers = async (
       },
     )
 
-    // Only an ALREADY-SILENT worker (the stall detector's own threshold) is judged
-    // for a rate-limit / permission WAIT. This is the false-kill fix: a productive
-    // worker that merely PRINTS limit-/prompt-like text (a plan, a diff, this very
-    // code) is still streaming output ⇒ silentMs < STALL_SILENCE_MS ⇒ not silent ⇒
-    // never classified, never Enter-nudged, never reclaimed. Reading the screen only
-    // when silent also avoids a per-pass TUI scrape for every busy worker.
-    if (stall.silentMs >= STALL_SILENCE_MS) {
-      let screen: string | null = null
-      try {
-        screen = deps.recentOutput(w.terminalId)
-      } catch {
-        /* unknown → classifyOutput('normal') → ordinary stall handling below */
-      }
-      const output = classifyOutput(screen)
+    // EARLY CONFIRMATION — a worker REJECTED AT SPAWN (the 2026-07-09 shape:
+    // "You've reached your Fable 5 limit." four seconds in) must not wait out the
+    // 10-min silence gate built for hung workers. Confirm rate-limited once the
+    // notice (a) appeared within the spawn onset window, (b) has held the screen
+    // for the confirm window, (c) with zero commits and (d) no heartbeat since
+    // the notice — i.e. the worker demonstrably never started working. A worker
+    // merely EDITING limit wording fails (a): that happens minutes into a
+    // session, past the onset window, and takes the ordinary clamped gate.
+    const earlyLimitConfirmed =
+      limitSince !== null &&
+      Number.isFinite(startedMs) &&
+      limitSince - startedMs <= RATE_LIMIT_EARLY_ONSET_MS &&
+      now - limitSince >= RATE_LIMIT_EARLY_CONFIRM_MS &&
+      commitsAhead === 0 &&
+      (!Number.isFinite(hbMs) || hbMs <= limitSince)
 
-      // RATE-LIMIT WAIT — silent because it is waiting on a usage/quota/overload
-      // limit, NOT wedged. Enter can't lift a limit and reclaiming throws away
-      // committed work + re-dispatches into the same wall, so the engine does
-      // NEITHER: it HOLDS the worker (dropping any stall-nudge budget) and only
-      // requeues to 'todo' once STILL limited past RATE_LIMIT_GRACE_MS (slot
-      // recovery; the branch keeps its commits, a later attempt retries when the
-      // limit resets). `since` is stamped once and persists across passes.
-      if (output === 'rate-limited') {
-        engine.permissionWaits.delete(w.terminalId)
-        engine.nudges.delete(w.terminalId)
-        const rl = engine.rateLimited.get(w.terminalId)
-        if (!rl) {
-          engine.rateLimited.set(w.terminalId, { since: now })
-          // QUOTA SENSOR (the one production write into swarmQuota's cooling
-          // table): attribute this sighting to the tier the worker launched on,
-          // so dispatch drops a tier — or parks when every tier is dry — instead
-          // of re-spawning into the same wall. Reset time resolves worker screen
-          // → A5 cache → RATE_LIMIT_GRACE_MS (resolveCoolingUntil). A worker
-          // with no recorded/on-ladder model is held exactly as before — it
-          // marks nothing (never cool a tier by guess).
-          const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
-          let cooling = ''
-          if (tier) {
-            const until = markRateLimited(tier, {
-              ptyText: screen,
-              a5ResetsAt: a5CoolingHint(),
-              graceMs: RATE_LIMIT_GRACE_MS,
-              now,
-            })
-            cooling = ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
-          }
-          logLine(
-            engine,
-            'warn',
-            `worker rate/usage-limited — holding (no nudge; requeue after ${Math.floor(RATE_LIMIT_GRACE_MS / 60_000)}m)${cooling}: ${w.branch} (${shorten(w.taskTitle)})`,
-          )
-        } else if (now - rl.since >= RATE_LIMIT_GRACE_MS) {
-          engine.rateLimited.delete(w.terminalId)
-          if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'rate-limit')) next.push(w)
-          continue
+    // RATE-LIMIT WAIT — waiting on a usage/quota/overload limit, NOT wedged.
+    // Enter can't lift a limit and reclaiming throws away committed work +
+    // re-dispatches into the same wall, so the engine does NEITHER: it HOLDS the
+    // worker (dropping any stall-nudge budget) and only requeues to 'todo' once
+    // STILL limited past RATE_LIMIT_GRACE_MS (slot recovery; the branch keeps
+    // its commits, a later attempt retries when the limit resets). `since` is
+    // stamped once and persists across passes. Entered by EITHER gate:
+    //  • the ordinary stall gate (silentMs ≥ STALL_SILENCE_MS) — silentMs is
+    //    computed on the CLAMPED output channel, so a limit screen that a toast
+    //    keeps "refreshing" still crosses it in real time; or
+    //  • the early at-spawn confirmation (earlyLimitConfirmed) — an instantly-
+    //    rejected worker is confirmed in ~1.5 min, not 10+.
+    // The false-kill contract holds: a productive worker that merely PRINTS
+    // limit-like text is streaming output ⇒ not silent, and (past the onset
+    // window / with commits or heartbeats) not early-confirmed ⇒ never enters;
+    // once its screen stops reading rate-limited the clamp dissolves with the
+    // clock, and the hold clears below the moment a sampled screen reads normal.
+    if (output === 'rate-limited' && (stall.silentMs >= STALL_SILENCE_MS || earlyLimitConfirmed)) {
+      engine.permissionWaits.delete(w.terminalId)
+      engine.nudges.delete(w.terminalId)
+      const rl = engine.rateLimited.get(w.terminalId)
+      if (!rl) {
+        engine.rateLimited.set(w.terminalId, { since: now })
+        // QUOTA SENSOR (the one production write into swarmQuota's cooling
+        // table): attribute this sighting to the tier the worker launched on,
+        // so dispatch drops a tier — or parks when every tier is dry — instead
+        // of re-spawning into the same wall. Reset time resolves worker screen
+        // → A5 cache → RATE_LIMIT_GRACE_MS (resolveCoolingUntil). A worker
+        // with no recorded/on-ladder model is held exactly as before — it
+        // marks nothing (never cool a tier by guess).
+        const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
+        let cooling = ''
+        if (tier) {
+          const until = markRateLimited(tier, {
+            ptyText: screen,
+            a5ResetsAt: a5CoolingHint(),
+            graceMs: RATE_LIMIT_GRACE_MS,
+            now,
+          })
+          cooling = ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
         }
-        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        logLine(
+          engine,
+          'warn',
+          `worker rate/usage-limited — holding (no nudge; requeue after ${Math.floor(RATE_LIMIT_GRACE_MS / 60_000)}m)${cooling}: ${w.branch} (${shorten(w.taskTitle)})`,
+        )
+      } else if (now - rl.since >= RATE_LIMIT_GRACE_MS && outQuietMs >= RATE_LIMIT_SCRAPE_QUIET_MS) {
+        // Requeue only while the RAW output channel is also quiet: a worker whose
+        // screen still shows the (scrolled-back) notice but is ACTIVELY streaming
+        // again is plainly working — never reclaim it on a stale sighting. The
+        // decorative-toast case stays covered: one repaint delays the requeue by
+        // at most one scrape-quiet window, it can't cancel it.
+        engine.rateLimited.delete(w.terminalId)
+        if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'rate-limit')) next.push(w)
         continue
       }
+      next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+      continue
+    }
 
+    // Only an ALREADY-SILENT worker (the stall detector's own threshold) is judged
+    // for a permission / question WAIT. This is the false-kill fix: a productive
+    // worker that merely PRINTS prompt-like text (a plan, a diff, this very code)
+    // is still streaming output ⇒ silentMs < STALL_SILENCE_MS ⇒ not silent ⇒
+    // never classified, never Enter-nudged, never reclaimed. (`screen`/`output`
+    // were sampled above — a worker this silent always crossed the scrape-quiet
+    // lull, so the sample is never missing here.)
+    if (stall.silentMs >= STALL_SILENCE_MS) {
       // PERMISSION-WAIT — silent at a trust/permission prompt that slipped past
       // bypass (--dangerously-skip-permissions should suppress every prompt; this
       // is the backstop). AUTO-ACCEPT once (Enter takes the trust dialog's default
@@ -4321,6 +4619,11 @@ const monitorWorkers = async (
   }
   for (const id of Array.from(engine.rateLimited.keys())) {
     if (!liveTerminalIds.has(id)) engine.rateLimited.delete(id)
+  }
+  if (engine.limitScreen) {
+    for (const id of Array.from(engine.limitScreen.keys())) {
+      if (!liveTerminalIds.has(id)) engine.limitScreen.delete(id)
+    }
   }
   for (const id of Array.from(engine.permissionWaits.keys())) {
     if (!liveTerminalIds.has(id)) engine.permissionWaits.delete(id)
@@ -4625,7 +4928,14 @@ export const runDispatchPass = async (
  *      isn't re-rebased every pass until it becomes fast-forwardable or leaves
  *      review.
  *  Honors the global stop: it bails the moment engine.running flips false (and
- *  re-checks autoMerge) between cards. Never throws — guarded + logged. */
+ *  re-checks autoMerge) between cards. Never throws — guarded + logged.
+ *
+ *  CONCURRENCY (integrate-beside-the-tick): driven by {@link kickIntegratePass},
+ *  fire-and-forget, so this pass OVERLAPS dispatch/monitor ticks instead of
+ *  starving them behind its multi-minute verify/panel awaits. Its board/worker
+ *  WRITE sections take the engine critical section (see runExclusive); the slow
+ *  awaits deliberately don't. `integrateInFlight` bars two of these from ever
+ *  overlapping each other. */
 export const runIntegratePass = async (
   engine: ProjectEngine,
   deps: IntegrationDeps,
@@ -4688,10 +4998,21 @@ export const runIntegratePass = async (
   // worker が居ない/死んでいる(継続不可)なら resolveOrchestratorReview('todo') と整合的に
   // 'todo' へ戻して再 dispatch。autoMerge が armed のとき(下の B.)だけ呼ばれる — OFF 時は
   // 従来どおりカードは review に留まる。安全ゲート(verify GREEN まで done にしない等)は不変。
-  const reworkOrPark = async (
+  // NOTE (integrate-beside-the-tick): the whole body runs INSIDE the engine
+  // critical section. The integrate pass no longer holds passInFlight (it is
+  // kicked fire-and-forget by kickIntegratePass so the monitor keeps ticking
+  // through a multi-minute verify), which means this write path — board moves +
+  // engine.workers rebuild — could otherwise INTERLEAVE with the monitor's own
+  // read→rebuild of the same state (lost updates both ways: a torn-down worker
+  // resurrected by the monitor's stale snapshot, or this filter missing a worker
+  // object the monitor just replaced). The slow verify/panel awaits stay OUTSIDE
+  // the section (owner stop/resolve clicks must not queue behind them); only
+  // these short write sections serialize. The worker lookup happens inside the
+  // lock too, so it always sees the monitor's committed roster.
+  const reworkOrPark = (
     card: ProjectTask & { branch: string },
     reasonLine: string,
-  ): Promise<void> => {
+  ): Promise<void> => runExclusive(engine, async () => {
     if (!engine.running) return // owner stop landed during the (slow) verify await — don't touch the card
     const branch = card.branch
     const title = shorten(card.title ?? '')
@@ -4820,7 +5141,7 @@ export const runIntegratePass = async (
       'warn',
       `差し戻し review→todo (${count}/${MAX_REWORKS}) 再 dispatch(worker 不在): ${branch} (${title}) — ${reasonLine}`,
     )
-  }
+  })
 
   // CONFLICT → worker rebase 委譲 (card 012a2848). 統合の rebase が競合したカードを review に
   // 滞留させ人手を待つ(旧 conflictedBranches/human-resolve)のをやめ、司令塔が手でやっている
@@ -4832,11 +5153,13 @@ export const runIntegratePass = async (
   // force-push 厳禁」を明記する(条件2)。委譲した時点でカードは review を離れる(doing/todo)ので
   // 二重統合されない(条件3)。worker が解消して commit→done を再報告→monitor が review へ再 promote
   // →次の統合パスが再統合を試みる(条件4)。autoMerge armed のとき(B.)だけ呼ばれる。
-  const delegateConflict = async (
+  // Same critical-section contract as reworkOrPark above (integrate-beside-the-
+  // tick): short write section inside the lock, slow awaits outside.
+  const delegateConflict = (
     card: ProjectTask & { branch: string },
     files: readonly string[],
     trunk: string,
-  ): Promise<void> => {
+  ): Promise<void> => runExclusive(engine, async () => {
     if (!engine.running || !engine.autoMerge) return // owner stop/disarm during the (slow) integrate await
     const branch = card.branch
     const title = shorten(card.title ?? '')
@@ -4958,7 +5281,7 @@ export const runIntegratePass = async (
       `conflict → 再dispatch review→todo (${count}/${MAX_CONFLICT_REWORKS}) worker不在: ${branch} (${title})`,
       'conflict',
     )
-  }
+  })
 
   // B. Act only when armed (and a trunk exists to land on).
   if (!engine.autoMerge) return
@@ -5022,6 +5345,9 @@ export const runIntegratePass = async (
     }
     // Verified green (or nothing to verify) — a previously-red branch was fixed.
     engine.verifyFailed.delete(card.branch)
+    // Docs-freshness soft-warn (TARGET-STATE §6) — read-only journal breadcrumb,
+    // never gates the merge (verdict.ok already true at this point).
+    if (verdict.docsWarning) logLine(engine, 'warn', `${verdict.docsWarning}: ${card.branch}`)
 
     // ADVERSARIAL REVIEW GATE (card a14329dc) — COMPLEMENT to the verify gate above.
     // verify proved the tree is MECHANICALLY sound (tsc/safety green); now N
@@ -5053,7 +5379,13 @@ export const runIntegratePass = async (
       const deferMemo = engine.reviewDeferred.get(card.branch)
       if (deferMemo && deferMemo.tip === reviewTip && deferMemo.count >= MAX_REVIEW_DEFERS) {
         const r = engine.reviews.find((x) => x.taskId === card.id)
-        if (r) r.status = 'conflict'
+        if (r) {
+          r.status = 'conflict'
+          // engine.reviews is rebuilt from readiness every pass — re-stamp the
+          // streak's abstention evidence so the dashboard keeps saying WHY this
+          // card froze (完了条件3), not just that it did.
+          r.abstainSummary = describeAbstainTallies(deferMemo.abstains)
+        }
         continue
       }
       const knownBadReviewTip = engine.reviewFailed.get(card.branch)
@@ -5097,21 +5429,38 @@ export const runIntegratePass = async (
         // review and retry next pass: never merge, never bump the 差し戻し count. Count
         // consecutive defers on this tip; at the cap, stop re-spawning (handled above)
         // and surface "needs a human". A NEW commit (different tip) resets the streak.
+        // Accumulate WHO abstained WHY across the streak (完了条件3) — the freeze's
+        // hand-off to the human must carry the whole streak's evidence, not just the
+        // last pass's.
+        const abstains: Record<string, number> =
+          deferMemo && deferMemo.tip === reviewTip ? { ...deferMemo.abstains } : {}
+        for (const v of review.verdicts) {
+          if (v.vote !== null) continue
+          const key = `${v.lens ?? `r${v.reviewer}`}(${v.abstainCause ?? 'unknown'})`
+          abstains[key] = (abstains[key] ?? 0) + 1
+        }
         const count = deferMemo && deferMemo.tip === reviewTip ? deferMemo.count + 1 : 1
-        engine.reviewDeferred.set(card.branch, { tip: reviewTip, count })
+        engine.reviewDeferred.set(card.branch, { tip: reviewTip, count, abstains })
         if (count >= MAX_REVIEW_DEFERS) {
+          const abstainSummary = describeAbstainTallies(abstains)
           const r = engine.reviews.find((x) => x.taskId === card.id)
-          if (r) r.status = 'conflict' // needs-human; further panels are skipped above
+          if (r) {
+            r.status = 'conflict' // needs-human; further panels are skipped above
+            r.abstainSummary = abstainSummary // …and the dashboard says WHY (完了条件3)
+          }
           logLine(
             engine,
             'warn',
-            `敵対レビュー: ${count}回連続で多数決つかず — needs-human 退避(再レビュー停止・新コミットで再開): ${card.branch} (${shorten(card.title ?? '')})`,
+            `敵対レビュー: ${count}回連続で多数決つかず — needs-human 退避(再レビュー停止・新コミットで再開): ${card.branch} (${shorten(card.title ?? '')}) — 棄権内訳: ${abstainSummary} — 最終: ${review.reason}`,
           )
         } else {
+          // The tally's reason names each abstaining lens AND its cause
+          // (完了条件1) — without it this line was an uninterpretable
+          // 「多数決つかず [must-fix 0 / clean 2]」.
           logLine(
             engine,
             'info',
-            `敵対レビュー多数決つかず → 保留 [${tally}] (${count}/${MAX_REVIEW_DEFERS}): ${card.branch} (${shorten(card.title ?? '')})`,
+            `敵対レビュー多数決つかず → 保留 [${tally}] (${count}/${MAX_REVIEW_DEFERS}): ${card.branch} (${shorten(card.title ?? '')}) — ${review.reason}`,
           )
         }
         continue
@@ -5130,8 +5479,8 @@ export const runIntegratePass = async (
     // 差し戻し(1/3) MUST-FIX) — a tmux 司令塔 (a SEPARATE `claude` process driving
     // this same repo by hand, via scripts/swarm-lock.js) may rebase/push the SAME
     // branch onto the SAME trunk at the SAME moment this engine is mid-integrate.
-    // engine.passInFlight only bars a second pass WITHIN this process; it does
-    // nothing against a separate process. Acquired HERE — immediately before the
+    // engine.integrateInFlight only bars a second pass WITHIN this process; it
+    // does nothing against a separate process. Acquired HERE — immediately before the
     // git mutation, per CARD, not once for the whole pass — because the pass also
     // runs verify/tsc and a multi-minute adversarial-review panel per card, which
     // can push a whole-pass hold well past DEFAULT_STALE_MS (10 min); a lock held
@@ -5167,77 +5516,85 @@ export const runIntegratePass = async (
       // no-op everywhere else (other projects, dev/tsx, the shipped app), and it
       // never throws, so the integration path is unaffected.
       requestEngineSelfUpdate(engine.path)
-      // Move the card FIRST; only sweep the worktree+branch once it is recorded
-      // done, so a failed board write self-heals next pass (re-integrate sees the
-      // branch already merged → integrated → retry the move) instead of stranding
-      // a landed card in review with its branch already deleted.
-      if (await deps.moveToDone(engine.path, card.id)) {
-        const cl = await deps.cleanup(engine.path, card.branch)
-        engine.conflictedBranches.delete(card.branch)
-        clearKeptMove(engine, card.id) // the done move landed — forget any stuck tracking
-        engine.reworks.delete(card.id) // landed — reset the 差し戻し budget (success column)
-        engine.conflictReworks.delete(card.id) // landed — reset the conflict-委譲 budget too
-        // Reliable flag CLEAR — the BACKSTOP for two cases the became-ff clear above
-        // can miss: (a) the stamp survived a server restart that lost the in-memory
-        // memo (so that block never ran), and (b) that block's markConflict(false)
-        // was itself KEPT (then the snapshot stays stamped). Only fires for a still-
-        // stamped card — the happy path and an already-cleared became-ff card write
-        // nothing — so a "done but flagged conflict" zombie can never survive a land.
-        if (card.integrationConflict) {
-          try {
-            await deps.markConflict(engine.path, card.id, false)
-          } catch {
-            /* best-effort — the card is already done; a kept clear is only cosmetic */
+      // Write section INSIDE the engine critical section (see reworkOrPark): the
+      // done-move + landed-worker teardown + roster filter must not interleave
+      // with the monitor's own workers rebuild now that integrate runs beside the
+      // tick. No running/autoMerge re-check on entry ON PURPOSE — the branch is
+      // ALREADY on the trunk, so recording that fact (and freeing the landed
+      // worker) stays correct even if a stop landed while awaiting the lock.
+      await runExclusive(engine, async () => {
+        // Move the card FIRST; only sweep the worktree+branch once it is recorded
+        // done, so a failed board write self-heals next pass (re-integrate sees the
+        // branch already merged → integrated → retry the move) instead of stranding
+        // a landed card in review with its branch already deleted.
+        if (await deps.moveToDone(engine.path, card.id)) {
+          const cl = await deps.cleanup(engine.path, card.branch)
+          engine.conflictedBranches.delete(card.branch)
+          clearKeptMove(engine, card.id) // the done move landed — forget any stuck tracking
+          engine.reworks.delete(card.id) // landed — reset the 差し戻し budget (success column)
+          engine.conflictReworks.delete(card.id) // landed — reset the conflict-委譲 budget too
+          // Reliable flag CLEAR — the BACKSTOP for two cases the became-ff clear above
+          // can miss: (a) the stamp survived a server restart that lost the in-memory
+          // memo (so that block never ran), and (b) that block's markConflict(false)
+          // was itself KEPT (then the snapshot stays stamped). Only fires for a still-
+          // stamped card — the happy path and an already-cleared became-ff card write
+          // nothing — so a "done but flagged conflict" zombie can never survive a land.
+          if (card.integrationConflict) {
+            try {
+              await deps.markConflict(engine.path, card.id, false)
+            } catch {
+              /* best-effort — the card is already done; a kept clear is only cosmetic */
+            }
           }
-        }
-        // Drop the just-landed card from the readiness snapshot so the dashboard
-        // doesn't show it as still-in-review until the next pass re-reads.
-        engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-        // Tear the just-landed worker down: kill its lingering `claude` PTY by id
-        // (the common case — a `claude` TUI does NOT exit when /order finishes, so
-        // the promoted worker sits in engine.workers as 'done' with its PTY alive)
-        // and drop it from the live set so its slot frees IMMEDIATELY. cleanup()
-        // already removed the worktree + killed any PTY by cwd; this by-id kill
-        // closes the symlinked-home cwd-miss gap and means no zombie PTY/slot ever
-        // outlives an integration. Branch names are unique per worker → matches ≤1.
-        const landed = engine.workers.filter((w) => w.branch === card.branch)
-        for (const w of landed) {
-          try {
-            deps.killPty(w.terminalId)
-          } catch {
-            /* best-effort — a dead/absent PTY is fine; the monitor would prune it anyway */
+          // Drop the just-landed card from the readiness snapshot so the dashboard
+          // doesn't show it as still-in-review until the next pass re-reads.
+          engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
+          // Tear the just-landed worker down: kill its lingering `claude` PTY by id
+          // (the common case — a `claude` TUI does NOT exit when /order finishes, so
+          // the promoted worker sits in engine.workers as 'done' with its PTY alive)
+          // and drop it from the live set so its slot frees IMMEDIATELY. cleanup()
+          // already removed the worktree + killed any PTY by cwd; this by-id kill
+          // closes the symlinked-home cwd-miss gap and means no zombie PTY/slot ever
+          // outlives an integration. Branch names are unique per worker → matches ≤1.
+          const landed = engine.workers.filter((w) => w.branch === card.branch)
+          for (const w of landed) {
+            try {
+              deps.killPty(w.terminalId)
+            } catch {
+              /* best-effort — a dead/absent PTY is fine; the monitor would prune it anyway */
+            }
           }
-        }
-        if (landed.length > 0) {
-          engine.workers = engine.workers.filter((w) => w.branch !== card.branch)
-        }
-        logLine(
-          engine,
-          'info',
-          `integrated (${outcome.mode}): ${shorten(card.title ?? '')} → ${target}` +
-            (cl.removed ? '' : ` · worktree kept (${cl.reason ?? '?'})`),
-          'integrate',
-        )
-        // A kept worktree after a successful land is a potential zombie — call it
-        // out as its own 'cleanup' warning so it isn't lost inside the (info)
-        // integrate line. The commits are already on the trunk, so this is just a
-        // leftover scratch tree the owner can clear by hand.
-        if (!cl.removed) {
+          if (landed.length > 0) {
+            engine.workers = engine.workers.filter((w) => w.branch !== card.branch)
+          }
           logLine(
             engine,
-            'warn',
-            `worktree teardown kept — clear by hand: ${card.branch} (${cl.reason ?? '?'})`,
-            'cleanup',
+            'info',
+            `integrated (${outcome.mode}): ${shorten(card.title ?? '')} → ${target}` +
+              (cl.removed ? '' : ` · worktree kept (${cl.reason ?? '?'})`),
+            'integrate',
           )
+          // A kept worktree after a successful land is a potential zombie — call it
+          // out as its own 'cleanup' warning so it isn't lost inside the (info)
+          // integrate line. The commits are already on the trunk, so this is just a
+          // leftover scratch tree the owner can clear by hand.
+          if (!cl.removed) {
+            logLine(
+              engine,
+              'warn',
+              `worktree teardown kept — clear by hand: ${card.branch} (${cl.reason ?? '?'})`,
+              'cleanup',
+            )
+          }
+        } else {
+          // Landed on the trunk but the review→done move was KEPT — the work is safe
+          // (commits are on the trunk) yet the card is stuck in review ("done なのに
+          // review"). Track it: a persistently-kept done-move surfaces as a
+          // 'move-stuck' anomaly so a human moves it, instead of an endless warn loop.
+          recordKeptMove(engine, card.id, 'done', card.branch, card.title ?? '')
+          logLine(engine, 'warn', `landed on ${target} but column move kept (will retry): ${shorten(card.title ?? '')}`)
         }
-      } else {
-        // Landed on the trunk but the review→done move was KEPT — the work is safe
-        // (commits are on the trunk) yet the card is stuck in review ("done なのに
-        // review"). Track it: a persistently-kept done-move surfaces as a
-        // 'move-stuck' anomaly so a human moves it, instead of an endless warn loop.
-        recordKeptMove(engine, card.id, 'done', card.branch, card.title ?? '')
-        logLine(engine, 'warn', `landed on ${target} but column move kept (will retry): ${shorten(card.title ?? '')}`)
-      }
+      })
     } else if (outcome.status === 'conflict') {
       // CONFLICT → worker rebase 委譲 (card 012a2848). NOT a human-resolve park
       // anymore: hand the conflict back to the branch's worker to rebase its OWN
@@ -5252,6 +5609,40 @@ export const runIntegratePass = async (
     }
     // 'skipped' (no trunk handled above; non-swarm filtered out) → silent.
   }
+}
+
+/** Fire the integrate pass BESIDE the tick — never awaited by {@link runEnginePass}.
+ *
+ *  WHY (the monitor-starvation leg of the 21-minute quota-detection lag,
+ *  measured 2026-07-09): the integrate pass verifies each candidate branch with
+ *  an inline tsc + vitest run (minutes) and can then await a diff-scaled
+ *  adversarial-review panel (up to ~20m). While runEnginePass awaited all of
+ *  that, `passInFlight` stayed set and EVERY 3s tick bailed — no dispatch, no
+ *  integrate, and above all NO MONITOR: a worker that hit its model limit
+ *  mid-verify wasn't looked at until the vitest run finished (auto-integrate ON
+ *  at 15:23:09 pushed an otherwise-due rate-limit sighting to 15:29:39). Same
+ *  starvation shape the self-supply scan had (see kickSelfSupplyPass) — same
+ *  cure: run it beside the tick.
+ *
+ *  Safety: `integrateInFlight` is check-and-set SYNCHRONOUSLY here and cleared
+ *  in `finally`, so integrate passes never overlap EACH OTHER (the per-pass
+ *  INTEGRATE_TICK_MS throttle inside runIntegratePass keeps its own cadence);
+ *  and every board/worker WRITE section inside the pass (reworkOrPark /
+ *  delegateConflict / the integrated-land block) takes the engine critical
+ *  section, so those mutations still serialize against the monitor and the
+ *  owner's control plane. The slow verify/panel awaits stay OUTSIDE the lock —
+ *  an owner stop/resolve click never queues behind them. */
+export const kickIntegratePass = (
+  engine: ProjectEngine,
+  deps: IntegrationDeps,
+): void => {
+  if (engine.integrateInFlight) return
+  engine.integrateInFlight = true
+  void runIntegratePass(engine, deps)
+    .catch((e) => logLine(engine, 'warn', `integrate pass errored — ${errMsg(e)}`))
+    .finally(() => {
+      engine.integrateInFlight = false
+    })
 }
 
 // ── Anomaly detection (条件2 — surface state drift the loop can't self-heal) ──
@@ -5602,10 +5993,16 @@ export const runEnginePass = async (
     // section so a control op can't interleave with the monitor's await window and have
     // its card-park silently overwritten by a stale pass-start snapshot (see
     // runExclusive). passInFlight still bars a SECOND pass from queueing here (it bails,
-    // it doesn't wait), so only control ops ever share this lock with a pass. The slow
-    // integrate pass below stays OUTSIDE the section on purpose (latency — see runExclusive).
+    // it doesn't wait), so only control ops ever share this lock with a pass.
     await runExclusive(engine, () => runDispatchPass(engine, deps))
-    if (engine.running) await runIntegratePass(engine, deps)
+    // Integrate runs BESIDE the tick (fire-and-forget), NOT awaited: its per-card
+    // verify (tsc+vitest, minutes) and diff-scaled review panel (up to ~20m) used
+    // to hold passInFlight for their whole duration, so every 3s tick bailed and
+    // the MONITOR was starved — a worker rate-limited mid-verify went unseen until
+    // the vitest run finished (the measured 21-minute quota-detection lag's third
+    // leg). kickIntegratePass owns the re-entrancy guard (integrateInFlight) and
+    // the .catch; its write sections take the engine critical section themselves.
+    if (engine.running) kickIntegratePass(engine, deps)
     if (engine.running) {
       let tasks: ProjectTask[] | null = null
       try {

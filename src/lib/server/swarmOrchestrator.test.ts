@@ -15,6 +15,9 @@ import {
   STALL_ECHO_GUARD_MS,
   MAX_EXEC_MS,
   RATE_LIMIT_GRACE_MS,
+  RATE_LIMIT_SCRAPE_QUIET_MS,
+  RATE_LIMIT_EARLY_ONSET_MS,
+  RATE_LIMIT_EARLY_CONFIRM_MS,
   PERMISSION_WAIT_GRACE_MS,
   QUESTION_GRACE_MS,
   classifyOutput,
@@ -39,6 +42,7 @@ import {
   recoveryColumn,
   runDispatchPass,
   runIntegratePass,
+  kickIntegratePass,
   runEnginePass,
   stopOrchestrator,
   setOverseer,
@@ -3169,6 +3173,373 @@ describe('runDispatchPass — monitor: rate-limit wait (no false kill)', () => {
   })
 })
 
+// ── Quota-detection fast path (the measured 21-minute lag, 2026-07-09) ─────────
+// Three workers printed "You've reached your Fable 5 limit." FOUR SECONDS after
+// spawn; the tier only cooled 21m30s later. The three legs, each pinned here:
+//  ① the 10-min silence gate never looked at an instantly-rejected worker;
+//  ② a decorative TUI repaint (a "Plugin updated" toast at 15:14:43) reset the
+//    silence clock and pushed the gate back 6m40s — repeatable indefinitely;
+//  ③ the integrate pass's inline verify starved the monitor (covered in the
+//    runEnginePass suite below).
+// Contract under test: an at-spawn rejection is confirmed (and its tier cooled)
+// in UNDER TWO MINUTES; chrome repaints cannot defer detection; the false-kill
+// guards (streaming worker untouched, limit wording in source ≠ limited) hold.
+
+describe('runDispatchPass — monitor: at-spawn rejection confirmed early (leg ①)', () => {
+  const T0 = Date.parse('2026-07-09T15:08:00Z') // the incident's clock
+  const startedAt = new Date(T0).toISOString()
+  const FABLE_LIMIT_NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+  const w1 = () =>
+    worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' })
+  beforeEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+  afterEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+
+  it('confirms an instantly-rejected worker UNDER TWO MINUTES and cools its tier (完了条件1)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', T0 + 4_000]]), // the notice's own paint — then nothing
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    // First pass after the output lulls past the scrape gate: the sighting is
+    // STAMPED (limit-screen clock starts) but one frame alone never confirms.
+    const tStamp = T0 + 4_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    await runDispatchPass(engine, deps, tStamp)
+    expect(engine.limitScreen?.get('pty-a-1')).toBe(tStamp)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false)
+    for (const tier of MODEL_TIER_LADDER) expect(isTierCooling(tier, tStamp + 1)).toBe(false)
+
+    // The notice holds the screen through the confirm window → confirmed + cooled,
+    // with the whole sighting→cooling chain landing well under two minutes.
+    const tConfirm = tStamp + RATE_LIMIT_EARLY_CONFIRM_MS + 3_000
+    expect(tConfirm - T0).toBeLessThan(2 * 60_000) // the card's observable contract
+    await runDispatchPass(engine, deps, tConfirm)
+    expect(engine.rateLimited.get('pty-a-1')?.since).toBe(tConfirm)
+    expect(isTierCooling('fable', tConfirm + 1)).toBe(true)
+    expect(engine.log.some((l) => l.message.startsWith('worker rate/usage-limited — holding'))).toBe(true)
+    // …and it is HELD: never nudged, never reclaimed, slot still counted.
+    expect(deps.nudged).toHaveLength(0)
+    expect(deps.tornDown).toHaveLength(0)
+    expect(engine.workers).toHaveLength(1)
+  })
+
+  it('does NOT early-confirm a worker with commits (it plainly worked — ordinary gate applies)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 1]]), // integrable work exists
+      outputs: new Map([['pty-a-1', T0 + 4_000]]),
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    const tStamp = T0 + 4_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    await runDispatchPass(engine, deps, tStamp)
+    await runDispatchPass(engine, deps, tStamp + RATE_LIMIT_EARLY_CONFIRM_MS + 3_000)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false) // early path refused
+    // The clamped stall gate still catches a REAL wait eventually (10min real time).
+    await runDispatchPass(engine, deps, tStamp + STALL_SILENCE_MS + 1_000)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(true)
+  })
+
+  it('does NOT early-confirm when a heartbeat postdates the notice (alive by the other channel)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const heartbeats = new Map<string, HeartbeatSign>()
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats,
+      outputs: new Map([['pty-a-1', T0 + 4_000]]),
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    const tStamp = T0 + 4_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    await runDispatchPass(engine, deps, tStamp)
+    // A heartbeat lands AFTER the sighting — the worker is demonstrably working
+    // (the notice is scrollback / quoted text, not its terminal state).
+    heartbeats.set('a', { ready: false, blocked: false, at: new Date(tStamp + 10_000).toISOString() })
+    await runDispatchPass(engine, deps, tStamp + RATE_LIMIT_EARLY_CONFIRM_MS + 15_000)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false)
+    expect(deps.tornDown).toHaveLength(0)
+  })
+
+  // ── REGRESSION (0d1f7f0 review residue) — the early path's FALSE-POSITIVE
+  // boundary, pinned fence by fence. Inside the spawn onset window a worker that
+  // is genuinely healthy but (a) keeps limit wording on screen, (b) lulls output
+  // past the scrape gate, (c) has zero commits and (d) no heartbeat after the
+  // sighting is INDISTINGUISHABLE from an at-spawn rejection, and the engine
+  // accepts the misfire BY DESIGN because it is non-destructive: the worker is
+  // only HELD (never nudged / torn down / requeued) and the cooling self-expires
+  // on the grace clock — the fail-closed contract this suite exists to keep.
+  // Each case crosses exactly ONE fence, so an edit that widens (or silently
+  // disables) any of them fails one row here; the fourth fence — onset itself
+  // (limitSince - startedMs) — is pinned by the editing-wording test in the
+  // false-kill suite below. Behaviour photographed as-is; a REAL fence bug found
+  // while writing this would be carded, not fixed here (worker discipline).
+  it.each([
+    {
+      label: 'inside every fence → falsely confirmed, but HELD only (the accepted residue)',
+      hbAt: 'spawn' as const, // only the spawn-time init beat — predates the sighting
+      commits: 0,
+      spinner: false,
+      confirmed: true,
+    },
+    {
+      label: 'heartbeat exactly AT the sighting (hbMs == limitSince) → still confirmed (≤ is the fence)',
+      hbAt: 'at-sighting' as const,
+      commits: 0,
+      spinner: false,
+      confirmed: true,
+    },
+    {
+      label: 'heartbeat 1ms AFTER the sighting → refused (alive by the other channel)',
+      hbAt: 'after-sighting' as const,
+      commits: 0,
+      spinner: false,
+      confirmed: false,
+    },
+    {
+      label: 'ONE commit ahead → refused (it plainly worked; ordinary gate applies)',
+      hbAt: 'spawn' as const,
+      commits: 1,
+      spinner: false,
+      confirmed: false,
+    },
+    {
+      label: 'spinner repaints hold the lull under the scrape gate → never sampled, never confirmed',
+      hbAt: 'spawn' as const,
+      commits: 0,
+      spinner: true,
+      confirmed: false,
+    },
+  ])('early-confirm false-positive boundary: $label', async ({ hbAt, commits, spinner, confirmed }) => {
+    const engine = newEngine({ workers: [w1()] })
+    const heartbeats = new Map<string, HeartbeatSign>()
+    const outputs = new Map([['pty-a-1', T0 + 4_000]]) // one early paint, then the lull
+    const screens = new Map([['pty-a-1', FABLE_LIMIT_NOTICE]])
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', commits]]),
+      heartbeats,
+      outputs,
+      screens,
+    })
+    // Same two-pass clock as the confirm test above (stamp, then confirm); fixture
+    // sanity: both passes land INSIDE the onset window, isolating the three fences.
+    const tStamp = T0 + 4_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    const tConfirm = tStamp + RATE_LIMIT_EARLY_CONFIRM_MS + 3_000
+    expect(tStamp - T0).toBeLessThanOrEqual(RATE_LIMIT_EARLY_ONSET_MS)
+    expect(tConfirm - T0).toBeLessThan(2 * 60_000)
+    const hbMs = { spawn: T0, 'at-sighting': tStamp, 'after-sighting': tStamp + 1 }[hbAt]
+    heartbeats.set('a', { ready: false, blocked: false, at: new Date(hbMs).toISOString() })
+
+    // A busy-but-quiet worker mid-thought; the spinner variant repaints chrome
+    // just inside the scrape-quiet gate before EACH pass, so the screen is never
+    // even sampled and no limit-screen clock can start.
+    if (spinner) outputs.set('pty-a-1', tStamp - RATE_LIMIT_SCRAPE_QUIET_MS + 1_000)
+    await runDispatchPass(engine, deps, tStamp)
+    if (spinner) {
+      expect(engine.limitScreen?.has('pty-a-1')).toBe(false) // no sample → no clock
+      outputs.set('pty-a-1', tConfirm - RATE_LIMIT_SCRAPE_QUIET_MS + 1_000)
+    } else {
+      expect(engine.limitScreen?.get('pty-a-1')).toBe(tStamp) // sighting stamped
+    }
+    await runDispatchPass(engine, deps, tConfirm)
+
+    // Whichever way the verdict goes, the worker itself is NEVER touched — a
+    // misfire is a hold, not a kill: no nudge, no teardown, no requeue, and the
+    // slot stays counted.
+    expect(deps.nudged).toHaveLength(0)
+    expect(deps.tornDown).toHaveLength(0)
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.workers).toHaveLength(1)
+
+    if (confirmed) {
+      expect(engine.rateLimited.get('pty-a-1')?.since).toBe(tConfirm)
+      expect(isTierCooling('fable', tConfirm + 1)).toBe(true) // the accepted cost: a tier cools early
+
+      // …and the misfire SELF-HEALS well inside the 20-min grace: work resumes
+      // (fresh output, the wording scrolls off) → the hold and the limit-screen
+      // clock dissolve on the next sampled pass, with the worker still intact.
+      screens.set('pty-a-1', 'editing src/lib/server/foo.ts — vitest running')
+      outputs.set('pty-a-1', tConfirm + 30_000)
+      await runDispatchPass(engine, deps, tConfirm + 60_000)
+      expect(engine.rateLimited.has('pty-a-1')).toBe(false)
+      expect(engine.limitScreen?.has('pty-a-1')).toBe(false)
+      expect(deps.tornDown).toHaveLength(0)
+      expect(engine.workers).toHaveLength(1)
+    } else {
+      expect(engine.rateLimited.has('pty-a-1')).toBe(false) // the crossed fence refused
+      for (const tier of MODEL_TIER_LADDER) expect(isTierCooling(tier, tConfirm + 1)).toBe(false)
+    }
+  })
+})
+
+describe('runDispatchPass — monitor: decorative repaints cannot defer detection (leg ②)', () => {
+  const T0 = Date.parse('2026-07-09T15:08:00Z')
+  const startedAt = new Date(T0).toISOString()
+  const FABLE_LIMIT_NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+  const w1 = () =>
+    worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' })
+  beforeEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+  afterEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+
+  it('a limit screen + PERIODIC meaningless repaints still confirms on the real clock (完了条件2)', async () => {
+    // The worker did real work for 5 minutes (past the early onset window — this
+    // pins the ORDINARY gate, not the early path), then hit the wall; from then
+    // on the TUI repaints chrome every minute while the notice holds the screen.
+    const engine = newEngine({ workers: [w1()] })
+    const outputs = new Map([['pty-a-1', T0 + 5 * 60_000]])
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs,
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    const tStamp = T0 + 5 * 60_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    await runDispatchPass(engine, deps, tStamp)
+    expect(engine.limitScreen?.get('pty-a-1')).toBe(tStamp)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false) // onset past the early window
+
+    // Ten minutes of repaints: lastOutputAt is never older than ~65s at any pass —
+    // the unfixed clock would sit permanently below the gate ("原理上、TUI が何か
+    // 描くたびに検知は先送りできてしまう"). The limit-screen clock is immune.
+    let confirmedAt: number | null = null
+    for (let k = 1; k <= 11; k++) {
+      const t = tStamp + k * 60_000
+      outputs.set('pty-a-1', t - 5_000) // fresh chrome 5s before each pass
+      await runDispatchPass(engine, deps, t)
+      if (confirmedAt === null && engine.rateLimited.has('pty-a-1')) confirmedAt = t
+    }
+    expect(confirmedAt).not.toBeNull() // detection FIRED through the repaints
+    expect(confirmedAt! - tStamp).toBeLessThanOrEqual(STALL_SILENCE_MS + 60_000) // …on the real clock
+    expect(isTierCooling('fable', confirmedAt! + 1)).toBe(true)
+    expect(deps.nudged).toHaveLength(0)
+    expect(deps.tornDown).toHaveLength(0)
+  })
+
+  it('REGRESSION (実測 15:14:43): ONE toast repaint does not push the gate back 6m40s', async () => {
+    // Same shape as the incident, with the early path fenced off (commits exist)
+    // so this isolates the clamp: notice at spawn+4s, one decorative repaint at
+    // +6m43s. The gate must fire ~10min after the NOTICE, not 10min after the toast.
+    const engine = newEngine({ workers: [w1()] })
+    const outputs = new Map([['pty-a-1', T0 + 4_000]])
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 1]]),
+      outputs,
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    const tStamp = T0 + 4_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    await runDispatchPass(engine, deps, tStamp) // sighting stamped
+    outputs.set('pty-a-1', T0 + 6 * 60_000 + 43_000) // the 15:14:43 toast
+
+    // Without the clamp, silence at this instant reads ~3m18s (< the gate) and
+    // detection recedes; with it, the notice's tenure IS the clock → confirmed.
+    const tGate = tStamp + STALL_SILENCE_MS + 1_000
+    await runDispatchPass(engine, deps, tGate)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(true)
+    expect(isTierCooling('fable', tGate + 1)).toBe(true)
+  })
+
+  it('requeue after grace ALSO demands the raw channel quiet — a re-streaming worker is never reclaimed', async () => {
+    // A confirmed-limited worker whose limit later lifts: output streams again but
+    // the (reconstructed) frame still shows the scrolled-back notice for a while.
+    // The grace requeue must NOT fire while output is actively flowing.
+    const engine = newEngine({ workers: [w1()] })
+    const outputs = new Map<string, number>()
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs,
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1_000
+    await runDispatchPass(engine, deps, t1) // confirmed via the ordinary gate
+    expect(engine.rateLimited.get('pty-a-1')?.since).toBe(t1)
+
+    const t2 = t1 + RATE_LIMIT_GRACE_MS + 1_000
+    outputs.set('pty-a-1', t2 - 10_000) // ACTIVELY streaming again (10s ago)
+    await runDispatchPass(engine, deps, t2)
+    expect(deps.tornDown).toHaveLength(0) // grace elapsed, but the worker is WORKING
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.workers).toHaveLength(1)
+
+    // Output goes quiet again with the notice still up → NOW the slot is recovered.
+    const t3 = t2 + RATE_LIMIT_SCRAPE_QUIET_MS + 60_000
+    await runDispatchPass(engine, deps, t3)
+    expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }])
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }])
+  })
+})
+
+describe('runDispatchPass — monitor: false-kill guards preserved (完了条件4)', () => {
+  const T0 = Date.parse('2026-07-09T15:08:00Z')
+  const startedAt = new Date(T0).toISOString()
+  const FABLE_LIMIT_NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+  const w1 = () =>
+    worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' })
+  beforeEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+  afterEach(() => {
+    __resetQuotaForTest()
+    a5Mock.current = null
+  })
+
+  it('a STREAMING worker is never even sampled, whatever its screen shows', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const now = T0 + 20 * 60_000 // long-lived worker…
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1_000]]), // …actively emitting
+      screens: new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]),
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(engine.limitScreen?.has('pty-a-1')).toBe(false) // no scrape, no clock
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false)
+    expect(deps.nudged).toHaveLength(0)
+    expect(deps.tornDown).toHaveLength(0)
+    for (const tier of MODEL_TIER_LADDER) expect(isTierCooling(tier, now + 1)).toBe(false)
+  })
+
+  it('a worker EDITING limit wording minutes into its session is not early-confirmed (onset window)', async () => {
+    // The fixture-text hazard: this repo's own tests quote the CLI notice
+    // verbatim; a worker Reads that file, the wording sits on screen, and the
+    // worker thinks for a while. Past the onset window the early path must
+    // refuse — only the (clamped) 10-min gate may ever classify it, exactly the
+    // pre-existing exposure, no wider.
+    const engine = newEngine({ workers: [w1()] })
+    const outputs = new Map([['pty-a-1', T0 + 3 * 60_000]]) // worked for 3 minutes…
+    const screens = new Map([['pty-a-1', FABLE_LIMIT_NOTICE]]) // …then the quoted wording idles on screen
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], outputs, screens })
+    expect(3 * 60_000).toBeGreaterThan(RATE_LIMIT_EARLY_ONSET_MS) // fixture sanity
+    const tStamp = T0 + 3 * 60_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    await runDispatchPass(engine, deps, tStamp)
+    await runDispatchPass(engine, deps, tStamp + RATE_LIMIT_EARLY_CONFIRM_MS + 30_000)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false) // early path refused (onset too late)
+    expect(deps.nudged).toHaveLength(0)
+    expect(deps.tornDown).toHaveLength(0)
+
+    // It resumes typing (output flows, the wording scrolls off) → clock cleared.
+    outputs.set('pty-a-1', tStamp + 6 * 60_000)
+    screens.set('pty-a-1', 'diff --git a/src/lib/server/swarmOrchestrator.ts …')
+    await runDispatchPass(engine, deps, tStamp + 6 * 60_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000)
+    expect(engine.limitScreen?.has('pty-a-1')).toBe(false)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false)
+  })
+})
+
 describe('runDispatchPass — monitor: runaway (execution-time ceiling)', () => {
   const T0 = Date.parse('2026-06-25T00:00:00Z')
   const startedAt = new Date(T0).toISOString()
@@ -4910,6 +5281,60 @@ describe('runIntegratePass — adversarial review gate (a14329dc)', () => {
     expect(deps.integrated).toContain('swarm/a') // re-reviewed clean on the new tip → landed
   })
 
+  it('needs-human 退避は棄権の内訳を運ぶ — WHO abstained WHY reaches the log AND engine.reviews (完了条件1/3)', async () => {
+    // The f3f1e5c6 freeze shape: two slow lenses time out every pass, two vote
+    // clean. Before this fix the operator got a bare 「多数決つかず」 3 times and a
+    // needs-human dot with NOTHING to act on.
+    const abstainingDefer = (): ReviewResult => ({
+      decision: 'defer',
+      verdicts: [
+        { reviewer: 1, lens: 'correctness', vote: null, note: '', abstainCause: 'timeout' },
+        { reviewer: 2, lens: 'security', vote: 'clean', note: '' },
+        { reviewer: 3, lens: 'perf', vote: 'clean', note: '' },
+        { reviewer: 4, lens: 'regression', vote: null, note: '', abstainCause: 'timeout' },
+      ] satisfies ReviewerVerdict[],
+      mustFix: 0,
+      clean: 2,
+      reason:
+        'lens別敵対レビュー [correctness=abstain(timeout), security=clean, perf=clean, regression=abstain(timeout)] — 2個のlensが未判定(未レビュー観点あり) → 保留して次パスで再評価',
+    })
+    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      reviewResults: { 'swarm/a': abstainingDefer() },
+    })
+    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
+
+    for (let i = 0; i < MAX_REVIEW_DEFERS; i++) {
+      engine.lastIntegrateAt = 0
+      await runIntegratePass(engine, deps)
+    }
+    // 完了条件1 — every held pass logs the tally's reason, i.e. WHICH lens abstained WHY.
+    expect(
+      engine.log.some(
+        (l) => l.message.includes('保留') && l.message.includes('correctness=abstain(timeout)'),
+      ),
+    ).toBe(true)
+    // 完了条件3 — the freeze line itself carries the accumulated per-lens tallies…
+    const freeze = engine.log.find((l) => l.message.includes('needs-human 退避'))
+    expect(freeze?.message).toContain('棄権内訳')
+    expect(freeze?.message).toContain(`correctness(timeout)×${MAX_REVIEW_DEFERS}`)
+    expect(freeze?.message).toContain(`regression(timeout)×${MAX_REVIEW_DEFERS}`)
+    // …and so does the dashboard row (engine.reviews) the human actually looks at.
+    const row = engine.reviews.find((r) => r.taskId === 'a')
+    expect(row?.status).toBe('conflict')
+    expect(row?.abstainSummary).toContain(`correctness(timeout)×${MAX_REVIEW_DEFERS}`)
+    expect(row?.abstainSummary).toContain(`regression(timeout)×${MAX_REVIEW_DEFERS}`)
+
+    // engine.reviews is REBUILT from readiness every pass — the defer-exhausted
+    // skip path must re-stamp the summary or the evidence vanishes on the next tick.
+    engine.lastIntegrateAt = 0
+    await runIntegratePass(engine, deps)
+    const restamped = engine.reviews.find((r) => r.taskId === 'a')
+    expect(restamped?.status).toBe('conflict')
+    expect(restamped?.abstainSummary).toContain(`correctness(timeout)×${MAX_REVIEW_DEFERS}`)
+  })
+
   it('MF-1: a quota park never consumes the defer streak — and review auto-resumes after the reset, no human', async () => {
     const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
     const deps = makeIntDeps({
@@ -5162,6 +5587,147 @@ describe('runEnginePass — never blocks on the self-supply scan', () => {
       releaseScan()
     }
     expect(await waitUntil(() => !engine.selfSupply.scanInFlight)).toBe(true)
+  })
+})
+
+// ── runEnginePass ⇄ integrate — the pass runs OFF the tick (21-min lag, leg ③) ──
+// The integrate pass verifies each candidate branch with an inline tsc+vitest run
+// (minutes) and can await a diff-scaled adversarial panel (~20m). It used to be
+// awaited here, inside the passInFlight window — so every 3s tick bailed for the
+// whole verify and the MONITOR was starved: the 実測 sequence armed auto-integrate
+// at 15:23:09 and a due rate-limit sighting could not fire until the vitest run
+// finished at 15:29:39. Same starvation shape (and same cure) as the self-supply
+// scan above: the pass is kicked and left to run beside the tick.
+
+describe('runEnginePass — never blocks on the integrate pass', () => {
+  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (pred()) return true
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    return pred()
+  }
+
+  const fullDeps = (over: {
+    board: Map<string, ProjectTask>
+    fetchReview: () => Promise<ProjectTask[]>
+    verify: IntegrationDeps['verify']
+    recovered: { taskId: string; column: string }[]
+    deadIds: Set<string>
+  }): OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps => ({
+    fetchTasks: async () => Array.from(over.board.values()).map((c) => ({ ...c })),
+    spawnWorker: async () => ({ terminalId: 'pty-x', agentSessionId: 's', worktree: '/wt/x', branch: 'swarm/x' }),
+    moveToDoing: async () => true,
+    moveToReview: async () => true,
+    countCommitsAhead: async () => 0,
+    readHeartbeat: async () => null,
+    recoverCard: async (_p, taskId, column) => {
+      over.recovered.push({ taskId, column })
+      const c = over.board.get(taskId)
+      if (c) c.boardColumn = column
+      return true
+    },
+    recoverWorker: async () => ({ removed: true }),
+    isAlive: (id) => !over.deadIds.has(id),
+    lastOutputAt: () => null,
+    nudge: () => true,
+    escalate: async () => true,
+    recentOutput: () => null,
+    fetchReview: over.fetchReview,
+    prepareTarget: async () => 'main',
+    classify: async () => 'ff',
+    verify: over.verify,
+    integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+    acquireLock: alwaysAcquireLock,
+    moveToDone: async () => true,
+    markConflict: async () => true,
+    cleanup: async () => ({ removed: true }),
+    killPty: () => {},
+    instructRework: () => {},
+    worktreeExists: async () => true,
+  })
+
+  it('returns while a slow verify is mid-flight, and the NEXT tick still MONITORS (完了条件3)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    let verifyEntered = false
+    let releaseVerify: () => void = () => {}
+    const verifyGate = new Promise<void>((r) => (releaseVerify = r))
+    const board = new Map<string, ProjectTask>([
+      ['r', { ...card('r', { boardColumn: 'review', branch: 'swarm/r' }) }],
+    ])
+    const recovered: { taskId: string; column: string }[] = []
+    const deadIds = new Set<string>()
+    const deps = fullDeps({
+      board,
+      fetchReview: async () => [{ ...board.get('r')! }],
+      // The verify stand-in: parked until the test releases it — the REAL one
+      // spawns tsc+vitest in a worktree; a unit test must never do that.
+      verify: async () => {
+        verifyEntered = true
+        await verifyGate
+        return { ok: true, tip: null }
+      },
+      recovered,
+      deadIds,
+    })
+
+    try {
+      // Would hang until the test timeout if the tick awaited the integrate pass.
+      await runEnginePass(engine, deps)
+      expect(engine.passInFlight).toBe(false) // the tick let go…
+      await waitUntil(() => verifyEntered)
+      expect(engine.integrateInFlight).toBe(true) // …while the verify runs beside it
+
+      // A worker dies while the verify is STILL mid-flight. The next tick must
+      // monitor (detect + recover it) without waiting for the verify — this is
+      // the exact starvation that delayed the 実測 rate-limit sighting to 15:29:39.
+      board.set('gone', { ...card('gone', { boardColumn: 'doing', branch: 'swarm/gone' }) })
+      engine.workers.push(
+        worker({
+          terminalId: 'pty-gone-1',
+          branch: 'swarm/gone',
+          worktree: '/wt/gone',
+          taskId: 'gone',
+          taskTitle: 'task gone',
+          startedAt: new Date().toISOString(),
+        }),
+      )
+      deadIds.add('pty-gone-1')
+      await runEnginePass(engine, deps)
+      expect(recovered).toEqual([{ taskId: 'gone', column: 'todo' }]) // the monitor RAN
+      expect(engine.workers.some((w) => w.terminalId === 'pty-gone-1')).toBe(false)
+      expect(engine.integrateInFlight).toBe(true) // the SAME verify still in flight — no second pass
+    } finally {
+      releaseVerify()
+    }
+    expect(await waitUntil(() => !engine.integrateInFlight)).toBe(true)
+  })
+
+  it('kickIntegratePass never overlaps two integrate passes (integrateInFlight guard)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    let reviewReads = 0
+    let releaseReview: () => void = () => {}
+    const reviewGate = new Promise<void>((r) => (releaseReview = r))
+    const deps = fullDeps({
+      board: new Map(),
+      fetchReview: async () => {
+        reviewReads++
+        await reviewGate
+        return []
+      },
+      verify: async () => ({ ok: true, tip: null }),
+      recovered: [],
+      deadIds: new Set(),
+    })
+
+    kickIntegratePass(engine, deps)
+    expect(engine.integrateInFlight).toBe(true)
+    kickIntegratePass(engine, deps) // both extra kicks must bail on the guard…
+    kickIntegratePass(engine, deps)
+    releaseReview()
+    expect(await waitUntil(() => engine.integrateInFlight === false)).toBe(true)
+    expect(reviewReads).toBe(1) // …so the pass ran exactly once
   })
 })
 

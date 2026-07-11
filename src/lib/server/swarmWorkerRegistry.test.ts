@@ -86,6 +86,50 @@ describe('listSwarmWorkers — server-truth union', () => {
     })
   })
 
+  it('prefers the live disk heartbeat updatedAt over the engine roster\'s frozen heartbeatAt', async () => {
+    // Regression for the 0710 "half a day dead" misdiagnosis (docs/commander/02-worker-lifecycle.md §4):
+    // the engine roster's heartbeatAt is only re-folded when the monitor actively re-probes a
+    // 'doing' worker, so it can go stale while the worker keeps beating on disk. The disk read
+    // (`hb`) happens fresh on every call to listSwarmWorkers and must win.
+    const deps = makeDeps({
+      getOrchestratorState: async () => ({
+        ...emptyEngineState,
+        workers: [engineWorker({ heartbeatAt: '2026-07-09T07:55:26.000Z' })],
+      }),
+      listActiveTerminals: () =>
+        activeTerminals([{ id: 'engine-pty', cwd: '/wt/engine-x', status: 'waiting' }]),
+      readHeartbeats: async () =>
+        new Map([
+          [
+            '/wt/engine-x',
+            {
+              branch: 'swarm/engine-x',
+              worktree: '/wt/engine-x',
+              updatedAt: '2026-07-10T00:41:49.000Z',
+            },
+          ],
+        ]),
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    expect(out).toHaveLength(1)
+    expect(out[0].heartbeatAt).toBe('2026-07-10T00:41:49.000Z')
+  })
+
+  it('falls back to the engine roster heartbeatAt when no disk heartbeat exists for that worker', async () => {
+    const deps = makeDeps({
+      getOrchestratorState: async () => ({
+        ...emptyEngineState,
+        workers: [engineWorker({ heartbeatAt: '2026-07-09T07:55:26.000Z' })],
+      }),
+      listActiveTerminals: () =>
+        activeTerminals([{ id: 'engine-pty', cwd: '/wt/engine-x', status: 'waiting' }]),
+      readHeartbeats: async () => new Map(),
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    expect(out).toHaveLength(1)
+    expect(out[0].heartbeatAt).toBe('2026-07-09T07:55:26.000Z')
+  })
+
   it('surfaces a curl-direct worker the engine never tracked, using its heartbeat for identity', async () => {
     const deps = makeDeps({
       listActiveTerminals: () =>

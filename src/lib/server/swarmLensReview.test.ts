@@ -24,6 +24,10 @@ import {
   tallyLensReview,
   buildReviewPrompt,
   extractReviewVerdict,
+  classifyAbstainCause,
+  computeReviewTimeoutMs,
+  describeAbstainTallies,
+  RATE_LIMIT_TAIL_MAX,
   DEFAULT_REVIEW_LENSES,
   __resetOrchestratorForTests,
   type ReviewLens,
@@ -352,4 +356,149 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
     expect(r.decision).toBe('defer')
     expect(r.reason).toContain('perf=abstain')
   }, 30_000)
+
+  // ── abstention ATTRIBUTION (card f3f1e5c6 完了条件1/5) — a defer must say WHO
+  // abstained WHY; a bare 「多数決つかず」 froze cards with nothing to act on. ──
+
+  it('回帰: EVERY lens abstains → defer, and the reason names each lens with its cause (完了条件5)', async () => {
+    const proj = await setupRepo()
+    const { branch, tip } = await branchWithCommit(proj)
+    const review = makeAdversarialReview({
+      lenses: DEFAULT_REVIEW_LENSES,
+      runReviewer: async () => 'prose without any verdict marker', // systemic outage shape
+    })
+    const r = await review(proj, branch, 'main', { tip })
+    expect(r.decision).toBe('defer') // fail-closed: nothing merges un-reviewed
+    expect(r.skippedForPark).toBeUndefined() // a real panel verdict — consumes the defer streak
+    for (const lens of DEFAULT_REVIEW_LENSES) {
+      expect(r.reason).toContain(`${lens.key}=abstain(no-marker)`)
+    }
+    // The sizing context rides along, so the operator can judge the budget at a glance.
+    expect(r.reason).toMatch(/diff \d+KB \/ budget \d+min\/reviewer/)
+  }, 30_000)
+
+  it('回帰: 2 lenses time out + 2 clean → still defer (fail-closed), but the reason RECORDS both timeouts (完了条件5)', async () => {
+    const proj = await setupRepo()
+    const { branch, tip } = await branchWithCommit(proj)
+    // The observed f3f1e5c6 shape: the two slow lenses hit the wall-clock budget
+    // (killTerminal'd before their marker), the two fast ones vote clean. The
+    // structured {raw, ended} return is how the real runner reports a cut-off.
+    const review = makeAdversarialReview({
+      lenses: DEFAULT_REVIEW_LENSES,
+      runReviewer: async ({ lens }) =>
+        lens!.key === 'correctness' || lens!.key === 'regression'
+          ? { raw: 'reading the diff… (killed at the budget)', ended: 'timeout' as const }
+          : 'OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::',
+    })
+    const r = await review(proj, branch, 'main', { tip })
+    expect(r.decision).toBe('defer') // abstentions never lower the merge bar (完了条件4)
+    expect(r.clean).toBe(2)
+    expect(r.mustFix).toBe(0)
+    expect(r.reason).toContain('correctness=abstain(timeout)')
+    expect(r.reason).toContain('regression=abstain(timeout)')
+    expect(r.reason).toContain('security=clean')
+    expect(r.reason).toContain('perf=clean')
+  }, 30_000)
+
+  it('a reviewer that THROWS is attributed abstain(error) — not silently a bare non-vote', async () => {
+    const proj = await setupRepo()
+    const { branch, tip } = await branchWithCommit(proj)
+    const review = makeAdversarialReview({
+      lenses: DEFAULT_REVIEW_LENSES,
+      runReviewer: async ({ lens }) => {
+        if (lens!.key === 'security') throw new Error('PTY spawn failed')
+        return 'OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
+      },
+    })
+    const r = await review(proj, branch, 'main', { tip })
+    expect(r.decision).toBe('defer')
+    expect(r.reason).toContain('security=abstain(error)')
+  }, 30_000)
+})
+
+// ── pure unit: abstention attribution + the diff-scaled reviewer budget ─────────
+describe('classifyAbstainCause — attributing WHY a reviewer produced no vote', () => {
+  const NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+
+  it('a transcript ENDING in the rate-limit notice is limit — even when the loop edge was a timeout', () => {
+    expect(classifyAbstainCause(NOTICE, 'timeout')).toBe('limit')
+    expect(classifyAbstainCause(NOTICE)).toBe('limit')
+  })
+
+  it("the runner's cut-off edge stands when the transcript is not a limit: timeout / aborted", () => {
+    expect(classifyAbstainCause('reading the diff…', 'timeout')).toBe('timeout')
+    expect(classifyAbstainCause('partial output', 'aborted')).toBe('aborted')
+  })
+
+  it('a self-ended PTY with NO output at all is spawn-failed (claude never really started)', () => {
+    expect(classifyAbstainCause('')).toBe('spawn-failed')
+    expect(classifyAbstainCause('   \n ')).toBe('spawn-failed')
+  })
+
+  it('a self-ended PTY with output but no marker is no-marker', () => {
+    expect(classifyAbstainCause('the model rambled and stopped')).toBe('no-marker')
+  })
+
+  it('quoting the limit notice and working WELL past it (beyond the tail window) is NOT limit', () => {
+    const worked = `${NOTICE}\n${'x'.repeat(RATE_LIMIT_TAIL_MAX + 1)}`
+    expect(classifyAbstainCause(worked, 'timeout')).toBe('timeout')
+  })
+})
+
+describe('computeReviewTimeoutMs — the diff-scaled reviewer budget (root cause of the f3f1e5c6 freeze)', () => {
+  const BASE = 5 * 60_000
+
+  it('a tiny diff keeps the flat floor', () => {
+    expect(computeReviewTimeoutMs(BASE, 0)).toBe(BASE)
+    expect(computeReviewTimeoutMs(BASE, 512)).toBe(BASE + 10_000) // 1KB rounded up
+  })
+
+  it('the measured freeze boundary (≥34KB froze on the flat 5min) now gets a real budget', () => {
+    // 33,891 bytes — the smallest diff OBSERVED to freeze (clean 2 / 2 timeouts).
+    const budget = computeReviewTimeoutMs(BASE, 33_891)
+    expect(budget).toBeGreaterThan(BASE) // no longer the flat floor that froze it
+    expect(budget).toBe(BASE + Math.ceil(33_891 / 1024) * 10_000) // +10s per KB
+  })
+
+  it('a huge diff is capped at 20min — the budget never grows unbounded', () => {
+    expect(computeReviewTimeoutMs(BASE, 122_858)).toBe(20 * 60_000) // the 122KB frozen card
+    expect(computeReviewTimeoutMs(BASE, 10_000_000)).toBe(20 * 60_000)
+  })
+
+  it('an UNSIZABLE diff (git failed / overflow) budgets as if large — fail toward waiting, never the freeze', () => {
+    expect(computeReviewTimeoutMs(BASE, null)).toBe(20 * 60_000)
+  })
+
+  it('an explicit base ABOVE the cap wins (the caller asked for it)', () => {
+    expect(computeReviewTimeoutMs(30 * 60_000, 1024)).toBe(30 * 60_000)
+    expect(computeReviewTimeoutMs(30 * 60_000, null)).toBe(30 * 60_000)
+  })
+})
+
+describe('describeAbstainTallies — the needs-human hand-off fragment (完了条件3)', () => {
+  it('names each lens(cause) with its streak count', () => {
+    expect(describeAbstainTallies({ 'correctness(timeout)': 3, 'regression(timeout)': 3 })).toBe(
+      'correctness(timeout)×3, regression(timeout)×3',
+    )
+  })
+
+  it('a streak of pure ties (nobody abstained) reads なし', () => {
+    expect(describeAbstainTallies({})).toBe('なし')
+  })
+})
+
+describe('tallyLensReview — abstention causes reach the logged reason (完了条件1)', () => {
+  it('an attributed abstention logs lens=abstain(cause), an unattributed one lens=abstain(unknown)', () => {
+    const verdicts: ReviewerVerdict[] = [
+      { reviewer: 1, lens: 'correctness', vote: null, note: '', abstainCause: 'timeout' },
+      { reviewer: 2, lens: 'security', vote: 'clean', note: '' },
+      { reviewer: 3, lens: 'perf', vote: 'clean', note: '' },
+      { reviewer: 4, lens: 'regression', vote: null, note: '' },
+    ]
+    const r = tallyLensReview(verdicts, DEFAULT_REVIEW_LENSES)
+    expect(r.decision).toBe('defer')
+    expect(r.reason).toContain('correctness=abstain(timeout)')
+    expect(r.reason).toContain('regression=abstain(unknown)')
+  })
 })

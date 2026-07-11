@@ -1135,6 +1135,58 @@ describe('swarmOrchestrator — swarm self-modification gate (verify)', () => {
     const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
     expect(trunkLog).toMatch(/work: doc card/)
   })
+
+  // ── docs-freshness soft-warn (TARGET-STATE §6) ──────────────────────────────
+  // READ-ONLY: a branch that touches swarm code but leaves docs/commander/ untouched
+  // gets a journal warn — merge still lands (never blocks). The two tests below prove
+  // both halves of the completion condition: warn fires without docs, stays silent with.
+  it('docs-freshness soft-warn: swarm change WITHOUT docs/commander/ → journal warn (merge still lands)', async () => {
+    const { proj } = await setupRepo()
+    const alive = new Set<string>()
+    const { board, col, boardDeps } = makeBoard([])
+    const spawn = makeSpawn(proj, alive, {
+      file: () => 'src/lib/server/swarmBar.ts',
+      content: 'export const y = 1\n',
+      scratch: false,
+    })
+    const res = await spawn({ projectPath: proj, title: 'swarm no docs', hint: 'sd1' })
+    board.set('sd1', todoCard('sd1', { boardColumn: 'review', branch: res.branch }))
+    const { deps } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: true })
+    const engine = newEngine(proj)
+    await runIntegratePass(engine, deps)
+    expect(col('sd1')).toBe('done') // green gates → landed regardless of the warn
+    expect(
+      engine.log.some(
+        (l) => l.level === 'warn' && l.message.includes('docs/commander/') && l.message.includes(res.branch),
+      ),
+    ).toBe(true)
+  })
+
+  it('docs-freshness soft-warn: swarm change WITH docs/commander/ update → no journal warn', async () => {
+    const { proj } = await setupRepo()
+    const alive = new Set<string>()
+    const { board, col, boardDeps } = makeBoard([])
+    // Same-shape swarm-touching branch, but the commit ALSO updates docs/commander/.
+    const spawn = (async ({ title, hint }: { title: string; hint?: string }) => {
+      const wt = await createSwarmWorktree(proj, { hint })
+      await mkdir(join(wt.worktree, 'src/lib/server'), { recursive: true })
+      await writeFile(join(wt.worktree, 'src/lib/server/swarmBaz.ts'), 'export const z = 1\n')
+      await mkdir(join(wt.worktree, 'docs/commander'), { recursive: true })
+      await writeFile(join(wt.worktree, 'docs/commander/TARGET-STATE.md'), '# updated\n')
+      await git(wt.worktree, ['add', '-A'])
+      await git(wt.worktree, ['commit', '-m', `work: ${title}`])
+      const terminalId = `pty-${wt.branch}`
+      alive.add(terminalId)
+      return { terminalId, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
+    }) as OrchestratorDeps['spawnWorker']
+    const res = await spawn({ projectPath: proj, title: 'swarm with docs', hint: 'sd2' })
+    board.set('sd2', todoCard('sd2', { boardColumn: 'review', branch: res.branch }))
+    const { deps } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: true })
+    const engine = newEngine(proj)
+    await runIntegratePass(engine, deps)
+    expect(col('sd2')).toBe('done')
+    expect(engine.log.some((l) => l.level === 'warn' && l.message.includes('docs/commander/'))).toBe(false)
+  })
 })
 
 // ── lint/tsc/test quality-floor gate (card 4e7f2151) ─────────────────────────

@@ -88,6 +88,7 @@ const makeDeps = (
   peekUsagePct: () => null,
   refreshUsage: () => {},
   listEscalations: async () => [],
+  listReceiptKeys: async () => new Set<string>(),
   recentFatals: async () => [],
   runJanitor: async () => {
     calls.janitor += 1
@@ -702,16 +703,22 @@ describe('overseer — S3/S10 edge fatals (sub-cycle dedup survives every-pass p
     const calls = makeCalls()
     const c = clock()
     const engine = makeEngine()
+    // The store record's append time is FIXED (append-once) — capture it before
+    // the clock advances, like the real store would.
+    const createdAt = c.now()
     const deps = makeDeps(calls, {
       now: c.now,
       recentFatals: async () => [
         {
-          event: 'exec-timeout',
-          detail: '実行時間上限を超過',
-          projectPath: '/proj',
-          taskId: 'card-t',
-          branch: 'swarm/t',
-          taskTitle: 'タイムアウトしたカード',
+          fatal: {
+            event: 'exec-timeout',
+            detail: '実行時間上限を超過',
+            projectPath: '/proj',
+            taskId: 'card-t',
+            branch: 'swarm/t',
+            taskTitle: 'タイムアウトしたカード',
+          },
+          createdAt,
         },
       ],
     })
@@ -733,17 +740,18 @@ describe('overseer — S3/S10 edge fatals (sub-cycle dedup survives every-pass p
     expect(calls.openEscalation).toHaveLength(1)
   })
 
-  it('two same-key fatals with different detail each raise ONCE — no per-subcycle ping-pong (MF1 finding 2)', async () => {
+  it('two occurrences of the same card each raise ONCE — no per-subcycle ping-pong (MF1 finding 2)', async () => {
     // Adversarial-review finding: seen mapped ONE signalKey → ONE fp, so two fatals
-    // sharing S3:exec-timeout:card-t but differing in detail (the same card timing
-    // out twice at different run-minutes) overwrote each other's fp and BOTH re-raised
-    // every ~60s sub-cycle. detail is now part of the key → each is a 1-shot slot.
+    // sharing S3:exec-timeout:card-t (the same card timing out twice) overwrote each
+    // other's fp and BOTH re-raised every ~60s sub-cycle. The store createdAt is now
+    // part of the key — each occurrence is its own 1-shot slot.
     const calls = makeCalls()
     const c = clock()
     const engine = makeEngine()
+    const shared = { event: 'exec-timeout' as const, projectPath: '/proj', taskId: 'card-t', branch: 'swarm/t', taskTitle: 'T' }
     const twoFatals = [
-      { event: 'exec-timeout' as const, detail: '上限30分を超過（31分稼働）', projectPath: '/proj', taskId: 'card-t', branch: 'swarm/t', taskTitle: 'T' },
-      { event: 'exec-timeout' as const, detail: '上限30分を超過（45分稼働）', projectPath: '/proj', taskId: 'card-t', branch: 'swarm/t', taskTitle: 'T' },
+      { fatal: { ...shared, detail: '上限30分を超過（31分稼働）' }, createdAt: c.now() - 120_000 },
+      { fatal: { ...shared, detail: '上限30分を超過（45分稼働）' }, createdAt: c.now() - 60_000 },
     ]
     const deps = makeDeps(calls, { now: c.now, recentFatals: async () => twoFatals })
 
@@ -763,7 +771,10 @@ describe('overseer — S3/S10 edge fatals (sub-cycle dedup survives every-pass p
     const c = clock()
     const engine = makeEngine()
     let failNext = false
-    const fatal = { event: 'exec-timeout' as const, detail: 'd', projectPath: '/proj', taskId: 'card-t', branch: 'swarm/t', taskTitle: 'T' }
+    const fatal = {
+      fatal: { event: 'exec-timeout' as const, detail: 'd', projectPath: '/proj', taskId: 'card-t', branch: 'swarm/t', taskTitle: 'T' },
+      createdAt: c.now(),
+    }
     const deps = makeDeps(calls, {
       now: c.now,
       recentFatals: async () => {
@@ -787,6 +798,178 @@ describe('overseer — S3/S10 edge fatals (sub-cycle dedup survives every-pass p
     c.advance(OVERSEER_THRESHOLDS.escalationsPollMs)
     await runOverseerPass(engine, [], () => {}, deps)
     expect(calls.openEscalation).toHaveLength(1)
+  })
+})
+
+// ── S3/S10 — the fatal window + the persistent receipt (the re-post bug class) ──
+//
+// The 2026-07-09 field bug: every overseer OFF→ON replayed 8 exec-timeouts of
+// workers dead since 07/01-07/06 — recentFatals had NO time window (the store
+// never expires its cap-50 records), ov.seen is in-memory (reset on re-arm), and
+// dismiss only wrote escalations.json (a store the raise path never consulted).
+// These tests pin the three fixes: the window, the sinceMs contract, and the
+// persistent receipt check that makes dismiss stick across restarts.
+
+describe('overseer — S3/S10 fatal window + persistent receipt (re-post bug)', () => {
+  const FATAL = {
+    event: 'exec-timeout' as const,
+    detail: 'ワーカーが実行時間上限を超過',
+    projectPath: '/proj',
+    taskId: 'card-t',
+    branch: 'swarm/t',
+    taskTitle: 'T',
+  }
+
+  it('passes sinceMs = now - fatalWindowMs to recentFatals (the window is explicit)', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const sinceSeen: number[] = []
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async (sinceMs) => {
+        sinceSeen.push(sinceMs)
+        return []
+      },
+    })
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(sinceSeen).toEqual([c.now() - OVERSEER_THRESHOLDS.fatalWindowMs])
+  })
+
+  it('a fatal older than the window NEVER raises — even if recentFatals returns it', async () => {
+    // Defense-in-depth: the pass re-enforces the window locally, so an
+    // out-of-contract recentFatals (or the raw store) cannot replay old fatals.
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const stale = { fatal: FATAL, createdAt: c.now() - OVERSEER_THRESHOLDS.fatalWindowMs - 1 }
+    const deps = makeDeps(calls, { now: c.now, recentFatals: async () => [stale] })
+
+    const out = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out.fired).not.toContain('S3')
+    expect(calls.openEscalation).toHaveLength(0)
+    // Nothing tracked either — an out-of-window fatal is not a live condition.
+    expect(Array.from(engine.overseer.seen.keys()).some((k) => k.startsWith('S3:'))).toBe(false)
+  })
+
+  it('an in-window fatal whose receiptKey already exists (e.g. DISMISSED) does not re-raise — receipt is persistent', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const createdAt = c.now() - 60_000
+    // What a prior raise persisted, later dismissed by the owner — the receipt
+    // check reads keys regardless of status, so the dismissed record still counts.
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [{ fatal: FATAL, createdAt }],
+      listReceiptKeys: async () => new Set([`S3:/proj:card-t:${createdAt}`]),
+    })
+
+    const out = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out.fired).not.toContain('S3')
+    expect(calls.openEscalation).toHaveLength(0)
+    // The occurrence is marked seen (skip the ledger read next sub-cycle)…
+    expect(engine.overseer.seen.has(`S3:exec-timeout:card-t:${createdAt}`)).toBe(true)
+
+    // …and it STAYS quiet on later sub-cycles too.
+    c.advance(OVERSEER_THRESHOLDS.escalationsPollMs)
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation).toHaveLength(0)
+  })
+
+  it('a dismissed fatal stays dismissed ACROSS A RESTART (fresh runtime, same ledger)', async () => {
+    // The user-visible bug: dismiss → app restart (ov.seen reset) → the same 8
+    // escalations reopen. The receipt now lives in escalations.json, which survives.
+    const c = clock()
+    const createdAt = c.now() - 60_000
+    // The persistent ledger, as receiptKey→status rows (what escalations.json keeps).
+    const ledger: { receiptKey: string; status: string }[] = []
+    const receiptKeysOf = async () => new Set(ledger.map((e) => e.receiptKey))
+
+    // Session 1: the fatal raises once; the raise lands in the (fake) ledger.
+    const calls1 = makeCalls()
+    const engine1 = makeEngine()
+    const deps1 = makeDeps(calls1, {
+      now: c.now,
+      recentFatals: async () => [{ fatal: FATAL, createdAt }],
+      listReceiptKeys: receiptKeysOf,
+      openEscalation: async (input) => {
+        calls1.openEscalation.push(input)
+        ledger.push({ receiptKey: input.receiptKey ?? '', status: 'open' })
+        return { escalation: { id: 'esc-1', status: 'open' } as never, deduped: false }
+      },
+    })
+    await runOverseerPass(engine1, [], () => {}, deps1)
+    expect(calls1.openEscalation).toHaveLength(1)
+
+    // The owner dismisses it (status flips in the persistent ledger — the receipt
+    // row itself SURVIVES; that survival is what the check keys on)…
+    ledger[0] = { ...ledger[0], status: 'dismissed' }
+
+    // …then the app RESTARTS: a brand-new runtime (seen is empty), same ledger.
+    const calls2 = makeCalls()
+    const engine2 = makeEngine() // fresh armed() runtime — the in-memory seen is gone
+    const deps2 = makeDeps(calls2, {
+      now: c.now,
+      recentFatals: async () => [{ fatal: FATAL, createdAt }],
+      listReceiptKeys: receiptKeysOf,
+    })
+    const out = await runOverseerPass(engine2, [], () => {}, deps2)
+    expect(out.fired).not.toContain('S3')
+    expect(calls2.openEscalation).toHaveLength(0) // ← the bug would make this 1
+  })
+
+  it('an unreadable receipt ledger defers the raise (no blind re-post), then raises once on recovery', async () => {
+    // Dep-contract shape (the REAL strict reader throwing on a corrupt ledger is
+    // exercised end-to-end in swarmOverseer.e2e.test.ts against the actual file).
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    let failLedger = true
+    const createdAt = c.now() - 60_000 // fixed append time — the SAME stored occurrence across passes
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [{ fatal: FATAL, createdAt }],
+      listReceiptKeys: async () => {
+        if (failLedger) throw new Error('ledger read blew up')
+        return new Set<string>()
+      },
+    })
+
+    // Ledger unreadable → nothing raised (raising blind could re-post a dismissed
+    // fatal — the exact bug), nothing marked seen.
+    const out1 = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out1.fired).not.toContain('S3')
+    expect(calls.openEscalation).toHaveLength(0)
+
+    // Ledger recovers on the next sub-cycle → the (unreceipted) fatal raises once.
+    failLedger = false
+    c.advance(OVERSEER_THRESHOLDS.escalationsPollMs)
+    const out2 = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out2.fired).toContain('S3')
+    expect(calls.openEscalation).toHaveLength(1)
+  })
+
+  it('S10 rides the same window + receipt path as S3', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const inWindow = c.now() - 60_000
+    const outOfWindow = c.now() - OVERSEER_THRESHOLDS.fatalWindowMs - 1
+    const rollback = (createdAt: number) => ({
+      fatal: { event: 'rollback' as const, detail: '自己入替がrollback', projectPath: '/proj' },
+      createdAt,
+    })
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [rollback(outOfWindow), rollback(inWindow)],
+      // The in-window occurrence is already receipted (dismissed earlier).
+      listReceiptKeys: async () => new Set([`S10:/proj:rollback:${inWindow}`]),
+    })
+
+    const out = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out.fired).not.toContain('S10')
+    expect(calls.openEscalation).toHaveLength(0)
   })
 })
 
@@ -876,6 +1059,8 @@ describe('overseer — threshold table + helpers', () => {
     expect(OVERSEER_THRESHOLDS.brainMaxPerDay).toBe(24)
     expect(OVERSEER_THRESHOLDS.blockedStuckMs).toBe(30 * 60_000)
     expect(OVERSEER_THRESHOLDS.inboxStaleMs).toBe(6 * 60 * 60_000)
+    // The S3/S10 fatal window: only fatals this fresh may open an escalation.
+    expect(OVERSEER_THRESHOLDS.fatalWindowMs).toBe(24 * 60 * 60_000)
   })
 
   it('looksLikeQuestion distinguishes questions from mechanical blockers', () => {
@@ -891,6 +1076,26 @@ describe('overseer — threshold table + helpers', () => {
     expect(typeof deps.answerAsOwner).toBe('function')
     expect(typeof deps.peekUsagePct).toBe('function')
     expect(typeof deps.runJanitor).toBe('function')
+  })
+
+  it('defaultOverseerDeps.recentFatals honours sinceMs against the REAL store (isolated HOME)', async () => {
+    // The store keeps up to 50 records with no expiry — the window filter in this
+    // seam is what stands between a re-arm and a replay of week-old fatals.
+    const { createSwarmFatalNotification } = await import('./swarmNotifications')
+    const now = Date.now()
+    const old = { event: 'exec-timeout' as const, detail: '古いfatal(窓外)', projectPath: '/proj-window' }
+    const recent = { event: 'exec-timeout' as const, detail: '新しいfatal(窓内)', projectPath: '/proj-window' }
+    await createSwarmFatalNotification(old, { os: false, now: now - OVERSEER_THRESHOLDS.fatalWindowMs - 60_000 })
+    await createSwarmFatalNotification(recent, { os: false, now: now - 60_000 })
+
+    const deps = defaultOverseerDeps({ isAlive: () => true, readHeartbeat: async () => null })
+    const got = await deps.recentFatals(now - OVERSEER_THRESHOLDS.fatalWindowMs)
+    const details = got.map((t) => t.fatal.detail)
+    expect(details).toContain('新しいfatal(窓内)')
+    expect(details).not.toContain('古いfatal(窓外)')
+    // The pairing carries the store timestamp (the occurrence's identity).
+    const hit = got.find((t) => t.fatal.detail === '新しいfatal(窓内)')
+    expect(hit?.createdAt).toBe(now - 60_000)
   })
 })
 
