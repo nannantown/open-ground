@@ -2,6 +2,7 @@
 
 **対象コミット: origin/main `0d1f7f0`** (2026-07-10)。初版は `cc7c60e` 基準で、`3129a58`(敵対レビューの diff 連動 budget + 棄権理由の可視化 — 大 diff 凍結の根治)と `0d1f7f0`(quota 検知 21 分遅延の根治 — 本章に効くのは **integrate の tick 分離 = monitor 飢餓の解消**、§2.1/§2.4)を本改訂で反映済み。
 行番号はすべて `0d1f7f0` 時点のもの。主戦場は `src/lib/server/swarmOrchestrator.ts`(6730行)と `src/lib/server/swarmIntegrate.ts`。
+その後 2026-07-11 の `SWARM_CODE_PATHS` への `server/routes/project.ts` 編入(Board API = 05 章の契約面を swarm-safety / docs ゲート対象へ)で swarmOrchestrator.ts の :2630 以降は **+3 シフト** — 本章では §2.4 の `SWARM_CODE_PATHS` / `touchesSwarmPaths` 直接参照のみ新値へ更新済み、他の :2630 以降参照は `0d1f7f0` 基準のまま(+3 して読む)。
 
 **読者**: 将来の司令塔(og-manage)セッション。このドキュメントは「review 列のカードがなぜ done にならないのか」を誤診しないために書かれている。**すべての主張に file:line の根拠がある。疑ったら §6 の検証コマンドで自分で裏取りすること。**
 
@@ -124,7 +125,7 @@ trunk ある? ─No→ warn して return                       :5275-5278
 1. swarm ブランチでなければ素通し(:2910)。tip をローカル→remote の順で解決、無ければ「何も land しない」ので素通し(:2912-2916)
 2. **tip memo**: `opts.skipIfTip === tip`(前回 RED と同一 tip)なら再実行せず `{ok:false, skipped:true}`(:2918-2920)。→ 直らないまま同じ commit で居座るブランチが毎パス tsc を焼かない
 3. already-merged なら素通し(:2925-2929)
-4. 走らせるチェックを diff から決める(:2936-2945): tsc は tsconfig があれば常に(:2937)、lint / full-test は **全ブランチ常時**(`appliesTo: () => true`、:2883-2892)、swarm-safety は **swarm コードを触った diff のみ**(`SWARM_CODE_PATHS` :2636-2641、`touchesSwarmPaths` :2645)
+4. 走らせるチェックを diff から決める(:2936-2945): tsc は tsconfig があれば常に(:2937)、lint / full-test は **全ブランチ常時**(`appliesTo: () => true`、:2883-2892)、swarm-safety は **swarm コードを触った diff のみ**(`SWARM_CODE_PATHS` :2642-2648 — swarm\*.ts / routes/swarm.ts / **routes/project.ts(Board API = 05 章の契約面、2026-07-11 編入)** / swarmSafety route net / Swarm\* UI、`touchesSwarmPaths` :2652。行番号は編入後の現物)
 5. `~/.openground/projects/<uuid>/worktrees/.verify-<12hex>` に detached worktree を作り(:2956,2962)、trunk へ rebase(競合したら **ok:true で integrate に委ねる** — verify は競合を二重報告しない、:2968-2970)、**メイン checkout の node_modules を symlink**(:2977)
 6. チェックを**安い順に直列実行し、最初の RED で打ち切り**(tsc→lint→swarm-safety→test、:2981-2988)。タイムアウトは tsc 180s(:2603)/lint 180s(:2805)/swarm-safety 240s(:2721)/full test 600s(:2865)
 7. finally で worktree を force remove(:2991-2992)

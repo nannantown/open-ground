@@ -1952,14 +1952,19 @@ export type NotificationKind = 'collab-invite' | 'swarm-fatal' | 'swarm-info'
  *                            but ZERO live workers (every worker crashed/stalled).
  *   • 'exec-timeout'      — a worker overran the execution-time ceiling
  *                            (MAX_EXEC_MS) and was force-reclaimed/parked.
+ *   • 'guard-unwired'     — the L4 PreToolUse guard wiring failed spawn-time
+ *                            verification, so a worker spawn was REFUSED
+ *                            (fail-closed — GAP-2; spawnSwarmWorker).
  *   • 'rollback'          — a broken self-update build was auto-rolled back.
  *   • 'canary-failed'     — the self-update canary failed to promote repeatedly.
  *  ('rework-exhausted' | 'all-workers-down' | 'exec-timeout' come from the swarm
- *  engine; 'rollback' | 'canary-failed' come from the Electron self-update cycle.) */
+ *  engine; 'guard-unwired' from the worker spawn path (swarmWorker.ts);
+ *  'rollback' | 'canary-failed' come from the Electron self-update cycle.) */
 export type SwarmFatalEvent =
   | 'rework-exhausted'
   | 'all-workers-down'
   | 'exec-timeout'
+  | 'guard-unwired'
   | 'rollback'
   | 'canary-failed'
 

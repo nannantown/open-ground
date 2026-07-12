@@ -1,8 +1,10 @@
 import { readFile, copyFile, mkdir, rm } from 'fs/promises'
-import { existsSync } from 'fs'
-import { join } from 'path'
+import { existsSync, realpathSync } from 'fs'
+import { dirname, isAbsolute, join, relative, resolve } from 'path'
+import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { atomicWriteJson } from './atomicWrite'
+import { openGroundHome } from './paths'
 
 // Idempotently install OPEN GROUND's Claude Code hook entries into the user's
 // global ~/.claude/settings.json. The installer is a true upsert:
@@ -20,8 +22,9 @@ import { atomicWriteJson } from './atomicWrite'
 //   Stop           — write a "turn-complete" marker + nudge OPEN GROUND
 //   PostToolUse    — bump the marker's mtime (heartbeat)
 //   PreToolUse     — openground-guard.js: the DETERMINISTIC deny veto (A3/L4)
-//                    for guarded sessions (OPENGROUND_GUARD=1 / SWARM_MANAGER=1;
-//                    an instant no-op for every other claude session). Wired
+//                    for guarded WORKER sessions (OPENGROUND_GUARD=1 only; an
+//                    instant no-op for every other claude session — including
+//                    the trusted SWARM_MANAGER=1 commander/supply). Wired
 //                    per-tool (Bash/Write/Edit/MultiEdit/NotebookEdit).
 //
 // The guard is NOT run from the repo checkout: installHooks copies it to
@@ -51,14 +54,101 @@ const GUARD_MATCHERS = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'] as
 const settingsPath = () => join(homedir(), '.claude', 'settings.json')
 const backupPath = () => join(homedir(), '.claude', 'settings.json.openground.bak')
 
-const hookScriptPath = (): string => {
-  // process.cwd() is the OPEN GROUND project root when running via
-  // `npm run dev` or the bundled OPEN GROUND.app launcher. The script lives
-  // alongside other dev scripts under <root>/scripts/.
-  return join(process.cwd(), 'scripts', 'openground-hook.js')
+// ─── Hook source resolution (cwd-INDEPENDENT) ────────────────────────────────
+// The wired hook commands carry ABSOLUTE paths into the user's GLOBAL
+// ~/.claude/settings.json, so the base they resolve from must never be
+// process.cwd(): a server booted with its cwd inside a swarm worker's
+// worktree (~/.openground/projects/<uuid>/worktrees/<x> — e.g. a `npm run
+// dev:alt` started there for verification) used to bake that worktree's
+// path into the global settings, and the janitor deleting the worktree later
+// broke EVERY claude session's Stop hook with MODULE_NOT_FOUND (observed
+// 2026-07-12). Resolution is anchored at THIS MODULE's location instead,
+// walking up to the first dir that holds both hook scripts — the app
+// checkout in dev/vitest (src/lib/server → root) and the packaged app root
+// in prod (server/dist → root; scripts/ ships via electron-builder `files`).
+//
+// Belt-and-braces: even a module-anchored root is REFUSED when it sits under
+// the OPEN GROUND data home (~/.openground) — an engine running FROM a swarm
+// worktree must degrade to "hooks not (re)installed" (installHooks reports
+// via result.errors and writes NOTHING; verifyGuardWiring stays NOT-ok so
+// worker spawns refuse) rather than wire a global path the janitor deletes.
+
+// This module's dir under both module systems it runs in: CJS (tsx dev on
+// this type-less package, and the esbuild CJS bundle) has __dirname; ESM
+// (vitest's transform) has import.meta.url. In the CJS bundle the
+// import.meta branch is dead code behind the __dirname guard (esbuild lowers
+// it to undefined — warning silenced in scripts/build-server.js).
+const realModuleDir = (): string => {
+  if (typeof __dirname !== 'undefined') return __dirname
+  return dirname(fileURLToPath(import.meta.url))
 }
 
-const guardSourcePath = (): string => join(process.cwd(), 'scripts', 'openground-guard.js')
+// Test seam: aims the resolver at a fake "engine running inside a worktree"
+// layout. null = use the real module location.
+let moduleDirOverride: string | null = null
+export const __setHookSourceModuleDirForTests = (dir: string | null): void => {
+  moduleDirOverride = dir
+}
+
+// realpath when the path exists (symlinks must not defeat the prefix check
+// below), plain resolve otherwise.
+const canonical = (p: string): string => {
+  try {
+    return realpathSync(p)
+  } catch {
+    return resolve(p)
+  }
+}
+
+const isUnder = (child: string, parent: string): boolean => {
+  const rel = relative(parent, child)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+export interface HookSourceRoot {
+  /** App root holding scripts/openground-hook.js + openground-guard.js, or null. */
+  root: string | null
+  /** Why root is null; null iff root is set. */
+  problem: string | null
+}
+
+export const resolveHookSourceRoot = (): HookSourceRoot => {
+  const start = moduleDirOverride ?? realModuleDir()
+  let dir = canonical(start)
+  for (;;) {
+    if (
+      existsSync(join(dir, 'scripts', 'openground-hook.js')) &&
+      existsSync(join(dir, 'scripts', 'openground-guard.js'))
+    ) {
+      // Canonicalize the HIT itself (it exists, so realpath always resolves) —
+      // not just the walk start: a symlinked path (e.g. macOS /var →
+      // /private/var) must not slip past the volatile-home prefix check.
+      const root = canonical(dir)
+      const home = canonical(openGroundHome())
+      if (isUnder(root, home)) {
+        return {
+          root: null,
+          problem:
+            `refusing hook source root ${root}: it sits under the OPEN GROUND data home (${home}) — ` +
+            'swarm worktrees there are transient (the janitor deletes them), and a global hook wired ' +
+            'to such a path breaks every claude session once it is gone',
+        }
+      }
+      return { root, problem: null }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return {
+        root: null,
+        problem: `scripts/openground-hook.js + openground-guard.js not found in any dir at or above ${start}`,
+      }
+    }
+    dir = parent
+  }
+}
+
+const hookScriptPath = (root: string): string => join(root, 'scripts', 'openground-hook.js')
+const guardSourcePath = (root: string): string => join(root, 'scripts', 'openground-guard.js')
 const guardInstallDir = (): string => join(homedir(), '.openground', 'guard')
 const guardInstalledPath = (): string => join(guardInstallDir(), 'openground-guard.js')
 
@@ -141,6 +231,15 @@ export const installHooks = async (): Promise<InstallResult> => {
     errors: [],
   }
 
+  // Resolve (and safety-check) the hook source BEFORE touching anything: a
+  // null root means there is nothing safe to wire, so the installer must
+  // write NOTHING — neither settings.json nor the guard copy.
+  const source = resolveHookSourceRoot()
+  if (source.root === null) {
+    result.errors.push(source.problem ?? 'hook source root unresolved')
+    return result
+  }
+
   const settingsFile = settingsPath()
   let raw = '{}'
   try {
@@ -162,7 +261,7 @@ export const installHooks = async (): Promise<InstallResult> => {
   if (!settings || typeof settings !== 'object') settings = {}
   if (!settings.hooks || typeof settings.hooks !== 'object') settings.hooks = {}
 
-  const scriptAbs = hookScriptPath()
+  const scriptAbs = hookScriptPath(source.root)
   if (!existsSync(scriptAbs)) {
     result.errors.push(`hook script not found at ${scriptAbs}`)
     return result
@@ -202,7 +301,7 @@ export const installHooks = async (): Promise<InstallResult> => {
   // the guard is vetoing). Wire only if the copy landed: a wired-but-missing
   // script would make the hook fail as a NON-blocking error — i.e. silently
   // stop vetoing — which is the exit-1 trap this guard exists to avoid.
-  const guardSrc = guardSourcePath()
+  const guardSrc = guardSourcePath(source.root)
   if (!existsSync(guardSrc)) {
     result.errors.push(`guard script not found at ${guardSrc}`)
   } else {
@@ -268,6 +367,104 @@ export const installHooks = async (): Promise<InstallResult> => {
   }
 
   return result
+}
+
+// ─── L4 wiring verification (GAP-2: the spawn-time fail-closed gate) ─────────
+// Claude Code fails a MISSING PreToolUse hook OPEN (a non-exit-2 hook is
+// non-blocking), so "the guard exists in the repo" proves nothing about a live
+// session — only the WIRING does: the settings.json entries AND the installed
+// guard body they point at. verifyGuardWiring re-derives both from disk and
+// compares against what installHooks would write, so installer and verifier can
+// never drift apart (same buildGuardEntry / same paths).
+//
+// STRICT READER — deliberately the opposite of this codebase's tolerant-read
+// convention: ANY failure (ENOENT, EACCES, JSON parse, a matcher's entry
+// missing, a byte mismatch against the expected guard version) is a problem,
+// never a silent default. A fail-closed gate built on a tolerant reader is
+// fail-open in disguise (the catch "recovers" exactly the state the gate exists
+// to refuse), so nothing here may grow a `.catch(() => ok)`.
+
+export interface GuardWiringCheck {
+  ok: boolean
+  /** Human-readable wiring problems; empty iff `ok`. */
+  problems: string[]
+}
+
+export const verifyGuardWiring = async (): Promise<GuardWiringCheck> => {
+  const problems: string[] = []
+
+  // (1) The EXPECTED guard version = the repo/app copy under <appRoot>/scripts/,
+  //     resolved module-anchored + volatile-root-refused exactly like the
+  //     installer (same resolveHookSourceRoot — installer and verifier cannot
+  //     drift, and a worktree-resident source is never accepted as "expected").
+  //     Unresolvable/unreadable ⇒ "expected" is undefined ⇒ NOT verified.
+  let source: Buffer | null = null
+  const sourceRoot = resolveHookSourceRoot()
+  if (sourceRoot.root === null) {
+    problems.push(sourceRoot.problem ?? 'hook source root unresolved')
+  } else {
+    try {
+      source = await readFile(guardSourcePath(sourceRoot.root))
+    } catch (e: any) {
+      problems.push(
+        `guard source unreadable at ${guardSourcePath(sourceRoot.root)}: ${e?.message ?? e}`,
+      )
+    }
+  }
+
+  // (2) The INSTALLED guard body (~/.openground/guard/ — what the hook command
+  //     actually executes) must exist and byte-match the expected version.
+  try {
+    const installed = await readFile(guardInstalledPath())
+    if (source && !installed.equals(source)) {
+      problems.push(
+        `installed guard at ${guardInstalledPath()} differs from the expected version`,
+      )
+    }
+  } catch (e: any) {
+    problems.push(`installed guard unreadable at ${guardInstalledPath()}: ${e?.message ?? e}`)
+  }
+
+  // (3) settings.json must exist, parse, and carry our PreToolUse entry with the
+  //     EXACT expected command for EVERY guarded tool — a partial wiring (say,
+  //     Bash guarded but Write not) is still an escape hatch, so it fails whole.
+  try {
+    const raw = await readFile(settingsPath(), 'utf8')
+    const settings = JSON.parse(raw)
+    const arr = settings?.hooks?.PreToolUse
+    for (const matcher of GUARD_MATCHERS) {
+      const desired = buildGuardEntry(matcher, guardInstalledPath()).hooks[0].command
+      const entry = Array.isArray(arr)
+        ? arr.find((e: any) => isOurGuardEntry(e) && e?.matcher === matcher)
+        : undefined
+      if (!entry) {
+        problems.push(`PreToolUse[${matcher}]: guard hook entry missing from settings.json`)
+      } else if (entry?.hooks?.[0]?.command !== desired) {
+        problems.push(`PreToolUse[${matcher}]: guard hook command differs from the expected wiring`)
+      }
+    }
+  } catch (e: any) {
+    problems.push(`settings.json unreadable/unparsable at ${settingsPath()}: ${e?.message ?? e}`)
+  }
+
+  return { ok: problems.length === 0, problems }
+}
+
+/** Verify the L4 wiring, self-healing ONCE through the idempotent installHooks()
+ *  when it doesn't hold (covers "the user deleted the guard dir / boot install
+ *  raced" without a restart). The verdict is always a fresh READ-BACK — the
+ *  install's own result is never trusted as proof. Callers gate on `ok` and must
+ *  refuse their spawn when it is false. */
+export const ensureGuardWiring = async (): Promise<GuardWiringCheck> => {
+  const first = await verifyGuardWiring()
+  if (first.ok) return first
+  try {
+    await installHooks()
+  } catch {
+    // installHooks reports failures via result.errors rather than throwing;
+    // belt-and-braces — the re-verify below is what decides either way.
+  }
+  return verifyGuardWiring()
 }
 
 // Uninstall — removes OPEN GROUND's hook entries while preserving siblings.

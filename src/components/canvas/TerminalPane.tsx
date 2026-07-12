@@ -623,13 +623,22 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
           )}
         </div>
       )}
-      <div className="relative min-h-0 flex-1">
+      {/* The padding lives on THIS wrapper, not on hostRef — @xterm/addon-fit's
+          FitAddon.proposeDimensions() reads the parent element's computed
+          height but the padding of terminal.element itself (an xterm-created
+          child of hostRef, which never has padding), so padding placed on
+          hostRef is silently NOT subtracted and FitAddon overshoots the row
+          count by that padding's worth of pixels — the extra rows then render
+          past the visible area and get clipped by hostRef's overflow-hidden
+          (the bottom-of-pane crop bug). Keeping hostRef padding-free and
+          giving the breathing room to this outer box keeps FitAddon's
+          measurement (hostRef's own content height) exactly equal to the
+          visible terminal area. */}
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2">
         <div
           ref={hostRef}
-          // xterm.js draws inside this div. The padding gives the cursor a bit
-          // of breathing room from the panel edges without confusing fit's math
-          // (its measurements are relative to this container).
-          className="h-full w-full overflow-hidden bg-[#1a1a1a] px-2 py-2"
+          // xterm.js draws inside this div — kept padding-free (see above).
+          className="h-full w-full overflow-hidden"
         />
         {/* SSE reconnect pill — overlays the top of the viewport (no layout shift,
             so xterm isn't resized) when the output stream drops. Suppressed once

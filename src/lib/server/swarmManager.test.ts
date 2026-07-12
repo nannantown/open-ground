@@ -5,10 +5,11 @@ import { managerLaunchOpts, MANAGER_INJECTION } from './swarmManager'
 // spawnSwarmManager spawns a real PTY (needs the `claude` CLI), so it is
 // curl-verified on the real machine. Here we pin the PURE launch contract —
 // the exact LaunchClaudeOpts the commander conversation runs with — which
-// encodes the security-relevant decisions (bypass IN THE REAL CHECKOUT but
-// guarded by SWARM_MANAGER=1; the /og-manage skill as the positional prompt).
+// encodes the security-relevant decisions (bypass IN THE REAL CHECKOUT, tagged
+// SWARM_MANAGER=1 — a TRUSTED session the worker-only PreToolUse veto does not
+// police; the /og-manage skill as the positional prompt).
 // Mirrors swarmSupply.test.ts: the commander is the supply officer's sibling —
-// same no-worktree, real-tree, guarded-bypass shape, different skill + role.
+// same no-worktree, real-tree, tagged-bypass shape, different skill + role.
 
 describe('managerLaunchOpts (commander launch contract)', () => {
   const base = managerLaunchOpts('/repo', 'sid-1')
@@ -22,19 +23,19 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.permissionMode).toBe('bypass')
   })
 
-  it('opts INTO the swarm guard (SWARM_MANAGER=1) — the commander runs in the REAL tree', () => {
-    // The WORKER passes NO env (contained throwaway worktree, guard inert); the
-    // commander runs bypass in the primary checkout and integrates branches, so
-    // it MUST pass SWARM_MANAGER=1 so the PreToolUse guard blocks stray
-    // destructive git (force-push, etc.) — the same net supply uses.
+  it('is TAGGED as the commander (SWARM_MANAGER=1) — a role tag, NOT a guard opt-in', () => {
+    // Under WORKER-ONLY guard scoping (2026-07) the PreToolUse veto polices only
+    // the confined worker (OPENGROUND_GUARD=1 + write roots); the commander is
+    // the TRUSTED human-in-the-loop integration desk, so SWARM_MANAGER=1 only
+    // TAGS the session for tooling/skills — the same tag supply carries.
     expect(base.env).toEqual({ SWARM_MANAGER: '1' })
   })
 
-  it('blocks MCP inheritance (strictMcpConfig) — the guard only vetoes Bash+Write, so mcp__* must not exist', () => {
-    // A bypass session in the REAL checkout must NOT inherit the user's MCP
-    // servers: mcp__* tools sit outside the PreToolUse veto, so a filesystem/
-    // shell/data MCP would be an unguarded RCE past the guard. (Commander
-    // focused-review MUST-FIX — pairs the guard with strictMcpConfig.)
+  it('blocks MCP inheritance (strictMcpConfig) — defense-in-depth for an unpoliced trusted session', () => {
+    // The commander is NOT policed by the PreToolUse veto (worker-only scoping),
+    // so this is no longer a veto-pairing requirement — kept as defense-in-depth
+    // so the bypass session boots with only its explicit MCP config (none)
+    // instead of inheriting user-scope MCP servers. (See managerLaunchOpts.)
     expect(base.strictMcpConfig).toBe(true)
   })
 

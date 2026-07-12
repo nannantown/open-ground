@@ -6,10 +6,13 @@ import { existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { integrateBranch } from './swarmIntegrate'
-import { installHooks } from './hooksInstall'
+import { installHooks, verifyGuardWiring, ensureGuardWiring } from './hooksInstall'
 import {
   createSwarmWorktree,
   removeSwarmWorktree,
+  spawnSwarmWorker,
+  GuardWiringError,
+  __resetGuardUnwiredNotifyThrottleForTests,
 } from './swarmWorker'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { centralWorktreesDir } from './paths'
@@ -404,7 +407,8 @@ describe('INVARIANT B — removeSwarmWorktree never deletes outside the central 
 // ─────────────────────────────────────────────────────────────────────────────
 // INVARIANT E — the PreToolUse guard (scripts/openground-guard.js, A3/L4) is
 // the ONE deterministic veto --dangerously-skip-permissions cannot override:
-// in a guarded session (OPENGROUND_GUARD=1 / SWARM_MANAGER=1) the destructive
+// in a guarded WORKER session (OPENGROUND_GUARD=1 — SWARM_MANAGER=1 is a
+// trusted-role tag, not a gate; see E18) the destructive
 // classes — rm -rf outside the write roots, git push in EVERY shape (a worker
 // never integrates — 2e7beb2), writes outside the roots — and every
 // recognizable evasion route into them
@@ -1119,8 +1123,10 @@ describe('INVARIANT E-WIRING — installHooks wires the PreToolUse guard into se
     process.env.HOME = tmpHome
     // NOTE: we deliberately do NOT pre-create ~/.claude — installHooks must
     // self-heal a fresh machine (mkdir before the atomic write), and W1 proves it.
-    // installHooks reads the guard/observer scripts from <cwd>/scripts, so keep
-    // cwd at the repo root (it already is under vitest, but pin it explicitly).
+    // installHooks resolves its scripts from its own MODULE location (cwd-
+    // independent since the 2026-07-12 worktree-path fix; hooksInstall.test.ts
+    // is the regression net) — the chdir is just a stable baseline, not a
+    // correctness requirement anymore.
     process.chdir(repoRoot)
   })
   afterEach(async () => {
@@ -1160,5 +1166,143 @@ describe('INVARIANT E-WIRING — installHooks wires the PreToolUse guard into se
       e.hooks?.[0]?.command?.includes('openground-guard.js'),
     )
     expect(guardEntries).toHaveLength(5) // Bash + Write + Edit + MultiEdit + NotebookEdit, no dupes
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INVARIANT E-FAILCLOSED — the worker spawn path REFUSES to spawn when the L4
+// wiring cannot be verified (GAP-2). E-WIRING above proves installHooks CAN
+// wire the guard; this proves the spawn path DEMANDS that wiring:
+//   • verifyGuardWiring is a STRICT reader — any read/parse failure, missing
+//     PreToolUse entry, or a byte mismatch between the installed guard and the
+//     expected (repo) version is NOT-verified. Never a tolerant default: a
+//     fail-closed gate on a tolerant reader is fail-open in disguise.
+//   • ensureGuardWiring self-heals ONCE through the idempotent installHooks(),
+//     then re-verifies from disk (read-back — the install result is not proof).
+//   • spawnSwarmWorker throws GuardWiringError BEFORE any worktree/branch/PTY
+//     exists when verification still fails, and persists a 'guard-unwired'
+//     fatal notification (the UI bell) for the refusal.
+// The negative control (F6) proves the gate is what refuses: with intact wiring
+// the same call passes the gate and fails LATER, on the unregistered project.
+//
+// HOME ISOLATION: HOME (→ ~/.claude + os.homedir-based guard install dir) AND
+// OPENGROUND_HOME (→ the notification store + central worktrees) are both
+// pinned into one throwaway dir — nothing touches the real machine state.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('INVARIANT E-FAILCLOSED — unverifiable guard wiring refuses the worker spawn', () => {
+  let tmpHome: string
+  let savedHome: string | undefined
+  let savedOgHome: string | undefined
+  let savedCwd: string
+  const repoRoot = process.cwd()
+  const installedGuard = () => join(tmpHome, '.openground', 'guard', 'openground-guard.js')
+  const claudeSettings = () => join(tmpHome, '.claude', 'settings.json')
+
+  beforeEach(async () => {
+    savedHome = process.env.HOME
+    savedOgHome = process.env.OPENGROUND_HOME
+    savedCwd = process.cwd()
+    tmpHome = await realpath(await mkdtemp(join(tmpdir(), 'og-guard-fc-')))
+    process.env.HOME = tmpHome
+    // paths.ts routes ~/.openground through OPENGROUND_HOME while hooksInstall
+    // resolves ~ via os.homedir() ($HOME) — pin BOTH into the same throwaway
+    // home so the guard install dir and the notification store line up.
+    process.env.OPENGROUND_HOME = join(tmpHome, '.openground')
+    process.chdir(repoRoot)
+    __resetGuardUnwiredNotifyThrottleForTests()
+  })
+  afterEach(async () => {
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+    if (savedOgHome === undefined) delete process.env.OPENGROUND_HOME
+    else process.env.OPENGROUND_HOME = savedOgHome
+    process.chdir(savedCwd)
+    await rm(tmpHome, { recursive: true, force: true })
+  })
+
+  it('F1 — a fresh machine (nothing installed) does NOT verify', async () => {
+    const check = await verifyGuardWiring()
+    expect(check.ok).toBe(false)
+    // Both halves of the wiring are reported missing: the installed guard body
+    // and the settings.json PreToolUse entries.
+    expect(check.problems.join('\n')).toContain('installed guard unreadable')
+    expect(check.problems.join('\n')).toContain('settings.json')
+  })
+
+  it('F2 — verifies right after installHooks (installer and verifier agree)', async () => {
+    const res = await installHooks()
+    expect(res.errors).toEqual([])
+    const check = await verifyGuardWiring()
+    expect(check.problems).toEqual([])
+    expect(check.ok).toBe(true)
+  })
+
+  it('F3 — a tampered installed guard fails verification; ensureGuardWiring self-heals it back to the expected version', async () => {
+    await installHooks()
+    await writeFile(installedGuard(), '// TAMPERED — not the expected guard\n', 'utf8')
+    const broken = await verifyGuardWiring()
+    expect(broken.ok).toBe(false)
+    expect(broken.problems.join('\n')).toContain('differs from the expected version')
+
+    const healed = await ensureGuardWiring()
+    expect(healed.ok).toBe(true)
+    // Read-back: the healed installed copy is byte-identical to the expected
+    // (repo) version again — "expected version" is enforced, not just present.
+    const src = await readFile(join(repoRoot, 'scripts', 'openground-guard.js'))
+    const cur = await readFile(installedGuard())
+    expect(cur.equals(src)).toBe(true)
+  })
+
+  it('F4 — an unparsable settings.json cannot self-heal: ensureGuardWiring stays NOT-ok', async () => {
+    await installHooks()
+    // installHooks refuses to rewrite a file it cannot parse (it must never
+    // clobber user-authored hooks), so this breakage is beyond self-heal — the
+    // gate must hold NOT-ok rather than "recover" into an unverified spawn.
+    await writeFile(claudeSettings(), '{ this is not json', 'utf8')
+    const check = await ensureGuardWiring()
+    expect(check.ok).toBe(false)
+    expect(check.problems.join('\n')).toContain('settings.json')
+  })
+
+  it('F5 — spawnSwarmWorker REFUSES on unverifiable wiring: GuardWiringError, no worktree minted, bell notified', async () => {
+    await installHooks()
+    await writeFile(claudeSettings(), '{ broken', 'utf8')
+
+    const err = await spawnSwarmWorker({
+      projectPath: join(tmpHome, 'some-project'),
+      title: 'goal',
+    }).catch((e) => e)
+    expect(err).toBeInstanceOf(GuardWiringError)
+    expect(String(err.message)).toContain('fail-closed')
+
+    // Fail-closed BEFORE any resource exists: the central projects/worktrees
+    // tree was never minted for the refused spawn (the gate sits before
+    // createSwarmWorktree — a GuardWiringError, NOT the unregistered-project
+    // error that same path would throw next, already proves the ordering).
+    expect(existsSync(join(tmpHome, '.openground', 'projects'))).toBe(false)
+
+    // ...and the refusal reached the UI store (the bell): a persisted
+    // 'guard-unwired' fatal notification with the fail-closed wording.
+    const raw = await readFile(join(tmpHome, '.openground', 'swarm-notifications.json'), 'utf8')
+    const store = JSON.parse(raw)
+    const hit = (store.items as any[]).find((i) => i?.swarmFatal?.event === 'guard-unwired')
+    expect(hit).toBeTruthy()
+    expect(hit.swarmFatal.detail).toContain('fail-closed')
+  })
+
+  it('F6 — NEGATIVE CONTROL: with intact wiring the same spawn PASSES the gate (fails later, on the unregistered project)', async () => {
+    await installHooks()
+    const err = await spawnSwarmWorker({
+      projectPath: join(tmpHome, 'some-project'),
+      title: 'goal',
+    }).catch((e) => e)
+    // Not the guard gate: the spawn got past it and died on the NEXT step —
+    // worktree creation for a project the registry doesn't own. This is what
+    // proves F5's refusal came from the gate rather than from a spawn path
+    // that is broken for any input.
+    expect(err).toBeTruthy()
+    expect(err).not.toBeInstanceOf(GuardWiringError)
+    expect(String(err.message)).toContain('no registered project owns')
   })
 })

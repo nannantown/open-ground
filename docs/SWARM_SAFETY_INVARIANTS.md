@@ -119,6 +119,23 @@ the guard to the sandbox-write-denied `~/.openground/guard/` and adds a per-tool
 `launchClaude({guard:{writeRoots:[worktree]}})`. Independent of the L3 sandbox — L4
 holds when the experiment is off, and runs *inside* the Seatbelt boundary when it's
 on.
+**The wiring itself is fail-closed at spawn time (GAP-2, 2026-07-11).** Claude
+Code fails a MISSING PreToolUse hook OPEN, and the boot-time `installHooks()`
+(server/index.ts) is fire-and-forget — so an install failure used to leave the
+next worker spawn unguarded. `spawnSwarmWorker` now verifies the full wiring
+BEFORE the worktree exists — `ensureGuardWiring()` (hooksInstall.ts): the
+settings.json `PreToolUse` entry for every guarded tool must match the expected
+command, AND the installed guard body must be byte-identical to the expected
+version (`scripts/openground-guard.js`); one idempotent `installHooks()`
+self-heal attempt, then a fresh read-back re-verify — still unverified ⇒ the
+spawn is REFUSED (`GuardWiringError`) and a `'guard-unwired'` fatal notification
+(bell + OS toast, throttled) surfaces the refusal. The verifier is a STRICT
+reader — any read/parse failure, missing entry, or byte mismatch is NOT-verified
+(a tolerant reader would make the gate fail-open in disguise). Every worker path
+(engine dispatch, `POST /api/swarm/worker`, RESTART) funnels through this gate;
+asserted by `swarmSafety.test.ts` INVARIANT **E-FAILCLOSED** (deliberately broken
+wiring ⇒ refusal + no worktree + bell record; negative control: intact wiring
+passes the gate).
 *Code:* `scripts/openground-guard.js` (`evaluate` / `analyzeBash` / `analyzeGit` /
 `makePathPolicy`); wiring in `hooksInstall.ts` + `sandbox.ts` + `claudeTerminal.ts`
 + `swarmWorker.ts`.
@@ -183,7 +200,8 @@ always-on `tsc` gate:
 1. **Detect.** Before landing a review branch, the engine computes the branch's own
    changed files vs the trunk (`changedFilesVsTrunk`: `git diff --name-only
    <trunk>...<tip>`). `touchesSwarmPaths` matches them against the swarm-code globs —
-   `src/lib/server/swarm*.ts`, `server/routes/swarm.ts`,
+   `src/lib/server/swarm*.ts`, `server/routes/swarm.ts`, `server/routes/project.ts`
+   (the Board API — the swarm contract's real surface, docs/commander/05),
    `src/components/canvas/modules/Swarm*`, **and the route safety net itself**
    (`server/routes/__tests__/swarmSafety.routes.test.ts`) so deleting/weakening it
    trips the gate too (the unit net is already covered by the `swarm*.ts` glob).

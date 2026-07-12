@@ -664,10 +664,14 @@ function resolveWebRoot() {
 // can identify us, and OPENGROUND_WEB_ROOT so the server serves the right
 // dist-web regardless of the child's cwd.
 //
-// cwd: the app root that holds scripts/ + src/designs/. src/lib/server's
-// hooksInstall.ts and screenWatcher.ts derive paths from process.cwd(), so the
-// child must run from a dir where those exist. We anchor it at the bundle's
-// app root (two levels up from server/dist/index.cjs).
+// cwd: the app root that holds scripts/ + src/designs/. screenWatcher.ts (and
+// the package.json readers in the misc/feedback routes) still derive paths
+// from process.cwd(), so the child must run from a dir where those exist.
+// (hooksInstall.ts / ogManageSkill.ts are deliberately cwd-INDEPENDENT — they
+// anchor at their own module location and refuse worktree roots — so the
+// global ~/.claude wiring stays safe even if a caller gets the cwd wrong.)
+// We anchor it at the bundle's app root (two levels up from
+// server/dist/index.cjs).
 // ---------------------------------------------------------------------------
 // Resolve (and memoize) the login-shell PATH. Async — the ~560ms `zsh -lic`
 // probe should run at most once, then be reused by every fork + the self-update

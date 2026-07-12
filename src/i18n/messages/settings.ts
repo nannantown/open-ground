@@ -21,6 +21,8 @@ export const settings = {
     'settings.experiments.heading': 'Experiments',
     'settings.experiments.hint': 'Early, owner-only features. Off by default; not covered by support.',
     'settings.experiments.swarm': 'Swarm orchestration',
+    'settings.experiments.swarmHint':
+      'Reveals the Swarm tab and its controls for you only — nothing runs on its own. Worker dispatch, auto-integrate, and the overseer all default off and stay off until you explicitly arm each one, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
@@ -69,6 +71,8 @@ export const settings = {
     'settings.experiments.heading': '実験的機能',
     'settings.experiments.hint': '初期段階のオーナー限定機能です。既定はオフで、サポート対象外です。',
     'settings.experiments.swarm': 'Swarm オーケストレーション',
+    'settings.experiments.swarmHint':
+      'この端末で Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・自動統合・監督はすべて既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',

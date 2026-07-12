@@ -145,7 +145,7 @@ export const projectPanel = {
     'projectPanel.swarm.manager.badge': 'Commander',
     'projectPanel.swarm.manager.autoMerge': 'Auto-integrate',
     'projectPanel.swarm.manager.autoMergeHint':
-      'Let the engine land review cards on the trunk itself — fast-forward / rebase only, never forced; conflicts are left for you. It does NOT run tests or review the diff first — for verified merges, drive them through the commander conversation (/manage) instead. Off by default.',
+      'Let the engine land review cards on your origin remote’s trunk by itself — plain push only (never `--force`), only the engine’s own `swarm/*` branches, and only after a verify gate (typecheck → lint → safety tests → full test suite) and unanimous adversarial review both pass. The push itself never resolves a conflict — a conflicting push is aborted and nothing lands. Instead the branch is handed back to its own autonomous worker to rebase and retry, no human involved; only repeated rebase failures park the card (blocked) for your review. This is all it does; for a diff you drive yourself, use the commander conversation (/manage) instead. Off by default. Note: stopping the autonomous drain does NOT disarm this — it stays armed for the next start; only switching it off yourself or a full app restart returns it to off.',
     'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
     'projectPanel.swarm.manager.overseerHint':
       'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. UNLIKE auto-integrate, turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
@@ -711,7 +711,7 @@ export const projectPanel = {
     'projectPanel.swarm.manager.badge': '司令官',
     'projectPanel.swarm.manager.autoMerge': '自動統合',
     'projectPanel.swarm.manager.autoMergeHint':
-      'review のカードをエンジンが本流へ自動で取り込みます（早送り/rebase のみ・強制プッシュはしません）。衝突は手動に残します。テストやレビューは回しません — 検証込みのマージは司令官との対話（/manage）に任せてください。既定はオフ。',
+      'review のカードを、origin リモートの本流へエンジンが自動で取り込みます — plain push のみ（`--force` は一切しません）、対象はエンジン自身の `swarm/*` ブランチのみ、そして検証ゲート（型チェック → lint → safety テスト → フルテスト）と敵対レビュー全員一致の両方を通ったものだけが対象です。push 自体は衝突を解決しません — 衝突した push は中断され、何も取り込まれません。代わりに、そのブランチは同じ自律 worker に差し戻され、人手を介さず rebase して再試行します。rebase が繰り返し失敗した場合のみ、カードは blocked に退避しあなたのレビューへ回されます。ここに書いた以上のことは起きません — 自分で操作するマージは司令官との対話（/manage）に任せてください。既定はオフ。注意：自律運転（drain）を止めても自動統合は解除されません — 次回の起動でもオンのままです。自分でオフに切り替えるか、アプリを完全に再起動した場合のみオフに戻ります。',
     'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
     'projectPanel.swarm.manager.overseerHint':
       'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。自動統合と違い、autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',

@@ -5,8 +5,9 @@ import { supplyLaunchOpts, SUPPLY_INJECTION } from './swarmSupply'
 // spawnSwarmSupply spawns a real PTY (needs the `claude` CLI), so it is
 // curl-verified on the real machine. Here we pin the PURE launch contract —
 // the exact LaunchClaudeOpts the supply officer runs with — which encodes the
-// security-relevant decisions (bypass IN THE REAL CHECKOUT but guarded by
-// SWARM_MANAGER=1; the /supply skill as the positional prompt).
+// security-relevant decisions (bypass IN THE REAL CHECKOUT, tagged
+// SWARM_MANAGER=1 — a TRUSTED session the worker-only PreToolUse veto does not
+// police; the /supply skill as the positional prompt).
 
 describe('supplyLaunchOpts (supply launch contract)', () => {
   const base = supplyLaunchOpts('/repo', 'sid-1')
@@ -20,16 +21,18 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.permissionMode).toBe('bypass')
   })
 
-  it('opts INTO the swarm guard (SWARM_MANAGER=1) — supply runs in the REAL tree', () => {
-    // The WORKER passes NO env (contained throwaway worktree, guard inert);
-    // supply runs bypass in the primary checkout, so it MUST pass
-    // SWARM_MANAGER=1 so the PreToolUse guard blocks any stray destructive git.
+  it('is TAGGED as the supply officer (SWARM_MANAGER=1) — a role tag, NOT a guard opt-in', () => {
+    // Under WORKER-ONLY guard scoping (2026-07) the PreToolUse veto polices only
+    // the confined worker (OPENGROUND_GUARD=1 + write roots); the supply desk is
+    // TRUSTED (it reads the repo + writes the recoverable Board), so
+    // SWARM_MANAGER=1 only TAGS the session for tooling — same as the commander.
     expect(base.env).toEqual({ SWARM_MANAGER: '1' })
   })
 
-  it('blocks MCP inheritance (strictMcpConfig) — mcp__* tools sit outside the veto', () => {
-    // Same as the worker/manager: a bypass session in the REAL checkout must not
-    // inherit user MCP servers (RCE past the veto). (Commander MUST-FIX.)
+  it('blocks MCP inheritance (strictMcpConfig) — defense-in-depth for an unpoliced trusted session', () => {
+    // Supply is NOT policed by the PreToolUse veto (worker-only scoping), so this
+    // is defense-in-depth, not veto-pairing: boot with only the explicit MCP
+    // config (none) instead of inheriting user-scope servers. (See supplyLaunchOpts.)
     expect(base.strictMcpConfig).toBe(true)
   })
 

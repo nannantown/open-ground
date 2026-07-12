@@ -25,16 +25,25 @@ import { readFile, mkdir } from 'fs/promises'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { atomicWriteText } from './atomicWrite'
+import { resolveHookSourceRoot } from './hooksInstall'
 
 /** The ownership marker burned into the shipped skill (an HTML comment right
  *  after the frontmatter). Its ABSENCE in an existing target file marks that
  *  file user-authored — the installer then never touches it. */
 export const OG_MANAGE_SKILL_MARKER = 'managed-by: openground'
 
-/** Canonical source inside the app checkout / bundle. process.cwd() is the
- *  project root in dev and the packaged app dir in prod (asar:false) — the
- *  same resolution hooksInstall.ts relies on for scripts/openground-guard.js. */
-const sourcePath = (): string => join(process.cwd(), 'skills', 'og-manage', 'SKILL.md')
+/** Canonical source inside the app checkout / bundle — resolved through the
+ *  same module-anchored, worktree-refusing root as hooksInstall.ts (NOT
+ *  process.cwd(): a wrong boot cwd used to make this ENOENT, and an engine
+ *  running from a swarm worktree must not ship that worktree's skill text
+ *  into ~/.claude). null when no safe root exists — reported as an 'error'
+ *  outcome, never thrown. */
+const sourcePath = (): { file: string | null; problem: string | null } => {
+  const { root, problem } = resolveHookSourceRoot()
+  return root
+    ? { file: join(root, 'skills', 'og-manage', 'SKILL.md'), problem: null }
+    : { file: null, problem }
+}
 
 const installedPath = (): string =>
   join(homedir(), '.claude', 'skills', 'og-manage', 'SKILL.md')
@@ -62,9 +71,21 @@ export const installOgManageSkill = async (
   opts: { sourceFile?: string; targetFile?: string } = {},
 ): Promise<OgManageSkillResult> => {
   const target = opts.targetFile ?? installedPath()
+  let source = opts.sourceFile ?? null
+  if (source === null) {
+    const resolved = sourcePath()
+    if (resolved.file === null) {
+      return {
+        outcome: 'error',
+        path: target,
+        error: `skill source unresolvable: ${resolved.problem}`,
+      }
+    }
+    source = resolved.file
+  }
   let desired: string
   try {
-    desired = await readFile(opts.sourceFile ?? sourcePath(), 'utf8')
+    desired = await readFile(source, 'utf8')
   } catch (e) {
     return {
       outcome: 'error',

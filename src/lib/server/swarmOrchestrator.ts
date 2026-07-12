@@ -2630,7 +2630,9 @@ export const tscCheck: VerifyCheck = {
 /** Repo-relative path patterns that constitute "swarm code" — the goal's enumerated
  *  set: src/lib/server/swarm*.ts (orchestrator / integrate / worker / janitor / …,
  *  AND the swarmSafety.test.ts net itself), server/routes/swarm.ts (the /api/swarm
- *  surface), and src/components/canvas/modules/Swarm* (the UI panes). The anchors are
+ *  surface), server/routes/project.ts (the Board API — the swarm contract's real
+ *  surface: workers/manager drive every card verb through it, docs/commander/05),
+ *  and src/components/canvas/modules/Swarm* (the UI panes). The anchors are
  *  deliberately tight: `swarm` must sit DIRECTLY under each dir (a nested
  *  `…/sub/swarmX.ts` or a stray `docs/swarm.ts` does NOT match). The route-level
  *  safety net (server/routes/__tests__/swarmSafety.routes.test.ts) is ALSO a trigger:
@@ -2640,6 +2642,7 @@ export const tscCheck: VerifyCheck = {
 const SWARM_CODE_PATHS: readonly RegExp[] = [
   /^src\/lib\/server\/swarm[^/]*\.ts$/,
   /^server\/routes\/swarm\.ts$/,
+  /^server\/routes\/project\.ts$/,
   /^server\/routes\/__tests__\/swarmSafety[^/]*$/,
   /^src\/components\/canvas\/modules\/Swarm[^/]*$/,
 ]

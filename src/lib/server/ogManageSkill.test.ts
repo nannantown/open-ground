@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { installOgManageSkill, OG_MANAGE_SKILL_MARKER } from './ogManageSkill'
+import { __setHookSourceModuleDirForTests } from './hooksInstall'
 
 // The installer's ownership contract, exercised against a throwaway tmpdir —
 // never the real ~/.claude (source AND target are injected via the test-only
@@ -74,11 +75,36 @@ describe('installOgManageSkill', () => {
     expect(r.error).toContain('marker')
     await expect(stat(dst)).rejects.toThrow()
   })
+
+  it('production source resolution refuses a worktree-resident engine (no worktree skill text reaches ~/.claude)', async () => {
+    // Point the shared module-anchored resolver at a fake engine checkout under
+    // the central worktrees dir (both hook scripts present = a real-looking
+    // checkout). The skill installer must degrade to an 'error' outcome and
+    // write nothing — same volatile-root refusal as hooksInstall.
+    const savedOg = process.env.OPENGROUND_HOME
+    process.env.OPENGROUND_HOME = join(dir, '.openground')
+    const wt = join(dir, '.openground', 'projects', 'u', 'worktrees', 'w')
+    await mkdir(join(wt, 'scripts'), { recursive: true })
+    await writeFile(join(wt, 'scripts', 'openground-hook.js'), '// stub\n', 'utf8')
+    await writeFile(join(wt, 'scripts', 'openground-guard.js'), '// stub\n', 'utf8')
+    __setHookSourceModuleDirForTests(join(wt, 'src', 'lib', 'server'))
+    try {
+      const r = await installOgManageSkill({ targetFile: dst }) // no sourceFile → production resolution
+      expect(r.outcome).toBe('error')
+      expect(r.error).toContain('refusing hook source root')
+      await expect(stat(dst)).rejects.toThrow() // target never created
+    } finally {
+      __setHookSourceModuleDirForTests(null)
+      if (savedOg === undefined) delete process.env.OPENGROUND_HOME
+      else process.env.OPENGROUND_HOME = savedOg
+    }
+  })
 })
 
 describe('shipped skill source (skills/og-manage/SKILL.md)', () => {
-  // vitest runs with cwd = the repo root — the same resolution the production
-  // installer uses (process.cwd() + skills/og-manage/SKILL.md).
+  // vitest runs from the repo root, and the production installer's
+  // module-anchored resolution (resolveHookSourceRoot) lands on this same
+  // checkout — so the file pinned here IS the file production installs.
   const shippedPath = join(process.cwd(), 'skills', 'og-manage', 'SKILL.md')
 
   it('exists, carries the managed-by marker, and declares the og-manage skill', async () => {

@@ -43,6 +43,7 @@
 | カード操作が効かない / 列が勝手に戻る | 05 章(§6.3 id の掟、§7 落とし穴) |
 | escalation が大量に来た / 古い障害が再通知される | 06 章(§4.1 S3 増殖、§5 トリアージ) |
 | エンジンが「何もしていない」ように見える / 検知が遅い | 01 章 §7.6(log ring buffer)+ TARGET-STATE §1(検知の現行機構)。※01 章 §6 の monitor 飢餓は `0d1f7f0` で解消済み(歴史) |
+| 全 claude セッションの Stop hook が MODULE_NOT_FOUND(worktree パスを指す) | 02 章 §2.5(hook source の cwd 非依存解決は 0712 根治済み — 応急処置は `installHooks` 再実行 = アプリ再起動 or POST /api/observer/install-hooks で正しいパスに上書き) |
 
 ---
 
@@ -176,6 +177,6 @@ flowchart TB
    jq -r '.tasks[] | select(.id | startswith("58335c7f") or startswith("4d1550d7") or startswith("c944ea69")) | "\(.boardColumn)\t\(.title)"' ~/.openground/projects/3de870a679fa/tasks.json
    ```
 
-3. **コード変更が文書を古びさせる問題への恒久策**は TARGET-STATE §6(コード変更カードの完了条件に「該当章の更新」を含める)。**検知2点は敷設済み**(2026-07-11): (a) verify が `SWARM_CODE_PATHS` 相当に触れつつ `docs/commander/` 無変更の diff を検知すると engine journal に `warn` 1 行を残す(block はしない — swarmOrchestrator.ts `makeVerify`/`runIntegratePass`)。(b) og-manage(このスキル)の「前提・環境確認」に本チェック(1.)をセッション開始手順として組み込み済み。**残るギャップ**: journal warn は 200 行 ring buffer で再起動すれば消える(揮発)ため、司令塔が能動的に journal を見ない限り気づかれない — カード起票テンプレへの完了条件の強制組み込みは未着手(TARGET-STATE §6 の新カード案 B')。手動追随の前例: 根治 3 件(`3129a58` / `d8431c3`+`aa9cb8d` / `0d1f7f0`)→ 03/06/TARGET-STATE/本索引(+01/04 への部分注記)を同一カードの2コミットで同日反映(2026-07-10)。
+3. **コード変更が文書を古びさせる問題への恒久策**は TARGET-STATE §6(コード変更カードの完了条件に「該当章の更新」を含める)。**検知2点は敷設済み**(2026-07-11): (a) verify が `SWARM_CODE_PATHS` 相当に触れつつ `docs/commander/` 無変更の diff を検知すると engine journal に `warn` 1 行を残す(block はしない — swarmOrchestrator.ts `makeVerify`/`runIntegratePass`)。(b) og-manage(このスキル)の「前提・環境確認」に本チェック(1.)をセッション開始手順として組み込み済み。**テンプレ組込みも完了**(案 B'、2026-07-11): supply / order / og-manage の起票テンプレに docs 追随ルールが入り、**テンプレ経由の運用実績 1 件目**(カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」— Board API = 05 章の契約面を swarm-safety / soft-warn のゲート対象へ編入、同一ブランチでコード+docs 同時更新)も観測済み(TARGET-STATE §6 = ✓)。journal warn の揮発(200 行 ring・再起動で消える)は残る性質だが、テンプレの起票時予防と両輪で塞ぐ。手動追随の前例: 根治 3 件(`3129a58` / `d8431c3`+`aa9cb8d` / `0d1f7f0`)→ 03/06/TARGET-STATE/本索引(+01/04 への部分注記)を同一カードの2コミットで同日反映(2026-07-10)。
 
 4. 章内の矛盾を見つけたら: 現物(コード)で裏取り → 正しい方に合わせて文書を直す。前例: 01 章の「reviewer 3 体」は誤り(実配線は `DEFAULT_REVIEW_LENSES` の lens 4 体 — swarmOrchestrator.ts:3900。`REVIEW_PANEL_SIZE`=3 :3108 は未使用の homogeneous パネル用定数)で、本索引の執筆時(2026-07-10)に修正済み。

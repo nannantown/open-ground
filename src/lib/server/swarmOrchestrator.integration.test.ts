@@ -802,11 +802,12 @@ describe('tscCheck — default verify check', () => {
 
 describe('touchesSwarmPaths — the swarm-code path matcher', () => {
   it('matches each enumerated swarm path, rejects unrelated + look-alikes', () => {
-    // swarm code (the goal's three globs) → true
+    // swarm code (the goal's enumerated globs) → true
     expect(touchesSwarmPaths(['src/lib/server/swarmOrchestrator.ts'])).toBe(true)
     expect(touchesSwarmPaths(['src/lib/server/swarmIntegrate.ts'])).toBe(true)
     expect(touchesSwarmPaths(['src/lib/server/swarmSafety.test.ts'])).toBe(true) // the net itself
     expect(touchesSwarmPaths(['server/routes/swarm.ts'])).toBe(true)
+    expect(touchesSwarmPaths(['server/routes/project.ts'])).toBe(true) // Board API — the swarm contract surface (docs/commander/05)
     expect(touchesSwarmPaths(['server/routes/__tests__/swarmSafety.routes.test.ts'])).toBe(true) // the route net
     expect(touchesSwarmPaths(['src/components/canvas/modules/SwarmModule.tsx'])).toBe(true)
     expect(touchesSwarmPaths(['src/components/canvas/modules/SwarmSupplyPane.tsx'])).toBe(true)
@@ -816,12 +817,12 @@ describe('touchesSwarmPaths — the swarm-code path matcher', () => {
     expect(touchesSwarmPaths([])).toBe(false)
     expect(touchesSwarmPaths(['README.md', 'src/App.tsx'])).toBe(false)
     expect(touchesSwarmPaths(['src/lib/server/projectData.ts'])).toBe(false) // not swarm*
-    expect(touchesSwarmPaths(['server/routes/project.ts'])).toBe(false)
     expect(touchesSwarmPaths(['src/components/canvas/modules/BoardModule.tsx'])).toBe(false)
     // look-alikes the TIGHT anchors must REJECT (no over-broad matching)
     expect(touchesSwarmPaths(['src/lib/server/sub/swarmX.ts'])).toBe(false) // not directly under the dir
     expect(touchesSwarmPaths(['docs/swarm.ts'])).toBe(false) // wrong dir
     expect(touchesSwarmPaths(['server/routes/swarmObsolete.ts'])).toBe(false) // only swarm.ts exact
+    expect(touchesSwarmPaths(['server/routes/projectMeta.ts'])).toBe(false) // only project.ts exact
   })
 })
 

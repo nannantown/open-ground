@@ -100,10 +100,10 @@ export interface LaunchClaudeOpts {
   hidden?: boolean
   // Extra environment variables to inject into THIS claude invocation's command
   // line, scoped to the one command (exactly like OPENGROUND_OWNED=1). The
-  // in-app swarm WORKER passes NONE — so the swarm PreToolUse guard, which fires
-  // only on SWARM_MANAGER=1, stays inert for workers (it `pass`es, as today).
-  // The port exists so a future in-app MANAGER spawn can pass
-  // `{ SWARM_MANAGER: '1' }` without reopening the launch internals. Keys must
+  // commander/supply spawns (swarmManager.ts / swarmSupply.ts) pass
+  // `{ SWARM_MANAGER: '1' }` here — a role TAG for tooling/skills, NOT a guard
+  // opt-in: the PreToolUse veto is WORKER-ONLY, armed via the `guard` opt below
+  // (OPENGROUND_GUARD=1), so a worker passes NO env at all. Keys must
   // be POSIX env-name shaped (others are dropped in buildLaunchCommand); values
   // are shell-quoted for the host shell. NEVER sourced from an API request body.
   env?: Record<string, string>

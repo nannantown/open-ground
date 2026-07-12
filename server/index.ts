@@ -108,6 +108,11 @@ void (async () => {
 //     an unwired guard means a bypass swarm worker runs with NO deterministic
 //     veto. Installing at boot makes the veto present by default (the sandbox
 //     experiment L3 is owner-only/off, so on a default install L4 is the layer).
+//     Boot install is only the FIRST line, though (GAP-2): the worker spawn path
+//     re-verifies the full wiring itself and REFUSES to spawn when it cannot be
+//     proven (ensureGuardWiring in spawnSwarmWorker — fail-closed), so a failure
+//     here degrades to "workers refuse to start" + a bell notification, never to
+//     an unguarded worker.
 // Fire-and-forget after boot (never blocks/crashes startup); installHooks copies
 // the guard to the sandbox-write-denied ~/.openground/guard/ and upserts the
 // PreToolUse entries idempotently, preserving any user-authored hooks. Runs ONLY

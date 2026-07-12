@@ -1,6 +1,6 @@
 # TARGET-STATE — 理想の稼働形(そこへ走るための北極星)
 
-**対象コミット: `0d1f7f0`**(origin/main tip、2026-07-10)。初版は `a8429b6` 時点(ソース = `cc7c60e`)。その後 `3129a58`(§2 の実装)、`d8431c3`+`aa9cb8d`(§3 の実装)、`0d1f7f0`(§1 の実装)が main に入り、本改訂で反映済み — 本書と 03/06 章の file:line は `0d1f7f0` 基準、01/02/04/05 章は `cc7c60e` 基準のまま(乖離の扱いは 00-INDEX 冒頭)。
+**対象コミット: `0d1f7f0`**(origin/main tip、2026-07-10)。初版は `a8429b6` 時点(ソース = `cc7c60e`)。その後 `3129a58`(§2 の実装)、`d8431c3`+`aa9cb8d`(§3 の実装)、`0d1f7f0`(§1 の実装)が main に入り、本改訂で反映済み — 本書と 03/06 章の file:line は `0d1f7f0` 基準、01/02/04/05 章は `cc7c60e` 基準のまま(乖離の扱いは 00-INDEX 冒頭)。2026-07-11 の `SWARM_CODE_PATHS` への `server/routes/project.ts` 編入で swarmOrchestrator.ts の :2630 以降は **+3 シフト** — 本書の §6 内参照は新値へ更新済み。
 **読者**: 将来の司令塔(og-manage / manage セッション)と、swarm コアを改修する worker。
 **この文書の役割**: 「swarm システムがこの状態で回っていれば健全」と言える条件を、**観測可能な形**(コマンドで真偽判定できる形)で列挙する。願望は書かない — 各項目は ①理想の観測可能条件 ②現状とのギャップ(file:line) ③対応カード ④到達判定コマンド、の 4 点で構成する。カード列の表記は 2026-07-10 時点のスナップショット(現在列は tasks.json で確認 — 00-INDEX §6)。
 
@@ -13,9 +13,9 @@
 | 1 | model 枯渇は 2 分以内に検知され dispatch が正しい tier に落ちる | ◐ **実装済み(`0d1f7f0`)— spawn 直後の即死は約 1.5 分(onset 窓)・稼働後は実クロック化した 10 分ゲート。実運用での検証待ち** | `4d1550d7`(done) |
 | 2 | 敵対レビューは diff サイズに依らず決着し、棄権には理由が残る | ◐ **実装済み(`3129a58`)・実運用での検証待ち** | `58335c7f`(done) |
 | 3 | 過去 fatal の再投函ゼロ・dismiss は再起動を跨いで効く | ◐ **実装済み(`d8431c3`+`aa9cb8d`)・実運用での検証待ち** | `c944ea69`(done) |
-| 4 | 司令塔 API は嘘をつかない(stale 心拍の解消) | ◐ **実装済み(worker ブランチ `swarm/swarm-workers-api-heartb-*`、2026-07-11)— main 統合・実運用実測待ち** | 統合待ち(commander) |
+| 4 | 司令塔 API は嘘をつかない(stale 心拍の解消) | ◐ **実装済み(`1f19770`、2026-07-11 main 入り)— 実運用実測待ち** | 統合済み(`1f19770`) |
 | 5 | autoMerge を常時 arm できる(+人間承認の境界確定) | △ §1・§2 とも実装済み — 残るは両者の実運用実測と再起動 OFF の設計判断 | 1・2 に従属(境界は本書 §5 が正典) |
-| 6 | 司令塔ドキュメントが変更に追随する | ◐ **検知2点は実装済み(本改訂)— verify soft-warn(journal)+ og-manage 起動時の 00-INDEX §6-1 チェック**。カード起票テンプレへの強制はまだ無い | 案 B のうち検知2点は完了。テンプレ組込みのみ残存 |
+| 6 | 司令塔ドキュメントが変更に追随する | ✓ **検知2点(verify soft-warn + og-manage 起動時の 00-INDEX §6-1 チェック)+ 起票テンプレ組込み(supply / order / og-manage、2026-07-11)実装済み+テンプレ経由の運用実績 1 件**(カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂) | 案 B(検知2点)+案 B'(テンプレ)完了。実績 1 件(2026-07-11) |
 
 (◐ = 実装は main 入り・到達判定コマンドでの実測が未。✓ にするのは実運用の観測のみ。)
 
@@ -169,7 +169,7 @@ jq -r '[.items[] | select(.question | contains("実行時間上限"))] | length'
 
 ### 対応カード
 
-`swarm/swarm-workers-api-heartb-*` ブランチで実装済み(worker コミット済み・main 未統合)。commander が統合し次第、本行の「対応カード」列と 判定サマリ §4 を `done` へ更新する。
+`swarm/swarm-workers-api-heartb-*` ブランチで実装 → **`1f19770` で main 入り(2026-07-11)**。残るは到達判定コマンドでの実運用実測のみ。
 
 ### 到達判定コマンド
 
@@ -227,23 +227,20 @@ curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{autoM
 
 ### 理想(観測可能条件)
 
-- swarm コアを変更する**すべての**カードが、完了条件に「`docs/commander/` 該当章の更新(更新不要ならその明示判断)」を含む。対象パスの目安は verify の swarm-safety ゲートが監視する集合と同じ(`SWARM_CODE_PATHS` — swarmOrchestrator.ts:2636-2641)+ `server/routes/swarm.ts` / `server/routes/project.ts`。
+- swarm コアを変更する**すべての**カードが、完了条件に「`docs/commander/` 該当章の更新(更新不要ならその明示判断)」を含む。対象パスの目安は verify の swarm-safety ゲートが監視する集合と同じ(`SWARM_CODE_PATHS` — swarmOrchestrator.ts:2642-2648。`server/routes/swarm.ts` に加え `server/routes/project.ts`(Board API = 05 章の契約面)も 2026-07-11 に集合へ編入済み — 理想と実装の集合が一致した)。
 - 各章冒頭の「対象コミット」と origin/main tip の乖離が、司令塔の定型チェック(00-INDEX §6-1 のワンライナー)で**セッション開始時に**検知される。
 - 観測: swarm コアの .ts に触れた main コミットの後、docs/commander/ の該当章が同時(または直後のカード)に更新されている — `git log` で対応が追える。
 
 ### 現状とのギャップ
 
 - **検知2点は実装済み**(本改訂・カード「docs 追随の仕組み化(後段)」):
-  1. **verify soft-warn** — `makeVerify`(swarmOrchestrator.ts:2906 付近)が `SWARM_CODE_PATHS` 相当(`touchesSwarmPaths`)に触れつつ `docs/commander/` 無変更の diff を検知すると `verdict.docsWarning` を立て、`runIntegratePass` がそれを engine journal に `warn` 1 行(`swarm code changed without a docs/commander/ update: <branch>`)として記録する。**block はしない**(`ok` には一切影響しない — 統合は通常どおり進む)。テスト: `swarmOrchestrator.integration.test.ts` の `docs-freshness soft-warn: ...` 2 件(docs 無変更 → warn あり / docs 更新あり → warn 無し)。
+  1. **verify soft-warn** — `makeVerify`(swarmOrchestrator.ts:2913 付近)が `SWARM_CODE_PATHS` 相当(`touchesSwarmPaths`)に触れつつ `docs/commander/` 無変更の diff を検知すると `verdict.docsWarning` を立て、`runIntegratePass` がそれを engine journal に `warn` 1 行(`swarm code changed without a docs/commander/ update: <branch>`)として記録する。**block はしない**(`ok` には一切影響しない — 統合は通常どおり進む)。テスト: `swarmOrchestrator.integration.test.ts` の `docs-freshness soft-warn: ...` 2 件(docs 無変更 → warn あり / docs 更新あり → warn 無し)。
   2. **og-manage 起動時チェック** — `skills/og-manage/SKILL.md` の「前提・環境確認」に、00-INDEX §6-1 の乖離チェック(対象コミットと origin/main tip の diff --stat)をセッション開始手順として追記済み。
-- **未実装のまま残る**: (1) 補給官(/supply)・/order のカード起票テンプレへの強制組み込み(「swarm コア変更なら完了条件に docs/commander 更新を含める」)。これは運用ルールであり、コード側の検知2点だけでは「docs 更新を忘れたカードが journal に warn を残したまま気づかれず放置される」ケースを防げない — journal は 200 行 ring buffer で再起動で消える(00-INDEX §7 参照)ため、司令塔が能動的に journal を確認しない限り warn は揮発する。
+- **起票テンプレへの組み込みも実装済み**(案 B'、2026-07-11): 補給官(`~/.claude/skills/supply/SKILL.md` 手順3)・/order(`~/.claude/skills/order/SKILL.md` 入力1)・og-manage(repo の `skills/og-manage/SKILL.md`「注文」手順3 — アプリ起動時に `~/.claude/skills/og-manage` へ自動配備される正典)の3テンプレすべてに「SWARM_CODE_PATHS 相当に触れるカードは、完了条件に docs/commander/ 該当章の更新(更新不要ならその明示判断)を含める」ルールが入った。役割分担: テンプレは**起票時の予防**、コード側の検知2点は**事後の警報**(journal warn は 200 行 ring で再起動により揮発する — 00-INDEX §7 — ため警報だけでは「気づかれず放置」を防げない。両輪で塞ぐ)。
 
 ### 対応カード
 
-案 B の検知2点(上記)は本改訂で完了。残るテンプレ組込みは**新カード案 B'**(起票する場合の下書き):
-
-> **タイトル**: [docs/commander] カード起票テンプレへの文書追随ルール組み込み
-> **notes**: 補給官(/supply)と /order のカード起票テンプレに「`SWARM_CODE_PATHS` 相当(swarmOrchestrator / swarmWorker / swarmQuota / swarmAllowedModels / swarmLaunch / swarmIntegrate / swarmOverseer* / swarmEscalations / swarmNotifications / swarmWorkerRegistry / swarmJanitor / routes/swarm / routes/project)に触れる場合、完了条件に docs/commander/ 該当章の更新を含める」を追記する。完了条件: テンプレの変更が main に入り、以後の swarm コア変更カード 1 件で運用が実際に回った実績。
+案 B の検知2点+案 B'(テンプレ組込み)まで完了: supply / order は 2026-07-11 にグローバルスキルへ直接追記済み、og-manage はカード「[docs/commander] カード起票テンプレへの文書追随ルール組み込み」で repo 正典(`skills/og-manage/SKILL.md`)に組込み。**テンプレ経由の運用実績 1 件目 = カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」(2026-07-11、本改訂)** — テンプレの docs 追随ルールどおり完了条件に文書更新が入り、同一ブランチでコード+docs/commander/ が一緒に動いた(soft-warn を踏まない形の実測を兼ねる)。§7 の §6 行は ✓。
 
 ### 到達判定コマンド
 
@@ -266,8 +263,8 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
 - [ ] §1: limit 表示 → journal 検知が 2 分以内(実事象またはテストで確認)— **実装 main 入り(`0d1f7f0`)・実測待ち**
 - [ ] §2: 34KB 超 diff が must-fix ゼロなら統合到達・棄権に理由が残る — **実装 main 入り(`3129a58`)・実測待ち**
 - [ ] §3: overseer re-arm で過去 fatal からの新規 escalation ゼロ — **実装 main 入り(`d8431c3`+`aa9cb8d`)・実測待ち**
-- [ ] §4: エンジン worker の API `heartbeatAt` がディスク `updatedAt` と一致 — **実装 worker ブランチ済み(未 main 統合)・実測待ち**
+- [ ] §4: エンジン worker の API `heartbeatAt` がディスク `updatedAt` と一致 — **実装 main 入り(`1f19770`)・実測待ち**
 - [ ] §5: autoMerge armed 7 日間で凍結ゼロ・二重統合ゼロ(§1・§2 の実測後に計測開始)
-- [ ] §6: swarm コア変更カードに文書更新が組み込まれ、実績 1 件以上 — 手動追随の実績 1 件あり(本改訂 = §2/§3 の docs 反映)。**仕組み**(テンプレ組み込み)は未着手
+- [x] §6: swarm コア変更カードに文書更新が組み込まれ、実績 1 件以上 — **仕組み**(検知2点+テンプレ組込み)実装済み+**テンプレ経由の運用実績 1 件**(2026-07-11、カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂。手動追随の前例は 2026-07-10 改訂)
 
 **未到達の間の司令塔の構え**(各章の運用節の要約): 最初の実枯渇イベントで検知 2 分を実測し、それまで journal の沈黙を無実と読まない(§1)・大 diff の最初の数枚は engine log を見届け、凍結したら abstainSummary を読む(§2)・S3/S10 は実発生として裏取り、増殖パターンを見たら回帰を疑う(§3)・鮮度はディスク(§4)・arm 実測は §1・§2 の初回観測とセットで(§5)・セッション開始時に文書鮮度チェック(§6)。

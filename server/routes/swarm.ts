@@ -346,7 +346,7 @@ export const swarmRoutes = new Hono()
 
     let res: SpawnSwarmWorkerResponse
     try {
-      // WORKER: no env passed → the SWARM_MANAGER=1 guard stays inert (pass).
+      // WORKER: no env — its veto arms via the guard opt (OPENGROUND_GUARD=1).
       res = await spawnSwarmWorker({
         projectPath: path,
         title,
@@ -374,8 +374,8 @@ export const swarmRoutes = new Hono()
   // worktree is created (supply only talks + writes the Board), so there is
   // nothing to tear down — stopping it is a plain terminal kill (DELETE
   // /api/terminal/:id). Owner-only + validated + preflighted exactly like
-  // /worker; bypass + SWARM_MANAGER=1 (set in swarmSupply) so the guard blocks
-  // any stray destructive git in the real checkout.
+  // /worker; bypass + SWARM_MANAGER=1 (set in swarmSupply) — a role TAG, not a
+  // guard opt-in: the WORKER-ONLY PreToolUse veto never polices this trusted desk.
   .post('/api/swarm/supply', async (c) => {
     // OWNER-ONLY gate (see /api/swarm/worker): the supply session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
@@ -413,8 +413,8 @@ export const swarmRoutes = new Hono()
   // (the commander operates on the primary checkout), so there is nothing to
   // tear down — stopping it is a plain terminal kill (DELETE /api/terminal/:id).
   // Owner-only + validated + preflighted exactly like /supply; bypass +
-  // SWARM_MANAGER=1 (set in swarmManager) so the guard blocks any stray
-  // destructive git in the real checkout.
+  // SWARM_MANAGER=1 (set in swarmManager) — a role TAG, not a guard opt-in:
+  // the WORKER-ONLY PreToolUse veto never polices the trusted commander.
   .post('/api/swarm/manager', async (c) => {
     // OWNER-ONLY gate (see /api/swarm/worker): the commander session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any

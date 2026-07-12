@@ -49,6 +49,11 @@ esbuild
     // Helpful when debugging the forked server in prod.
     sourcemap: true,
     logLevel: 'info',
+    // hooksInstall.ts falls back to import.meta.url for its ESM runtime
+    // (vitest); in this CJS bundle that branch is dead code behind a
+    // `typeof __dirname` guard, so esbuild's "import.meta will be empty"
+    // warning is expected + harmless here.
+    logOverride: { 'empty-import-meta': 'silent' },
   })
   .then(() => {
     console.log('[build-server] wrote server/dist/index.cjs')

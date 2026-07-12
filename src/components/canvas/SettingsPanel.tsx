@@ -66,19 +66,24 @@ interface Props {
 // `onChange` (a discrete switch, not debounced text).
 const ExperimentToggle = ({
   label,
+  hint,
   value,
   onChange,
   offLabel,
   onLabel,
 }: {
   label: string
+  hint?: string
   value: boolean
   onChange: (next: boolean) => void
   offLabel: string
   onLabel: string
 }) => (
-  <div className="flex items-center justify-between gap-3">
-    <span className="text-[13px] text-ink">{label}</span>
+  <div className="flex items-start justify-between gap-3">
+    <div className="min-w-0">
+      <div className="text-[13px] text-ink">{label}</div>
+      {hint && <div className="mt-0.5 text-[11px] leading-snug text-ink-subtle">{hint}</div>}
+    </div>
     <div
       role="group"
       aria-label={label}
@@ -479,6 +484,7 @@ export const SettingsPanel = ({
                     <div className="flex flex-col gap-3">
                       <ExperimentToggle
                         label={t('settings.experiments.swarm')}
+                        hint={t('settings.experiments.swarmHint')}
                         value={swarmExp}
                         onChange={setSwarm}
                         offLabel={t('settings.experiments.off')}

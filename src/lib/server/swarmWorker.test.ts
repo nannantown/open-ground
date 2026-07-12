@@ -213,12 +213,13 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(base.remoteControl).toBe('worker')
   })
 
-  it('passes NO env for a worker — the SWARM_MANAGER guard stays inert', () => {
-    // undefined env → buildLaunchCommand emits no extra env → guard never fires.
+  it('passes NO env for a worker — the SWARM_MANAGER role TAG is commander/supply-only', () => {
+    // undefined env → buildLaunchCommand emits no extra env. The worker's veto
+    // is armed by the `guard` opt (OPENGROUND_GUARD=1), never by this port.
     expect(base.env).toBeUndefined()
   })
 
-  it('threads an explicit env through (the future-manager port)', () => {
+  it('threads an explicit env through (the commander/supply SWARM_MANAGER port)', () => {
     const mgr = workerLaunchOpts('/wt', 'sid-2', {
       title: 'x',
       env: { SWARM_MANAGER: '1' },

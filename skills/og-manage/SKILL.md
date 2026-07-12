@@ -126,6 +126,11 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 3. **ゴールを観測可能に**整える(true/false で判定できる完了条件。「完璧」等の無限大表現は禁止。
    大きな1ゴールは disjoint なサブゴール(触るファイル群が重ならない単位)に切って複数カードにするのは
    司令塔の仕事)。カードの title+notes がそのまま worker への注文になる — 直すならまずカードを直す。
+   **swarm コアに触れるカードは docs 追随を完了条件に含める(必須)** — SWARM_CODE_PATHS 相当
+   (src/lib/server/swarm*.ts / server/routes/swarm.ts / server/routes/project.ts /
+   src/components/canvas/modules/Swarm* / swarmSafety 系テスト)に触れるカードは、完了条件に
+   「docs/commander/ 該当章の更新(更新不要ならその明示判断)」を必ず入れる
+   (docs/commander/TARGET-STATE.md §6 — 実装↔文書同期の原則)。
 4. **起動**: `curl -s -X POST $OG/api/swarm/worker -H 'content-type: application/json' -d '{"path":"'"$PWD"'","taskId":"<フルUUID>"}'`
    - 返り値 `{terminalId, worktree, branch}` を控える。**カードの todo→doing 移動と branch 記録は
      この API が自動でやる**(自分で move しない)。

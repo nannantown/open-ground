@@ -519,10 +519,16 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
           wrapper is `relative` so the overlay covers ONLY the terminal area, not
           the header/strip above — the last screen of output stays dimly visible
           behind it rather than collapsing to a black void with a raw error. */}
-      <div className="relative min-h-0 flex-1">
+      {/* The padding lives on THIS wrapper, not on hostRef — see TerminalPane.tsx
+          for why: @xterm/addon-fit reads padding off terminal.element (never
+          padded) instead of hostRef (term.element's actual parent), so padding
+          placed directly on hostRef is silently dropped from FitAddon's row
+          math, overshooting the computed row count and clipping the bottom of
+          the pane under hostRef's overflow-hidden. */}
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2">
         <div
           ref={hostRef}
-          className="h-full w-full overflow-hidden bg-[#1a1a1a] px-2 py-2"
+          className="h-full w-full overflow-hidden"
         />
         {/* SSE reconnect pill — overlays the top of the viewport (no layout shift,
             so xterm isn't resized) when the output stream drops. Suppressed once

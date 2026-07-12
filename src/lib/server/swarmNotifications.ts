@@ -78,6 +78,7 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   'rework-exhausted': 'Swarm — card parked (rework limit)',
   'all-workers-down': 'Swarm — all workers stopped',
   'exec-timeout': 'Swarm — worker hit time limit',
+  'guard-unwired': 'Swarm — worker spawn refused (guard unwired)',
   rollback: 'Self-update rolled back',
   'canary-failed': 'Self-update canary failed',
 }

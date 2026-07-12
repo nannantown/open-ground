@@ -36,6 +36,8 @@ import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
+import { ensureGuardWiring } from './hooksInstall'
+import { createSwarmFatalNotification } from './swarmNotifications'
 import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
@@ -350,8 +352,8 @@ export interface SpawnSwarmWorkerOpts {
   notes?: string
   /** Optional branch-name decoration (uniqueness comes from the timestamp). */
   hint?: string
-  /** Extra env for the claude invocation — the MANAGER port. WORKERS pass none
-   *  (so the SWARM_MANAGER=1 guard stays inert). Never an API body value. */
+  /** Extra env for the claude invocation — the commander/supply SWARM_MANAGER=1
+   *  role TAG rides this port; a worker passes none. Never an API body value. */
   env?: Record<string, string>
   cols?: number
   rows?: number
@@ -376,9 +378,9 @@ export interface SpawnSwarmWorkerOpts {
  *     swarm-new.sh's `--dangerously-skip-permissions`.
  *   - appContext:false — lean; the /order skill is the worker's protocol, not
  *     the board-API usage card.
- *   - env passthrough — the MANAGER port; a worker's `opts.env` is undefined, so
- *     the SWARM_MANAGER=1 guard stays inert (buildLaunchCommand emits no extra
- *     env), exactly as the shell worker does today.
+ *   - env passthrough — the port the commander/supply SWARM_MANAGER=1 role TAG
+ *     rides; a worker's `opts.env` is undefined (no extra env emitted). The
+ *     worker's policing is the `guard` opt below (OPENGROUND_GUARD=1), not env.
  *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
  *     swarm launch default (swarmLaunch.ts), so a worker runs at full capability
  *     and is controllable from claude.ai / mobile like the supply officer
@@ -446,6 +448,52 @@ export const workerLaunchOpts = (
   initialPrompt: buildOrderInjection(opts.title, opts.notes, opts.priorFailure),
 })
 
+/** Thrown when the L4 guard wiring cannot be VERIFIED at spawn time (GAP-2).
+ *  A worker runs bypass, so the PreToolUse deny veto is its only deterministic
+ *  block — and Claude Code fails a MISSING hook OPEN. Unverified wiring ⇒ no
+ *  worker (fail-closed), the same shape as NoAllowedModelTierError above. */
+export class GuardWiringError extends Error {
+  readonly problems: readonly string[]
+  constructor(problems: readonly string[]) {
+    super(
+      'L4 guard wiring failed verification — worker spawn refused (fail-closed): ' +
+        (problems.length ? problems.join('; ') : 'unknown wiring problem'),
+    )
+    this.name = 'GuardWiringError'
+    this.problems = problems
+  }
+}
+
+// One bell/toast per THROTTLE window, not per refused spawn — the engine's
+// dispatch tick retries a refused spawn every few seconds, and the refusal
+// itself (the throw) already repeats; only the human-facing notification needs
+// deduping. In-memory on purpose: a restart re-notifying once is fine.
+const GUARD_UNWIRED_NOTIFY_THROTTLE_MS = 10 * 60_000
+let lastGuardUnwiredNotifyAt = 0
+export const __resetGuardUnwiredNotifyThrottleForTests = (): void => {
+  lastGuardUnwiredNotifyAt = 0
+}
+const notifyGuardUnwired = async (
+  projectPath: string,
+  problems: readonly string[],
+): Promise<void> => {
+  const now = Date.now()
+  if (now - lastGuardUnwiredNotifyAt < GUARD_UNWIRED_NOTIFY_THROTTLE_MS) return
+  lastGuardUnwiredNotifyAt = now
+  // Awaited (persist BEFORE the refusal throws — a fire-and-forget write could
+  // be lost with the process), but its own failure is swallowed: the
+  // notification must never decide the refusal, which happens regardless.
+  await createSwarmFatalNotification({
+    event: 'guard-unwired',
+    detail:
+      'L4ガード(PreToolUse veto)の配線検証に失敗したため、worker の起動を拒否しました(fail-closed)。' +
+      `詳細: ${problems.join(' / ')}`,
+    projectPath,
+    logHint:
+      '~/.claude/settings.json と ~/.openground/guard/ を確認してください(OPEN GROUND 再起動で再インストールが走ります)。',
+  }).catch(() => {})
+}
+
 /** Create the worktree and launch ONE interactive claude PTY in it, handing the
  *  `/order ゴール: …` goal to claude as its POSITIONAL prompt so it runs the
  *  command on startup (see the delivery note above — a TUI-injected slash
@@ -471,6 +519,22 @@ export const spawnSwarmWorker = async (
     await getAllowedModelTiers(),
   )
   if (!me) throw new NoAllowedModelTierError()
+  // L4 WIRING GATE (GAP-2) — fail-closed, and like the model mask above it runs
+  // BEFORE the worktree exists so a refusal leaves no orphan worktree/branch.
+  // A worker runs bypass inside a worktree that SHARES the main repo's .git,
+  // and Claude Code fails a MISSING PreToolUse hook OPEN — so boot-time
+  // installHooks() being fire-and-forget (server/index.ts) used to mean a
+  // failed install still let unguarded workers spawn. Here the wiring is
+  // verified on every spawn (settings.json entries + installed guard body
+  // byte-identical to the expected version), self-healing once through the
+  // idempotent installHooks(); when it STILL doesn't verify, the spawn is
+  // refused and the refusal is surfaced to the UI (bell + OS toast, throttled).
+  // Covers every worker path — engine dispatch, POST /api/swarm/worker, RESTART.
+  const wiring = await ensureGuardWiring()
+  if (!wiring.ok) {
+    await notifyGuardUnwired(opts.projectPath, wiring.problems)
+    throw new GuardWiringError(wiring.problems)
+  }
   // RESTART (opts.worktree) relaunches IN the existing worktree — same swarm/*
   // branch + work preserved; a fresh dispatch creates a new isolated worktree.
   const { worktree, branch } = opts.worktree
