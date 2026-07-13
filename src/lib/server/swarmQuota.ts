@@ -16,8 +16,18 @@
 //   • PURE / clock-injected. Every function takes `now` (epoch ms) rather than
 //     calling Date.now(), so a fake clock makes cooling / expiry / cascade
 //     deterministic in a unit test (mirrors swarmOrchestrator's isRunaway /
-//     classifyOutput discipline). The ONLY mutable state is the cooling table
-//     on globalThis — nothing else is written.
+//     classifyOutput discipline). The reads stay SYNCHRONOUS, which is load-
+//     bearing: the spawn-path resolver (swarmAllowedModels.isTierSpawnable) is
+//     sync and is reached from places that cannot await. So the globalThis table
+//     remains the authority for every read; its DISK MIRROR (swarmQuotaStore) is
+//     written off to the side and only ever read once, at boot.
+//   • PERSISTENT across processes (2026-07-13). The table used to be memory-only,
+//     so every restart forgot which tiers were dry and re-learned it by BURNING a
+//     session on the wall — and the app is restarted after every release. Now
+//     every mutation mirrors to ~/.openground/swarm-quota.json and boot hydrates
+//     from it. Fail-safe by construction: an unreadable / corrupt file boots with
+//     NO cooling (exactly the old behaviour) plus one engine-log line — it never
+//     blocks startup.
 //   • No import of swarmOrchestrator. The engine will import THIS (Card 2/3);
 //     importing it back would be a cycle. RATE_LIMIT_GRACE_MS is passed in as
 //     `graceMs` instead (the caller forwards the engine's value), with a local
@@ -37,6 +47,7 @@
 // SWARM_LAUNCH_MODEL); haiku is the cheapest floor.
 
 import { SWARM_MODEL_TIERS, type SwarmModelTier, type SwarmQuotaTier } from '../types'
+import { loadCoolingMarks, saveCoolingMarks, type CoolingMarks } from './swarmQuotaStore'
 
 /** A model tier, by the CLI `--model` alias the swarm launches with. Ordered
  *  best → cheapest by {@link MODEL_TIER_LADDER}; the cooling table is keyed by
@@ -67,9 +78,33 @@ export const DEFAULT_COOLING_GRACE_MS = 20 * 60_000
 // future; expiry is LAZY (a reader treats `until <= now` as available), so no
 // timer is needed and a fake clock alone drives Done ② (auto-recovery). Kept on
 // globalThis exactly like swarmOrchestrator's engine store and the usage-cli
-// cache, so a dev reload doesn't silently forget which tiers are dry.
+// cache, so a dev reload doesn't silently forget which tiers are dry — and
+// MIRRORED to disk (swarmQuotaStore), so neither does a full restart.
 interface QuotaState {
   cooling: Map<ModelTier, number>
+  /** Memoized boot hydration (the disk → table load). Lives beside the table on
+   *  globalThis so a tsx-watch reload — which resets module scope but keeps the
+   *  map — doesn't re-read the file and doesn't resurrect marks the live table
+   *  has since dropped. `undefined` = never loaded (the next
+   *  {@link ensureCoolingTableLoaded} does the read). */
+  loaded?: Promise<void>
+  /** Tail of the single-flight persist chain. Every mutation appends to it, so
+   *  two writes can't interleave into a torn file and a caller can await the
+   *  flush ({@link flushQuotaPersist}). Never rejects (faults are recorded in
+   *  `lastPersistError` and logged inside the chain), so one failed save can't
+   *  wedge every later one. */
+  persist?: Promise<void>
+  /** Why the LAST mirror write failed — null/absent when it landed. This is what
+   *  makes a failed save VISIBLE: without it the persist chain's own catch would
+   *  swallow an EISDIR/EACCES/ENOSPC and the manual-cool route would answer 200
+   *  ("it is on disk") for a mark that is only in memory and dies at the next
+   *  restart — the exact loop this whole module exists to close. */
+  lastPersistError?: string | null
+  /** Tiers a mutation has named since the table was last loaded. A load that
+   *  lands AFTER a mutation must leave these alone — see persistence rule 2: the
+   *  map alone cannot express "the owner just released this tier", so without a
+   *  tombstone the hydration would read the released mark straight back in. */
+  touched?: Set<ModelTier>
 }
 
 declare global {
@@ -80,6 +115,150 @@ declare global {
 const state: QuotaState =
   globalThis.__openground_swarm_quota ??
   (globalThis.__openground_swarm_quota = { cooling: new Map() })
+
+// ── Persistence (the disk mirror — swarmQuotaStore) ──────────────────────────
+//
+// The table above stays the AUTHORITY: reads are sync and never touch the disk.
+// The file is a mirror, written after each mutation and read once per process.
+// Three rules make that safe, and they are the whole trick here:
+//
+//   1. A SAVE NEVER RUNS BEFORE THE TABLE HAS SEEN THE DISK. A write serialises
+//      the WHOLE table, so writing before the load has landed would clobber every
+//      tier the file holds and memory doesn't. The chain therefore awaits the load
+//      — and if nobody kicked one, it kicks one itself ({@link loadedForWrite}),
+//      so the rule holds by CONSTRUCTION rather than by caller discipline.
+//   2. A LATE LOAD MUST NOT UNDO A MUTATION. Merging "in-memory wins" (a `has()`
+//      check) is enough for a SET but NOT for a DELETE: a cleared tier is absent
+//      from the map, which is indistinguishable from "never had it", so the
+//      hydration would faithfully read the tier back out of the file and resurrect
+//      the very mark the owner just released. {@link touched} closes that: any
+//      tier a mutation has named is off-limits to a later load, whatever the map
+//      says about it.
+//   3. THE TABLE IS SERIALISED INSIDE THE CHAIN, not at call time, so what lands
+//      on disk is always the newest state — never a stale snapshot captured before
+//      an earlier write in the queue finished.
+
+/** What the mirror did. Returned by {@link flushQuotaPersist} so a CALLER can
+ *  tell the truth about durability: the manual-cool route promises "a 200 means
+ *  it is on disk", and it can only keep that promise if a failed write is
+ *  visible. (Not a client contract — the routes translate it into HTTP.) */
+export interface QuotaPersistResult {
+  /** True iff the table is mirrored on disk right now. */
+  persisted: boolean
+  /** Why the last mirror write failed; null when it succeeded. */
+  error: string | null
+}
+
+/** The table as the file wants it. Verbatim — elapsed marks ride along and are
+ *  dropped on LOAD, so the write path needs no clock (see swarmQuotaStore's
+ *  header). Walks the LADDER rather than the Map (as every other reader here
+ *  does), which bounds the file at 4 entries by construction and writes them in
+ *  best→cheapest order — a table a human can read straight out of the JSON. */
+const marksFromTable = (): CoolingMarks => {
+  const marks: CoolingMarks = {}
+  for (const tier of MODEL_TIER_LADDER) {
+    const until = state.cooling.get(tier)
+    if (until != null) marks[tier] = until
+  }
+  return marks
+}
+
+/** Record that a mutation has spoken for `tier`, so a load that lands afterwards
+ *  leaves it alone (rule 2). Called by all three mutations, before they touch the
+ *  map. */
+const markTouched = (tier: ModelTier): void => {
+  ;(state.touched ??= new Set()).add(tier)
+}
+
+/** The load a WRITE must wait behind (rule 1). Normally this is just the boot
+ *  hydration, already kicked by server/index.ts and awaited by every quota route;
+ *  `??=` covers the case where a mutation somehow gets in first (a future caller,
+ *  a differently-wired entry point), so a write can never serialise a table that
+ *  has never seen the disk.
+ *
+ *  Clock `0` — i.e. "load everything, drop nothing" — is deliberate and is NOT
+ *  the boot semantics. This hydration exists only to stop the write CLOBBERING the
+ *  file, not to interpret it, and picking a clock here would drag Date.now() into
+ *  a module whose entire contract is clock injection (and would make a fake-clock
+ *  test silently expire the very marks it seeded). Loading an elapsed mark is
+ *  inert: every reader treats `until <= now` as available, and the write path
+ *  already mirrors elapsed marks verbatim. The REAL boot path
+ *  ({@link ensureCoolingTableLoaded}) passes the real clock and does drop them. */
+const loadedForWrite = (): Promise<void> => (state.loaded ??= hydrateCoolingTable(0))
+
+/** Queue a mirror write of the CURRENT table, and REMEMBER whether it landed.
+ *  Fire-and-forget for the sync callers (the engine's sensor path can't await);
+ *  awaitable via {@link flushQuotaPersist} for the routes and the tests.
+ *
+ *  A write fault is recorded, logged, and SWALLOWED — the promise never rejects,
+ *  so one bad write can't wedge the chain and a cockpit never falls over because a
+ *  ~100-byte cache file wouldn't write. The mark still stands in memory, so the
+ *  engine keeps honouring it; only its survival across a restart is lost. That is
+ *  the right trade for the engine's sensor path — but it is NOT good enough for
+ *  the owner's manual cool, which explicitly promises durability, so the outcome
+ *  is kept in `lastPersistError` for {@link flushQuotaPersist} to surface. */
+const schedulePersist = (): Promise<void> => {
+  const run = (state.persist ?? Promise.resolve())
+    .then(loadedForWrite) // rule 1 — never write a table that hasn't seen the disk
+    .then(() => saveCoolingMarks(marksFromTable())) // rule 3 — serialise here, not at call time
+    .then(
+      () => {
+        // The file now mirrors the table WHOLE, so an earlier failure is moot.
+        state.lastPersistError = null
+      },
+      (e: unknown) => {
+        const detail = e instanceof Error ? e.message : String(e)
+        state.lastPersistError = detail
+        console.warn(
+          `[openground:swarm-quota] failed to persist the cooling table — the marks stand in memory but will be FORGOTTEN on restart: ${detail}`,
+        )
+      },
+    )
+  state.persist = run
+  return run
+}
+
+/** Await every queued mirror write and report whether the table is on disk.
+ *
+ *  This is what lets `POST /api/swarm/quota/cool` keep its promise: it answers 200
+ *  only when this says `persisted`, and 500 otherwise — so a 200 from that route
+ *  really does mean "quit the app right now and the mark is still there". Reports
+ *  the outcome of the LAST write in the queue; since every write mirrors the whole
+ *  table, the last one succeeding means the file is current (and, in the reverse
+ *  direction, a failure is never hidden). Never rejects. */
+export const flushQuotaPersist = async (): Promise<QuotaPersistResult> => {
+  await (state.persist ?? Promise.resolve())
+  const error = state.lastPersistError ?? null
+  return { persisted: error == null, error }
+}
+
+/** Read the persisted marks into the table. Applies the SAME lazy expiry as
+ *  {@link isTierCooling} — an elapsed mark (`until <= now`) is simply not loaded,
+ *  so a week-old file can't resurrect a stale cooling. Two marks are left alone:
+ *  a tier already IN the map (a live signal — a sighting, a manual cool — is newer
+ *  than what the disk held), and a tier some mutation has TOUCHED (rule 2: an
+ *  uncool empties the map entry, and without this the load would read it straight
+ *  back in). Never throws — swarmQuotaStore's read is fail-safe and yields {} for
+ *  an unreadable / corrupt file. */
+const hydrateCoolingTable = async (now: number): Promise<void> => {
+  const marks = await loadCoolingMarks()
+  for (const [tier, until] of Object.entries(marks) as [ModelTier, number][]) {
+    if (until <= now) continue // elapsed ⇒ available (lazy expiry, same as isTierCooling)
+    if (state.cooling.has(tier)) continue // a live mark is newer than the disk
+    if (state.touched?.has(tier)) continue // …and so is a live REMOVAL (rule 2)
+    state.cooling.set(tier, until)
+  }
+}
+
+/** Hydrate the table from disk, ONCE per process. Kicked at boot (server/index.ts)
+ *  and awaited by the quota routes, so the first `GET /api/swarm/quota` after a
+ *  restart reports the tiers that were dry BEFORE it — instead of reporting a
+ *  clean slate and sending the next dispatch straight back into the wall (the
+ *  "burn one session per restart to re-learn it" loop this closes). Memoized on
+ *  the globalThis state, so the extra awaits cost one file read for the whole
+ *  process. */
+export const ensureCoolingTableLoaded = (now: number): Promise<void> =>
+  (state.loaded ??= hydrateCoolingTable(now))
 
 // ── Reset-time parsing (PURE, clock injected) ────────────────────────────────
 
@@ -193,13 +372,20 @@ export const resolveCoolingUntil = (opts: {
 }
 
 // ── Cooling table mutations (the ONLY writes — all land on the globalThis map) ─
+//
+// There are exactly THREE of them (markCoolingUntil / markRateLimited /
+// clearCooling) and every one mirrors to disk via schedulePersist(). If you add a
+// fourth, mirror it too — a mutation that skips the mirror is a mark that dies at
+// the next restart, silently, which is the whole bug this persistence closes.
 
 /** Low-level: mark `tier` cooling until an ALREADY-RESOLVED epoch ms. Use when
  *  the caller computed `until` itself; most callers want {@link markRateLimited}
  *  which resolves it from the PTY/A5/grace sources. A later mark for the same
- *  tier overwrites (the newest signal wins). */
+ *  tier overwrites (the newest signal wins). Mirrored to disk. */
 export const markCoolingUntil = (tier: ModelTier, until: number): void => {
+  markTouched(tier)
   state.cooling.set(tier, until)
+  void schedulePersist()
 }
 
 /** Mark the tier a rate-limited worker was running on as cooling, resolving the
@@ -223,7 +409,9 @@ export const markRateLimited = (
   },
 ): number => {
   const until = resolveCoolingUntil(opts)
+  markTouched(tier)
   state.cooling.set(tier, until)
+  void schedulePersist()
   return until
 }
 
@@ -237,9 +425,15 @@ export const MAX_MANUAL_COOLING_MS = 7 * 24 * 3_600_000
 
 /** Undo a cooling mark: `tier` is available again immediately. The owner's
  *  escape hatch when a mark was wrong (a transient 5xx read as exhaustion) —
- *  and the inverse of the manual cool. Absent tier ⇒ no-op (idempotent). */
+ *  and the inverse of the manual cool. Absent tier ⇒ no-op (idempotent).
+ *
+ *  Mirrored to disk, and that direction matters as much as the cooling one: an
+ *  uncool must also SURVIVE the restart, or the boot hydration would faithfully
+ *  reload the very mark the owner just released. */
 export const clearCooling = (tier: ModelTier): void => {
+  markTouched(tier) // …so a load landing later cannot read the released mark back in
   state.cooling.delete(tier)
+  void schedulePersist()
 }
 
 /** Narrow an untrusted string (a request body) to a ladder tier. The routes'
@@ -296,7 +490,47 @@ export const coolingSnapshot = (now: number): SwarmQuotaTier[] =>
 
 /** Test-only: clear the cooling table. The table lives on globalThis (shared
  *  across a process), so a unit suite must reset it between cases to stay
- *  order-independent. Not used in production. */
+ *  order-independent. Not used in production.
+ *
+ *  It also NEUTRALISES hydration (marks the load as already-done-and-empty) and
+ *  drops the persist chain. Both matter now that a file exists: without it, a
+ *  case that cooled a tier would leave `swarm-quota.json` behind in the suite's
+ *  shared tmp HOME, and the NEXT case's route call would faithfully hydrate that
+ *  mark back in — a green suite silently leaking cooling across cases. Stays
+ *  SYNCHRONOUS (26 call sites use it bare in beforeEach/afterEach) and touches no
+ *  disk, so it can never race a test's own file setup. Use
+ *  {@link __simulateRestartForTest} when you WANT the file to be re-read. */
 export const __resetQuotaForTest = (): void => {
   state.cooling.clear()
+  state.loaded = Promise.resolve() // "already loaded, nothing in it" ⇒ no disk read
+  state.lastPersistError = null
+  state.touched = undefined
+  // The persist CHAIN is deliberately KEPT. Most callers mutate without awaiting
+  // the mirror write (the engine's sensor path can't), so a case can end with a
+  // save still in flight — and that save serialises the table INSIDE the chain,
+  // i.e. AFTER this clear, so it lands as an empty file some milliseconds later.
+  // Dropping the chain here would orphan that write: unawaitable, and free to
+  // stomp on a file the NEXT case has just seeded (a load-dependent flake — the
+  // kind that passes on a quiet box and fails on a busy one). Holding the tail
+  // keeps it drainable: a suite that touches the file awaits flushQuotaPersist()
+  // first and knows the disk has gone quiet.
+}
+
+/** Test-only: simulate a PROCESS RESTART. Drops exactly what process death drops
+ *  — the globalThis table and the memoized load — and leaves the FILE alone, so
+ *  the next {@link ensureCoolingTableLoaded} does a REAL read. That is the boot
+ *  path under test: cool a tier, restart, and the mark must still be there.
+ *
+ *  Drains the mirror first (hence async). A real crash could of course lose an
+ *  in-flight write, but reproducing THAT here would only buy a nondeterministic
+ *  test; what we assert is the promise the module actually makes — "what was
+ *  saved is still there after a restart" — so the disk is quiesced before the
+ *  table is dropped. Not used in production. */
+export const __simulateRestartForTest = async (): Promise<void> => {
+  await flushQuotaPersist()
+  state.cooling.clear()
+  state.loaded = undefined // ⇒ the next ensureCoolingTableLoaded() re-reads the file
+  state.persist = undefined
+  state.lastPersistError = null
+  state.touched = undefined // a new process has touched nothing yet
 }

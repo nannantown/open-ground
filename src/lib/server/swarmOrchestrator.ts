@@ -4191,7 +4191,11 @@ const withHeartbeat = (w: OrchestratorWorker, hb: HeartbeatSign | null): Orchest
 /** Re-examine every dispatched worker against the freshly-read board and rebuild
  *  engine.workers. For each worker:
  *   • already 'done' (promoted) → keep while its PTY lingers (so the UI shows the
- *     'done' dot); drop once it exits — that's when the slot truly frees.
+ *     'done' dot); drop once it exits — that's when the slot truly frees. EXCEPT
+ *     when its card is back in 'doing' (an EXTERNAL 差し戻し — Board API / UI drag,
+ *     which never touches this in-memory roster): re-arm it (stage='running' +
+ *     reworkAt=now) and fall through to the normal probe, so the worker's next
+ *     FRESH completion sign re-promotes the card instead of it sinking forever.
  *   • its card vanished → keep counting it while ALIVE (don't free a slot for a
  *     still-running PTY), drop a dead orphan.
  *   • its card left 'doing' to review/done (us or a human) → treat as done.
@@ -4345,13 +4349,32 @@ const monitorWorkers = async (
     return false
   }
 
-  for (const w of engine.workers) {
+  for (let w of engine.workers) {
     if (!engine.running) {
       next.push(w) // a stop mid-pass: keep the rest untouched
       continue
     }
     const alive = deps.isAlive(w.terminalId)
     const card = byId.get(w.taskId)
+
+    // 外部差し戻しの観測(Board API / UI ドラッグ): roster は 'done'(このカードは一度
+    // review へ昇格済み)なのにカードが 'doing' に戻っている。エンジン自身の integrate
+    // 差し戻しはその場で stage='running' + reworkAt を立て直すのでこのシェイプを残さない
+    // — ここに来るのはエンジンの外(司令官の POST /api/project/tasks {rework} / UI の
+    // review→doing ドラッグ)だけ。従来は直下の stage:'done' 早期 continue が先に効いて
+    // 永久スキップされ、worker が直して ready を打ち直してもカードが doing に沈み続けた
+    // (2026-07-13 実測: 55分放置しても昇格せず)。stage='running' + reworkAt=now(Board の
+    // rework はカードに差し戻し時刻を記録しないので観測時刻)で再武装し、通常の監視へ
+    // 落とす — 差し戻し前の古い readyToMerge:true では re-promote されず(下の freshSign
+    // ガード)、reworkAt より新しい心拍が来て初めて再昇格する。
+    if (w.stage === 'done' && card && columnOf(card) === 'doing') {
+      w = { ...w, stage: 'running', reworkAt: new Date(now).toISOString() }
+      logLine(
+        engine,
+        'info',
+        `Board 側の差し戻し(review→doing)を観測 — worker を再作業中へ: ${w.branch} (${shorten(w.taskTitle)})`,
+      )
+    }
 
     // Already promoted, or the card already sits in review/done → terminal. Keep
     // showing 'done' while the PTY lingers; an exit is what frees the slot.

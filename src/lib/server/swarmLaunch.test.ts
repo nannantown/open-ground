@@ -250,10 +250,11 @@ describe('quota fallback — launch tier follows the foundation (Done ①②③)
 })
 
 // ─── Usage-cache pre-launch veto (claudeUsageCli, fail-open) ─────────────────
-// Fable exhaustion is only knowable BEFORE a launch fails via the cached
-// `/usage` scrape (there is no per-model breakdown, so the veto only ever
-// applies to the ladder head). `usage` is injected directly (the 6th param) so
-// these stay deterministic — no globalThis cache, no node-pty spawn.
+// Top-tier exhaustion is knowable BEFORE a launch fails via the cached `/usage`
+// scrape: the account-wide session/weekAll slots, or — the only reading that
+// catches the flagship running dry ALONE — its own `Current week (<Model> only)`
+// row. `usage` is injected directly (the 6th param) so these stay deterministic
+// — no globalThis cache, no node-pty spawn.
 describe('isTopTierExhaustedByUsage (fail-open pure predicate)', () => {
   const slot = (pct: number): CliUsage => ({
     session: { pct, resetsAt: 'in 40 minutes' },
@@ -293,6 +294,80 @@ describe('isTopTierExhaustedByUsage (fail-open pure predicate)', () => {
       status: 'scrape-failed',
     }
     expect(isTopTierExhaustedByUsage(usage)).toBe(false)
+  })
+})
+
+// ─── The per-model weekly row — a DORMANT reading ────────────────────────────
+// The account-wide slots CANNOT express "only the flagship is dry". Measured
+// 2026-07-13 03:04Z: `claude` refused every launch with "You've reached your
+// Fable 5 limit" while /usage read session 3% / weekAll 63%, so the swarm
+// relaunched into the limit screen at every restart. A per-model row WOULD make
+// that visible — but the CLI shipping today (2.1.207) prints none (it shows a
+// "Per-model breakdown unavailable" placeholder instead), so `weekModels` is
+// always empty in practice and NONE of these cases occur in the wild yet. They
+// pin the contract for the day the row returns; the wall itself is only
+// observable via a `claude --model <tier> -p` refusal probe (separate card).
+//
+// Every `usage` below is injected by hand — no globalThis cache, no pty spawn.
+describe('isTopTierExhaustedByUsage — per-model weekly rows (dormant contract)', () => {
+  // The 03:04Z account-wide numbers, plus the row the CLI did NOT print.
+  const withModelRow = (model: string, pct: number): CliUsage => ({
+    session: { pct: 3, resetsAt: '12:30 pm (Asia/Tokyo)' },
+    weekAll: { pct: 63, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' },
+    weekModels: [{ model, pct, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' }],
+    capturedAt: '2026-07-13T03:04:00.000Z',
+    status: 'ok',
+  })
+
+  it('the top tier spent at 100% ⇒ exhausted, even though session (3%) and weekAll (63%) look healthy', () => {
+    expect(isTopTierExhaustedByUsage(withModelRow(SWARM_LAUNCH_MODEL, 100))).toBe(true)
+  })
+
+  it('matches the label however the TUI spells it — "Fable 5" / "Fable" / lowercase / space-lost "Fable5"', () => {
+    // The row label is whatever /usage printed; the swarm must not depend on a
+    // fixed spelling (the flagship name and its version suffix both move).
+    for (const label of ['Fable 5', 'Fable', 'fable', 'FABLE', 'Fable5']) {
+      expect(isTopTierExhaustedByUsage(withModelRow(label, 100))).toBe(true)
+    }
+  })
+
+  it('a DIFFERENT tier at 100% is NOT a top-tier veto (a dry Sonnet row leaves fable launchable)', () => {
+    // Layer A (cooling) covers the lower rungs reactively; this predicate answers
+    // one question only — is the LADDER HEAD dry?
+    for (const label of ['Sonnet', 'Sonnet 4.5', 'Opus', 'Haiku']) {
+      expect(isTopTierExhaustedByUsage(withModelRow(label, 100))).toBe(false)
+    }
+  })
+
+  it('the top tier in the gray zone (95%) ⇒ not exhausted (same threshold as the account-wide slots)', () => {
+    expect(isTopTierExhaustedByUsage(withModelRow(SWARM_LAUNCH_MODEL, 95))).toBe(false)
+    expect(isTopTierExhaustedByUsage(withModelRow(SWARM_LAUNCH_MODEL, 99))).toBe(false)
+  })
+
+  it('finds the dry top-tier row even when a healthy row is listed first', () => {
+    // A first-match-wins reading would have latched onto Opus and missed it.
+    const usage: CliUsage = {
+      session: { pct: 3, resetsAt: '12:30 pm (Asia/Tokyo)' },
+      weekAll: { pct: 63, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' },
+      weekModels: [
+        { model: 'Opus', pct: 30, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' },
+        { model: 'Fable 5', pct: 100, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' },
+      ],
+      capturedAt: '2026-07-13T03:04:00.000Z',
+      status: 'ok',
+    }
+    expect(isTopTierExhaustedByUsage(usage)).toBe(true)
+  })
+
+  it('BACK-COMPAT: no per-model rows at all (absent or empty) ⇒ unchanged fail-open false', () => {
+    const noRows: CliUsage = {
+      session: { pct: 3, resetsAt: '12:30 pm (Asia/Tokyo)' },
+      weekAll: { pct: 63, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' },
+      capturedAt: '2026-07-13T03:04:00.000Z',
+      status: 'ok',
+    }
+    expect(isTopTierExhaustedByUsage(noRows)).toBe(false)
+    expect(isTopTierExhaustedByUsage({ ...noRows, weekModels: [] })).toBe(false)
   })
 })
 
@@ -341,6 +416,37 @@ describe('resolveAvailableTier / resolveSwarmModelEffort — usage-cache veto (t
   it('a switched-OFF fable is still skipped even when usage says it is fine (mask independent of usage)', () => {
     const off = { fable: false, opus: true, sonnet: true, haiku: true } as SwarmAllowedModels
     expect(resolveAvailableTier('fable', NOW, off, null)).toBe('opus')
+  })
+
+  // End-to-end, for the day the row returns: a fable-only weekly row must move
+  // the launch tier exactly like a 100% session would. It does NOT run today —
+  // the CLI prints no such row (see the dormant-contract note above), so the
+  // 2026-07-13 wall is still walked into. That is the probe card's job, not this
+  // one's.
+  const fableWeekDry: CliUsage = {
+    session: { pct: 3, resetsAt: '12:30 pm (Asia/Tokyo)' },
+    weekAll: { pct: 63, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' },
+    weekModels: [{ model: 'Fable 5', pct: 100, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' }],
+    capturedAt: '2026-07-13T03:04:00.000Z',
+    status: 'ok',
+  }
+
+  it('DORMANT: a dry FABLE-only week WOULD drop the ladder head to opus, though session/weekAll read 3%/63%', () => {
+    expect(resolveAvailableTier('fable', NOW, undefined, fableWeekDry)).toBe('opus')
+  })
+
+  it('DORMANT: …and a max-mode worker would then launch on opus/max instead of the limit screen', () => {
+    const me = resolveSwarmModelEffort('max', 'worker', undefined, NOW, undefined, fableWeekDry)!
+    expect(me.model).toBe('opus')
+    expect(me.effort).toBe('max') // the veto moves the tier only — never the effort
+  })
+
+  it('DORMANT: a dry SONNET-only week changes nothing — fable still launches (the veto is head-only)', () => {
+    const sonnetWeekDry: CliUsage = {
+      ...fableWeekDry,
+      weekModels: [{ model: 'Sonnet', pct: 100, resetsAt: 'Jul 20 at 3 pm (Asia/Tokyo)' }],
+    }
+    expect(resolveAvailableTier('fable', NOW, undefined, sonnetWeekDry)).toBe('fable')
   })
 })
 

@@ -361,6 +361,13 @@ export interface ClaudeUsage {
   cli?: {
     session: { pct: number; resetsAt: string } | null
     weekAll: { pct: number; resetsAt: string } | null
+    /** The `Current week (<Model> only)` rows — a weekly cap owned by ONE model
+     *  rather than the account-wide pool, so a dry flagship is visible even
+     *  while `session` / `weekAll` still look healthy. `model` is the TUI's own
+     *  label ("Sonnet", "Fable 5"): which model has its own row is a property of
+     *  the account's plan, never a fixed list. Optional — absent from payloads
+     *  produced before this field existed. */
+    weekModels?: { model: string; pct: number; resetsAt: string }[]
     capturedAt: string
     status: 'ok' | 'signed-out' | 'not-installed' | 'scrape-failed'
   } | null
@@ -1047,11 +1054,15 @@ export interface OrchestratorWorker {
   /** ISO timestamp of the worker's latest heartbeat (`updatedAt`), or absent
    *  when it never beat. Display-only — the pane uses it to show staleness. */
   heartbeatAt?: string
-  /** ISO timestamp the engine LAST sent this worker's card review→doing on a 差し戻し
-   *  (rework). The monitor suppresses re-promoting the card until the worker emits a
-   *  FRESH completion sign (a heartbeat strictly newer than this) — so a just-reworked
-   *  worker gets time to actually fix the issue instead of being instantly re-promoted
-   *  on its stale pre-rework readyToMerge:true (which would burn the rework budget by
+  /** ISO timestamp of the LAST 差し戻し (rework) that sent this worker's card
+   *  review→doing — set by the engine's own integrate rework, OR stamped by the
+   *  monitor when it OBSERVES an external 差し戻し (Board API {rework} / a UI drag,
+   *  which bypass this in-memory roster; the monitor detects stage:'done' with the
+   *  card back in 'doing' and re-arms the worker). The monitor suppresses
+   *  re-promoting the card until the worker emits a FRESH completion sign (a
+   *  heartbeat strictly newer than this) — so a just-reworked worker gets time to
+   *  actually fix the issue instead of being instantly re-promoted on its stale
+   *  pre-rework readyToMerge:true (which would burn the rework budget by
    *  wall-clock). Cleared on a fresh-heartbeat promote. In-memory only; absent for a
    *  never-reworked worker. */
   reworkAt?: string

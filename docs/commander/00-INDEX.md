@@ -29,7 +29,7 @@
 | 1 | [01-engine-core](01-engine-core.md) | エンジン中枢 — 3 秒 tick の回り方・dispatch 6 ゲート・monitor 全分岐・in-memory 状態の寿命(再起動で全部消える)。※TL;DR#3/§6 の「integrate が monitor を飢餓させる」は `0d1f7f0` 以前の歴史 |
 | 2 | [02-worker-lifecycle](02-worker-lifecycle.md) | worker の生涯 — spawn/心拍/promote/回収、worktree 削除の全 8 経路と**回収前の WIP 保全**、実行時間上限は**実作業時間**で測る(quota 待ちは控除 — 0712 の 47KB 全損を根治)、workers API `heartbeatAt` 凍結の解明と根治(0710 誤診の真因 → 0711 修正済み) |
 | 3 | [03-integration-review](03-integration-review.md) | 統合パス 2 相(表示 A / land B)と敵対レビュー — verify、lens 4 体の全員一致、diff 連動 budget+棄権理由(`3129a58` 根治)と大 diff 凍結の実測(歴史)。tick 分離後の integrate の現行正典(§2.1/§2.4) |
-| 4 | [04-quota-models](04-quota-models.md) | quota 四層 — 冷却テーブル(A)/rate-limit 検知(B)/使用可能モデル mask(C)/使用状況キャッシュ pre-launch veto(D、`/usage` が既知の枯渇を起動前に見て梯子からトップ tier を篩う・2026-07-12)。検知 21 分遅延の 3 因子と根治(`0d1f7f0` — 45 秒サンプリング+早期認定+limit 画面クロック)。**hold 中の時間は worker の実行時間から控除される**(§3.4-6 — 0712 根治)。真実は `launchTier` だけ |
+| 4 | [04-quota-models](04-quota-models.md) | quota 四層 — 冷却テーブル(A、**再起動を生き延びる**・0713 永続化)/rate-limit 検知(B)/使用可能モデル mask(C)/使用状況キャッシュ pre-launch veto(D、`/usage` の既知の枯渇を起動前に見て梯子からトップ tier を篩う・2026-07-12。⛔ **ただし現行 CLI は per-model 行を出さないので fable 単独枯渇は層Dでは見えない** — 0713 実測、§5.7 冒頭)。検知 21 分遅延の 3 因子と根治(`0d1f7f0` — 45 秒サンプリング+早期認定+limit 画面クロック)。**hold 中の時間は worker の実行時間から控除される**(§3.4-6 — 0712 根治)。真実は `launchTier` だけ |
 | 5 | [05-board-api-contract](05-board-api-contract.md) | Board 契約 — tasks.json が唯一の永続体、列ライフサイクル、ロック/CAS、フル UUID の掟、二重 dispatch 両方向封鎖(cc7c60e)、**司令官/補給官の会話 resume(§10)** |
 | 6 | [06-overseer-escalations](06-overseer-escalations.md) | overseer 信号 S1〜S11 と escalations/通知ストア — S3/S10 の 24h 窓+永続受領(`d8431c3`+`aa9cb8d` 根治)、再投函増殖の実測(歴史) |
 | 7 | [TARGET-STATE](TARGET-STATE.md) | 理想の稼働形(北極星)— 観測可能な 6 条件・現状ギャップ・対応カード |
@@ -67,7 +67,7 @@ flowchart TB
   D -. "kickIntegratePass(await しない)" .-> I
   B[("<b>Board</b> tasks.json<br/>todo / doing / review / done / blocked<br/>— 唯一の永続体(05 章)")]
   W["<b>worker</b> = 中央 worktree + claude PTY + 心拍ファイル<br/>(02 章。作業の担保は branch のコミットのみ)"]
-  Q[("<b>quota 三層</b>(04 章)<br/>A 冷却テーブル(揮発) / B 検知 / C mask(永続)")]
+  Q[("<b>quota 三層</b>(04 章)<br/>A 冷却テーブル(永続・0713〜) / B 検知 / C mask(永続)")]
   E[("<b>escalations.json</b> + 通知ストア(06 章)<br/>人間への出口 — 自動では何も動かさない")]
   B -- "todo を優先度順に 6 ゲートで選抜" --> D
   D -- "spawn(worktree + PTY + /order 注入)" --> W
@@ -108,7 +108,8 @@ flowchart TB
 | | 再起動後 |
 |---|---|
 | 司令官・補給官の**会話履歴** | ✅ **生き残る**(resume) |
-| エンジンの **in-memory 認知**(worker roster / reviews / quota 冷却) | ❌ **全消え**。自動運転も必ず OFF に戻る(安全側) |
+| エンジンの **in-memory 認知**(worker roster / reviews) | ❌ **全消え**。自動運転も必ず OFF に戻る(安全側) |
+| **quota 冷却テーブル**(層A) | ✅ **生き残る**(2026-07-13 永続化 — `~/.openground/swarm-quota.json`。04 章 §2.1.1)。**「再起動後は冷却が空が正常」は旧知識** |
 | Board / branch / 心拍 / escalations(**永続体**) | ✅ ディスクに在る = 唯一の足場 |
 | **コード自体** | ⚠️ 変わっている可能性大 — 再起動はたいてい**リリース**。各章の file:line も疑う(§6) |
 
@@ -145,7 +146,7 @@ flowchart TB
 | `GET /api/swarm/orchestrator` の `workers[].heartbeatAt`(roster 生値) | ❌ 信じるな | こちらは今回未修正 — エンジンが最後に monitor で読んだ凍結値のまま。鮮度確認は上の `/api/swarm/workers` かディスクの `updatedAt` を使う |
 | workers API `ready` / `blocked` / `blockers` | ✅ | 全ソースでディスク心拍由来(swarmWorkerRegistry.ts:189-193, :227-231, :247-250) |
 | 心拍ファイルの `updatedAt` | ✅ **唯一の真実** | worker(swarm-beat.sh)だけが書く。ただし内容(task 要約・ready)は自己申告 — 成果は戒 2 で裏取り |
-| 心拍の `readyToMerge:true` | ⚠️ 宣言のみ | promote は `commitsAhead>0` が別途必須(swarmOrchestrator.ts:964-967)。差し戻し直後は古い ready が残る(:3932-3940 が抑制) |
+| 心拍の `readyToMerge:true` | ⚠️ 宣言のみ | promote は `commitsAhead>0` が別途必須(swarmOrchestrator.ts:984-985)。差し戻し直後は古い ready が残る(:4433-4442 が抑制)— Board API/UI の外部差し戻しも 0713 からエンジンが観測して同じ抑制に乗る(02 章 §5.3) |
 | `reviews[].status = 'conflict'` | ❌ 額面で信じるな | 4 事象の相乗り(戒 3)。→ engine log の直前行(03 章 §6-3)。`abstainSummary` が付いていれば defer 凍結(03 章 §2.6) |
 | `reviews[].status = 'ff'` | ✅(その pass 時点) | 純 git 読み(swarmIntegrate.ts:188-215)。'rebase' は「競合するかは試すまで不明」の意 |
 | `GET /api/swarm/quota` の `tiers[]` | ❌ 単独では信じるな | mask 盲目(04 章 §2.6)。「cooling:false = 使える」ではない |
@@ -173,7 +174,7 @@ flowchart TB
 | [01 章](01-engine-core.md) **§9** | 対象コミットの鮮度 / エンジン状態(GET orchestrator)/ journal の scale・park・dispatch 行 / server-truth worker 一覧 / 心拍ディスク直読 / 定数の実値 / 二重 dispatch 封鎖の現物 / selectDispatch 6 ゲート / monitor 飢餓の観測(journal 時刻の空白) |
 | [02 章](02-worker-lifecycle.md) **§8** | repo キー導出 / 全 worker のディスク心拍一覧 / workers API との突き合わせ(凍結の確認)/ worktree 実在確認 / promote 条件の手動再現(rev-list)/ dirty 判定 / 停止・削除・RESTART・手動 dispatch の実操作 |
 | [03 章](03-integration-review.md) **§6** | reviews[] と autoMerge の現在値 / conflict 表示の真因区別(journal)/ arm・disarm / resolve(blocked・todo)/ **diff サイズ測定(凍結境界 22〜34KB との突合)** / classify の手動再現 / verify・review worktree 残骸 / カード 58335c7f の本文 |
-| [04 章](04-quota-models.md) **§10** | mask がソース・bundle に入っているか / 定数の現在値 / センサー書込箇所が 2 つだけ / spawn 経路の fail-closed / **launchTier(唯一の真実)** / 手動 cool・uncool の実験 / 冷却の揮発性 / ケーススタディの一次痕跡 |
+| [04 章](04-quota-models.md) **§10** | mask がソース・bundle に入っているか / 定数の現在値 / センサー書込箇所が 2 つだけ / spawn 経路の fail-closed / **launchTier(唯一の真実)** / 手動 cool・uncool の実験 / **冷却 file(`jq . ~/.openground/swarm-quota.json`)の読み方**(⚠ `server.log` は存在しない=偽陰性) / **壁の有無は `claude --model <tier> -p` のプローブ**(`/usage` では fable 単独枯渇は見えない) / ケーススタディの一次痕跡 |
 | [05 章](05-board-api-contract.md) **§9 / §10.4** | 対象コミット確認 / **Board 読み→書き(results 確認)→読み戻しの型** / rework と blocked 退避 / 手動 dispatch 前のエンジン確認 / quota・park の理由 / 永続体(tasks.json)直読 / merged-branches(done 化の前提確認) / **会話 resume の永続体(swarm-sessions.json)と transcript の実在確認(§10.4)** |
 | [06 章](06-overseer-escalations.md) **§7** | overseer の armed 状態 / inbox の open 一覧・status 内訳 / **S3 増殖の突合(発火源 fatal ↔ escalation 世代)** / 通知ストアの内訳と cap 消費 / escalation の偽物判定(branch・カード実在)/ answer・dismiss・手動 open / 付帯物(PTY キャプチャ・scratch) |
 | [TARGET-STATE](TARGET-STATE.md) | 各理想条件の「到達判定」コマンド(現状はギャップの再確認に使う) |

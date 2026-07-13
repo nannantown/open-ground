@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -6,7 +6,12 @@ import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import { __resetOrchestratorForTests } from '@/lib/server/swarmOrchestrator'
-import { __resetQuotaForTest } from '@/lib/server/swarmQuota'
+import {
+  __resetQuotaForTest,
+  __simulateRestartForTest,
+  flushQuotaPersist,
+} from '@/lib/server/swarmQuota'
+import { swarmQuotaFile } from '@/lib/server/paths'
 import { setSettings } from '@/lib/server/store'
 import { createSwarmFatalNotification } from '@/lib/server/swarmNotifications'
 import type { SwarmOrchestratorState, AppNotificationsResponse, SwarmQuotaResponse } from '@/lib/types'
@@ -622,6 +627,124 @@ describe('/api/swarm/quota — the model-tier cooling table', () => {
   it('400 when neither untilMs nor minutes is given', async () => {
     const res = await app.request('/api/swarm/quota/cool', json({ tier: 'fable' }))
     expect(res.status).toBe(400)
+  })
+
+  // The mark has to outlive the PROCESS, not just the request. Before 2026-07-13
+  // the table was memory-only, so a relaunch — which is what happens after every
+  // release — came up believing every tier was fresh: `cooling:false`,
+  // `launchTier:"fable"`, straight back into the wall it hit yesterday. The cost
+  // was one session burned per restart, purely to re-learn a known fact.
+  //
+  // This is the acceptance from the card, driven end-to-end through the routes:
+  // cool → restart → still cooling. haiku throughout (cooling fable or opus in a
+  // test would model a tier the real launcher actually picks).
+  describe('persistence — a cool survives the app restart', () => {
+    beforeEach(async () => {
+      // Earlier cases in this block cool tiers too, and their marks are now real
+      // files. Drain any write still in flight, then start from no file at all,
+      // so this case's restart hydrates ONLY what this case wrote.
+      // `recursive`: the write-failure cases below make the path a DIRECTORY.
+      await flushQuotaPersist()
+      await rm(swarmQuotaFile(), { force: true, recursive: true })
+    })
+    afterEach(async () => {
+      await flushQuotaPersist()
+      await rm(swarmQuotaFile(), { force: true, recursive: true })
+      vi.restoreAllMocks()
+    })
+
+    /** Make the mirror write fail the way a real filesystem does: atomicWrite
+     *  renames a temp file onto the target, and renaming onto a DIRECTORY is
+     *  EISDIR. Stands in for the EACCES / ENOSPC / read-only-volume family. */
+    const breakTheFile = () => mkdir(swarmQuotaFile(), { recursive: true })
+
+    it('POST /cool haiku → restart → GET still reports haiku cooling', async () => {
+      const res = await app.request('/api/swarm/quota/cool', json({ tier: 'haiku', minutes: 60 }))
+      expect(res.status).toBe(200)
+      const until = ((await res.json()) as SwarmQuotaResponse).tiers.find((t) => t.tier === 'haiku')
+        ?.until
+      expect(until).toBeGreaterThan(Date.now())
+
+      // The 200 above already means "on disk" — the route awaits the mirror write
+      // before answering. So dropping the whole in-memory table now is exactly
+      // what quitting the app does.
+      await __simulateRestartForTest()
+
+      const after = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+      const haiku = after.tiers.find((t) => t.tier === 'haiku')
+      expect(haiku?.cooling).toBe(true)
+      expect(haiku?.until).toBe(until) // the same reset time, not a fresh window
+      expect(after.launchTier).toBe('fable') // and only haiku came back
+    })
+
+    it('POST /uncool → restart → the tier stays RELEASED (hydration must not undo it)', async () => {
+      await app.request('/api/swarm/quota/cool', json({ tier: 'haiku', minutes: 60 }))
+      expect(
+        (await app.request('/api/swarm/quota/uncool', json({ tier: 'haiku' }))).status,
+      ).toBe(200)
+
+      await __simulateRestartForTest()
+
+      const after = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+      expect(after.tiers.find((t) => t.tier === 'haiku')?.cooling).toBe(false)
+      expect(after.tiers.every((t) => !t.cooling)).toBe(true)
+    })
+
+    // A 200 from /cool asserts durability ("quit now and the mark is still there").
+    // If the write failed, the honest answer is 500 — a 200 would put us straight
+    // back in the loop this whole card closes: the owner cools a dry tier, the app
+    // relaunches having forgotten it, and the next dispatch burns a session
+    // rediscovering the wall. The engine's own sensor path still shrugs off a bad
+    // write (a mark it can re-learn is not worth killing the cockpit for); this
+    // route cannot, because durability IS what it is for.
+    it('POST /cool answers 500 — not 200 — when the mark could NOT be persisted', async () => {
+      await breakTheFile()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const res = await app.request('/api/swarm/quota/cool', json({ tier: 'haiku', minutes: 60 }))
+      expect(res.status).toBe(500)
+      expect(((await res.json()) as { error: string }).error).toMatch(/forgotten when the app restarts/i)
+      expect(warn).toHaveBeenCalled()
+
+      // …and the tier IS cooling in this process. We do not roll the mark back: the
+      // running engine should still avoid the tier. Only its survival across a
+      // restart was lost, which is exactly what the 500 says.
+      const after = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+      expect(after.tiers.find((t) => t.tier === 'haiku')?.cooling).toBe(true)
+    })
+
+    it('POST /uncool answers 500 when the RELEASE could not be persisted', async () => {
+      // Cool first (that write lands), then break the file so only the release fails.
+      expect(
+        (await app.request('/api/swarm/quota/cool', json({ tier: 'haiku', minutes: 60 }))).status,
+      ).toBe(200)
+      await rm(swarmQuotaFile(), { force: true, recursive: true })
+      await breakTheFile()
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const res = await app.request('/api/swarm/quota/uncool', json({ tier: 'haiku' }))
+      expect(res.status).toBe(500)
+      // The stakes are the opposite of /cool's and the message must say so: the old
+      // mark is still on disk, so a restart brings the released tier BACK cooling.
+      expect(((await res.json()) as { error: string }).error).toMatch(/COOLING again after a restart/i)
+    })
+
+    it('a later successful write heals it — /cool answers 200 again', async () => {
+      await breakTheFile()
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      expect(
+        (await app.request('/api/swarm/quota/cool', json({ tier: 'haiku', minutes: 60 }))).status,
+      ).toBe(500)
+
+      await rm(swarmQuotaFile(), { force: true, recursive: true })
+      const res = await app.request('/api/swarm/quota/cool', json({ tier: 'haiku', minutes: 90 }))
+      expect(res.status).toBe(200)
+
+      // And the durability the 200 now claims is real.
+      await __simulateRestartForTest()
+      const after = (await (await app.request('/api/swarm/quota')).json()) as SwarmQuotaResponse
+      expect(after.tiers.find((t) => t.tier === 'haiku')?.cooling).toBe(true)
+    })
   })
 
   // The owner's model hard mask is a SEPARATE layer. It must not touch the cooling

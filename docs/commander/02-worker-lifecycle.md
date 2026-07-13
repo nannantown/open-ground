@@ -194,38 +194,47 @@ dispatch ──> starting ──(心拍 or コミット or 25秒経過)──> r
                 └──────────── どの段階でも: PTY 死亡/stall/runaway → 回収(recoverLost) ────────────┘
 ```
 
-- `starting`: spawn 直後。心拍もコミットも無い最初の 25 秒(`STARTUP_GRACE_MS` — swarmOrchestrator.ts:207)は「起動中」表示(:932-933)
-- `running`: 何らかの活動が見えた後。差し戻し直後も強制的に running(:3938, :4774, :4912)
-- `done`: promote 成功(:3956)。**PTY が生きている限り roster に残り**(claude TUI は /order 完了で exit しないのが普通)、exit した瞬間 slot が空く(:3877-3883)
+- `starting`: spawn 直後。心拍もコミットも無い最初の 25 秒(`STARTUP_GRACE_MS` — swarmOrchestrator.ts:207)は「起動中」表示(:988-989)
+- `running`: 何らかの活動が見えた後。差し戻し直後も強制的に running — エンジン差し戻し(:5404, :5554)/外部差し戻しの観測(:4370-4371。§5.3)/古い心拍での promote 抑制(:4440-4441)のいずれも running に戻す
+- `done`: promote 成功(:4458)。**PTY が生きている限り roster に残り**(claude TUI は /order 完了で exit しないのが普通)、exit した瞬間 slot が空く(:4381-4385)。ただしカードが doing に戻っていたら done のままにしない — 外部差し戻しの観測で running に再武装(§5.3)
 
-### 5.2 promote 条件(`classifyWorker` — swarmOrchestrator.ts:922-934)
+### 5.2 promote 条件(`classifyWorker` — swarmOrchestrator.ts:978-990)
 
 ```
 promote = commitsAhead > 0 && ( ready || ( !alive && !blocked ) )
 ```
 
-- `commitsAhead` = **branch ref が trunk より先行しているコミット数**(:2201-2211 `defaultCountCommitsAhead`)。worktree ではなく共有 repo の branch ref で数えるので worktree 消滅後も判定可能。trunk はプロジェクトごとに解決(origin/main 固定ではない)
-- `ready` = 心拍ファイルの `readyToMerge === true`(:2258)
-- `blocked` = `phase==='blocked'` または blockers 非空(:2269)
+- `commitsAhead` = **branch ref が trunk より先行しているコミット数**(:2392 `defaultCountCommitsAhead`)。worktree ではなく共有 repo の branch ref で数えるので worktree 消滅後も判定可能。trunk はプロジェクトごとに解決(origin/main 固定ではない)
+- `ready` = 心拍ファイルの `readyToMerge === true`(:2449)
+- `blocked` = `phase==='blocked'` または blockers 非空(:2460)
 - **「dirty=0」という直接条件は promote には無い**ことに注意。dirty が効くのは worktree 削除の可否(git が非 force 削除を拒否 — §6)と司令塔の統合作業であって、promote 判定は「コミットが積まれたか + 完了宣言(または死亡かつ非 blocked)」だけ。worker が commit せずに done true を打っても commitsAhead=0 で promote されない(だから「ready 前に必ず自分でコミット」が worker の掟)
 
-promote 成功でカードは doing→review に移り(:3945)、review 列は統合ステージ(review → verify → 敵対レビュー → rebase/FF → done)の入力になる(01-engine-core.md の領分)。
+promote 成功でカードは doing→review に移り(:4447)、review 列は統合ステージ(review → verify → 敵対レビュー → rebase/FF → done)の入力になる(01-engine-core.md の領分)。
 
 ### 5.3 reworkAt との新旧比較(差し戻し後の re-promote 抑制)
 
-統合ステージがカードを review→doing に差し戻すと、worker の roster エントリに `reworkAt = now` が刻まれる(レビュー差し戻し: swarmOrchestrator.ts:4775 / conflict rebase 委譲: :4913。型定義 types.ts:1038-1044)。**心拍ファイルは worker しか書けないので、差し戻し前の `readyToMerge:true` が残ったまま**になる。そのままだと次 pass が即 re-promote → 同一 tip の verify skip-RED → また差し戻し、で rework 予算(`MAX_REWORKS=2` — :238)が壁時計 30 秒で燃え尽きる。これを防ぐのが:
+`reworkAt`(型定義 types.ts:1057-1068)が立つ経路は **2 つ**:
+
+1. **エンジン自身の差し戻し** — 統合ステージがカードを review→doing に差し戻すとき、roster エントリにその場で `stage='running'` + `reworkAt = now` を刻む(レビュー差し戻し: swarmOrchestrator.ts:5404-5405 / conflict rebase 委譲: :5554-5555)。
+2. **外部差し戻しの観測**(2026-07-13 追加) — 司令官の `POST /api/project/tasks {rework:[…]}` や UI ドラッグ(review→doing)は **in-memory roster に届かない**。monitor は「roster が `stage:'done'` なのにカードが `doing` に戻っている」形を外部差し戻しとみなし、`stage='running'` + `reworkAt = now`(観測 tick の時刻 — Board の rework verb はカードに差し戻し時刻を記録しないため)で再武装して通常の監視フローに落とす(:4360-4377。engine log に `Board 側の差し戻し(review→doing)を観測` が 1 回出る)。**この観測が無かった時代は直後の stage:'done' 早期 continue(:4379-4385)が先に効いて永久スキップ** — worker が直して ready を打ち直してもカードは doing に沈み続けた(2026-07-13 実測: 55 分放置しても昇格せず、司令官の手動 setColumn でしか復旧しなかった)。
+
+**既知の残穴(未解決)**: この観測は roster に `stage:'done'` のエントリが**残っている**ことが前提。**PTY が差し戻しより前に exit していた**場合、worker はその時点の tick で「done worker closed — slot freed」(:4381-4385)として roster から既に消えており、再武装する対象が存在しない — **カードは worker 無しで doing に沈む**(55 分沈黙と同じ症状が、この稀な条件でだけ残る)。しかも `orphan-doing` 異常(:5996)は **worktree の消滅が発火条件**(:6091-6099)で、slot-freed 経路は worktree を撤去しないため発火しない。復旧は手動(setColumn で review へ戻す、または worktree/branch を確認して再 dispatch)。
+
+どちらの経路でも、**心拍ファイルは worker しか書けないので、差し戻し前の `readyToMerge:true` が残ったまま**になる。そのままだと次 pass が即 re-promote → 同一 tip の verify skip-RED → また差し戻し、で rework 予算(`MAX_REWORKS=2` — :238)が壁時計 30 秒で燃え尽きる。これを防ぐのが:
 
 ```
 promote && w.reworkAt のとき: hbAtMs > reworkAtMs(差し戻しより厳密に新しい心拍)でなければ promote を落とす
 ```
 
-(:3932-3940)。**司令塔への含意**: 差し戻された worker は「swarm-beat.sh で done true を打ち直す」まで絶対に review に戻らない。worker が心拍を打たない限りカードは doing に残り続ける(stall 監視には掛かる — :3928-3930 のフォールスルー設計)。
+(:4433-4442)。**司令塔への含意**: 差し戻された worker は「swarm-beat.sh で done true を打ち直す」まで絶対に review に戻らない — エンジン差し戻しでも Board API / UI ドラッグの差し戻しでも同じ(古い心拍での再昇格はどちらの経路でも起きない)。worker が心拍を打たない限りカードは doing に残り続ける(stall 監視には掛かる — :4424-4432 のフォールスルー設計)。回帰テスト: swarmOrchestrator.test.ts の describe「monitorWorkers — re-promote suppression after a 差し戻し (reworkAt)」に、①エンジン昇格 → ②Board 直接差し戻し → ③古い心拍では抑制 → ④新しい心拍で再昇格、の通しがある。
 
-差し戻しの分岐(`reworkOrPark` — :4700-4823):
+**回収先の非対称(事実・コードは仕様のまま)**: 差し戻しの**後**に PTY が死んだ場合の回収先は経路で異なる — **外部差し戻し**では再武装後の fall-through が `recoverLost` に落ち、古い心拍の `ready===true` を見た `recoveryColumn`(:1039)が **blocked** に送る(worktree 撤去・branch 保持・WIP 救済つき)。**エンジン自身の差し戻し**では worker 不在/死亡分岐が **todo** に戻して再配車する(:5426)。どちらも警告ログ付き・ロスレスなので挙動としては許容 — 非対称であること自体を知っておく。
 
-- **LIVE worker**: 同一 branch 継続。カード review→doing、`instructRework` で PTY に理由を直接注入(:4777-4780)+ 差し戻し理由を `reworkReasons` に永続 memo(:4713 — worker が死んで再 dispatch になった時 `priorFailure` として次の /order に注入される :4535, :4562)
-- **worker 不在/死亡**: カード review→todo(新 worker に再 dispatch)+ 死骸 teardown(:4812 — **worktree force 削除**、branch 維持)
-- **上限超過(count > MAX_REWORKS)**: カード blocked 退避 + teardown(:4735)。人手待ち
+差し戻しの分岐(`reworkOrPark` — :5316):
+
+- **LIVE worker**: 同一 branch 継続。カード review→doing、`instructRework` で PTY に理由を直接注入(:5407)+ 差し戻し理由を `reworkReasons` に永続 memo(:5338 — worker が死んで再 dispatch になった時 `priorFailure` として次の /order に注入される :5142, :5169)
+- **worker 不在/死亡**: カード review→todo(新 worker に再 dispatch)+ 死骸 teardown(**worktree force 削除**、branch 維持 — :5422-5457)
+- **上限超過(count > MAX_REWORKS)**: カード blocked 退避 + teardown(:5341-5344)。人手待ち
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 
@@ -320,8 +329,8 @@ janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を�
 1. **【0710 実測・0711 根治済み】API の `heartbeatAt` を信じて「worker が半日死んでいる」と誤診** — §4 のとおり、当時はエンジン worker の heartbeatAt が凍結値だった(ディスクを読めば 00:41 まで生きていた)。2026-07-11 の修正で `heartbeatAt` はディスク優先になったため、この誤診パターンは再発しない
 2. **【0710 実測】「rebase 済みだから安全」と思っていた worktree が worker 停止で消えた** — §6 のとおり、停止=force 削除が仕様。しかも rebase で commitsAhead=0 になった branch は promote 不能なので、PTY 死亡 → crash 回収(経路 3)コース。**worktree を残したい stop は存在しない**(soft Terminate=経路 1 の force なしだけが dirty tree を拒否して守る — ただし clean なら消える)
 3. **worker 停止 → RESTART の順で操作すると RESTART が必ず失敗する** — 停止が worktree を消すため(§6 → RESTART 節)。再開させたいなら停止せず RESTART(古い PTY は API/UI が kill してくれる)
-4. **差し戻し後の即 re-promote は起きない設計** — 心拍ファイルに古い `readyToMerge:true` が残っていても、`reworkAt` より新しい心拍が来るまで promote は抑制される(:3932-3940)。「worker に直せと言ったのにカードが review に戻らない」ときは、worker が **swarm-beat.sh を打ち直していない**のをまず疑う
-5. **worker が commit せず done true だけ打っても何も進まない** — promote は commitsAhead>0 が必須(:928-929)。dead+ready+成果ゼロは blocked 送り(:974)。worker の掟「ready 前に必ず自分でコミット」はコードで強制されている
+4. **差し戻し後の即 re-promote は起きない設計** — 心拍ファイルに古い `readyToMerge:true` が残っていても、`reworkAt` より新しい心拍が来るまで promote は抑制される(:4433-4442)。「worker に直せと言ったのにカードが review に戻らない」ときは、worker が **swarm-beat.sh を打ち直していない**のをまず疑う。**【0713 実測・同日修正(残穴あり)】**司令官が Board API(`{rework}`)で差し戻したカードをエンジンが二度と拾わない事象があった — 外部差し戻しは in-memory roster に届かず `stage:'done'` のまま早期 continue(:4379-4385)で永久スキップされ、worker が直して ready を打ち直しても doing に沈み続けた(実測 55 分・手動 setColumn でしか復旧せず)。修正後は monitor が「stage:'done' なのにカードが doing」を外部差し戻しとして観測し `stage='running'` + `reworkAt=now` で再武装する(:4360-4377。§5.3)。古い心拍で即 re-promote しない保証(この項の前段)もこの経路でそのまま効く。**ただし PTY が差し戻しより前に exit していた場合は roster にエントリが無く観測できない** — 同じ沈み方がその稀な条件でだけ残る(§5.3 の「既知の残穴」。orphan-doing 異常も worktree 残存で発火しない)
+5. **worker が commit せず done true だけ打っても何も進まない** — promote は commitsAhead>0 が必須(:984-985)。dead+ready+成果ゼロは blocked 送り(:1039)。worker の掟「ready 前に必ず自分でコミット」はコードで強制されている
 6. **エンジン roster は in-memory** — アプリ/サーバ再起動でエンジンは worker を忘れる(stage 無しのエンジン外 worker として workers API に出続ける)。「エンジンに worker が居ないから全員死んだ」ではない。ソース 2/3(live PTY / 心拍ファイル)で必ず突き合わせる
 7. **心拍ファイルは worker 停止後も最大 15 分+α 残る** — janitor は overseer ON 時 15 分毎にしか回らず(swarmOverseer.ts:126, :568)、しかも branch か worktree の消滅が証明できるまで消さない(swarmJanitor.ts:377)。**dead worker タイルが workers API に残っていても異常ではない**。branch も worktree も残したまま PTY だけ死んだ手動 worker は、restart 対象として意図的に表示され続ける(swarmWorkerRegistry.ts:238-251)
 8. **PTY exit 後 30 秒は linger** — セッションは `finishedAt` 付きで約 30 秒プールに残る(terminal.ts:334-337)。`isWorkerAlive` は finishedAt で判定するので生存誤判定はないが(:2325-2330)、workers API のソース 2 は `listActiveTerminals`(finishedAt 除外 — terminal.ts:419)を使うため、exit 直後の worker は「terminalId 無し」に即時遷移する

@@ -16,6 +16,7 @@ import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/serve
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
 import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
+import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
@@ -53,6 +54,20 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOSTNAME }, (info
 // only Electron observes). Fail-safe — a no-op unless we're the forked engine with
 // an IPC channel (prod). The OUTWARD half (server→Electron OS toast) is osNotify.ts.
 registerIncomingNotifications()
+
+// QUOTA COOLING TABLE — hydrate the persisted marks (~/.openground/swarm-quota.json)
+// into swarmQuota's in-memory table. Without this the app forgets, on every single
+// launch, which model tiers were dry — and since a launch usually follows a
+// release, it re-learned the fact the expensive way: dispatch on fable → hit the
+// limit screen → cool. One burned session per restart (observed 2026-07-13, 0.11.25).
+//
+// Fire-and-forget: the load is fail-safe (an unreadable / corrupt file yields NO
+// cooling plus one log line — never a throw), so it cannot block or crash startup,
+// and the quota routes await the SAME memoized promise before they answer — so
+// there is no window where a read beats the hydration. Elapsed marks are dropped
+// as they load (lazy expiry, same rule as isTierCooling), so a stale file can only
+// ever cool LESS, never more.
+void ensureCoolingTableLoaded(Date.now())
 
 // Retention sweep — drop the raw episodic layer (run cache + attachments) older
 // than RAW_RETENTION_DAYS. Fire-and-forget after boot so it never blocks

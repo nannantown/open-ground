@@ -206,17 +206,57 @@ const desiredModelEffort = (
  *  `desired`, so the execution-mode matrix below is exactly today's behavior. An
  *  unknown model string (not on the ladder) is treated as the ladder head — walk
  *  the whole thing — a safe "best available" default rather than a throw. */
+/** Does a per-model `/usage` row NAME this tier? The label is whatever the TUI
+ *  printed — "Fable 5", "Fable", "fable", and (after the TUI's space loss)
+ *  "Fable5" all mean the fable rung. Compared as WORDS (split on every
+ *  non-letter), never as a substring, so a "Sonnet" row can never satisfy the
+ *  fable tier. Splitting is also why no RegExp is built from `tier` here: there
+ *  is nothing to escape, so claudeUsageCli's escape helper is not needed (and
+ *  not duplicated). */
+const rowNamesTier = (label: string, tier: string): boolean =>
+  label
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .includes(tier.toLowerCase())
+
 /** True iff the cached `claude /usage` scrape shows the swarm's TOP tier
- *  ({@link SWARM_LAUNCH_MODEL}) genuinely EXHAUSTED — session or
- *  week-all-models pct >= 100. This is the ONLY tier the scrape's account-wide
- *  session/weekly % can speak to (there is no per-model breakdown in the
- *  cache — {@link CliUsage} only carries `session` + `weekAll`), so this veto
- *  is never applied to any other rung of {@link MODEL_TIER_LADDER}.
+ *  ({@link SWARM_LAUNCH_MODEL}) genuinely EXHAUSTED. Three independent readings
+ *  can say so, OR'd — any one at pct >= 100 is a wall the top tier cannot launch
+ *  through:
+ *    • `session` / `weekAll` — the ACCOUNT-WIDE slots. They cap every model at
+ *      once, so the top tier is dry whenever they are.
+ *    • `weekModels` — the per-model weekly rows (`Current week (<Model> only)`),
+ *      matched to {@link SWARM_LAUNCH_MODEL} by label ({@link rowNamesTier}).
+ *      The only reading that COULD see the top tier run dry alone — and it is
+ *      DORMANT: the `claude` shipping today (2.1.207) prints NO per-model row.
+ *      Where 2.1.196 rendered one, a "Per-model breakdown unavailable (rate
+ *      limited — try again in a moment)" placeholder now sits, so `weekModels`
+ *      is ALWAYS empty in practice and this branch never fires (live render
+ *      captured 2026-07-13 04:5xZ: two rows, zero occurrences of "only").
+ *
+ *  So this predicate does NOT catch a fable-only wall today. At 03:04Z that same
+ *  day `claude` refused every fable launch ("You've reached your Fable 5 limit")
+ *  while the scrape read session 3% / weekAll 63% and carried no row that could
+ *  say otherwise — /usage simply cannot express it. The reading above is wired
+ *  for the day the row comes back; the signal that DOES observe the wall is the
+ *  CLI's own refusal string (`claude --model <tier> -p …` — one second, and no
+ *  tokens at all when the tier is dry). That probe is a separate card; see
+ *  docs/commander/04-quota-models.md §5.7.
+ *
+ *  A per-model row for a DIFFERENT tier (a dry `Sonnet only` while fable has
+ *  headroom) is deliberately ignored here: this predicate answers one question —
+ *  "is the LADDER HEAD dry?" — because that is the only rung
+ *  {@link resolveAvailableTier}'s veto excludes. Vetoing a middle rung from its
+ *  own row would need the walk to take a per-tier mask, not a boolean; the
+ *  cooling table (layer A) already covers those tiers reactively.
  *
  *  FAIL-OPEN by construction (2026-07-12, user-confirmed policy: don't
  *  pre-emptively hunt down a tier that might still have headroom):
  *    • no cache yet / expired (`usage` is null, e.g. never scraped or the
  *      scrape failed) → false, never treated as exhausted;
+ *    • no per-model row in the render (`weekModels` empty/absent — an older
+ *      cached payload, or a plan whose /usage shows none) → false, exactly as
+ *      before this reading existed;
  *    • a gray-zone reading (pct < 100, e.g. 95%) → false — only a CONFIRMED,
  *      fully-spent slot (pct >= 100) counts, mirroring the same threshold
  *      swarmOrchestrator's `a5CoolingHint` already trusts for reset times. */
@@ -224,7 +264,9 @@ export const isTopTierExhaustedByUsage = (usage: CliUsage | null): boolean => {
   if (!usage) return false
   if (usage.session && usage.session.pct >= 100) return true
   if (usage.weekAll && usage.weekAll.pct >= 100) return true
-  return false
+  return (usage.weekModels ?? []).some(
+    (row) => row.pct >= 100 && rowNamesTier(row.model, SWARM_LAUNCH_MODEL),
+  )
 }
 
 export const resolveAvailableTier = (
@@ -233,11 +275,11 @@ export const resolveAvailableTier = (
   allowed: SwarmAllowedModels = allowedModelTiers(),
   usage: CliUsage | null = peekCachedUsage(),
 ): string | null => {
-  // A THIRD, independent veto (on top of cooling + the owner's mask): the
-  // cached /usage scrape's account-wide session/week-all-models % is the only
-  // signal it can speak to the swarm's TOP tier (SWARM_LAUNCH_MODEL) — `claude`
-  // draws that session/weekly cap from whichever model the swarm has actually
-  // been launching. See isTopTierExhaustedByUsage for the fail-open contract.
+  // A THIRD, independent veto (on top of cooling + the owner's mask): the cached
+  // /usage scrape. It speaks to the swarm's TOP tier (SWARM_LAUNCH_MODEL) two
+  // ways — the account-wide session/week-all slots (which cap every model) and
+  // the top tier's OWN per-model weekly row, the only reading that catches it
+  // running dry alone. See isTopTierExhaustedByUsage for the fail-open contract.
   const topTierExhausted = isTopTierExhaustedByUsage(usage)
   const spawnable = (tier: ModelTier): boolean =>
     !(topTierExhausted && tier === MODEL_TIER_LADDER[0]) && isTierSpawnable(tier, now, allowed)
@@ -293,11 +335,18 @@ export const resolveAvailableTier = (
 // /usage` scrape (claudeUsageCli — the same cache UsageHud reads, never a live
 // spawn here). Unlike cooling (learned ONLY after a launch actually gets
 // rate-limited — swarmOrchestrator.markRateLimited), this one can act BEFORE
-// the swarm even tries — if the scrape already shows the top tier's session or
-// weekly-all-models % at a CONFIRMED 100 (isTopTierExhaustedByUsage), the top
-// tier is excluded from every ladder walk in resolveAvailableTier, exactly like
-// a cooling mark would. A gray-zone reading (<100%) or no cache at all changes
-// nothing (fail-open) — this is a "known exhausted" veto, not a heuristic.
+// the swarm even tries — if the scrape already shows the top tier at a CONFIRMED
+// 100% (isTopTierExhaustedByUsage: the account-wide session / week-all slots, OR
+// the top tier's own `Current week (<Model> only)` row), the top tier is excluded
+// from every ladder walk in resolveAvailableTier, exactly like a cooling mark
+// would. A gray-zone reading (<100%) or no cache at all changes nothing
+// (fail-open) — this is a "known exhausted" veto, not a heuristic.
+//
+// REACH, measured: only the ACCOUNT-WIDE slots actually fire today. The current
+// CLI prints no per-model row (see isTopTierExhaustedByUsage), so a wall that
+// belongs to the top tier ALONE — the 2026-07-13 fable case — is invisible to
+// every layer here and the swarm still walks into it. Closing that is the
+// refusal-string probe's job, not this cache's.
 
 /** Resolve the model + effort a swarm role launches at under `mode`, WITH the live
  *  quota fallback, the owner's hard mask, AND the pre-launch usage-cache veto

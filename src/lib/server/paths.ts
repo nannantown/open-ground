@@ -31,6 +31,18 @@ export const swarmNotificationsFile = () => join(openGroundHome(), 'swarm-notifi
 // (fail-closed); resolved records are pruned by the boot retention sweep
 // instead. See src/lib/server/swarmEscalations.ts.
 export const escalationsFile = () => join(openGroundHome(), 'escalations.json')
+// The swarm's model-quota COOLING TABLE (tier → reset epoch ms) — the persisted
+// mirror of swarmQuota's in-memory table, so "fable is dry until 15:00" survives
+// a restart / self-update instead of being re-learned by BURNING a session on the
+// wall every time the app relaunches. Its OWN file, deliberately not a field in
+// settings.json: (a) settings.json holds `projects`, the validateProjectPath
+// allowlist — the security boundary — and this table is written from the engine's
+// hot rate-limit sensor path, so a read-modify-write of that file on every
+// sighting is needless blast radius; (b) a cooling mark is app STATE, not a user
+// preference (the same rule that keeps notifications.json out of settings);
+// (c) store.ts → swarmAllowedModels.ts → swarmQuota.ts already, so swarmQuota
+// importing store.ts would be an import CYCLE. See swarmQuotaStore.ts.
+export const swarmQuotaFile = () => join(openGroundHome(), 'swarm-quota.json')
 // PTY-tail captures attached to escalations ("what the worker's screen showed
 // when it got stuck") — one small text file per escalation, referenced by the
 // record's screenshotRef and unlinked when the record is pruned.
@@ -87,6 +99,12 @@ export const centralWorktreesDir = (uuid: string) => join(projectCentralDir(uuid
 // /api/health. Kept here so every reader agrees on the canonical paths.
 export const serverStatePath = () => join(openGroundHome(), 'server.json')
 export const serverLockDir = () => join(openGroundHome(), 'bootstrap.lock')
+// DEAD (kept only so an old build's import still resolves): NOTHING WRITES THIS.
+// The deprecated shell launcher used to tee the server here; the Electron path
+// pipes the forked server's stdout straight to Electron's own stdout instead
+// (electron/main.js). So `~/.openground/server.log` does not exist on a real
+// machine, and grepping it is a permanent FALSE NEGATIVE — a 2026-07-13 review
+// caught a diagnostic doc doing exactly that. Don't cite it as a log source.
 export const serverLogPath = () => join(openGroundHome(), 'server.log')
 
 // One-shot migration from old codenames. Runs at most once per process (the

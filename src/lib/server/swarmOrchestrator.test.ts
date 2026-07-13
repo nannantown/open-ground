@@ -5539,6 +5539,65 @@ describe('monitorWorkers — re-promote suppression after a 差し戻し (rework
     expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }]) // promoted on the fresh sign
     expect(engine.workers[0]?.reworkAt).toBeUndefined() // suppression cleared on promote
   })
+
+  // 外部差し戻し(Board API / UI ドラッグ)はエンジンの in-memory roster に届かない — roster が
+  // stage:'done' のままだと従来は監視ループが永久スキップし、worker が直して ready を打ち
+  // 直してもカードが doing に沈み続けた(2026-07-13 実運用で実測: 55分放置しても昇格せず)。
+  // 監視ループが「stage:'done' なのにカードが doing」を外部差し戻しとして観測して再武装し、
+  // 差し戻し前の古い心拍では再昇格せず、reworkAt より新しい心拍で初めて再昇格する — を
+  // ①昇格 → ②Board 直接差し戻し → ③古い心拍で抑制 → ④新しい心拍で再昇格、の通しで固定。
+  it('外部差し戻し(Board API 経由 review→doing)を観測して再武装 — 古い心拍では再昇格せず、新しい心拍で再昇格する', async () => {
+    const NOW = Date.parse('2026-07-13T12:00:00Z')
+    const firstBeatAt = new Date(NOW - 60_000).toISOString() // 初回の完了報告
+    const heartbeats = new Map([['a', { ready: true, blocked: false, at: firstBeatAt }]])
+    const engine = newEngine({
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a-1', stage: 'running' })],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 1]]),
+      heartbeats,
+    })
+    const observedLogs = () => engine.log.filter((l) => l.message.includes('Board 側の差し戻し')).length
+
+    // ① エンジンがカードを review へ昇格(通常の完了経路)
+    await runDispatchPass(engine, deps, NOW)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(engine.workers[0]?.stage).toBe('done')
+    expect(deps.board.get('a')?.boardColumn).toBe('review')
+
+    // ② Board API 経由の差し戻し(エンジンを経由しない): POST /api/project/tasks {rework} と
+    //    同じ書き込みをカードへ直接施す — roster は 'done' のまま、reworkAt も立っていない。
+    const c = deps.board.get('a')
+    if (!c) throw new Error('card lost')
+    c.boardColumn = 'doing'
+    c.done = false
+    c.reworkCount = 1
+
+    // ③ 次 tick: 外部差し戻しを観測 → stage='running' + reworkAt=now(観測 tick の時刻)で
+    //    再武装。心拍ファイルはまだ差し戻し前の readyToMerge:true — これでは再昇格しない。
+    const T1 = NOW + 30_000
+    await runDispatchPass(engine, deps, T1)
+    expect(deps.reviews).toHaveLength(1) // 古い心拍では再昇格しない
+    expect(deps.board.get('a')?.boardColumn).toBe('doing')
+    expect(engine.workers[0]?.stage).toBe('running')
+    expect(engine.workers[0]?.reworkAt).toBe(new Date(T1).toISOString())
+    expect(observedLogs()).toBe(1)
+
+    // 古い心拍のまま更に tick が回っても沈黙のまま(再昇格も、観測ログ・reworkAt の連打もない)
+    await runDispatchPass(engine, deps, T1 + 30_000)
+    expect(deps.reviews).toHaveLength(1)
+    expect(engine.workers[0]?.reworkAt).toBe(new Date(T1).toISOString()) // 基準時刻は据え置き
+    expect(observedLogs()).toBe(1)
+
+    // ④ worker が差し戻し後の新しい完了報告(reworkAt より新しい心拍)を打つ → 次 tick で再昇格
+    heartbeats.set('a', { ready: true, blocked: false, at: new Date(T1 + 40_000).toISOString() })
+    await runDispatchPass(engine, deps, T1 + 60_000)
+    expect(deps.reviews).toHaveLength(2) // review へ再昇格した
+    expect(deps.board.get('a')?.boardColumn).toBe('review')
+    expect(engine.workers[0]?.stage).toBe('done')
+    expect(engine.workers[0]?.reworkAt).toBeUndefined() // 抑制は昇格で解除
+  })
 })
 
 // ── runEnginePass — re-entrancy guard (twin-dispatch defense) ──────────────────

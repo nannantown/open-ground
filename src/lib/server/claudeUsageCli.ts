@@ -39,9 +39,37 @@ export interface CliUsageSlot {
   resetsAt: string
 }
 
+/** A `Current week (<Model> only)` row — a weekly cap that belongs to ONE model
+ *  instead of the account-wide pool. `model` is the label VERBATIM from the TUI
+ *  ("Sonnet", "Fable 5", "Opus"), never normalised against a hard-coded list:
+ *  WHICH model gets its own weekly row depends on the account's plan and moves
+ *  with each new flagship. Matching a label to a swarm tier is the launch
+ *  layer's job (swarmLaunch.isTopTierExhaustedByUsage). */
+export interface CliUsageModelSlot extends CliUsageSlot {
+  model: string
+}
+
 export interface CliUsage {
   session: CliUsageSlot | null
   weekAll: CliUsageSlot | null
+  /** EVERY per-model weekly row the render carried, in TUI order.
+   *
+   *  ⚠ EMPTY IN PRACTICE TODAY — this is a DORMANT reading, not a live one. The
+   *  `claude` shipping now (2.1.207) renders NO per-model row: where 2.1.196
+   *  printed `Current week (Sonnet only)`, a "Per-model breakdown unavailable
+   *  (rate limited — try again in a moment)" placeholder sits instead (live
+   *  render captured 2026-07-13 04:5xZ — two rows, zero occurrences of "only").
+   *  So a model whose OWN weekly quota is spent while the account-wide slots
+   *  still look healthy — `claude` refusing every launch with "You've reached
+   *  your Fable 5 limit" at 03:04Z that day, with `session` at 3% and `weekAll`
+   *  at 63% — is NOT visible here, and cannot be: /usage does not say it. The
+   *  parser is wired for the day the row returns; the signal that actually sees
+   *  such a wall is the CLI's own refusal string (`claude --model <tier> -p`).
+   *
+   *  Optional so every pre-existing `CliUsage` literal (other layers' tests,
+   *  older cached payloads) stays valid; the parser and {@link emptyCliUsage}
+   *  always populate it (with `[]`, which is the CORRECT value today). */
+  weekModels?: CliUsageModelSlot[]
   capturedAt: string
   /** Outcome of the most recent fetch attempt — drives the HUD's
    *  reason-or-fallback when `session` is null (see {@link CliUsageStatus}). */
@@ -54,6 +82,7 @@ export interface CliUsage {
 export const emptyCliUsage = (status: CliUsageStatus): CliUsage => ({
   session: null,
   weekAll: null,
+  weekModels: [],
   capturedAt: new Date().toISOString(),
   status,
 })
@@ -150,29 +179,67 @@ const stripAnsi = (s: string): string =>
 // arrives as "Currentsession". We make the header tokens whitespace-tolerant
 // (\s* between every pair) and let the percentage and Resets line be picked
 // up by relaxed `[\s\S]{0,N}?` spans.
-const findSection = (header: string, clean: string): CliUsageSlot | null => {
-  const flexible = header
-    .split(/\s+/)
-    .map(t => t.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'))
-    .join('\\s*')
-  const re = new RegExp(
-    `${flexible}[\\s\\S]{0,400}?(\\d{1,3})\\s*%\\s*used[\\s\\S]{0,200}?Resets\\s*([^\\r\\n]+)`,
-    'i',
-  )
-  const m = clean.match(re)
-  if (!m) return null
-  const pct = Number(m[1])
-  if (!Number.isFinite(pct)) return null
-  // Normalise "ResetsMay25at3pm(Asia/Tokyo)" → "May 25 at 3pm (Asia/Tokyo)".
-  // The TUI's space loss hits us here too; inject a space at every digit↔letter
-  // boundary so the result reads like the original /usage line.
-  const resetsAt = m[2]
+
+// What follows EVERY section header: the bar row's "NN% used", then the
+// "Resets …" line. Shared by the fixed headers (session / week-all) and the
+// dynamic per-model ones so all three tolerate the space loss identically.
+// Contributes two capture groups (pct, resetsAt) AFTER whatever the header adds.
+const SECTION_BODY =
+  '[\\s\\S]{0,400}?(\\d{1,3})\\s*%\\s*used[\\s\\S]{0,200}?Resets\\s*([^\\r\\n]+)'
+
+const escapeRe = (s: string): string => s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
+
+// Normalise "ResetsMay25at3pm(Asia/Tokyo)" → "May 25 at 3pm (Asia/Tokyo)".
+// The TUI's space loss hits the reset line too; inject a space at every
+// digit↔letter boundary so the result reads like the original /usage line.
+const cleanResetsAt = (raw: string): string =>
+  raw
     .replace(/([a-z])(\d)/gi, '$1 $2')
     .replace(/(\d)([a-z])/gi, '$1 $2')
     .replace(/\s*\(\s*/, ' (')
     .replace(/\s+/g, ' ')
     .trim()
-  return { pct, resetsAt }
+
+const findSection = (header: string, clean: string): CliUsageSlot | null => {
+  const flexible = header.split(/\s+/).map(escapeRe).join('\\s*')
+  const m = clean.match(new RegExp(`${flexible}${SECTION_BODY}`, 'i'))
+  if (!m) return null
+  const pct = Number(m[1])
+  if (!Number.isFinite(pct)) return null
+  return { pct, resetsAt: cleanResetsAt(m[2]) }
+}
+
+// Every `Current week (<Model> only)` row — see CliUsage.weekModels: today's CLI
+// prints none, so this returns [] on every real scrape. It exists so the reading
+// is already in place if the rows come back (they were there in 2.1.196).
+//
+// The model name is CAPTURED, never matched against a fixed list — the row read
+// "Sonnet only" on that build, and which model owns a weekly cap is a property of
+// the account's plan. An account could render more than one, so all rows are
+// scanned rather than the first: a dry flagship must stay visible even when a
+// cheaper tier's row comes first.
+//
+// The trailing "only)" is also what separates these rows from the account-wide
+// "Current week (all models)" one: that parenthetical never ends in "only", and
+// `[^)]` can't cross the closing paren, so the all-models header can never be
+// mistaken for a per-model row.
+const findModelWeeks = (clean: string): CliUsageModelSlot[] => {
+  const re = new RegExp(
+    `Current\\s*week\\s*\\(\\s*([^)]{1,40}?)\\s*only\\s*\\)${SECTION_BODY}`,
+    'gi',
+  )
+  const rows: CliUsageModelSlot[] = []
+  // exec-loop rather than matchAll: tsconfig sets no `target` (⇒ ES5), where
+  // iterating an iterator is a TS2802. The pattern can never match empty, so
+  // lastIndex always advances.
+  let m: RegExpExecArray | null
+  while ((m = re.exec(clean)) !== null) {
+    const model = m[1].replace(/\s+/g, ' ').trim()
+    const pct = Number(m[2])
+    if (!model || !Number.isFinite(pct)) continue
+    rows.push({ model, pct, resetsAt: cleanResetsAt(m[3]) })
+  }
+  return rows
 }
 
 // Exported for unit testing against captured `/usage` fixtures — the TUI scrape
@@ -184,6 +251,7 @@ export const parseUsageOutput = (raw: string): CliUsage => {
   return {
     session,
     weekAll: findSection('Current week (all models)', clean),
+    weekModels: findModelWeeks(clean),
     capturedAt: new Date().toISOString(),
     // A usable session % is the gauge's headline; its absence means the TUI
     // format changed (or the render was truncated) — surface that as a failure

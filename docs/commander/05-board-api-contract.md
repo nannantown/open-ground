@@ -126,11 +126,11 @@
 | 遷移 | 誰が | 根拠 |
 |---|---|---|
 | todo→doing | **手動 dispatch**: `POST /api/swarm/worker` が spawn **前**に claim CAS で移す | `server/routes/swarm.ts:177-190, :317` |
-| todo→doing | **エンジン**: spawn 成功後に `deps.moveToDoing`(=setColumn doing + setBranch) | `swarmOrchestrator.ts:4595, :2127-2150` |
-| doing→review | **エンジン monitor**: 完了判定(commit-gated)で promote | `swarmOrchestrator.ts:3945`; stage 定義 `types.ts:984-998` |
+| todo→doing | **エンジン**: spawn 成功後に `deps.moveToDoing`(=setColumn doing + setBranch) | `swarmOrchestrator.ts:5202, :2340` |
+| doing→review | **エンジン monitor**: 完了判定(commit-gated)で promote | `swarmOrchestrator.ts:4447`; stage 定義 `types.ts:1009` |
 | doing→review | **司令塔(手動)**: worker の心拍 `done true` を見て `setColumn review` | 運用(§9 のコマンド) |
 | review→done | **main 入り確認後のみ**。エンジン autoMerge(FF/クリーン rebase のみ・conflict は自動解決しない) | `swarmOrchestrator.ts:3593-3601, :4613-4628`; トグルは `server/routes/swarm.ts:606-627` |
-| review→doing | **rework verb**(counter+1) | `server/routes/project.ts:984-1014` |
+| review→doing | **rework verb**(counter+1)。**0713〜エンジン監視が観測する**: roster が `stage:'done'` のままのカードが doing に居たら外部差し戻しとみなし worker を再武装(`stage='running'`+`reworkAt=now` — `swarmOrchestrator.ts:4360-4377`)。worker が**差し戻しより新しい**心拍で ready を打ち直せば自動で review に再昇格する(古い ready では昇格しない — 02 章 §5.3)。roster に worker が残っている通常ケースでは司令官が rework 後に手で setColumn review する必要は無い — **ただし PTY が差し戻しより前に死んでいた稀ケースは観測できず沈む**(02 章 §5.3 の既知の残穴・手動復旧) | `server/routes/project.ts:984-1014` |
 | review→blocked | rework の counter が maxReworks(既定 3)を**超えた**とき(`count > max`) | `server/routes/project.ts:1000-1001` |
 | 任意→blocked/todo | `POST /api/swarm/orchestrator/review/resolve`(スタック review カードの人間裁定) | `server/routes/swarm.ts:628-652` |
 | crash 回収 | エンジンがカードを todo(再投入)/blocked(退避)へ | `swarmOrchestrator.ts:2332-2347` |
@@ -538,7 +538,8 @@ curl -s -X POST "$API/api/project/merged-branches" -H 'content-type: application
 続ける(00-INDEX §2.1 の表が正典):
 
 - **会話履歴** → ✅ 生き残る(resume)
-- **エンジンの in-memory 認知**(worker roster / reviews / quota 冷却 / 自動運転 ON) → ❌ **全消え**(01 章 §2)
+- **エンジンの in-memory 認知**(worker roster / reviews / 自動運転 ON) → ❌ **全消え**(01 章 §2)
+- **quota 冷却テーブル**(層A) → ✅ **生き残る**(2026-07-13 永続化。04 章 §2.1.1)
 - **Board / branch / 心拍 / escalations**(永続体) → ✅ ディスクに在る = **唯一の足場**
 - **コード自体** → ⚠️ 変わっている可能性大(再起動はたいていリリース)。各章の file:line も疑う
 

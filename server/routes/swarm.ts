@@ -89,6 +89,8 @@ import {
   clearCooling,
   isModelTier,
   allCoolingUntil,
+  ensureCoolingTableLoaded,
+  flushQuotaPersist,
   MAX_MANUAL_COOLING_MS,
   MODEL_TIER_LADDER,
 } from '@/lib/server/swarmQuota'
@@ -896,7 +898,15 @@ export const swarmRoutes = new Hono()
   // there is no `path` and no validateProjectPath.
   .get('/api/swarm/quota', async (c) => {
     if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
-    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now(), await getAllowedModelTiers()))
+    const now = Date.now()
+    // Fold in the PERSISTED cooling marks before answering. Boot kicks this too
+    // (server/index.ts) and it is memoized, so this is a no-op after the first
+    // call — but awaiting it here is what makes the FIRST read after a restart
+    // truthful rather than a clean slate. That clean slate was the bug: the app
+    // forgot fable was dry, reported launchTier:"fable", and burned a session
+    // discovering it again (2026-07-13).
+    await ensureCoolingTableLoaded(now)
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(now, await getAllowedModelTiers()))
   })
   // --- POST /api/swarm/quota/cool — cool a tier BY HAND -----------------------
   // Body: { tier, untilMs } or { tier, minutes }. The operator's steering wheel
@@ -921,6 +931,12 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}` }, 400)
     }
     const now = Date.now()
+    // Hydrate before mutating: the persist below serialises the WHOLE table, so
+    // writing while the boot load is still outstanding would mirror a table that
+    // doesn't yet hold the other tiers' persisted marks. (swarmQuota's chain
+    // enforces this ordering internally too — this just makes it explicit on the
+    // route that can be the very first caller after a restart.)
+    await ensureCoolingTableLoaded(now)
     let until: number
     if (typeof body?.untilMs === 'number' && Number.isFinite(body.untilMs)) {
       until = body.untilMs
@@ -934,6 +950,30 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `until must be within ${MAX_MANUAL_COOLING_MS}ms of now` }, 400)
     }
     markCoolingUntil(tier, until)
+    // Await the mirror write, so a 200 here MEANS "on disk". The owner's next move
+    // after cooling a tier is often to quit / relaunch the app; a fire-and-forget
+    // save could still be in flight when the process dies.
+    //
+    // And if the write FAILED, say so — 500, not 200. The engine's own sensor path
+    // is allowed to shrug off a failed save (a mark it can re-learn is not worth
+    // killing the cockpit for), but this route exists BECAUSE the owner is telling
+    // us something the sensor can't learn cheaply — "this tier is dry" — and its
+    // whole value is that the fact survives the restart. A 200 that quietly meant
+    // "in memory only" would put us straight back in the loop this closes: the app
+    // relaunches, the mark is gone, and the next dispatch burns a session
+    // rediscovering it. The mark IS applied in memory (we don't roll it back — the
+    // running engine should still avoid the tier), which is what the message says.
+    const flushed = await flushQuotaPersist()
+    if (!flushed.persisted) {
+      return c.json(
+        {
+          error:
+            `${tier} is cooling in THIS process, but the cooling table could not be persisted — ` +
+            `it will be forgotten when the app restarts: ${flushed.error}`,
+        },
+        500,
+      )
+    }
     return c.json<SwarmQuotaResponse>(quotaSnapshot(now, await getAllowedModelTiers()))
   })
   // --- POST /api/swarm/quota/uncool — release a tier --------------------------
@@ -952,6 +992,26 @@ export const swarmRoutes = new Hono()
     if (!isModelTier(tier)) {
       return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}` }, 400)
     }
+    const now = Date.now()
+    // Same two beats as /cool — and the uncool needs them just as much: hydrate
+    // first (else the release lands on a table that hasn't loaded the disk's
+    // marks and the persist would drop them), then flush (else a restart right
+    // after would faithfully reload the mark the owner just released).
+    await ensureCoolingTableLoaded(now)
     clearCooling(tier)
-    return c.json<SwarmQuotaResponse>(quotaSnapshot(Date.now(), await getAllowedModelTiers()))
+    // A failed save is arguably WORSE here than on /cool: the file still holds the
+    // mark, so the next boot would hydrate it and the tier the owner just released
+    // would come back cooling. Report that rather than answering 200.
+    const flushed = await flushQuotaPersist()
+    if (!flushed.persisted) {
+      return c.json(
+        {
+          error:
+            `${tier} is released in THIS process, but the cooling table could not be persisted — ` +
+            `the old mark is still on disk, so it will be COOLING again after a restart: ${flushed.error}`,
+        },
+        500,
+      )
+    }
+    return c.json<SwarmQuotaResponse>(quotaSnapshot(now, await getAllowedModelTiers()))
   })
