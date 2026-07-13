@@ -132,6 +132,22 @@ describe('buildOrderInjection', () => {
     expect(buildOrderInjection('T', 'n', 'prior fail').endsWith(WORKER_ORDER_RULES)).toBe(true)
   })
 
+  it('orders the worker to COMMIT BEFORE the completion gate (the 2026-07-12 全損)', () => {
+    // The old rule read 実装→検証→git commit: commit AFTER the gate. A worker
+    // obeyed it, was force-reclaimed at the execution ceiling mid-gate, and lost 15
+    // uncommitted files with its worktree. The discipline must now say, in the
+    // prompt every worker actually reads: commit at every phase boundary, and never
+    // enter the gate dirty. (The engine's salvage commit is the net — this is the
+    // discipline; a worker whose own commits exist never needs the net.)
+    expect(WORKER_ORDER_RULES).toContain('フェーズの境目ごとに必ず git commit')
+    expect(WORKER_ORDER_RULES).toContain('完了ゲート')
+    expect(WORKER_ORDER_RULES).toContain('WIP コミットを打ってから回す')
+    // The WHY has to ride along — a rule without its reason is the first one dropped.
+    expect(WORKER_ORDER_RULES).toContain('worktree ごと強制回収')
+    // Still one line (the whole order is a single slash-command argument).
+    expect(WORKER_ORDER_RULES).not.toMatch(/[\n\r\t]/)
+  })
+
   it('appends the LEARNING-LOOP clause when a prior 差し戻し reason is given (card fdf714ef)', () => {
     const out = buildOrderInjection('Logout button', 'in the header', 'tsc: error TS2345 not assignable')
     // The goal is preserved AND the prior-failure cause is appended, labelled.

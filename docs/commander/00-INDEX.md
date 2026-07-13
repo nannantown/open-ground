@@ -3,6 +3,7 @@
 **対象コミット: `0d1f7f0`**(origin/main tip、2026-07-10)。章ごとの行番号基準が**2 つ**ある:
 **03/06 章と TARGET-STATE は `0d1f7f0`** — 同日 main 入りの根治 3 件(`3129a58` = レビューの diff 連動 budget + 棄権理由、`d8431c3`+`aa9cb8d` = S3/S10 再投函根絶、`0d1f7f0` = quota 検知 21 分遅延の根治)を反映・リナンバー済み。
 **01/02/04/05 章は `cc7c60e` のまま** — 根治 3 件が `swarmOrchestrator.ts`(6349→6730 行、:355 以降が +38〜+381 シフト)/ `swarmOverseer.ts` / `swarmEscalations.ts`(:250 以降 +36)/ `types.ts`(:1147 以降 +7)を変えたため、これらのファイルへの行番号参照はずれている可能性がある(:354 以前の orchestrator 参照と、terminal.ts 等それ以外のファイル参照は有効)。**01 章 TL;DR#3・§6(monitor 飢餓)と 04 章 §3.2/3.3/3.6(検知 3 因子)は `0d1f7f0` で機構ごと過去の姿になった** — 両章に部分注記済み、現行の姿は 03 章 §2.1/§2.4 と TARGET-STATE §1。疑ったら現物優先(§6-1)。
+**例外(2026-07-12・会話 resume)**: 05 章 §6.2 の `/api/swarm/*` 行番号と 04 章 §2.6 の manager/supply 行番号は、resume 実装時に**現物から実測し直して更新済み**(`server/routes/swarm.ts` は +17 シフトしていた)。05 章に **§10(会話 resume)** を追加。それ以外の 04/05 の参照は依然 `cc7c60e` 基準。
 **読者**: 将来の司令塔(og-manage / manage セッション)。
 **この文書の役割**: docs/commander/ 全 6 章 + TARGET-STATE の統合索引。個別の機構は各章が正典 — ここは「どこを読むか」「全体がどう噛み合うか」「何を信じ何を疑うか」「何をしてはいけないか」を 1 枚に持つ。
 
@@ -26,10 +27,10 @@
 | 順 | 章 | 1 行要約 |
 |---|---|---|
 | 1 | [01-engine-core](01-engine-core.md) | エンジン中枢 — 3 秒 tick の回り方・dispatch 6 ゲート・monitor 全分岐・in-memory 状態の寿命(再起動で全部消える)。※TL;DR#3/§6 の「integrate が monitor を飢餓させる」は `0d1f7f0` 以前の歴史 |
-| 2 | [02-worker-lifecycle](02-worker-lifecycle.md) | worker の生涯 — spawn/心拍/promote/回収、worktree 削除の全 8 経路、workers API `heartbeatAt` 凍結の解明と根治(0710 誤診の真因 → 0711 修正済み) |
+| 2 | [02-worker-lifecycle](02-worker-lifecycle.md) | worker の生涯 — spawn/心拍/promote/回収、worktree 削除の全 8 経路と**回収前の WIP 保全**、実行時間上限は**実作業時間**で測る(quota 待ちは控除 — 0712 の 47KB 全損を根治)、workers API `heartbeatAt` 凍結の解明と根治(0710 誤診の真因 → 0711 修正済み) |
 | 3 | [03-integration-review](03-integration-review.md) | 統合パス 2 相(表示 A / land B)と敵対レビュー — verify、lens 4 体の全員一致、diff 連動 budget+棄権理由(`3129a58` 根治)と大 diff 凍結の実測(歴史)。tick 分離後の integrate の現行正典(§2.1/§2.4) |
-| 4 | [04-quota-models](04-quota-models.md) | quota 三層 — 冷却テーブル(A)/rate-limit 検知(B)/使用可能モデル mask(C)。検知 21 分遅延の 3 因子と根治(`0d1f7f0` — 45 秒サンプリング+早期認定+limit 画面クロック)。真実は `launchTier` だけ |
-| 5 | [05-board-api-contract](05-board-api-contract.md) | Board 契約 — tasks.json が唯一の永続体、列ライフサイクル、ロック/CAS、フル UUID の掟、二重 dispatch 両方向封鎖(cc7c60e) |
+| 4 | [04-quota-models](04-quota-models.md) | quota 四層 — 冷却テーブル(A)/rate-limit 検知(B)/使用可能モデル mask(C)/使用状況キャッシュ pre-launch veto(D、`/usage` が既知の枯渇を起動前に見て梯子からトップ tier を篩う・2026-07-12)。検知 21 分遅延の 3 因子と根治(`0d1f7f0` — 45 秒サンプリング+早期認定+limit 画面クロック)。**hold 中の時間は worker の実行時間から控除される**(§3.4-6 — 0712 根治)。真実は `launchTier` だけ |
+| 5 | [05-board-api-contract](05-board-api-contract.md) | Board 契約 — tasks.json が唯一の永続体、列ライフサイクル、ロック/CAS、フル UUID の掟、二重 dispatch 両方向封鎖(cc7c60e)、**司令官/補給官の会話 resume(§10)** |
 | 6 | [06-overseer-escalations](06-overseer-escalations.md) | overseer 信号 S1〜S11 と escalations/通知ストア — S3/S10 の 24h 窓+永続受領(`d8431c3`+`aa9cb8d` 根治)、再投函増殖の実測(歴史) |
 | 7 | [TARGET-STATE](TARGET-STATE.md) | 理想の稼働形(北極星)— 観測可能な 6 条件・現状ギャップ・対応カード |
 
@@ -38,12 +39,15 @@
 | 症状 | 直行先 |
 |---|---|
 | worker が動かない / 消えた / 心拍が古く見える | 02 章(§4 heartbeatAt 凍結は 0711 根治済み、§6 worktree 削除の全経路) |
+| **worker が実行時間上限で消え、未コミット作業が失われた** | 02 章 §5.5(runaway は**実作業時間**で判定 — quota 待ちは控除。0712 根治)+ §6(teardown 前に **WIP コミットで保全** — `git log <branch>` に `WIP: swarm reclaim auto-save`)+ §7-11(事故の全容)。quota 側の見方は 04 章 §3.4-6 |
 | review 列から進まない / 'conflict' 表示 | 03 章(§2.2 conflict 相乗り、§3 大 diff 凍結、§5 手動統合) |
 | dispatch されない / park している | 04 章(§5.5 spawnBlock、§7 運用手順)+ 01 章 §4.2 |
 | カード操作が効かない / 列が勝手に戻る | 05 章(§6.3 id の掟、§7 落とし穴) |
 | escalation が大量に来た / 古い障害が再通知される | 06 章(§4.1 S3 増殖、§5 トリアージ) |
 | エンジンが「何もしていない」ように見える / 検知が遅い | 01 章 §7.6(log ring buffer)+ TARGET-STATE §1(検知の現行機構)。※01 章 §6 の monitor 飢餓は `0d1f7f0` で解消済み(歴史) |
 | 全 claude セッションの Stop hook が MODULE_NOT_FOUND(worktree パスを指す) | 02 章 §2.5(hook source の cwd 非依存解決は 0712 根治済み — 応急処置は `installHooks` 再実行 = アプリ再起動 or POST /api/observer/install-hooks で正しいパスに上書き) |
+| 司令官が**存在しない worker の話をする** / 前回の認識のまま喋る | §2.1 + 05 章 §10.2 — resume で会話は復元されるがエンジンの認知は消えている。「状況」で読み直させる |
+| 司令官・補給官が**毎回記憶喪失**で立ち上がる(resume されない) | 05 章 §10.3 — fail-open の理由コード(`none`/`moved`/`live`/`missing`/`store`)。応答の `resumed` とサーバ log の `[swarmSessions]` 行で判別 |
 
 ---
 
@@ -94,6 +98,24 @@ flowchart TB
 | エンジンの認知 | `GET /api/swarm/orchestrator`(in-memory の写し — 再起動で全消え) | 01 章 §2 |
 | 起動できる tier | `GET /api/swarm/quota` の **`launchTier`**(`tiers[]` は mask 盲目) | 04 章 §2.6 |
 | 人間待ちの案件 | `~/.openground/escalations.json` の `status=open` | 06 章 §7.2 |
+| 司令官/補給官の会話 | claude の transcript(id は `~/.openground/projects/<id>/swarm-sessions.json`)— **再起動を跨いで生き残る**(2026-07-12) | 05 章 §10 |
+
+### 2.1 再起動で何が消え、何が生き残るか(resume した司令官は必ず読む)
+
+2026-07-12 から司令官・補給官は `claude --resume` で**前回の会話を復元して**立ち上がる(05 章 §10)。
+このとき**非対称性**を取り違えると、実在しない世界の話を続けることになる:
+
+| | 再起動後 |
+|---|---|
+| 司令官・補給官の**会話履歴** | ✅ **生き残る**(resume) |
+| エンジンの **in-memory 認知**(worker roster / reviews / quota 冷却) | ❌ **全消え**。自動運転も必ず OFF に戻る(安全側) |
+| Board / branch / 心拍 / escalations(**永続体**) | ✅ ディスクに在る = 唯一の足場 |
+| **コード自体** | ⚠️ 変わっている可能性大 — 再起動はたいてい**リリース**。各章の file:line も疑う(§6) |
+
+→ **だから resume 起動の司令官は、口を開く前に「状況」を頭から実行して Board 実体・worker 一覧・
+エンジン状態を読み直す**(命令はスキル注入に埋め込み済み: `swarmManager.ts` `MANAGER_RESUME_INJECTION`)。
+「前回こう言っていた」は根拠にならない — 現物(API/git)が正。これは戒 2「自己申告を信じず再検証」の
+自分自身への適用でもある。
 
 ---
 
@@ -104,7 +126,7 @@ flowchart TB
 3. **`reviews[].status` の 'conflict' は 4 事象の相乗り表示。** 本物の rebase 競合 / verify RED / must-fix 差し戻し直後 / defer 凍結(needs-human)が全部 'conflict' に上書きされる(swarmOrchestrator.ts:5324-5325, 5396-5397, 5367, 5432。03 章 §2.2)。engine log の直前行で種別を確認してから動く。凍結だけは `reviews[].abstainSummary`(棄権内訳、`3129a58`)の有無で API 単体でも見分けられる。
 4. **心拍鮮度は 0711 の修正後 workers API `heartbeatAt` を信じてよい。** 以前はエンジン worker の workers API `heartbeatAt` が「エンジンが最後に読んだ時刻」の凍結値で、0710 に「半日死んでいる」と誤診した(02 章 §4)。`hb?.updatedAt ?? w.heartbeatAt`(swarmWorkerRegistry.ts:188)への修正でディスク優先になった。`phase`/`note` は今回の修正対象外(引き続きエンジンの凍結値)なので、それらが必要なときはディスクの `updatedAt`/`.phase` で裏取りする。
 5. **`branch -d` の前に local main を FF。** `branch -d` は現在の HEAD 側へのマージ済み判定なので、local main が origin/main に追従していないと統合済み branch でも "not fully merged" で失敗する(司令塔セッションで実測済みのツールギャップ)。先に `git fetch origin main` し、`git merge-base --is-ancestor <branch> origin/main` で統合済みを確認してから消す。
-6. **掃除は merge-base 確認後のみ。** worker の「停止」は worktree force 削除とセット(02 章 §6 の全 8 経路)— 消す前に「コミットが branch / trunk に残るか」を確認する。janitor ですら `branch -d` のみ(`-D` は明示 force のみ)+ worker の消滅が証明できた心拍しか消さない(swarmJanitor.ts:219-231, :364-377)。
+6. **掃除は merge-base 確認後のみ。** worker の「停止」は worktree force 削除とセット(02 章 §6 の全 8 経路)— 消す前に「コミットが branch / trunk に残るか」を確認する。janitor ですら `branch -d` のみ(`-D` は明示 force のみ)+ worker の消滅が証明できた心拍しか消さない(swarmJanitor.ts:219-231, :364-377)。**0712 根治後、エンジン経由の teardown(経路 2〜5)は消す前に未コミット分を WIP コミットに変換する**が、**`POST /api/swarm/worktree/remove` の force(経路 1)はその保全を通らない** — 手で消すときは今も自分で dirty を見る。
 7. **guard の誤 block 3 パターンを知っておく**(実体は `~/.openground/guard/openground-guard.js`。PreToolUse hook、exit 2 で deny): ① push と `rm -f` が同居する 1-liner が force-push に誤検出される ② echo / コメント内の危険文字列が誤抽出される ③ `xargs git` は「stdin 供給のターゲットを検査できない」として一律 block(0710 実測: `git merge-base … | xargs git log` が blocked)。回避は「注釈を入れず 1 種類ずつ分割」「xargs でなく直接引数」。**guard の block は敵ではなく安全装置 — 回避のために guard を外さない。**
 8. **緑テスト ≠ 正しさ。** `npm test` は型エラーを捕らない — 完了ゲートは `npx tsc --noEmit` / `npm test` / `npm run lint` の 3 点セット。テスト自体の効力も「コードを意図的に壊して赤くなるか」(変異テストの型)で初めて証明される — 実例: 循環判定の naive back-edge DFS はテスト green のまま cross edge を見逃した(SCC 必須と判明)。CI の flaky(負荷で timeout 発火がずれ pass/fail が反転)も「緑 = 正しい」を裏切る。
 9. **エンジン稼働中に手動 dispatch しない — するなら `POST /api/swarm/worker {taskId}` 一択。** 同一 repo の dispatcher は常に 1 つ。手動 dispatch 前に `GET /api/swarm/orchestrator` で `running` を確認する(05 章 §7-2)。cc7c60e で両方向とも機械封鎖されたので taskId 経由は 409 で守られる — **409 は「先客あり」の正常動作**(05 章 §5.4)。`setColumn doing` + PTY 手組みは封鎖の外(やらない)。
@@ -152,7 +174,7 @@ flowchart TB
 | [02 章](02-worker-lifecycle.md) **§8** | repo キー導出 / 全 worker のディスク心拍一覧 / workers API との突き合わせ(凍結の確認)/ worktree 実在確認 / promote 条件の手動再現(rev-list)/ dirty 判定 / 停止・削除・RESTART・手動 dispatch の実操作 |
 | [03 章](03-integration-review.md) **§6** | reviews[] と autoMerge の現在値 / conflict 表示の真因区別(journal)/ arm・disarm / resolve(blocked・todo)/ **diff サイズ測定(凍結境界 22〜34KB との突合)** / classify の手動再現 / verify・review worktree 残骸 / カード 58335c7f の本文 |
 | [04 章](04-quota-models.md) **§10** | mask がソース・bundle に入っているか / 定数の現在値 / センサー書込箇所が 2 つだけ / spawn 経路の fail-closed / **launchTier(唯一の真実)** / 手動 cool・uncool の実験 / 冷却の揮発性 / ケーススタディの一次痕跡 |
-| [05 章](05-board-api-contract.md) **§9** | 対象コミット確認 / **Board 読み→書き(results 確認)→読み戻しの型** / rework と blocked 退避 / 手動 dispatch 前のエンジン確認 / quota・park の理由 / 永続体(tasks.json)直読 / merged-branches(done 化の前提確認) |
+| [05 章](05-board-api-contract.md) **§9 / §10.4** | 対象コミット確認 / **Board 読み→書き(results 確認)→読み戻しの型** / rework と blocked 退避 / 手動 dispatch 前のエンジン確認 / quota・park の理由 / 永続体(tasks.json)直読 / merged-branches(done 化の前提確認) / **会話 resume の永続体(swarm-sessions.json)と transcript の実在確認(§10.4)** |
 | [06 章](06-overseer-escalations.md) **§7** | overseer の armed 状態 / inbox の open 一覧・status 内訳 / **S3 増殖の突合(発火源 fatal ↔ escalation 世代)** / 通知ストアの内訳と cap 消費 / escalation の偽物判定(branch・カード実在)/ answer・dismiss・手動 open / 付帯物(PTY キャプチャ・scratch) |
 | [TARGET-STATE](TARGET-STATE.md) | 各理想条件の「到達判定」コマンド(現状はギャップの再確認に使う) |
 

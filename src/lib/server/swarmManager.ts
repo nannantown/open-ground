@@ -52,6 +52,7 @@ import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
+import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
 import { installOgManageSkill } from './ogManageSkill'
 import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
@@ -69,12 +70,42 @@ import { type SpawnSwarmManagerResponse } from '../types'
  *  points at the app-native sibling instead. */
 export const MANAGER_INJECTION = '/og-manage'
 
+/** The positional prompt for a RESUMED commander (swarmSessions.ts): the same
+ *  `/og-manage` skill, plus the ONE instruction a restored commander must obey
+ *  before it opens its mouth — re-read the Board.
+ *
+ *  WHY this is not optional. Everything the commander believed when it was last
+ *  awake is now suspect, and in two different ways:
+ *    - Its ENGINE knowledge is not just stale but GONE: the orchestrator's roster,
+ *      review state and quota cooling are in-memory and die with the process (01
+ *      章 §2 / 00-INDEX §2). The conversation survives the restart; the engine's
+ *      認知 does not. A commander that keeps talking about "the three workers I
+ *      dispatched" is describing a world that no longer exists.
+ *    - The CODE may have changed underneath it — an OPEN GROUND restart is usually
+ *      a RELEASE. Cards it remembers as `doing` may be merged; its own file:line
+ *      references may have shifted.
+ *  So the resumed session is told to run 「状況」 FIRST — the skill's own status
+ *  routine (GET /api/swarm/workers + /api/swarm/orchestrator + git + Board 列の
+ *  突き合わせ), i.e. the existing read-the-world logic, not a new one — and report
+ *  from what it FINDS, never from what it remembers.
+ *
+ *  ONE LINE, on purpose — the delivery contract buildOrderInjection (swarmWorker.ts)
+ *  documents: the whole thing must land as a SINGLE slash-command argument, or it
+ *  risks being split / collapsed into a `[Pasted text]` chip where `/og-manage` is
+ *  never parsed as a command. */
+export const MANAGER_RESUME_INJECTION =
+  '/og-manage セッション再開: アプリ再起動をまたいで前回の会話を復元した。記憶をそのまま前提にするな — エンジンの in-memory 状態(worker roster・review・quota)は再起動で全消えし、再起動はたいていリリースなのでコード自体も変わっている。最初にやることは1つだけ: 「状況」を頭から実行し、Board の実体(todo/doing/review)・worker 一覧・エンジン状態を API と git で読み直して、その結果だけを根拠に現状を報告する。前回の認識との食い違いがあれば現物(API/git)を正とし、食い違った点を明示すること。'
+
 export interface SpawnSwarmManagerOpts {
   /** The registered project to command — the commander PTY's cwd (its primary
    *  checkout). The route validates this with validateProjectPath first. */
   projectPath: string
   cols?: number
   rows?: number
+  /** Force a BRAND-NEW conversation, ignoring (and overwriting) the persisted
+   *  session id. The escape hatch for a restored context that has gone bad — off
+   *  by default, so the normal button always resumes. */
+  fresh?: boolean
 }
 
 /** Build the LaunchClaudeOpts for a commander conversation — pure + exported so
@@ -96,10 +127,15 @@ export interface SpawnSwarmManagerOpts {
  *     CLAUDE_EFFORTS-guarded there; the Remote Control session is named 'manager'.
  *   - initialPrompt — `/og-manage` positional (claude runs the tmux-free
  *     commander skill on startup). */
+//   - resume — when the project already has a commander conversation claude can
+//     load (swarmSessions.resolveSwarmSession proved it), the SAME session id rides
+//     `--resume` instead of `--session-id` (buildClaudeArgv), so the commander wakes
+//     up remembering the last weeks of integration — with the re-read-the-Board
+//     order above. Absent ⇒ the historical fresh-session launch, byte-for-byte.
 export const managerLaunchOpts = (
   cwd: string,
   agentSessionId: string,
-  opts: { cols?: number; rows?: number } = {},
+  opts: { cols?: number; rows?: number; resume?: boolean } = {},
   // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
   me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
@@ -118,7 +154,8 @@ export const managerLaunchOpts = (
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,
-  initialPrompt: MANAGER_INJECTION,
+  ...(opts.resume ? { resume: true } : {}),
+  initialPrompt: opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION,
 })
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
@@ -130,7 +167,16 @@ export const managerLaunchOpts = (
 export const spawnSwarmManager = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
-  const agentSessionId = randomUUID()
+  // RESUME the project's previous commander conversation whenever claude can still
+  // load it (swarmSessions.ts) — the commander is a days-long integration desk, not
+  // a disposable worker, and an OPEN GROUND restart (i.e. every release) used to
+  // wipe it. Fail-open: any doubt about the persisted session (gone, corrupt, still
+  // open in a live PTY, project moved) and it opens a fresh one instead — the desk
+  // always launches. `fresh` skips the lookup outright (and overwrites the record
+  // below): the owner's way out of a restored context that has gone bad.
+  const session = opts.fresh
+    ? { agentSessionId: randomUUID(), resume: false }
+    : await resolveSwarmSession(opts.projectPath, 'manager')
   // Self-repair the /og-manage skill RIGHT BEFORE launch (idempotent, best-
   // effort): the boot-time install covers the normal path, but a skill deleted
   // mid-session — or a dev server that booted before the skill shipped — would
@@ -152,7 +198,23 @@ export const spawnSwarmManager = async (
   )
   if (!me) throw new NoAllowedModelTierError()
   const ref = launchClaude(
-    managerLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }, me),
+    managerLaunchOpts(
+      opts.projectPath,
+      session.agentSessionId,
+      { cols: opts.cols, rows: opts.rows, resume: session.resume },
+      me,
+    ),
   )
-  return { terminalId: ref.terminalId, agentSessionId }
+  // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
+  // commander its memory on the following launch (it starts fresh — the old
+  // behaviour), and must NEVER turn a successfully-spawned PTY into a 500.
+  await recordSwarmSession(opts.projectPath, 'manager', session.agentSessionId).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[swarmManager] could not persist the commander session id: ${String(e)}`)
+  })
+  return {
+    terminalId: ref.terminalId,
+    agentSessionId: session.agentSessionId,
+    resumed: session.resume,
+  }
 }

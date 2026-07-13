@@ -36,6 +36,7 @@ import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
+import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
 import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmSupplyResponse } from '../types'
@@ -44,12 +45,32 @@ import { type SpawnSwarmSupplyResponse } from '../types'
  *  (claude submits it on startup; a TUI-injected slash command would not). */
 export const SUPPLY_INJECTION = '/supply'
 
+/** The positional prompt for a RESUMED supply desk (swarmSessions.ts): the same
+ *  `/supply` skill, plus the one thing a restored conversation must be told —
+ *  its memory of the Board is STALE. The desk was last awake before an app
+ *  restart, and in the meantime the commander may have dispatched, merged or
+ *  closed the very cards it remembers filing, so anything it "knows" about the
+ *  queue is a guess. Re-reading the Board before filing is also the standing
+ *  house rule for this role (積む前に必ず現状調査): a supply officer working from
+ *  stale memory files duplicates of work that already shipped.
+ *
+ *  ONE LINE, on purpose — the same hard-won delivery contract buildOrderInjection
+ *  (swarmWorker.ts) documents: the whole thing must land as a SINGLE slash-command
+ *  argument. A multi-line positional risks being split, or collapsed into a
+ *  `[Pasted text]` chip where `/supply` is never parsed as a command at all. */
+export const SUPPLY_RESUME_INJECTION =
+  '/supply セッション再開: アプリ再起動をまたいで前回の会話を復元した。あなたの記憶は古い — 前回以降に司令官が配車・統合・完了させたカードがある。新しいカードを積む前に、まず Board の現状(todo/doing/review)を API で読み直し、既に実装済み・重複・前提が変わったタスクを積まないこと。読み直した結果を1行で報告してから待機する。'
+
 export interface SpawnSwarmSupplyOpts {
   /** The registered project to feed — the supply PTY's cwd (its primary
    *  checkout). The route validates this with validateProjectPath first. */
   projectPath: string
   cols?: number
   rows?: number
+  /** Force a BRAND-NEW conversation, ignoring (and overwriting) the persisted
+   *  session id. The escape hatch for a desk whose restored context has gone bad
+   *  — off by default, so the normal button always resumes. */
+  fresh?: boolean
 }
 
 /** Build the LaunchClaudeOpts for a supply session — pure + exported so the
@@ -70,10 +91,15 @@ export interface SpawnSwarmSupplyOpts {
  *     `--model opus --effort max … --remote-control supply`. effort is
  *     CLAUDE_EFFORTS-guarded there; the Remote Control session is named 'supply'.
  *   - initialPrompt — `/supply` positional (claude runs the skill on startup). */
+//   - resume — when the project already has a supply conversation claude can load
+//     (swarmSessions.resolveSwarmSession proved it), the SAME session id rides
+//     `--resume` instead of `--session-id` (buildClaudeArgv) and the desk wakes up
+//     with its memory intact, plus the stale-Board warning above. Absent ⇒ the
+//     historical fresh-session launch, byte-for-byte.
 export const supplyLaunchOpts = (
   cwd: string,
   agentSessionId: string,
-  opts: { cols?: number; rows?: number } = {},
+  opts: { cols?: number; rows?: number; resume?: boolean } = {},
   // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
   me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
@@ -91,7 +117,8 @@ export const supplyLaunchOpts = (
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,
-  initialPrompt: SUPPLY_INJECTION,
+  ...(opts.resume ? { resume: true } : {}),
+  initialPrompt: opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION,
 })
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
@@ -99,14 +126,26 @@ export const supplyLaunchOpts = (
  *  Subscription-only (launchClaude — never `claude -p`/the SDK). Returns as soon
  *  as the PTY is up; claude boots and invokes /supply on its own. No worktree is
  *  created, so there is nothing to clean up on stop — the caller just kills the
- *  PTY. */
+ *  PTY.
+ *
+ *  RESUMES the project's previous supply conversation whenever claude can still
+ *  load it (swarmSessions.ts) — the desk is a days-long conversation, not a
+ *  disposable worker, so an app restart must not wipe its memory. Fail-open: any
+ *  doubt about the persisted session (gone, corrupt, still open, project moved)
+ *  and it opens a fresh one instead. The desk always launches. */
 export const spawnSwarmSupply = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
-  const agentSessionId = randomUUID()
+  // `fresh` skips the lookup entirely (and overwrites the record below) — the
+  // owner's way out of a restored context that has gone bad.
+  const session = opts.fresh
+    ? { agentSessionId: randomUUID(), resume: false }
+    : await resolveSwarmSession(opts.projectPath, 'supply')
   // Token budget (card 68d8e00f): economy/optimize run the supply officer on sonnet.
   // Null ⇒ every tier switched OFF: no model, no spawn (the same hard mask every
-  // other swarm role obeys — fail-CLOSED).
+  // other swarm role obeys — fail-CLOSED). Checked BEFORE we record anything, so a
+  // refused launch never leaves a session id pointing at a conversation that
+  // does not exist.
   const me = resolveSwarmModelEffort(
     await getExecutionMode(),
     'supply',
@@ -116,7 +155,23 @@ export const spawnSwarmSupply = async (
   )
   if (!me) throw new NoAllowedModelTierError()
   const ref = launchClaude(
-    supplyLaunchOpts(opts.projectPath, agentSessionId, { cols: opts.cols, rows: opts.rows }, me),
+    supplyLaunchOpts(
+      opts.projectPath,
+      session.agentSessionId,
+      { cols: opts.cols, rows: opts.rows, resume: session.resume },
+      me,
+    ),
   )
-  return { terminalId: ref.terminalId, agentSessionId }
+  // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
+  // desk its memory on the following launch (it starts fresh — the old behaviour),
+  // and must NEVER turn a successfully-spawned PTY into a 500.
+  await recordSwarmSession(opts.projectPath, 'supply', session.agentSessionId).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[swarmSupply] could not persist the supply session id: ${String(e)}`)
+  })
+  return {
+    terminalId: ref.terminalId,
+    agentSessionId: session.agentSessionId,
+    resumed: session.resume,
+  }
 }

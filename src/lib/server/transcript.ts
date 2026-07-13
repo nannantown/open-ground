@@ -22,7 +22,11 @@ import { claudeDirName } from './claudeProjectDir'
 const claudeProjectsRoot = () => join(homedir(), '.claude', 'projects')
 const sessionDir = (cwd: string): string =>
   join(claudeProjectsRoot(), claudeDirName(cwd))
-const sessionJsonlPath = (cwd: string, sessionId: string): string =>
+/** Where claude keeps THIS session's transcript — the one place that knowledge
+ *  lives. Exported because swarmSessions.ts probes the same file to decide whether
+ *  a persisted desk session is still `--resume`-able (a second derivation of the
+ *  path would be free to drift from claude's actual storage layout). */
+export const sessionJsonlPath = (cwd: string, sessionId: string): string =>
   join(sessionDir(cwd), `${sessionId}.jsonl`)
 
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)

@@ -3,6 +3,7 @@
 **対象コミット: `cc7c60e`**(使用可能モデル mask は `d1485ea`(2026-07-09 18:05 +0900)で main 入り)
 **読者: 将来の司令塔(og-manage)セッション。** モデル枯渇まわりで誤診しないための正確な機構文書。全主張に file:line の根拠を付す。行番号は上記コミット時点のもの — ズレたら §10 の grep で自分で裏取りすること。
 > **部分更新(2026-07-10)**: `0d1f7f0` が**検知 21 分遅延の 3 因子(§3.2 沈黙ゲート / §3.3 装飾再描画 / §3.6 monitor 飢餓)をすべて根治**した — 各節に注記済み、§4 の実測は歴史(照合点)として保持。根治後の機構と到達判定は TARGET-STATE §1 が正典(0d1f7f0 基準の行番号つき)。層 A/B/C の三層モデル自体と §5 以降の park/mask 機構は不変。swarmOrchestrator.ts の行番号は :355 以降 +38〜+381 シフト(00-INDEX 冒頭)。
+> **部分更新(2026-07-12)**: `swarmLaunch.ts` に**層D — 使用状況キャッシュ(claudeUsageCli/「A5」)による PRE-LAUNCH veto**が追加された(§5.7)。層A(冷却)は**起動して rate-limit を実際に食らって初めて**学習する事後学習(reactive)だが、A5 の `/usage` スクレイプは UsageHud がとっくに「fable 実質 100%」と知っている状態を起動前から握っている — その既知の枯渇を**起動判断そのもの**に使うのが層D。層 A/B/C とは独立(fail-open・trailing/gray-zone は無視)で、行番号はこの節時点の `swarmLaunch.ts` 現物 grep で裏取りすること(§10)。
 
 ---
 
@@ -15,8 +16,9 @@
 | **A. 冷却テーブル**(センサーの記憶) | tier → 解禁時刻(epoch ms)の Map | `globalThis.__openground_swarm_quota`(`src/lib/server/swarmQuota.ts:75-82`) | **in-memory。アプリ(サーバプロセス)再起動で消える**。tsx watch リロードは生存(swarmQuota.ts:64-70) | 「この tier は今冷えている」を一時記憶。期限で**勝手に復活**(lazy expiry、swarmQuota.ts:256-259) |
 | **B. rate-limit 検知**(センサーの目) | worker 画面/reviewer transcript のパターン監視 | `src/lib/server/swarmOrchestrator.ts`(worker arm: 4064-4115 / reviewer arm: 3522-3586) | エンジン稼働中のみ | limit 文言を見つけて A に書き込む(`markRateLimited`)。**唯一の自動書込経路** |
 | **C. 使用可能モデル mask**(オーナーの政策) | tier → ON/OFF の永続スイッチ | `settings.json` の `Settings.swarmAllowedModels`(src/lib/types.ts:111-115)+ globalThis ミラー(`src/lib/server/swarmAllowedModels.ts:67-74`) | **永続。再起動・self-update を生き延びる** | 「この tier は使うな」を恒久指定。**期限で復活しない** |
+| **D. 使用状況キャッシュ**(A5・pre-launch veto、2026-07-12) | `claude /usage` スクレイプの成功キャッシュ(`session`/`weekAll` の pct) | `globalThis.__openground_usage_cli_state`(`src/lib/server/claudeUsageCli.ts:73-92`)を `peekCachedUsage()` で同期 peek | in-memory・TTL 30分(CACHE_TTL_MS)・成功時のみキャッシュ | **起動前**に「トップ tier(fable)は確定で 100% 枯渇」と分かっている場合だけ、`resolveAvailableTier` の梯子からトップ tier を除外する。層Aと違い**まだ一度も起動していない状態でも**効く |
 
-**合流点は1つ**: `isTierSpawnable = isTierAllowed AND !isTierCooling`(swarmAllowedModels.ts:97-101)。**A と C は独立した2つの拒否権**で、どちらか一方だけで tier を殺せる。cool 解除は OFF tier を復活させないし、ON に戻しても cooling は縮まない(swarmAllowedModels.ts:16-18)。
+**合流点は1つ**: `isTierSpawnable = isTierAllowed AND !isTierCooling`(swarmAllowedModels.ts:97-101)。**A と C は独立した2つの拒否権**で、どちらか一方だけで tier を殺せる。cool 解除は OFF tier を復活させないし、ON に戻しても cooling は縮まない(swarmAllowedModels.ts:16-18)。層D はこの2つに**さらに独立して**重なる第3の拒否権だが、**トップ tier(梯子の先頭)にしか適用されない**(A5 のキャッシュに per-tier 内訳が無く、account-wide の session/weekly % しかないため — §5.7)。
 
 tier の梯子は `SWARM_MODEL_TIERS = ['fable', 'opus', 'sonnet', 'haiku']`(src/lib/types.ts:2173、best→cheapest)。swarmQuota の `MODEL_TIER_LADDER` はこれの alias(swarmQuota.ts:55)。4 alias とも 2026-07-06 に CLI 実機検証済み(swarmQuota.ts:31-37)。
 
@@ -28,11 +30,11 @@ tier の梯子は `SWARM_MODEL_TIERS = ['fable', 'opus', 'sonnet', 'haiku']`(src
 |---|---|---|
 | `src/lib/server/swarmQuota.ts` | 層A。純粋関数+globalThis テーブル。エンジンも usage センサーも import しない一方向依存(swarmQuota.ts:15-29) | `MODEL_TIER_LADDER` / `markRateLimited`(216) / `markCoolingUntil`(201) / `clearCooling`(241) / `resolveCoolingUntil`(178) / `isTierCooling`(256) / `highestAvailableTier`(264) / `allCoolingUntil`(275) / `coolingSnapshot`(290) / `isModelTier`(247) / `MAX_MANUAL_COOLING_MS`(236) |
 | `src/lib/server/swarmAllowedModels.ts` | 層C(d1485ea 新規)。swarmQuota+types のみ import(swarmAllowedModels.ts:30-31) | `normalizeAllowedModels`(47) / `anyTierAllowed`(59) / `isTierSpawnable`(97) / `highestSpawnableTier`(106) / `highestAllowedTier`(114) / `spawnBlock`(132) / `NoAllowedModelTierError`(154) / `setAllowedModelTiersCache`(78) |
-| `src/lib/server/swarmLaunch.ts` | 起動 tier の決定。A/C を読む(書かない) | `SWARM_LAUNCH_MODEL='fable'`(52) / `resolveAvailableTier`(205) / `resolveSwarmModelEffort`(257) / `execModeMaxWorkers`(272) |
+| `src/lib/server/swarmLaunch.ts` | 起動 tier の決定。A/C/D を読む(書かない) | `SWARM_LAUNCH_MODEL='fable'`(56) / `isTopTierExhaustedByUsage`(223、層D) / `resolveAvailableTier`(230) / `resolveSwarmModelEffort`(315) / `execModeMaxWorkers` |
 | `src/lib/server/swarmOrchestrator.ts` | 層B(検知)+park(ACTUATOR)。`markRateLimited` の生産呼出は worker arm(4096)と reviewer arm(3572)の2箇所だけ | `RATE_LIMIT_PATTERNS`(1123) / `classifyOutput`(1256) / `endsInRateLimit`(1203) / `STALL_SILENCE_MS`(271) / `RATE_LIMIT_GRACE_MS`(347) / `describeSpawnBlock`(3421) |
 | `server/routes/swarm.ts` | quota API 3本(ヘッダ一覧 swarm.ts:26-31) | `GET /api/swarm/quota`(880) / `POST /api/swarm/quota/cool`(894) / `POST /api/swarm/quota/uncool`(926) |
 | `src/lib/server/store.ts` | mask の永続化と読出。**全OFF拒否の書込境界**(181-185) | `getAllowedModelTiers`(195-196) |
-| `src/lib/server/claudeUsageCli.ts` | 「A5」= CLI `/usage` スクレイプのキャッシュ | `peekCachedUsage`(105-110、TTL 内の最終**成功**スクレイプのみ返す) |
+| `src/lib/server/claudeUsageCli.ts` | 層D。「A5」= CLI `/usage` スクレイプのキャッシュ。swarmLaunch.ts が読むのは既存の `peekCachedUsage` のみ — このファイル自体(スクレイプ機構・watcher・TTL)は今回のカードで無改修 | `peekCachedUsage`(105-110、TTL 内の最終**成功**スクレイプのみ返す) / `CliUsage`(42-49、`session`/`weekAll`/`status`) |
 | `src/lib/server/terminal.ts` | PTY プール。`lastOutputAt` の唯一のスタンプ箇所(297) | `WORKING_SILENCE_MS=3000`(21) |
 
 spawn 経路(5+1)と fail-closed の実装箇所は §5.4。
@@ -69,7 +71,7 @@ swarmQuota.ts:178-193。上から順に試し、**過去時刻は無視して次
 2. **A5**(CLI usage センサーのキャッシュ値): 呼出側が `a5CoolingHint()` で渡す(swarmOrchestrator.ts:4098, 3574)。**pct >= 100 ゲート付き** — A5 の `resetsAt` は 3% 使用時でも常時表示される「現ウィンドウの終端」なので、その slot が実際に**枯れている**(session.pct>=100、次いで weekAll.pct>=100)ときだけ信用する(swarmOrchestrator.ts:1223-1238)。ゲートが無いと、一過性 429/5xx への RATE_LIMIT_PATTERNS ヒットで健全 tier を最長 ~5h 冷やしてしまう(0708 must-fix 差し戻しの教訓、1227-1230)。両 slot 枯れなら先に評価される session(=より早い reset)が勝つ(1230-1232, 1235-1236)。
 3. **フラット grace**: `now + graceMs`(192)。エンジンは `RATE_LIMIT_GRACE_MS` を渡す(swarmOrchestrator.ts:4099, 3575)。
 
-`RATE_LIMIT_GRACE_MS` = **20分が既定**。env `OPENGROUND_SWARM_RATE_LIMIT_GRACE_MIN` で 2〜360分に調整可、ただし `MAX_EXEC_MS - 60s` で強制クランプ(暴走 park より先に requeue する band-inversion 防御。swarmOrchestrator.ts:347-353)。swarmQuota 側の `DEFAULT_COOLING_GRACE_MS`(62)は同値 20分のローカル既定(import 循環回避のための重複、57-61)。
+`RATE_LIMIT_GRACE_MS` = **20分が既定**。env `OPENGROUND_SWARM_RATE_LIMIT_GRACE_MIN` で 2〜360分に調整可、ただし `MAX_EXEC_MS - 60s` で強制クランプ(暴走 park より先に requeue する band-inversion 防御。swarmOrchestrator.ts:365-373)。swarmQuota 側の `DEFAULT_COOLING_GRACE_MS`(62)は同値 20分のローカル既定(import 循環回避のための重複、57-61)。**この grace の間に流れた時間は worker の実行時間に算入されない**(§3.4-6 — hold 台帳で控除される)。
 
 ### 2.5 手動 cool / uncool API
 
@@ -120,15 +122,18 @@ swarmQuota.ts:178-193。上から順に試し、**過去時刻は無視して次
 - echo 割引(1065-1071)は **nudge 後(count>0)の echo だけ**を除外する仕組みで、**平常時の装飾再描画には無力**(1069 の `count > 0` 条件)。→ ケーススタディ原因②。
 - **`0d1f7f0` 後**: terminal.ts の無条件スタンプは残るが、**limit 文言が画面を占有している間は stall クロックの出力チャネルを文言出現時刻でクランプ**(`engine.limitScreen` + `stallLastOut`)— 文言保持中の repaint は chrome とみなす。心拍はクランプしない(打てる worker は働いている)。requeue は grace 経過に加え raw 沈黙 45 秒も要求。正典 = TARGET-STATE §1。
 
-### 3.4 worker arm — 検知したら「hold → cool → 20分後 requeue」
+### 3.4 worker arm — 検知したら「hold → cool → 20分後 requeue」(hold 中の時間は実行時間から控除される)
 
-monitor(`monitorWorkers`、dispatch pass の一部)にて、silent かつ `classifyOutput === 'rate-limited'` の worker(4080-4116):
+monitor(`monitorWorkers`、dispatch pass の一部)にて、silent かつ `classifyOutput === 'rate-limited'` の worker:
 
-1. 初回 sighting: `engine.rateLimited.set(terminalId, {since: now})`(4083-4085)。
+1. 初回 sighting: `engine.rateLimited.set(terminalId, {since: now, holdSince: limitSince ?? now})`。`since` は **requeue クロック**(下記 4)の起点、`holdSince` は **hold 台帳**(下記 6)の起点で、後者は limit 文言が画面を掴んだ瞬間(`engine.limitScreen` の onset)まで遡る。
 2. **QUOTA SENSOR**(冷却テーブルへの生産書込): `w.model` が梯子上の tier のときだけ `markRateLimited(tier, {ptyText: screen, a5ResetsAt: a5CoolingHint(), graceMs: RATE_LIMIT_GRACE_MS, now})`(4093-4101)。model 不明の worker は**何も mark しない**(推測で冷やさない、4090-4092)。`w.model` は spawn 時に `SpawnSwarmWorkerResponse.model` から記録される(4583、swarmWorker.ts:503、types.ts:1014-1019)。
 3. hold: **nudge しない・reclaim しない**(Enter で limit は明けない/reclaim は成果ごと捨てて同じ壁に再突入するから。4073-4076)。journal に `worker rate/usage-limited — holding (no nudge; requeue after 20m) · tier fable cooling until …` と出る(4104-4108)。
-4. `RATE_LIMIT_GRACE_MS` 経過後もまだ limited: slot を解放して card を 'todo' へ requeue(`recoverLost`、4109-4112)。**branch のコミットは保持** — 後の再挑戦が引き継ぐ(4077-4079)。
-5. 画面が normal に戻れば `rateLimited` エントリはクリア(1424-1429 の契約コメント)。
+4. `RATE_LIMIT_GRACE_MS` 経過後もまだ limited: slot を解放して card を 'todo' へ requeue(`recoverLost`)。**branch のコミットは保持** — 後の再挑戦が引き継ぐ。さらに **未コミットの作業も WIP コミットで保全される**(02 章 §6 — `commitWipBeforeTeardown`)。
+5. 画面が normal に戻れば hold は**解除**され、`rateLimited` エントリはクリアされる。
+6. **【2026-07-12 根治】hold していた時間は worker の実行時間から控除される。** 解除のたびに `endRateLimitHold`(swarmOrchestrator.ts:1963 — `engine.rateLimited` を落とす唯一の seam)が hold の長さを `engine.rateLimitHeldMs` に積み、runaway 判定は「実作業時間 = 通算 − hold 累計」で行う(`isRunaway` :1347 / `rateLimitHoldCredit` :1980)。**進行中の hold も実時間で控除**されるので、今まさに limit で凍っている worker が「長く生きているだけ」で暴走扱いされることはない。控除の上限は `HOLD_CREDIT_CAP_MS`(:352 = `MAX_EXEC_MS`)。
+
+   **なぜ必要だったか(実測)**: 旧実装は runaway を wall-clock で測り、コードコメントも「rate-limit 待ちを含めて数える — band が広いから足りる」と明言していた。2026-07-12 にその前提が破れた: **quota 待ち 20 分 + 実作業 84 分 = 通算 104 分** → 90 分上限で強制回収 → 実装完了済み・未コミットの 15 ファイル(47KB)が worktree ごと消滅。**quota 待ちは worker の落ち度ではないので、worker の実行予算から引いてはならない。** 詳細 = 02 章 §5.5。
 
 ### 3.5 reviewer arm — パネル全滅を tier に帰属させる
 
@@ -196,8 +201,8 @@ monitor のセンサーは **worker 画面しか見ない**ので、レビュー
 | 経路 | 実装 | null 時の挙動 |
 |---|---|---|
 | worker | swarmWorker.ts:466-473 | `throw NoAllowedModelTierError`。**worktree 作成より前**に解決するので孤児 worktree/branch を残さない(460-465) |
-| manager(司令官) | swarmManager.ts:146-153 | 同 throw |
-| supply(補給官) | swarmSupply.ts:110-117 | 同 throw |
+| manager(司令官) | swarmManager.ts:192-199 | 同 throw。**session 解決(resume 判定)より後・record より前**に効くので、tier 全滅で spawn を拒んだときに「存在しない会話の session id」を永続化してしまうことはない(05 章 §10) |
+| supply(補給官) | swarmSupply.ts:149-156 | 同 throw(同上) |
 | reviewer panel | swarmOrchestrator.ts:3470-3501 | throw ではなく **defer**(3472-3481 park gate、3491-3500 `resolveAvailableTier` null → defer + `skippedForPark`)。「never merge un-reviewed」を守りつつ streak を焦がさない |
 | overseer brain(大脳) | swarmOverseerBrain.ts:416-421 | `throw NoAllowedModelTierError`(runner が fail-closed → answerAsOwner が owner へ escalate)。ミラー読みだが直前に defaultOverseerDeps が settings を再読してミラーを更新(swarmOverseer.ts:316, brain 416-419 コメント) |
 | engine dispatch(自動補給) | swarmOrchestrator.ts:4450-4461 | spawn せず **park**(§5.5) |
@@ -229,13 +234,42 @@ d1485ea(2026-07-09 18:05 +0900)は **ソース**に入っただけ。本番(pack
 
 ---
 
+## 5.7 層D — 使用状況キャッシュによる pre-launch veto(swarmLaunch.ts、2026-07-12)
+
+### 5.7.1 動機 — 層Aは事後学習、層Dは起動前に効く
+
+層A(冷却テーブル)は `markRateLimited` が**唯一の書込元**(§2.2)で、これは**実際に起動して rate-limit 応答を受け取ってから**しか書けない(swarmOrchestrator.ts の worker arm / reviewer arm、両方とも「動いている worker/panel の画面を読んで」書く)。一方 `claudeUsageCli.ts`(「A5」、既に §2.4 で cooling の reset 時刻ソースとして使われている)は UsageHud が 60 秒おきにポーリングしているキャッシュで、**起動する前から** fable が実質 100% 枯渇している事実を握っていることがある。層Dはその既知の枯渇を**起動判断そのもの**(`resolveAvailableTier`)に接続する ── 「UsageHud には出ているのに swarm は知らずに fable で起動を試みて詰まる」というギャップを塞ぐ。
+
+### 5.7.2 実装 — `isTopTierExhaustedByUsage` + `resolveAvailableTier` の第4引数
+
+- `isTopTierExhaustedByUsage(usage: CliUsage | null): boolean`(swarmLaunch.ts:223 付近)。**session.pct >= 100 または weekAll.pct >= 100 のときだけ true**。それ以外(null・95% 等のグレーゾーン・両 slot null)はすべて **false = 非枯渇扱い(fail-open)**。閾値はセンサーが既に使っている `a5CoolingHint`(swarmOrchestrator.ts:1271-1276)と同じ「pct>=100 ゲート」を踏襲 ── A5 の `resetsAt` は 3% 使用時でも常時表示される「現ウィンドウの終端」なので、**実際に枯れているとき以外は信用しない**という既存の設計原則をそのまま流用している。
+- `resolveAvailableTier(desired, now, allowed, usage = peekCachedUsage())`(swarmLaunch.ts:230-)。第4引数 `usage` を追加(既定値は `peekCachedUsage()` の同期 peek ── **起動のたびに `/usage` を live scrape することは絶対にしない**。TTL 内の最終成功キャッシュを読むだけ)。ladder walk 内部の `spawnable(tier)` 述語に `!(topTierExhausted && tier === MODEL_TIER_LADDER[0])` を足しただけ ── **梯子の先頭(fable)にしか適用されない**(A5 のキャッシュには per-tier 内訳が無く、`session`/`weekAll` は account-wide の集計値しか無いため。§0 の D 行)。
+- `resolveSwarmModelEffort(mode, role, card?, now?, allowed?, usage = peekCachedUsage())`(swarmLaunch.ts:315-)。第6引数として同じ既定値でスルー渡し。**worker/manager/supply/overseer の全呼出箇所は無改修**(swarmWorker.ts / swarmManager.ts / swarmSupply.ts / swarmOverseer.ts はどこも `usage` を渡していない → 既定値経由で自動的に効く)。
+- 層A・層Cとの合成は「梯子を歩く前にトップ tier を篩い落とす」だけなので、**冷却・mask と完全に独立して重なる**(例: 層Dでトップ tier 除外 + 層Aで opus も cooling → sonnet まで降りる。swarmLaunch.test.ts の「composes with cooling」ケースで確認済み)。
+
+### 5.7.3 何が違うか — 層Aと層Dの比較
+
+| | 層A(冷却) | 層D(使用状況 pre-launch veto) |
+|---|---|---|
+| いつ学習するか | **起動して** rate-limit 応答を受け取ってから(reactive) | 起動する**前**、UsageHud と同じキャッシュを peek するだけ(proactive) |
+| 対象 tier | 梯子の**どの tier でも**(w.model が分かれば) | **トップ tier(fable)のみ**(account-wide %しか無いため) |
+| 情報源 | PTY 画面の rate-limit 文言 / A5 の reset 時刻 / grace | A5 の pct(session/weekAll) のみ |
+| 閾値 | (時刻の話。pct 概念なし) | **pct >= 100 のみ**(95% 等では絶対に動かない ── 「まだ使えるはずの枠を事前に狩りすぎない」というオーナー確認済み方針) |
+| 未知/取得不可のとき | mark 自体が起きない(何も変わらない) | `usage=null` → **false = 非枯渇扱い**(fail-open。層Cのfail-closedとは対照的) |
+
+### 5.7.4 テスト・裏取り
+
+`src/lib/server/swarmLaunch.test.ts` の `isTopTierExhaustedByUsage (fail-open pure predicate)` と `resolveAvailableTier / resolveSwarmModelEffort — usage-cache veto` の2 describe ブロックが仕様のピン留め(null/gray-zone/100%/mask との独立性/cooling との合成の5ケース)。`usage` は全テストで直接注入 ── globalThis キャッシュや node-pty spawn には一切触れない。
+
+---
+
 ## 6. 状態機械 / データフロー(1周)
 
 ```
 [spawn 要求: worker/manager/supply/panel/brain]
         │ desired tier ← 実行モード×role×カード重み (swarmLaunch.ts:148-174)
         ▼
-resolveAvailableTier(desired, now, allowed)      … 層A+C を AND (swarmLaunch.ts:205-220)
+resolveAvailableTier(desired, now, allowed, usage)   … 層A+C+D (usageは層D=A5 pre-launch veto、§5.7)
         │ null → throw NoAllowedModelTierError / panel は defer (§5.4)
         ▼
 claude 起動 (--model <tier>) … worker は tier を w.model に記録 (swarmOrchestrator.ts:4583)
@@ -318,11 +352,11 @@ curl -s http://127.0.0.1:47776/api/swarm/quota | jq
 2. **アプリ再起動で冷却が全消え** → 枯れ tier が復活して再突入(swarmAllowedModels.ts:8-9)。再起動後は quota API で冷却が空なのが正常。恒久は mask。
 3. **手動 cool がセンサーに短縮される**(newest wins §2.3)。7日 cool を打っても、次の sighting が PTY/A5 から短い reset を解決すればそちらで上書き。
 4. **「journal に rate-limited が無い」は無実の証明にならない** — かつては検知自体が最大20分超盲目だった(§4、`0d1f7f0` で根治・実測待ち)。根治後も journal は ring 200 行+再起動で全消えなので、疑ったら worker 画面と /usage を自分で見る。
-5. **rate-limit hold 中の worker は「止まって見える」が正常動作** — nudge されず、20分後に todo requeue、**branch にコミットは残る**(4073-4079)。消えた扱いで worktree を掃除しない([[swarm-janitor が fresh worker を誤殺した事故]]と同型の早合点に注意)。
+5. **rate-limit hold 中の worker は「止まって見える」が正常動作** — nudge されず、20分後に todo requeue、**branch にコミットは残る**。消えた扱いで worktree を掃除しない([[swarm-janitor が fresh worker を誤殺した事故]]と同型の早合点に注意)。**hold していた時間は実行時間から控除される**ので、「limit で待たされた分だけ寿命が削られて runaway で消える」ことはない(§3.4-6 — 0712 根治。これを放置して 47KB を失った)。
 6. **panel 全滅は card の失敗ではない** — `skippedForPark` の defer は rework でも needs-human 前進でもない(§3.5)。「レビューが3回 defer した」と叱る前に quota を見る。
 7. **mask を書いたのに効かない** — 実行中プロセスは旧 bundle かもしれない(§5.6)。`grep -c swarmAllowedModels server/dist/index.cjs` で確認してから騒ぐ。
 8. **quota API が 403** — owner gate(§2.5)。cockpit で owner ログインしたセッション経由で叩く。
-9. **`OPENGROUND_SWARM_RATE_LIMIT_GRACE_MIN` を伸ばしすぎても** `MAX_EXEC_MS - 60s` でクランプされる(347-353)。runaway 側の env(`OPENGROUND_SWARM_MAX_EXEC_MIN`、334)と辻褄が取られる。
+9. **`OPENGROUND_SWARM_RATE_LIMIT_GRACE_MIN` を伸ばしすぎても** `MAX_EXEC_MS - 60s` でクランプされる(365-373)。runaway 側の env(`OPENGROUND_SWARM_MAX_EXEC_MIN`、343)と辻褄が取られる。なお **hold 中の時間は runaway 判定から控除される**(§3.4-6)ので、grace を伸ばしても worker の実作業予算は削られない — ただし控除の上限は `HOLD_CREDIT_CAP_MS`(=`MAX_EXEC_MS`、352)で、worker の絶対 wall-clock 寿命は `MAX_EXEC_MS + 上限`(既定 180 分)で必ず打ち切られる。
 
 ---
 
@@ -362,6 +396,14 @@ grep -n "lastOutputAt = Date.now()" src/lib/server/terminal.ts          # 無条
 ```bash
 grep -rn "markRateLimited(" src/lib/server --include='*.ts' | grep -v test | grep -v swarmQuota.ts
 grep -rn "NoAllowedModelTierError()" src/lib/server --include='*.ts' | grep -v test
+```
+
+層D(pre-launch veto、§5.7)の裏取り:
+
+```bash
+grep -n "isTopTierExhaustedByUsage\|peekCachedUsage" src/lib/server/swarmLaunch.ts   # 実装の存在確認
+grep -rn "resolveSwarmModelEffort(" src/lib/server --include='*.ts' | grep -v test   # 全呼出箇所が usage 引数を渡していない=既定値経由で自動適用の裏取り
+npx vitest run src/lib/server/swarmLaunch.test.ts -t "usage"                          # ピン留めテストだけ実行
 ```
 
 実行系(owner セッションで):

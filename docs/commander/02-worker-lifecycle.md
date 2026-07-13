@@ -9,7 +9,7 @@
 ## 0. 司令塔が最初に知るべき 3 つの真実
 
 1. **心拍の鮮度は `heartbeatAt` を信じてよい(2026-07-11 根治済み)。** `GET /api/swarm/workers` の `heartbeatAt` は、以前はエンジンが追跡している worker で「エンジンが最後に monitor パスでその worker の心拍を読んだ時刻の写し」(凍結値)を返していたが、ディスク心拍の `updatedAt` を優先するよう修正された(§4)。ディスク `~/.openground/swarm/<repoキー>/<branch名変換>.json` の `updatedAt` を直接読む裏取りは、API にアクセスできない場面のフォールバックとして引き続き有効。
-2. **worker の「停止」は worktree の force 削除とセット。** オーナーの Stop・エンジンの crash/stall 回収・rework 上限超過・統合成功後 cleanup — どれも `removeSwarmWorktree(…, { force: true })` を通る(§6 の全経路表)。コミット済みの作業は branch に残る(統合成功後 cleanup だけは branch も `-D`)。**未コミットの作業と「rebase しただけでコミット差分が消えた」状態は保護されない。**
+2. **worker の「停止」は worktree の force 削除とセット。ただし未コミットの作業は消えない(2026-07-12 根治)。** オーナーの Stop・エンジンの crash/stall/runaway 回収・rework 上限超過・統合成功後 cleanup — どれも `removeSwarmWorktree(…, { force: true })` を通る(§6 の全経路表)。コミット済みの作業は branch に残る(統合成功後 cleanup だけは branch も `-D`)。**エンジン経由の teardown(§6 経路 2〜5)は worktree を消す前に dirty を検査し、あれば `git add -A` + 回収理由入りの WIP コミットを branch に打つ**(`commitWipBeforeTeardown` — swarmOrchestrator.ts:2583)。保全に失敗したら **worktree を消さない**(作業の唯一のコピーだから)。ただし **「rebase しただけでコミット差分が消えた」状態は依然として保護されない**(それはコミット済み扱いで dirty ではない)。
 3. **RESTART(`POST /api/swarm/worker` に `worktree` を渡す)は「同じ worktree・同じ branch で claude を再起動」**。worktree が既に消えていれば失敗する(`resolveExistingSwarmWorktree` が throw — src/lib/server/swarmWorker.ts:325-342)。つまり「停止(=worktree 削除)してから RESTART」は成立しない。作業を続けさせたいなら worktree を消さずに再起動する。
 
 ---
@@ -23,7 +23,8 @@
 | claude PTY 起動(フラグ組み立て) | `src/lib/server/claudeTerminal.ts` | `launchClaude`(:461) / `buildClaudeArgv`(:261) / `buildLaunchCommand`(:380) |
 | PTY プール(生存・linger・sweep) | `src/lib/server/terminal.ts` | `createTerminal`(:230) / `listActiveTerminals`(:414) / `killTerminalsByCwd`(:465) / `sweepTerminalPool`(:533) |
 | worker 一覧 API の統合ロジック | `src/lib/server/swarmWorkerRegistry.ts` | `listSwarmWorkers`(:157) / `readHeartbeats`(:91) / `parseHeartbeat`(:67) |
-| エンジン(monitor / promote / 回収 / 差し戻し) | `src/lib/server/swarmOrchestrator.ts` | `monitorWorkers`(:3742) / `classifyWorker`(:922) / `defaultReadHeartbeat`(:2243) / `defaultRecoverWorker`(:2354) / `defaultCleanup`(:3628) / `stopOrchestratorWorker`(:5936) |
+| エンジン(monitor / promote / 回収 / 差し戻し) | `src/lib/server/swarmOrchestrator.ts` | `monitorWorkers`(:4208) / `classifyWorker`(:978) / `defaultReadHeartbeat`(:2434) / `defaultRecoverWorker`(:2649) / **`commitWipBeforeTeardown`(:2583 — 回収前の WIP 保全)** / `defaultCleanup`(:4094) / `stopOrchestratorWorker`(:6634) |
+| 実行時間上限と rate-limit hold 台帳 | `src/lib/server/swarmOrchestrator.ts` | `MAX_EXEC_MS`(:343) / `HOLD_CREDIT_CAP_MS`(:352) / `isRunaway`(:1347) / `endRateLimitHold`(:1963) / `rateLimitHoldCredit`(:1980) |
 | 残骸掃除(branch / 心拍ファイル / terminal pool) | `src/lib/server/swarmJanitor.ts` | `sweepSwarmBranches`(:170) / `sweepSwarmHeartbeats`(:310) / `runSwarmJanitor`(:405) / `swarmRepoKey`(:280) |
 | clean worktree の一括掃除 | `src/lib/server/worktreeCleanup.ts` | `cleanProjectWorktrees`(:105) / `listProjectWorktrees`(:83) |
 | HTTP routes(spawn / remove / workers / stop) | `server/routes/swarm.ts` | `POST /api/swarm/worker`(:241) / `POST /api/swarm/worktree/remove`(:451) / `GET /api/swarm/workers`(:501) / `POST /api/swarm/orchestrator/worker/stop`(:591) |
@@ -228,7 +229,7 @@ promote && w.reworkAt のとき: hbAtMs > reworkAtMs(差し戻しより厳密に
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 
-PTY 死亡・stall(両チャネル 10 分沈黙 — `STALL_SILENCE_MS` :271)・runaway(dispatch から 90 分 — `MAX_EXEC_MS` :334、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:3764-3867)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:966-978)で決める:
+PTY 死亡・stall(両チャネル 10 分沈黙 — `STALL_SILENCE_MS` :271)・runaway(**実作業**が 90 分 — `MAX_EXEC_MS` :343、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。§5.5)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:4230)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:1031)で決める:
 
 | 状況 | カードの行き先 |
 |---|---|
@@ -239,22 +240,50 @@ PTY 死亡・stall(両チャネル 10 分沈黙 — `STALL_SILENCE_MS` :271)・r
 | リトライ予算切れ(`RECOVER_MAX_REQUEUE=1` :217) | blocked |
 | それ以外の bare crash | todo(もう 1 回だけ自動再試行) |
 
+**どの行き先でも、teardown の前に未コミット作業は WIP コミットで branch に保全される**(§6 冒頭)。回収後に `git log <branch>` を見れば `WIP: swarm reclaim auto-save (<理由>)` が立っている(dirty が無ければ何も起きない)。
+
+### 5.5 実行時間上限(runaway)は **実作業時間**で測る — quota 待ちは控除される(2026-07-12 根治)
+
+`MAX_EXEC_MS`(:343、既定 90 分)が bound するのは **worker が働いた時間**であって wall-clock ではない。判定は `isRunaway(startedAt, now, MAX_EXEC_MS, heldMs)`(:1347):
+
+```
+実作業時間 = (now − dispatch) − rate-limit hold 累計
+```
+
+- **hold 台帳**: エンジンは worker(terminalId)ごとに rate-limit hold の**確定分**を `engine.rateLimitHeldMs` に積む(`endRateLimitHold` :1963 — `engine.rateLimited` を落とす唯一の seam)。hold の起点は「limit 通知が画面を掴んだ瞬間」(`holdSince` = `engine.limitScreen` の onset)であって、hold が**確定**した時刻(`since`)ではない — 確定ゲート(最大 `STALL_SILENCE_MS`=10 分)の分まで遡って返す
+- **進行中の hold も実時間で控除**される(`rateLimitHoldCredit` :1980 = 確定分 + in-flight)。今まさに limit で凍っている worker が「長く生きている」だけで暴走扱いされることはない
+- **控除には上限がある**: `HOLD_CREDIT_CAP_MS`(:352 = `MAX_EXEC_MS` と同値)。limit↔作業 を往復して runaway 判定を無限に先送りできないようにするため。**worker の絶対 wall-clock 寿命 = MAX_EXEC_MS + 上限**(既定 180 分)
+- journal の文言も実作業ベース: `worker runaway — worked 91m ≥ 90m execution limit (alive 111m; 20m of rate-limit hold credited back): …`
+
+**なぜ変えたか(実測・2026-07-12)**: 旧実装は「wall-clock で数える — band が広いから rate-limit 待ちを含めても足りる」と明言していた。その前提が破れた: **quota 待ち 20 分 + 実作業 84 分 = 通算 104 分** → 90 分上限で runaway 判定 → 実装完了済み・未コミットの **15 ファイル 47KB が worktree ごと消滅**した。quota 待ちは worker の落ち度ではないので、その時間を worker の予算から引いてはならない。
+
 ---
 
 ## 6. worktree の回収 — 誰が・いつ・何を消すか(全経路表)
 
 worktree を消せるコードパスは以下で**全部**(検索根拠: `removeSwarmWorktree` / `recoverWorker` / `deps.cleanup` / `cleanProjectWorktrees` の全呼び出し元)。全経路が central worktrees dir 配下限定ガードを通る(removeSwarmWorktree :266-275 / cleanProjectWorktrees は listProjectWorktrees :92 でフィルタ)。
 
-| # | 経路 | トリガ | force? | branch | 心拍ファイル | engine log の文言 |
-|---|---|---|---|---|---|---|
-| 1 | `POST /api/swarm/worktree/remove`(server/routes/swarm.ts:451-474) | UI Terminate(SwarmModule.tsx:430-434)/司令塔 curl | body の `force`(soft は dirty 拒否) | 残る | 残る(janitor 待ち) | (エンジン外 — ログ無し) |
-| 2 | `stopOrchestratorWorker`(swarmOrchestrator.ts:5936-5991) | オーナーがエンジン worker を Stop(`POST /api/swarm/orchestrator/worker/stop`) | **force**(:5959→:2366) | 残る | 残る | `worker stopped by owner — card → blocked: …`(:5983-5988) |
-| 3 | monitor の `recoverLost`(:3782-3792) | PTY 死亡 / stall / runaway / rate-limit / permission / question | **force** | 残る | 残る | `worker lost/stalled — card → todo|blocked: …`(:3860-3865) |
-| 4 | 差し戻し系 teardown(:4735, :4812, :4876, :4949) | rework/conflict 委譲で worker 不在 or 上限超過 | **force** | 残る | 残る | `差し戻し review→todo … 再 dispatch(worker 不在)` 等(:4818-4822) |
-| 5 | `resolveOrchestratorReview`(:6008-6094) | オーナーが review カードを手動 resolve(todo/blocked) | **force**(:6060) | **残す**(:6053-6056 — 人/次 worker がコミットを使う前提) | 残る | `review resolved by owner — card → …`(:6086-6091) |
-| 6 | 統合成功後の `defaultCleanup`(:3628-3653) | autoMerge がその branch を trunk に land し、カードが review→done に動いた直後(:5174-5175) | **force** + **`branch -D`**(:3644) | **消える** | 残る(branch 消滅により janitor の掃除対象になる) | `integrated (ff|rebase-ff): … → main`(:5214-5218) |
-| 7 | `POST /api/project/worktrees/clean`(server/routes/project.ts:458-468 → worktreeCleanup.ts:105-171) | 手動 API / UI の worktree 掃除 | **force なし**(clean のみ。dirty と live-PTY は必ず skip — :140-143) | 残る | 残る | (エンジン外) |
-| 8 | `withRebasedWorktree`(:3257-3290) | エンジンの verify/レビュー用 **一時** `.review-*` dir(worker の worktree ではない) | force(:3287) | — | — | — |
+**WIP 保全(2026-07-12 根治)**: `deps.recoverWorker`(= `defaultRecoverWorker` :2649)を通る経路 = 表の **2・3・4・5** は、worktree を消す前に必ず `commitWipBeforeTeardown`(:2583)を通る:
+
+1. PTY を kill(先に殺す — 消す木にまだ書かれては困る)
+2. worktree の `node_modules` symlink を外す(`node_modules/` 記法の .gitignore だと symlink が untracked に見え、`git add -A` が拾ってしまうため)
+3. `git status --porcelain` が **空なら no-op**(clean な木に偽のコミットは作らない)
+4. dirty なら `git add -A` + `git commit --no-verify` で **`WIP: swarm reclaim auto-save (<TeardownReason>)`**(:1006 — crash/stall/runaway/rate-limit/permission/question/stopped/rework)を branch に打つ。本文に「未検証。統合前にレビューせよ」と明記される。committer identity が解決できない環境では swarm 名義で 1 回リトライする
+5. **保全に失敗したら worktree を消さない**(`{removed:false}` — 作業の唯一のコピーだから)。journal に `uncommitted work could not be saved (…) — worktree kept` が出る
+6. 保全したら journal に `worker reclaimed with UNCOMMITTED work — auto-saved as a WIP commit (<sha>) on <branch>` が出る ← **司令塔はこれを見て branch を拾う**(再 dispatch は新 branch を切るので、この行だけが手掛かり)
+
+経路 **1・6・7・8** は通らない(1・7 = エンジン外の API、6 = 統合成功後なのでコミット済み、8 = エンジン自身の一時 dir)。
+
+| # | 経路 | トリガ | force? | WIP保全 | branch | 心拍ファイル | engine log の文言 |
+|---|---|---|---|---|---|---|---|
+| 1 | `POST /api/swarm/worktree/remove`(server/routes/swarm.ts:451-474) | UI Terminate(SwarmModule.tsx:430-434)/司令塔 curl | body の `force`(soft は dirty 拒否) | — | 残る | 残る(janitor 待ち) | (エンジン外 — ログ無し) |
+| 2 | `stopOrchestratorWorker`(swarmOrchestrator.ts:6634) | オーナーがエンジン worker を Stop(`POST /api/swarm/orchestrator/worker/stop`) | **force** | **あり**(`stopped`) | 残る | 残る | `worker stopped by owner — card → blocked: …` |
+| 3 | monitor の `recoverLost`(:4230) | PTY 死亡 / stall / runaway / rate-limit / permission / question | **force** | **あり**(回収理由) | 残る | 残る | `worker lost/stalled/runaway … — card → todo|blocked: …` |
+| 4 | 差し戻し系 teardown(rework / conflict 委譲) | rework/conflict 委譲で worker 不在 or 上限超過 | **force** | **あり**(`rework`) | 残る | 残る | `差し戻し review→todo … 再 dispatch(worker 不在)` 等 |
+| 5 | `resolveOrchestratorReview`(:6708) | オーナーが review カードを手動 resolve(todo/blocked) | **force** | **あり**(`stopped`) | **残す**(人/次 worker がコミットを使う前提) | 残る | `review resolved by owner — card → …` |
+| 6 | 統合成功後の `defaultCleanup`(:4094) | autoMerge がその branch を trunk に land し、カードが review→done に動いた直後 | **force** + **`branch -D`** | — (統合済み = コミット済み) | **消える** | 残る(branch 消滅により janitor の掃除対象になる) | `integrated (ff|rebase-ff): … → main` |
+| 7 | `POST /api/project/worktrees/clean`(server/routes/project.ts:458-468 → worktreeCleanup.ts:105-171) | 手動 API / UI の worktree 掃除 | **force なし**(clean のみ。dirty と live-PTY は必ず skip — :140-143) | — (dirty は skip) | 残る | 残る | (エンジン外) |
+| 8 | `withRebasedWorktree`(:3673) | エンジンの verify/レビュー用 **一時** `.review-*` dir(worker の worktree ではない) | force | — | — | — | — |
 
 janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を消さない**。消すのは (1) merged/empty な `swarm/*` branch(`-d` のみ。`-D` は user-explicit force のみ — :219-231)、(2) 15 分 stale かつ worker 証明済み消滅の心拍ファイル(:310-390)、(3) terminal pool の死骸エントリ(terminal.ts:533-553 — kill はしない)。呼び出しは overseer ON 時の 15 分毎のみ(swarmOverseer.ts:568-570)。
 
@@ -267,7 +296,13 @@ janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を�
 - autoMerge がその branch を land していたなら経路 6(cleanup が worktree + branch を両方消す)。ログに `integrated (…)` が残る
 - 誰かが `worktrees/clean` を叩いたなら経路 7(rebase 済み = コミット済み = clean なので、PTY が死んでいれば削除対象)
 
-**どれだったかはエンジン log(`GET /api/swarm/orchestrator` の `log`)の上記文言で裏取りできる**(§8)。共通する教訓: **worktree は「worker の作業机」であり、PTY が死ぬか止められた時点で回収される消耗品**。コミット済みの中身は branch が担保する(経路 6 以外)。「worktree に置いたままの未コミット物・stash・untracked ファイル」は停止と同時に消える — 司令塔が worker を止める前に確認すべきは「branch にコミットが乗っているか」であって「worktree が綺麗か」ではない。
+**どれだったかはエンジン log(`GET /api/swarm/orchestrator` の `log`)の上記文言で裏取りできる**(§8)。共通する教訓: **worktree は「worker の作業机」であり、PTY が死ぬか止められた時点で回収される消耗品**。中身を担保するのは **branch のコミット**であって worktree ではない。
+
+2026-07-12 の根治で、エンジン経由の teardown(経路 2〜5)は消す前に未コミット分を **WIP コミット**に変換するようになった(§6 冒頭)ので「作業そのもの」は失われない。ただしそれは**救命ネットであって設計ではない**:
+
+- WIP コミットは **未検証**(`--no-verify`、完了ゲート未通過)。統合前に必ず人/エンジンが verify する
+- **経路 1・7(エンジン外の API)には保全が無い** — soft(force 無し)は dirty を拒否して守るが、**force Terminate は未コミット物ごと消す**
+- だから規律は変わらない: **worker はフェーズの境目ごとに自分でコミットする**(§2.4 の `/order` 注入に焼き込み済み)。司令塔が worker を止める前に確認すべきは「branch にコミットが乗っているか」であって「worktree が綺麗か」ではない
 
 ### RESTART(worktree 指定)の意味
 
@@ -292,6 +327,7 @@ janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を�
 8. **PTY exit 後 30 秒は linger** — セッションは `finishedAt` 付きで約 30 秒プールに残る(terminal.ts:334-337)。`isWorkerAlive` は finishedAt で判定するので生存誤判定はないが(:2325-2330)、workers API のソース 2 は `listActiveTerminals`(finishedAt 除外 — terminal.ts:419)を使うため、exit 直後の worker は「terminalId 無し」に即時遷移する
 9. **node_modules に触るな** — worktree の node_modules は本体への symlink(§2.3)。worker に `npm install` をさせない・司令塔も worktree 内で lock を書き換える操作をしない
 10. **同一ファイル群を触る 2 枚のカードを同時に走らせない** — twin-dispatch ガードは「同一カード」の二重 spawn を塞ぐだけ(routes :301-345)。別カード同士のファイル衝突は統合ステージの conflict 委譲(:4835-)で後払いになる。カード分割時点で disjoint に切るのが司令塔の仕事
+11. **【0712 実測・根治済み】worker が実行時間上限で消え、未コミットの 15 ファイル(47KB)が worktree ごと失われた** — 欠陥が 3 つ重なった: (a) runaway が **wall-clock** で判定され、quota 待ち 20 分が worker の予算から引かれなかった(20 + 実作業 84 = 通算 104 分 → 90 分上限で暴走判定)、(b) worker 規律が「実装→検証→git commit」で **検証(完了ゲート)の前にコミットさせなかった** — worker は指示どおり振る舞った結果 全損した、(c) teardown が未コミット作業を保全せず dirty のまま force 削除した。現在は **(a) 実作業時間で判定(§5.5)・(b) 規律を「フェーズ境目ごとにコミット/完了ゲート前は必ず WIP コミット」に変更(`WORKER_ORDER_RULES` — swarmWorker.ts)・(c) teardown が WIP コミットで保全(§6)**。回収 worker の branch に `WIP: swarm reclaim auto-save (…)` が立っていたら、それは**未検証の作業**なので verify を通してから統合すること。なお **worktree が既に消えてしまった過去の全損は、claude のセッション JSONL(`~/.claude/projects/…`)の tool_use を時系列 replay すれば復元できる**(0712 実証)
 
 ---
 

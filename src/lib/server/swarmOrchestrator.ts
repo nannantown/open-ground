@@ -62,7 +62,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { readFile, stat, symlink } from 'fs/promises'
+import { readFile, stat, lstat, symlink, unlink } from 'fs/promises'
 import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
@@ -327,11 +327,29 @@ const envInt = (name: string, def: number, min: number, max: number): number => 
  *  worker, not just a silent one. Generous by default (a real /order round —
  *  audit→implement→verify→integrate — legitimately runs long; the whole point of
  *  the swarm is heavy, unhurried work), so it never guillotines productive work;
- *  it only catches the genuinely-unbounded. Adjustable via env. NOTE: it counts
- *  wall-clock INCLUDING any rate-limit waits — kept simple on purpose; the band
- *  is wide enough that a normal worker that paused for a limit still finishes
- *  well under it. Min 10m guards against an env typo bricking every worker. */
+ *  it only catches the genuinely-unbounded. Adjustable via env. Min 10m guards
+ *  against an env typo bricking every worker.
+ *
+ *  IT COUNTS *WORKING* TIME, NOT RAW WALL-CLOCK: the time a worker sat frozen on
+ *  a rate-limit hold is CREDITED BACK (engine.rateLimitHeldMs — see
+ *  {@link rateLimitHoldCredit} / {@link isRunaway}). It used to count wall-clock
+ *  INCLUDING quota waits, on the assumption that "the band is wide enough" — and
+ *  on 2026-07-12 that assumption broke in the field: a worker waited 20m on a
+ *  limit, then worked 84m (104m wall-clock), was judged runaway at 90m, and was
+ *  torn down with 15 uncommitted files (47KB) still in its worktree. A quota wait
+ *  is not the worker's doing and must not spend its budget. (The other half of
+ *  that fix is {@link commitWipBeforeTeardown} — no reclaim, for ANY reason, may
+ *  destroy uncommitted work again.) */
 export const MAX_EXEC_MS = envMinutesMs('OPENGROUND_SWARM_MAX_EXEC_MIN', 90, 10, 600)
+
+/** CEILING on the rate-limit credit one worker may subtract from its execution
+ *  clock. Without it, a worker cycling limit → work → limit → … could defer the
+ *  runaway check forever and the 暴走 defense would have no teeth at all. With it,
+ *  a worker's ABSOLUTE wall-clock lifetime is bounded by MAX_EXEC_MS + this (180m
+ *  at the defaults) however long it spent waiting — the runaway ceiling stays a
+ *  real ceiling while an honest quota wait is still forgiven. Tied to MAX_EXEC_MS
+ *  on purpose (one knob to retune, not two). */
+export const HOLD_CREDIT_CAP_MS = MAX_EXEC_MS
 
 /** RATE-LIMIT GRACE — how long a worker WAITING on a usage / quota / overload
  *  limit is HELD before its card is requeued to 'todo' (slot recovery). A
@@ -978,6 +996,15 @@ export const classifyWorker = (
  *  couldn't clear. (Card 4880e9c6.) */
 export type WorkerRecoveryReason = 'crash' | 'stall' | 'runaway' | 'rate-limit' | 'permission' | 'question'
 
+/** WHY a worker's worktree is being torn down. The recovery reasons above PLUS the
+ *  two teardowns that are not recoveries: an owner STOP, and a 差し戻し REWORK
+ *  (the card goes back and a fresh worker is dispatched). Every one of them
+ *  force-removes a possibly-dirty worktree, so every one of them must first
+ *  salvage its uncommitted work — the reason rides into that commit's message so
+ *  `git log <branch>` says WHY the WIP commit exists. (2026-07-12 全損 — see
+ *  {@link commitWipBeforeTeardown}.) */
+export type TeardownReason = WorkerRecoveryReason | 'stopped' | 'rework'
+
 /** Where a LOST/RECLAIMED worker's card goes — called when its PTY is dead and
  *  {@link classifyWorker} did NOT promote it (a crash/kill, a self-declared block,
  *  a "done but produced nothing" finish), OR when an ALIVE worker is reclaimed for
@@ -1303,13 +1330,29 @@ export const classifyOutput = (
   return 'normal'
 }
 
-/** Has a worker blown the hard execution ceiling — a 暴走 to stop? True iff its
- *  dispatch time is known (finite, > 0) and `maxExecMs` has elapsed since. The
- *  finite/positive guard is load-bearing: a worker with an unparseable / missing
- *  startedAt is NEVER judged runaway (no false kill on a clockless fixture). Pure
- *  (clock injected). */
-export const isRunaway = (startedAtMs: number, now: number, maxExecMs: number): boolean =>
-  Number.isFinite(startedAtMs) && startedAtMs > 0 && now - startedAtMs >= maxExecMs
+/** Has a worker blown the hard execution ceiling — a 暴走 to stop? Judged on its
+ *  WORKING time: wall-clock since dispatch MINUS `heldMs`, the time it sat frozen
+ *  on a rate-limit hold (see {@link rateLimitHoldCredit}). A quota wait is not
+ *  work and must never spend the worker's budget — the 2026-07-12 loss (20m of
+ *  limit + 84m of real work = 104m ⇒ reclaimed at the 90m ceiling, taking 15
+ *  uncommitted files with it) is exactly what this subtraction closes.
+ *
+ *  True iff its dispatch time is known (finite, > 0) and `maxExecMs` of WORKING
+ *  time has elapsed. The finite/positive guard is load-bearing: a worker with an
+ *  unparseable / missing startedAt is NEVER judged runaway (no false kill on a
+ *  clockless fixture). `heldMs` defaults to 0 — a worker that never waited on a
+ *  limit is judged byte-for-byte as before — and a negative / non-finite credit
+ *  is floored to 0 (a corrupt ledger can only ever make the check STRICTER, never
+ *  grant infinite life). Pure (clock injected). */
+export const isRunaway = (
+  startedAtMs: number,
+  now: number,
+  maxExecMs: number,
+  heldMs = 0,
+): boolean => {
+  const credit = Number.isFinite(heldMs) ? Math.max(0, heldMs) : 0
+  return Number.isFinite(startedAtMs) && startedAtMs > 0 && now - startedAtMs - credit >= maxExecMs
+}
 
 // ── Engine state (per project, on a globalThis singleton) ────────────────────
 
@@ -1480,8 +1523,25 @@ export interface ProjectEngine {
    *  the pass its screen first reads as rate-limited, cleared the moment its
    *  screen reads normal again (it resumed) or it leaves the live set. Drives the
    *  "hold, don't nudge, requeue only after RATE_LIMIT_GRACE_MS" path — NOT the
-   *  stall clock. In-memory only. (Card 4880e9c6 — 進まない分類.) */
-  rateLimited: Map<string, { since: number }>
+   *  stall clock. In-memory only. (Card 4880e9c6 — 進まない分類.)
+   *
+   *  `holdSince` is the epoch ms this hold ACTUALLY began — the limit notice's
+   *  onset (engine.limitScreen), which precedes `since` by however long the
+   *  confirmation gates took (up to STALL_SILENCE_MS). `since` still drives the
+   *  RATE_LIMIT_GRACE_MS requeue clock (unchanged); `holdSince` drives the
+   *  execution-time CREDIT ({@link rateLimitHoldCredit}) so the worker is repaid
+   *  for the whole wait, not just its confirmed tail. Optional: an engine literal
+   *  from an older build / a test fixture falls back to `since`. */
+  rateLimited: Map<string, { since: number; holdSince?: number }>
+  /** Per-worker (keyed by terminalId) BANKED rate-limit hold, in ms: the total
+   *  time this worker has already spent frozen on (now-ended) rate-limit holds.
+   *  Credited back to its execution clock so a quota wait never spends the
+   *  MAX_EXEC_MS budget (the 2026-07-12 loss). Added to on every hold RELEASE
+   *  ({@link endRateLimitHold} — the single seam that clears engine.rateLimited),
+   *  read with any in-flight hold by {@link rateLimitHoldCredit}, dropped when the
+   *  worker leaves the live set. Optional (older-build backfill). In-memory
+   *  only. */
+  rateLimitHeldMs?: Map<string, number>
   /** Per-worker (keyed by terminalId) LIMIT-SCREEN clock (quota-detection fast
    *  path): the epoch ms a rate-limit notice was FIRST sighted holding this
    *  worker's screen. Unlike `rateLimited.since` (stamped only once the worker
@@ -1624,6 +1684,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       stuckMoves: new Map(),
       nudges: new Map(),
       rateLimited: new Map(),
+      rateLimitHeldMs: new Map(),
       permissionWaits: new Map(),
       questionRaised: new Map(),
       questionWaits: new Map(),
@@ -1661,6 +1722,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.stuckMoves ??= new Map()
     engine.nudges ??= new Map()
     engine.rateLimited ??= new Map()
+    engine.rateLimitHeldMs ??= new Map()
     engine.limitScreen ??= new Map()
     engine.integrateInFlight ??= false
     engine.permissionWaits ??= new Map()
@@ -1880,6 +1942,50 @@ const clearKeptMove = (engine: ProjectEngine, taskId: string): void => {
   engine.stuckMoves.delete(taskId)
 }
 
+// ── Rate-limit hold ledger (the execution clock's credit side) ────────────────
+// A worker frozen on a usage/quota limit is not WORKING, so that time must not
+// spend its MAX_EXEC_MS budget (the 2026-07-12 loss: 20m limit + 84m work = 104m
+// ⇒ runaway at 90m, 15 uncommitted files destroyed with the worktree). The engine
+// therefore banks every hold it observes and subtracts the total from the runaway
+// check. Two functions own the whole ledger: END a hold (banking its span) and
+// READ the credit (banked + any hold still in flight).
+
+/** END a worker's rate-limit hold, BANKING its span into the execution-time
+ *  credit ledger. THE single seam that clears `engine.rateLimited` on a live
+ *  worker — clearing the map directly would silently drop the credit and re-open
+ *  the 2026-07-12 hole, so route every release through here.
+ *
+ *  The span is measured from `holdSince` (the limit notice's onset) when present,
+ *  else `since` (the confirmed-hold stamp) — an older-build / fixture entry
+ *  without `holdSince` still banks its confirmed tail rather than nothing.
+ *  Idempotent: a worker not on hold banks nothing. A clock that runs backwards
+ *  (a fixture, an NTP step) banks 0, never a negative credit. */
+const endRateLimitHold = (engine: ProjectEngine, terminalId: string, now: number): void => {
+  const rl = engine.rateLimited.get(terminalId)
+  engine.rateLimited.delete(terminalId)
+  if (!rl) return
+  const from = rl.holdSince ?? rl.since
+  const held = Number.isFinite(from) ? Math.max(0, now - from) : 0
+  if (held <= 0) return
+  engine.rateLimitHeldMs ??= new Map() // lazy backfill (older-build engine / test literal)
+  engine.rateLimitHeldMs.set(terminalId, (engine.rateLimitHeldMs.get(terminalId) ?? 0) + held)
+}
+
+/** How much rate-limit hold to CREDIT BACK to this worker's execution clock:
+ *  everything banked by {@link endRateLimitHold} PLUS any hold still IN FLIGHT
+ *  (a worker frozen right now is being repaid in real time — it must not cross
+ *  the ceiling while it sits there waiting). Capped at {@link HOLD_CREDIT_CAP_MS}
+ *  so a limit↔work cycle can't defer the runaway check forever: the absolute
+ *  wall-clock lifetime of any worker stays bounded by MAX_EXEC_MS + the cap. */
+const rateLimitHoldCredit = (engine: ProjectEngine, terminalId: string, now: number): number => {
+  const banked = engine.rateLimitHeldMs?.get(terminalId) ?? 0
+  const rl = engine.rateLimited.get(terminalId)
+  const from = rl ? (rl.holdSince ?? rl.since) : null
+  const live = from !== null && Number.isFinite(from) ? Math.max(0, now - from) : 0
+  const total = (Number.isFinite(banked) ? Math.max(0, banked) : 0) + live
+  return Math.min(total, HOLD_CREDIT_CAP_MS)
+}
+
 const emptyState = (): SwarmOrchestratorState => ({
   running: false,
   manualStop: false,
@@ -1991,12 +2097,20 @@ export interface OrchestratorDeps {
    *  session leaves a dirty/locked tree). Does NOT delete the branch — a blocked /
    *  owner-stopped worker's branch may carry commits a human picks up, and branch
    *  names are unique per spawn so a leftover never blocks re-dispatch. Resolves
-   *  {removed:false, reason} on failure (logged; never throws into the loop). */
+   *  {removed:false, reason} on failure (logged; never throws into the loop).
+   *
+   *  SALVAGE FIRST: any uncommitted work in the worktree is committed to the
+   *  worker's branch before the (forced) removal — `reason` names WHY the worker
+   *  is being reclaimed and rides into that commit message. If the salvage commit
+   *  fails, the implementation KEEPS the worktree ({removed:false}) rather than
+   *  destroy the only copy of the work. (2026-07-12 全損 — see
+   *  {@link commitWipBeforeTeardown}.) */
   recoverWorker: (opts: {
     projectPath: string
     worktree: string
     terminalId: string
-  }) => Promise<{ removed: boolean; reason?: string }>
+    reason?: TeardownReason
+  }) => Promise<{ removed: boolean; reason?: string; wip?: WipCommitResult }>
   /** Epoch ms of the worker PTY's last output chunk (terminal.ts stamps it on
    *  every onData), or null when unknown / it has produced none yet. The SECOND
    *  liveness channel beside the heartbeat: a worker streaming tokens is alive even
@@ -2164,12 +2278,14 @@ export interface IntegrationDeps {
    *  (review→todo). (Same dep as OrchestratorDeps.isAlive.) */
   isAlive: (terminalId: string) => boolean
   /** Tear down a worker's worktree + PTY (KEEPS its branch) — used to clean up a
-   *  parked / re-dispatched worker on 差し戻し. (Same dep as OrchestratorDeps.recoverWorker.) */
+   *  parked / re-dispatched worker on 差し戻し. Uncommitted work is salvaged onto the
+   *  branch first (see OrchestratorDeps.recoverWorker — same dep, same contract). */
   recoverWorker: (opts: {
     projectPath: string
     worktree: string
     terminalId: string
-  }) => Promise<{ removed: boolean; reason?: string }>
+    reason?: TeardownReason
+  }) => Promise<{ removed: boolean; reason?: string; wip?: WipCommitResult }>
   /** Tell a LIVE worker (over its PTY) WHY its card was sent back and to fix it
    *  IN PLACE — one line written to its terminal so a review→doing 差し戻し actually
    *  restarts work instead of leaving an idle (post-done) worker untouched.
@@ -2421,26 +2537,147 @@ const defaultRecoverCard = async (
   return res.ok
 }
 
+/** The outcome of the pre-teardown WIP commit ({@link commitWipBeforeTeardown}). */
+export interface WipCommitResult {
+  /** A WIP commit LANDED on the worker's branch (there was work to save). */
+  committed: boolean
+  /** There WAS (or might have been) uncommitted work and we could NOT commit it.
+   *  The caller must then KEEP the worktree: it holds the only copy left. */
+  failed?: boolean
+  /** Detail for the log (short sha on success, the git failure otherwise). */
+  reason?: string
+}
+
+/** COMMIT whatever a reclaimed worker left UNCOMMITTED, onto its own `swarm/*`
+ *  branch, BEFORE the worktree is force-removed.
+ *
+ *  THE 2026-07-12 LOSS: a worker was reclaimed at the execution-time ceiling with
+ *  its implementation finished but not yet committed (worker discipline told it to
+ *  commit AFTER the completion gate, and the gate was still running) — teardown
+ *  force-removed the worktree and 15 files / 47KB of finished work ceased to
+ *  exist. `--force` is required (a mid-implementation tree is dirty by
+ *  definition), so the ONLY defense is to commit first. Every reclaim path
+ *  (runaway / stall / crash / rate-limit / permission / question / owner-stop)
+ *  routes through here.
+ *
+ *  Contract:
+ *   • clean tree (or no worktree on disk) ⇒ NO-OP, `{committed:false}` — teardown
+ *     proceeds exactly as before.
+ *   • dirty ⇒ `git add -A` + a WIP commit NAMING THE RECLAIM REASON, so
+ *     `git log <branch>` explains itself and the commander can pick the work up.
+ *   • anything git refuses ⇒ `{failed:true}` — the caller KEEPS the worktree
+ *     rather than destroy the only copy of the work. Losing a worktree slot is
+ *     recoverable; losing the work is not.
+ *
+ *  The commit is deliberately UNVERIFIED (`--no-verify`, no tsc/test): this is a
+ *  salvage, not a promotion. The branch's commits still face the ordinary verify +
+ *  review gates before anything integrates, and the message says so.
+ *
+ *  node_modules: the worktree carries a SYMLINK to the repo's real node_modules
+ *  (swarmWorker seeds it). Under the common `node_modules/` (trailing-slash)
+ *  ignore pattern that symlink reads as UNTRACKED — `git add -A` would commit the
+ *  pointer. Unlink it first (removeSwarmWorktree does the same before its own
+ *  removal, and unlinking a symlink never touches the real modules it targets).
+ *
+ *  Never throws — gitOut swallows every git failure into null. */
+export const commitWipBeforeTeardown = async (
+  worktree: string,
+  reason: TeardownReason,
+): Promise<WipCommitResult> => {
+  if (!worktree) return { committed: false }
+  // Gone already (a pruned/never-created tree) ⇒ nothing to save; let teardown run
+  // its idempotent course. NOT a failure — the caller must not keep a ghost.
+  if (!(await stat(worktree).then(() => true).catch(() => false))) return { committed: false }
+
+  // Drop the node_modules symlink so `git add -A` can never stage it (see above).
+  try {
+    const nm = join(worktree, 'node_modules')
+    if ((await lstat(nm)).isSymbolicLink()) await unlink(nm)
+  } catch {
+    /* no symlink / already gone — best effort */
+  }
+
+  const status = await gitOut(worktree, ['status', '--porcelain'])
+  // Status unavailable ⇒ we cannot PROVE the tree is clean. Fail CLOSED (keep the
+  // worktree): the whole point of this function is that unproven-clean must never
+  // be destroyed. A genuinely broken tree surfaces as a kept worktree in the log.
+  if (status === null) return { committed: false, failed: true, reason: 'git status unavailable' }
+  if (status === '') return { committed: false } // clean — no-op, teardown proceeds
+
+  if ((await gitOut(worktree, ['add', '-A'])) === null) {
+    return { committed: false, failed: true, reason: 'git add failed' }
+  }
+
+  const subject = `WIP: swarm reclaim auto-save (${reason})`
+  const body =
+    `The engine reclaimed this worker (reason: ${reason}) while its worktree still held ` +
+    `uncommitted work, and committed it here so the teardown could not destroy it. ` +
+    `NOTHING HERE IS VERIFIED — review, amend or drop this commit before integrating.`
+  const bodyJa =
+    `回収理由: ${reason} — worktree 削除の前に未コミットの作業を自動保全したコミット` +
+    `(完了ゲート未通過。統合前に必ずレビューすること)。`
+  const args = ['commit', '--no-verify', '-m', subject, '-m', body, '-m', bodyJa]
+
+  let out = await gitOut(worktree, args)
+  if (out === null) {
+    // Most likely cause: no committer identity resolvable in this environment
+    // (a stripped-env fork, a fresh CI box). Retry ONCE under a swarm identity —
+    // a salvage commit under a synthetic author beats losing the work. Any other
+    // failure just fails again here and is reported.
+    out = await gitOut(worktree, [
+      '-c',
+      'user.name=OPEN GROUND swarm',
+      '-c',
+      'user.email=swarm@openground.local',
+      ...args,
+    ])
+  }
+  if (out === null) return { committed: false, failed: true, reason: 'git commit failed' }
+
+  const sha = await gitOut(worktree, ['rev-parse', '--short', 'HEAD'])
+  return { committed: true, reason: sha ?? undefined }
+}
+
 /** Tear down a lost/stopped worker's worktree + PTY. Kills the PTY by id FIRST
  *  (covers the symlinked-home cwd-miss that removeSwarmWorktree's by-cwd kill can
- *  drop), then force-removes the worktree (which also kills any PTY by cwd and is
- *  idempotent — already-gone reads as removed). Branch is intentionally KEPT (see
- *  the dep doc). Never throws — a failure is reported for the log. */
+ *  drop), then — CRITICALLY — commits any uncommitted work to the worker's branch
+ *  ({@link commitWipBeforeTeardown}) before force-removing the worktree (which
+ *  also kills any PTY by cwd and is idempotent — already-gone reads as removed).
+ *  If that salvage commit FAILS the worktree is KEPT, not destroyed: the work in
+ *  it is unrecoverable, a leftover worktree is not. Branch is intentionally KEPT
+ *  (see the dep doc). Never throws — a failure is reported for the log. */
 const defaultRecoverWorker = async (opts: {
   projectPath: string
   worktree: string
   terminalId: string
-}): Promise<{ removed: boolean; reason?: string }> => {
+  reason?: TeardownReason
+}): Promise<{ removed: boolean; reason?: string; wip?: WipCommitResult }> => {
   try {
     killTerminal(opts.terminalId)
   } catch {
     /* already dead / absent — the worktree teardown below is what matters */
   }
   if (!opts.worktree) return { removed: false, reason: 'no worktree path on record' }
+  // Kill FIRST, then salvage: a dead PTY can't keep writing into the tree we are
+  // about to snapshot.
+  let wip: WipCommitResult = { committed: false }
   try {
-    return await removeSwarmWorktree(opts.projectPath, opts.worktree, { force: true })
+    wip = await commitWipBeforeTeardown(opts.worktree, opts.reason ?? 'stopped')
   } catch (e) {
-    return { removed: false, reason: errMsg(e) }
+    wip = { committed: false, failed: true, reason: errMsg(e) }
+  }
+  if (wip.failed) {
+    return {
+      removed: false,
+      reason: `uncommitted work could not be saved (${wip.reason ?? '?'}) — worktree kept`,
+      wip,
+    }
+  }
+  try {
+    const res = await removeSwarmWorktree(opts.projectPath, opts.worktree, { force: true })
+    return { ...res, wip }
+  } catch (e) {
+    return { removed: false, reason: errMsg(e), wip }
   }
 }
 
@@ -4008,17 +4245,30 @@ const monitorWorkers = async (
               : reason === 'question'
                 ? 'free-text question unanswered too long — parked'
                 : 'lost'
-    let teardown: { removed: boolean; reason?: string } = { removed: false }
+    let teardown: { removed: boolean; reason?: string; wip?: WipCommitResult } = { removed: false }
     try {
       teardown = await deps.recoverWorker({
         projectPath: engine.path,
         worktree: w.worktree,
         terminalId: w.terminalId,
+        reason, // rides into the salvage commit's message (commitWipBeforeTeardown)
       })
     } catch {
       /* reported via teardown.removed=false below */
     }
     const keptNote = teardown.removed ? '' : ` · worktree kept (${teardown.reason ?? '?'})`
+    // SALVAGE SURFACED (2026-07-12 全損): the reclaimed worktree held uncommitted
+    // work and it was committed to the worker's branch instead of being destroyed.
+    // The commander MUST see this — a re-dispatch of the same card branches fresh,
+    // so that commit is the only remaining trace of the work.
+    const wipNote = teardown.wip?.committed ? ` · WIP保全 ${teardown.wip.reason ?? 'commit'}` : ''
+    if (teardown.wip?.committed) {
+      logLine(
+        engine,
+        'warn',
+        `worker reclaimed with UNCOMMITTED work — auto-saved as a WIP commit (${teardown.wip.reason ?? 'commit'}) on ${w.branch}: 未検証のまま保全。統合前にレビューを (理由: ${reason})`,
+      )
+    }
 
     // Only re-home a card STILL in 'doing' (ours to move). A deleted card has
     // nothing to move; a human-moved one is the human's now — clean, don't fight.
@@ -4028,7 +4278,7 @@ const monitorWorkers = async (
       logLine(
         engine,
         'info',
-        `worker ${verb} — slot freed: ${w.branch} (${shorten(w.taskTitle)})${keptNote}`,
+        `worker ${verb} — slot freed: ${w.branch} (${shorten(w.taskTitle)})${keptNote}${wipNote}`,
         'routine',
       )
       return false
@@ -4089,7 +4339,7 @@ const monitorWorkers = async (
     logLine(
       engine,
       'warn',
-      `worker ${verb} — card → ${col}: ${w.branch} (${shorten(w.taskTitle)})${keptNote}`,
+      `worker ${verb} — card → ${col}: ${w.branch} (${shorten(w.taskTitle)})${keptNote}${wipNote}`,
       reason === 'stall' ? 'stall' : reason === 'crash' ? 'crash' : undefined,
     )
     return false
@@ -4226,19 +4476,28 @@ const monitorWorkers = async (
     // detector can never catch. Stop it (teardown + → 'blocked': a re-run would
     // just overrun again, so a human looks). Clear all per-worker bookkeeping so a
     // reclaimed terminalId never carries stale state into a future spawn.
-    if (isRunaway(startedMs, now, MAX_EXEC_MS)) {
+    // The runaway clock is the WORKING clock: repay every rate-limit hold this
+    // worker sat through (banked + any still in flight, capped at
+    // HOLD_CREDIT_CAP_MS) before comparing against the ceiling. A quota wait is
+    // not 暴走 — charging it to the worker is what destroyed 47KB of finished work
+    // on 2026-07-12 (see MAX_EXEC_MS / rateLimitHoldCredit).
+    const heldMs = rateLimitHoldCredit(engine, w.terminalId, now)
+    if (isRunaway(startedMs, now, MAX_EXEC_MS, heldMs)) {
       engine.nudges.delete(w.terminalId)
       engine.rateLimited.delete(w.terminalId)
+      engine.rateLimitHeldMs?.delete(w.terminalId)
       engine.limitScreen?.delete(w.terminalId)
       engine.permissionWaits.delete(w.terminalId)
       engine.questionRaised?.delete(w.terminalId)
       engine.questionWaits?.delete(w.terminalId)
       const ranMin = Math.floor((now - startedMs) / 60_000)
+      const heldMin = Math.floor(heldMs / 60_000)
+      const workedMin = Math.floor((now - startedMs - heldMs) / 60_000)
       const limitMin = Math.floor(MAX_EXEC_MS / 60_000)
       logLine(
         engine,
         'warn',
-        `worker runaway — alive ${ranMin}m ≥ ${limitMin}m execution limit: ${w.branch} (${shorten(w.taskTitle)})`,
+        `worker runaway — worked ${workedMin}m ≥ ${limitMin}m execution limit (alive ${ranMin}m; ${heldMin}m of rate-limit hold credited back): ${w.branch} (${shorten(w.taskTitle)})`,
       )
       // Escalation safety valve (exec-timeout): a worker overran the execution-time
       // ceiling and is being force-reclaimed/parked — a human should know (a re-run
@@ -4246,7 +4505,7 @@ const monitorWorkers = async (
       // pushes it exactly once after the pass settles.
       engine.pendingFatal.push({
         event: 'exec-timeout',
-        detail: `ワーカーが実行時間上限 ${limitMin}分 を超過（${ranMin}分稼働）→ 強制回収。`,
+        detail: `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち rate-limit 待ち ${heldMin}分は控除済み）→ 強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`,
         projectPath: engine.path,
         taskId: card?.id,
         branch: w.branch,
@@ -4370,7 +4629,13 @@ const monitorWorkers = async (
       engine.nudges.delete(w.terminalId)
       const rl = engine.rateLimited.get(w.terminalId)
       if (!rl) {
-        engine.rateLimited.set(w.terminalId, { since: now })
+        // `since` — the CONFIRMED-hold stamp: drives the RATE_LIMIT_GRACE_MS
+        // requeue clock (unchanged).
+        // `holdSince` — when the limit notice ACTUALLY took the screen: the hold
+        // BEGAN there, and the execution-time credit must repay the whole wait,
+        // not just its confirmed tail (confirmation can take up to
+        // STALL_SILENCE_MS). Falls back to `now` when the screen clock is unset.
+        engine.rateLimited.set(w.terminalId, { since: now, holdSince: limitSince ?? now })
         // QUOTA SENSOR (the one production write into swarmQuota's cooling
         // table): attribute this sighting to the tier the worker launched on,
         // so dispatch drops a tier — or parks when every tier is dry — instead
@@ -4400,7 +4665,7 @@ const monitorWorkers = async (
         // again is plainly working — never reclaim it on a stale sighting. The
         // decorative-toast case stays covered: one repaint delays the requeue by
         // at most one scrape-quiet window, it can't cancel it.
-        engine.rateLimited.delete(w.terminalId)
+        endRateLimitHold(engine, w.terminalId, now)
         if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'rate-limit')) next.push(w)
         continue
       }
@@ -4424,7 +4689,7 @@ const monitorWorkers = async (
       // and loops). commitsAhead===0 gate: a worker that already produced integrable
       // work is not stuck at a boot dialog, so it takes the ordinary stall path.
       if (output === 'permission-wait' && commitsAhead === 0) {
-        engine.rateLimited.delete(w.terminalId)
+        endRateLimitHold(engine, w.terminalId, now) // hold (if any) ended — bank it
         engine.nudges.delete(w.terminalId)
         const pw = engine.permissionWaits.get(w.terminalId)
         if (!pw) {
@@ -4470,7 +4735,7 @@ const monitorWorkers = async (
       // 'blocked'. An unanswered real question, or a courtesy/rhetorical "?"
       // false-positive, must not squat the slot until the 90-min runaway ceiling.
       if (output === 'question') {
-        engine.rateLimited.delete(w.terminalId)
+        endRateLimitHold(engine, w.terminalId, now) // hold (if any) ended — bank it
         engine.permissionWaits.delete(w.terminalId)
         engine.nudges.delete(w.terminalId)
         // Lazy backfill (beside ensureEngine's): a plain engine literal from an
@@ -4535,7 +4800,12 @@ const monitorWorkers = async (
     // silent worker is NUDGED (Enter) up to STALL_MAX_NUDGES then RECLAIMED
     // (teardown + re-home) like a crash; a still-active one (action 'none') is
     // simply kept. Unchanged from the pre-card stall self-healing (c9fe657).
-    engine.rateLimited.delete(w.terminalId)
+    // The worker's screen reads NORMAL (or it never stopped working) ⇒ any
+    // rate-limit hold it was in has ENDED. Bank that span into the execution-time
+    // credit ledger — THIS is the release path a worker takes when a quota wait
+    // lifts and it resumes, and the one whose span the runaway check must repay
+    // (2026-07-12: 20m of wait charged to a worker that then worked 84m).
+    endRateLimitHold(engine, w.terminalId, now)
     engine.permissionWaits.delete(w.terminalId)
     engine.questionRaised?.delete(w.terminalId)
     engine.questionWaits?.delete(w.terminalId)
@@ -4620,8 +4890,16 @@ const monitorWorkers = async (
   for (const id of Array.from(engine.nudges.keys())) {
     if (!liveTerminalIds.has(id)) engine.nudges.delete(id)
   }
+  // A terminalId that left the live set is GONE (reclaimed / exited) — drop its
+  // hold state outright. Deleting rather than banking is correct here: there is no
+  // execution clock left to credit, and terminalIds are never reused.
   for (const id of Array.from(engine.rateLimited.keys())) {
     if (!liveTerminalIds.has(id)) engine.rateLimited.delete(id)
+  }
+  if (engine.rateLimitHeldMs) {
+    for (const id of Array.from(engine.rateLimitHeldMs.keys())) {
+      if (!liveTerminalIds.has(id)) engine.rateLimitHeldMs.delete(id)
+    }
   }
   if (engine.limitScreen) {
     for (const id of Array.from(engine.limitScreen.keys())) {
@@ -5056,7 +5334,12 @@ export const runIntegratePass = async (
       engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
       if (w) {
         try {
-          await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+          await deps.recoverWorker({
+            projectPath: engine.path,
+            worktree: w.worktree,
+            terminalId: w.terminalId,
+            reason: 'rework', // salvage any uncommitted work onto the branch first
+          })
         } catch {
           /* best-effort teardown */
         }
@@ -5133,7 +5416,12 @@ export const runIntegratePass = async (
     clearKeptMove(engine, card.id)
     if (w) {
       try {
-        await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+        await deps.recoverWorker({
+          projectPath: engine.path,
+          worktree: w.worktree,
+          terminalId: w.terminalId,
+          reason: 'rework', // salvage any uncommitted work onto the branch first
+        })
       } catch {
         /* best-effort teardown */
       }
@@ -5199,7 +5487,12 @@ export const runIntegratePass = async (
       engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
       if (w) {
         try {
-          await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+          await deps.recoverWorker({
+            projectPath: engine.path,
+            worktree: w.worktree,
+            terminalId: w.terminalId,
+            reason: 'rework', // salvage any uncommitted work onto the branch first
+          })
         } catch {
           /* best-effort teardown — branch KEPT for the human */
         }
@@ -5272,7 +5565,12 @@ export const runIntegratePass = async (
     clearKeptMove(engine, card.id)
     if (w) {
       try {
-        await deps.recoverWorker({ projectPath: engine.path, worktree: w.worktree, terminalId: w.terminalId })
+        await deps.recoverWorker({
+          projectPath: engine.path,
+          worktree: w.worktree,
+          terminalId: w.terminalId,
+          reason: 'rework', // salvage any uncommitted work onto the branch first
+        })
       } catch {
         /* best-effort teardown */
       }
@@ -6354,9 +6652,11 @@ export const stopOrchestratorWorker = async (
 
     // Tear the worktree + PTY down FIRST (the zombie-eradication — idempotent, and
     // the critical guarantee). Best-effort: a failure is logged, never blocks the stop.
-    let teardown: { removed: boolean; reason?: string } = { removed: false }
+    let teardown: { removed: boolean; reason?: string; wip?: WipCommitResult } = { removed: false }
     try {
-      teardown = await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId })
+      // 'stopped' — an OWNER stop. Its uncommitted work is salvaged onto the branch
+      // like any other teardown: the owner stopped the worker, not the work.
+      teardown = await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId, reason: 'stopped' })
     } catch {
       /* reported via teardown.removed=false below */
     }
@@ -6457,7 +6757,12 @@ export const resolveOrchestratorReview = async (
     const owned = branch ? engine.workers.filter((w) => w.branch === branch) : []
     for (const w of owned) {
       try {
-        await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId: w.terminalId })
+        await deps.recoverWorker({
+          projectPath: key,
+          worktree: w.worktree,
+          terminalId: w.terminalId,
+          reason: 'stopped', // salvage any uncommitted work onto the branch first
+        })
       } catch {
         /* best-effort teardown — the card already left review, which is the point */
       }

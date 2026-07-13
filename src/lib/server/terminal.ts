@@ -387,6 +387,24 @@ export const listActiveTerminalCwds = (): string[] => {
   return Array.from(out)
 }
 
+/** Is a LIVE PTY already driving this claude session id?
+ *
+ *  The resume seam (swarmSessions.ts) asks before handing a PERSISTED session id to
+ *  `claude --resume`: two claude processes appending to the SAME session transcript
+ *  would interleave-corrupt it, so a session that is still open is NOT resumable —
+ *  the caller mints a fresh id instead (fail-open). Deliberately INCLUDES hidden
+ *  utility sessions (they are real claude processes holding a real transcript open)
+ *  and EXCLUDES exited-but-lingering ones (`finishedAt` set, kept ~30s so the client
+ *  can drain the buffer) — that PTY is gone, so its session is free to resume. */
+export const isClaudeSessionLive = (agentSessionId: string): boolean => {
+  if (!agentSessionId) return false
+  let live = false
+  sessions.forEach((s) => {
+    if (!s.info.finishedAt && s.info.agentSessionId === agentSessionId) live = true
+  })
+  return live
+}
+
 /** Working/waiting judgement for a claude PTY. Pure — `now` is injected so
  *  tests don't need fake timers (house style).
  *  - An open TUI menu (permission prompt etc.) means claude is blocked on the

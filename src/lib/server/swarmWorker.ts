@@ -128,9 +128,18 @@ const flattenOneLine = (s: string): string =>
  *  beat ready + STOP, integration belongs to the commander, and heartbeats are
  *  mandatory (30 min of none is flagged as an anomaly). Single line, same
  *  slash-command-argument constraint as the goal text. Exported so tests pin
- *  the exact contract. */
+ *  the exact contract.
+ *
+ *  COMMIT EARLY (2026-07-12 全損): the rule used to read "実装→検証→git commit"
+ *  — commit AFTER the completion gate. A worker followed it exactly: it finished
+ *  the implementation, entered the gate, and was force-reclaimed at the execution
+ *  ceiling with 15 files (47KB) never committed — the worktree was removed and the
+ *  work ceased to exist. The order is now inverted: COMMIT AT EVERY PHASE
+ *  BOUNDARY, and ALWAYS before the gate. The engine also salvages a dirty worktree
+ *  on reclaim now (commitWipBeforeTeardown), but that is the NET — this is the
+ *  discipline, and a worker whose own commits exist needs no net. */
 export const WORKER_ORDER_RULES =
-  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。実装→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。'
+  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。【コミットは早く・こまめに】フェーズの境目ごとに必ず git commit を打て。特に完了ゲート(npm test / tsc / lint)に入る前は必ず WIP コミットを打ってから回すこと — 実行時間上限を超えた worker は worktree ごと強制回収されるので、未コミットのまま長い検証に入ると作業が消える(2026-07-12 に実際に 47KB 全損した)。実装→WIPコミット→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。'
 
 export const buildOrderInjection = (title: string, notes?: string, priorFailure?: string): string => {
   const t = flattenOneLine(title || '')

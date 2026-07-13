@@ -25,6 +25,13 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 
 ## 前提・環境確認
 
+- **あなたの会話は再起動を跨いで復元される(resume)— だが記憶は信じるな**: 2026-07-12 から司令官
+  セッションは `claude --resume` で前回の会話ごと立ち上がる(session id はプロジェクトごとに
+  `~/.openground/projects/<uuid>/swarm-sessions.json` に永続化)。**復元されるのは会話だけ**で、
+  エンジンの in-memory 状態(worker roster・reviews・quota 冷却・自動運転 ON)は再起動で**全消え**し、
+  さらに再起動はたいてい**リリース**なのでコード自体も変わっている。よって**再開直後の最初の行動は
+  「状況」を頭から実行すること**(§状況 — workers/orchestrator API + git + Board 突き合わせ)。
+  「前回こう言っていた」を根拠に喋らない — 現物(API/git)が正。詳細は `docs/commander/05-board-api-contract.md` §10。
 - cwd = 対象プロジェクトの primary checkout(OPEN GROUND に登録済みのパス)。以下 `<repo>` と表記
   (コマンド例の `$PWD` はそのまま使える)。
 - API ベース URL は自動注入される「OPEN GROUND context」カードの `http://127.0.0.1:<port>` を使う

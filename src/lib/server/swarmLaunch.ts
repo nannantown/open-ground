@@ -31,11 +31,15 @@ import { MODEL_TIER_LADDER, type ModelTier } from './swarmQuota'
 import {
   allowedModelTiers,
   highestAllowedTier,
-  highestSpawnableTier,
   isTierAllowed,
   isTierSpawnable,
 } from './swarmAllowedModels'
 import type { SwarmAllowedModels } from '../types'
+// The [Usage] pre-launch signal — the SAME cache UsageHud reads (claudeUsageCli),
+// consulted here read-only (never a live ~9s scrape at launch time; peekCachedUsage
+// is a synchronous in-memory peek that misses on a cold/expired cache — see
+// isTopTierExhaustedByUsage for the fail-open contract that follows from that).
+import { peekCachedUsage, type CliUsage } from './claudeUsageCli'
 
 /** The TOP-TIER model — what "full capability" means today. Fable 5 superseded
  *  Opus 4.8 as the newest flagship (alias verified against the CLI: `--model
@@ -184,8 +188,8 @@ const desiredModelEffort = (
  *  spawnable tier, and a slot that deliberately chose a cheaper tier (economy /
  *  optimize chore) keeps it unless it too is unusable, then drops further. Only
  *  when EVERY tier at-or-below `desired` is unusable does it look UP to the best
- *  spawnable one ({@link highestSpawnableTier}) — a launch must never land on a
- *  known-dry tier while another still has headroom.
+ *  spawnable one — a launch must never land on a known-dry tier while another
+ *  still has headroom.
  *
  *  FAIL-CLOSED on the mask. When nothing is spawnable the resolver still has to
  *  name a model (the wait-until-reset decision belongs to the engine — see
@@ -202,20 +206,61 @@ const desiredModelEffort = (
  *  `desired`, so the execution-mode matrix below is exactly today's behavior. An
  *  unknown model string (not on the ladder) is treated as the ladder head — walk
  *  the whole thing — a safe "best available" default rather than a throw. */
+/** True iff the cached `claude /usage` scrape shows the swarm's TOP tier
+ *  ({@link SWARM_LAUNCH_MODEL}) genuinely EXHAUSTED — session or
+ *  week-all-models pct >= 100. This is the ONLY tier the scrape's account-wide
+ *  session/weekly % can speak to (there is no per-model breakdown in the
+ *  cache — {@link CliUsage} only carries `session` + `weekAll`), so this veto
+ *  is never applied to any other rung of {@link MODEL_TIER_LADDER}.
+ *
+ *  FAIL-OPEN by construction (2026-07-12, user-confirmed policy: don't
+ *  pre-emptively hunt down a tier that might still have headroom):
+ *    • no cache yet / expired (`usage` is null, e.g. never scraped or the
+ *      scrape failed) → false, never treated as exhausted;
+ *    • a gray-zone reading (pct < 100, e.g. 95%) → false — only a CONFIRMED,
+ *      fully-spent slot (pct >= 100) counts, mirroring the same threshold
+ *      swarmOrchestrator's `a5CoolingHint` already trusts for reset times. */
+export const isTopTierExhaustedByUsage = (usage: CliUsage | null): boolean => {
+  if (!usage) return false
+  if (usage.session && usage.session.pct >= 100) return true
+  if (usage.weekAll && usage.weekAll.pct >= 100) return true
+  return false
+}
+
 export const resolveAvailableTier = (
   desired: string,
   now: number,
   allowed: SwarmAllowedModels = allowedModelTiers(),
+  usage: CliUsage | null = peekCachedUsage(),
 ): string | null => {
+  // A THIRD, independent veto (on top of cooling + the owner's mask): the
+  // cached /usage scrape's account-wide session/week-all-models % is the only
+  // signal it can speak to the swarm's TOP tier (SWARM_LAUNCH_MODEL) — `claude`
+  // draws that session/weekly cap from whichever model the swarm has actually
+  // been launching. See isTopTierExhaustedByUsage for the fail-open contract.
+  const topTierExhausted = isTopTierExhaustedByUsage(usage)
+  const spawnable = (tier: ModelTier): boolean =>
+    !(topTierExhausted && tier === MODEL_TIER_LADDER[0]) && isTierSpawnable(tier, now, allowed)
+
   const startIdx = MODEL_TIER_LADDER.indexOf(desired as ModelTier)
   const from = startIdx < 0 ? 0 : startIdx
   for (let i = from; i < MODEL_TIER_LADDER.length; i++) {
-    if (isTierSpawnable(MODEL_TIER_LADDER[i], now, allowed)) return MODEL_TIER_LADDER[i]
+    if (spawnable(MODEL_TIER_LADDER[i])) return MODEL_TIER_LADDER[i]
   }
-  const best = highestSpawnableTier(now, allowed)
-  if (best) return best
-  // Nothing has headroom. Keep `desired` only while the owner still allows it.
-  if (startIdx >= 0 && isTierAllowed(desired as ModelTier, allowed)) return desired
+  // Re-walk from the top for the "best available, above `desired`" case — mirrors
+  // highestSpawnableTier but honors the usage veto too (that helper only knows
+  // cooling + the mask).
+  for (const tier of MODEL_TIER_LADDER) {
+    if (spawnable(tier)) return tier
+  }
+  // Nothing has headroom. Keep `desired` only while the owner still allows it
+  // AND the usage veto doesn't rule it out.
+  if (
+    startIdx >= 0 &&
+    isTierAllowed(desired as ModelTier, allowed) &&
+    !(topTierExhausted && (desired as ModelTier) === MODEL_TIER_LADDER[0])
+  )
+    return desired
   return highestAllowedTier(allowed)
 }
 
@@ -243,13 +288,26 @@ export const resolveAvailableTier = (
 // swarm with fable OFF runs `max` on opus — and the mode's UI copy says so
 // (ExecutionModeToggle drops disabled tiers from the hint) rather than promising
 // a model the engine will never launch.
+//
+// A THIRD, PRE-LAUNCH signal narrows it further still: the cached `claude
+// /usage` scrape (claudeUsageCli — the same cache UsageHud reads, never a live
+// spawn here). Unlike cooling (learned ONLY after a launch actually gets
+// rate-limited — swarmOrchestrator.markRateLimited), this one can act BEFORE
+// the swarm even tries — if the scrape already shows the top tier's session or
+// weekly-all-models % at a CONFIRMED 100 (isTopTierExhaustedByUsage), the top
+// tier is excluded from every ladder walk in resolveAvailableTier, exactly like
+// a cooling mark would. A gray-zone reading (<100%) or no cache at all changes
+// nothing (fail-open) — this is a "known exhausted" veto, not a heuristic.
 
 /** Resolve the model + effort a swarm role launches at under `mode`, WITH the live
- *  quota fallback AND the owner's hard mask applied to the model (effort is passed
- *  through untouched). `now` defaults to the wall clock so every call site
- *  re-resolves the CURRENT state AT launch — and is injectable for deterministic
- *  tests. `allowed` defaults to the globalThis mirror of Settings; every spawn path
- *  that can await settings passes the freshly-read map.
+ *  quota fallback, the owner's hard mask, AND the pre-launch usage-cache veto
+ *  applied to the model (effort is passed through untouched). `now` defaults to
+ *  the wall clock so every call site re-resolves the CURRENT state AT launch —
+ *  and is injectable for deterministic tests. `allowed` defaults to the
+ *  globalThis mirror of Settings; every spawn path that can await settings
+ *  passes the freshly-read map. `usage` defaults to a synchronous peek of the
+ *  claudeUsageCli cache (see {@link isTopTierExhaustedByUsage}) — never a live
+ *  scrape at launch time.
  *
  *  Returns `null` when the owner has switched EVERY tier OFF: there is no model to
  *  launch on, so the caller MUST NOT spawn (it throws NoAllowedModelTierError, or
@@ -260,9 +318,10 @@ export const resolveSwarmModelEffort = (
   card?: { title?: string; notes?: string },
   now: number = Date.now(),
   allowed: SwarmAllowedModels = allowedModelTiers(),
+  usage: CliUsage | null = peekCachedUsage(),
 ): { model: string; effort?: ClaudeEffort } | null => {
   const desired = desiredModelEffort(mode, role, card)
-  const model = resolveAvailableTier(desired.model, now, allowed)
+  const model = resolveAvailableTier(desired.model, now, allowed, usage)
   return model ? { ...desired, model } : null
 }
 

@@ -5,10 +5,12 @@ import {
   swarmLaunchDefaults,
   resolveSwarmModelEffort,
   resolveAvailableTier,
+  isTopTierExhaustedByUsage,
   classifyCardWeight,
   execModeMaxWorkers,
   asExecutionMode,
 } from './swarmLaunch'
+import type { CliUsage } from './claudeUsageCli'
 import {
   CLAUDE_EFFORTS,
   DEFAULT_EXECUTION_MODE,
@@ -244,6 +246,101 @@ describe('quota fallback — launch tier follows the foundation (Done ①②③)
       model: 'fable',
       effort: 'low',
     })
+  })
+})
+
+// ─── Usage-cache pre-launch veto (claudeUsageCli, fail-open) ─────────────────
+// Fable exhaustion is only knowable BEFORE a launch fails via the cached
+// `/usage` scrape (there is no per-model breakdown, so the veto only ever
+// applies to the ladder head). `usage` is injected directly (the 6th param) so
+// these stay deterministic — no globalThis cache, no node-pty spawn.
+describe('isTopTierExhaustedByUsage (fail-open pure predicate)', () => {
+  const slot = (pct: number): CliUsage => ({
+    session: { pct, resetsAt: 'in 40 minutes' },
+    weekAll: null,
+    capturedAt: '2026-07-12T00:00:00.000Z',
+    status: 'ok',
+  })
+
+  it('no cache at all ⇒ not exhausted (fail-open — never scraped / expired)', () => {
+    expect(isTopTierExhaustedByUsage(null)).toBe(false)
+  })
+
+  it('gray zone (95%, even 99%) ⇒ not exhausted — only a CONFIRMED 100% counts', () => {
+    expect(isTopTierExhaustedByUsage(slot(95))).toBe(false)
+    expect(isTopTierExhaustedByUsage(slot(99))).toBe(false)
+  })
+
+  it('session at 100% ⇒ exhausted', () => {
+    expect(isTopTierExhaustedByUsage(slot(100))).toBe(true)
+  })
+
+  it('weekAll at 100% (session unknown) ⇒ exhausted', () => {
+    const usage: CliUsage = {
+      session: null,
+      weekAll: { pct: 100, resetsAt: 'in 6 days' },
+      capturedAt: '2026-07-12T00:00:00.000Z',
+      status: 'ok',
+    }
+    expect(isTopTierExhaustedByUsage(usage)).toBe(true)
+  })
+
+  it('both null slots (e.g. scrape-failed) ⇒ not exhausted', () => {
+    const usage: CliUsage = {
+      session: null,
+      weekAll: null,
+      capturedAt: '2026-07-12T00:00:00.000Z',
+      status: 'scrape-failed',
+    }
+    expect(isTopTierExhaustedByUsage(usage)).toBe(false)
+  })
+})
+
+describe('resolveAvailableTier / resolveSwarmModelEffort — usage-cache veto (this card)', () => {
+  const NOW = 1_700_000_000_000
+  const exhausted: CliUsage = {
+    session: { pct: 100, resetsAt: 'in 40 minutes' },
+    weekAll: null,
+    capturedAt: '2026-07-12T00:00:00.000Z',
+    status: 'ok',
+  }
+  const grayZone: CliUsage = {
+    session: { pct: 95, resetsAt: 'in 40 minutes' },
+    weekAll: null,
+    capturedAt: '2026-07-12T00:00:00.000Z',
+    status: 'ok',
+  }
+
+  it('fable confirmed exhausted (100%) ⇒ resolveAvailableTier drops to opus, exactly like cooling', () => {
+    expect(resolveAvailableTier('fable', NOW, undefined, exhausted)).toBe('opus')
+  })
+
+  it('gray zone (95%) ⇒ no effect — fable is still returned (no over-hunting)', () => {
+    expect(resolveAvailableTier('fable', NOW, undefined, grayZone)).toBe('fable')
+  })
+
+  it('null usage (no cache) ⇒ no effect — fail-open, fable still returned', () => {
+    expect(resolveAvailableTier('fable', NOW, undefined, null)).toBe('fable')
+  })
+
+  it('the veto never touches a non-top tier: sonnet stays sonnet even when fable is exhausted', () => {
+    expect(resolveAvailableTier('sonnet', NOW, undefined, exhausted)).toBe('sonnet')
+  })
+
+  it('max mode worker launch drops fable→opus under a confirmed-exhausted usage cache', () => {
+    const me = resolveSwarmModelEffort('max', 'worker', undefined, NOW, undefined, exhausted)!
+    expect(me.model).toBe('opus')
+    expect(me.effort).toBe('max') // usage veto moves the tier only, same as cooling
+  })
+
+  it('composes with cooling: fable exhausted by usage AND opus cooling ⇒ drops to sonnet', () => {
+    markCoolingUntil('opus', NOW + 3_600_000)
+    expect(resolveAvailableTier('fable', NOW, undefined, exhausted)).toBe('sonnet')
+  })
+
+  it('a switched-OFF fable is still skipped even when usage says it is fine (mask independent of usage)', () => {
+    const off = { fable: false, opus: true, sonnet: true, haiku: true } as SwarmAllowedModels
+    expect(resolveAvailableTier('fable', NOW, off, null)).toBe('opus')
   })
 })
 

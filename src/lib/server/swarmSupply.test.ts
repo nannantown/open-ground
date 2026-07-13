@@ -1,6 +1,7 @@
 import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
-import { supplyLaunchOpts, SUPPLY_INJECTION } from './swarmSupply'
+import { buildClaudeArgv } from './claudeTerminal'
+import { supplyLaunchOpts, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
 
 // spawnSwarmSupply spawns a real PTY (needs the `claude` CLI), so it is
 // curl-verified on the real machine. Here we pin the PURE launch contract —
@@ -68,5 +69,55 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
   it('leaves cols/rows undefined when omitted (launchClaude defaults apply)', () => {
     expect(base.cols).toBeUndefined()
     expect(base.rows).toBeUndefined()
+  })
+
+  // ── RESUME (swarmSessions.ts): the desk survives an app restart ───────────
+  describe('resume', () => {
+    const resumed = supplyLaunchOpts('/repo', 'sid-old', { resume: true })
+
+    it('a FRESH launch is byte-identical to the pre-resume contract (no `resume` flag)', () => {
+      // The old behaviour must be untouched when there is nothing to resume — this is
+      // the branch every first launch (and every fail-open fallback) still takes.
+      expect(base.resume).toBeUndefined()
+      expect(base.initialPrompt).toBe(SUPPLY_INJECTION)
+    })
+
+    it('a RESUMED launch reaches `claude --resume <id>` — never `--session-id`', () => {
+      // The end of the wire: buildClaudeArgv's long-dormant --resume branch is finally
+      // fed. Getting this wrong (both flags, or the wrong one) silently starts a NEW
+      // conversation, which is the exact bug this feature exists to kill.
+      expect(resumed.resume).toBe(true)
+      const argv = buildClaudeArgv(resumed, null, null, null, 'darwin')
+      expect(argv).toContain('--resume')
+      expect(argv[argv.indexOf('--resume') + 1]).toBe('sid-old')
+      expect(argv).not.toContain('--session-id')
+    })
+
+    it('tells the restored desk its Board memory is STALE — re-read before filing', () => {
+      // A supply officer resuming from a pre-restart memory files duplicates of cards
+      // the commander already merged. The injection must order a re-read of the live
+      // Board (the standing 積む前に必ず現状調査 rule), not just re-run the skill.
+      expect(resumed.initialPrompt).toBe(SUPPLY_RESUME_INJECTION)
+      expect(SUPPLY_RESUME_INJECTION).toMatch(/^\/supply /)
+      expect(SUPPLY_RESUME_INJECTION).toContain('Board')
+      expect(SUPPLY_RESUME_INJECTION).toContain('todo/doing/review')
+    })
+
+    it('keeps the injection to ONE line (the slash-command delivery contract)', () => {
+      // Same rule buildOrderInjection (swarmWorker.ts) is built around: a multi-line
+      // positional risks being split, or collapsed into a `[Pasted text]` chip where
+      // `/supply` is never parsed as a command at all.
+      expect(SUPPLY_RESUME_INJECTION).not.toContain('\n')
+      expect(SUPPLY_INJECTION).not.toContain('\n')
+    })
+
+    it('changes NOTHING else about the launch (bypass / tag / model / remote control)', () => {
+      expect(resumed.permissionMode).toBe('bypass')
+      expect(resumed.env).toEqual({ SWARM_MANAGER: '1' })
+      expect(resumed.strictMcpConfig).toBe(true)
+      expect(resumed.appContext).toBe(true)
+      expect(resumed.remoteControl).toBe('supply')
+      expect(resumed.model).toBe(SWARM_LAUNCH_MODEL)
+    })
   })
 })

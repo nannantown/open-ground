@@ -2,7 +2,9 @@
 
 > **対象コミット: `cc7c60e`** (origin/main tip, 2026-07-10 —
 > "fix(swarm): 手動 dispatch とエンジンの二重 dispatch 窓を両方向とも塞ぐ")。
-> 行番号は全てこのコミット時点。読者 = 将来の司令塔(og-manage / manage セッション)。
+> 行番号は原則このコミット時点。読者 = 将来の司令塔(og-manage / manage セッション)。
+> **例外: §6.2 の `/api/swarm/*` 行番号は 2026-07-12(会話 resume 実装)に現物から実測し直した**
+> (`server/routes/swarm.ts` は +17 シフトしていた)。同日 **§10(会話 resume)** を追加。
 > 本文書の主張には全て `file:line` の根拠を付けてある。裏取りは §9 の検証コマンドで自分で行うこと。
 
 ## 0. 司令塔が最初に覚える 5 行
@@ -330,28 +332,28 @@ POST `/api/projects/new`(`:164`)/`import`(`:256`)/`remove`(`:302` — 登録解�
 | Method Path | 主要入力 | 返り値 / 特記 | 行 |
 |---|---|---|---|
 | POST `/api/swarm/worker` | `{path, taskId?\|title?, notes?, hint?, worktree?, cols?, rows?}` | `SpawnSwarmWorkerResponse {terminalId, agentSessionId, worktree, branch, model?}`(`types.ts:939-950`)。taskId 有 = claim 先行 CAS(§5)。409=already dispatched、404=task not found、503=claude 未準備、400=goal 空/8KiB 超(`swarm.ts:113`) | `swarm.ts:241` |
-| POST `/api/swarm/supply` | `{path, cols?, rows?}` | 補給官 PTY(primary checkout・worktree なし) | `:379` |
-| POST `/api/swarm/manager` | `{path, cols?, rows?}` | 司令官 PTY(primary checkout・worktree なし) | `:418` |
-| POST `/api/swarm/worktree/remove` | `{path, worktree, force?}` | `{removed, reason?}` — dirty は force なしで拒否 | `:451` |
-| GET `/api/swarm/orchestrator` | `?path=` | `SwarmOrchestratorState`(`types.ts:1280-1361`)。**pure read — spawn しない**(eadb25e6) | `:486` |
-| GET `/api/swarm/workers` | `?path=` | **サーバ真実の worker 一覧**(PTY+roster+心拍の合成、`types.ts:1047-1092`) | `:501` |
-| POST `/api/swarm/orchestrator/drain-tick` | `{path}` | state 返すだけ(auto-start は廃止済み) | `:516` |
-| GET `/api/swarm/notifications` | — | FATAL 通知(マシン全体) | `:535` |
-| POST `/api/swarm/orchestrator/start` | `{path}` | 自律 dispatch ON(冪等)。503=claude 未準備 | `:546` |
-| POST `/api/swarm/orchestrator/stop` | `{path}` | OFF(冪等)。走行中 worker は放置 | `:570` |
-| POST `/api/swarm/orchestrator/worker/stop` | `{path, terminalId}` | エンジン worker 1 体停止 + カード blocked 駐機。unknown id は no-op | `:591` |
-| POST `/api/swarm/orchestrator/automerge` | `{path, enabled}` | Card③ 自動統合トグル(autonomy とは別スイッチ・既定 OFF) | `:614` |
-| POST `/api/swarm/orchestrator/review/resolve` | `{path, taskId, target:'blocked'\|'todo'}` | スタック review カードの人間裁定 | `:636` |
-| POST `/api/swarm/orchestrator/selfsupply` | `{path, enabled}` | 自己補給トグル | `:661` |
-| POST `/api/swarm/orchestrator/overseer` | `{path, enabled}` | 監督ノードトグル(+`sandboxWarning`) | `:688` |
-| POST `/api/swarm/orchestrator/selfsupply/approve` | `{path, cardId}` | 自己補給カードの承認(dispatch ゲート解除) | `:714` |
-| GET `/api/swarm/escalations` | `?path=&status=` | 人間への質問 inbox | `:740` |
-| POST `/api/swarm/escalations/open` | `{path, question, context, whyEscalated, …}` | 質問を上げる(receiptKey で冪等) | `:761` |
-| POST `/api/swarm/escalations/answer` | `{id, answer}` | 回答 → live PTY 注入 or 次回 dispatch へ | `:833` |
-| POST `/api/swarm/escalations/dismiss` | `{id}` | 未回答クローズ | `:858` |
-| GET `/api/swarm/quota` | — | `SwarmQuotaResponse {now, tiers, launchTier, allCoolingUntil}`(`types.ts:2228-2244`)。path 不要(subscription 全体の話) | `:880` |
-| POST `/api/swarm/quota/cool` | `{tier, untilMs\|minutes}` | tier を手動冷却(上限 `MAX_MANUAL_COOLING_MS`) | `:894` |
-| POST `/api/swarm/quota/uncool` | `{tier}` | 冷却解除(冪等) | `:926` |
+| POST `/api/swarm/supply` | `{path, cols?, rows?, fresh?}` | 補給官 PTY(primary checkout・worktree なし)。`{terminalId, agentSessionId, resumed}` — **既定で前回の会話を resume**(§10)。`fresh:true` で新規会話 | `:381` |
+| POST `/api/swarm/manager` | `{path, cols?, rows?, fresh?}` | 司令官 PTY(primary checkout・worktree なし)。同上 — **resume 時は Board を読み直してから喋る**(§10) | `:430` |
+| POST `/api/swarm/worktree/remove` | `{path, worktree, force?}` | `{removed, reason?}` — dirty は force なしで拒否 | `:468` |
+| GET `/api/swarm/orchestrator` | `?path=` | `SwarmOrchestratorState`(`types.ts:1280-1361`)。**pure read — spawn しない**(eadb25e6) | `:503` |
+| GET `/api/swarm/workers` | `?path=` | **サーバ真実の worker 一覧**(PTY+roster+心拍の合成、`types.ts:1047-1092`) | `:518` |
+| POST `/api/swarm/orchestrator/drain-tick` | `{path}` | state 返すだけ(auto-start は廃止済み) | `:533` |
+| GET `/api/swarm/notifications` | — | FATAL 通知(マシン全体) | `:552` |
+| POST `/api/swarm/orchestrator/start` | `{path}` | 自律 dispatch ON(冪等)。503=claude 未準備 | `:563` |
+| POST `/api/swarm/orchestrator/stop` | `{path}` | OFF(冪等)。走行中 worker は放置 | `:587` |
+| POST `/api/swarm/orchestrator/worker/stop` | `{path, terminalId}` | エンジン worker 1 体停止 + カード blocked 駐機。unknown id は no-op | `:608` |
+| POST `/api/swarm/orchestrator/automerge` | `{path, enabled}` | Card③ 自動統合トグル(autonomy とは別スイッチ・既定 OFF) | `:631` |
+| POST `/api/swarm/orchestrator/review/resolve` | `{path, taskId, target:'blocked'\|'todo'}` | スタック review カードの人間裁定 | `:653` |
+| POST `/api/swarm/orchestrator/selfsupply` | `{path, enabled}` | 自己補給トグル | `:678` |
+| POST `/api/swarm/orchestrator/overseer` | `{path, enabled}` | 監督ノードトグル(+`sandboxWarning`) | `:705` |
+| POST `/api/swarm/orchestrator/selfsupply/approve` | `{path, cardId}` | 自己補給カードの承認(dispatch ゲート解除) | `:731` |
+| GET `/api/swarm/escalations` | `?path=&status=` | 人間への質問 inbox | `:757` |
+| POST `/api/swarm/escalations/open` | `{path, question, context, whyEscalated, …}` | 質問を上げる(receiptKey で冪等) | `:778` |
+| POST `/api/swarm/escalations/answer` | `{id, answer}` | 回答 → live PTY 注入 or 次回 dispatch へ | `:850` |
+| POST `/api/swarm/escalations/dismiss` | `{id}` | 未回答クローズ | `:875` |
+| GET `/api/swarm/quota` | — | `SwarmQuotaResponse {now, tiers, launchTier, allCoolingUntil}`(`types.ts:2228-2244`)。path 不要(subscription 全体の話) | `:897` |
+| POST `/api/swarm/quota/cool` | `{tier, untilMs\|minutes}` | tier を手動冷却(上限 `MAX_MANUAL_COOLING_MS`) | `:911` |
+| POST `/api/swarm/quota/uncool` | `{tier}` | 冷却解除(冪等) | `:943` |
 
 ### 6.3 id の掟
 
@@ -499,4 +501,87 @@ ls ~/.openground/projects/$UUID/worktrees # worker の中央 worktree
 curl -s -X POST "$API/api/project/merged-branches" -H 'content-type: application/json' \
   -d "{\"path\":\"$P\",\"branches\":[\"swarm/<branch>\"]}" | jq .
 # 'merged' になって初めて setColumn done(または markDone 相当)を打つ
+```
+
+---
+
+## 10. 司令官・補給官の会話 resume(2026-07-12)
+
+司令官と補給官は**日をまたいで育つ会話**であり、使い捨ての worker とは性質が逆
+(worker は 1 ゴール 1 worktree 1 セッションで、忘れてよい)。にもかかわらず 2026-07-12 まで、
+両者は起動のたびに `crypto.randomUUID()` を `--session-id` に渡していた。つまり
+**OPEN GROUND を再起動するたび(= リリースのたび)に、司令官も補給官も記憶喪失で立ち上がっていた**。
+
+現在は **(プロジェクト × 役割) ごとに session id を永続化し、次回は `claude --resume <id>` で
+同じ会話を続ける**。seam は `src/lib/server/swarmSessions.ts`(`resolveSwarmSession` /
+`recordSwarmSession`)。`--resume` / `--session-id` の分岐自体は元から
+`claudeTerminal.ts:314-318`(`buildClaudeArgv`)に在り、呼ばれていなかっただけ。
+
+### 10.1 どこに何が永続化されるか
+
+| | |
+|---|---|
+| ファイル | `~/.openground/projects/<projectUUID>/swarm-sessions.json` |
+| なぜ中央 dir か | CLAUDE.md の原則(per-project data はユーザーの repo に書かない)。**tasks.json とは別ファイル**なのも意図的 — git 共有モードでは tasks.json が repo に移動するが、session id は**このマシンの `~/.claude` を指す個人状態**で、共有しても相手は開けない |
+| 形 | `{"manager":{"sessionId":"<uuid>","cwd":"<起動時の絶対パス>","updatedAt":"<ISO>"}, "supply":{…}}` |
+| 対象ロール | `supply` / `manager` **のみ**(`SWARM_SESSION_ROLES`)。worker は意図的に対象外 |
+| 書き込み | 毎起動(resume でも `updatedAt` を打ち直す)。supply と manager が 1 ファイルを共有するため read-modify-write は**パス単位で直列化**(同時起動でも片方のキーが消えない) |
+| tier 全滅時 | `NoAllowedModelTierError` は **record より前**に throw(04 章 §2.6)。spawn を拒んだのに「存在しない会話の id」を書き残すことはない |
+
+`cwd` を持つのは、claude が transcript を **cwd から導いたディレクトリ名**
+(`~/.claude/projects/<cwd をハイフン化>/<sessionId>.jsonl` — `claudeProjectDir.ts`)に置くから。
+プロジェクトを移動すると同じ id でも `--resume` が届かないので、その場合は新規に落とす(§10.3 `moved`)。
+
+### 10.2 resume した司令官が最初にやること =「状況」(非対称性の罠)
+
+**再起動で復元されるのは会話だけ**。これを取り違えると、司令官は**実在しない worker の話**を
+続ける(00-INDEX §2.1 の表が正典):
+
+- **会話履歴** → ✅ 生き残る(resume)
+- **エンジンの in-memory 認知**(worker roster / reviews / quota 冷却 / 自動運転 ON) → ❌ **全消え**(01 章 §2)
+- **Board / branch / 心拍 / escalations**(永続体) → ✅ ディスクに在る = **唯一の足場**
+- **コード自体** → ⚠️ 変わっている可能性大(再起動はたいていリリース)。各章の file:line も疑う
+
+だから resume 起動時は、`/og-manage` に**「まず『状況』を頭から実行し、Board 実体(todo/doing/review)・
+worker 一覧・エンジン状態を API と git で読み直してから喋れ」**という命令が同梱される
+(`swarmManager.ts` `MANAGER_RESUME_INJECTION` / 補給官は `swarmSupply.ts` `SUPPLY_RESUME_INJECTION`
+= 「積む前に Board を読み直せ」)。**新しい読み込みロジックではなく、既存の「状況」を呼ぶだけ。**
+「前回こう言っていた」は根拠にならない — 現物(API/git)が正。
+
+### 10.3 fail-open — resume されない 5 つの理由(壊れても必ず起動する)
+
+`claude --resume <id>` は claude が**読めない id**を渡すとエラー終了する。それは
+「司令官を開いたのに死んだ PTY が出る」ということなので、**resume は「証明できたときだけ」**行う
+(`isSessionResumable` が transcript の実在・非空・先頭 64KB に**パース可能な JSON 行が 1 本以上**を確認)。
+証明できない場合は**必ず新規セッションに落として起動する** — 2026-07-12 以前と同じ挙動に戻るだけで、
+**デスクは常に立ち上がる**。
+
+| `reason` | 意味 | 典型 |
+|---|---|---|
+| `none` | 何も永続化されていない | そのプロジェクト×役割の**初回起動** |
+| `moved` | 記録された `cwd` と今の cwd が違う | プロジェクトを移動/relocate した(transcript が旧ディレクトリ名の下に在る) |
+| `live` | その id を**生きた PTY が既に掴んでいる** | 司令官を二重に開いた。2 プロセスが 1 transcript に追記すると壊れるので、2 枚目は別会話にする |
+| `missing` | claude 側に読める transcript が無い | `~/.claude` を消した / 別マシン / 古い session が pruned / 空・破損 |
+| `store` | 永続化層自体が失敗 | 未登録パス等の**バグ**。それでも起動は止めない |
+
+**見分け方**: `POST /api/swarm/{supply,manager}` の応答 **`resumed`**(true=会話復元 / false=新規)と、
+サーバログの `[swarmSessions]` 行。`fresh:true` を渡すと**記録を無視して新規会話**にし、記録も
+上書きする(復元した文脈が壊れているときの脱出ハッチ — 上書きするからこそ「脱出」になる)。
+
+### 10.4 検証(そのまま打つ)
+
+```bash
+UUID=$(jq -r --arg p "$P" '.projects[] | select(.path==$p) | .id' ~/.openground/settings.json)
+
+# 永続化されている会話(無ければ初回 = 次回から resume される)
+jq . ~/.openground/projects/$UUID/swarm-sessions.json
+
+# その id を claude 側が読めるか = 次回 resume されるか(空/不在なら missing で新規に落ちる)
+SID=$(jq -r '.manager.sessionId' ~/.openground/projects/$UUID/swarm-sessions.json)
+DIR=$(printf '%s' "$(cd "$P" && pwd -P)" | sed 's/[/. ]/-/g')
+wc -l ~/.claude/projects/$DIR/$SID.jsonl
+
+# 起動が resume だったか(応答で判る)。fresh:true で新規会話に逃がす
+curl -s -X POST "$API/api/swarm/manager" -H 'content-type: application/json' \
+  -d "{\"path\":\"$P\"}" | jq '{terminalId, agentSessionId, resumed}'
 ```

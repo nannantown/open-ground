@@ -957,28 +957,41 @@ export interface RemoveSwarmWorktreeResponse {
   reason?: string
 }
 
-/** POST /api/swarm/supply — a freshly spawned in-app SUPPLY (補給官) session:
- *  the claude PTY id + minted session id. Unlike a worker it has NO worktree —
- *  it runs in the project's PRIMARY checkout cwd, running the /supply skill to
- *  turn the user's vague requests into observable Board:todo cards. It only
- *  talks to the user + writes the Board; it never edits code or pushes (so no
- *  worktree to return, and stopping it is a plain PTY kill). */
+/** POST /api/swarm/supply — a spawned in-app SUPPLY (補給官) session: the claude
+ *  PTY id + its session id. Unlike a worker it has NO worktree — it runs in the
+ *  project's PRIMARY checkout cwd, running the /supply skill to turn the user's
+ *  vague requests into observable Board:todo cards. It only talks to the user +
+ *  writes the Board; it never edits code or pushes (so no worktree to return, and
+ *  stopping it is a plain PTY kill). */
 export interface SpawnSwarmSupplyResponse {
   terminalId: string
   agentSessionId: string
+  /** true ⇒ this is the project's PREVIOUS supply conversation, resumed
+   *  (`claude --resume`): its session id was persisted centrally and claude still
+   *  had the transcript, so the desk kept its memory across the app restart. false
+   *  ⇒ a brand-new conversation — nothing persisted yet, the stored session was
+   *  gone/corrupt/still open, or `fresh` was requested (swarmSessions.ts). */
+  resumed: boolean
 }
 
-/** POST /api/swarm/manager — a freshly spawned in-app COMMANDER (司令官)
- *  CONVERSATION session: the claude PTY id + minted session id. Like the supply
- *  officer (and unlike a worker) it has NO worktree — it runs in the project's
- *  PRIMARY checkout cwd, running the /manage skill so the owner can talk to the
- *  commander (status / merge / advise) interactively. It complements the
- *  AUTONOMOUS engine (the orchestrator behind /api/swarm/orchestrator): the
- *  engine is the unattended drain+integrate loop, this is the human-in-the-loop
- *  conversational counterpart. Stopping it is a plain PTY kill (no worktree). */
+/** POST /api/swarm/manager — a spawned in-app COMMANDER (司令官) CONVERSATION
+ *  session: the claude PTY id + its session id. Like the supply officer (and
+ *  unlike a worker) it has NO worktree — it runs in the project's PRIMARY checkout
+ *  cwd, running the /og-manage skill so the owner can talk to the commander
+ *  (status / merge / advise) interactively. It complements the AUTONOMOUS engine
+ *  (the orchestrator behind /api/swarm/orchestrator): the engine is the unattended
+ *  drain+integrate loop, this is the human-in-the-loop conversational counterpart.
+ *  Stopping it is a plain PTY kill (no worktree). */
 export interface SpawnSwarmManagerResponse {
   terminalId: string
   agentSessionId: string
+  /** true ⇒ this is the project's PREVIOUS commander conversation, resumed
+   *  (`claude --resume`) — see SpawnSwarmSupplyResponse.resumed. NOTE the asymmetry
+   *  a resumed commander must respect: its CONVERSATION survived the restart, but
+   *  the ENGINE's in-memory state (worker roster / reviews / quota cooling) did
+   *  NOT. That is why a resumed commander is ordered to re-read the Board and the
+   *  worker list before it says anything (swarmManager.MANAGER_RESUME_INJECTION). */
+  resumed: boolean
 }
 
 /** The coarse lifecycle stage the COMMANDER engine reports for one of its

@@ -1,6 +1,7 @@
 import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
-import { managerLaunchOpts, MANAGER_INJECTION } from './swarmManager'
+import { buildClaudeArgv } from './claudeTerminal'
+import { managerLaunchOpts, MANAGER_INJECTION, MANAGER_RESUME_INJECTION } from './swarmManager'
 
 // spawnSwarmManager spawns a real PTY (needs the `claude` CLI), so it is
 // curl-verified on the real machine. Here we pin the PURE launch contract —
@@ -77,5 +78,55 @@ describe('managerLaunchOpts (commander launch contract)', () => {
   it('leaves cols/rows undefined when omitted (launchClaude defaults apply)', () => {
     expect(base.cols).toBeUndefined()
     expect(base.rows).toBeUndefined()
+  })
+
+  // ── RESUME (swarmSessions.ts): the commander survives an app restart ──────
+  describe('resume', () => {
+    const resumed = managerLaunchOpts('/repo', 'sid-old', { resume: true })
+
+    it('a FRESH launch is byte-identical to the pre-resume contract (no `resume` flag)', () => {
+      expect(base.resume).toBeUndefined()
+      expect(base.initialPrompt).toBe(MANAGER_INJECTION)
+    })
+
+    it('a RESUMED launch reaches `claude --resume <id>` — never `--session-id`', () => {
+      // buildClaudeArgv's --resume branch existed for months with no caller; this is
+      // the wire that finally feeds it. Emitting both flags (or the wrong one) would
+      // silently open a NEW conversation — the exact amnesia this feature kills.
+      expect(resumed.resume).toBe(true)
+      const argv = buildClaudeArgv(resumed, null, null, null, 'darwin')
+      expect(argv).toContain('--resume')
+      expect(argv[argv.indexOf('--resume') + 1]).toBe('sid-old')
+      expect(argv).not.toContain('--session-id')
+    })
+
+    it('ORDERS the restored commander to re-read the Board before it speaks', () => {
+      // The asymmetry that makes this mandatory: the CONVERSATION survives the restart,
+      // the ENGINE's in-memory roster/reviews/quota do NOT — and the restart is usually
+      // a RELEASE, so the code moved too. A commander answering from memory describes a
+      // world that no longer exists. It must run 「状況」 (the skill's own read-the-world
+      // routine: workers + orchestrator + git + Board) and report from what it FINDS.
+      expect(resumed.initialPrompt).toBe(MANAGER_RESUME_INJECTION)
+      expect(MANAGER_RESUME_INJECTION).toMatch(/^\/og-manage /)
+      expect(MANAGER_RESUME_INJECTION).toContain('状況')
+      expect(MANAGER_RESUME_INJECTION).toContain('todo/doing/review')
+    })
+
+    it('keeps the injection to ONE line (the slash-command delivery contract)', () => {
+      // Same rule buildOrderInjection (swarmWorker.ts) is built around: a multi-line
+      // positional risks being split, or collapsed into a `[Pasted text]` chip where
+      // `/og-manage` is never parsed as a command at all.
+      expect(MANAGER_RESUME_INJECTION).not.toContain('\n')
+      expect(MANAGER_INJECTION).not.toContain('\n')
+    })
+
+    it('changes NOTHING else about the launch (bypass / tag / model / remote control)', () => {
+      expect(resumed.permissionMode).toBe('bypass')
+      expect(resumed.env).toEqual({ SWARM_MANAGER: '1' })
+      expect(resumed.strictMcpConfig).toBe(true)
+      expect(resumed.appContext).toBe(true)
+      expect(resumed.remoteControl).toBe('manager')
+      expect(resumed.model).toBe(SWARM_LAUNCH_MODEL)
+    })
   })
 })

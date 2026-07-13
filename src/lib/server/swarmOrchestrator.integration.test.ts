@@ -48,6 +48,7 @@ import {
   SWARM_SAFETY_TESTS,
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
+  MAX_EXEC_MS,
   __resetOrchestratorForTests,
   emptyMetricsCounters,
   MAX_CONFLICT_REWORKS,
@@ -675,6 +676,97 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(col('a')).toBe('todo') // ← requeued, not stranded in doing
     expect(engine.workers).toHaveLength(0) // slot freed
     expect(engine.log.some((l) => l.message.startsWith('worker lost — card → todo'))).toBe(true)
+  })
+
+  it('SALVAGES uncommitted work as a WIP commit before tearing a RUNAWAY worker down (2026-07-12 全損)', async () => {
+    // THE ACCIDENT, reproduced end-to-end on real git: a worker had finished its
+    // implementation but had NOT committed it (the old discipline said commit AFTER
+    // the completion gate, and the gate was still running) when the execution-time
+    // ceiling fired. Teardown force-removes the worktree — `--force` is mandatory
+    // for a dirty tree — so 15 files / 47KB ceased to exist. The engine must now
+    // COMMIT what it finds before it removes anything.
+    const { proj } = await setupRepo()
+    const { col, boardDeps } = makeBoard([todoCard('a')])
+    // A worker that creates a REAL worktree and commits NOTHING — it just works.
+    const spawn = (async ({ hint }: { title: string; hint?: string }) => {
+      const wt = await createSwarmWorktree(proj, { hint })
+      return { terminalId: `pty-${wt.branch}`, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
+    }) as OrchestratorDeps['spawnWorker']
+    const deps: OrchestratorDeps & IntegrationDeps = {
+      ...defaultDeps(), // REAL recoverWorker ⇒ REAL commitWipBeforeTeardown + worktree removal
+      ...boardDeps,
+      spawnWorker: spawn,
+      isAlive: () => true, // BUSY throughout — only the runaway ceiling can stop it
+      readHeartbeat: async () => null,
+      killPty: () => {},
+    }
+    const engine = newEngine(proj)
+
+    // Pass 1 — dispatch: a real worktree on a real `swarm/*` branch, nothing committed.
+    await runDispatchPass(engine, deps)
+    expect(engine.workers).toHaveLength(1)
+    const { worktree, branch, startedAt } = engine.workers[0]
+    expect(await deps.countCommitsAhead(proj, branch)).toBe(0)
+
+    // The worker DOES THE WORK — an edit and a new file — and commits none of it.
+    await writeFile(join(worktree, 'README.md'), '# base\nthe finished implementation\n')
+    await writeFile(join(worktree, 'newFeature.ts'), 'export const answer = 42\n')
+
+    // Pass 2 — the execution ceiling fires while it is still busy ⇒ runaway teardown.
+    const now = Date.parse(startedAt) + MAX_EXEC_MS + 1
+    await runDispatchPass(engine, deps, now)
+
+    // The worktree is gone and the card parked — the reclaim itself is UNCHANGED …
+    expect(await exists(worktree)).toBe(false)
+    expect(col('a')).toBe('blocked') // a re-run would overrun again ⇒ a human looks
+    expect(engine.workers).toHaveLength(0)
+
+    // … but THE WORK SURVIVES: it was committed to the worker's branch first.
+    expect(await deps.countCommitsAhead(proj, branch)).toBe(1)
+    const { stdout: subject } = await git(proj, ['log', '-1', '--format=%s', branch])
+    expect(subject).toContain('WIP')
+    expect(subject).toContain('runaway') // the reclaim REASON is in the message
+    // The actual bytes are on the branch — the edit AND the untracked new file
+    // (`git add -A`), readable from the shared repo after the worktree is gone.
+    const { stdout: added } = await git(proj, ['show', `${branch}:newFeature.ts`])
+    expect(added).toBe('export const answer = 42\n')
+    const { stdout: edited } = await git(proj, ['show', `${branch}:README.md`])
+    expect(edited).toContain('the finished implementation')
+    // The commander is TOLD: a re-dispatch branches fresh, so this log line is the
+    // only way the owner learns there is salvaged work sitting on the old branch.
+    expect(engine.log.some((l) => l.message.includes('auto-saved as a WIP commit'))).toBe(true)
+  })
+
+  it('NO-OPs on a clean worktree — an empty reclaim never manufactures a commit', async () => {
+    // The other half of the contract: the salvage must be invisible when there is
+    // nothing to save. A crashed worker with a CLEAN tree is torn down exactly as
+    // before — no WIP commit, no phantom "work" for the commander to review.
+    const { proj } = await setupRepo()
+    const alive = new Set<string>()
+    const { boardDeps } = makeBoard([todoCard('a')])
+    const spawn = (async ({ hint }: { title: string; hint?: string }) => {
+      const wt = await createSwarmWorktree(proj, { hint })
+      const terminalId = `pty-${wt.branch}`
+      alive.add(terminalId)
+      return { terminalId, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
+    }) as OrchestratorDeps['spawnWorker']
+    const deps: OrchestratorDeps & IntegrationDeps = {
+      ...defaultDeps(),
+      ...boardDeps,
+      spawnWorker: spawn,
+      isAlive: (id) => alive.has(id),
+      readHeartbeat: async () => null,
+      killPty: () => {},
+    }
+    const engine = newEngine(proj)
+    await runDispatchPass(engine, deps)
+    const { worktree, branch, terminalId } = engine.workers[0]
+    alive.delete(terminalId) // dies with a spotless tree
+
+    await runDispatchPass(engine, deps)
+    expect(await exists(worktree)).toBe(false)
+    expect(await deps.countCommitsAhead(proj, branch)).toBe(0) // ← nothing invented
+    expect(engine.log.some((l) => l.message.includes('auto-saved as a WIP commit'))).toBe(false)
   })
 
   it('(a)+(3) RECLAIMS a STALLED (alive but silent) worker: nudges, then REAL worktree torn down + card requeued', async () => {

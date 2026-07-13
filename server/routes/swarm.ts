@@ -368,7 +368,7 @@ export const swarmRoutes = new Hono()
     return c.json(res)
   })
   // --- POST /api/swarm/supply — spawn the in-app supply officer (補給官) ------
-  // Body: { path, cols?, rows? }. Launches ONE interactive claude PTY in the
+  // Body: { path, cols?, rows?, fresh? }. Launches ONE interactive claude PTY in the
   // project's PRIMARY checkout (NOT a worktree) running the /supply skill, which
   // turns the user's vague requests into observable Board:todo cards. No
   // worktree is created (supply only talks + writes the Board), so there is
@@ -376,6 +376,8 @@ export const swarmRoutes = new Hono()
   // /api/terminal/:id). Owner-only + validated + preflighted exactly like
   // /worker; bypass + SWARM_MANAGER=1 (set in swarmSupply) — a role TAG, not a
   // guard opt-in: the WORKER-ONLY PreToolUse veto never polices this trusted desk.
+  // RESUMES the project's previous supply conversation by default (the response's
+  // `resumed` says which happened); `fresh:true` opts out. See swarmSessions.ts.
   .post('/api/swarm/supply', async (c) => {
     // OWNER-ONLY gate (see /api/swarm/worker): the supply session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
@@ -399,14 +401,20 @@ export const swarmRoutes = new Hono()
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     try {
-      const res = await spawnSwarmSupply({ projectPath: path, cols, rows })
+      // Default: RESUME the project's persisted supply conversation when claude can
+      // still load it (swarmSessions.ts) — the desk survives an app restart instead
+      // of waking up amnesiac. `fresh:true` forces a brand-new conversation (the way
+      // out of a restored context that has gone bad); anything but a literal true is
+      // a resume, so a junk body can never silently discard the desk's memory.
+      const fresh = body?.fresh === true
+      const res = await spawnSwarmSupply({ projectPath: path, cols, rows, fresh })
       return c.json(res)
     } catch (e: any) {
       return c.json({ error: `failed to spawn supply: ${e?.message ?? e}` }, 500)
     }
   })
   // --- POST /api/swarm/manager — spawn the in-app commander (司令官) ----------
-  // Body: { path, cols?, rows? }. Launches ONE interactive claude PTY in the
+  // Body: { path, cols?, rows?, fresh? }. Launches ONE interactive claude PTY in the
   // project's PRIMARY checkout (NOT a worktree) running the /manage skill — the
   // conversational commander the owner talks to (status / merge / advise),
   // complementing the autonomous orchestrator engine. No worktree is created
@@ -415,6 +423,10 @@ export const swarmRoutes = new Hono()
   // Owner-only + validated + preflighted exactly like /supply; bypass +
   // SWARM_MANAGER=1 (set in swarmManager) — a role TAG, not a guard opt-in:
   // the WORKER-ONLY PreToolUse veto never polices the trusted commander.
+  // RESUMES the project's previous commander conversation by default (the response's
+  // `resumed` says which happened) — and a resumed commander re-reads the Board
+  // before it speaks, because the engine's in-memory roster did NOT survive the
+  // restart even though the conversation did. `fresh:true` opts out (swarmSessions.ts).
   .post('/api/swarm/manager', async (c) => {
     // OWNER-ONLY gate (see /api/swarm/worker): the commander session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
@@ -438,7 +450,12 @@ export const swarmRoutes = new Hono()
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     try {
-      const res = await spawnSwarmManager({ projectPath: path, cols, rows })
+      // Default: RESUME the project's persisted commander conversation when claude
+      // can still load it (swarmSessions.ts). The resumed commander is ordered to
+      // re-read the Board first — its conversation survived the restart, the
+      // engine's in-memory roster did not. `fresh:true` forces a new conversation.
+      const fresh = body?.fresh === true
+      const res = await spawnSwarmManager({ projectPath: path, cols, rows, fresh })
       return c.json(res)
     } catch (e: any) {
       return c.json({ error: `failed to spawn manager: ${e?.message ?? e}` }, 500)

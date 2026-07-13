@@ -1206,6 +1206,23 @@ describe('isRunaway — the hard execution-time ceiling', () => {
     expect(isRunaway(0, NOW, 90 * 60_000)).toBe(false)
     expect(isRunaway(NOW + 1000, NOW, 90 * 60_000)).toBe(false)
   })
+  it('SUBTRACTS the rate-limit hold — the ceiling bounds WORKING time (2026-07-12 全損)', () => {
+    // The measured shape: 20m of quota wait + 84m of work = 104m alive. Charged as
+    // wall-clock it is a runaway at 90m (and the worker was torn down with 15
+    // uncommitted files); charged as WORK it is 84m — nowhere near the ceiling.
+    expect(isRunaway(NOW - 104 * 60_000, NOW, 90 * 60_000)).toBe(true) // the OLD verdict
+    expect(isRunaway(NOW - 104 * 60_000, NOW, 90 * 60_000, 20 * 60_000)).toBe(false) // the fix
+    // Still fires once the WORKED time crosses the ceiling, however long it waited.
+    expect(isRunaway(NOW - 200 * 60_000, NOW, 90 * 60_000, 100 * 60_000)).toBe(true) // 100m worked
+    expect(isRunaway(NOW - 110 * 60_000, NOW, 90 * 60_000, 20 * 60_000)).toBe(true) // exactly 90m
+  })
+  it('floors a nonsense credit at 0 — a corrupt ledger can only make the check STRICTER', () => {
+    // A negative / NaN credit must never be ADDED to the worker's lifetime (that
+    // would kill a healthy worker early) and must never grant amnesty.
+    expect(isRunaway(NOW - 91 * 60_000, NOW, 90 * 60_000, -60 * 60_000)).toBe(true)
+    expect(isRunaway(NOW - 91 * 60_000, NOW, 90 * 60_000, Number.NaN)).toBe(true)
+    expect(isRunaway(NOW - 89 * 60_000, NOW, 90 * 60_000, -60 * 60_000)).toBe(false)
+  })
 })
 
 // ── maybeAutoStartDrain / drainTickOrchestrator — auto-start without a manual ON ──
@@ -3577,6 +3594,9 @@ describe('runDispatchPass — monitor: runaway (execution-time ceiling)', () => 
 
   it('runaway takes PRIORITY over a rate-limit wait (→ blocked, not todo)', async () => {
     const engine = newEngine({ workers: [w1()] })
+    // Alive past the ceiling on WORKING time (no hold has ever been banked, and the
+    // screen only reads limited on THIS pass — the credit is 0), so runaway still
+    // wins the race against the rate-limit arm.
     const now = T0 + MAX_EXEC_MS + 1
     const deps = makeDeps({
       cards: [card('a', { boardColumn: 'doing' })],
@@ -3585,6 +3605,94 @@ describe('runDispatchPass — monitor: runaway (execution-time ceiling)', () => 
     await runDispatchPass(engine, deps, now)
     expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
     expect(engine.rateLimited.has('pty-a-1')).toBe(false)
+  })
+
+  // ── The 2026-07-12 全損: a quota wait must not spend the execution budget ─────
+  // Measured: 20m held on a Fable limit + 84m of real work = 104m wall-clock ⇒
+  // judged runaway at the 90m ceiling and torn down with 15 uncommitted files. The
+  // ceiling bounds WORKING time; a hold is repaid.
+
+  it('does NOT count a BANKED rate-limit hold against the execution ceiling', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const heldMs = 20 * 60_000 // the worker sat 20m on a limit earlier, then resumed
+    engine.rateLimitHeldMs = new Map([['pty-a-1', heldMs]])
+    const now = T0 + MAX_EXEC_MS + 10 * 60_000 // ALIVE 100m at the 90m default …
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1000]]), // busy: back at work, screen normal
+    })
+    await runDispatchPass(engine, deps, now)
+    // … but only 80m WORKED (100 − 20) ⇒ under the ceiling ⇒ left alone.
+    expect(deps.tornDown).toHaveLength(0)
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false)
+  })
+
+  it('credits a hold that is STILL IN FLIGHT (a worker frozen at the ceiling is not 暴走)', async () => {
+    // A worker held on a limit RIGHT NOW must not cross the ceiling while it sits
+    // there waiting — the credit is paid in real time, not only once the hold ends.
+    // (Without this, a worker 75m in that hits a limit is reclaimed 15m later for
+    // "running too long" while it has done nothing at all.)
+    const engine = newEngine({ workers: [w1()] })
+    const now = T0 + MAX_EXEC_MS + 10 * 60_000 // alive 100m
+    const holdSince = now - 20 * 60_000 // ... 20m of which it has been frozen
+    engine.rateLimited = new Map([['pty-a-1', { since: holdSince, holdSince }]])
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached']]),
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false)
+    expect(deps.recovered).not.toContainEqual({ taskId: 'a', column: 'blocked' }) // not parked as 暴走
+    expect(deps.nudged).toHaveLength(0) // still held, never nudged
+  })
+
+  it('STILL stops a worker that never waited on a limit (regression guard on the credit)', async () => {
+    // The credit must not become a blanket amnesty: with no hold banked and none in
+    // flight, 91m alive at the 90m default is 91m WORKED ⇒ runaway, exactly as before.
+    const engine = newEngine({ workers: [w1()] })
+    const now = T0 + MAX_EXEC_MS + 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1000]]), // busy — only the ceiling can stop it
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(engine.rateLimitHeldMs?.get('pty-a-1')).toBeUndefined() // no hold ever existed
+    expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }])
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    expect(engine.workers).toHaveLength(0)
+    const log = engine.log.find((l) => l.message.startsWith('worker runaway'))
+    expect(log?.level).toBe('warn')
+    expect(log?.message).toContain('0m of rate-limit hold credited back')
+  })
+
+  it('BANKS a hold when the limit lifts — the ledger is what the ceiling reads', async () => {
+    // The wiring under the two tests above: the engine must actually RECORD the
+    // hold's span when the worker resumes. Pass 1 holds it (screen limited, silent);
+    // pass 2 sees a normal screen ⇒ the hold ENDS and its span is banked.
+    const engine = newEngine({ workers: [w1()] })
+    const holdStart = T0 + 10 * 60_000
+    const deps1 = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached']]),
+      outputs: new Map([['pty-a-1', T0]]), // silent since dispatch ⇒ the hold gate opens
+    })
+    await runDispatchPass(engine, deps1, holdStart)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(true) // held, not reclaimed
+    expect(deps1.tornDown).toHaveLength(0)
+
+    // 15 minutes later the limit lifts: the screen reads normal and output flows.
+    const resumed = holdStart + 15 * 60_000
+    const deps2 = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'thinking…']]),
+      outputs: new Map([['pty-a-1', resumed - 1000]]),
+    })
+    await runDispatchPass(engine, deps2, resumed)
+    expect(engine.rateLimited.has('pty-a-1')).toBe(false) // hold released …
+    expect(engine.rateLimitHeldMs?.get('pty-a-1')).toBe(15 * 60_000) // … and BANKED
+    expect(engine.workers).toHaveLength(1) // still working, untouched
   })
 })
 
