@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef } from 'react'
 import { Code2 } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { buildMockSrcdoc, hash32 } from '@/lib/mockSrcdoc'
+import { useClientLockdown } from '@/lib/lockdownClient'
 import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { textSizingOf, textVAlignOf, textBox } from '@/lib/canvasTextSizing'
 import { resolveStickyFill, DEFAULT_STICKY_FILL } from '@/lib/canvasFillStyle'
@@ -455,10 +456,12 @@ const MockView = ({
 
   // Memoised so we don't reload the iframe on unrelated parent re-renders
   // (e.g. someone else's selection change). Rebuilds only when the code,
-  // framework, or theme changes.
+  // framework, theme — or work mode, which swaps CDN-backed templates for the
+  // explicit placeholder — changes.
+  const lockdown = useClientLockdown()
   const srcdoc = useMemo(
-    () => buildMockSrcdoc(element.text, framework, theme),
-    [element.text, framework, theme],
+    () => buildMockSrcdoc(element.text, framework, theme, { lockdown }),
+    [element.text, framework, theme, lockdown],
   )
 
   // Inspect-and-instruct ("tweak") flow — shared with ScreenView, see there.

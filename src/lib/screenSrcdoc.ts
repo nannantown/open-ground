@@ -25,7 +25,7 @@
 // reach the host page's DOM / cookies / storage. Network is allowed — that's
 // how the CDN + fonts load (cached after first online load, like mocks).
 
-import { hash32 } from './mockSrcdoc'
+import { hash32, buildLockdownPlaceholderSrcdoc, type SrcdocOpts } from './mockSrcdoc'
 import { buildInspectScript } from './canvasInspect'
 import { messages, type Lang } from '@/i18n/messages'
 
@@ -98,9 +98,13 @@ const TAILWIND_CONFIG = {
   },
 }
 
-const FONTS_HREF =
-  'https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..700' +
-  '&family=Instrument+Sans:wght@400..600&family=JetBrains+Mono:wght@400..600&display=swap'
+// Self-hosted fonts (public/fonts/ — same files the app shell loads). A
+// srcdoc iframe inherits the parent document's base URL, so this resolves to
+// the loopback origin; the server adds Access-Control-Allow-Origin for
+// /fonts/* because the sandboxed iframe is null-origin and font loads are
+// CORS-gated. Deliberately NOT fonts.googleapis.com — see docs/SECURITY.md
+// §8-8 / §12 (no non-Anthropic egress).
+const FONTS_HREF = '/fonts/fonts.css'
 
 // Custom utilities / CSS vars not expressible through the Tailwind config — the
 // `--font-*` vars the token fontFamily references, plus the `.label-cap` /
@@ -404,7 +408,15 @@ export function buildScreenSrcdoc(
   framework: ScreenFramework = 'react',
   theme: ScreenTheme = 'light',
   props?: Record<string, unknown>,
+  opts: SrcdocOpts = {},
 ): string {
+  // WORK MODE (lockdown): BOTH screen templates need external CDNs (Tailwind
+  // Play at minimum; react/babel/lucide for 'react') — under lockdown they
+  // cannot render truthfully, so show the explicit placeholder instead of a
+  // silently unstyled/broken frame (docs/SECURITY.md §12). Custom-module tabs
+  // route through here too, which is exactly the third-party-code surface the
+  // placeholder's CSP exists for.
+  if (opts.lockdown === true) return buildLockdownPlaceholderSrcdoc(theme)
   if (framework === 'html') return HTML_TEMPLATE(source, theme)
   let propsJson = '{}'
   try {

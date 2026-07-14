@@ -133,6 +133,15 @@ export interface Settings {
    *  boundary (POST /api/terminal is already ungated locally — swarmGate.ts).
    *  Scope: swarm only — marketplace/custom-tab roles ignore it. */
   swarmLocalOwner?: boolean
+  /** Work mode (lockdown) — the one-toggle kill switch for every NON-Anthropic
+   *  external egress, for running OPEN GROUND on a confidential work machine.
+   *  ON ⇒ auto-update checks, the in-app release check, feedback, marketplace,
+   *  Supabase login/refresh, and collab are all disabled server-side (each
+   *  surface reports itself unavailable), and the server process refuses any
+   *  other external fetch (src/lib/server/lockdown.ts). The claude CLI —
+   *  the user's Anthropic subscription — is deliberately NOT touched. Absent ⇒
+   *  off (existing behaviour, nothing changes). User-settable. */
+  lockdownMode?: boolean
 }
 
 /** Owner-only experiment ids — hidden features gated behind the owner role AND
@@ -182,6 +191,9 @@ export interface ReleaseNotesResponse {
   current: string
   releases: ReleaseNote[]
   error?: string
+  /** True when work mode (lockdown) suppressed the GitHub fetch — the client
+   *  renders "disabled by work mode" instead of an empty/error list. */
+  lockdown?: boolean
 }
 
 /** ── Canvas AI: server-side JOBS ──────────────────────────────────────────
@@ -2507,6 +2519,10 @@ export interface CustomModuleDef {
 export interface CustomModulesResponse {
   role: CustomTabRole
   modules: CustomModuleDef[]
+  /** False while work mode (lockdown) is on — the marketplace routes 503, so
+   *  the client hides its "Browse marketplace" entries. Local module CRUD is
+   *  unaffected (it never leaves the machine). */
+  marketAvailable: boolean
 }
 
 /** GET /api/custom-modules/:id/source — feeds the sandboxed iframe and the

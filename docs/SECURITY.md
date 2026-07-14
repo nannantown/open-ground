@@ -309,9 +309,17 @@ OPEN GROUND は自動生成系のセッション(タイトル / 説明 / Canvas 
 mock/screen 要素の iframe が unpkg.com から `react@18` / `react-dom@18` / `@babel/standalone@8` / **`lucide@latest`(完全未固定)**、cdn.tailwindcss.com から Tailwind を読み込んで実行する。iframe は `sandbox="allow-scripts"`(same-origin なし)なのでホスト側には波及しないが、**srcdoc に CSP が無い**ため、CDN 侵害時に悪性スクリプトが iframe 内の内容を任意の外部ホストへ持ち出せる。Electron シェル側にも `session.webRequest` フィルタや CSP 注入が無く、egress を止める層が存在しない。
 根拠: `mockSrcdoc.ts:79-81`, `screenSrcdoc.ts:363,383,386,387`, `ElementView.tsx:520`, `electron/main.js:554-597`(webRequest 設定の不在)
 
+> **追記(2026-07-14)**: 業務モード ON でこの経路は遮断される — webRequest
+> フィルタ + srcdoc CSP + プレースホルダ(§12.1 層3)。OFF 時の CDN 依存
+> (バージョン未固定を含む)は従来どおり残る。
+
 ### 8-8. 【medium】Google Fonts が起動ビーコンになっている(無効化不可)
 
 `index.html:24-27` の Web フォント参照により、**アプリのウィンドウを開くたびに必ず** Google へ接続する(IP + UA)。設定・環境変数での停止手段はなく、`index.html` の編集 + 再ビルドが唯一の手段。フォントをローカル同梱すれば根治できる構造。egress 監視のある環境では「このマシンで OPEN GROUND が起動した」ことが常時観測される。実測でも確認した。
+
+> **追記(2026-07-14)**: **根治済み** — フォントは `public/fonts/` に同梱され、
+> `index.html` / srcdoc は Google Fonts を一切参照しない(§12.1 層3-2。
+> lockdown OFF でも接続ゼロ。`srcdocLockdown.test.ts` で固定)。
 
 ### 8-9. 【low / ドキュメント】`CLAUDE.md` が削除済みの「git-shared モード」を現役機能として記述している
 
@@ -443,3 +451,107 @@ Anthropic §1-A #1、ユーザー自身の git remote への push §1-A #8 — �
 (両解錠経路で全ルート通過・swarm 限定スコープ・HTTP からの設定不能・escalations の
 実 read/write、いずれも未ログイン+Supabase 環境変数なしで検証)、
 `src/lib/server/swarmGate.test.ts`(解錠源の解決)。
+
+---
+
+## 12. 業務モード(ロックダウン) — Anthropic 以外の外部通信を一括遮断するキルスイッチ
+
+**本章は §11 と同じく、§0-§10 の監査(`a64c8cc` 時点)より後に入った実装の記述である
+(2026-07-14 追加)。**
+
+§1 の表のうち「遮断してよい経路」(§6)を、1トグルでまとめて落とすアプリ内キル
+スイッチ。Settings パネルの **業務モード(ロックダウン)** トグル =
+`Settings.lockdownMode`(settings.json 永続・既定 **OFF** = 既存ユーザーの挙動は
+不変)。ON の間、このアプリ由来の外部エグレスは「ユーザー自身の claude
+サブスクリプション(Anthropic)」だけになる。claude CLI(§1-A #1,#2,#3 — 製品の
+本質)には一切触れない(subscription-only 原則も不変 — API キー経路は存在しない)。
+
+### 12.1 実装 — 遮断の3層(サーバ / Electron / renderer)
+
+**層1: 機能ゲート** — 各 route / seam が `isLockdownEnabled()`(store.ts、毎リク
+エストにディスクの settings.json を参照)を消灯条件に加える:
+
+| 遮断対象(§1 の行) | ON 時の観測可能な振る舞い |
+|---|---|
+| #4 electron-updater | `electron/lockdown.js` — **毎チェック直前**(起動時+4時間毎 tick)に settings.json を読み直し、ON なら check ごとスキップ(再起動不要でトグルが効く)。§8-5 の「opt-out なし」はこのトグルで解消 |
+| #6 GitHub リリース照会 | `/api/update/check` `/api/release-notes` がローカル応答(`lockdown:true`)を返し、GitHub への fetch はゼロ |
+| #18 feedback | `/api/feedback/config` → `{enabled:false}`、送信/一覧 route は 503。UI の送信導線も無効表示 |
+| #10 Supabase ログイン | `/api/auth/config` → `{enabled:false}`(Sign in UI 非表示)、start/callback/signout は 503。`/api/auth/session` は**トークンリフレッシュせず・auth.json に触れず**サインアウト扱いを返す(保存済みセッションはローカルに保持 = OFF で復帰・revoke しない) |
+| #11-16 collab / roles | `/api/collab/config` → `{enabled:false}`(SPA は collab バンドル自体をロードしない → CF Worker への WS が張られない)、他の collab route は group middleware で 503。`supabaseAuth.postToken` / `getFreshSession` が null を返す(projectMembers / collabInvites / roles を網ごと止める単一 seam)。roles は env override(`OPENGROUND_OWNER_EMAILS`)か最終キャッシュへ degrade — **業務モードで swarm を使う owner は §11 のローカル解錠と `OPENGROUND_OWNER_EMAILS` を併用する** |
+| #13 サーバ側 collab mirror(ws) | `collabMirrorCore` が enqueue を入口で drop + `openScopedDoc` が接続前に throw。トグル前から生きていた mirror 接続は ~60秒の idle 解体で自然死し、再接続は不能(チケット発行が lockdown-null)。ON 中に漏れた書込は既存の再起動ギャップと同じ治癒(OFF 後の最初の書込がディスク全量を再ミラー) |
+| #19 marketplace / 提出 | 一覧・インストール・公開・提出 route は 503。`GET /api/custom-modules` は 200 のまま `marketAvailable:false` を返す(ローカル CRUD は生存・市場導線だけ UI から消える) |
+
+**層2: fetch 底網** — `installLockdownFetchGuard()`(`src/lib/server/lockdown.ts`、
+server/index.ts で常設)。サーバプロセスの global `fetch` を wrap し、ON の間、宛先
+ホストが loopback でも Anthropic(`anthropic.com` / `claude.ai` — egressProxy.ts と
+同一 allowlist)でもない http(s) リクエストは接続前に `LockdownEgressError` で落ち
+る。層1 の取りこぼし(将来のコード追加を含む)への保険。
+
+**層3: renderer 遮断** — SPA(ウィンドウ)と iframe が Chromium のネットワーク
+スタック経由で直接出すリクエストは層1・層2 に掛からない(監査の §1-A #5 Google
+Fonts / #7 iframe CDN・§8-7・§8-8 がまさにこれ)。3点で塞ぐ:
+
+1. **Electron `session.webRequest` フィルタ**(`electron/main.js`
+   `installLockdownWebRequestGuard` + 判定は `electron/lockdown.js`)— ON の間、
+   renderer 発のリクエストは allowlist(loopback / `file:` `data:` `blob:` /
+   Anthropic)以外**接続前に cancel**。allowlist 判定が先に走るので loopback の
+   ホットパス(API/SSE)はディスク読みゼロ、非 allowlist 宛だけが settings.json
+   の再読を払う(= トグルは再起動不要で即時反映、updater ガードと同じ契約)。
+2. **Google Fonts の根治(§8-8)** — Web フォント3família を `public/fonts/` に
+   **同梱**(woff2 11本・OFL・`LICENSE.txt` 同梱)し、`index.html` と
+   `screenSrcdoc.ts` はローカル `/fonts/fonts.css` だけを参照する。これは
+   lockdown と無関係の**常時**変更 — OFF でも Google への接続はもう存在しない
+   (起動ビーコンの根絶。フォールバック劣化も無くなる)。null-origin の srcdoc
+   iframe からフォントを読めるよう、サーバは `/fonts/*` にだけ
+   `Access-Control-Allow-Origin: *` を付ける(`server/app.ts` — loopback 専用
+   サーバの GET 静的アセットなので露出は増えない)。
+3. **srcdoc iframe の CSP + 明示プレースホルダ**(`mockSrcdoc.ts` /
+   `screenSrcdoc.ts`、client 側の鏡 = `src/lib/lockdownClient.ts`)— ON の間:
+   外部 CDN ランタイムを**必要とする**テンプレート(mock 'react'、screen の
+   全 framework、カスタムタブ、提出レビューのプレビュー)は描画せず
+   **「業務モードによりブロック中」のプレースホルダ**(バイリンガル・外部参照
+   ゼロ)に差し替える — 黙って壊れない。CDN 不要の mock 'html' は描画を続け、
+   `default-src 'none'; connect-src 'none'` の CSP `<meta>` を注入して中の
+   コード(マーケット製第三者コード含む)が fetch/beacon で外へ持ち出すのを
+   **文書層で**遮断する。CSP は iframe 自身の文書に効くため、Electron を
+   介さないブラウザ利用でも有効(層3-1 の補完)。トグルは
+   `useClientLockdown()` 経由で live iframe にも両方向即時反映。
+
+### 12.2 可観測性・往復
+
+- ON 中は Settings 冒頭に控えめなバッジを表示。無効化された各 surface は自分で理由
+  を名乗る(`lockdown:true` / 503 "disabled by work mode" / `enabled:false` /
+  iframe はプレースホルダ)— 黙って壊れない。
+- OFF に戻すと全機能が復帰する(トグル往復はテストで固定)。
+
+### 12.3 ON 中に残る通信(全数)
+
+- **Anthropic のみ**: claude CLI(子プロセス)と、その claude が読む MCP サーバ
+  (ユーザーの `~/.claude.json` 次第 — §8-3b。アプリからは制御不能)。
+- ユーザーが PTY 内で自分で打つコマンド(git push / curl 等)はアプリの管轄外。
+
+### 12.4 限界(業務導入者は必読)
+
+- **settings.json が破損して読めない場合、フラグは既定値 OFF(= 外部通信が復活)へ
+  倒れる(fail-open)**。サーバ(store.ts)・Electron(lockdown.js)・SPA の三者が
+  同じ「壊れたら OFF」に解決するので食い違いはしないが、**業務 Mac では
+  settings.json の健全性(バックアップ・構成管理)も運用対象に含めること**。
+  ON の証拠は Settings バッジ(§12.2)で常時視認できる。
+- **dev モード(Vite :5174 直開き)の renderer は webRequest の対象外** —
+  層3-1 は Electron ウィンドウにしか効かない。ブラウザで開いた場合の遮断は
+  層1(route ゲート)+層2(サーバ fetch 底網)+層3-3(CSP)+フォント同梱で
+  成立しており、通常利用で外部へ出る経路は残らないが、**ネットワーク層での
+  強制は Electron 利用時のみ**である(既知の限界)。
+- アプリ内スイッチであり OS ファイアウォールではない: 他のプロセス、claude 自身と
+  その MCP(§8-3b)、PTY 内でユーザーが打つコマンドは対象外(そこは §5 の FW /
+  sandbox の領分)。
+
+### 12.5 テスト
+
+`server/routes/__tests__/lockdown.test.ts`(route ゲート全数 + トグル往復 + fetch
+ゼロ)、`src/lib/server/lockdown.test.ts`(fetch 底網 / Anthropic・loopback
+allowlist / supabaseAuth seam)、`server/__tests__/electronLockdown.test.ts`
+(Electron main プロセスの updater ガード probe + webRequest allowlist —
+lookalike ドメイン拒否・IPv6 loopback 含む)、`src/lib/srcdocLockdown.test.ts`
+(srcdoc の CSP / プレースホルダ / OFF 時の完全非改変、index.html と
+`public/fonts/fonts.css` の外部参照ゼロ固定)。

@@ -99,7 +99,8 @@ describe('GET /api/custom-modules — role + list for any caller', () => {
   it('signed out → role none, empty list', async () => {
     const res = await app.request('/api/custom-modules')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ role: 'none', modules: [] })
+    // marketAvailable: true is the default (work mode / lockdown off).
+    expect(await res.json()).toEqual({ role: 'none', modules: [], marketAvailable: true })
   })
 
   it('owner sees role owner and the created modules', async () => {

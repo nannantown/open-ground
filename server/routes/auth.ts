@@ -40,6 +40,7 @@ import {
   expiryFrom,
 } from '@/lib/server/supabaseAuth'
 import { clearMembershipCache } from '@/lib/server/projectMembers'
+import { isLockdownEnabled } from '@/lib/server/store'
 import type { AuthProvider, AuthSessionResponse } from '@/lib/types'
 
 // The OAuth redirect URI — the same loopback Hono origin in dev and prod. This
@@ -163,11 +164,20 @@ const renderCallback = (
   })
 }
 
+// Work mode (lockdown): the app login is a Supabase egress feature (authorize
+// redirect, PKCE token exchange, refresh grants, remote revoke), so while it is
+// on the routes below answer locally — /config reports disabled (the Sign-in UI
+// hides), /session reports signed-out WITHOUT a refresh attempt (the stored
+// auth.json is kept, so turning lockdown off restores the account), and the
+// action routes 503 like an unconfigured build.
+const LOCKDOWN_MSG = 'disabled by work mode (lockdown)'
+
 export const authRoutes = new Hono()
   // --- GET /api/auth/config -------------------------------------------------
   // Gates the UI exactly like feedback/config. Reports only a boolean — never
   // echoes the URL or key.
-  .get('/api/auth/config', (c) => {
+  .get('/api/auth/config', async (c) => {
+    if (await isLockdownEnabled()) return c.json({ enabled: false })
     return c.json({ enabled: readAuthConfig() !== null })
   })
 
@@ -175,7 +185,8 @@ export const authRoutes = new Hono()
   // Begin a login. Generates a PKCE pair, stashes the verifier server-side, and
   // returns the Supabase authorize URL for the SPA to open in the real browser.
   // 503 when unconfigured; 400 on an unknown provider.
-  .get('/api/auth/start', (c) => {
+  .get('/api/auth/start', async (c) => {
+    if (await isLockdownEnabled()) return c.json({ error: LOCKDOWN_MSG }, 503)
     const config = readAuthConfig()
     if (!config) return c.json({ error: 'auth not configured' }, 503)
 
@@ -207,6 +218,11 @@ export const authRoutes = new Hono()
   // Errors render the same page with a failure message so the user isn't dropped
   // on a blank tab.
   .get('/api/auth/callback', async (c) => {
+    // Fail closed under lockdown: a callback should be unreachable (no /start
+    // succeeds), but a stray/racing redirect must not trigger a token exchange.
+    if (await isLockdownEnabled()) {
+      return renderCallback(c, false, 'Sign-in is disabled by work mode (lockdown).', 503)
+    }
     const config = readAuthConfig()
     if (!config) return renderCallback(c, false, 'Login is not configured.', 503)
 
@@ -257,6 +273,10 @@ export const authRoutes = new Hono()
   // the credential-free public build. The action routes (start/callback/signout)
   // still 503 when unconfigured.
   .get('/api/auth/session', async (c) => {
+    // Lockdown: report signed-out WITHOUT touching the network OR the stored
+    // session. No refresh grant fires (the point), and auth.json survives so
+    // turning lockdown off brings the account straight back.
+    if (await isLockdownEnabled()) return c.json<AuthSessionResponse>({ user: null })
     const config = readAuthConfig()
     if (!config) return c.json<AuthSessionResponse>({ user: null })
 
@@ -304,6 +324,10 @@ export const authRoutes = new Hono()
   // best-effort — a failed remote logout must not block local sign-out). Always
   // returns { ok: true } so the UI can clear unconditionally.
   .post('/api/auth/signout', async (c) => {
+    // Lockdown: refuse rather than fire the remote revoke. The Sign-out UI is
+    // unreachable anyway (config reports disabled), and keeping the stored
+    // session intact preserves the OFF-restores-everything contract.
+    if (await isLockdownEnabled()) return c.json({ error: LOCKDOWN_MSG }, 503)
     const config = readAuthConfig()
     if (!config) return c.json({ error: 'auth not configured' }, 503)
 

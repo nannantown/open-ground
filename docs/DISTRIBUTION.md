@@ -45,12 +45,39 @@ git add package.json && git commit -m "release: X.Y.Z"
 git push origin <feature-branch>:main      # or however main is updated
 
 # 2. Snapshot PMmap's tree onto open-ground's clean history, then tag THERE.
+#    ALWAYS author the snapshot as the GitHub noreply identity — public commits
+#    must never carry a real name/email (PII hygiene, see below + PII_SCRUB_RUNBOOK.md).
+#    fetch first: the parent MUST be the current openground/main (a stale ref as
+#    parent would resurrect pre-reset history).
 git fetch openground
-SNAP=$(git commit-tree "main^{tree}" -p openground/main -m "OPEN GROUND X.Y.Z")
+SNAP=$(GIT_AUTHOR_NAME=nannantown GIT_AUTHOR_EMAIL=48724510+nannantown@users.noreply.github.com \
+       GIT_COMMITTER_NAME=nannantown GIT_COMMITTER_EMAIL=48724510+nannantown@users.noreply.github.com \
+       git commit-tree "main^{tree}" -p openground/main -m "OPEN GROUND X.Y.Z")
 git push openground "$SNAP":main           # fast-forward on open-ground/main
 git tag vX.Y.Z "$SNAP"
 git push openground vX.Y.Z                  # pushing the tag to OPEN-GROUND fires release.yml
 ```
+
+> **PII hygiene (2026-07 incident, permanent rules).** Personal information
+> (real email / real name / home paths) must NEVER reach open-ground — neither
+> in the tree nor in commit author/committer metadata:
+>
+> 1. **Tree**: `src/repoPiiGuard.test.ts` (runs in `npm test` = PMmap CI) scans
+>    every tracked text file; the release gate requires the snapshot tree to be
+>    identical to the tested `origin/main` tree; and `release.yml` re-runs the
+>    guard against the tag's own tree as the final line of defense before
+>    building installers.
+> 2. **Author metadata**: snapshot commits are authored as
+>    `nannantown <48724510+nannantown@users.noreply.github.com>` via the env
+>    overrides above — never as the local `git config` identity.
+> 3. **History reset (2026-07-14)**: open-ground's main + all 46 tags were/are
+>    to be repointed onto a single clean root snapshot commit to purge PII from
+>    all published history, keeping every Release asset (dmg/exe/yml) and the
+>    electron-updater feed intact. Full runbook, actor split (force ops are
+>    user-only), rollback and GitHub-cache purge steps:
+>    **`docs/PII_SCRUB_RUNBOOK.md`**. After that reset, main remains a linear
+>    snapshot chain and normal FF-only releases continue from the new root —
+>    no force pushes needed again.
 
 > Runners: `release.yml` pins **windows-2022**. The floating `windows-latest`
 > moved to a VS2026 image where node-gyp can't find a usable Visual Studio,

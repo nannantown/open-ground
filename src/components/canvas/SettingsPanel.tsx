@@ -136,6 +136,9 @@ export const SettingsPanel = ({
   // immediately on toggle (below) and re-seeded from settings on open.
   const [swarmExp, setSwarmExp] = useState(settings.experiments?.swarm === true)
   const [sandboxExp, setSandboxExp] = useState(settings.experiments?.sandbox === true)
+  // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
+  // instant-feedback + persist-immediately pattern as the experiment toggles.
+  const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
   // Non-persisted placeholder for the Display name input: the user's global
   // git identity, served by GET /api/settings as `suggestedDisplayName`.
   const [suggestedName, setSuggestedName] = useState<string | null>(null)
@@ -194,6 +197,7 @@ export const SettingsPanel = ({
     setDisplayName(settings.displayName ?? '')
     setSwarmExp(settings.experiments?.swarm === true)
     setSandboxExp(settings.experiments?.sandbox === true)
+    setLockdownState(settings.lockdownMode === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -223,6 +227,20 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       experiments: { ...s.experiments, sandbox: next },
+    })
+  }
+
+  // Flip work mode (lockdown) and persist immediately — the server enforces it
+  // the moment the save lands (route gates + fetch floor read settings live).
+  const setLockdown = (next: boolean) => {
+    if (next === lockdown) return
+    setLockdownState(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      lockdownMode: next,
     })
   }
 
@@ -302,6 +320,16 @@ export const SettingsPanel = ({
         />
 
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+          {/* Work mode (lockdown) badge — the quiet, always-visible reminder
+              that non-Anthropic egress is blocked, shown only while it is on
+              (the toggle itself lives under Advanced). */}
+          {lockdown && (
+            <div className="mb-6 flex items-start gap-2 rounded-[3px] border border-line bg-bg-inset/40 px-3 py-2.5 text-[11px] leading-relaxed text-ink-muted">
+              <span className="mt-[3px] size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
+              <span>{t('settings.lockdown.badge')}</span>
+            </div>
+          )}
+
           {/* Feedback — a clear, single call to action (not a label). */}
           {onOpenFeedback && (
             <section className="mb-6 rounded-[3px] border border-line bg-bg-inset/40 px-4 py-3.5">
@@ -471,6 +499,24 @@ export const SettingsPanel = ({
                   <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{t('settings.connection.hint')}</p>
                 </Section>
 
+                {/* Work mode (lockdown) — every user (not owner-gated): the
+                    one-toggle kill switch for non-Anthropic egress on a
+                    confidential machine. Same segmented On/Off row as the
+                    experiments, persisted immediately; the badge at the top of
+                    the panel keeps the ON state visible once Advanced closes. */}
+                <Section
+                  heading={t('settings.lockdown.heading')}
+                  hint={t('settings.lockdown.hint')}
+                >
+                  <ExperimentToggle
+                    label={t('settings.lockdown.label')}
+                    value={lockdown}
+                    onChange={setLockdown}
+                    offLabel={t('settings.experiments.off')}
+                    onLabel={t('settings.experiments.on')}
+                  />
+                </Section>
+
                 {/* Experiments — owner only (experimentsEligible from the
                     server's og_roles owner check). Hidden for everyone else, so
                     the toggles never betray the feature's existence. The same
@@ -583,7 +629,10 @@ const ReleaseNotesSection = () => {
               {t('settings.releaseNotes.loading')}
             </span>
           )}
-          {!loading && data && data.releases.length === 0 && (
+          {!loading && data?.lockdown && (
+            <p className="text-[11px] text-ink-subtle">{t('settings.releaseNotes.lockdown')}</p>
+          )}
+          {!loading && data && !data.lockdown && data.releases.length === 0 && (
             <div className="inline-flex items-start gap-1 text-[11px] text-accent">
               <AlertCircle size={12} className="mt-[2px] shrink-0" />
               <span>{t('settings.releaseNotes.error')}</span>

@@ -25,6 +25,7 @@ import { GroundLoadError } from '@/components/canvas/GroundLoadError'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
 import { aggregateClaudeBeacons } from '@/lib/groundBeacon'
+import { setClientLockdown } from '@/lib/lockdownClient'
 import { autoLayout, frameLabelFor } from '@/lib/layout'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
@@ -123,6 +124,12 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [canvas, setCanvas] = useState<CanvasState | null>(null)
+  // Mirror work mode (lockdown) into the module store the srcdoc builders
+  // read (src/lib/lockdownClient.ts) — covers both the initial settings load
+  // and every save, in both toggle directions.
+  useEffect(() => {
+    setClientLockdown(settings?.lockdownMode === true)
+  }, [settings?.lockdownMode])
   // Why load() last failed. Only reachable as UI before the first successful
   // load, where it replaces the blank Ground with an error + Retry.
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -523,7 +530,9 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [authUser?.id])
+    // lockdownMode: both configs report disabled while work mode is on, so the
+    // entries hide the moment the toggle saves (and return when it clears).
+  }, [authUser?.id, settings?.lockdownMode])
 
   // Poll the unread feedback count (owner build only) so the settings gear can
   // show a "new feedback" dot. `since` is the newest created_at we've shown in
@@ -788,7 +797,9 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+    // Re-probe when work mode (lockdown) flips: the server reports auth
+    // disabled while it is on, so the Sign-in UI hides/returns with the toggle.
+  }, [settings?.lockdownMode])
 
   const scheduleSave = useCallback(
     (c: CanvasState) => {

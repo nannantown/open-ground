@@ -13,6 +13,7 @@ import {
   writeSession,
   type StoredSession,
 } from './authStore'
+import { isLockdownEnabledSync } from './lockdown'
 import type { AuthProvider, AuthUser } from '../types'
 
 // --- Env-driven configuration (read lazily, per call) -----------------------
@@ -86,6 +87,11 @@ export const postToken = async (
   grantType: 'pkce' | 'refresh_token',
   body: Record<string, string>,
 ): Promise<TokenResponse | null> => {
+  // Work mode (lockdown): no token grant of ANY kind leaves the machine. Every
+  // caller already handles null as "grant failed" — under lockdown that reads
+  // as signed-out, which is exactly the UI the routes report. (Belt to the
+  // route gates' braces; the fetch floor below both would refuse the URL too.)
+  if (isLockdownEnabledSync()) return null
   try {
     const res = await fetch(
       `${config.url}/auth/v1/token?grant_type=${grantType}`,
@@ -121,6 +127,11 @@ export const getFreshSession = async (): Promise<{
   accessToken: string
   expiresAt: number
 } | null> => {
+  // Work mode (lockdown): report "no session" WITHOUT reading or refreshing.
+  // This single early-return is what keeps every Supabase REST caller
+  // (projectMembers, collabInvites, roles) off the network — they all gate on
+  // this token. The stored session is untouched, so lockdown-off restores it.
+  if (isLockdownEnabledSync()) return null
   const config = readAuthConfig()
   if (!config) return null
   const stored = await readSession()

@@ -18,6 +18,9 @@ import type {
 export interface CustomModulesState {
   role: CustomTabRole
   modules: CustomModuleDef[]
+  /** False while work mode (lockdown) blocks the marketplace — hides the
+   *  "Browse marketplace" entries (server-decided, like `role`). */
+  marketAvailable: boolean
   /** True once a fetch has succeeded at least once. */
   loaded: boolean
   refresh: () => Promise<void>
@@ -26,6 +29,7 @@ export interface CustomModulesState {
 export function useCustomModules(): CustomModulesState {
   const [role, setRole] = useState<CustomTabRole>('none')
   const [modules, setModules] = useState<CustomModuleDef[]>([])
+  const [marketAvailable, setMarketAvailable] = useState(true)
   const [loaded, setLoaded] = useState(false)
   // Guards setState-after-unmount from a slow in-flight fetch.
   const aliveRef = useRef(true)
@@ -44,6 +48,8 @@ export function useCustomModules(): CustomModulesState {
       if (!aliveRef.current) return
       setRole(body.role ?? 'none')
       setModules(Array.isArray(body.modules) ? body.modules : [])
+      // Absent (an older server) reads as available — the pre-lockdown shape.
+      setMarketAvailable(body.marketAvailable !== false)
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known list quietly.
@@ -69,5 +75,5 @@ export function useCustomModules(): CustomModulesState {
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
 
-  return { role, modules, loaded, refresh }
+  return { role, modules, marketAvailable, loaded, refresh }
 }

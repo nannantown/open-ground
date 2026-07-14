@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Inbox, RefreshCw, Loader2, AlertCircle, Check, X, Code2 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { buildScreenSrcdoc } from '@/lib/screenSrcdoc'
+import { useClientLockdown } from '@/lib/lockdownClient'
 import type { ModuleSubmissionItem, ModuleSubmissionsResponse } from '@/lib/types'
 
 // Owner-only review inbox for tester tab submissions (docs/CUSTOM_TABS_PLAN.md —
@@ -23,6 +24,8 @@ export const ModuleReviewInbox = ({
   onSeen?: (latestCreatedAt: string | null) => void
 }) => {
   const { t } = useT()
+  // Work mode: submission previews render third-party code — placeholder while on.
+  const lockdown = useClientLockdown()
   const [items, setItems] = useState<ModuleSubmissionItem[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -227,6 +230,8 @@ export const ModuleReviewInbox = ({
                               openSource!.source,
                               openSource!.framework,
                               'dark',
+                              undefined,
+                              { lockdown },
                             )}
                             className="h-[220px] w-full border-0"
                           />

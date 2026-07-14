@@ -9,6 +9,7 @@ import type {
   TweakCanvasAiRequest,
 } from '@/lib/types'
 import { buildScreenSrcdoc, hash32 } from '@/lib/screenSrcdoc'
+import { useClientLockdown } from '@/lib/lockdownClient'
 import type { InspectPick } from '@/lib/canvasInspect'
 import { resolveOpacity } from '@/lib/canvasTransform'
 import { jobLostToRestart, readBootSignature } from '@/lib/canvasAiRestart'
@@ -709,9 +710,10 @@ export const ScreenView = ({
   }, [editing])
 
   const source = element.text ?? ''
+  const lockdown = useClientLockdown()
   const srcdoc = useMemo(
-    () => buildScreenSrcdoc(source, framework, theme, element.props),
-    [source, framework, theme, element.props],
+    () => buildScreenSrcdoc(source, framework, theme, element.props, { lockdown }),
+    [source, framework, theme, element.props, lockdown],
   )
 
   const tweak = useInspectTweak({

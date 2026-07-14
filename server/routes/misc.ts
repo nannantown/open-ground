@@ -24,6 +24,7 @@ import {
   setCanvas,
   getNotificationState,
   markNotificationsRead,
+  isLockdownEnabled,
 } from '@/lib/server/store'
 import { resolveExperiments } from '@/lib/server/experiments'
 import { scanProjects } from '@/lib/server/scan'
@@ -417,6 +418,20 @@ export const miscRoutes = new Hono()
   // --- GET /api/update/check ------------------------------------------------
   .get('/api/update/check', async (c) => {
     const current = await readCurrentVersion()
+    // Work mode (lockdown): answer locally without touching GitHub. `lockdown:
+    // true` lets the client say WHY checking is off rather than showing a
+    // spurious "up to date".
+    if (await isLockdownEnabled()) {
+      return c.json({
+        current,
+        latest: current,
+        hasUpdate: false,
+        releaseUrl: '',
+        publishedAt: '',
+        notes: '',
+        lockdown: true,
+      })
+    }
     let latest = current
     let releaseUrl = ''
     let publishedAt = ''
@@ -467,6 +482,12 @@ export const miscRoutes = new Hono()
   // markdown notes written at publish time (docs/DISTRIBUTION.md §0).
   .get('/api/release-notes', async (c) => {
     const current = await readCurrentVersion()
+    // Work mode (lockdown): no GitHub fetch, not even a cached list (the panel
+    // should read "disabled", not "up to date as of some earlier fetch").
+    if (await isLockdownEnabled()) {
+      const body: ReleaseNotesResponse = { current, releases: [], lockdown: true }
+      return c.json(body)
+    }
     const cached = gNotes.__openground_release_notes
     if (cached && Date.now() - cached.at < RELEASE_NOTES_TTL_MS) {
       const body: ReleaseNotesResponse = { current, releases: cached.releases }

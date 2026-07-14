@@ -42,6 +42,7 @@ import * as Y from 'yjs'
 import type { CollabTicketResponse, DocScope } from '../types'
 import { connectCollabDoc } from '../collab/provider'
 import { getFreshAccessToken } from './supabaseAuth'
+import { isLockdownEnabledSync } from './lockdown'
 import { readCollabWsUrl, roomFor, issueWorkerTicket } from '../../../server/routes/ticket'
 
 /** Ceiling for the initial doc sync — past this the connect attempt is failed
@@ -273,6 +274,13 @@ export const createCollabMirror = <P>(deps: CoreMirrorDeps<P>): CollabMirror<P> 
 
   return {
     queue: (projectPath, sub, payload, stamp) => {
+      // Work mode (lockdown): the mirror is pure egress (Supabase pid lookup +
+      // a Worker WebSocket), so stop at the front door — nothing is enqueued,
+      // so a pre-lockdown connection stops being refreshed and dies at idleMs,
+      // and no retry loop accumulates. Missed writes heal exactly like the
+      // documented restart gap: every mirror is a FULL-state mirror, so the
+      // first write after lockdown turns off re-mirrors the whole disk state.
+      if (isLockdownEnabledSync()) return
       void (async () => {
         try {
           const canonicalPath = await deps.canonicalize(projectPath)
@@ -343,6 +351,11 @@ export const openScopedDoc = async (
   pid: string,
   scope: DocScope,
 ): Promise<{ doc: Y.Doc; destroy: () => void }> => {
+  // Work mode (lockdown): never dial the Worker. The queue gate above already
+  // starves the mirror; this covers the residual paths — a pre-lockdown entry's
+  // retry timer, or any future caller — and would fail via the null ticket
+  // (getFreshAccessToken is lockdown-null) anyway. Explicit beats incidental.
+  if (isLockdownEnabledSync()) throw new Error('disabled by work mode (lockdown)')
   const wsUrl = readCollabWsUrl()
   if (!wsUrl) throw new Error('collab ws url unset')
   const mint = async (): Promise<CollabTicketResponse | null> => {

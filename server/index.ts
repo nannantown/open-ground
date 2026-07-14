@@ -13,6 +13,7 @@ import { serve } from '@hono/node-server'
 import { app } from './app'
 import { pruneOldAttachments, pruneOldRunFiles, sweepCrossRepoResidue, RAW_RETENTION_DAYS } from '@/lib/server/retention'
 import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/server/swarmEscalations'
+import { installLockdownFetchGuard } from '@/lib/server/lockdown'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
 import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
@@ -44,6 +45,18 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   console.error('[openground:hono] uncaughtException', err)
 })
+
+// WORK MODE (lockdown) fetch floor — wrap this process's global fetch so that
+// while Settings.lockdownMode is ON, any http(s) request to a non-loopback,
+// non-Anthropic host throws instead of connecting (src/lib/server/lockdown.ts).
+// The per-feature route gates are the first layer; this is the backstop for a
+// call site they missed. Installed before boot's own background work so nothing
+// can race it; fire-and-forget (never blocks startup — the guard resolves after
+// one settings read warms the mirror). Real-server entry only: unit tests mount
+// the Hono app and install/uninstall the guard explicitly where they test it.
+void installLockdownFetchGuard().catch((e) =>
+  console.error('[openground:hono] lockdown fetch guard install failed', e),
+)
 
 const server = serve({ fetch: app.fetch, port: PORT, hostname: HOSTNAME }, (info) => {
   // Stable startup line the launcher / log tail can grep for.

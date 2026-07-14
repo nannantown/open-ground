@@ -24,7 +24,7 @@ import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { release } from 'os'
 import { createHash } from 'crypto'
-import { getSettings } from '@/lib/server/store'
+import { getSettings, isLockdownEnabled } from '@/lib/server/store'
 import { readSession } from '@/lib/server/authStore'
 import { FeedbackApiBodySchema, sanitizeFeedbackImages } from '@/lib/schemas'
 
@@ -159,6 +159,11 @@ const countProjects = async (): Promise<number | null> => {
 
 const osString = (): string => `${process.platform} ${release()}`.trim()
 
+// Work mode (lockdown): feedback is a Supabase egress feature, so every route
+// below answers locally while it is on — /config reports disabled (the SPA
+// hides its entries), the data routes 503 like an unconfigured build.
+const LOCKDOWN_MSG = 'disabled by work mode (lockdown)'
+
 export const feedbackRoutes = new Hono()
   // --- GET /api/feedback/config ---------------------------------------------
   // Lets the SPA decide what to show. `enabled` gates the "Send feedback" entry
@@ -166,6 +171,9 @@ export const feedbackRoutes = new Hono()
   // (service-role key present AND — when an admin allowlist is set — the signed-in
   // user is on it). Reports only booleans/an opaque id — never the url or key.
   .get('/api/feedback/config', async (c) => {
+    if (await isLockdownEnabled()) {
+      return c.json({ enabled: false, canRead: false })
+    }
     const service = readServiceConfig()
     const canRead = service !== null && (await isOwner())
     return c.json({
@@ -181,6 +189,7 @@ export const feedbackRoutes = new Hono()
   // — exactly the public build, where the inbox is never shown anyway. Rows are
   // returned ONLY to the loopback client; the key itself never leaves the server.
   .get('/api/feedback/list', async (c) => {
+    if (await isLockdownEnabled()) return c.json({ error: LOCKDOWN_MSG }, 503)
     const config = readServiceConfig()
     if (!config) {
       return c.json({ error: 'feedback reading not configured' }, 503)
@@ -226,6 +235,7 @@ export const feedbackRoutes = new Hono()
   // in the Content-Range header without transferring any rows. 503 (like /list)
   // when no service key is configured — the public build never polls this.
   .get('/api/feedback/unread', async (c) => {
+    if (await isLockdownEnabled()) return c.json({ error: LOCKDOWN_MSG }, 503)
     const config = readServiceConfig()
     if (!config) {
       return c.json({ error: 'feedback reading not configured' }, 503)
@@ -268,6 +278,7 @@ export const feedbackRoutes = new Hono()
   // BEFORE we touch Supabase. When the env isn't configured we 503 with a
   // clear message so the (rare) client that POSTs anyway gets a useful error.
   .post('/api/feedback', zValidator('json', FeedbackApiBodySchema), async (c) => {
+    if (await isLockdownEnabled()) return c.json({ error: LOCKDOWN_MSG }, 503)
     const config = readFeedbackConfig()
     if (!config) {
       return c.json({ error: 'feedback not configured' }, 503)

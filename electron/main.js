@@ -25,7 +25,7 @@
 // so dev only requires app === 'openground'. Prod requires the exact bootId,
 // exactly like the shell launcher's STEP 6.
 
-const { app, BrowserWindow, dialog, ipcMain, shell, Notification } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } = require('electron')
 const path = require('path')
 const http = require('http')
 const net = require('net')
@@ -45,6 +45,7 @@ const {
   runRegressionSteps,
 } = require('./selfUpdate')
 const { hasLiveForkedChildren, applyDownloadedUpdate } = require('./autoUpdate')
+const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown } = require('./lockdown')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -1562,6 +1563,38 @@ function handleSelfUpdateOutcome(result) {
 }
 
 // ---------------------------------------------------------------------------
+// Work mode (lockdown) — renderer egress filter.
+//
+// The forked server's fetch floor (src/lib/server/lockdown.ts) cannot see
+// requests the RENDERER makes: <link>/<img>/<script> resource loads, fetches
+// from Canvas mock/screen iframes, and marketplace custom-tab code all leave
+// through Chromium's network stack. This session-level filter is their floor:
+// while lockdown is ON, any renderer request that is neither local
+// (loopback / file: / data: / blob:) nor Anthropic is cancelled before it
+// dials out.
+//
+// The allowlist check runs FIRST so the hot path (every loopback API/SSE/
+// static request) never touches the disk; only a non-allowlisted destination
+// pays the settings.json read — and those are exactly the requests lockdown
+// exists to stop, made rare by the srcdoc CSP + self-hosted fonts. Per-request
+// freshness is what makes the Settings toggle live without an app restart,
+// same contract as the updater guard above.
+//
+// Scope note (documented limitation): this covers the Electron window only.
+// Opening the SPA in an ordinary browser (dev: Vite on :5174, or prod
+// :47776) bypasses main-process filtering — there the in-page layers (server
+// route gates + fetch floor + srcdoc CSP) are the enforcement.
+// ---------------------------------------------------------------------------
+function installLockdownWebRequestGuard() {
+  session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+    if (isRendererUrlAllowedUnderLockdown(details.url)) return callback({})
+    if (!isLockdownEnabled()) return callback({})
+    console.log(`[lockdown] renderer egress blocked: ${details.url}`)
+    callback({ cancel: true })
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration.
 // ---------------------------------------------------------------------------
 async function start() {
@@ -1572,6 +1605,10 @@ async function start() {
     const fromArgv = deepLinkFromArgv(process.argv)
     if (fromArgv) pendingDeepLink = fromArgv
   }
+
+  // BEFORE the window exists, so the very first document load is already
+  // filtered (a lockdown machine must not even leak the boot-time requests).
+  installLockdownWebRequestGuard()
 
   createWindow()
 
@@ -1743,12 +1780,23 @@ function initAutoUpdater() {
 
   // Kick off an initial check, then poll every 4h. checkForUpdatesAndNotify
   // surfaces a native OS notification on its own in addition to our handlers.
-  autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-    console.error('[updater] initial check failed:', err && err.message)
-  })
-  setInterval(() => {
+  //
+  // WORK MODE (lockdown): the switch is re-read from settings.json IMMEDIATELY
+  // BEFORE every check (electron/lockdown.js) — not once at init — so toggling
+  // it in Settings takes effect at the next tick, both directions, without an
+  // app restart. The updater is MAIN-process egress (GitHub), which the forked
+  // server's fetch floor cannot reach; this is its counterpart guard.
+  const maybeCheck = (label) => {
+    if (isLockdownEnabled()) {
+      console.log(`[updater] ${label} check skipped — work mode (lockdown) is on`)
+      return
+    }
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-      console.error('[updater] periodic check failed:', err && err.message)
+      console.error(`[updater] ${label} check failed:`, err && err.message)
     })
+  }
+  maybeCheck('initial')
+  setInterval(() => {
+    maybeCheck('periodic')
   }, AUTO_UPDATE_INTERVAL_MS)
 }

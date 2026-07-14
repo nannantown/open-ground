@@ -15,18 +15,17 @@
     <link rel="icon" type="image/png" sizes="256x256" href="/brand/favicon-256.png" />
     <link rel="apple-touch-icon" href="/brand/favicon-256.png" />
 
-    <!-- Fonts. The Next.js build used next/font/google for Fraunces
-         (variable, opsz + SOFT axes), Instrument Sans (400/500/600) and
-         JetBrains Mono (400/500). Replicated here as plain Google Fonts
-         links; the CSS variables below feed Tailwind's font-family tokens
-         (--font-fraunces / --font-instrument-sans / --font-jetbrains-mono),
-         matching tailwind.config.ts. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,SOFT@9..144,0..100&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Fonts: SELF-HOSTED (public/fonts/ — Fraunces variable with the
+         opsz/wght/SOFT axes, Instrument Sans, JetBrains Mono; OFL, see
+         public/fonts/LICENSE.txt). Deliberately NOT Google Fonts links: the
+         app must not dial Google on every window open — the font beacon was
+         egress finding §8-8 in docs/SECURITY.md, and work mode (§12)
+         promises zero non-Anthropic egress (srcdocLockdown.test.ts pins
+         this file to zero external font hosts). The CSS variables below
+         feed Tailwind's font-family tokens (--font-fraunces /
+         --font-instrument-sans / --font-jetbrains-mono), matching
+         tailwind.config.ts. -->
+    <link href="/fonts/fonts.css" rel="stylesheet" />
     <style>
       .font-vars {
         --font-fraunces: 'Fraunces';

@@ -7,6 +7,7 @@ import type {
   CustomTabRole,
 } from '@/lib/types'
 import { buildScreenSrcdoc } from '@/lib/screenSrcdoc'
+import { useClientLockdown } from '@/lib/lockdownClient'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import {
   attachFrameAnchor,
@@ -147,12 +148,15 @@ export const CustomModuleView = ({
     }
   }, [module.id])
 
+  // Work mode: a custom tab is exactly the third-party-code surface lockdown
+  // must contain — swap in the explicit placeholder while it is on.
+  const lockdown = useClientLockdown()
   const srcDoc = useMemo(
     () =>
       src === null
         ? null
-        : buildScreenSrcdoc(src.source, module.framework, 'dark'),
-    [src, module.framework],
+        : buildScreenSrcdoc(src.source, module.framework, 'dark', undefined, { lockdown }),
+    [src, module.framework, lockdown],
   )
 
   // ── Hosted-frame plumbing (CustomFrameHost) ──

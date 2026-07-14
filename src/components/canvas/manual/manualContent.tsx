@@ -543,6 +543,35 @@ export const MANUAL_SECTIONS: Section[] = [
           { en: 'Advanced — default workspace, and a Claude CLI re-check.', ja: '詳細 —— 既定ワークスペースと、Claude CLI の再チェック。' },
         ],
       },
+      { kind: 'subhead', text: { en: 'Work mode (lockdown)', ja: '業務モード（ロックダウン）' } },
+      {
+        kind: 'p',
+        text: {
+          en: 'For confidential machines: Settings → Advanced → Work mode is a one-toggle kill switch for every connection that isn’t your own Claude. While it is on, OPEN GROUND stops talking to anything else — update checks, release notes, feedback, the marketplace, sign-in (including token refreshes for an existing login), and shared projects are all disabled, and the server refuses any other outbound request as a backstop. Your claude CLI keeps working as usual — the whole point is “Claude only”.',
+          ja: '機密情報を扱うマシン向け：設定 → 詳細設定 → 業務モード は、自分の Claude 以外のすべての通信を 1 トグルで止めるキルスイッチです。オンの間、OPEN GROUND は Claude 以外のどことも通信しません —— アップデート確認・リリースノート・フィードバック・マーケットプレイス・サインイン（ログイン済みセッションのトークン更新も含む）・共有プロジェクトはすべて無効になり、その他の外向き通信もサーバーが最後の砦として拒否します。claude CLI はそのまま使えます —— 「Claude だけ」がこのモードの目的です。',
+        },
+      },
+      {
+        kind: 'bullets',
+        items: [
+          {
+            en: 'While it is on, a quiet badge at the top of Settings reminds you. Nothing else about the UI changes — the disabled entries simply disappear.',
+            ja: 'オンの間は、設定パネル上部に控えめなバッジが表示されます。それ以外の UI は変わりません —— 無効になった項目が単に消えるだけです。',
+          },
+          {
+            en: 'Turning it off restores everything, including a signed-in account you had before (the session is kept locally, never revoked).',
+            ja: 'オフに戻せば全機能が復帰します。以前サインインしていたアカウントもそのまま戻ります（セッションはローカルに保持され、失効させません）。',
+          },
+          {
+            en: 'It is a per-machine app setting (default off) — it never changes your projects or your Claude subscription.',
+            ja: 'このマシンのアプリ設定です（既定オフ）—— プロジェクトや Claude サブスクリプションには一切影響しません。',
+          },
+          {
+            en: 'The UI’s fonts are bundled with the app (never fetched from Google Fonts), and while work mode is on, Canvas Mocks / Screens / custom tabs that need a public CDN for their renderer show a “Blocked by work mode” placeholder instead of loading it — plain-HTML mocks keep rendering, sealed so their code cannot call out. Everything renders normally again when you turn work mode off.',
+            ja: 'UI のフォントはアプリに同梱されており、Google Fonts へは接続しません。業務モード中、描画エンジンに公開 CDN が必要な Canvas の Mock・Screen・カスタムタブは、読み込む代わりに「業務モードによりブロック中」のプレースホルダを表示します（HTML の Mock はそのまま描画され、中のコードが外部へ通信できないよう封じられます）。オフに戻せば通常どおり描画されます。',
+          },
+        ],
+      },
       { kind: 'subhead', text: { en: 'Optional login', ja: '任意のログイン' } },
       {
         kind: 'p',

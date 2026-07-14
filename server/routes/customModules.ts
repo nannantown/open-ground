@@ -12,6 +12,7 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { getCustomTabRole } from '@/lib/server/roles'
+import { isLockdownEnabled } from '@/lib/server/store'
 import { killTerminalsByCwd } from '@/lib/server/terminal'
 import { customModuleDir } from '@/lib/server/paths'
 import {
@@ -61,8 +62,14 @@ export const customModulesRoutes = new Hono()
   // read-only; only the management UI is role-gated (and re-checked here on
   // every mutating route).
   .get('/api/custom-modules', async (c) => {
-    const [role, modules] = await Promise.all([getCustomTabRole(), listModules()])
-    return c.json({ role, modules })
+    const [role, modules, lockdown] = await Promise.all([
+      getCustomTabRole(),
+      listModules(),
+      isLockdownEnabled(),
+    ])
+    // marketAvailable=false hides the client's "Browse marketplace" entries
+    // while work mode blocks the marketplace routes below (local CRUD stays).
+    return c.json({ role, modules, marketAvailable: !lockdown })
   })
   // --- POST /api/custom-modules — create a local module (owner | tester) -----
   // Authoring is open to testers (they build a tab locally, then submit it to
@@ -156,7 +163,12 @@ export const customModulesRoutes = new Hono()
     return c.json({ ok: true })
   })
   // --- POST /api/custom-modules/:id/publish — upsert to Supabase (owner) -----
+  // Local module CRUD above stays available under work mode (lockdown) — it
+  // never leaves the machine. The three Supabase-egress routes below do not.
   .post('/api/custom-modules/:id/publish', async (c) => {
+    if (await isLockdownEnabled()) {
+      return c.json({ error: 'disabled by work mode (lockdown)' }, 503)
+    }
     if ((await getCustomTabRole()) !== 'owner') return forbidden(c)
     const config = readPublishConfig()
     if (!config) {
@@ -178,6 +190,9 @@ export const customModulesRoutes = new Hono()
   })
   // --- GET /api/marketplace — list published modules (owner | tester) --------
   .get('/api/marketplace', async (c) => {
+    if (await isLockdownEnabled()) {
+      return c.json({ error: 'disabled by work mode (lockdown)' }, 503)
+    }
     const role = await getCustomTabRole()
     if (role === 'none') return forbidden(c)
     const config = readMarketConfig()
@@ -192,6 +207,9 @@ export const customModulesRoutes = new Hono()
   })
   // --- POST /api/marketplace/install — copy a row locally (owner | tester) ---
   .post('/api/marketplace/install', async (c) => {
+    if (await isLockdownEnabled()) {
+      return c.json({ error: 'disabled by work mode (lockdown)' }, 503)
+    }
     const role = await getCustomTabRole()
     if (role === 'none') return forbidden(c)
     const config = readMarketConfig()

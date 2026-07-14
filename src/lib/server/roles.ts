@@ -25,6 +25,7 @@
 
 import { readSession } from './authStore'
 import { readAuthConfig, getFreshAccessToken } from './supabaseAuth'
+import { isLockdownEnabledSync } from './lockdown'
 import type { CustomTabRole } from '../types'
 
 // Parse a comma-separated allowlist env var. No fallback — unset/blank means
@@ -79,6 +80,13 @@ const strongest = (rows: Array<{ role?: string }>): CustomTabRole => {
 }
 
 const fetchRemoteRole = async (): Promise<CustomTabRole | null> => {
+  // Work mode (lockdown): never reach for og_roles. Returning null lets
+  // getCustomTabRole fall back to the env override / last cached role — so an
+  // owner who set OPENGROUND_OWNER_EMAILS (the documented offline fallback)
+  // keeps their role with zero egress, and everyone else degrades to 'none'
+  // instead of leaking a lookup. (getFreshAccessToken is also lockdown-null;
+  // this early return just makes the skip explicit and lookup-free.)
+  if (isLockdownEnabledSync()) return null
   const config = readAuthConfig()
   if (!config) return null
   const token = await getFreshAccessToken()

@@ -18,6 +18,7 @@ import type { Context } from 'hono'
 import { zValidator } from '@hono/zod-validator'
 import { createHash } from 'crypto'
 import { getCustomTabRole } from '@/lib/server/roles'
+import { isLockdownEnabled } from '@/lib/server/store'
 import { readSession } from '@/lib/server/authStore'
 import { SubmitModuleBodySchema } from '@/lib/schemas'
 import {
@@ -86,12 +87,32 @@ const unreachable = (c: Context, label: string, e: unknown) => {
 
 const forbidden = (c: Context) => c.json({ error: 'forbidden' }, 403)
 
+// Work mode (lockdown) gate for the WHOLE group — every route here is Supabase
+// egress (submit/list/moderate). /config is exempt so the SPA's capability
+// probe keeps its normal 200 shape and reports disabled. Registered on BOTH
+// the bare path and the subtree: Hono's `/*` does not cover the bare path,
+// and the submit POST / list GET live exactly there.
+const lockdownGuard = async (
+  c: Context,
+  next: () => Promise<void>,
+): Promise<Response | void> => {
+  if (c.req.path !== '/api/module-submissions/config' && (await isLockdownEnabled())) {
+    return c.json({ error: 'disabled by work mode (lockdown)' }, 503)
+  }
+  await next()
+}
+
 export const moduleSubmissionsRoutes = new Hono()
+  .use('/api/module-submissions', lockdownGuard)
+  .use('/api/module-submissions/*', lockdownGuard)
   // --- GET /api/module-submissions/config -----------------------------------
   // enabled: a tester can submit (anon key present). canReview: the owner review
   // inbox shows (service-role key present AND — when an allowlist is set — the
   // signed-in account is on it). Reports only booleans / an opaque id.
   .get('/api/module-submissions/config', async (c) => {
+    if (await isLockdownEnabled()) {
+      return c.json({ enabled: false, canReview: false })
+    }
     const admin = readSubmissionAdminConfig()
     const canReview = admin !== null && (await isReviewer())
     return c.json({

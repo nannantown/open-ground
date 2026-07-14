@@ -7,6 +7,7 @@ import {
   normalizeAllowedModels,
   setAllowedModelTiersCache,
 } from './swarmAllowedModels'
+import { setLockdownCache } from './lockdown'
 import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
@@ -76,6 +77,10 @@ export const getSettings = async (): Promise<Settings> => {
   // inside the single-flight chain — so a toggle is mirrored the moment it lands.
   // The cache is derived, never authoritative (settings.json is).
   setAllowedModelTiersCache(s.swarmAllowedModels)
+  // Mirror the lockdown switch the same way: the fetch floor (lockdown.ts) is
+  // a synchronous wrapper around global fetch and cannot await a disk read per
+  // request.
+  setLockdownCache(s.lockdownMode)
   return {
     ...s,
     projects: Array.isArray(s.projects)
@@ -109,6 +114,8 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
     // mirrored the pre-patch one). Without this a freshly-toggled tier would stay
     // spawnable for every sync reader until the next settings read.
     setAllowedModelTiersCache(merged.swarmAllowedModels)
+    // Same for lockdown: the fetch floor must see the toggle the moment it lands.
+    setLockdownCache(merged.lockdownMode)
   })
   // Keep the chain advancing even if one write throws, so a single failure
   // can't wedge every subsequent settings save.
@@ -158,6 +165,7 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'experiments',
   'executionMode',
   'swarmAllowedModels',
+  'lockdownMode',
 ]
 
 // Persist a settings patch that ORIGINATES FROM AN UNTRUSTED HTTP CLIENT
@@ -187,6 +195,11 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
     const mask = normalizeAllowedModels(safe.swarmAllowedModels)
     if (anyTierAllowed(mask)) safe.swarmAllowedModels = mask
     else delete safe.swarmAllowedModels
+  }
+  // Store the lockdown switch as a REAL boolean: only a literal `true` turns it
+  // on (a forged truthy string must not), everything else persists `false`.
+  if (Object.prototype.hasOwnProperty.call(safe, 'lockdownMode')) {
+    safe.lockdownMode = safe.lockdownMode === true
   }
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]
@@ -296,6 +309,14 @@ export const isSwarmManualStopPersisted = async (key: string): Promise<boolean> 
 // A hand-corrupted / absent value degrades to the smart default via asExecutionMode.
 export const getExecutionMode = async (): Promise<ExecutionMode> =>
   asExecutionMode((await getSettings()).executionMode)
+
+// ─── Work mode / lockdown (Settings.lockdownMode) ─────────────────────────────
+// The authoritative reader every egress feature gate consults (see lockdown.ts
+// for the two-layer model). Absent / hand-corrupted ⇒ off — the shipped default.
+// Lives here (not lockdown.ts) so the settings module stays the only one that
+// imports lockdown's cache setter, never the reverse (no import cycle).
+export const isLockdownEnabled = async (): Promise<boolean> =>
+  (await getSettings()).lockdownMode === true
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)
 export const setCanvas = (c: CanvasState) => writeJson(canvasFile(), c)

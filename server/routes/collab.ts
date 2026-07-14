@@ -35,6 +35,7 @@
 
 import { Hono, type Context } from 'hono'
 import { readAuthConfig, getFreshAccessToken } from '@/lib/server/supabaseAuth'
+import { isLockdownEnabled } from '@/lib/server/store'
 import { readSession } from '@/lib/server/authStore'
 import {
   getMyMembership,
@@ -110,13 +111,15 @@ const realtimeEnvOn = (): boolean => {
 }
 
 // The single capability predicate, shared by /config (whether to load the
-// bundle) and /ticket (503 collab-disabled). ZERO-CONFIG contract: the flag AND a
+// bundle) and /ticket (503 collab-disabled). ZERO-CONFIG contract: NOT work
+// mode (lockdown — collab is Supabase + Cloudflare egress) AND the flag AND a
 // Worker WS endpoint AND a signed-in session. The HMAC ticket secret is NO LONGER
 // a local condition — it lives only on the operator Worker now (the Hono relays
 // the user's access token to the Worker, which mints). A session implies Supabase
 // Auth was configured, so membership lookups + the access-token relay work; we
-// don't double-check readAuthConfig() here to keep the gate exactly these three.
+// don't double-check readAuthConfig() here to keep the gate exactly these.
 const collabEnabled = async (): Promise<boolean> =>
+  !(await isLockdownEnabled()) &&
   realtimeEnvOn() &&
   readCollabWsUrl() !== null &&
   (await readSession()) !== null
@@ -225,6 +228,18 @@ const parseMemberCap = (raw: unknown): number | null | undefined => {
 }
 
 export const collabRoutes = new Hono()
+  // Work mode (lockdown) gate for the WHOLE group: most collab routes reach
+  // Supabase (membership/invites under the caller's JWT) or the Cloudflare
+  // Worker WITHOUT passing collabEnabled(), so a per-route audit would be
+  // fragile — this middleware fails them all closed in one place. /config is
+  // exempt so the SPA's capability probe still gets its normal 200 shape
+  // (collabEnabled above already answers false under lockdown).
+  .use('/api/collab/*', async (c, next): Promise<Response | void> => {
+    if (c.req.path !== '/api/collab/config' && (await isLockdownEnabled())) {
+      return c.json({ error: 'disabled by work mode (lockdown)' }, 503)
+    }
+    await next()
+  })
   // GET /api/collab/config — global capability gate. The SPA checks this once on
   // mount to decide whether to load the collab bundle. No project path.
   .get('/api/collab/config', async (c) => {

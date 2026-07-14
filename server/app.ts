@@ -136,6 +136,14 @@ export const createApp = () => {
   // non-asset path that 404s on disk falls back to index.html (history API).
   const webRoot = process.env.OPENGROUND_WEB_ROOT || resolve(process.cwd(), 'dist-web')
   if (existsSync(webRoot)) {
+    // Self-hosted fonts are also loaded from inside sandboxed srcdoc iframes
+    // (Canvas mock/screen — null origin, and font loads are CORS-gated), so
+    // /fonts/* needs an explicit ACAO. Loopback-only server, GET-only assets —
+    // the wildcard exposes nothing. Vite dev serves public/ with cors:true.
+    routed.use('/fonts/*', async (c, next) => {
+      await next()
+      c.header('Access-Control-Allow-Origin', '*')
+    })
     routed.use('/*', serveStatic({ root: webRoot }))
     // SPA fallback: serve index.html for any unmatched GET that isn't /api.
     routed.get('*', serveStatic({ path: 'index.html', root: webRoot }))

@@ -69,6 +69,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # PII guard — the tag's tree is exactly what ships publicly, so this is the
+      # last line of defense: refuse to build a release from a tree that
+      # reintroduces personal information (real-provider emails / home-path user
+      # segments / banned tokens). src/repoPiiGuard.test.ts scans every tracked
+      # text file; see docs/PII_SCRUB_RUNBOOK.md §8.
+      - name: PII guard (refuse to release a tainted tree)
+        run: npx vitest run src/repoPiiGuard.test.ts
+
       # Defensive clean. v0.11.7 built the CORRECT 0.11.7 git tree (verified: tag
       # tree == origin/main, swarm sources present) yet produced a 0.10.1 installer.
       # The only explanation is a stale dist-web/server/dist/dist-electron (or a

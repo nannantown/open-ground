@@ -26,6 +26,12 @@ export const settings = {
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
+    // Work mode (lockdown) — the non-Anthropic egress kill switch
+    'settings.lockdown.heading': 'Work mode',
+    'settings.lockdown.label': 'Block non-Anthropic connections',
+    'settings.lockdown.hint':
+      'For confidential machines. Turns off everything that talks to a server other than your own Claude: update checks, release notes, feedback, marketplace, sign-in, and shared projects. Your claude CLI keeps working as usual. Turning it off restores everything.',
+    'settings.lockdown.badge': 'Work mode is on — connections other than Claude are blocked.',
     // Plan
     // Workspace
     'settings.workspace.heading': 'Default workspace',
@@ -46,6 +52,7 @@ export const settings = {
     'settings.releaseNotes.heading': 'Release notes',
     'settings.releaseNotes.loading': 'Loading releases…',
     'settings.releaseNotes.error': "Couldn't load release notes. Check your connection and try again.",
+    'settings.releaseNotes.lockdown': 'Disabled while work mode is on.',
     'settings.releaseNotes.current': 'Current',
     // App version (so users can confirm an update actually took effect)
     'settings.version.heading': 'Version',
@@ -76,6 +83,11 @@ export const settings = {
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
+    'settings.lockdown.heading': '業務モード',
+    'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
+    'settings.lockdown.hint':
+      '機密情報を扱うマシン向け。自分の Claude 以外のサーバーと通信する機能 — アップデート確認・リリースノート・フィードバック・マーケットプレイス・サインイン・共有プロジェクト — をすべて止めます。claude CLI はそのまま使えます。オフに戻せば全機能が復帰します。',
+    'settings.lockdown.badge': '業務モード ON — Claude 以外の外部通信を遮断中',
     'settings.workspace.heading': 'デフォルトの作業フォルダ',
     'settings.workspace.hint': '新規作成したプロジェクトの置き場所です。既存フォルダのインポートはどこからでも可能です。',
     'settings.workspace.browse': '参照',
@@ -90,6 +102,7 @@ export const settings = {
     'settings.releaseNotes.heading': 'リリースノート',
     'settings.releaseNotes.loading': 'リリース情報を読み込み中…',
     'settings.releaseNotes.error': 'リリースノートを取得できませんでした。接続を確認して再度開いてください。',
+    'settings.releaseNotes.lockdown': '業務モード中は無効です。',
     'settings.releaseNotes.current': '使用中',
     'settings.version.heading': 'バージョン',
     'settings.inbox.heading': '受信したフィードバック',

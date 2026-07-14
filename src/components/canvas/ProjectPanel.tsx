@@ -895,6 +895,7 @@ const OwnedProjectBody = ({
   const {
     role: customRole,
     modules: customModules,
+    marketAvailable,
     loaded: customModulesLoaded,
     refresh: refreshCustomModules,
   } = useCustomModules()
@@ -2575,7 +2576,7 @@ const OwnedProjectBody = ({
           projectPath={project.path}
           data={data}
           onBrowseMarket={
-            customRole !== 'none'
+            customRole !== 'none' && marketAvailable
               ? () => {
                   setProjectSettingsOpen(false)
                   setMarketOpen(true)
@@ -2641,7 +2642,7 @@ const OwnedProjectBody = ({
               : undefined
           }
           onBrowseMarket={
-            customRole !== 'none'
+            customRole !== 'none' && marketAvailable
               ? () => {
                   setPickerOpen(false)
                   setMarketOpen(true)
