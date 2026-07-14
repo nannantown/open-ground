@@ -43,7 +43,7 @@ import { killTerminal, subscribeTerminal } from './terminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { ensureBrainEgressProxy } from './egressProxy'
 import { youCorpusFile, openGroundHome } from './paths'
-import { SWARM_LAUNCH_MODEL, SWARM_LAUNCH_EFFORT, resolveAvailableTier } from './swarmLaunch'
+import { SWARM_LAUNCH_MODEL, SWARM_LAUNCH_EFFORT, resolveAvailableTierProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import {
   classifyReversibility,
@@ -417,7 +417,10 @@ export const makeOverseerBrain = (
     // the settings FILE: the brain is a sandboxed, network-closed one-off and has no
     // business touching fs here, and its only caller (defaultOverseerDeps) re-reads
     // settings — refreshing the mirror — immediately before building this runner.
-    const tier = resolveAvailableTier(model, Date.now())
+    // PROBED (2026-07-13): an UNKNOWN tier gets one collapsed pre-launch probe
+    // (swarmTierProbe) before the brain PTY spawns on it — a tier-local wall is
+    // invisible to /usage, and a brain seated on one answers nothing.
+    const tier = await resolveAvailableTierProbed(model, Date.now())
     if (!tier) throw new NoAllowedModelTierError()
     // EGRESS close, resolved BEFORE any resource is created: on macOS the brain is
     // ALWAYS sandboxed (NOT experiment-gated like the worker/interactive paths —

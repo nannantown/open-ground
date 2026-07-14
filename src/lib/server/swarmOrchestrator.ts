@@ -87,7 +87,10 @@ import {
 } from './store'
 import { launchClaude } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
-import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTier } from './swarmLaunch'
+import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTierProbed } from './swarmLaunch'
+// The limit-wording detector, extracted to swarmRateLimitText.ts (2026-07-13) so
+// the pre-launch tier probe shares it — see the re-export further down.
+import { normalizeScreen, matchesRateLimit, endsInRateLimit } from './swarmRateLimitText'
 // [Quota] the engine is BOTH sides of the quota loop now: the rate-limit
 // sighting in monitorWorkers is the swarm's SENSOR (markRateLimited — the one
 // production write into the cooling table, attributing the sighting to the tier
@@ -1162,62 +1165,16 @@ export const classifyStall = (
   return { action: 'nudge', progressed: false, silentMs }
 }
 
-/** Strip ANSI/CSI escape sequences and collapse whitespace, lowercased — so the
- *  output classifier below matches against the clean text a human reads, immune
- *  to the cursor-addressing a `claude` TUI interleaves (and to a raw-buffer
- *  fallback that still carries escapes). Pure. */
-const normalizeScreen = (s: string): string =>
-  s
-    // CSI / OSC / single-char escapes — enough to clear the sequences claude emits.
-    .replace(/\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\][^]*(?:|\\)/g, '')
-    .replace(/[@-Z\\-_]/g, '')
-    .replace(/\s+/g, ' ')
-    .toLowerCase()
+// The rate/usage-limit WORDING detector — normalizeScreen, RATE_LIMIT_PATTERNS,
+// matchesRateLimit, RATE_LIMIT_TAIL_MAX, endsInRateLimit — lived here (layer B's
+// eyes) until 2026-07-13, when it moved VERBATIM to swarmRateLimitText.ts so the
+// pre-launch tier probe (swarmTierProbe) can reuse the exact same patterns
+// without importing this engine (probe → engine → probe would be a cycle, and a
+// copy would drift the moment the CLI rewords a notice). Re-exported here so
+// existing importers keep their paths; the engine itself imports the helpers at
+// the top of this file like any other module.
+export { RATE_LIMIT_PATTERNS, RATE_LIMIT_TAIL_MAX, endsInRateLimit } from './swarmRateLimitText'
 
-/** High-precision markers that a worker's `claude` is WAITING on a rate / usage /
- *  quota / overload limit — a legitimate pause, NOT a hang. Matched against the
- *  normalized screen text. Deliberately tuned to claude's RUNTIME messages
- *  ("usage limit reached", an API overload error, a backoff "retrying in 30s"),
- *  which a worker editing source would not reproduce verbatim — so a worker
- *  literally writing rate-limit CODE is rarely misread. The residual risk is a
- *  FALSE POSITIVE (extra grace for a worker that isn't really limited), the SAFE
- *  direction: it never kills, and the runaway ceiling still backstops a worker
- *  that genuinely never progresses. A false NEGATIVE would be the dangerous one
- *  (reclaiming a real waiter) — hence the bias toward catching the limit. */
-export const RATE_LIMIT_PATTERNS: readonly RegExp[] = [
-  /usage limit/, // "claude usage limit reached", "approaching your usage limit"
-  /limit (?:will )?reset/, // "your limit will reset at 3pm", "limit resets in…"
-  /\boverloaded_error\b/,
-  /\brate_limit_error\b/,
-  /api error[^.]{0,40}\b(?:429|500|503|529|overloaded)\b/,
-  /\b(?:429|529)\b[^.]{0,40}\boverloaded\b/,
-  /too many requests/,
-  /retrying in \d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes)\b/,
-  // The CLI's PER-MODEL exhaustion notice, verbatim off a worker's session on
-  // 2026-07-09: "You've reached your Fable 5 limit. Run /usage-credits to
-  // continue or switch models with /model." NONE of the patterns above see it —
-  // a model-named limit is not the string "usage limit" — so the quota sensor
-  // never fired, fable never cooled, and dispatch kept re-launching workers and
-  // reviewers into the dry tier (stalls + empty review panels). Each of the
-  // notice's three independent phrases gets its own pattern, because a TUI wraps
-  // the sentence at the box edge and only one fragment may survive on screen.
-  // The wording is pinned by a verbatim regression fixture in the test suite.
-  /reached your .{0,40}\blimit\b/, // "You've reached your Fable 5 limit."
-  // A limit ANNOUNCEMENT, qualified by what ran out. The qualifier is the whole
-  // point: a bare /limit reached/ also fires on "connection limit reached", a
-  // "buffer limit reached" log line, and `throw new Error(...)` in source — text
-  // an ordinary worker prints — which would cool a HEALTHY tier for 20 minutes.
-  // The alternation covers a numbered window (5-hour, 4.8), and the usage /
-  // model / session / weekly / your qualifiers the CLI actually uses.
-  /\b(?:\d+[\w.-]*|usage|model|session|weekly|your)\s+limit reached\b/,
-  /switch models with \/model\b/, // the notice's remedy line
-  // …and its other remedy line. `run ` is load-bearing (a bare /usage-credits/
-  // would fire on prose and on this file); normalizeScreen lowercases AFTER its
-  // escape strip, so the CLI's capital "Run" reaches this pattern — see the
-  // isolation test that drives this pattern alone.
-  /\brun \/usage-credits\b/,
-]
 
 /** Markers of a permission / trust prompt blocking a worker. DELIBERATELY NARROW
  *  — only `claude`'s literal directory-trust dialog phrasing, which a worker's
@@ -1231,59 +1188,6 @@ export const PERMISSION_PROMPT_PATTERNS: readonly RegExp[] = [
   /do you trust the files in this (?:folder|directory)/,
   /do you want to (?:proceed|trust|allow) .{0,40}\?/, // claude's trust/allow confirmation line
 ]
-
-/** {@link RATE_LIMIT_PATTERNS} against ALREADY-normalized text (the classifier
- *  below has one in hand and must not normalize twice). */
-const matchesRateLimit = (normalized: string): boolean =>
-  RATE_LIMIT_PATTERNS.some((re) => re.test(normalized))
-
-/** How much text may trail the limit wording and still count as "the session died
- *  right there" ({@link endsInRateLimit}). Sized for the CLI's chrome — the input
- *  box + hint line claude repaints under its last message — and nothing more. */
-export const RATE_LIMIT_TAIL_MAX = 800
-
-/** Does `text` END in a rate/usage-limit notice — i.e. is the limit wording the
- *  LAST thing this `claude` said, with only chrome after it?
- *
- *  The reviewer arm's quota sensor (makeAdversarialReview) needs this rather than
- *  a bare "does the transcript CONTAIN limit wording" test, because a reviewer's
- *  transcript is 64KB of whatever it read: review the rate-limit code itself (this
- *  very file, swarmQuota.ts) and the notice's verbatim wording is QUOTED in the
- *  diff and in the reviewer's own prose. Containment cannot tell a quote from the
- *  real thing; POSITION can. When `claude` actually walks into the wall the notice
- *  is its terminal utterance — it stops there, and only the input box follows. A
- *  reviewer that merely quoted the wording goes on working: hundreds to thousands
- *  more characters of reading and reasoning trail the quote (each repaint pushes
- *  the earlier one further from the tail), so the last match sits far from the end.
- *
- *  Distance is measured from the END of the LAST match across all
- *  {@link RATE_LIMIT_PATTERNS}, on the normalized text, and must be within
- *  {@link RATE_LIMIT_TAIL_MAX}. Pure.
- *
- *  Deliberately NOT used for the worker arm: a worker's PTY *screen* is a live
- *  snapshot, not a transcript, and {@link classifyOutput} rightly matches anywhere
- *  in it. And when this check misses a real notice that has scrolled away, the
- *  cost is bounded — the panel just defers, and the worker sensor (which reads the
- *  live screen, where the notice still sits) cools the tier on the next dispatch. */
-export const endsInRateLimit = (
-  text: string | null | undefined,
-  tailMax: number = RATE_LIMIT_TAIL_MAX,
-): boolean => {
-  if (!text) return false
-  const norm = normalizeScreen(text)
-  if (!norm) return false
-  let lastEnd = -1
-  for (const re of RATE_LIMIT_PATTERNS) {
-    // Scan for the LAST occurrence: a fresh global clone per call, so neither the
-    // shared pattern's `lastIndex` nor this scan's leaks between callers.
-    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
-    for (let m = scan.exec(norm); m; m = scan.exec(norm)) {
-      lastEnd = Math.max(lastEnd, m.index + m[0].length)
-      if (m[0].length === 0) scan.lastIndex++ // no pattern is zero-width; never spin if one becomes so
-    }
-  }
-  return lastEnd >= 0 && norm.length - lastEnd <= tailMax
-}
 
 /** The reset time A5 (the CLI usage sensor) offers as a cooling horizon, or null.
  *
@@ -3932,7 +3836,12 @@ export const makeAdversarialReview = (
     // unreachable behind `spawnBlock` — kept as a defer (never a throw, never a
     // silent fall-back onto the disabled tier) so this stays fail-CLOSED by
     // construction rather than by the gate above happening to run first.
-    const panelModel = resolveAvailableTier(model, Date.now(), allowed)
+    // PROBED (2026-07-13): when the chosen tier is UNKNOWN (no cooling mark, no
+    // usage veto), one headless `claude --model <tier> -p` probe confirms it can
+    // actually launch before the whole panel spawns into a wall /usage cannot
+    // see (the fable-only exhaustion) — wall ⇒ the tier cools and the walk drops
+    // a rung, exactly like the worker path (swarmTierProbe / resolveAvailableTierProbed).
+    const panelModel = await resolveAvailableTierProbed(model, Date.now(), allowed)
     if (!panelModel) {
       return {
         decision: 'defer',

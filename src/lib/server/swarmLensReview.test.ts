@@ -36,7 +36,7 @@ import {
   type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
-import { markCoolingUntil, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
+import { markCoolingUntil, __resetQuotaForTest, flushQuotaPersist, MODEL_TIER_LADDER } from './swarmQuota'
 import { setSettings } from './store'
 
 // ── pure unit: the weighted-OR lens tally ──────────────────────────────────────
@@ -221,6 +221,12 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
   afterEach(async () => {
     __resetOrchestratorForTests()
     __resetQuotaForTest() // the cooling table is a globalThis singleton — never leak across cases
+    // Drain the cooling table's fire-and-forget disk mirror BEFORE deleting the
+    // HOME it writes into (swarmQuota's contract: a suite that touches the file
+    // awaits flushQuotaPersist first). Without this, the quota-park case's
+    // markCoolingUntil×4 can land its atomic-write temp file mid-rm on a loaded
+    // box — ENOTEMPTY, a load-dependent teardown flake, not a product bug.
+    await flushQuotaPersist()
     await rm(home, { recursive: true, force: true })
     await rm(scratch, { recursive: true, force: true })
   })

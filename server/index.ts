@@ -17,6 +17,7 @@ import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
 import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
+import { warmTierProbeAtBoot } from '@/lib/server/swarmTierProbe'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
@@ -68,6 +69,14 @@ registerIncomingNotifications()
 // as they load (lazy expiry, same rule as isTierCooling), so a stale file can only
 // ever cool LESS, never more.
 void ensureCoolingTableLoaded(Date.now())
+
+// Warm the TOP tier's pre-launch probe verdict (layer E, swarmTierProbe),
+// detached: a healthy-tier probe measures 19-73s — far past the 8s a launch
+// will wait — so probing once at boot means the first spawn after a restart
+// (usually the commander) finds the verdict already recorded instead of
+// launching fail-open while the probe still runs. Fire-and-forget by contract:
+// runs the claude preflight itself, never throws, never blocks boot.
+warmTierProbeAtBoot()
 
 // Retention sweep — drop the raw episodic layer (run cache + attachments) older
 // than RAW_RETENTION_DAYS. Fire-and-forget after boot so it never blocks

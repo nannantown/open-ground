@@ -23,7 +23,14 @@ import {
 // turns the launch model from a fixed top-tier constant into "the highest tier
 // with headroom" (see resolveAvailableTier). One-way dep — swarmQuota imports
 // nothing back (it's the pure foundation).
-import { MODEL_TIER_LADDER, type ModelTier } from './swarmQuota'
+import { MODEL_TIER_LADDER, isTierCooling, isModelTier, type ModelTier } from './swarmQuota'
+// The [Probe] pre-launch wall detector (swarmTierProbe): one headless
+// `claude --model <tier> -p` call that reads the CLI's own refusal string — the
+// ONLY signal that sees a tier-local wall /usage cannot express (the 2026-07-13
+// fable-only exhaustion; see the module head there). The probed resolver below
+// consults it exactly when a tier is UNKNOWN; a wall it finds lands in the
+// cooling table via the sensor's own write path, so the ladder walk drops a rung.
+import { ensureTierProbed, type TierProbeVerdict } from './swarmTierProbe'
 // The [Allowed] policy layer (swarmAllowedModels) is the SECOND, independent veto
 // this file reads: the owner's permanent per-tier ON/OFF switch. Cooling expires;
 // this does not. Both must pass for a tier to be launched on — `isTierSpawnable`
@@ -306,6 +313,49 @@ export const resolveAvailableTier = (
   return highestAllowedTier(allowed)
 }
 
+/** {@link resolveAvailableTier} + the PRE-LAUNCH PROBE: the async resolver every
+ *  spawn path calls at launch time (worker / manager / supply / overseer / brain
+ *  / reviewer panel — they are all async there). Semantics:
+ *
+ *    1. Resolve the tier exactly as the sync walk does (cooling + mask + usage
+ *       veto — behavior unchanged when everything is known).
+ *    2. If the chosen tier is UNKNOWN — a ladder tier with no cooling mark (the
+ *       usage veto was already applied by the walk) — PROBE it once
+ *       ({@link ensureTierProbed}: collapsed, TTL-cached, fail-open).
+ *    3. 'wall' ⇒ the probe has ALREADY cooled the tier (markRateLimited, disk-
+ *       mirrored), so re-resolving walks one rung down — loop. 'ok'/'unknown' ⇒
+ *       launch on it (fail-open: not knowing never kills a tier).
+ *
+ *  The loop is bounded by the ladder length: each 'wall' pass cools the tier it
+ *  probed, so the walk can never revisit it. Two early exits keep the probe
+ *  honest: a NON-ladder model string is returned as-is (never probe arbitrary
+ *  strings), and a tier the walk returned WHILE COOLING (the nothing-spawnable
+ *  "keep desired" fallback) is returned unprobed — it is already known-dry and
+ *  the engine's park gate owns that case, exactly as before.
+ *
+ *  `probe` is injectable for tests; production always means ensureTierProbed. */
+export const resolveAvailableTierProbed = async (
+  desired: string,
+  now: number = Date.now(),
+  allowed: SwarmAllowedModels = allowedModelTiers(),
+  usage: CliUsage | null = peekCachedUsage(),
+  probe: (tier: string) => Promise<TierProbeVerdict> = ensureTierProbed,
+): Promise<string | null> => {
+  for (let i = 0; i < MODEL_TIER_LADDER.length; i++) {
+    const tier = resolveAvailableTier(desired, now, allowed, usage)
+    if (tier == null) return null
+    if (!isModelTier(tier)) return tier // not a ladder tier — nothing to probe
+    if (isTierCooling(tier, now)) return tier // known-dry fallback (park's case) — don't probe
+    const verdict = await probe(tier)
+    if (verdict !== 'wall') return tier // ok / unknown ⇒ fail-open: launch here
+    // wall ⇒ the probe cooled `tier`; the next resolve walks one rung down.
+  }
+  // Every ladder tier probed dry in one pass — fall through to the sync walk's
+  // own nothing-spawnable answer (desired-if-allowed / best-allowed / null), the
+  // same state a fully-cooled ladder reaches today; the engine parks on it.
+  return resolveAvailableTier(desired, now, allowed, usage)
+}
+
 // ─── EXECUTION MODE × QUOTA FALLBACK ─────────────────────────────────────────
 // How the launch tier is chosen once a tier is cooling. resolveSwarmModelEffort
 // takes the mode's DESIRED tier (desiredModelEffort, logic UNCHANGED) then maps it
@@ -371,6 +421,33 @@ export const resolveSwarmModelEffort = (
 ): { model: string; effort?: ClaudeEffort } | null => {
   const desired = desiredModelEffort(mode, role, card)
   const model = resolveAvailableTier(desired.model, now, allowed, usage)
+  return model ? { ...desired, model } : null
+}
+
+/** {@link resolveSwarmModelEffort} with the PRE-LAUNCH PROBE — what every spawn
+ *  path actually calls at launch time (they are all async there). Identical to
+ *  the sync resolver when the chosen tier is already known (cooling mark, usage
+ *  veto, fresh probe verdict); when it is UNKNOWN, one collapsed headless probe
+ *  ({@link resolveAvailableTierProbed}) checks it can launch before a `claude`
+ *  is seated on it — the only pre-launch signal that sees a tier-local wall
+ *  (/usage cannot express one — measured 2026-07-13, see swarmTierProbe). The
+ *  probe never holds the spawn past its wait window (fail-open race — see
+ *  TIER_PROBE_LAUNCH_WAIT_MS). The sync {@link resolveSwarmModelEffort} above
+ *  has NO production caller left (every spawn path is probed now) — it stays as
+ *  the probe-free core this wraps, and the deliberate answer for any future
+ *  sync context, which CANNOT await a probe by construction. `probe` is
+ *  injectable for tests. */
+export const resolveSwarmModelEffortProbed = async (
+  mode: ExecutionMode,
+  role: 'worker' | 'supply' | 'manager' | 'overseer',
+  card?: { title?: string; notes?: string },
+  now: number = Date.now(),
+  allowed: SwarmAllowedModels = allowedModelTiers(),
+  usage: CliUsage | null = peekCachedUsage(),
+  probe: (tier: string) => Promise<TierProbeVerdict> = ensureTierProbed,
+): Promise<{ model: string; effort?: ClaudeEffort } | null> => {
+  const desired = desiredModelEffort(mode, role, card)
+  const model = await resolveAvailableTierProbed(desired.model, now, allowed, usage, probe)
   return model ? { ...desired, model } : null
 }
 

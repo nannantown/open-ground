@@ -34,7 +34,7 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { swarmLaunchDefaults, resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
 import { getExecutionMode, getAllowedModelTiers } from './store'
@@ -146,7 +146,10 @@ export const spawnSwarmSupply = async (
   // other swarm role obeys — fail-CLOSED). Checked BEFORE we record anything, so a
   // refused launch never leaves a session id pointing at a conversation that
   // does not exist.
-  const me = resolveSwarmModelEffort(
+  // PROBED (2026-07-13): same pre-launch wall check as every other spawn path —
+  // an UNKNOWN tier gets one collapsed headless probe before the desk is seated
+  // on it (swarmTierProbe); wall ⇒ cool + one rung down, unknown ⇒ fail-open.
+  const me = await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'supply',
     undefined,

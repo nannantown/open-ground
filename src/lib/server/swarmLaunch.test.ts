@@ -4,12 +4,15 @@ import {
   SWARM_LAUNCH_EFFORT,
   swarmLaunchDefaults,
   resolveSwarmModelEffort,
+  resolveSwarmModelEffortProbed,
   resolveAvailableTier,
+  resolveAvailableTierProbed,
   isTopTierExhaustedByUsage,
   classifyCardWeight,
   execModeMaxWorkers,
   asExecutionMode,
 } from './swarmLaunch'
+import { ensureTierProbed, __resetTierProbeForTest, type TierProbeExec } from './swarmTierProbe'
 import type { CliUsage } from './claudeUsageCli'
 import {
   CLAUDE_EFFORTS,
@@ -19,7 +22,7 @@ import {
   type SwarmAllowedModels,
   type SwarmModelTier,
 } from '../types'
-import { MODEL_TIER_LADDER, markCoolingUntil, __resetQuotaForTest } from './swarmQuota'
+import { MODEL_TIER_LADDER, markCoolingUntil, isTierCooling, __resetQuotaForTest } from './swarmQuota'
 import { __resetAllowedModelsForTest } from './swarmAllowedModels'
 
 // The quota cooling table and the allowed-models mirror are process-wide
@@ -572,5 +575,150 @@ describe('hard mask — a switched-OFF tier is never launched on', () => {
     // fable OFF, opus cooling ⇒ sonnet. Turning fable back ON returns fable.
     expect(resolveAvailableTier('fable', NOW, off('fable'))).toBe('sonnet')
     expect(resolveAvailableTier('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS)).toBe('fable')
+  })
+})
+
+// ─── The PROBED resolvers — pre-launch wall detection (2026-07-13) ───────────
+// Integration-shaped: the REAL ensureTierProbed runs behind the resolver, with
+// only its exec seam mocked (CI never spawns a real `claude`). This is the card's
+// acceptance shape in unit form: a dry fable refuses the probe ⇒ the launch
+// lands on opus AND the cooling mark appears with no manual cool.
+
+describe('resolveAvailableTierProbed / resolveSwarmModelEffortProbed (pre-launch probe)', () => {
+  const NOW = 1_700_000_000_000
+  const HOUR = 3_600_000
+  const FABLE_LIMIT_NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+
+  beforeEach(() => {
+    __resetTierProbeForTest()
+  })
+
+  /** Wire the REAL ensureTierProbed to a scripted exec: `walls` refuse with the
+   *  verbatim CLI notice, everything else answers. Returns the probe fn the
+   *  resolvers take, plus the per-tier call log. */
+  const scriptedProbe = (...walls: SwarmModelTier[]) => {
+    const calls: string[] = []
+    const exec: TierProbeExec = async (_bin, args) => {
+      const tier = args[args.indexOf('--model') + 1]
+      calls.push(tier)
+      return walls.includes(tier as SwarmModelTier)
+        ? { stdout: FABLE_LIMIT_NOTICE.replace('Fable 5', tier), stderr: '', failed: true }
+        : { stdout: 'PROBE_OK', stderr: '', failed: false }
+    }
+    const probe = (tier: string) =>
+      ensureTierProbed(tier, { exec, bin: '/fake/claude', now: () => NOW })
+    return { probe, calls }
+  }
+
+  it('a dry fable refuses the probe ⇒ the launch drops to opus AND fable cools automatically', async () => {
+    const { probe, calls } = scriptedProbe('fable')
+    expect(isTierCooling('fable', NOW)).toBe(false) // no cooling mark, no usage veto — UNKNOWN
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(tier).toBe('opus')
+    expect(isTierCooling('fable', NOW)).toBe(true) // the probe recorded the wall — no manual cool
+    expect(calls).toEqual(['fable', 'opus']) // one probe per unknown rung, nothing more
+  })
+
+  it('a healthy fable answers the probe ⇒ launch on fable, one probe total', async () => {
+    const { probe, calls } = scriptedProbe()
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(tier).toBe('fable')
+    expect(calls).toEqual(['fable'])
+    expect(isTierCooling('fable', NOW)).toBe(false)
+  })
+
+  it('a fresh verdict is reused — the next launch does not probe again', async () => {
+    const { probe, calls } = scriptedProbe()
+    await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(calls).toEqual(['fable']) // the TTL cache served the second launch
+  })
+
+  it("an inconclusive probe (timeout/no wording) is FAIL-OPEN: launch on the desired tier", async () => {
+    const calls: string[] = []
+    const exec: TierProbeExec = async (_bin, args) => {
+      calls.push(args[args.indexOf('--model') + 1])
+      return { stdout: '', stderr: 'spawn ETIMEDOUT', failed: true }
+    }
+    const probe = (tier: string) =>
+      ensureTierProbed(tier, { exec, bin: '/fake/claude', now: () => NOW })
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(tier).toBe('fable') // not knowing never kills a tier
+    expect(isTierCooling('fable', NOW)).toBe(false)
+    expect(calls).toEqual(['fable'])
+  })
+
+  it('an already-cooling fable is KNOWN: no probe spent on it, walk starts at opus', async () => {
+    markCoolingUntil('fable', NOW + HOUR)
+    const { probe, calls } = scriptedProbe()
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(tier).toBe('opus')
+    expect(calls).toEqual(['opus']) // fable was never probed — the table already knew
+  })
+
+  it('a usage-vetoed top tier is KNOWN: no probe spent on it either', async () => {
+    const usage: CliUsage = {
+      session: null,
+      weekAll: { pct: 100, resetsAt: 'in 6 days' },
+      capturedAt: '2026-07-12T00:00:00.000Z',
+      status: 'ok',
+    }
+    const { probe, calls } = scriptedProbe()
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, usage, probe)
+    expect(tier).toBe('opus')
+    expect(calls).toEqual(['opus'])
+  })
+
+  it('every rung dry ⇒ each probed once, then the nothing-spawnable fallback (park owns it)', async () => {
+    const { probe, calls } = scriptedProbe('fable', 'opus', 'sonnet', 'haiku')
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(tier).toBe('fable') // the sync walk's "keep desired while allowed" answer — engine parks
+    expect(calls).toEqual(['fable', 'opus', 'sonnet', 'haiku'])
+    for (const t of MODEL_TIER_LADDER) expect(isTierCooling(t, NOW)).toBe(true)
+  })
+
+  it('a fully-cooled ladder at entry returns the park fallback WITHOUT probing (known-dry)', async () => {
+    for (const t of MODEL_TIER_LADDER) markCoolingUntil(t, NOW + HOUR)
+    const { probe, calls } = scriptedProbe()
+    const tier = await resolveAvailableTierProbed('fable', NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe)
+    expect(tier).toBe('fable') // same answer the sync walk gives today
+    expect(calls).toEqual([])
+  })
+
+  it('the owner mask still wins: a disabled fable is never probed nor launched', async () => {
+    const off = { fable: false, opus: true, sonnet: true, haiku: true } as SwarmAllowedModels
+    const { probe, calls } = scriptedProbe()
+    const tier = await resolveAvailableTierProbed('fable', NOW, off, null, probe)
+    expect(tier).toBe('opus')
+    expect(calls).toEqual(['opus'])
+  })
+
+  it('resolveSwarmModelEffortProbed: max/worker on a dry fable seats opus, effort untouched', async () => {
+    const { probe } = scriptedProbe('fable')
+    const me = await resolveSwarmModelEffortProbed(
+      'max', 'worker', undefined, NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe,
+    )
+    expect(me).toEqual({ model: 'opus', effort: 'max' })
+    expect(isTierCooling('fable', NOW)).toBe(true)
+  })
+
+  it('resolveSwarmModelEffortProbed: the probe goes to the tier that would LAUNCH (economy ⇒ sonnet)', async () => {
+    const { probe, calls } = scriptedProbe()
+    const me = await resolveSwarmModelEffortProbed(
+      'economy', 'worker', undefined, NOW, DEFAULT_SWARM_ALLOWED_MODELS, null, probe,
+    )
+    expect(me).toEqual({ model: 'sonnet', effort: 'low' })
+    expect(calls).toEqual(['sonnet']) // never a probe wasted on a tier this launch would not use
+  })
+
+  it('resolveSwarmModelEffortProbed: every tier masked OFF ⇒ null (fail-closed), no probes', async () => {
+    const none = { fable: false, opus: false, sonnet: false, haiku: false } as SwarmAllowedModels
+    const { probe, calls } = scriptedProbe()
+    const me = await resolveSwarmModelEffortProbed(
+      'max', 'worker', undefined, NOW, none, null, probe,
+    )
+    expect(me).toBeNull()
+    expect(calls).toEqual([])
   })
 })

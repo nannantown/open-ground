@@ -50,7 +50,7 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { swarmLaunchDefaults, resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
 import { installOgManageSkill } from './ogManageSkill'
@@ -189,7 +189,11 @@ export const spawnSwarmManager = async (
   // it on the top tier (its integration / safety-review judgment is quality-critical).
   // Null ⇒ the owner switched every tier OFF: no model, no spawn (fail-CLOSED — the
   // commander is a claude PTY like any other and honors the same hard mask).
-  const me = resolveSwarmModelEffort(
+  // PROBED (2026-07-13): the 2026-07-13 burn was exactly THIS path — a commander
+  // seated on a fable whose tier-local wall /usage could not show. One collapsed
+  // headless probe (swarmTierProbe) now confirms the tier before the desk spawns;
+  // wall ⇒ it cools (disk-mirrored) and the walk seats the commander one rung down.
+  const me = await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'manager',
     undefined,

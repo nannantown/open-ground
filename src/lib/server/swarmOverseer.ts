@@ -76,7 +76,7 @@ import { usageLevel } from '../usageThresholds'
 import { peekCachedUsage, refreshUsageCacheDetached } from './claudeUsageCli'
 import { runSwarmJanitor } from './swarmJanitor'
 import { createSwarmInfoNotification, listSwarmNotifications } from './swarmNotifications'
-import { resolveSwarmModelEffort } from './swarmLaunch'
+import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { getSettings, getAllowedModelTiers } from './store'
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
@@ -344,7 +344,10 @@ export const defaultOverseerDeps = (io: {
     // spawn-time mask check throw — the runner failing CLOSED is exactly how the
     // brain already handles "cannot launch safely" (答えは出さず owner へ escalate),
     // so there is no second refusal path to keep in sync.
-    const me = resolveSwarmModelEffort(mode, 'overseer', undefined, Date.now(), await getAllowedModelTiers())
+    // PROBED (2026-07-13): the cerebrum is a spawn path like any other — an
+    // UNKNOWN tier gets one collapsed pre-launch probe (swarmTierProbe) so the
+    // brain is never seated on a tier-local wall /usage cannot show.
+    const me = await resolveSwarmModelEffortProbed(mode, 'overseer', undefined, Date.now(), await getAllowedModelTiers())
     return realAnswerAsOwner(q, {
       runBrain: makeOverseerBrain({ model: me?.model, effort: me?.effort }),
       signal,

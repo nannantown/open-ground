@@ -44,7 +44,7 @@
 | git 操作の実体(classify / integrate / conflict 指示文) | `src/lib/server/swarmIntegrate.ts:188-215 / 251-350 / 373-391` |
 | reviewer-arm quota sensor `endsInRateLimit` | `src/lib/server/swarmOrchestrator.ts:1241-1259` |
 | spawn park 判定 `spawnBlock` | `src/lib/server/swarmAllowedModels.ts:132-148` |
-| tier 降格 `resolveAvailableTier` | `src/lib/server/swarmLaunch.ts:205-220` |
+| tier 降格 `resolveAvailableTierProbed`(panel は 2026-07-13 から probed 版 — 未知 tier は起動前プローブ、04 章 §5.8) | `src/lib/server/swarmLaunch.ts`(同期 walk = `resolveAvailableTier` / probed = `resolveAvailableTierProbed`) |
 | HTTP API(状態 GET / automerge / review/resolve) | `server/routes/swarm.ts:486 / :614 / :636` |
 | engine in-memory 状態(reviews / 各 memo) | `src/lib/server/swarmOrchestrator.ts:1392-1460` |
 
@@ -138,7 +138,7 @@ RED の帰結: `verifyFailed[branch]=tip` を記録(:5321)、status を 'conflic
 
 verify green の後、`deps.review`(実体 `makeAdversarialReview({lenses: DEFAULT_REVIEW_LENSES})`、配線 :3900)が走る(:5336-5460)。
 
-**パネル構成**: 既定は lens パネル 4 体 — correctness / security / perf / regression(`DEFAULT_REVIEW_LENSES`、:3114-3135)。1 lens = 1 レビュアーで、それぞれ焦点だけ違う read-only プロンプト(`buildReviewPrompt` :3279-3299)。モデルは `SWARM_LAUNCH_MODEL='fable'`(`swarmLaunch.ts:52`)を望みつつ、**cooling と使用可能モデルマスクを通して降格解決**(`resolveAvailableTier` 経由 :3673-3692、`swarmLaunch.ts:205-220`)。
+**パネル構成**: 既定は lens パネル 4 体 — correctness / security / perf / regression(`DEFAULT_REVIEW_LENSES`、:3114-3135)。1 lens = 1 レビュアーで、それぞれ焦点だけ違う read-only プロンプト(`buildReviewPrompt` :3279-3299)。モデルは `SWARM_LAUNCH_MODEL='fable'`(`swarmLaunch.ts:52`)を望みつつ、**cooling と使用可能モデルマスクを通して降格解決**(2026-07-13 からは `resolveAvailableTierProbed` 経由 — 未知 tier には起動前プローブが1発入り、壁なら冷却して1段降格。04 章 §5.8)。
 
 **実行前の早期 return**(スポーン費用ゼロの順に):
 - 同一 tip が前回 must-fix → panel を再スポーンせず rework を carry(`skipIfTip`、:3609-3618)

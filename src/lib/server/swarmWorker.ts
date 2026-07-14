@@ -34,7 +34,7 @@ import { killTerminalsByCwd } from './terminal'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
-import { swarmLaunchDefaults, resolveSwarmModelEffort } from './swarmLaunch'
+import { swarmLaunchDefaults, resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { ensureGuardWiring } from './hooksInstall'
 import { createSwarmFatalNotification } from './swarmNotifications'
@@ -520,7 +520,12 @@ export const spawnSwarmWorker = async (
   // Resolved BEFORE the worktree is created: with every tier switched OFF there is
   // no model to launch on, and failing here leaves no orphan worktree/branch behind
   // (fail-CLOSED — the hard mask must never be worked around by "just spawn anyway").
-  const me = resolveSwarmModelEffort(
+  // PROBED (2026-07-13): when the resolved tier is UNKNOWN (no cooling mark, no
+  // usage veto) one collapsed headless probe confirms it can actually launch —
+  // the only pre-launch signal that sees a tier-local wall /usage cannot express
+  // (swarmTierProbe). Wall ⇒ the tier cools (disk-mirrored) and the ladder walk
+  // drops a rung, so a dry fable seats this worker on opus instead of burning it.
+  const me = await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'worker',
     { title: opts.title, notes: opts.notes },
