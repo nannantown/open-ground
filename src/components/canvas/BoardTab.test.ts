@@ -48,16 +48,16 @@ describe('boardColumnKeys (always all five lanes)', () => {
 
 describe('assigneeMatches (Mine-only filter compare)', () => {
   it('matches case-insensitively with trimmed whitespace', () => {
-    expect(assigneeMatches('  Koki ', 'koki')).toBe(true)
-    expect(assigneeMatches('KOKI', ' Koki ')).toBe(true)
+    expect(assigneeMatches('  Alice ', 'alice')).toBe(true)
+    expect(assigneeMatches('ALICE', ' Alice ')).toBe(true)
   })
   it('does not match different names', () => {
-    expect(assigneeMatches('koki', 'naniwa')).toBe(false)
+    expect(assigneeMatches('alice', 'bob')).toBe(false)
   })
   it('never matches when either side is empty or unset', () => {
-    expect(assigneeMatches(undefined, 'koki')).toBe(false)
-    expect(assigneeMatches('koki', undefined)).toBe(false)
-    expect(assigneeMatches('koki', null)).toBe(false)
+    expect(assigneeMatches(undefined, 'alice')).toBe(false)
+    expect(assigneeMatches('alice', undefined)).toBe(false)
+    expect(assigneeMatches('alice', null)).toBe(false)
     expect(assigneeMatches('', '')).toBe(false)
     expect(assigneeMatches('   ', '   ')).toBe(false)
   })
@@ -131,11 +131,11 @@ describe('withCardDuplicated (card duplication — F020)', () => {
   })
 
   it('copies notes + assignee; mints a fresh id', () => {
-    const src = task({ id: 'src', title: 'T', notes: 'plan', assignee: 'koki' })
+    const src = task({ id: 'src', title: 'T', notes: 'plan', assignee: 'alice' })
     const next = withCardDuplicated(projectData([src]), 'src')
     const dup = next.tasks[1]
     expect(dup.notes).toBe('plan')
-    expect(dup.assignee).toBe('koki')
+    expect(dup.assignee).toBe('alice')
     expect(dup.id).not.toBe('src')
     expect(dup.id.length).toBeGreaterThan(0)
   })
@@ -146,7 +146,7 @@ describe('withCardDuplicated (card duplication — F020)', () => {
       title: 'T',
       branch: 'task/x',
       prUrl: 'https://example.com/pr/1',
-      reviewedBy: 'naniwa',
+      reviewedBy: 'bob',
       titleAuto: true,
       done: true,
       boardColumn: 'review',
@@ -255,14 +255,14 @@ describe('withCardMoved (drag/drop + merged-chip move — full-column renumberin
       id: 'm',
       boardColumn: 'review',
       boardOrder: 0,
-      reviewedBy: 'koki',
+      reviewedBy: 'alice',
     })
     const back = withCardMoved(projectData([m]), 'm', 'doing', null)
     expect(back.tasks[0]).toMatchObject({ boardColumn: 'doing', done: false })
     expect(back.tasks[0].reviewedBy).toBeUndefined()
     const done = withCardMoved(projectData([m]), 'm', 'done', null)
     expect(done.tasks[0]).toMatchObject({ boardColumn: 'done', done: true })
-    expect(done.tasks[0].reviewedBy).toBe('koki') // kept for Done — the stamp survives
+    expect(done.tasks[0].reviewedBy).toBe('alice') // kept for Done — the stamp survives
   })
 
   it('keeps a review-column card in review — never folded into doing (review lane always shown)', () => {

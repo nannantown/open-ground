@@ -30,12 +30,12 @@
 | 層 | ファイル | 役割 |
 |---|---|---|
 | ルート(Board/project) | `server/routes/project.ts` | `/api/project*` の Hono チェーン。thin adapter — 実ロジックは `src/lib/server/*` (`server/routes/project.ts:1-8`) |
-| ルート(swarm) | `server/routes/swarm.ts` | `/api/swarm/*` の Hono チェーン。**全ルート owner gate** (`server/routes/swarm.ts:34-41`) |
+| ルート(swarm) | `server/routes/swarm.ts` | `/api/swarm/*` の Hono チェーン。**全ルート swarm owner gate** (`server/routes/swarm.ts:34-48`) |
 | データ読み書き | `src/lib/server/projectData.ts` | `readProjectData` / `writeProjectData`(CAS) / `mutateProjectData`(per-project ロック) |
 | カード schema | `src/lib/schemas.ts:39-156` | `ProjectTaskSchema`(zod)。`src/lib/schemas.ts:158-196` が `ProjectDataSchema` |
 | TS 契約 | `src/lib/types.ts:1440-1532` | `ProjectTask`。`:1577` `BoardColumn`。API レスポンス型もここ |
 | path 検証 | `server/middleware/projectPath.ts:68-75` | `requireProjectPath`(body→query の順で path を読む `:44-56`)。実体は `src/lib/server/projectData.ts:373-374` → `projectDataPath.ts` の registry allowlist |
-| owner gate | `src/lib/server/roles.ts:115-134` | `getCustomTabRole()` — **サーバ永続 session**(`readSession`)から解決。リクエストの cookie/ヘッダは見ない → 同一マシンの curl でも owner ログイン済みなら通る |
+| owner gate | `src/lib/server/swarmGate.ts`(役割解決は `src/lib/server/roles.ts:115-134`) | `hasSwarmOwnerAccess()` — **サーバ永続 session**(`readSession`)の owner 役割 **または** サーバローカル解錠(env `OPENGROUND_LOCAL_OWNER=1` / settings.json 手編集 `swarmLocalOwner:true` — ログイン無効の業務モード用、docs/SECURITY.md)。リクエストの cookie/ヘッダ/body は見ない → 同一マシンの curl でも owner ログイン済み(か解錠済み)なら通る |
 | エンジン | `src/lib/server/swarmOrchestrator.ts` | 自律 dispatch/monitor/integrate。状態は `globalThis.__openground_swarm_orchestrator`(`:1532-1534`) — **in-memory、再起動で消える** |
 | 手動 worker 生成 | `src/lib/server/swarmWorker.ts` (`spawnSwarmWorker`) | 中央 worktree + claude PTY + /order 注入。ルートから呼ばれる |
 
@@ -323,11 +323,13 @@ owner gate なし = 同一マシンから誰でも叩ける(local single-user to
 POST `/api/projects/new`(`:164`)/`import`(`:256`)/`remove`(`:302` — 登録解除のみ、
 フォルダは触らない)。
 
-### 6.2 `/api/swarm/*`(`server/routes/swarm.ts` — **全ルート owner gate**)
+### 6.2 `/api/swarm/*`(`server/routes/swarm.ts` — **全ルート swarm owner gate**)
 
-全ルートが最初に `getCustomTabRole() !== 'owner'` → 403(body parse より前 —
-`swarm.ts:241-247` ほか各ルート先頭)。owner 判定はサーバ保存 session なので、
-**owner がアプリにログイン済みのマシンなら curl でもそのまま通る**(§1 表)。
+全ルートが最初に `hasSwarmOwnerAccess()` を通れなければ → 403(body parse より前 —
+`swarm.ts:247-253` ほか各ルート先頭。src/lib/server/swarmGate.ts)。判定は owner の
+サーバ保存 session **または** サーバローカル解錠(env `OPENGROUND_LOCAL_OWNER=1` /
+settings.json 手編集 `swarmLocalOwner:true` — 業務モード用、docs/SECURITY.md)なので、
+**owner がアプリにログイン済み(かローカル解錠済み)のマシンなら curl でもそのまま通る**(§1 表)。
 
 | Method Path | 主要入力 | 返り値 / 特記 | 行 |
 |---|---|---|---|
@@ -425,10 +427,10 @@ POST `/api/projects/new`(`:164`)/`import`(`:256`)/`remove`(`:302` — 登録解�
 ## 9. 検証コマンド集(司令塔がそのまま打つ)
 
 前提: `P` に対象プロジェクトの登録済み絶対パス。ポートは 47776 固定。
-`/api/swarm/*` は owner ログイン済みマシンであること(§6.2)。
+`/api/swarm/*` は owner ログイン済み(またはローカル解錠済み — docs/SECURITY.md)マシンであること(§6.2)。
 
 ```bash
-P=/Users/kokinaniwa/projects/OPEN-GROUND   # 例
+P=/path/to/OPEN-GROUND   # 例
 API=http://127.0.0.1:47776
 ```
 

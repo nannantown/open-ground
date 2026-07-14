@@ -14,8 +14,17 @@
 // `swarm: false` — the gate never opens for anyone but the owner. `eligible`
 // surfaces condition 1 alone so the client can show the owner the toggle
 // (without it, the toggle itself would betray the feature's existence).
+//
+// ONE exception, scoped to `swarm` alone: the server-local owner unlock
+// (swarmGate.ts — env OPENGROUND_LOCAL_OWNER=1 / a hand-edited
+// settings.swarmLocalOwner, for login-disabled machines) opens the swarm flag
+// DIRECTLY, with no login and no experiments toggle — it is the same unlock
+// the /api/swarm routes honour, mirrored here so the Swarm tab actually
+// appears. It never touches `eligible` (the experiments toggle UI stays
+// owner-only) nor any other experiment (`sandbox` keeps requiring the owner).
 
 import { getCustomTabRole } from './roles'
+import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getSettings } from './store'
 import type {
   CustomTabRole,
@@ -27,24 +36,31 @@ import type {
 // Pure resolver — separated from the I/O wiring below so it unit-tests without
 // mocking the session / Supabase / disk. `eligible` is owner-only; each flag is
 // `eligible && the stored toggle`, so non-owners get all-false regardless of
-// what their settings.json claims.
+// what their settings.json claims. `opts.swarmLocalOwner` (the resolved local
+// unlock — see the header) opens ONLY the swarm flag, bypassing both.
 export const computeExperiments = (
   role: CustomTabRole,
   settings: Pick<Settings, 'experiments'>,
+  opts?: { swarmLocalOwner?: boolean },
 ): ExperimentsResponse => {
   const eligible = role === 'owner'
   return {
     eligible,
     flags: {
-      swarm: eligible && settings.experiments?.swarm === true,
+      swarm:
+        (eligible && settings.experiments?.swarm === true) ||
+        opts?.swarmLocalOwner === true,
       sandbox: eligible && settings.experiments?.sandbox === true,
     },
   }
 }
 
-// Resolve the caller's experiment gate from the live session role + settings.
+// Resolve the caller's experiment gate from the live session role + settings
+// (+ the server-local swarm unlock).
 export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
-  computeExperiments(await getCustomTabRole(), await getSettings())
+  computeExperiments(await getCustomTabRole(), await getSettings(), {
+    swarmLocalOwner: await isSwarmLocalOwnerUnlocked(),
+  })
 
 // Is ONE experiment open for the caller? Same gate as resolveExperiments (owner
 // && the toggle) but TOGGLE-FIRST: it reads settings (cheap, local) and only
@@ -54,6 +70,10 @@ export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
 // possible Supabase round-trip on each launch would be wasteful. Still
 // server-authoritative: a non-owner with a forged toggle fails the role check.
 export const isExperimentEnabled = async (id: ExperimentId): Promise<boolean> => {
+  // Keep the swarm flag consistent with resolveExperiments: the local unlock
+  // (swarmGate.ts) opens it without a login or the toggle — otherwise a future
+  // caller here would see the flag closed while the UI shows the tab.
+  if (id === 'swarm' && (await isSwarmLocalOwnerUnlocked())) return true
   const settings = await getSettings()
   if (settings.experiments?.[id] !== true) return false
   return (await getCustomTabRole()) === 'owner'

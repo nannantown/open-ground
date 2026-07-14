@@ -1,6 +1,6 @@
 # NENE 再生状態ブリッジ パッチ（Songs タブ連携の相方）
 
-`nene-playback-bridge.patch` は **NENE リポジトリ（`/Users/kokinaniwa/projects/NENE`）用**の
+`nene-playback-bridge.patch` は **NENE リポジトリ（`~/projects/NENE`）用**の
 パッチ。OPEN GROUND 側の「Songs タブ再生継続＋再生中インジケーター」実装
 （`CustomFrameHost` / `playbackStore`）の**相方**で、NENE のプレイヤー
 （`index.html` の `<audio id="audio">`）から再生状態を `window.top` へ
@@ -16,7 +16,7 @@ worker セッションは書き込み先が worktree に限定されるため（
 NENE への適用は統合側で行う:
 
 ```bash
-cd /Users/kokinaniwa/projects/NENE
+cd ~/projects/NENE
 git apply /path/to/this/repo/docs/patches/nene-playback-bridge.patch
 git add index.html
 git commit -m "Announce playback state to OPEN GROUND host (og-playback postMessage bridge)"

@@ -43,7 +43,7 @@
 | 受信箱(C1) | `src/lib/server/swarmEscalations.ts` | escalations.json の CRUD + PTY 注入(W16)+ you-corpus 書き戻し |
 | 通知(bell/toast) | `src/lib/server/swarmNotifications.ts` | swarm-notifications.json(fatal/info)+ OS toast |
 | 可逆性ゲート(C4) | `src/lib/server/swarmReversibility.ts` | 大脳の前後で question/answer を構造チェック(`swarmOverseerBrain.ts:48-53` import) |
-| ルート | `server/routes/swarm.ts` | `/api/swarm/escalations*`(`:740,761,833,858`)、overseer トグル(`:688`)、通知(`:535`)。**全ルート owner gate** |
+| ルート | `server/routes/swarm.ts` | `/api/swarm/escalations*`(`:740,761,833,858`)、overseer トグル(`:688`)、通知(`:535`)。**全ルート swarm owner gate**(swarmGate.ts — owner ログイン or ローカル解錠、§7 前提) |
 
 ### 1.2 永続ストアと in-memory 状態
 
@@ -215,7 +215,7 @@ prune seen/watch                                      :617
     (`:5916-5927`)と `all-workers-down`(`:5930-5943`)。条件が消えると notified から外れ、
     **本物の再発は再通知される**(`:5945-5953`)。
 - fatal イベントの全種は `SwarmFatalEvent`(`types.ts:1959-1964`)、info は `SwarmInfoEvent`
-  (`types.ts:1999-2003`)。GET は `/api/swarm/notifications`(owner gate、
+  (`types.ts:1999-2003`)。GET は `/api/swarm/notifications`(swarm owner gate、
   `server/routes/swarm.ts:535-538`)。
 
 ### 3.5 engine 側 C3(TUI スクレイプ質問)と S4 の分担
@@ -428,8 +428,10 @@ sub-cycle は raise 見送り、`:927-932`)。また当時の detail-in-key 設�
 
 ## 7. 検証コマンド集(そのまま打てる形)
 
-前提: OPEN GROUND が :47776 で稼働、owner ログイン済み(全 /api/swarm/* は owner gate —
-サーバ永続 session で判定するので同一マシンの curl は通る)。`<PATH>` は対象プロジェクトの
+前提: OPEN GROUND が :47776 で稼働、owner ログイン済み **または** ローカル解錠済み(全
+/api/swarm/* は swarm owner gate = swarmGate.ts — サーバ永続 session かサーバローカル解錠
+(env `OPENGROUND_LOCAL_OWNER=1` / settings.json 手編集 `swarmLocalOwner:true`、
+docs/SECURITY.md)で判定するので同一マシンの curl は通る)。`<PATH>` は対象プロジェクトの
 登録済み絶対パス。
 
 ### 7.1 overseer の現在状態(armed か・engine が running か)

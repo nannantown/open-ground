@@ -123,6 +123,16 @@ export interface Settings {
    *  (see {@link ExperimentsResponse} / resolveExperiments), so a non-owner who
    *  forges a `true` here never actually opens the gate. Absent ⇒ all off. */
   experiments?: Partial<ExperimentFlags>
+  /** LOCAL owner unlock for the SWARM control plane only (hidden, default off;
+   *  no UI — see docs/SECURITY.md). `true` opens every /api/swarm route and the
+   *  Swarm tab WITHOUT an app login, for machines that run login-disabled
+   *  (業務モード). Deliberately NOT in USER_SETTINGS_KEYS (store.ts), so
+   *  POST /api/settings can never set it — enabling means hand-editing
+   *  ~/.openground/settings.json (or env OPENGROUND_LOCAL_OWNER=1). Safe
+   *  because the swarm owner gate is a feature-visibility flag, not a security
+   *  boundary (POST /api/terminal is already ungated locally — swarmGate.ts).
+   *  Scope: swarm only — marketplace/custom-tab roles ignore it. */
+  swarmLocalOwner?: boolean
 }
 
 /** Owner-only experiment ids — hidden features gated behind the owner role AND

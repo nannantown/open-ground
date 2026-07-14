@@ -77,7 +77,15 @@ const swarmRoutes: { method: string; path: string }[] = (() => {
 })()
 
 let home: string
-const ENV_KEYS = ['OPENGROUND_HOME', 'OPENGROUND_OWNER_EMAILS', 'OPENGROUND_TESTER_EMAILS'] as const
+// OPENGROUND_LOCAL_OWNER is cleared (never set) here: this suite pins the
+// LOCKED default of the swarm gate (swarmGate.ts), so a developer machine with
+// the login-free unlock exported must not turn the 403 sweep green-by-accident.
+const ENV_KEYS = [
+  'OPENGROUND_HOME',
+  'OPENGROUND_OWNER_EMAILS',
+  'OPENGROUND_TESTER_EMAILS',
+  'OPENGROUND_LOCAL_OWNER',
+] as const
 let savedEnv: Record<string, string | undefined> = {}
 
 beforeEach(async () => {
@@ -86,6 +94,7 @@ beforeEach(async () => {
   process.env.OPENGROUND_HOME = home
   process.env.OPENGROUND_OWNER_EMAILS = OWNER
   process.env.OPENGROUND_TESTER_EMAILS = TESTER
+  delete process.env.OPENGROUND_LOCAL_OWNER
   __resetMigrationCacheForTests()
 })
 afterEach(async () => {

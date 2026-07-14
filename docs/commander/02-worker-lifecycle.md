@@ -49,7 +49,7 @@ worker が生まれる経路は (a) エンジンの dispatch パス(swarmOrchest
 
 `POST /api/swarm/worker` の入口で効く順序(server/routes/swarm.ts):
 
-1. owner ゲート(:247 — 非オーナー/未ログインは 403。app-login のサーバ永続 session で判定するので、オーナーがアプリにログイン済みなら cookie 無しの curl でも通る)
+1. swarm owner ゲート(:253 `hasSwarmOwnerAccess` — src/lib/server/swarmGate.ts。owner の app-login(サーバ永続 session)**または**サーバローカル解錠(env `OPENGROUND_LOCAL_OWNER=1` / settings.json 手編集 `swarmLocalOwner:true` — ログイン無効の業務モード用、docs/SECURITY.md)で通過、どちらも無ければ 403。リクエスト由来の値(cookie/ヘッダ/body)では絶対に開かないので、通過側もオーナーがログイン済み(か解錠済み)のマシンなら cookie 無しの curl でそのまま通る)
 2. `validateProjectPath`(:256)
 3. ゴール解決 — `taskId` があれば Board カードの title+notes が優先(:261-269)、無ければ `title`/`notes`(:270-275)。合計 8KiB 上限(:113, :279-281)
 4. claude preflight(:286-287 — CLI 不在/未ログインは worktree を作る前に 503)
@@ -342,7 +342,7 @@ janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を�
 
 ## 8. 検証コマンド集(司令塔が主張を自分で裏取りするためのワンライナー)
 
-前提: `P=/Users/kokinaniwa/projects/OPEN-GROUND`(対象プロジェクトの登録パスに読み替え)。owner がアプリにログイン済みなら curl はそのまま通る(owner ゲートはサーバ永続 session を読む)。
+前提: `P=/path/to/OPEN-GROUND`(対象プロジェクトの登録パスに読み替え)。owner がアプリにログイン済みなら curl はそのまま通る(swarm ゲート = swarmGate.ts はサーバ永続 session を読む — リクエストの cookie/ヘッダは見ない)。ログイン無効運用(業務モード)では、サーバローカル解錠(env `OPENGROUND_LOCAL_OWNER=1` か settings.json 手編集の `swarmLocalOwner:true` — docs/SECURITY.md)でも同様に通る。
 
 ```bash
 # --- 心拍(ディスク = 唯一の真実) ---

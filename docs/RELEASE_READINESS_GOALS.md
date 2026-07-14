@@ -24,6 +24,8 @@
 
 前提の確認(2026-07-11 時点の最重要事実): **現状の配布物では swarm は一般ユーザーに到達不能**である。UI は owner-only experiment(`moduleRegistry.tsx` の `experiment: 'swarm'` + `experiments.ts` = owner ロール AND `settings.experiments.swarm`、fail-closed)、API は全 `/api/swarm/*` ルートが owner gate で 403(不変条件 C)、そして**バイナリに owner は焼き込まれていない**(`roles.ts` — Supabase `og_roles` に行がなければ `'none'`)。つまり今日リリースしても一般ユーザーに swarm 事故は構造的に起きない — 代わりに **swarm 機能も存在しない**。「swarm 込み公開」とはこのゲートを**意図して開く**ことであり、開き方の設計(§5 GAP-1)が本ゴールの最上流にある。
 
+【2026-07-14 更新】上の「到達不能」は「**明示的なローカル opt-in がない限り**到達不能」に変わった: swarm ローカル解錠(`swarmGate.ts` — 手編集 settings.json `swarmLocalOwner:true` / env `OPENGROUND_LOCAL_OWNER=1`、UI なし・既定 OFF・HTTP からは設定不能・swarm 限定スコープ、docs/SECURITY.md)が入り、ログイン無効の業務モードでも(そして知っていれば任意のユーザーでも)自機の swarm を開けられる。GAP-1 の「開き方」の UI なし先行実装に相当し、(a) の「ユーザー自身の明示的な有効化操作」要件は満たすが、(d) の同意開示 UI は未提供のまま — GAP-1 本体(opt-in UI + 開示文)は依然オープン。
+
 ---
 
 ## 2. 安全性ゴール(ガードレール)

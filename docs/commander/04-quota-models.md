@@ -102,7 +102,7 @@ swarmQuota.ts:357-372。上から順に試し、**過去時刻は無視して次
 - `POST /api/swarm/quota/cool` body `{tier, untilMs}` または `{tier, minutes}`(server/routes/swarm.ts:921-978)。検証: tier は `isModelTier` で梯子照合(930-932、未知 alias は 400 = 推測で冷やさない fail-closed)、`until` は `(now, now + MAX_MANUAL_COOLING_MS]` 必須(948-951)。
 - `MAX_MANUAL_COOLING_MS` = **7日**(swarmQuota.ts:424)。週次 quota より長く、忘れた cool が自己治癒する上限。
 - `POST /api/swarm/quota/uncool` body `{tier}`(983-1017)→ `clearCooling`(swarmQuota.ts:433-437、idempotent)。センサー製・手動製どちらの mark も消せる。誤検知(一過性 5xx を枯渇と誤読)の脱出口。
-- 3本とも **owner gate**: `getCustomTabRole() !== 'owner'` なら 403(900, 922, 984)。
+- 3本とも **swarm owner gate**: `hasSwarmOwnerAccess()` を通れなければ 403(904, 926, 988 — owner ログイン **or** サーバローカル解錠。swarmGate.ts、docs/SECURITY.md)。
 - **3本とも永続化を経由する**(§2.1.1): GET/cool/uncool は応答前に `ensureCoolingTableLoaded` を await(908 / 939 / 1000)、cool/uncool はさらに `flushQuotaPersist` を await する(966 / 1005)。
 - **200 は嘘をつかない**: 書込に失敗したら **500**(966-977 / 1005-1016)。`/cool` の 200 = ディスクに載った、`/uncool` の 200 = ディスクから消えた。500 のときは **mark はメモリには効いている**(このプロセスのエンジンは tier を避ける)が**再起動で消える** — 本文がそう言う。`/uncool` の 500 はさらに危険で、**古い mark が file に残っているので再起動すると tier が cooling に戻る**。500 を見たら §10 の書込先チェック(権限 / ディスク残量 / `swarm-quota.json` がディレクトリになっていないか)。
 

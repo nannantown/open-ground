@@ -91,8 +91,8 @@ afterEach(async () => {
 
 describe('encodeClaudeProjectKey', () => {
   it('replaces every non-alphanumeric char with "-" (no run-collapsing)', () => {
-    expect(encodeClaudeProjectKey('/Users/kokinaniwa/projects/OPEN GROUND')).toBe(
-      '-Users-kokinaniwa-projects-OPEN-GROUND',
+    expect(encodeClaudeProjectKey('/Users/dev/projects/OPEN GROUND')).toBe(
+      '-Users-dev-projects-OPEN-GROUND',
     )
     // underscore and dot are non-alphanumeric too; '/.' becomes '--'
     expect(encodeClaudeProjectKey('/a/OPEN_GROUND-w3')).toBe('-a-OPEN-GROUND-w3')

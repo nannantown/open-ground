@@ -20,10 +20,10 @@ describe('peersFromAwareness (u15 presence projection)', () => {
   it('excludes self (the local clientID)', () => {
     const aw = fakeAwareness(1, [
       [1, { name: 'me', color: '#000' }],
-      [2, { name: 'koki', color: '#f00' }],
+      [2, { name: 'bob', color: '#f00' }],
     ])
     const peers = peersFromAwareness(aw)
-    expect(peers).toEqual([{ clientId: 2, name: 'koki', color: '#f00' }])
+    expect(peers).toEqual([{ clientId: 2, name: 'bob', color: '#f00' }])
   })
 
   it('drops entries with no usable name (connecting {} / non-string / missing)', () => {
@@ -61,22 +61,22 @@ describe('peersFromAwareness (u15 presence projection)', () => {
 
   it('carries the full email when a peer publishes one (tooltip uses it)', () => {
     const aw = fakeAwareness(1, [
-      [2, { name: 'op', color: '#f00', email: 'opengroundcoffee@gmail.com' }],
+      [2, { name: 'op', color: '#f00', email: 'op@example.org' }],
     ])
     expect(peersFromAwareness(aw)).toEqual([
-      { clientId: 2, name: 'op', color: '#f00', email: 'opengroundcoffee@gmail.com' },
+      { clientId: 2, name: 'op', color: '#f00', email: 'op@example.org' },
     ])
   })
 
   it('omits email for older peers that publish only a name (back-compat)', () => {
-    const peer = peersFromAwareness(fakeAwareness(1, [[2, { name: 'koki', color: '#f00' }]]))[0]
-    expect(peer).toEqual({ clientId: 2, name: 'koki', color: '#f00' })
+    const peer = peersFromAwareness(fakeAwareness(1, [[2, { name: 'bob', color: '#f00' }]]))[0]
+    expect(peer).toEqual({ clientId: 2, name: 'bob', color: '#f00' })
     expect(peer.email).toBeUndefined()
   })
 
   it('drops a non-string email (keeps the peer, no email field)', () => {
     const peer = peersFromAwareness(
-      fakeAwareness(1, [[2, { name: 'koki', color: '#f00', email: 42 }]]),
+      fakeAwareness(1, [[2, { name: 'bob', color: '#f00', email: 42 }]]),
     )[0]
     expect(peer.email).toBeUndefined()
   })

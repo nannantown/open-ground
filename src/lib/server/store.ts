@@ -135,6 +135,11 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 //   swarmManualStop     — server-owned (stopOrchestrator/startOrchestrator only);
 //                         a forged body must never fake or erase the owner's
 //                         "stopped by hand" record
+//   swarmLocalOwner     — the login-free swarm unlock (swarmGate.ts). It must
+//                         come ONLY from server-local state (a hand-edited
+//                         settings.json / env), NEVER from a request — listing
+//                         it here would let any local HTTP caller unlock the
+//                         gate it is supposed to sit behind
 //   archiveDirName      — deprecated migration input
 //   excludePatterns     — deprecated migration input
 //

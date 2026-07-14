@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
-import { dirname } from 'path'
+import { tmpdir } from 'os'
+import { dirname, join } from 'path'
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { seedHeavyHome, type SeedResult } from './seed'
 import {
@@ -14,13 +15,11 @@ import {
 // One serial test that seeds a heavy isolated home (50 projects / 200 Board
 // cards / 300 Canvas elements), then drives standardized gestures on each
 // surface and records interaction main-thread cost + frame smoothness. Results
-// are written to PERF_OUT (default: scratchpad) so a baseline run and an
-// after-fix run can be diffed for the "before/after numbers" deliverable.
+// are written to PERF_OUT (default: under the OS tmpdir) so a baseline run and
+// an after-fix run can be diffed for the "before/after numbers" deliverable.
 
 const LABEL = process.env.PERF_LABEL ?? 'run'
-const OUT =
-  process.env.PERF_OUT ??
-  `/private/tmp/claude-502/-Users-kokinaniwa-projects-OPEN-GROUND-w2-0630-171946-3517/3f0ca048-4422-48f6-9d86-1bc617faf2f3/scratchpad/perf-${LABEL}.json`
+const OUT = process.env.PERF_OUT ?? join(tmpdir(), 'openground-perf', `perf-${LABEL}.json`)
 
 interface MountResult {
   name: string

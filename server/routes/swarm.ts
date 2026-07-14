@@ -32,18 +32,22 @@
 //
 // Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts +
 // swarmOrchestrator.ts. OWNER-ONLY:
-// every route gates on the signed-in app-login role (getCustomTabRole,
-// owner-only) at the very top, so a non-owner / signed-out caller gets 403
-// before any body parse, path validation, or git — closing the local curl/SDK
-// direct-call hole (the UI hiding the tab is NOT the only guard). Then every
-// path-accepting route runs validateProjectPath (the registry allowlist) BEFORE
-// any work, and the spawn routes also run the shared claude preflight so a
-// missing/signed-out CLI fails fast (503) instead of orphaning a PTY (+worktree).
-// Subscription-only: every spawn is an interactive `claude` PTY (launchClaude),
-// never `claude -p`/SDK.
+// every route gates on hasSwarmOwnerAccess (swarmGate.ts — the signed-in owner
+// role OR the explicit server-local unlock: env OPENGROUND_LOCAL_OWNER=1 /
+// settings.swarmLocalOwner, for login-disabled machines) at the very top, so
+// an unauthorized caller gets 403 before any body parse, path validation, or
+// git — closing the local curl/SDK direct-call hole (the UI hiding the tab is
+// NOT the only guard). The unlock never comes from the request itself (see
+// swarmGate.ts for why that is safe: this gate is a feature-visibility flag,
+// not a security boundary — POST /api/terminal is already ungated locally).
+// Then every path-accepting route runs validateProjectPath (the registry
+// allowlist) BEFORE any work, and the spawn routes also run the shared claude
+// preflight so a missing/signed-out CLI fails fast (503) instead of orphaning
+// a PTY (+worktree). Subscription-only: every spawn is an interactive `claude`
+// PTY (launchClaude), never `claude -p`/SDK.
 
 import { Hono } from 'hono'
-import { getCustomTabRole } from '@/lib/server/roles'
+import { hasSwarmOwnerAccess } from '@/lib/server/swarmGate'
 import {
   readProjectData,
   mutateProjectData,
@@ -246,7 +250,7 @@ export const swarmRoutes = new Hono()
     // restricted to the signed-in owner. Same server-side role resolution as the
     // custom-tab routes (identity from the app-login session; the
     // OPENGROUND_OWNER_EMAILS env override is honoured). Non-owner/signed-out → 403.
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -384,7 +388,7 @@ export const swarmRoutes = new Hono()
     // OWNER-ONLY gate (see /api/swarm/worker): the supply session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
     // body parse / path validation.
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -433,7 +437,7 @@ export const swarmRoutes = new Hono()
     // OWNER-ONLY gate (see /api/swarm/worker): the commander session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
     // body parse / path validation.
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -471,7 +475,7 @@ export const swarmRoutes = new Hono()
     // OWNER-ONLY gate (see /api/swarm/worker): tearing a worktree down is a
     // control-plane action, restricted to the signed-in owner. Non-owner/
     // signed-out → 403, before any body parse / path validation.
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -503,7 +507,7 @@ export const swarmRoutes = new Hono()
   // the engine" contract). Autonomy is STRICT opt-in via POST /orchestrator/start
   // (the old drain-tick auto-start was removed — card eadb25e6).
   .get('/api/swarm/orchestrator', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     const path = c.req.query('path') ?? ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
@@ -518,7 +522,7 @@ export const swarmRoutes = new Hono()
   // each missed. PURE READ-ONLY, polled by the Swarm worker tab. Owner-only +
   // validated, like the rest of /api/swarm/*.
   .get('/api/swarm/workers', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     const path = c.req.query('path') ?? ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
@@ -533,7 +537,7 @@ export const swarmRoutes = new Hono()
   // that drives it (and as the seam where a future consent-carrying tick would go).
   // Returns SwarmOrchestratorState. Owner-only + validated, exactly like /start.
   .post('/api/swarm/orchestrator/drain-tick', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -552,7 +556,7 @@ export const swarmRoutes = new Hono()
   // simply shows none (the client tolerates a non-ok fetch). Read-state is tracked
   // by the SAME /api/notifications read endpoint as collab invites.
   .get('/api/swarm/notifications', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     return c.json<AppNotificationsResponse>({ notifications: await listSwarmNotifications() })
   })
   // --- POST /api/swarm/orchestrator/start — turn autonomous drain ON ---------
@@ -563,7 +567,7 @@ export const swarmRoutes = new Hono()
   // missing/signed-out CLI is a fast 503 (same body as POST /api/swarm/worker)
   // rather than a silently idle engine. Owner-only + validated.
   .post('/api/swarm/orchestrator/start', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -587,7 +591,7 @@ export const swarmRoutes = new Hono()
   // LEFT ALONE (the manual control plane owns their teardown); the existing
   // manual spawn (POST /api/swarm/worker) is unaffected either way. Owner-only.
   .post('/api/swarm/orchestrator/stop', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -608,7 +612,7 @@ export const swarmRoutes = new Hono()
   // only on its OWN workers; a manual worker is stopped via the existing
   // /api/swarm/worktree/remove. Returns the full SwarmOrchestratorState. Owner-only.
   .post('/api/swarm/orchestrator/worker/stop', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -631,7 +635,7 @@ export const swarmRoutes = new Hono()
   // Only ever acts while the engine is running — the global stop halts it too.
   // Owner-only + validated, like the rest of /api/swarm/*.
   .post('/api/swarm/orchestrator/automerge', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -653,7 +657,7 @@ export const swarmRoutes = new Hono()
   // leftover worker. Idempotent — a card not currently in review is a no-op.
   // Returns the full SwarmOrchestratorState. Owner-only + validated.
   .post('/api/swarm/orchestrator/review/resolve', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -678,7 +682,7 @@ export const swarmRoutes = new Hono()
   // for the rest of the safety net to land — until then this stays OFF.
   // Owner-only + validated, like the rest of /api/swarm/*.
   .post('/api/swarm/orchestrator/selfsupply', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -705,7 +709,7 @@ export const swarmRoutes = new Hono()
   // (off-darwin / sandbox-exec gone): there the brain runs on the permission-layer
   // stop-gap alone (a structural READ-ONLY design + budget still hold).
   .post('/api/swarm/orchestrator/overseer', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -731,7 +735,7 @@ export const swarmRoutes = new Hono()
   // card never spawns a worker until this runs. Idempotent (a non-self-supplied /
   // already-approved / absent card is a no-op). Owner-only + validated.
   .post('/api/swarm/orchestrator/selfsupply/approve', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -757,7 +761,7 @@ export const swarmRoutes = new Hono()
   // polls ?status=open every 10s, so resolved history (and its expanded PTY
   // captures) doesn't ride every poll. PURE READ (K8).
   .get('/api/swarm/escalations', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     const path = c.req.query('path') ?? ''
     if (path && !(await validateProjectPath(path))) {
       return c.json({ error: 'path not allowed' }, 403)
@@ -778,7 +782,7 @@ export const swarmRoutes = new Hono()
   // Until C-core lands this is the manual/verification entry point; the
   // overseer will call openEscalation() in-process.
   .post('/api/swarm/escalations/open', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -850,7 +854,7 @@ export const swarmRoutes = new Hono()
   // or queues for the card's next dispatch. Re-answering an answered record is
   // an idempotent no-op; answering a dismissed one is 409.
   .post('/api/swarm/escalations/answer', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -875,7 +879,7 @@ export const swarmRoutes = new Hono()
   // Body: { id }. Nothing is injected, nothing is learned. Idempotent on
   // already-resolved records.
   .post('/api/swarm/escalations/dismiss', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -897,7 +901,7 @@ export const swarmRoutes = new Hono()
   // per-project — a quota belongs to the `claude` subscription, not a repo — so
   // there is no `path` and no validateProjectPath.
   .get('/api/swarm/quota', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     const now = Date.now()
     // Fold in the PERSISTED cooling marks before answering. Boot kicks this too
     // (server/index.ts) and it is memoized, so this is a no-op after the first
@@ -919,7 +923,7 @@ export const swarmRoutes = new Hono()
   // `until` must sit in (now, now + MAX_MANUAL_COOLING_MS] so a fat-fingered
   // epoch cannot retire a tier forever.
   .post('/api/swarm/quota/cool', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()
@@ -981,7 +985,7 @@ export const swarmRoutes = new Hono()
   // on the next launch. Idempotent: releasing an already-available tier is a
   // no-op that still returns the snapshot.
   .post('/api/swarm/quota/uncool', async (c) => {
-    if ((await getCustomTabRole()) !== 'owner') return c.json({ error: 'forbidden' }, 403)
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
       body = await c.req.json()

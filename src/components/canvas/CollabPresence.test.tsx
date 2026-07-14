@@ -4,7 +4,7 @@ import { render, screen, act } from '@testing-library/react'
 import type { PresencePeer } from '@/lib/types'
 
 vi.mock('@/lib/auth/AuthContext', () => ({
-  useAuth: () => ({ user: { id: 'u1', email: 'namihna@icloud.com', provider: 'google' } }),
+  useAuth: () => ({ user: { id: 'u1', email: 'alice@example.com', provider: 'google' } }),
 }))
 
 import { CollabPresence, usePublishPresence, type PresenceChannel } from './CollabPresence'
@@ -45,14 +45,14 @@ describe('CollabPresence (u15 awareness avatars)', () => {
     // full email so a peer's tooltip can show the complete address.
     expect(channel.setPresence).toHaveBeenCalledWith(
       expect.objectContaining({
-        name: 'namihna',
-        email: 'namihna@icloud.com',
+        name: 'alice',
+        email: 'alice@example.com',
         color: expect.stringContaining('hsl'),
       }),
     )
     // A peer arrives → an avatar with their initials + the "N others here" label.
-    emit([{ clientId: 2, name: 'koki', color: '#ff0000' }])
-    expect(screen.getByText('KO')).toBeTruthy()
+    emit([{ clientId: 2, name: 'bob', color: '#ff0000' }])
+    expect(screen.getByText('BO')).toBeTruthy()
     expect(screen.getByLabelText(/1 other/)).toBeTruthy()
   })
 
@@ -60,13 +60,13 @@ describe('CollabPresence (u15 awareness avatars)', () => {
     const { channel, emit } = makeChannel()
     render(<CollabPresence channel={channel} />)
     emit([
-      { clientId: 2, name: 'op', color: '#ff0000', email: 'opengroundcoffee@gmail.com' },
-      { clientId: 3, name: 'koki', color: '#00ff00' }, // older peer: no email field
+      { clientId: 2, name: 'op', color: '#ff0000', email: 'op@example.org' },
+      { clientId: 3, name: 'bob', color: '#00ff00' }, // older peer: no email field
     ])
     // The peer that published an email → its avatar tooltip is the FULL address.
-    expect(screen.getByText('OP').getAttribute('title')).toBe('opengroundcoffee@gmail.com')
+    expect(screen.getByText('OP').getAttribute('title')).toBe('op@example.org')
     // The peer with no email → tooltip falls back to the name (unchanged behaviour).
-    expect(screen.getByText('KO').getAttribute('title')).toBe('koki')
+    expect(screen.getByText('BO').getAttribute('title')).toBe('bob')
     // The initials themselves are unchanged (still derived from the name).
     expect(screen.getByText('OP')).toBeTruthy()
   })
@@ -88,7 +88,7 @@ describe('CollabPresence (u15 awareness avatars)', () => {
     }
     const { unmount } = render(<Probe />)
     expect(channel.setPresence).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'namihna' }),
+      expect.objectContaining({ name: 'alice' }),
     )
     unmount()
     expect(channel.setPresence).toHaveBeenLastCalledWith(null)
@@ -100,7 +100,7 @@ describe('CollabPresence (u15 awareness avatars)', () => {
     // Display-only mount must NOT touch the shared local state (another surface
     // owns publishing — a second publisher's unmount would clear it).
     expect(channel.setPresence).not.toHaveBeenCalled()
-    emit([{ clientId: 2, name: 'koki', color: '#ff0000' }])
-    expect(screen.getByText('KO')).toBeTruthy()
+    emit([{ clientId: 2, name: 'bob', color: '#ff0000' }])
+    expect(screen.getByText('BO')).toBeTruthy()
   })
 })

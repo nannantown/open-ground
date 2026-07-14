@@ -42,12 +42,14 @@ The gate is the **same machinery as the `swarm` experiment** (`experiments.ts` /
 - **UI invisibility:** `GET /api/experiments` returns `eligible: false` for
   non-owners, and the Settings panel only renders the Experiments section when
   `experimentsEligible` — so the toggle never betrays the feature's existence.
-- **403:** the only places a worker is sandboxed are owner-gated already — the
-  swarm spawn routes return `403 forbidden` to non-owners *before* any spawn
-  (`server/routes/swarm.ts`), and the interactive `/api/terminal/claude` path
-  only sandboxes when the server-resolved `flags.sandbox` is true (false for
-  everyone but the owner-with-toggle). There is no path by which a non-owner gets
-  a sandboxed — or differently-behaving — launch.
+- **403:** the swarm spawn routes return `403 forbidden` before any spawn to
+  callers who pass neither the owner login nor the swarm-scoped local unlock
+  (`server/routes/swarm.ts` / `swarmGate.ts` — the unlock opens swarm spawns
+  but deliberately NOT this experiment), and the interactive
+  `/api/terminal/claude` path only sandboxes when the server-resolved
+  `flags.sandbox` is true (false for everyone but the owner-with-toggle,
+  including locally-unlocked signed-out machines). There is no path by which a
+  non-owner gets a sandboxed — or differently-behaving — launch.
 
 Net: feature is invisible + inert for non-owners; only the signed-in owner with
 the toggle on ever sees it or gets a sandboxed launch.

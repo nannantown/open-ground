@@ -118,4 +118,4 @@ own 0.9.1 change to each file → collab's contribution landed exactly as in `b2
 - `origin/main` is an ancestor of the rebased tip → **`git push origin swarm/w1-0618-153923-57300:main` is a clean
   fast-forward** (no further conflict). Re-fetch + re-confirm FF immediately before pushing in case main moved.
 - **Do not force-push.** Recovery point: `backup/w1-pre-rebase-b2626ca`.
-- Worktree: `/Users/kokinaniwa/projects/OG-collab-rebase` (this report lives there). Safe to remove after integration.
+- Worktree: `~/projects/OG-collab-rebase` (this report lives there). Safe to remove after integration.

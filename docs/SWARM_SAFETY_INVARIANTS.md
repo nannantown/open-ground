@@ -60,11 +60,19 @@ validation, preflight, or git — closing the local `curl` / SDK direct-call hol
 (the UI hiding the tab is not the only guard). The sweep is driven off the live
 Hono route table, so a **newly added swarm route that forgets the gate** also trips
 it.
-*Code:* `server/routes/swarm.ts` (the `getCustomTabRole() !== 'owner'` gate atop
-every handler).
+*Code:* `server/routes/swarm.ts` (the `hasSwarmOwnerAccess()` gate atop every
+handler — `src/lib/server/swarmGate.ts`: the signed-in owner role OR the
+explicit server-local unlock for login-disabled machines, env
+`OPENGROUND_LOCAL_OWNER=1` / hand-edited `settings.swarmLocalOwner`; see
+`docs/SECURITY.md` for why that unlock is not a boundary change).
 *Mirrors:* `test-swarm-safety.sh` §13 (the PreToolUse gate is owner-scoped).
 *Negative control:* a hand-built **un-gated** swarm route returns non-403 when
 signed out — exactly what the sweep forbids.
+*Unlock caveat:* the sweep above runs with the unlock ABSENT (its env var is
+cleared in `beforeEach`), pinning the locked shipped default. The unlocked
+side — both sources open every route signed-out, the unlock is swarm-scoped
+(marketplace stays 403), and `POST /api/settings` can never set the key — is
+pinned by `server/routes/__tests__/swarmLocalOwner.routes.test.ts`.
 
 ### D — A merge conflict aborts; integration never continues through it
 `swarmIntegrate.integrateBranch` rebases the worker branch onto the trunk in a

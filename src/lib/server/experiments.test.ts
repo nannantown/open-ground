@@ -47,3 +47,41 @@ describe('computeExperiments', () => {
     }
   })
 })
+
+// The server-local swarm unlock (swarmGate.ts, 業務モード = login disabled):
+// opens the swarm flag alone, with no role and no experiments toggle. It must
+// never widen `eligible` (the experiments toggle UI stays owner-only) nor any
+// other experiment — sandbox keeps requiring owner && toggle.
+describe('computeExperiments — swarm local owner unlock', () => {
+  it('signed out + unlock → swarm opens; eligible and sandbox stay closed', () => {
+    expect(computeExperiments('none', {}, { swarmLocalOwner: true })).toEqual({
+      eligible: false,
+      flags: { swarm: true, sandbox: false },
+    })
+  })
+
+  it('the unlock does NOT leak to sandbox — even with a forged sandbox toggle', () => {
+    expect(
+      computeExperiments('none', { experiments: { sandbox: true } }, { swarmLocalOwner: true }),
+    ).toEqual({
+      eligible: false,
+      flags: { swarm: true, sandbox: false },
+    })
+  })
+
+  it('unlock false/absent changes nothing (the locked default)', () => {
+    for (const opts of [undefined, {}, { swarmLocalOwner: false }]) {
+      expect(computeExperiments('none', {}, opts)).toEqual({
+        eligible: false,
+        flags: { swarm: false, sandbox: false },
+      })
+    }
+  })
+
+  it('owner + unlock → swarm open even without the experiments toggle', () => {
+    expect(computeExperiments('owner', {}, { swarmLocalOwner: true })).toEqual({
+      eligible: true,
+      flags: { swarm: true, sandbox: false },
+    })
+  })
+})

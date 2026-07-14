@@ -26,7 +26,7 @@
 | tier ON/OFF mask([Allowed] 層) | `src/lib/server/swarmAllowedModels.ts`(詳細は 04 章) |
 | worker spawn の実体(worktree + claude PTY + /order 注入) | `src/lib/server/swarmWorker.ts` — `spawnSwarmWorker`(:455)(詳細は 02 章) |
 | 優先度ソートの一次ソース | `src/lib/boardPriority.ts` — `sortByPriority`(`sortTodos` :418 が委譲) |
-| HTTP routes(owner gate + validateProjectPath) | `server/routes/swarm.ts` — GET `/api/swarm/orchestrator`(:486)、POST `…/drain-tick`(:516)、`…/start`(:546)、`…/stop`(:570)、`…/worker/stop`(:591)、`…/automerge`(:614)、`…/review/resolve`(:636)、`…/selfsupply`(:661)、`…/overseer`(:688) |
+| HTTP routes(swarm owner gate + validateProjectPath) | `server/routes/swarm.ts` — GET `/api/swarm/orchestrator`(:486)、POST `…/drain-tick`(:516)、`…/start`(:546)、`…/stop`(:570)、`…/worker/stop`(:591)、`…/automerge`(:614)、`…/review/resolve`(:636)、`…/selfsupply`(:661)、`…/overseer`(:688)。gate = swarmGate.ts(owner ログイン or ローカル解錠 — docs/SECURITY.md) |
 | 状態の公開形 | `src/lib/types.ts` — `SwarmOrchestratorState`(:1280)。**`pendingDispatch` / `lock` / `generation` / 各種 Map は API に出ない**(`stateOf` :1836-1873 が返すのは running/manualStop(+Persisted)/autoMerge/selfSupply/overseer/workers(生存のみ)/reviews/log/anomalies/maxWorkers/kpis/consumption/autonomyRemembered/parkUntil のみ) |
 
 エンジン stage の全景(1 tick = `runEnginePass` :5593):
@@ -281,7 +281,7 @@ git -C ~/projects/OPEN\ GROUND diff --stat cc7c60e..origin/main -- src/lib/serve
 # ↑ 空なら本書の行番号は origin/main tip でもそのまま有効
 ```
 
-エンジン状態(owner ログイン済みのアプリが :47776 で稼働中の前提。path は登録済み project の実パス):
+エンジン状態(swarm ゲートを通過できるアプリが :47776 で稼働中の前提 — owner ログイン済み、**または**ログイン無効運用のサーバローカル解錠(env `OPENGROUND_LOCAL_OWNER=1` / settings.json 手編集 `swarmLocalOwner:true` — swarmGate.ts、docs/SECURITY.md)。path は登録済み project の実パス):
 
 ```bash
 curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=$HOME/projects/OPEN%20GROUND" | jq '{running, manualStop, manualStopPersisted, autoMerge, selfSupply, overseer, parkUntil, workers: (.workers|length), anomalies}'

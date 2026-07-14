@@ -23,10 +23,10 @@ describe('assigneeCandidates (list-driven)', () => {
   it('orders: registered members → me → the current assignee', () => {
     const out = assigneeCandidates(
       { config: { members: ['Yuki', 'Ken'] } },
-      'Koki',
+      'Aoi',
       'Mana',
     )
-    expect(out).toEqual(['Yuki', 'Ken', 'Koki', 'Mana'])
+    expect(out).toEqual(['Yuki', 'Ken', 'Aoi', 'Mana'])
   })
 
   it('does NOT derive names from other cards — the list is the list', () => {

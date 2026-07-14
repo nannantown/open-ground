@@ -35,7 +35,7 @@ const sampleData = (): ProjectData => ({
   ],
   tabOrder: ['terminal', 'board'], // personal — must NOT enter the doc
   customTabs: ['custom:abc'], // personal
-  config: { completionFlow: 'pr', members: ['Koki'] },
+  config: { completionFlow: 'pr', members: ['Aoi'] },
   launch: { model: 'fable' }, // personal
   notes: 'board notes\nsecond line',
   updatedAt: '2026-01-03T00:00:00.000Z',
