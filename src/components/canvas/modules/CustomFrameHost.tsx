@@ -245,6 +245,7 @@ const HostedFrame = ({
     height: number
   } | null>(null)
   const anchor = frame.anchor
+  const elRef = useRef<HTMLIFrameElement | null>(null)
 
   useLayoutEffect(() => {
     if (!anchor) {
@@ -268,11 +269,30 @@ const HostedFrame = ({
     }
   }, [anchor])
 
-  if (frame.srcDoc === null) return null
   const visible = anchor !== null && rect !== null && !covered
+
+  // Redisplay after keep-alive (hidden → visible): the embedded app's own
+  // keydown forwarder (Songs tab's source.tsx) only wires up once ITS window
+  // gets a 'focus' event — but going display:none→visible again never fires
+  // one on its own (unlike the initial mount, which the module's iframe
+  // onLoad already covers). Re-focusing the outer hosted iframe here is what
+  // triggers that 'focus' event, so keyboard shortcuts (Space, etc.) work
+  // again without an extra click. Skipped on the FIRST visible render (ref
+  // starts null) so a brand-new frame's initial-open behaviour is unchanged —
+  // only a real hidden→visible transition should steal focus.
+  const wasVisibleRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (wasVisibleRef.current === false && visible) {
+      elRef.current?.focus()
+    }
+    wasVisibleRef.current = visible
+  }, [visible])
+
+  if (frame.srcDoc === null) return null
   return (
     <iframe
       ref={(el) => {
+        elRef.current = el
         if (el) frameElements.set(frame.moduleId, el)
         else frameElements.delete(frame.moduleId)
       }}

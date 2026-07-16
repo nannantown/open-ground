@@ -70,6 +70,7 @@ import {
   setAutoMerge,
   setSelfSupply,
   setOverseer,
+  writeManagerHeartbeat,
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
 import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
@@ -467,6 +468,29 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `failed to spawn manager: ${e?.message ?? e}` }, 500)
     }
   })
+  // --- POST /api/swarm/manager/beat — the commander's heartbeat (card B) ------
+  // The `/og-manage` commander curls this at each integration phase boundary (it
+  // drives the app API for everything else too) so the engine can tell a HUNG desk
+  // from a healthy one and RESUSCITATE it (swarmOrchestrator Part B). Owner-gated +
+  // path-validated like every /api/swarm/* write; the write itself is best-effort
+  // (a missed beat only looks like brief silence to the monitor). Body: { path,
+  // phase?, note? }.
+  .post('/api/swarm/manager/beat', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const phase = typeof body?.phase === 'string' ? body.phase : undefined
+    const note = typeof body?.note === 'string' ? body.note : undefined
+    const ok = await writeManagerHeartbeat(path, { phase, note })
+    return c.json({ ok })
+  })
   // --- POST /api/swarm/worktree/remove — tear a worker worktree down ---------
   // Body: { path, worktree, force? }. `force` (the kill/abandon case) lets a
   // dirty mid-implementation tree be removed; without it a dirty worktree is
@@ -626,12 +650,14 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await stopOrchestratorWorker(path, terminalId))
   })
-  // --- POST /api/swarm/orchestrator/automerge — arm/disarm auto-integration ---
-  // Body: { path, enabled:boolean }. Toggles Card③ (auto-merge completed review
-  // cards onto the trunk). A SEPARATE switch from autonomy (start/stop), default
-  // OFF: when OFF the engine only classifies review cards and shows "統合可"; when
-  // ON it lands the fast-forwardable / cleanly-rebasable ones (FF / rebase only,
-  // never force, never auto-resolving a conflict) and moves them review→done.
+  // --- POST /api/swarm/orchestrator/automerge — arm/disarm AUTO-WAKE-COMMANDER ---
+  // Body: { path, enabled:boolean }. Toggles Card③. MEANING CHANGED 2026-07-15
+  // (manager-only integration — endpoint name kept for API stability): the engine
+  // NO LONGER integrates. A SEPARATE switch from autonomy (start/stop), default OFF:
+  // when OFF the engine only classifies review cards and shows "統合可"; when ON, a
+  // ready worker (review card) WAKES the commander desk (spawnSwarmManager, batched)
+  // so a human-in-the-loop review decides the merge — the engine never verifies,
+  // reviews, or pushes to the trunk itself (docs/commander/03-integration-review.md).
   // Only ever acts while the engine is running — the global stop halts it too.
   // Owner-only + validated, like the rest of /api/swarm/*.
   .post('/api/swarm/orchestrator/automerge', async (c) => {

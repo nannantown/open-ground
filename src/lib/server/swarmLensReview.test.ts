@@ -119,6 +119,43 @@ describe('tallyLensReview — lens-panel weighted-OR decision (card 5f85d2f5)', 
     expect(r.reason).toContain('security=abstain')
   })
 
+  // ── fail-closed hardening (2026-07-14): the [must-fix 0 / clean 0] land ──────
+  // A panel with ZERO decisive votes must NEVER read as clean. `abstained === 0`
+  // alone is also true of an EMPTY verdict list, which the old tally treated as
+  // "every lens voted" and integrated — un-reviewed code auto-merged.
+
+  it('an EMPTY verdict list (panel never ran / lost every reviewer) → defer, NEVER integrate', () => {
+    const r = tallyLensReview([], DEFAULT_REVIEW_LENSES)
+    expect(r.decision).toBe('defer')
+    expect(r.mustFix).toBe(0)
+    expect(r.clean).toBe(0)
+    expect(r.reason).toContain('欠落')
+  })
+
+  it('EVERY lens abstaining (panel wipe-out: 0 decisive votes) → defer, NEVER integrate', () => {
+    const r = tallyLensReview(
+      DEFAULT_REVIEW_LENSES.map((l) => v(l.key, null)),
+      DEFAULT_REVIEW_LENSES,
+    )
+    expect(r.decision).toBe('defer')
+    expect(r.mustFix).toBe(0)
+    expect(r.clean).toBe(0)
+  })
+
+  it('a SHORT panel (fewer verdicts than lenses, all of them clean) → defer — a missing lens is an un-reviewed dimension', () => {
+    const r = tallyLensReview(
+      [v('correctness', 'clean'), v('security', 'clean')], // perf + regression verdicts LOST
+      DEFAULT_REVIEW_LENSES,
+    )
+    expect(r.decision).toBe('defer')
+    expect(r.reason).toContain('2個のlensの結果が欠落')
+  })
+
+  it('a must-fix still reworks even on a short/deficient panel (a concrete flag always wins)', () => {
+    const r = tallyLensReview([v('security', 'must-fix', 'hole')], DEFAULT_REVIEW_LENSES)
+    expect(r.decision).toBe('rework')
+  })
+
   it('a real must-fix beats a co-occurring abstention → rework (a concrete flag is never deferred away)', () => {
     const r = tallyLensReview(
       [v('correctness', 'must-fix', 'bug'), v('security', null), v('perf', 'clean'), v('regression', 'clean')],

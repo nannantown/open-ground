@@ -81,6 +81,9 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   'guard-unwired': 'Swarm — worker spawn refused (guard unwired)',
   rollback: 'Self-update rolled back',
   'canary-failed': 'Self-update canary failed',
+  'review-panel-failed': 'Swarm — review panel failed (merge withheld)',
+  'high-risk-hold': 'Swarm — high-risk paths (awaiting manual merge)',
+  'manager-unrevivable': 'Swarm — commander keeps dying (check it manually)',
 }
 
 /** The OS toast (title + body) for a fatal event. Body carries WHAT happened, the
@@ -148,6 +151,7 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   'escalation-reminder': 'Swarm — a question is still waiting',
   'review-idle': 'Swarm — review cards await integration',
   'overseer-throttled': 'Swarm — overseer throttled (usage cap)',
+  'manager-woke': 'Swarm — commander woken to decide an integration',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

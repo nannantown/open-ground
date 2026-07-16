@@ -247,6 +247,11 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
     // wiring is already denied above, this denies the script body too. Entry-
     // anchored like the others (vs symlink-swap).
     '.*/\\.openground/guard(/.*)?$',
+    // The session-event hook's INSTALLED copy (hooksInstall.ts wires
+    // ~/.openground/hooks/openground-hook.js into SessionStart/Stop/
+    // PostToolUse). Not a veto, but it runs in EVERY claude session on the
+    // machine — a contained worker must not be able to plant code there.
+    '.*/\\.openground/hooks(/.*)?$',
   ]
 
   const lines: string[] = [

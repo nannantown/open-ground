@@ -93,7 +93,18 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 | Board 列移動 | `POST $OG/api/project/tasks` body `{path, setColumn:[{"id":…,"column":…}]}`(あれば `swarm-board.sh move <id> <col>` でも同じ) |
 | 差し戻し(counter 付き・1呼び出しで完結) | `POST $OG/api/project/tasks` body `{path, rework:[{"id":"<フルUUID>"}]}` — review→doing 移動+per-card counter+1+上限(既定3、`maxReworks`で上書き可)超過時は `blocked` 退避を1回で行う。counter はカード自体のフィールド(`reworkCount`)に乗るので **アプリが動いてさえいれば動く**(`~/.claude/swarm-board.sh` 不要)。応答 `results.rework[0]` の `column`(`"doing"` か `"blocked"`)と `count` で分岐する。`swarm-board.sh rework <id>` があればそちらでも良い(独自カウンタファイルで別管理・動作は今回無変更) |
 | カード追加 | `POST $OG/api/project/tasks` body `{path, add:["Title"]}`(あれば `swarm-board.sh add "<title>" "<notes>"` でも同じ) |
+| **自分の心拍**(統合中は各段で1回) | `curl -s -X POST $OG/api/swarm/manager/beat -H 'content-type: application/json' -d '{"path":"'"$PWD"'","phase":"<merge/review/status>","note":"<今やってる事1行>"}'` |
 
+- **あなた(司令官)は心拍を打つ — エンジンが蘇生できるように**(2026-07-15 card B): エンジンは
+  「統合を manager 専任」にした代わりに、**司令官が止まったら自動で蘇生する反射**を持つ。判定材料は
+  上の `manager/beat` が書く心拍の鮮度 — **10 分打たないと「固まっている」と見なされ**、自動運転
+  (autoMerge)ONかつ review 待ちがあると engine が `spawnSwarmManager` で卓を起こし直す(モデルは
+  quota 枯渇なら1段繰り下げ)。だから**重い統合(大 diff レビュー・複数本のマージ)を回している間は
+  各段で1回 beat を打つ**(1本マージするごと・レビュー sub-agent を起こす直前など)。無音のまま長時間
+  ハングすると蘇生対象になる=それが狙い(コンテキスト溢れ・API エラーで黙り込んだ卓を神経系が起こす)。
+  **予防が本筋**: 大 diff レビューは Agent ツール(sub-agent)に逃がして自分のコンテキストを守る
+  (蘇生は対症療法・docs/commander/03-integration-review.md §2.4)。連続蘇生が上限(3回)を超えると
+  engine は諦めて fatal 通知(「司令官が繰り返し落ちている」)を上げるので、その時は手動で卓を立て直す。
 - 心拍の生ファイルは `~/.openground/swarm/<repoキー>/<branchの/を-にした名>.json`(worker が
   `swarm-beat.sh` で書く)。**普段は読まなくてよい** — `GET /api/swarm/workers` が統合済み
   (`phase`/`note`/`heartbeatAt`/`ready`/`blocked`)。生で見たいときだけ `ls ~/.openground/swarm/` で
@@ -157,13 +168,22 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 > `git -C "$PWD" worktree list --porcelain` で実在を取り直す**(候補 = 実在 worktree のうち
 > branch が `swarm/*` で dirty=0 の物)。
 
-1本ずつ統合する。1本ごと:
+1本ずつ統合する。**各本の頭で心拍を1回打つ**(`manager/beat` phase=merge・上表 — 重い統合中に
+黙り込むと engine の蘇生対象になる)。1本ごと:
 
 0. **対象確定**(上の実在確認)。心拍 task が `[hold]` で始まる worker は自動巡回では除外
    (ユーザー明示の「マージ」「swarm/X 入れて」で解除)。
    **高リスク force-hold(構造的・`[hold]` 無指定でも)**: `git -C <wt> diff --name-only origin/main..HEAD` が
    `.github/workflows/**`・`release.yml`/`ci.yml`・`package.json`/lockfile・署名/notary スクリプト・
-   `electron/main.js`・`*secret*`/`.env*`/auth/token に触れていたら自動では入れず「承認待ち(高リスク)」で報告。
+   `electron/main.js`・`*secret*`/`.env*`/auth/token(camelCase 結合 `supabaseAuth.ts`/`authStore.ts` 型も掴む)・
+   認可の本体(`roles.ts`/`swarmGate.ts`/`swarmAllowedModels.ts`)に触れていたら自動では入れず「承認待ち(高リスク)」で報告。
+   (2026-07-15〜 エンジンの autoMerge も同じ集合で force-hold する — 単一定義は
+   `HIGH_RISK_PATHS`(swarmOrchestrator.ts)で、ユニットテストが**本節の上3行の文言ごと**固定している。
+   ⚠ その固定は verbatim pin(一言一句の一致)であって意味の同期ではない — pin が緑でも regex が
+   本当に各カテゴリを掴むかまでは保証しない(2026-07-15 の camelCase 素通りがまさにその穴)。実挙動は
+   ユニットテスト側の実ファイル HOLD/PASS(it.each)が固定する。集合を変えるときは SKILL.md と
+   HIGH_RISK_PATHS と実ファイルテストを同じコミットで — 片方だけ変えるとテストが割れる。
+   エンジン側の挙動・解除手順の正典は docs/commander/03-integration-review.md §2.3.1。)
 1. **dirty=0 を確認**(worker がまだ書いてるなら待つ)。
 2. `git -C "$PWD" fetch origin main`。
 3. **再検証(必須)**: `<wt>` でゴール基準(`npx tsc --noEmit` / `npm test` 等)を**自分で回す**。緑のときだけ次へ。

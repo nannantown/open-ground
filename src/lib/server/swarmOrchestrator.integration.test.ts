@@ -49,9 +49,16 @@ import {
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
   MAX_EXEC_MS,
+  // RESURRECTION reflex (card B): the real manager heartbeat seam + freshness rule,
+  // and the state-machine constants — exercised end-to-end against real files below.
+  writeManagerHeartbeat,
+  readManagerHeartbeatAt,
+  isManagerHeartbeatFresh,
+  MANAGER_HEARTBEAT_STALE_MS,
+  MANAGER_RESUME_GRACE_MS,
+  MAX_MANAGER_RESUME_ATTEMPTS,
   __resetOrchestratorForTests,
   emptyMetricsCounters,
-  MAX_CONFLICT_REWORKS,
   type OrchestratorDeps,
   type IntegrationDeps,
   type ProjectEngine,
@@ -61,7 +68,7 @@ import { createSwarmWorktree } from './swarmWorker'
 import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
-import type { ProjectTask } from '../types'
+import type { ProjectTask, SwarmFatalNotification } from '../types'
 
 // Every test here drives REAL git: init / clone / commit / branch / rebase / push
 // plus real worktree add+remove, each 1–3s in isolation (the slowest, the conflict
@@ -242,6 +249,7 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
   verifyFailed: new Map(),
   reviewFailed: new Map(),
   reviewDeferred: new Map(),
+  highRiskHolds: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
   reworks: new Map(),
@@ -275,6 +283,26 @@ const reviewClean: NonNullable<IntegrationDeps['review']> = async () => ({
   reason: 'review faked clean (integration test)',
 })
 
+// MANAGER-ONLY INTEGRATION (2026-07-15): the integrate pass now WAKES the commander
+// instead of merging. The REAL defaultWakeManager spawns a `claude` PTY
+// (spawnSwarmManager) — an integration test must never do that — so these tests fake
+// the wake: isManagerActive:false (desk absent ⇒ the engine wakes) and wakeManager
+// records the branches it was asked to wake. Returns the recorder + the two deps to
+// spread over defaultDeps().
+const wakeFake = (): { woke: string[]; deps: Pick<IntegrationDeps, 'isManagerActive' | 'wakeManager'> } => {
+  const woke: string[] = []
+  return {
+    woke,
+    deps: {
+      isManagerActive: async () => false,
+      wakeManager: async (_p, cards) => {
+        for (const c of cards) woke.push(c.branch)
+        return true
+      },
+    },
+  }
+}
+
 const todoCard = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
   id,
   title: `card ${id}`,
@@ -298,15 +326,20 @@ afterEach(async () => {
 })
 
 describe('swarmOrchestrator — REAL git end-to-end', () => {
-  it('(2)+(3) drives a card todo→doing→review→done with a REAL fast-forward, then leaves NO zombie', async () => {
+  it('(2) drives a card todo→doing→review with REAL git, then WAKES the commander and NEVER FF-pushes (完了条件1+2)', async () => {
+    // MANAGER-ONLY INTEGRATION (2026-07-15): the engine drives dispatch + monitor
+    // (still its job) but NO LONGER integrates. Once the worker is ready (review), the
+    // integrate pass WAKES the commander and leaves origin/main EXACTLY where it was —
+    // the structural guarantee that the engine's readiness can never move the trunk.
     const { proj } = await setupRepo()
     const alive = new Set<string>()
     const killed: string[] = []
+    const wake = wakeFake()
     const { col, boardDeps } = makeBoard([todoCard('a')])
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
       ...boardDeps,
-      review: reviewClean,
+      ...wake.deps,
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
       isAlive: (id) => alive.has(id),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
@@ -316,6 +349,8 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       },
     }
     const engine = newEngine(proj)
+
+    const trunkBefore = (await git(proj, ['rev-parse', 'origin/main'])).stdout.trim()
 
     // Pass 1 — dispatch: a real worktree + commit is created; the card moves to doing.
     await runDispatchPass(engine, deps)
@@ -332,48 +367,48 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     await runDispatchPass(engine, deps)
     expect(col('a')).toBe('review')
 
-    // Integrate — REAL fast-forward push onto origin/main, then teardown.
+    // Integrate — the engine WAKES the commander for the ready branch and does NOTHING
+    // to the trunk. The card stays in review (the commander owns the merge), the
+    // worktree + branch + PTY are all UNTOUCHED, and origin/main has not moved.
     await runIntegratePass(engine, deps)
-    expect(col('a')).toBe('done')
+    expect(col('a')).toBe('review') // NOT done — the engine never merges
+    expect(wake.woke).toEqual([w.branch]) // it woke the commander for this branch (完了条件2)
 
-    // (2) the commit really landed on origin/main.
+    // 完了条件1: origin/main is EXACTLY where it was — the engine FF-pushed nothing.
+    const trunkAfter = (await git(proj, ['rev-parse', 'origin/main'])).stdout.trim()
+    expect(trunkAfter).toBe(trunkBefore)
     const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
-    expect(trunkLog).toMatch(/work: card a/)
-    expect(await deps.countCommitsAhead(proj, w.branch)).toBe(0) // branch fully merged
+    expect(trunkLog).not.toMatch(/work: card a/) // the worker's commit is NOT on the trunk
+    expect(await deps.countCommitsAhead(proj, w.branch)).toBe(1) // still 1 ahead — nothing merged
 
-    // (3) no zombie: worktree force-removed (despite the untracked scratch),
-    //     branch deleted, PTY killed by id, slot freed.
-    expect(await exists(worktree)).toBe(false)
-    const { stdout: branches } = await git(proj, ['branch', '--list', w.branch])
-    expect(branches.trim()).toBe('')
-    expect(killed).toEqual([w.terminalId])
-    expect(engine.workers).toHaveLength(0)
-    expect(engine.log.some((l) => l.message.startsWith('integrated (ff)'))).toBe(true)
+    // The branch's worktree + PTY are kept (the commander tears them down on merge).
+    expect(await exists(worktree)).toBe(true)
+    expect(killed).toEqual([]) // the engine killed no PTY — it did not land anything
+    expect(engine.log.some((l) => l.message.includes('司令官を起こしました'))).toBe(true)
+    expect(engine.log.some((l) => l.message.startsWith('integrated (ff)'))).toBe(false)
   })
 
-  it('(1) promotes a COMMITTED worker to review in a NON-MAIN (master) trunk repo, then LANDS it on origin/master', async () => {
+  it('(1) promotes a COMMITTED worker to review in a NON-MAIN (master) trunk repo, then WAKES the commander', async () => {
     // Regression for the promote-gate bug: countCommitsAhead was hardcoded to
     // ['origin/main','main']. In a master-default repo (no main / origin/main
     // anywhere) the worker forks off HEAD (the master tip) and commits, but the
     // old probe resolved NEITHER base → returned 0 → classifyWorker saw
     // hasWork=false → the card sat in 'doing' forever (stall/runaway → re-dispatch
-    // loop, work never reaching review). The integrate stage already resolved the
-    // trunk via resolveTarget; this aligns the promote gate with it.
+    // loop, work never reaching review). The promote gate resolves the non-main trunk
+    // via resolveTarget. (2026-07-15: the engine no longer LANDS — it wakes the
+    // commander — but the promote-gate regression this fixes is still engine work.)
     const { proj } = await setupRepoMaster()
     const alive = new Set<string>()
-    const killed: string[] = []
+    const wake = wakeFake()
     const { col, boardDeps } = makeBoard([todoCard('m')])
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
       ...boardDeps,
-      review: reviewClean,
+      ...wake.deps,
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
       isAlive: (id) => alive.has(id),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: (id) => {
-        killed.push(id)
-        alive.delete(id)
-      },
+      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -391,219 +426,15 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     await runDispatchPass(engine, deps)
     expect(col('m')).toBe('review')
 
-    // Integrate — REAL fast-forward push onto origin/MASTER (resolveTarget handles
-    // the non-main trunk on the integrate side too), card → done, no zombie.
+    // Integrate — the engine wakes the commander (resolveTarget resolved origin/master
+    // as the trunk so the wake fires), and does NOT land: the card stays in review and
+    // origin/master is untouched.
+    const trunkBefore = (await git(proj, ['rev-parse', 'origin/master'])).stdout.trim()
     await runIntegratePass(engine, deps)
-    expect(col('m')).toBe('done')
-    const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/master'])
-    expect(trunkLog).toMatch(/work: card m/)
-    expect(await deps.countCommitsAhead(proj, w.branch)).toBe(0) // fully merged into master
-  })
-
-  it('(2) lands a DIVERGED branch by a REAL rebase when the trunk moved under it', async () => {
-    const { proj, origin } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const deps: OrchestratorDeps & IntegrationDeps = {
-      ...defaultDeps(),
-      ...boardDeps,
-      review: reviewClean,
-      isAlive: (id) => alive.has(id),
-      readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: () => {},
-    }
-    // Build a finished worker branch (off the ORIGINAL trunk) directly.
-    const spawn = makeSpawn(proj, alive, { file: () => 'worker.txt', content: 'worker change\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card r', hint: 'r' })
-    // Now move the trunk forward with a DISJOINT file → the branch diverges.
-    await advanceTrunk(origin, 'trunk.txt', 'trunk change\n')
-    // Seed the review card pointing at that branch.
-    board.set('r', todoCard('r', { boardColumn: 'review', branch: res.branch }))
-
-    await runIntegratePass(newEngine(proj), deps)
-    expect(col('r')).toBe('done')
-    // The worker's change AND the trunk's later change are BOTH on origin/main —
-    // the rebase replayed worker.txt on top of the moved trunk and landed it.
-    const { stdout: tree } = await git(proj, ['ls-tree', '-r', '--name-only', 'origin/main'])
-    expect(tree).toMatch(/worker\.txt/)
-    expect(tree).toMatch(/trunk\.txt/)
-  })
-
-  it('(1)(2)(3)(4) DELEGATES a real conflict to its worker to rebase, then LANDS the resolved branch by fast-forward (no force)', async () => {
-    // The order goal's headline change (card 012a2848): a real rebase conflict is no
-    // longer parked for a human — the engine hands it back to the branch's worker to
-    // rebase ITS OWN branch + resolve + commit (no push, no force), then re-integrates.
-    const { proj, origin } = await setupRepo()
-    const alive = new Set<string>()
-    const killed: string[] = []
-    const { board, col, boardDeps } = makeBoard([])
-    const deps: OrchestratorDeps & IntegrationDeps = {
-      ...defaultDeps(),
-      ...boardDeps,
-      review: reviewClean,
-      isAlive: (id) => alive.has(id),
-      readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: (id) => {
-        killed.push(id)
-        alive.delete(id)
-      },
-    }
-    // Worker edits collide.txt; trunk then edits the SAME file differently → real conflict.
-    const spawn = makeSpawn(proj, alive, { file: () => 'collide.txt', content: 'WORKER side\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card c', hint: 'c' })
-    await advanceTrunk(origin, 'collide.txt', 'TRUNK side\n')
-    board.set('c', todoCard('c', { boardColumn: 'review', branch: res.branch }))
-
-    // The engine counts this worker live (a `claude` TUI lingers after /order finishes —
-    // the common case that drives the IN-PLACE rebase delegation).
-    const engine = newEngine(proj, {
-      workers: [
-        {
-          terminalId: res.terminalId,
-          branch: res.branch,
-          worktree: res.worktree,
-          taskId: 'c',
-          taskTitle: 'card c',
-          startedAt: '2026-06-29T00:00:00Z',
-          stage: 'done',
-        },
-      ],
-    })
-
-    await git(proj, ['fetch', 'origin', 'main'])
-    const trunkBefore = (await git(proj, ['rev-parse', 'origin/main'])).stdout.trim()
-
-    // Pass 1 — conflict → DELEGATED (条件1). The card leaves review for doing (条件3: it
-    // can't be double-integrated while resolving), the SEPARATE conflict budget is bumped,
-    // the trunk is UNTOUCHED (条件2: the rebase was aborted, nothing pushed, no force), and
-    // the live worker + its worktree are KEPT so it can fix in place.
-    await runIntegratePass(engine, deps)
-    expect(col('c')).toBe('doing')
-    expect(engine.conflictReworks.get('c')).toBe(1)
-    expect(engine.conflictReworks.get('c')).toBeLessThanOrEqual(MAX_CONFLICT_REWORKS)
-    expect(engine.workers).toHaveLength(1) // live worker kept (not torn down)
-    expect(await exists(res.worktree)).toBe(true)
-    const trunkMid = (await git(proj, ['rev-parse', 'origin/main'])).stdout.trim()
-    expect(trunkMid).toBe(trunkBefore) // failed integrate left the trunk exactly where it was
-
-    // The worker does what it was told: rebase its OWN branch onto the moved trunk +
-    // resolve + commit (NO push). Reproduce that end state in the REAL worktree (a merged
-    // resolution), then the monitor re-promotes the card to review.
-    await git(res.worktree, ['fetch', 'origin', 'main'])
-    await git(res.worktree, ['reset', '--hard', 'origin/main'])
-    await writeFile(join(res.worktree, 'collide.txt'), 'RESOLVED: worker + trunk\n')
-    await git(res.worktree, ['add', '-A'])
-    await git(res.worktree, ['commit', '-m', 'resolve: collide.txt rebased onto trunk'])
-    board.set('c', { ...board.get('c')!, boardColumn: 'review' })
-
-    // Pass 2 — the resolved branch now fast-forwards onto the trunk → the engine LANDS it
-    // (条件4) and resets the conflict budget.
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(col('c')).toBe('done')
-    expect(engine.conflictReworks.has('c')).toBe(false) // budget reset on a successful land
-
-    // The land was a NORMAL push (NO force): the prior trunk is an ANCESTOR of the new one.
-    await git(proj, ['fetch', 'origin', 'main'])
-    await git(proj, ['merge-base', '--is-ancestor', trunkBefore, 'origin/main']) // throws if not an ancestor
-    const { stdout: landed } = await git(proj, ['show', 'origin/main:collide.txt'])
-    expect(landed).toContain('RESOLVED')
-  }, 30_000) // two REAL integrate passes (rebase worktrees) — over the 5s default
-
-  it('(1) auto-merge REFUSES a branch whose verification is RED — sends it back review→doing, trunk UNTOUCHED', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    // A REAL worker branch off origin/main carrying one commit (the to-be-landed work).
-    const spawn = makeSpawn(proj, alive, { file: () => 'worker.txt', content: 'worker change\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card v', hint: 'v' })
-    board.set('v', todoCard('v', { boardColumn: 'review', branch: res.branch }))
-
-    // Capture the trunk so we can prove the RED verify left origin/main untouched.
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkBefore } = await git(proj, ['rev-parse', 'origin/main'])
-
-    // The REAL verify dep (makeVerify) drives the REAL worktree+rebase mechanics;
-    // a fake CHECK reports RED — proving the gate blocks the merge end-to-end
-    // without needing a TypeScript toolchain in the throwaway repo.
-    const checked: string[] = []
-    const deps: OrchestratorDeps & IntegrationDeps = {
-      ...defaultDeps(),
-      ...boardDeps,
-      review: reviewClean,
-      isAlive: (id) => alive.has(id),
-      readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: () => {},
-      instructRework: () => {}, // synthetic PTY in this fixture — keep the fix-in-place nudge inert
-      verify: makeVerify({
-        applicable: async () => true,
-        run: async (dir) => {
-          checked.push(dir) // the gate materialized a REAL rebased worktree to check
-          return { ok: false, output: 'TS2322: fake type error' }
-        },
-      }),
-    }
-    // The engine OWNS this live worker, so a RED verify CONTINUES it in place — the card
-    // is sent review→doing (差し戻し) for the same worker to fix on the same branch.
-    const engine = newEngine(proj, {
-      workers: [
-        {
-          terminalId: res.terminalId,
-          branch: res.branch,
-          worktree: res.worktree,
-          taskId: 'v',
-          taskTitle: 'card v',
-          startedAt: new Date(0).toISOString(),
-          stage: 'done',
-        },
-      ],
-    })
-    await runIntegratePass(engine, deps)
-
-    // Sent back to rework: card → doing, nothing landed, the trunk never moved.
-    expect(checked).toHaveLength(1) // the rebased tree was really built + checked
-    expect(col('v')).toBe('doing')
-    expect(engine.reworks.get('v')).toBe(1)
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkAfter } = await git(proj, ['rev-parse', 'origin/main'])
-    expect(trunkAfter).toBe(trunkBefore)
-    expect(engine.log.some((l) => l.message.includes('差し戻し review→doing'))).toBe(true)
-    // The worker's branch is LEFT — the worker keeps working it (not cleaned up).
-    const { stdout: branch } = await git(proj, ['branch', '--list', res.branch])
-    expect(branch.trim()).not.toBe('')
-    // The verify worktree was torn down — no zombie left behind.
-    const { stdout: wts } = await git(proj, ['worktree', 'list'])
-    expect(wts).not.toMatch(/\.verify-/)
-  })
-
-  it('(1) auto-merge LANDS a branch whose verification is GREEN (real worktree, real check)', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card g', hint: 'g' })
-    board.set('g', todoCard('g', { boardColumn: 'review', branch: res.branch }))
-    const checked: string[] = []
-    const deps: OrchestratorDeps & IntegrationDeps = {
-      ...defaultDeps(),
-      ...boardDeps,
-      review: reviewClean,
-      isAlive: (id) => alive.has(id),
-      readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: () => {},
-      verify: makeVerify({
-        applicable: async () => true,
-        run: async (dir) => {
-          checked.push(dir)
-          return { ok: true, output: '' }
-        },
-      }),
-    }
-    await runIntegratePass(newEngine(proj), deps)
-    expect(checked).toHaveLength(1) // the gate ran a real check on the rebased tree
-    expect(col('g')).toBe('done') // verified green → landed
-    const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
-    expect(trunkLog).toMatch(/work: card g/)
+    expect(col('m')).toBe('review') // NOT done — the engine never merges
+    expect(wake.woke).toEqual([w.branch])
+    expect((await git(proj, ['rev-parse', 'origin/master'])).stdout.trim()).toBe(trunkBefore)
+    expect(await deps.countCommitsAhead(proj, w.branch)).toBe(1) // still ahead — nothing merged
   })
 
   it('(5) NEVER dispatches a blocked-column card', async () => {
@@ -830,6 +661,100 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(col('a')).toBe('todo') // ← requeued for one retry, not stranded in doing
     expect(engine.workers).toHaveLength(0) // slot freed
     expect(engine.log.some((l) => l.message.startsWith('worker stalled — reclaimed — card → todo'))).toBe(true)
+  })
+})
+
+// ── RESURRECTION reflex — REAL heartbeat end-to-end (card B, 受け入れの肝) ─────────
+// The owner's complaint: the commander (opus) STOPS under a big diff (context
+// overflow / API error / hang) and nobody notices, so integration stalls. Card B's
+// answer: the commander beats a heartbeat while it works; the engine watches it and
+// re-wakes a desk that goes silent, giving up (fatal escalation) only after it keeps
+// dying. This test fixes that reflex against REAL files — the manager heartbeat is
+// written/read through the actual seam in the isolated tmp HOME, and the detection is
+// the REAL freshness rule. spawnSwarmManager is the wakeManager seam (mocked): an
+// integration test must NEVER launch a real claude.
+//
+// 受け入れの肝: HOME-isolated, STOP the manager heartbeat → the engine DETECTS it →
+// spawnSwarmManager(mock) is called → after MAX consecutive failures it fires ONE
+// 'manager-unrevivable' fatal notification (完了条件2+3+5).
+describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受け入れの肝, 完了条件2-5)', () => {
+  it('心拍を止める → 検知 → spawnSwarmManager(モック)を呼ぶ → 3連続失敗で fatal 通知', async () => {
+    const { proj } = await setupRepo()
+
+    // The commander's heartbeat is a REAL file under the isolated HOME
+    // (~/.openground/swarm/<repoKey>/manager.json). It beat ONCE, then STOPPED.
+    const t0 = 1_700_000_000_000
+    expect(await writeManagerHeartbeat(proj, { phase: 'integrate' }, t0)).toBe(true)
+
+    // "心拍を止める → 検知", nothing faked: fresh right after the beat, HUNG once `now`
+    // crosses the stale window — the real read-back + the real freshness rule.
+    expect(isManagerHeartbeatFresh(await readManagerHeartbeatAt(proj), t0 + 5 * 60_000)).toBe(true)
+    expect(
+      isManagerHeartbeatFresh(await readManagerHeartbeatAt(proj), t0 + MANAGER_HEARTBEAT_STALE_MS + 1),
+    ).toBe(false)
+
+    // spawnSwarmManager is the wakeManager seam — count it, NEVER launch claude. The
+    // resurrected desk never recovers (never beats again), so every grace-spaced pass
+    // re-detects the stale heartbeat and re-wakes, until the reflex gives up.
+    let spawnCalls = 0
+    const fatals: SwarmFatalNotification[] = []
+    const { boardDeps } = makeBoard([todoCard('a', { boardColumn: 'review', branch: 'swarm/a' })])
+    const deps: OrchestratorDeps & IntegrationDeps = {
+      ...defaultDeps(),
+      ...boardDeps,
+      // Part A readiness runs on the real repo; swarm/a isn't a real ref, so pin the
+      // seams the resurrection reflex doesn't exercise.
+      prepareTarget: async () => 'main',
+      classify: async () => 'ff',
+      // REAL hung-detection: read the REAL heartbeat file + the REAL freshness rule
+      // (the live-PTY half of defaultIsManagerActive needs a real PTY — absent in a
+      // test — so this isolates exactly the heartbeat signal card B adds).
+      isManagerActive: async (p, now) => isManagerHeartbeatFresh(await readManagerHeartbeatAt(p), now),
+      // The spawnSwarmManager boundary (mock).
+      wakeManager: async () => {
+        spawnCalls += 1
+        return true
+      },
+      notify: (n) => fatals.push(n),
+    }
+    const engine = newEngine(proj)
+    // Drive a pass at wall-clock `now`, bypassing the 15s TICK throttle (its own tests
+    // cover cadence) so ONLY the resurrection grace window governs re-wakes.
+    const pass = async (now: number): Promise<void> => {
+      engine.lastIntegrateAt = 0
+      await runIntegratePass(engine, deps, now)
+    }
+
+    // 1) Desk STILL beating (5 min old) → healthy → NO resurrection.
+    await pass(t0 + 5 * 60_000)
+    expect(spawnCalls).toBe(0)
+
+    // 2) Heartbeat STOPPED: `now` past the stale window → detected hung → resurrect, up
+    //    to MAX, one wake per grace window.
+    const STALE = MANAGER_HEARTBEAT_STALE_MS
+    const GRACE = MANAGER_RESUME_GRACE_MS
+    let now = t0 + STALE + 60_000
+    for (let i = 0; i < MAX_MANAGER_RESUME_ATTEMPTS; i++) {
+      await pass(now)
+      now += GRACE + 1000
+    }
+    expect(spawnCalls).toBe(MAX_MANAGER_RESUME_ATTEMPTS) // spawnSwarmManager(mock) called 3×
+    expect(fatals).toHaveLength(0) // not given up yet
+
+    // 3) Still silent after MAX attempts → GIVE UP: fatal escalation, NO 4th spawn.
+    await pass(now)
+    expect(spawnCalls).toBe(MAX_MANAGER_RESUME_ATTEMPTS) // the token-burn loop is broken
+    expect(fatals.map((n) => n.event)).toEqual(['manager-unrevivable'])
+    expect(fatals[0].projectPath).toBe(proj)
+
+    // 4) The commander RECOVERS (beats again) → detection clears → self-heals, and the
+    //    one-shot fatal is not re-fired.
+    now += GRACE + 1000
+    expect(await writeManagerHeartbeat(proj, { phase: 'integrate' }, now)).toBe(true)
+    await pass(now)
+    expect(spawnCalls).toBe(MAX_MANAGER_RESUME_ATTEMPTS) // no wake — the desk is alive again
+    expect(fatals).toHaveLength(1) // still one-shot
+    expect(engine.managerResume?.attempts).toBe(0) // reflex disarmed by the sighting of health
   })
 })
 
@@ -1104,354 +1029,6 @@ describe('runGateProcess — reaps the whole fork pool on a timeout (no orphaned
     },
     45000, // gate timeout (8s) + worker-death condition-wait (≤15s) + REAL-process headroom under load
   )
-})
-
-describe('swarmOrchestrator — swarm self-modification gate (verify)', () => {
-  // verify = REAL makeVerify(fake-tsc, [swarm-safety w/ REAL diff gate + FAKE check]).
-  // The diff detection + the appliesTo gate are REAL; only the (heavy) suite run is faked.
-  const gateDeps = (
-    proj: string,
-    alive: Set<string>,
-    boardDeps: ReturnType<typeof makeBoard>['boardDeps'],
-    flags: { tsc: boolean; safety: boolean },
-  ) => {
-    const safetyRuns: string[] = []
-    const deps: OrchestratorDeps & IntegrationDeps = {
-      ...defaultDeps(),
-      ...boardDeps,
-      review: reviewClean,
-      isAlive: (id) => alive.has(id),
-      readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: () => {},
-      instructRework: () => {}, // synthetic PTY in this fixture — keep the nudge inert
-      verify: makeVerify(
-        {
-          applicable: async () => true,
-          run: async () => ({ ok: flags.tsc, output: flags.tsc ? '' : 'TS2322 fake type error' }),
-        },
-        [
-          {
-            label: 'swarm-safety',
-            appliesTo: touchesSwarmPaths, // the REAL diff gate
-            check: {
-              applicable: async () => true,
-              run: async (dir) => {
-                safetyRuns.push(dir)
-                return { ok: flags.safety, output: flags.safety ? '' : 'invariant A regression (fake)' }
-              },
-            },
-          },
-        ],
-      ),
-    }
-    return { deps, safetyRuns }
-  }
-
-  it('(1)+(2) swarm change + safety RED → sent back review→doing, suite RAN, trunk UNTOUCHED', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    // A REAL worker branch whose ONLY change is a swarm file → touchesSwarmPaths.
-    const spawn = makeSpawn(proj, alive, {
-      file: () => 'src/lib/server/swarmFoo.ts',
-      content: 'export const x = 1\n',
-      scratch: false,
-    })
-    const res = await spawn({ projectPath: proj, title: 'swarm card', hint: 's' })
-    board.set('s', todoCard('s', { boardColumn: 'review', branch: res.branch }))
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkBefore } = await git(proj, ['rev-parse', 'origin/main'])
-
-    const { deps, safetyRuns } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: false })
-    const engine = newEngine(proj, {
-      workers: [
-        {
-          terminalId: res.terminalId,
-          branch: res.branch,
-          worktree: res.worktree,
-          taskId: 's',
-          taskTitle: 'swarm card',
-          startedAt: new Date(0).toISOString(),
-          stage: 'done',
-        },
-      ],
-    })
-    await runIntegratePass(engine, deps)
-
-    expect(safetyRuns).toHaveLength(1) // the swarm-safety suite REALLY ran (swarm touched)
-    expect(col('s')).toBe('doing') // RED → 差し戻し (blocked from landing)
-    expect(engine.reworks.get('s')).toBe(1)
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkAfter } = await git(proj, ['rev-parse', 'origin/main'])
-    expect(trunkAfter).toBe(trunkBefore) // nothing landed on the trunk
-    expect(engine.log.some((l) => l.message.includes('差し戻し review→doing'))).toBe(true)
-    // the block reason names the SAFETY gate (not tsc) — proves WHICH gate stopped it
-    expect(engine.log.some((l) => l.message.includes('swarm-safety'))).toBe(true)
-  })
-
-  it('(1) swarm change + safety GREEN → integrated (done), suite RAN', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, {
-      file: () => 'src/lib/server/swarmFoo.ts',
-      content: 'export const x = 2\n',
-      scratch: false,
-    })
-    const res = await spawn({ projectPath: proj, title: 'swarm ok', hint: 'sg' })
-    board.set('sg', todoCard('sg', { boardColumn: 'review', branch: res.branch }))
-    const { deps, safetyRuns } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: true })
-    await runIntegratePass(newEngine(proj), deps)
-    expect(safetyRuns).toHaveLength(1) // the suite ran (swarm touched) and was GREEN
-    expect(col('sg')).toBe('done') // both gates green → landed
-    const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
-    expect(trunkLog).toMatch(/work: swarm ok/)
-  })
-
-  it('(3) non-swarm change → swarm-safety suite is NOT run; branch lands on tsc alone', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    // A REAL worker branch whose change is a NON-swarm file (README.md exists in base).
-    const spawn = makeSpawn(proj, alive, {
-      file: () => 'README.md',
-      content: '# changed by worker\n',
-      scratch: false,
-    })
-    const res = await spawn({ projectPath: proj, title: 'doc card', hint: 'd' })
-    board.set('d', todoCard('d', { boardColumn: 'review', branch: res.branch }))
-    // safety:false would BLOCK *if* it ran — so a landing proves the suite was SKIPPED.
-    const { deps, safetyRuns } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: false })
-    await runIntegratePass(newEngine(proj), deps)
-    expect(safetyRuns).toHaveLength(0) // ← unrelated branch never pays for the suite
-    expect(col('d')).toBe('done') // tsc green → landed normally
-    const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
-    expect(trunkLog).toMatch(/work: doc card/)
-  })
-
-  // ── docs-freshness soft-warn (TARGET-STATE §6) ──────────────────────────────
-  // READ-ONLY: a branch that touches swarm code but leaves docs/commander/ untouched
-  // gets a journal warn — merge still lands (never blocks). The two tests below prove
-  // both halves of the completion condition: warn fires without docs, stays silent with.
-  it('docs-freshness soft-warn: swarm change WITHOUT docs/commander/ → journal warn (merge still lands)', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, {
-      file: () => 'src/lib/server/swarmBar.ts',
-      content: 'export const y = 1\n',
-      scratch: false,
-    })
-    const res = await spawn({ projectPath: proj, title: 'swarm no docs', hint: 'sd1' })
-    board.set('sd1', todoCard('sd1', { boardColumn: 'review', branch: res.branch }))
-    const { deps } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: true })
-    const engine = newEngine(proj)
-    await runIntegratePass(engine, deps)
-    expect(col('sd1')).toBe('done') // green gates → landed regardless of the warn
-    expect(
-      engine.log.some(
-        (l) => l.level === 'warn' && l.message.includes('docs/commander/') && l.message.includes(res.branch),
-      ),
-    ).toBe(true)
-  })
-
-  it('docs-freshness soft-warn: swarm change WITH docs/commander/ update → no journal warn', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    // Same-shape swarm-touching branch, but the commit ALSO updates docs/commander/.
-    const spawn = (async ({ title, hint }: { title: string; hint?: string }) => {
-      const wt = await createSwarmWorktree(proj, { hint })
-      await mkdir(join(wt.worktree, 'src/lib/server'), { recursive: true })
-      await writeFile(join(wt.worktree, 'src/lib/server/swarmBaz.ts'), 'export const z = 1\n')
-      await mkdir(join(wt.worktree, 'docs/commander'), { recursive: true })
-      await writeFile(join(wt.worktree, 'docs/commander/TARGET-STATE.md'), '# updated\n')
-      await git(wt.worktree, ['add', '-A'])
-      await git(wt.worktree, ['commit', '-m', `work: ${title}`])
-      const terminalId = `pty-${wt.branch}`
-      alive.add(terminalId)
-      return { terminalId, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
-    }) as OrchestratorDeps['spawnWorker']
-    const res = await spawn({ projectPath: proj, title: 'swarm with docs', hint: 'sd2' })
-    board.set('sd2', todoCard('sd2', { boardColumn: 'review', branch: res.branch }))
-    const { deps } = gateDeps(proj, alive, boardDeps, { tsc: true, safety: true })
-    const engine = newEngine(proj)
-    await runIntegratePass(engine, deps)
-    expect(col('sd2')).toBe('done')
-    expect(engine.log.some((l) => l.level === 'warn' && l.message.includes('docs/commander/'))).toBe(false)
-  })
-})
-
-// ── lint/tsc/test quality-floor gate (card 4e7f2151) ─────────────────────────
-// GENERALIZES B2: where B2 ran ONE suite (swarm-safety) ONLY for swarm-touching
-// branches, the floor here runs lint + tsc + the FULL test suite for EVERY branch
-// before it may auto-merge. The gate is driven through the REAL makeVerify composition
-// wired EXACTLY like defaultDeps (tsc primary + [lint always-on, swarm-safety diff-gated,
-// test always-on]); the diff detection + appliesTo gating are REAL — only the (heavy)
-// check RUNS are faked so behavior is deterministic. Each fake records its label as it
-// runs, so a test can assert WHICH gates ran and in what order (first-red-blocks).
-describe('swarmOrchestrator — lint/tsc/test quality-floor gate (card 4e7f2151)', () => {
-  const qualityGateDeps = (
-    proj: string,
-    alive: Set<string>,
-    boardDeps: ReturnType<typeof makeBoard>['boardDeps'],
-    flags: { tsc?: boolean; lint?: boolean; test?: boolean; safety?: boolean },
-  ) => {
-    const ran: string[] = []
-    const reworkMsgs: string[] = []
-    const fake = (label: string, ok: boolean, out: string): VerifyCheck => ({
-      applicable: async () => true,
-      run: async () => {
-        ran.push(label)
-        return { ok, output: ok ? '' : out }
-      },
-    })
-    const deps: OrchestratorDeps & IntegrationDeps = {
-      ...defaultDeps(),
-      ...boardDeps,
-      review: reviewClean, // green-path lands without spawning the real claude panel
-      isAlive: (id) => alive.has(id),
-      readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: () => {},
-      instructRework: (_id, msg) => {
-        reworkMsgs.push(msg) // capture the worker's 差し戻し instruction (carries the failing gate)
-      },
-      // Mirror defaultDeps EXACTLY: tsc primary, then lint(always)/swarm-safety(diff)/test(always).
-      verify: makeVerify(fake('tsc', flags.tsc ?? true, 'TS2322 fake type error'), [
-        { label: 'lint', appliesTo: () => true, check: fake('lint', flags.lint ?? true, 'eslint: 3 problems (fake)') },
-        {
-          label: 'swarm-safety',
-          appliesTo: touchesSwarmPaths, // the REAL diff gate (B2)
-          check: fake('swarm-safety', flags.safety ?? true, 'invariant A regression (fake)'),
-        },
-        { label: 'test', appliesTo: () => true, check: fake('test', flags.test ?? true, '2 failed (fake)') },
-      ]),
-    }
-    return { deps, ran, reworkMsgs }
-  }
-
-  it('wiring: lint + test are ALWAYS-ON (appliesTo ⇒ true); swarm-safety stays diff-gated', () => {
-    // The generalization, asserted at the wiring level: the quality-floor checks fire for
-    // EVERY branch (empty diff included), while B2's swarm-safety only fires for swarm code.
-    expect(lintConditional.appliesTo([])).toBe(true)
-    expect(testConditional.appliesTo([])).toBe(true)
-    expect(lintConditional.appliesTo(['README.md'])).toBe(true)
-    expect(testConditional.appliesTo(['README.md'])).toBe(true)
-    expect(swarmSafetyConditional.appliesTo([])).toBe(false)
-    expect(swarmSafetyConditional.appliesTo(['README.md'])).toBe(false)
-    expect(swarmSafetyConditional.appliesTo(['src/lib/server/swarmFoo.ts'])).toBe(true)
-    // the conditionals wrap the real exported checks (so defaultDeps runs the real lint/test)
-    expect(lintConditional.check).toBe(lintCheck)
-    expect(testConditional.check).toBe(testCheck)
-  })
-
-  it('(1)+(2) NON-swarm branch all-GREEN → LANDS; lint+test RAN, swarm-safety SKIPPED', async () => {
-    // The core generalization: a branch touching NO swarm code still pays lint + test
-    // (B2 would have run nothing but tsc here). All green → it lands by fast-forward.
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, { file: () => 'src/App.tsx', content: 'export const A = 1\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'ui card', hint: 'u' })
-    board.set('u', todoCard('u', { boardColumn: 'review', branch: res.branch }))
-    const { deps, ran } = qualityGateDeps(proj, alive, boardDeps, {}) // all green
-    await runIntegratePass(newEngine(proj), deps)
-    expect(col('u')).toBe('done') // verified green → landed
-    expect(ran).toEqual(['tsc', 'lint', 'test']) // lint+test ran for a NON-swarm branch; swarm-safety skipped
-    const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
-    expect(trunkLog).toMatch(/work: ui card/)
-  })
-
-  it('(3)+(4) NON-swarm branch with lint RED → 差し戻し review→doing, trunk UNTOUCHED, reason names "lint"', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, { file: () => 'src/App.tsx', content: 'export const B = 2\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'lint card', hint: 'l' })
-    board.set('l', todoCard('l', { boardColumn: 'review', branch: res.branch }))
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkBefore } = await git(proj, ['rev-parse', 'origin/main'])
-    const { deps, ran, reworkMsgs } = qualityGateDeps(proj, alive, boardDeps, { lint: false })
-    // A LIVE worker the engine OWNS → a RED gate CONTINUES it in place (review→doing).
-    const engine = newEngine(proj, {
-      workers: [
-        {
-          terminalId: res.terminalId,
-          branch: res.branch,
-          worktree: res.worktree,
-          taskId: 'l',
-          taskTitle: 'lint card',
-          startedAt: new Date(0).toISOString(),
-          stage: 'done',
-        },
-      ],
-    })
-    await runIntegratePass(engine, deps)
-    expect(col('l')).toBe('doing') // RED lint → 差し戻し, NOT merged
-    expect(engine.reworks.get('l')).toBe(1)
-    expect(ran).toEqual(['tsc', 'lint']) // first-red-blocks: tsc green, lint red, test never ran
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkAfter } = await git(proj, ['rev-parse', 'origin/main'])
-    expect(trunkAfter).toBe(trunkBefore) // nothing landed
-    // condition (4): the failing gate is named in BOTH the engine log AND the worker's instruction
-    expect(engine.log.some((l) => l.message.includes('差し戻し review→doing') && l.message.includes('lint'))).toBe(true)
-    expect(reworkMsgs.some((m) => m.includes('lint'))).toBe(true)
-  })
-
-  it('(3)+(4) NON-swarm branch with test RED → 差し戻し review→doing, trunk UNTOUCHED, reason names "test"', async () => {
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, { file: () => 'src/App.tsx', content: 'export const C = 3\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'test card', hint: 't' })
-    board.set('t', todoCard('t', { boardColumn: 'review', branch: res.branch }))
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkBefore } = await git(proj, ['rev-parse', 'origin/main'])
-    const { deps, ran, reworkMsgs } = qualityGateDeps(proj, alive, boardDeps, { test: false })
-    const engine = newEngine(proj, {
-      workers: [
-        {
-          terminalId: res.terminalId,
-          branch: res.branch,
-          worktree: res.worktree,
-          taskId: 't',
-          taskTitle: 'test card',
-          startedAt: new Date(0).toISOString(),
-          stage: 'done',
-        },
-      ],
-    })
-    await runIntegratePass(engine, deps)
-    expect(col('t')).toBe('doing') // RED test → 差し戻し
-    expect(engine.reworks.get('t')).toBe(1)
-    expect(ran).toEqual(['tsc', 'lint', 'test']) // tsc+lint green, test red (full suite runs last)
-    await git(proj, ['fetch', 'origin', 'main'])
-    const { stdout: trunkAfter } = await git(proj, ['rev-parse', 'origin/main'])
-    expect(trunkAfter).toBe(trunkBefore)
-    expect(engine.log.some((l) => l.message.includes('差し戻し review→doing') && l.message.includes('test'))).toBe(true)
-    expect(reworkMsgs.some((m) => m.includes('test'))).toBe(true)
-  })
-
-  it('(B2 contained) swarm branch runs lint + swarm-safety + test; all green → LANDS', async () => {
-    // A swarm-touching branch pays the new quality floor AND B2's diff-gated swarm-safety
-    // net — proving B2 is contained, not replaced (the safety gate STILL fires for it).
-    const { proj } = await setupRepo()
-    const alive = new Set<string>()
-    const { board, col, boardDeps } = makeBoard([])
-    const spawn = makeSpawn(proj, alive, {
-      file: () => 'src/lib/server/swarmFoo.ts',
-      content: 'export const x = 1\n',
-      scratch: false,
-    })
-    const res = await spawn({ projectPath: proj, title: 'swarm card', hint: 's' })
-    board.set('s', todoCard('s', { boardColumn: 'review', branch: res.branch }))
-    const { deps, ran } = qualityGateDeps(proj, alive, boardDeps, {}) // all green
-    await runIntegratePass(newEngine(proj), deps)
-    expect(col('s')).toBe('done')
-    expect(ran).toEqual(['tsc', 'lint', 'swarm-safety', 'test']) // B2's gate STILL runs, alongside the floor
-    const { stdout: trunkLog } = await git(proj, ['log', '--oneline', 'origin/main'])
-    expect(trunkLog).toMatch(/work: swarm card/)
-  })
 })
 
 // ── makeAdversarialReview — REAL panel orchestration (card a14329dc) ───────────

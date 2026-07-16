@@ -30,7 +30,14 @@
 // routes), each launching an interactive `claude` PTY — never `claude -p` / the
 // SDK. This module never spawns claude itself.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 import { Network, Inbox, Boxes, Gauge, ShieldCheck, X, Power, type LucideIcon } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
@@ -45,8 +52,11 @@ import type {
   SpawnSwarmManagerResponse,
   SpawnSwarmSupplyResponse,
   SpawnSwarmWorkerResponse,
+  SwarmPaneId,
   SwarmWorkerRecord,
 } from '@/lib/types'
+import { SWARM_PANE_IDS } from '@/lib/types'
+import { effectiveTabOrder, moveTab } from '@/lib/modules/tabOrder'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
@@ -166,7 +176,11 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
 // other views). (The old todo rail was removed — todos live on the Board tab
 // now; the old Flow visualization tab was removed too — its needs-attention
 // content lives on the overseer tab.)
-type MainView = 'supply' | 'manager' | 'workers' | 'overseer'
+//
+// The id list + type is canonical in types.ts (SWARM_PANE_IDS) so the persisted
+// Settings.swarmPaneOrder and the reorder helpers share one source of truth; the
+// local alias keeps the many existing `MainView` references unchanged.
+type MainView = SwarmPaneId
 
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
@@ -198,8 +212,30 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // Supply is the conversational entry point, so the main area opens on it.
   // supplyBusy = a launch/stop round-trip is in flight.
   const [supply, setSupply] = useState<SwarmSupply | null>(() => loadSupply(project.id))
-  const [mainView, setMainView] = useState<MainView>('supply')
+  const [mainView, setMainView] = useState<MainView>(SWARM_PANE_IDS[0])
   const [supplyBusy, setSupplyBusy] = useState(false)
+
+  // ── Sub-tab order (条件1/2/3) ───────────────────────────────────────────────
+  // The owner's saved left-to-right order of the four sub-tabs, loaded ONCE from
+  // /api/settings (Settings.swarmPaneOrder — GLOBAL: the four roles are identical
+  // across projects, so one order serves them all, sitting beside executionMode /
+  // swarmAllowedModels which the same header edits). `order` reconciles the saved
+  // list against the canonical id set so a stale/garbage save can never strand a
+  // pane, and its FIRST id is the default view. `userPickedRef` stops the async
+  // settings load from overriding a tab the user clicked while it was in flight;
+  // the reset effect re-lands on the first tab on every project switch.
+  const [paneOrder, setPaneOrder] = useState<readonly string[] | undefined>(undefined)
+  const order = useMemo(
+    () => effectiveTabOrder<MainView>(paneOrder, SWARM_PANE_IDS),
+    [paneOrder],
+  )
+  const paneOrderRef = useRef(paneOrder)
+  paneOrderRef.current = paneOrder
+  const userPickedRef = useRef(false)
+  // Drag-to-reorder state (mirrors ProjectPanel's TabRow): `dragFrom` = the pane
+  // being dragged, `dropAt` = the insertion slot it would land in (0..order.length).
+  const [dragFrom, setDragFrom] = useState<number | null>(null)
+  const [dropAt, setDropAt] = useState<number | null>(null)
 
   // The single commander (司令官) CONVERSATION session + its in-flight flag,
   // owned here exactly like the supply session and passed down to
@@ -247,7 +283,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setSupply(loadSupply(project.id))
     setManager(loadManager(project.id))
     setManagerBusy(false)
-    setMainView('supply')
+    // Land on the FIRST sub-tab of the (global) saved order (条件3). Read the
+    // latest order via the ref, NOT a dep: a reorder changes paneOrder but not
+    // project.id, so keying this on project.id keeps a reorder from re-firing
+    // here and yanking the active tab back to the first one.
+    userPickedRef.current = false
+    setMainView(effectiveTabOrder<MainView>(paneOrderRef.current, SWARM_PANE_IDS)[0])
+    setDragFrom(null)
+    setDropAt(null)
     setSupplyBusy(false)
     setExitedIds(new Set())
     setRetainedByWorktree(new Map())
@@ -258,6 +301,35 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setEscCount(0)
     seenRef.current = new Set()
   }, [project.id])
+
+  // Load the saved sub-tab order ONCE (Settings.swarmPaneOrder is GLOBAL, like
+  // executionMode which the same header's mode menu reads over /api/settings). On
+  // arrival, land on the saved FIRST tab (条件3) unless the user already picked
+  // one while it was in flight (userPickedRef). A missing/garbage value degrades
+  // to the shipped order via effectiveTabOrder, and a reorder's fire-and-forget
+  // persist self-heals here on the next mount's GET.
+  useEffect(() => {
+    let alive = true
+    fetch('/api/settings')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (!alive || !s) return
+        const raw = (s as { swarmPaneOrder?: unknown }).swarmPaneOrder
+        const saved = Array.isArray(raw)
+          ? raw.filter((x): x is string => typeof x === 'string')
+          : undefined
+        setPaneOrder(saved)
+        if (!userPickedRef.current) {
+          setMainView(effectiveTabOrder<MainView>(saved, SWARM_PANE_IDS)[0])
+        }
+      })
+      .catch(() => {
+        /* offline / server not up — the strip still works, defaults to supply */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // Reconcile the optimistic restart/terminate overlays against the latest
   // server-truth poll: once GET /api/swarm/workers confirms a restart's new
@@ -804,27 +876,66 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const swarmIdle =
     !engine.running && !supply && !manager && allWorkers.length === 0 && escCount === 0
 
-  // The sub-view tab strip — data-driven so the two badges (live workers /
-  // open questions) stay declarative. It renders ON the header row (one line
-  // instead of the old three stacked strips: power bar + mode row + tab row).
-  const tabs: {
-    view: MainView
-    icon: LucideIcon
-    label: string
-    badge?: number
-    badgeTone?: 'accent' | 'line'
-  }[] = [
-    { view: 'supply', icon: Inbox, label: t('projectPanel.swarm.supply.tab') },
-    { view: 'manager', icon: Gauge, label: t('projectPanel.swarm.manager.tab') },
-    {
-      view: 'workers',
+  // Persist a drag/keyboard reorder to Settings.swarmPaneOrder (条件2). moveTab
+  // (shared with the per-project tab row) computes the new order; the POST is
+  // optimistic + fire-and-forget (the strip updates at once; a failed persist
+  // self-heals on the next mount's GET). The server narrows the body to the known
+  // pane ids, so a bad index/order can never poison the stored value.
+  const reorderPanes = useCallback(
+    (from: number, to: number) => {
+      const next = moveTab(order, from, to)
+      if (next.every((id, i) => id === order[i])) return
+      setPaneOrder(next)
+      void fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ swarmPaneOrder: next }),
+      }).catch(() => {
+        /* fire-and-forget; the next mount's GET re-reads the persisted order */
+      })
+    },
+    [order],
+  )
+  const endPaneDrag = () => {
+    setDragFrom(null)
+    setDropAt(null)
+  }
+  const commitPaneDrop = () => {
+    if (dragFrom !== null && dropAt !== null) reorderPanes(dragFrom, dropAt)
+    endPaneDrag()
+  }
+  // Alt+←/→ keyboard reorder — the accessible alternative to dragging (same idiom
+  // as ProjectPanel's tab row). A move drops the focused pane one slot over.
+  const onPaneKeyDown = (e: ReactKeyboardEvent, i: number) => {
+    if (!e.altKey) return
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      reorderPanes(i, i - 1)
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      reorderPanes(i, i + 2)
+    }
+  }
+
+  // The sub-view tab strip — per-pane metadata keyed by id (so the strip renders
+  // in the reconciled `order`), with the two badges (live workers / open
+  // questions) kept declarative. It renders ON the header row (one line instead
+  // of the old three stacked strips: power bar + mode row + tab row). 条件5: with
+  // no saved order `order` === SWARM_PANE_IDS, so `orderedTabs` is byte-for-byte
+  // the old hardcoded strip.
+  const paneMeta: Record<
+    MainView,
+    { icon: LucideIcon; label: string; badge?: number; badgeTone?: 'accent' | 'line' }
+  > = {
+    supply: { icon: Inbox, label: t('projectPanel.swarm.supply.tab') },
+    manager: { icon: Gauge, label: t('projectPanel.swarm.manager.tab') },
+    workers: {
       icon: Boxes,
       label: t('projectPanel.swarm.workersTab'),
       badge: allWorkers.length > 0 ? allWorkers.length : undefined,
       badgeTone: 'line',
     },
-    {
-      view: 'overseer',
+    overseer: {
       icon: ShieldCheck,
       label: t('projectPanel.swarm.overseer.tab'),
       // An open question needs the OWNER's action — the accent badge is what
@@ -832,7 +943,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       badge: escCount > 0 ? escCount : undefined,
       badgeTone: 'accent',
     },
-  ]
+  }
+  const orderedTabs = order.map((view) => ({ view, ...paneMeta[view] }))
 
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
@@ -866,20 +978,69 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             aria-label={t('projectPanel.swarm.title')}
             className="flex min-w-0 flex-1 items-center gap-4 self-stretch overflow-x-auto"
           >
-            {tabs.map(({ view, icon: Icon, label, badge, badgeTone }) => (
+            {orderedTabs.map(({ view, icon: Icon, label, badge, badgeTone }, i) => {
+              const active = mainView === view
+              // The dragged pane dims; the cursor reads grab / grabbing.
+              const dimmed = dragFrom === i
+              // Accent insertion bar at the LEADING edge of the pane a drop would
+              // land before (or the trailing edge of the last pane for an
+              // end-drop). Suppressed where moveTab is a no-op (dropping onto self
+              // or just after self). Bars sit at the pane's inner edge (left-0 /
+              // right-0), NOT floating in the gap like ProjectPanel's — this strip
+              // is an overflow-x-auto container, which would clip an outside bar.
+              const barBefore =
+                dragFrom !== null && dropAt === i && dropAt !== dragFrom && dropAt !== dragFrom + 1
+              const barAfter =
+                dragFrom !== null &&
+                i === orderedTabs.length - 1 &&
+                dropAt === orderedTabs.length &&
+                dropAt !== dragFrom + 1
+              return (
               <button
                 key={view}
                 type="button"
                 role="tab"
-                aria-selected={mainView === view}
-                onClick={() => setMainView(view)}
+                aria-selected={active}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = 'move'
+                  // Firefox needs a payload for the drag to fire; we read state.
+                  e.dataTransfer.setData('text/plain', String(i))
+                  setDragFrom(i)
+                }}
+                onDragOver={(e) => {
+                  if (dragFrom === null) return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  const r = e.currentTarget.getBoundingClientRect()
+                  const past = e.clientX > r.left + r.width / 2
+                  setDropAt(i + (past ? 1 : 0))
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  commitPaneDrop()
+                }}
+                onDragEnd={endPaneDrag}
+                onClick={() => {
+                  // Mark an explicit pick so the async settings load can't override
+                  // it, then switch. (Reordering does NOT change the active tab.)
+                  userPickedRef.current = true
+                  setMainView(view)
+                }}
+                onKeyDown={(e) => onPaneKeyDown(e, i)}
+                title={t('projectPanel.dragToReorder')}
                 className={[
-                  '-mb-px flex shrink-0 items-center gap-1.5 self-stretch border-b-2 px-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
-                  mainView === view
+                  '-mb-px relative flex shrink-0 items-center gap-1.5 self-stretch border-b-2 px-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+                  active
                     ? 'border-accent text-accent'
                     : 'border-transparent text-ink-muted hover:text-accent',
+                  dimmed ? 'opacity-40' : '',
+                  dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
                 ].join(' ')}
               >
+                {barBefore && (
+                  <span className="pointer-events-none absolute left-0 top-1 bottom-1 w-0.5 bg-accent" />
+                )}
                 <Icon size={12} strokeWidth={2} />
                 {label}
                 {badge !== undefined && (
@@ -893,8 +1054,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                     {badge}
                   </span>
                 )}
+                {barAfter && (
+                  <span className="pointer-events-none absolute right-0 top-1 bottom-1 w-0.5 bg-accent" />
+                )}
               </button>
-            ))}
+              )
+            })}
           </div>
         )}
         <ExecutionModeMenu />

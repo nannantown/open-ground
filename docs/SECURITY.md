@@ -301,7 +301,7 @@ OPEN GROUND は自動生成系のセッション(タイトル / 説明 / Canvas 
 
 ### 8-6. 【medium】起動のたびにユーザーの `~/.claude/settings.json` を自動改変する
 
-サーバは毎起動 `installHooks()` を実行し、グローバルな Claude Code 設定に SessionStart/Stop/PostToolUse/**PreToolUse** フックを upsert し、`~/.openground/guard/` にガードスクリプトをコピー、`~/.claude/skills/og-manage/` にスキルを設置する。egress ではない(フックの通信先は 127.0.0.1 のみ)し、既存のユーザー定義フックは保持されるが、**他ツールのグローバル設定を無断で書き換える**挙動は業務端末の構成管理と衝突し得る。加えて `POST/DELETE /api/observer/install-hooks` は**無認証**なので、ローカルの他プロセスがこのガード(`--dangerously-skip-permissions` すら貫通する唯一の拒否 veto)を**取り外せる**。
+サーバは毎起動 `installHooks()` を実行し、グローバルな Claude Code 設定に SessionStart/Stop/PostToolUse/**PreToolUse** フックを upsert し、`~/.openground/guard/` にガードスクリプト・`~/.openground/hooks/` にフックスクリプトをコピー(settings.json が参照するのは常にこの homedir 基準の安定パスのみ — 解決元 checkout/worktree のパスは書かれない)、`~/.claude/skills/og-manage/` にスキルを設置する。egress ではない(フックの通信先は 127.0.0.1 のみ)し、既存のユーザー定義フックは保持されるが、**他ツールのグローバル設定を無断で書き換える**挙動は業務端末の構成管理と衝突し得る。加えて `POST/DELETE /api/observer/install-hooks` は**無認証**なので、ローカルの他プロセスがこのガード(`--dangerously-skip-permissions` すら貫通する唯一の拒否 veto)を**取り外せる**。
 根拠: `server/index.ts:144-167`, `hooksInstall.ts:15-24`, `misc.ts:530-537`
 
 ### 8-7. 【medium】Canvas の mock/screen が外部 CDN から実行コードを取得する(バージョン未固定・CSP なし)

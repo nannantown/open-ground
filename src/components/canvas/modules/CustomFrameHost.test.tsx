@@ -122,6 +122,27 @@ describe('CustomFrameHost keep-alive', () => {
     unmount()
   })
 
+  it('refocuses the outer iframe on redisplay after keep-alive (Space-key regression)', () => {
+    const { container, unmount } = render(<CustomFrameHost />)
+    act(() => {
+      attachFrameAnchor(MODULE_ID, anchor, 'Songs', PROJ)
+      setFrameSource(MODULE_ID, '<html>x</html>', 'Songs')
+      reportPlayback(MODULE_ID, playingMsg(true))
+    })
+    const iframe = container.querySelector('iframe')!
+    // Initial open must NOT trigger the redisplay refocus path.
+    const initialFocusSpy = vi.spyOn(iframe, 'focus')
+    act(() => {
+      detachFrameAnchor(MODULE_ID) // still playing → hidden, not destroyed
+    })
+    expect(initialFocusSpy).not.toHaveBeenCalled()
+    act(() => {
+      attachFrameAnchor(MODULE_ID, anchor, 'Songs', PROJ) // tab reopened
+    })
+    expect(initialFocusSpy).toHaveBeenCalled()
+    unmount()
+  })
+
   it('destroys a hidden frame after the grace period once playback stops', () => {
     vi.useFakeTimers()
     const { unmount } = render(<CustomFrameHost />)

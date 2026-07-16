@@ -113,6 +113,18 @@ export interface Settings {
    *  for the week" stays told. At least one tier must stay ON — `setUserSettings`
    *  refuses an all-OFF patch (a swarm with no model can only park). User-settable. */
   swarmAllowedModels?: Partial<SwarmAllowedModels>
+  /** The owner's chosen left-to-right order of the Swarm tab's sub-view strip
+   *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー / 監督). PERSONAL UI
+   *  state, kept central in `~/.openground/settings.json` (never the user's
+   *  repo), exactly like the per-project `ProjectData.tabOrder` but GLOBAL: the
+   *  four roles are identical across every project, so one order serves them all
+   *  — hence it sits beside {@link executionMode} / {@link swarmAllowedModels},
+   *  the sibling swarm settings edited from the SAME header row over
+   *  POST /api/settings. Absent / partial ⇒ the shipped order (supply first);
+   *  unknown/duplicate ids are reconciled away on read (`effectiveTabOrder`), so
+   *  a stale value can never strand a pane. The FIRST id opens by default.
+   *  User-settable (narrowed to the known pane ids by `setUserSettings`). */
+  swarmPaneOrder?: SwarmPaneId[]
   /** UI + prompt language. OPEN GROUND is English-first: unset means English.
    *  'ja' switches the UI strings AND the prompts sent to the spawned Claude
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
@@ -1197,6 +1209,14 @@ export interface OrchestratorReview {
    *  instead of a bare 「多数決つかず」. In-memory (engine) state — resets with
    *  the defer streak (a new commit) and on engine restart. */
   abstainSummary?: string
+  /** Set when the HIGH-RISK FORCE-HOLD gate withheld auto-integration because the
+   *  branch's diff touches release/CI/signing/dependency/secrets-grade paths
+   *  (HIGH_RISK_PATHS — the same set as the commander's manual-merge rule): the
+   *  matched repo-relative paths. Lets the API/dashboard distinguish this hold
+   *  from the other 'conflict'-status causes without reading the engine log.
+   *  In-memory (engine) state — cleared when a new commit stops touching the
+   *  set, and on engine restart. */
+  highRiskFiles?: string[]
 }
 
 /** A STATE INCONSISTENCY the commander engine detected between its own worker
@@ -1230,7 +1250,22 @@ export interface OrchestratorReview {
  *                         lost worker's card couldn't be re-homed out of 'doing'
  *                         (`intent:'recover'` — "dead なのに doing"). The engine
  *                         keeps retrying (and escalates a recoverable case to
- *                         'blocked'); this surfaces the ones a human must move. */
+ *                         'blocked'); this surfaces the ones a human must move.
+ *   - 'review-panel-failed' — the adversarial review panel could not produce a
+ *                         decisive verdict (zero must-fix/clean votes, or no
+ *                         majority) even after its retry budget, so the card is
+ *                         FROZEN in 'review' un-merged (fail-closed: "could not
+ *                         review" is never "clean") and the panel is no longer
+ *                         re-spawned. The worker is NOT at fault (no rework
+ *                         burned); a human must look, or a new commit re-arms
+ *                         the panel.
+ *   - 'high-risk-hold'  — the branch's diff touches release/CI/signing/
+ *                         dependency/secrets-grade paths (HIGH_RISK_PATHS — the
+ *                         same set as the commander's manual-merge rule), so
+ *                         auto-merge is withheld BY DESIGN: the card stays in
+ *                         'review' and ONLY a human's manual merge can land it.
+ *                         Not a fault — a structural approval gate; `files`
+ *                         carries the matched paths. */
 export type OrchestratorAnomalyKind =
   | 'orphan-doing'
   | 'worktree-missing'
@@ -1238,6 +1273,8 @@ export type OrchestratorAnomalyKind =
   | 'no-heartbeat'
   | 'move-stuck'
   | 'rework-exhausted'
+  | 'review-panel-failed'
+  | 'high-risk-hold'
 
 export interface OrchestratorAnomaly {
   /** Which inconsistency — see {@link OrchestratorAnomalyKind}. */
@@ -1259,8 +1296,13 @@ export interface OrchestratorAnomaly {
   intent?: 'review' | 'done' | 'recover'
   /** For 'move-stuck': how many consecutive writes were kept (display-only).
    *  For 'rework-exhausted': how many times the card bounced review→doing before
-   *  the loop guard parked it in 'blocked' (display-only). */
+   *  the loop guard parked it in 'blocked' (display-only).
+   *  For 'review-panel-failed': how many consecutive panels ended indecisive
+   *  before re-spawning stopped (display-only). */
   attempts?: number
+  /** For 'high-risk-hold': the repo-relative changed paths that matched
+   *  HIGH_RISK_PATHS — WHAT made the branch high-risk (display-only). */
+  files?: string[]
 }
 
 /** KPI roll-up the commander dashboard renders (the ANALYTICS layer, distinct
@@ -1610,6 +1652,22 @@ export const CLAUDE_EFFORTS: readonly ClaudeEffort[] = [
 export type ExecutionMode = 'max' | 'economy' | 'optimize'
 export const EXECUTION_MODES: readonly ExecutionMode[] = ['max', 'economy', 'optimize']
 export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'optimize'
+
+/** The four faces of the Swarm tab's sub-view strip — 補給官 (supply) / 司令官
+ *  (manager) / ワーカー (workers) / 監督 (overseer) — as reorderable pane ids.
+ *  The ARRAY ORDER is the shipped default left-to-right order (supply first, the
+ *  conversational entry point) AND the canonical id set the UI reconciles a
+ *  saved {@link Settings.swarmPaneOrder} against (via `effectiveTabOrder`, shared
+ *  with the per-project tab row: it drops unknown/retired/duplicate ids and
+ *  appends any missing pane in this order). The FIRST id of the reconciled order
+ *  is the tab that opens by default. Keep in sync with SwarmModule's `MainView`. */
+export type SwarmPaneId = 'supply' | 'manager' | 'workers' | 'overseer'
+export const SWARM_PANE_IDS: readonly SwarmPaneId[] = [
+  'supply',
+  'manager',
+  'workers',
+  'overseer',
+]
 
 /** Per-card overrides for the drawer's 実行 button. Each key falls back to
  *  the board defaults when absent: flow → config.completionFlow,
@@ -2003,8 +2061,27 @@ export type NotificationKind = 'collab-invite' | 'swarm-fatal' | 'swarm-info'
  *                            (fail-closed — GAP-2; spawnSwarmWorker).
  *   • 'rollback'          — a broken self-update build was auto-rolled back.
  *   • 'canary-failed'     — the self-update canary failed to promote repeatedly.
- *  ('rework-exhausted' | 'all-workers-down' | 'exec-timeout' come from the swarm
- *  engine; 'guard-unwired' from the worker spawn path (swarmWorker.ts);
+ *   • 'review-panel-failed' — the adversarial review panel stayed indecisive
+ *                            (0 votes / no majority) past its retry budget; the
+ *                            card is frozen in 'review' un-merged awaiting a
+ *                            human (fail-closed review, 2026-07-14).
+ *   • 'high-risk-hold'    — the branch touches release/CI/signing/dependency/
+ *                            secrets-grade paths (HIGH_RISK_PATHS), so auto-merge
+ *                            is withheld BY DESIGN; the card waits in 'review'
+ *                            for a human's manual merge (force-hold, 2026-07-15).
+ *                            Not a fault — but without a notification the card
+ *                            would sit silently forever.
+ *   • 'manager-unrevivable' — the engine tried to RESUSCITATE a stopped commander
+ *                            (dead PTY / hung — no manager heartbeat) but it kept
+ *                            dying: after MAX_MANAGER_RESUME_ATTEMPTS consecutive
+ *                            resurrections the reflex GIVES UP (so a permanent
+ *                            quota wall / boot-crash can't burn tokens in an
+ *                            infinite detect→spawn→die loop) and escalates —
+ *                            integration is stalled until a human checks the desk
+ *                            (manager heartbeat card, 2026-07-15).
+ *  ('rework-exhausted' | 'all-workers-down' | 'exec-timeout' |
+ *  'review-panel-failed' | 'high-risk-hold' | 'manager-unrevivable' come from the
+ *  swarm engine; 'guard-unwired' from the worker spawn path (swarmWorker.ts);
  *  'rollback' | 'canary-failed' come from the Electron self-update cycle.) */
 export type SwarmFatalEvent =
   | 'rework-exhausted'
@@ -2013,6 +2090,9 @@ export type SwarmFatalEvent =
   | 'guard-unwired'
   | 'rollback'
   | 'canary-failed'
+  | 'review-panel-failed'
+  | 'high-risk-hold'
+  | 'manager-unrevivable'
 
 /** The payload of a 'swarm-fatal' notification — carries WHAT happened, WHICH
  *  card/branch it concerns, and a POINTER to the engine log so the notification
@@ -2045,13 +2125,19 @@ export interface SwarmFatalNotification {
  *                              (S11 — it never auto-progresses, fail-closed).
  *   • 'review-idle'         — mergeable review cards are piling up (S7).
  *   • 'overseer-throttled'  — the overseer degraded on the usage cap (S9/T3').
- *  ('escalation-open' fires from swarmEscalations.ts today; the other three are
- *  reserved for the overseer brainstem (C-core) so this union is additive.) */
+ *   • 'manager-woke'        — a worker became ready and the engine WOKE the
+ *                              commander desk to decide the integration
+ *                              (2026-07-15 manager-only integration; the engine no
+ *                              longer merges — swarmOrchestrator runIntegratePass).
+ *  ('escalation-open' fires from swarmEscalations.ts, 'manager-woke' from the
+ *  engine's integrate pass; the other three are reserved for the overseer
+ *  brainstem (C-core) so this union is additive.) */
 export type SwarmInfoEvent =
   | 'escalation-open'
   | 'escalation-reminder'
   | 'review-idle'
   | 'overseer-throttled'
+  | 'manager-woke'
 
 /** The payload of a 'swarm-info' notification — the info-grade sibling of
  *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,

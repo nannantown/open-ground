@@ -62,10 +62,11 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { readFile, stat, lstat, symlink, unlink } from 'fs/promises'
+import { readFile, stat, lstat, symlink, unlink, mkdir } from 'fs/promises'
 import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
+import { atomicWriteJson } from './atomicWrite'
 // The fork-pool group reaper. It lives in a leaf module (not here) because
 // swarmSelfSupply — which this module imports — needs the same reaper for its
 // vitest/eslint scanners, and a back-import would close a cycle. Re-exported
@@ -122,11 +123,9 @@ import {
   classifyBranch,
   integrateBranch,
   isSwarmBranch,
-  buildConflictRebaseInstruction,
   type ReviewReadiness,
   type IntegrateOutcome,
 } from './swarmIntegrate'
-import { requestEngineSelfUpdate } from './selfUpdateSignal'
 import { acquireIntegrationLock, type AcquireIntegrationLockResult } from './swarmIntegrationLock'
 import {
   initSelfSupplyRuntime,
@@ -161,7 +160,12 @@ import type {
   SwarmOrchestratorState,
   SwarmFatalNotification,
 } from '../types'
-import { createSwarmFatalNotification } from './swarmNotifications'
+import { createSwarmFatalNotification, createSwarmInfoNotification } from './swarmNotifications'
+// Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
+// commander when a worker is ready. These are the seams the default wake dep uses.
+import { spawnSwarmManager } from './swarmManager'
+import { readSwarmSessions } from './swarmSessions'
+import { isClaudeSessionLive } from './terminal'
 import { sortByPriority } from '../boardPriority'
 
 const execFile = promisify(execFileCb)
@@ -257,8 +261,12 @@ export const MAX_CONFLICT_REWORKS = 3
  *  makes every reviewer abstain) — without it the panel re-burns N claude sessions
  *  every INTEGRATE_TICK_MS forever. A NEW commit (different tip) resets the count and
  *  re-arms the panel. Distinct from MAX_REWORKS: a defer is NOT the worker's fault, so
- *  it neither bumps the rework budget nor parks to 'blocked'. */
-export const MAX_REVIEW_DEFERS = 3
+ *  it neither bumps the rework budget nor parks to 'blocked'.
+ *  2 = the initial panel + exactly ONE retry (fail-closed review, 2026-07-14): an
+ *  indecisive panel gets a single second chance, then the card freezes in 'review'
+ *  and a 'review-panel-failed' anomaly + fatal notification hand it to a human —
+ *  never an unbounded retry, never a merge on zero decisive votes. */
+export const MAX_REVIEW_DEFERS = 2
 
 /** STALL SELF-HEALING (Card e8022e — distinct from the crash recovery above,
  *  which handles a DEAD PTY). A worker can be ALIVE yet unresponsive — hung on an
@@ -1292,8 +1300,22 @@ export interface ProjectEngine {
    *  pause survives a restart, and which the state API surfaces so "stopped by hand"
    *  is machine-readable from outside (the 0707 twin-dispatch root cause). */
   manualStop?: boolean
-  /** Auto-integration armed (Card③) — a SEPARATE switch from `running`, default
-   *  OFF. Only ever acts while `running` (turning the engine off = global stop). */
+  /** AUTO-WAKE-THE-COMMANDER armed (Card③) — a SEPARATE switch from `running`,
+   *  default OFF. Only ever acts while `running` (turning the engine off = global
+   *  stop).
+   *
+   *  MEANING CHANGED 2026-07-15 (manager-only integration): this flag NO LONGER
+   *  makes the engine merge. The engine never verifies / lens-reviews / FF-pushes /
+   *  lands a branch anymore — integration is the commander's job alone. When armed,
+   *  a ready worker (review-column card) instead WAKES the commander desk
+   *  (spawnSwarmManager) so a human-in-the-loop heavyweight review + manual merge
+   *  decides. This closes the 2026-07-15 incident (autoMerge FF-pushed a hole-y
+   *  branch onto main OVER the commander's concurrent 差し戻し): with the engine out
+   *  of the merge business, the two can never race on the trunk (structural, not a
+   *  rule). The field/endpoint name is KEPT (`autoMerge` / POST
+   *  /api/swarm/orchestrator/automerge) only for API + persistence stability across
+   *  the redesign — its OBSERVABLE meaning and every UI label are now "auto-wake the
+   *  commander". See docs/commander/03-integration-review.md. */
   autoMerge: boolean
   /** True while a pass is mid-flight — the re-entrancy guard that GUARANTEES no two
    *  passes ever overlap (twin-dispatch defense). The setTimeout chain already
@@ -1365,8 +1387,33 @@ export interface ProjectEngine {
    *  (完了条件3) instead of a bare 「多数決つかず」. Pruned when the branch
    *  leaves review. In-memory only. */
   reviewDeferred: Map<string, { tip: string; count: number; abstains: Record<string, number> }>
+  /** Branches under a HIGH-RISK FORCE-HOLD (2026-07-15): their diff touches
+   *  release/CI/signing/dependency/secrets-grade paths ({@link HIGH_RISK_PATHS} —
+   *  the same set as the commander's manual-merge rule, skills/og-manage/SKILL.md
+   *  §「マージ」手順 0), so the engine withholds auto-integration BY DESIGN — the
+   *  card stays in 'review' and ONLY a human's manual merge lands it. Keyed
+   *  branch → {tip at hold time, the matched paths}. The tip memo keeps the hold
+   *  log/notification to one per commit (a re-pass on the same tip is silent); a
+   *  NEW commit re-evaluates — if it no longer touches the set, the hold lifts
+   *  and the normal verify→review→integrate path resumes. detectAnomalies reads
+   *  this to surface the 'high-risk-hold' anomaly (+ fatal notification). Pruned
+   *  when the branch leaves review. In-memory only. */
+  highRiskHolds: Map<string, { tip: string; files: string[] }>
   /** Wall-clock (ms) of the last integration pass — the INTEGRATE_TICK_MS gate. */
   lastIntegrateAt: number
+  /** MANAGER RESURRECTION reflex state (2026-07-15 card B) — the in-memory bookkeeping
+   *  that lets the engine RE-wake a stopped/hung commander without (a) double-spawning a
+   *  booting desk or (b) looping forever on one that keeps dying:
+   *    - `attempts`   — consecutive resurrections since the desk was last seen HEALTHY.
+   *                     Reset to 0 when it responds again (or no work is waiting); at
+   *                     {@link MAX_MANAGER_RESUME_ATTEMPTS} the reflex gives up + escalates.
+   *    - `lastWakeAt` — wall-clock (ms) of the last wake, so a freshly-woken desk gets
+   *                     {@link MANAGER_RESUME_GRACE_MS} to boot + beat before re-judging.
+   *    - `fatalFired` — the 'manager-unrevivable' escalation is one-shot per episode
+   *                     (cleared when the desk recovers / no work waits).
+   *  Optional (absent ⇒ zero, lazy-init) for older-build / test-literal backfill. In-memory
+   *  only — a restart re-arms autoMerge OFF anyway, so the reflex starts disarmed. */
+  managerResume?: { attempts: number; lastWakeAt: number; fatalFired: boolean }
   /** How many times each card (taskId) has been RE-QUEUED after a lost worker —
    *  the {@link recoveryColumn} retry budget. Bumped on a 'todo' requeue, reset
    *  when the card is parked in 'blocked' (so a human requeue starts fresh) or
@@ -1580,6 +1627,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       verifyFailed: new Map(),
       reviewFailed: new Map(),
       reviewDeferred: new Map(),
+      highRiskHolds: new Map(),
       lastIntegrateAt: 0,
       recoveries: new Map(),
       reworks: new Map(),
@@ -1617,6 +1665,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.verifyFailed ??= new Map()
     engine.reviewFailed ??= new Map()
     engine.reviewDeferred ??= new Map()
+    engine.highRiskHolds ??= new Map()
     engine.lastIntegrateAt ??= 0
     engine.anomalies ??= []
     engine.recoveries ??= new Map()
@@ -2137,6 +2186,19 @@ export interface IntegrationDeps {
     target: string,
     opts: { tip: string; skipIfTip?: string },
   ) => Promise<ReviewResult>
+  /** Repo-relative paths the branch changed vs the trunk (merge-base(target,tip)…tip
+   *  — the branch's OWN diff), plus the tip sha — the HIGH-RISK FORCE-HOLD gate's
+   *  read (run BEFORE verify so a held branch never burns tsc/tests/panels).
+   *  MUST THROW on a git failure (unresolvable tip, diff error) — fail-closed: the
+   *  caller then DEFERS integration (retries next pass) instead of reading an
+   *  uncomputable diff as "no risky paths". (Deliberately NOT the fail-open
+   *  changedFilesVsTrunk used by the docs soft-warn — that one may return [] on
+   *  error because it only gates a warning.) Default: {@link defaultChangedPaths}. */
+  changedPaths: (
+    projectPath: string,
+    branch: string,
+    target: string,
+  ) => Promise<{ tip: string; files: string[] }>
   /** Land one branch on the trunk (FF / rebase / conflict). Never forces. */
   integrate: (projectPath: string, branch: string, target: string) => Promise<IntegrateOutcome>
   /** Acquire the CROSS-PROCESS integration lock for this repo (0706 二重司令塔
@@ -2195,6 +2257,41 @@ export interface IntegrationDeps {
    *  restarts work instead of leaving an idle (post-done) worker untouched.
    *  best-effort (a no-op when the session is gone). Default: defaultInstructRework. */
   instructRework: (terminalId: string, message: string) => void
+  // ── MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15) — the engine WAKES the
+  //    commander when a worker is ready instead of merging itself, and RE-wakes it if
+  //    it dies/hangs (card B). These seams replace the verify→lens→FF-push→land
+  //    machinery on the armed path (完了条件1+2+3) and add the resuscitation reflex. ──
+  /** Is the project's commander (manager) desk up AND RESPONDING? — the guard that stops
+   *  the engine spawning a SECOND commander PTY when a healthy one is present (二重起動
+   *  防止, 完了条件2) AND the trigger that resuscitates a stopped one (完了条件2+3).
+   *  Folds TWO signals (2026-07-15 card B): a LIVE PTY on the persisted manager session
+   *  (catches a dead process) AND a FRESH manager heartbeat (catches a HUNG one — PTY
+   *  alive but silent past {@link MANAGER_HEARTBEAT_STALE_MS}). `now` is the pass clock
+   *  (injected for deterministic staleness). MUST NOT throw — an unreadable session store
+   *  ⇒ false (absent), so the safe default is to resuscitate rather than stall integration.
+   *  Default: {@link defaultIsManagerActive}. */
+  isManagerActive: (projectPath: string, now: number) => Promise<boolean>
+  /** WAKE / RESUSCITATE the commander so it can decide the integration: spawn/resume the
+   *  manager PTY (spawnSwarmManager — resumes the days-long integration conversation, or
+   *  opens fresh; on a quota wall it DROPS the model one tier via resolveSwarmModelEffort
+   *  Probed inside — 完了条件4) AND raise ONE info notification naming the review branches
+   *  now waiting on a merge decision (完了条件2 — BATCH: one wake for the whole set, token-
+   *  thrifty). The spawned `/og-manage` reads the Board on startup and finds the review
+   *  cards itself; the notification is the durable, human-facing record. Returns true iff
+   *  the desk was actually woken; false ⇒ no usable model tier (every tier OFF/cooling) or
+   *  the spawn failed — the caller counts it as a failed attempt and retries next pass.
+   *  MUST NOT throw. Default: {@link defaultWakeManager}. */
+  wakeManager: (
+    projectPath: string,
+    cards: readonly { branch: string; title: string }[],
+  ) => Promise<boolean>
+  /** Push a FATAL event to the human (bell + OS toast) — the SAME seam as
+   *  {@link OrchestratorDeps.notify}, surfaced here so the integrate pass can escalate a
+   *  commander that keeps dying ('manager-unrevivable', 完了条件5). OPTIONAL + best-effort
+   *  (never awaited, internal-catch) so a notification fault can never disturb a pass, and
+   *  so tests/callers that don't set it keep working. Default (defaultDeps): the same
+   *  createSwarmFatalNotification wiring. */
+  notify?: (n: SwarmFatalNotification) => void
 }
 
 // --- Default (real) deps ------------------------------------------------------
@@ -2246,6 +2343,145 @@ const defaultMoveToDoing = (projectPath: string, taskId: string, branch: string)
 
 const defaultMoveToReview = (projectPath: string, taskId: string, branch: string): Promise<boolean> =>
   setCardColumn(projectPath, taskId, 'review', branch)
+
+// --- manager-only integration wake + resurrection (2026-07-15) ---------------
+//
+// The engine WAKES the commander when a worker is ready (it no longer integrates
+// itself). Card B adds the RESUSCITATION reflex on top: a heartbeat the commander
+// writes while it works, so the engine can tell a HUNG desk (live PTY, but silent —
+// context overflow / API error / hang while a big diff floods in, the owner's actual
+// complaint) from a healthy one, and re-wake it. The nervous system revives the brain.
+
+/** No manager heartbeat within this window (while integration work is WAITING) ⇒ the
+ *  commander is HUNG, not merely idle. Generous: an actively-integrating desk beats far
+ *  more often (每 phase), so 10 min of TOTAL silence with review cards stacked up is a
+ *  wedge, not a think-pause. Only ever consulted on the ARMED (autopilot) path, where a
+ *  live desk is expected to be auto-integrating, never idle-waiting for a human. */
+export const MANAGER_HEARTBEAT_STALE_MS = 10 * 60_000
+
+/** After the engine wakes/resuscitates a desk, wait this long before judging it again —
+ *  a freshly-`claude --resume`d commander needs to boot AND emit its first beat, and the
+ *  PREVIOUS (stale) heartbeat file still reads dead until it does. Without this grace the
+ *  boot gap would look like a hang and the engine would double-spawn every 15s tick. */
+export const MANAGER_RESUME_GRACE_MS = 5 * 60_000
+
+/** Consecutive resurrections before the reflex GIVES UP and escalates (完了条件5). A
+ *  commander that dies immediately every time (permanent quota wall / boot-crash bug)
+ *  would otherwise burn tokens forever in a detect→spawn→die loop. After this many
+ *  failed revivals the engine stops reviving and fires ONE 'manager-unrevivable' fatal
+ *  notification instead. In-memory counter (engine.managerResume) — resets on restart,
+ *  like all engine cognition. */
+export const MAX_MANAGER_RESUME_ATTEMPTS = 3
+
+/** The commander's own heartbeat file — a FIXED `manager.json` in the SAME per-repo dir
+ *  the workers beat into (`~/.openground/swarm/<repoKey>/`, 完了条件1: 心拍の在処). Keyed
+ *  by repo, not branch (the commander runs on the primary checkout, has no `swarm/*`
+ *  branch of its own), so it never collides with a worker heartbeat. null when the repo
+ *  key can't be derived (not a git repo / torn home). */
+const managerHeartbeatFile = async (projectPath: string): Promise<string | null> => {
+  const key = await swarmRepoKey(projectPath)
+  return key ? join(openGroundHome(), 'swarm', key, 'manager.json') : null
+}
+
+/** Write/refresh the commander's heartbeat (the seam POST /api/swarm/manager/beat calls
+ *  on the commander's behalf — it curls the app API for everything else too, so this
+ *  fits its「HTTP API + git だけ」protocol). `now` is injected for deterministic tests.
+ *  Best-effort: a write fault is swallowed (a missed beat at worst looks like a brief
+ *  silence to the monitor — never a crash). */
+export const writeManagerHeartbeat = async (
+  projectPath: string,
+  info: { phase?: string; note?: string } = {},
+  now: number = Date.now(),
+): Promise<boolean> => {
+  const file = await managerHeartbeatFile(projectPath)
+  if (!file) return false
+  try {
+    await mkdir(dirname(file), { recursive: true })
+    await atomicWriteJson(file, {
+      role: 'manager',
+      updatedAt: new Date(now).toISOString(),
+      ...(info.phase ? { phase: info.phase } : {}),
+      ...(info.note ? { note: info.note } : {}),
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Read the commander heartbeat's `updatedAt` as epoch ms, or null when absent /
+ *  unreadable / unparseable (never beat, torn home, hand-corrupted). Pure read — the
+ *  monitor decides freshness against its own clock ({@link isManagerHeartbeatFresh}). */
+export const readManagerHeartbeatAt = async (projectPath: string): Promise<number | null> => {
+  const file = await managerHeartbeatFile(projectPath)
+  if (!file) return null
+  try {
+    const j = JSON.parse(await readFile(file, 'utf8')) as { updatedAt?: unknown }
+    if (typeof j.updatedAt !== 'string') return null
+    const t = Date.parse(j.updatedAt)
+    return Number.isFinite(t) ? t : null
+  } catch {
+    return null
+  }
+}
+
+/** Is the commander heartbeat FRESH at `now`? Pure (no IO/clock) so the freshness rule
+ *  is unit-tested directly. `at == null` (never beat) is deliberately treated as FRESH
+ *  (fail-open): a live desk that simply isn't beating — an old pre-heartbeat session, a
+ *  desk the human started by hand — must not be torn down and respawned. Only a heartbeat
+ *  that EXISTED and went stale past {@link MANAGER_HEARTBEAT_STALE_MS} reads as hung. */
+export const isManagerHeartbeatFresh = (at: number | null, now: number): boolean =>
+  at == null || now - at < MANAGER_HEARTBEAT_STALE_MS
+
+/** "Is the commander desk up AND responding?" ({@link IntegrationDeps.isManagerActive}).
+ *  Two signals ANDed (完了条件2 — detect process death AND hang):
+ *    1. a LIVE PTY on the persisted manager session (swarmSessions + isClaudeSessionLive)
+ *       — catches a DEAD process (PTY gone), and
+ *    2. a FRESH manager heartbeat — catches a HUNG one (PTY alive but silent past the
+ *       stale window). Fail-open on a never-written beat (see isManagerHeartbeatFresh).
+ *  NEVER throws: an unreadable session store (unregistered path, torn home) ⇒ false, so
+ *  the engine resuscitates a fresh desk rather than silently stall integration. */
+const defaultIsManagerActive = async (projectPath: string, now: number): Promise<boolean> => {
+  try {
+    const rec = (await readSwarmSessions(projectPath)).manager
+    if (!rec || !isClaudeSessionLive(rec.sessionId)) return false // dead / absent PTY
+    return isManagerHeartbeatFresh(await readManagerHeartbeatAt(projectPath), now) // hung?
+  } catch {
+    return false
+  }
+}
+
+/** WAKE the commander ({@link IntegrationDeps.wakeManager}): spawn/resume its PTY
+ *  (spawnSwarmManager — resumes the days-long integration conversation, else fresh)
+ *  and post ONE info notification naming the waiting review branches. The spawned
+ *  `/og-manage` reads the Board and finds the review cards itself; the notification
+ *  is the durable, human-facing record. NEVER throws — a NoAllowedModelTierError
+ *  (every tier OFF/cooling) or any spawn fault ⇒ false, so the engine retries the
+ *  wake next pass instead of marking the branches handed-off. */
+const defaultWakeManager = async (
+  projectPath: string,
+  cards: readonly { branch: string; title: string }[],
+): Promise<boolean> => {
+  try {
+    await spawnSwarmManager({ projectPath })
+  } catch {
+    return false // no usable tier / claude missing / spawn fault — retry next pass
+  }
+  const n = cards.length
+  const list =
+    cards
+      .slice(0, 3)
+      .map((c) => c.branch)
+      .join(', ') + (n > 3 ? ` 他${n - 3}件` : '')
+  await createSwarmInfoNotification({
+    event: 'manager-woke',
+    projectPath,
+    branch: cards[0]?.branch,
+    taskTitle: cards[0]?.title || undefined,
+    detail: `review に ${n} 件の統合待ち — 司令官を起こしました。統合を判断してください (${list})`,
+  }).catch(() => {})
+  return true
+}
 
 // --- git + heartbeat probes (the monitor's read-only signals) ----------------
 
@@ -2793,6 +3029,61 @@ const SWARM_CODE_PATHS: readonly RegExp[] = [
 export const touchesSwarmPaths = (changedFiles: readonly string[]): boolean =>
   changedFiles.some((f) => SWARM_CODE_PATHS.some((re) => re.test(f)))
 
+/** HIGH-RISK paths the engine must NEVER auto-merge (force-hold, 2026-07-15).
+ *  MIRRORS the commander's manual-merge rule — skills/og-manage/SKILL.md
+ *  §「マージ」手順 0 の高リスク force-hold — and the two lists MUST stay the same
+ *  set: the unit test pins BOTH this set's match behavior AND the SKILL.md wording,
+ *  so a drift on either side breaks the build (single-definition + sync-test in
+ *  place of a shared constant, since the skill is prose). A branch whose diff vs
+ *  the trunk touches ANY of these is withheld from auto-integration: the card
+ *  stays in 'review' with a 'high-risk-hold' anomaly + fatal notification, and
+ *  ONLY a human's manual merge (the commander's 「マージ」 flow) lands it.
+ *  Matching leans fail-safe — a false hold costs one manual look, a miss ships a
+ *  poisoned release pipeline (the 2026-07-14 release.yml auto-merge). The set:
+ *   - CI/CD pipelines: `.github/workflows/` + release.yml / ci.yml anywhere
+ *   - dependency/build-script injection: package.json + lockfiles
+ *   - signing/notarization: `sign…` / `notar…` path segments (e.g.
+ *     scripts/sign-and-notarize.sh; segment-anchored so design… / assign… never match)
+ *   - the privileged Electron process: electron/main.js
+ *   - secrets/credentials: `secret` anywhere, `.env` files, auth/token path segments
+ *     AND camelCase joins (supabaseAuth.ts / authStore.ts — the 2026-07-15 gap: the
+ *     segment-boundary regexes above can't see camel boundaries, and case-insensitive
+ *     matching can't distinguish authStore from author, so the camel companions below
+ *     are case-SENSITIVE and live as separate patterns)
+ *   - the authorization core by explicit path: roles.ts / swarmGate.ts /
+ *     swarmAllowedModels.ts decide WHO is owner and WHICH models swarm may use, but
+ *     contain no auth-ish name segment. Deliberately NOT widened to swarmOrchestrator /
+ *     swarmLaunch: those change on every engine iteration, and holding all swarm work
+ *     would normalize overriding the hold — the fence stays on the decision layer. */
+export const HIGH_RISK_PATHS: readonly RegExp[] = [
+  /^\.github\/workflows\//,
+  /(^|\/)(release|ci)\.ya?ml$/,
+  /(^|\/)package\.json$/,
+  /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.ya?ml|bun\.lockb?)$/,
+  /(^|[/._-])(code)?sign(ing|ed)?([/._-]|$)/i,
+  /notar/i,
+  /^electron\/main\.js$/,
+  /secret/i,
+  /(^|\/)\.env(\.|$)/,
+  /(^|[/._-])o?auth([/._-]|$)/i,
+  /(^|[/._-])tokens?([/._-]|$)/i,
+  // camelCase companions (case-sensitive — /i would swallow author/tokenizer):
+  // an Upper word standing on a camel boundary (supabaseAuth.ts, AuthGate.tsx,
+  // refreshTokens.ts, apiSecretKey.ts)…
+  /(^|[/._-]|[a-z0-9])(OAuth|Auth|Tokens?|Secrets?)([/._-]|$|[A-Z0-9])/,
+  // …and a segment-initial lower word continued in camelCase or by a digit
+  // (authStore.ts, oauth2.ts, tokenRefresh.ts). author/authoring stay clear:
+  // their next char is lowercase.
+  /(^|[/._-])(o?auth|tokens?|secrets?)[A-Z0-9]/,
+  // authorization core — no auth-ish segment in the names, so listed explicitly
+  /^src\/lib\/server\/(roles|swarmGate|swarmAllowedModels)\.ts$/,
+]
+
+/** The subset of a changed-file list that matches {@link HIGH_RISK_PATHS}. Pure;
+ *  [] ⇒ the branch is NOT high-risk. Exported for the force-hold gate + tests. */
+export const highRiskChangedPaths = (changedFiles: readonly string[]): string[] =>
+  changedFiles.filter((f) => HIGH_RISK_PATHS.some((re) => re.test(f)))
+
 /** Repo-relative paths the branch changed vs the trunk (its own diff:
  *  merge-base(trunk,tip)…tip), as a pure read in the main checkout — no worktree.
  *  [] on any git failure: a diff we cannot compute triggers NO diff-gated check,
@@ -2810,6 +3101,32 @@ const changedFilesVsTrunk = async (
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean)
+}
+
+/** {@link IntegrationDeps.changedPaths}'s real implementation — the HIGH-RISK
+ *  FORCE-HOLD gate's read. Same three-dot read as {@link changedFilesVsTrunk}
+ *  (merge-base(target,tip)…tip = the branch's OWN changes) but FAIL-CLOSED where
+ *  that one is fail-open: gitOut returns null on a git FAILURE and '' on a
+ *  genuinely empty diff (already merged) — here a failure THROWS (the caller
+ *  defers integration; an unreadable diff is never "no risky paths") while an
+ *  empty diff is a normal `{files: []}`. Pure read in the main checkout — no
+ *  worktree, no mutation. */
+const defaultChangedPaths = async (
+  projectPath: string,
+  branch: string,
+  targetRef: string,
+): Promise<{ tip: string; files: string[] }> => {
+  const tip = await gitOut(projectPath, ['rev-parse', '--verify', `${branch}^{commit}`])
+  if (!tip) throw new Error(`unresolvable branch tip: ${branch}`)
+  const out = await gitOut(projectPath, ['diff', '--name-only', `${targetRef}...${tip}`])
+  if (out === null) throw new Error(`diff --name-only failed: ${targetRef}...${branch}`)
+  return {
+    tip,
+    files: out
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  }
 }
 
 /** The swarm safety regression suite (the A1 net, card 8d778645). Running these two
@@ -3352,10 +3669,14 @@ export const tallyReview = (verdicts: ReviewerVerdict[], panelSize: number): Rev
  *  the rule is a WEIGHTED OR, not a vote count:
  *    - must-fix weight (Σ of each must-fix lens's weight) ≥ `reworkThreshold`
  *      → 'rework'    (差し戻し・絶対にマージしない)                          [条件2]
- *    - else if EVERY lens returned a decisive verdict (no abstention) → 'integrate'
- *      (統合に進む — must-fix weight is under threshold)                     [条件4]
- *    - else (a lens ABSTAINED ⇒ that failure mode went UN-reviewed) → 'defer'
+ *    - else if EVERY lens is PRESENT and returned a decisive verdict (a full
+ *      panel, no abstention, ≥1 decisive vote) → 'integrate' (統合に進む —
+ *      must-fix weight is under threshold)                                   [条件4]
+ *    - else (a lens ABSTAINED, or the verdict list is EMPTY/short of the panel ⇒
+ *      that failure mode went UN-reviewed) → 'defer'
  *      (保留・次パスで再評価・マージもせず 差し戻しカウントも進めない)。
+ *      FAIL-CLOSED: zero decisive votes can never integrate — "レビューできな
+ *      かった" is not "クリーン" (2026-07-14, the [must-fix 0 / clean 0] land).
  *  Default lens weights are 1 and the default threshold 1, so ANY single lens's
  *  must-fix reworks — but a lens can be down-weighted so its must-fix alone does not
  *  block (条件2「lens別の重み付けは設定可」). Per-lens verdicts are folded into
@@ -3395,7 +3716,13 @@ export const tallyLensReview = (
       reason: `lens別敵対レビュー [${summary}] — must-fix 重み ${mustFixWeight} ≥ 閾値 ${reworkThreshold} で差し戻し`,
     }
   }
-  if (abstained === 0) {
+  // FAIL-CLOSED (2026-07-14): 'integrate' requires POSITIVE evidence — a FULL panel
+  // where every lens voted decisively. `abstained === 0` alone is also true of an
+  // EMPTY (or short) verdict list — a panel that never ran, or lost reviewers before
+  // they entered the tally — and that shape is "nobody reviewed", not "everybody
+  // approved". Zero decisive votes must never read as clean.
+  const decisive = mustFix + clean
+  if (abstained === 0 && decisive >= lenses.length && decisive > 0) {
     return {
       decision: 'integrate',
       verdicts,
@@ -3404,12 +3731,19 @@ export const tallyLensReview = (
       reason: `lens別敵対レビュー [${summary}] — 全lens判定済 (must-fix 重み ${mustFixWeight} < 閾値 ${reworkThreshold}) で統合`,
     }
   }
+  const missing = Math.max(0, lenses.length - verdicts.length)
+  const shortfall =
+    missing > 0
+      ? `${missing}個のlensの結果が欠落`
+      : abstained > 0
+        ? `${abstained}個のlensが未判定`
+        : 'decisiveな票が0(パネル空)'
   return {
     decision: 'defer',
     verdicts,
     mustFix,
     clean,
-    reason: `lens別敵対レビュー [${summary}] — ${abstained}個のlensが未判定(未レビュー観点あり) → 保留して次パスで再評価`,
+    reason: `lens別敵対レビュー [${summary || '票なし'}] — ${shortfall}(未レビュー観点あり) → 保留して次パスで再評価`,
   }
 }
 
@@ -4049,6 +4383,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   fetchReview: defaultFetchReview,
   prepareTarget: defaultPrepareTarget,
   classify: classifyBranch,
+  changedPaths: defaultChangedPaths,
   // The quality-floor gate (card 4e7f2151): lint + tsc + test green on EVERY branch
   // before it may auto-merge. tsc is the always-on primary; lint + the full test suite
   // are always-on too (appliesTo ⇒ true); swarm-safety stays diff-gated (B2 contained).
@@ -4067,6 +4402,10 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   cleanup: defaultCleanup,
   killPty: killTerminal,
   instructRework: defaultInstructRework,
+  // Manager-only integration (2026-07-15): the engine wakes the commander instead
+  // of merging. isManagerActive gates the double-launch; wakeManager spawns the desk.
+  isManagerActive: defaultIsManagerActive,
+  wakeManager: defaultWakeManager,
   worktreeExists: defaultWorktreeExists,
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
   // path uses, so the unattended background sweep never flips an engine `running` into a
@@ -5152,12 +5491,14 @@ export const runDispatchPass = async (
 export const runIntegratePass = async (
   engine: ProjectEngine,
   deps: IntegrationDeps,
+  // Injected for deterministic tests of the RESURRECTION reflex's time-based state
+  // machine (stale window / boot grace). Production passes the wall clock.
+  now: number = Date.now(),
 ): Promise<void> => {
   if (!engine.running) return
   // Throttle: skip ticks until INTEGRATE_TICK_MS has passed (the loop still
   // ticks every TICK_MS for dispatch). lastIntegrateAt starts at 0 so the first
   // pass after start (or after arming auto-integrate) runs immediately.
-  const now = Date.now()
   if (now - engine.lastIntegrateAt < INTEGRATE_TICK_MS) return
   engine.lastIntegrateAt = now
 
@@ -5191,6 +5532,9 @@ export const runIntegratePass = async (
   for (const b of Array.from(engine.reviewDeferred.keys())) {
     if (!present.has(b)) engine.reviewDeferred.delete(b)
   }
+  for (const b of Array.from(engine.highRiskHolds.keys())) {
+    if (!present.has(b)) engine.highRiskHolds.delete(b)
+  }
 
   // A. Read-only readiness for the dashboard (both switch positions).
   const readiness: OrchestratorReview[] = []
@@ -5203,645 +5547,122 @@ export const runIntegratePass = async (
   }
   engine.reviews = readiness
 
-  // 差し戻し(rework) — レビューで must-fix(verify が RED)を見つけたカードを review に
-  // 滞留させず doing へ戻し、worker に再作業させる『欠落遷移』。手動 swarm-board.sh の
-  // `rework <id> [max]` と同じく per-card のループガード(engine.reworks / MAX_REWORKS)を
-  // 持ち、上限超過で 'blocked' へ退避して review→doing→review の無限バウンスを断つ。LIVE
-  // worker は同一ブランチ/worktree で継続(stage→running + 修正指示で『戻して直す』);
-  // worker が居ない/死んでいる(継続不可)なら resolveOrchestratorReview('todo') と整合的に
-  // 'todo' へ戻して再 dispatch。autoMerge が armed のとき(下の B.)だけ呼ばれる — OFF 時は
-  // 従来どおりカードは review に留まる。安全ゲート(verify GREEN まで done にしない等)は不変。
-  // NOTE (integrate-beside-the-tick): the whole body runs INSIDE the engine
-  // critical section. The integrate pass no longer holds passInFlight (it is
-  // kicked fire-and-forget by kickIntegratePass so the monitor keeps ticking
-  // through a multi-minute verify), which means this write path — board moves +
-  // engine.workers rebuild — could otherwise INTERLEAVE with the monitor's own
-  // read→rebuild of the same state (lost updates both ways: a torn-down worker
-  // resurrected by the monitor's stale snapshot, or this filter missing a worker
-  // object the monitor just replaced). The slow verify/panel awaits stay OUTSIDE
-  // the section (owner stop/resolve clicks must not queue behind them); only
-  // these short write sections serialize. The worker lookup happens inside the
-  // lock too, so it always sees the monitor's committed roster.
-  const reworkOrPark = (
-    card: ProjectTask & { branch: string },
-    reasonLine: string,
-  ): Promise<void> => runExclusive(engine, async () => {
-    if (!engine.running) return // owner stop landed during the (slow) verify await — don't touch the card
-    const branch = card.branch
-    const title = shorten(card.title ?? '')
-    const count = (engine.reworks.get(card.id) ?? 0) + 1
-    const w = engine.workers.find((x) => x.branch === branch)
-
-    // LEARNING LOOP (card fdf714ef): remember WHY this card was sent back BEFORE any
-    // branch decision, keyed by taskId (stable across the fresh branch a re-dispatch
-    // mints). Every rework/rollback path below flows through here, so this single
-    // write covers all of them (live-rework, dead→re-dispatch, budget→blocked). The
-    // NEXT dispatch of this SAME card (runDispatchPass) consumes it into the fresh
-    // worker's /order so the swarm doesn't repeat the same RED verify / must-fix.
-    // Overwritten every time so the memo is always the LATEST reason — but any
-    // queued owner-answer segments (C1 escalations) are preserved across the
-    // overwrite (mergeReworkReason); pruned on done/vanish by pruneReworks. A
-    // LIVE worker is ALSO told the reason directly over its PTY (instructRework,
-    // below) — this memo is the durable copy that survives a worker crash +
-    // requeue, when the in-place instruction is lost.
-    engine.reworkReasons.set(card.id, mergeReworkReason(engine.reworkReasons.get(card.id), reasonLine))
-
-    // 上限超過 → 'blocked' 退避(無限バウンス遮断)。leftover worker は teardown(branch 維持)。
-    if (count > MAX_REWORKS) {
-      let parked = false
-      try {
-        parked = await deps.recoverCard(engine.path, card.id, 'blocked')
-      } catch {
-        parked = false
-      }
-      if (!parked) {
-        // park の write が kept — reworks は bump せず次パスで再試行(カードは review に残る)。
-        logLine(engine, 'warn', `rework→blocked move kept (will retry): ${title}`)
-        return
-      }
-      engine.reworks.set(card.id, count) // count > MAX を保持 → detectAnomalies が surface
-      engine.verifyFailed.delete(branch)
-      engine.reviewFailed.delete(branch)
-      engine.conflictedBranches.delete(branch)
-      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-      if (w) {
-        try {
-          await deps.recoverWorker({
-            projectPath: engine.path,
-            worktree: w.worktree,
-            terminalId: w.terminalId,
-            reason: 'rework', // salvage any uncommitted work onto the branch first
-          })
-        } catch {
-          /* best-effort teardown */
-        }
-        engine.workers = engine.workers.filter((x) => x !== w)
-      }
-      logLine(
-        engine,
-        'error',
-        `差し戻し上限(${MAX_REWORKS})超過 — 'blocked' 退避(要人手): ${branch} (${title}) — ${reasonLine}`,
-      )
-      return
-    }
-
-    // 上限内 → 差し戻し。LIVE worker は同一ブランチで継続(『戻して直す』)。
-    const workerAlive = !!w && deps.isAlive(w.terminalId)
-    if (workerAlive && w) {
-      let moved = false
-      try {
-        moved = await deps.moveToDoing(engine.path, card.id, branch)
-      } catch {
-        moved = false
-      }
-      if (!moved) {
-        logLine(engine, 'warn', `rework→doing move kept (will retry): ${title}`)
-        return
-      }
-      engine.reworks.set(card.id, count)
-      engine.conflictedBranches.delete(branch)
-      // verifyFailed は KEEP: worker が直さず同 tip で再 promote したら verify は skip され
-      // (無駄な再 tsc 無し)また差し戻されて count が進む; 直して tip が変われば再 verify が
-      // 走り、緑なら done。
-      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-      clearKeptMove(engine, card.id)
-      // promote 済み('done' 表示)の worker を「再作業中」に戻し、なぜ戻されたかを伝えて idle の
-      // ままにしない。reworkAt は monitorWorkers の re-promote 抑制の基準時刻 — worker の心拍ファイルは
-      // まだ差し戻し前の readyToMerge:true を保持しているため、これが無いと次パスで即 re-promote され、
-      // worker が修正する間もなく差し戻しが連打されて budget を浪費する(re-promote race)。worker が
-      // 差し戻し後の新しい完了報告を出すまで promote を抑える。
-      w.stage = 'running'
-      w.reworkAt = new Date(now).toISOString()
-      try {
-        deps.instructRework(
-          w.terminalId,
-          `[レビュー差し戻し ${count}/${MAX_REWORKS}] このカードはレビューで問題が見つかり doing に戻されました。理由: ${reasonLine}。同じブランチ ${branch} で修正し、tsc/lint/test を緑にしてから swarm-beat.sh で done を再報告してください。`,
-        )
-      } catch {
-        /* best-effort PTY write */
-      }
-      logLine(
-        engine,
-        'warn',
-        `差し戻し review→doing (${count}/${MAX_REWORKS}) 同一ブランチ継続: ${branch} (${title}) — ${reasonLine}`,
-      )
-      return
-    }
-
-    // worker が居ない/死んでいる → 同一継続は不可。'todo' へ戻して新 worker に再 dispatch
-    // (resolveOrchestratorReview('todo') と整合)。leftover の死んだ worker は teardown。
-    let moved = false
-    try {
-      moved = await deps.recoverCard(engine.path, card.id, 'todo')
-    } catch {
-      moved = false
-    }
-    if (!moved) {
-      logLine(engine, 'warn', `rework→todo move kept (will retry): ${title}`)
-      return
-    }
-    engine.reworks.set(card.id, count)
-    engine.verifyFailed.delete(branch)
-    engine.reviewFailed.delete(branch)
-    engine.conflictedBranches.delete(branch)
-    engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-    clearKeptMove(engine, card.id)
-    if (w) {
-      try {
-        await deps.recoverWorker({
-          projectPath: engine.path,
-          worktree: w.worktree,
-          terminalId: w.terminalId,
-          reason: 'rework', // salvage any uncommitted work onto the branch first
-        })
-      } catch {
-        /* best-effort teardown */
-      }
-      engine.workers = engine.workers.filter((x) => x !== w)
-    }
-    logLine(
-      engine,
-      'warn',
-      `差し戻し review→todo (${count}/${MAX_REWORKS}) 再 dispatch(worker 不在): ${branch} (${title}) — ${reasonLine}`,
-    )
-  })
-
-  // CONFLICT → worker rebase 委譲 (card 012a2848). 統合の rebase が競合したカードを review に
-  // 滞留させ人手を待つ(旧 conflictedBranches/human-resolve)のをやめ、司令塔が手でやっている
-  // 「担当 worker に『自分のブランチを rebase して解消しろ』と投げ返す」を自動化する。構造は
-  // reworkOrPark と同型(LIVE worker は同一ブランチ継続+PTY 指示、不在なら review→todo 再
-  // dispatch、上限超過で 'blocked' 退避)だが、(1)別予算 conflictReworks/MAX_CONFLICT_REWORKS で
-  // 数え(conflict は worker のコード問題でなく trunk が動いた結果)、(2)指示は
-  // buildConflictRebaseInstruction(swarmIntegrate) で「自分のブランチのみ rebase・push しない・
-  // force-push 厳禁」を明記する(条件2)。委譲した時点でカードは review を離れる(doing/todo)ので
-  // 二重統合されない(条件3)。worker が解消して commit→done を再報告→monitor が review へ再 promote
-  // →次の統合パスが再統合を試みる(条件4)。autoMerge armed のとき(B.)だけ呼ばれる。
-  // Same critical-section contract as reworkOrPark above (integrate-beside-the-
-  // tick): short write section inside the lock, slow awaits outside.
-  const delegateConflict = (
-    card: ProjectTask & { branch: string },
-    files: readonly string[],
-    trunk: string,
-  ): Promise<void> => runExclusive(engine, async () => {
-    if (!engine.running || !engine.autoMerge) return // owner stop/disarm during the (slow) integrate await
-    const branch = card.branch
-    const title = shorten(card.title ?? '')
-    const count = (engine.conflictReworks.get(card.id) ?? 0) + 1
-    const w = engine.workers.find((x) => x.branch === branch)
-    // The single source of the delegated instruction (condition 1+2): names the
-    // conflicting files + the rebase command + the never-(force-)push contract.
-    const reasonLine = buildConflictRebaseInstruction({ branch, target: trunk, files })
-    // LEARNING LOOP (shared with reworkOrPark, card fdf714ef): durable memo a
-    // dead-worker re-dispatch hands to the fresh worker's /order — so the conflict
-    // context survives a worker crash + requeue, when the in-place PTY hint is
-    // lost. Queued owner answers (C1) survive the overwrite (mergeReworkReason).
-    engine.reworkReasons.set(card.id, mergeReworkReason(engine.reworkReasons.get(card.id), reasonLine))
-
-    // 上限超過 → 'blocked' 退避(無限投げ返し遮断)。stamp を残して「要人手の競合」を可視化。
-    if (count > MAX_CONFLICT_REWORKS) {
-      let parked = false
-      try {
-        parked = await deps.recoverCard(engine.path, card.id, 'blocked')
-      } catch {
-        parked = false
-      }
-      if (!parked) {
-        logLine(engine, 'warn', `conflict→blocked move kept (will retry): ${title}`)
-        return
-      }
-      engine.conflictReworks.set(card.id, count)
-      try {
-        await deps.markConflict(engine.path, card.id, true) // 要人手の競合として可視化
-      } catch {
-        /* best-effort — the card is parked regardless */
-      }
-      engine.conflictedBranches.delete(branch)
-      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-      if (w) {
-        try {
-          await deps.recoverWorker({
-            projectPath: engine.path,
-            worktree: w.worktree,
-            terminalId: w.terminalId,
-            reason: 'rework', // salvage any uncommitted work onto the branch first
-          })
-        } catch {
-          /* best-effort teardown — branch KEPT for the human */
-        }
-        engine.workers = engine.workers.filter((x) => x !== w)
-      }
-      logLine(
-        engine,
-        'error',
-        `conflict 委譲上限(${MAX_CONFLICT_REWORKS})超過 — 'blocked' 退避(要人手): ${branch} (${title})`,
-        'conflict',
-      )
-      return
-    }
-
-    // 上限内・LIVE worker → 同一ブランチで rebase 解消させる(『戻して直す』)。force-push せず
-    // worker 自身の swarm/* ブランチを rebase するだけ; 統合(push)は engine が後で行う(条件2)。
-    const workerAlive = !!w && deps.isAlive(w.terminalId)
-    if (workerAlive && w) {
-      let moved = false
-      try {
-        moved = await deps.moveToDoing(engine.path, card.id, branch)
-      } catch {
-        moved = false
-      }
-      if (!moved) {
-        logLine(engine, 'warn', `conflict rework→doing move kept (will retry): ${title}`)
-        return
-      }
-      engine.conflictReworks.set(card.id, count)
-      engine.conflictedBranches.delete(branch)
-      engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-      clearKeptMove(engine, card.id)
-      // promote 済み('done' 表示)の worker を「再作業中」に戻し、なぜ戻されたかを伝える。
-      // reworkAt は monitorWorkers の re-promote 抑制基準(心拍 FILE はまだ readyToMerge:true の
-      // ため、これが無いと次パスで即 re-promote→未解消のまま再統合→また conflict と空回り)。
-      w.stage = 'running'
-      w.reworkAt = new Date(now).toISOString()
-      try {
-        deps.instructRework(
-          w.terminalId,
-          `[統合rebase委譲 ${count}/${MAX_CONFLICT_REWORKS}] ${reasonLine} 解消後は swarm-beat.sh で done を再報告してください。`,
-        )
-      } catch {
-        /* best-effort PTY write */
-      }
-      logLine(
-        engine,
-        'warn',
-        `conflict → rebase委譲 review→doing (${count}/${MAX_CONFLICT_REWORKS}) 同一ブランチ継続: ${branch} (${title})`,
-        'conflict',
-      )
-      return
-    }
-
-    // worker 不在/死亡 → 同一継続不可。'todo' へ戻して新 worker に再 dispatch(reworkReasons が
-    // /order に conflict 文脈を注入 → 最新 trunk から作り直す)。死んだ worker は teardown(branch 維持)。
-    let moved = false
-    try {
-      moved = await deps.recoverCard(engine.path, card.id, 'todo')
-    } catch {
-      moved = false
-    }
-    if (!moved) {
-      logLine(engine, 'warn', `conflict rework→todo move kept (will retry): ${title}`)
-      return
-    }
-    engine.conflictReworks.set(card.id, count)
-    engine.conflictedBranches.delete(branch)
-    engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-    clearKeptMove(engine, card.id)
-    if (w) {
-      try {
-        await deps.recoverWorker({
-          projectPath: engine.path,
-          worktree: w.worktree,
-          terminalId: w.terminalId,
-          reason: 'rework', // salvage any uncommitted work onto the branch first
-        })
-      } catch {
-        /* best-effort teardown */
-      }
-      engine.workers = engine.workers.filter((x) => x !== w)
-    }
-    logLine(
-      engine,
-      'warn',
-      `conflict → 再dispatch review→todo (${count}/${MAX_CONFLICT_REWORKS}) worker不在: ${branch} (${title})`,
-      'conflict',
-    )
-  })
-
-  // B. Act only when armed (and a trunk exists to land on).
+  // ── B. MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15) — armed = "keep the
+  //       commander alive to integrate" ──
+  //
+  //  The engine NO LONGER integrates. Everything that used to live here — the
+  //  high-risk force-hold gate, the verify (tsc/lint/safety/test) gate, the
+  //  adversarial LENS panel + its majority vote, the cross-process integration lock,
+  //  the FF / rebase push that moved the trunk, the review→done move, the worktree
+  //  teardown, and the reworkOrPark / delegateConflict 差し戻し machinery — is GONE
+  //  from the armed path. Integration is the COMMANDER's job ALONE now: its own
+  //  heavyweight review + manual FF push (skills/og-manage §「マージ」). The safety
+  //  nets that used to live here — the fail-closed 0-vote ban and the high-risk
+  //  force-hold — now live only in that manual-merge flow (完了条件4; the engine-side
+  //  copies are retired, not double-managed — docs/commander/03-integration-review.md).
+  //
+  //  WHY (the 2026-07-15 incident): autoMerge FF-pushed a hole-y branch onto main
+  //  OVER the commander's concurrent review→doing 差し戻し — two integrators racing on
+  //  one trunk. And its budget-bounded lens majority (4 votes clean) had missed an
+  //  auth camelCase hole that the commander's heavyweight reviewer caught. Taking the
+  //  engine out of the merge business entirely makes that race STRUCTURALLY impossible
+  //  (a mechanism, not a rule) and guarantees the engine's lens result can no longer
+  //  move main by ANY route (完了条件1+3 — fixed in tests).
+  //
+  //  BUT making integration manager-only means the swarm STALLS if the commander stops
+  //  — and it does stop (opus flooded by a big diff: context overflow / API error /
+  //  hang — the owner's actual complaint). So the engine keeps a RESUSCITATION reflex
+  //  (card B, 完了条件1-6): with work WAITING, it checks the desk is up AND responding
+  //  (isManagerActive = live PTY + fresh heartbeat), and re-wakes a dead/hung one. The
+  //  engine only WAKES — it never integrates on the commander's behalf (完了条件6, reflex
+  //  ≠ judgment). A desk that keeps dying escalates instead of looping (完了条件5).
+  //
+  //  This reflex runs ONLY on the armed path: with autoMerge OFF the human drives the
+  //  desk by hand, so an idle-waiting commander is NORMAL and must never be torn down.
+  //  Read-only Part A above already published the「統合可」readiness the owner sees
+  //  either way.
   if (!engine.autoMerge) return
-  if (!target) {
-    logLine(engine, 'warn', 'auto-integrate: no remote trunk to land on — leaving cards in review')
+
+  const rs = (engine.managerResume ??= { attempts: 0, lastWakeAt: 0, fatalFired: false })
+
+  // No integrable work → the commander isn't needed. DISARM the reflex fully (a later
+  // batch starts a clean episode) and stop — we never resuscitate a desk with no work.
+  if (swarmCards.length === 0) {
+    rs.attempts = 0
+    rs.lastWakeAt = 0
+    rs.fatalFired = false
     return
   }
 
-  for (const card of swarmCards) {
-    if (!engine.running || !engine.autoMerge) return // global stop / disarm mid-pass
+  // Work IS waiting. In autopilot the commander must be up AND responding to land it.
+  // isManagerActive folds in the heartbeat (card B): a live PTY silent past the stale
+  // window reads as HUNG, not present. Slow await, but no trunk mutation follows.
+  const active = await deps.isManagerActive(engine.path, now)
+  if (!engine.running || !engine.autoMerge) return // owner stop/disarm during the probe
+  if (active) {
+    // Healthy desk on the job → reflex disarmed (a future silence starts fresh).
+    rs.attempts = 0
+    rs.fatalFired = false
+    return
+  }
 
-    // A branch already known to conflict: only retry once it has become a clean
-    // fast-forward (a human rebased / the trunk moved), else skip the rebase.
-    if (engine.conflictedBranches.has(card.branch)) {
-      if ((await deps.classify(engine.path, card.branch, target)) !== 'ff') {
-        // Still conflicted — re-apply the Board stamp if it's missing (self-heals
-        // a stamp write that was kept on the pass that first hit the conflict),
-        // WITHOUT re-running the rebase that already failed.
-        if (!card.integrationConflict) await deps.markConflict(engine.path, card.id, true)
-        continue
-      }
-      engine.conflictedBranches.delete(card.branch)
-      // Clear the persistent stamp, and reflect a SUCCESSFUL clear in the local
-      // snapshot so the land-path backstop below skips a redundant re-clear. A KEPT
-      // clear leaves the snapshot stamped → the backstop still fixes it on land.
-      if (await deps.markConflict(engine.path, card.id, false)) card.integrationConflict = false
-    }
+  // Desk ABSENT (dead PTY) or HUNG (stale heartbeat). Give a freshly-woken one time to
+  // boot + emit its first beat before judging again (else the boot gap double-spawns).
+  if (rs.lastWakeAt > 0 && now - rs.lastWakeAt < MANAGER_RESUME_GRACE_MS) return
 
-    // VERIFICATION GATE — never let the engine auto-merge code that doesn't even
-    // type-check. Verify the to-be-landed tree (branch rebased onto trunk); a RED
-    // result keeps the card in review (NOT merged) and logs the reason. Memoized
-    // by tip so a persistently-red branch isn't re-tsc'd every pass — but a new
-    // commit (different tip ⇒ a fix) re-verifies and can land.
-    const knownBadTip = engine.verifyFailed.get(card.branch)
-    let verdict: Awaited<ReturnType<IntegrationDeps['verify']>>
-    try {
-      verdict = await deps.verify(
-        engine.path,
-        card.branch,
-        target,
-        knownBadTip ? { skipIfTip: knownBadTip } : undefined,
-      )
-    } catch (e) {
-      // An ERRORED verify is not a green light: defer (leave in review, retry next
-      // pass) rather than fall through to integrate unverified.
-      logLine(engine, 'warn', `verification errored (deferring): ${card.branch} — ${errMsg(e)}`)
-      continue
-    }
-    if (!verdict.ok) {
-      if (verdict.tip) engine.verifyFailed.set(card.branch, verdict.tip)
-      // Surface "needs a human" on the dashboard (the same dot a merge conflict
-      // gets — both mean "auto-merge can't take it from here").
-      const r = engine.reviews.find((x) => x.taskId === card.id)
-      if (r) r.status = 'conflict'
-      // 差し戻し: 検証 RED は worker のコード問題 — review に滞留させず doing へ戻して直させる
-      // (『欠落遷移』の核心)。上限超過で 'blocked' 退避。verdict.reason(tsc エラー要約)を worker
-      // への修正指示に渡す。skipped(同 tip の再評価=worker が直さず同じ commit で戻ってきた)でも
-      // 差し戻して count を進め、最終的に blocked へ寄せる — これが review↔doing の無限往復を断つ。
-      await reworkOrPark(card, verdict.reason ?? 'verification not green (tsc)')
-      continue // never integrate unverified work
-    }
-    // Verified green (or nothing to verify) — a previously-red branch was fixed.
-    engine.verifyFailed.delete(card.branch)
-    // Docs-freshness soft-warn (TARGET-STATE §6) — read-only journal breadcrumb,
-    // never gates the merge (verdict.ok already true at this point).
-    if (verdict.docsWarning) logLine(engine, 'warn', `${verdict.docsWarning}: ${card.branch}`)
-
-    // ADVERSARIAL REVIEW GATE (card a14329dc) — COMPLEMENT to the verify gate above.
-    // verify proved the tree is MECHANICALLY sound (tsc/safety green); now N
-    // INDEPENDENT reviewers (NONE the worker) adversarially fact-check the
-    // to-be-landed diff and a STRICT majority decides. Optional dep: defaultDeps
-    // wires the real claude panel; absent ⇒ this stage is skipped (pre-a14329dc
-    // behavior). Only runs when there is a real tip to land (verify can return a
-    // vacuous ok with tip:null — nothing to review; integrate handles it). Memoized
-    // by tip exactly like verify, so a stuck worker re-reporting the SAME commit
-    // re-reworks WITHOUT re-burning N claude sessions.
-    if (deps.review && verdict.tip) {
-      // SPAWN PARK pre-gate (must-fix 差し戻し 0708): while no tier is usable — every
-      // ENABLED tier cooling, or every tier switched OFF — don't call the review dep
-      // at all; the card simply WAITS in review and the first tick with a usable tier
-      // re-enters here as if nothing happened. Deliberately BEFORE the defer-streak
-      // machinery and WITHOUT touching reviewDeferred: a park is an engine hold, not a
-      // panel verdict, and counting it would burn MAX_REVIEW_DEFERS in ~3 ticks (~45s),
-      // flip the card to needs-human, and — via the defer-exhausted memo below — never
-      // re-spawn the panel even after the park lifts. No per-tick log either: the
-      // dispatch pass already logs the park's enter/lift edges. Evaluated fresh per
-      // card (not the tick-top `now`) — verify above can run for minutes, so the park
-      // state may have changed since the tick began.
-      if (spawnBlock(Date.now(), await getAllowedModelTiers()) != null) continue
-      const reviewTip = verdict.tip
-      // Defer-exhausted on THIS exact tip → don't re-burn the panel (it kept reaching
-      // no majority). Keep the "needs a human" dot and leave the card in review; a NEW
-      // commit (different tip) clears this and re-arms the panel. Bounds the drain a
-      // systemic claude outage (every reviewer abstains) would otherwise cause.
-      const deferMemo = engine.reviewDeferred.get(card.branch)
-      if (deferMemo && deferMemo.tip === reviewTip && deferMemo.count >= MAX_REVIEW_DEFERS) {
-        const r = engine.reviews.find((x) => x.taskId === card.id)
-        if (r) {
-          r.status = 'conflict'
-          // engine.reviews is rebuilt from readiness every pass — re-stamp the
-          // streak's abstention evidence so the dashboard keeps saying WHY this
-          // card froze (完了条件3), not just that it did.
-          r.abstainSummary = describeAbstainTallies(deferMemo.abstains)
-        }
-        continue
-      }
-      const knownBadReviewTip = engine.reviewFailed.get(card.branch)
-      let review: ReviewResult
-      try {
-        review = await deps.review(engine.path, card.branch, target, {
-          tip: reviewTip,
-          ...(knownBadReviewTip ? { skipIfTip: knownBadReviewTip } : {}),
-        })
-      } catch (e) {
-        // An ERRORED review is NOT a green light: defer (leave in review, retry next
-        // pass) rather than fall through and merge un-reviewed.
-        logLine(engine, 'warn', `adversarial review errored (deferring): ${card.branch} — ${errMsg(e)}`)
-        continue
-      }
-      // The panel is slow (N claude sessions) — re-check the owner's stop/disarm
-      // that may have landed while we awaited, before mutating the card.
-      if (!engine.running || !engine.autoMerge) return
-      const tally = `must-fix ${review.mustFix} / clean ${review.clean}`
-      if (review.decision === 'rework') {
-        // Majority must-fix → 差し戻し (review→doing), NEVER merge (condition 2).
-        engine.reviewFailed.set(card.branch, reviewTip)
-        engine.reviewDeferred.delete(card.branch) // a decisive verdict ends any defer streak
-        const r = engine.reviews.find((x) => x.taskId === card.id)
-        if (r) r.status = 'conflict' // "needs a human" dot, like a verify-RED / conflict
-        logLine(
-          engine,
-          'warn',
-          `敵対レビュー多数決 → 差し戻し [${tally}]: ${card.branch} (${shorten(card.title ?? '')}) — ${review.reason}`,
-        )
-        await reworkOrPark(card, review.reason)
-        continue // never integrate work the panel flagged
-      }
-      if (review.decision === 'defer') {
-        // Quota-park skip that slipped past the pre-gate above (the park began
-        // while this card's multi-minute verify/panel await was in flight, or a
-        // custom review dep park-gates itself) — an ENGINE hold, not a panel
-        // verdict: leave the card in review WITHOUT consuming the defer streak.
-        if (review.skippedForPark) continue
-        // No majority (tie / reviewers failed to vote) — thin signal. Leave the card in
-        // review and retry next pass: never merge, never bump the 差し戻し count. Count
-        // consecutive defers on this tip; at the cap, stop re-spawning (handled above)
-        // and surface "needs a human". A NEW commit (different tip) resets the streak.
-        // Accumulate WHO abstained WHY across the streak (完了条件3) — the freeze's
-        // hand-off to the human must carry the whole streak's evidence, not just the
-        // last pass's.
-        const abstains: Record<string, number> =
-          deferMemo && deferMemo.tip === reviewTip ? { ...deferMemo.abstains } : {}
-        for (const v of review.verdicts) {
-          if (v.vote !== null) continue
-          const key = `${v.lens ?? `r${v.reviewer}`}(${v.abstainCause ?? 'unknown'})`
-          abstains[key] = (abstains[key] ?? 0) + 1
-        }
-        const count = deferMemo && deferMemo.tip === reviewTip ? deferMemo.count + 1 : 1
-        engine.reviewDeferred.set(card.branch, { tip: reviewTip, count, abstains })
-        if (count >= MAX_REVIEW_DEFERS) {
-          const abstainSummary = describeAbstainTallies(abstains)
-          const r = engine.reviews.find((x) => x.taskId === card.id)
-          if (r) {
-            r.status = 'conflict' // needs-human; further panels are skipped above
-            r.abstainSummary = abstainSummary // …and the dashboard says WHY (完了条件3)
-          }
-          logLine(
-            engine,
-            'warn',
-            `敵対レビュー: ${count}回連続で多数決つかず — needs-human 退避(再レビュー停止・新コミットで再開): ${card.branch} (${shorten(card.title ?? '')}) — 棄権内訳: ${abstainSummary} — 最終: ${review.reason}`,
-          )
-        } else {
-          // The tally's reason names each abstaining lens AND its cause
-          // (完了条件1) — without it this line was an uninterpretable
-          // 「多数決つかず [must-fix 0 / clean 2]」.
-          logLine(
-            engine,
-            'info',
-            `敵対レビュー多数決つかず → 保留 [${tally}] (${count}/${MAX_REVIEW_DEFERS}): ${card.branch} (${shorten(card.title ?? '')}) — ${review.reason}`,
-          )
-        }
-        continue
-      }
-      // Majority clean (condition 3) → proceed to integrate. Forget any prior memos.
-      engine.reviewFailed.delete(card.branch)
-      engine.reviewDeferred.delete(card.branch)
+  // Grace elapsed and still not responding → the last wake didn't take (or first sighting).
+  // INFINITE-RESURRECTION GUARD (完了条件5): after MAX consecutive attempts, STOP reviving a
+  // desk that keeps dying (permanent quota wall / boot-crash) and escalate to the owner
+  // ONCE — burning tokens in a detect→spawn→die loop helps no one. `attempts` resets the
+  // moment the desk is seen healthy again (above) or work drains (no card waiting).
+  if (rs.attempts >= MAX_MANAGER_RESUME_ATTEMPTS) {
+    if (!rs.fatalFired) {
+      rs.fatalFired = true
       logLine(
         engine,
-        'info',
-        `敵対レビュー多数決 → clean [${tally}]: ${card.branch} (${shorten(card.title ?? '')})`,
+        'error',
+        `司令官が ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動で司令官卓を確認してください` +
+          `(Swarm タブ → 司令官)。統合待ち ${swarmCards.length} 件`,
+        'integrate',
       )
-    }
-
-    // Cross-process integration lock (0706 二重司令塔事故フォロー; tightened after
-    // 差し戻し(1/3) MUST-FIX) — a tmux 司令塔 (a SEPARATE `claude` process driving
-    // this same repo by hand, via scripts/swarm-lock.js) may rebase/push the SAME
-    // branch onto the SAME trunk at the SAME moment this engine is mid-integrate.
-    // engine.integrateInFlight only bars a second pass WITHIN this process; it
-    // does nothing against a separate process. Acquired HERE — immediately before the
-    // git mutation, per CARD, not once for the whole pass — because the pass also
-    // runs verify/tsc and a multi-minute adversarial-review panel per card, which
-    // can push a whole-pass hold well past DEFAULT_STALE_MS (10 min); a lock held
-    // that long would itself look stale and let a second process steal it — the
-    // exact 0706 race this lock exists to prevent. Scoped to just deps.integrate()
-    // (the only step that actually rebases/pushes), the hold is seconds, safely
-    // under staleMs. On contention, skip only THIS card (not the whole pass) and
-    // say so explicitly in the engine log; the next tick retries.
-    const integrationLock = await deps.acquireLock(engine.path)
-    if (!integrationLock.ok) {
-      const who =
-        integrationLock.reason === 'held' && integrationLock.holder
-          ? `pid ${integrationLock.holder.pid}${integrationLock.holder.label ? ` (${integrationLock.holder.label})` : ''}`
-          : 'unavailable'
-      logLine(engine, 'warn', `integration lock held by ${who} — skipping integration: ${card.branch}`, 'integrate')
-      continue
-    }
-    let outcome: IntegrateOutcome
-    try {
-      outcome = await deps.integrate(engine.path, card.branch, target)
-    } catch (e) {
-      logLine(engine, 'warn', `integration deferred: ${card.branch} — ${errMsg(e)}`)
-      continue
-    } finally {
-      await integrationLock.release()
-    }
-
-    if (outcome.status === 'integrated') {
-      // A swarm branch just landed on the trunk. If this project IS OPEN GROUND's
-      // own source repo (the self-gating check inside requestEngineSelfUpdate), a
-      // self-improvement is now on main — ask the Electron main process to rebuild
-      // and cut the live engine over to its new self (electron/selfUpdate.js). A
-      // no-op everywhere else (other projects, dev/tsx, the shipped app), and it
-      // never throws, so the integration path is unaffected.
-      requestEngineSelfUpdate(engine.path)
-      // Write section INSIDE the engine critical section (see reworkOrPark): the
-      // done-move + landed-worker teardown + roster filter must not interleave
-      // with the monitor's own workers rebuild now that integrate runs beside the
-      // tick. No running/autoMerge re-check on entry ON PURPOSE — the branch is
-      // ALREADY on the trunk, so recording that fact (and freeing the landed
-      // worker) stays correct even if a stop landed while awaiting the lock.
-      await runExclusive(engine, async () => {
-        // Move the card FIRST; only sweep the worktree+branch once it is recorded
-        // done, so a failed board write self-heals next pass (re-integrate sees the
-        // branch already merged → integrated → retry the move) instead of stranding
-        // a landed card in review with its branch already deleted.
-        if (await deps.moveToDone(engine.path, card.id)) {
-          const cl = await deps.cleanup(engine.path, card.branch)
-          engine.conflictedBranches.delete(card.branch)
-          clearKeptMove(engine, card.id) // the done move landed — forget any stuck tracking
-          engine.reworks.delete(card.id) // landed — reset the 差し戻し budget (success column)
-          engine.conflictReworks.delete(card.id) // landed — reset the conflict-委譲 budget too
-          // Reliable flag CLEAR — the BACKSTOP for two cases the became-ff clear above
-          // can miss: (a) the stamp survived a server restart that lost the in-memory
-          // memo (so that block never ran), and (b) that block's markConflict(false)
-          // was itself KEPT (then the snapshot stays stamped). Only fires for a still-
-          // stamped card — the happy path and an already-cleared became-ff card write
-          // nothing — so a "done but flagged conflict" zombie can never survive a land.
-          if (card.integrationConflict) {
-            try {
-              await deps.markConflict(engine.path, card.id, false)
-            } catch {
-              /* best-effort — the card is already done; a kept clear is only cosmetic */
-            }
-          }
-          // Drop the just-landed card from the readiness snapshot so the dashboard
-          // doesn't show it as still-in-review until the next pass re-reads.
-          engine.reviews = engine.reviews.filter((r) => r.taskId !== card.id)
-          // Tear the just-landed worker down: kill its lingering `claude` PTY by id
-          // (the common case — a `claude` TUI does NOT exit when /order finishes, so
-          // the promoted worker sits in engine.workers as 'done' with its PTY alive)
-          // and drop it from the live set so its slot frees IMMEDIATELY. cleanup()
-          // already removed the worktree + killed any PTY by cwd; this by-id kill
-          // closes the symlinked-home cwd-miss gap and means no zombie PTY/slot ever
-          // outlives an integration. Branch names are unique per worker → matches ≤1.
-          const landed = engine.workers.filter((w) => w.branch === card.branch)
-          for (const w of landed) {
-            try {
-              deps.killPty(w.terminalId)
-            } catch {
-              /* best-effort — a dead/absent PTY is fine; the monitor would prune it anyway */
-            }
-          }
-          if (landed.length > 0) {
-            engine.workers = engine.workers.filter((w) => w.branch !== card.branch)
-          }
-          logLine(
-            engine,
-            'info',
-            `integrated (${outcome.mode}): ${shorten(card.title ?? '')} → ${target}` +
-              (cl.removed ? '' : ` · worktree kept (${cl.reason ?? '?'})`),
-            'integrate',
-          )
-          // A kept worktree after a successful land is a potential zombie — call it
-          // out as its own 'cleanup' warning so it isn't lost inside the (info)
-          // integrate line. The commits are already on the trunk, so this is just a
-          // leftover scratch tree the owner can clear by hand.
-          if (!cl.removed) {
-            logLine(
-              engine,
-              'warn',
-              `worktree teardown kept — clear by hand: ${card.branch} (${cl.reason ?? '?'})`,
-              'cleanup',
-            )
-          }
-        } else {
-          // Landed on the trunk but the review→done move was KEPT — the work is safe
-          // (commits are on the trunk) yet the card is stuck in review ("done なのに
-          // review"). Track it: a persistently-kept done-move surfaces as a
-          // 'move-stuck' anomaly so a human moves it, instead of an endless warn loop.
-          recordKeptMove(engine, card.id, 'done', card.branch, card.title ?? '')
-          logLine(engine, 'warn', `landed on ${target} but column move kept (will retry): ${shorten(card.title ?? '')}`)
-        }
+      // Best-effort escalation (bell + OS toast) — never awaited, internal-catch so a
+      // notification fault can't disturb the pass (mirrors the fatal-notify contract).
+      deps.notify?.({
+        event: 'manager-unrevivable',
+        projectPath: engine.path,
+        branch: swarmCards[0]?.branch,
+        taskTitle: swarmCards[0]?.title || undefined,
+        detail: `司令官が ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
+        logHint: 'Swarm タブ → 司令官 / engine log の integrate 行',
       })
-    } else if (outcome.status === 'conflict') {
-      // CONFLICT → worker rebase 委譲 (card 012a2848). NOT a human-resolve park
-      // anymore: hand the conflict back to the branch's worker to rebase its OWN
-      // branch onto the moved trunk + resolve + commit, then the engine retries the
-      // integration (条件1+2+3+4). delegateConflict moves the card off review
-      // (doing/todo) so it is never double-integrated, bumps the SEPARATE conflict
-      // budget, and parks to 'blocked' once that budget is spent (loop guard).
-      await delegateConflict(card, outcome.files ?? [], target)
-    } else if (outcome.status === 'error') {
-      // Transient (push rejected by a moved trunk, network…) — retry next pass.
-      logLine(engine, 'warn', `integration deferred: ${card.branch} — ${outcome.reason}`)
     }
-    // 'skipped' (no trunk handled above; non-swarm filtered out) → silent.
+    return
   }
+
+  // RESUSCITATE (完了条件2+3): wake/resume the commander for the whole batch at once
+  // (token-thrifty). spawnSwarmManager resumes the days-long integration conversation and
+  // — on a quota wall — drops the model one tier (完了条件4, inside wakeManager). Count the
+  // attempt whether or not the spawn itself succeeded (woke=false ⇒ no usable tier; that
+  // is a failed resurrection too, and drives the guard above toward escalation). Record
+  // the wake time so the grace throttles the next attempt.
+  const woke = await deps.wakeManager(
+    engine.path,
+    swarmCards.map((c) => ({ branch: c.branch, title: c.title ?? '' })),
+  )
+  rs.lastWakeAt = now
+  rs.attempts += 1
+  const names = swarmCards.map((c) => c.branch)
+  logLine(
+    engine,
+    woke ? 'info' : 'warn',
+    (rs.attempts === 1
+      ? 'worker ready — 司令官を起こしました'
+      : `司令官が応答しないため蘇生しました(${rs.attempts}回目)`) +
+      (woke ? '' : '(使えるモデル tier が無く spawn 保留 — 次 pass で再試行)') +
+      `(統合判断は司令官・engine は統合しない): ` +
+      `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` 他${names.length - 5}件` : ''}`,
+    'integrate',
+  )
 }
 
 /** Fire the integrate pass BESIDE the tick — never awaited by {@link runEnginePass}.
@@ -5913,7 +5734,9 @@ export const STALE_HEARTBEAT_MS = 30 * 60_000
  *                        output. Complements worker-stale, whose output channel
  *                        deliberately clears it: a dark-but-ACTIVE worker (the
  *                        2e7beb2 bypass shape) never trips stale, so this is the
- *                        flag that surfaces it. */
+ *                        flag that surfaces it.
+ *  (Plus the tracker-fed checks below: move-stuck / rework-exhausted /
+ *  review-panel-failed — read from engine state maps, same read-only rule.) */
 export const detectAnomalies = async (
   engine: ProjectEngine,
   tasks: readonly ProjectTask[],
@@ -6046,6 +5869,53 @@ export const detectAnomalies = async (
     })
   }
 
+  // Review-panel-failed check (fail-closed review, 2026-07-14): a review card whose
+  // adversarial panel hit the defer cap — it could not produce ONE decisive verdict
+  // (0 must-fix/clean votes, or no majority) even after its retry, so integration is
+  // withheld and runIntegratePass's defer-exhausted memo stops re-spawning the panel.
+  // NOT the worker's fault (no rework burned; the card stays in 'review', never
+  // 'blocked') — a human must look, or a new commit (fresh tip) re-arms the panel.
+  // Read from engine.reviewDeferred (branch-keyed), surfaced card-rooted like
+  // 'rework-exhausted', and only while the card still sits in 'review' (the memo is
+  // pruned when the branch leaves review, but this pass's board read may be fresher
+  // than the last integrate pass's).
+  const byBranch = new Map<string, ProjectTask>()
+  for (const t of tasks) {
+    if (typeof t.branch === 'string' && t.branch) byBranch.set(t.branch, t)
+  }
+  for (const [branch, memo] of Array.from(engine.reviewDeferred)) {
+    if (memo.count < MAX_REVIEW_DEFERS) continue
+    const card = byBranch.get(branch)
+    if (!card || columnOf(card) !== 'review') continue
+    out.push({
+      kind: 'review-panel-failed',
+      ref: card.id,
+      branch,
+      taskTitle: card.title ?? '',
+      attempts: memo.count,
+    })
+  }
+
+  // High-risk force-hold check (2026-07-15): a review card whose branch touches
+  // release/CI/signing/dependency/secrets-grade paths (HIGH_RISK_PATHS) — the
+  // integrate pass withheld auto-merge BY DESIGN and stamped engine.highRiskHolds;
+  // here we only SURFACE the standing hold so the owner actually notices the card
+  // waiting for a manual merge (the hold is not a fault, but silence would strand
+  // it in review forever). Card-rooted like 'review-panel-failed', and only while
+  // the card still sits in 'review' (a landed/reworked card's memo is pruned by
+  // the integrate pass, but this pass's board read may be fresher).
+  for (const [branch, hold] of Array.from(engine.highRiskHolds)) {
+    const card = byBranch.get(branch)
+    if (!card || columnOf(card) !== 'review') continue
+    out.push({
+      kind: 'high-risk-hold',
+      ref: card.id,
+      branch,
+      taskTitle: card.title ?? '',
+      files: hold.files,
+    })
+  }
+
   return out
 }
 
@@ -6123,9 +5993,12 @@ export const pruneReworks = (engine: ProjectEngine, tasks: readonly ProjectTask[
 //   • STATE-derived events — re-derivable each pass, so deduped on the RISING EDGE
 //     via engine.notified: fire ONCE when the condition appears, forget it the
 //     moment it clears (a genuine recurrence re-fires, a persisting one never
-//     spams). Two cases:
+//     spams). Three cases:
 //       – 'rework-exhausted'  — a card parked in 'blocked' past its rework budget
 //         (read from this pass's anomalies).
+//       – 'review-panel-failed' — a review card frozen because the adversarial
+//         panel stayed indecisive past its retry budget (fail-closed review,
+//         2026-07-14; read from this pass's anomalies).
 //       – 'all-workers-down'  — running, ZERO live workers, yet 'doing' swarm work
 //         remains (every worker crashed/stalled and the loop stalled).
 //
@@ -6175,7 +6048,47 @@ export const fireFatalNotifications = (
     })
   }
 
-  // 2b. all-workers-down — running, zero live workers, yet 'doing' swarm work left.
+  // 2b. review-panel-failed — straight from this pass's anomalies (fail-closed
+  // review, 2026-07-14): the panel exhausted its retry without ONE decisive vote,
+  // the card is frozen in 'review' un-merged, and further panels are skipped —
+  // exactly the "自動では進めない・人間へ橋渡し" shape that must wake someone.
+  for (const a of engine.anomalies) {
+    if (a.kind !== 'review-panel-failed') continue
+    current.set(`review-panel-failed:${a.ref}`, {
+      event: 'review-panel-failed',
+      detail: `敵対レビューのパネルが ${a.attempts ?? '?'} 回連続で決着せず(decisive 0票/過半数未達)、統合を保留して review に凍結しました(worker の差し戻しカウントは消費しません)。`,
+      projectPath: engine.path,
+      taskId: a.ref,
+      branch: a.branch,
+      taskTitle: a.taskTitle,
+      logHint:
+        'commander の reviews(棄権内訳 abstainSummary)と engine log を確認してください。新しいコミットが積まれると再レビューが自動再開します。',
+    })
+  }
+
+  // 2b'. high-risk-hold — straight from this pass's anomalies (force-hold,
+  // 2026-07-15): the branch touches release/CI/signing/dependency/secrets-grade
+  // paths, so auto-merge is withheld BY DESIGN and only a human's manual merge
+  // can land the card. Not a fault — but without a hand-off it would sit in
+  // review silently forever; exactly one notification per standing hold
+  // (rising edge), re-fired only if the hold clears and genuinely recurs.
+  for (const a of engine.anomalies) {
+    if (a.kind !== 'high-risk-hold') continue
+    const files = a.files ?? []
+    const shown = files.slice(0, 3).join(', ') + (files.length > 3 ? ` 他${files.length - 3}件` : '')
+    current.set(`high-risk-hold:${a.ref}`, {
+      event: 'high-risk-hold',
+      detail: `高リスクパス(リリース/CI/署名/依存/secrets 系)に触れるため自動統合を保留しました: ${shown}`,
+      projectPath: engine.path,
+      taskId: a.ref,
+      branch: a.branch,
+      taskTitle: a.taskTitle,
+      logHint:
+        '差分を確認し、問題なければ手動統合(司令官の「マージ」)で取り込んでください。エンジンはこのカードを自動では統合しません。',
+    })
+  }
+
+  // 2c. all-workers-down — running, zero live workers, yet 'doing' swarm work left.
   const liveWorkers = engine.workers.filter((w) => deps.isAlive(w.terminalId))
   if (engine.running && liveWorkers.length === 0) {
     const doing = tasks.filter(

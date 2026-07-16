@@ -1,20 +1,56 @@
-# 03 — 統合パス(auto-integrate)と敵対レビュー: 実挙動と「なぜ凍結したか」
+# 03 — 統合パス: 統合は manager 専任・engine は ready 検知で司令官を起こすだけ
 
-**対象コミット: origin/main `0d1f7f0`** (2026-07-10)。初版は `cc7c60e` 基準で、`3129a58`(敵対レビューの diff 連動 budget + 棄権理由の可視化 — 大 diff 凍結の根治)と `0d1f7f0`(quota 検知 21 分遅延の根治 — 本章に効くのは **integrate の tick 分離 = monitor 飢餓の解消**、§2.1/§2.4)を本改訂で反映済み。
-行番号はすべて `0d1f7f0` 時点のもの。主戦場は `src/lib/server/swarmOrchestrator.ts`(6730行)と `src/lib/server/swarmIntegrate.ts`。
-その後 2026-07-11 の `SWARM_CODE_PATHS` への `server/routes/project.ts` 編入(Board API = 05 章の契約面を swarm-safety / docs ゲート対象へ)で swarmOrchestrator.ts の :2630 以降は **+3 シフト** — 本章では §2.4 の `SWARM_CODE_PATHS` / `touchesSwarmPaths` 直接参照のみ新値へ更新済み、他の :2630 以降参照は `0d1f7f0` 基準のまま(+3 して読む)。
+> **⚠ 2026-07-15 中核転換 — マネージャ専任化(manager-only integration)。**
+> **エンジンはもう統合しない。** review 列に ready カードが来たら、エンジンは
+> **司令官(manager)を起こすだけ**で、verify も敵対レビューも FF push も掃除も
+> **一切しない**。統合(重量級レビュー + 手動 FF push)は司令官の専任業務になった。
+> これは 2026-07-15 の事故 —— autoMerge が司令官の差し戻し(review→doing)と**並行で**
+> 穴あきブランチを main に FF 統合した(かつ engine のレンズ 4 票 clean が auth の
+> camelCase 取りこぼしを見逃し、司令官の重量級レビューだけが検出した)—— を受けた
+> **構造的**な役割分離。エンジンを統合業務から外すことで、両者が本流で競合する経路が
+> 機構ごと消えた(ルール依存ではない)。**エンジンのレンズ結果だけで main が動く経路は
+> 金輪際ゼロ**(回帰テストで固定 — `swarmOrchestrator.test.ts` の「manager-only
+> integration wake」+ integration の「WAKES the commander and NEVER FF-pushes」)。
 
-**読者**: 将来の司令塔(og-manage)セッション。このドキュメントは「review 列のカードがなぜ done にならないのか」を誤診しないために書かれている。**すべての主張に file:line の根拠がある。疑ったら §6 の検証コマンドで自分で裏取りすること。**
+**対象コミット: マネージャ専任化ブランチ**(swarm/swarm-engine-manager-aut-…、2026-07-15)。
+主戦場は `src/lib/server/swarmOrchestrator.ts`。**§2.3.1 以降(旧 land 機構: verify/敵対
+レビュー/tally/差し戻し/conflict 委譲/凍結)は HISTORICAL** —— エンジンは**もうこれを
+やらない**(その機構は撤去、または司令官の手動統合フロー §5 に移った)。歴史として、また
+司令官が手動統合で同じ判断(検証・レビュー・rebase)を人力でなぞる際の型として残す。
+
+**読者**: 将来の司令塔(og-manage)セッション。**統合は君(司令官)の仕事だ。** エンジンは
+「worker が ready になった」と君を起こすだけ。起きたら §5 の手動統合手順で land する。
 
 ---
 
-## 0. TL;DR — 司令塔が最初に知るべき5点
+## 0. TL;DR — 司令塔が最初に知るべき6点
 
-1. **統合パスは2相**。A相(read-only 分類 → `engine.reviews[]` = UI の「統合可」表示)は engine 稼働中つねに走る。B相(実際の land)は **autoMerge が armed のときだけ**走る(`swarmOrchestrator.ts:4905-4925`)。autoMerge は in-memory・既定 OFF(`server/routes/swarm.ts:605-613`)。
-2. land の前に**2つのゲート**がある: verify(`.verify-*` worktree で tsc→lint→swarm-safety→test をインライン await、`swarmOrchestrator.ts:2906-2994`)と敵対レビュー(4 lens の claude パネル、`swarmOrchestrator.ts:3598-3804`)。
-3. **敵対レビューは「全員一致」でしか統合を許可しない**。lens パネルは棄権(vote:null)が1つでもあると decision を出さず defer する(`tallyLensReview`、`swarmOrchestrator.ts:3241`)。同一 tip で 3 回 defer すると needs-human 凍結(`MAX_REVIEW_DEFERS=3`、`swarmOrchestrator.ts:258`)。
-4. **大 diff での構造的凍結は `3129a58`(2026-07-10)で根治済み**: レビュアーの budget は diff 実測バイトでスケールする(floor 既定 5 分・+10s/KB・cap 20 分、`computeReviewTimeoutMs`、`swarmOrchestrator.ts:3383-3389`)。根治前は固定 5 分 budget のせいで 22〜34KB を境界に必ず 2 lens が棄権→凍結していた(当時の実測は §3 に保持)。棄権には理由(`abstainCause`)が付き、凍結ログと `reviews[].abstainSummary` に内訳が残る(§2.6)。**カード `58335c7f` は修正済み(done 列)** — 実運用での検証待ち(TARGET-STATE §2)。
-5. 凍結・conflict・verify RED はどれも UI 上 **`reviews[].status='conflict'` に上書き表示される**。「conflict」と見えても本物の rebase 競合とは限らない(§2.2 と §4)。凍結の場合だけは `reviews[].abstainSummary`(`src/lib/types.ts:1147-1153`)に棄権内訳が併記される。
+1. **エンジンは統合しない(2026-07-15〜)。** 統合パス `runIntegratePass` は2相: **A相**
+   (read-only 分類 → `engine.reviews[]` = UI の「統合可」表示)は engine 稼働中つねに走る。
+   **B相**は autoMerge(**意味変更: 今は「司令官を自動で起こす」**)が armed のとき、
+   review に ready カードがあり**司令官の卓が不在**なら **`spawnSwarmManager` で司令官を
+   起こす**だけ。verify も敵対レビューも FF push も掃除も**しない**。
+2. **統合(land)は司令官の専任。** 重量級レビュー + 手動 FF push は §5 の手順で司令官が行う。
+   fail-closed 0票禁止・高リスク force-hold の安全網も**司令官側**(skills/og-manage §「マージ」)。
+   エンジン側の verify/レンズ/force-hold は **dormant/撤去**(二重管理しない)。
+3. **autoMerge トグルの意味が変わった。** `POST /api/swarm/orchestrator/automerge`
+   (エンドポイント名は API 安定のため据え置き)は今や「**worker が ready になったら
+   司令官を自動で起こす**」の ON/OFF。ON でも main は 1bit も動かない —— 起こすだけ。
+   in-memory・**再起動で必ず OFF**(他の autonomy トグルと同じ安全モデル)。安全なので**推奨は ON**。
+4. **司令官起こしはバッチ・二重起動しない・落ちたら蘇生する(card B, 2026-07-16)。** 待っている
+   review ブランチは**まとめて1回**で起こす(トークン節約)。「起きている」判定は今や **2 信号の AND**
+   (`isManagerActive`): 永続 manager セッションが **live PTY**(プロセス死を捕捉)**かつ** manager 心拍が
+   **新鮮**(10 分無音でハングと判定)。健全なら二度目は起こさない。**死んだ/固まった卓は蘇生**する —
+   `spawnSwarmManager` で起こし直し(quota 壁なら tier 繰り下げ)、grace 5 分ごとに再試行、**3 連続失敗で
+   `manager-unrevivable` fatal を1回**上げて諦める(無限ループ防止)。状態は `engine.managerResume`
+   (in-memory・再起動で消える)。**エンジンは起こすだけ**で統合はしない(反射 ≠ 判断)。詳細 §2.3。
+5. **`reviews[].status` の読み方は不変(A相は残る)。** engine 稼働中は autoMerge OFF でも
+   毎パス「統合可」を publish する。`'conflict'` 表示の相乗り事象のうち engine 由来のもの
+   (verify RED / must-fix / defer 凍結 / force-hold)は**もう発生しない**(B相が撤去された)——
+   純粋な git 分岐(`classifyBranch` の 'rebase')か、司令官が手動で付けた stamp だけ。
+6. **緊急バックドアは温存。** 司令官の手動統合(§5 の FF push・「マージ」フロー)はそのまま。
+   エンジンが統合しなくなっても**司令官は統合できる**(むしろ主経路)。§2.3.1 以降の旧機構は
+   HISTORICAL 参照 —— 司令官が手動で verify/レビュー/rebase をなぞる際の型として読む。
 
 ---
 
@@ -87,38 +123,110 @@ engine は `globalThis` 上のプロジェクト別シングルトンで、**全
 | verify RED(tsc/lint/test/swarm-safety 落ち) | `swarmOrchestrator.ts:5324-5325` |
 | 敵対レビュー must-fix 差し戻しの直後 | `swarmOrchestrator.ts:5396-5397` |
 | **defer streak 枯渇(needs-human 凍結)** | `swarmOrchestrator.ts:5367, 5432` |
+| **高リスクパスの force-hold(2026-07-15・§2.3.1)** | `swarmOrchestrator.ts:5696-5702`(現物実測・camelCase 追補後) |
 
-つまり司令塔が UI やAPI で `'conflict'` を見ても、**「rebase が競合した」とは限らない**。engine log(`GET /api/swarm/orchestrator` の `log[]`)で直前の行(`敵対レビュー: N回連続で多数決つかず…` / `検証` / `conflict`)を読んで初めて区別できる。誤診の典型がここ(§4-1)。ただし `3129a58` 以降、**凍結だけは `reviews[].abstainSummary` に棄権内訳(`lens(cause)×N` 形式)が併記される**(:5371, :5433、型 `src/lib/types.ts:1147-1153`)ので、4 事象のうち凍結は API 単体でも見分けられる。
+つまり司令塔が UI やAPI で `'conflict'` を見ても、**「rebase が競合した」とは限らない**。engine log(`GET /api/swarm/orchestrator` の `log[]`)で直前の行(`敵対レビュー: N回連続で多数決つかず…` / `検証` / `conflict` / `高リスクパス force-hold`)を読んで初めて区別できる。誤診の典型がここ(§4-1)。ただし `3129a58` 以降、**凍結だけは `reviews[].abstainSummary` に棄権内訳(`lens(cause)×N` 形式)が併記される**(:5371, :5433、型 `src/lib/types.ts:1147-1153`)ので、また **force-hold は `reviews[].highRiskFiles`(触れた高リスクパスの一覧)が併記される**(§2.3.1)ので、5 事象のうちこの2つは API 単体でも見分けられる。
 
-### 2.3 B相 — land(autoMerge armed のときだけ)
+### 2.3 B相 — 司令官を起こす・落ちたら蘇生する(autoMerge = 「自動起こし」armed のときだけ)
 
-`swarmOrchestrator.ts:5273-5596`。ゲートは直列で、**どれか1つでも落ちたらそのカードは今パスでは統合されない**:
+**2026-07-15〜。エンジンはもう統合しない。** B相の旧全体(高リスク hold・verify・敵対レビュー・
+lock・FF push・land・掃除・reworkOrPark・delegateConflict)は**撤去された**。そのうえで
+**2026-07-16 の card B** が、単発の「起こす memo(handoffs)」を **蘇生反射の状態機械**に置き換えた。
+オーナーの実訴え(**opus に大 diff が流入すると司令官が固まる** — context 溢れ・API エラー・ハング)に
+対する反射で、統合が司令官専任になった以上「司令官が落ちたら swarm 全体が止まる」を塞ぐ。**神経系
+(engine)が脳(manager)を蘇生する** — 3層設計(worker=手 / engine=神経系+反射 / manager=脳)の反射の中核。
+今の B相は:
 
 ```
-autoMerge? ─No→ return(A相のみ)                        :5274
-trunk ある? ─No→ warn して return                       :5275-5278
-カードごとに(engine.running && autoMerge を毎周再確認 :5281):
-  1. conflictedBranches 済み? → ff になるまで skip       :5285-5298
-  2. verify(tsc/lint/…)      → RED なら reworkOrPark    :5300-5334
-  3. 敵対レビュー             → rework/defer/integrate   :5336-5460
-  4. クロスプロセス統合 lock   → 取れなければ skip        :5462-5484
-  5. deps.integrate           → integrated/conflict/error :5485-5493
-  6. integrated → moveToDone → cleanup → killPty         :5495-5581
-     conflict   → delegateConflict(worker に rebase 委譲) :5582-5589
-     error      → 次パス再試行                            :5590-5593
+autoMerge(=自動起こし)? ─No→ return(A相の「統合可」表示だけ publish・手動卓は不触)
+rs = engine.managerResume(in-memory {attempts, lastWakeAt, fatalFired}・再起動で消える)
+review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs リセット)して return(仕事無し=蘇生しない)
+司令官の卓は「生きていて応答している」か?(isManagerActive・now 注入)
+  = 永続 manager セッションが live PTY(プロセス死を捕捉) AND 心拍が新鮮(ハングを捕捉)
+  ─Yes(健全)→ rs.attempts=0・fatalFired=false にして return(反射 disarm・二重起動しない)
+  ─No(死 or ハング)→ 直前 wake から grace(5分)未満? ─Yes→ return(resume した卓の起動+初回心拍を待つ)
+                      attempts が上限(3)到達? ─Yes→ fatal 'manager-unrevivable' を1回だけ上げて return
+                                                     (毎回落ちる卓を無限に焚かない=完了条件5)
+                      ─No→ wakeManager(review 全ブランチをまとめて1回)= spawnSwarmManager + 情報通知1本
+                           lastWakeAt=now・attempts+1(spawn 成否に関わらず「1回試みた」と数える)
 ```
 
-`deps.integrate` の実体は `integrateBranch`(`swarmIntegrate.ts:251-301`)で、never force・never auto-resolve:
+- **心拍(完了条件1)**: 司令官は統合の各段(1本マージ毎・レビュー sub-agent を起こす直前など)で
+  `POST /api/swarm/manager/beat`(owner+path gate)を打つ。その実体は `writeManagerHeartbeat` =
+  **固定名 `~/.openground/swarm/<repoキー>/manager.json`**(worker 心拍と同じ体系・repo キーで衝突しない)。
+  og-manage スキルに配線済み。
+- **検知(完了条件2)= 2信号の AND**(`isManagerActive`): ① live PTY(`isClaudeSessionLive`)で**プロセス死**を、
+  ② 心拍鮮度(`MANAGER_HEARTBEAT_STALE_MS` = **10分**無心拍で stale=ハング)で**固まり**を捕捉。心拍を
+  **一度も打っていない卓は fail-open で「新鮮」扱い**(旧 pre-心拍セッション・人が手で開いた卓を壊さない)—
+  **在った心拍が 10 分途切れて初めて**ハングと判定する。異常時は必ず `false`(=蘇生)へ倒す。
+- **蘇生(完了条件3)= wakeManager**: `spawnSwarmManager`(永続会話を `--resume`、無ければ fresh)+
+  `manager-woke` 情報通知1本。起きた司令官は `/og-manage` で Board を読み review カードを自分で見つける。
+- **quota 繰り下げ(完了条件4)**: 蘇生時のモデルは `resolveSwarmModelEffortProbed`(`swarmManager.ts`)が
+  選ぶ — opus/fable が quota 切れで落ちたなら**枯れていない tier へ 1 段繰り下げてから** resume する
+  (同じモデルで起こすと同じ壁に当たる=数日前の fable 事故と同型)。枯渇の記憶は永続冷却テーブル
+  (`swarm-quota.json`・層A)から読む。
+- **無限蘇生ループの上限(完了条件5)**: 起動直後に毎回落ちる(quota 完全枯渇・恒久バグ)と検知→蘇生→死の
+  無限ループでトークンを焚く。`MAX_MANAGER_RESUME_ATTEMPTS` = **3** 連続失敗で蘇生を諦め、`manager-unrevivable`
+  fatal を**1回だけ**上げてオーナーへエスカレーション(「司令官が繰り返し落ちている・手動確認を」)。
+  カウンタは **in-memory**(`engine.managerResume`・再起動で消える=engine 認知と同じ寿命)。卓が健全に戻る/
+  仕事が枯れると 0 にリセットされ、次のエピソードは満額 3 回からやり直す。
+- **grace 窓**: `MANAGER_RESUME_GRACE_MS` = **5分**。`--resume` した司令官は起動+初回心拍までに時間が要り、
+  前の(stale な)心拍ファイルもそれまで死んで見える。この猶予が無いと起動ギャップをハングと誤読して
+  毎 tick 二重 spawn する。
+- **反射であって判断ではない(完了条件6)**: エンジンは**起こすだけ**。統合するか・配車するか等の判断は
+  蘇生後の司令官がやる。**エンジンは司令官の代わりに統合を実行しない**(main を 1bit も動かさない)。
+- **既存の worker 監視・緊急停止(反射)は保持**(完了条件7): manager 蘇生は同じ integrate tick に相乗りするが、
+  worker の runaway reclaim(02 章 §5.5)を壊さない。
+- **予防の注記(蘇生は対症療法)**: この反射は「止まった司令官を立て直す」対症策。**そもそも司令官を
+  止めないための予防**は manager 側の運用 —— 重い処理(大 diff レビュー)を sub-agent に逃がす(司令官は既に
+  そうしている)—— であって本機構の領分ではない。card B は蘇生(対症)に集中する。
+- 自己更新(engine 自己入替)トリガは land 時に発火していた(`requestEngineSelfUpdate`)ため、
+  エンジンが land しなくなった今は**engine 側で発火しない**(dormant)。OG 自身の swarm 統合で
+  自己更新を回したい場合は、司令官の手動統合フロー側で発火させる必要がある(別カードの領分)。
 
-- **already-merged**(branch ⊆ trunk)→ push なしで `integrated/ff`(:277-280)
-- **clean FF**(trunk ⊆ branch)→ `git push origin refs/heads/<branch>:refs/heads/<target>`(:286-295)。remote が動いていたら reject → `error`(次パス再試行)
-- **分岐**→ 使い捨て detached worktree `.integrate-<12hex>`(`defaultIntegrate`、`swarmOrchestrator.ts:2533-2541`)で `rebase <trunk>` → 成功なら `push origin HEAD:<target>`、競合なら `rebase --abort` + 競合ファイル一覧を添えて `{status:'conflict', files}`(`rebaseAndPush`、`swarmIntegrate.ts:305-350`)
+---
 
-**land 成功後の後始末**(:5495-5581): カード move が先(review→done、:5514)、成功して初めて worktree+branch 掃除(`defaultCleanup` :5515 — force remove + `branch -D`、`swarmOrchestrator.ts:3841-3866`)、残った worker PTY を id でも kill(:5536-5552)、`reworks`/`conflictReworks` 予算リセット(:5518-5519)。move が kept(Board 書込失敗)なら**コミットは trunk に載っているのにカードは review に残る**「done なのに review」状態になり、次パスの already-merged 判定で自己修復を再試行しつつ `move-stuck` anomaly が上がる(:5573-5579)。
+**⚠ ここから §2.3.1〜§3 は HISTORICAL(2026-07-15 でエンジンから撤去/dormant 化)。**
+下記の verify ゲート・高リスク force-hold・敵対レビュー(lens/tally/64KB/budget)・差し戻し
+(reworkOrPark)・conflict 委譲(delegateConflict)・大 diff 凍結は、**エンジンはもう実行しない**。
+これらの安全網・判断は**司令官の手動統合フロー(§5)に一本化**された(二重管理しない)。以下は
+(a)歴史の記録、(b)司令官が §5 で同じ判断(検証・レビュー・rebase)を人力でなぞる際の型、
+として残す。file:line は撤去前の値で、現行コードには**もう存在しない**ものが多い。
 
-また land 成功時、対象プロジェクトが OPEN GROUND 自身なら engine 自己更新(rebuild+canary 切替)を要求する(`requestEngineSelfUpdate` :5502)。
+---
 
-### 2.4 verify ゲート — `.verify-*` worktree と「インライン await」
+### 2.3.1 [HISTORICAL] 高リスクパスの force-hold(2026-07-15)— 司令官の手動統合規約へ一本化
+
+**実測事象(2026-07-14 18:18)**: autoMerge が `.github/workflows/release.yml` に触れるブランチを人間の確認なしに integrated (rebase) した。司令官の手動統合には規約(skills/og-manage/SKILL.md §「マージ」手順 0 の高リスク force-hold)があったが、**エンジンには対応する構造ゲートが無かった**。このサブ節のゲートがその穴を塞ぐ(このとき司令官が事前に敵対レビュー済みだったため実害ゼロ — だが構造で塞ぐべき穴)。
+
+**パス集合 = `HIGH_RISK_PATHS`(`swarmOrchestrator.ts:2853`・単一定義)**。司令官規約と**同一の集合**で、両者の一致はユニットテスト(`swarmOrchestrator.test.ts` の「司令官規約と同一集合」— SKILL.md の文言ごと固定)が機械で守る — どちらかを変えるとテストが割れて同期を強制する:
+
+| カテゴリ | マッチ例 |
+|---|---|
+| CI/CD パイプライン | `.github/workflows/**`・どの階層でも `release.yml` / `ci.yml` |
+| 依存/ビルドスクリプト注入 | `package.json`・lockfile(package-lock / npm-shrinkwrap / yarn.lock / pnpm-lock / bun.lockb) |
+| 署名/notarization | `sign…` / `notar…` のパスセグメント(例 `scripts/sign-and-notarize.sh`。セグメント境界判定なので design… / assign… は誤爆しない) |
+| 特権 Electron プロセス | `electron/main.js` |
+| secrets/credentials | `*secret*`・`.env*`・`auth` / `token` のパスセグメント **+ camelCase 結合**(2026-07-15 追補: `supabaseAuth.ts` / `authStore.ts` / `refreshTokens.ts` 型。case-sensitive の companion 2 本で判定するので `author` / `tokenizer` / `Authoring` は誤爆しない) |
+| 認可の本体(明示列挙) | `src/lib/server/roles.ts` / `swarmGate.ts` / `swarmAllowedModels.ts`(2026-07-15 追補: 「誰が owner か・どのモデルが使えるか」を決める層はパス名に auth を含まないため名前マッチ不能 — 明示で hold。**swarmOrchestrator / swarmLaunch へは意図的に広げない**: swarm エンジン改修が全部 hold になると解除操作が常態化してゲートが形骸化する) |
+
+**動き方**(ゲート 0 — 現物 :5662-5706): カードごとに `deps.changedPaths`(実体 `defaultChangedPaths` :2909 — `git rev-parse` + `git diff --name-only <trunk>...<tip>` の**読み取りだけ**・fail-closed で失敗は throw)でブランチ自身の変更ファイルを取り、`highRiskChangedPaths`(:2879)に1つでもマッチしたら:
+
+- **統合しない**(integrate どころか verify にも進まない — hold されるカードに毎パス tsc/test/claude パネルを焼かないため、ゲートは列の先頭)
+- `engine.highRiskHolds`(branch → {tip, files})に記録し、engine log に `高リスクパス force-hold — 自動統合を保留(出口は人間の手動統合のみ)` を **1 コミットにつき 1 行だけ**残す(同じ tip の再パスは沈黙 — tip メモ)
+- `reviews[].status='conflict'`(needs-human dot・§2.2 の相乗り5事象目)+ **`reviews[].highRiskFiles`** に触れたパス一覧を毎パス re-stamp(API 単体で他の 'conflict' と判別可能)
+- `detectAnomalies` が **`'high-risk-hold'` anomaly**(ref=カードid・`files` 付き、:6277)を立て、`fireFatalNotifications` が **fatal 通知**(:6442 — rising edge で1回だけ・解消→再発で再通知)で人間を起こす
+
+**解除(出口)は2つだけ** — エンジンは自動では絶対に入れない:
+
+1. **人間の手動統合**(§5「手動統合の手順」がそのまま出口)。diff を読み、問題なければ司令官が「マージ」で land する。Board の done 移動も司令官(§5)。カードが review を離れれば hold メモは prune される(:5324)
+2. **worker が新コミットで高リスク接触を取り除く**(tip が変われば再判定 — 高リスクパスに触れなくなっていれば hold が解けて通常の verify→パネル→integrate に戻る :5705-5706)
+
+**fail-closed の形**: diff が読めない(git 一時失敗)ときは**統合に進まない**が **hold にもしない** — `high-risk check errored (deferring)` を warn して次パス再試行(:5674-5680)。「読めない diff = 安全」とは読まず、かつ一時失敗で人間ゲートに固定化もしない。誤爆側の設計も fail-safe: 誤 hold のコストは人間が一度 diff を見るだけ・見逃しのコストはリリースパイプライン汚染なので、マッチは広めに倒してある(sign/auth/token はセグメント境界+camel 境界の判定で design/assign/tokenizer 等の明確な誤爆だけ潰す — 実測: 本 repo 757 ファイル中 hit 21 は全部意図どおりの高リスク系)。
+
+**camelCase 追補の経緯(2026-07-15)**: 初版のセグメント境界 regex(`(^|[/._-])o?auth([/._-]|$)/i` 等)は `supabaseAuth.ts` / `authStore.ts` のような camelCase 結合を素通りさせていた — OAuth 実装・認証ストア・認可判定の本体(`roles.ts` / `swarmGate.ts`)が force-hold の対象外という中核の穴。司令官の敵対レビューがこれを検出して差し戻したが、修正が始まる前にエンジンの autoMerge(レンズ 4 票 clean — レンズは穴を見抜けなかった)が差し戻し前の ready tip を FF 統合した(**外部レビューの verdict はエンジンに伝わらない**、という §2.2 とは別種の教訓も残した事故)。塞ぎは前進(companion 2 本 + 認可層の明示列挙)で行い、実ファイルの HOLD/PASS はユニットテスト(`swarmOrchestrator.test.ts`「highRiskChangedPaths」)が固定している。SKILL.md 同期テストは **verbatim pin(文言一致)であって意味の同期ではない**(pin 緑 ≠ regex のカバレッジ保証)ことも同テストに明記した。
+
+**寿命**: `highRiskHolds` は in-memory(§2.8 の他メモと同じく再起動で消える)— 消えても次の統合パスが同じ diff から再判定するので hold は**自然に復元される**(永続化不要の設計)。カードが review を離れた時点で prune(:5324)。
 
 `makeVerify`(`swarmOrchestrator.ts:2906-2994`)。**land するのとまったく同じ tree**(branch を trunk に rebase したもの)を検証する:
 
@@ -134,7 +242,11 @@ trunk ある? ─No→ warn して return                       :5275-5278
 
 RED の帰結: `verifyFailed[branch]=tip` を記録(:5321)、status を 'conflict' に上書き(:5324-5325)、`reworkOrPark`(:5330)。node_modules 未 install は「検証不能=RED」扱い(fail-closed、`tscCheck` :2593-2598)なので、**install していないプロジェクトで autoMerge を arm しても全カードが差し戻される**。
 
-### 2.5 敵対レビュー — PTY・マーカー・64KB・diff 連動 budget
+### 2.5 [HISTORICAL] 敵対レビュー — PTY・マーカー・64KB・diff 連動 budget
+
+> [HISTORICAL] エンジンはこの lens パネルを**もう回さない**(2026-07-15 撤去)。統合可否を
+> エンジンのレンズ多数決で決める経路は金輪際ゼロ —— それが本転換の核心(オーナーの本質的
+> 懸念: レンズは司令官の重量級レビューの検出力に届かない)。以下は歴史/手動レビューの参考。
 
 verify green の後、`deps.review`(実体 `makeAdversarialReview({lenses: DEFAULT_REVIEW_LENSES})`、配線 :3900)が走る(:5336-5460)。
 
@@ -142,7 +254,7 @@ verify green の後、`deps.review`(実体 `makeAdversarialReview({lenses: DEFAU
 
 **実行前の早期 return**(スポーン費用ゼロの順に):
 - 同一 tip が前回 must-fix → panel を再スポーンせず rework を carry(`skipIfTip`、:3609-3618)
-- diff が計算できない(git 失敗)→ defer(:3627-3630)。diff が空 → 統合(already merged、:3631-3633)
+- diff が計算できない(git 失敗)→ defer(:3627-3630)。diff が空 → 統合(already merged、:3631-3633)。**この「パネルを開かずに integrate を返す」経路(空 diff / 後述の rebase 競合委譲)は verdicts が空** — 2026-07-14 から engine log は `敵対レビュー省略(パネル対象外: <reason>) → 統合へ` と正直に出す(以前は `多数決 → clean [must-fix 0 / clean 0]` と表示され、パネルが承認したように読めた — 実測 2026-07-14 18:11 の「0票 clean」ログの正体)
 - **spawn park**: 有効 tier が全部 cooling / 全 OFF → `skippedForPark:true` の defer(:3594-3605)。呼び出し側 `runIntegratePass` にも同じ pre-gate があり(:5357)、park 中はそもそも review を呼ばない
 
 **budget は diff 実測でスケールする(`3129a58` の根治核心)**: 早期 return を抜けたら、まず to-be-landed diff の**テキスト実バイト数**を独自 execFile(maxBuffer 32MB — gitOut だと >1MB diff で溢れて「サイズ不明」になるため)で測る(:3634-3651)。per-reviewer budget は `computeReviewTimeoutMs(baseMs, diffBytes)`(:3383-3389)= **floor 既定 5 分(`REVIEW_TIMEOUT_MS` :3356)+ 10s/KB(`REVIEW_TIMEOUT_PER_KB_MS` :3373)、cap 20 分(`REVIEW_TIMEOUT_MAX_MS` :3374)**。34KB → 約 10.7 分、122KB → cap の 20 分。**サイズ不明(git 失敗)時は cap 側に倒す**(:3385-3386 — 待つ方向に fail し、凍結方向には fail しない)。レビュアーは並列なので wall-clock は最遅の 1 体分(:3652 で全員同じ budget)。
@@ -170,8 +282,8 @@ verify green の後、`deps.review`(実体 `makeAdversarialReview({lenses: DEFAU
 **lens パネル(既定)** `tallyLensReview`(:3208-3257)は多数決ではなく **weighted OR + 全員一致**:
 
 - must-fix の重み合計 ≥ `reworkThreshold`(既定1、つまり **どれか1 lens の must-fix で即差し戻し**)→ `'rework'`(:3232-3239)
-- そうでなく **`abstained === 0`(4人全員が決定的 verdict)のときだけ** `'integrate'`(:3241-3248)
-- **棄権が1つでもあれば `'defer'`**(:3250-3256)— 「その failure mode は未レビュー」という理屈
+- そうでなく **「全 lens が実在し decisive に投票」(`abstained === 0` かつ decisive 票数 ≥ lens 数 かつ decisive > 0)のときだけ** `'integrate'`
+- **棄権が1つでもあれば `'defer'`**— 「その failure mode は未レビュー」という理屈。**verdicts が空/lens 数未満でも `'defer'`**(2026-07-14 fail-closed 化: 旧実装は `abstained === 0` **だけ**を見ており、**空の verdicts(パネル全滅・1票も無い)を「全員判定済」と誤認して integrate** し得た — 0票は絶対に clean と読まない)
 
 reason に折り込まれる per-lens summary は `3129a58` 以降 **`lens=abstain(cause)` 形式**(:3222-3231 — 例 `correctness=abstain(timeout)`)。さらに makeAdversarialReview は、棄権を含む defer の reason 末尾に **`(diff NNKB / budget NNmin/reviewer)`** を付記する(:3792-3801)ので、engine log の 1 行だけで「誰が・なぜ棄権し・budget は何分だったか」まで読める。
 
@@ -180,12 +292,17 @@ reason に折り込まれる per-lens summary は `3129a58` 以降 **`lens=absta
 **defer streak → 凍結**(`runIntegratePass` 側、:5406-5449):
 
 - defer のたび `reviewDeferred[branch] = {tip, count+1, abstains}`(:5419-5427)。**streak 全体の棄権内訳 `abstains`(`lens(cause)` → 回数)も蓄積**される(:5419-5425、型 :1420)。ただし `skippedForPark` の defer は engine 都合の hold なので streak を**消費しない**(:5411)
-- `count >= MAX_REVIEW_DEFERS`(=3、:258)で needs-human: status='conflict' 表示 + `abstainSummary` に累積棄権内訳を stamp(:5428-5434)+ログ「敵対レビュー: 3回連続で多数決つかず — needs-human 退避(再レビュー停止・新コミットで再開): … — 棄権内訳: correctness(timeout)×3, … — 最終: …」(:5435-5439)
-- 以後のパスは **defer-exhausted memo で panel を再スポーンしない**(:5359-5374)。トークン焼き防止。`engine.reviews` は毎パス再構築されるので、凍結 skip のたびに `abstainSummary` を再 stamp する(:5368-5371)
-- **リセット条件は「新コミット(tip が変わる)」だけ**(:5359-5362, 5262)。決定的 verdict(rework/clean)も streak を終わらせる(:5395, 5454)が、凍結後は panel 自体が走らないので、実質 **worker が commit を積む(または人間が rebase して tip を変える)まで凍結は解けない**
-- 15秒ごとの統合パス×3回なので、**棄権が続くと 3 パネル分の実行時間で凍結に到達する**(旧固定5分 budget の実測では 6-7 分間隔×3 回 = 約13分、§3。現 budget は diff 連動で最長 20 分/パネルなので、大 diff で本当に棄権が続く場合の凍結到達は最長約 60 分)
+- `count >= MAX_REVIEW_DEFERS`(**=2**、2026-07-14 に 3→2: 初回パネル+**再試行はちょうど1回** — 完了条件「1回だけ再試行」の明文化)で needs-human: status='conflict' 表示 + `abstainSummary` に累積棄権内訳を stamp +ログ「敵対レビュー: 2回連続で多数決つかず — needs-human 退避(再レビュー停止・新コミットで再開): … — 棄権内訳: correctness(timeout)×2, … — 最終: …」
+- **凍結は 2026-07-14 から anomaly として観測可能**: `detectAnomalies` が `reviewDeferred` の cap 到達 + review 列在籍から **`review-panel-failed` anomaly**(ref=taskId・attempts=count)を毎パス導出し、`fireFatalNotifications` が **rising edge で fatal 通知**(in-app bell + OS toast)を1回発火する。**rework counter は焼かない**(defer は worker の過失ではない — reworkOrPark を通らない、従来どおり)
+- 以後のパスは **defer-exhausted memo で panel を再スポーンしない**(:5359-5374)。トークン焼き防止(無限リトライ禁止)。`engine.reviews` は毎パス再構築されるので、凍結 skip のたびに `abstainSummary` を再 stamp する(:5368-5371)
+- **リセット条件は「新コミット(tip が変わる)」だけ**(:5359-5362, 5262)。決定的 verdict(rework/clean)も streak を終わらせる(:5395, 5454)が、凍結後は panel 自体が走らないので、実質 **worker が commit を積む(または人間が rebase して tip を変える)まで凍結は解けない**(凍結が anomaly/通知で人間に届くようになったのが 2026-07-14 の追加)
+- 15秒ごとの統合パスなので、**棄権が続くと 2 パネル分の実行時間で凍結に到達する**(budget は diff 連動で最長 20 分/パネル — 大 diff で本当に棄権が続く場合の凍結到達は最長約 40 分。旧 `MAX_REVIEW_DEFERS=3`・固定5分 budget 時代の実測は §3)
 
-### 2.7 差し戻し(reworkOrPark)と conflict 委譲(delegateConflict)
+### 2.7 [HISTORICAL] 差し戻し(reworkOrPark)と conflict 委譲(delegateConflict)
+
+> [HISTORICAL] `reworkOrPark` / `delegateConflict` は**撤去された**(2026-07-15)。エンジンは
+> もう verify RED / must-fix / conflict でカードを review→doing に戻さない —— 統合の判断
+> (差し戻すか land するか)は司令官の専任。以下は歴史。
 
 どちらも autoMerge armed のときだけ動く「review に滞留させない」機構。
 
@@ -241,7 +358,7 @@ reason に折り込まれる per-lens summary は `3129a58` 以降 **`lens=absta
 
 ## 4. 落とし穴 — 司令塔が実際に踏んだ/踏みやすい誤診
 
-1. **「conflict 表示 = rebase 競合」と思い込む**。§2.2 の通り、verify RED・must-fix 差し戻し直後・**defer 凍結**(:5324-5325,5396-5397,5367,5432)が全部 'conflict' に相乗りする。凍結カードを「競合だ」と誤診して worktree で rebase を試みても、競合は無く FF 可能なことがある(実際 §3 の凍結 3 枚がそう)。**engine log の直前行で種別を確認**(§6-3)— `3129a58` 以降は `reviews[].abstainSummary` の有無でも凍結だけは即判別できる(§2.2)。
+1. **「conflict 表示 = rebase 競合」と思い込む**。§2.2 の通り、verify RED・must-fix 差し戻し直後・**defer 凍結**(:5324-5325,5396-5397,5367,5432)・**高リスク force-hold**(2026-07-15・§2.3.1)が全部 'conflict' に相乗りする。凍結カードを「競合だ」と誤診して worktree で rebase を試みても、競合は無く FF 可能なことがある(実際 §3 の凍結 3 枚がそう)。**engine log の直前行で種別を確認**(§6-3)— `3129a58` 以降は `reviews[].abstainSummary` の有無で凍結が、2026-07-15 以降は `reviews[].highRiskFiles` の有無で force-hold が、それぞれ API 単体でも即判別できる(§2.2/§6-13)。force-hold は**故障ではない**(設計どおりの承認待ち)— 直しに行くのではなく diff を読んで手動統合の判断をする。
 2. **「must-fix 0 / clean 2 なら、あと少しで通る」と思い込む**。clean 2 は「賛成2」ではなく「**2 lens が棄権 = 全員一致が絶対に成立しない**」。同じ tip で待っても3回で凍結し、以後 panel は走らない(:5359-5374)。新コミットを積まない限り再開しない。(`3129a58` 以前は「大 diff だから棄権」がこの型の支配的原因だった — 現在棄権が続くなら `abstainCause` で真因を読む。)
 3. **棄権の理由が残らない前提で諦める(逆に、探して時間を溶かす)**。**これは `3129a58` で過去の話になった** — 当時は `.catch → vote:null` と timeout kill が理由を握りつぶし、調べる手段が無かった。現在は3か所に残る: ① 毎 defer の engine log(`lens=abstain(cause)` + `(diff NNKB / budget NNmin/reviewer)`、:3222-3231,3725-3734)② 凍結ログの「棄権内訳: …」(:5435-5439)③ API の `reviews[].abstainSummary`(:5371,5433)。診断はまずここを読む — `timeout` なら diff/budget、`limit` なら quota(§2.5 sensor)、`spawn-failed`/`error` なら PTY 環境。
 4. **autoMerge OFF なのに「統合されない」と騒ぐ**。B相は armed のときだけ(:5274)。OFF 時は分類表示だけで、差し戻しも委譲も起きない(:236-237 のコメント通り「カードは review に留まる」のが正常)。
@@ -252,19 +369,33 @@ reason に折り込まれる per-lens summary は `3129a58` 以降 **`lens=absta
 
 ---
 
-## 5. 司令塔の運用注意
+## 5. 司令塔の運用注意 — **統合は君の仕事(主経路)**
 
-### autoMerge を arm してよい条件
+2026-07-15〜、統合は司令官の専任。エンジンは「worker が ready」と君を起こすだけ。起きたら
+下の**手動統合の手順**で land する —— これが**主経路**であって例外ではない。
 
-以下を**全部**満たすときだけ arm する(1つでも欠けると review が詰まるか、全カード差し戻しになる):
+### autoMerge(=「司令官を自動起こし」)を arm してよい条件
 
-1. **origin の trunk が存在する**(無いと B相は丸ごと no-op、:5275-5278)
-2. **プロジェクトに node_modules がある**(無いと tsc gate が fail-closed で全カード RED → 差し戻し2回→blocked、:2593-2598)
-3. **使用可能モデルに ON の tier があり、全滅 cooling でない**(park 中は review が進まないだけだが、arm する意味がない。:5357、`swarmAllowedModels.ts:132-148`)
-4. **大 diff カードも決着する前提でよい(`3129a58` 以降)** — budget が diff 連動(cap 20 分、§2.5)になり、旧 22KB 制限は撤廃。含みは1つ: **実運用でこのサイズ帯が arm 下で決着した実績はまだ無い**(TARGET-STATE §2 — 最初の1枚は engine log を見届ける)。かつて併記していた「arm 中は panel が pass を握るため最長 20 分/カードの monitor 空白」は **`0d1f7f0`(同日)で解消** — integrate は tick から分離され、panel/verify 中も monitor は回る(§2.1/§2.4。検知21分遅延そのものの根治は 04 章 §4・TARGET-STATE §1)
-5. **他に同じ repo を統合する主体がいない**(tmux 司令塔・手動 rebase/push と同時にしない。§4-8)
+**意味が変わった**: arm しても main は 1bit も動かない —— review に ready が来たら**君(司令官)を
+自動で起こす**だけ。だから条件はほぼ無い(旧「node_modules / tier / 大 diff / 単一統合主体」の
+前提は全部消えた —— エンジンはもう verify も push もしないから)。安全なので**推奨は ON**:
 
-arm/disarm は `POST /api/swarm/orchestrator/automerge` body `{path, enabled}`(`server/routes/swarm.ts:614-627`)。in-memory・既定 OFF・engine 停止中に arm しても intent が残るだけ(:6635-6640)。
+1. これだけ: **無人でも review カードに人の目を入れたい**なら ON。ON = ready のたびに君が起こされる。
+2. OFF にするのは、**君が常時この卓に居て手動で見にいく**運用のとき(起こされ通知が不要)。
+
+arm/disarm は `POST /api/swarm/orchestrator/automerge` body `{path, enabled}`
+(エンドポイント名は API 安定のため据え置き)。in-memory・**既定 OFF・再起動で必ず OFF**
+(他の autonomy トグルと同じ安全モデル)。engine 停止中に arm しても intent が残るだけ。
+
+### 起こされたら(`manager-woke` 通知が来たら)
+
+`manager-woke` 情報通知(または起動直後の `/og-manage` の「状況」)で review に統合待ちが
+来たと分かる。やることは1つ: **review の各カードの diff を読み、重量級レビューして、問題なければ
+下の手順で land する**。エンジンは verify も敵対レビューもしていない —— **検証もレビューも君が負う**
+(必要なら時間無制限の subagent レビュアーを立てる。これが「深い判断が要る統合は必ず manager の
+目を通す」の実装)。**高リスクパス(release/CI/署名/依存/secrets 系 = `HIGH_RISK_PATHS` / og-manage
+§「マージ」手順 0)に触れるブランチは、他が緑でも特に慎重に** —— fail-closed の安全網は今や君の
+手順の中にしかない(エンジン側の force-hold は撤去済み)。
 
 ### 凍結/conflict カードの解除 — 2つの正規ルート
 
@@ -351,6 +482,17 @@ grep -n "REVIEW_TIMEOUT_MS =\|REVIEW_TIMEOUT_PER_KB_MS =\|REVIEW_TIMEOUT_MAX_MS 
 # 12) 「棄権1つで defer(全員一致)」と budget 式の該当行を直接見る
 sed -n '3241,3257p' src/lib/server/swarmOrchestrator.ts   # tallyLensReview の integrate/defer 分岐
 sed -n '3383,3389p' src/lib/server/swarmOrchestrator.ts   # computeReviewTimeoutMs(diff 連動 budget)
+
+# 13) 高リスク force-hold(2026-07-15・§2.3.1)の現物確認
+#   a. hold 中のカードを API で見る(highRiskFiles が付くのは force-hold だけ)
+curl -sG "http://127.0.0.1:47776/api/swarm/orchestrator" --data-urlencode "path=/path/to/project" | jq -r '.reviews[] | select(.highRiskFiles) | "\(.branch)\t\(.highRiskFiles | join(", "))"'
+#   b. anomaly として上がっているか('high-risk-hold' kind)
+curl -sG "http://127.0.0.1:47776/api/swarm/orchestrator" --data-urlencode "path=/path/to/project" | jq -r '.anomalies[] | select(.kind == "high-risk-hold") | "\(.ref)\t\(.branch)\t\(.files | join(", "))"'
+#   c. hold 判定を手で再現(そのブランチは高リスクパスに触れているか)
+git -C /path/to/project fetch origin main && git -C /path/to/project diff --name-only origin/main...<branch>
+#      ↑ の出力を HIGH_RISK_PATHS(swarmOrchestrator.ts:2853 — workflows/release.yml/ci.yml/package.json/lockfile/sign…/notar…/electron\/main.js/secret/.env/auth/token(camelCase 結合 supabaseAuth.ts/authStore.ts 型も)/roles.ts/swarmGate.ts/swarmAllowedModels.ts)と突き合わせる
+#   d. パス集合が司令官規約とドリフトしていないか(同期テストがスイートで守っている)
+npx vitest run src/lib/server/swarmOrchestrator.test.ts -t '司令官規約'
 ```
 
 (47776 は `server/index.ts` の固定ポート契約 — engine 自身も同じ loopback origin で Board API を叩く、`swarmOrchestrator.ts:2178-2183`)

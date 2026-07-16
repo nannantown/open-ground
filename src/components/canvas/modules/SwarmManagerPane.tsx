@@ -27,13 +27,16 @@
 // `useSwarmEngine` hook, which SwarmModule calls ONCE and threads down here as
 // props. This pane is therefore PURELY PRESENTATIONAL for the engine — it never
 // fetches. Start/stop (autonomy) is driven from SwarmModule's master power
-// switch; only Auto-integrate is toggled here:
+// switch; only Auto-wake-the-commander is toggled here:
 //
-//   • Auto-integrate (③) — POST /api/swarm/orchestrator/automerge. The engine
-//     lands fast-forwardable / cleanly-rebasable review cards on the trunk
-//     itself (FF / rebase only, never forced; conflicts left for a human). Read
-//     off the state's `autoMerge`, default OFF. The switch dims when the route
-//     is unreachable (`available === false`) and goes live once it answers.
+//   • Auto-wake the commander (③) — POST /api/swarm/orchestrator/automerge
+//     (endpoint name kept for API stability). MEANING CHANGED 2026-07-15: the
+//     engine NO LONGER integrates. When armed and a worker is ready (review card),
+//     it WAKES the commander desk (spawnSwarmManager, batched) so a human-in-the-
+//     loop review decides the merge; it never verifies / reviews / pushes to the
+//     trunk itself. Read off the state's `autoMerge`, default OFF. The switch dims
+//     when the route is unreachable (`available === false`) and goes live once it
+//     answers. See docs/commander/03-integration-review.md.
 //
 // The commander CONVERSATION (/manage) is a SEPARATE PTY session, independent of
 // the engine route — it works whether or not the autonomous engine is available;

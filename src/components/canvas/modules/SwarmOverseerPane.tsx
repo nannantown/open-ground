@@ -60,6 +60,8 @@ const ANOMALY_LABEL: Record<EngineAnomaly['kind'], MessageKey> = {
   'no-heartbeat': 'projectPanel.swarm.overseer.anomalyNoHeartbeat',
   'move-stuck': 'projectPanel.swarm.manager.anomalyMoveStuck',
   'rework-exhausted': 'projectPanel.swarm.overseer.anomalyReworkExhausted',
+  'review-panel-failed': 'projectPanel.swarm.overseer.anomalyReviewPanelFailed',
+  'high-risk-hold': 'projectPanel.swarm.overseer.anomalyHighRiskHold',
 }
 const MOVE_INTENT_LABEL: Record<NonNullable<EngineAnomaly['intent']>, MessageKey> = {
   review: 'projectPanel.swarm.manager.moveStuckReview',
@@ -76,6 +78,8 @@ const FATAL_EVENT_LABEL: Record<SwarmFatalEventKind, MessageKey> = {
   'exec-timeout': 'projectPanel.swarm.overseer.fatalExecTimeout',
   rollback: 'projectPanel.swarm.overseer.fatalRollback',
   'canary-failed': 'projectPanel.swarm.overseer.fatalCanaryFailed',
+  'review-panel-failed': 'projectPanel.swarm.overseer.fatalReviewPanelFailed',
+  'high-risk-hold': 'projectPanel.swarm.overseer.fatalHighRiskHold',
 }
 
 export const SwarmOverseerPane = ({

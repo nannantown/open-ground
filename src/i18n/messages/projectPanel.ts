@@ -143,9 +143,9 @@ export const projectPanel = {
     // and shows the engine's live log. (Board pipeline tallies live on the Board.)
     'projectPanel.swarm.manager.tab': 'Manager',
     'projectPanel.swarm.manager.badge': 'Commander',
-    'projectPanel.swarm.manager.autoMerge': 'Auto-integrate',
+    'projectPanel.swarm.manager.autoMerge': 'Auto-wake the commander',
     'projectPanel.swarm.manager.autoMergeHint':
-      'Let the engine land review cards on your origin remote’s trunk by itself — plain push only (never `--force`), only the engine’s own `swarm/*` branches, and only after a verify gate (typecheck → lint → safety tests → full test suite) and unanimous adversarial review both pass. The push itself never resolves a conflict — a conflicting push is aborted and nothing lands. Instead the branch is handed back to its own autonomous worker to rebase and retry, no human involved; only repeated rebase failures park the card (blocked) for your review. This is all it does; for a diff you drive yourself, use the commander conversation (/manage) instead. Off by default. Note: stopping the autonomous drain does NOT disarm this — it stays armed for the next start; only switching it off yourself or a full app restart returns it to off.',
+      'When a worker is ready (a review-column card), the engine WAKES your commander desk so a human-in-the-loop review decides the merge. It batches every waiting branch into a single wake, and never spawns a second desk when one is already up. The engine itself NEVER integrates — it does not verify, run a review panel, or push to your trunk; the commander owns the merge (its own heavyweight review + a manual fast-forward, and the fail-closed / high-risk-hold safety nets live there too). This replaced the old “auto-integrate” after that path once fast-forwarded a flawed branch onto main OVER the commander’s concurrent send-back — with the engine out of the merge business, the two can no longer race on the trunk. Recommended ON: waking the commander moves nothing, so review cards get attended even while you’re away. Off by default (the restart-safe autonomy model); a full app restart returns it to off.',
     'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
     'projectPanel.swarm.manager.overseerHint':
       'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. UNLIKE auto-integrate, turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
@@ -271,8 +271,10 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.ago': '{age} ago',
     'projectPanel.swarm.overseer.anomalyReworkExhausted': 'Card retried too many times — parked in Blocked',
     'projectPanel.swarm.overseer.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
-    // Fatal-event labels — the five escalation events the safety valve
-    // (card 6fe48c1f) persists. Three come from the swarm engine, two from the
+    'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'Review panel indecisive — merge withheld, needs a human',
+    'projectPanel.swarm.overseer.anomalyHighRiskHold': 'High-risk paths touched — auto-merge withheld, merge manually',
+    // Fatal-event labels — the escalation events the safety valve
+    // (card 6fe48c1f) persists. The engine-side ones plus two from the
     // Electron self-update cycle. The server `detail` (Japanese) rides as a
     // secondary line; these label WHAT fired in the UI language.
     'projectPanel.swarm.overseer.fatalReworkExhausted': 'Card parked · rework limit',
@@ -280,6 +282,8 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.fatalExecTimeout': 'Worker hit time limit',
     'projectPanel.swarm.overseer.fatalRollback': 'Self-update rolled back',
     'projectPanel.swarm.overseer.fatalCanaryFailed': 'Self-update canary failed',
+    'projectPanel.swarm.overseer.fatalReviewPanelFailed': 'Review panel failed · merge withheld',
+    'projectPanel.swarm.overseer.fatalHighRiskHold': 'High-risk paths · awaiting manual merge',
     // Escalations inbox (C1) — questions the swarm raised to YOU, waiting for
     // your answer. Fail-closed: nothing proceeds until you decide.
     'projectPanel.swarm.esc.title': 'Escalations — waiting for your answer',
@@ -709,9 +713,9 @@ export const projectPanel = {
     // （Board のパイプライン件数は Board タブで見る。）
     'projectPanel.swarm.manager.tab': '司令官',
     'projectPanel.swarm.manager.badge': '司令官',
-    'projectPanel.swarm.manager.autoMerge': '自動統合',
+    'projectPanel.swarm.manager.autoMerge': '司令官を自動で起こす',
     'projectPanel.swarm.manager.autoMergeHint':
-      'review のカードを、origin リモートの本流へエンジンが自動で取り込みます — plain push のみ（`--force` は一切しません）、対象はエンジン自身の `swarm/*` ブランチのみ、そして検証ゲート（型チェック → lint → safety テスト → フルテスト）と敵対レビュー全員一致の両方を通ったものだけが対象です。push 自体は衝突を解決しません — 衝突した push は中断され、何も取り込まれません。代わりに、そのブランチは同じ自律 worker に差し戻され、人手を介さず rebase して再試行します。rebase が繰り返し失敗した場合のみ、カードは blocked に退避しあなたのレビューへ回されます。ここに書いた以上のことは起きません — 自分で操作するマージは司令官との対話（/manage）に任せてください。既定はオフ。注意：自律運転（drain）を止めても自動統合は解除されません — 次回の起動でもオンのままです。自分でオフに切り替えるか、アプリを完全に再起動した場合のみオフに戻ります。',
+      'worker が ready（review 列のカード）になったら、エンジンが司令官の卓を自動で起こし、人が判断する統合レビューに委ねます。待っているブランチはまとめて1回で起こし、司令官がすでに起きているときは二重に立ち上げません。エンジン自身は一切統合しません — 検証もレビューパネルも本流への push もせず、統合は司令官の仕事です（司令官自身の重量級レビュー＋手動の fast-forward。fail-closed／高リスク hold の安全網も司令官側にあります）。これは旧「自動統合」の置き換えです — かつて自動統合が、司令官の差し戻しと並行して穴あきブランチを main に FF して入れてしまった事故を受け、エンジンを統合から外すことで両者が本流で競合しない構造にしました。推奨はオン：司令官を起こすだけで本流は一切動かないので、離席中でも review のカードに人の目が入ります。既定はオフ（再起動で必ずオフに戻る安全モデル）。アプリを完全に再起動するとオフに戻ります。',
     'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
     'projectPanel.swarm.manager.overseerHint':
       'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。自動統合と違い、autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
@@ -834,15 +838,19 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.ago': '{age} 前',
     'projectPanel.swarm.overseer.anomalyReworkExhausted': 'リトライ上限超過 — blocked に退避',
     'projectPanel.swarm.overseer.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
-    // 致命イベントのラベル — 安全弁（カード 6fe48c1f）が永続化する5つの
-    // エスカレーションイベント。3つは swarm エンジン由来、2つは Electron 自己更新
-    // サイクル由来。サーバの detail（日本語）は副行に出し、ここでは何が起きたかを
+    'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'レビューパネル決着せず — 統合保留・人間の確認待ち',
+    'projectPanel.swarm.overseer.anomalyHighRiskHold': '高リスクパスに接触 — 自動統合を保留・手動マージ待ち',
+    // 致命イベントのラベル — 安全弁（カード 6fe48c1f）が永続化する
+    // エスカレーションイベント。エンジン由来のものと、Electron 自己更新
+    // サイクル由来の2つ。サーバの detail（日本語）は副行に出し、ここでは何が起きたかを
     // UI 言語で示す。
     'projectPanel.swarm.overseer.fatalReworkExhausted': 'カード退避 · 差し戻し上限',
     'projectPanel.swarm.overseer.fatalAllWorkersDown': '全ワーカー停止',
     'projectPanel.swarm.overseer.fatalExecTimeout': 'ワーカーが時間上限に到達',
     'projectPanel.swarm.overseer.fatalRollback': '自己更新をロールバック',
     'projectPanel.swarm.overseer.fatalCanaryFailed': '自己更新カナリア失敗',
+    'projectPanel.swarm.overseer.fatalReviewPanelFailed': 'レビューパネル不成立 · 統合保留',
+    'projectPanel.swarm.overseer.fatalHighRiskHold': '高リスクパス · 手動マージ待ち',
     // エスカレーション受信箱（C1）— swarm があなたに上げた質問の回答待ち。
     // fail-closed: あなたが決めるまで何も先に進まない。
     'projectPanel.swarm.esc.title': 'エスカレーション — あなたの回答待ち',

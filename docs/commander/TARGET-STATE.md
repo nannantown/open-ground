@@ -11,10 +11,10 @@
 | # | 理想 | 現状 | 対応カード |
 |---|---|---|---|
 | 1 | model 枯渇は 2 分以内に検知され dispatch が正しい tier に落ちる | ◐ **実装済み(`0d1f7f0`)— spawn 直後の即死は約 1.5 分(onset 窓)・稼働後は実クロック化した 10 分ゲート。実運用での検証待ち** | `4d1550d7`(done) |
-| 2 | 敵対レビューは diff サイズに依らず決着し、棄権には理由が残る | ◐ **実装済み(`3129a58`)・実運用での検証待ち** | `58335c7f`(done) |
+| 2 | ~~敵対レビューは diff サイズに依らず決着し…~~ **[SUPERSEDED 2026-07-15]** engine はもう敵対レビューをしない(統合は司令官専任・§5) | ⊘ **エンジンから撤去** — レビューは司令官の重量級レビューへ一本化 | `58335c7f`(歴史) |
 | 3 | 過去 fatal の再投函ゼロ・dismiss は再起動を跨いで効く | ◐ **実装済み(`d8431c3`+`aa9cb8d`)・実運用での検証待ち** | `c944ea69`(done) |
 | 4 | 司令塔 API は嘘をつかない(stale 心拍の解消) | ◐ **実装済み(`1f19770`、2026-07-11 main 入り)— 実運用実測待ち** | 統合済み(`1f19770`) |
-| 5 | autoMerge を常時 arm できる(+人間承認の境界確定) | △ §1・§2 とも実装済み — 残るは両者の実運用実測と再起動 OFF の設計判断 | 1・2 に従属(境界は本書 §5 が正典) |
+| 5 | **統合は司令官専任 — engine は ready 検知で司令官を起こすだけ(main を FF する経路が engine に1つも無い)+ 落ちた司令官を蘇生する反射** | ◐ **実装済み(2026-07-15 マネージャ専任化 + 2026-07-16 manager 蘇生 card B)・実運用での検証待ち** | 本カード + 蘇生 card B(§5 が正典) |
 | 6 | 司令塔ドキュメントが変更に追随する | ✓ **検知2点(verify soft-warn + og-manage 起動時の 00-INDEX §6-1 チェック)+ 起票テンプレ組込み(supply / order / og-manage、2026-07-11)実装済み+テンプレ経由の運用実績 1 件**(カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂) | 案 B(検知2点)+案 B'(テンプレ)完了。実績 1 件(2026-07-11) |
 
 (◐ = 実装は main 入り・到達判定コマンドでの実測が未。✓ にするのは実運用の観測のみ。)
@@ -182,15 +182,45 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
 
 ---
 
-## 5. autoMerge を常時 arm できる条件と、人間承認が必須で残る操作の境界
+## 5. 統合は司令官専任 — engine は ready 検知で司令官を起こすだけ
+
+> **2026-07-15 マネージャ専任化で本節の理想が変わった。** 旧理想は「autoMerge を常時 arm
+> できる(engine が自動統合する)」だった。それは 2026-07-15 の事故 —— autoMerge が司令官の
+> 差し戻しと並行で穴あきブランチを main に FF した + engine のレンズ 4 票 clean が auth の
+> camelCase 取りこぼしを見逃した —— を受けて**撤回**された。新しい理想は下記。
 
 ### 理想(観測可能条件)
 
-**常時 arm の成立条件**(すべて満たしたとき「arm しっぱなし」を既定運用にできる):
+**3層設計(2026-07-15/16 で確立)**: **worker = 手**(コードと心拍だけ)/ **engine = 神経系 + 反射**
+(検知して機械的に対処する — dispatch・monitor・runaway reclaim、そして **manager 蘇生**)/ **manager = 脳**
+(統合・配車の判断)。統合は脳(manager)専任で、engine はもう統合しない。だが統合が manager 専任である以上
+**manager が落ちたら swarm 全体が止まる** —— そこで engine は**反射**として manager の生死を監視し、止まったら
+蘇生する(神経系が脳を蘇生する)。**蘇生は反射であって判断ではない** —— engine は起こすだけ、統合の判断は
+蘇生後の manager がやる。成立条件:
 
-1. §1(quota 検知)と §2(レビュー決着)が解消済み — 大 diff カードが凍結せず、枯渇時もレビューパネルが誤 defer しない。
-2. 03 章 §5 の静的条件が定常的に真: origin trunk あり / node_modules あり(verify が fail-closed のため — swarmOrchestrator.ts:2593-2598)/ spawnable tier あり / **同一 repo を統合する主体が engine のみ**(手動統合と併走しない — 03 章 §4-8)。
-3. 観測(到達の定義): autoMerge armed のまま **7 日間**、(a) needs-human 凍結ゼロ、(b) 二重統合・force push ゼロ(そもそも機構が never force — swarmIntegrate.ts:251-301)、(c) 「done なのに review」残置が自己修復以外で発生しない(swarmOrchestrator.ts:5573-5579)。
+1. **engine の統合経路(runIntegratePass の verify→レンズ→FF push→land)が撤去され、engine が
+   main を FF する経路が1つも無い。** レンズ結果だけで main が動く経路は金輪際ゼロ(回帰テスト
+   `swarmOrchestrator.test.ts`「manager-only integration wake / 受け入れの肝」+ integration
+   「WAKES the commander and NEVER FF-pushes」で固定)。
+2. **worker が ready(review 昇格)になったら engine が司令官を起こす** — autoMerge(=「自動起こし」)
+   armed のとき、review の swarm カードがあり司令官の卓が不在なら `spawnSwarmManager` で起こす。
+   複数 ready はまとめて1回(バッチ)。
+3. **manager 蘇生反射(card B, 2026-07-16)** —— engine は manager の生死を監視し、止まったら蘇生する:
+   (a) **検知**は 2 信号 AND(live PTY でプロセス死・**manager 心拍**の 10 分無音でハング)、
+   (b) 死/ハングなら `spawnSwarmManager` で**蘇生**(＝二重起動もこの1判定で防ぐ)、
+   (c) quota 壁で落ちたなら**枯れていない tier へ繰り下げてから**蘇生(同じモデルは同じ壁)、
+   (d) 起動直後に毎回落ちる場合は **3 連続失敗で諦め `manager-unrevivable` fatal** をオーナーへ上げる
+      (無限に蘇生してトークンを焚かない)。回帰テストは integration「RESURRECTION reflex, REAL
+      manager heartbeat」(実心拍を止める→検知→spawn 3回→fatal を HOME 隔離で通し)で固定。
+4. **統合(重量級レビュー + 手動 FF push)は司令官が行う** — fail-closed 0票禁止・高リスク
+   force-hold の安全網も司令官側(skills/og-manage §「マージ」)。engine 側の verify/レンズ/
+   force-hold は撤去/dormant で**二重管理しない**。
+5. **緊急バックドア温存** — 司令官の手動統合(§5 の FF push・「マージ」フロー)はそのまま。engine が
+   統合しなくなっても司令官は統合できる(主経路)。
+6. 観測(到達の定義): autoMerge(自動起こし)armed のまま運用し、(a) engine 由来の main への
+   FF push がゼロ(そもそも経路が無い)、(b) ready カードに対し司令官が起こされ統合判断が入る、
+   (c) 司令官不在で ready が放置され続けない、(d) 固まった/落ちた司令官が蘇生され、蘇生不能なら
+   fatal が上がる。
 
 **人間承認が必須で残る操作**(理想状態でも自動化しない境界 — これは到達目標ではなく**恒久の境界線**):
 
@@ -207,18 +237,35 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
 
 ### 現状とのギャップ
 
-- §2 の実装(`3129a58`)で「小 diff 限定」の制約は撤廃され、§1 の実装(`0d1f7f0`)で「arm 中の monitor 空白(panel が pass を握る)」も解消された — integrate は tick の脇で走り、panel/verify 中も monitor は回る(03 章 §2.1/§2.4)。残るのは **§1・§2 とも実運用実測がゼロ**なこと(◐ → ✓ の壁)。
-- `autoMerge` は in-memory・再起動で OFF(swarmOrchestrator.ts:1350)— 「常時」を実現するには再起動後の再 arm 運用(または永続化の設計判断)も必要。これは §1・§2 の実測が揃った後に改めて起票する(今のカード無し)。
+- **実装は main 入り(2026-07-15 マネージャ専任化)**: runIntegratePass の B相は「司令官を起こす」だけに
+  置換され、verify/レンズ/FF push/land/reworkOrPark/delegateConflict は撤去。回帰テストで「engine が
+  main を FF する経路ゼロ」を固定済み。残るのは **実運用での検証** —— 実際に ready カードで司令官が
+  起こされ、統合判断が入る様子を見届けること(◐ → ✓ の壁)。
+- **manager アクティブ判定は精緻化済み(card B, 2026-07-16)**: live-PTY のみだった暫定シグナルは
+  **live PTY + 心拍鮮度(10 分無音でハング)の 2 信号 AND** に精緻化された。live だが hang した卓も
+  検知され蘇生される。残るは **実運用での検証** —— 実際に固まった司令官が蘇生され、恒久障害なら fatal が
+  上がる様子を見届けること(◐ → ✓ の壁)。
+- **自己更新トリガ**: engine の land 時に発火していた `requestEngineSelfUpdate` は engine が land
+  しなくなり dormant。OG 自身の swarm 統合で自己更新を回したいなら司令官の手動統合側で発火させる
+  必要がある(別カードの領分)。
 
 ### 対応カード
 
-§1(`4d1550d7` done)と §2(`58335c7f` done)の**実運用検証**に従属(カード無し — 到達判定の実測のみ)。両者が揃った後、「autoMerge 永続化(再起動を跨ぐ arm)の是非」を独立カードとして起票するのが順序。
+**2026-07-15 マネージャ専任化**(統合を司令官専任に)で B相を「起こすだけ」に置換 main 入り。**2026-07-16
+manager 蘇生 card B**(manager 心拍 + engine が死/ハングを検知し蘇生・quota 繰り下げ・無限ループ上限・fatal
+通知)で条件 3 を実装 main 入り。両者で条件 1-6 の**機構は揃った** —— 残るは実運用検証(下の到達判定
+コマンド)。
 
 ### 到達判定コマンド
 
 ```bash
-# arm 状態と直近の統合結果・凍結の有無を 1 コマンドで
-curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{autoMerge, reviews, log: [.log[] | select(.message | test("integrated|needs-human|差し戻し"))] | .[-10:]}'
+# autoMerge(=自動起こし)armed か + engine が「司令官を起こした/蘇生した」ログが出ているか
+curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{autoMerge, reviews, log: [.log[] | select(.message | test("司令官を起こしました|応答しないため蘇生|連続で蘇生に失敗|integrated"))] | .[-10:]}'
+# ↑ 「司令官を起こしました」「応答しないため蘇生しました(N回目)」は出る。「integrated (ff)」は
+#   engine が統合しなくなったので二度と出ない。3 連続失敗なら通知ストアに 'manager-unrevivable' fatal。
+# 司令官の心拍(蘇生反射が見ているファイル)を直読 — updatedAt が 10 分以上前ならハングと判定される。
+# 在処は固定名 manager.json(worker 心拍と同じ repo 別ディレクトリ):
+jq '{role, updatedAt, phase}' ~/.openground/swarm/*/manager.json 2>/dev/null || echo "manager 心拍なし(司令官がまだ beat していない)"
 ```
 
 ---

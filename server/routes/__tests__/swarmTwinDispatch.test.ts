@@ -279,6 +279,7 @@ const newEngine = (path: string): ProjectEngine => ({
   verifyFailed: new Map(),
   reviewFailed: new Map(),
   reviewDeferred: new Map(),
+  highRiskHolds: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
   reworks: new Map(),

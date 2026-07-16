@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest'
+import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import {
@@ -10,6 +12,7 @@ import {
   MAX_REWORKS,
   MAX_CONFLICT_REWORKS,
   MAX_REVIEW_DEFERS,
+  highRiskChangedPaths,
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
   STALL_ECHO_GUARD_MS,
@@ -43,6 +46,8 @@ import {
   runDispatchPass,
   runIntegratePass,
   kickIntegratePass,
+  MANAGER_RESUME_GRACE_MS,
+  MAX_MANAGER_RESUME_ATTEMPTS,
   runEnginePass,
   stopOrchestrator,
   setOverseer,
@@ -198,6 +203,7 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   verifyFailed: new Map(),
   reviewFailed: new Map(),
   reviewDeferred: new Map(),
+  highRiskHolds: new Map(),
   lastIntegrateAt: 0,
   recoveries: new Map(),
   reworks: new Map(),
@@ -1244,6 +1250,7 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
     const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = {
       ...base,
       fetchReview: async () => [],
+      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
@@ -1254,6 +1261,11 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
+      // Manager-only integration (2026-07-15): inert wake half — no desk, no spawn.
+      // The integrate pass never fires in these dispatch/runEnginePass unit tests
+      // (the TICK_MS timer is cleared first), so these only satisfy the type.
+      isManagerActive: async () => false,
+      wakeManager: async () => true,
       worktreeExists: async () => true,
       preflight: async () => ({ ok: true }), // claude ready by default; a test overrides to ok:false
     }
@@ -4053,6 +4065,21 @@ const makeIntDeps = (init: {
   // always-succeeds (pre-existing tests are unaffected); a test overrides with a
   // fake that returns ok:false to exercise the skip-this-pass path.
   acquireLock?: IntegrationDeps['acquireLock']
+  // 高リスク force-hold (2026-07-15) テスト用: per-branch の changed-file リスト。
+  // default は安全な1ファイル(既存テストは不変 — 完了条件『通常カードは1bitも
+  // 変わらない』をスイート全体がそのまま固定する)。Error を与えると changedPaths が
+  // throw して fail-closed の defer 経路を駆動。tip は verify の fake と同じ
+  // `tip-<branch>` 既定で、changedTips で差し替え(新コミットで hold が解ける経路)。
+  changedFiles?: Record<string, string[] | Error>
+  changedTips?: Record<string, string>
+  // MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15 card B) wake seam. managerActive
+  // ⇒ isManagerActive returns true (a desk is up AND responding: no spawn). managerActiveFn
+  // ⇒ a per-call verdict keyed off the pass `now` (models a desk that goes hung / recovers
+  // over time). wakeFails ⇒ wakeManager returns false (no usable tier / spawn fault: a
+  // FAILED resurrection attempt).
+  managerActive?: boolean
+  managerActiveFn?: (now: number) => boolean
+  wakeFails?: boolean
 }): IntegrationDeps & {
   integrated: string[]
   moved: string[]
@@ -4065,6 +4092,15 @@ const makeIntDeps = (init: {
   recovered: { taskId: string; column: 'todo' | 'blocked' }[]
   tornDown: string[]
   instructed: { terminalId: string; message: string }[]
+  pathsChecked: string[]
+  // Wake recording: how many times the commander was woken, and every branch batch
+  // handed to it (one inner array per wake call) — the 完了条件2 assertions.
+  wakeCalls: { branch: string; title: string }[][]
+  woke: string[]
+  managerChecks: number
+  // Fatal escalations the RESUSCITATION reflex fired (完了条件5, event
+  // 'manager-unrevivable') — captured via the `notify` seam.
+  notifications: SwarmFatalNotification[]
 } => {
   const reviews = [...init.reviews]
   const outcomes = init.outcomes ?? {}
@@ -4085,6 +4121,11 @@ const makeIntDeps = (init: {
   const dead = init.dead ?? new Set<string>()
   const moveToDoingFails = new Set(init.moveToDoingFails ?? [])
   const recoverFails = new Set(init.recoverFails ?? [])
+  const pathsChecked: string[] = []
+  const wakeCalls: { branch: string; title: string }[][] = []
+  const woke: string[] = []
+  const notifications: SwarmFatalNotification[] = []
+  let managerChecks = 0
   const dropReview = (taskId: string) => {
     const i = reviews.findIndex((c) => c.id === taskId)
     if (i >= 0) reviews.splice(i, 1)
@@ -4117,10 +4158,23 @@ const makeIntDeps = (init: {
     marks,
     verified,
     reviewed,
+    wakeCalls,
+    woke,
+    notifications,
+    get managerChecks() {
+      return managerChecks
+    },
     ...(reviewConfigured ? { review: reviewDep } : {}),
+    pathsChecked,
     fetchReview: async () => [...reviews],
     prepareTarget: async () => (init.target === undefined ? 'main' : init.target),
     classify: async (_p, branch) => readiness[branch] ?? 'ff',
+    changedPaths: async (_p, branch) => {
+      pathsChecked.push(branch)
+      const cf = (init.changedFiles ?? {})[branch]
+      if (cf instanceof Error) throw cf
+      return { tip: (init.changedTips ?? {})[branch] ?? `tip-${branch}`, files: cf ?? ['src/lib/safe-change.ts'] }
+    },
     verify: async (_p, branch, _t, opts) => {
       verified.push({ branch, skipIfTip: opts?.skipIfTip })
       const v = verifyResults[branch]
@@ -4182,6 +4236,29 @@ const makeIntDeps = (init: {
     instructRework: (terminalId, message) => {
       instructed.push({ terminalId, message })
     },
+    // MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15 card B) wake seam.
+    // isManagerActive honours the `now` the pass injects: managerActiveFn models a
+    // desk whose health CHANGES over time (fresh → hung → recovered); the static
+    // managerActive is the timeless default.
+    isManagerActive: async (_p, now) => {
+      managerChecks += 1
+      if (init.managerActiveFn) return init.managerActiveFn(now)
+      return init.managerActive ?? false
+    },
+    // The spawnSwarmManager boundary (defaultWakeManager wraps spawnSwarmManager +
+    // the info notification). wakeFails ⇒ false = a FAILED resurrection (no usable
+    // tier / spawn fault): the state machine still counts it as an attempt.
+    wakeManager: async (_p, cards) => {
+      wakeCalls.push(cards.map((c) => ({ ...c })))
+      if (init.wakeFails) return false
+      for (const c of cards) woke.push(c.branch)
+      return true
+    },
+    // Fatal-escalation seam (完了条件5) — capture 'manager-unrevivable' so the
+    // give-up path is assertable without touching the real notification store.
+    notify: (n) => {
+      notifications.push(n)
+    },
   }
 }
 
@@ -4222,742 +4299,200 @@ describe('runIntegratePass — switch positions', () => {
   })
 })
 
-describe('runIntegratePass — landing (autoMerge ON)', () => {
-  it('integrates a clean card, moves it to done, then cleans up its worktree+branch', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(deps.moved).toEqual(['a'])
-    expect(deps.cleaned).toEqual(['swarm/a'])
-    expect(engine.log.find((l) => l.message.startsWith('integrated (ff)'))?.kind).toBe('integrate')
-  })
-
-  it('kills the just-landed worker PTY by id and frees its slot (no zombie)', async () => {
-    // The lingering-PTY case: the worker was promoted to review but its `claude`
-    // TUI never exits, so it sits in engine.workers as 'done'. Landing its branch
-    // must kill that PTY by id and drop it — slot freed immediately, no zombie.
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [worker({ terminalId: 'pty-a', branch: 'swarm/a', taskId: 'a', stage: 'done' })],
-    })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
-    await runIntegratePass(engine, deps)
-    expect(deps.cleaned).toEqual(['swarm/a']) // worktree+branch torn down
-    expect(deps.killed).toEqual(['pty-a']) // PTY killed by id
-    expect(engine.workers).toHaveLength(0) // slot freed
-  })
-
-  it('only tears down the LANDED worker, leaving a sibling on another branch', async () => {
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [
-        worker({ terminalId: 'pty-a', branch: 'swarm/a', taskId: 'a', stage: 'done' }),
-        worker({ terminalId: 'pty-b', branch: 'swarm/b', taskId: 'b', stage: 'running' }),
-      ],
-    })
-    // Only 'a' is up for integration (in review); 'b' is still doing.
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
-    await runIntegratePass(engine, deps)
-    expect(deps.killed).toEqual(['pty-a'])
-    expect(engine.workers.map((w) => w.terminalId)).toEqual(['pty-b']) // sibling untouched
-  })
-
-  it('does NOT kill the worker when the column move is kept (it still owns the branch)', async () => {
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [worker({ terminalId: 'pty-a', branch: 'swarm/a', taskId: 'a', stage: 'done' })],
-    })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], moveToDoneFails: new Set(['a']) })
-    await runIntegratePass(engine, deps)
-    expect(deps.killed).toHaveLength(0) // landed but card stuck in review → keep the worker
-    expect(engine.workers).toHaveLength(1) // retry next pass
-  })
-
-  it('does NOT clean up when the column move is kept (self-heals next pass)', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], moveToDoneFails: new Set(['a']) })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(deps.cleaned).toHaveLength(0) // branch NOT deleted while card stuck in review
-    expect(engine.log.some((l) => l.message.includes('column move kept'))).toBe(true)
-  })
-
-  it('skips integration when there is no remote trunk, leaving cards in review', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], target: null })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0)
-    expect(engine.reviews.map((r) => r.status)).toEqual(['unknown'])
-    expect(engine.log.some((l) => l.message.includes('no remote trunk'))).toBe(true)
-  })
-})
-
-describe('runIntegratePass — conflict handling', () => {
-  // CONFLICT → worker rebase 委譲 (card 012a2848): a fresh rebase conflict is no longer
-  // parked for a human — it is delegated to the branch's worker to rebase its OWN branch
-  // + resolve + commit, then the engine retries. Mirrors the verify-rework tests above.
-  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
-    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
-
-  it('delegates a fresh conflict to the LIVE worker (review→doing) for a rebase — never parks for a human', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      outcomes: { 'swarm/a': { status: 'conflict', files: ['src/x.ts'] } },
-    })
-    await runIntegratePass(engine, deps)
-    // Did NOT land; sent review→doing on the SAME branch (the worker rebases in place).
-    expect(deps.integrated).toEqual(['swarm/a']) // the conflict came FROM a real integrate attempt
-    expect(deps.moved).toHaveLength(0) // moveToDone never called — nothing landed
-    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
-    expect(deps.recovered).toHaveLength(0) // not todo/blocked — continued in place
-    // SEPARATE conflict budget bumped (NOT the verify rework budget).
-    expect(engine.conflictReworks.get('a')).toBe(1)
-    expect(engine.reworks.size).toBe(0)
-    // Worker put back to 'running' and told to rebase its own branch (never force-push).
-    expect(engine.workers[0].stage).toBe('running')
-    expect(deps.instructed).toHaveLength(1)
-    expect(deps.instructed[0].terminalId).toBe('pty-a')
-    expect(deps.instructed[0].message).toContain('git rebase origin/main')
-    expect(deps.instructed[0].message).toContain('src/x.ts')
-    expect(deps.instructed[0].message).toContain('force-push')
-    expect(deps.tornDown).toHaveLength(0) // live worker kept (not torn down)
-    // The durable /order memo carries the conflict context for a later re-dispatch.
-    expect(engine.reworkReasons.get('a')).toContain('git rebase origin/main')
-    // Card left review → never double-integrated while the worker resolves (条件3).
-    expect(engine.reviews.find((r) => r.taskId === 'a')).toBeUndefined()
-  })
-
-  it('re-dispatches a fresh conflict (review→todo) when the worker is gone — /order carries the conflict context', async () => {
-    const engine = newEngine({ autoMerge: true }) // no live worker for the branch
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      outcomes: { 'swarm/a': { status: 'conflict', files: ['src/x.ts'] } },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.reworkedToDoing).toHaveLength(0) // no live worker to continue in place
-    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // re-queued for a fresh worker
-    expect(deps.instructed).toHaveLength(0) // nothing alive to instruct
-    expect(engine.conflictReworks.get('a')).toBe(1)
-    // The fresh worker's /order will be handed the conflict-resolution context.
-    expect(engine.reworkReasons.get('a')).toContain('git rebase origin/main')
-    expect(engine.reworkReasons.get('a')).toContain('force-push')
-  })
-
-  it('PARKS the card in blocked once MAX_CONFLICT_REWORKS is spent — conflict loop guard', async () => {
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [doneWorker('swarm/a', 'a')],
-      conflictReworks: new Map([['a', MAX_CONFLICT_REWORKS]]), // at the cap → this pass overflows it
-    })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      outcomes: { 'swarm/a': { status: 'conflict' } },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.reworkedToDoing).toHaveLength(0) // NOT delegated again
-    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // parked for a human
-    expect(deps.marks).toContainEqual({ taskId: 'a', value: true }) // stamped so the board shows the conflict
-    expect(deps.tornDown).toEqual(['pty-a']) // worker torn down (branch kept for the human)
-    expect(engine.conflictReworks.get('a')).toBe(MAX_CONFLICT_REWORKS + 1)
-    expect(engine.workers).toHaveLength(0)
-    expect(engine.log.some((l) => l.kind === 'conflict' && l.level === 'error')).toBe(true)
-  })
-
-  it('the conflict budget is INDEPENDENT of the verify rework budget (a maxed verify budget still delegates)', async () => {
-    // A card already at the verify-rework cap must STILL get its conflict delegated (a
-    // conflict is not the worker's code being wrong) — the two counters never cross.
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [doneWorker('swarm/a', 'a')],
-      reworks: new Map([['a', MAX_REWORKS]]), // verify budget already spent
-    })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      outcomes: { 'swarm/a': { status: 'conflict' } },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.recovered).toHaveLength(0) // NOT parked — the conflict budget is fresh
-    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }]) // delegated
-    expect(engine.conflictReworks.get('a')).toBe(1)
-    expect(engine.reworks.get('a')).toBe(MAX_REWORKS) // verify budget untouched by a conflict
-  })
-
-  it('a delegated conflict LANDS once the worker resolves it, resetting the conflict budget (条件4)', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      outcomes: { 'swarm/a': { status: 'conflict' } },
-    })
-    // Pass 1 — conflict → delegated to the live worker (card → doing).
-    await runIntegratePass(engine, deps)
-    expect(engine.conflictReworks.get('a')).toBe(1)
-    expect(deps.moved).toHaveLength(0)
-
-    // The worker rebases + resolves + re-reports: the branch is now cleanly landable,
-    // and the monitor re-promoted it to review. Model that for pass 2.
-    deps.integrate = async (_p, branch) => {
-      deps.integrated.push(branch)
-      return { status: 'integrated', mode: 'rebase' }
-    }
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
-    engine.lastIntegrateAt = 0 // clear the throttle
-    await runIntegratePass(engine, deps)
-    expect(deps.moved).toEqual(['a']) // landed → review→done
-    expect(engine.conflictReworks.has('a')).toBe(false) // budget reset on a successful land
-  })
-
-  it('retries a previously-conflicting branch once it becomes fast-forwardable', async () => {
-    const engine = newEngine({ autoMerge: true, conflictedBranches: new Set(['swarm/a']) })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      readiness: { 'swarm/a': 'ff' }, // a human rebased it → now clean
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.marks).toContainEqual({ taskId: 'a', value: false }) // stamp cleared
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(deps.moved).toEqual(['a'])
-    expect(engine.conflictedBranches.has('swarm/a')).toBe(false)
-  })
-
-  it('forgets a conflict memo when the card leaves the review column', async () => {
-    const engine = newEngine({ autoMerge: true, conflictedBranches: new Set(['swarm/gone']) })
-    const deps = makeIntDeps({ reviews: [] }) // card no longer in review
-    await runIntegratePass(engine, deps)
-    expect(engine.conflictedBranches.has('swarm/gone')).toBe(false)
-  })
-
-  it('re-stamps a still-conflicting card whose Board stamp went missing, without re-rebasing', async () => {
-    // Memo'd + still diverged, but the card lost its stamp (a kept write) → re-stamp.
-    const engine = newEngine({ autoMerge: true, conflictedBranches: new Set(['swarm/a']) })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a', { integrationConflict: false })],
-      readiness: { 'swarm/a': 'rebase' },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0) // NOT re-rebased
-    expect(deps.marks).toEqual([{ taskId: 'a', value: true }]) // stamp self-healed
-  })
-
-  it('does not redundantly re-stamp a still-conflicting card that already carries the stamp', async () => {
-    const engine = newEngine({ autoMerge: true, conflictedBranches: new Set(['swarm/b']) })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('b', 'swarm/b', { integrationConflict: true })],
-      readiness: { 'swarm/b': 'rebase' },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0)
-    expect(deps.marks).toHaveLength(0) // no redundant write
-  })
-})
-
 describe('runIntegratePass — throttle', () => {
-  it('skips ticks until INTEGRATE_TICK_MS has passed', async () => {
+  it('skips ticks until INTEGRATE_TICK_MS has passed (the wake is throttled too)', async () => {
     const engine = newEngine({ autoMerge: true })
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
     await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a'])
-    // Immediately again → throttled (lastIntegrateAt just set), no second attempt.
-    const before = deps.integrated.length
+    expect(deps.wakeCalls).toHaveLength(1) // first pass woke the commander
+    // Fire immediately (no clock advance): throttled (lastIntegrateAt was just set to
+    // ~now), so the pass returns at the very top — it never re-checks the desk or the
+    // resurrection state, let alone re-wakes.
     await runIntegratePass(engine, deps)
-    expect(deps.integrated.length).toBe(before)
+    expect(deps.wakeCalls).toHaveLength(1) // still 1 — the throttle short-circuited the whole pass
+    expect(deps.managerChecks).toBe(1) // isManagerActive not even reached on the throttled tick
   })
 })
 
-// ── runIntegratePass — cross-process integration lock (0706 二重司令塔事故フォロー) ──
-// Observable: a SEPARATE process (a tmux 司令塔 holding the repo-scoped file lock
-// via scripts/swarm-lock.js) must make the in-app engine skip a card's integration
-// — never land it under contention — and say so explicitly in the engine log
-// (never silent). 差し戻し(1/3) MUST-FIX: the lock is acquired PER CARD, immediately
-// before `integrate()` — NOT once for the whole pass — because the pass also runs
-// verify/tsc + a multi-minute adversarial-review panel per card, which could push a
-// whole-pass hold past DEFAULT_STALE_MS and let a second process steal a still-live
-// lock (reproducing the 0706 race this lock exists to prevent).
-
-describe('runIntegratePass — cross-process integration lock', () => {
-  it('skips a card (not the whole pass) when the lock is held elsewhere, and logs it', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b')],
-      acquireLock: async () => ({
-        ok: false,
-        reason: 'held',
-        holder: { pid: 4242, acquiredAt: '2026-07-08T00:00:00.000Z', label: 'tmux-cli' },
-      }),
-    })
-    await runIntegratePass(engine, deps)
-
-    // Neither card landed.
-    expect(deps.integrated).toEqual([])
-    expect(deps.moved).toEqual([])
-
-    // The skip is explicit in the engine log (never silent contention), once per card.
-    const lines = engine.log.filter((l) => l.message.includes('integration lock'))
-    expect(lines).toHaveLength(2)
-    expect(lines.every((l) => l.level === 'warn')).toBe(true)
-    expect(lines.some((l) => l.message.includes('4242') && l.message.includes('swarm/a'))).toBe(true)
-    expect(lines.some((l) => l.message.includes('4242') && l.message.includes('swarm/b'))).toBe(true)
-  })
-
-  it('proceeds to integrate normally once the lock is free again', async () => {
-    const engine = newEngine({ autoMerge: true, lastIntegrateAt: 0 })
-    let held = true
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      acquireLock: async () =>
-        held
-          ? { ok: false, reason: 'held', holder: { pid: 1, acquiredAt: '1970-01-01T00:00:00.000Z' } }
-          : {
-              ok: true,
-              holder: { pid: process.pid, acquiredAt: new Date().toISOString() },
-              release: async () => {},
-            },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual([])
-
-    held = false
-    engine.lastIntegrateAt = 0 // bypass the throttle for the test's second tick
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a'])
-  })
-
-  it('releases the lock even when integrate() itself throws', async () => {
-    const engine = newEngine({ autoMerge: true })
-    let released = false
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      acquireLock: async () => ({
-        ok: true,
-        holder: { pid: process.pid, acquiredAt: new Date().toISOString() },
-        release: async () => {
-          released = true
-        },
-      }),
-    })
-    let integrateCalled = false
-    deps.integrate = async () => {
-      integrateCalled = true
-      throw new Error('boom')
-    }
-    await runIntegratePass(engine, deps)
-    expect(integrateCalled).toBe(true)
-    expect(released).toBe(true)
-  })
-
-  it('MUST-FIX regression: the lock is NOT held during verify/review — only acquired right before integrate()', async () => {
-    // Records the ORDER acquireLock / verify / review / integrate fire in, for
-    // ONE card, so a long verify+review (the multi-minute adversarial panel in
-    // production) provably happens BEFORE the lock is ever taken — never while
-    // held. This is the structural fix for the 差し戻し(1/3) finding: the OLD
-    // (pass-scoped) design acquired the lock BEFORE verify/review, so a slow
-    // pass could hold it past staleMs and get stolen mid-integrate.
-    const order: string[] = []
+// ── runIntegratePass — MANAGER-ONLY INTEGRATION wake + RESURRECTION (2026-07-15) ──
+// The redesign's core: with auto-wake ARMED and a worker READY (review-column
+// swarm card), the engine WAKES the commander instead of merging. It never
+// verifies, never runs the lens panel, never acquires the integration lock, never
+// FF-pushes, never moves a card to done. Integration is the commander's alone.
+//
+// 受け入れの肝 (完了条件1+3): there is NO path where the engine's lens result — or
+// anything else — moves main. The first test fixes exactly that: a clean,
+// fast-forwardable review card produces ZERO integrate/verify/review/lock calls.
+//
+// Card B adds the RESUSCITATION reflex on top (完了条件2-6): a stopped desk (dead PTY
+// or hung — stale heartbeat) is re-woken across a boot-grace window, and a desk that
+// keeps dying escalates ONCE instead of looping forever. The time-based state machine
+// is driven here with an injected `now`; the REAL heartbeat detection (write → stop →
+// stale) is fixed end-to-end, HOME-isolated, in swarmOrchestrator.integration.test.ts.
+describe('runIntegratePass — manager-only integration wake + resurrection (2026-07-15)', () => {
+  it('受け入れの肝: a clean ff-ready review card is NEVER FF-pushed — engine calls no integrate/verify/review/lock', async () => {
     const engine = newEngine({ autoMerge: true })
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
-      reviewDefault: 'integrate',
-      acquireLock: async () => {
-        order.push('acquireLock')
-        return {
-          ok: true,
-          holder: { pid: process.pid, acquiredAt: new Date().toISOString() },
-          release: async () => {
-            order.push('release')
-          },
-        }
-      },
+      readiness: { 'swarm/a': 'ff' }, // maximally mergeable — the old engine WOULD have landed it
+      reviewDefault: 'integrate', // even with a lens panel wired + voting clean…
     })
-    const realVerify = deps.verify
-    deps.verify = async (...args) => {
-      order.push('verify:start')
-      // Simulate a slow tsc/lint/test pass (elapsed real time, no lock held).
-      await new Promise((r) => setTimeout(r, 5))
-      order.push('verify:end')
-      return realVerify(...args)
-    }
-    const realReview = deps.review
-    deps.review = async (...args) => {
-      order.push('review:start')
-      // Simulate a multi-minute adversarial-review panel (elapsed real time).
-      await new Promise((r) => setTimeout(r, 5))
-      order.push('review:end')
-      return realReview!(...args)
-    }
-    const realIntegrate = deps.integrate
-    deps.integrate = async (...args) => {
-      order.push('integrate:start')
-      const res = await realIntegrate(...args)
-      order.push('integrate:end')
-      return res
-    }
-
     await runIntegratePass(engine, deps)
-
-    expect(deps.integrated).toEqual(['swarm/a'])
-    // verify and review run to completion strictly BEFORE acquireLock — the lock
-    // is never held during the slow stages.
-    expect(order).toEqual([
-      'verify:start',
-      'verify:end',
-      'review:start',
-      'review:end',
-      'acquireLock',
-      'integrate:start',
-      'integrate:end',
-      'release',
-    ])
+    // …the engine moves main by NO route:
+    expect(deps.integrated).toEqual([]) // never FF-pushed (完了条件1 — engine never touches the trunk)
+    expect(deps.moved).toEqual([]) // never moved review→done
+    expect(deps.cleaned).toEqual([]) // never tore a worktree down after a (non-)land
+    expect(deps.verified).toEqual([]) // never ran the verify gate
+    expect(deps.reviewed).toEqual([]) // never ran the lens panel (its result can't gate main — 完了条件3)
+    expect(deps.pathsChecked).toEqual([]) // never ran the high-risk diff scan
+    // Instead it woke the commander to decide the integration.
+    expect(deps.woke).toEqual(['swarm/a'])
   })
 
-  it('MUST-FIX regression (fake clock): a second process can safely acquire while THIS engine is between cards (verify/review), and the engine still lands its own card without a double-hold', async () => {
-    // Fake clock: elapsed "wall time" advances past DEFAULT_STALE_MS (10 min)
-    // during verify — a competing process (e.g. scripts/swarm-lock.js) checks in
-    // during that window and correctly sees the lock FREE (never acquires it
-    // falsely, and never contends with the engine, because the engine isn't
-    // holding it then). When the engine reaches integrate(), IT acquires the
-    // lock — proving no window exists where the lock is held long enough for a
-    // competitor to observe (and reclaim) a stale-but-still-relevant hold.
-    let clockMs = 0
-    const held = { by: null as null | 'engine' | 'external' }
+  it('wakes the commander for review cards when the desk is INACTIVE — dead PTY OR hung (完了条件2)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    // managerActive:false models EITHER signal isManagerActive folds in: a dead PTY
+    // or a heartbeat gone stale (the real heartbeat path is fixed end-to-end in the
+    // integration suite's RESURRECTION test).
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActive: false })
+    await runIntegratePass(engine, deps)
+    expect(deps.managerChecks).toBe(1) // it checked whether a desk was up AND responding…
+    expect(deps.wakeCalls).toHaveLength(1) // …found none, and woke one
+    expect(deps.woke).toEqual(['swarm/a'])
+    expect(engine.managerResume?.attempts).toBe(1) // resurrection attempt counted
+    expect(engine.log.some((l) => l.message.includes('司令官を起こしました'))).toBe(true)
+  })
+
+  it('BATCHES every waiting review branch into ONE wake call (token-thrifty, 完了条件2)', async () => {
     const engine = newEngine({ autoMerge: true })
     const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewDefault: 'integrate',
-      acquireLock: async () => {
-        if (held.by !== null) return { ok: false, reason: 'held', holder: { pid: 1, acquiredAt: '' } }
-        held.by = 'engine'
-        return {
-          ok: true,
-          holder: { pid: process.pid, acquiredAt: new Date(clockMs).toISOString() },
-          release: async () => {
-            held.by = null
-          },
-        }
-      },
+      reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b'), reviewCard('c', 'swarm/c')],
     })
-    const realVerify = deps.verify
-    deps.verify = async (...args) => {
-      // 11 minutes of "wall time" elapse during verify — well past a 10-minute
-      // staleMs — while the engine holds NO lock at all.
-      clockMs += 11 * 60_000
-      // A competing external process checks in mid-verify: sees the lock FREE
-      // (correct — the engine isn't holding it), and does NOT need to steal
-      // anything (nothing to steal). It immediately releases (simulating a
-      // read-only status check, or a quick unrelated hold-and-release).
-      expect(held.by).toBeNull()
-      return realVerify(...args)
-    }
-
     await runIntegratePass(engine, deps)
-
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(held.by).toBeNull() // released after landing — nothing left dangling
+    expect(deps.wakeCalls).toHaveLength(1) // ONE spawn, not three
+    expect(deps.wakeCalls[0].map((x) => x.branch)).toEqual(['swarm/a', 'swarm/b', 'swarm/c'])
   })
-})
 
-// ── runIntegratePass — verification gate (Card③: no unverified merge) ──────────
-// Observable (1): with auto-merge ARMED, the engine VERIFIES (tsc on the
-// to-be-landed tree) BEFORE integrating; a RED result keeps the card in review
-// (NOT merged) and logs the reason. The gate is memoized by tip so a stuck-red
-// branch isn't re-checked every pass, yet a fix (new tip) re-verifies and lands.
+  it('does NOT wake a SECOND desk when the commander is up AND responding (二重起動防止, 完了条件2)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActive: true })
+    await runIntegratePass(engine, deps)
+    expect(deps.managerChecks).toBe(1) // it checked…
+    expect(deps.wakeCalls).toHaveLength(0) // …and did NOT spawn a duplicate
+    expect(engine.managerResume?.attempts).toBe(0) // a healthy desk keeps the reflex disarmed
+  })
 
-describe('runIntegratePass — verification gate', () => {
-  it('does NOT integrate a branch that fails verification — sends it back to rework, never the trunk', async () => {
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a', worktree: '/wt/a', stage: 'done' })],
-    })
+  // ── RESURRECTION reflex state machine (card B, 完了条件2-5). Drive one integrate
+  //    pass at an injected wall-clock `now`, bypassing the 15s TICK throttle (its own
+  //    test above) so ONLY the resurrection grace window governs re-wakes. ──
+  const passAt = (engine: ProjectEngine, deps: IntegrationDeps, now: number): Promise<void> => {
+    engine.lastIntegrateAt = 0
+    return runIntegratePass(engine, deps, now)
+  }
+  const GRACE = MANAGER_RESUME_GRACE_MS
+  const T0 = 10_000_000 // arbitrary fixed base (Date.now injected, never read)
+
+  it('does NOT re-wake a stopped desk WITHIN the boot grace, re-wakes once it ELAPSES (完了条件3)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
+    await passAt(engine, deps, T0)
+    expect(deps.wakeCalls).toHaveLength(1) // wake #1 — a freshly-resumed desk needs time to boot + beat
+    await passAt(engine, deps, T0 + GRACE - 1) // still inside the grace window…
+    expect(deps.wakeCalls).toHaveLength(1) // …so NO double-spawn (the boot gap isn't a hang)
+    await passAt(engine, deps, T0 + GRACE) // grace elapsed and STILL silent → the wake didn't take
+    expect(deps.wakeCalls).toHaveLength(2) // re-woken
+  })
+
+  it('GIVES UP after MAX consecutive failed resurrections and escalates ONCE (完了条件5)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    // A desk that dies immediately every time (permanent quota wall / boot-crash): the
+    // wake "succeeds" but the desk never responds, so every grace-spaced pass re-wakes.
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
+    for (let i = 0; i < MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // 3 spawns…
+    expect(deps.notifications).toEqual([]) // …not given up YET
+    // Next grace-spaced pass: attempts hit the ceiling → STOP reviving, escalate.
+    await passAt(engine, deps, T0 + MAX_MANAGER_RESUME_ATTEMPTS * GRACE)
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // NO 4th spawn — the token-burn loop is broken
+    expect(deps.notifications).toHaveLength(1)
+    expect(deps.notifications[0].event).toBe('manager-unrevivable')
+    // One-shot per episode: a further pass does NOT re-fire the fatal.
+    await passAt(engine, deps, T0 + (MAX_MANAGER_RESUME_ATTEMPTS + 1) * GRACE)
+    expect(deps.notifications).toHaveLength(1)
+  })
+
+  it('a FAILED wake (no usable tier) still counts as an attempt — drives escalation too (完了条件4+5)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    // wakeFails ⇒ every spawn returns false (every model tier OFF/cooling). The desk
+    // is never actually raised, but the engine must not loop forever probing it.
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false, wakeFails: true })
+    for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
+    expect(deps.woke).toEqual([]) // no spawn ever succeeded…
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // …but attempts were capped at MAX
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unrevivable']) // and it escalated
+  })
+
+  it('a RECOVERED desk RESETS the attempt budget (a later hang gets the full MAX again, 完了条件2)', async () => {
+    const engine = newEngine({ autoMerge: true })
+    // Healthy ONLY in [T0+2·GRACE, T0+3·GRACE): hung, hung, RECOVERED, hung-again.
+    const healthyFrom = T0 + 2 * GRACE
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, tip: 'sha-a', reason: 'src/x.ts(9): error TS2322' } },
+      managerActiveFn: (now) => now >= healthyFrom && now < healthyFrom + GRACE,
     })
-    await runIntegratePass(engine, deps)
-    // 安全ゲート: the gate ran; integrate / move / cleanup did NOT — nothing reached the trunk.
-    expect(deps.verified.map((v) => v.branch)).toEqual(['swarm/a'])
-    expect(deps.integrated).toHaveLength(0)
-    expect(deps.moved).toHaveLength(0)
-    expect(deps.cleaned).toHaveLength(0)
-    // Sent back review→doing for the LIVE worker to fix (差し戻し); the red tip is remembered
-    // (so an un-fixed re-promote skips re-tsc); the worker is told WHY.
-    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
-    expect(engine.reworks.get('a')).toBe(1)
-    expect(engine.verifyFailed.get('swarm/a')).toBe('sha-a')
-    expect(deps.instructed[0]?.message).toContain('error TS2322')
+    await passAt(engine, deps, T0) // hung → wake #1 (attempts 1)
+    await passAt(engine, deps, T0 + GRACE) // hung → wake #2 (attempts 2)
+    await passAt(engine, deps, healthyFrom) // RECOVERED → reflex disarms
+    expect(engine.managerResume?.attempts).toBe(0) // budget reset by the sighting of health
+    await passAt(engine, deps, T0 + 3 * GRACE) // hung AGAIN → wake #3, but from a FRESH budget
+    expect(deps.wakeCalls).toHaveLength(3)
+    expect(engine.managerResume?.attempts).toBe(1) // NOT 3 → the recovery prevented a premature give-up
+    expect(deps.notifications).toEqual([]) // so no fatal fired
   })
 
-  it('integrates normally when verification passes (the green path is unchanged)', async () => {
+  it('DISARMS fully when the review work DRAINS — no work, no resurrection (完了条件6)', async () => {
     const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }) // default verify = green
-    await runIntegratePass(engine, deps)
-    expect(deps.verified.map((v) => v.branch)).toEqual(['swarm/a'])
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(deps.moved).toEqual(['a'])
-    expect(engine.verifyFailed.has('swarm/a')).toBe(false)
+    const present = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
+    await passAt(engine, present, T0)
+    expect(present.woke).toEqual(['swarm/a'])
+    expect(engine.managerResume?.attempts).toBe(1)
+    // The commander merged it → review empties. With nothing waiting, the desk isn't
+    // needed: the reflex disarms (counter cleared) and probes NOTHING.
+    const gone = makeIntDeps({ reviews: [], managerActiveFn: () => false })
+    await passAt(engine, gone, T0 + GRACE)
+    expect(gone.managerChecks).toBe(0) // never even probed the desk (no work)
+    expect(engine.managerResume?.attempts).toBe(0) // cleared
+    // A NEW card arriving later starts a clean episode (full budget, immediate wake).
+    const back = makeIntDeps({ reviews: [reviewCard('b', 'swarm/b')], managerActiveFn: () => false })
+    await passAt(engine, back, T0 + 2 * GRACE)
+    expect(back.woke).toEqual(['swarm/b'])
+    expect(engine.managerResume?.attempts).toBe(1)
   })
 
-  it('classifies but NEVER verifies/integrates when autoMerge is OFF (read-only)', async () => {
+  it('does NOT wake when auto-wake is OFF (readiness still published — switch semantics)', async () => {
     const engine = newEngine({ autoMerge: false })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], readiness: { 'swarm/a': 'ff' } })
     await runIntegratePass(engine, deps)
-    expect(deps.verified).toHaveLength(0) // verification is part of the ARMED path only
-    expect(deps.integrated).toHaveLength(0)
-  })
-
-  it('does not re-run the check for an unchanged red tip (memo skip) — re-reworks, no fresh tsc', async () => {
-    // A LIVE worker bounces back un-fixed (same tip) each pass: verifyFailed is KEPT across a
-    // doing-continuation, so the 2nd verify is called WITH skipIfTip and short-circuits.
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a', worktree: '/wt/a', stage: 'done' })],
-    })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, tip: 'sha-a', reason: 'TS2322' } },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // un-fixed worker keeps re-appearing in review
-    await runIntegratePass(engine, deps)
-    expect(engine.verifyFailed.get('swarm/a')).toBe('sha-a')
-    expect(engine.reworks.get('a')).toBe(1)
-
-    // Second pass (throttle reset): verify is called WITH skipIfTip; the fake reports
-    // `skipped` (no check run) → still not integrated, just re-reworked.
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(deps.verified[1]?.skipIfTip).toBe('sha-a')
-    expect(deps.integrated).toHaveLength(0) // never integrates unverified work
-    expect(engine.reworks.get('a')).toBe(2) // re-reworked, not merged
-  })
-
-  it('re-verifies and LANDS once the branch tip changes (the worker fixed it after a 差し戻し)', async () => {
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a', worktree: '/wt/a', stage: 'done' })],
-    })
-    const verifyResults: Record<string, { ok: boolean; tip?: string | null; reason?: string }> = {
-      'swarm/a': { ok: false, tip: 'sha-old', reason: 'TS2322' },
-    }
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], verifyResults })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // the worker keeps the card visible in review
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0) // RED → sent back to rework, not landed
-    expect(engine.verifyFailed.get('swarm/a')).toBe('sha-old')
-    expect(engine.reworks.get('a')).toBe(1)
-
-    // The worker fixes it → the branch tip changes and the check now passes.
-    verifyResults['swarm/a'] = { ok: true, tip: 'sha-new' }
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a']) // verified green at the NEW tip → landed
-    expect(deps.moved).toEqual(['a'])
-    expect(engine.verifyFailed.has('swarm/a')).toBe(false) // memo cleared on green
-    expect(engine.reworks.has('a')).toBe(false) // 差し戻し budget reset on success
-  })
-
-  it('forgets a verify-fail memo when the card leaves the review column', async () => {
-    const engine = newEngine({ autoMerge: true, verifyFailed: new Map([['swarm/gone', 'sha']]) })
-    const deps = makeIntDeps({ reviews: [] }) // card no longer in review
-    await runIntegratePass(engine, deps)
-    expect(engine.verifyFailed.has('swarm/gone')).toBe(false)
-  })
-
-  it('an ERRORED verify DEFERS — never falls through to integrate unverified', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
-    deps.verify = async () => {
-      throw new Error('verify boom')
-    }
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0)
-    expect(engine.log.some((l) => l.message.startsWith('verification errored'))).toBe(true)
-  })
-
-  it('a known-conflict branch is short-circuited BEFORE verify (no redundant check)', async () => {
-    // The conflict memo wins: a branch already known to conflict never reaches the
-    // verification gate (it can't land anyway until a human rebases it).
-    const engine = newEngine({ autoMerge: true, conflictedBranches: new Set(['swarm/a']) })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a', { integrationConflict: true })],
-      readiness: { 'swarm/a': 'rebase' }, // still diverged → stays conflicted
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.verified).toHaveLength(0) // gate not reached
-    expect(deps.integrated).toHaveLength(0)
-  })
-})
-
-// ── runIntegratePass — rework 差し戻し (review→doing, the missing transition) ───
-describe('runIntegratePass — rework 差し戻し (review→doing)', () => {
-  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
-    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
-
-  it('sends a verify-RED card back review→doing, keeps the LIVE worker on the same branch + instructs it', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'TS2322 not assignable' } },
-    })
-    await runIntegratePass(engine, deps)
-    // Did NOT integrate; moved review→doing recording the SAME branch (戻して直す).
-    expect(deps.integrated).toHaveLength(0)
-    expect(deps.moved).toHaveLength(0) // moveToDone never called
-    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
-    expect(deps.recovered).toHaveLength(0) // not todo/blocked — continued in place
-    // Counter bumped, readiness dropped, worker put back to 'running' + instructed why.
-    expect(engine.reworks.get('a')).toBe(1)
-    expect(engine.reviews.find((r) => r.taskId === 'a')).toBeUndefined()
-    expect(engine.workers[0].stage).toBe('running')
-    expect(deps.instructed).toHaveLength(1)
-    expect(deps.instructed[0].terminalId).toBe('pty-a')
-    expect(deps.instructed[0].message).toContain('TS2322 not assignable')
-    expect(deps.tornDown).toHaveLength(0) // live worker kept (not torn down)
-  })
-
-  it('re-dispatches (review→todo) when the worker is DEAD — same-branch continuation impossible', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'tsc red' } },
-      dead: new Set(['pty-a']),
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.reworkedToDoing).toHaveLength(0) // not continued in place
-    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // re-queued for a fresh worker
-    expect(deps.tornDown).toEqual(['pty-a']) // dead worker torn down
-    expect(deps.instructed).toHaveLength(0) // nothing alive to instruct
-    expect(engine.reworks.get('a')).toBe(1)
-    expect(engine.workers).toHaveLength(0) // dropped from the live set
-  })
-
-  it('PARKS the card in blocked once the rework budget (MAX_REWORKS) is spent — loop guard', async () => {
-    const engine = newEngine({
-      autoMerge: true,
-      workers: [doneWorker('swarm/a', 'a')],
-      reworks: new Map([['a', MAX_REWORKS]]), // already at the cap → this pass overflows it
-    })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'still red' } },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.reworkedToDoing).toHaveLength(0) // NOT sent back to doing again
-    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // parked for a human
-    expect(deps.tornDown).toEqual(['pty-a']) // won't keep a worker on a parked card
-    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1) // over-budget count kept for the anomaly
-    expect(engine.workers).toHaveLength(0)
-  })
-
-  it('surfaces a parked (over-budget) card as a rework-exhausted anomaly', async () => {
-    const engine = newEngine({ reworks: new Map([['a', MAX_REWORKS + 1]]) })
-    const tasks = [card('a', { boardColumn: 'blocked', branch: 'swarm/a', title: 'Card A' })]
-    const deps = makeDeps({ cards: tasks })
-    const anomalies = await detectAnomalies(
-      engine,
-      tasks,
-      { ...deps, worktreeExists: async () => true },
-      Date.now(),
-    )
-    const a = anomalies.find((x) => x.kind === 'rework-exhausted')
-    expect(a).toBeTruthy()
-    expect(a?.ref).toBe('a')
-    expect(a?.branch).toBe('swarm/a')
-    expect(a?.attempts).toBe(MAX_REWORKS + 1)
-  })
-
-  it('does NOT rework when autoMerge is OFF — read-only classify, the card stays in review', async () => {
-    const engine = newEngine({ autoMerge: false, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'red' } },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.reworkedToDoing).toHaveLength(0)
-    expect(deps.recovered).toHaveLength(0)
-    expect(engine.reworks.size).toBe(0) // never touched while disarmed
-  })
-
-  it('a verify-GREEN card still integrates — the rework path never fires on success (no regression)', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }) // default green + clean FF
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(deps.moved).toEqual(['a']) // review→done
-    expect(deps.reworkedToDoing).toHaveLength(0)
-    expect(engine.reworks.size).toBe(0)
-  })
-
-  it('keeps bumping the SAME counter across passes when the worker returns un-fixed (same tip)', async () => {
-    // The anti-bounce guarantee: a worker that bounces back to review WITHOUT fixing
-    // (same branch/tip) is escalated, not looped forever. Pass 1 RED → 差し戻し
-    // (count 1); the un-fixed card returns to review; pass 2's verify is `skipped`
-    // (same tip) but still a rework → count 2; pass 3 overflows MAX_REWORKS=2 → parked
-    // in blocked (no 3rd doing bounce). Also proves verifyFailed is KEPT across a
-    // doing-continuation (so the same-tip re-check short-circuits, no wasted tsc).
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'red' } },
-    })
-    // Model the worker bouncing back to review un-fixed each pass (same card/branch):
-    // the board keeps reporting it in review even after the engine sent it to doing.
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(1)
-    engine.lastIntegrateAt = 0 // clear the 15s integration throttle so the next pass acts
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(2)
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1) // budget spent → parked, not bounced
-    expect(deps.recovered.some((r) => r.column === 'blocked')).toBe(true)
-  })
-
-  it('escalates a DEAD-worker rework to blocked across passes — the todo re-dispatch budget is NOT reset', async () => {
-    // A worker that keeps dying with RED work: each pass reworks review→todo (no live worker), and
-    // the taskId-keyed counter survives the todo hop (pruneReworks does NOT wipe todo), so the cap
-    // eventually bites → blocked. Without that it would bounce review→todo forever (the MAJOR fix).
-    const engine = newEngine({ autoMerge: true }) // no live worker → dead/re-dispatch path each pass
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'red' } },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // card keeps re-appearing in review
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(1)
-    expect(deps.recovered.at(-1)).toEqual({ taskId: 'a', column: 'todo' }) // dead path → re-dispatch
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(2)
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1)
-    expect(deps.recovered.at(-1)).toEqual({ taskId: 'a', column: 'blocked' }) // cap → parked, not looping
+    expect(deps.managerChecks).toBe(0) // never even probed the desk
+    expect(deps.wakeCalls).toHaveLength(0) // OFF = the owner drives the commander by hand
+    expect(engine.reviews.map((r) => r.status)).toEqual(['ff']) // but the 「統合可」display is still published
   })
 })
 
 // ── Learning loop — 差し戻し原因を次の再dispatchの /order に注入 (card fdf714ef) ──────
-// The whole point: a 差し戻し/rollback shouldn't repeat. The integrate pass RECORDS
-// why a card was sent back; the NEXT dispatch of that SAME card HANDS the reason to
-// the fresh worker's /order (so it doesn't repeat the RED verify / must-fix) and the
-// engine log records that the context was injected. Reproduced end-to-end (HOME-free,
-// fully faked) by chaining runIntegratePass → runDispatchPass on one engine.
+// The whole point: a 差し戻し/rollback shouldn't repeat. A rework cause RECORDED on
+// engine.reworkReasons (post 2026-07-15 the engine no longer reworks during integrate
+// — the commander does — so the durable memo is now written by the C1 owner-answer /
+// escalation path, modelled here by seeding it directly); the NEXT dispatch of that
+// SAME card HANDS the reason to the fresh worker's /order (so it doesn't repeat the
+// failure) and the engine log records that the context was injected. Reproduced
+// end-to-end (HOME-free, fully faked) on one engine via runDispatchPass.
 describe('learning loop — rework reason injected into the re-dispatch /order (card fdf714ef)', () => {
-  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
-    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
-
-  it('records the rework cause, then injects it into the re-dispatched card /order + logs it', async () => {
-    // 1) 差し戻し: verify RED + DEAD worker ⇒ review→todo 再 dispatch 経路。原因を engine state に記録。
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const intDeps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'tsc: error TS2345 foo not assignable to bar' } },
-      dead: new Set(['pty-a']),
-    })
-    await runIntegratePass(engine, intDeps)
-    // 条件1: 差し戻しの原因が engine state に記録された。
+  it('injects a recorded rework cause into the re-dispatched card /order + logs it', async () => {
+    // 1) 差し戻し原因が engine state に記録済み(C1 owner-answer 経路が書く durable memo を直接 seed)。
+    const engine = newEngine({ reworkReasons: new Map([['a', 'tsc: error TS2345 foo not assignable to bar']]) })
+    // 条件1: 差し戻しの原因が engine state に記録されている。
     expect(engine.reworkReasons.get('a')).toContain('TS2345')
-    expect(intDeps.recovered).toEqual([{ taskId: 'a', column: 'todo' }]) // 再 dispatch 待ちで todo へ
-    expect(engine.workers).toHaveLength(0) // dead worker は撤去
 
     // 2) 再 dispatch: カードは todo に戻っている。runDispatchPass が前回原因を /order に注入。
     const dispDeps = makeDeps({ cards: [card('a', { boardColumn: 'todo' })] })
@@ -5183,324 +4718,128 @@ describe('buildReviewPrompt — the reviewer contract', () => {
   })
 })
 
-// ── runIntegratePass — adversarial review gate (card a14329dc) ─────────────────
-// The COMPLEMENT to the verify gate: after verify is GREEN, an INDEPENDENT panel
-// fact-checks the diff and a STRICT majority decides. Driven with a FAKE `review`
-// dep (the real claude panel is covered by tallyReview / extractReviewVerdict above
-// + the REAL-git integration test) to prove the ROUTING the goal specifies:
-// majority must-fix → 差し戻し (never merge); all clean → land; no majority → defer.
-describe('runIntegratePass — adversarial review gate (a14329dc)', () => {
-  // The quota cooling table is a globalThis singleton — the park pre-gate tests
-  // below write it, so every case resets it to stay order-independent.
-  beforeEach(() => __resetQuotaForTest())
-  afterEach(() => __resetQuotaForTest())
+// ── HIGH-RISK PATH SET (2026-07-15) — 高リスクパスの単一定義 ─────────────────────
+// HIGH_RISK_PATHS は「人間の手動統合以外で main に入れてはいけない」高リスク集合の単一
+// 定義。2026-07-15 のマネージャ専任化でエンジンは統合自体をやめた(force-hold は engine
+// 側では dormant)ので、この集合が裏付けるのは司令官の手動統合規約 skills/og-manage
+// §「マージ」手順 0 のみ。集合は規約と同一で、下の同期テストが文言ごと固定する。
 
-  const doneWorker = (branch: string, taskId: string, over: Partial<OrchestratorWorker> = {}) =>
-    worker({ branch, taskId, terminalId: `pty-${taskId}`, worktree: `/wt/${taskId}`, stage: 'done', ...over })
-
-  const mustFixResult = (note = 'real bug'): ReviewResult => ({
-    decision: 'rework',
-    verdicts: [],
-    mustFix: 2,
-    clean: 1,
-    reason: `敵対レビュー多数決: 2/${REVIEW_PANEL_SIZE} が must-fix 判定 — ${note}`,
-  })
-  const cleanResult = (): ReviewResult => ({
-    decision: 'integrate',
-    verdicts: [],
-    mustFix: 0,
-    clean: 3,
-    reason: '敵対レビュー多数決: 3/3 clean',
-  })
-  const deferResult = (): ReviewResult => ({
-    decision: 'defer',
-    verdicts: [],
-    mustFix: 1,
-    clean: 1,
-    reason: '敵対レビュー多数決つかず',
-  })
-
-  it('(1)+(2) majority must-fix → 差し戻し review→doing, NEVER integrated, logged', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': mustFixResult('off-by-one in loop') },
-    })
-    await runIntegratePass(engine, deps)
-    // Composition order: verify ran GREEN first, THEN the panel reviewed.
-    expect(deps.verified).toHaveLength(1)
-    expect(deps.reviewed).toHaveLength(1)
-    expect(deps.reviewed[0]).toMatchObject({ branch: 'swarm/a', tip: 'tip-swarm/a' })
-    // Majority must-fix → NOT merged; sent back review→doing (戻して直す) with the reason.
-    expect(deps.integrated).toHaveLength(0)
-    expect(deps.moved).toHaveLength(0)
-    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
-    expect(engine.reworks.get('a')).toBe(1)
-    expect(engine.reviewFailed.get('swarm/a')).toBe('tip-swarm/a') // memoized for the skip path
-    expect(deps.instructed[0]?.message).toContain('off-by-one in loop')
-    // Observability (condition 4): the verdict + tally is in the engine log.
-    expect(engine.log.some((l) => l.message.includes('敵対レビュー多数決 → 差し戻し'))).toBe(true)
-    expect(engine.log.some((l) => l.message.includes('must-fix 2 / clean 1'))).toBe(true)
+describe('highRiskChangedPaths — the HIGH_RISK_PATHS set', () => {
+  it.each([
+    '.github/workflows/release.yml',
+    '.github/workflows/new-pipeline.yml',
+    'release.yml',
+    'sub/dir/ci.yml',
+    'package.json',
+    'worker/package.json',
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'bun.lockb',
+    'scripts/sign-and-notarize.sh',
+    'scripts/codesign-app.sh',
+    'electron/main.js',
+    'src/lib/secretStore.ts',
+    'config/secrets.json',
+    '.env',
+    '.env.local',
+    'server/routes/auth.ts',
+    'src/lib/auth/AuthContext.tsx',
+    'src/lib/oauth.ts',
+    'src/lib/token-store.ts',
+    'api/tokens/refresh.ts',
+    // camelCase 結合(2026-07-15 の穴 — セグメント境界 regex が素通りさせた実ファイル):
+    'src/lib/server/supabaseAuth.ts', // OAuth/PKCE 本体(小文字+大文字 Auth)
+    'src/lib/server/authStore.ts', // 認証セッションストア(セグメント頭 auth+大文字継続)
+    'src/AuthGate.tsx', // セグメント頭 PascalCase
+    'src/hooks/useAuth.tsx',
+    'src/lib/supabaseOAuth.ts',
+    'src/oauth2Client.ts', // 小文字 oauth+数字継続
+    'src/lib/refreshTokens.ts',
+    'src/tokenStore.ts',
+    'src/lib/apiSecretKey.ts',
+    // 認可の本体(パス名に auth を含まない決定層 — 明示列挙、2026-07-15):
+    'src/lib/server/roles.ts', // owner 判定
+    'src/lib/server/swarmGate.ts', // ローカル owner 解錠
+    'src/lib/server/swarmAllowedModels.ts', // モデル allowlist
+  ])('holds %s', (f) => {
+    expect(highRiskChangedPaths([f])).toEqual([f])
   })
 
-  it('(3) all clean → integrated (lands), logged green', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': cleanResult() },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.reviewed).toHaveLength(1)
-    expect(deps.integrated).toEqual(['swarm/a']) // majority clean → landed
-    expect(deps.moved).toEqual(['a'])
-    expect(deps.reworkedToDoing).toHaveLength(0)
-    expect(engine.reworks.has('a')).toBe(false)
-    expect(engine.reviewFailed.has('swarm/a')).toBe(false)
-    expect(engine.log.some((l) => l.message.includes('敵対レビュー多数決 → clean'))).toBe(true)
+  // 誤爆最小化(完了条件3)— sign/auth/token はセグメント境界+camel 境界で判定するので、
+  // design/assign/author/tokenizer 等の substring 一致は素通りする。camelCase companion は
+  // case-sensitive: Author/Tokenizer(大文字語の右が小文字)も構造的にマッチしない。
+  it.each([
+    'src/App.tsx',
+    'src/lib/server/swarmOrchestrator.ts', // swarm エンジン本体 — 認可の決定層ではない(広げない線引き)
+    'src/lib/server/swarmOrchestrator.test.ts',
+    'src/lib/server/swarmLaunch.ts', // 同上 — ここまで hold すると swarm 改修が全部止まり形骸化する
+    'docs/commander/03-integration-review.md',
+    'src/components/canvas/modules/SwarmOverseerPane.tsx',
+    'src/design-system.ts',
+    'src/lib/assignments.ts',
+    'src/author-tools.ts',
+    'docs/authoring.md',
+    'src/AuthorList.tsx', // Auth の右が小文字 o — camel companion は掴まない
+    'src/tokenizer.ts',
+    'src/lib/tokenizer.ts',
+    'src/Tokenizer.ts', // Token の右が小文字 i
+    'src/detokenize.ts', // token がセグメント頭でない
+    'electron/preload.js',
+    'packages/core/index.ts',
+    'src/environment.ts',
+    'cicd.yml',
+  ])('does NOT hold %s', (f) => {
+    expect(highRiskChangedPaths([f])).toEqual([])
   })
 
-  it('no majority (defer) → stays in review: NOT integrated, NOT reworked, not memoized', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': deferResult() },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0) // never merge on thin signal
-    expect(deps.reworkedToDoing).toHaveLength(0) // not sent back…
-    expect(deps.recovered).toHaveLength(0)
-    expect(engine.reworks.has('a')).toBe(false) // …so the 差し戻し budget is untouched
-    expect(engine.reviewFailed.has('swarm/a')).toBe(false) // transient — retried fresh next pass
-    expect(engine.log.some((l) => l.message.includes('敵対レビュー多数決つかず → 保留'))).toBe(true)
-  })
-
-  it('the panel runs ONLY after verify is green — a verify-RED card never reaches it', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      verifyResults: { 'swarm/a': { ok: false, reason: 'tsc red' } },
-      reviewDefault: 'integrate', // would PASS if reached — proving it is NOT reached
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.verified).toHaveLength(1)
-    expect(deps.reviewed).toHaveLength(0) // verify RED short-circuits BEFORE the panel
-    expect(deps.integrated).toHaveLength(0) // 差し戻し on the verify gate
-    expect(deps.reworkedToDoing).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
-  })
-
-  it('back-compat: NO review dep wired → integrate runs straight after verify (stage skipped)', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }) // no reviewResults/reviewDefault
-    expect(deps.review).toBeUndefined()
-    await runIntegratePass(engine, deps)
-    expect(deps.reviewed).toHaveLength(0)
-    expect(deps.integrated).toEqual(['swarm/a']) // lands exactly as before a14329dc
-    expect(deps.moved).toEqual(['a'])
-  })
-
-  it('memo: an unchanged must-fix tip re-reworks WITHOUT a fresh panel (skipIfTip), escalating to blocked', async () => {
-    // A LIVE worker keeps bouncing back un-fixed (same tip). Pass 1 reviews must-fix +
-    // memoizes; passes 2-3 carry it via skipIfTip (panel SKIPPED — no re-burning claude)
-    // and re-rework until MAX_REWORKS overflows → parked in 'blocked'.
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': mustFixResult() },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // un-fixed worker re-appears in review
-
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(1)
-    expect(engine.reviewFailed.get('swarm/a')).toBe('tip-swarm/a')
-    expect(deps.reviewed.filter((r) => r.skipIfTip === undefined)).toHaveLength(1) // 1st: real panel
-
-    engine.lastIntegrateAt = 0 // reset throttle
-    await runIntegratePass(engine, deps)
-    expect(engine.reworks.get('a')).toBe(2)
-    // 2nd review call carried skipIfTip = the memoized tip (panel short-circuited).
-    expect(deps.reviewed.at(-1)?.skipIfTip).toBe('tip-swarm/a')
-
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0) // never merged across the whole bounce
-    expect(deps.recovered.at(-1)).toEqual({ taskId: 'a', column: 'blocked' }) // budget spent → parked
-    expect(engine.reworks.get('a')).toBe(MAX_REWORKS + 1)
-    expect(engine.reviewFailed.has('swarm/a')).toBe(false) // cleared on park
-  })
-
-  it('owner DISARM during the (slow) panel: the card is not mutated', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
-    // A review that flips autoMerge OFF mid-await, then reports must-fix.
-    deps.review = async () => {
-      engine.autoMerge = false
-      return mustFixResult()
-    }
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0)
-    expect(deps.reworkedToDoing).toHaveLength(0) // disarm landed → no 差し戻し write
-    expect(engine.reworks.has('a')).toBe(false)
-  })
-
-  it('an ERRORED panel defers (leaves the card in review) — never merges un-reviewed', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
-    deps.review = async () => {
-      throw new Error('panel spawn failed')
-    }
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toHaveLength(0) // not merged
-    expect(deps.reworkedToDoing).toHaveLength(0) // not a worker fault → not sent back
-    expect(engine.reworks.has('a')).toBe(false)
-    expect(engine.log.some((l) => l.message.includes('adversarial review errored'))).toBe(true)
-  })
-
-  it('persistent defer is BOUNDED — after MAX_REVIEW_DEFERS the panel stops re-spawning + needs-human; a new tip re-arms', async () => {
-    // A genuinely ambiguous diff (or a systemic claude outage where every reviewer
-    // abstains) defers every pass. Unbounded, that re-burns N claude sessions forever.
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': deferResult() },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')] // ambiguous card keeps re-appearing
-
-    for (let i = 0; i < MAX_REVIEW_DEFERS; i++) {
-      engine.lastIntegrateAt = 0
-      await runIntegratePass(engine, deps)
-    }
-    expect(deps.reviewed).toHaveLength(MAX_REVIEW_DEFERS) // a REAL panel ran each pass so far
-    expect(deps.integrated).toHaveLength(0) // never merged on no-majority
-    expect(engine.reviewDeferred.get('swarm/a')?.count).toBe(MAX_REVIEW_DEFERS)
-    expect(engine.reviews.find((r) => r.taskId === 'a')?.status).toBe('conflict') // needs-human dot
-    expect(engine.log.some((l) => l.message.includes('needs-human 退避'))).toBe(true)
-
-    // Next pass: defer-exhausted on THIS tip → panel is SKIPPED (no fresh claude burn).
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(deps.reviewed).toHaveLength(MAX_REVIEW_DEFERS) // NOT incremented — panel skipped
-    expect(deps.integrated).toHaveLength(0)
-
-    // A NEW commit (different verified tip) clears the streak → the panel re-arms.
-    deps.verify = async () => ({ ok: true, tip: 'tip-fixed' })
-    deps.review = async () => cleanResult()
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toContain('swarm/a') // re-reviewed clean on the new tip → landed
-  })
-
-  it('needs-human 退避は棄権の内訳を運ぶ — WHO abstained WHY reaches the log AND engine.reviews (完了条件1/3)', async () => {
-    // The f3f1e5c6 freeze shape: two slow lenses time out every pass, two vote
-    // clean. Before this fix the operator got a bare 「多数決つかず」 3 times and a
-    // needs-human dot with NOTHING to act on.
-    const abstainingDefer = (): ReviewResult => ({
-      decision: 'defer',
-      verdicts: [
-        { reviewer: 1, lens: 'correctness', vote: null, note: '', abstainCause: 'timeout' },
-        { reviewer: 2, lens: 'security', vote: 'clean', note: '' },
-        { reviewer: 3, lens: 'perf', vote: 'clean', note: '' },
-        { reviewer: 4, lens: 'regression', vote: null, note: '', abstainCause: 'timeout' },
-      ] satisfies ReviewerVerdict[],
-      mustFix: 0,
-      clean: 2,
-      reason:
-        'lens別敵対レビュー [correctness=abstain(timeout), security=clean, perf=clean, regression=abstain(timeout)] — 2個のlensが未判定(未レビュー観点あり) → 保留して次パスで再評価',
-    })
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': abstainingDefer() },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
-
-    for (let i = 0; i < MAX_REVIEW_DEFERS; i++) {
-      engine.lastIntegrateAt = 0
-      await runIntegratePass(engine, deps)
-    }
-    // 完了条件1 — every held pass logs the tally's reason, i.e. WHICH lens abstained WHY.
+  it('filters a mixed diff down to just the risky paths', () => {
     expect(
-      engine.log.some(
-        (l) => l.message.includes('保留') && l.message.includes('correctness=abstain(timeout)'),
-      ),
-    ).toBe(true)
-    // 完了条件3 — the freeze line itself carries the accumulated per-lens tallies…
-    const freeze = engine.log.find((l) => l.message.includes('needs-human 退避'))
-    expect(freeze?.message).toContain('棄権内訳')
-    expect(freeze?.message).toContain(`correctness(timeout)×${MAX_REVIEW_DEFERS}`)
-    expect(freeze?.message).toContain(`regression(timeout)×${MAX_REVIEW_DEFERS}`)
-    // …and so does the dashboard row (engine.reviews) the human actually looks at.
-    const row = engine.reviews.find((r) => r.taskId === 'a')
-    expect(row?.status).toBe('conflict')
-    expect(row?.abstainSummary).toContain(`correctness(timeout)×${MAX_REVIEW_DEFERS}`)
-    expect(row?.abstainSummary).toContain(`regression(timeout)×${MAX_REVIEW_DEFERS}`)
-
-    // engine.reviews is REBUILT from readiness every pass — the defer-exhausted
-    // skip path must re-stamp the summary or the evidence vanishes on the next tick.
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    const restamped = engine.reviews.find((r) => r.taskId === 'a')
-    expect(restamped?.status).toBe('conflict')
-    expect(restamped?.abstainSummary).toContain(`correctness(timeout)×${MAX_REVIEW_DEFERS}`)
+      highRiskChangedPaths(['src/App.tsx', '.github/workflows/release.yml', 'docs/x.md', 'electron/main.js']),
+    ).toEqual(['.github/workflows/release.yml', 'electron/main.js'])
   })
 
-  it('MF-1: a quota park never consumes the defer streak — and review auto-resumes after the reset, no human', async () => {
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': cleanResult() },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
-    // Every tier cooling — the state a full quota wall leaves behind.
-    for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, Date.now() + 10 * 60_000)
-
-    // WELL past MAX_REVIEW_DEFERS ticks while parked. Before the fix, ~3 ticks
-    // (~45s) burned the streak → needs-human 'conflict' + the defer-exhausted
-    // memo kept the panel off FOREVER (even after the park lifted).
-    for (let i = 0; i < MAX_REVIEW_DEFERS + 2; i++) {
-      engine.lastIntegrateAt = 0
-      await runIntegratePass(engine, deps)
+  it('司令官規約(skills/og-manage/SKILL.md §マージ 手順0)と同一集合 — 規約の文言ごと固定', async () => {
+    const md = await readFile(resolve(process.cwd(), 'skills/og-manage/SKILL.md'), 'utf8')
+    // 規約の正典行。ここが変わったら集合がドリフトしている — HIGH_RISK_PATHS と
+    // このテストの代表パスを同じコミットで直す(二重管理をテストで単一化する仕掛け)。
+    // ⚠ この toContain 群は verbatim pin(文言の一致)であって意味の同期ではない —
+    // pin が緑でも「regex が文言どおりのカバレッジを持つ」ことは保証しない
+    // (2026-07-15: 文言に auth/token とありながら camelCase 実ファイルが素通りした)。
+    // 実挙動の保証は下の rep ループと上の it.each(実ファイル HOLD/PASS)が担う。
+    expect(md).toContain(
+      '`.github/workflows/**`・`release.yml`/`ci.yml`・`package.json`/lockfile・署名/notary スクリプト・',
+    )
+    expect(md).toContain(
+      '`electron/main.js`・`*secret*`/`.env*`/auth/token(camelCase 結合 `supabaseAuth.ts`/`authStore.ts` 型も掴む)・',
+    )
+    expect(md).toContain(
+      '認可の本体(`roles.ts`/`swarmGate.ts`/`swarmAllowedModels.ts`)に触れていたら自動では入れず',
+    )
+    // 規約に列挙された各カテゴリの代表が実際に hold されることを機械で固定する。
+    for (const rep of [
+      '.github/workflows/anything.yml', // .github/workflows/**
+      'release.yml', // release.yml
+      'ci.yml', // ci.yml
+      'package.json', // package.json
+      'package-lock.json', // lockfile
+      'scripts/sign-and-notarize.sh', // 署名/notary スクリプト
+      'electron/main.js', // electron/main.js
+      'lib/apiSecret.ts', // *secret*
+      '.env.production', // .env*
+      'server/routes/auth.ts', // auth
+      'src/token.ts', // token
+      // camelCase 結合(2026-07-15 追記) — 規約の括弧書きが指す実ファイル:
+      'src/lib/server/supabaseAuth.ts',
+      'src/lib/server/authStore.ts',
+      // 認可の本体(2026-07-15 追記) — 規約の明示列挙と同一:
+      'src/lib/server/roles.ts',
+      'src/lib/server/swarmGate.ts',
+      'src/lib/server/swarmAllowedModels.ts',
+    ]) {
+      expect(highRiskChangedPaths([rep]), rep).toEqual([rep])
     }
-    expect(deps.reviewed).toHaveLength(0) // pre-gate: the panel dep is never even called
-    expect(engine.reviewDeferred.has('swarm/a')).toBe(false) // streak untouched
-    expect(engine.reviews.find((r) => r.taskId === 'a')?.status).not.toBe('conflict') // no needs-human flip
-    expect(engine.log.some((l) => l.message.includes('needs-human'))).toBe(false)
-    expect(deps.integrated).toHaveLength(0) // and of course nothing merged un-reviewed
-
-    // The reset passes (cooling table empties) → the very next tick reviews and
-    // lands, with no human action and no new commit.
-    __resetQuotaForTest()
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, deps)
-    expect(deps.reviewed).toHaveLength(1) // panel re-spawned as if nothing happened
-    expect(deps.integrated).toEqual(['swarm/a'])
-  })
-
-  it('MF-1 backstop: a review dep answering skippedForPark:true is kept OUT of the defer streak (verify-window race)', async () => {
-    // The park can BEGIN while a card's multi-minute verify runs — the pre-gate
-    // (evaluated before deps.review) passed, but the dep itself park-gated. That
-    // answer is an engine hold, not a panel verdict: no streak, no needs-human.
-    const engine = newEngine({ autoMerge: true, workers: [doneWorker('swarm/a', 'a')] })
-    const parkSkip: ReviewResult = {
-      decision: 'defer',
-      verdicts: [],
-      mustFix: 0,
-      clean: 0,
-      skippedForPark: true,
-      reason: 'quota park: every model tier is cooling — review deferred',
-    }
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      reviewResults: { 'swarm/a': parkSkip },
-    })
-    deps.fetchReview = async () => [reviewCard('a', 'swarm/a')]
-    for (let i = 0; i < MAX_REVIEW_DEFERS + 1; i++) {
-      engine.lastIntegrateAt = 0
-      await runIntegratePass(engine, deps)
-    }
-    expect(deps.reviewed).toHaveLength(MAX_REVIEW_DEFERS + 1) // the dep WAS called (no park in the table)
-    expect(engine.reviewDeferred.has('swarm/a')).toBe(false) // …but the streak never moved
-    expect(engine.reviews.find((r) => r.taskId === 'a')?.status).not.toBe('conflict')
-    expect(deps.integrated).toHaveLength(0) // still never merges un-reviewed
   })
 })
 
@@ -5638,6 +4977,7 @@ describe('runEnginePass — never overlaps itself', () => {
       recentOutput: () => null,
       // Integration half — present but inert (autoMerge OFF, no review cards).
       fetchReview: async () => [],
+      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
@@ -5648,6 +4988,8 @@ describe('runEnginePass — never overlaps itself', () => {
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
+      isManagerActive: async () => false,
+      wakeManager: async () => true,
       worktreeExists: async () => true,
     }
     const p1 = runEnginePass(engine, deps)
@@ -5707,6 +5049,7 @@ describe('runEnginePass — never blocks on the self-supply scan', () => {
       escalate: async () => true,
       recentOutput: () => null,
       fetchReview: async () => [],
+      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
@@ -5717,6 +5060,8 @@ describe('runEnginePass — never blocks on the self-supply scan', () => {
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
+      isManagerActive: async () => false,
+      wakeManager: async () => true,
       worktreeExists: async () => true,
       // The scan stand-in: parked in its first scanner until the test releases it. The
       // REAL scanners spawn tsc/eslint/vitest — a test must never do that.
@@ -5779,7 +5124,9 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
   const fullDeps = (over: {
     board: Map<string, ProjectTask>
     fetchReview: () => Promise<ProjectTask[]>
-    verify: IntegrationDeps['verify']
+    // The integrate pass's SLOW await is now isManagerActive (2026-07-15 — it no
+    // longer verifies/reviews). Parked in test 1 to prove the tick doesn't block on it.
+    isManagerActive?: IntegrationDeps['isManagerActive']
     recovered: { taskId: string; column: string }[]
     deadIds: Set<string>
   }): OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps => ({
@@ -5804,22 +5151,25 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
     fetchReview: over.fetchReview,
     prepareTarget: async () => 'main',
     classify: async () => 'ff',
-    verify: over.verify,
-    integrate: async () => ({ status: 'integrated', mode: 'ff' }),
+    changedPaths: async () => ({ tip: 'tip-x', files: [] }),
+    verify: async () => ({ ok: true, tip: null }), // dead post-2026-07-15 (engine doesn't verify)
+    integrate: async () => ({ status: 'integrated', mode: 'ff' }), // dead — engine never merges
     acquireLock: alwaysAcquireLock,
     moveToDone: async () => true,
     markConflict: async () => true,
     cleanup: async () => ({ removed: true }),
     killPty: () => {},
     instructRework: () => {},
+    isManagerActive: over.isManagerActive ?? (async () => false),
+    wakeManager: async () => true,
     worktreeExists: async () => true,
   })
 
-  it('returns while a slow verify is mid-flight, and the NEXT tick still MONITORS (完了条件3)', async () => {
+  it('returns while a slow manager-wake probe is mid-flight, and the NEXT tick still MONITORS (完了条件3)', async () => {
     const engine = newEngine({ autoMerge: true })
-    let verifyEntered = false
-    let releaseVerify: () => void = () => {}
-    const verifyGate = new Promise<void>((r) => (releaseVerify = r))
+    let probeEntered = false
+    let releaseProbe: () => void = () => {}
+    const probeGate = new Promise<void>((r) => (releaseProbe = r))
     const board = new Map<string, ProjectTask>([
       ['r', { ...card('r', { boardColumn: 'review', branch: 'swarm/r' }) }],
     ])
@@ -5828,12 +5178,13 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
     const deps = fullDeps({
       board,
       fetchReview: async () => [{ ...board.get('r')! }],
-      // The verify stand-in: parked until the test releases it — the REAL one
-      // spawns tsc+vitest in a worktree; a unit test must never do that.
-      verify: async () => {
-        verifyEntered = true
-        await verifyGate
-        return { ok: true, tip: null }
+      // The integrate pass's slow await is now the commander-presence probe — parked
+      // until the test releases it. (The REAL one reads swarm-sessions + checks a live
+      // PTY; even the wake it precedes spawns a claude — a unit test must never do that.)
+      isManagerActive: async () => {
+        probeEntered = true
+        await probeGate
+        return true // "desk already up" — so the wake never actually spawns here
       },
       recovered,
       deadIds,
@@ -5843,12 +5194,12 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
       // Would hang until the test timeout if the tick awaited the integrate pass.
       await runEnginePass(engine, deps)
       expect(engine.passInFlight).toBe(false) // the tick let go…
-      await waitUntil(() => verifyEntered)
-      expect(engine.integrateInFlight).toBe(true) // …while the verify runs beside it
+      await waitUntil(() => probeEntered)
+      expect(engine.integrateInFlight).toBe(true) // …while the wake probe runs beside it
 
-      // A worker dies while the verify is STILL mid-flight. The next tick must
-      // monitor (detect + recover it) without waiting for the verify — this is
-      // the exact starvation that delayed the 実測 rate-limit sighting to 15:29:39.
+      // A worker dies while the probe is STILL mid-flight. The next tick must monitor
+      // (detect + recover it) without waiting for the probe — this is the exact
+      // starvation that delayed the 実測 rate-limit sighting to 15:29:39.
       board.set('gone', { ...card('gone', { boardColumn: 'doing', branch: 'swarm/gone' }) })
       engine.workers.push(
         worker({
@@ -5864,9 +5215,9 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
       await runEnginePass(engine, deps)
       expect(recovered).toEqual([{ taskId: 'gone', column: 'todo' }]) // the monitor RAN
       expect(engine.workers.some((w) => w.terminalId === 'pty-gone-1')).toBe(false)
-      expect(engine.integrateInFlight).toBe(true) // the SAME verify still in flight — no second pass
+      expect(engine.integrateInFlight).toBe(true) // the SAME probe still in flight — no second pass
     } finally {
-      releaseVerify()
+      releaseProbe()
     }
     expect(await waitUntil(() => !engine.integrateInFlight)).toBe(true)
   })
@@ -5883,7 +5234,6 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
         await reviewGate
         return []
       },
-      verify: async () => ({ ok: true, tip: null }),
       recovered: [],
       deadIds: new Set(),
     })
@@ -5980,6 +5330,7 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       recentOutput: () => null,
       // Integration half — present but inert (autoMerge OFF, no review cards).
       fetchReview: async () => [],
+      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
       verify: async () => ({ ok: true, tip: null }),
@@ -5990,6 +5341,8 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
+      isManagerActive: async () => false,
+      wakeManager: async () => true,
       worktreeExists: async () => true,
     }
 
@@ -6257,6 +5610,76 @@ describe('detectAnomalies — state inconsistency detection', () => {
     ])
   })
 
+  // ── review-panel-failed (fail-closed review, 2026-07-14) ──────────────────────
+  // The adversarial panel exhausted its retry budget without one decisive vote —
+  // the card is frozen in 'review' un-merged and further panels are skipped; a
+  // human must be surfaced (the "レビュー不能 → anomaly" hand-off, never a merge).
+
+  it('flags a review card whose panel exhausted the defer budget (review-panel-failed)', async () => {
+    const engine = newEngine({
+      reviewDeferred: new Map([
+        ['swarm/rp', { tip: 't1', count: MAX_REVIEW_DEFERS, abstains: { 'correctness(timeout)': MAX_REVIEW_DEFERS } }],
+      ]),
+    })
+    const tasks = [card('rp', { boardColumn: 'review', branch: 'swarm/rp' })]
+    const out = await detectAnomalies(engine, tasks, depsWith(new Set()), NOW)
+    expect(out).toEqual([
+      {
+        kind: 'review-panel-failed',
+        ref: 'rp',
+        branch: 'swarm/rp',
+        taskTitle: 'task rp',
+        attempts: MAX_REVIEW_DEFERS,
+      },
+    ])
+  })
+
+  it('does NOT flag an under-budget defer streak (the panel still gets its retry)', async () => {
+    const engine = newEngine({
+      reviewDeferred: new Map([['swarm/rp', { tip: 't1', count: MAX_REVIEW_DEFERS - 1, abstains: {} }]]),
+    })
+    const tasks = [card('rp', { boardColumn: 'review', branch: 'swarm/rp' })]
+    expect(await detectAnomalies(engine, tasks, depsWith(new Set()), NOW)).toEqual([])
+  })
+
+  it('does NOT flag review-panel-failed once the card left review (resolved by a human / a fresh cycle)', async () => {
+    const engine = newEngine({
+      reviewDeferred: new Map([['swarm/rp', { tip: 't1', count: MAX_REVIEW_DEFERS, abstains: {} }]]),
+    })
+    // worktree present so the doing card doesn't trip the (unrelated) orphan check.
+    const tasks = [card('rp', { boardColumn: 'doing', branch: 'swarm/rp' })]
+    expect(await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/rp'])), NOW)).toEqual([])
+  })
+
+  // ── high-risk-hold (force-hold, 2026-07-15) ────────────────────────────────────
+
+  it('flags a review card under a standing high-risk force-hold (high-risk-hold)', async () => {
+    const engine = newEngine({
+      highRiskHolds: new Map([
+        ['swarm/hr', { tip: 't1', files: ['.github/workflows/release.yml'] }],
+      ]),
+    })
+    const tasks = [card('hr', { boardColumn: 'review', branch: 'swarm/hr' })]
+    const out = await detectAnomalies(engine, tasks, depsWith(new Set()), NOW)
+    expect(out).toEqual([
+      {
+        kind: 'high-risk-hold',
+        ref: 'hr',
+        branch: 'swarm/hr',
+        taskTitle: 'task hr',
+        files: ['.github/workflows/release.yml'],
+      },
+    ])
+  })
+
+  it('does NOT flag a high-risk hold once the card left review (merged by hand / sent back)', async () => {
+    const engine = newEngine({
+      highRiskHolds: new Map([['swarm/hr', { tip: 't1', files: ['release.yml'] }]]),
+    })
+    const tasks = [card('hr', { boardColumn: 'done', branch: 'swarm/hr' })]
+    expect(await detectAnomalies(engine, tasks, depsWith(new Set()), NOW)).toEqual([])
+  })
+
   it('returns empty when everything is coherent', async () => {
     const fresh = at(NOW - 60_000)
     const engine = newEngine({
@@ -6323,81 +5746,10 @@ describe('runDispatchPass — monitor surfaces heartbeat phase/note', () => {
 // flagged (the "done but flagged conflict" zombie), and a real conflict names its
 // files so the human can resolve it.
 
-describe('runIntegratePass — reliable conflict-flag clear on land', () => {
-  it('clears a stale stamp when a still-stamped card finally lands (no done-but-flagged zombie)', async () => {
-    // The branch carries the persistent stamp but the in-memory memo is EMPTY (e.g.
-    // a server restart lost the memo while the board stamp survived). It is now
-    // fast-forwardable and lands — the stamp must be cleared on the way to done.
-    const engine = newEngine({ autoMerge: true }) // conflictedBranches empty
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a', { integrationConflict: true })],
-      readiness: { 'swarm/a': 'ff' },
-    })
-    await runIntegratePass(engine, deps)
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(deps.moved).toEqual(['a'])
-    expect(deps.marks).toContainEqual({ taskId: 'a', value: false }) // stamp cleared on land
-  })
-
-  it('does NOT write a clear for a normal (never-stamped) card that lands', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }) // no stamp
-    await runIntegratePass(engine, deps)
-    expect(deps.moved).toEqual(['a'])
-    expect(deps.marks).toHaveLength(0) // no wasted markConflict write on the happy path
-  })
-
-  it('names the conflicted files in the delegated rebase instruction so the worker knows where to resolve', async () => {
-    // Card 012a2848: the conflict files are now surfaced in the WORKER instruction
-    // (the /order memo a re-dispatch carries), not a "manual integration" log line.
-    const engine = newEngine({ autoMerge: true }) // no live worker → todo re-dispatch path
-    const deps = makeIntDeps({
-      reviews: [reviewCard('a', 'swarm/a')],
-      outcomes: { 'swarm/a': { status: 'conflict', files: ['src/x.ts', 'src/y.ts'] } },
-    })
-    await runIntegratePass(engine, deps)
-    const memo = engine.reworkReasons.get('a')
-    expect(memo).toContain('src/x.ts')
-    expect(memo).toContain('src/y.ts')
-    // It is recorded as a 'conflict'-kind event (so the KPI conflicted counter is bumped).
-    expect(engine.log.some((l) => l.kind === 'conflict')).toBe(true)
-  })
-})
-
 // ── Card 254fe0 ② — anti-zombie: column-move save-failure recovery ─────────────
 // A KEPT column move is tracked (engine.stuckMoves) and, past the budget, the
 // engine ESCALATES (a lost-worker recovery → blocked) and SURFACES the rest as a
 // 'move-stuck' anomaly, instead of an endless silent warn loop that zombies a card.
-
-describe('runIntegratePass — anti-zombie: done-move kept tracking ("done なのに review")', () => {
-  it('tracks a landed-but-kept card and bumps it each pass up to the budget', async () => {
-    const engine = newEngine({ autoMerge: true })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], moveToDoneFails: new Set(['a']) })
-    await runIntegratePass(engine, deps)
-    // The branch landed on the trunk but the review→done move was kept → tracked.
-    expect(deps.integrated).toEqual(['swarm/a'])
-    expect(engine.stuckMoves.get('a')).toMatchObject({ intent: 'done', attempts: 1, branch: 'swarm/a' })
-    // Each throttle-reset pass re-integrates (already merged) and re-keeps the move.
-    for (let i = 2; i <= MOVE_STUCK_MAX_RETRIES; i++) {
-      engine.lastIntegrateAt = 0
-      await runIntegratePass(engine, deps)
-    }
-    expect(engine.stuckMoves.get('a')?.attempts).toBe(MOVE_STUCK_MAX_RETRIES)
-  })
-
-  it('clears the tracking once the done move finally lands', async () => {
-    const engine = newEngine({ autoMerge: true })
-    await runIntegratePass(
-      engine,
-      makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], moveToDoneFails: new Set(['a']) }),
-    )
-    expect(engine.stuckMoves.has('a')).toBe(true)
-    // The board write recovers (a fresh deps with no failure) → move lands → cleared.
-    engine.lastIntegrateAt = 0
-    await runIntegratePass(engine, makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] }))
-    expect(engine.stuckMoves.has('a')).toBe(false)
-  })
-})
 
 describe('runDispatchPass — anti-zombie: lost-worker recovery escalates to blocked (blocked退避)', () => {
   it('parks a lost worker in blocked once its todo-requeue keeps failing ("dead なのに doing")', async () => {
@@ -6687,6 +6039,59 @@ describe('fireFatalNotifications — fatal events push, normal passes are silent
     expect(fired[0].logHint).toBeTruthy() // 導線 present (条件3)
   })
 
+  it('notifies on a review-panel-failed anomaly (panel indecisive → merge withheld) — once, rising-edge', () => {
+    const anomalies = [
+      {
+        kind: 'review-panel-failed' as const,
+        ref: 'rp',
+        branch: 'swarm/rp',
+        taskTitle: 'risky change',
+        attempts: MAX_REVIEW_DEFERS,
+      },
+    ]
+    const engine = newEngine({ running: true, anomalies })
+    const tasks = [card('rp', { boardColumn: 'review', branch: 'swarm/rp' })]
+    const fired = run(engine, tasks)
+    expect(fired).toHaveLength(1)
+    expect(fired[0].event).toBe('review-panel-failed')
+    expect(fired[0].taskId).toBe('rp')
+    expect(fired[0].branch).toBe('swarm/rp')
+    expect(fired[0].detail).toContain('決着せず')
+    expect(fired[0].logHint).toBeTruthy() // 導線 present
+    expect(run(engine, tasks)).toEqual([]) // persisting condition → silent (dedup)
+    engine.anomalies = [] // resolved (human moved it / a new commit re-armed)
+    expect(run(engine, tasks)).toEqual([])
+    engine.anomalies = anomalies // recurs → re-fires
+    expect(run(engine, tasks)).toHaveLength(1)
+  })
+
+  it('notifies on a high-risk-hold anomaly (auto-merge withheld → manual merge required) — once, rising-edge', () => {
+    const anomalies = [
+      {
+        kind: 'high-risk-hold' as const,
+        ref: 'hr',
+        branch: 'swarm/hr',
+        taskTitle: 'release pipeline change',
+        files: ['.github/workflows/release.yml', 'electron/main.js'],
+      },
+    ]
+    const engine = newEngine({ running: true, anomalies })
+    const tasks = [card('hr', { boardColumn: 'review', branch: 'swarm/hr' })]
+    const fired = run(engine, tasks)
+    expect(fired).toHaveLength(1)
+    expect(fired[0].event).toBe('high-risk-hold')
+    expect(fired[0].taskId).toBe('hr')
+    expect(fired[0].branch).toBe('swarm/hr')
+    expect(fired[0].detail).toContain('高リスクパス')
+    expect(fired[0].detail).toContain('.github/workflows/release.yml') // WHAT made it risky
+    expect(fired[0].logHint).toContain('手動統合') // 出口の導線 — 人間のマージだけが出す
+    expect(run(engine, tasks)).toEqual([]) // standing hold → silent (dedup)
+    engine.anomalies = [] // resolved (merged by hand / a new commit dropped the risky paths)
+    expect(run(engine, tasks)).toEqual([])
+    engine.anomalies = anomalies // recurs → re-fires
+    expect(run(engine, tasks)).toHaveLength(1)
+  })
+
   it('notifies all-workers-down: running, zero live workers, doing work remains', () => {
     const engine = newEngine({
       running: true,
@@ -6763,7 +6168,7 @@ describe('fireFatalNotifications — fatal events push, normal passes are silent
     expect(run(engine, tasks)).toHaveLength(1) // fires again
   })
 
-  it('only rework-exhausted is fatal — other anomaly kinds never notify (条件4)', () => {
+  it('only rework-exhausted / review-panel-failed / high-risk-hold are fatal — other anomaly kinds never notify (条件4)', () => {
     const engine = newEngine({
       running: true,
       anomalies: [

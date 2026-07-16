@@ -93,6 +93,8 @@ export type EngineAnomalyKind =
   | 'no-heartbeat'
   | 'move-stuck'
   | 'rework-exhausted'
+  | 'review-panel-failed'
+  | 'high-risk-hold'
 
 export interface EngineAnomaly {
   kind: EngineAnomalyKind
@@ -107,8 +109,14 @@ export interface EngineAnomaly {
    *  stuck in doing, 'done' = a landed branch stuck in review, 'recover' = a lost
    *  worker stuck in doing), so the pane can name the exact zombie. */
   intent?: 'review' | 'done' | 'recover'
-  /** 'move-stuck' only — consecutive kept writes (display-only). */
+  /** 'move-stuck' — consecutive kept writes; 'rework-exhausted' — review→doing
+   *  bounces before parking; 'review-panel-failed' — consecutive indecisive
+   *  panels before re-spawning stopped (display-only). */
   attempts?: number
+  /** 'high-risk-hold' — the changed paths that matched the high-risk set
+   *  (release/CI/signing/dependency/secrets), i.e. WHY auto-merge is withheld
+   *  (display-only). */
+  files?: string[]
 }
 
 /** KPI roll-up (the analytics layer) — mirrors the server's SwarmKpis. A `null`
@@ -225,8 +233,13 @@ const KNOWN_REVIEW_STATUS: ReadonlySet<string> = new Set(['ff', 'rebase', 'confl
 const KNOWN_LOG_KINDS: ReadonlySet<string> = new Set([
   'routine', 'dispatch', 'promote', 'integrate', 'conflict', 'cleanup', 'crash',
 ])
+// NOTE: 'no-heartbeat' was missing here until 2026-07-14 — the server emitted it
+// but this sanitize filter silently dropped it, so the overseer pane (whose label
+// map always knew the kind) never showed it. Keep this set in lockstep with
+// EngineAnomalyKind above.
 const KNOWN_ANOMALY_KINDS: ReadonlySet<string> = new Set([
-  'orphan-doing', 'worktree-missing', 'worker-stale', 'move-stuck', 'rework-exhausted',
+  'orphan-doing', 'worktree-missing', 'worker-stale', 'no-heartbeat', 'move-stuck',
+  'rework-exhausted', 'review-panel-failed', 'high-risk-hold',
 ])
 const KNOWN_MOVE_INTENTS: ReadonlySet<string> = new Set(['review', 'done', 'recover'])
 
@@ -373,6 +386,10 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
           ...(typeof a.attempts === 'number' && Number.isFinite(a.attempts)
             ? { attempts: a.attempts }
             : {}),
+          // 'high-risk-hold' — the matched paths; strings only, capped (defensive).
+          ...(Array.isArray(a.files)
+            ? { files: a.files.filter((f): f is string => typeof f === 'string').slice(0, 20) }
+            : {}),
         }))
         .slice(0, 50) // cap — defensive against a forged huge list
     : []
@@ -399,17 +416,20 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
 // The escalation safety valve (card 6fe48c1f) PERSISTS every fatal event of the
 // unmanned loop as a notification, surfaced by GET /api/swarm/notifications. The
 // flow pane reads THESE — the AUTHORITATIVE source — for its "needs attention"
-// banner, so all five fatal kinds show: the three engine-side ones (rework-
-// exhausted / all-workers-down / exec-timeout) AND the two that come from the
-// Electron self-update cycle (rollback / canary-failed) and never touch the engine
-// state at all. Mirrors the server's SwarmFatalEvent / SwarmFatalNotification (a
-// LOCAL mirror keeps this front-end decoupled, like the engine-state mirror above).
+// banner, so every fatal kind shows: the engine-side ones (rework-exhausted /
+// all-workers-down / exec-timeout / review-panel-failed) AND the two that come
+// from the Electron self-update cycle (rollback / canary-failed) and never touch
+// the engine state at all. Mirrors the server's SwarmFatalEvent /
+// SwarmFatalNotification (a LOCAL mirror keeps this front-end decoupled, like the
+// engine-state mirror above).
 export type SwarmFatalEventKind =
   | 'rework-exhausted'
   | 'all-workers-down'
   | 'exec-timeout'
   | 'rollback'
   | 'canary-failed'
+  | 'review-panel-failed'
+  | 'high-risk-hold'
 
 export interface SwarmFatalView {
   /** Stable React key (the persisted notification id). */
@@ -433,6 +453,7 @@ export interface SwarmFatalView {
 
 const KNOWN_FATAL_EVENTS: ReadonlySet<string> = new Set([
   'rework-exhausted', 'all-workers-down', 'exec-timeout', 'rollback', 'canary-failed',
+  'review-panel-failed', 'high-risk-hold',
 ])
 
 // The notifications file is untrusted on disk (hand-editable), so coerce every

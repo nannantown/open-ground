@@ -20,14 +20,27 @@ import {
 // baked that worktree's ABSOLUTE path into the user's GLOBAL
 // ~/.claude/settings.json; the janitor later deleted the worktree and every
 // claude session — OPEN GROUND-related or not — started failing its Stop hook
-// with MODULE_NOT_FOUND. Two layers now prevent this:
-//   (1) resolution anchors at the hooksInstall MODULE's own location (never
-//       the process cwd), and
-//   (2) even a module-anchored root is refused (fail-closed, nothing written)
-//       when it sits under the OPEN GROUND data home, where worktrees are
-//       transient by design.
+// with MODULE_NOT_FOUND.
 //
-// HOME ISOLATION: HOME (→ ~/.claude + the homedir-based guard install dir)
+// The RELAPSE (2026-07-14): the volatile-root refusal anchored at
+// openGroundHome(), which honours the OPENGROUND_HOME redirect. A worker
+// verifying its branch with `OPENGROUND_HOME=$(mktemp -d) node
+// server/dist/index.cjs` from its worktree moved the refusal prefix to /tmp
+// while settingsPath() (homedir-based) kept pointing at the REAL
+// ~/.claude/settings.json — the worktree root sailed past the check and got
+// wired globally again. Three layers now prevent this:
+//   (1) resolution anchors at the hooksInstall MODULE's own location (never
+//       the process cwd),
+//   (2) a module-anchored root is refused (fail-closed, nothing written) when
+//       it sits under EITHER openGroundHome() OR the literal
+//       homedir()/.openground — the redirect can no longer move the fence, and
+//   (3) the wired command never carries the resolved root at all: the hook is
+//       COPIED to the stable ~/.openground/hooks/ (like the guard to
+//       ~/.openground/guard/) and settings.json only ever references that
+//       homedir-anchored copy — the same anchor settings.json itself lives
+//       under, so no env redirect can split them apart again.
+//
+// HOME ISOLATION: HOME (→ ~/.claude + the homedir-based install dirs)
 // and OPENGROUND_HOME (→ the volatile-root refusal prefix) are both pinned
 // into one throwaway dir — nothing here touches the real machine state.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,13 +114,18 @@ describe('hook source resolution — cwd-independent, worktree-refusing', () => 
     expect(commands.length).toBeGreaterThan(0)
     for (const cmd of commands) {
       expect(cmd, 'a wired hook command must never point into the worktree').not.toContain(wt)
+      expect(
+        cmd,
+        'a wired hook command must never point into the source checkout either — it dies with the checkout',
+      ).not.toContain(repoRoot)
     }
     // The Stop hook (the entry that broke in the incident) points at the
-    // module-anchored checkout, not wherever cwd happened to be.
+    // stable installed copy, not wherever cwd or the source checkout happened
+    // to be.
     const stop = settings.hooks.Stop.find((e: any) =>
       e?.hooks?.[0]?.command?.includes('openground-hook.js'),
     )
-    expect(stop.hooks[0].command).toContain(join(repoRoot, 'scripts', 'openground-hook.js'))
+    expect(stop.hooks[0].command).toContain(join(ogHome(), 'hooks', 'openground-hook.js'))
   })
 
   it('R2 — an engine whose MODULE lives under the central worktrees refuses to install: nothing written', async () => {
@@ -162,5 +180,119 @@ describe('hook source resolution — cwd-independent, worktree-refusing', () => 
     expect(existsSync(join(root!, 'scripts', 'openground-guard.js'))).toBe(true)
     // vitest runs from the checkout root — the resolved root IS that checkout.
     expect(root).toBe(await realpath(repoRoot))
+  })
+
+  it('R5 — the 2026-07-14 relapse: an OPENGROUND_HOME redirect must not move the refusal fence off the real data home', async () => {
+    // Incident shape: a worker verifies its branch with
+    // `OPENGROUND_HOME=$(mktemp -d) node server/dist/index.cjs` from inside
+    // its worktree. openGroundHome() then points at the redirect while
+    // settingsPath() still points at the REAL ~/.claude — the fake worktree
+    // below sits under homedir()/.openground, NOT under the redirect.
+    const redirect = await realpath(await mkdtemp(join(tmpdir(), 'og-redirect-')))
+    process.env.OPENGROUND_HOME = redirect
+    try {
+      const wt = await mintFakeWorktree() // under join(tmpHome, '.openground')
+      __setHookSourceModuleDirForTests(join(wt, 'src', 'lib', 'server'))
+      const res = await installHooks()
+      expect(res.errors.join('\n')).toContain('refusing hook source root')
+      expect(res.installed).toEqual([])
+      expect(res.refreshed).toEqual([])
+      expect(existsSync(claudeSettings())).toBe(false)
+    } finally {
+      await rm(redirect, { recursive: true, force: true })
+    }
+  })
+
+  it('R6 — the hook is COPIED to ~/.openground/hooks and the wiring references only that stable copy', async () => {
+    const res = await installHooks()
+    expect(res.errors).toEqual([])
+
+    const installedHook = join(ogHome(), 'hooks', 'openground-hook.js')
+    expect(existsSync(installedHook)).toBe(true)
+    const src = await readFile(join(repoRoot, 'scripts', 'openground-hook.js'))
+    expect((await readFile(installedHook)).equals(src)).toBe(true)
+
+    const settings = JSON.parse(await readFile(claudeSettings(), 'utf8'))
+    for (const phase of ['SessionStart', 'Stop', 'PostToolUse']) {
+      const entry = settings.hooks[phase].find((e: any) =>
+        e?.hooks?.[0]?.command?.includes('openground-hook.js'),
+      )
+      expect(entry, `${phase} entry missing`).toBeTruthy()
+      expect(entry.hooks[0].command).toContain(installedHook)
+    }
+  })
+
+  it('R7 — SELF-HEAL: a poisoned entry pointing into a deleted worktree is rewritten to the stable copy (user hooks untouched)', async () => {
+    await mkdir(join(tmpHome, '.claude'), { recursive: true })
+    const gone = join(ogHome(), 'projects', 'x', 'worktrees', 'janitor-deleted')
+    await writeFile(
+      claudeSettings(),
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            { matcher: '', hooks: [{ type: 'command', command: 'afplay Glass.aiff' }] },
+            {
+              matcher: '',
+              hooks: [
+                { type: 'command', command: `node ${gone}/scripts/openground-hook.js stop` },
+              ],
+            },
+          ],
+        },
+      }),
+      'utf8',
+    )
+
+    const res = await installHooks()
+    expect(res.errors).toEqual([])
+    expect(res.refreshed).toContain('Stop')
+
+    const settings = JSON.parse(await readFile(claudeSettings(), 'utf8'))
+    const cmds = settings.hooks.Stop.map((e: any) => e.hooks[0].command)
+    expect(cmds).toContain('afplay Glass.aiff')
+    const ours = cmds.filter((c: string) => c.includes('openground-hook.js'))
+    expect(ours).toHaveLength(1)
+    expect(ours[0]).toContain(join(ogHome(), 'hooks', 'openground-hook.js'))
+    expect(ours[0]).not.toContain(gone)
+  })
+
+  it('R8 — SELF-HEAL: duplicate entries of ours (poison + manual repair) collapse to ONE stable entry', async () => {
+    await mkdir(join(tmpHome, '.claude'), { recursive: true })
+    const gone = join(ogHome(), 'projects', 'x', 'worktrees', 'janitor-deleted')
+    await writeFile(
+      claudeSettings(),
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            {
+              matcher: '',
+              hooks: [
+                { type: 'command', command: `node ${gone}/scripts/openground-hook.js stop` },
+              ],
+            },
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: `node ${join(repoRoot, 'scripts', 'openground-hook.js')} stop`,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+      'utf8',
+    )
+
+    const res = await installHooks()
+    expect(res.errors).toEqual([])
+
+    const settings = JSON.parse(await readFile(claudeSettings(), 'utf8'))
+    const ours = settings.hooks.Stop.map((e: any) => e.hooks[0].command).filter((c: string) =>
+      c.includes('openground-hook.js'),
+    )
+    expect(ours).toHaveLength(1)
+    expect(ours[0]).toContain(join(ogHome(), 'hooks', 'openground-hook.js'))
   })
 })

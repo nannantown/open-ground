@@ -8,7 +8,8 @@ import {
   setAllowedModelTiersCache,
 } from './swarmAllowedModels'
 import { setLockdownCache } from './lockdown'
-import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels } from '../types'
+import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels, SwarmPaneId } from '../types'
+import { SWARM_PANE_IDS } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
   projects: [],
@@ -165,8 +166,30 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'experiments',
   'executionMode',
   'swarmAllowedModels',
+  'swarmPaneOrder',
   'lockdownMode',
 ]
+
+/** Narrow an untrusted `swarmPaneOrder` body to the known pane ids, in the
+ *  caller's order, DEDUPED. A forged POST /api/settings therefore can't persist
+ *  arbitrary strings into the settings file; the client's `effectiveTabOrder`
+ *  reconciles anything else on read anyway. Returns `undefined` when nothing
+ *  valid survives (all-garbage) so the previous order is kept rather than wiped
+ *  — the same "refuse a meaningless patch" stance as the swarmAllowedModels
+ *  all-off guard. */
+const normalizeSwarmPaneOrder = (v: unknown): SwarmPaneId[] | undefined => {
+  if (!Array.isArray(v)) return undefined
+  const known = new Set<string>(SWARM_PANE_IDS)
+  const seen = new Set<string>()
+  const out: SwarmPaneId[] = []
+  for (const id of v) {
+    if (typeof id === 'string' && known.has(id) && !seen.has(id)) {
+      seen.add(id)
+      out.push(id as SwarmPaneId)
+    }
+  }
+  return out.length > 0 ? out : undefined
+}
 
 // Persist a settings patch that ORIGINATES FROM AN UNTRUSTED HTTP CLIENT
 // (POST /api/settings). Unlike setSettings — a general internal merge that
@@ -195,6 +218,15 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
     const mask = normalizeAllowedModels(safe.swarmAllowedModels)
     if (anyTierAllowed(mask)) safe.swarmAllowedModels = mask
     else delete safe.swarmAllowedModels
+  }
+  // The swarm sub-tab order is stored NARROWED to the known pane ids (deduped,
+  // in the caller's order). An array that filters down to nothing (all-garbage)
+  // is refused — the previous order survives — mirroring the swarmAllowedModels
+  // all-off guard above; the caller then sees the key missing from the returned list.
+  if (Object.prototype.hasOwnProperty.call(safe, 'swarmPaneOrder')) {
+    const clean = normalizeSwarmPaneOrder(safe.swarmPaneOrder)
+    if (clean) safe.swarmPaneOrder = clean
+    else delete safe.swarmPaneOrder
   }
   // Store the lockdown switch as a REAL boolean: only a literal `true` turns it
   // on (a forged truthy string must not), everything else persists `false`.

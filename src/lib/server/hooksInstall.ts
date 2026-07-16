@@ -13,8 +13,8 @@ import { openGroundHome } from './paths'
 //     hook) are NEVER touched. We add ours as additional sibling entries.
 //   - Our entries are identified by the command path ending with
 //     `openground-hook.js` / `openground-guard.js`. If present, the entry is
-//     rewritten so the absolute path stays correct after the project folder is
-//     moved.
+//     rewritten to the expected command — which also SELF-HEALS a poisoned
+//     entry (one pointing at a deleted checkout/worktree) on the next install.
 //   - A backup of the prior settings file is written before any change.
 //
 // Phases we install:
@@ -27,11 +27,20 @@ import { openGroundHome } from './paths'
 //                    the trusted SWARM_MANAGER=1 commander/supply). Wired
 //                    per-tool (Bash/Write/Edit/MultiEdit/NotebookEdit).
 //
-// The guard is NOT run from the repo checkout: installHooks copies it to
-// ~/.openground/guard/ first and wires THAT path. The repo copy sits inside a
-// worktree cwd a sandboxed worker may write to; the installed copy is inside
-// the sandbox profile's write-deny (sandbox.ts) and the guard's OWN substrate
-// deny, so a guarded claude cannot rewrite its own veto.
+// NEITHER script is run from the repo checkout: installHooks copies BOTH to
+// stable dirs under the real home (~/.openground/guard/ + ~/.openground/hooks/)
+// and wires THOSE paths. Two independent reasons:
+//   - guard: the repo copy sits inside a worktree cwd a sandboxed worker may
+//     write to; the installed copy is inside the sandbox profile's write-deny
+//     (sandbox.ts) and the guard's OWN substrate deny, so a guarded claude
+//     cannot rewrite its own veto.
+//   - hook: the wired path must survive the SOURCE checkout disappearing. A
+//     repo-resident path baked into the global settings breaks every claude
+//     session with MODULE_NOT_FOUND the moment that checkout moves or a swarm
+//     worktree is janitor-deleted (2026-07-12 and again 2026-07-14). With the
+//     copy, whatever root the source resolution lands on, the GLOBAL settings
+//     only ever reference the stable installed path — a volatile root can at
+//     worst refresh the copy's CONTENT, never the wiring.
 //
 // The installer is intended to be called once at server start. Run cost is
 // trivial (a read, a maybe-write, a backup), so a re-install on every boot
@@ -68,10 +77,20 @@ const backupPath = () => join(homedir(), '.claude', 'settings.json.openground.ba
 // in prod (server/dist → root; scripts/ ships via electron-builder `files`).
 //
 // Belt-and-braces: even a module-anchored root is REFUSED when it sits under
-// the OPEN GROUND data home (~/.openground) — an engine running FROM a swarm
-// worktree must degrade to "hooks not (re)installed" (installHooks reports
-// via result.errors and writes NOTHING; verifyGuardWiring stays NOT-ok so
-// worker spawns refuse) rather than wire a global path the janitor deletes.
+// the OPEN GROUND data home — an engine running FROM a swarm worktree must
+// degrade to "hooks not (re)installed" (installHooks reports via
+// result.errors and writes NOTHING; verifyGuardWiring stays NOT-ok so worker
+// spawns refuse) rather than wire a global path the janitor deletes.
+//
+// The refusal checks BOTH homes: openGroundHome() (honours the
+// OPENGROUND_HOME redirect) AND the literal ~/.openground under the real
+// homedir(). They differ exactly when a process redirects OPENGROUND_HOME —
+// e.g. a worker verifying its branch with `OPENGROUND_HOME=$(mktemp -d) node
+// server/dist/index.cjs` from its worktree (observed 2026-07-14). That
+// redirect moved the refusal prefix to /tmp while settingsPath() (homedir-
+// based) kept pointing at the REAL ~/.claude/settings.json, so the worktree
+// root sailed past the check and got wired globally. The guard prefix must
+// live in the same homedir()-anchored world as the file it protects.
 
 // This module's dir under both module systems it runs in: CJS (tsx dev on
 // this type-less package, and the esbuild CJS bundle) has __dirname; ESM
@@ -124,14 +143,16 @@ export const resolveHookSourceRoot = (): HookSourceRoot => {
       // not just the walk start: a symlinked path (e.g. macOS /var →
       // /private/var) must not slip past the volatile-home prefix check.
       const root = canonical(dir)
-      const home = canonical(openGroundHome())
-      if (isUnder(root, home)) {
-        return {
-          root: null,
-          problem:
-            `refusing hook source root ${root}: it sits under the OPEN GROUND data home (${home}) — ` +
-            'swarm worktrees there are transient (the janitor deletes them), and a global hook wired ' +
-            'to such a path breaks every claude session once it is gone',
+      const volatileHomes = [canonical(openGroundHome()), canonical(join(homedir(), '.openground'))]
+      for (const home of volatileHomes) {
+        if (isUnder(root, home)) {
+          return {
+            root: null,
+            problem:
+              `refusing hook source root ${root}: it sits under the OPEN GROUND data home (${home}) — ` +
+              'swarm worktrees there are transient (the janitor deletes them), and a global hook wired ' +
+              'to such a path breaks every claude session once it is gone',
+          }
         }
       }
       return { root, problem: null }
@@ -147,8 +168,17 @@ export const resolveHookSourceRoot = (): HookSourceRoot => {
   }
 }
 
-const hookScriptPath = (root: string): string => join(root, 'scripts', 'openground-hook.js')
+// Install dirs are ANCHORED AT homedir() ON PURPOSE — not openGroundHome().
+// settings.json lives under homedir() (~/.claude), so the scripts its hook
+// commands point at must resolve from the SAME anchor: an OPENGROUND_HOME
+// redirect (tests, isolated verification servers) must never move where the
+// REAL global settings' hook targets live. Do not "unify" these onto
+// openGroundHome() — that asymmetry is what the 2026-07-14 incident exploited
+// in the opposite direction (refusal prefix moved, write target didn't).
+const hookSourcePath = (root: string): string => join(root, 'scripts', 'openground-hook.js')
 const guardSourcePath = (root: string): string => join(root, 'scripts', 'openground-guard.js')
+const hookInstallDir = (): string => join(homedir(), '.openground', 'hooks')
+const hookInstalledPath = (): string => join(hookInstallDir(), 'openground-hook.js')
 const guardInstallDir = (): string => join(homedir(), '.openground', 'guard')
 const guardInstalledPath = (): string => join(guardInstallDir(), 'openground-guard.js')
 
@@ -261,31 +291,56 @@ export const installHooks = async (): Promise<InstallResult> => {
   if (!settings || typeof settings !== 'object') settings = {}
   if (!settings.hooks || typeof settings.hooks !== 'object') settings.hooks = {}
 
-  const scriptAbs = hookScriptPath(source.root)
-  if (!existsSync(scriptAbs)) {
-    result.errors.push(`hook script not found at ${scriptAbs}`)
+  const hookSrc = hookSourcePath(source.root)
+  if (!existsSync(hookSrc)) {
+    result.errors.push(`hook script not found at ${hookSrc}`)
+    return result
+  }
+
+  // Copy the hook OUT of the checkout before wiring anything — the wired
+  // command must point at the stable ~/.openground/hooks/ copy, never at the
+  // resolved source root (see the header: a checkout/worktree path baked into
+  // the GLOBAL settings dies with its checkout). Wire only if the copy landed:
+  // fail-closed like the guard, so settings.json never references a path that
+  // is not known to exist. On copy failure existing entries are left alone —
+  // a stale-but-present target beats a freshly wired missing one.
+  let dirty = false
+  try {
+    await mkdir(hookInstallDir(), { recursive: true })
+    await copyFile(hookSrc, hookInstalledPath())
+  } catch (e: any) {
+    result.errors.push(`hook copy failed: ${e?.message ?? e}`)
     return result
   }
 
   // Decide changes per phase WITHOUT touching the file yet, so we can write
-  // backup + new settings atomically.
-  let dirty = false
+  // backup + new settings atomically. This is also the SELF-HEAL path: any
+  // existing entry of ours whose command differs from the expected one — e.g.
+  // a poisoned entry still pointing into a deleted worktree (2026-07-14), or
+  // a user's manual repair pointing at a repo checkout — is rewritten to the
+  // stable installed path, and accidental duplicates are collapsed to one.
   for (const phase of PHASES) {
     const arr: any[] = Array.isArray(settings.hooks[phase]) ? settings.hooks[phase] : []
-    const ourIdx = arr.findIndex(isOurEntry)
-    const desired = buildEntry(phase, scriptAbs)
-    if (ourIdx < 0) {
+    const ourIdxs = arr.reduce<number[]>((acc, e, i) => (isOurEntry(e) ? [...acc, i] : acc), [])
+    const desired = buildEntry(phase, hookInstalledPath())
+    if (ourIdxs.length === 0) {
       arr.push(desired)
       settings.hooks[phase] = arr
       result.installed.push(phase)
       dirty = true
     } else {
-      // Check whether the resolved path still matches; if not, rewrite.
-      const existing = arr[ourIdx]
+      let touched = false
       const desiredCommand = desired.hooks[0].command
-      const actualCommand = existing?.hooks?.[0]?.command
+      const actualCommand = arr[ourIdxs[0]]?.hooks?.[0]?.command
       if (actualCommand !== desiredCommand) {
-        arr[ourIdx] = desired
+        arr[ourIdxs[0]] = desired
+        touched = true
+      }
+      for (const i of ourIdxs.slice(1).reverse()) {
+        arr.splice(i, 1)
+        touched = true
+      }
+      if (touched) {
         settings.hooks[phase] = arr
         result.refreshed.push(phase)
         dirty = true
@@ -503,7 +558,7 @@ export const uninstallHooks = async (): Promise<InstallResult> => {
       dirty = true
     }
   }
-  // PreToolUse guard entries + the installed guard copy.
+  // PreToolUse guard entries + the installed guard/hook copies.
   {
     const arr: any[] = settings.hooks.PreToolUse
     if (Array.isArray(arr)) {
@@ -518,6 +573,11 @@ export const uninstallHooks = async (): Promise<InstallResult> => {
       await rm(guardInstalledPath(), { force: true })
     } catch (e: any) {
       result.errors.push(`guard remove failed: ${e?.message ?? e}`)
+    }
+    try {
+      await rm(hookInstalledPath(), { force: true })
+    } catch (e: any) {
+      result.errors.push(`hook remove failed: ${e?.message ?? e}`)
     }
   }
   if (!dirty) return result

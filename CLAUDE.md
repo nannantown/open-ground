@@ -19,7 +19,7 @@ npm run dev:server # Hono API only (:47776, tsx watch)
 npm run build      # vite build → dist-web/  +  esbuild → server/dist/index.cjs
 npm run start      # prod: Hono on :47776 serving dist-web + /api (one origin)
 npm run lint       # eslint . --ext .ts,.tsx
-npm test           # vitest (~450 tests)
+npm test           # vitest (~4100 tests)
 npm run test:e2e   # playwright smoke (builds + boots Hono prod, then hits :47776)
 ```
 
@@ -143,8 +143,11 @@ and spawns `claude` as a child process, so it must run locally.
   (free workspace).
 - **Layer 2 — per-project tabs**: **Terminal / Canvas / Board** (see
   `src/components/canvas/moduleRegistry.tsx` — the single source of truth
-  for the tab set). Terminal is tiled `claude` PTY panes; Board is a
-  kanban. Opening a card NO LONGER auto-launches anything (the drawer
+  for the tab set), plus an **owner-only, hidden-by-default `Swarm` tab**
+  (gated by `experiment: 'swarm'` — see the Swarm section) and any
+  **user-installed custom tabs** (`server/routes/customModules.ts`,
+  `~/.openground/custom-modules/`). Terminal is tiled `claude` PTY panes;
+  Board is a kanban. Opening a card NO LONGER auto-launches anything (the drawer
   auto-launch died 2026-06-12, `BoardModule.tsx`); a task's `claude`
   session starts ONLY when the user clicks the card drawer's explicit
   **実行 (Run)** button, which launches `claude` with the composed task
@@ -176,9 +179,11 @@ port (47776). `@/*` maps to `src/*`.
   **thin adapters** over the real logic in `src/lib/server/*`. Bundled by
   esbuild (`scripts/build-server.js`) to `server/dist/index.cjs`, which
   Electron forks in prod.
-- **`server/routes/`**: health, project, canvas, misc, terminal, sse.
-  `server/middleware/projectPath.ts` adapts `validateProjectPath` to Hono.
-  `server/routes/_shared.ts` holds cross-route helpers (e.g. `validateName`).
+- **`server/routes/`**: health, project, canvas, canvasAi, misc, terminal,
+  sse, auth, collab, customModules, moduleSubmissions, feedback, swarm,
+  ticket, youCorpus. `server/middleware/projectPath.ts` adapts
+  `validateProjectPath` to Hono. `server/routes/_shared.ts` holds
+  cross-route helpers (e.g. `validateName`).
 
 ### Two stores, two scopes
 
@@ -200,18 +205,27 @@ port (47776). `@/*` maps to `src/*`.
   `doc.json`, `task-images/`, `task-attachments/`, `verify-logs/`,
   `worktrees/` — are legacy on old installs; old attachments are pruned by
   `retention.ts`, the rest is simply ignored.)
-- **Exception — git-shared mode** (user-consented, per project): "Share via
-  Git" moves Board + Canvas data INTO the repo under `.openground/` so
-  collaborators sync it through normal git. The marker
-  `.openground/openground.json` is the mode switch (detection automatic on
-  import of a shared clone; creation ONLY via `/api/project/share/enable`).
-  One card per file (`board/cards/<id>.json`), `notes.md`, canvases + shared
-  order in `canvas/`; personal state (`tabOrder`, canvas `activeId`) STAYS
-  central in both modes. The Sync button commits **pathspec-scoped to
-  `.openground/` only** (never the user's code), then
-  `pull --rebase --autostash`, then push — pure git, no GitHub API/tokens.
-  Seam: `src/lib/server/sharedData.ts`; engine: `gitShare.ts`; routes:
-  `server/routes/share.ts`. Full design: `docs/SHARED_DATA_PLAN.md`.
+- **Sharing — realtime collab (v2, Cloudflare Durable Object)**: the old
+  **"Share via Git" feature was removed** (`9aedd5d`); the in-repo
+  `.openground/` data mode and its `sharedData.ts` / `gitShare.ts` /
+  `server/routes/share.ts` seams **no longer exist**. Sharing is now a
+  **CRDT (Yjs) realtime session — never files written into the user's
+  repo**. The owner shares a project; members join by 7-day invite code or
+  email and get a live Board + Canvas. Transport is a **Cloudflare Durable
+  Object** WebSocket (`worker/src/OgCollabDoc.ts`, y-partyserver) gated by a
+  short-lived minted **ticket**; membership + invites live in **Supabase**
+  (`project_members`, RLS). Seams: `server/routes/collab.ts` (capability
+  gate + per-project resolution + ticket mint),
+  `src/lib/server/projectMembers.ts` (membership resolver + owner-managed
+  writes), `src/lib/server/collabMirror.ts` / `canvasCollabMirror.ts`
+  (server-side Board/Canvas writes mirrored INTO the collab doc so a shared
+  project and swarm edits coexist without rollback). Client CRDT lives in
+  `src/lib/collab/*` (`ydoc.ts`, `provider.ts` / `yProvider.ts`,
+  `boardDoc.ts`, `canvasDoc.ts`, `assetSync.ts`, `RealtimeContext.tsx`); UI
+  entries are `CollabSharedDialog.tsx` / `SharedProjectBody.tsx`. The whole
+  path is **feature-gated and OFF by default** — inert unless enabled. Full
+  design: `docs/COLLAB_CF_DO_PLAN.md` (+ `COLLAB_PLAN.md`,
+  `COLLAB_MEMBER_CLIENT_PLAN.md`).
 
 ### Project discovery (registry model)
 
@@ -245,8 +259,9 @@ Both drop the card's canvas position.
 **Security boundary:** every API route that takes a project path calls
 `validateProjectPath()` — the resolved-and-canonicalized path must equal or sit
 under **one of the registered projects**, OR under that project's central
-worktrees dir (`~/.openground/projects/<uuid>/worktrees/` — kept only because
-legacy worktrees may still exist on disk; nothing creates new ones). The
+worktrees dir (`~/.openground/projects/<uuid>/worktrees/` — where the **swarm
+engine** creates the isolated per-worker worktrees it owns; see the Swarm
+section). The
 registry is the allowlist (it only grows via the explicit Create / Import / relocate routes); the
 UUID is taken **only** from the registry (never parsed from the incoming path),
 both sides are canonicalized, and the bare central data root is rejected. The
@@ -267,13 +282,21 @@ execution is an **interactive PTY** the user types into:
 - `src/lib/server/claudeTerminal.ts` (`launchClaude`) — `POST
   /api/terminal/claude` spawns `claude --session-id <uuid>` inside a PTY.
   **Subscription-only:** OPEN GROUND only ever drives the user's `claude`
-  CLI — never the Anthropic API key. The Board drawer's auto-launch goes
-  through this with `taskWorktrees:true` (which only pre-authorizes the
-  central worktrees dir via `--add-dir`; NO prompt is sent — plain claude).
-  The task's title + content are injected later, UNSENT, via `POST
-  /api/terminal/:id/paste-task` (`src/lib/server/pastePrompt.ts` wraps the
-  `buildTaskPrompt` text in bracketed-paste markers, stripping any embedded
-  ESC so the span can't be closed early). The slot is keyed by taskId.
+  CLI — never the Anthropic API key. The Board card's **実行 (Run)** button
+  posts here with a `task` body + `taskWorktrees:true`: the server
+  **composes the task prompt** server-side (`composeTaskPrompt` — the card's
+  live drawer values → stored `card.run` → project prefs, i.e. title +
+  notes + attachments, honouring flow / model / effort) and passes it as
+  `initialPrompt` so claude launches with it **AUTO-SENT**. `taskWorktrees`
+  also pre-authorizes the central worktrees dir + the card's out-of-repo
+  attachments dir via `--add-dir` so file / attachment reads don't trip path
+  prompts.
+- Separate **UNSENT** path — "Insert task into input" (`POST
+  /api/terminal/:id/paste-task`) pastes a task's title + content (same
+  `composeTaskPrompt`) into a LIVE session, wrapped by
+  `src/lib/server/pastePrompt.ts`'s `bracketedPaste` in bracketed-paste
+  markers (stripping any embedded ESC so the span can't be closed early),
+  no trailing newline — the user reviews and presses Enter. Keyed by taskId.
 - Terminal pool state is stored on `globalThis.__openground_terminal` so it
   **survives `tsx watch` server reloads** in dev. Keep this pattern for any
   new in-memory server state.
