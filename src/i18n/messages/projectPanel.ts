@@ -139,16 +139,15 @@ export const projectPanel = {
     'projectPanel.swarm.supply.stopping': 'Stopping…',
     // Commander (司令官) dashboard — the third Swarm view: the worker-monitor +
     // integration-control surface. Drives the autonomous orchestration engine
-    // (start/stop · auto-integrate), lets each worker's live screen open inline,
+    // (start/stop · overseer), lets each worker's live screen open inline,
     // and shows the engine's live log. (Board pipeline tallies live on the Board.)
+    // (The auto-wake-the-commander toggle was retired 2026-07-16 — with the engine
+    // ON, a ready worker always wakes the commander desk; the engine never merges.)
     'projectPanel.swarm.manager.tab': 'Manager',
     'projectPanel.swarm.manager.badge': 'Commander',
-    'projectPanel.swarm.manager.autoMerge': 'Auto-wake the commander',
-    'projectPanel.swarm.manager.autoMergeHint':
-      'When a worker is ready (a review-column card), the engine WAKES your commander desk so a human-in-the-loop review decides the merge. It batches every waiting branch into a single wake, and never spawns a second desk when one is already up. The engine itself NEVER integrates — it does not verify, run a review panel, or push to your trunk; the commander owns the merge (its own heavyweight review + a manual fast-forward, and the fail-closed / high-risk-hold safety nets live there too). This replaced the old “auto-integrate” after that path once fast-forwarded a flawed branch onto main OVER the commander’s concurrent send-back — with the engine out of the merge business, the two can no longer race on the trunk. Recommended ON: waking the commander moves nothing, so review cards get attended even while you’re away. Off by default (the restart-safe autonomy model); a full app restart returns it to off.',
     'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
     'projectPanel.swarm.manager.overseerHint':
-      'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. UNLIKE auto-integrate, turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
+      'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. Turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
     'projectPanel.swarm.manager.overseerSandboxWarning':
       '⚠ Kernel-level containment is unavailable on this host (macOS sandbox-exec required) — the overseer’s brain runs with the permission-layer safeguards only. Its read-only design and budget still hold.',
     'projectPanel.swarm.manager.on': 'On',
@@ -708,17 +707,16 @@ export const projectPanel = {
     'projectPanel.swarm.supply.stop': '停止',
     'projectPanel.swarm.supply.stopping': '停止中…',
     // 司令官（commander）ダッシュボード — Swarm の3つ目のビュー。worker 監視＋統合
-    // コントロールの面。自律オーケストレーションエンジン（起動/停止・自動統合）を
+    // コントロールの面。自律オーケストレーションエンジン（起動/停止・監督）を
     // 操作し、各 worker のライブ画面をその場で開け、エンジンのライブログを見せる。
     // （Board のパイプライン件数は Board タブで見る。）
+    // （「司令官を自動で起こす」トグルは 2026-07-16 に廃止 — エンジン ON なら worker の
+    // ready で常に司令官を起こす。エンジン自身は統合しない。）
     'projectPanel.swarm.manager.tab': '司令官',
     'projectPanel.swarm.manager.badge': '司令官',
-    'projectPanel.swarm.manager.autoMerge': '司令官を自動で起こす',
-    'projectPanel.swarm.manager.autoMergeHint':
-      'worker が ready（review 列のカード）になったら、エンジンが司令官の卓を自動で起こし、人が判断する統合レビューに委ねます。待っているブランチはまとめて1回で起こし、司令官がすでに起きているときは二重に立ち上げません。エンジン自身は一切統合しません — 検証もレビューパネルも本流への push もせず、統合は司令官の仕事です（司令官自身の重量級レビュー＋手動の fast-forward。fail-closed／高リスク hold の安全網も司令官側にあります）。これは旧「自動統合」の置き換えです — かつて自動統合が、司令官の差し戻しと並行して穴あきブランチを main に FF して入れてしまった事故を受け、エンジンを統合から外すことで両者が本流で競合しない構造にしました。推奨はオン：司令官を起こすだけで本流は一切動かないので、離席中でも review のカードに人の目が入ります。既定はオフ（再起動で必ずオフに戻る安全モデル）。アプリを完全に再起動するとオフに戻ります。',
     'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
     'projectPanel.swarm.manager.overseerHint':
-      'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。自動統合と違い、autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
+      'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
     'projectPanel.swarm.manager.overseerSandboxWarning':
       '⚠ この環境ではカーネルレベルの封じ込め（macOS の sandbox-exec）が利用できません — 監督の大脳は permission 層の防壁のみで動きます。読み取り専用設計と予算上限は有効です。',
     'projectPanel.swarm.manager.on': 'オン',

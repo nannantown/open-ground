@@ -238,7 +238,6 @@ const makeSpawn = (
 const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   path: proj,
   running: true,
-  autoMerge: true,
   passInFlight: false,
   generation: 0,
   timer: null,

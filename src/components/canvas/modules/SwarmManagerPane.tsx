@@ -11,8 +11,8 @@
 //      session — this pane only renders it.
 //
 //   ② a SIDEBAR (right) — the autonomous orchestration ENGINE's CONTROLS ONLY:
-//        • Engine — the run/stop/offline status badge + the Auto-integrate (③)
-//          switch. The autonomy ON/OFF (Card①) moved OUT to the module-level
+//        • Engine — the run/stop/offline status badge + the Overseer switch.
+//          The autonomy ON/OFF (Card①) moved OUT to the module-level
 //          master power switch (SwarmPowerBar) so the engine has a SINGLE
 //          start/stop control; this dashboard no longer toggles it (it only
 //          shows the resulting `running` status). The worker monitor + engine
@@ -22,21 +22,18 @@
 //          the worker tab.)
 //
 // SPLIT OF CONCERNS: the autonomous engine lives server-side behind
-// /api/swarm/orchestrator{,/start,/stop,/automerge}; its FRONT-END half (the
+// /api/swarm/orchestrator{,/start,/stop}; its FRONT-END half (the
 // poll, the switches, graceful 404 degradation) lives in the shared
 // `useSwarmEngine` hook, which SwarmModule calls ONCE and threads down here as
 // props. This pane is therefore PURELY PRESENTATIONAL for the engine — it never
 // fetches. Start/stop (autonomy) is driven from SwarmModule's master power
-// switch; only Auto-wake-the-commander is toggled here:
+// switch; only the Overseer is toggled here.
 //
-//   • Auto-wake the commander (③) — POST /api/swarm/orchestrator/automerge
-//     (endpoint name kept for API stability). MEANING CHANGED 2026-07-15: the
-//     engine NO LONGER integrates. When armed and a worker is ready (review card),
-//     it WAKES the commander desk (spawnSwarmManager, batched) so a human-in-the-
-//     loop review decides the merge; it never verifies / reviews / pushes to the
-//     trunk itself. Read off the state's `autoMerge`, default OFF. The switch dims
-//     when the route is unreachable (`available === false`) and goes live once it
-//     answers. See docs/commander/03-integration-review.md.
+// (The Auto-wake-the-commander switch — POST /api/swarm/orchestrator/automerge —
+// was RETIRED 2026-07-16: waking the commander when a worker is ready is now
+// ALWAYS ON while the engine runs; the engine still never merges. Merge consent
+// stays per-card ([hold] prefix + the commander's high-risk force-hold). See
+// docs/commander/03-integration-review.md.)
 //
 // The commander CONVERSATION (/manage) is a SEPARATE PTY session, independent of
 // the engine route — it works whether or not the autonomous engine is available;
@@ -79,18 +76,14 @@ interface Props {
    *  overlay's Restart button (POST /api/swarm/manager again, via SwarmModule). */
   onRestartSession: () => void
   // ── Engine controls (from useSwarmEngine, owned by SwarmModule) ─────────────
-  /** Latest engine state — only `running` / `autoMerge` are read here now. */
+  /** Latest engine state — only `running` / `overseer` are read here now. */
   engine: SwarmEngineState
   /** Whether the orchestrator route answered (false dims the switches). */
   available: boolean
-  /** A start/stop or auto-merge round-trip is in flight (disables both switches). */
+  /** A start/stop or overseer round-trip is in flight (disables the switches). */
   busy: boolean
   /** Last engine-action failure, already localized (null when none). */
   error: string | null
-  /** Auto-integrate switch (Card③). The autonomy ON/OFF (Card①) moved OUT of this
-   *  dashboard to the module-level master power switch (SwarmPowerBar), so the
-   *  engine has a SINGLE start/stop control; this pane keeps only Auto-integrate. */
-  onToggleAutoMerge: (next: boolean) => void
   /** Overseer switch (EPIC C / C-core) — the THIRD toggle. ASYMMETRIC: an explicit
    *  autonomy OFF clears it, so the owner re-arms it every session (surfaced in its
    *  hint). Default OFF. */
@@ -177,7 +170,6 @@ export const SwarmManagerPane = ({
   available,
   busy,
   error,
-  onToggleAutoMerge,
   onToggleOverseer,
   sandboxWarning,
 }: Props) => {
@@ -351,19 +343,11 @@ export const SwarmManagerPane = ({
 
           {/* Autonomy (Card① start/stop) moved to the module-level master power
               switch (SwarmPowerBar) — the engine's SINGLE on/off — so this
-              dashboard keeps only Auto-integrate (Card③), the separate
-              default-off landing policy. The engine status badge above still
-              reads `engine.running` (driven by the master switch). */}
+              dashboard keeps only the Overseer switch. (The auto-wake toggle was
+              retired 2026-07-16: waking the commander is always on while the
+              engine runs.) The engine status badge above still reads
+              `engine.running` (driven by the master switch). */}
           <div className="flex flex-col gap-2.5">
-            <ControlRow
-              label={t('projectPanel.swarm.manager.autoMerge')}
-              hint={t('projectPanel.swarm.manager.autoMergeHint')}
-              value={engine.autoMerge}
-              disabled={busy || !available}
-              ariaLabel={t('projectPanel.swarm.manager.autoMerge')}
-              onToggle={(v) => onToggleAutoMerge(v)}
-              t={t}
-            />
             {/* Overseer (EPIC C / C-core) — the THIRD toggle. Its hint states the D1
                 asymmetry: an explicit autonomy OFF disarms it, so it is re-armed each
                 session (no auto-resume). Disabled while the engine is stopped — the

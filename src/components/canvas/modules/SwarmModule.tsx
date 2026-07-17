@@ -266,7 +266,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     error: engineError,
     toggleAutonomy,
     dismissAutonomyReminder,
-    toggleAutoMerge,
     toggleOverseer,
     sandboxWarning: engineSandboxWarning,
   } = useSwarmEngine(project.path)
@@ -1215,7 +1214,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               available={engineAvailable}
               busy={engineBusy}
               error={engineError}
-              onToggleAutoMerge={toggleAutoMerge}
               onToggleOverseer={toggleOverseer}
               sandboxWarning={engineSandboxWarning}
             />

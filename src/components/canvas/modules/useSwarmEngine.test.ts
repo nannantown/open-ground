@@ -88,7 +88,6 @@ describe('sanitizeEngineState — engine workers survive the poll', () => {
   it('parses engine workers from a raw orchestrator response, dropping malformed rows', () => {
     const raw = {
       running: true,
-      autoMerge: false,
       maxWorkers: 4,
       workers: [
         { terminalId: 'eng-1', branch: 'swarm/eng-1', taskId: 't1', taskTitle: 'T1', startedAt: 'x', stage: 'running' },

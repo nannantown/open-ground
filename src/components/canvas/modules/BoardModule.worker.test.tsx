@@ -98,7 +98,6 @@ vi.mock('@/lib/api-client', () => ({
               json: () =>
                 Promise.resolve({
                   running: true,
-                  autoMerge: false,
                   maxWorkers: 6,
                   workers: h.workers,
                   reviews: [],

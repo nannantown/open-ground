@@ -65,6 +65,11 @@ grep -n "limitScreen" src/lib/server/swarmOrchestrator.ts | head -3
 
 ## 2. 敵対レビューは diff サイズに依らず決着し、棄権には必ず理由が残る
 
+> **⚠ 2026-07-15 マネージャ専任化で前提が変わった**: engine の敵対レビュー(lens パネル)
+> そのものが撤去され、この節の「実運用での検証待ち」は engine 側では**永遠に来ない**。
+> budget 根治(`3129a58`)の設計と実測境界は、司令官の手動統合(03 章 §5)が大 diff を
+> 扱う際の照合点、およびパネル復活時の設計基準として保持する。
+
 ### 理想(観測可能条件)
 
 - 任意サイズの to-be-landed diff で、パネルが `rework` か `integrate` に**決着**する — 「diff が大きい」ことだけを原因とする defer→needs-human 凍結が起きない(分割レビュー・タイムアウト/バッファのスケーリング・棄権の除外集計など、手段はカード側の設計に委ねる)。
@@ -85,7 +90,7 @@ grep -n "limitScreen" src/lib/server/swarmOrchestrator.ts | head -3
 
 当時の実測(2026-07-09、同一ビルド 7 件、03 章 §3 に保持): 22KB 以下は clean 4 で統合成功、34KB 以上は毎回ちょうど 2 lens 棄権 → defer×3 → 凍結。**must-fix が無くても構造的に統合できなかった**。
 
-**検証待ちの間の司令塔運用**: 大 diff カードを arm 下で流す最初の数枚は engine log を見届ける(凍結したら `abstainSummary` で理由を読む — 03 章 §4-3)。凍結が出ない実績が積めるまで、03 章 §5 の手動統合を fallback として維持。
+**司令塔運用(2026-07-15 更新)**: engine はもうパネルを回さないので「arm 下で見届ける」運用は消滅。大 diff の review カードは 03 章 §5 の手動統合(重量級レビュー)が唯一の経路 — 上の実測境界(22〜34KB)は「このサイズ帯から反射的に読めなくなる」負荷感覚の照合点として使う。
 
 ### 対応カード
 
@@ -94,7 +99,7 @@ grep -n "limitScreen" src/lib/server/swarmOrchestrator.ts | head -3
 ### 到達判定コマンド
 
 ```bash
-# 34KB 超 diff のカードが autoMerge で決着するか(凍結行が出ないこと)— ✓ にする実測はこれ
+# (歴史)34KB 超 diff の凍結行が出ないこと — engine パネル撤去(2026-07-15)で engine 側の実測は永遠に来ない
 git -C <PATH> diff origin/main...<branch> | wc -c
 curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq -r '.log[] | select(.message | test("多数決|needs-human|敵対レビュー")) | "\(.at) \(.message)"'
 # 棄権理由の記録(実装後は defer/凍結行に lens=abstain(cause) と棄権内訳が出る):
@@ -202,9 +207,11 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
    main を FF する経路が1つも無い。** レンズ結果だけで main が動く経路は金輪際ゼロ(回帰テスト
    `swarmOrchestrator.test.ts`「manager-only integration wake / 受け入れの肝」+ integration
    「WAKES the commander and NEVER FF-pushes」で固定)。
-2. **worker が ready(review 昇格)になったら engine が司令官を起こす** — autoMerge(=「自動起こし」)
-   armed のとき、review の swarm カードがあり司令官の卓が不在なら `spawnSwarmManager` で起こす。
-   複数 ready はまとめて1回(バッチ)。
+2. **worker が ready(review 昇格)になったら engine が司令官を起こす** — **エンジン ON で常時**
+   (2026-07-16 に独立の autoMerge トグルを廃止 — 「エンジン ON・起こし OFF」の中途半端な既定が
+   ready 品の滞留を生んだため)。review の swarm カードがあり司令官の卓が不在/沈黙なら
+   `spawnSwarmManager` で起こす。複数 ready はまとめて1回(バッチ)。統合の同意粒度は
+   カード単位([hold] + 高リスク force-hold)が担う。
 3. **manager 蘇生反射(card B, 2026-07-16)** —— engine は manager の生死を監視し、止まったら蘇生する:
    (a) **検知**は 2 信号 AND(live PTY でプロセス死・**manager 心拍**の 10 分無音でハング)、
    (b) 死/ハングなら `spawnSwarmManager` で**蘇生**(＝二重起動もこの1判定で防ぐ)、
@@ -217,10 +224,10 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
    force-hold は撤去/dormant で**二重管理しない**。
 5. **緊急バックドア温存** — 司令官の手動統合(§5 の FF push・「マージ」フロー)はそのまま。engine が
    統合しなくなっても司令官は統合できる(主経路)。
-6. 観測(到達の定義): autoMerge(自動起こし)armed のまま運用し、(a) engine 由来の main への
-   FF push がゼロ(そもそも経路が無い)、(b) ready カードに対し司令官が起こされ統合判断が入る、
-   (c) 司令官不在で ready が放置され続けない、(d) 固まった/落ちた司令官が蘇生され、蘇生不能なら
-   fatal が上がる。
+6. 観測(到達の定義): エンジン ON のまま運用し(起こし反射は常時 — arm 操作は無い)、
+   (a) engine 由来の main への FF push がゼロ(そもそも経路が無い)、(b) ready カードに対し
+   司令官が起こされ統合判断が入る、(c) 司令官不在で ready が放置され続けない、(d) 固まった/
+   落ちた司令官が蘇生され、蘇生不能なら fatal が上がる。
 
 **人間承認が必須で残る操作**(理想状態でも自動化しない境界 — これは到達目標ではなく**恒久の境界線**):
 
@@ -253,14 +260,15 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
 
 **2026-07-15 マネージャ専任化**(統合を司令官専任に)で B相を「起こすだけ」に置換 main 入り。**2026-07-16
 manager 蘇生 card B**(manager 心拍 + engine が死/ハングを検知し蘇生・quota 繰り下げ・無限ループ上限・fatal
-通知)で条件 3 を実装 main 入り。両者で条件 1-6 の**機構は揃った** —— 残るは実運用検証(下の到達判定
-コマンド)。
+通知)で条件 3 を実装 main 入り。**同日の autoMerge トグル廃止**で条件 2 の「常時」化(arm 不要 —
+`engine.autoMerge` / POST automerge / UI トグル / i18n 撤去、GAP-5 の同意粒度判断は [hold]+force-hold で
+確定)。三者で条件 1-6 の**機構は揃った** —— 残るは実運用検証(下の到達判定コマンド)。
 
 ### 到達判定コマンド
 
 ```bash
-# autoMerge(=自動起こし)armed か + engine が「司令官を起こした/蘇生した」ログが出ているか
-curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{autoMerge, reviews, log: [.log[] | select(.message | test("司令官を起こしました|応答しないため蘇生|連続で蘇生に失敗|integrated"))] | .[-10:]}'
+# engine が「司令官を起こした/蘇生した」ログが出ているか(起こし反射はエンジン ON で常時 — autoMerge フィールドは 2026-07-16 撤去済み・出ない)
+curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{running, reviews, log: [.log[] | select(.message | test("司令官を起こしました|応答しないため蘇生|連続で蘇生に失敗|integrated"))] | .[-10:]}'
 # ↑ 「司令官を起こしました」「応答しないため蘇生しました(N回目)」は出る。「integrated (ff)」は
 #   engine が統合しなくなったので二度と出ない。3 連続失敗なら通知ストアに 'manager-unrevivable' fatal。
 # 司令官の心拍(蘇生反射が見ているファイル)を直読 — updatedAt が 10 分以上前ならハングと判定される。
@@ -311,7 +319,7 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
 - [ ] §2: 34KB 超 diff が must-fix ゼロなら統合到達・棄権に理由が残る — **実装 main 入り(`3129a58`)・実測待ち**
 - [ ] §3: overseer re-arm で過去 fatal からの新規 escalation ゼロ — **実装 main 入り(`d8431c3`+`aa9cb8d`)・実測待ち**
 - [ ] §4: エンジン worker の API `heartbeatAt` がディスク `updatedAt` と一致 — **実装 main 入り(`1f19770`)・実測待ち**
-- [ ] §5: autoMerge armed 7 日間で凍結ゼロ・二重統合ゼロ(§1・§2 の実測後に計測開始)
+- [ ] §5: エンジン ON(起こし反射は常時 — 2026-07-16 トグル廃止)7 日間で、ready 放置ゼロ・engine 由来の main FF ゼロ・蘇生反射が実事象で機能
 - [x] §6: swarm コア変更カードに文書更新が組み込まれ、実績 1 件以上 — **仕組み**(検知2点+テンプレ組込み)実装済み+**テンプレ経由の運用実績 1 件**(2026-07-11、カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂。手動追随の前例は 2026-07-10 改訂)
 
-**未到達の間の司令塔の構え**(各章の運用節の要約): 最初の実枯渇イベントで検知 2 分を実測し、それまで journal の沈黙を無実と読まない(§1)・大 diff の最初の数枚は engine log を見届け、凍結したら abstainSummary を読む(§2)・S3/S10 は実発生として裏取り、増殖パターンを見たら回帰を疑う(§3)・鮮度はディスク(§4)・arm 実測は §1・§2 の初回観測とセットで(§5)・セッション開始時に文書鮮度チェック(§6)。
+**未到達の間の司令塔の構え**(各章の運用節の要約): 最初の実枯渇イベントで検知 2 分を実測し、それまで journal の沈黙を無実と読まない(§1)・大 diff の review カードは手動統合が唯一の経路 — 実測境界を負荷感覚の照合点に(§2)・S3/S10 は実発生として裏取り、増殖パターンを見たら回帰を疑う(§3)・鮮度はディスク(§4)・エンジン ON 運用で起こし/蘇生の実事象を見届ける(§5)・セッション開始時に文書鮮度チェック(§6)。

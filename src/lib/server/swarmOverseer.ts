@@ -22,7 +22,7 @@
 // WHY IT IS SAFE (the whole point of its shape — it can only READ, RAISE, or ASK):
 //   1. OFF BY DEFAULT + in-memory (K2) — engine.overseer.enabled starts false, only
 //      the owner-gated setOverseer flips it, a restart re-arms OFF. It is the THIRD
-//      toggle (D1), asymmetric to autoMerge/selfSupply: an explicit autonomy OFF
+//      toggle (D1), asymmetric to selfSupply: an explicit autonomy OFF
 //      (stopOrchestrator) CLEARS it, and an auto-drain re-ignition NEVER sets it
 //      (enabled only ever becomes true through the owner POST). So the most-dangerous
 //      stage never rides along on a machine-driven restart.

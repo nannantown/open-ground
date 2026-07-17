@@ -239,9 +239,9 @@ export const MOVE_STUCK_MAX_RETRIES = 5
  *  これを超えたら 'blocked' へ退避し、review→doing→review の無限バウンスを断つ。
  *  手動運用の `swarm-board.sh rework <id> [max]` ループガードの in-app(自律エンジン)
  *  版で、同じ "差し戻しすぎたら人間に上げる" 契約。既定は控えめに 2(worker に最大 2
- *  回直すチャンス、3 度目の must-fix で blocked + 'rework-exhausted' anomaly)。差し戻し
- *  自体は autoMerge が armed のときだけ起きる(統合パスの問題分岐に乗るため)— OFF 時は
- *  従来どおり read-only classify のみで、カードは review に留まる。 */
+ *  回直すチャンス、3 度目の must-fix で blocked + 'rework-exhausted' anomaly)。
+ *  2026-07-15 のマネージャ専任化以降、エンジン自身は差し戻さない(engine.reworks への
+ *  加算経路は撤去済み)— この上限は 'rework-exhausted' anomaly 表示の判定にのみ残る。 */
 export const MAX_REWORKS = 2
 
 /** 統合 conflict → worker rebase 委譲 の往復上限(card 012a2848)。統合時に rebase 競合した
@@ -250,8 +250,8 @@ export const MAX_REWORKS = 2
  *  (verify/レビュー差し戻し)とは別カウンタ — conflict は worker のコード品質ではなく「trunk が
  *  動いた」結果なので独立予算で数え、混ぜて早すぎる park を招かない。これを超えたら 'blocked'
  *  へ退避(conflict stamp を残す)、worker が解けない競合を無限に投げ返すループを断つ。conflict は
- *  trunk の動き次第で複数回起こりうるので既定は MAX_REWORKS より気持ち多めの 3。委譲自体は
- *  autoMerge が armed のとき(統合パス)だけ起きる — OFF 時は read-only classify のみで不変。 */
+ *  trunk の動き次第で複数回起こりうるので既定は MAX_REWORKS より気持ち多めの 3。
+ *  2026-07-15 のマネージャ専任化で委譲機構ごと撤去済み — 定数はカウンタの遺構として残る。 */
 export const MAX_CONFLICT_REWORKS = 3
 
 /** How many consecutive NO-majority adversarial reviews (defer) on the SAME tip are
@@ -1300,23 +1300,6 @@ export interface ProjectEngine {
    *  pause survives a restart, and which the state API surfaces so "stopped by hand"
    *  is machine-readable from outside (the 0707 twin-dispatch root cause). */
   manualStop?: boolean
-  /** AUTO-WAKE-THE-COMMANDER armed (Card③) — a SEPARATE switch from `running`,
-   *  default OFF. Only ever acts while `running` (turning the engine off = global
-   *  stop).
-   *
-   *  MEANING CHANGED 2026-07-15 (manager-only integration): this flag NO LONGER
-   *  makes the engine merge. The engine never verifies / lens-reviews / FF-pushes /
-   *  lands a branch anymore — integration is the commander's job alone. When armed,
-   *  a ready worker (review-column card) instead WAKES the commander desk
-   *  (spawnSwarmManager) so a human-in-the-loop heavyweight review + manual merge
-   *  decides. This closes the 2026-07-15 incident (autoMerge FF-pushed a hole-y
-   *  branch onto main OVER the commander's concurrent 差し戻し): with the engine out
-   *  of the merge business, the two can never race on the trunk (structural, not a
-   *  rule). The field/endpoint name is KEPT (`autoMerge` / POST
-   *  /api/swarm/orchestrator/automerge) only for API + persistence stability across
-   *  the redesign — its OBSERVABLE meaning and every UI label are now "auto-wake the
-   *  commander". See docs/commander/03-integration-review.md. */
-  autoMerge: boolean
   /** True while a pass is mid-flight — the re-entrancy guard that GUARANTEES no two
    *  passes ever overlap (twin-dispatch defense). The setTimeout chain already
    *  serializes the SCHEDULED passes, but a stop→start within a slow pass's await
@@ -1412,7 +1395,7 @@ export interface ProjectEngine {
    *    - `fatalFired` — the 'manager-unrevivable' escalation is one-shot per episode
    *                     (cleared when the desk recovers / no work waits).
    *  Optional (absent ⇒ zero, lazy-init) for older-build / test-literal backfill. In-memory
-   *  only — a restart re-arms autoMerge OFF anyway, so the reflex starts disarmed. */
+   *  only — a restart relaunches the engine OFF anyway, so the reflex starts disarmed. */
   managerResume?: { attempts: number; lastWakeAt: number; fatalFired: boolean }
   /** How many times each card (taskId) has been RE-QUEUED after a lost worker —
    *  the {@link recoveryColumn} retry budget. Bumped on a 'todo' requeue, reset
@@ -1541,7 +1524,7 @@ export interface ProjectEngine {
   /** OVERSEER (EPIC C / C-core) state — the autonomous proxy-you watcher's runtime:
    *  the third arm-able stage (D1), armed flag + edge-dedup (seen) + dwell (watch) +
    *  brain budget + fire-and-forget mailbox. Default OFF, in-memory ONLY (a restart
-   *  re-arms OFF — K2). ASYMMETRIC to autoMerge/selfSupply: an explicit autonomy OFF
+   *  re-arms OFF — K2). ASYMMETRIC to selfSupply: an explicit autonomy OFF
    *  (stopOrchestrator) CLEARS `overseer.enabled`, and an auto-drain re-ignition never
    *  sets it (only the owner POST does — D1). Optional for an engine minted by an
    *  older build (backfilled on retrieval). See {@link OverseerRuntime}. */
@@ -1617,7 +1600,6 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       path: key,
       running: false,
       manualStop: false,
-      autoMerge: false,
       passInFlight: false,
       generation: 0,
       timer: null,
@@ -1657,7 +1639,6 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     // throw. Materialize any missing field once on retrieval. Harmless in prod
     // (forked fresh each boot); it only ever fires on a dev hot-reload.
     engine.manualStop ??= false
-    engine.autoMerge ??= false
     engine.passInFlight ??= false
     engine.generation ??= 0
     engine.reviews ??= []
@@ -1943,7 +1924,6 @@ const emptyState = (): SwarmOrchestratorState => ({
   running: false,
   manualStop: false,
   manualStopPersisted: false,
-  autoMerge: false,
   selfSupply: false,
   overseer: false,
   workers: [],
@@ -1987,7 +1967,6 @@ const stateOf = (
     // reads true across a restart (fresh engine ⇒ flag false, record still true).
     manualStop: engine.manualStop === true || manualStopPersisted,
     manualStopPersisted,
-    autoMerge: engine.autoMerge,
     selfSupply: engine.selfSupply.enabled,
     overseer: engine.overseer.enabled,
     workers: live,
@@ -5468,19 +5447,17 @@ export const runDispatchPass = async (
 // ── The integration pass (Card③ — review → done, the riskiest stage) ─────────
 
 /** ONE integration pass. Throttled to INTEGRATE_TICK_MS inside the loop. In
- *  TWO halves:
- *   A. ALWAYS (while running) — classify every review-column swarm card's
- *      readiness against the trunk, READ-ONLY (no git mutation), and publish it
- *      on engine.reviews. This is the "統合可" display the owner sees whether or
- *      not auto-integrate is armed.
- *   B. ONLY when autoMerge is armed — land the fast-forwardable / cleanly-
- *      rebasable ones on the trunk, move each review→done, and tear its worktree
- *      + branch down. A real rebase CONFLICT is aborted (never auto-resolved),
- *      the card is stamped + left in review, and the branch is remembered so it
- *      isn't re-rebased every pass until it becomes fast-forwardable or leaves
- *      review.
- *  Honors the global stop: it bails the moment engine.running flips false (and
- *  re-checks autoMerge) between cards. Never throws — guarded + logged.
+ *  TWO halves — BOTH unconditional while the engine is running (the auto-wake
+ *  toggle was RETIRED 2026-07-16; engine ON = the wake reflex is armed, see the
+ *  Part-B comment below):
+ *   A. Classify every review-column swarm card's readiness against the trunk,
+ *      READ-ONLY (no git mutation), and publish it on engine.reviews — the
+ *      "統合可" display the owner sees.
+ *   B. Keep the commander alive to integrate: when review cards are waiting and
+ *      the commander desk is absent/hung, WAKE it (spawnSwarmManager, batched) —
+ *      the engine itself never merges.
+ *  Honors the global stop: it bails the moment engine.running flips false
+ *  between the slow awaits. Never throws — guarded + logged.
  *
  *  CONCURRENCY (integrate-beside-the-tick): driven by {@link kickIntegratePass},
  *  fire-and-forget, so this pass OVERLAPS dispatch/monitor ticks instead of
@@ -5498,7 +5475,7 @@ export const runIntegratePass = async (
   if (!engine.running) return
   // Throttle: skip ticks until INTEGRATE_TICK_MS has passed (the loop still
   // ticks every TICK_MS for dispatch). lastIntegrateAt starts at 0 so the first
-  // pass after start (or after arming auto-integrate) runs immediately.
+  // pass after start runs immediately.
   if (now - engine.lastIntegrateAt < INTEGRATE_TICK_MS) return
   engine.lastIntegrateAt = now
 
@@ -5547,21 +5524,21 @@ export const runIntegratePass = async (
   }
   engine.reviews = readiness
 
-  // ── B. MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15) — armed = "keep the
+  // ── B. MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15) — "keep the
   //       commander alive to integrate" ──
   //
   //  The engine NO LONGER integrates. Everything that used to live here — the
   //  high-risk force-hold gate, the verify (tsc/lint/safety/test) gate, the
   //  adversarial LENS panel + its majority vote, the cross-process integration lock,
   //  the FF / rebase push that moved the trunk, the review→done move, the worktree
-  //  teardown, and the reworkOrPark / delegateConflict 差し戻し machinery — is GONE
-  //  from the armed path. Integration is the COMMANDER's job ALONE now: its own
-  //  heavyweight review + manual FF push (skills/og-manage §「マージ」). The safety
-  //  nets that used to live here — the fail-closed 0-vote ban and the high-risk
-  //  force-hold — now live only in that manual-merge flow (完了条件4; the engine-side
-  //  copies are retired, not double-managed — docs/commander/03-integration-review.md).
+  //  teardown, and the reworkOrPark / delegateConflict 差し戻し machinery — is GONE.
+  //  Integration is the COMMANDER's job ALONE now: its own heavyweight review +
+  //  manual FF push (skills/og-manage §「マージ」). The safety nets that used to live
+  //  here — the fail-closed 0-vote ban and the high-risk force-hold — now live only
+  //  in that manual-merge flow (完了条件4; the engine-side copies are retired, not
+  //  double-managed — docs/commander/03-integration-review.md).
   //
-  //  WHY (the 2026-07-15 incident): autoMerge FF-pushed a hole-y branch onto main
+  //  WHY (the 2026-07-15 incident): auto-integrate FF-pushed a hole-y branch onto main
   //  OVER the commander's concurrent review→doing 差し戻し — two integrators racing on
   //  one trunk. And its budget-bounded lens majority (4 votes clean) had missed an
   //  auth camelCase hole that the commander's heavyweight reviewer caught. Taking the
@@ -5577,11 +5554,17 @@ export const runIntegratePass = async (
   //  engine only WAKES — it never integrates on the commander's behalf (完了条件6, reflex
   //  ≠ judgment). A desk that keeps dying escalates instead of looping (完了条件5).
   //
-  //  This reflex runs ONLY on the armed path: with autoMerge OFF the human drives the
-  //  desk by hand, so an idle-waiting commander is NORMAL and must never be torn down.
-  //  Read-only Part A above already published the「統合可」readiness the owner sees
-  //  either way.
-  if (!engine.autoMerge) return
+  //  ALWAYS ARMED while the engine runs (2026-07-16): the separate auto-wake toggle
+  //  (the old `autoMerge` flag + POST /api/swarm/orchestrator/automerge) was RETIRED —
+  //  with it OFF, ready work sat unattended in review (observed in production), and
+  //  since waking moves nothing on the trunk there is no half-way autonomy worth
+  //  keeping. Engine ON = the wake reflex is on; engine OFF (or an app restart, which
+  //  always relaunches OFF) stops it. Merge CONSENT stays per-card: the [hold] title
+  //  prefix and the commander's high-risk force-hold (HIGH_RISK_PATHS) gate what
+  //  actually lands. A hand-driven desk stays safe either way: isManagerActive treats
+  //  a live, beat-fresh (or never-beat, fail-open) desk as present, so the reflex
+  //  never tears down or duplicates one — worst case it wakes a desk the owner would
+  //  have started themselves.
 
   const rs = (engine.managerResume ??= { attempts: 0, lastWakeAt: 0, fatalFired: false })
 
@@ -5598,7 +5581,7 @@ export const runIntegratePass = async (
   // isManagerActive folds in the heartbeat (card B): a live PTY silent past the stale
   // window reads as HUNG, not present. Slow await, but no trunk mutation follows.
   const active = await deps.isManagerActive(engine.path, now)
-  if (!engine.running || !engine.autoMerge) return // owner stop/disarm during the probe
+  if (!engine.running) return // owner stopped the engine during the probe
   if (active) {
     // Healthy desk on the job → reflex disarmed (a future silence starts fresh).
     rs.attempts = 0
@@ -6323,8 +6306,8 @@ export const stopOrchestrator = async (
   // until a manual ON clears it. A DEFAULT-off engine (never paused) still auto-drains.
   engine.manualStop = true
   // OVERSEER ASYMMETRY (D1): an explicit autonomy OFF also DISARMS the overseer — the
-  // most-dangerous stage never survives a stop (unlike autoMerge/selfSupply, which are
-  // temporarily inert while stopped but re-arm on the next start). Combined with
+  // most-dangerous stage never survives a stop (unlike selfSupply, which is
+  // temporarily inert while stopped but re-arms on the next start). Combined with
   // in-memory OFF-on-restart (K2), this is why an auto-drain re-ignition can NEVER wake
   // the overseer: `enabled` only becomes true through the owner POST, and both an
   // explicit OFF (here) and a restart have already dropped it false. Abort any brain in
@@ -6801,34 +6784,17 @@ export const stopAutoDrainLoop = (): void => {
   }
 }
 
-/** Arm / disarm auto-integration (Card③), idempotent. A SEPARATE switch from the
- *  drain (start/stop) — default OFF. It only ever takes effect while the engine
- *  is `running` (the drain ON), so flipping it ON while the engine is stopped
- *  records the intent but integrates nothing until the engine is started — and
- *  stopping the engine (the global stop) halts integration too. Arming it resets
- *  the integration throttle so the next tick acts promptly. */
-export const setAutoMerge = async (
-  projectPath: string,
-  enabled: boolean,
-  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
-): Promise<SwarmOrchestratorState> => {
-  const key = await canonicalize(projectPath)
-  const engine = getOrCreateEngine(key)
-  if (engine.autoMerge !== enabled) {
-    engine.autoMerge = enabled
-    logLine(engine, 'info', enabled ? 'auto-integrate ON' : 'auto-integrate OFF')
-    if (enabled) engine.lastIntegrateAt = 0 // act on the next tick, not 15s later
-  }
-  return stateOf(engine, deps.isAlive)
-}
+// (setAutoMerge — the separate auto-wake-the-commander toggle — was RETIRED
+// 2026-07-16: the wake reflex is always armed while the engine runs. See the
+// Part-B comment in runIntegratePass.)
 
 /** Arm / disarm SELF-SUPPLY (card b3fbbfba), idempotent. The owner-gated switch
  *  for the engine proposing its OWN improvement cards. A SEPARATE switch from the
- *  drain (start/stop) and from auto-integration — default OFF, in-memory only (a
- *  restart re-arms OFF, fail-safe). Like autoMerge it only takes effect while the
- *  engine is `running`; arming it zeroes the scan throttle so the next tick scans
- *  promptly. Proposed cards are STILL owner-approval-gated before any dispatch —
- *  arming this only lets the engine FILL todo, never auto-run what it proposed. */
+ *  drain (start/stop) — default OFF, in-memory only (a restart re-arms OFF,
+ *  fail-safe). It only takes effect while the engine is `running`; arming it
+ *  zeroes the scan throttle so the next tick scans promptly. Proposed cards are
+ *  STILL owner-approval-gated before any dispatch — arming this only lets the
+ *  engine FILL todo, never auto-run what it proposed. */
 export const setSelfSupply = async (
   projectPath: string,
   enabled: boolean,
@@ -6845,7 +6811,7 @@ export const setSelfSupply = async (
 }
 
 /** Arm / disarm the OVERSEER (EPIC C / C-core), idempotent — the owner-gated THIRD
- *  toggle (D1). SEPARATE from the drain (start/stop), autoMerge, and selfSupply;
+ *  toggle (D1). SEPARATE from the drain (start/stop) and selfSupply;
  *  default OFF, in-memory ONLY (a restart re-arms OFF — K2). It only ACTS while the
  *  engine is `running` (the brainstem is a stage of the running tick). Unlike the
  *  other switches, an explicit autonomy OFF (stopOrchestrator) CLEARS it — so it is

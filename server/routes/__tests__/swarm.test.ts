@@ -302,24 +302,6 @@ describe('owner gate — the in-app swarm is owner-only', () => {
     expect(res.status).toBe(400)
   })
 
-  it('POST /api/swarm/orchestrator/automerge → 403 when signed out', async () => {
-    await clearSession()
-    const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
-    expect(res.status).toBe(403)
-  })
-
-  it('POST /api/swarm/orchestrator/automerge → 403 for a tester', async () => {
-    await signInAs(TESTER)
-    const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
-    expect(res.status).toBe(403)
-  })
-
-  it('POST /api/swarm/orchestrator/automerge → owner passes the gate (reaches validation: 400)', async () => {
-    await signInAs(OWNER)
-    const res = await app.request('/api/swarm/orchestrator/automerge', json({}))
-    expect(res.status).toBe(400)
-  })
-
   it('POST /api/swarm/orchestrator/drain-tick → 403 when signed out', async () => {
     await clearSession()
     const res = await app.request('/api/swarm/orchestrator/drain-tick', json({}))
@@ -339,39 +321,17 @@ describe('owner gate — the in-app swarm is owner-only', () => {
   })
 })
 
-describe('POST /api/swarm/orchestrator/automerge (auto-integrate toggle — owner)', () => {
-  // setAutoMerge only flips an in-memory flag + returns state — no claude
-  // preflight, no git — so the happy path is fully exercisable here (unlike
-  // /start, which spawns workers and is curl-verified on the real machine).
-  it('403 when the path is not a registered project (the allowlist holds)', async () => {
-    const dir = join(scratch, 'unregistered')
-    await mkdir(dir, { recursive: true })
+describe('POST /api/swarm/orchestrator/automerge (RETIRED 2026-07-16)', () => {
+  // The separate auto-wake-the-commander toggle is GONE: the wake reflex is
+  // always armed while the engine runs, so this route must stay unmounted —
+  // a 404 like any unknown /api/* path, even for the owner. Pins the retirement
+  // (a resurrected toggle would answer 403/400/200 here and fail this).
+  it('404 even for the owner — the toggle route is gone, not gated', async () => {
+    await signInAs(OWNER)
+    const dir = join(scratch, 'app')
+    await register(dir)
     const res = await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: true }))
-    expect(res.status).toBe(403)
-  })
-
-  it('400 when `enabled` is missing or not a boolean', async () => {
-    const dir = join(scratch, 'app')
-    await register(dir)
-    expect((await app.request('/api/swarm/orchestrator/automerge', json({ path: dir }))).status).toBe(400)
-    expect(
-      (await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: 'yes' }))).status,
-    ).toBe(400)
-  })
-
-  it('arms (default OFF) then disarms auto-integration, reflected in the state', async () => {
-    const dir = join(scratch, 'app')
-    await register(dir)
-    // Default is OFF on a never-armed engine.
-    const initial = (await (await app.request(`/api/swarm/orchestrator?path=${encodeURIComponent(dir)}`)).json()) as SwarmOrchestratorState
-    expect(initial.autoMerge).toBe(false)
-
-    const on = await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: true }))
-    expect(on.status).toBe(200)
-    expect(((await on.json()) as SwarmOrchestratorState).autoMerge).toBe(true)
-
-    const off = await app.request('/api/swarm/orchestrator/automerge', json({ path: dir, enabled: false }))
-    expect(((await off.json()) as SwarmOrchestratorState).autoMerge).toBe(false)
+    expect(res.status).toBe(404)
   })
 })
 

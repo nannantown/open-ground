@@ -1367,10 +1367,10 @@ export interface SwarmConsumption {
   overLimit: boolean
 }
 
-/** GET/POST /api/swarm/orchestrator{,/start,/stop,/automerge} — the commander
+/** GET/POST /api/swarm/orchestrator{,/start,/stop} — the commander
  *  engine's state for ONE project: whether the autonomous drain loop is running,
- *  whether auto-integration is armed, the workers it counts against the cap, the
- *  review cards it could land, the recent journal, and the concurrency ceiling.
+ *  the workers it counts against the cap, the review cards awaiting the
+ *  commander, the recent journal, and the concurrency ceiling.
  *  Owner-only (same gate as the rest of /api/swarm/*). */
 export interface SwarmOrchestratorState {
   /** True while the autonomous drain+dispatch loop is scheduled. OFF ⇒ the
@@ -1394,23 +1394,18 @@ export interface SwarmOrchestratorState {
    *  (`manualStop` true via the in-memory flag) from the durable record. A
    *  record only — it never auto-resumes (or auto-stops) anything by itself. */
   manualStopPersisted: boolean
-  /** True while auto-integration (Card③) is armed: a SEPARATE switch from
-   *  `running`, default OFF. When OFF the engine only CLASSIFIES review cards
-   *  (the `reviews` readiness below) and shows "統合可"; when ON it lands the
-   *  fast-forwardable / cleanly-rebasable ones on the trunk and moves them to
-   *  done. Only ever acts while `running` — turning the engine off stops
-   *  integration too. */
-  autoMerge: boolean
   /** True while SELF-SUPPLY (card b3fbbfba) is armed: the engine proposes its own
    *  improvement cards (discovered from tsc/lint/test/anomalies/TODOs) into todo.
-   *  A SEPARATE switch from `running`/`autoMerge`, default OFF (in-memory, so a
+   *  A SEPARATE switch from `running`, default OFF (in-memory, so a
    *  restart re-arms OFF — fail-safe). Even when ON, a proposed card is
-   *  approval-gated: it never dispatches until the owner approves it. */
+   *  approval-gated: it never dispatches until the owner approves it.
+   *  (The old `autoMerge` field — the separate auto-wake-the-commander toggle —
+   *  was RETIRED 2026-07-16: the wake reflex is always armed while `running`.) */
   selfSupply: boolean
   /** True while the OVERSEER (EPIC C / C-core) is armed: the autonomous proxy-you
    *  brainstem watches the swarm and, on judgment edges, wakes a one-off brain or
    *  raises to the human inbox. The THIRD toggle, default OFF, in-memory (a restart
-   *  re-arms OFF). ASYMMETRIC to autoMerge/selfSupply: an explicit autonomy OFF
+   *  re-arms OFF). ASYMMETRIC to selfSupply: an explicit autonomy OFF
    *  CLEARS it (the owner re-arms it every session — no persisted reminder). */
   overseer: boolean
   /** Workers the engine dispatched and still counts as live (≤ maxWorkers). */

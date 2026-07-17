@@ -11,7 +11,7 @@
 //        ever flipped by the owner-gated route (setSelfSupply). Ignition waits for
 //        the rest of the safety net (regression gate + rollback + notifications)
 //        to land; until armed, this stage does NOTHING. A server restart re-arms
-//        OFF (the flag is in-memory, like autoMerge) — fail-safe to silent.
+//        OFF (the flag is in-memory) — fail-safe to silent.
 //     2. PER-CARD OWNER APPROVAL — a proposed card carries `selfSupplyKey` and
 //        `selfSupplyApproved:false`. selectDispatch SKIPS such a card until the
 //        owner approves it (approveSelfSupplyCard → selfSupplyApproved:true). So

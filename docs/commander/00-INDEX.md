@@ -5,6 +5,7 @@
 **01/02/04/05 章は `cc7c60e` のまま** — 根治 3 件が `swarmOrchestrator.ts`(6349→6730 行、:355 以降が +38〜+381 シフト)/ `swarmOverseer.ts` / `swarmEscalations.ts`(:250 以降 +36)/ `types.ts`(:1147 以降 +7)を変えたため、これらのファイルへの行番号参照はずれている可能性がある(:354 以前の orchestrator 参照と、terminal.ts 等それ以外のファイル参照は有効)。**01 章 TL;DR#3・§6(monitor 飢餓)と 04 章 §3.2/3.3/3.6(検知 3 因子)は `0d1f7f0` で機構ごと過去の姿になった** — 両章に部分注記済み、現行の姿は 03 章 §2.1/§2.4 と TARGET-STATE §1。疑ったら現物優先(§6-1)。
 **例外(2026-07-12・会話 resume)**: 05 章 §6.2 の `/api/swarm/*` 行番号と 04 章 §2.6 の manager/supply 行番号は、resume 実装時に**現物から実測し直して更新済み**(`server/routes/swarm.ts` は +17 シフトしていた)。05 章に **§10(会話 resume)** を追加。それ以外の 04/05 の参照は依然 `cc7c60e` 基準。
 **追記(2026-07-15・マネージャ専任化 — 中核転換)**: **エンジンは統合をやめた。** review に ready カードが来たら engine は**司令官(manager)を起こすだけ**で、verify も敵対レビューも FF push も掃除も一切しない — 統合(重量級レビュー + 手動 FF push)は司令官の専任になった。同日の事故(autoMerge が司令官の差し戻しと並行で穴あきブランチを main に FF 統合 + engine のレンズ 4 票 clean が auth の camelCase 取りこぼしを見逃した)を受けた**構造的**役割分離で、**エンジンのレンズ結果だけで main が動く経路は金輪際ゼロ**(回帰テストで固定)。**03 章が全面改訂され、§2.3.1〜§3(旧 land 機構: verify/高リスク force-hold/敵対レビュー/差し戻し/conflict 委譲/凍結)は HISTORICAL** — engine はもうやらない(撤去 or 司令官の手動統合 §5 に一本化)。autoMerge トグルの意味も「エンジンが統合」→「worker が ready で司令官を自動起こし」に変わった(UI/i18n 追随済み)。TARGET-STATE §5 も新理想へ書き換え済み。**(直前の 2026-07-15 高リスク force-hold 追記は、この転換で engine 側は HISTORICAL 化 — 高リスク判定は司令官の手動統合規約側に残る。)**
+**追記(2026-07-16・autoMerge トグル廃止)**: 上の「自動起こし」トグルは**廃止**され、**エンジン ON で常時セット**になった(「エンジン ON・起こし OFF」の中途半端な既定が ready 品の滞留を生んだため — 実運用で観測)。`engine.autoMerge` フィールド・`POST /api/swarm/orchestrator/automerge`(404 化・回帰テストでピン)・UI トグル・i18n は全撤去。`GET /api/swarm/orchestrator` のレスポンスからも `autoMerge` が消えた(`src/lib/types.ts` 追随済み)。統合の同意粒度はカード単位([hold] + 司令官の高リスク force-hold)が担う。正典は 03 章 TL;DR#3・§2.3。**01/02/05/06 章に残る `autoMerge` 言及(GET の jq 例・02 章の cleanup 経路 6・01 章 §2 の flag 表など)は撤去前の姿**で、これらの章は基準コミットが古いまま(冒頭注記どおり)— 個別更新はせず本注記で一括カバーする(実行しても `autoMerge` フィールドが出ない/route が 404 なだけで害はない)。
 **読者**: 将来の司令塔(og-manage / manage セッション)。
 **この文書の役割**: docs/commander/ 全 6 章 + TARGET-STATE の統合索引。個別の機構は各章が正典 — ここは「どこを読むか」「全体がどう噛み合うか」「何を信じ何を疑うか」「何をしてはいけないか」を 1 枚に持つ。
 
@@ -29,7 +30,7 @@
 |---|---|---|
 | 1 | [01-engine-core](01-engine-core.md) | エンジン中枢 — 3 秒 tick の回り方・dispatch 6 ゲート・monitor 全分岐・in-memory 状態の寿命(再起動で全部消える)。※TL;DR#3/§6 の「integrate が monitor を飢餓させる」は `0d1f7f0` 以前の歴史 |
 | 2 | [02-worker-lifecycle](02-worker-lifecycle.md) | worker の生涯 — spawn/心拍/promote/回収、worktree 削除の全 8 経路と**回収前の WIP 保全**、実行時間上限は**実作業時間**で測る(quota 待ちは控除 — 0712 の 47KB 全損を根治)、workers API `heartbeatAt` 凍結の解明と根治(0710 誤診の真因 → 0711 修正済み) |
-| 3 | [03-integration-review](03-integration-review.md) | **統合は司令官専任・engine は ready で司令官を起こすだけ(2026-07-15 マネージャ専任化)**。A相(read-only「統合可」表示)は残る。B相は autoMerge(=「自動起こし」)armed のとき review の ready カードがあり司令官不在なら `spawnSwarmManager` で起こす(バッチ・二重起動しない) — verify/敵対レビュー/FF push/land は全部撤去。**engine のレンズ結果だけで main が動く経路は金輪際ゼロ**。**+ 蘇生反射(card B, 2026-07-16)**: manager 心拍で死/ハングを検知し蘇生(quota 繰り下げ・grace 再試行・3連続失敗で `manager-unrevivable` fatal・完了条件1-6)。§2.3.1〜§3(旧 land 機構)は HISTORICAL。統合(重量級レビュー+手動 FF push)と安全網は司令官側 §5 に一本化 |
+| 3 | [03-integration-review](03-integration-review.md) | **統合は司令官専任・engine は ready で司令官を起こすだけ(2026-07-15 マネージャ専任化)**。A相(read-only「統合可」表示)は残る。B相は**エンジン ON で常時**(2026-07-16 に autoMerge トグル廃止): review の ready カードがあり司令官不在/沈黙なら `spawnSwarmManager` で起こす(バッチ・二重起動しない) — verify/敵対レビュー/FF push/land は全部撤去。**engine のレンズ結果だけで main が動く経路は金輪際ゼロ**。**+ 蘇生反射(card B, 2026-07-16)**: manager 心拍で死/ハングを検知し蘇生(quota 繰り下げ・grace 再試行・3連続失敗で `manager-unrevivable` fatal・完了条件1-6)。§2.3.1〜§3(旧 land 機構)は HISTORICAL。統合(重量級レビュー+手動 FF push)と安全網は司令官側 §5 に一本化 |
 | 4 | [04-quota-models](04-quota-models.md) | quota 五層 — 冷却テーブル(A、**再起動を生き延びる**・0713 永続化)/rate-limit 検知(B)/使用可能モデル mask(C)/使用状況キャッシュ pre-launch veto(D、`/usage` の既知の枯渇を起動前に見て梯子からトップ tier を篩う・2026-07-12。⛔ **ただし現行 CLI は per-model 行を出さないので fable 単独枯渇は層Dでは見えない** — 0713 実測、§5.7 冒頭)/**起動前プローブ(E、0713 — spawn 直前に未知 tier へ headless 1発叩いて CLI のクォータ拒否文字列を読む。fable 単独枯渇を起動前に検知できる唯一の層・壁は層Aに記録して梯子1段下げ・分からなければ fail-open。⚠ 健全 tier のプローブは実測 19〜73s なので launch は最大 8s しか待たず、プローブは detached 完走で次の launch から効く、§5.8)**。検知 21 分遅延の 3 因子と根治(`0d1f7f0` — 45 秒サンプリング+早期認定+limit 画面クロック)。**hold 中の時間は worker の実行時間から控除される**(§3.4-6 — 0712 根治)。真実は `launchTier` だけ |
 | 5 | [05-board-api-contract](05-board-api-contract.md) | Board 契約 — tasks.json が唯一の永続体、列ライフサイクル、ロック/CAS、フル UUID の掟、二重 dispatch 両方向封鎖(cc7c60e)、**司令官/補給官の会話 resume(§10)** |
 | 6 | [06-overseer-escalations](06-overseer-escalations.md) | overseer 信号 S1〜S11 と escalations/通知ストア — S3/S10 の 24h 窓+永続受領(`d8431c3`+`aa9cb8d` 根治)、再投函増殖の実測(歴史) |
@@ -41,7 +42,7 @@
 |---|---|
 | worker が動かない / 消えた / 心拍が古く見える | 02 章(§4 heartbeatAt 凍結は 0711 根治済み、§6 worktree 削除の全経路) |
 | **worker が実行時間上限で消え、未コミット作業が失われた** | 02 章 §5.5(runaway は**実作業時間**で判定 — quota 待ちは控除。0712 根治)+ §6(teardown 前に **WIP コミットで保全** — `git log <branch>` に `WIP: swarm reclaim auto-save`)+ §7-11(事故の全容)。quota 側の見方は 04 章 §3.4-6 |
-| review 列から進まない / done にならない | 03 章 §2.3/§5 — **2026-07-15〜これが正常**: engine は統合しない。review の ready カードは**司令官が起こされて手動で land する**まで review に留まる。`manager-woke` 通知が来ているか、司令官の卓が生きているか(不在なら engine が起こす。autoMerge=自動起こしが ON か)を確認し、来ていたら §5 の手動統合で land する |
+| review 列から進まない / done にならない | 03 章 §2.3/§5 — **2026-07-15〜これが正常**: engine は統合しない。review の ready カードは**司令官が起こされて手動で land する**まで review に留まる。`manager-woke` 通知が来ているか、司令官の卓が生きているか(不在なら engine が起こす — **エンジン ON なら常時**・2026-07-16 トグル廃止。エンジン自体が OFF だと起こしも止まる)を確認し、来ていたら §5 の手動統合で land する |
 | **manager(司令官)が固まって統合が進まない** / engine が起こしても動かない | 03 章 §2.3 — **蘇生反射(card B, 2026-07-16)**: engine は manager 心拍(`manager.json`)を見て**死・ハングを検知し `spawnSwarmManager` で蘇生**する(quota 壁なら tier 繰り下げ・grace 5 分ごと再試行)。**3 連続失敗で `manager-unrevivable` fatal** を上げて諦める → その通知が来ていたら**手で司令官卓を確認/再起動**する(恒久バグ・quota 完全枯渇の疑い)。心拍を一度も打っていない手動卓は fail-open で不触 |
 | **`high-risk-hold` / `[must-fix 0 / clean 0]` / 敵対レビュー凍結が出ない・出ていた** | 03 章 §2.3.1〜§3 は **HISTORICAL**(2026-07-15 でエンジンから撤去)。engine はもう verify も敵対レビューも force-hold もしない。高リスク判定・fail-closed の安全網は**司令官の手動統合規約**(skills/og-manage §「マージ」)側にある。過去ログにこれらが見えるのは撤去前の履歴 |
 | dispatch されない / park している | 04 章(§5.5 spawnBlock、§7 運用手順)+ 01 章 §4.2 |
@@ -66,8 +67,11 @@ flowchart TB
     O["anomaly 検出 → FATAL 通知 → <b>overseer pass</b>(S1〜S11) → self-supply kick"]
     D --> O
   end
-  I["<b>integrate pass</b>(tick の脇で fire-and-forget — 0d1f7f0 で分離・integrateInFlight で 1 本)<br/>(15s throttle・land は autoMerge armed 時のみ)<br/>verify(tsc→lint→safety→test を直列 await)→ 敵対レビュー lens 4 体(全員一致のみ land)<br/>→ lock → FF / rebase push → done + 掃除(Board/worker を書く区間だけ runExclusive)"]
+  I["<b>integrate pass</b>(tick の脇で fire-and-forget — 0d1f7f0 で分離・integrateInFlight で 1 本)<br/>(15s throttle)A相: read-only classify → reviews[](統合可表示)<br/>B相(2026-07-15〜): ready カードあり+司令官不在/沈黙なら spawnSwarmManager で起こす/蘇生するだけ<br/>(エンジン ON で常時 — 2026-07-16 トグル廃止。verify/レンズ/FF push/land は撤去 — main は動かさない)"]
   D -. "kickIntegratePass(await しない)" .-> I
+  M["<b>manager(司令官)卓</b> = 統合の専任<br/>重量級レビュー + 手動 FF push(og-manage §マージ)"]
+  I -- "wake / 蘇生(manager-woke 通知・3連続失敗で fatal)" --> M
+  M -- "land(手動 FF push)→ done / 差し戻し → doing" --> B
   B[("<b>Board</b> tasks.json<br/>todo / doing / review / done / blocked<br/>— 唯一の永続体(05 章)")]
   W["<b>worker</b> = 中央 worktree + claude PTY + 心拍ファイル<br/>(02 章。作業の担保は branch のコミットのみ)"]
   Q[("<b>quota 三層</b>(04 章)<br/>A 冷却テーブル(永続・0713〜) / B 検知 / C mask(永続)")]
@@ -77,11 +81,10 @@ flowchart TB
   Q -- "spawnable tier(launchTier)/ 全滅なら park" --> D
   W -- "limit 文言(45s 沈黙でサンプリング・spawn 直後は約 95s で早期認定)→ markRateLimited" --> Q
   W -- "commit + 心拍 ready → promote(doing→review)" --> B
-  I -- "land → done / RED・must-fix → rework(doing) / 上限超過 → blocked" --> B
   O -- "T3 信号(S1/S2/S3/S5/S10)" --> E
 ```
 
-**時間軸の罠(`0d1f7f0` で解消 — 歴史)**: かつては pass が dispatch → integrate を直列 await していたため、integrate 内の verify(最大 tsc 180s + test 600s)と敵対レビュー(カード直列・`3129a58` 後は最長 20 分/パネル)が pass を握っている間、**monitor は 1 回も回らなかった**(01 章 §6 に当時の機構、04 章 §4 に実測 21 分 30 秒)。現在は integrate が tick の脇で走る(03 章 §2.1)ので、**verify/panel がどれだけ遅くても monitor は 3 秒 tick で回り続ける** — 遅い integrate の実害は「review 列の決着が遅れる」ことに閉じる。
+**時間軸の罠(`0d1f7f0` で解消 — 歴史)**: かつては pass が dispatch → integrate を直列 await していたため、integrate 内の verify(最大 tsc 180s + test 600s)と敵対レビュー(カード直列・`3129a58` 後は最長 20 分/パネル)が pass を握っている間、**monitor は 1 回も回らなかった**(01 章 §6 に当時の機構、04 章 §4 に実測 21 分 30 秒)。現在は integrate が tick の脇で走る(03 章 §2.1)ので、integrate がどれだけ遅くても monitor は 3 秒 tick で回り続ける(なお 2026-07-15 で verify/panel 自体が撤去され、現 integrate は classify + 司令官 wake だけの軽い pass になった)。
 
 ```
 現在:   tick(3s): |-dispatch+monitor-|-dispatch+monitor-|-dispatch+monitor-|-…(常に数秒周期)
@@ -158,7 +161,7 @@ flowchart TB
 | engine log(journal) | ⚠️ 「無い」を証明しない | 200 行 ring buffer(swarmOrchestrator.ts:201)+ 再起動で全消え。「journal に無い = 起きていない」ではない(01 章 §7.6) |
 | journal に rate-limit 行が無い | ❌ 無実の証明にならない | `0d1f7f0` で根治 — spawn 直後の即死は約 1.5 分で検知(onset 窓)、稼働後の limit は実クロック化した 10 分ゲート(装飾再描画による無限先送りは根絶。TARGET-STATE §1・実測待ち)。加えて **journal 自体が 200 行 ring + 再起動で全消え**なので「無い」は今も無実を証明しない。疑ったら worker 画面と /usage を自分で見る |
 | `manualStop` / `manualStopPersisted` | ✅ | 唯一 Settings に永続される engine 状態(swarmOrchestrator.ts:6155, :6239) |
-| `autoMerge` / `selfSupply` / `overseer` の ON | ⚠️ 現プロセス限り | in-memory・再起動で必ず OFF(01 章 §7.4)。「前回 ON だったから今も ON」は成立しない |
+| `selfSupply` / `overseer` の ON | ⚠️ 現プロセス限り | in-memory・再起動で必ず OFF(01 章 §7.4)。「前回 ON だったから今も ON」は成立しない。(`autoMerge` フィールドは 2026-07-16 撤去 — 司令官の自動起こしはエンジン ON で常時) |
 | escalation の `branch` / `taskId` / スクリーンショット | ⚠️ 起票時点のスナップショット | 現在の実在は git / tasks.json で裏取り(06 章 §5.2 の 3 点セット) |
 | S3(exec-timeout)escalation | ⚠️ 実発生として裏取り | `d8431c3`+`aa9cb8d` 以降は 24h 窓内の未受領 occurrence のみ上がる(06 章 §3.6 — 過去分の再投函は根絶済み。当時の実測 8 件→25 件増殖は §4.1 の歴史)。branch/カードの実在は 06 章 §5.2 で裏取り |
 | カードの `reworkCount` | ⚠️ 全体像ではない | カウンタは 3 系統(API verb / engine in-memory / swarm-board.sh)で干渉しない(05 章 §2.4)。「エンジンが差し戻したのに 0」は正常 |
@@ -176,7 +179,7 @@ flowchart TB
 |---|---|
 | [01 章](01-engine-core.md) **§9** | 対象コミットの鮮度 / エンジン状態(GET orchestrator)/ journal の scale・park・dispatch 行 / server-truth worker 一覧 / 心拍ディスク直読 / 定数の実値 / 二重 dispatch 封鎖の現物 / selectDispatch 6 ゲート / monitor 飢餓の観測(journal 時刻の空白) |
 | [02 章](02-worker-lifecycle.md) **§8** | repo キー導出 / 全 worker のディスク心拍一覧 / workers API との突き合わせ(凍結の確認)/ worktree 実在確認 / promote 条件の手動再現(rev-list)/ dirty 判定 / 停止・削除・RESTART・手動 dispatch の実操作 |
-| [03 章](03-integration-review.md) **§6** | reviews[] と autoMerge の現在値 / conflict 表示の真因区別(journal)/ arm・disarm / resolve(blocked・todo)/ **diff サイズ測定(凍結境界 22〜34KB との突合)** / classify の手動再現 / verify・review worktree 残骸 / カード 58335c7f の本文 |
+| [03 章](03-integration-review.md) **§6** | reviews[] の現在値 / conflict 表示の真因区別(journal)/ automerge route の 404 確認(撤去ピン)/ resolve(blocked・todo)/ **diff サイズ測定(凍結境界 22〜34KB との突合)** / classify の手動再現 / verify・review worktree 残骸 / カード 58335c7f の本文 |
 | [04 章](04-quota-models.md) **§10** | mask がソース・bundle に入っているか / 定数の現在値 / センサー書込箇所が 3 つだけ(worker arm / reviewer arm / 層Eプローブ) / spawn 経路の fail-closed / **launchTier(唯一の真実)** / 手動 cool・uncool の実験 / **冷却 file(`jq . ~/.openground/swarm-quota.json`)の読み方**(⚠ `server.log` は存在しない=偽陰性) / **壁の有無は `claude --model <tier> -p` のプローブ**(`/usage` では fable 単独枯渇は見えない — engine は層E(§5.8)が spawn 直前に同じプローブを自動で叩く) / 層Eの6経路配線 grep / ケーススタディの一次痕跡 |
 | [05 章](05-board-api-contract.md) **§9 / §10.4** | 対象コミット確認 / **Board 読み→書き(results 確認)→読み戻しの型** / rework と blocked 退避 / 手動 dispatch 前のエンジン確認 / quota・park の理由 / 永続体(tasks.json)直読 / merged-branches(done 化の前提確認) / **会話 resume の永続体(swarm-sessions.json)と transcript の実在確認(§10.4)** |
 | [06 章](06-overseer-escalations.md) **§7** | overseer の armed 状態 / inbox の open 一覧・status 内訳 / **S3 増殖の突合(発火源 fatal ↔ escalation 世代)** / 通知ストアの内訳と cap 消費 / escalation の偽物判定(branch・カード実在)/ answer・dismiss・手動 open / 付帯物(PTY キャプチャ・scratch) |

@@ -51,7 +51,6 @@ import {
   runEnginePass,
   stopOrchestrator,
   setOverseer,
-  setAutoMerge,
   setSelfSupply,
   stopOrchestratorWorker,
   resolveOrchestratorReview,
@@ -193,7 +192,6 @@ const worker = (over: Partial<OrchestratorWorker> = {}): OrchestratorWorker => (
 const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   path: '/proj',
   running: true,
-  autoMerge: false,
   passInFlight: false,
   generation: 0,
   timer: null,
@@ -1504,10 +1502,9 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       disarm(engine)
     })
 
-    it('stopOrchestrator CLEARS overseer.enabled but LEAVES autoMerge/selfSupply (the D1 asymmetry)', async () => {
+    it('stopOrchestrator CLEARS overseer.enabled but LEAVES selfSupply (the D1 asymmetry)', async () => {
       const key = await canonicalize('/proj-overseer-stopclear')
       const engine = newEngine({ path: key, running: true })
-      engine.autoMerge = true
       engine.selfSupply.enabled = true
       engine.overseer.enabled = true
       __seedEngineForTests(engine)
@@ -1516,8 +1513,7 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
 
       // The most-dangerous stage is disarmed by an explicit OFF …
       expect(engine.overseer.enabled).toBe(false)
-      // … while the two benign switches survive (they re-act on the next start).
-      expect(engine.autoMerge).toBe(true)
+      // … while the benign switch survives (it re-acts on the next start).
       expect(engine.selfSupply.enabled).toBe(true)
     })
 
@@ -4266,32 +4262,38 @@ const reviewCard = (id: string, branch: string | undefined, over: Partial<Projec
   card(id, { boardColumn: 'review', branch, ...over })
 
 describe('runIntegratePass — switch positions', () => {
-  it('classifies review cards but integrates NOTHING when autoMerge is OFF', async () => {
-    const engine = newEngine({ autoMerge: false })
+  it('classifies review cards AND wakes the commander with NO separate arm — the auto-wake toggle is gone (2026-07-16)', async () => {
+    // No `autoMerge` field exists anymore: `running` is the ONLY gate. A resurrected
+    // toggle (any gate between running and the wake reflex) would fail this.
+    const engine = newEngine()
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b')],
       readiness: { 'swarm/a': 'ff', 'swarm/b': 'rebase' },
     })
     await runIntegratePass(engine, deps)
-    // Read-only readiness published, no mutation.
+    // Read-only readiness published, no board/trunk mutation…
     expect(engine.reviews.map((r) => [r.branch, r.status])).toEqual([
       ['swarm/a', 'ff'],
       ['swarm/b', 'rebase'],
     ])
     expect(deps.integrated).toHaveLength(0)
     expect(deps.moved).toHaveLength(0)
+    // …and the wake reflex fired unarmed: engine ON = auto-wake always on.
+    expect(deps.wakeCalls).toHaveLength(1)
+    expect(deps.woke).toEqual(['swarm/a', 'swarm/b'])
   })
 
   it('does nothing at all when the engine is stopped (global stop)', async () => {
-    const engine = newEngine({ running: false, autoMerge: true })
+    const engine = newEngine({ running: false })
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
     await runIntegratePass(engine, deps)
     expect(engine.reviews).toHaveLength(0)
     expect(deps.integrated).toHaveLength(0)
+    expect(deps.wakeCalls).toHaveLength(0) // stopped engine never wakes a desk either
   })
 
   it('ignores non-swarm branches entirely', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'feature/x'), reviewCard('b', undefined)] })
     await runIntegratePass(engine, deps)
     expect(engine.reviews).toHaveLength(0)
@@ -4301,7 +4303,7 @@ describe('runIntegratePass — switch positions', () => {
 
 describe('runIntegratePass — throttle', () => {
   it('skips ticks until INTEGRATE_TICK_MS has passed (the wake is throttled too)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')] })
     await runIntegratePass(engine, deps)
     expect(deps.wakeCalls).toHaveLength(1) // first pass woke the commander
@@ -4331,7 +4333,7 @@ describe('runIntegratePass — throttle', () => {
 // stale) is fixed end-to-end, HOME-isolated, in swarmOrchestrator.integration.test.ts.
 describe('runIntegratePass — manager-only integration wake + resurrection (2026-07-15)', () => {
   it('受け入れの肝: a clean ff-ready review card is NEVER FF-pushed — engine calls no integrate/verify/review/lock', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
       readiness: { 'swarm/a': 'ff' }, // maximally mergeable — the old engine WOULD have landed it
@@ -4350,7 +4352,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('wakes the commander for review cards when the desk is INACTIVE — dead PTY OR hung (完了条件2)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     // managerActive:false models EITHER signal isManagerActive folds in: a dead PTY
     // or a heartbeat gone stale (the real heartbeat path is fixed end-to-end in the
     // integration suite's RESURRECTION test).
@@ -4364,7 +4366,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('BATCHES every waiting review branch into ONE wake call (token-thrifty, 完了条件2)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b'), reviewCard('c', 'swarm/c')],
     })
@@ -4374,7 +4376,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('does NOT wake a SECOND desk when the commander is up AND responding (二重起動防止, 完了条件2)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActive: true })
     await runIntegratePass(engine, deps)
     expect(deps.managerChecks).toBe(1) // it checked…
@@ -4393,7 +4395,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   const T0 = 10_000_000 // arbitrary fixed base (Date.now injected, never read)
 
   it('does NOT re-wake a stopped desk WITHIN the boot grace, re-wakes once it ELAPSES (完了条件3)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
     await passAt(engine, deps, T0)
     expect(deps.wakeCalls).toHaveLength(1) // wake #1 — a freshly-resumed desk needs time to boot + beat
@@ -4404,7 +4406,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('GIVES UP after MAX consecutive failed resurrections and escalates ONCE (完了条件5)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     // A desk that dies immediately every time (permanent quota wall / boot-crash): the
     // wake "succeeds" but the desk never responds, so every grace-spaced pass re-wakes.
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
@@ -4422,7 +4424,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('a FAILED wake (no usable tier) still counts as an attempt — drives escalation too (完了条件4+5)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     // wakeFails ⇒ every spawn returns false (every model tier OFF/cooling). The desk
     // is never actually raised, but the engine must not loop forever probing it.
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false, wakeFails: true })
@@ -4433,7 +4435,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('a RECOVERED desk RESETS the attempt budget (a later hang gets the full MAX again, 完了条件2)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     // Healthy ONLY in [T0+2·GRACE, T0+3·GRACE): hung, hung, RECOVERED, hung-again.
     const healthyFrom = T0 + 2 * GRACE
     const deps = makeIntDeps({
@@ -4451,7 +4453,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   })
 
   it('DISARMS fully when the review work DRAINS — no work, no resurrection (完了条件6)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     const present = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
     await passAt(engine, present, T0)
     expect(present.woke).toEqual(['swarm/a'])
@@ -4469,14 +4471,9 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     expect(engine.managerResume?.attempts).toBe(1)
   })
 
-  it('does NOT wake when auto-wake is OFF (readiness still published — switch semantics)', async () => {
-    const engine = newEngine({ autoMerge: false })
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], readiness: { 'swarm/a': 'ff' } })
-    await runIntegratePass(engine, deps)
-    expect(deps.managerChecks).toBe(0) // never even probed the desk
-    expect(deps.wakeCalls).toHaveLength(0) // OFF = the owner drives the commander by hand
-    expect(engine.reviews.map((r) => r.status)).toEqual(['ff']) // but the 「統合可」display is still published
-  })
+  // (The 'does NOT wake when auto-wake is OFF' case is GONE with the toggle
+  // (2026-07-16): there is no OFF short of stopping the engine, which the
+  // global-stop test in the switch-positions block pins.)
 })
 
 // ── Learning loop — 差し戻し原因を次の再dispatchの /order に注入 (card fdf714ef) ──────
@@ -4975,7 +4972,7 @@ describe('runEnginePass — never overlaps itself', () => {
       nudge: () => true,
       escalate: async () => true,
       recentOutput: () => null,
-      // Integration half — present but inert (autoMerge OFF, no review cards).
+      // Integration half — present but inert (no review cards).
       fetchReview: async () => [],
       changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
@@ -5166,7 +5163,7 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
   })
 
   it('returns while a slow manager-wake probe is mid-flight, and the NEXT tick still MONITORS (完了条件3)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     let probeEntered = false
     let releaseProbe: () => void = () => {}
     const probeGate = new Promise<void>((r) => (releaseProbe = r))
@@ -5223,7 +5220,7 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
   })
 
   it('kickIntegratePass never overlaps two integrate passes (integrateInFlight guard)', async () => {
-    const engine = newEngine({ autoMerge: true })
+    const engine = newEngine()
     let reviewReads = 0
     let releaseReview: () => void = () => {}
     const reviewGate = new Promise<void>((r) => (releaseReview = r))
@@ -5328,7 +5325,7 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       nudge: () => true,
       escalate: async () => true,
       recentOutput: () => null,
-      // Integration half — present but inert (autoMerge OFF, no review cards).
+      // Integration half — present but inert (no review cards).
       fetchReview: async () => [],
       changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',

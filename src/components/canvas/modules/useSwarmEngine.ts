@@ -1,5 +1,5 @@
 // useSwarmEngine — the SINGLE source of the commander engine's state for the
-// Swarm surface. It owns the one orchestrator poll + the start/stop/automerge
+// Swarm surface. It owns the one orchestrator poll + the start/stop
 // actions, and polls the SERVER-TRUTH worker list (`realWorkers`, from
 // GET /api/swarm/workers) that both Swarm sub-views render.
 //
@@ -25,7 +25,7 @@ import type { SwarmWorkerRecord } from '@/lib/types'
 // Kept as a LOCAL mirror (not imported from src/lib/types.ts) on purpose: the
 // server half lives behind the orchestrator route and a local mirror keeps this
 // front-end decoupled. The shape stays in lockstep with the server's
-// `SwarmOrchestratorState` (incl. `autoMerge` + the read-only `reviews`).
+// `SwarmOrchestratorState` (incl. the read-only `reviews`).
 export type EngineLogLevel = 'info' | 'warn' | 'error'
 
 /** Structured event class — mirrors the server's OrchestratorLogLine.kind.
@@ -114,8 +114,8 @@ export interface EngineAnomaly {
    *  panels before re-spawning stopped (display-only). */
   attempts?: number
   /** 'high-risk-hold' — the changed paths that matched the high-risk set
-   *  (release/CI/signing/dependency/secrets), i.e. WHY auto-merge is withheld
-   *  (display-only). */
+   *  (release/CI/signing/dependency/secrets), i.e. WHY the merge is held for a
+   *  human (display-only). */
   files?: string[]
 }
 
@@ -166,12 +166,11 @@ export interface SwarmEngineState {
    *  — the UI can tell a DELIBERATE stop from a never-started engine. Display
    *  only; an explicit Start always clears it. */
   manualStop: boolean
-  /** Auto-integrate — the engine lands completed review cards itself (Card③).
-   *  A separate switch from `running`, default OFF. */
-  autoMerge: boolean
-  /** Overseer — the autonomous proxy-you brainstem (EPIC C). The THIRD toggle,
-   *  default OFF, in-memory. ASYMMETRIC to autoMerge: an explicit autonomy OFF
-   *  CLEARS it, so the owner re-arms it every session (no persisted reminder — D1). */
+  /** Overseer — the autonomous proxy-you brainstem (EPIC C). Default OFF,
+   *  in-memory. ASYMMETRIC: an explicit autonomy OFF CLEARS it, so the owner
+   *  re-arms it every session (no persisted reminder — D1). (The old `autoMerge`
+   *  auto-wake toggle was retired 2026-07-16 — waking the commander is now always
+   *  on while the engine runs.) */
   overseer: boolean
   /** Workers the engine itself dispatched and still counts as live. */
   workers: EngineWorker[]
@@ -216,7 +215,6 @@ export const EMPTY_CONSUMPTION: EngineConsumption = {
 export const DEFAULT_ENGINE: SwarmEngineState = {
   running: false,
   manualStop: false,
-  autoMerge: false,
   overseer: false,
   workers: [],
   reviews: [],
@@ -399,7 +397,6 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     // Strict boolean like `running`: a forged / absent value folds to FALSE — the
     // fail-safe direction (no spurious "stopped by hand" badge).
     manualStop: o.manualStop === true,
-    autoMerge: o.autoMerge === true,
     overseer: o.overseer === true,
     workers,
     reviews,
@@ -605,7 +602,7 @@ export interface UseSwarmEngine {
   /** Whether the orchestrator route answered at all (false = not built / offline:
    *  the dashboard switches dim instead of firing a POST that 404s). */
   available: boolean
-  /** A start/stop or auto-merge round-trip is in flight (disables both switches). */
+  /** A start/stop or overseer round-trip is in flight (disables the switches). */
   busy: boolean
   /** Last engine-action failure, already localized. */
   error: string | null
@@ -618,8 +615,6 @@ export interface UseSwarmEngine {
    *  clears the persisted marker (POST stop → forgetSwarmAutonomy). Distinct from
    *  toggleAutonomy(false), which no-ops when the engine is already stopped. */
   dismissAutonomyReminder: () => void
-  /** Auto-integrate switch (Card③) — arm/disarm the engine's own landing. */
-  toggleAutoMerge: (next: boolean) => void
   /** Overseer switch (EPIC C / C-core) — arm/disarm the autonomous proxy-you
    *  brainstem. Reads back `sandboxWarning` when arming without the sandbox (L3). */
   toggleOverseer: (next: boolean) => void
@@ -649,7 +644,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // interval, three endpoints) so the worker tab never needs a second poll.
   const [realWorkers, setRealWorkers] = useState<SwarmWorkerRecord[]>([])
   const [available, setAvailable] = useState(false)
-  // A start/stop or auto-merge round-trip is in flight — disables both switches.
+  // A start/stop or overseer round-trip is in flight — disables the switches.
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // L3: the overseer was armed WITHOUT the sandbox experiment — the UI shows a
@@ -759,10 +754,10 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   }, [projectPath, busy])
 
   // POST an engine action and adopt the authoritative state it returns. All
-  // (start / stop / automerge / overseer) return the full SwarmOrchestratorState; an
+  // (start / stop / overseer) return the full SwarmOrchestratorState; an
   // old server without the route 404s and the caller surfaces "not available".
   const callEngine = useCallback(
-    async (action: 'start' | 'stop' | 'automerge' | 'overseer', extra: Record<string, unknown>) => {
+    async (action: 'start' | 'stop' | 'overseer', extra: Record<string, unknown>) => {
       const res = await fetch(`/api/swarm/orchestrator/${action}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -826,30 +821,8 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     }
   }, [busy, callEngine, t])
 
-  // Auto-integrate switch — Card③. Same optimistic-then-confirm shape as autonomy;
-  // an old server without the route 404s, so we revert and show the engine-failure
-  // note (the switch stays present + default OFF).
-  const toggleAutoMerge = useCallback(
-    async (next: boolean) => {
-      if (busy || next === engine.autoMerge) return
-      setBusy(true)
-      setError(null)
-      setEngine((s) => ({ ...s, autoMerge: next }))
-      try {
-        const fresh = await callEngine('automerge', { enabled: next })
-        setEngine(fresh)
-        setAvailable(true)
-      } catch (e) {
-        setEngine((s) => ({ ...s, autoMerge: !next }))
-        setError(
-          t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
-        )
-      } finally {
-        setBusy(false)
-      }
-    },
-    [busy, engine.autoMerge, callEngine, t],
-  )
+  // (The auto-wake toggle that used to live here — POST …/automerge — was retired
+  // 2026-07-16: waking the commander is always on while the engine runs.)
 
   // Overseer switch — the THIRD toggle (EPIC C / C-core). Same optimistic-then-confirm
   // shape. Its own fetch (not callEngine) so it can read the `sandboxWarning` the route
@@ -960,7 +933,6 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     sandboxWarning,
     toggleAutonomy: (next) => void toggleAutonomy(next),
     dismissAutonomyReminder: () => void dismissAutonomyReminder(),
-    toggleAutoMerge: (next) => void toggleAutoMerge(next),
     toggleOverseer: (next) => void toggleOverseer(next),
     stopWorker: (terminalId) => void stopWorker(terminalId),
     resolveReview: (taskId, target) => void resolveReview(taskId, target),

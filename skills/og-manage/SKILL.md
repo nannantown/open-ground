@@ -84,8 +84,7 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 | live worker へ指示を注入(未送信) | `curl -s -X POST $OG/api/terminal/<terminalId>/paste -H 'content-type: application/json' -d '{"path":"'"$PWD"'","text":"<指示文>"}'` |
 | ↑を送信(Enter) / つつく(nudge) | `curl -s -X POST $OG/api/terminal/<terminalId>/input -H 'content-type: application/json' -d '{"data":"\r"}'` |
 | worker worktree 撤去(PTY kill 込み) | `curl -s -X POST $OG/api/swarm/worktree/remove -H 'content-type: application/json' -d '{"path":"'"$PWD"'","worktree":"<絶対パス>","force":false}'` |
-| エンジン ON / OFF | `curl -s -X POST $OG/api/swarm/orchestrator/start -H 'content-type: application/json' -d '{"path":"'"$PWD"'"}'` / 同 `/stop` |
-| 自動統合 arm | `curl -s -X POST $OG/api/swarm/orchestrator/automerge -H 'content-type: application/json' -d '{"path":"'"$PWD"'","enabled":true}'` |
+| エンジン ON / OFF | `curl -s -X POST $OG/api/swarm/orchestrator/start -H 'content-type: application/json' -d '{"path":"'"$PWD"'"}'` / 同 `/stop`(ON で「worker ready → あなたを自動で起こす」反射も常時セット — 旧 `…/automerge` は 2026-07-16 撤去・404) |
 | エンジン worker を1体止める | `POST $OG/api/swarm/orchestrator/worker/stop` body `{path, terminalId}` |
 | 滞留 review カードの退避 | `POST $OG/api/swarm/orchestrator/review/resolve` body `{path, taskId, target:"blocked"\|"todo"}` |
 | 質問インボックス | `curl -s "$OG/api/swarm/escalations?status=open"` → answer/dismiss は同 `/answer` `/dismiss` |
@@ -97,9 +96,9 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 
 - **あなた(司令官)は心拍を打つ — エンジンが蘇生できるように**(2026-07-15 card B): エンジンは
   「統合を manager 専任」にした代わりに、**司令官が止まったら自動で蘇生する反射**を持つ。判定材料は
-  上の `manager/beat` が書く心拍の鮮度 — **10 分打たないと「固まっている」と見なされ**、自動運転
-  (autoMerge)ONかつ review 待ちがあると engine が `spawnSwarmManager` で卓を起こし直す(モデルは
-  quota 枯渇なら1段繰り下げ)。だから**重い統合(大 diff レビュー・複数本のマージ)を回している間は
+  上の `manager/beat` が書く心拍の鮮度 — **10 分打たないと「固まっている」と見なされ**、エンジン
+  ON かつ review 待ちがあると engine が `spawnSwarmManager` で卓を起こし直す(2026-07-16〜この反射は
+  エンジン ON で常時 — 独立トグルは廃止。モデルは quota 枯渇なら1段繰り下げ)。だから**重い統合(大 diff レビュー・複数本のマージ)を回している間は
   各段で1回 beat を打つ**(1本マージするごと・レビュー sub-agent を起こす直前など)。無音のまま長時間
   ハングすると蘇生対象になる=それが狙い(コンテキスト溢れ・API エラーで黙り込んだ卓を神経系が起こす)。
   **予防が本筋**: 大 diff レビューは Agent ツール(sub-agent)に逃がして自分のコンテキストを守る
@@ -129,7 +128,7 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
    - ⚠**要 rebase** … behind>0(main が先に進んだ — 統合時に rebase が要るだけ。異常ではない)。
    - ⚠**衝突リスク** … 2本以上の `swarm/*` が同じファイルを触っている:
      各ブランチの `git -C "$PWD" diff --name-only $(git -C "$PWD" merge-base origin/main <br>)..<br>` の集合が重なるか。
-3. エンジン状態を1行添える: `running`(自動運転中か)・`autoMerge`・`reviews[]`(統合可 ff / rebase / conflict)・
+3. エンジン状態を1行添える: `running`(自動運転中か — ON なら ready 時の司令官自動起こしも常時)・`reviews[]`(統合可 ff / rebase / conflict)・
    `anomalies[]`(orphan-doing / worker-stale / no-heartbeat / move-stuck / rework-exhausted は要注意)・
    `parkUntil`(クォータ待機中)。
 4. Board が読めるなら列不一致も是正(§Board「列不一致の是正」を1回)。
@@ -177,8 +176,9 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
    `.github/workflows/**`・`release.yml`/`ci.yml`・`package.json`/lockfile・署名/notary スクリプト・
    `electron/main.js`・`*secret*`/`.env*`/auth/token(camelCase 結合 `supabaseAuth.ts`/`authStore.ts` 型も掴む)・
    認可の本体(`roles.ts`/`swarmGate.ts`/`swarmAllowedModels.ts`)に触れていたら自動では入れず「承認待ち(高リスク)」で報告。
-   (2026-07-15〜 エンジンの autoMerge も同じ集合で force-hold する — 単一定義は
-   `HIGH_RISK_PATHS`(swarmOrchestrator.ts)で、ユニットテストが**本節の上3行の文言ごと**固定している。
+   (単一定義は `HIGH_RISK_PATHS`(swarmOrchestrator.ts)で、ユニットテストが**本節の上3行の文言ごと**
+   固定している。2026-07-15 のマネージャ専任化でエンジン側の force-hold 実行は撤去され、
+   **この集合を実際に効かせるのはあなたの手動統合だけ**になった。
    ⚠ その固定は verbatim pin(一言一句の一致)であって意味の同期ではない — pin が緑でも regex が
    本当に各カテゴリを掴むかまでは保証しない(2026-07-15 の camelCase 素通りがまさにその穴)。実挙動は
    ユニットテスト側の実ファイル HOLD/PASS(it.each)が固定する。集合を変えるときは SKILL.md と
@@ -238,14 +238,16 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
 ### 「自動運転」/ エンジンに任せる
 「全部自動で回して」「無人でお願い」と言われたら、会話巡回ではなく**エンジンを ON にする**:
 1. `POST $OG/api/swarm/orchestrator/start`(todo の自動 drain+dispatch+監視+crash/stall 回収が回り出す)。
-2. 統合まで任せるなら `POST …/automerge` `{enabled:true}` — エンジンは
-   **検証(tsc/lint/test)→独立レンズレビュー(多数決)→FF/クリーン rebase のみ→done 移動→worktree 掃除**まで
-   自動でやる(force 禁止・実衝突は自動解決せず worker へ rebase 委譲 → 上限超過で blocked 退避)。
-3. 以後のあなたの仕事は**窓口**: 「状況」で `GET /api/swarm/orchestrator` を要約報告し、
+   これだけで「worker が ready になったら**あなた(司令官)を自動で起こす/固まったら蘇生する**」反射も
+   **常時セット**される(2026-07-16〜 — 旧 `POST …/automerge` の arm 手順は**廃止・route は 404**)。
+2. **統合は自動化されない — あなたの専任**(2026-07-15〜)。エンジンは verify もレビューも FF push も
+   しない。起こされたら §「マージ」の手順(再検証・敵対レビュー・高リスク force-hold・FF push)で
+   あなたが land する。カード単位の承認待ちは `[hold]` prefix と高リスク force-hold が担う。
+3. 以後のあなたの仕事は**統合と窓口**: 「状況」で `GET /api/swarm/orchestrator` を要約報告し、
    `anomalies` / `escalations`(質問インボックス)/ conflict 滞留を人間に橋渡しする
-   (滞留 review の退避は `review/resolve`)。**エンジン稼働中に手動 dispatch / 手動 merge をしない**。
-4. 「止めて」で `POST …/stop`(稼働中 worker は残る — 個別停止は `worker/stop`)。
-   エンジンは**アプリ再起動で必ず OFF に戻る**(安全側)。再開はユーザーの明示 ON だけ。
+   (滞留 review の退避は `review/resolve`)。**エンジン稼働中に手動 dispatch をしない**。
+4. 「止めて」で `POST …/stop`(稼働中 worker は残る — 個別停止は `worker/stop`)。停止で起こし反射も
+   止まる。エンジンは**アプリ再起動で必ず OFF に戻る**(安全側)。再開はユーザーの明示 ON だけ。
 - エンジンを使わない見張りは **nudge 駆動**(ユーザーの「状況」「マージ」に応答)が基本。
   自発の定期巡回を張るなら長間隔(60分)の保険だけ — 短間隔ポーリングでトークンを焚かない。
 

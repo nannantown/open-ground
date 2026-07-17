@@ -67,7 +67,6 @@ import {
   resolveOrchestratorReview,
   getOrchestratorState,
   drainTickOrchestrator,
-  setAutoMerge,
   setSelfSupply,
   setOverseer,
   writeManagerHeartbeat,
@@ -650,30 +649,10 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await stopOrchestratorWorker(path, terminalId))
   })
-  // --- POST /api/swarm/orchestrator/automerge — arm/disarm AUTO-WAKE-COMMANDER ---
-  // Body: { path, enabled:boolean }. Toggles Card③. MEANING CHANGED 2026-07-15
-  // (manager-only integration — endpoint name kept for API stability): the engine
-  // NO LONGER integrates. A SEPARATE switch from autonomy (start/stop), default OFF:
-  // when OFF the engine only classifies review cards and shows "統合可"; when ON, a
-  // ready worker (review card) WAKES the commander desk (spawnSwarmManager, batched)
-  // so a human-in-the-loop review decides the merge — the engine never verifies,
-  // reviews, or pushes to the trunk itself (docs/commander/03-integration-review.md).
-  // Only ever acts while the engine is running — the global stop halts it too.
-  // Owner-only + validated, like the rest of /api/swarm/*.
-  .post('/api/swarm/orchestrator/automerge', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
-    let body: any
-    try {
-      body = await c.req.json()
-    } catch {
-      return c.json({ error: 'invalid body' }, 400)
-    }
-    const path = typeof body?.path === 'string' ? body.path : ''
-    if (!path) return c.json({ error: 'path is required' }, 400)
-    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-    if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
-    return c.json(await setAutoMerge(path, body.enabled))
-  })
+  // (POST /api/swarm/orchestrator/automerge was RETIRED 2026-07-16 — the auto-wake-
+  // the-commander reflex is always armed while the engine runs, so the separate
+  // toggle is gone and the route 404s like any unknown /api/* path. Merge consent
+  // stays per-card: the [hold] title prefix + the commander's high-risk force-hold.)
   // --- POST /api/swarm/orchestrator/review/resolve — resolve a stuck review card -
   // Body: { path, taskId, target:'blocked'|'todo' }. The owner takes a review card
   // the engine can NOT auto-land (a real rebase conflict, or one that keeps failing
@@ -725,7 +704,7 @@ export const swarmRoutes = new Hono()
   // Body: { path, enabled:boolean }. Toggles the autonomous proxy-you BRAINSTEM (the
   // THIRD toggle — D1): it watches the swarm and, on judgment edges, wakes a one-off
   // brain (fire-and-forget) or raises to the human inbox. SEPARATE from autonomy
-  // (start/stop) / autoMerge / selfSupply, default OFF, in-memory (a restart re-arms
+  // (start/stop) / selfSupply, default OFF, in-memory (a restart re-arms
   // OFF — K2). ASYMMETRIC: an explicit autonomy OFF CLEARS it (the owner re-arms every
   // session). Owner-only + validated, like the rest of /api/swarm/* (K3). GET carries
   // no mutation (K8); this POST is the only path that sets `enabled` true.

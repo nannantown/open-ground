@@ -269,7 +269,6 @@ describe('POST /api/swarm/worker — the card is claimed BEFORE the worker spawn
 const newEngine = (path: string): ProjectEngine => ({
   path,
   running: true,
-  autoMerge: false,
   passInFlight: false,
   generation: 0,
   timer: null,
