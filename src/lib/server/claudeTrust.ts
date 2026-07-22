@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, renameSync, realpathSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { assertTestHomeIsolated } from './testHomeGuard'
 
 // claude 2.1.167+ shows a BLOCKING "Is this a project you created or one you
 // trust?" prompt the first time it starts in a directory it hasn't seen —
@@ -40,8 +41,20 @@ import { join } from 'path'
 
 // Path to claude's global config. Overridable via env so unit tests never
 // touch the real ~/.claude.json (CLAUDE_CONFIG_PATH points at a tmp file).
-const claudeConfigPath = () =>
-  process.env.CLAUDE_CONFIG_PATH || join(homedir(), '.claude.json')
+// FENCED (testHomeGuard.ts): the override is the ONLY thing keeping tests off
+// the user's real ~/.claude.json — which holds their claude OAuth tokens, so a
+// stray write logs them out. Ten test files reach here through
+// worktreeCleanup / swarmWorker / swarmOrchestrator / swarmOverseerBrain while
+// only two pin CLAUDE_CONFIG_PATH; the rest are safe by ACCIDENT (they pin HOME
+// to isolate git's global config, which incidentally moves homedir()). Swap
+// that pin for GIT_CONFIG_GLOBAL — the more correct fix — and the suite starts
+// reading and rewriting the real file. Per-file discipline is exactly what this
+// fence exists to replace, so the resolved path is checked here too.
+const claudeConfigPath = () => {
+  const p = process.env.CLAUDE_CONFIG_PATH || join(homedir(), '.claude.json')
+  assertTestHomeIsolated(p, 'claudeTrust (CLAUDE_CONFIG_PATH ?? homedir()/.claude.json)')
+  return p
+}
 
 // claude keys its projects map by the cwd it runs in. macOS paths here
 // (/Users/…, ~/.openground/…) aren't symlinked, so realpath == path, but cover

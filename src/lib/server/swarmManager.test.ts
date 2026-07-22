@@ -1,7 +1,15 @@
 import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { buildClaudeArgv } from './claudeTerminal'
-import { managerLaunchOpts, MANAGER_INJECTION, MANAGER_RESUME_INJECTION } from './swarmManager'
+import {
+  managerLaunchOpts,
+  MANAGER_INJECTION,
+  MANAGER_RESUME_INJECTION,
+  watchDeskForDeathOnArrival,
+  DESK_DOA_WINDOW_MS,
+} from './swarmManager'
+import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
+import type { TerminalInfo } from './terminal'
 
 // spawnSwarmManager spawns a real PTY (needs the `claude` CLI), so it is
 // curl-verified on the real machine. Here we pin the PURE launch contract —
@@ -52,11 +60,19 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.effort).toBe('max')
   })
 
-  it('starts with Remote Control ON, named "manager" (mirrors --remote-control manager)', () => {
-    // The shell cockpit runs the commander `… --remote-control manager "/manage"`;
-    // the in-app commander must match so it is controllable from claude.ai /
-    // mobile with no manual toggle.
+  it('starts with Remote Control ON — legacy fixed name when no remoteName resolved', () => {
+    // remoteName absent (legacy caller / resolution failed) ⇒ the historical
+    // fixed 'manager', so Remote Control is never silently OFF.
     expect(base.remoteControl).toBe('manager')
+  })
+
+  it('threads the resolved IDENTIFIABLE Remote Control name through (opts.remoteName)', () => {
+    // spawnSwarmManager resolves 「マネージャー <プロジェクト表示名>」/ "Manager
+    // <project>" via resolveSwarmRemoteName (language = Settings.language) so the
+    // claude.ai / mobile session list reads WHICH project's commander this is —
+    // the fix for the wall of identical 'manager' rows (owner feedback 2026-07-18).
+    const named = managerLaunchOpts('/proj', 'sid-rc', { remoteName: 'マネージャー 受注管理' })
+    expect(named.remoteControl).toBe('マネージャー 受注管理')
   })
 
   it('delivers /og-manage (the tmux-free commander skill) as the positional prompt', () => {
@@ -128,5 +144,85 @@ describe('managerLaunchOpts (commander launch contract)', () => {
       expect(resumed.remoteControl).toBe('manager')
       expect(resumed.model).toBe(SWARM_LAUNCH_MODEL)
     })
+  })
+})
+
+// ── watchDeskForDeathOnArrival — learn the tier wall from the CORPSE (2026-07-19) ─────
+//
+// The pre-launch probe is a PREDICTION with a fail-open path; when it misses, the desk
+// spawns on a spent tier and prints "You've reached your Fable 5 limit." seconds later.
+// This second防壁 turns that death into evidence: a desk that dies ON ARRIVAL saying its
+// tier is spent cools the tier so the next spawn doesn't repeat it. The polarity rule is
+// strict — ONLY the CLI's quota-refusal wording cools anything, because a mark here is 20
+// persisted minutes across every spawn path, so a crash / ^D / transient fault must NOT
+// drag a healthy tier down. The exit-watch is injected (deps.watch/screen/now), so no PTY
+// is spawned and the whole thing is deterministic. HOME is isolated suite-wide, so the
+// markRateLimited disk mirror lands in a throwaway tmp dir.
+describe('watchDeskForDeathOnArrival — learn the tier wall from a desk that died on arrival', () => {
+  const NOW = Date.parse('2026-07-19T20:28:00Z')
+  const FABLE_NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+
+  // A fake exit-watch: captures the desk's exit callback so a test FIRES the death when it
+  // chooses, and hands back a no-op unsubscribe (onTerminalExit's shape).
+  const captureWatch = () => {
+    let cb: ((info: TerminalInfo) => void) | null = null
+    return {
+      watch: (_id: string, onExit: (info: TerminalInfo) => void) => {
+        cb = onExit
+        return () => {}
+      },
+      // The real callback ignores its info arg; a bare cast keeps the exit shape honest.
+      fire: () => cb?.({} as TerminalInfo),
+      registered: () => cb !== null,
+    }
+  }
+
+  beforeEach(() => __resetQuotaForTest())
+
+  it('a desk that dies INSIDE the window saying its tier is spent COOLS that tier', () => {
+    const w = captureWatch()
+    let clock = NOW
+    watchDeskForDeathOnArrival('t1', 'fable', { watch: w.watch, screen: () => FABLE_NOTICE, now: () => clock })
+    clock = NOW + 2_000 // refused ~2s after opening (measured 1.4–3.8s)
+    w.fire()
+    expect(isTierCooling('fable', clock)).toBe(true)
+  })
+
+  it('a desk that dies of something OTHER than quota does NOT cool the tier (a crash ≠ a wall)', () => {
+    const w = captureWatch()
+    let clock = NOW
+    watchDeskForDeathOnArrival('t1', 'fable', {
+      watch: w.watch,
+      screen: () => 'panic: runtime out of memory',
+      now: () => clock,
+    })
+    clock = NOW + 2_000
+    w.fire()
+    expect(isTierCooling('fable', clock)).toBe(false)
+  })
+
+  it('a desk that OUTLIVED the window says nothing about its tier — its later death is not a wall', () => {
+    const w = captureWatch()
+    let clock = NOW
+    watchDeskForDeathOnArrival('t1', 'fable', { watch: w.watch, screen: () => FABLE_NOTICE, now: () => clock })
+    clock = NOW + DESK_DOA_WINDOW_MS + 1 // it did real work, THEN exited
+    w.fire()
+    expect(isTierCooling('fable', clock)).toBe(false)
+  })
+
+  it('a missing screen cools nothing (best-effort — learned nothing, never a throw)', () => {
+    const w = captureWatch()
+    let clock = NOW
+    watchDeskForDeathOnArrival('t1', 'fable', { watch: w.watch, screen: () => null, now: () => clock })
+    clock = NOW + 2_000
+    w.fire()
+    expect(isTierCooling('fable', clock)).toBe(false)
+  })
+
+  it('a non-ladder model string is never watched nor cooled (only real tiers cool)', () => {
+    const w = captureWatch()
+    watchDeskForDeathOnArrival('t1', 'gpt-5', { watch: w.watch, screen: () => FABLE_NOTICE, now: () => NOW })
+    expect(w.registered()).toBe(false) // returned before ever arming the watch
   })
 })

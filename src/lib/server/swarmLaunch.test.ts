@@ -1,8 +1,14 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mkdtemp, mkdir, rm, realpath } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
   SWARM_LAUNCH_MODEL,
   SWARM_LAUNCH_EFFORT,
   swarmLaunchDefaults,
+  swarmRemoteControlName,
+  resolveSwarmRemoteName,
+  REMOTE_NAME_MAX,
   resolveSwarmModelEffort,
   resolveSwarmModelEffortProbed,
   resolveAvailableTier,
@@ -12,6 +18,13 @@ import {
   execModeMaxWorkers,
   asExecutionMode,
 } from './swarmLaunch'
+import {
+  addProjectEntry,
+  setProjectDisplayName,
+  __resetMigrationCacheForTests,
+} from './registry'
+import * as registryModule from './registry'
+import { setSettings } from './store'
 import { ensureTierProbed, __resetTierProbeForTest, type TierProbeExec } from './swarmTierProbe'
 import type { CliUsage } from './claudeUsageCli'
 import {
@@ -85,6 +98,138 @@ describe('swarmLaunch (shared swarm launch defaults)', () => {
     const d = swarmLaunchDefaults('worker', { model: 'sonnet' })
     expect(d.model).toBe('sonnet')
     expect('effort' in d).toBe(false)
+  })
+})
+
+// Remote Control 名の識別化(オーナー直接フィードバック 2026-07-18): スマホ一覧に
+// 「manager/worker」が同名で大量に並ぶ問題への対処。役割語はオーナー確定語彙
+// (JA=マネージャー/ワーカー/タスク窓口、EN=Manager/Worker/Supply officer)、言語は
+// Settings.language、プロジェクト名は registry の表示名(displayName || フォルダ名)。
+// 名前制約は実測済み(CLI 2.1.214): 日本語/スペース/コロン/長名すべて受理・一覧表示。
+describe('swarmRemoteControlName (識別可能なリモコン名 — pure)', () => {
+  it('JA: 役割語 + プロジェクト表示名 (+ worker はカード title)', () => {
+    expect(swarmRemoteControlName('manager', 'ja', 'OPEN GROUND')).toBe(
+      'マネージャー OPEN GROUND',
+    )
+    expect(swarmRemoteControlName('supply', 'ja', 'OPEN GROUND')).toBe('タスク窓口 OPEN GROUND')
+    expect(swarmRemoteControlName('worker', 'ja', 'OPEN GROUND', '検品可視化')).toBe(
+      'ワーカー OPEN GROUND: 検品可視化',
+    )
+  })
+
+  it('EN: Manager / Worker / Supply officer(既存 i18n EN 訳と整合)', () => {
+    expect(swarmRemoteControlName('manager', 'en', 'myapp')).toBe('Manager myapp')
+    expect(swarmRemoteControlName('supply', 'en', 'myapp')).toBe('Supply officer myapp')
+    expect(swarmRemoteControlName('worker', 'en', 'myapp', 'Fix login bug')).toBe(
+      'Worker myapp: Fix login bug',
+    )
+  })
+
+  it('プロジェクト名が空でも役割語だけは残る(旧固定名より情報が減らない)', () => {
+    expect(swarmRemoteControlName('worker', 'ja')).toBe('ワーカー')
+    expect(swarmRemoteControlName('manager', 'en', '', '')).toBe('Manager')
+    // タスクだけある(プロジェクト名なし)でも壊れない
+    expect(swarmRemoteControlName('worker', 'en', undefined, 'fix')).toBe('Worker: fix')
+  })
+
+  it('title/プロジェクト名の改行・タブ・連続空白は 1 スペースに潰す(一覧を壊さない)', () => {
+    expect(swarmRemoteControlName('worker', 'ja', ' p ', 'a\n b\t\tc   d')).toBe(
+      'ワーカー p: a b c d',
+    )
+  })
+
+  it('REMOTE_NAME_MAX 超は末尾 … に切り詰め・code point 単位でサロゲートを分断しない', () => {
+    const name = swarmRemoteControlName('worker', 'ja', 'p', 'あ'.repeat(100))
+    expect(Array.from(name).length).toBe(REMOTE_NAME_MAX)
+    expect(name.endsWith('…')).toBe(true)
+    // 絵文字(サロゲートペア)の並びを境界で切っても lone surrogate を作らない
+    const n2 = swarmRemoteControlName('worker', 'en', 'p', '😀'.repeat(80))
+    expect(Array.from(n2).length).toBe(REMOTE_NAME_MAX)
+    expect(n2.endsWith('…')).toBe(true)
+    for (const cp of Array.from(n2)) {
+      const first = cp.charCodeAt(0)
+      const loneSurrogate = first >= 0xd800 && first <= 0xdfff && cp.length === 1
+      expect(loneSurrogate).toBe(false)
+    }
+  })
+
+  it('C0/C1 制御文字(ESC 含む)は除去される — PTY 入力行を壊さないため', () => {
+    // eslint-disable-next-line no-control-regex
+    expect(swarmRemoteControlName('worker', 'en', 'p\x1broj', 'ta\x1bsk')).toBe(
+      'Worker proj: task',
+    )
+    // eslint-disable-next-line no-control-regex
+    expect(swarmRemoteControlName('worker', 'en', '\x00\x07proj\x7f', undefined)).toBe(
+      'Worker proj',
+    )
+    // タブ・改行は除去でなく 1 スペースへの畳み込み(既存挙動を維持)
+    expect(swarmRemoteControlName('worker', 'en', 'p\tq', 'a\nb')).toBe('Worker p q: a b')
+  })
+
+  it('ちょうど上限なら切り詰めない', () => {
+    // 'Worker p: ' は 10 code point — title 50 で計 60 ちょうど。
+    const title = 'x'.repeat(REMOTE_NAME_MAX - 10)
+    const name = swarmRemoteControlName('worker', 'en', 'p', title)
+    expect(name).toBe(`Worker p: ${title}`)
+    expect(Array.from(name).length).toBe(REMOTE_NAME_MAX)
+  })
+})
+
+describe('resolveSwarmRemoteName (spawn 時解決 — HOME 隔離統合)', () => {
+  let home: string
+  let scratch: string
+  let proj: string
+  let savedOgHome: string | undefined
+
+  beforeEach(async () => {
+    home = await realpath(await mkdtemp(join(tmpdir(), 'og-rcname-home-')))
+    scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-rcname-scratch-')))
+    savedOgHome = process.env.OPENGROUND_HOME
+    process.env.OPENGROUND_HOME = home
+    __resetMigrationCacheForTests()
+    proj = join(scratch, 'proj')
+    await mkdir(proj, { recursive: true })
+    await addProjectEntry(proj)
+  })
+
+  afterEach(async () => {
+    // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedOgHome !== undefined) process.env.OPENGROUND_HOME = savedOgHome
+    __resetMigrationCacheForTests()
+    await rm(home, { recursive: true, force: true })
+    await rm(scratch, { recursive: true, force: true })
+  })
+
+  it('ja 設定では owner 表示名(displayName)を最優先で使う', async () => {
+    await setSettings({ language: 'ja' })
+    await setProjectDisplayName(proj, '受注管理')
+    expect(await resolveSwarmRemoteName('manager', proj)).toBe('マネージャー 受注管理')
+    expect(await resolveSwarmRemoteName('worker', proj, '検品可視化')).toBe(
+      'ワーカー 受注管理: 検品可視化',
+    )
+  })
+
+  it('言語未設定は English-first・displayName 無しはフォルダ名(git リポ名ではない)', async () => {
+    expect(await resolveSwarmRemoteName('supply', proj)).toBe('Supply officer proj')
+    expect(await resolveSwarmRemoteName('worker', proj, 'Fix bug')).toBe('Worker proj: Fix bug')
+  })
+
+  it('未登録パスでも throw せず basename で組む(名前解決は spawn を殺さない)', async () => {
+    const outside = join(scratch, 'unregistered')
+    await mkdir(outside, { recursive: true })
+    await expect(resolveSwarmRemoteName('manager', outside)).resolves.toBe('Manager unregistered')
+  })
+
+  it('NEVER THROWS: registry 読みが throw しても catch fallback(role そのもの)へ落ちる', async () => {
+    const spy = vi
+      .spyOn(registryModule, 'findProjectEntryByPath')
+      .mockRejectedValue(new Error('boom: simulated registry read failure'))
+    try {
+      await expect(resolveSwarmRemoteName('worker', proj, '検品可視化')).resolves.toBe('worker')
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
 

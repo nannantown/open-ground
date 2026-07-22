@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.31",
+  "version": "0.11.32",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -16,6 +16,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "check:screens": "npx tsx scripts/check-screen-modules.ts",
     "you-corpus": "tsx scripts/you-corpus.ts",
+    "swarm:audit": "tsx scripts/swarm-token-audit.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",

@@ -1,6 +1,7 @@
 import { readFile } from 'fs/promises'
 import { ensureOpenGroundHome, settingsFile, canvasFile, notificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
+import { snapshotBeforeWrite } from './homeBackup'
 import { asExecutionMode } from './swarmLaunch'
 import {
   anyTierAllowed,
@@ -58,6 +59,16 @@ const readJson = async <T>(path: string, fallback: T): Promise<T> => {
 
 const writeJson = async (path: string, data: unknown) => {
   await ensureOpenGroundHome()
+  // GENERATIONAL BACKUP (2026-07-18 incident): copy the CURRENT content aside
+  // before it is replaced, so the previous generation of settings.json /
+  // canvas.json always survives an overwrite. A no-op for every other path, and
+  // content-deduped, so the high-frequency canvas save doesn't pile up copies.
+  //
+  // Awaited DELIBERATELY: it must complete before the overwrite, or it is
+  // backing up content that is already gone. snapshotBeforeWrite never throws
+  // (its own invariant) — a failed backup logs and the save proceeds — so this
+  // cannot turn a backup problem into a save problem.
+  await snapshotBeforeWrite(path)
   await atomicWriteJson(path, data)
 }
 

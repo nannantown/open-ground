@@ -100,11 +100,15 @@ beforeEach(async () => {
 afterEach(async () => {
   __resetOrchestratorForTests()
   await clearSession()
-  // Restore every env var to its pre-test value (delete if it was unset) so this
-  // file leaks nothing — including a dangling OPENGROUND_HOME at a deleted dir.
+  // Restore every env var to its pre-test value so this file leaks nothing —
+  // EXCEPT the home vars, which are never unset. A dangling OPENGROUND_HOME
+  // pointing at a deleted temp dir is inert; an UNSET one points at the user's
+  // real data (paths.ts openGroundHome), which is the strictly worse leak.
   for (const k of ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k]
-    else process.env[k] = savedEnv[k]
+    if (savedEnv[k] !== undefined) process.env[k] = savedEnv[k]
+    // NEVER unset the home vars: empty means the user's REAL ~/.openground
+    // (paths.ts openGroundHome), and vitest reuses workers across files.
+    else if (!['OPENGROUND_HOME', 'HOME'].includes(k)) delete process.env[k]
   }
   await rm(home, { recursive: true, force: true })
 })

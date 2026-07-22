@@ -61,6 +61,7 @@ import {
   type OwnerQuestion,
   type OwnerAnswer,
 } from './swarmOverseerBrain'
+import { buildUnclassifiedRoutingPlainQuestion } from './swarmDecisionRouting'
 import {
   openEscalation as realOpenEscalation,
   defaultReceiptKey,
@@ -444,6 +445,14 @@ const raiseToInbox = async (
     projectPath: string
     question: string
     context: string
+    /** 平易文 (①決めること ②選択肢 ③各選択の影響) — the overseer's OWN template
+     *  raises (S1/S2/S3/S5/S10) supply it; the S4 worker-question raises mostly
+     *  don't (their question text is worker-authored, already-plain per the /order
+     *  worker rules — there is no template to render it from). The ONE exception is
+     *  the S4 ABSTENTION lane: "the corpus doesn't ground this" means the area is
+     *  not on the owner's involvement map, and THAT has a template — the routing
+     *  question (swarmDecisionRouting.buildUnclassifiedRoutingPlainQuestion). */
+    plainQuestion?: string
     whyEscalated: OpenEscalationInput['whyEscalated']
     receiptKey: string
     taskId?: string
@@ -457,6 +466,7 @@ const raiseToInbox = async (
       projectPath: input.projectPath,
       question: input.question,
       context: input.context,
+      ...(input.plainQuestion ? { plainQuestion: input.plainQuestion } : {}),
       whyEscalated: input.whyEscalated,
       receiptKey: input.receiptKey,
       ...(input.taskId ? { taskId: input.taskId } : {}),
@@ -673,16 +683,50 @@ const drainBrainResults = async (
     // the proxy's draft when it produced one (abstention flag set for calibrated "thin").
     const why = ans && ans.kind === 'escalate' ? ans.why : 'insufficient-info'
     const reason = ans && ans.kind === 'escalate' ? ans.reason : 'proxy brain produced no answer'
+    // UNCLASSIFIED lane (2026-07-18 owner design): the brain READ the corpus and
+    // judged it doesn't ground this — i.e. the area is not on the owner's
+    // 「関与の観測地図」. Rather than forwarding a question the owner may not even
+    // want to own, lead with the ONE routing question ("is this yours to decide?");
+    // their answer flows to you-corpus through the existing answer path and grows
+    // the map.
+    //
+    // GATED ON `abstained`, NOT ON `why` — load-bearing. 'insufficient-info' is
+    // ALSO what the FAILURE paths report: brain crash/timeout (incl. every model
+    // tier off / quota park), an unparseable verdict, and the watchdog's synthesized
+    // null result above. On those the corpus was never consulted, so the routing
+    // question would (a) assert a finding nobody made and promise a silence
+    // (「次から…なるべく止めないようにします」) the failure lane cannot honour, and worse
+    // (b) invite blanket delegation ("まかせる") for a question whose
+    // REVERSIBILITY nothing has judged — the keyword pre-gate is best-effort by
+    // design, so a paraphrased irreversible action is caught only by the brain's own
+    // ESCALATE, which is exactly what is missing when the brain is down. Those raise
+    // bare, keeping the worker's own question as the owner's primary text.
+    // 'irreversible'/'policy' are not wrapped either: both are already correctly
+    // addressed, so asking who owns them would be noise.
+    // ONE source for both surfaces below. `why` cannot stand in for either: it is
+    // 'insufficient-info' on the failure paths too (see the note above).
+    const abstained = ans?.kind === 'escalate' && !!ans.abstained
+    const plainQuestion = abstained
+      ? buildUnclassifiedRoutingPlainQuestion(r.question)
+      : undefined
     await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
       question: r.question,
       context: `${r.context}\n\n(監督の proxy 判断: ${reason})`,
+      ...(plainQuestion ? { plainQuestion } : {}),
       whyEscalated: why,
       receiptKey: defaultReceiptKey({ projectPath: engine.path, taskId: r.taskId, question: r.question }),
       taskId: r.taskId,
       branch: r.branch,
       terminalId: r.terminalId,
-      proxyDraft: { answer: reason, confidence: 'low', isAbstention: why === 'insufficient-info' },
+      // Same `abstained` gate, for the same reason the plainQuestion uses it: keyed
+      // on `why` this read TRUE for a crashed / unparseable / timed-out brain, so the
+      // UI labelled a FAILURE as a considered abstention ("コーパスが薄い") and swapped
+      // the real reason for that generic line. Keyed on `abstained`, a failure now
+      // renders its own `reason` — "proxy brain failed: …" — which is the truth and
+      // the thing the owner needs to act on. (Pre-existing on origin/main; the
+      // `abstained` flag this branch added is what makes the fix a one-liner.)
+      proxyDraft: { answer: reason, confidence: 'low', isAbstention: abstained },
     })
     log('info', `overseer: proxy escalated a worker question (${why}) → inbox: ${shorten(r.question)}`)
   }
@@ -794,6 +838,19 @@ const detectWorkerQuestions = async (
 }
 
 // ── S1/S2 — state-derived escalations (T3), in-pass every tick (zero-cost) ───────
+//
+// ADDRESSING AUDIT (2026-07-18, the WHO-decides card). Every TEMPLATE raise below
+// — S1, S2, S3, S10, S5, plus the orchestrator's no-model raise — was re-read
+// against the owner's 「関与の観測地図」 (swarmDecisionRouting.ts). FINDING: NONE
+// needed changing. Each one asks what to DO WITH THE WORK (retry / split / give
+// up / resume / put back) or flips a standing policy switch (the allowed-model
+// mask) — both squarely in the areas the owner is observed to decide (進め方の戦略
+// / 恒久境界). None asks them to pick an implementation, an algorithm, a library,
+// or any engineering trade-off. The routing rules therefore constrain the two
+// lanes whose text is NOT template-authored — the worker's own questions
+// (WORKER_ORDER_RULES) and the proxy brain's verdict (the brain prompt) — while
+// these templates stand as written. Keep it that way: a new template raise must
+// name an owner-domain choice, not delegate a technical decision.
 
 const detectStateAnomalies = async (
   engine: OverseerEngine,
@@ -816,6 +873,10 @@ const detectStateAnomalies = async (
       projectPath: engine.path,
       question: `差し戻し上限を超えて blocked 入りしたカード ${who} をどうしますか？（設計見直し / 諦めて放置 / 分割して再依頼）`,
       context: `review→doing の差し戻しが ${a.attempts ?? '?'} 回で上限超過し 'blocked' に退避。本人の方針判断が要ります。`,
+      plainQuestion:
+        `${who} の作業をAIに${a.attempts ?? '数'}回やり直させましたが、検査に合格しませんでした。この作業をどうするか決めてください。\n` +
+        'A: 頼み方や作業の分け方を見直して、もう一度やらせる（やり方を変えて再挑戦します）\n' +
+        'B: この作業はいったん諦めて保留のままにする（ほかの作業はそのまま続きます）',
       whyEscalated: 'policy',
       receiptKey: `S1:${engine.path}:${a.ref}:${a.attempts ?? 0}`,
       taskId: a.ref,
@@ -840,6 +901,10 @@ const detectStateAnomalies = async (
         projectPath: engine.path,
         question: '全ワーカーが停止し doing が宙吊りです。どう復旧しますか？（原因を調べて再依頼 / 一旦停止）',
         context: '稼働中のワーカーが0になり doing のカードが進みません（全員 crash/stall）。auto-drain で復旧しない場合は本人判断が要ります。',
+        plainQuestion:
+          '作業していたAIが全員止まってしまい、やりかけの仕事が宙に浮いています。どうしますか？\n' +
+          'A: もう一度AIを動かして、続きをやらせる（これまでの成果は残っています）\n' +
+          'B: いったんこのまま止めておく（あとで再開できます。データは消えません）',
         whyEscalated: 'policy',
         receiptKey: `S2:${engine.path}:all-workers-down`,
       })
@@ -943,11 +1008,48 @@ const detectEdgeFatals = async (
     }
     const ok = await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
+      // S3 carries TWO different situations under one event, and they need opposite
+      // questions (2026-07-18). A never-ready worker really is a "split it up or
+      // drop it" decision. A worker that had ALREADY delivered is NOT: its branch
+      // holds integrable work, its card is back in 'review', and the judgement is
+      // the commander's. Offering "split it up and retry" there is not merely noise
+      // — an answered escalation whose worker is gone is queued into the card's NEXT
+      // dispatch as a directive, so that answer would order a fresh worker to redo
+      // finished work. The owner's only real call is whether to abandon it.
       question:
         c.id === 'S3'
-          ? `カード "${c.f.taskTitle ?? c.ref}" が実行時間上限を超えました。分割して再依頼しますか、それとも見送りますか？`
+          ? c.f.execTimeoutKind === 'integration-wait'
+            ? c.f.execTimeoutShape === 'capped-wait'
+              ? `カード "${c.f.taskTitle ?? c.ref}" は ready 到達後、統合待ちが控除上限を超えて長引いたため停止しました（再作業はしていません）。成果はブランチに残り、カードは review にあります（統合の可否は司令官が判断します）。この作業自体を見送りますか？`
+              : c.f.execTimeoutShape === 'work'
+                ? `カード "${c.f.taskTitle ?? c.ref}" は ready 到達後、実作業が作業上限に達して停止しました（待ち時間が原因ではありません）。成果はブランチに残り、カードは review にあります（統合の可否は司令官が判断します）。この作業自体を見送りますか？`
+                : `カード "${c.f.taskTitle ?? c.ref}" は一度 ready に到達した後、差し戻し後の再作業で作業上限に達して停止しました。成果はブランチに残り、カードは review にあります（統合の可否は司令官が判断します）。この作業自体を見送りますか？`
+            : `カード "${c.f.taskTitle ?? c.ref}" が実行時間上限を超えました。分割して再依頼しますか、それとも見送りますか？`
           : `エンジン自己入替が失敗し旧版で動作中です（${c.f.event}）。どう対応しますか？`,
       context: c.f.detail,
+      plainQuestion:
+        c.id === 'S3'
+          ? c.f.execTimeoutKind === 'integration-wait'
+            ? c.f.execTimeoutShape === 'capped-wait'
+              ? // 手直しはしていない。順番待ちが長かっただけ、と正確に言う。
+                `「${c.f.taskTitle ?? c.ref}」はできあがったあと、取り込みの順番待ちが長引いたので、いったん担当を降ろしました。手直しはしていません（時間を使い切った原因は待ち時間で、失敗でもありません）。できあがった分はそのまま残っていて、取り込むかどうかは担当（司令官）が中身を見て決めます。あなたが決めることは基本ありません。\n` +
+                'A: このまま任せる（担当が中身を確認して取り込みます）\n' +
+                'B: この作業は見送る（できあがった分も取り込みません）'
+              : c.f.execTimeoutShape === 'work'
+                ? // 待ちでも手直しでもなく、純粋に作業時間を使い切った。順番待ちの
+                  // せいにすると事実に反する(このワーカーはずっと働いていた)。
+                  `「${c.f.taskTitle ?? c.ref}」はできあがったあとも作業を続け、持ち時間を使い切ったので、いったん担当を降ろしました。順番待ちのせいではありません。できあがった分は残っていて、取り込むかどうかは担当（司令官）が中身を見て決めます。あなたが決めることは基本ありません。\n` +
+                  'A: このまま任せる（担当が中身を確認して取り込みます）\n' +
+                  'B: この作業は見送る（残っている分も取り込みません）'
+                : `「${c.f.taskTitle ?? c.ref}」は一度できあがったのですが、その後の手直しが持ち時間を使い切って途中で止まりました。できあがった分は残っていて、取り込むかどうかは担当（司令官）が中身を見て決めます。あなたが決めることは基本ありません。\n` +
+                  'A: このまま任せる（担当が中身を確認して取り込みます）\n' +
+                  'B: この作業は見送る（残っている分も取り込みません）'
+            : `「${c.f.taskTitle ?? c.ref}」の作業が持ち時間を使い切ったため、途中で打ち切られました。書きかけの成果は保存されています。どうしますか？\n` +
+              'A: 作業を小さく分けて、もう一度やらせる（持ち時間内に終わりやすくなります）\n' +
+              'B: この作業は見送る（今回の変更は取り込まれません）'
+          : 'このアプリ自身を新しい版に入れ替えようとして失敗したため、自動で元の版に戻して動いています。故障ではありませんが、直近の改善分は反映されていません。どうしますか？\n' +
+            'A: 入れ替えに失敗した原因の調査を、新しい作業としてAIに頼む\n' +
+            'B: このまま様子を見る（次に入れ替えが成功するまで、今の版のまま動き続けます）',
       whyEscalated: 'policy',
       receiptKey: c.receiptKey,
       taskId: c.f.taskId,
@@ -979,6 +1081,12 @@ const detectBlockedDwell = async (
 ): Promise<void> => {
   for (const t of tasks) {
     if (columnOf(t) !== 'blocked') continue
+    // The daily fuel report's proposal cards SIT in blocked by design (it is the
+    // human-judgment lane — see dailyFuelReport.ts). They are not waiting on a
+    // dependency, so S5's question 「依存は解けましたか？」 is meaningless for
+    // them, and the report already told the owner when it filed one. Firing here
+    // would be a second nag, worded for a situation the card is not in.
+    if (t.fuelProposalKey) continue
     const watchKey = `S5:${t.id}`
     activeWatch.add(watchKey)
     const prev = ov.watch.get(watchKey)
@@ -997,6 +1105,10 @@ const detectBlockedDwell = async (
       projectPath: engine.path,
       question: `カード "${t.title ?? t.id}" が blocked のまま30分以上滞留しています。依存は解けましたか？（todo へ戻す / このまま保留）`,
       context: 'blocked 列で長く止まっているカード。列移動は本人の判断です（監督は自動で動かしません）。',
+      plainQuestion:
+        `「${t.title ?? t.id}」の作業が「保留」の置き場に入ったまま、30分以上動いていません。保留にした理由（何かの順番待ちなど）がもう解決していれば、戻すと作業が再開されます。どうしますか？\n` +
+        'A: 順番待ちの列に戻して、作業を再開させる\n' +
+        'B: このまま保留にしておく（勝手に動かすことはありません）',
       whyEscalated: 'policy',
       receiptKey: `S5:${engine.path}:${t.id}`,
       taskId: t.id,
@@ -1043,7 +1155,7 @@ const detectReviewIdle = async (
   if (ov.seen.get(signalKey) === fp) return
   ov.seen.set(signalKey, fp)
   fired.push('S7')
-  // T0' — info notice ONLY (never the inbox — §6 S7). Auto-integrate is the owner's.
+  // T0' — info notice ONLY (never the inbox — §6 S7). Landing is the commander's.
   await deps
     .notifyInfo({
       event: 'review-idle',

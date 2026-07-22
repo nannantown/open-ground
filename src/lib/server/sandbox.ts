@@ -125,11 +125,18 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
   // git / IaC token stores. Credential DIRS use subpath; credential FILES use
   // literal where the parent dir also holds read-needed build data (cargo/gem/
   // terraform registries + plugins) so we deny only the secret, not the dir.
-  // NOTE (honest limit): the login KEYCHAIN's secrets are reached via securityd
-  // IPC (mach-lookup, allowed — it's how https git push authenticates), NOT by
-  // reading these files, so a determined payload can still `git credential fill` a
-  // stored token. Denying these files does not close that; true secret isolation
-  // needs the egress-proxy follow-up (docs/SANDBOX_EXPERIMENT.md).
+  // NOTE (honest limit): the LOGIN keychain is deliberately reachable — denying it
+  // is 100% launch failure (the reasoning is at that carve-in), while the other
+  // credential stores sharing its directory are denied by the depth regex below.
+  // So a determined payload can still reach ANY login-keychain item
+  // (`security find-generic-password`, `git credential fill`) — and "any item" is
+  // broader than claude's own token: on a normal machine that set includes
+  // `Chrome Safe Storage`, the master key to the browser password vault. Denying
+  // the login family would not have closed that either — it only broke login: true
+  // secret isolation needs the egress-proxy follow-up (docs/SANDBOX_EXPERIMENT.md),
+  // which the overseer brain already runs. What IS closed here is the vault's other
+  // half — the browser credential DBs, denied by regex below — so the key alone no
+  // longer opens anything locally.
   const denyReadSubpaths = [
     join(home, '.ssh'),
     join(home, '.aws'),
@@ -141,17 +148,13 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
     join(home, '.azure'), // Azure CLI tokens
     join(home, '.wrangler'), // Cloudflare wrangler (legacy token location)
     join(home, '.config/.wrangler'), // Cloudflare wrangler (current token location)
-    // The login-keychain FILES — but NOT under 'loopback': claude's subscription
-    // credential lives in the login keychain, and Security.framework READS the
-    // keychain db files from the CLIENT process (verified on the real kernel: a
-    // sandboxed `security find-generic-password` fails with this deny and
-    // succeeds without it — the securityd mach IPC alone is NOT the whole path),
-    // so keeping the deny leaves the confined claude "Not logged in". Under
-    // 'loopback' the deny also buys ~nothing: the db is encrypted at rest and
-    // every off-machine byte still has to pass the host-side allowlist proxy —
-    // there is no exfil destination. Under 'all' (worker/interactive) outbound
-    // is open, so the file-level deny stays as the historical exfil-surface trim.
-    ...(input.network === 'loopback' ? [] : [join(home, 'Library/Keychains')]),
+    // Safari / NSHTTPCookieStorage session cookies — the Safari-side twin of the
+    // Chromium `Cookies` DBs denied by regex below. A live session cookie IS a
+    // bearer credential; claude never needs one.
+    join(home, 'Library/Cookies'),
+    // (~/Library/Keychains is NOT denied wholesale — that breaks the keychain
+    // WRITE path. Its co-resident secrets are denied by the depth-based regex
+    // emitted after these loops; see there.)
   ]
   const denyReadLiterals = [
     join(home, '.netrc'),
@@ -167,6 +170,41 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
     join(home, '.vault-token'), // HashiCorp Vault token
     join(home, '.gradle/gradle.properties'), // Gradle signing / repo creds (gradle caches stay readable)
     join(home, '.m2/settings.xml'), // Maven repo creds (the local .m2/repository stays readable)
+  ]
+
+  // BROWSER credential stores — the OTHER half of the keychain carve-in's blast
+  // radius, and the half that is actually cheap to close.
+  //
+  // Chromium encrypts its password vault with a master key stored as the login
+  // keychain item `Chrome Safe Storage` (measured: present on the dev machine).
+  // The carve-in above makes that item reachable; the vault FILES were reachable
+  // all along via the broad `(allow file-read* (subpath "/"))`. Either half alone
+  // is inert — together they let a contained worker with open egress lift every
+  // saved browser password. The keychain half is UNAVOIDABLE (denying it is the
+  // 100%-launch-failure this whole change fixes). This half is not, so it is
+  // closed here, and residual 1 below is worded for what actually remains.
+  //
+  // Anchored under `<home>/Library/Application Support/` and matched by FILENAME
+  // at ANY depth (`.` matches `/` in POSIX ERE), because the profile directory
+  // level varies per browser and per user-created profile: `Google/Chrome/Default`,
+  // `Google/Chrome/Profile 1`, `Microsoft Edge/Default`,
+  // `BraveSoftware/Brave-Browser/Default`, `Firefox/Profiles/<rand>.default` — all
+  // five verified denied on the real kernel, while `Google/Chrome/Local State`
+  // stays readable. A literal per path could not keep up with profile names the
+  // user invents, which is why these are regexes and not `denyReadLiterals`.
+  // Trailing `.*` catches the SQLite sidecars (`-journal` / `-wal` / `-shm`) and
+  // Chromium's `Login Data For Account`.
+  //
+  // Deliberately NOT a subpath deny of the browser dirs: a Chrome extension's
+  // source legitimately lives under Application Support and claude may be asked to
+  // work on it. Only the credential DBs are denied. Alternation (not a `[…]` char
+  // class) for the Firefox family, matching this profile's house rule — a profile
+  // that fails to COMPILE breaks every launch.
+  const denyReadRegexes = [
+    // Chromium family: saved passwords / cookies / autofill (incl. stored cards).
+    `^${homeRx}/Library/Application Support/.*/(Login Data|Cookies|Web Data).*$`,
+    // Firefox family: the password store, its master key, and the cookie jar.
+    `^${homeRx}/Library/Application Support/.*/(logins\\.json|key3\\.db|key4\\.db|cert9\\.db|cookies\\.sqlite.*)$`,
   ]
 
   // AUTO-EXECUTING config re-denied for WRITE (last-match-wins, so it overrides
@@ -294,6 +332,71 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
   // bracket expression) keeps it to the atomic-sibling shape.
   lines.push(`(allow file-write* (regex #"^${homeRx}/\\.claude\\.json(\\..*)?$"))`)
 
+  // THE LOGIN KEYCHAIN — claude's subscription credential lives in
+  // `~/Library/Keychains/login.keychain-db`, and Security.framework does that db's
+  // file I/O from the CLIENT process (not purely over securityd IPC), so Seatbelt
+  // sees it as ordinary file ops. Both directions are required:
+  //   • READ — denying it is not a secrecy trim, it is an auth outage: claude
+  //     starts `Not logged in · Please run /login`. That is 100% launch failure,
+  //     which is what made a sandboxed swarm worker unable to run at all while the
+  //     historical `(deny file-read* …/Library/Keychains)` stood. Read needs no
+  //     rule here — the broad `(allow file-read* (subpath "/"))` covers it once
+  //     that deny is gone (and it is gone: see the note by denyReadSubpaths).
+  //   • WRITE — claude PERSISTS its REFRESHED OAuth token back to the item
+  //     (measured: the item's `cdat` is the original login months back, its `mdat`
+  //     tracks the latest refresh, hours apart). Read-only would fix start-up and
+  //     then EPERM the refresh (`SecKeychainItemCreateFromContent:
+  //     UNIX[Operation not permitted]`) — a worker that launches fine and dies
+  //     hours in, harder to diagnose than the bug it replaced.
+  // Scoped to the `login.keychain*` FAMILY, not the whole `~/Library/Keychains`
+  // subpath: the prefix covers the modern `login.keychain-db`, the legacy
+  // `login.keychain`, and the SQLite atomic siblings (`-journal`/`-wal`/`-shm`,
+  // `.tmp`) — real-kernel verified that an item write and a full `claude -p` both
+  // succeed under exactly this rule — while the dir's OTHER occupants, the
+  // per-UUID data-protection keychains (Safari / iCloud / app secrets), stay
+  // write-denied. claude never touches those. (The trailing `.*` also lets a
+  // `login.keychain…`-PREFIXED dir be created and written under — deliberate: it
+  // is inert scratch inside an otherwise write-denied dir, nothing auto-executes
+  // from there, and the UUID-named DP keychains can't be reached by that prefix.
+  // Nor can that dir be used as a springboard OUT of the family: the kernel matches
+  // the RESOLVED path, so `login.keychainX/../other.keychain` is denied like any
+  // other non-family sibling — sandbox-probe.ts pins exactly that, so the claim is
+  // measured rather than argued. Tightening the prefix itself would need a `[^/]`
+  // char class, which this profile avoids — sandbox-exec's regex engine has
+  // rejected bracket expressions here before, and a profile that fails to COMPILE
+  // breaks every launch.)
+  // SECURITY: this is NOT the auto-executing-config class the write-denies below
+  // guard — a keychain item is data, never code, so it cannot plant something that
+  // RUNS un-sandboxed on a later launch. Two residuals it DOES leave, stated
+  // plainly rather than waved past:
+  //   1. Read of ANY login-keychain item by a contained agent whose outbound is
+  //      open — not just claude's own token. Name it concretely rather than saying
+  //      "a stored token": on a normal machine the login keychain holds
+  //      `Chrome Safe Storage`, the master key to the BROWSER PASSWORD VAULT, plus
+  //      whatever else the user has saved there over the years. The vault's other
+  //      half (the Chromium/Firefox credential DBs) is denied by the read-regexes
+  //      above, so the key no longer unlocks anything reachable — but the items
+  //      themselves are still readable, and that is what stays open. Closed
+  //      structurally only by `network:'loopback'` + the allowlist egress proxy (no
+  //      destination to exfil to) — which is why the brain runs that way and
+  //      extending it to workers is the follow-up.
+  //   2. MUTATION of claude's own credential store — tamper, or outright deletion
+  //      of `login.keychain-db` AND its legacy twin `login.keychain` (both are in
+  //      the write-allowed family, and the legacy file is real: 265 KB, 2016, still
+  //      present on the dev machine — destroying it is just as irreversible).
+  //      Note what that file also holds on a release
+  //      machine: the Developer ID signing key + the notary profile (see
+  //      docs/DISTRIBUTION.md). Deletion is not re-downloadable from Apple, and
+  //      `network:'loopback'` does NOT mitigate it — that closes exfil, not
+  //      destruction. Unavoidable given the fix (the same file must be writable
+  //      for the token refresh); worth knowing rather than discovering.
+  //      Certificate TRUST SETTINGS — the sharper worry, since a planted root is
+  //      policy an UN-sandboxed process honours — turn out NOT to be in the
+  //      keychain db: they live at `~/Library/Keychains/TrustSettings.plist`,
+  //      which this family regex does not match, so the write-deny still covers
+  //      them (verified: absent on the dev machine, and the path is denied).
+  lines.push(`(allow file-write* (regex #"^${homeRx}/Library/Keychains/login\\.keychain.*$"))`)
+
   // Credential read-denies LAST so they win over the broad read above.
   for (const p of denyReadSubpaths) {
     lines.push(`(deny file-read* (subpath "${sbStr(p)}"))`)
@@ -301,6 +404,44 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
   for (const p of denyReadLiterals) {
     lines.push(`(deny file-read* (literal "${sbStr(p)}"))`)
   }
+  for (const re of denyReadRegexes) {
+    lines.push(`(deny file-read* (regex #"${re}"))`)
+  }
+  // ~/Library/Keychains is SHARED between claude's login keychain (which must stay
+  // fully reachable — see the carve-in above) and the user's OTHER credential
+  // stores: the per-UUID **data-protection keychains** (`keychain-2.db` with its
+  // `user.kb`/`stash.kb` keybags — Safari / iCloud / app secrets) and Octagon
+  // device-trust state, all of which live one level DEEPER, plus the DP
+  // `metadata.keychain-db` alongside. claude never reads any of them, so they are
+  // denied — but the deny has to be DEPTH-BASED, not the whole dir.
+  //
+  // Why not simply `(deny file-read* (subpath …/Library/Keychains))` + re-allow the
+  // login family? Measured on the real kernel: that shape authenticates fine but
+  // KILLS the keychain WRITE (`SecKeychainItemCreateFromContent:
+  // UNIX[Operation not permitted]`) — mutating an item needs read access to the
+  // directory's own entries, which a dir-wide deny withholds. Adding an explicit
+  // allow for the dir ENTRY does not restore it either. That shape would trade the
+  // launch failure this whole change fixes for a refresh failure hours in, so the
+  // deny stops at depth: everything at `<dir>/<x>/<y>` (the DP keychain dirs) is
+  // denied while the dir's own direct entries — the login keychain among them —
+  // stay readable.
+  //
+  // `.+/.+` rather than a `[^/]` char class: sandbox-exec's regex engine has
+  // rejected bracket expressions here before, and a profile that fails to COMPILE
+  // breaks every launch. `.` matches `/` in POSIX ERE, so this reads as "at least
+  // two path components below the dir".
+  lines.push(`(deny file-read* (regex #"^${homeRx}/Library/Keychains/.+/.+"))`)
+  // BOTH spellings of the DP metadata store, which sits at depth 1 (the depth regex
+  // above starts at depth 2, so it needs its own deny). The legacy `metadata.keychain`
+  // is not hypothetical — it is present on the dev machine (0600, 23 KB, 2016) and
+  // was measurably read-ALLOWED while only the `-db` twin was denied. The write side
+  // already covers its legacy twin (`login.keychain` — same era, same reason), so
+  // covering only one spelling here was an oversight, not a decision. No other
+  // sidecars exist at this depth (verified: the dir holds exactly these two plus the
+  // login family and the per-UUID DP dirs), so two literals are exact.
+  lines.push(`(deny file-read* (literal "${sbStr(join(home, 'Library/Keychains/metadata.keychain'))}"))`)
+  lines.push(`(deny file-read* (literal "${sbStr(join(home, 'Library/Keychains/metadata.keychain-db'))}"))`)
+
   // Execution-config write-denies LAST so they win over the write-allows above.
   for (const p of denyWriteLiterals) {
     lines.push(`(deny file-write* (literal "${sbStr(p)}"))`)

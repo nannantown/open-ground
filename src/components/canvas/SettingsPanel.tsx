@@ -136,6 +136,7 @@ export const SettingsPanel = ({
   // immediately on toggle (below) and re-seeded from settings on open.
   const [swarmExp, setSwarmExp] = useState(settings.experiments?.swarm === true)
   const [sandboxExp, setSandboxExp] = useState(settings.experiments?.sandbox === true)
+  const [personaExp, setPersonaExp] = useState(settings.experiments?.persona === true)
   // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
@@ -197,6 +198,7 @@ export const SettingsPanel = ({
     setDisplayName(settings.displayName ?? '')
     setSwarmExp(settings.experiments?.swarm === true)
     setSandboxExp(settings.experiments?.sandbox === true)
+    setPersonaExp(settings.experiments?.persona === true)
     setLockdownState(settings.lockdownMode === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -227,6 +229,18 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       experiments: { ...s.experiments, sandbox: next },
+    })
+  }
+
+  const setPersona = (next: boolean) => {
+    if (next === personaExp) return
+    setPersonaExp(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      experiments: { ...s.experiments, persona: next },
     })
   }
 
@@ -540,6 +554,14 @@ export const SettingsPanel = ({
                         label={t('settings.experiments.sandbox')}
                         value={sandboxExp}
                         onChange={setSandbox}
+                        offLabel={t('settings.experiments.off')}
+                        onLabel={t('settings.experiments.on')}
+                      />
+                      <ExperimentToggle
+                        label={t('settings.experiments.persona')}
+                        hint={t('settings.experiments.personaHint')}
+                        value={personaExp}
+                        onChange={setPersona}
                         offLabel={t('settings.experiments.off')}
                         onLabel={t('settings.experiments.on')}
                       />

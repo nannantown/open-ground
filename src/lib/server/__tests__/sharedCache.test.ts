@@ -28,12 +28,20 @@ const sample = (): ProjectData => ({
 })
 
 let home: string
+// The suite-wide pin (src/test/setup-home.ts), restored in afterEach. NEVER
+// `delete` it: an unset OPENGROUND_HOME makes every later openGroundHome()
+// resolve to the REAL ~/.openground (the 2026-07-18 data loss).
+const prevHome = process.env.OPENGROUND_HOME
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), 'og-shared-cache-'))
   process.env.OPENGROUND_HOME = home
 })
 afterEach(async () => {
-  delete process.env.OPENGROUND_HOME
+  // NOT unset — see paths.ts openGroundHome(): empty means the real
+  // ~/.openground, and worker processes are reused across test files. Restore
+  // the suite-wide pin rather than leaving the (about to be removed) temp dir
+  // in place, so the next file inherits a home that still exists.
+  if (prevHome !== undefined) process.env.OPENGROUND_HOME = prevHome
   await rm(home, { recursive: true, force: true })
 })
 

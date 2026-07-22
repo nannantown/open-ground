@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 import {
   listActiveTerminalCwds,
   listActiveTerminals,
+  claudeSessionActivity,
+  isClaudeSessionLive,
   claudeStatus,
   scheduleMenuDetect,
   getTerminal,
@@ -57,6 +59,7 @@ const fakeSession = (
     lastOutputAt?: number
     menuOpen?: boolean
     hidden?: boolean
+    agentSessionId?: string
   } = {},
 ): FakeSessionShape => ({
   info: {
@@ -67,6 +70,7 @@ const fakeSession = (
     rows: 30,
     startedAt: new Date().toISOString(),
     tag: opts.tag ?? 'shell',
+    ...(opts.agentSessionId !== undefined ? { agentSessionId: opts.agentSessionId } : {}),
     ...(opts.lastOutputAt !== undefined ? { lastOutputAt: opts.lastOutputAt } : {}),
     ...(opts.menuOpen !== undefined ? { menuOpen: opts.menuOpen } : {}),
     ...(opts.hidden ? { hidden: true } : {}),
@@ -349,6 +353,88 @@ describe('listActiveTerminals', () => {
     const res = listActiveTerminals()
     expect(res.cwds).toEqual(['/tmp/proj-a'])
     expect(res.claude).toEqual([{ id: 'user', cwd: '/tmp/proj-a', status: 'working' }])
+  })
+})
+
+// ── claudeSessionActivity — liveness + ACTIVITY for a persisted session id ──────
+// The swarm commander monitor's primitive (2026-07-18). isClaudeSessionLive answers
+// only "is a PTY holding this transcript open?"; conflating that single bit with
+// heartbeat silence made the engine declare a LIVE, working commander dead and respawn
+// it three times. `lastOutputAt` is the second channel that distinguishes a quiet desk
+// from a gone one, and `terminalId` is the PTY a nudge is written to.
+describe('claudeSessionActivity', () => {
+  it('reports a live session with its newest paint and the PTY to address', () => {
+    const now = Date.now()
+    state().sessions.set(
+      'm1',
+      fakeSession('m1', '/tmp/proj-a', { tag: 'claude', agentSessionId: 'sess-1', lastOutputAt: now }),
+    )
+    expect(claudeSessionActivity('sess-1')).toEqual({
+      live: true,
+      lastOutputAt: now,
+      terminalId: 'm1',
+    })
+    expect(isClaudeSessionLive('sess-1')).toBe(true) // the wrapper agrees
+  })
+
+  it('a live PTY that has NEVER painted is still live, and is still addressable', () => {
+    // The distinction the whole fix rests on: no output ≠ no process. A desk that has
+    // not painted must remain nudge-able rather than be treated as absent.
+    state().sessions.set(
+      'm2',
+      fakeSession('m2', '/tmp/proj-a', { tag: 'claude', agentSessionId: 'sess-2' }),
+    )
+    expect(claudeSessionActivity('sess-2')).toEqual({
+      live: true,
+      lastOutputAt: null,
+      terminalId: 'm2',
+    })
+  })
+
+  it('an EXITED session is not live — its id is free to resume and there is nothing to nudge', () => {
+    state().sessions.set(
+      'm3',
+      fakeSession('m3', '/tmp/proj-a', {
+        tag: 'claude',
+        agentSessionId: 'sess-3',
+        lastOutputAt: Date.now(),
+        finishedAt: new Date().toISOString(),
+      }),
+    )
+    expect(claudeSessionActivity('sess-3')).toEqual({
+      live: false,
+      lastOutputAt: null,
+      terminalId: null,
+    })
+    expect(isClaudeSessionLive('sess-3')).toBe(false)
+  })
+
+  it('unknown / empty session ids report absent rather than throwing', () => {
+    expect(claudeSessionActivity('nope')).toEqual({ live: false, lastOutputAt: null, terminalId: null })
+    expect(claudeSessionActivity('')).toEqual({ live: false, lastOutputAt: null, terminalId: null })
+  })
+
+  it('with several live PTYs on one id, the NEWEST-painting one is the one to address', () => {
+    const now = Date.now()
+    state().sessions.set(
+      'old',
+      fakeSession('old', '/tmp/proj-a', { tag: 'claude', agentSessionId: 'dup', lastOutputAt: now - 60_000 }),
+    )
+    state().sessions.set(
+      'new',
+      fakeSession('new', '/tmp/proj-a', { tag: 'claude', agentSessionId: 'dup', lastOutputAt: now }),
+    )
+    expect(claudeSessionActivity('dup')).toEqual({ live: true, lastOutputAt: now, terminalId: 'new' })
+  })
+
+  it('a HIDDEN utility session still counts — it is a real claude process holding the id', () => {
+    // Mirrors isClaudeSessionLive's documented rule (unlike the user-facing beacon,
+    // which filters hidden sessions out).
+    state().sessions.set(
+      'util',
+      fakeSession('util', '/tmp/proj-a', { tag: 'claude', agentSessionId: 'sess-h', hidden: true }),
+    )
+    expect(claudeSessionActivity('sess-h').live).toBe(true)
   })
 })
 

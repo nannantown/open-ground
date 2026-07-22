@@ -176,6 +176,11 @@ describe('overseer — S1 rework-exhausted', () => {
     expect(calls.openEscalation).toHaveLength(1)
     expect(calls.openEscalation[0].whyEscalated).toBe('policy')
     expect(calls.openEscalation[0].taskId).toBe('card-9')
+    // 平易文 rides every overseer TEMPLATE raise (non-programmer owner surface):
+    // ①決めること ②選択肢 ③影響 — here just pin presence + the A/B shape.
+    expect(calls.openEscalation[0].plainQuestion).toContain('A: ')
+    expect(calls.openEscalation[0].plainQuestion).toContain('B: ')
+    expect(calls.openEscalation[0].plainQuestion).toContain('ナイン')
 
     // Same anomaly next pass → deduped (no second raise).
     const out2 = await runOverseerPass(engine, [], () => {}, makeDeps(calls))
@@ -216,6 +221,8 @@ describe('overseer — S2 all-workers-down', () => {
     const out1 = await runOverseerPass(engine, [], () => {}, makeDeps(calls))
     expect(out1.fired).toContain('S2')
     expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0].plainQuestion).toContain('AIが全員止まって')
+    expect(calls.openEscalation[0].plainQuestion).toContain('A: ')
 
     await runOverseerPass(engine, [], () => {}, makeDeps(calls))
     expect(calls.openEscalation).toHaveLength(1) // deduped
@@ -274,8 +281,16 @@ describe('overseer — S4 worker question (brain ignition)', () => {
     const engine = makeEngine({ workers: [worker()] })
     const deps = makeDeps(calls, {
       readHeartbeat: blockedQuestion('この機能の価格はいくらにすべき？'),
+      // `abstained: true` is what the real brain emits for a considered abstention
+      // (swarmOverseerBrain answerAsOwner, the ONLY site that sets it). Without it
+      // this fixture was a failure-lane result wearing an abstention's label.
       answerAsOwner: async () =>
-        ({ kind: 'escalate', why: 'insufficient-info', reason: 'コーパスに価格判断の記録が薄い' }) as OwnerAnswer,
+        ({
+          kind: 'escalate',
+          why: 'insufficient-info',
+          reason: 'コーパスに価格判断の記録が薄い',
+          abstained: true,
+        }) as OwnerAnswer,
     })
 
     await runOverseerPass(engine, [], () => {}, deps) // launch
@@ -288,6 +303,117 @@ describe('overseer — S4 worker question (brain ignition)', () => {
     expect(esc.whyEscalated).toBe('insufficient-info')
     expect(esc.proxyDraft?.isAbstention).toBe(true)
     expect(esc.taskId).toBe('card-1')
+  })
+
+  // 2026-07-18 owner design: an ABSTENTION means the corpus doesn't ground this —
+  // i.e. the area is NOT on the involvement map. Don't guess the addressee: ask the
+  // ONE routing question first, and let the answer (which already flows into
+  // you-corpus) grow the map.
+  it('wraps an ABSTENTION in the plain routing question — the unclassified lane', async () => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [worker()] })
+    const deps = makeDeps(calls, {
+      readHeartbeat: blockedQuestion('この機能の価格はいくらにすべき？'),
+      // `abstained: true` = what answerAsOwner's step 4 emits: the brain RAN, read
+      // the corpus, and found no grounding. Only this shape gets the wrapper.
+      answerAsOwner: async () =>
+        ({
+          kind: 'escalate',
+          why: 'insufficient-info',
+          reason: 'コーパスが薄い',
+          abstained: true,
+        }) as OwnerAnswer,
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    await flush()
+    await runOverseerPass(engine, [], () => {}, deps)
+
+    const esc = calls.openEscalation[0]
+    expect(esc.plainQuestion).toContain('「あなたが決めたい種類の話」かどうかだけ')
+    // Choices are WORDS, not A/B letters — a bare letter re-binds to whatever
+    // option list sits next to it downstream (see swarmDecisionRouting's
+    // ROUTING_CHOICE_* and the misattribution pins in swarmEscalations.test.ts).
+    expect(esc.plainQuestion).toContain('「まかせる」と書く')
+    expect(esc.plainQuestion).toContain('「自分で決める」と書く')
+    // The worker's own question is the SUBJECT of the routing question…
+    expect(esc.plainQuestion).toContain('この機能の価格はいくらにすべき？')
+    // …and the technical original still rides `question` untouched (§2.2's contract:
+    // the plain text is added, never a replacement — no technical detail is lost).
+    expect(esc.question).toBe('この機能の価格はいくらにすべき？')
+  })
+
+  // M1 — the routing question asserts a FINDING ("the map doesn't cover this") and
+  // promises future silence. Both are false when the brain never ran: a crash, a
+  // timeout, every model tier off (NoAllowedModelTierError), an unparseable verdict
+  // and the watchdog's synthesized null ALL report why='insufficient-info' too.
+  // Worse, offering the "まかせる" choice there invites blanket delegation for a
+  // question whose reversibility nothing judged — the keyword pre-gate is
+  // best-effort, and the brain's own ESCALATE is the layer that is missing.
+  it.each([
+    ['brain crashed / every tier off', { kind: 'escalate', why: 'insufficient-info', reason: 'proxy brain failed: no allowed model tier' }],
+    ['unparseable verdict', { kind: 'escalate', why: 'insufficient-info', reason: 'proxy brain returned no parseable verdict' }],
+  ] as const)('does NOT ask who owns it when the brain never consulted the map (%s)', async (_label, answer) => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [worker()] })
+    const deps = makeDeps(calls, {
+      readHeartbeat: blockedQuestion('本番データを全部消してよいですか？'),
+      answerAsOwner: async () => answer as OwnerAnswer,
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    await flush()
+    await runOverseerPass(engine, [], () => {}, deps)
+
+    const esc = calls.openEscalation[0]
+    expect(esc.whyEscalated).toBe('insufficient-info')
+    expect(esc.plainQuestion).toBeUndefined() // raises BARE — the worker's own text stands
+    expect(esc.question).toBe('本番データを全部消してよいですか？')
+    // …and it must not WEAR an abstention's label either. `isAbstention` drives the
+    // inbox card: true swaps the real reason for the generic 「コーパスが薄い」 line, so
+    // a crashed brain would read as a considered judgment and hide "proxy brain
+    // failed: …" — the one string naming the true cause.
+    expect(esc.proxyDraft?.isAbstention).toBe(false)
+    expect(esc.proxyDraft?.answer).toBe(answer.reason)
+  })
+
+  it('does NOT ask who owns it when the watchdog synthesizes a null result (hung brain)', async () => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [worker()] })
+    // A brain that never settles → the 5-min watchdog force-releases the flight and
+    // pushes {answer: null} into the mailbox.
+    const deps = makeDeps(calls, {
+      readHeartbeat: blockedQuestion('この設定を本番へ反映してよいですか？'),
+      answerAsOwner: () => new Promise<OwnerAnswer>(() => {}),
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    engine.overseer.brainResults.push({ ...engine.overseer.brainInFlight!, answer: null })
+    engine.overseer.brainInFlight = undefined
+    await runOverseerPass(engine, [], () => {}, deps)
+
+    const esc = calls.openEscalation[0]
+    expect(esc.whyEscalated).toBe('insufficient-info')
+    expect(esc.plainQuestion).toBeUndefined()
+    expect(esc.proxyDraft?.isAbstention).toBe(false) // a hang is not a judgment
+  })
+
+  it('does NOT ask who owns an IRREVERSIBLE question — that is already correctly addressed', async () => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [worker()] })
+    const deps = makeDeps(calls, {
+      readHeartbeat: blockedQuestion('この変更を公開してよいですか？'),
+      answerAsOwner: async () =>
+        ({ kind: 'escalate', why: 'irreversible', reason: '公開は不可逆' }) as OwnerAnswer,
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    await flush()
+    await runOverseerPass(engine, [], () => {}, deps)
+
+    const esc = calls.openEscalation[0]
+    expect(esc.whyEscalated).toBe('irreversible')
+    expect(esc.plainQuestion).toBeUndefined()
   })
 
   it('does NOT wake the brain for a mechanical (non-question) blocker', async () => {
@@ -727,6 +853,12 @@ describe('overseer — S3/S10 edge fatals (sub-cycle dedup survives every-pass p
     const out1 = await runOverseerPass(engine, [], () => {}, deps)
     expect(out1.fired).toContain('S3')
     expect(calls.openEscalation).toHaveLength(1)
+    // 平易文: what happened + A/B + consequences, in everyday language; the
+    // technical detail stays in `context` (c.f.detail) untouched.
+    expect(calls.openEscalation[0].plainQuestion).toContain('持ち時間を使い切った')
+    expect(calls.openEscalation[0].plainQuestion).toContain('タイムアウトしたカード')
+    expect(calls.openEscalation[0].plainQuestion).toContain('A: ')
+    expect(calls.openEscalation[0].context).toBe('実行時間上限を超過')
 
     // A non-subcycle pass must NOT churn the S3 dedup key…
     c.advance(3_000)
@@ -738,6 +870,186 @@ describe('overseer — S3/S10 edge fatals (sub-cycle dedup survives every-pass p
     const out3 = await runOverseerPass(engine, [], () => {}, deps)
     expect(out3.fired).not.toContain('S3')
     expect(calls.openEscalation).toHaveLength(1)
+  })
+
+  it('a ready worker\'s exec-timeout does NOT offer the owner "split it up and retry" (2026-07-18)', async () => {
+    // One event, two situations. A worker that had ALREADY delivered is stopped
+    // with its work on the branch and its card back in 'review' — the integration
+    // call is the commander's, not the owner's. The legacy A ("作業を小さく分けて、
+    // もう一度やらせる") is actively harmful here: an answered escalation whose
+    // worker is gone rides into the card's NEXT dispatch as a directive, so that
+    // answer would order a fresh worker to redo work that is already delivered.
+    // 0718 harm (c) — a judgement-free card piled into the owner's queue.
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [
+        {
+          fatal: {
+            event: 'exec-timeout',
+            execTimeoutKind: 'integration-wait',
+            detail: '一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限に到達',
+            projectPath: '/proj',
+            taskId: 'card-t',
+            branch: 'swarm/t',
+            taskTitle: '計測器カード',
+          },
+          createdAt: c.now(),
+        },
+      ],
+    })
+
+    expect((await runOverseerPass(engine, [], () => {}, deps)).fired).toContain('S3')
+    const { plainQuestion, question } = calls.openEscalation[0]
+    // The destructive option is GONE — this is the assertion that fails if the
+    // flavor stops being carried through the fatal.
+    expect(plainQuestion).not.toContain('作業を小さく分けて')
+    expect(question).not.toContain('分割して再依頼')
+    // …replaced by an honest one: nothing for the owner to decide but abandonment.
+    expect(plainQuestion).toContain('あなたが決めることは基本ありません')
+    expect(plainQuestion).toContain('A: ')
+    expect(plainQuestion).toContain('B: ')
+    expect(plainQuestion).toContain('計測器カード')
+    // plainQuestion renders as RAW text (whitespace-pre-wrap, no markdown), so
+    // markup would show up literally in the owner's inbox.
+    expect(plainQuestion).not.toContain('**')
+  })
+
+  it('a LONG-QUEUE stop never tells the owner about a 手直し that did not happen', async () => {
+    // execTimeoutReworked:false = ready, then simply queued past the credit cap.
+    // Nothing was re-worked, so the plain text must not say 「その後の手直しが…」.
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [
+        {
+          fatal: {
+            event: 'exec-timeout',
+            execTimeoutKind: 'integration-wait',
+            execTimeoutShape: 'capped-wait',
+            detail: '統合待ちが長引いたため停止',
+            projectPath: '/proj',
+            taskId: 'card-q',
+            branch: 'swarm/q',
+            taskTitle: '週末レビューのカード',
+          },
+          createdAt: c.now(),
+        },
+      ],
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    const { plainQuestion, question } = calls.openEscalation[0]
+    expect(plainQuestion).not.toContain('手直しが持ち時間を使い切って')
+    expect(question).not.toContain('差し戻し後の再作業')
+    expect(plainQuestion).toContain('手直しはしていません')
+    expect(plainQuestion).toContain('順番待ち')
+    // still not an owner decision, and still no destructive re-dispatch option
+    expect(plainQuestion).not.toContain('作業を小さく分けて')
+    expect(plainQuestion).toContain('あなたが決めることは基本ありません')
+    expect(plainQuestion).not.toContain('**') // renders as raw text
+  })
+
+  it('a WORK overrun blames neither the queue nor a 手直し (MF1 — the shape the 2-way split dropped)', async () => {
+    // The gap the boolean left. The engine has THREE shapes but the notification
+    // carried a 2-valued flag, so the kept-promote / short-wait worker arrived with
+    // "not reworked" and the owner was told 「取り込みの順番待ちが長引いた…時間を
+    // 使い切った原因は待ち時間」 — about a worker that waited zero minutes and
+    // worked the entire time. The detail said the opposite in the same card.
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [
+        {
+          fatal: {
+            event: 'exec-timeout',
+            execTimeoutKind: 'integration-wait',
+            execTimeoutShape: 'work',
+            detail: '実作業が作業上限に到達',
+            projectPath: '/proj',
+            taskId: 'card-w',
+            branch: 'swarm/w',
+            taskTitle: '働き続けたカード',
+          },
+          createdAt: c.now(),
+        },
+      ],
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    const { plainQuestion, question } = calls.openEscalation[0]
+    // neither fiction
+    expect(plainQuestion).not.toContain('順番待ちが長引いた')
+    expect(plainQuestion).not.toContain('手直しが持ち時間を使い切って')
+    expect(question).not.toContain('差し戻し後の再作業')
+    expect(question).not.toContain('統合待ちが控除上限')
+    // …and it says the true thing
+    expect(plainQuestion).toContain('順番待ちのせいではありません')
+    expect(question).toContain('待ち時間が原因ではありません')
+    // still not an owner decision, still no destructive re-dispatch option
+    expect(plainQuestion).toContain('あなたが決めることは基本ありません')
+    expect(plainQuestion).not.toContain('作業を小さく分けて')
+    expect(plainQuestion).not.toContain('**')
+  })
+
+  it('a REAL rework overrun still says 手直し (the split must not silence the true case)', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [
+        {
+          fatal: {
+            event: 'exec-timeout',
+            execTimeoutKind: 'integration-wait',
+            execTimeoutShape: 'rework',
+            detail: '差し戻し後の再作業で作業上限に到達',
+            projectPath: '/proj',
+            taskId: 'card-r',
+            branch: 'swarm/r',
+            taskTitle: '差し戻されたカード',
+          },
+          createdAt: c.now(),
+        },
+      ],
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation[0].plainQuestion).toContain('手直しが持ち時間を使い切って')
+  })
+
+  it('an exec-timeout with NO flavor keeps the legacy question (older persisted fatals)', async () => {
+    // execTimeoutKind is optional and absent on notifications persisted before
+    // 2026-07-18; those must not silently become the ready-worker wording.
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [
+        {
+          fatal: {
+            event: 'exec-timeout',
+            detail: 'd',
+            projectPath: '/proj',
+            taskId: 'card-legacy',
+            branch: 'swarm/l',
+            taskTitle: '旧カード',
+          },
+          createdAt: c.now(),
+        },
+      ],
+    })
+
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation[0].plainQuestion).toContain('作業を小さく分けて')
   })
 
   it('two occurrences of the same card each raise ONCE — no per-subcycle ping-pong (MF1 finding 2)', async () => {
@@ -971,6 +1283,31 @@ describe('overseer — S3/S10 fatal window + persistent receipt (re-post bug)', 
     expect(out.fired).not.toContain('S10')
     expect(calls.openEscalation).toHaveLength(0)
   })
+
+  it('an UNRECEIPTED in-window S10 raises with the self-update 平易文 (A/B + consequences)', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const engine = makeEngine()
+    const deps = makeDeps(calls, {
+      now: c.now,
+      recentFatals: async () => [
+        {
+          fatal: { event: 'rollback' as const, detail: 'canary健康チェック失敗→旧版へ復帰', projectPath: '/proj' },
+          createdAt: c.now() - 60_000,
+        },
+      ],
+    })
+
+    const out = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out.fired).toContain('S10')
+    expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0].plainQuestion).toContain('元の版に戻して動いています')
+    expect(calls.openEscalation[0].plainQuestion).toContain('A: ')
+    expect(calls.openEscalation[0].plainQuestion).toContain('B: ')
+    // The technical original is untouched (question keeps the event name).
+    expect(calls.openEscalation[0].question).toContain('rollback')
+    expect(calls.openEscalation[0].context).toBe('canary健康チェック失敗→旧版へ復帰')
+  })
 })
 
 describe('overseer — S5 dwell survives a board-read blip (MF1 finding 3)', () => {
@@ -1003,6 +1340,8 @@ describe('overseer — S5 dwell survives a board-read blip (MF1 finding 3)', () 
     const out = await runOverseerPass(engine, tasks, () => {}, deps)
     expect(out.fired).toContain('S5')
     expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0].plainQuestion).toContain('「保留」の置き場')
+    expect(calls.openEscalation[0].plainQuestion).toContain('A: ')
 
     // A blip AFTER the raise must NOT drop the S5 seen key → the answered card is not re-asked.
     c.advance(60_000)

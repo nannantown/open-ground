@@ -15,6 +15,7 @@ import {
   sanitizeConsumption,
   sanitizeFatalNotifications,
   planSwarmPower,
+  commanderPresence,
   EMPTY_KPIS,
   EMPTY_CONSUMPTION,
   DEFAULT_ENGINE,
@@ -101,6 +102,29 @@ describe('sanitizeEngineState — engine workers survive the poll', () => {
     expect(state.workers[0]).toMatchObject({ branch: 'swarm/eng-1', taskTitle: 'T1', stage: 'running' })
   })
 
+  it('keeps every move-stuck intent the server can emit — including recover-review', () => {
+    // The KNOWN_* allowlists are a lockstep hazard: 'no-heartbeat' was emitted by
+    // the server but stripped here for months (2026-07-14), and 'recover-review'
+    // repeated it on 2026-07-18 — added to the type, the label map and both
+    // locales, but not to the runtime set, so the pane fell back to the generic
+    // label. That intent is the ONLY surface for a ready worker whose card could
+    // not be returned to 'review' (it is deliberately excluded from the blocked
+    // escalation), so dropping it hid the state entirely. A ReadonlySet<string>
+    // is invisible to tsc, so this test is the only guard.
+    const anomaly = (intent: string) => ({ kind: 'move-stuck', ref: 't1', intent })
+    const state = sanitizeEngineState({
+      anomalies: ['review', 'done', 'recover', 'recover-review'].map(anomaly),
+    })
+    expect(state.anomalies.map((a) => a.intent)).toEqual([
+      'review',
+      'done',
+      'recover',
+      'recover-review',
+    ])
+    // …and an unknown one is still dropped (the allowlist keeps its teeth).
+    expect(sanitizeEngineState({ anomalies: [anomaly('bogus')] }).anomalies[0]?.intent).toBeUndefined()
+  })
+
   it('a garbage response degrades to the empty default (no throw)', () => {
     expect(sanitizeEngineState(null).workers).toEqual([])
     expect(sanitizeEngineState('boom').workers).toEqual([])
@@ -131,6 +155,59 @@ describe('sanitizeEngineState — engine workers survive the poll', () => {
     expect(DEFAULT_ENGINE.manualStop).toBe(false) // the offline default carries no badge
   })
 
+  it('parses the commander heartbeat whole-or-null — a well-formed record survives, field by field', () => {
+    // The inspection presence line renders off this — phase/note pass through
+    // (display-only), fresh stays a server verdict, blank optionals are omitted.
+    const full = {
+      phase: 'merge',
+      note: '統合中 — swarm/x を検品',
+      updatedAt: '2026-07-17T09:00:00.000Z',
+      ageMs: 120_000,
+      fresh: true,
+    }
+    expect(sanitizeEngineState({ manager: full }).manager).toEqual(full)
+    // Blank/absent optionals are dropped (same omit-when-blank as worker beats).
+    const minimal = sanitizeEngineState({
+      manager: { updatedAt: full.updatedAt, ageMs: 0, fresh: false, phase: '', note: 7 },
+    }).manager
+    expect(minimal).toEqual({ updatedAt: full.updatedAt, ageMs: 0, fresh: false })
+  })
+
+  it('drops a forged/broken commander heartbeat to null — the standby fail-safe (完了条件4)', () => {
+    // A record missing its identity or freshness inputs is dropped WHOLE: the UI
+    // must degrade to the standby wording, never render a half-trusted "active".
+    const base = { updatedAt: '2026-07-17T09:00:00.000Z', ageMs: 1000, fresh: true }
+    expect(sanitizeEngineState({ manager: { ...base, updatedAt: undefined } }).manager).toBeNull()
+    expect(sanitizeEngineState({ manager: { ...base, updatedAt: '' } }).manager).toBeNull()
+    expect(sanitizeEngineState({ manager: { ...base, ageMs: 'soon' } }).manager).toBeNull()
+    expect(sanitizeEngineState({ manager: { ...base, ageMs: -5 } }).manager).toBeNull()
+    expect(sanitizeEngineState({ manager: { ...base, ageMs: Infinity } }).manager).toBeNull()
+    expect(sanitizeEngineState({ manager: 'boom' }).manager).toBeNull()
+    expect(sanitizeEngineState({ manager: null }).manager).toBeNull()
+    expect(sanitizeEngineState({}).manager).toBeNull() // absent (old server / action ack)
+    expect(DEFAULT_ENGINE.manager).toBeNull() // the offline default shows standby
+    // fresh is STRICT boolean true — a forged truthy string can't fake "active now".
+    expect(sanitizeEngineState({ manager: { ...base, fresh: 'yes' } }).manager?.fresh).toBe(false)
+  })
+})
+
+describe('commanderPresence — the inspection line two-state rule (完了条件2)', () => {
+  const beat = { updatedAt: '2026-07-17T09:00:00.000Z', ageMs: 60_000, fresh: true }
+
+  it('active ONLY on a server-confirmed fresh heartbeat', () => {
+    expect(commanderPresence(beat)).toBe('active')
+  })
+
+  it('stale or absent degrades to standby — never an error (fail-safe)', () => {
+    expect(commanderPresence({ ...beat, fresh: false, ageMs: 30 * 60_000 })).toBe('standby')
+    expect(commanderPresence(null)).toBe('standby')
+  })
+})
+
+// The rest of the sanitize layer over the one orchestrator poll: structured log
+// kinds, anomalies, the KPI roll-up, and the consumption snapshot — same
+// coerce-or-drop discipline as the state fields above.
+describe('sanitizeEngineState — log / anomalies / kpis / consumption survive the poll', () => {
   it('preserves known structured log kinds and drops unknown ones', () => {
     const state = sanitizeEngineState({
       log: [

@@ -1,7 +1,14 @@
 import type { Config } from 'tailwindcss'
 
 const config: Config = {
-  content: ['./src/**/*.{ts,tsx}'],
+  // UI class scanning must NOT reach server-side code: files under
+  // src/lib/server carry no className usage, only backend logic — and a bare
+  // regex character class there (e.g. `/[-:.]/` in homeBackup.ts) is misread by
+  // the JIT as an arbitrary-property utility, emitting invalid CSS (`.[-:.]{-: .}`)
+  // that lightningcss then rejects at minify, breaking `npm run build`
+  // (regression landed 2026-07-19). Excluding the server tree is safe: none of
+  // OPEN GROUND's own utility classes originate there.
+  content: ['./src/**/*.{ts,tsx}', '!./src/lib/server/**'],
   theme: {
     extend: {
       colors: {

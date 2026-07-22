@@ -183,6 +183,54 @@ const state: TierProbeState =
  *  {@link realExec} vitest tripwire is the second, louder line of defence. */
 const findClaudeBinary = (): string | null => resolvedClaudeBin()
 
+/** The binary to probe with — resolving it OURSELVES when it is still cold.
+ *
+ *  WHY THIS EXISTS (measured 2026-07-19, the 11-desk commander multiplication).
+ *  {@link findClaudeBinary} reads a module-level cache in claudeConnection that
+ *  ONLY `claudeConnection()` ever fills. The docblock above assumed every spawn
+ *  path had run that preflight — and every spawn ROUTE does
+ *  (`claudeRunPreflight`, server/routes/swarm.ts). But the ENGINE does not: its
+ *  resuscitation reflex calls `spawnSwarmManager` directly
+ *  (swarmOrchestrator.defaultWakeManager), through no route and therefore
+ *  through no preflight. On that path `resolvedClaudeBin()` is whatever the last
+ *  unrelated caller happened to leave — and it is `null` after a cold start with
+ *  the window closed, or after a transient `auth status` timeout resets it.
+ *
+ *  A null binary made {@link probeOnce} answer 'unknown' WITHOUT SPAWNING A
+ *  CHILD. Not "the probe ran and learned nothing" — the probe never ran at all,
+ *  on the one path that was burned in 2026-07-13 and burned again in 07-19: four
+ *  commander desks seated on an exhausted `fable`, each dying on arrival to
+ *  "You've reached your Fable 5 limit." while the layer that exists to prevent
+ *  exactly that was silently inert. The only reason the tier EVER cooled was
+ *  layer B learning it the expensive way (a live worker walking into the wall),
+ *  and each time that 20-minute mark lapsed the desk was seated on fable again —
+ *  which is the 27–29 minute spacing measured between the dead desks.
+ *
+ *  So the probe no longer DEPENDS on someone else having warmed the binary: when
+ *  it is cold, run the preflight here (exactly what {@link warmTierProbeAtBoot}
+ *  already does before its own probe) and re-read the cache. Fail-open is
+ *  unchanged — a preflight that throws or still yields nothing answers 'unknown'
+ *  and is not cached, so the next launch retries as soon as the CLI is reachable.
+ *  Cost is bounded: claudeConnection caches for ~10s, and this only runs on the
+ *  cold path a probe would otherwise have skipped entirely. */
+const resolveBinWarming = async (deps: TierProbeDeps): Promise<string | null> => {
+  const warm = findClaudeBinary()
+  if (warm) return warm
+  // Same tripwire discipline as realExec: `claudeConnection` shells out to
+  // `claude auth status`, so a suite that injected neither `bin` nor `connect`
+  // must NOT reach the developer's real CLI just because this path now warms.
+  // Skipping the warm-up under vitest reproduces the pre-2026-07-19 answer
+  // exactly (null bin ⇒ 'unknown', uncached), which is what the existing
+  // no-preflight test asserts.
+  if (process.env.VITEST && !deps.connect) return null
+  try {
+    await (deps.connect ?? claudeConnection)()
+  } catch {
+    /* fail-open — an unreachable CLI is 'unknown', never a wall */
+  }
+  return findClaudeBinary()
+}
+
 /** Default exec: one headless `claude --model <tier> -p <prompt>
  *  --strict-mcp-config` child in a NEUTRAL cwd. Never rejects — a non-zero
  *  exit / timeout resolves with `failed: true` and whatever output the child
@@ -229,6 +277,11 @@ export interface TierProbeDeps {
    *  (the probe itself keeps running detached). Default
    *  {@link TIER_PROBE_LAUNCH_WAIT_MS}; Infinity ⇒ await completion. */
   launchWaitMs?: number
+  /** The connection preflight the probe runs ITSELF when the binary has not been
+   *  resolved yet — see {@link probeOnce}'s cold-binary branch. Injected by tests
+   *  (production: claudeConnection); never called when `bin` is passed
+   *  explicitly, so a suite that pins a binary never reaches it either. */
+  connect?: () => Promise<unknown>
 }
 
 /** Run ONE probe child to completion and RECORD what it learned. This is the
@@ -252,7 +305,7 @@ const probeOnce = async (
   nowFn: () => number,
 ): Promise<TierProbeVerdict> => {
   try {
-    const bin = deps.bin !== undefined ? deps.bin : findClaudeBinary()
+    const bin = deps.bin !== undefined ? deps.bin : await resolveBinWarming(deps)
     if (!bin) return 'unknown' // not a probe result — deliberately uncached
     const out = await (deps.exec ?? realExec)(
       bin,

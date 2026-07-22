@@ -34,7 +34,11 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { swarmLaunchDefaults, resolveSwarmModelEffortProbed } from './swarmLaunch'
+import {
+  swarmLaunchDefaults,
+  resolveSwarmModelEffortProbed,
+  resolveSwarmRemoteName,
+} from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
 import { getExecutionMode, getAllowedModelTiers } from './store'
@@ -88,8 +92,12 @@ export interface SpawnSwarmSupplyOpts {
  *     is exactly on-mission (the worker turns it off for leanness; supply keeps it).
  *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
  *     swarm launch default (swarmLaunch.ts), mirroring the shell supply officer's
- *     `--model opus --effort max … --remote-control supply`. effort is
- *     CLAUDE_EFFORTS-guarded there; the Remote Control session is named 'supply'.
+ *     `--model opus --effort max … --remote-control <name>`. effort is
+ *     CLAUDE_EFFORTS-guarded there. The Remote Control session name is the
+ *     IDENTIFIABLE one the spawn path resolved (resolveSwarmRemoteName:
+ *     「タスク窓口 <プロジェクト表示名>」/ "Supply officer <project>" per the app
+ *     language) — opts.remoteName; absent (legacy caller) it falls back to the
+ *     historical fixed 'supply'.
  *   - initialPrompt — `/supply` positional (claude runs the skill on startup). */
 //   - resume — when the project already has a supply conversation claude can load
 //     (swarmSessions.resolveSwarmSession proved it), the SAME session id rides
@@ -99,7 +107,7 @@ export interface SpawnSwarmSupplyOpts {
 export const supplyLaunchOpts = (
   cwd: string,
   agentSessionId: string,
-  opts: { cols?: number; rows?: number; resume?: boolean } = {},
+  opts: { cols?: number; rows?: number; resume?: boolean; remoteName?: string } = {},
   // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
   me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
@@ -113,7 +121,12 @@ export const supplyLaunchOpts = (
   // (none) instead of inheriting user-scope MCP servers. (The confined WORKER
   // still REQUIRES strictMcpConfig — mcp__* tools bypass ITS veto.)
   strictMcpConfig: true,
-  ...swarmLaunchDefaults('supply', me),
+  // A DESK the owner talks to (フワッとした要望 → Board カード), not an unattended
+  // worker: a model-limit stop here stops the owner's own conversation. Watched by
+  // ownerDeskLimit.ts, which names it by the role the owner knows it as.
+  ownerDesk: true,
+  deskLabel: '補給官',
+  ...swarmLaunchDefaults(opts.remoteName ?? 'supply', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,
@@ -157,11 +170,16 @@ export const spawnSwarmSupply = async (
     await getAllowedModelTiers(),
   )
   if (!me) throw new NoAllowedModelTierError()
+  // Remote Control 名の識別化: 「タスク窓口 <プロジェクト表示名>」/ "Supply officer
+  // <project>"(言語は Settings.language、表示名は registry の displayName ||
+  // フォルダ名)。resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名
+  // 'supply' で spawn は通る。
+  const remoteName = await resolveSwarmRemoteName('supply', opts.projectPath)
   const ref = launchClaude(
     supplyLaunchOpts(
       opts.projectPath,
       session.agentSessionId,
-      { cols: opts.cols, rows: opts.rows, resume: session.resume },
+      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName },
       me,
     ),
   )

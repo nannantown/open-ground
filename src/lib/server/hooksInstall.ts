@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { atomicWriteJson } from './atomicWrite'
 import { openGroundHome } from './paths'
+import { assertTestHomeIsolated } from './testHomeGuard'
 
 // Idempotently install OPEN GROUND's Claude Code hook entries into the user's
 // global ~/.claude/settings.json. The installer is a true upsert:
@@ -60,8 +61,26 @@ const PHASE_TO_ARG: Record<Phase, string> = {
 // a guarded session can't write outside its roots (or onto the guard itself).
 const GUARD_MATCHERS = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'] as const
 
-const settingsPath = () => join(homedir(), '.claude', 'settings.json')
-const backupPath = () => join(homedir(), '.claude', 'settings.json.openground.bak')
+// ─── The homedir() anchor, fenced ────────────────────────────────────────────
+// This module writes to the user's GLOBAL ~/.claude/settings.json and to
+// ~/.openground/{hooks,guard} — anchored at homedir() ON PURPOSE (see the long
+// note at hookInstallDir below), which means paths.openGroundHome()'s
+// fail-closed fence does NOT cover them: OPENGROUND_HOME cannot move these.
+// So the SAME fence (testHomeGuard.ts, one implementation, no second copy) is
+// applied to this anchor too. Under a test process homedir() must be a tmpdir —
+// i.e. the test pinned process.env.HOME — or every write target below throws
+// before it can be built. Isolation here has always been per-file discipline
+// (hooksInstall.test.ts:62 and swarmSafety.test.ts pin HOME; nothing forced
+// them to), and installHooks() takes no arguments, so one uncovered caller
+// would rewrite the user's real global Claude config. Inert in production.
+const guardedHomedir = (): string => {
+  const h = homedir()
+  assertTestHomeIsolated(h, 'hooksInstall (homedir-anchored)')
+  return h
+}
+
+const settingsPath = () => join(guardedHomedir(), '.claude', 'settings.json')
+const backupPath = () => join(guardedHomedir(), '.claude', 'settings.json.openground.bak')
 
 // ─── Hook source resolution (cwd-INDEPENDENT) ────────────────────────────────
 // The wired hook commands carry ABSOLUTE paths into the user's GLOBAL
@@ -177,9 +196,9 @@ export const resolveHookSourceRoot = (): HookSourceRoot => {
 // in the opposite direction (refusal prefix moved, write target didn't).
 const hookSourcePath = (root: string): string => join(root, 'scripts', 'openground-hook.js')
 const guardSourcePath = (root: string): string => join(root, 'scripts', 'openground-guard.js')
-const hookInstallDir = (): string => join(homedir(), '.openground', 'hooks')
+const hookInstallDir = (): string => join(guardedHomedir(), '.openground', 'hooks')
 const hookInstalledPath = (): string => join(hookInstallDir(), 'openground-hook.js')
-const guardInstallDir = (): string => join(homedir(), '.openground', 'guard')
+const guardInstallDir = (): string => join(guardedHomedir(), '.openground', 'guard')
 const guardInstalledPath = (): string => join(guardInstallDir(), 'openground-guard.js')
 
 const isOurEntry = (entry: any): boolean => {
@@ -397,7 +416,7 @@ export const installHooks = async (): Promise<InstallResult> => {
   // not exist yet, and atomicWriteJson does not create the parent. Without this
   // the write ENOENTs and the guard silently never installs.
   try {
-    await mkdir(join(homedir(), '.claude'), { recursive: true })
+    await mkdir(join(guardedHomedir(), '.claude'), { recursive: true })
   } catch (e: any) {
     result.errors.push(`ensure ~/.claude: ${e?.message ?? e}`)
   }

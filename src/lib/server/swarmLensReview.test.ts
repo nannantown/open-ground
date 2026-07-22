@@ -219,6 +219,7 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
 
   let home: string
   let scratch: string
+  let savedClaudeCfg: string | undefined
 
   // A real repo with a real bare origin (origin/main resolvable, registered so
   // projectUUIDFromPath / centralWorktreesDir resolve under the isolated HOME).
@@ -252,11 +253,21 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
     home = await realpath(await mkdtemp(join(tmpdir(), 'og-lens-home-')))
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-lens-scratch-')))
     process.env.OPENGROUND_HOME = home
+    // Pin claude's config as well: this file reaches claudeTrust (via
+    // ensureClaudeFolderTrusted / removeClaudeFolderTrust), whose path is
+    // CLAUDE_CONFIG_PATH ?? homedir()/.claude.json — a homedir anchor that
+    // OPENGROUND_HOME cannot move. Unpinned, these cases read and REWRITE the
+    // user's real ~/.claude.json (their claude OAuth tokens live there).
+    // Caught 2026-07-19 by the production-home fence; it had been live and silent.
+    savedClaudeCfg = process.env.CLAUDE_CONFIG_PATH
+    process.env.CLAUDE_CONFIG_PATH = join(home, '.claude.json')
     __resetMigrationCacheForTests()
     __resetOrchestratorForTests()
   })
   afterEach(async () => {
     __resetOrchestratorForTests()
+    if (savedClaudeCfg === undefined) delete process.env.CLAUDE_CONFIG_PATH
+    else process.env.CLAUDE_CONFIG_PATH = savedClaudeCfg
     __resetQuotaForTest() // the cooling table is a globalThis singleton — never leak across cases
     // Drain the cooling table's fire-and-forget disk mirror BEFORE deleting the
     // HOME it writes into (swarmQuota's contract: a suite that touches the file

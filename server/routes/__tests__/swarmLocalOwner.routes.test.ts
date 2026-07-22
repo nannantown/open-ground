@@ -72,7 +72,9 @@ let savedEnv: Record<string, string | undefined> = {}
 beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-swarm-local-owner-')))
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
-  for (const k of ENV_KEYS) delete process.env[k]
+  // Skip the home vars: unset means the user's REAL ~/.openground (paths.ts
+  // openGroundHome), so never leave even a momentary gap before the line below.
+  for (const k of ENV_KEYS) if (!['OPENGROUND_HOME', 'HOME'].includes(k)) delete process.env[k]
   process.env.OPENGROUND_HOME = home
   __resetMigrationCacheForTests()
   await clearSession()
@@ -81,8 +83,10 @@ afterEach(async () => {
   __resetOrchestratorForTests()
   await clearSession()
   for (const k of ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k]
-    else process.env[k] = savedEnv[k]
+    if (savedEnv[k] !== undefined) process.env[k] = savedEnv[k]
+    // NEVER unset the home vars: empty means the user's REAL ~/.openground
+    // (paths.ts openGroundHome), and vitest reuses workers across files.
+    else if (!['OPENGROUND_HOME', 'HOME'].includes(k)) delete process.env[k]
   }
   await rm(home, { recursive: true, force: true })
 })
@@ -101,14 +105,17 @@ describe('swarm local owner unlock — env OPENGROUND_LOCAL_OWNER=1', () => {
     },
   )
 
-  it('GET /api/experiments mirrors the unlock: flags.swarm true, eligible/sandbox untouched', async () => {
+  it('GET /api/experiments mirrors the unlock: flags.swarm true, every other flag untouched', async () => {
     process.env.OPENGROUND_LOCAL_OWNER = '1'
     const res = await app.request('/api/experiments')
     expect(res.status).toBe(200)
     const body = (await res.json()) as ExperimentsResponse
+    // Exhaustive on purpose: the unlock is a SWARM control-plane convenience,
+    // so any other experiment resolving open here — persona, which reads the
+    // owner's personal corpus, most of all — is a leak this must catch.
     expect(body).toEqual({
       eligible: false,
-      flags: { swarm: true, sandbox: false },
+      flags: { swarm: true, sandbox: false, persona: false },
     })
   })
 

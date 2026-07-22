@@ -18,12 +18,12 @@
 // SCOPE: this surface LAUNCHES the role PTYs (supply / commander / worker
 // restart) and RENDERS state. It owns the master power SWITCH (start/stop +
 // the idempotent launches, composed in `powerSwarm`), but NOT the autonomy
-// LOOP: the auto-drain / dispatch / auto-merge / scheduled column movement all
-// run in the server-side engine — the switch just starts/stops it via
-// toggleAutonomy. Auto-integrate stays a separate switch on the commander
-// dashboard (default off). The only column move owned here is a terminate's
-// doing→todo requeue (its todo→doing counterpart left with the removed
-// manual-dispatch rail).
+// LOOP: the auto-drain / dispatch / commander wake-ups / scheduled column
+// movement all run in the server-side engine — the switch just starts/stops it
+// via toggleAutonomy. (The separate auto-integrate switch was retired
+// 2026-07-16 — the engine never pushes; landing is the commander's.) The only
+// column move owned here is a terminate's doing→todo requeue (its todo→doing
+// counterpart left with the removed manual-dispatch rail).
 //
 // SUBSCRIPTION-ONLY: every role PTY is spawned through the /api/swarm/* routes
 // (worker restart → POST /api/swarm/worker, supply / commander → their own
@@ -832,8 +832,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // belt-and-suspenders: each executed action ALSO self-guards — toggleAutonomy
   // no-ops when the engine is already in the target state, and launchSupply /
   // launchManager no-op when their session exists or a launch is in flight. The
-  // server engine's twin-dispatch / blocked / same-file gates are untouched, and
-  // Auto-integrate stays a SEPARATE switch on the commander dashboard (default off).
+  // server engine's twin-dispatch / blocked / same-file gates are untouched.
+  // (No separate auto-integrate switch exists anymore — retired 2026-07-16.)
   const powerSwarm = useCallback(
     (next: boolean) => {
       const plan = planSwarmPower(next, {
@@ -1197,7 +1197,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           )
         ) : mainView === 'manager' ? (
           // Commander (司令官) dashboard: the conversation stage + the engine
-          // controls (Autonomy / Auto-integrate). Its engine state comes from the
+          // controls (Autonomy status / Overseer). Its engine state comes from the
           // shared useSwarmEngine hook above — no own fetch. Live worker screens
           // live on the worker tab; the Board pipeline tallies on the Board tab.
           <div className="min-h-0 flex-1">

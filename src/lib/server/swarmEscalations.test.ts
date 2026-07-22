@@ -18,6 +18,7 @@ import {
   EscalationStateError,
   ESCALATION_RETENTION_DAYS,
   MAX_ESCALATION_SHOT_CHARS,
+  MAX_ESCALATION_PLAIN_QUESTION,
   ENTER_RETRY_MAX,
 } from './swarmEscalations'
 import { escalationsFile, escalationShotsDir, youCorpusAdditionsFile } from './paths'
@@ -40,6 +41,10 @@ import type { OpenEscalationInput } from './swarmEscalations'
 
 let home: string
 let project: string
+// The suite-wide pin (src/test/setup-home.ts), restored in afterEach. NEVER
+// `delete` it: an unset OPENGROUND_HOME makes every later openGroundHome()
+// resolve to the REAL ~/.openground (the 2026-07-18 data loss).
+const prevHome = process.env.OPENGROUND_HOME
 
 beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-escalations-')))
@@ -51,7 +56,13 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(home, { recursive: true, force: true })
-  delete process.env.OPENGROUND_HOME
+  // Deliberately NOT unset: openGroundHome() falls back to the user's real
+  // ~/.openground when this is empty, and vitest reuses worker processes across
+  // files, so an unset here aims every later write in this process at real data
+  // (observed 2026-07-19). Restore the suite-wide pin instead of leaving the
+  // just-removed temp dir in place — inert either way under isolate:true, but
+  // with --no-isolate the next file would inherit a home that no longer exists.
+  if (prevHome !== undefined) process.env.OPENGROUND_HOME = prevHome
 })
 
 const openInput = (over: Partial<OpenEscalationInput> = {}): OpenEscalationInput => ({
@@ -96,6 +107,41 @@ describe('openEscalation — persistence, idempotency, capture', () => {
     expect(list[0].question).toContain('Stripe')
     expect(list[0].proxyDraft?.confidence).toBe('high')
     expect(list[0].whyEscalated).toBe('irreversible')
+  })
+
+  it('plainQuestion (平易文) persists first-class, clamps, and leads the toast teaser', async () => {
+    const { calls, notify } = makeNotify()
+    const plain =
+      '作業中のプログラムが、古いデータの置き場所を削除してよいか聞いています。\n' +
+      'A: 削除する（二度と戻せませんが、動作が軽くなります）\n' +
+      'B: 残す（安全ですが、容量を使い続けます）'
+    const { escalation } = await openEscalation(openInput({ plainQuestion: plain }), { notify })
+    expect(escalation.plainQuestion).toBe(plain)
+    const [row] = await listEscalations()
+    expect(row.plainQuestion).toBe(plain) // survives persist → list round-trip
+    // The owner-facing toast leads with the PLAIN text, not the technical question.
+    expect((calls[0] as { detail: string }).detail).toContain('古いデータの置き場所')
+    expect((calls[0] as { detail: string }).detail).not.toContain('Stripe')
+
+    // Absent stays absent (backward compat — the UI then renders `question`).
+    const bare = await openEscalation(openInput({ taskId: 'card-2', question: '素の質問？' }), { notify })
+    expect(bare.escalation.plainQuestion).toBeUndefined()
+    // Whitespace-only collapses to absent (never a blank primary line in the UI).
+    const blank = await openEscalation(
+      openInput({ taskId: 'card-3', question: '第三の質問？', plainQuestion: '   ' }),
+      { notify },
+    )
+    expect(blank.escalation.plainQuestion).toBeUndefined()
+    // Clamped like question (the inbox is uncapped — nothing unbounded may enter).
+    const long = await openEscalation(
+      openInput({
+        taskId: 'card-4',
+        question: '第四の質問？',
+        plainQuestion: 'あ'.repeat(MAX_ESCALATION_PLAIN_QUESTION + 100),
+      }),
+      { notify },
+    )
+    expect((long.escalation.plainQuestion ?? '').length).toBe(MAX_ESCALATION_PLAIN_QUESTION)
   })
 
   it('is idempotent on receiptKey while OPEN: no second record, no re-notification', async () => {
@@ -242,12 +288,94 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     // Memory carries the owner's Q→A, tagged for the training pipeline.
     expect(h.memory).toHaveLength(1)
     expect(h.memory[0].text).toContain('Q: ')
-    expect(h.memory[0].text).toContain('→ A: 埋めない')
+    // Labelled in words, not `→ A:` — the corpus is what the brain reads back, and
+    // an `A:` answer next to the question's own `A: …` option is the misreading
+    // this routing work exists to prevent (same rule as the injection).
+    expect(h.memory[0].text).toContain('→ オーナーの回答: 埋めない')
     expect(h.memory[0].tags).toContain('escalation')
     expect(h.memory[0].tags).toContain('irreversible')
 
     // Nothing was queued — the live path won.
     expect(h.queued).toHaveLength(0)
+  })
+
+  // ── Misattribution guard, END-TO-END (the routing lane's whole point) ────────
+  // The pure helper is pinned in "injection helpers" below; THESE pin the WIRING —
+  // that every delivery lane actually passes plainQuestion through. Both lanes are
+  // covered because the queued one re-introduced the bug once: the injection was
+  // fixed while `queueForNextDispatch` kept pairing the raw technical question, so
+  // the misattribution simply moved to the next dispatch.
+  const routingInput = (over: Partial<OpenEscalationInput> = {}) =>
+    openInput({
+      question: '実装方式はどちらにしますか？ A: 既存テーブルを拡張 B: 新テーブルを追加',
+      // Multi-line on purpose — the real routing question is a joined block, and
+      // the queued lane must survive it (the /order goal is one argv line).
+      plainQuestion: [
+        '聞かれているのは「実装方式はどちらにしますか？」です。',
+        '「まかせる」と書く → AIが判断して先へ進みます。',
+      ].join('\n'),
+      whyEscalated: 'insufficient-info',
+      ...over,
+    })
+
+  it('LIVE worker, routing record → the paste pairs the answer with the OWNER’s question, not the技術原文', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(routingInput({ terminalId: 'pty-r' }), { notify })
+    const h = answerDeps()
+    const res = await answerEscalation(escalation.id, 'まかせる', h.deps)
+
+    expect(res.delivery).toBe('injected')
+    const paste = h.writes[0].data
+    expect(paste).toContain('オーナーに表示された質問')
+    expect(paste).toContain('「まかせる」と書く')
+    expect(paste).toContain('あなたが出した元の質問')
+    // The failure this closes: "A: 既存テーブルを拡張…" sitting under a bare `Q:`
+    // with `A: まかせる` beneath it, so the worker reads its own option as chosen.
+    expect(paste).not.toContain('Q: 実装方式はどちらにしますか？')
+  })
+
+  it('queued lane, routing record → the next dispatch carries the same attribution', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(routingInput(), { notify }) // no terminalId
+    const h = answerDeps()
+    const res = await answerEscalation(escalation.id, 'まかせる', h.deps)
+
+    expect(res.delivery).toBe('queued')
+    const line = h.queued[0].line
+    expect(line).toContain('オーナーに表示された質問')
+    expect(line).toContain('あなたが出した元の質問')
+    expect(line).toContain('まかせる')
+    expect(line).not.toContain('Q: 実装方式はどちらにしますか？')
+    // Still ONE argv-bound line — the /order goal cannot carry a newline.
+    expect(line).not.toMatch(/[\n\r]/)
+  })
+
+  it('plain records are untouched — no plainQuestion means the original Q: shape', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(openInput({ terminalId: 'pty-p' }), { notify })
+    const h = answerDeps()
+    await answerEscalation(escalation.id, '埋めない', h.deps)
+    expect(h.writes[0].data).toContain('Q: 本番の Stripe キーを配布物に埋めますか？')
+    expect(h.writes[0].data).not.toContain('オーナーに表示された質問')
+  })
+
+  // The BARE queue lane — the one that carries worker-authored questions, whose
+  // option menus `brief()` folds onto this single line. It had no label assertion,
+  // so `→ A:` survived here after the other two surfaces were converted.
+  it('the bare queue lane labels the answer in words too (all three surfaces agree)', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(
+      openInput({
+        question: 'カードのデータをどちらに置きますか？\nA: 既存テーブルを拡張\nB: 新テーブルを追加',
+      }),
+      { notify },
+    )
+    const h = answerDeps()
+    const res = await answerEscalation(escalation.id, 'B', h.deps)
+    expect(res.delivery).toBe('queued')
+    expect(h.queued[0].line).toContain('オーナーの回答: B')
+    // `A:` may appear ONLY as the question's own option — never as the answer.
+    expect(h.queued[0].line).not.toContain('→ A: ')
   })
 
   it('dead PTY (write returns false) → falls back to the next-dispatch queue', async () => {
@@ -352,6 +480,39 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     expect(additions).toHaveLength(1)
     expect(additions[0].text).toContain('本人の実回答')
     expect(additions[0].tags).toContain('escalation')
+  })
+
+  // M2 — the corpus must record the question the owner ACTUALLY READ. The UI shows
+  // plainQuestion as the primary text (the technical original folds into a details
+  // pane), so pairing their answer with the technical wording misattributes it. The
+  // routing question is the sharp case: "まかせる" (= "you decide") filed under
+  // "which library should we use?" would teach the next brain something about the
+  // LIBRARY — inverting the whole point of routing.
+  it('learns the PLAIN question the owner answered, not the technical original', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(
+      openInput({
+        taskId: undefined,
+        question: 'ライブラリはAとBのどちらを使うべきですか？',
+        plainQuestion: [
+          'これはあなたが決めたい種類の話ですか？',
+          '「まかせる」と書く → AIが判断して先へ進みます。',
+          '「自分で決める」と書く → 続けてあなたの考えを書いてください。',
+        ].join('\n'),
+      }),
+      { notify },
+    )
+    const h = answerDeps()
+    await answerEscalation(escalation.id, 'まかせる', { ...h.deps, appendMemory: undefined })
+    const additions = JSON.parse(await readFile(youCorpusAdditionsFile(), 'utf8')) as Array<{
+      text: string
+    }>
+    expect(additions[0].text).toContain('これはあなたが決めたい種類の話ですか？')
+    expect(additions[0].text).not.toContain('ライブラリはAとBのどちらを使うべきですか？')
+    // The technical text is NOT lost — it stays on the record (and the worker's
+    // injection carries it too, labelled as the worker's own question).
+    const [stored] = await listEscalations()
+    expect(stored.question).toBe('ライブラリはAとBのどちらを使うべきですか？')
   })
 
   it('DEFAULT queue wiring (lazy import → engine rework slot) resolves to queued', async () => {
@@ -588,7 +749,7 @@ describe('adversarial-review hardening (2026-07-03 pass)', () => {
       REWORK_REASON_SEP,
       recordEscalationAnswerForNextDispatch,
     } = await import('./swarmOrchestrator')
-    const answer = `${ESCALATION_ANSWER_MARKER} Q: どっち? → A: B案で`
+    const answer = `${ESCALATION_ANSWER_MARKER} Q: どっち? → オーナーの回答: B案で`
     // plain → plain: latest reason wins outright
     expect(mergeReworkReason('old tsc failure', 'new lint failure')).toBe('new lint failure')
     // answer in the slot → preserved in front of the fresh mechanical reason
@@ -596,7 +757,7 @@ describe('adversarial-review hardening (2026-07-03 pass)', () => {
       `${answer}${REWORK_REASON_SEP}fresh reason`,
     )
     // the conduit itself marks lines and appends without dropping prior answers
-    await recordEscalationAnswerForNextDispatch(project, 'card-z', 'Q: x → A: y')
+    await recordEscalationAnswerForNextDispatch(project, 'card-z', 'Q: x → オーナーの回答: y')
     const orch = await import('./swarmOrchestrator')
     orch.__resetOrchestratorForTests()
   })
@@ -608,7 +769,7 @@ describe('adversarial-review hardening (2026-07-03 pass)', () => {
     // ' / ' is legitimate answer content (path lists, options) — with a
     // content-bearing separator this used to split into a marker-less tail
     // that got dropped, resuming the worker on a TRUNCATED answer.
-    const answer = `${ESCALATION_ANSWER_MARKER} Q: どの構成? → A: src/a / src/b の両方を移し、option A / B は B で`
+    const answer = `${ESCALATION_ANSWER_MARKER} Q: どの構成? → オーナーの回答: src/a / src/b の両方を移し、option A / B は B で`
     const merged = mergeReworkReason(answer, 'fresh mechanical reason')
     expect(merged.split(REWORK_REASON_SEP)).toEqual([answer, 'fresh mechanical reason'])
     // A second overwrite still carries the FULL answer (and only one copy).
@@ -661,12 +822,67 @@ const answerDepsShared = () => {
 }
 
 describe('injection helpers (W16 — shared with C3)', () => {
-  it('buildAnswerInjection carries Q, A and the resume instruction', () => {
+  it('buildAnswerInjection carries Q, the answer and the resume instruction', () => {
     const text = buildAnswerInjection('進めてよい？', 'はい、Aの方針で。')
     expect(text).toContain('Q: 進めてよい？')
-    expect(text).toContain('A: はい、Aの方針で。')
+    expect(text).toContain('オーナーの回答: はい、Aの方針で。')
     expect(text).toContain('再開')
   })
+
+  // MISATTRIBUTION GUARD. An answer means nothing without the question it
+  // answered, and when a plainQuestion exists the owner read THAT — the UI folds
+  // the technical `question` into a details pane. The routing lane is the sharp
+  // case: the worker's own question is usually an A/B menu, so a reply aimed at
+  // the routing question ("is this yours to decide?") would land under the
+  // technical menu and read as picking an option there. These assertions are the
+  // teeth: before them the guard could be deleted with the suite still green.
+  it('buildAnswerInjection pairs the answer with the question the OWNER read, and keeps the technical original labelled', () => {
+    const technical = '実装方式はどちらにしますか？ A: 既存テーブルを拡張 B: 新テーブルを追加'
+    const plain = '聞かれているのは「実装方式…」です。「まかせる」と書く → …'
+    const text = buildAnswerInjection(technical, 'まかせる', plain)
+
+    // The owner's text is present and marked as what the answer responds to.
+    expect(text).toContain(`オーナーに表示された質問（下の回答はこれに対するものです）: ${plain}`)
+    // The technical original is NOT dropped — it is labelled as the worker's own.
+    expect(text).toContain(`あなたが出した元の質問: ${technical}`)
+    expect(text).toContain('オーナーの回答: まかせる')
+    // The bare `Q:` framing must NOT appear: that is the shape that let the
+    // worker bind the answer to its own option list.
+    expect(text).not.toContain(`Q: ${technical}`)
+    // Attribution must be readable in order: owner's question before the answer.
+    expect(text.indexOf('オーナーに表示された質問')).toBeLessThan(text.indexOf('オーナーの回答:'))
+  })
+
+  // Escalation questions carry an option list BY DESIGN — the worker rules require
+  // 「②選択肢(A/B など)」 and the overseer templates render one — so prefixing the
+  // answer `A:` would put two meanings on one prefix inside a single injection.
+  // BOTH branches are checked: the bare one is not the safe one, it is the lane
+  // that carries worker-authored questions (no template ⇒ no plainQuestion ⇒ it
+  // always brings its own A/B menu).
+  it.each([
+    [
+      'bare (worker-authored question — the A/B menu comes from the worker)',
+      ['カードのデータをどちらに置きますか？', 'A: 既存テーブルを拡張', 'B: 新テーブルを追加'].join('\n'),
+      undefined,
+      ['A: 既存テーブルを拡張'],
+    ],
+    [
+      'plainQuestion (the A/B menu comes from the rendered template)',
+      'どうしますか？',
+      ['どれか選んでください。', 'A: 設定を戻す', 'B: このままにする'].join('\n'),
+      ['A: 設定を戻す'],
+    ],
+  ])(
+    'never reuses the `A:` prefix for the answer — %s',
+    (_label, question, plain, expectedOptionLines) => {
+      const text = buildAnswerInjection(question, 'B', plain)
+      // EXACT list, not just "the answer isn't among them": every `A: `-prefixed
+      // line must be an option the question itself supplied. An implementation that
+      // added its own (a re-quoted answer, a summary) would fail here.
+      expect(text.split('\n').filter((l) => l.startsWith('A: '))).toEqual(expectedOptionLines)
+      expect(text).toContain('オーナーの回答: B')
+    },
+  )
 
   it('injectAnswerIntoWorker reports failure when the FIRST write dies (no Enter sent)', async () => {
     const writes: string[] = []

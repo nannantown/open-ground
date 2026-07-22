@@ -1359,12 +1359,24 @@ describe('gracefulGroupKill', () => {
 
         const freed = await waitFor(async () => !(await portBound(port)), 15000)
         expect(freed).toBe(true)
-        expect(isAlive(childPid)).toBe(false) // the webServer (G2) really died
+        // The port frees the moment the kernel closes C's listening fd — which happens
+        // DURING C's teardown, not after it. So "port freed" is reached while the pid can
+        // still be mid-exit (not even a zombie yet), and that window widens under load.
+        // Sampling liveness instantly here races the very exit it wants to observe; poll
+        // for the end state instead (same ceiling idiom as the killtree case above — it
+        // returns the moment C dies, so the normal run costs nothing).
+        const childDead = await waitFor(() => !isAlive(childPid), 15000)
+        expect(childDead).toBe(true) // the webServer (G2) really died
       } finally {
         cleanupTree(proc, childPid, dir)
       }
     },
-    30000,
+    // 60s, not 30s: this body now holds TWO 15s ceilings (port freed, then child
+    // dead) on top of the fixture's own waits, so a 30s budget was fully committed
+    // the moment the second one was added — under load it would report a timeout
+    // instead of the assertion it is actually making. Both waits return the instant
+    // their predicate holds, so a green run costs nothing extra.
+    60000,
   )
 
   it.skipIf(process.platform === 'win32')(
@@ -1380,12 +1392,15 @@ describe('gracefulGroupKill', () => {
 
         const freed = await waitFor(async () => !(await portBound(port)), 15000)
         expect(freed).toBe(true)
-        expect(isAlive(childPid)).toBe(false)
+        // Same exit race as the graceful case above — the freed port does not prove the
+        // pid is gone yet, only that its listening fd is closed.
+        const childDead = await waitFor(() => !isAlive(childPid), 15000)
+        expect(childDead).toBe(true)
       } finally {
         cleanupTree(proc, childPid, dir)
       }
     },
-    30000,
+    60000, // same two-ceiling arithmetic as the graceful case above
   )
 
   it.skipIf(process.platform === 'win32')(

@@ -55,8 +55,10 @@ beforeEach(async () => {
 afterEach(async () => {
   await clearSession()
   for (const k of ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k]
-    else process.env[k] = savedEnv[k]
+    if (savedEnv[k] !== undefined) process.env[k] = savedEnv[k]
+    // NEVER unset the home vars: empty means the user's REAL ~/.openground
+    // (paths.ts openGroundHome), and vitest reuses workers across files.
+    else if (!['OPENGROUND_HOME', 'HOME'].includes(k)) delete process.env[k]
   }
   await rm(home, { recursive: true, force: true })
   await rm(project, { recursive: true, force: true })
@@ -123,6 +125,24 @@ describe('escalations routes — the owner journey', () => {
       answer: 'too late',
     })
     expect(lateAnswer.status).toBe(409)
+  })
+
+  it('plainQuestion rides open → list (the owner-facing 平易文); oversize is 400', async () => {
+    const plain = '古いデータを消してよいか聞いています。A: 消す（戻せません） B: 残す（容量を使います）'
+    const res = await post('/api/swarm/escalations/open', openBody({ plainQuestion: plain }))
+    expect(res.status).toBe(200)
+    const opened = (await res.json()) as EscalationOpenResponse
+    expect(opened.escalation.plainQuestion).toBe(plain)
+    const list = (await (
+      await app.request(`/api/swarm/escalations?path=${encodeURIComponent(project)}&status=open`)
+    ).json()) as EscalationsResponse
+    expect(list.escalations[0]?.plainQuestion).toBe(plain)
+    // Oversize is refused loudly, mirroring question/context.
+    const big = await post(
+      '/api/swarm/escalations/open',
+      openBody({ taskId: 'c-big', question: '大きい平易文？', plainQuestion: 'あ'.repeat(4 * 1024 + 1) }),
+    )
+    expect(big.status).toBe(400)
   })
 
   it('validates loudly: bad why=400, missing question=400, malformed proxyDraft=400', async () => {

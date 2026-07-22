@@ -28,6 +28,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises'
 import { join, resolve, sep } from 'path'
 import { createHash, randomUUID } from 'crypto'
+import { WORKING_FOOTER_RE } from '@/lib/claudeScreen'
 import { ensureOpenGroundHome, escalationsFile, escalationShotsDir } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import { getTerminal, getTerminalScreen, writeInput } from './terminal'
@@ -50,6 +51,9 @@ import type {
 export const MAX_ESCALATION_QUESTION = 4 * 1024
 export const MAX_ESCALATION_CONTEXT = 16 * 1024
 export const MAX_ESCALATION_ANSWER = 16 * 1024
+/** Clamp for the plain-language question (平易文 — same budget as `question`:
+ *  it replaces it as the PRIMARY text on the owner's decision surface). */
+export const MAX_ESCALATION_PLAIN_QUESTION = 4 * 1024
 /** Clamp for id-like fields (receiptKey / taskId / branch / terminalId). */
 export const MAX_ESCALATION_SHORT_FIELD = 512
 /** The worker-gone fallback rides the /order goal line of the card's NEXT
@@ -76,8 +80,10 @@ export const ENTER_RETRY_MAX = 3
 export const ENTER_RETRY_INTERVAL_MS = 900
 /** Footer marker claude's TUI shows ONLY while generating — its appearance
  *  after our CR is positive proof the submitted turn LANDED. (Verified against
- *  live frames 2026-07-06; the idle counterpart is "? for shortcuts".) */
-export const CLAUDE_WORKING_FOOTER_RE = /esc to interrupt/i
+ *  live frames 2026-07-06; the idle counterpart is "? for shortcuts".) Defined
+ *  with the rest of the frame anatomy in @/lib/claudeScreen and re-exported
+ *  under this module's historical name for its existing importers. */
+export { WORKING_FOOTER_RE as CLAUDE_WORKING_FOOTER_RE } from '@/lib/claudeScreen'
 
 const ESCALATION_STATUSES: readonly EscalationStatus[] = [
   'open',
@@ -291,6 +297,11 @@ export interface OpenEscalationInput {
   /** Why this is being asked + what is at stake. Required — a question without
    *  stakes is not decidable at a glance (§8's "1 画面で判断できる粒度"). */
   context: string
+  /** 平易文 for a non-programmer owner (①決めること ②選択肢 ③各選択の影響を
+   *  生活言語で) — see {@link Escalation.plainQuestion}. Optional: template
+   *  raisers (overseer S1/S2/S3/S5/S10, no-model) supply it; worker-derived
+   *  question text arrives already-plain per the /order worker rules. */
+  plainQuestion?: string
   whyEscalated: EscalationWhy
   /** Idempotency key; defaults to sha1(taskId|projectPath|normalized question). */
   receiptKey?: string
@@ -333,6 +344,9 @@ export const openEscalation = async (
 ): Promise<{ escalation: Escalation; deduped: boolean }> => {
   const question = (input.question ?? '').trim().slice(0, MAX_ESCALATION_QUESTION)
   const context = (input.context ?? '').trim().slice(0, MAX_ESCALATION_CONTEXT)
+  // Optional — empty collapses to "absent" so the UI's `plainQuestion ?? question`
+  // fallback can never render a blank primary line.
+  const plainQuestion = (input.plainQuestion ?? '').trim().slice(0, MAX_ESCALATION_PLAIN_QUESTION)
   if (!question) throw new Error('question is required')
   if (!context) throw new Error('context is required')
   if (!ESCALATION_WHYS.includes(input.whyEscalated)) throw new Error('invalid whyEscalated')
@@ -414,6 +428,7 @@ export const openEscalation = async (
         : {}),
       question,
       context,
+      ...(plainQuestion ? { plainQuestion } : {}),
       ...(screenshotRef ? { screenshotRef } : {}),
       ...(proxyDraft ? { proxyDraft } : {}),
       whyEscalated: input.whyEscalated,
@@ -429,9 +444,12 @@ export const openEscalation = async (
     // failure to escalate (the record IS the escalation).
     try {
       const notify = deps?.notify ?? createSwarmInfoNotification
+      // The toast is an OWNER surface — lead with the plain-language text when
+      // the raiser supplied one (same precedence as the inbox UI).
+      const teaser = plainQuestion || question
       await notify({
         event: 'escalation-open',
-        detail: `質問が届いています: ${question.length > 120 ? `${question.slice(0, 120)}…` : question}`,
+        detail: `質問が届いています: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`,
         projectPath,
         ...(input.taskId ? { taskId: input.taskId } : {}),
         ...(input.branch ? { branch: input.branch } : {}),
@@ -448,12 +466,50 @@ export const openEscalation = async (
 
 /** The text pasted into the blocked worker's PTY when the owner answers. Pure +
  *  exported so the byte contract is unit-testable; C3 (free-text question
- *  detection) reuses this same helper — W16 is implemented ONCE, here. */
-export const buildAnswerInjection = (question: string, answer: string): string =>
+ *  detection) reuses this same helper — W16 is implemented ONCE, here.
+ *
+ *  `plainQuestion` — MISATTRIBUTION GUARD, load-bearing. An answer only means
+ *  something next to the question it answered, and when a raiser supplied a
+ *  plainQuestion THAT is what the owner read (the UI folds the technical
+ *  `question` into a details pane). Pairing their reply with the technical
+ *  original instead lets the worker re-bind it to its own wording: the routing
+ *  lane makes this concrete — the worker asks an A/B technical menu, the owner is
+ *  shown the routing question, and a reply meant for the routing question would
+ *  land under the technical menu as if it picked an option there. So when a
+ *  plainQuestion exists BOTH texts go in, explicitly labelled, and the answer
+ *  hangs off the one the owner actually saw. (The word-not-letter choice tokens
+ *  in swarmDecisionRouting are the other half of this fix; this side is the one
+ *  that holds even when the owner answers in free text.) Same precedence the
+ *  corpus write-back and the toast already use — this was the odd surface out.
+ *
+ *  NOTE (deliberate): the overseer's PROXY answers reuse this helper too
+ *  (swarmOverseer's brain-result drain, swarmQuestions), so they also render
+ *  `オーナーの回答:`. That is not a new claim — the 【本人からの回答】 header has always
+ *  framed a proxy answer that way, and it matches the proxy's contract
+ *  (`answerAsOwner`: answer AS the owner when the corpus grounds it, escalate
+ *  otherwise). The line that must NOT blur is the corpus write-back, and that one
+ *  is reached only from the owner-gated answer route — §8 invariant 6 holds. */
+export const buildAnswerInjection = (
+  question: string,
+  answer: string,
+  plainQuestion?: string,
+): string =>
   [
     '【本人からの回答】エスカレーションした質問に、本人（オーナー）が回答しました。',
-    `Q: ${question}`,
-    `A: ${answer}`,
+    ...(plainQuestion
+      ? [
+          `オーナーに表示された質問（下の回答はこれに対するものです）: ${plainQuestion}`,
+          `あなたが出した元の質問: ${question}`,
+        ]
+      : [`Q: ${question}`]),
+    // The answer is labelled in WORDS on BOTH branches, never `A:`. Escalation
+    // questions carry an option list by design — the worker rules REQUIRE
+    // 「②選択肢(A/B など)」 (swarmWorker.ts), and the overseer's templates render one —
+    // so an `A:` answer prefix would sit next to an `A:` option meaning something
+    // else entirely. The bare branch is not the safe one here: it is precisely the
+    // lane that carries WORKER-authored questions, which have no template to render
+    // a plainQuestion from and therefore always bring their own A/B menu.
+    `オーナーの回答: ${answer}`,
     'この回答を前提に、ブロックされていた作業を再開してください。',
   ].join('\n')
 
@@ -575,7 +631,7 @@ export const injectAnswerIntoWorker = async (
       screen = null
     }
     if (screen === null) return true // no frame to judge by — both writes landed
-    if (CLAUDE_WORKING_FOOTER_RE.test(screen)) return true // generating ⇒ landed
+    if (WORKING_FOOTER_RE.test(screen)) return true // generating ⇒ landed
     if (!pasteStillInInputBox(screen, payload)) return true // box clear ⇒ landed
     if (attempt >= ENTER_RETRY_MAX) return false // still pending after N resends
     if (!write(terminalId, '\r')) return false // PTY died mid-retry
@@ -623,7 +679,7 @@ const deliverAnswer = async (
     (await canInject(record.terminalId, record.projectPath)) &&
     (await injectAnswerIntoWorker(
       record.terminalId,
-      buildAnswerInjection(record.question, answer),
+      buildAnswerInjection(record.question, answer, record.plainQuestion),
       deps,
     ))
   ) {
@@ -638,14 +694,32 @@ const deliverAnswer = async (
     // (engine.reworkReasons → /order). Lazy import to stay cycle-free with
     // swarmOrchestrator. Q/A are shortened here — the /order goal is ONE
     // argv-bound line; the full text stays on this record.
+    //
+    // Carries the SAME attribution as the live injection above: the next
+    // dispatch is just a later delivery of the same answer, so a plainQuestion
+    // record must not lose the question the owner read on the way (that was the
+    // second half of the misattribution — the queued lane re-introduced it).
     const queue =
       deps?.queueForNextDispatch ??
       (await import('./swarmOrchestrator')).recordEscalationAnswerForNextDispatch
-    const brief = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
+    // Fold whitespace BEFORE clamping: a plainQuestion is a multi-line block, so
+    // folding first spends the budget on words rather than on newlines. (The
+    // receiver folds again — this keeps the "ONE argv-bound line" promise true
+    // here, where it is written, instead of borrowing it from the callee.)
+    const brief = (s: string, n: number) => {
+      const flat = s.replace(/\s+/g, ' ').trim()
+      return flat.length > n ? `${flat.slice(0, n)}…` : flat
+    }
     await queue(
       record.projectPath,
       record.taskId,
-      `Q: ${brief(record.question, 600)} → A: ${brief(answer, 900)} — この回答を前提に再開すること`,
+      record.plainQuestion
+        ? `オーナーに表示された質問(回答はこれに対するもの): ${brief(record.plainQuestion, 400)} / あなたが出した元の質問: ${brief(record.question, 300)} → オーナーの回答: ${brief(answer, 600)} — この回答を前提に再開すること`
+        : // `オーナーの回答:` here too — and this branch needs it MOST. It is the lane
+          // that carries worker-authored questions (which always bring their own A/B
+          // menu), and `brief()` folds the menu onto this single line, so an `A:`
+          // answer label would sit inline next to the question's own `A: …`.
+          `Q: ${brief(record.question, 600)} → オーナーの回答: ${brief(answer, 900)} — この回答を前提に再開すること`,
     )
     return 'queued'
   }
@@ -704,8 +778,23 @@ export const answerEscalation = async (
     let memoryWritten = false
     try {
       const appendMemory = deps?.appendMemory ?? appendJudgment
+      // Learn the question the owner ACTUALLY ANSWERED. When a raiser supplied a
+      // plainQuestion it is what the UI shows as the primary text (the technical
+      // `question` is folded into a details pane), so pairing their answer with
+      // the technical original would MISATTRIBUTE it. The routing question makes
+      // the hazard concrete: it asks "is this yours to decide?", and if its choices
+      // were bare letters (they are not — swarmDecisionRouting uses WORDS precisely
+      // for this reason) an "A" recorded against "which library should we use?"
+      // would read to the next brain as the owner picking library A — the exact
+      // inversion this routing layer exists to prevent. The technical text is not lost:
+      // it stays verbatim on the escalation record (and in the injection the
+      // worker receives, which correctly keeps the technical wording).
       await appendMemory({
-        text: `Q: ${record.question}\n→ A: ${text}`,
+        // `→ オーナーの回答:` not `→ A:` — same reason as the injection above. This
+        // is the surface the BRAIN reads back live, so an answer sitting under an
+        // `A:` prefix next to the question's own `A: …` option is the misreading
+        // this card exists to prevent, one level further downstream.
+        text: `Q: ${record.plainQuestion || record.question}\n→ オーナーの回答: ${text}`,
         tags: ['escalation', record.whyEscalated],
         ...(record.branch || record.taskId
           ? { context: `swarm escalation (${record.branch ?? record.taskId})` }

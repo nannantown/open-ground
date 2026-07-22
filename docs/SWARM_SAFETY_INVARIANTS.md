@@ -18,11 +18,51 @@ Tests:
   fixtures in a tmpdir; no mocks, no network).
 - `server/routes/__tests__/swarmSafety.routes.test.ts` — invariant **C** (the real
   Hono app via `app.request`, owner gate swept across *every* `/api/swarm` route).
+- `src/lib/server/gateEnv.test.ts` — invariant **F** (the handoff policy + a
+  source-text pin on every spawn site). Deliberately spawn-free: it runs inside
+  the merge gate's 240s budget, so it must stay cheap and deterministic.
+  - `src/lib/server/gateEnvTamper.test.ts` — **F**'s end-to-end demonstration (a
+    fixture worktree with deliberately tampered `vitest.config.ts` +
+    `setup-home.ts`, run through the real `testCheck`). NOT in the net: it spawns
+    a real vitest, and nesting that inside the gate's budget invites load-induced
+    false REDs. It runs on every branch via the full suite instead.
+- `src/lib/server/testHomeGuard.test.ts` — invariant **G** (the production-home
+  fence; teeth measured — see below). Includes child-process cases, because the
+  one hole found by review could only be reproduced with the poisoning in place
+  *before* the guard module loads.
+  - `src/testHomeEnvGuard.test.ts` — **G**'s static half (51 cases): sweeps that
+    share ONE file enumeration (`git ls-files` + a JS-side `SOURCE_EXT`, so
+    `.mts`/`.cts`/`.jsx` cannot fall through a pathspec, and a file carrying NUL
+    bytes cannot be skipped in silence the way `grep` skips it). The unset sweep
+    fails the build if `delete process.env.<home var>` comes back — including the
+    `vi.stubEnv(…, undefined)`, aliased-`env`, whole-object-replacement and
+    empty-string spellings of the same act; the resolver sweep fails it if a
+    SECOND home resolver appears outside the choke point, in any of six spellings
+    (`homedir` / `process.env.HOME` / `process.env['HOME']` / `USERPROFILE` /
+    `HOMEPATH` / `getPath('home')`). Both matchers are pure functions with their
+    own teeth, because a sweep returns `[]` both when nothing is wrong and when
+    it looked at nothing — measured 2026-07-21, when the narrower version stayed
+    **51/51 green** with two real violations planted in `scripts/` and
+    `electron/` (`docs/commander/07` §4.14).
 
 All tests run with `OPENGROUND_HOME` pinned to a throwaway tmp dir (see
 `src/test/setup-home.ts` + each file's `beforeEach`), so the suite **never touches
-the real `~/.openground`** — the home-isolation invariant the whole vitest suite
-already enforces.
+the real `~/.openground`**.
+
+> **CORRECTION (2026-07-19).** Until this date the paragraph above was a claim,
+> not a fact. The pin existed, but the check that "verified" it was a tautology
+> (`join(tmpdir(), …)` asserted with `startsWith(tmpdir())`), and on **2026-07-18
+> a vitest run overwrote the user's real `~/.openground/settings.json` — 45
+> registered projects collapsed to 3, and `canvas.json`'s card layout was lost
+> for good.** Home isolation is now enforced by invariant **G** below, at the
+> resolution seam, and its teeth are measured rather than asserted. Full contract:
+> [docs/commander/07-test-isolation-contract.md](commander/07-test-isolation-contract.md).
+
+**That in-suite pin is not a security control, and must not be read as one**
+(invariant **F**): when the *engine* runs this suite against a branch, both
+`setup-home.ts` and the `vitest.config.ts` that loads it come **from that branch**.
+The isolation that matters is the one the engine imposes from OUTSIDE, before the
+child starts.
 
 ---
 
@@ -175,6 +215,105 @@ teeth); the
 end-to-end tests spawn the real script and assert the process **exit code** (2 vs
 0), so a regression to exit 1/0 on a dangerous command goes red.
 
+### F — The engine never hands untrusted branch code the production home
+Every engine spawn that runs **code from the artifact being judged** — the merge
+gate's `tsc` / `eslint` / `vitest`, the self-supply scanners, and the self-update
+`npm run build` / `npm test` — receives an `OPENGROUND_HOME` that the **engine**
+mkdtemp'd, never the real one. Loading a worktree's `vitest.config.ts` and its
+`setupFiles` is arbitrary code execution before any assertion runs, so "the suite
+isolates itself" was circular: that isolation ships **inside the artifact**. The
+production-data pointers (`OPENGROUND_HOME`, `OPENGROUND_MEMORY_DIR`,
+`OPENGROUND_CONCEPT_PATH`, `CLAUDE_CONFIG_PATH`) are **redirected** — never unset,
+since every reader falls back to a `homedir()`-derived production path — and the
+secrets/authority the engine really carries (`SUPABASE_*`, the admin/owner email
+allowlists, `OPENGROUND_LOCAL_OWNER`) are stripped.
+*Deliberately NOT redirected:* `OPENGROUND_SOURCE_ROOT` — it names the checkout the
+child is already running inside (its own `cwd`/`.git`), so passing it grants no
+reach the child does not already have, and the self-update request path it feeds
+(`selfUpdateSignal`) is an engine concern, not something a test/lint/build child
+can invoke. This list is the whole set; anything not named here is passed through.
+*Code:* `src/lib/server/gateProcess.ts` (`gateEnvFor` / `withGateEnv`), duplicated
+for the Electron main process in `electron/gateEnv.js` (parity pinned by
+`server/__tests__/gateEnvParity.test.ts` — as SETS, not just by output equality,
+because output equality alone cannot see a key ADDED to only one copy).
+*Exception — producers:* a step that BUILDS the shipped artifact must keep its
+build inputs. `npm run build`'s first stage bakes `BAKED_KEYS` into
+`electron/runtime-config.json` (and always rewrites the file, so stripping erases
+rather than preserves), which silently shipped a build with sign-in and collab
+disabled. `electron/gateEnv.js buildProducerEnv` exempts exactly that allowlist —
+read from `runtimeConfig.js`, whose own `assertBakeable` guard refuses to admit a
+secret or authority key. **That guard and the strip policy must be ONE set of
+rules**: the exemption overrides stripping, so any name the guard admits is a name
+handed to untrusted code. They were not one, twice — round 3: the guard's pattern
+lacked `TOKEN`; round 4: the guard checked only the pattern while stripping was
+pattern ∪ list, so listed-but-not-secret-named keys (`FEEDBACK_ADMIN_EMAILS`,
+`OPENGROUND_OWNER_EMAILS`, `SUPABASE_*_TABLE`, `OPENGROUND_LOCAL_OWNER`) could pass
+it. Both now read `electron/secretPolicy.js`, which splits the strip list into
+**FORBIDDEN** (secrets + authority — never bakeable) and **HERMETIC** (public
+values stripped only for test hygiene — deliberately baked and handed back to
+producers). Conflating those two again either re-opens round 4 or re-breaks the
+build. The parity test pins all three copies equal and asserts no BAKED_KEY is
+forbidden.
+Verifier steps (tsc / eslint / vitest / scanners) strip everything.
+**Producer-ness is TRANSITIVE**: the `e2e` regression step runs no build itself,
+but playwright's `webServer.command` starts with `npm run build && …`, so it is a
+producer too (`buildStepEnv` + a per-step `producer` flag). The flags are
+cross-checked against `package.json` + `playwright.config.ts`, so a build added to
+another step's script fails a test instead of erasing the config.
+*Beyond the hand list:* a secret-NAME pattern
+(`/SERVICE_ROLE|SECRET|PASSWORD|PRIVATE|TOKEN/i`, mirroring the bake-side guard)
+strips secrets nobody enumerated — added after `OPENGROUND_COLLAB_TICKET_SECRET`
+was found missing from the list.
+*Negative control:* the fixture worktree ships a `vitest.config.ts` with no
+`setupFiles` **and** a gutted `setup-home.ts`, and its probe reports the home it can
+actually reach; the assertion is that the reported home is the engine's throwaway
+and **not** the engine's own. Reverting any spawn site to `{ ...process.env }` makes
+the reported home identical to the engine's → red (verified by hand, 2026-07-19).
+*Scope:* an env-handoff control, **not a sandbox** — `HOME` itself is deliberately
+untouched, so code that actively deletes the injected var can still derive
+`homedir()/.openground`. Reasoning, measurements and the rejected alternatives:
+`docs/commander/03-integration-review.md` §2.9.
+### G — A test process can never resolve an OPEN GROUND home outside tmpdir
+While a test process is running, every OPEN GROUND home path **must** canonicalize
+under the OS temp dir; anything else **throws — reads included**. The check lives
+at the single resolution seam (`paths.openGroundHome()`, which every `*File()` /
+`*Dir()` builder is made from) plus the one anchor it structurally cannot cover
+(`hooksInstall`'s deliberately `homedir()`-anchored install dirs), and both call
+**one** implementation so they cannot drift. There is deliberately no opt-out env.
+*Code:* `src/lib/server/testHomeGuard.ts` (`testHomeProblem` decides,
+`assertTestHomeIsolated` throws), wired into `paths.openGroundHome()` plus the
+four `homedir()`-anchored resolvers (`hooksInstall` / `claudeTrust` /
+`ogManageSkill` / `generateSkill`); detection + blame in `src/test/setup-home.ts`
+(`verifyAndRepin`, which calls the SAME predicate rather than restating it).
+Referenced by symbol, not line: the line numbers in this file rotted twice in one
+day, and a stale anchor sends the next reader to the wrong code.
+*Why it must sit in the path BUILDER, not inside the fs call:* `store.readJson` is
+a tolerant reader (`catch { return fallback }`), so a fence thrown during
+`readFile` would be swallowed and `getSettings()` would hand back defaults as if
+nothing were wrong — fail-closed degrading to fail-open, a shape this repo has
+been bitten by before. Pinned by the *"getSettings REJECTS rather than falling
+back to defaults"* case.
+*Negative control (measured, not assumed):* neutering `assertTestHomeIsolated` to
+a no-op turns **15 of 22** cases red; breaking test-mode detection turns **16**
+red; re-introducing a single unconditional `delete process.env.OPENGROUND_HOME`
+turns `swarmNotifications.test.ts` **10 red and names the offending file**.
+Re-measured after each later round — most recently, reverting the
+poisoned-`TMPDIR` fix turns exactly the **2** child-process cases red while the
+isolated-`$HOME` regression case stays green.
+*Denominator caveat (2026-07-20):* the **/22** above is the case count as of the
+§4.3 baseline; the file now holds **43**. That specific ratio has NOT been
+re-measured since, and deliberately so — obtaining it means running all 43 cases
+with `assertTestHomeIsolated` neutered, which is the exact condition that
+destroyed the user's data on 2026-07-18. The per-round reverts quoted above are
+narrow (revert ONE fix, watch ITS cases) and carry no such exposure. Read the
+ratio as "most cases, measured once at that size", not as a current figure.
+*Known boundary:* this invariant is about a test process resolving a home. It does
+**not** cover a `--pool=threads` run: `worker_threads` share one `process.env`
+view for `os.homedir()`, so the seven files that pin `HOME` lose their isolation.
+That direction is **fail-closed** (the fence sees the real home and throws), so it
+surfaces as a red suite rather than as damage.
+Procedure + full results: `docs/commander/07-test-isolation-contract.md` §4.
+
 ---
 
 ## Supporting invariants (asserted by the pre-existing swarm tests)
@@ -216,7 +355,14 @@ always-on `tsc` gate:
 2. **Gate.** If (and only if) the branch touches swarm code, the engine runs the
    safety suite above (`SWARM_SAFETY_TESTS`) with the project's own `vitest`, inside
    the **same throwaway worktree it already builds for `tsc`** (branch rebased onto
-   the trunk = exactly what would land). A RED suite returns `verify → ok:false`.
+   the trunk = exactly what would land), and — since 2026-07-19 — with an
+   `OPENGROUND_HOME` the engine mkdtemp'd rather than its own (invariant **F**).
+   A RED suite returns `verify → ok:false`.
+   *Membership rule for `SWARM_SAFETY_TESTS`:* a file belongs in that list when its
+   **deletion would silently re-open a hole**, because the list's real power is the
+   existence check in `swarmSafetyCheck.run` (vitest silently skips a missing file,
+   so a deleted test would otherwise pass vacuously). `gateEnv.test.ts` was added on
+   those grounds — it is the only pin on the env handoff.
 3. **Block.** A RED verify takes the existing path a RED `tsc` does: the card is sent
    **review→doing** (差し戻し) for the worker to fix, and parked in **`blocked`** after
    `MAX_REWORKS` (`reworkOrPark`). Nothing is pushed; the trunk is untouched.

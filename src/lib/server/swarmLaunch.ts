@@ -11,6 +11,7 @@
 // launch inherits opus/max (and, once added, Remote Control) for free, without
 // re-deriving the guard.
 
+import { basename } from 'path'
 import {
   CLAUDE_EFFORTS,
   type ClaudeEffort,
@@ -18,6 +19,16 @@ import {
   EXECUTION_MODES,
   DEFAULT_EXECUTION_MODE,
 } from '../types'
+// Remote Control 名の識別化(下の swarmRemoteControlName / resolveSwarmRemoteName):
+// 言語は OG の言語設定(Settings.language — promptLang)、プロジェクト表示名は
+// registry(displayName || フォルダ名)から spawn 時に解決する。registry は
+// store.ts を import し、store.ts は asExecutionMode 目的で本ファイルを import
+// するため、swarmLaunch → registry → store → swarmLaunch という循環 import は
+// 実在する。ただし両側とも関数内でしか相手を参照しない(module init 時に互いへ
+// アクセスしない)ため今は無害 — この import 循環に頼って module top-level で
+// 互いの値を読む変更を足すと TDZ / undefined 初期化を踏むので要注意。
+import { pick, getPromptLang, type PromptLang } from './promptLang'
+import { findProjectEntryByPath } from './registry'
 // The [Quota] foundation (swarmQuota) is the tier AWARENESS layer this file reads
 // (never writes): the ladder + which tiers are cooling. Importing it here is what
 // turns the launch model from a fixed top-tier constant into "the highest tier
@@ -104,6 +115,91 @@ export const swarmLaunchDefaults = (
   ...(me.effort ? { effort: me.effort } : {}),
   remoteControl: remoteName,
 })
+
+// ─── Remote Control セッション名の識別化(オーナー直接フィードバック 2026-07-18)──
+// スマホ / claude.ai のセッション一覧には --remote-control に渡した名前がそのまま
+// 並ぶ。固定の 'manager'/'worker'/'supply' では同名が大量に並び、どのプロジェクトの
+// 何のセッションか読めない。そこで「役割 + プロジェクト表示名(+ worker はカード
+// title)」を OG の言語設定で合成した名前を渡す。
+//
+// 名前の制約は実測済み(2026-07-18, claude CLI 2.1.214): 日本語・スペース・コロン・
+// 括弧・120 字超のいずれも CLI が受理して /remote-control is active になり、
+// claude.ai 一覧にもそのまま表示された(長名は一覧 UI 側が末尾省略)。よって ASCII
+// への転写は不要 — 可読性のためだけに下の REMOTE_NAME_MAX で切り詰める。
+
+export type SwarmRemoteRole = 'manager' | 'worker' | 'supply'
+
+// 役割語(オーナー確定語彙 2026-07-18): JA は「マネージャー / ワーカー / タスク窓口」
+// のナチュラル表記 — 「司令官/作業員/補給官」はセッション名には使わない。EN は
+// Manager / Worker、supply のみ既存 i18n の EN 訳
+// (projectPanel.swarm.supply.badge = 'Supply officer')と整合させる。
+const REMOTE_ROLE_LABEL: Record<SwarmRemoteRole, { en: string; ja: string }> = {
+  manager: { en: 'Manager', ja: 'マネージャー' },
+  worker: { en: 'Worker', ja: 'ワーカー' },
+  supply: { en: 'Supply officer', ja: 'タスク窓口' },
+}
+
+/** 一覧での可読性上限(code point 数)。実測ではもっと長くても通るが、モバイル一覧は
+ *  先頭 20〜30 字しか見えないので、役割+プロジェクト名の後にタスク要約の頭が乗る
+ *  長さで切る。切り詰めは code point 単位(Array.from)でサロゲートを分断しない。 */
+export const REMOTE_NAME_MAX = 60
+
+/** Remote Control 名を合成する(pure): `<役割語> <プロジェクト表示名>[: <タスク>]`。
+ *  空白の連なり(改行・タブ含む)は 1 個のスペースに潰す — カード title の改行が
+ *  そのまま名前に乗ると一覧が壊れて見えるため。C0/C1 制御文字(\x00-\x1F, \x7F-\x9F
+ *  — ESC \x1b を含む)は先に除去する。quote 済みでも PTY 入力行に ESC が残ると
+ *  zsh ZLE がキーバインドとして解釈し起動行が壊れ得るため — pastePrompt.ts が
+ *  ESC を除去している方針と同じ理由。projectName が空でも役割語だけは必ず残る
+ *  (旧固定名より情報が減ることはない)。上限超過は末尾 '…'。 */
+export const swarmRemoteControlName = (
+  role: SwarmRemoteRole,
+  lang: PromptLang,
+  projectName?: string,
+  taskTitle?: string,
+): string => {
+  // \t \n \r は \s+ の空白畳み込みに委ねる(除去でなく 1 スペースへ)ので対象外。
+  // eslint-disable-next-line no-control-regex
+  const CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g
+  const clean = (s?: string): string =>
+    (s ?? '')
+      .replace(CONTROL_CHARS, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  const label = pick(lang, REMOTE_ROLE_LABEL[role])
+  const proj = clean(projectName)
+  const task = clean(taskTitle)
+  const base = proj ? `${label} ${proj}` : label
+  const full = task ? `${base}: ${task}` : base
+  const cps = Array.from(full)
+  return cps.length <= REMOTE_NAME_MAX
+    ? full
+    : cps.slice(0, REMOTE_NAME_MAX - 1).join('') + '…'
+}
+
+/** spawn 時に言語設定(Settings.language — spawn 後の切替は次の spawn から反映)と
+ *  プロジェクト表示名(registry: displayName?.trim() || フォルダ basename — scan.ts の
+ *  カード表示名と同じ規則。git リポジトリ名ではない)を読んで合成する async 実体。
+ *  manager / supply / worker の 3 spawn パスが呼ぶ。
+ *
+ *  NEVER THROWS: 名前の識別化は表示品質であって起動条件ではない。設定/レジストリの
+ *  読みに失敗したら旧固定名(role 文字列そのもの)へ落として spawn を通す —
+ *  「リモコン登録に失敗しても spawn 自体は成功する」既存挙動と同じ精神。 */
+export const resolveSwarmRemoteName = async (
+  role: SwarmRemoteRole,
+  projectPath: string,
+  taskTitle?: string,
+): Promise<string> => {
+  try {
+    const [lang, entry] = await Promise.all([
+      getPromptLang(),
+      findProjectEntryByPath(projectPath),
+    ])
+    const projectName = entry?.displayName?.trim() || basename(projectPath) || undefined
+    return swarmRemoteControlName(role, lang, projectName, taskTitle)
+  } catch {
+    return role
+  }
+}
 
 // ─── Execution mode (トークン節約) — card 68d8e00f ────────────────────────────
 // One global switch that sets how much capability the in-app swarm burns, so the

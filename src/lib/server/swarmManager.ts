@@ -49,10 +49,18 @@
 // `claude -p` / the SDK.
 
 import { randomUUID } from 'crypto'
+import { resolve } from 'path'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { swarmLaunchDefaults, resolveSwarmModelEffortProbed } from './swarmLaunch'
+import {
+  swarmLaunchDefaults,
+  resolveSwarmModelEffortProbed,
+  resolveSwarmRemoteName,
+} from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
+import { listLiveDesksIn, onTerminalExit, getTerminalScreen } from './terminal'
+import { matchesQuotaExhaustion, normalizeScreen } from './swarmRateLimitText'
+import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
 import { getExecutionMode, getAllowedModelTiers } from './store'
 import type { ClaudeEffort } from '../types'
@@ -69,6 +77,15 @@ import { type SpawnSwarmManagerResponse } from '../types'
  *  cannot work inside the app's PTY, which is exactly why this injection
  *  points at the app-native sibling instead. */
 export const MANAGER_INJECTION = '/og-manage'
+
+/** The owner-facing name of this desk, carried onto its PTY pool entry
+ *  (`TerminalInfo.deskLabel`). Two consumers, and the second is why it is a
+ *  shared constant rather than a literal: the model-limit watch names the desk
+ *  by it (ownerDeskLimit.ts), and {@link spawnSwarmManager}'s singleton guard
+ *  IDENTIFIES a commander desk by it — the pool is the only authority that
+ *  cannot desynchronise from itself (terminal.listLiveDesksIn). A desk the owner
+ *  started by hand carries no label, so it is never mistaken for this one. */
+export const MANAGER_DESK_LABEL = '司令官'
 
 /** The positional prompt for a RESUMED commander (swarmSessions.ts): the same
  *  `/og-manage` skill, plus the ONE instruction a restored commander must obey
@@ -95,6 +112,73 @@ export const MANAGER_INJECTION = '/og-manage'
  *  never parsed as a command. */
 export const MANAGER_RESUME_INJECTION =
   '/og-manage セッション再開: アプリ再起動をまたいで前回の会話を復元した。記憶をそのまま前提にするな — エンジンの in-memory 状態(worker roster・review・quota)は再起動で全消えし、再起動はたいていリリースなのでコード自体も変わっている。最初にやることは1つだけ: 「状況」を頭から実行し、Board の実体(todo/doing/review)・worker 一覧・エンジン状態を API と git で読み直して、その結果だけを根拠に現状を報告する。前回の認識との食い違いがあれば現物(API/git)を正とし、食い違った点を明示すること。'
+
+/** How long after launch a commander desk's death still counts as DEATH ON
+ *  ARRIVAL — i.e. as evidence about the TIER rather than about the work.
+ *
+ *  Measured from the four desks that died in the 2026-07-19 incident: each
+ *  reached its refusal 1.4–3.8s after its session opened, and the whole
+ *  process — spawn, boot, refuse, exit — fits inside a few seconds. 90s is far
+ *  past that spread while staying far short of any real integration session, so
+ *  a desk that did actual work and then exited is never mistaken for one that
+ *  never started. (Same order as the probe's own completion budget, and for the
+ *  same reason: it bounds a `claude` that has to boot before it can answer.) */
+export const DESK_DOA_WINDOW_MS = 90_000
+
+/** LEARN FROM THE CORPSE: if the desk we just launched dies on arrival because
+ *  its MODEL is spent, cool that tier so the next launch does not repeat it.
+ *
+ *  WHY THIS EXISTS ALONGSIDE THE PRE-LAUNCH PROBE (2026-07-19). The probe is a
+ *  PREDICTION and every prediction has a fail-open path — it waits at most 8s,
+ *  it cannot run without a resolved binary, and a tier can dry up in the seconds
+ *  between the verdict and the spawn. When the prediction misses, the outcome is
+ *  a desk that prints "You've reached your Fable 5 limit." and exits, and the
+ *  engine's only recorded reaction was to try again 5 minutes later — on the same
+ *  tier, because nothing had written the wall down. Four desks died that way.
+ *  An OUTCOME is strictly better evidence than a prediction, and it is free: the
+ *  desk already paid for it. This closes the loop no pre-launch check can.
+ *
+ *  ONLY THE CLI'S QUOTA-REFUSAL WORDING COOLS ANYTHING — the same polarity rule
+ *  the probe follows (swarmRateLimitText.QUOTA_EXHAUSTION_PATTERNS, and the
+ *  measured 2026-07-13 reason for it): a mark here is 20 PERSISTED minutes
+ *  applied to every spawn path, so a desk that died of a crash, an owner's ^D, a
+ *  bad skill or a transient 529 must NOT drag a healthy tier down with it. "The
+ *  desk died young" is not evidence about the tier; "the desk said the tier is
+ *  spent" is.
+ *
+ *  Best-effort throughout: a missing screen, an unreadable pool entry or a
+ *  non-ladder model string all mean "learned nothing", never a thrown spawn. */
+export const watchDeskForDeathOnArrival = (
+  terminalId: string,
+  tier: string,
+  deps: {
+    watch?: typeof onTerminalExit
+    screen?: (id: string) => string | null
+    now?: () => number
+  } = {},
+): void => {
+  if (!isModelTier(tier)) return // never cool an arbitrary model string
+  const nowFn = deps.now ?? Date.now
+  const bornAt = nowFn()
+  const stop = (deps.watch ?? onTerminalExit)(terminalId, () => {
+    try {
+      if (nowFn() - bornAt > DESK_DOA_WINDOW_MS) return // it lived; its death says nothing
+      const screen = (deps.screen ?? getTerminalScreen)(terminalId)
+      if (!screen) return
+      if (!matchesQuotaExhaustion(normalizeScreen(screen))) return
+      const until = markRateLimited(tier, { ptyText: screen, now: nowFn() })
+      console.warn(
+        `[swarmManager] 司令官卓が tier '${tier}' の枯渇で起動即死 — ` +
+          `${tier} を ${new Date(until).toISOString()} まで冷却(次の起動は1段下の tier)`,
+      )
+    } catch {
+      /* learning is best-effort; a fault here must never surface as a spawn error */
+    }
+  })
+  // Disarm once the desk has outlived the window, so a long-lived commander's
+  // eventual exit is never read as a launch failure.
+  if (stop) setTimeout(stop, DESK_DOA_WINDOW_MS).unref?.()
+}
 
 export interface SpawnSwarmManagerOpts {
   /** The registered project to command — the commander PTY's cwd (its primary
@@ -123,8 +207,12 @@ export interface SpawnSwarmManagerOpts {
  *     (same as supply; the worker turns it off for leanness).
  *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
  *     swarm launch default (swarmLaunch.ts), mirroring the shell commander's
- *     `--model opus --effort max … --remote-control manager`. effort is
- *     CLAUDE_EFFORTS-guarded there; the Remote Control session is named 'manager'.
+ *     `--model opus --effort max … --remote-control <name>`. effort is
+ *     CLAUDE_EFFORTS-guarded there. The Remote Control session name is the
+ *     IDENTIFIABLE one the spawn path resolved (resolveSwarmRemoteName:
+ *     「マネージャー <プロジェクト表示名>」/ "Manager <project>" per the app
+ *     language) — opts.remoteName; absent (legacy caller) it falls back to the
+ *     historical fixed 'manager'.
  *   - initialPrompt — `/og-manage` positional (claude runs the tmux-free
  *     commander skill on startup). */
 //   - resume — when the project already has a commander conversation claude can
@@ -135,7 +223,7 @@ export interface SpawnSwarmManagerOpts {
 export const managerLaunchOpts = (
   cwd: string,
   agentSessionId: string,
-  opts: { cols?: number; rows?: number; resume?: boolean } = {},
+  opts: { cols?: number; rows?: number; resume?: boolean; remoteName?: string } = {},
   // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
   me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
@@ -150,13 +238,136 @@ export const managerLaunchOpts = (
   // keeping the engine-driven commander deterministic. (The confined WORKER still
   // REQUIRES strictMcpConfig — mcp__* tools bypass ITS veto; see swarmWorker.ts.)
   strictMcpConfig: true,
-  ...swarmLaunchDefaults('manager', me),
+  // The commander is a DESK the owner talks to ("状況" / "マージ"), not an
+  // unattended worker: when it stops on a spent model quota the owner's own
+  // conversation is stopped, and nothing else notices (the engine's resuscitation
+  // reflex only runs while the engine does). Watched by ownerDeskLimit.ts, which
+  // names it by the role the owner knows it as — an account-wide exhaustion stops
+  // every desk at once, so "which conversation" has to be in the message.
+  ownerDesk: true,
+  deskLabel: MANAGER_DESK_LABEL,
+  ...swarmLaunchDefaults(opts.remoteName ?? 'manager', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
   rows: opts.rows,
   ...(opts.resume ? { resume: true } : {}),
   initialPrompt: opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION,
 })
+
+/** ONE DESK PER PROJECT, decided on the POOL (2026-07-19 incident): if a labelled
+ *  commander desk is live in `projectPath`, ADOPT it — return its terminal (and
+ *  repoint the session record at it) instead of building a twin. null ⇒ no desk
+ *  exists, so the caller may spawn.
+ *
+ *  Eleven commander desks accumulated in three hours, and the duplicate-dispatcher
+ *  hazard they created is the expensive part: two desks integrating one trunk is
+ *  the shape of the 2026-07-15 concurrent-integration incident. The engine's
+ *  presence probe was supposed to prevent this by spawning only when it reads
+ *  'absent' — but 'absent' means "the PTY holding the RECORDED session id is
+ *  gone", and the record is a single slot every spawn overwrites
+ *  (recordSwarmSession, whose failure is deliberately swallowed). One missed
+ *  write, one transient store read fault, or one spawn racing another leaves a
+ *  live desk that the store no longer names — permanently invisible to presence,
+ *  which then reads 'absent' and asks for another desk every five minutes,
+ *  forever. The desks were never dead; they were UNADDRESSED.
+ *
+ *  So existence is decided where it cannot desynchronise: the PTY pool. This holds
+ *  for EVERY caller (the engine's reflex and the owner's button alike), which the
+ *  presence-based guard never could: the route had no such check at all, and the
+ *  UI's was browser-local state.
+ *
+ *  …AND IT RECONCILES THE STORE ON THE WAY OUT. Refusing to spawn stops the
+ *  bleeding; repointing the record at the desk that actually exists is what HEALS
+ *  the desync, so presence stops reading 'absent' and the engine goes back to
+ *  nudging the live desk instead of escalating 'manager-unrevivable' against it.
+ *
+ *  PURE with respect to the invariant: it reads the pool and writes the record,
+ *  and can therefore NEVER create a second desk. That is why the timeout path in
+ *  {@link spawnSwarmManager} may call it without holding the spawn lock. */
+const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResponse | null> => {
+  const liveDesks = listLiveDesksIn(projectPath, MANAGER_DESK_LABEL)
+  const existing = liveDesks[0]
+  if (!existing) return null
+  if (liveDesks.length > 1)
+    console.warn(
+      `[swarmManager] ${liveDesks.length} live commander desks in ${projectPath} — ` +
+        '本来1卓のみ。余分な卓は Terminal タブから閉じてください(自動 kill はしない)',
+    )
+  if (existing.agentSessionId) {
+    await recordSwarmSession(projectPath, 'manager', existing.agentSessionId).catch(() => {})
+  }
+  return {
+    terminalId: existing.id,
+    agentSessionId: existing.agentSessionId ?? '',
+    resumed: false,
+    reused: true,
+  }
+}
+
+/** How long a caller waits for an in-flight commander spawn in the SAME project
+ *  before giving up on the lock.
+ *
+ *  Sized off the critical section's own worst case, not off a round number: the
+ *  slow step is `resolveSwarmModelEffortProbed`, which may probe several tiers in
+ *  turn and budgets `TIER_PROBE_LAUNCH_WAIT_MS`-scale seconds for each (8s per
+ *  rung), on top of a session probe, a skill install and two settings reads. 120s
+ *  clears a full ladder walk with room to spare while still being a BOUND — a
+ *  holder that never settles must not wedge the commander button forever. */
+export const DESK_SPAWN_LOCK_WAIT_MS = 120_000
+
+/** key = resolve(projectPath) → a promise that settles when the holder releases.
+ *
+ *  On globalThis so the critical section survives `tsx watch` reloads in dev —
+ *  the same rule the PTY pool it guards follows (`globalThis.__openground_terminal`).
+ *  A lock that reloaded while the pool did not would stop excluding anything at
+ *  exactly the moment the pool still remembered the desk. */
+const lockGlobal = globalThis as typeof globalThis & {
+  __openground_manager_spawn_locks?: Map<string, Promise<void>>
+}
+const deskSpawnLocks: Map<string, Promise<void>> =
+  lockGlobal.__openground_manager_spawn_locks ??
+  (lockGlobal.__openground_manager_spawn_locks = new Map())
+
+/** true ⇒ `p` settled within `ms`; false ⇒ the wait expired. Leaves no live timer
+ *  behind either way, and the timer never holds the process open. */
+const settledWithin = (p: Promise<void>, ms: number): Promise<boolean> =>
+  new Promise((res) => {
+    const timer = setTimeout(() => res(false), ms)
+    timer.unref?.()
+    const done = () => {
+      clearTimeout(timer)
+      res(true)
+    }
+    p.then(done, done)
+  })
+
+/** Take the project's spawn lock, waiting out any current holder. Returns the
+ *  release fn (idempotent-safe: it only clears the map slot that is still OURS),
+ *  or null when the wait expired. */
+const acquireDeskSpawnLock = async (
+  key: string,
+  waitMs: number,
+): Promise<(() => void) | null> => {
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    const held = deskSpawnLocks.get(key)
+    if (!held) {
+      // COMPARE-AND-SET. There is deliberately NO `await` between this read and
+      // the write below, so on JS's single thread the pair is atomic — precisely
+      // the property the old read-pool-then-launch sequence lacked.
+      let release!: () => void
+      const mine = new Promise<void>((r) => (release = r))
+      deskSpawnLocks.set(key, mine)
+      return () => {
+        if (deskSpawnLocks.get(key) === mine) deskSpawnLocks.delete(key)
+        release()
+      }
+    }
+    if (!(await settledWithin(held, Math.max(0, deadline - Date.now())))) return null
+    // The holder released — loop and re-test. Several waiters wake together and
+    // only one wins the compare-and-set above; the losers simply wait again.
+  }
+}
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
  *  the `/og-manage` skill (handed positionally so claude submits it on startup).
@@ -165,6 +376,72 @@ export const managerLaunchOpts = (
  *  created, so there is nothing to clean up on stop — the caller just kills the
  *  PTY. */
 export const spawnSwarmManager = async (
+  opts: SpawnSwarmManagerOpts,
+): Promise<SpawnSwarmManagerResponse> => {
+  // ── ONE SPAWN AT A TIME, per project: the check-then-act is a CRITICAL SECTION ──
+  //
+  // {@link adoptLiveDesk} decides existence on the pool, which cannot desynchronise
+  // from itself — but reading it is only half the guard. Between that read and the
+  // `launchClaude` that finally puts a desk INTO the pool sit four awaits (the
+  // session probe, the skill install, two settings reads, and the tier probe, which
+  // alone can spend tens of seconds walking the ladder). Two callers arriving inside
+  // that window both read "no desk" and both spawn: a textbook check-then-act with
+  // no lock.
+  //
+  // The two callers are independent BY CONSTRUCTION — the engine's resuscitation
+  // reflex (swarmOrchestrator, on its own timer) and the owner's 司令官 button
+  // (POST /api/swarm/manager) — and they run in the SAME Node process, so "truly
+  // simultaneous" only requires landing in the same event-loop window, not the same
+  // microsecond. The 2026-07-19 eleven-desk incident was the SEQUENTIAL form of this
+  // (five minutes apart, where the pool read alone was enough); this is the
+  // concurrent form, and it is closed by making the whole check-then-act atomic
+  // with respect to other spawns of the SAME project.
+  //
+  // Keyed by `resolve(projectPath)` — EXACTLY the identity `listLiveDesksIn` uses to
+  // decide whether a desk is "in this project" (it compares `resolve(d.cwd)`), so
+  // the lock is never coarser or finer than the check it guards. Different projects
+  // never wait on each other.
+  //
+  // Serialised, NOT coalesced: the second caller re-runs the check after the first
+  // finishes rather than inheriting its result, so its answer still comes from the
+  // pool (the authority) — it gets `reused:true` naming the desk that now exists,
+  // and a first caller that FAILED does not poison it into failing too.
+  //
+  // `fresh` does NOT bypass any of this. It means "do not resume the persisted
+  // conversation", which is a question about WHICH conversation a new desk opens —
+  // not a licence to run two. An owner replacing a wedged desk stops it from the
+  // Terminal tab first; the engine must never have that power (auto-killing a desk
+  // in the repo's own cwd is the one thing 03 §2.3 rules out, because the owner's
+  // own sessions live there too).
+  const release = await acquireDeskSpawnLock(resolve(opts.projectPath), DESK_SPAWN_LOCK_WAIT_MS)
+  if (!release) {
+    // Waited out a holder that never settled. Falling through to spawn anyway is
+    // the one thing we must not do — that is the twin this guard exists to
+    // prevent. If the wedged holder already got its PTY up, ADOPT it (a pool read
+    // + record write can never build a desk); otherwise refuse, and let the caller
+    // decide: the engine's wakeManager reads a throw as "retry next pass", and the
+    // owner's button surfaces it instead of quietly seating a second commander.
+    const adopted = await adoptLiveDesk(opts.projectPath)
+    if (adopted) return adopted
+    throw new Error(
+      `commander spawn already in flight for ${opts.projectPath} ` +
+        `(waited ${DESK_SPAWN_LOCK_WAIT_MS}ms) — refusing to open a second 司令官 desk`,
+    )
+  }
+  try {
+    const adopted = await adoptLiveDesk(opts.projectPath)
+    if (adopted) return adopted
+    return await launchNewDesk(opts)
+  } finally {
+    release()
+  }
+}
+
+/** The spawn half of {@link spawnSwarmManager}, split out so the critical section
+ *  it must run inside is a single `try`/`finally` at the call site rather than a
+ *  release scattered down every exit path. NEVER call this without holding the
+ *  project's spawn lock. */
+const launchNewDesk = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
   // RESUME the project's previous commander conversation whenever claude can still
@@ -184,7 +461,33 @@ export const spawnSwarmManager = async (
   // user-authored file (managed-by marker removed) is still never overwritten,
   // and a failure never blocks the spawn (the commander then just reports the
   // missing skill conversationally).
-  await installOgManageSkill().catch(() => {})
+  //
+  // …AND THE BEST-EFFORT-NESS IS NOW VISIBLE (adversarial review 2026-07-19,
+  // MUST-FIX 2). This install is the ONLY thing carrying the commander's half of
+  // the review protocol — this card's specialist clauses AND the pre-existing
+  // fail-CLOSED gate — from the repo to the desk that actually integrates. Two
+  // outcomes leave the desk on a STALE copy:
+  //   • 'kept-user' — the managed-by marker was removed, so it is never updated again.
+  //   • 'error'     — source unreadable (e.g. a worktree-resident engine whose
+  //                   resolveHookSourceRoot refuses to hand over a source root).
+  // Neither blocks the spawn — that stays deliberate (a commander on an old skill
+  // still beats no commander) — but they must not be SILENT, which they were:
+  // the return value was discarded and `.catch(() => {})` swallowed the rest.
+  // The repo-side pins (ogManageSkill.test.ts) hold 定数 ↔ repo SKILL.md; they do
+  // NOT hold repo ↔ running desk. This log is the only seam where that gap is
+  // observable, so the asymmetry is findable instead of inferred after the fact.
+  const skill = await installOgManageSkill().catch((e) => ({
+    outcome: 'error' as const,
+    path: '(unresolved)',
+    error: String(e),
+  }))
+  if (skill.outcome === 'error' || skill.outcome === 'kept-user') {
+    console.warn(
+      `[swarmManager] og-manage skill NOT refreshed (${skill.outcome}) at ${skill.path}` +
+        `${skill.error ? `: ${skill.error}` : ''} — ` +
+        '司令官は旧 SKILL.md で統合する(専門レビュアー条項・fail-CLOSED 条項を欠く可能性)',
+    )
+  }
   // Token budget (card 68d8e00f): economy runs the commander on sonnet; optimize keeps
   // it on the top tier (its integration / safety-review judgment is quality-critical).
   // Null ⇒ the owner switched every tier OFF: no model, no spawn (fail-CLOSED — the
@@ -201,14 +504,22 @@ export const spawnSwarmManager = async (
     await getAllowedModelTiers(),
   )
   if (!me) throw new NoAllowedModelTierError()
+  // Remote Control 名の識別化: 「マネージャー <プロジェクト表示名>」/ "Manager
+  // <project>"(言語は Settings.language、表示名は registry の displayName ||
+  // フォルダ名)。resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名
+  // 'manager' で spawn は通る。
+  const remoteName = await resolveSwarmRemoteName('manager', opts.projectPath)
   const ref = launchClaude(
     managerLaunchOpts(
       opts.projectPath,
       session.agentSessionId,
-      { cols: opts.cols, rows: opts.rows, resume: session.resume },
+      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName },
       me,
     ),
   )
+  // Arm the death-watch BEFORE anything else can await: a tier this dry refuses in
+  // 1.4–3.8s (measured 2026-07-19), which is well inside the store write below.
+  watchDeskForDeathOnArrival(ref.terminalId, me.model)
   // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
   // commander its memory on the following launch (it starts fresh — the old
   // behaviour), and must NEVER turn a successfully-spawned PTY into a 500.

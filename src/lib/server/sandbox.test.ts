@@ -5,6 +5,31 @@ import { buildSandboxProfile, wrapWithSandboxExec } from '@/lib/server/sandbox'
 // experiment, so its shape is pinned here (the kernel-level proof — that these
 // rules actually confine — lives in scripts/sandbox-probe.ts, run on macOS).
 
+/**
+ * Evaluate the profile's emitted READ-deny rules against a CONCRETE path.
+ *
+ * Deliberately behavioural rather than a `toContain` on the rule text: a test
+ * that transcribes the implementation passes for any rewrite that keeps the
+ * spelling and fails for every rewrite that changes it — exactly backwards. This
+ * re-runs the rules, so an equivalent refactor still passes while a profile that
+ * stops covering a path fails, whatever the new spelling is.
+ *
+ * POSIX ERE (what sandbox-exec compiles) and JS RegExp agree on every construct
+ * this profile uses — anchors, alternation, escaped dots, and `.`, which matches
+ * `/` in both — so JS evaluation is a faithful stand-in. The kernel-level proof
+ * is scripts/sandbox-probe.ts.
+ */
+const deniedForRead = (profile: string, path: string): boolean =>
+  profile.split('\n').some((line) => {
+    const sub = line.match(/^\(deny file-read\* \(subpath "(.*)"\)\)$/)
+    if (sub) return path === sub[1] || path.startsWith(`${sub[1]}/`)
+    const lit = line.match(/^\(deny file-read\* \(literal "(.*)"\)\)$/)
+    if (lit) return path === lit[1]
+    const re = line.match(/^\(deny file-read\* \(regex #"(.*)"\)\)$/)
+    if (re) return new RegExp(re[1]).test(path)
+    return false
+  })
+
 describe('buildSandboxProfile', () => {
   const profile = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u' })
 
@@ -32,7 +57,7 @@ describe('buildSandboxProfile', () => {
       '/home/u/.azure',
       '/home/u/.wrangler',
       '/home/u/.config/.wrangler',
-      '/home/u/Library/Keychains',
+      // NB: ~/Library/Keychains is deliberately absent — see the keychain test below.
     ]) {
       expect(profile).toContain(`(deny file-read* (subpath "${p}"))`)
     }
@@ -168,19 +193,110 @@ describe('buildSandboxProfile', () => {
     expect(p).not.toContain('(allow network*)')
   })
 
-  it("network:'loopback' — the login-keychain READ deny is dropped (claude's credential), all other credential denies stay", () => {
-    // Security.framework reads the keychain db FILES from the client process, so
-    // the deny leaves the confined claude "Not logged in" (real-kernel verified).
-    // With egress closed to the allowlist proxy there is no exfil destination, so
-    // 'loopback' trades the file deny for a working login. 'all' keeps it.
-    const p = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u', network: 'loopback' })
-    expect(p).not.toContain('(deny file-read* (subpath "/home/u/Library/Keychains"))')
-    expect(profile).toContain('(deny file-read* (subpath "/home/u/Library/Keychains"))') // 'all' unchanged
-    // The rest of the credential wall is untouched under 'loopback':
-    for (const kept of ['/home/u/.ssh', '/home/u/.aws', '/home/u/.gnupg']) {
-      expect(p).toContain(`(deny file-read* (subpath "${kept}"))`)
+  it('login keychain family is read+write allowed in BOTH modes, the rest of the keychain dir stays denied', () => {
+    // REGRESSION GUARD — do not "harden" this back. Security.framework does the
+    // keychain db file I/O from the CLIENT process, so a Seatbelt deny here is not
+    // an exfil-surface trim, it is an auth outage:
+    //   • READ denied  → a real `claude -p` under this exact profile answers
+    //     `Not logged in · Please run /login` (real-kernel verified 2026-07-19).
+    //   • WRITE denied → claude cannot persist its REFRESHED OAuth token
+    //     (`SecKeychainItemCreateFromContent: UNIX[Operation not permitted]`), so
+    //     read-only would fix start-up and then fail hours in.
+    // The historical deny was dropped for 'loopback' only, which left every swarm
+    // worker / interactive launch ('all') unable to start while the experiment was on.
+    const loopback = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u', network: 'loopback' })
+    const DIR = '/home/u/Library/Keychains'
+    const FAMILY = '#"^/home/u/Library/Keychains/login\\.keychain.*$"'
+    for (const p of [profile, loopback]) {
+      // READ: the co-resident stores are denied by DEPTH (everything two levels
+      // below the dir = the per-UUID data-protection keychains + keybags) plus the
+      // DP metadata file — NOT by denying the dir, which would authenticate fine
+      // and then kill the keychain WRITE (real-kernel measured).
+      const denyDeep = p.indexOf('(deny file-read* (regex #"^/home/u/Library/Keychains/.+/.+"))')
+      const broadRead = p.indexOf('(allow file-read* (subpath "/"))')
+      expect(broadRead).toBeGreaterThanOrEqual(0)
+      expect(denyDeep).toBeGreaterThan(broadRead) // deny must beat the broad read
+      // BOTH spellings of the DP metadata store, which sits at depth 1 and so is
+      // missed by the depth regex. The legacy `metadata.keychain` is not
+      // hypothetical: it is present on the dev machine (0600, 23 KB, 2016) and was
+      // measurably read-ALLOWED while only the `-db` twin was denied.
+      expect(deniedForRead(p, `${DIR}/metadata.keychain`)).toBe(true)
+      expect(deniedForRead(p, `${DIR}/metadata.keychain-db`)).toBe(true)
+      // …the per-UUID DP keychains + keybags stay denied by depth…
+      expect(deniedForRead(p, `${DIR}/AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB/keychain-2.db`)).toBe(true)
+      expect(deniedForRead(p, `${DIR}/AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB/user.kb`)).toBe(true)
+      // …while the login family itself stays READABLE. That is the whole fix: a
+      // deny here is the `Not logged in` launch failure, not a secrecy trim.
+      expect(deniedForRead(p, `${DIR}/login.keychain-db`)).toBe(false)
+      expect(deniedForRead(p, `${DIR}/login.keychain`)).toBe(false)
+      // The dir itself must NOT be denied — that is the shape that breaks writes.
+      expect(p).not.toContain(`(deny file-read* (subpath "${DIR}"))`)
+      // WRITE: the login family only — never the whole dir, whose other occupants
+      // are the per-UUID data-protection keychains + keybags (Safari / iCloud /
+      // app secrets), Octagon trust state and TrustSettings.plist.
+      expect(p).toContain(`(allow file-write* (regex ${FAMILY}))`)
+      expect(p).not.toContain(`(allow file-write* (subpath "${DIR}"))`)
+      // No LATER rule of any form may claw the keychain back — check every deny
+      // line mentioning the dir, not just the subpath spelling (the profile emits
+      // both subpath and regex denies, so a presence check on one form would miss).
+      const clawback = p.split('\n').filter((l) => l.startsWith('(deny file-write*') && l.includes('Keychains'))
+      expect(clawback).toEqual([])
+      // The rest of the credential wall is untouched in both modes.
+      for (const kept of ['/home/u/.ssh', '/home/u/.aws', '/home/u/.gnupg']) {
+        expect(p).toContain(`(deny file-read* (subpath "${kept}"))`)
+      }
+      expect(p).toContain('(deny file-read* (literal "/home/u/.netrc"))')
     }
-    expect(p).toContain('(deny file-read* (literal "/home/u/.netrc"))')
+  })
+
+  it('re-denies BROWSER credential stores at every profile depth, without over-denying the browser dirs', () => {
+    // The keychain carve-in above makes `Chrome Safe Storage` — the master key to
+    // Chromium's password vault — reachable, and the vault FILES were reachable all
+    // along via the broad read. Either half alone is inert; together they hand a
+    // contained worker with open egress every saved browser password. The keychain
+    // half cannot be closed (denying it is the launch failure the carve-in fixes),
+    // so this half must stay closed.
+    const AS = '/home/u/Library/Application Support'
+    const loopback = buildSandboxProfile({ cwd: '/work/proj', home: '/home/u', network: 'loopback' })
+    for (const p of [profile, loopback]) {
+      for (const denied of [
+        // Chromium family. The profile dir level differs per browser AND per
+        // user-created profile, so every real shape is pinned — a fix that only
+        // covered `Chrome/Default` would leave `Profile 1`, Edge and Brave open.
+        `${AS}/Google/Chrome/Default/Login Data`,
+        `${AS}/Google/Chrome/Profile 1/Login Data`,
+        `${AS}/Google/Chrome/Default/Login Data For Account`,
+        `${AS}/Google/Chrome/Default/Login Data-journal`, // SQLite sidecar
+        `${AS}/Google/Chrome/Default/Cookies`,
+        `${AS}/Google/Chrome/Default/Cookies-wal`,
+        `${AS}/Google/Chrome/Default/Web Data`, // autofill, incl. stored cards
+        `${AS}/Microsoft Edge/Default/Login Data`,
+        `${AS}/BraveSoftware/Brave-Browser/Default/Login Data`,
+        // Firefox family: password store, its master key, the cookie jar.
+        `${AS}/Firefox/Profiles/b3eq95yh.default/logins.json`,
+        `${AS}/Firefox/Profiles/b3eq95yh.default/key4.db`,
+        `${AS}/Firefox/Profiles/b3eq95yh.default/key3.db`,
+        `${AS}/Firefox/Profiles/b3eq95yh.default/cert9.db`,
+        `${AS}/Firefox/Profiles/b3eq95yh.default/cookies.sqlite`,
+        `${AS}/Firefox/Profiles/b3eq95yh.default/cookies.sqlite-wal`,
+        // Safari / NSHTTPCookieStorage — a live session cookie is a bearer credential.
+        '/home/u/Library/Cookies/Cookies.binarycookies',
+      ]) {
+        expect(deniedForRead(p, denied)).toBe(true)
+      }
+      // NEGATIVE CONTROL — the deny is the credential DBs, NOT the browser dirs.
+      // claude is legitimately asked to work on a Chrome extension whose source
+      // lives under Application Support, and a project file may share a filename.
+      for (const allowed of [
+        `${AS}/Google/Chrome/Local State`,
+        `${AS}/Google/Chrome/Default/Preferences`,
+        `${AS}/my-extension/src/index.ts`,
+        '/work/proj/fixtures/Login Data', // same name INSIDE the project
+        '/work/proj/src/cookies.sqlite',
+      ]) {
+        expect(deniedForRead(p, allowed)).toBe(false)
+      }
+    }
   })
 
   it("network:'all' and omitted both keep the historical open-outbound line (worker profile unchanged)", () => {

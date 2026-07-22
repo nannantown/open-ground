@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **コード探索の前に [docs/MAP.md](docs/MAP.md) を読む** — 機能領域→入口ファイル→テスト→落とし穴の1枚索引(探索の買い直し防止)。
+
 ## Commands
 
 The app is a **Vite + React SPA** (front-end) talking to a **Hono** server

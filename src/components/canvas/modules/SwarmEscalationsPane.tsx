@@ -205,12 +205,40 @@ export const SwarmEscalationsPane = ({
                 </span>
               </div>
 
-              <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">
-                {e.question}
-              </p>
-              <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
-                {e.context}
-              </p>
+              {/* 平易文 (plainQuestion) is the DEFAULT rendering — the owner is a
+                  non-programmer; when it exists, the technical original
+                  (question + context: file:line, branch, logs) folds behind a
+                  <details>. Records predating the field (no plainQuestion)
+                  keep the legacy layout: question primary, context secondary. */}
+              {e.plainQuestion?.trim() ? (
+                <>
+                  <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">
+                    {e.plainQuestion}
+                  </p>
+                  <details className="min-w-0">
+                    <summary className="cursor-pointer text-[11px] text-ink-faint hover:text-ink">
+                      {t('projectPanel.swarm.esc.techDetails')}
+                    </summary>
+                    <div className="mt-1 flex flex-col gap-1">
+                      <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                        {e.question}
+                      </p>
+                      <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                        {e.context}
+                      </p>
+                    </div>
+                  </details>
+                </>
+              ) : (
+                <>
+                  <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">
+                    {e.question}
+                  </p>
+                  <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                    {e.context}
+                  </p>
+                </>
+              )}
 
               {e.proxyDraft && (
                 <div className="rounded-[2px] border border-line bg-bg-inset px-2.5 py-2">

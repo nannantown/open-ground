@@ -25,10 +25,16 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { addProjectEntry, __resetMigrationCacheForTests } from './registry'
 import { claudeDirName } from './claudeProjectDir'
-import { isClaudeSessionLive, killTerminal } from './terminal'
-import { spawnSwarmManager, MANAGER_INJECTION, MANAGER_RESUME_INJECTION } from './swarmManager'
+import { isClaudeSessionLive, killTerminal, listLiveDesksIn } from './terminal'
+import {
+  spawnSwarmManager,
+  MANAGER_INJECTION,
+  MANAGER_RESUME_INJECTION,
+  MANAGER_DESK_LABEL,
+} from './swarmManager'
 import { spawnSwarmSupply, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
-import { readSwarmSessions } from './swarmSessions'
+import { readSwarmSessions, recordSwarmSession } from './swarmSessions'
+import { defaultManagerPresence } from './swarmOrchestrator'
 
 // A stand-in for `claude` that does the two things this test needs: dump the argv it was
 // actually launched with, and write the session transcript where claude writes it (so the
@@ -80,6 +86,34 @@ printf '%s\\n' "$@" > "${capdir}/tmp.$$"
 mv "${capdir}/tmp.$$" "${capdir}/launch.$n"
 [ -z "$sid" ] && exit 2
 exit 0
+`
+
+// A KEEP-ALIVE variant of the stub for the bug-B test, which needs a LIVE desk in the pool
+// (the resume tests deliberately want theirs to EXIT so `--resume` is exercised — the
+// opposite requirement). Everything up to publishing `launch.N` is identical; then, instead
+// of exiting, it blocks forever so the PTY stays live until the test kills it. `exec cat`
+// is a zero-CPU wait for input that never comes (no busy sleep loop).
+const ALIVE_STUB = (capdir: string) => `#!/bin/sh
+set -u
+case "\${1:-}" in
+  --version|-v) echo "stub-claude 0.0.0"; exit 0 ;;
+  auth) [ "\${2:-}" = "status" ] && { echo '{"loggedIn":true}'; exit 0; } ;;
+esac
+n=0
+while ! mkdir "${capdir}/claim.$n" 2>/dev/null; do n=$((n+1)); done
+sid=""; prev=""
+for a in "$@"; do
+  case "$prev" in --session-id|--resume) sid="$a" ;; esac
+  prev="$a"
+done
+if [ -n "$sid" ]; then
+  dir=$(pwd -P | sed 's/[/. ]/-/g')
+  mkdir -p "$HOME/.claude/projects/$dir"
+  printf '{"type":"system","subtype":"init","sessionId":"%s"}\\n' "$sid" >> "$HOME/.claude/projects/$dir/$sid.jsonl"
+fi
+printf '%s\\n' "$@" > "${capdir}/tmp.$$"
+mv "${capdir}/tmp.$$" "${capdir}/launch.$n"
+exec cat
 `
 
 interface Launch {
@@ -194,8 +228,10 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
   afterEach(async () => {
     for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
+      if (v !== undefined) process.env[k] = v
+      // NEVER unset the home vars: empty means the user's REAL ~/.openground
+      // (paths.ts openGroundHome), and vitest reuses workers across files.
+      else if (!['OPENGROUND_HOME', 'HOME'].includes(k)) delete process.env[k]
     }
     __resetMigrationCacheForTests()
     await rm(home, { recursive: true, force: true })
@@ -308,5 +344,68 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     // on the next restart, which is the only behaviour that makes it an escape.
     expect((await readSwarmSessions(proj)).manager?.sessionId).toBe(brandNew.agentSessionId)
     await appRestart(brandNew.agentSessionId, brandNew.terminalId)
+  }, 90_000)
+
+  // ── bug B, end to end (2026-07-20): a LIVE desk the record no longer names must NOT
+  // read 'absent', and a second spawn must NOT build a twin. This is the FAITHFUL
+  // reproduction — a REAL desk, the REAL pool, the REAL presence probe and the REAL
+  // spawn guard, with only the `claude` binary stubbed. No injected deps.
+  //
+  // The commander measured 11 desks pile up with FABLE UNINVOLVED. Root cause: presence
+  // and the resume seam both asked the single-slot session record "is the recorded id
+  // live?", and that slot is best-effort (recordSwarmSession's write is `.catch(()=>{})`)
+  // and overwritten by every spawn. Corrupt it — exactly what a swallowed write or a
+  // racing spawn does — and `claudeSessionActivity(rec.sessionId)` answers live:false for
+  // a desk that is very much alive. The desk was never dead; it was UNNAMED. On the old
+  // code presence then returned 'absent' (the ONLY spawn trigger) and the engine built a
+  // twin; here both the pool-backed presence and the pool-backed spawn guard refuse to.
+  it('a live desk the record has LOST its id for is not absent, and a 2nd spawn reuses it — never a twin (bug B)', async () => {
+    // This desk must STAY UP (the opposite of the resume tests), so swap in the keep-alive
+    // stub before spawning — the pool can only be the existence authority for a desk that
+    // is actually in it.
+    const aliveBin = join(scratch, 'alive-claude.sh')
+    await writeFile(aliveBin, ALIVE_STUB(capdir))
+    await chmod(aliveBin, 0o755)
+    process.env.OPENGROUND_CLAUDE_BIN = aliveBin
+
+    // A real commander desk boots (real launchClaude → real PTY → live stub) and stays up.
+    const desk = await spawnSwarmManager({ projectPath: proj })
+    await nthLaunch(1)
+    await until('the desk to be live', async () => (isClaudeSessionLive(desk.agentSessionId) ? true : null))
+
+    // The POOL — the authority the fix relies on — sees it under its 司令官 label in this
+    // cwd. (This is the empirical proof deskLabel/ownerDesk/cwd propagate to the pool.)
+    const inPool = listLiveDesksIn(proj, MANAGER_DESK_LABEL)
+    expect(inPool).toHaveLength(1)
+    expect(inPool[0].id).toBe(desk.terminalId)
+    expect(inPool[0].agentSessionId).toBe(desk.agentSessionId)
+
+    // bug B's SYMPTOM: corrupt the single record slot (a swallowed / overwritten write).
+    // claudeSessionActivity(this id) now answers live:false while the desk keeps running.
+    await recordSwarmSession(proj, 'manager', '00000000-dead-dead-dead-000000000000')
+
+    // bug B's FIX #1 (presence): consult the pool → the desk EXISTS → NOT 'absent'.
+    // (Old code: rec's id not live ⇒ 'absent' ⇒ the engine spawns beside a live desk.)
+    const presence = await defaultManagerPresence(proj, Date.now())
+    expect(presence).not.toBe('absent')
+
+    // bug B's FIX #2 (spawn guard): a second spawn hands back the desk that already
+    // exists instead of building a twin — the invariant "≤1 commander desk per project".
+    const twin = await spawnSwarmManager({ projectPath: proj })
+    expect(twin.reused).toBe(true)
+    expect(twin.terminalId).toBe(desk.terminalId) // the SAME desk, not a new PTY
+    expect(twin.agentSessionId).toBe(desk.agentSessionId)
+
+    // Still exactly ONE desk and ONE launch — no second `claude` was ever spawned.
+    expect(listLiveDesksIn(proj, MANAGER_DESK_LABEL)).toHaveLength(1)
+    expect(await launches()).toHaveLength(1)
+
+    // …and the guard RECONCILED the corrupted slot back onto the live desk on the way
+    // out, so presence stops reading 'absent' at the source.
+    expect((await readSwarmSessions(proj)).manager?.sessionId).toBe(desk.agentSessionId)
+
+    // Tear the live desk down (the keep-alive stub blocks on stdin until its PTY dies).
+    killTerminal(desk.terminalId)
+    await until('the desk to be gone', async () => (isClaudeSessionLive(desk.agentSessionId) ? null : true))
   }, 90_000)
 })

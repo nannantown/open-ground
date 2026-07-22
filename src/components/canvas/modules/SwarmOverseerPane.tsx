@@ -67,6 +67,7 @@ const MOVE_INTENT_LABEL: Record<NonNullable<EngineAnomaly['intent']>, MessageKey
   review: 'projectPanel.swarm.manager.moveStuckReview',
   done: 'projectPanel.swarm.manager.moveStuckDone',
   recover: 'projectPanel.swarm.manager.moveStuckRecover',
+  'recover-review': 'projectPanel.swarm.manager.moveStuckRecoverReview',
 }
 
 // Fatal-event kind → localized label. The three engine-side events plus the two

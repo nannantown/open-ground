@@ -76,8 +76,9 @@ beforeEach(async () => {
   __resetMigrationCacheForTests()
 })
 afterEach(async () => {
-  if (savedHome === undefined) delete process.env.OPENGROUND_HOME
-  else process.env.OPENGROUND_HOME = savedHome
+  // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+  // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+  if (savedHome !== undefined) process.env.OPENGROUND_HOME = savedHome
   if (savedCfg === undefined) delete process.env.CLAUDE_CONFIG_PATH
   else process.env.CLAUDE_CONFIG_PATH = savedCfg
   __resetMigrationCacheForTests()

@@ -47,7 +47,12 @@ import {
   runIntegratePass,
   kickIntegratePass,
   MANAGER_RESUME_GRACE_MS,
+  INTEGRATE_TICK_MS,
   MAX_MANAGER_RESUME_ATTEMPTS,
+  MANAGER_UNREVIVABLE_RETRY_MS,
+  MAX_MANAGER_NUDGES,
+  MANAGER_NUDGE_INTERVAL_MS,
+  type ManagerPresence,
   runEnginePass,
   stopOrchestrator,
   setOverseer,
@@ -232,6 +237,9 @@ const makeDeps = (init: {
   spawnFails?: Set<string> // taskIds whose spawn throws
   moveFails?: Set<string> // taskIds whose FIRST todo→doing move returns false
   reviewFails?: Set<string> // taskIds whose FIRST doing→review move returns false
+  reviewAlwaysFails?: Set<string> // taskIds whose doing→review move ALWAYS returns false —
+  //   models a PERMANENTLY rejected Board write, the only way to walk a kept move past
+  //   MOVE_STUCK_MAX_RETRIES (reviewFails above fails once, so it can never reach it)
   commits?: Map<string, number> // taskId → commits ahead of trunk
   heartbeats?: Map<string, HeartbeatSign> // taskId → heartbeat
   recoverFails?: Set<string> // taskIds whose FIRST recover (todo/blocked) move returns false
@@ -257,6 +265,7 @@ const makeDeps = (init: {
   const spawnFails = init.spawnFails ?? new Set<string>()
   const moveFails = new Set(init.moveFails ?? [])
   const reviewFails = new Set(init.reviewFails ?? [])
+  const reviewAlwaysFails = new Set(init.reviewAlwaysFails ?? [])
   const recoverFails = new Set(init.recoverFails ?? [])
   const recoverTodoFails = new Set(init.recoverTodoFails ?? [])
   const commits = init.commits ?? new Map<string, number>()
@@ -312,6 +321,7 @@ const makeDeps = (init: {
       return true
     },
     moveToReview: async (_path, taskId, branch) => {
+      if (reviewAlwaysFails.has(taskId)) return false // never lands
       if (reviewFails.has(taskId)) {
         reviewFails.delete(taskId) // only the FIRST move fails
         return false
@@ -792,6 +802,34 @@ describe('recoveryColumn — where a LOST worker’s card goes', () => {
   it('parks a PERMISSION wait in blocked (bypass is broken — needs a human)', () => {
     expect(recoveryColumn(p(), 0, 1, 'permission')).toBe('blocked')
   })
+  it('sends an INTEGRATION-WAIT stop to review, never blocked (2026-07-18)', () => {
+    // A worker stopped after it already reached ready has committed, integrable
+    // work: that is the commander's queue, not an owner decision.
+    expect(recoveryColumn(p(), 0, 1, 'integration-wait')).toBe('review')
+    // …and it must beat every rule that would otherwise say 'blocked': the stale
+    // `ready` heartbeat (the exact shape of the incident) and a spent budget.
+    expect(recoveryColumn(p({ heartbeat: { ready: true, blocked: false } }), 0, 1, 'integration-wait')).toBe('review')
+    expect(recoveryColumn(p(), 9, 1, 'integration-wait')).toBe('review')
+  })
+  it('but a worker’s OWN blocked declaration still wins over integration-wait (2026-07-19)', () => {
+    // The exemption above is scoped to ONE rule — the stale `ready` heartbeat.
+    // `blocked` is different in kind: `ready` is an artefact of an earlier state,
+    // `blocked` is the worker's LIVE report that it hit a wall a human must clear.
+    // Routing that to 'review' discarded the only signal it managed to raise, and
+    // the commander would just 差し戻し it into the same wall.
+    expect(
+      recoveryColumn(p({ commitsAhead: 3, heartbeat: { ready: false, blocked: true } }), 0, 1, 'integration-wait'),
+    ).toBe('blocked')
+    // …including when the retry budget is long gone.
+    expect(
+      recoveryColumn(p({ commitsAhead: 3, heartbeat: { ready: false, blocked: true } }), 5, 1, 'integration-wait'),
+    ).toBe('blocked')
+    // A worker that says BOTH (ready from before the 差し戻し, blocked now) is
+    // blocked: the live report beats the stale one.
+    expect(
+      recoveryColumn(p({ heartbeat: { ready: true, blocked: true } }), 0, 1, 'integration-wait'),
+    ).toBe('blocked')
+  })
   it('stall behaves like crash (budget-driven) when passed explicitly', () => {
     expect(recoveryColumn(p(), 0, 1, 'stall')).toBe('todo')
     expect(recoveryColumn(p(), 1, 1, 'stall')).toBe('blocked')
@@ -1227,6 +1265,18 @@ describe('isRunaway — the hard execution-time ceiling', () => {
     expect(isRunaway(NOW - 91 * 60_000, NOW, 90 * 60_000, Number.NaN)).toBe(true)
     expect(isRunaway(NOW - 89 * 60_000, NOW, 90 * 60_000, -60 * 60_000)).toBe(false)
   })
+
+  it('repays 統合待ち too — the 2026-07-18 loss (ready 63m + idle 28m = 91m alive)', () => {
+    // Ready at 63m, then 28m idle in the integration queue, then 差し戻し. On raw
+    // wall-clock that is a runaway at the 90m ceiling — and the worker was torn
+    // down and its card parked in 'blocked'. The credit is the whole fix.
+    expect(isRunaway(NOW - 91 * 60_000, NOW, 90 * 60_000)).toBe(true) // the OLD verdict
+    expect(isRunaway(NOW - 91 * 60_000, NOW, 90 * 60_000, 28 * 60_000)).toBe(false) // the fix
+    // The credit is the SUM of both non-working spans (executionCredit): 20m held
+    // on a quota wall + 30m waiting for the commander = 90m worked out of 140m.
+    expect(isRunaway(NOW - 140 * 60_000, NOW, 90 * 60_000, 50 * 60_000)).toBe(true) // exactly 90m
+    expect(isRunaway(NOW - 139 * 60_000, NOW, 90 * 60_000, 50 * 60_000)).toBe(false)
+  })
 })
 
 // ── maybeAutoStartDrain / drainTickOrchestrator — auto-start without a manual ON ──
@@ -1262,7 +1312,8 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       // Manager-only integration (2026-07-15): inert wake half — no desk, no spawn.
       // The integrate pass never fires in these dispatch/runEnginePass unit tests
       // (the TICK_MS timer is cleared first), so these only satisfy the type.
-      isManagerActive: async () => false,
+      managerPresence: async () => 'absent',
+      nudgeManager: async () => true,
       wakeManager: async () => true,
       worktreeExists: async () => true,
       preflight: async () => ({ ok: true }), // claude ready by default; a test overrides to ok:false
@@ -2337,6 +2388,10 @@ describe('runDispatchPass — every tier switched OFF (none-allowed hold)', () =
     expect(deps.raised[0].projectPath).toBe(engine.path)
     expect(deps.raised[0].whyEscalated).toBe('policy')
     expect(deps.raised[0].question).toContain('switched OFF')
+    // 平易文 rides the template raise (non-programmer owner surface): A/B + 影響.
+    expect(deps.raised[0].plainQuestion).toContain('すべてオフになっています')
+    expect(deps.raised[0].plainQuestion).toContain('A: ')
+    expect(deps.raised[0].plainQuestion).toContain('B: ')
     // …and only one warn line, not one per tick.
     expect(engine.log.filter((l) => l.level === 'warn')).toHaveLength(1)
   })
@@ -3672,7 +3727,7 @@ describe('runDispatchPass — monitor: runaway (execution-time ceiling)', () => 
     expect(engine.workers).toHaveLength(0)
     const log = engine.log.find((l) => l.message.startsWith('worker runaway'))
     expect(log?.level).toBe('warn')
-    expect(log?.message).toContain('0m of rate-limit hold credited back')
+    expect(log?.message).toContain('0m rate-limit hold + 0m 統合待ち credited back')
   })
 
   it('BANKS a hold when the limit lifts — the ledger is what the ceiling reads', async () => {
@@ -3701,6 +3756,989 @@ describe('runDispatchPass — monitor: runaway (execution-time ceiling)', () => 
     expect(engine.rateLimited.has('pty-a-1')).toBe(false) // hold released …
     expect(engine.rateLimitHeldMs?.get('pty-a-1')).toBe(15 * 60_000) // … and BANKED
     expect(engine.workers).toHaveLength(1) // still working, untouched
+  })
+})
+
+// ── The 2026-07-18 事故: 統合待ちの idle が実行時間上限に算入されていた ──────────
+// A worker reached ready at 04:18; its card sat in 'review' waiting for the
+// commander; at 04:46 the commander 差し戻し'd it (review→doing). The very next
+// pass judged it "worker runaway — worked 91m ≥ 90m execution limit" and tore the
+// worktree down, parking the card in 'blocked'. It had actually WORKED 63m — the
+// 28 minutes it spent idle in the integration queue were charged to it as work.
+// The ceiling bounds WORKING time; 統合待ち is repaid, exactly like a quota hold.
+describe('runDispatchPass — monitor: 統合待ち is not working time (2026-07-18)', () => {
+  const T0 = Date.parse('2026-07-18T03:15:00Z')
+  const startedAt = new Date(T0).toISOString()
+  const w1 = (over: Partial<OrchestratorWorker> = {}) =>
+    worker({
+      terminalId: 'pty-a-1',
+      branch: 'swarm/a',
+      worktree: '/wt/a',
+      taskId: 'a',
+      taskTitle: 'task a',
+      startedAt,
+      ...over,
+    })
+  /** A worker READY to merge: its branch has commits and its heartbeat says so. */
+  const readyDeps = (boardColumn: 'doing' | 'review', at: number) =>
+    makeDeps({
+      cards: [card('a', { boardColumn })],
+      commits: new Map([['a', 3]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(at - 1000).toISOString() }]]),
+      outputs: new Map([['pty-a-1', at - 1000]]),
+    })
+  /** The post-差し戻し shape: card back in 'doing', busy, but its heartbeat file
+   *  still holds the PRE-rework readyToMerge:true (the engine can't clear it). The
+   *  re-promote suppression drops the promote on that stale sign, so the worker
+   *  falls THROUGH to the execution-ceiling check — the exact incident path. */
+  const staleReadyDeps = (heartbeatAt: number, at: number) =>
+    makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 3]]),
+      heartbeats: new Map([
+        ['a', { ready: true, blocked: false, at: new Date(heartbeatAt - 1000).toISOString() }],
+      ]),
+      outputs: new Map([['pty-a-1', at - 1000]]), // busy — only the ceiling can stop it
+    })
+
+  it('REPLAYS the incident: ready → 28m 統合待ち → 差し戻し ⇒ NOT stopped', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    // 04:18 — 63m in, the worker reports ready and the card is promoted to review.
+    const readyAtMs = T0 + 63 * 60_000
+    const deps1 = readyDeps('doing', readyAtMs)
+    await runDispatchPass(engine, deps1, readyAtMs)
+    expect(deps1.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(engine.workers[0].stage).toBe('done')
+    expect(engine.workers[0].readyAt).toBe(new Date(readyAtMs).toISOString())
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBe(readyAtMs) // 統合待ち clock started
+
+    // 04:46 — the commander 差し戻し's it (review→doing) after 28m of queue latency.
+    // 91m ALIVE at the 90m default: the OLD code called this "runaway 91m".
+    const reworkMs = T0 + 91 * 60_000
+    const deps2 = readyDeps('doing', reworkMs)
+    await runDispatchPass(engine, deps2, reworkMs)
+
+    // The wait is banked and repaid ⇒ 63m WORKED ⇒ nowhere near the ceiling.
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(28 * 60_000)
+    expect(engine.integrationWaitSince?.has('pty-a-1')).toBe(false) // ended, not double-counted
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+    expect(deps2.tornDown).toHaveLength(0) // worktree SURVIVES — the commander's recovery plan holds
+    expect(deps2.recovered).toHaveLength(0) // and the card never reaches 'blocked'
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.workers[0].stage).toBe('running') // back at work on the 差し戻し
+  })
+
+  it('a COMMANDER hand-move (doing→review) starts the same ledger as a promote', async () => {
+    // The route the first fix missed. og-manage tells the commander to
+    // `move <id> review` the moment a worker reports READY (SKILL.md 「READY を見たら
+    // まず move review」), so the hand-move routinely BEATS the engine's promote
+    // tick — it is the MOST COMMON way a card reaches review, not an edge.
+    // Binding readyAt / 統合待ち to the promote WRITE instead of the card's COLUMN
+    // left that route off the ledger: stage went 'done' with no readyAt, the wait
+    // never banked, and the next 差し戻し replayed 0718 verbatim — "runaway 91m",
+    // worktree torn down, card → blocked.
+    const engine = newEngine({ workers: [w1()] })
+    // 63m — the worker IS ready (3 commits + ready heartbeat), but the commander
+    // already moved the card to review, so the engine never runs its own promote.
+    const readyAtMs = T0 + 63 * 60_000
+    const deps1 = readyDeps('review', readyAtMs)
+    await runDispatchPass(engine, deps1, readyAtMs)
+    expect(deps1.reviews).toHaveLength(0) // the ENGINE did not promote — the human did
+    expect(engine.workers[0].stage).toBe('done')
+    expect(engine.workers[0].readyAt).toBe(new Date(readyAtMs).toISOString()) // …ledger ON anyway
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBe(readyAtMs)
+
+    // 91m — 差し戻し (review→doing). 91m alive at the 90m default: the exact input
+    // that produced the incident's log line on the hand-move path.
+    const reworkMs = T0 + 91 * 60_000
+    const deps2 = readyDeps('doing', reworkMs)
+    await runDispatchPass(engine, deps2, reworkMs)
+
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(28 * 60_000) // banked, then repaid
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+    expect(deps2.tornDown).toHaveLength(0) // worktree SURVIVES
+    expect(deps2.recovered).toHaveLength(0) // card never reaches 'blocked'
+    expect(engine.workers[0].stage).toBe('running') // back at work on the 差し戻し
+  })
+
+  it('a BARE card parked in review does NOT earn readyAt — the 暴走 guard must not fail open', async () => {
+    // `readyAt` is the only thing standing between a worker and the 暴走 label, and
+    // the column is a CLAIM, not a receipt: anyone can drag a card to 'review'.
+    // Stamping on the claim alone meant that parking an untouched card in review
+    // once, then dragging it back, permanently immunised that worker — it could
+    // then run for hours with zero commits, escape the 'blocked' park, and tell the
+    // owner 「統合可能な成果を一度出しています」 about an empty branch.
+    const engine = newEngine({ workers: [w1()] })
+    const at = T0 + 20 * 60_000
+    const bare = makeDeps({
+      cards: [card('a', { boardColumn: 'review' })], // hand-moved…
+      // …but NOTHING delivered: no commits, no ready heartbeat.
+      outputs: new Map([['pty-a-1', at - 1000]]),
+    })
+    await runDispatchPass(engine, bare, at)
+    expect(engine.workers[0].readyAt).toBeUndefined() // the claim is not corroborated
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBeUndefined()
+
+    // …so when it later blows the ceiling with nothing to show, it is still a 暴走.
+    const now = T0 + 200 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })], // dragged back
+      outputs: new Map([['pty-a-1', now - 1000]]),
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // parked for a human
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(true)
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutKind).toBe('runaway')
+    expect(fatal?.detail).not.toContain('統合可能な成果を一度出しています')
+  })
+
+  it('…but a corroborated review card DOES earn it (commits alone are enough)', async () => {
+    // The corroboration is a NECESSARY condition, not a new witness: a hand-moved
+    // card whose branch actually has commits still lands on the ledger exactly as
+    // before, so the 0718 fix is untouched.
+    const engine = newEngine({ workers: [w1()] })
+    const at = T0 + 20 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'review' })],
+      commits: new Map([['a', 3]]),
+      outputs: new Map([['pty-a-1', at - 1000]]),
+    })
+    await runDispatchPass(engine, deps, at)
+    expect(engine.workers[0].readyAt).toBe(new Date(at).toISOString())
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBe(at)
+  })
+
+  it('…and a ready heartbeat alone is enough too (commits not yet visible)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const at = T0 + 20 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'review' })],
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(at - 1000).toISOString() }]]),
+      outputs: new Map([['pty-a-1', at - 1000]]),
+    })
+    await runDispatchPass(engine, deps, at)
+    expect(engine.workers[0].readyAt).toBe(new Date(at).toISOString())
+  })
+
+  it('SURVIVES the ticks in between — the wait clock is stamped once, not every pass', async () => {
+    // THE GAP EVERY OTHER TEST HERE LEAVES OPEN. The rest drive two passes (promote,
+    // then 差し戻し) and never a pass in BETWEEN — but the real tick is 3 seconds, so
+    // a 28-minute integration wait contains ~560 of them, and the early-continue
+    // calls beginIntegrationWait on every single one. Only the `has()` guard keeps
+    // the ORIGINAL stamp; drop it and each pass re-stamps `now`, so the banked wait
+    // collapses from 28m to one tick and 0718 returns intact.
+    //
+    // Mutation-checked: removing the guard turns this red (1665000 vs 1680000) and
+    // leaves the other 495 tests green — it is the only thing holding that line.
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 63 * 60_000
+    await runDispatchPass(engine, readyDeps('doing', readyAtMs), readyAtMs) // promote
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBe(readyAtMs)
+
+    // …now the ordinary ticks while the card simply sits in review.
+    for (let i = 1; i <= 5; i++) {
+      const t = readyAtMs + i * 3_000
+      await runDispatchPass(engine, readyDeps('review', t), t)
+      expect(engine.integrationWaitSince?.get('pty-a-1')).toBe(readyAtMs) // never re-stamped
+    }
+
+    const reworkMs = T0 + 91 * 60_000
+    await runDispatchPass(engine, readyDeps('doing', reworkMs), reworkMs) // 差し戻し
+    // The FULL 28 minutes is banked — not the 3 seconds since the last tick.
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(28 * 60_000)
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+  })
+
+  it('the hand-move path reaches the ceiling as integration-wait too — never runaway/blocked', async () => {
+    // Composition of the two halves, walked end to end on the COMMANDER's route:
+    // hand-move → 差し戻し → genuinely works past the ceiling. The other ceiling
+    // test injects `readyAt` through the fixture, so only this one proves the
+    // stamp SURVIVES the round trip and lands the card in review. 完了条件 1 + 2.
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 63 * 60_000
+    const handMove = readyDeps('review', readyAtMs) // 司令官が先に review へ動かした後の姿
+    await runDispatchPass(engine, handMove, readyAtMs)
+    // PIN THE ROUTE, not just the outcome. The card starts in 'review', so the
+    // early-continue must fire and the engine's own promote must never run — that
+    // is the whole point of this test, and without these two lines a refactor that
+    // reordered promote ahead of the early-continue would keep it green while it
+    // silently stopped covering the hand-move path (the regression that got this
+    // very change 差し戻し'd once).
+    expect(handMove.reviews).toEqual([]) // engine did NOT promote — the commander had
+    expect(engine.workers[0].readyAt).toBe(new Date(readyAtMs).toISOString()) // stamped anyway
+
+    const reworkMs = T0 + 88 * 60_000
+    await runDispatchPass(engine, readyDeps('doing', reworkMs), reworkMs) // 差し戻し
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(25 * 60_000) // banked by the round trip
+
+    // The RE-WORK itself runs 95m past the 差し戻し ⇒ over the 90m ceiling on its
+    // OWN budget, so it IS stopped — but as a worker that delivered, not as a 暴走.
+    // (Before 2026-07-20 this fired at 120m, i.e. by charging the re-work for the
+    // 63m of work that preceded it; the ceiling now measures the current assignment,
+    // so the overrun has to be a real overrun.)
+    const now = reworkMs + 95 * 60_000
+    const deps = staleReadyDeps(readyAtMs, now)
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }]) // stopped for real
+    expect(deps.recovered).toHaveLength(0) // never recoverCard'd ⇒ never 'blocked'
+    expect(deps.board.get('a')?.boardColumn).toBe('review')
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false)
+    expect(engine.log.filter((l) => l.message.includes('統合待ちのまま'))).toEqual([])
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.detail).toContain('差し戻し後の再作業')
+    // The flavor must travel WITH the event: the overseer raises ONE S3 signal for
+    // both kinds and needs this to avoid asking the owner to "split it up and
+    // retry" a card whose branch already holds delivered work (that answer rides
+    // into the card's next dispatch). Covered end-to-end in swarmOverseer.test.ts.
+    expect(fatal?.execTimeoutKind).toBe('integration-wait')
+  })
+
+  it('a promote WINS the race against the ceiling (unchanged — characterisation)', async () => {
+    // A worker that finishes at 95m is promoted, not reclaimed: the ceiling must
+    // never steal a card whose work is already integrable. This held BEFORE this
+    // fix too (the promote block runs earlier in the pass) — pinned here because
+    // it is the invariant that makes `readyAt` only ever reachable via 差し戻し.
+    const engine = newEngine({ workers: [w1()] })
+    const now = T0 + MAX_EXEC_MS + 5 * 60_000
+    const deps = readyDeps('doing', now)
+    await runDispatchPass(engine, deps, now)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(deps.tornDown).toHaveLength(0)
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+  })
+
+  it('a ready worker OVER the ceiling on WORKED time → review, never blocked/runaway', async () => {
+    // Even when the credit is not enough — it genuinely worked past the ceiling
+    // after the 差し戻し — a worker that has DELIVERED is not a 暴走. It is stopped
+    // (the slot is real), but under its own reason: card → review (the commander's
+    // queue), never → blocked (the owner's). 完了条件 1 + 2.
+    //
+    // The post-差し戻し shape: ready at 80m, 差し戻し'd at 105m (25m banked), now
+    // re-working with its PRE-rework heartbeat still on disk — so the re-promote
+    // suppression drops the promote and it falls through to the ceiling check.
+    const readyAtMs = T0 + 80 * 60_000
+    const reworkAtMs = T0 + 105 * 60_000
+    const engine = newEngine({
+      workers: [
+        w1({ readyAt: new Date(readyAtMs).toISOString(), reworkAt: new Date(reworkAtMs).toISOString() }),
+      ],
+    })
+    engine.integrationWaitMs = new Map([['pty-a-1', 25 * 60_000]]) // banked by the 差し戻し
+    // The re-work runs 95m past the 差し戻し ⇒ over the 90m ceiling on its own
+    // budget. The 25m of banked 統合待ち is no longer SUBTRACTED (the clock simply
+    // starts after it), so the line reports it as 計上対象外 rather than credited.
+    const now = reworkAtMs + 95 * 60_000
+    const deps = staleReadyDeps(readyAtMs, now)
+    await runDispatchPass(engine, deps, now)
+
+    // It WAS stopped (the slot is real) — so this is the recovery path, not a promote.
+    expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }])
+    expect(engine.workers).toHaveLength(0)
+    expect(deps.recovered).toHaveLength(0) // never recoverCard'd → never 'blocked'
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }]) // left in review instead
+    expect(deps.board.get('a')?.boardColumn).toBe('review')
+    const log = engine.log.find((l) => l.message.startsWith('worker over execution budget while RE-WORKING'))
+    expect(log?.level).toBe('warn')
+    expect(log?.message).toContain('暴走ではない')
+    expect(log?.message).toContain('統合待ち 25m は計上対象外')
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false) // NOT that label
+    // The owner's escalation must describe THIS situation truthfully: a 差し戻し
+    // re-work that was cut off — not "idle in 統合待ち", and not a tip that is
+    // safe to land. (A message that over-claims is how the 0718 diagnosis went
+    // wrong; the fix must not reproduce that in a new shape.)
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.detail).toContain('差し戻し後の再作業')
+    expect(fatal?.detail).toContain('暴走ではありません')
+    expect(fatal?.detail).toContain('未検証') // the WIP-salvage caveat rides on BOTH reasons
+    expect(fatal?.detail).not.toContain('統合待ちのまま') // it is NOT waiting — it was re-working
+    // …and the SAME truth on every journal line, not just the ceiling's. This stop
+    // emits TWO lines (the ceiling's, then recoverLost's `worker <verb> — card →`),
+    // and the second one used to carry 「統合待ちのまま」 — the wording this branch's
+    // docs and the assertion above explicitly forbid. Sweep the whole journal so a
+    // banned phrase can't sneak back through a line nobody is asserting on.
+    expect(engine.log.filter((l) => l.message.includes('統合待ちのまま'))).toEqual([])
+    const recovery = engine.log.find((l) => l.message.startsWith('worker 差し戻し後の再作業'))
+    expect(recovery?.message).toContain('暴走ではない')
+    expect(recovery?.message).toContain('card → review') // the destination, on the line that moves it
+  })
+
+  it('STILL runs away a worker that never reached ready (the ceiling keeps its teeth)', async () => {
+    // The mirror of the test above with the ONE difference that matters: NEITHER
+    // witness of delivery — no readyAt AND no commits (makeDeps defaults commits to
+    // 0). A worker that has produced nothing and blew the ceiling is a 暴走 —
+    // labelled 'runaway', parked in 'blocked', exactly as before. 完了条件 4(後半).
+    const engine = newEngine({ workers: [w1()] })
+    const now = T0 + 120 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1000]]), // busy — only the ceiling can stop it
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    expect(deps.tornDown).toEqual([{ terminalId: 'pty-a-1', worktree: '/wt/a' }])
+    const log = engine.log.find((l) => l.message.startsWith('worker runaway'))
+    expect(log?.level).toBe('warn')
+    expect(engine.workers).toHaveLength(0)
+    // …and the owner still gets the "split it up and retry, or drop it" question,
+    // which IS the right ask for a worker that never produced anything.
+    expect(engine.pendingFatal.find((f) => f.event === 'exec-timeout')?.execTimeoutKind).toBe(
+      'runaway',
+    )
+  })
+
+  it('COMMITS ARE NOT DELIVERY — a committing worker that never reached ready still runs away', async () => {
+    // The teeth test that matters most, because the obvious "durable witness" is a
+    // trap. `commitsAhead > 0` was briefly used as a second witness of delivery and
+    // REVERTED on 2026-07-19: workers are INSTRUCTED to commit before declaring
+    // ready (「完了ゲートに入る前に必ず WIP コミット」 ships in every /order
+    // dispatch), so commits-ahead is the normal state of a working worker, not a
+    // mark of completion. Keying on it meant only a worker that had committed
+    // literally nothing could ever be called a 暴走.
+    //
+    // THE SHAPE THAT MUST STAY BLOCKED: a card too big — the worker commits its
+    // scaffolding early, then spins in an /order loop until the ceiling. It never
+    // reached ready and was never 差し戻し'd, so there is nothing for a commander
+    // to integrate; a human has to split the card. Sending it to 'review' instead
+    // would also print 「一度 ready に到達したワーカーが、差し戻し後の再作業で…」
+    // to the owner about a 差し戻し that never happened.
+    const engine = newEngine({ workers: [w1()] })
+    expect(engine.workers[0].readyAt).toBeUndefined() // never delivered
+    const now = T0 + 120 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 1]]), // …but it DID commit — the normal case, not evidence
+      outputs: new Map([['pty-a-1', now - 1000]]), // busy — only the ceiling can stop it
+    })
+
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }]) // parked for a human
+    expect(deps.tornDown).toHaveLength(1)
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(true)
+    expect(engine.pendingFatal.find((f) => f.event === 'exec-timeout')?.execTimeoutKind).toBe(
+      'runaway',
+    )
+    // …and the owner is never told about a delivery or a 差し戻し that never happened.
+    const detail = engine.pendingFatal.find((f) => f.event === 'exec-timeout')?.detail ?? ''
+    expect(detail).not.toContain('差し戻し後の再作業')
+    expect(detail).not.toContain('暴走ではありません')
+  })
+
+  it('a KEPT review move still records the delivery (promote decided; only the write failed)', async () => {
+    // Route A of the same hole. We reach the kept-move branch only with
+    // promote === true — the engine's own strongest delivery statement — but the
+    // pre-fix code withheld readyAt until the Board write landed. countCommitsAhead
+    // and readHeartbeat are swallowed to 0/null on failure, so one transient read
+    // flips promote false on a later pass and the worker meets the ceiling bare.
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 60 * 60_000
+    const deps = readyDeps('doing', readyAtMs)
+    deps.moveToReview = async () => false // Board write fails → move KEPT
+
+    await runDispatchPass(engine, deps, readyAtMs)
+
+    expect(engine.log.some((l) => l.message.startsWith('review move kept'))).toBe(true)
+    expect(engine.workers[0].stage).toBe('running') // not 'done' — the card IS still in doing
+    expect(engine.workers[0].readyAt).toBe(new Date(readyAtMs).toISOString()) // …but delivery recorded
+    // The wait clock stays SHUT: the card never reached review, so this worker is
+    // not idle in 統合待ち and must keep being charged for the time. (The map is
+    // created lazily, so "never stamped" reads as undefined, not false.)
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBeUndefined()
+  })
+
+  it('BANKS an un-ended wait defensively (an unobserved 差し戻し cannot resurrect the bug)', async () => {
+    // The 差し戻し observation is the semantic seam that banks the wait. If any
+    // transition were ever missed, the ceiling check's own idempotent
+    // endIntegrationWait must bank the still-open stamp before reading the credit
+    // — a stale stamp may never push a ready worker over the ceiling. (The credit
+    // reader itself is bank-only; this defensive end is what makes that safe.)
+    const readyAtMs = T0 + 40 * 60_000
+    const engine = newEngine({
+      workers: [
+        w1({
+          stage: 'running',
+          readyAt: new Date(readyAtMs).toISOString(),
+          reworkAt: new Date(readyAtMs + 5 * 60_000).toISOString(),
+        }),
+      ],
+    })
+    engine.integrationWaitSince = new Map([['pty-a-1', readyAtMs]]) // stamped, never ended
+    const now = T0 + 120 * 60_000 // alive 120m, 80m of it idle ⇒ 40m worked
+    const deps = staleReadyDeps(readyAtMs, now)
+    await runDispatchPass(engine, deps, now)
+    expect(deps.tornDown).toHaveLength(0)
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(80 * 60_000) // banked defensively
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+  })
+
+  it('a 20h queue buys ONE fresh budget, not unlimited runway', async () => {
+    // A review card early-continues the monitor, so its worker faces no ceiling, no
+    // stall check and no heartbeat check for as long as it sits there. The engine
+    // cannot tell an idle waiter from an /order loop still burning tokens, so the
+    // question this test has always asked is: what stops the burning one?
+    //
+    // The answer CHANGED on 2026-07-20 and this test changed with it. It used to be
+    // WAIT_CREDIT_CAP_MS: the 差し戻し banked all 20h, only 8h was spendable, and the
+    // remaining ~12h of charged time tore the worker down IN THAT PASS. That is the
+    // 0720 harm — a worker killed on the pass that asked it to re-work, its worktree
+    // removed, having re-worked for zero minutes. The bound is now the re-work budget
+    // itself: the queue is excluded rather than charged, and the worker gets exactly
+    // ONE MAX_EXEC_MS to do what it was 差し戻し'd for. Bounded, and useful.
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 10 * 60_000
+    await runDispatchPass(engine, readyDeps('review', readyAtMs), readyAtMs)
+
+    const reworkMs = readyAtMs + 20 * 60 * 60_000 // sits in review for 20 HOURS…
+    const deps = readyDeps('doing', reworkMs)
+    await runDispatchPass(engine, deps, reworkMs)
+
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(20 * 60 * 60_000) // banked…
+    expect(deps.tornDown).toHaveLength(0) // …but NOT spent as a reason to kill it
+    expect(engine.workers[0].stage).toBe('running') // it is re-working
+
+    // …and the runway really is bounded: 91m into the RE-WORK it is stopped.
+    const late = reworkMs + 91 * 60_000
+    const deps2 = staleReadyDeps(readyAtMs, late)
+    await runDispatchPass(engine, deps2, late)
+    expect(deps2.tornDown).toHaveLength(1) // ONE budget, not unlimited
+    // …and because it HAD delivered, it is still not a 暴走 and still not blocked.
+    expect(deps2.recovered).toHaveLength(0)
+    expect(deps2.board.get('a')?.boardColumn).toBe('review')
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false)
+  })
+
+  it('a LONG queue never narrates a 差し戻し that did not happen (63h weekend review)', async () => {
+    // The cap has a wording consequence the first version got wrong. A ready worker
+    // reaches the ceiling two ways, and `readyAt` cannot tell them apart: 差し戻し'd
+    // then burned the budget re-working, or simply queued past the cap having
+    // re-worked NOTHING. A careful Friday-night→Monday-morning review is enough to
+    // hit the second. Keying the words on `readyAt` billed 55 hours of weekend queue
+    // as 実作業 and told the owner about a 手直し that never occurred.
+    // 2026-07-20 made the fiction IMPOSSIBLE rather than merely well-worded. The
+    // old shape was: 差し戻し observed → torn down in the same pass → now describe a
+    // stop whose re-work lasted zero minutes without implying a 手直し. There is no
+    // such stop any more, because the queue is excluded from the clock instead of
+    // charged to it. So this test now pins the stronger property: after a 63-hour
+    // weekend review the 差し戻し produces NO exec-timeout narration at all, and the
+    // stop that eventually comes is a real, honestly-named re-work overrun.
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 10 * 60_000
+    await runDispatchPass(engine, readyDeps('review', readyAtMs), readyAtMs)
+
+    const reworkMs = readyAtMs + 63 * 60 * 60_000 // queued for 63 hours, then 差し戻し
+    const deps = readyDeps('doing', reworkMs)
+    await runDispatchPass(engine, deps, reworkMs)
+
+    // Nothing to narrate: no stop, so no story about one. 55 hours of weekend queue
+    // can no longer be billed as 実作業 because they never reach the clock.
+    expect(deps.tornDown).toHaveLength(0)
+    expect(engine.pendingFatal.filter((f) => f.event === 'exec-timeout')).toEqual([])
+    expect(engine.log.some((l) => l.message.includes('LONG integration queue'))).toBe(false)
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false)
+
+    // When it IS eventually stopped, the words match what happened: a re-work that
+    // really did run 95m, not a queue and not a 暴走.
+    const late = reworkMs + 95 * 60_000
+    const deps2 = staleReadyDeps(readyAtMs, late)
+    await runDispatchPass(engine, deps2, late)
+    expect(deps2.recovered).toHaveLength(0) // never blocked
+    expect(deps2.board.get('a')?.boardColumn).toBe('review')
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutKind).toBe('integration-wait')
+    expect(fatal?.execTimeoutShape).toBe('rework') // it really did re-work
+    expect(fatal?.detail).toContain('差し戻し後の再作業')
+    // …and the 63h queue is named as EXCLUDED, never as a credit that was spent —
+    // a subtraction the judgement did not perform must not appear as one.
+    expect(fatal?.detail).not.toContain('原因は待ち時間であって作業ではありません')
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(false)
+  })
+
+  it('a KEPT promote that later overruns does not claim a 差し戻し either', async () => {
+    // The other route to a readyAt with no 差し戻し: promote was decided but the
+    // Board write was kept, so readyAt is stamped while the worker stays 'running'
+    // and its card never leaves 'doing'. A later transient countCommitsAhead
+    // failure drops the promote and it meets the ceiling — having never been in
+    // review, let alone 差し戻し'd. (This also falsifies the old invariant comment
+    // that readyAt is only ever stamped on the way to stage:'done'.)
+    const engine = newEngine({ workers: [w1()] })
+    const keptMs = T0 + 20 * 60_000
+    const kept = readyDeps('doing', keptMs)
+    kept.moveToReview = async () => false
+    await runDispatchPass(engine, kept, keptMs)
+    expect(engine.workers[0].readyAt).toBeDefined()
+    expect(engine.workers[0].reworkAt).toBeUndefined()
+
+    // Later: no commits visible (transient read failure) ⇒ no promote ⇒ ceiling.
+    const now = T0 + 120 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1000]]),
+    })
+    await runDispatchPass(engine, deps, now)
+
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutShape).toBe('work')
+    expect(fatal?.detail).not.toContain('差し戻し後の再作業')
+    // …and it must not swing to the OTHER fiction either: this worker waited zero
+    // minutes (its card never left 'doing'), so blaming the ceiling on queue time
+    // would be just as false. It really did work the whole 120m.
+    expect(fatal?.detail).not.toContain('原因は待ち時間であって作業ではありません')
+    expect(fatal?.detail).toContain('待ち時間が原因ではありません')
+    expect(fatal?.detail).toContain('未検証') // tip was cut off mid-work
+  })
+
+  it('the TWO journal lines of one stop never contradict each other', async () => {
+    // 02章 §5.6 requires that the ceiling line and recoverLost's recovery line say
+    // the SAME thing. The recovery verb was derived from `reason` alone, so the
+    // 63-hour case printed 「上限の原因は待ち時間であって作業ではない」 on one line
+    // and 「差し戻し後の再作業で作業上限に到達」 on the next.
+    // Driven through the KEPT-promote route, which is where a non-'rework' shape
+    // still reaches the ceiling: promote was decided but the Board write was kept,
+    // so `readyAt` is stamped while the card never leaves 'doing' and no 差し戻し
+    // ever happens. The stop is therefore shape 'work', and BOTH lines must say so.
+    const engine = newEngine({ workers: [w1()] })
+    const keptMs = T0 + 20 * 60_000
+    const kept = readyDeps('doing', keptMs)
+    kept.moveToReview = async () => false
+    await runDispatchPass(engine, kept, keptMs)
+    expect(engine.workers[0].readyAt).toBeDefined()
+    expect(engine.workers[0].reworkAt).toBeUndefined() // no 差し戻し in this story
+
+    const now = T0 + 120 * 60_000
+    await runDispatchPass(
+      engine,
+      makeDeps({ cards: [card('a', { boardColumn: 'doing' })], outputs: new Map([['pty-a-1', now - 1000]]) }),
+      now,
+    )
+
+    const lines = engine.log.map((l) => l.message)
+    expect(lines.some((m) => m.includes('REAL WORK'))).toBe(true) // the ceiling line
+    // Matched on the VERB, not on '— card → review': the ceiling line carries that
+    // phrase too, so a looser predicate silently asserts the same line twice.
+    const recovery = lines.find((m) => m.startsWith('worker 実作業が作業上限に到達'))
+    expect(recovery).toBeDefined() // …and the recovery line agrees
+    expect(recovery).toContain('card → review')
+    // neither line may narrate a 差し戻し that never happened
+    expect(lines.filter((m) => m.includes('差し戻し後の再作業で作業上限に到達'))).toEqual([])
+    expect(lines.filter((m) => m.includes('LONG integration queue'))).toEqual([])
+  })
+
+  it('a SHORT wait under the cap is not blamed for the ceiling (MF2 — the common case)', async () => {
+    // The predicate 「上限の原因は待ち時間」 was keyed on rawWaited > 0, which does
+    // not mean the cap truncated anything. This shape is STRUCTURALLY common, not
+    // rare: the tick is 3s, so a worker 差し戻し'd while already near the ceiling
+    // crosses it inside the first minute and lands in reworkedMs < 60_000. It then
+    // announced 「waited 20m, only 480m creditable … 上限の原因は待ち時間であって
+    // 作業ではない」 — 20 < 480, nothing was truncated, and the 90 minutes were real
+    // work. The honest predicate is rawWaited > WAIT_CREDIT_CAP_MS.
+    // Driven through the KEPT-promote route (readyAt stamped, card never left
+    // 'doing', no 差し戻し). Since 2026-07-20 that is the shape a sub-cap wait can
+    // still reach the ceiling in: a worker judged from its 差し戻し never carries
+    // the queue on its clock at all, so the mis-blame this test guards against
+    // cannot arise there by construction.
+    const now = T0 + 110 * 60_000 // alive 110m
+    const readyAtMs = T0 + 89 * 60_000 + 59_000
+    const engine = newEngine({
+      workers: [w1({ stage: 'running', readyAt: new Date(readyAtMs).toISOString() })],
+    })
+    engine.integrationWaitMs = new Map([['pty-a-1', 20 * 60_000]]) // 20m banked, cap is 480m
+    // 110m alive − 20m credited = 90m worked ⇒ the ceiling fires on real work.
+    // No commits / no heartbeat visible (a transient read failure) so the promote
+    // is dropped and the pass reaches the ceiling instead of re-promoting.
+    const deps2 = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1000]]),
+    })
+    await runDispatchPass(engine, deps2, now)
+
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutShape).toBe('work') // NOT 'capped-wait' — nothing was cut
+    expect(fatal?.detail).toContain('待ち時間が原因ではありません')
+    expect(fatal?.detail).not.toContain('控除できるのは上限')
+    // the journal must not blame the queue either
+    expect(engine.log.some((l) => l.message.includes('LONG integration queue'))).toBe(false)
+    expect(engine.log.some((l) => l.message.includes('REAL WORK'))).toBe(true)
+  })
+
+  it('a PERMANENTLY rejected review write never escalates the card to blocked', async () => {
+    // The central promise of this card, and it had no teeth: deleting
+    // `&& reason !== 'integration-wait'` from the move-stuck escalation left all
+    // 581 tests green. Without it, a Board write that keeps failing walks the retry
+    // counter past MOVE_STUCK_MAX_RETRIES and then calls recoverCard('blocked') —
+    // putting a READY worker's card in the owner's column, which is the 0718 harm
+    // arriving through the back door. The existing harness could not reach this:
+    // `reviewFails` fails only the FIRST write, so the counter never got past 1.
+    const readyAtMs = T0 + 80 * 60_000
+    const engine = newEngine({
+      workers: [
+        w1({ readyAt: new Date(readyAtMs).toISOString(), reworkAt: new Date(T0 + 105 * 60_000).toISOString() }),
+      ],
+    })
+    engine.integrationWaitMs = new Map([['pty-a-1', 25 * 60_000]])
+
+    // Walk well past MOVE_STUCK_MAX_RETRIES (5) with the write rejected every time.
+    // 200m puts the RE-WORK itself (差し戻し at 105m) 95m past its own budget — the
+    // overrun has to be a real overrun since 2026-07-20.
+    let now = T0 + 200 * 60_000
+    for (let i = 0; i < 9; i++) {
+      const deps = makeDeps({
+        cards: [card('a', { boardColumn: 'doing' })],
+        commits: new Map([['a', 3]]),
+        heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(readyAtMs).toISOString() }]]),
+        outputs: new Map([['pty-a-1', now - 1000]]),
+        reviewAlwaysFails: new Set(['a']),
+      })
+      await runDispatchPass(engine, deps, now)
+      // NEVER parked in the owner's column, however many times the write is kept.
+      expect(deps.recovered).toEqual([])
+      expect(deps.board.get('a')?.boardColumn).toBe('doing')
+      now += 60_000
+    }
+    // The retry budget really was exceeded — this test would pass vacuously if the
+    // counter had never advanced past the escalation threshold.
+    expect(engine.stuckMoves.get('a')?.attempts).toBeGreaterThan(MOVE_STUCK_MAX_RETRIES)
+    expect(engine.stuckMoves.get('a')?.intent).toBe('recover-review')
+  })
+
+  it('a KEPT recovery RETRY keeps its shape — the retry must not invent a 再作業', async () => {
+    // The retry rebuilds the recovery from scratch on a later pass. It restored the
+    // intent (so the card still avoids 'blocked') but NOT the shape, so a
+    // 'capped-wait' / 'work' stop fell back to the default verb and logged
+    // 「差し戻し後の再作業で作業上限に到達」 right after a line saying 「再作業 0m」.
+    // 20h banked against the 8h cap ⇒ 'capped-wait'; no 差し戻し ⇒ not 'rework'.
+    // (Since 2026-07-20 a 差し戻し'd worker is judged from the 差し戻し, so the
+    // ledger cannot be what stops it — this shape now belongs to a roster entry
+    // whose card never left 'doing'. The point under test is unchanged: whatever
+    // the shape is, the RETRY must carry it rather than fall back to the default.)
+    const now = T0 + 600 * 60_000 // alive 600m − 480m credited = 120m worked ⇒ ceiling
+    const readyAtMs = T0 + 10 * 60_000
+    const engine = newEngine({ workers: [w1({ readyAt: new Date(readyAtMs).toISOString() })] })
+    engine.integrationWaitMs = new Map([['pty-a-1', 20 * 60 * 60_000]])
+
+    // Pass 1: over the ceiling, but the doing→review write is REJECTED. No commits
+    // / heartbeat visible, so the promote is dropped and the ceiling is reached.
+    const kept = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', now - 1000]]),
+      reviewFails: new Set(['a']),
+    })
+    await runDispatchPass(engine, kept, now)
+    expect(engine.stuckMoves.get('a')?.intent).toBe('recover-review')
+    expect(engine.stuckMoves.get('a')?.shape).toBe('capped-wait') // carried, not just the intent
+
+    // Pass 2: PTY gone (torn down in pass 1) ⇒ the !alive retry rebuilds it.
+    const before = engine.log.length // only the RETRY pass's lines are under test
+    // No commits visible (the same transient read failure as pass 1) so the dead
+    // worker takes the RETRY path rather than being promoted outright — while its
+    // heartbeat still says ready, which is exactly the stale sign that must not
+    // send the card to 'blocked'.
+    const retry = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(readyAtMs).toISOString() }]]),
+      dead: new Set(['a']),
+    })
+    await runDispatchPass(engine, retry, now + 60_000)
+
+    const emitted = engine.log.slice(before).map((l) => l.message)
+    const recovery = emitted.find((m) => m.includes('— card → '))
+    expect(recovery).toBeDefined()
+    expect(recovery).toContain('統合待ちが控除上限を超過')
+    expect(emitted.filter((m) => m.includes('差し戻し後の再作業'))).toEqual([]) // the invented one
+  })
+
+  it('DELIVERED counts the done column too, not just review', async () => {
+    // The early-continue treats a card the commander pushed straight past review to
+    // 'done' as delivered. Untested until now: narrowing it to 'review' alone left
+    // every other test green, while a later 差し戻し of such a card would arrive with
+    // no readyAt and be labelled a 暴走.
+    const engine = newEngine({ workers: [w1()] })
+    const at = T0 + 30 * 60_000
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'done' })],
+      commits: new Map([['a', 3]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(at - 1000).toISOString() }]]),
+      outputs: new Map([['pty-a-1', at - 1000]]),
+    })
+    await runDispatchPass(engine, deps, at)
+
+    expect(deps.reviews).toEqual([]) // already past review — no promote
+    expect(engine.workers[0].stage).toBe('done')
+    expect(engine.workers[0].readyAt).toBe(new Date(at).toISOString()) // delivered
+    expect(engine.integrationWaitSince?.get('pty-a-1')).toBe(at) // and the clock runs
+  })
+
+  it('a REAL 差し戻し still says so (the wording split must not silence the true case)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 30 * 60_000
+    await runDispatchPass(engine, readyDeps('review', readyAtMs), readyAtMs)
+    const reworkMs = readyAtMs + 20 * 60_000
+    await runDispatchPass(engine, readyDeps('doing', reworkMs), reworkMs) // 差し戻し観測
+    expect(engine.workers[0].reworkAt).toBeDefined()
+
+    const now = reworkMs + 100 * 60_000 // genuinely re-works past the ceiling
+    const deps = staleReadyDeps(readyAtMs, now)
+    await runDispatchPass(engine, deps, now)
+
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutShape).toBe('rework')
+    expect(fatal?.detail).toContain('差し戻し後の再作業')
+    expect(fatal?.detail).toContain('未検証') // its tip really was cut off mid-flight
+  })
+
+  it('a wait UNDER the cap is still forgiven whole (an ordinary overnight review)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const readyAtMs = T0 + 30 * 60_000
+    await runDispatchPass(engine, readyDeps('review', readyAtMs), readyAtMs)
+    const reworkMs = readyAtMs + 6 * 60 * 60_000 // 6h — under the 8h default cap
+    await runDispatchPass(engine, readyDeps('doing', reworkMs), reworkMs)
+
+    // 6h30m alive, 6h credited ⇒ 30m worked ⇒ nowhere near the ceiling.
+    const now = reworkMs + 60_000
+    const deps = staleReadyDeps(readyAtMs, now)
+    await runDispatchPass(engine, deps, now)
+    expect(deps.tornDown).toHaveLength(0)
+    expect(engine.workers[0].stage).toBe('running')
+  })
+
+  it('ACCUMULATES across repeated ready↔差し戻し rounds (each wait is banked once)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    // Round 1: ready at 20m, reworked at 50m ⇒ 30m banked.
+    await runDispatchPass(engine, readyDeps('doing', T0 + 20 * 60_000), T0 + 20 * 60_000)
+    await runDispatchPass(engine, readyDeps('doing', T0 + 50 * 60_000), T0 + 50 * 60_000)
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(30 * 60_000)
+    const firstReadyAt = engine.workers[0].readyAt
+    // Round 2: ready again at 60m (a FRESH heartbeat clears the rework suppression),
+    // reworked again at 75m ⇒ +15m.
+    await runDispatchPass(engine, readyDeps('doing', T0 + 60 * 60_000), T0 + 60 * 60_000)
+    await runDispatchPass(engine, readyDeps('doing', T0 + 75 * 60_000), T0 + 75 * 60_000)
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBe(45 * 60_000)
+    expect(engine.workers[0].readyAt).toBe(firstReadyAt) // stamped ONCE — "has ever delivered"
+  })
+
+  it('keeps the card OUT of blocked even when the review move is KEPT and retried', async () => {
+    // The Board write can fail. When it does, recoverLost keeps the worker so the
+    // next pass retries — and that retry must NOT silently become a 'crash'
+    // recovery, whose stale `ready` heartbeat would send the card to 'blocked'
+    // (the very harm this reason exists to prevent), nor escalate there past the
+    // move-stuck budget.
+    const readyAtMs = T0 + 80 * 60_000
+    const engine = newEngine({
+      workers: [
+        w1({
+          readyAt: new Date(readyAtMs).toISOString(),
+          reworkAt: new Date(T0 + 105 * 60_000).toISOString(),
+        }),
+      ],
+    })
+    engine.integrationWaitMs = new Map([['pty-a-1', 25 * 60_000]])
+    const now = T0 + 200 * 60_000 // the RE-WORK (差し戻し at 105m) is 95m over its own budget
+
+    // Pass 1: over the ceiling, but the doing→review write is REJECTED.
+    const deps1 = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 3]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(readyAtMs).toISOString() }]]),
+      outputs: new Map([['pty-a-1', now - 1000]]),
+      reviewFails: new Set(['a']), // the FIRST review move is kept
+    })
+    await runDispatchPass(engine, deps1, now)
+    expect(deps1.recovered).toHaveLength(0) // kept ≠ parked
+    expect(deps1.board.get('a')?.boardColumn).toBe('doing') // still stuck in doing
+    expect(engine.workers).toHaveLength(1) // worker KEPT so the move retries
+    expect(engine.stuckMoves.get('a')?.attempts).toBe(1)
+
+    // Pass 2: the PTY is gone (torn down in pass 1) and the heartbeat file still
+    // says ready. The retry must land the card in REVIEW, not blocked.
+    const deps2 = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 3]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(readyAtMs).toISOString() }]]),
+      dead: new Set(['a']),
+    })
+    await runDispatchPass(engine, deps2, now + 60_000)
+    expect(deps2.recovered).toHaveLength(0) // never 'blocked'
+    expect(deps2.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(deps2.board.get('a')?.boardColumn).toBe('review')
+  })
+
+  it('drops the ledger when the worker leaves the live set (no map leak)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    engine.integrationWaitSince = new Map([['pty-gone', 1], ['pty-a-1', T0]])
+    engine.integrationWaitMs = new Map([['pty-gone', 99], ['pty-a-1', 5]])
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], outputs: new Map([['pty-a-1', T0]]) })
+    await runDispatchPass(engine, deps, T0 + 60_000)
+    expect(engine.integrationWaitSince?.has('pty-gone')).toBe(false)
+    expect(engine.integrationWaitMs?.has('pty-gone')).toBe(false)
+    expect(engine.integrationWaitMs?.has('pty-a-1')).toBe(true) // the live one keeps its ledger
+  })
+})
+
+describe('runDispatchPass — monitor: 差し戻し gives the RE-WORK its own budget (2026-07-20)', () => {
+  // 2026-07-20, TWO workers destroyed 150–250ms apart. Both were ready and
+  // queued overnight; the commander 差し戻し'd them and the very next lines were
+  // 「worker runaway — worked 478m >= 90m execution limit」 → stopped → worktree
+  // physically removed → card parked in 'blocked'. Zero minutes of re-work.
+  //
+  // The emitting binary was ~2 days stale (its 「0m of rate-limit hold credited
+  // back」 phrasing existed only 2026-07-12→07-18, before the 統合待ち ledger),
+  // so the 07-18 credit fix was never loaded in that process. But the SOURCE was
+  // not innocent: crediting the wait only changes the LABEL and the card's
+  // destination. The worker is stopped and its worktree torn down either way —
+  // the ceiling ran from `startedAt`, so a worker 差し戻し'd near its ceiling
+  // crossed it on the SAME pass that observed the 差し戻し. These tests pin the
+  // thing the credit never covered: a 差し戻し is a NEW assignment and must come
+  // with a budget to actually do it.
+  const T0 = Date.parse('2026-07-20T18:00:00Z')
+  const startedAt = new Date(T0).toISOString()
+  const readyAtMs = T0 + 60 * 60_000 // delivered 60m in…
+  const now = T0 + 478 * 60_000 // …then queued overnight — the incident's 478m
+  const w1 = (over: Partial<OrchestratorWorker> = {}) =>
+    worker({
+      terminalId: 'pty-a-1',
+      branch: 'swarm/a',
+      worktree: '/wt/a',
+      taskId: 'a',
+      taskTitle: 'task a',
+      startedAt,
+      stage: 'done', // ready, sitting in the commander's queue
+      ...over,
+    })
+  /** The 差し戻し probe shape: card back in 'doing', PTY busy, and the heartbeat
+   *  file still holding the PRE-rework ready:true (the engine cannot clear it, so
+   *  the re-promote suppression drops the promote and the worker falls THROUGH to
+   *  the execution-ceiling check — the incident path). */
+  const reworkDeps = (at: number, over: Partial<Parameters<typeof makeDeps>[0]> = {}) =>
+    makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 3]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(readyAtMs).toISOString() }]]),
+      outputs: new Map([['pty-a-1', at - 1000]]),
+      ...over,
+    })
+
+  it('REPLAYS the incident: 差し戻し at 478m alive ⇒ NOT stopped, worktree SURVIVES', async () => {
+    // The engine's own ledger is EMPTY — which is the realistic state, not a
+    // contrived one: it is in-memory and poll-observed, so a restart, a blind
+    // spot, or (as here) an engine running older code leaves nothing banked.
+    // The fix must not depend on it.
+    const engine = newEngine({ workers: [w1({ readyAt: new Date(readyAtMs).toISOString() })] })
+    expect(engine.integrationWaitMs?.get('pty-a-1')).toBeUndefined() // 「0m credited back」
+
+    const deps = reworkDeps(now)
+    await runDispatchPass(engine, deps, now)
+
+    // The 差し戻し IS observed — this test must not pass by missing that path.
+    expect(engine.log.some((l) => l.message.includes('差し戻し(review→doing)を観測'))).toBe(true)
+    // …and the worker is left alone to actually do the re-work.
+    expect(deps.tornDown).toHaveLength(0) // THE HARM: the worktree survives
+    expect(deps.recovered).toHaveLength(0) // card never parked in 'blocked'
+    expect(deps.board.get('a')?.boardColumn).toBe('doing')
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+    expect(engine.pendingFatal.some((f) => f.event === 'exec-timeout')).toBe(false)
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.workers[0].stage).toBe('running') // back at work on the 差し戻し
+  })
+
+  it('survives even with NO readyAt — the durable witness is the worker’s own ready heartbeat', async () => {
+    // `readyAt` is a POLL OBSERVATION: it exists only if the engine happened to be
+    // watching when the card passed through review, and it does not survive a
+    // restart. A worker that delivered while the engine was blind arrives here
+    // BARE and was labelled 暴走 → card to the owner's 'blocked' column → worktree
+    // destroyed. Its own heartbeat file is the durable record of the delivery, and
+    // it outlives the engine. (NOT commitsAhead — workers are told to commit
+    // before declaring ready, so commits are the normal state of a WORKING worker;
+    // that witness was tried and reverted 2026-07-19.)
+    const engine = newEngine({ workers: [w1()] }) // no readyAt at all
+    expect(engine.workers[0].readyAt).toBeUndefined()
+
+    const deps = reworkDeps(now)
+    await runDispatchPass(engine, deps, now)
+
+    expect(engine.log.some((l) => l.message.includes('差し戻し(review→doing)を観測'))).toBe(true)
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(false)
+    expect(deps.tornDown).toHaveLength(0)
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.workers[0].stage).toBe('running')
+  })
+
+  it('KEEPS ITS TEETH: a re-work that blows its OWN budget is still stopped', async () => {
+    // The fresh budget is a budget, not an exemption. A worker that has been
+    // re-working past MAX_EXEC_MS SINCE the 差し戻し is stopped — under
+    // 'integration-wait' (it did deliver once) with shape 'rework', so its card
+    // goes to the commander's 'review', not the owner's 'blocked'.
+    const engine = newEngine({
+      workers: [
+        w1({
+          stage: 'running', // already re-working (差し戻し observed on an earlier pass)
+          readyAt: new Date(readyAtMs).toISOString(),
+          reworkAt: new Date(now - 95 * 60_000).toISOString(), // 95m of re-work
+        }),
+      ],
+    })
+    const deps = reworkDeps(now)
+    await runDispatchPass(engine, deps, now)
+
+    expect(deps.tornDown).toHaveLength(1) // the ceiling still bites
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutKind).toBe('integration-wait') // not 暴走 — it delivered
+    expect(fatal?.execTimeoutShape).toBe('rework')
+    expect(deps.recovered).toHaveLength(0) // never the owner's 'blocked' column
+    expect(deps.board.get('a')?.boardColumn).toBe('review')
+  })
+
+  it('does NOT fail open: a BARE worker dragged review→doing gets no fresh budget', async () => {
+    // The guard that keeps the fresh budget from becoming immortality. Anyone can
+    // drag a card through 'review'; that is a CLAIM, not a delivery. A worker with
+    // nothing on its branch and no ready heartbeat must still be a 暴走 — otherwise
+    // one drag buys a fresh 90m, every time, for a worker that has produced nothing.
+    const engine = newEngine({ workers: [w1()] }) // stage 'done' via the bare claim
+    const deps = reworkDeps(now, {
+      commits: new Map([['a', 0]]), // nothing on the branch…
+      heartbeats: new Map(), // …and no ready heartbeat
+    })
+    await runDispatchPass(engine, deps, now)
+
+    expect(engine.log.some((l) => l.message.includes('runaway'))).toBe(true)
+    expect(deps.tornDown).toHaveLength(1)
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+  })
+
+  it('does NOT fail open on a ready HEARTBEAT alone — a 0-commit worker never 差し戻し’d is still a 暴走', async () => {
+    // The MIRROR of 'survives even with NO readyAt', with the single difference
+    // that decides fail-open: this worker was NEVER 差し戻し'd (no reworkAt). Its
+    // ready heartbeat is a bare premature claim — 0 commits, nothing delivered — so
+    // the ceiling's heartbeat witness is REFUSED. That witness is GATED on reworkAt
+    // for exactly this reason: a delivery the engine can trust is one a human
+    // corroborated by sending the card back for more, not one the worker asserted
+    // about an empty branch. Ungated (stamp on any ready heartbeat), the loose
+    // stamp would label THIS 'integration-wait' → review; the commander reverts
+    // (finds nothing), and now readyAt + a fresh reworkAt hand it an unlimited
+    // re-work budget every round — a worker that produced NOTHING running forever
+    // and telling the owner 「統合可能な成果を一度出しています」 about an empty branch.
+    //
+    // Mutation-checked (2026-07-21): dropping the `w.reworkAt &&` guard flips this
+    // to 'integration-wait' → 'review' and turns all four ceiling assertions red,
+    // while the rest of the file stays green — it is the only thing holding it.
+    const engine = newEngine({ workers: [w1({ stage: 'running' })] }) // still working, never delivered
+    expect(engine.workers[0].readyAt).toBeUndefined()
+    expect(engine.workers[0].reworkAt).toBeUndefined()
+    const deps = reworkDeps(now, {
+      cards: [card('a', { boardColumn: 'doing' })], // never routed through review → no 差し戻し observed
+      commits: new Map([['a', 0]]), // …nothing on the branch, only a premature ready claim
+    })
+    await runDispatchPass(engine, deps, now)
+
+    // No 差し戻し was observed (the card never left 'doing' for review), and the
+    // bare ready is refused, so the worker stays a 暴走 → the owner's 'blocked'.
+    expect(engine.log.some((l) => l.message.includes('差し戻し(review→doing)を観測'))).toBe(false)
+    expect(engine.log.some((l) => l.message.startsWith('worker runaway'))).toBe(true)
+    expect(deps.tornDown).toHaveLength(1)
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    const fatal = engine.pendingFatal.find((f) => f.event === 'exec-timeout')
+    expect(fatal?.execTimeoutKind).toBe('runaway')
+    expect(fatal?.detail).not.toContain('統合可能な成果を一度出しています')
   })
 })
 
@@ -4068,14 +5106,21 @@ const makeIntDeps = (init: {
   // `tip-<branch>` 既定で、changedTips で差し替え(新コミットで hold が解ける経路)。
   changedFiles?: Record<string, string[] | Error>
   changedTips?: Record<string, string>
-  // MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15 card B) wake seam. managerActive
-  // ⇒ isManagerActive returns true (a desk is up AND responding: no spawn). managerActiveFn
-  // ⇒ a per-call verdict keyed off the pass `now` (models a desk that goes hung / recovers
-  // over time). wakeFails ⇒ wakeManager returns false (no usable tier / spawn fault: a
-  // FAILED resurrection attempt).
-  managerActive?: boolean
-  managerActiveFn?: (now: number) => boolean
+  // MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15 card B) wake seam, re-cut for
+  // the 2026-07-18 presence model. managerPresence ⇒ the desk's static state
+  // ('absent' = no PTY: spawn; 'idle' = up but quiet: nudge only; 'active' = working:
+  // leave alone). managerPresenceFn ⇒ a per-call verdict keyed off the pass `now`
+  // (models a desk that dies / recovers over time). Default 'absent' keeps every
+  // pre-existing wake assertion meaning what it always meant. wakeFails ⇒ wakeManager
+  // returns false (no usable tier / spawn fault: a FAILED resurrection attempt).
+  managerPresence?: ManagerPresence
+  // `echoUntil` is the cutoff the pass hands down so a probe can discount the echo of our
+  // OWN nudge (PTY paint at/before it is a TUI repaint, not life). A fake that models a
+  // real desk must honour it — that is what makes the poke budget actually empty.
+  managerPresenceFn?: (now: number, echoUntil: number) => ManagerPresence
   wakeFails?: boolean
+  /** nudgeManager returns false — the live desk's PTY vanished mid-poke. */
+  nudgeFails?: boolean
 }): IntegrationDeps & {
   integrated: string[]
   moved: string[]
@@ -4094,6 +5139,10 @@ const makeIntDeps = (init: {
   wakeCalls: { branch: string; title: string }[][]
   woke: string[]
   managerChecks: number
+  /** Every nudge sent to a LIVE desk (2026-07-18) — the counterpart of wakeCalls: a
+   *  nudge must never coincide with a spawn for the same episode. */
+  nudged: string[]
+  echoUntils: number[]
   // Fatal escalations the RESUSCITATION reflex fired (完了条件5, event
   // 'manager-unrevivable') — captured via the `notify` seam.
   notifications: SwarmFatalNotification[]
@@ -4120,6 +5169,9 @@ const makeIntDeps = (init: {
   const pathsChecked: string[] = []
   const wakeCalls: { branch: string; title: string }[][] = []
   const woke: string[] = []
+  const nudged: string[] = []
+  /** The echo cutoff the pass handed each presence probe (0 = nothing to discount). */
+  const echoUntils: number[] = []
   const notifications: SwarmFatalNotification[] = []
   let managerChecks = 0
   const dropReview = (taskId: string) => {
@@ -4156,6 +5208,8 @@ const makeIntDeps = (init: {
     reviewed,
     wakeCalls,
     woke,
+    nudged,
+    echoUntils,
     notifications,
     get managerChecks() {
       return managerChecks
@@ -4233,13 +5287,21 @@ const makeIntDeps = (init: {
       instructed.push({ terminalId, message })
     },
     // MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15 card B) wake seam.
-    // isManagerActive honours the `now` the pass injects: managerActiveFn models a
-    // desk whose health CHANGES over time (fresh → hung → recovered); the static
-    // managerActive is the timeless default.
-    isManagerActive: async (_p, now) => {
+    // managerPresence honours the `now` the pass injects: managerPresenceFn models a
+    // desk whose state CHANGES over time (up → gone → back); the static
+    // managerPresence is the timeless default.
+    managerPresence: async (_p, now, echoUntil) => {
       managerChecks += 1
-      if (init.managerActiveFn) return init.managerActiveFn(now)
-      return init.managerActive ?? false
+      echoUntils.push(echoUntil ?? 0)
+      if (init.managerPresenceFn) return init.managerPresenceFn(now, echoUntil ?? 0)
+      return init.managerPresence ?? 'absent'
+    },
+    // The live-desk poke (2026-07-18). Recorded, never spawning: reaching this seam at
+    // all is the assertion that the engine chose "talk to the desk that exists" over
+    // "open another one".
+    nudgeManager: async (p) => {
+      nudged.push(p)
+      return !init.nudgeFails
     },
     // The spawnSwarmManager boundary (defaultWakeManager wraps spawnSwarmManager +
     // the info notification). wakeFails ⇒ false = a FAILED resurrection (no usable
@@ -4312,7 +5374,7 @@ describe('runIntegratePass — throttle', () => {
     // resurrection state, let alone re-wakes.
     await runIntegratePass(engine, deps)
     expect(deps.wakeCalls).toHaveLength(1) // still 1 — the throttle short-circuited the whole pass
-    expect(deps.managerChecks).toBe(1) // isManagerActive not even reached on the throttled tick
+    expect(deps.managerChecks).toBe(1) // managerPresence not even reached on the throttled tick
   })
 })
 
@@ -4331,6 +5393,8 @@ describe('runIntegratePass — throttle', () => {
 // keeps dying escalates ONCE instead of looping forever. The time-based state machine
 // is driven here with an injected `now`; the REAL heartbeat detection (write → stop →
 // stale) is fixed end-to-end, HOME-isolated, in swarmOrchestrator.integration.test.ts.
+// The bug-B presence fix (a LIVE labelled desk must never read 'absent') is pinned
+// end-to-end with a REAL desk + REAL listLiveDesksIn in swarmSessions.integration.test.ts.
 describe('runIntegratePass — manager-only integration wake + resurrection (2026-07-15)', () => {
   it('受け入れの肝: a clean ff-ready review card is NEVER FF-pushed — engine calls no integrate/verify/review/lock', async () => {
     const engine = newEngine()
@@ -4353,16 +5417,17 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
 
   it('wakes the commander for review cards when the desk is INACTIVE — dead PTY OR hung (完了条件2)', async () => {
     const engine = newEngine()
-    // managerActive:false models EITHER signal isManagerActive folds in: a dead PTY
-    // or a heartbeat gone stale (the real heartbeat path is fixed end-to-end in the
-    // integration suite's RESURRECTION test).
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActive: false })
+    // 'absent' = no live PTY holds the manager session: the desk is GONE, which since
+    // 2026-07-18 is the ONLY state that spawns one (a live-but-quiet desk is 'idle' and
+    // gets nudged instead — see the sibling tests). The real file-driven detection is
+    // fixed end-to-end in the integration suite's RESURRECTION test.
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'absent' })
     await runIntegratePass(engine, deps)
     expect(deps.managerChecks).toBe(1) // it checked whether a desk was up AND responding…
     expect(deps.wakeCalls).toHaveLength(1) // …found none, and woke one
     expect(deps.woke).toEqual(['swarm/a'])
     expect(engine.managerResume?.attempts).toBe(1) // resurrection attempt counted
-    expect(engine.log.some((l) => l.message.includes('司令官を起こしました'))).toBe(true)
+    expect(engine.log.some((l) => l.message.includes('マネージャーを起こしました'))).toBe(true)
   })
 
   it('BATCHES every waiting review branch into ONE wake call (token-thrifty, 完了条件2)', async () => {
@@ -4377,7 +5442,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
 
   it('does NOT wake a SECOND desk when the commander is up AND responding (二重起動防止, 完了条件2)', async () => {
     const engine = newEngine()
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActive: true })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'active' })
     await runIntegratePass(engine, deps)
     expect(deps.managerChecks).toBe(1) // it checked…
     expect(deps.wakeCalls).toHaveLength(0) // …and did NOT spawn a duplicate
@@ -4396,7 +5461,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
 
   it('does NOT re-wake a stopped desk WITHIN the boot grace, re-wakes once it ELAPSES (完了条件3)', async () => {
     const engine = newEngine()
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent' })
     await passAt(engine, deps, T0)
     expect(deps.wakeCalls).toHaveLength(1) // wake #1 — a freshly-resumed desk needs time to boot + beat
     await passAt(engine, deps, T0 + GRACE - 1) // still inside the grace window…
@@ -4409,7 +5474,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     const engine = newEngine()
     // A desk that dies immediately every time (permanent quota wall / boot-crash): the
     // wake "succeeds" but the desk never responds, so every grace-spaced pass re-wakes.
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent' })
     for (let i = 0; i < MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
     expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // 3 spawns…
     expect(deps.notifications).toEqual([]) // …not given up YET
@@ -4423,11 +5488,105 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     expect(deps.notifications).toHaveLength(1)
   })
 
+  it('RE-ARMS after a backoff when the give-up was a QUOTA WALL (no usable tier) — a transient wall never stalls integration forever (完了条件2, 2026-07-20)', async () => {
+    const engine = newEngine()
+    // wakeFails ⇒ every wake finds NO usable tier (every allowed tier cooling/masked): a
+    // quota wall, which LIFTS on its own. No desk is ever seated, so re-arming this costs
+    // ZERO tokens — it just keeps checking until a tier frees up. Giving up must stop the
+    // TIGHT loop without also freezing this recovery (one missed toast else strands
+    // integration permanently). Contrast the FLAPPING desk below, which DOES spawn a desk
+    // each time and is deliberately NOT re-armed.
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresenceFn: () => 'absent',
+      wakeFails: true,
+    })
+    // Climb to the ceiling and fire the fatal (the 4th grace-spaced pass).
+    for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // 3 attempts, then stopped
+    expect(deps.notifications).toHaveLength(1) // fatal fired ONCE
+    // The 3rd wake's clock is the backoff anchor. INSIDE the backoff → still paused
+    // (integration is not looping — the give-up guard is doing its job).
+    const lastWake = T0 + (MAX_MANAGER_RESUME_ATTEMPTS - 1) * GRACE
+    await passAt(engine, deps, lastWake + MANAGER_UNREVIVABLE_RETRY_MS - 1)
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // no 4th attempt yet
+    // Backoff elapsed → exactly ONE more resuscitation is let through (recovery path)…
+    await passAt(engine, deps, lastWake + MANAGER_UNREVIVABLE_RETRY_MS)
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS + 1) // re-armed: a 4th attempt
+    // …WITHOUT re-firing the fatal toast — the owner is alerted once per episode, not per
+    // cycle. (Only a desk that actually COMES UP clears fatalFired; that path is the
+    // 'a RECOVERED desk RESETS the attempt budget' case above.)
+    expect(deps.notifications).toHaveLength(1)
+  })
+
+  it('does NOT re-arm a FLAPPING desk that keeps SPAWNING and dying — that burn is what give-up exists to stop (完了条件2)', async () => {
+    // Belt-and-suspenders (2026-07-22, adversarial review of card add3af4c): the give-up
+    // check now ALSO reads the global quota cooling table via spawnBlock (see the
+    // quota-DOA re-arm test below), so this test's "stays latched" assertion is only
+    // true while every ladder tier reads not-cooling. That table is a globalThis
+    // singleton shared across this whole file (same discipline as the quota-park
+    // describe block above) — reset it here explicitly instead of relying on suite
+    // order, so a later-added test that leaves tiers cooling can never turn this into an
+    // order-dependent false red.
+    __resetQuotaForTest()
+    try {
+      const engine = newEngine()
+      // Default wake ⇒ woke=true: a desk IS seated each time, then dies on arrival (a
+      // boot-crash bug / context overflow). Re-arming this would burn a fresh desk every
+      // cycle — permanent, not transient. The give-up must HOLD past the backoff.
+      const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent' })
+      for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
+      expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS)
+      // Well past the backoff — a transient give-up would have re-armed here; this one must not.
+      const lastWake = T0 + (MAX_MANAGER_RESUME_ATTEMPTS - 1) * GRACE
+      await passAt(engine, deps, lastWake + MANAGER_UNREVIVABLE_RETRY_MS + GRACE)
+      expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // still 3 — no re-arm for a spawning desk
+      expect(deps.notifications).toHaveLength(1)
+    } finally {
+      __resetQuotaForTest()
+    }
+  })
+
+  it('RE-ARMS after a backoff when the give-up desk was a SPAWN+DOA on the last usable tier — quota, not a boot-crash (card add3af4c, 2026-07-22)', async () => {
+    // The gap this fix closes: with 3+ allowed tiers all exhausted-but-spawnable, the
+    // LAST wake's headless probe can still pass (a tier reads not-cooling at probe time),
+    // so spawnSwarmManager does not throw and wakeManager returns true — `lastWakeSpawned`
+    // latches PERMANENT even though the seated desk died on arrival for quota (the SAME
+    // root cause a `false` would already re-arm for). By the time the give-up ceiling
+    // fires, watchDeskForDeathOnArrival has cooled the tier it died on — simulate that by
+    // marking EVERY ladder tier cooling before the give-up pass runs.
+    __resetQuotaForTest()
+    try {
+      const engine = newEngine()
+      // Default wake ⇒ woke=true: a desk IS seated each time (mirrors the FLAPPING-desk
+      // test above byte-for-byte) — the only difference is what spawnBlock reads.
+      const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent' })
+      for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
+      expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // ceiling hit, fatal fired
+      expect(engine.managerResume?.lastWakeSpawned).toBe(true) // the woke bit alone says "permanent"…
+      expect(deps.notifications).toHaveLength(1)
+      // …but every allowed tier is quota-exhausted RIGHT NOW (the DOA death-watch's
+      // outcome, arriving after the woke bit was already latched true).
+      const now = T0 + MAX_MANAGER_RESUME_ATTEMPTS * GRACE
+      // Well past MANAGER_UNREVIVABLE_RETRY_MS (30m) so the cooling window still covers
+      // the re-arm pass below, whenever it lands relative to `now`.
+      for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, now + 60 * 60_000)
+      const lastWake = T0 + (MAX_MANAGER_RESUME_ATTEMPTS - 1) * GRACE
+      // Backoff elapsed → the quota signal must re-arm exactly ONE more attempt, same as
+      // the `lastWakeSpawned === false` transient path does.
+      await passAt(engine, deps, lastWake + MANAGER_UNREVIVABLE_RETRY_MS)
+      expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS + 1) // re-armed, not stuck forever
+      expect(deps.notifications).toHaveLength(1) // still one fatal per episode, not re-fired
+    } finally {
+      __resetQuotaForTest()
+    }
+  })
+
   it('a FAILED wake (no usable tier) still counts as an attempt — drives escalation too (完了条件4+5)', async () => {
     const engine = newEngine()
     // wakeFails ⇒ every spawn returns false (every model tier OFF/cooling). The desk
     // is never actually raised, but the engine must not loop forever probing it.
-    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false, wakeFails: true })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent', wakeFails: true })
     for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
     expect(deps.woke).toEqual([]) // no spawn ever succeeded…
     expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS) // …but attempts were capped at MAX
@@ -4440,7 +5599,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     const healthyFrom = T0 + 2 * GRACE
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
-      managerActiveFn: (now) => now >= healthyFrom && now < healthyFrom + GRACE,
+      managerPresenceFn: (now) => (now >= healthyFrom && now < healthyFrom + GRACE ? 'active' : 'absent'),
     })
     await passAt(engine, deps, T0) // hung → wake #1 (attempts 1)
     await passAt(engine, deps, T0 + GRACE) // hung → wake #2 (attempts 2)
@@ -4454,18 +5613,23 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
 
   it('DISARMS fully when the review work DRAINS — no work, no resurrection (完了条件6)', async () => {
     const engine = newEngine()
-    const present = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerActiveFn: () => false })
+    const present = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent' })
     await passAt(engine, present, T0)
     expect(present.woke).toEqual(['swarm/a'])
     expect(engine.managerResume?.attempts).toBe(1)
+    expect(engine.managerResume?.lastWakeSpawned).toBe(true) // this episode's wake DID seat a desk
     // The commander merged it → review empties. With nothing waiting, the desk isn't
     // needed: the reflex disarms (counter cleared) and probes NOTHING.
-    const gone = makeIntDeps({ reviews: [], managerActiveFn: () => false })
+    const gone = makeIntDeps({ reviews: [], managerPresenceFn: () => 'absent' })
     await passAt(engine, gone, T0 + GRACE)
     expect(gone.managerChecks).toBe(0) // never even probed the desk (no work)
     expect(engine.managerResume?.attempts).toBe(0) // cleared
+    // card add3af4c (2026-07-22): `lastWakeSpawned` is the give-up ratchet's
+    // transient-vs-permanent bit, and a full disarm has to clear it too — else a NEXT
+    // episode's very first give-up would be judged on THIS episode's (unrelated) outcome.
+    expect(engine.managerResume?.lastWakeSpawned).toBeUndefined()
     // A NEW card arriving later starts a clean episode (full budget, immediate wake).
-    const back = makeIntDeps({ reviews: [reviewCard('b', 'swarm/b')], managerActiveFn: () => false })
+    const back = makeIntDeps({ reviews: [reviewCard('b', 'swarm/b')], managerPresenceFn: () => 'absent' })
     await passAt(engine, back, T0 + 2 * GRACE)
     expect(back.woke).toEqual(['swarm/b'])
     expect(engine.managerResume?.attempts).toBe(1)
@@ -4474,6 +5638,359 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   // (The 'does NOT wake when auto-wake is OFF' case is GONE with the toggle
   // (2026-07-16): there is no OFF short of stopping the engine, which the
   // global-stop test in the switch-positions block pins.)
+
+  // ── The 2026-07-18 false-death fix (完了条件1-3+6). A desk that is UP but quiet is
+  //    'idle', NOT dead: the engine talks to the desk it has instead of stacking a new
+  //    one, and can never escalate "the commander cannot be started" while one is
+  //    demonstrably running. Every assertion here is a bug the old single-bit probe had:
+  //    it read this exact state as HUNG, spawned three amnesiac twins over 15 minutes,
+  //    orphaned the working desk, and fired a FALSE fatal at the owner. ──
+
+  it('(a) a LIVE but SILENT desk is NEVER resuscitated — it gets nudged instead (完了条件1+2)', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(engine, deps, T0)
+    expect(deps.wakeCalls).toEqual([]) // ← THE fix: no spawn while a desk is alive
+    expect(deps.nudged).toEqual([engine.path]) // the existing desk was addressed instead
+    expect(engine.managerResume?.attempts).toBe(0) // a live desk is NOT a failed resurrection
+    expect(deps.notifications).toEqual([]) // and nothing was escalated to the owner
+    expect(engine.log.some((l) => l.message.includes('蘇生せず声をかけました'))).toBe(true)
+  })
+
+  it('(b) a desk that is genuinely GONE is still resuscitated — the reflex keeps its value (完了条件4)', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'absent' })
+    await passAt(engine, deps, T0)
+    expect(deps.wakeCalls).toHaveLength(1) // spawned — a dead commander must be replaced
+    expect(deps.woke).toEqual(['swarm/a'])
+    expect(deps.nudged).toEqual([]) // nothing to nudge: there is no desk
+    expect(engine.managerResume?.attempts).toBe(1)
+  })
+
+  it('(c) nudges are THROTTLED and BUDGETED — a quiet desk is never poked in a loop (完了条件2+5)', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(engine, deps, T0)
+    expect(deps.nudged).toHaveLength(1)
+    // Inside the interval → silent (the desk gets a full window to answer).
+    await passAt(engine, deps, T0 + MANAGER_NUDGE_INTERVAL_MS - 1)
+    expect(deps.nudged).toHaveLength(1)
+    // Interval elapsed → nudge again, up to the budget…
+    for (let i = 1; i < MAX_MANAGER_NUDGES; i++) {
+      await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    }
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+    // …then STOP. A desk that ignores us is a human matter, not a loop to run forever.
+    await passAt(engine, deps, T0 + 10 * MANAGER_NUDGE_INTERVAL_MS)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+    expect(deps.wakeCalls).toEqual([]) // and at no point did the budget spill into a spawn
+    expect(deps.notifications).toEqual([]) // nor into a fatal
+  })
+
+  it('a desk that ignores EVERY nudge is reported ONCE in the log — a wedge is not silence (完了条件4)', async () => {
+    const engine = newEngine()
+    // The nudges are PROBES, not just reminders: a healthy claude answers a submitted
+    // prompt with output, which would have read 'active'. Ignoring all of them across
+    // the full interval is real evidence of a wedged desk — so it must not vanish.
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    for (let i = 0; i < MAX_MANAGER_NUDGES; i++) await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    const unresponsive = (): number =>
+      engine.log.filter((l) => l.message.includes('声かけに応答しません')).length
+    // Immediately after the last nudge: NOT yet — nudge #3 gets its full window to answer.
+    await passAt(engine, deps, T0 + (MAX_MANAGER_NUDGES - 1) * MANAGER_NUDGE_INTERVAL_MS + 1)
+    expect(unresponsive()).toBe(0)
+    // A full interval later with still nothing → say it once…
+    await passAt(engine, deps, T0 + MAX_MANAGER_NUDGES * MANAGER_NUDGE_INTERVAL_MS)
+    expect(unresponsive()).toBe(1)
+    // …and only once, however long the wedge lasts.
+    for (let i = 4; i < 12; i++) await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(unresponsive()).toBe(1)
+    expect(deps.notifications).toEqual([]) // still NOT a fatal — the desk is up (完了条件3)
+    expect(deps.wakeCalls).toEqual([]) // and still never a duplicate desk
+  })
+
+  it('(d) fatal is reserved for a desk that will not START — an idle desk never reaches it (完了条件3)', async () => {
+    const engine = newEngine()
+    // The exact 2026-07-18 shape: the desk is up the whole time, just quiet. Drive far
+    // MORE passes than the give-up threshold — the old code fired 'manager-unrevivable'
+    // after three; this must never escalate, because "unrevivable" would be a lie.
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS * 3; i++) {
+      await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    }
+    expect(deps.notifications).toEqual([]) // ← the false fatal the owner actually received
+    expect(deps.wakeCalls).toEqual([])
+    expect(engine.managerResume?.fatalFired).toBe(false)
+
+    // Contrast: the SAME engine, once the desk truly disappears, escalates as before.
+    const dead = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'absent' })
+    let now = T0 + 100 * MANAGER_NUDGE_INTERVAL_MS
+    for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++, now += GRACE + 1) await passAt(engine, dead, now)
+    expect(dead.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS)
+    expect(dead.notifications.map((n) => n.event)).toEqual(['manager-unrevivable'])
+  })
+
+  it('a desk that comes BACK to life clears the nudge budget (a later silence is nudged afresh)', async () => {
+    const engine = newEngine()
+    const quiet = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    for (let i = 0; i < MAX_MANAGER_NUDGES; i++) await passAt(engine, quiet, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(quiet.nudged).toHaveLength(MAX_MANAGER_NUDGES) // budget spent
+    // The commander answers (starts working) → the episode is over.
+    const working = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'active' })
+    await passAt(engine, working, T0 + 20 * MANAGER_NUDGE_INTERVAL_MS)
+    expect(engine.managerResume?.nudges).toBe(0)
+    // A LATER quiet spell gets a fresh budget rather than being silently ignored forever.
+    const quietAgain = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(engine, quietAgain, T0 + 40 * MANAGER_NUDGE_INTERVAL_MS)
+    expect(quietAgain.nudged).toHaveLength(1)
+  })
+
+  it('a RESPAWNED desk gets a FRESH nudge budget — one desk\'s silence is not charged to its successor', async () => {
+    const engine = newEngine()
+    // A desk ignores every nudge, spending the budget (and arming the one-shot log).
+    const quiet = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    for (let i = 0; i < MAX_MANAGER_NUDGES; i++) await passAt(engine, quiet, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(quiet.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+
+    // …then it DIES, and the reflex replaces it with a brand-new desk.
+    const dead = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'absent' })
+    const spawnAt = T0 + 20 * MANAGER_NUDGE_INTERVAL_MS
+    await passAt(engine, dead, spawnAt)
+    expect(dead.wakeCalls).toHaveLength(1)
+    expect(engine.managerResume?.nudges).toBe(0) // the counters belong to the DEAD desk
+
+    // The successor never ignored anything, so a quiet spell must still be poked. Note no
+    // 'active' probe intervenes here: a spawned desk normally paints while booting (which
+    // would clear the counters as a side effect), but an integrate pass can hold the lane
+    // ~20m for verify + the adversarial panel, and past MANAGER_HEARTBEAT_STALE_MS that
+    // paint has aged out — so the first sighting of a healthy successor really can be
+    // 'idle'. With the dead desk's budget inherited this nudge went missing and, because
+    // `unresponsiveLogged` came along too, integration stalled without even a log line.
+    const successorQuiet = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(engine, successorQuiet, spawnAt + GRACE + 1)
+    expect(successorQuiet.nudged).toHaveLength(1)
+    expect(successorQuiet.notifications).toEqual([]) // and still never a fatal (完了条件3)
+  })
+
+  it('the ECHO of our own nudge must not refund the budget — else a wedged desk is poked forever', async () => {
+    // Writing into a desk makes claude's TUI repaint, which stamps `lastOutputAt` whether
+    // or not anything PROCESSED the prompt. So a desk wedged with a responsive TUI (the
+    // classic shape: stuck on a hung request, input box still echoing) looks 'active' for
+    // a full staleness window after every poke. Left uncorrected the reflex refunds its
+    // own budget — nudge → echo → 'active' → nudges=0 → nudge → … — so the budget never
+    // empties, the 「N 回の声かけに応答しません」 line never fires, and the desk is poked
+    // forever. The worker stall path has guarded this since STALL_ECHO_GUARD_MS ("output
+    // within echoGuardMs after our nudge is the TUI repaint, not life"); this is the same
+    // trap on the manager path.
+    const engine = newEngine()
+    // A desk whose ONLY output is our own poke bouncing back. The fake models a real probe
+    // faithfully: paint at/before the `echoUntil` the pass hands down does not count, so
+    // this desk reads 'active' only where the engine failed to discount its own echo.
+    let paintedAt = -Infinity
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresenceFn: (now, echoUntil) => {
+        const real = echoUntil > 0 && paintedAt <= echoUntil ? -Infinity : paintedAt
+        return now - real < MANAGER_NUDGE_INTERVAL_MS ? 'active' : 'idle'
+      },
+    })
+    // Probe on the real cadence (passes are frequent — INTEGRATE_TICK_MS is seconds), not
+    // only at nudge boundaries: it is the passes BETWEEN nudges that see the echo as life.
+    let seen = 0
+    for (let i = 0; i < 300; i++) {
+      const at = T0 + i * 60_000
+      await passAt(engine, deps, at)
+      if (deps.nudged.length > seen) {
+        seen = deps.nudged.length
+        paintedAt = at // the TUI repaints what we just typed — instantly
+      }
+    }
+    // The contract the docs promise (03章 §7-10): at most MAX_MANAGER_NUDGES pokes, ever.
+    expect(deps.nudged.length).toBeLessThanOrEqual(MAX_MANAGER_NUDGES)
+    expect(deps.wakeCalls).toEqual([]) // and never a spawn — the desk was up throughout
+    expect(deps.notifications).toEqual([]) // nor a fatal (完了条件3)
+    // The wedge must still be SAID once, rather than vanishing into an endless poke loop.
+    expect(engine.log.filter((l) => l.message.includes('声かけに応答しません'))).toHaveLength(1)
+  })
+
+  it('a JUST-RESURRECTED desk is left alone through the boot grace — no ESC through its opening prompt', async () => {
+    // The regression this pins is one the 2026-07-18 work created by composition, and it
+    // fired on EVERY resurrection: (1) the spawn's launch echo is discounted for
+    // STALL_ECHO_GUARD_MS so a booting desk reads 'idle'; (2) the spawn clears
+    // lastNudgeAt so the nudge throttle is disarmed; (3) the poke leads with ESC. At the
+    // first tick after a wake (INTEGRATE_TICK_MS = 15s) the fresh commander therefore took
+    // an ESC through the middle of the /og-manage prompt it was launched with.
+    const engine = newEngine()
+    let up = false // the desk exists only after we spawn it
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      // Exactly the shape the real probe produces while booting: a live PTY whose only
+      // paint so far is the launch line we ourselves wrote, hence discounted ⇒ 'idle'.
+      managerPresenceFn: () => (up ? 'idle' : 'absent'),
+    })
+    await passAt(engine, deps, T0)
+    expect(deps.wakeCalls).toHaveLength(1) // spawned
+    up = true
+    // The next integrate tick lands 15s later — mid-boot.
+    await passAt(engine, deps, T0 + INTEGRATE_TICK_MS)
+    expect(deps.nudged).toEqual([]) // ← THE fix: a booting desk is not interrupted
+    // …and it stays untouched for the whole grace.
+    await passAt(engine, deps, T0 + MANAGER_RESUME_GRACE_MS - 1)
+    expect(deps.nudged).toEqual([])
+    expect(deps.wakeCalls).toHaveLength(1) // nor is a second desk opened
+    // Once the grace is over and it is STILL quiet, the poke is due as before.
+    await passAt(engine, deps, T0 + MANAGER_RESUME_GRACE_MS + 1)
+    expect(deps.nudged).toHaveLength(1)
+  })
+
+  it('a desk that only ever leaves a SHELL behind still reaches manager-unrevivable (provenSinceWake)', async () => {
+    // The other half of the flapping story, and the one that actually exercises the idle
+    // refund gate. `launchClaude` runs claude inside a login shell, so a boot that dies on
+    // arrival can leave the SHELL alive: the PTY is live, nothing ever paints again, and
+    // presence reads 'idle' — not 'absent' — for as long as that shell lingers. Past the
+    // boot grace the idle branch would normally refund `attempts` ("a live desk falsifies
+    // 'unrevivable'"), which would retire the give-up guard for precisely the boot-crash
+    // case it exists for. `provenSinceWake` is what stops that: a desk that has never once
+    // been SEEN working has proved nothing, so the budget keeps accruing.
+    //
+    // NB this deliberately outlives the grace — the sibling FLAPPING test never gets here
+    // because its desk dies inside the grace window, so it cannot pin this gate.
+    const engine = newEngine()
+    let shellUp = false
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresenceFn: () => (shellUp ? 'idle' : 'absent'),
+    })
+    let spawns = 0
+    let at = T0
+    for (let i = 0; i < 60; i++) {
+      at = T0 + i * 60_000 // a minute apart, so grace windows really elapse
+      await passAt(engine, deps, at)
+      if (deps.wakeCalls.length > spawns) {
+        spawns = deps.wakeCalls.length
+        shellUp = true // claude died instantly; only the login shell is left
+      } else if (shellUp && at - (engine.managerResume?.lastWakeAt ?? 0) > MANAGER_RESUME_GRACE_MS * 2) {
+        shellUp = false // the orphaned shell finally exits → 'absent' → next resurrection
+      }
+    }
+    // It must give up and TELL the owner rather than resurrect a dead boot forever.
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unrevivable'])
+    expect(deps.wakeCalls.length).toBeLessThanOrEqual(MAX_MANAGER_RESUME_ATTEMPTS)
+  })
+
+  it('a NEW batch never inherits the previous desk\'s unproven verdict (no false fatal on a live desk)', async () => {
+    // provenSinceWake describes THE DESK WE LAST SPAWNED. If a drain (no integrable work)
+    // does not clear it, the next batch judges a live, answering desk on a previous
+    // episode's verdict: `lastWakeAt` is cleared so the boot grace cannot apply, and
+    // `provenSinceWake===false` blocks the idle refund, so `attempts` climbs to a
+    // manager-unrevivable fatal against a desk that is demonstrably up. That is the exact
+    // harm this card exists to remove, re-entering by the back door.
+    const engine = newEngine()
+    let present = false
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresenceFn: () => (present ? 'idle' : 'absent'),
+    })
+    // Episode 1: work waiting, no desk → spawn. The desk comes up and does the whole
+    // integration WITHOUT the engine ever sampling it as 'active' (the probe is a 15s
+    // tick; a batch can drain between two of them).
+    await passAt(engine, deps, T0)
+    expect(deps.wakeCalls).toHaveLength(1)
+    expect(engine.managerResume?.provenSinceWake).toBe(false)
+    present = true
+
+    // The batch drains — no integrable work left. The reflex must disarm FULLY.
+    const drained = makeIntDeps({ reviews: [], managerPresence: 'idle' })
+    await passAt(engine, drained, T0 + 60_000)
+    expect(engine.managerResume?.provenSinceWake).not.toBe(false) // ← the leak
+
+    // Episode 2: a new batch arrives and the SAME desk is live but quiet. The verdict it
+    // is judged by must be the DEFAULT (proven), not the corpse of episode 1.
+    const next = makeIntDeps({ reviews: [reviewCard('b', 'swarm/b')], managerPresence: 'idle' })
+    await passAt(engine, next, T0 + 120_000)
+    expect(next.wakeCalls).toEqual([]) // a live desk is never duplicated
+    expect(next.notifications).toEqual([]) // …nor escalated about
+    expect(engine.managerResume?.attempts).toBe(0) // and the give-up budget stays refunded
+  })
+
+  it('a FLAPPING desk (boots, echoes the launch line, dies) still reaches manager-unrevivable', async () => {
+    // launchClaude writes the launch command INTO the fresh PTY, and the login shell
+    // echoes it back within milliseconds (claudeTerminal.ts). That echo alone satisfies
+    // "painted recently", so a desk that boots and dies without ever doing work used to
+    // read 'active' on the very next tick and zero `attempts` — meaning a desk that flaps
+    // could never reach MAX_MANAGER_RESUME_ATTEMPTS, and the infinite-resurrection guard
+    // silently retired for the exact cases it exists for (context overflow / API error /
+    // boot-crash). Measured before the fix: 72 spawns in 6h, zero escalation. The echo
+    // discount must therefore cover the SPAWN write, not only the nudge.
+    const engine = newEngine()
+    let bootEchoAt = -Infinity // the launch line bouncing off the shell
+    let deskUp = false
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresenceFn: (now, echoUntil) => {
+        if (!deskUp) return 'absent'
+        const real = echoUntil > 0 && bootEchoAt <= echoUntil ? -Infinity : bootEchoAt
+        return now - real < MANAGER_NUDGE_INTERVAL_MS ? 'active' : 'idle'
+      },
+    })
+    let at = T0
+    let spawns = 0
+    for (let i = 0; i < 200; i++) {
+      at = T0 + i * 30_000 // probe every 30s, well inside the boot grace
+      await passAt(engine, deps, at)
+      if (deps.wakeCalls.length > spawns) {
+        // It booted: the launch line echoes at once, and the desk lives ~60s then dies.
+        spawns = deps.wakeCalls.length
+        bootEchoAt = at
+        deskUp = true
+      } else if (deskUp && at - bootEchoAt >= 60_000) {
+        deskUp = false // dead again — nothing but the boot echo was ever produced
+      }
+    }
+    // The guard must fire: a desk that only ever echoed its own launch line has NOT been
+    // raised, so the budget must keep accruing until it gives up and tells the owner.
+    // (Before: 20 spawns, 0 fatals, 0 warnings — a silent token-burn loop.)
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unrevivable'])
+    expect(deps.wakeCalls.length).toBeLessThanOrEqual(MAX_MANAGER_RESUME_ATTEMPTS)
+  })
+
+  it('hands the probe an echo cutoff of lastNudgeAt + STALL_ECHO_GUARD_MS (0 before any poke)', async () => {
+    // The wiring the two tests around this one depend on: without the cutoff reaching the
+    // probe, the discount cannot happen at all and the fix is inert.
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(engine, deps, T0)
+    expect(deps.echoUntils).toEqual([0]) // nothing poked yet ⇒ nothing to discount
+    await passAt(engine, deps, T0 + MANAGER_NUDGE_INTERVAL_MS)
+    expect(deps.echoUntils[1]).toBe(T0 + STALL_ECHO_GUARD_MS)
+  })
+
+  it('a desk that REALLY answers the nudge still refunds its budget — the guard is not a gag', async () => {
+    // The mirror of the test above: the discount must be narrow enough that genuine
+    // recovery still counts. A desk that actually processes the poke keeps painting long
+    // past the guard (streaming output), so it reads 'active' and the budget resets —
+    // otherwise the fix would silence a healthy desk after three lifetime pokes.
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(engine, deps, T0)
+    expect(deps.nudged).toHaveLength(1)
+    expect(engine.managerResume?.nudges).toBe(1)
+    // It wakes up and works (sustained activity, far past STALL_ECHO_GUARD_MS).
+    const working = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'active' })
+    await passAt(engine, working, T0 + 5 * 60_000)
+    expect(engine.managerResume?.nudges).toBe(0) // refunded — real work is not an echo
+  })
+
+  it('a nudge whose PTY write FAILS still counts (no tight retry loop) and stays non-fatal', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle', nudgeFails: true })
+    await passAt(engine, deps, T0)
+    await passAt(engine, deps, T0 + 1000) // immediately again — throttled regardless of outcome
+    expect(deps.nudged).toHaveLength(1)
+    expect(engine.log.some((l) => l.message.includes('PTY への書き込みに失敗'))).toBe(true)
+    expect(deps.notifications).toEqual([])
+    expect(deps.wakeCalls).toEqual([]) // a failed nudge must not fall back to spawning a twin
+  })
 })
 
 // ── Learning loop — 差し戻し原因を次の再dispatchの /order に注入 (card fdf714ef) ──────
@@ -4985,7 +6502,8 @@ describe('runEnginePass — never overlaps itself', () => {
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
-      isManagerActive: async () => false,
+      managerPresence: async () => 'absent',
+      nudgeManager: async () => true,
       wakeManager: async () => true,
       worktreeExists: async () => true,
     }
@@ -5057,7 +6575,8 @@ describe('runEnginePass — never blocks on the self-supply scan', () => {
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
-      isManagerActive: async () => false,
+      managerPresence: async () => 'absent',
+      nudgeManager: async () => true,
       wakeManager: async () => true,
       worktreeExists: async () => true,
       // The scan stand-in: parked in its first scanner until the test releases it. The
@@ -5121,9 +6640,9 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
   const fullDeps = (over: {
     board: Map<string, ProjectTask>
     fetchReview: () => Promise<ProjectTask[]>
-    // The integrate pass's SLOW await is now isManagerActive (2026-07-15 — it no
+    // The integrate pass's SLOW await is now managerPresence (2026-07-15 — it no
     // longer verifies/reviews). Parked in test 1 to prove the tick doesn't block on it.
-    isManagerActive?: IntegrationDeps['isManagerActive']
+    managerPresence?: IntegrationDeps['managerPresence']
     recovered: { taskId: string; column: string }[]
     deadIds: Set<string>
   }): OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps => ({
@@ -5157,7 +6676,8 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
     cleanup: async () => ({ removed: true }),
     killPty: () => {},
     instructRework: () => {},
-    isManagerActive: over.isManagerActive ?? (async () => false),
+    managerPresence: over.managerPresence ?? (async () => 'absent'),
+    nudgeManager: async () => true,
     wakeManager: async () => true,
     worktreeExists: async () => true,
   })
@@ -5178,10 +6698,10 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
       // The integrate pass's slow await is now the commander-presence probe — parked
       // until the test releases it. (The REAL one reads swarm-sessions + checks a live
       // PTY; even the wake it precedes spawns a claude — a unit test must never do that.)
-      isManagerActive: async () => {
+      managerPresence: async () => {
         probeEntered = true
         await probeGate
-        return true // "desk already up" — so the wake never actually spawns here
+        return 'active' // "desk already up AND working" — so nothing spawns or pokes here
       },
       recovered,
       deadIds,
@@ -5338,7 +6858,8 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       cleanup: async () => ({ removed: true }),
       killPty: () => {},
       instructRework: () => {},
-      isManagerActive: async () => false,
+      managerPresence: async () => 'absent',
+      nudgeManager: async () => true,
       wakeManager: async () => true,
       worktreeExists: async () => true,
     }
@@ -6588,5 +8109,83 @@ describe('Consumption: getOrchestratorState surfaces the snapshot end-to-end', (
       limit: DISPATCH_BUDGET,
       overLimit: false,
     })
+  })
+})
+
+// ── Token-consumption journal line on promote (card swarm-token) ──────────────
+//
+// The done moment (promote doing→review) is the one point a card's cost is
+// complete, so the engine records ONE `consumption:` info line there via the
+// OPTIONAL deps.readConsumption. The contract under test: the line appears
+// with the meter's summary + the card title, and EVERY failure shape (null,
+// throw, dep absent) silently skips the line without disturbing the promote.
+
+describe('runDispatchPass — consumption journal line on promote', () => {
+  const promotable = () => ({
+    engine: newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a' }),
+      ],
+    }),
+    init: {
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 2]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false }]]),
+    },
+  })
+  const consumptionLines = (engine: ProjectEngine) =>
+    engine.log.filter((l) => l.message.startsWith('consumption:'))
+
+  it('records one info line (meter summary + card title) right after the promote', async () => {
+    const { engine, init } = promotable()
+    const asked: { worktree: string; terminalId: string }[] = []
+    const deps = {
+      ...makeDeps(init),
+      readConsumption: async (opts: { worktree: string; terminalId: string }) => {
+        asked.push(opts)
+        return '手数191 束ね1.00 文脈max336k 出力347k'
+      },
+    }
+    await runDispatchPass(engine, deps)
+    expect(asked).toEqual([{ worktree: '/wt/a', terminalId: 'pty-a-1' }])
+    const lines = consumptionLines(engine)
+    expect(lines).toHaveLength(1)
+    expect(lines[0].level).toBe('info')
+    expect(lines[0].message).toBe('consumption: 手数191 束ね1.00 文脈max336k 出力347k — task a')
+    expect(lines[0].kind).toBeUndefined() // no metrics counter — classifyMetricEvent maps it to null
+    // The journal ORDER matches the flow: promote line first, its cost line after.
+    const promoteIdx = engine.log.findIndex((l) => l.message.startsWith('promoted to review'))
+    const consumptionIdx = engine.log.findIndex((l) => l.message.startsWith('consumption:'))
+    expect(promoteIdx).toBeGreaterThanOrEqual(0)
+    expect(consumptionIdx).toBe(promoteIdx + 1)
+  })
+
+  it('skips the line silently when the meter resolves null (JSONL unreadable) — promote unharmed', async () => {
+    const { engine, init } = promotable()
+    const deps = { ...makeDeps(init), readConsumption: async () => null }
+    await runDispatchPass(engine, deps)
+    expect(consumptionLines(engine)).toHaveLength(0)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }]) // the promote still landed
+  })
+
+  it('swallows a throwing meter — promote unharmed (fail-safe)', async () => {
+    const { engine, init } = promotable()
+    const deps = {
+      ...makeDeps(init),
+      readConsumption: async () => {
+        throw new Error('disk boom')
+      },
+    }
+    await runDispatchPass(engine, deps)
+    expect(consumptionLines(engine)).toHaveLength(0)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+  })
+
+  it('an absent dep (existing fake-deps shape) never records the line', async () => {
+    const { engine, init } = promotable()
+    const deps = makeDeps(init) // no readConsumption at all
+    await runDispatchPass(engine, deps)
+    expect(consumptionLines(engine)).toHaveLength(0)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
   })
 })

@@ -23,8 +23,14 @@
 //     OPENGROUND_COLLAB_WS_URL is the public Worker WS endpoint the browser dials
 //     — neither is a credential. The SERVICE_ROLE key and the collab HMAC ticket
 //     secret (OPENGROUND_COLLAB_TICKET_SECRET) are server-secret and NEVER
-//     bundled; writeRuntimeConfig() refuses to bake a SERVICE_ROLE/SECRET-named
-//     key (the guard below would throw if one were ever added to BAKED_KEYS).
+//     bundled; `assertBakeable` below throws if a secret-named OR authority key
+//     is ever added to BAKED_KEYS. That guard carries a SECOND load since
+//     2026-07-19: the swarm's self-update runs `npm run build` from an env that
+//     strips secrets, and BAKED_KEYS is the EXEMPTION from that stripping
+//     (electron/gateEnv.js buildProducerEnv) — so anything this guard lets into
+//     the list is also something handed to untrusted post-merge code. The two
+//     therefore share ONE policy module, electron/secretPolicy.js; see its header
+//     for the two rounds in which they were found drifting apart.
 //   - The collab WS endpoint is the destination the signed-in user's Supabase
 //     access token is relayed to (server-to-server) to mint a ticket, so in a
 //     SHIPPED build it must be the baked constant and nothing the local launch
@@ -36,6 +42,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const { assertBakeable } = require('./secretPolicy')
 
 // The only keys we ever bake into the shipped app. PUBLIC values only:
 //   SUPABASE_URL / SUPABASE_ANON_KEY  — app login (anon key is public by design)
@@ -48,12 +55,15 @@ const BAKED_KEYS = [
   'OPENGROUND_COLLAB_WS_URL',
 ]
 
-// Hard guard: a future edit must never add a server-secret to the allowlist.
-for (const k of BAKED_KEYS) {
-  if (/SERVICE_ROLE|SECRET|PASSWORD|PRIVATE/i.test(k)) {
-    throw new Error(`runtimeConfig: refusing to bake secret-named key "${k}"`)
-  }
-}
+// Hard guard: a future edit must never add a secret OR an authority value to the
+// allowlist. The policy is NOT defined here — it lives in electron/secretPolicy.js
+// so that this guard and the untrusted-child strip policy (electron/gateEnv.js)
+// are literally the same rules. They have to be: `buildProducerEnv` exempts all of
+// BAKED_KEYS from stripping, so anything this guard admits is also something
+// handed to untrusted post-merge code. Two rounds of review found the guard
+// weaker than the strip policy (round 3: pattern missing TOKEN; round 4: guard
+// checked only the pattern while stripping was pattern ∪ list) — see that file.
+assertBakeable(BAKED_KEYS)
 
 // Co-located with this module so it ships under electron/** and resolves the
 // same way in dev (repo) and in the packaged .app (…/Resources/app/electron/).

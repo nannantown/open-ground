@@ -60,8 +60,10 @@ beforeEach(async () => {
 
 afterEach(async () => {
   for (const [key, value] of Object.entries(savedEnv)) {
-    if (value === undefined) delete process.env[key]
-    else process.env[key] = value
+    if (value !== undefined) process.env[key] = value
+    // NEVER unset the home vars: empty means the user's REAL ~/.openground
+    // (paths.ts openGroundHome), and vitest reuses workers across files.
+    else if (!['OPENGROUND_HOME', 'HOME'].includes(key)) delete process.env[key]
   }
   await rm(scratch, { recursive: true, force: true })
 })

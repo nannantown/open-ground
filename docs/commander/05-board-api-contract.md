@@ -115,8 +115,8 @@
     │   エンジン: moveToDoing                │ worker が READY（心拍 done true / 完了サイン）
     │                                        ▼
     │      rework verb（counter+1）       review ──── 統合(main入り確認後) ───▶ done
-    └── resolve 'todo' ◀──┐                 │  エンジン autoMerge=defaultMoveToDone
-                          │                 │  司令塔=手動マージ後 setColumn done
+    └── resolve 'todo' ◀──┐                 │  司令塔=手動マージ後 setColumn done
+                          │                 │  （エンジンは land しない — ready を見て司令官を起こすだけ）
         counter > maxReworks（既定3）        │
    blocked ◀──────────────┴─────────────────┘（resolve 'blocked' / 人間判断）
 ```
@@ -129,7 +129,7 @@
 | todo→doing | **エンジン**: spawn 成功後に `deps.moveToDoing`(=setColumn doing + setBranch) | `swarmOrchestrator.ts:5202, :2340` |
 | doing→review | **エンジン monitor**: 完了判定(commit-gated)で promote | `swarmOrchestrator.ts:4447`; stage 定義 `types.ts:1009` |
 | doing→review | **司令塔(手動)**: worker の心拍 `done true` を見て `setColumn review` | 運用(§9 のコマンド) |
-| review→done | **main 入り確認後のみ**。エンジン autoMerge(FF/クリーン rebase のみ・conflict は自動解決しない) | `swarmOrchestrator.ts:3593-3601, :4613-4628`; トグルは `server/routes/swarm.ts:606-627` |
+| review→done | **main 入り確認後のみ**。司令官の手動統合(03 章 §5)後に司令官が `setColumn done`(**エンジンの autoMerge land + defaultMoveToDone は 2026-07-15/16 に撤去** — エンジンはもう review→done を動かさない。旧トグル route も 404) | 03 章 §5(司令官の統合手順); 旧機構は HISTORICAL(03 章 §2.3.1) |
 | review→doing | **rework verb**(counter+1)。**0713〜エンジン監視が観測する**: roster が `stage:'done'` のままのカードが doing に居たら外部差し戻しとみなし worker を再武装(`stage='running'`+`reworkAt=now` — `swarmOrchestrator.ts:4360-4377`)。worker が**差し戻しより新しい**心拍で ready を打ち直せば自動で review に再昇格する(古い ready では昇格しない — 02 章 §5.3)。roster に worker が残っている通常ケースでは司令官が rework 後に手で setColumn review する必要は無い — **ただし PTY が差し戻しより前に死んでいた稀ケースは観測できず沈む**(02 章 §5.3 の既知の残穴・手動復旧) | `server/routes/project.ts:984-1014` |
 | review→blocked | rework の counter が maxReworks(既定 3)を**超えた**とき(`count > max`) | `server/routes/project.ts:1000-1001` |
 | 任意→blocked/todo | `POST /api/swarm/orchestrator/review/resolve`(スタック review カードの人間裁定) | `server/routes/swarm.ts:628-652` |
@@ -336,7 +336,7 @@ settings.json 手編集 `swarmLocalOwner:true` — 業務モード用、docs/SEC
 | POST `/api/swarm/worker` | `{path, taskId?\|title?, notes?, hint?, worktree?, cols?, rows?}` | `SpawnSwarmWorkerResponse {terminalId, agentSessionId, worktree, branch, model?}`(`types.ts:939-950`)。taskId 有 = claim 先行 CAS(§5)。409=already dispatched、404=task not found、503=claude 未準備、400=goal 空/8KiB 超(`swarm.ts:113`) | `swarm.ts:241` |
 | POST `/api/swarm/supply` | `{path, cols?, rows?, fresh?}` | 補給官 PTY(primary checkout・worktree なし)。`{terminalId, agentSessionId, resumed}` — **既定で前回の会話を resume**(§10)。`fresh:true` で新規会話 | `:381` |
 | POST `/api/swarm/manager` | `{path, cols?, rows?, fresh?}` | 司令官 PTY(primary checkout・worktree なし)。同上 — **resume 時は Board を読み直してから喋る**(§10) | `:430` |
-| POST `/api/swarm/worktree/remove` | `{path, worktree, force?}` | `{removed, reason?}` — dirty は force なしで拒否 | `:468` |
+| POST `/api/swarm/worktree/remove` | `{path, worktree, force?}` | `{removed, reason?, selfUpdate?}` — dirty は force なしで拒否。**非 force の撤去成功時は司令官統合の検知結果 `selfUpdate:{detected,requested}` が付く**(branch tip が trunk 到達済みなら self-update トリガ発火 — selfUpdateOnIntegrate.ts、TARGET-STATE §5) | `:468` |
 | GET `/api/swarm/orchestrator` | `?path=` | `SwarmOrchestratorState`(`types.ts:1280-1361`)。**pure read — spawn しない**(eadb25e6) | `:503` |
 | GET `/api/swarm/workers` | `?path=` | **サーバ真実の worker 一覧**(PTY+roster+心拍の合成、`types.ts:1047-1092`) | `:518` |
 | POST `/api/swarm/orchestrator/drain-tick` | `{path}` | state 返すだけ(auto-start は廃止済み) | `:533` |
@@ -344,13 +344,13 @@ settings.json 手編集 `swarmLocalOwner:true` — 業務モード用、docs/SEC
 | POST `/api/swarm/orchestrator/start` | `{path}` | 自律 dispatch ON(冪等)。503=claude 未準備 | `:563` |
 | POST `/api/swarm/orchestrator/stop` | `{path}` | OFF(冪等)。走行中 worker は放置 | `:587` |
 | POST `/api/swarm/orchestrator/worker/stop` | `{path, terminalId}` | エンジン worker 1 体停止 + カード blocked 駐機。unknown id は no-op | `:608` |
-| POST `/api/swarm/orchestrator/automerge` | `{path, enabled}` | Card③ 自動統合トグル(autonomy とは別スイッチ・既定 OFF) | `:631` |
+| ~~POST `/api/swarm/orchestrator/automerge`~~ | — | **撤去(2026-07-16)— 404**。旧「司令官自動起こし」トグル。起こし反射はエンジン ON で常時になった(03 章 §2.3。404 は回帰テストでピン) | — |
 | POST `/api/swarm/orchestrator/review/resolve` | `{path, taskId, target:'blocked'\|'todo'}` | スタック review カードの人間裁定 | `:653` |
 | POST `/api/swarm/orchestrator/selfsupply` | `{path, enabled}` | 自己補給トグル | `:678` |
 | POST `/api/swarm/orchestrator/overseer` | `{path, enabled}` | 監督ノードトグル(+`sandboxWarning`) | `:705` |
 | POST `/api/swarm/orchestrator/selfsupply/approve` | `{path, cardId}` | 自己補給カードの承認(dispatch ゲート解除) | `:731` |
 | GET `/api/swarm/escalations` | `?path=&status=` | 人間への質問 inbox | `:757` |
-| POST `/api/swarm/escalations/open` | `{path, question, context, whyEscalated, …}` | 質問を上げる(receiptKey で冪等) | `:778` |
+| POST `/api/swarm/escalations/open` | `{path, question, context, plainQuestion?, whyEscalated, …}` | 質問を上げる(receiptKey で冪等。`plainQuestion`=オーナー向け平易文・2026-07-17〜、06 章 §2.2) | `:778` |
 | POST `/api/swarm/escalations/answer` | `{id, answer}` | 回答 → live PTY 注入 or 次回 dispatch へ | `:850` |
 | POST `/api/swarm/escalations/dismiss` | `{id}` | 未回答クローズ | `:875` |
 | GET `/api/swarm/quota` | — | `SwarmQuotaResponse {now, tiers, launchTier, allCoolingUntil}`(`types.ts:2228-2244`)。path 不要(subscription 全体の話) | `:897` |
@@ -469,7 +469,7 @@ curl -s -X POST "$API/api/project/tasks" -H 'content-type: application/json' \
 
 ```bash
 # 手動 dispatch 前の掟: エンジン稼働状況を見る(pure read・spawn しない)
-curl -s "$API/api/swarm/orchestrator?path=$P" | jq '{running, manualStop, manualStopPersisted, autoMerge, parkUntil, workers: [.workers[] | {taskId, branch, stage, terminalId}]}'
+curl -s "$API/api/swarm/orchestrator?path=$P" | jq '{running, manualStop, manualStopPersisted, parkUntil, workers: [.workers[] | {taskId, branch, stage, terminalId}]}'
 
 # サーバ真実の worker 一覧(エンジン外の worker も出る)
 curl -s "$API/api/swarm/workers?path=$P" | jq '.workers[] | {worktree, branch, terminalId, taskId, phase, ready, blocked}'

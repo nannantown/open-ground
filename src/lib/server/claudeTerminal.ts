@@ -98,6 +98,20 @@ export interface LaunchClaudeOpts {
   // "claude working" beacon on a card. Default false: every user-launched pane
   // (the terminal routes, Board 実行, the swarm roles) stays visible as before.
   hidden?: boolean
+  // Mark this as an OWNER'S CONVERSATION DESK: a session the owner types into and
+  // waits on (the Terminal tab's panes, Board 実行, the commander / supply desks).
+  // Carried onto the pool entry (TerminalInfo.ownerDesk) so the model-limit watch
+  // (ownerDeskLimit.ts) can tell the owner when THIS conversation stops on a spent
+  // model quota — the gap the 2026-07-18 event exposed, where the engine rescued
+  // its own workers while the owner's desk sat dead until they happened to look.
+  // Default false: the swarm's UNATTENDED sessions (workers, review-panel
+  // reviewers) and every headless utility run stay silent, since the engine
+  // already handles their limits (hold → requeue → tier demotion).
+  ownerDesk?: boolean
+  // For an ownerDesk — what to CALL this desk in that notification ("司令官").
+  // See TerminalInfo.deskLabel: an account-wide exhaustion stops every desk at
+  // once, so the message has to say WHICH conversation stopped.
+  deskLabel?: string
   // Extra environment variables to inject into THIS claude invocation's command
   // line, scoped to the one command (exactly like OPENGROUND_OWNED=1). The
   // commander/supply spawns (swarmManager.ts / swarmSupply.ts) pass
@@ -431,9 +445,13 @@ const writeSandboxProfile = (
   }
   // A worker worktree's node_modules is a SYMLINK to the MAIN checkout's
   // node_modules. We deliberately carve out NONE of it — not .bin, not .cache,
-  // and NOT .vite: `npm run build` + `npm test` run with it fully READ-only
-  // (verified — they read the existing cache and write any transient cache to
-  // TMPDIR/cwd, never into <main>/node_modules), and making ANY of it writable
+  // and NOT .vite: `npm run build` + `npm test` run with it fully READ-only.
+  // (Precisely: vitest DOES attempt one write into <main>/node_modules —
+  // .vite/vitest/<hash>/results.json, its previous-run cache — and the kernel
+  // denies it; the run is unaffected only because vitest wraps that write in a
+  // bare try/catch. The gate survives on vitest's tolerance, not because nothing
+  // writes there — an earlier version of this comment claimed the latter, which
+  // is wrong. Anything less tolerant would break.) Making ANY of it writable
   // would let a sandboxed worker poison code the owner later runs UN-sandboxed in
   // main = full-privilege escape. That includes vite's .vite/deps slices: the dev
   // server serves them to the browser and runs them in the dev/Electron origin,
@@ -473,6 +491,10 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
     // Hidden utility sessions (auto-title / auto-description) stay off the Ground
     // beacon — carried onto the pool entry so listActiveTerminals can filter them.
     ...(opts.hidden ? { hidden: true } : {}),
+    // …and an OWNER DESK is carried on so the model-limit watch can find it,
+    // with the name it should use for this desk when it does.
+    ...(opts.ownerDesk ? { ownerDesk: true } : {}),
+    ...(opts.ownerDesk && opts.deskLabel ? { deskLabel: opts.deskLabel } : {}),
   })
 
   // Route the positional prompt through a temp file (see buildClaudeArgv §2):

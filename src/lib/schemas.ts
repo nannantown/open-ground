@@ -153,6 +153,14 @@ export const ProjectTaskSchema = z.object({
   // (e.g. -99 never crosses maxReworks). .catch(undefined): junk → field drops,
   // card survives (同じ drop-the-field-never-the-card 契約)。
   reworkCount: z.number().int().nonnegative().optional().catch(undefined),
+  // 日次燃費日報が blocked に置く改善提案カードの目印 兼 重複起票ガード
+  // (types.ts参照)。MUST be in this schema: stripped on the read→write
+  // round-trip, the report's Board 走査は毎回「提案なし」を見て同じカードを
+  // 積み増す — sentinel 消失時の洪水を塞ぐ当のガードが無音で開く。
+  // .catch(undefined): junk → field drops, card survives (同じ
+  // drop-the-field-never-the-card 契約)。落ちた場合の最悪は提案1枚の重複で、
+  // カード消失より軽い。
+  fuelProposalKey: z.string().optional().catch(undefined),
 })
 
 export const ProjectDataSchema = z.object({

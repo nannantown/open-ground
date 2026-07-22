@@ -31,6 +31,10 @@ export interface ModuleDescriptor {
   id: string
   kind: ModuleKind
   label: string
+  /** native only — i18n key for a TRANSLATED name (see TabDef.labelKey in
+   *  moduleRegistry). Set on natives whose name is localised product copy; a
+   *  sandboxed module's label is user-authored, so it never has one. */
+  labelKey?: string
   /** sandboxed only — the on-disk def (source/framework/origin/remoteId…). */
   def?: CustomModuleDef
 }

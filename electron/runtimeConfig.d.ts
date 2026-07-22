@@ -32,3 +32,6 @@ export function writeRuntimeConfig(env?: NodeJS.ProcessEnv, file?: string): Bake
  * process env. Returns `{}` on a missing/empty/corrupt file.
  */
 export function readBakedAuthEnv(file?: string): BakedAuthEnv
+
+// The secret/bake policy itself lives in electron/secretPolicy.js (one definition
+// shared with the untrusted-child strip policy) — import it from there.

@@ -71,9 +71,19 @@ import { atomicWriteJson } from './atomicWrite'
 // swarmSelfSupply — which this module imports — needs the same reaper for its
 // vitest/eslint scanners, and a back-import would close a cycle. Re-exported
 // below so existing importers of `runGateProcess` keep their path.
-import { runGateProcess } from './gateProcess'
+import { runGateProcess, withGateEnv } from './gateProcess'
 import { openGroundHome } from './paths'
-import { getTerminal, getTerminalScreen, killTerminal, subscribeTerminal, writeInput } from './terminal'
+import {
+  claudeSessionActivity,
+  type ClaudeSessionActivity,
+  getTerminal,
+  getTerminalScreen,
+  killTerminal,
+  listLiveDesksIn,
+  type OwnerDeskTerminal,
+  subscribeTerminal,
+  writeInput,
+} from './terminal'
 import { claudeRunPreflight } from './claudePreflight'
 import {
   getSettings,
@@ -157,15 +167,17 @@ import type {
   SpawnSwarmWorkerResponse,
   SwarmConsumption,
   SwarmKpis,
+  SwarmManagerHeartbeat,
   SwarmOrchestratorState,
   SwarmFatalNotification,
 } from '../types'
 import { createSwarmFatalNotification, createSwarmInfoNotification } from './swarmNotifications'
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
-import { spawnSwarmManager } from './swarmManager'
+import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
 import { readSwarmSessions } from './swarmSessions'
-import { isClaudeSessionLive } from './terminal'
+import { sessionJsonlPath } from './transcript'
+import { readWorkerConsumptionLine } from './swarmTokenAudit'
 import { sortByPriority } from '../boardPriority'
 
 const execFile = promisify(execFileCb)
@@ -361,6 +373,29 @@ export const MAX_EXEC_MS = envMinutesMs('OPENGROUND_SWARM_MAX_EXEC_MIN', 90, 10,
  *  real ceiling while an honest quota wait is still forgiven. Tied to MAX_EXEC_MS
  *  on purpose (one knob to retune, not two). */
 export const HOLD_CREDIT_CAP_MS = MAX_EXEC_MS
+
+/** CEILING on the 統合待ち credit (2026-07-19). A card sitting in 'review'
+ *  early-continues the monitor, so while it waits its worker is subject to NO
+ *  ceiling, NO stall check and NO heartbeat check — and the whole span is credited
+ *  back on 差し戻し. Uncapped, a worker whose PTY is actually still BURNING (an
+ *  /order loop under a card the commander hand-moved, or a promote off a stale
+ *  ready heartbeat) earns unlimited credit: six hours of tokens in review, then a
+ *  fresh full MAX_EXEC_MS of 'doing' before the ceiling can bite.
+ *
+ *  The engine cannot tell an idle waiter from a busy one here (the credit is a
+ *  span between two OBSERVATIONS, not a measure of work — see §5.5(b)), so it
+ *  bounds what it cannot measure. Generous by design: a normal overnight review
+ *  is still forgiven whole, and the cap only engages on waits far longer than any
+ *  healthy integration queue.
+ *
+ *  This reverses the original "統合待ちは cap しない" rule, whose stated reason —
+ *  "a card left in review overnight would come back already past the ceiling and
+ *  be torn down as a 暴走" — no longer holds: the 暴走 label and the 'blocked' park
+ *  are now decided by `readyAt`, NOT by the credit. A ready worker that trips the
+ *  ceiling because its credit was capped is stopped as 'integration-wait' and its
+ *  card goes to 'review' with its work committed. That is a bounded, honest
+ *  outcome; unbounded token burn is not. */
+export const WAIT_CREDIT_CAP_MS = envMinutesMs('OPENGROUND_SWARM_WAIT_CREDIT_CAP_MIN', 480, 30, 2880)
 
 /** RATE-LIMIT GRACE — how long a worker WAITING on a usage / quota / overload
  *  limit is HELD before its card is requeued to 'todo' (slot recovery). A
@@ -1002,10 +1037,20 @@ export const classifyWorker = (
 
 /** Why a worker was reclaimed/recovered — selects its recovery column and labels
  *  the journal. 'crash' = dead PTY; 'stall' = alive but silent past every nudge;
- *  'runaway' = blew the execution-time ceiling; 'rate-limit' = waited on a
+ *  'runaway' = blew the execution-time ceiling WITHOUT ever producing integrable
+ *  work (a genuine 暴走); 'integration-wait' = crossed that same ceiling but had
+ *  ALREADY reached ready, so it is not a 暴走 and its card belongs in review, not
+ *  in the owner's blocked column (2026-07-18); 'rate-limit' = waited on a
  *  usage/quota limit past its grace; 'permission' = a startup prompt bypass
  *  couldn't clear. (Card 4880e9c6.) */
-export type WorkerRecoveryReason = 'crash' | 'stall' | 'runaway' | 'rate-limit' | 'permission' | 'question'
+export type WorkerRecoveryReason =
+  | 'crash'
+  | 'stall'
+  | 'runaway'
+  | 'integration-wait'
+  | 'rate-limit'
+  | 'permission'
+  | 'question'
 
 /** WHY a worker's worktree is being torn down. The recovery reasons above PLUS the
  *  two teardowns that are not recoveries: an owner STOP, and a 差し戻し REWORK
@@ -1025,9 +1070,21 @@ export type TeardownReason = WorkerRecoveryReason | 'stopped' | 'rework'
  *    • 'rate-limit' ⇒ 'todo' — a transient WAIT, never a human's problem: requeue
  *      so a later attempt retries once the limit has reset (its committed work is
  *      preserved on the branch). Auto-retry is correct here, NOT a block.
+ *    • 'integration-wait' ⇒ 'review' — the worker crossed the execution ceiling
+ *      but had ALREADY reached ready, so its branch holds integrable, committed
+ *      work. That is a job for the commander (verify → land or 差し戻し), NOT an
+ *      owner decision, so it must never land in 'blocked' — the 2026-07-18 harm
+ *      was exactly this: a ready worker's card parked in the owner's column where
+ *      nobody could act on it. 'review' is where a branch-with-commits belongs.
+ *      SCOPE OF THE EXEMPTION (narrowed 2026-07-19): it jumps exactly ONE rule,
+ *      `heartbeat.ready ⇒ 'blocked'`, because a 差し戻し'd worker still carries the
+ *      stale `ready` from before the 差し戻し. It does NOT jump `heartbeat.blocked`
+ *      — that is the worker's own LIVE report that a human is needed, and routing
+ *      it to 'review' would discard the one signal it managed to raise.
  *    • 'runaway' / 'permission' ⇒ 'blocked' — a human is needed: a task that blows
- *      the time ceiling would just overrun again on retry, and a prompt bypass
- *      can't clear means the environment is wrong. Park, don't loop.
+ *      the time ceiling WITHOUT ever producing integrable work would just overrun
+ *      again on retry, and a prompt bypass can't clear means the environment is
+ *      wrong. Park, don't loop.
  *  Otherwise (crash / stall — a possibly-transient failure) the heartbeat + retry
  *  budget decide, exactly as before:
  *    • heartbeat `ready` ⇒ 'blocked' — it DECLARED itself done yet has nothing
@@ -1044,11 +1101,22 @@ export const recoveryColumn = (
   requeues: number,
   maxRequeues: number,
   reason: WorkerRecoveryReason = 'crash',
-): 'todo' | 'blocked' => {
+): 'todo' | 'blocked' | 'review' => {
   if (reason === 'rate-limit') return 'todo'
   if (reason === 'runaway' || reason === 'permission' || reason === 'question') return 'blocked'
-  if (probe.heartbeat?.ready === true) return 'blocked'
+  // A worker's OWN blocked declaration outranks the integration-wait exemption.
+  // The exemption exists to jump ONE rule — `heartbeat.ready ⇒ blocked` below,
+  // which a 差し戻し'd worker still trips on its pre-差し戻し heartbeat (the 0718
+  // harm). Jumping this one too was collateral: a worker that hit a genuine
+  // blocker while re-working WROTE "a human is needed" into its heartbeat, and
+  // routing it to 'review' discards that declaration silently — the commander
+  // reviews an unverified tip, 差し戻し's it, and the worker hits the same wall.
+  // `ready` is a stale artefact of an earlier state; `blocked` is a live report.
   if (probe.heartbeat?.blocked === true) return 'blocked'
+  // Now the exemption: crossed the ceiling but had ALREADY delivered ⇒ the
+  // commander's queue, never the owner's column.
+  if (reason === 'integration-wait') return 'review'
+  if (probe.heartbeat?.ready === true) return 'blocked'
   if (requeues >= maxRequeues) return 'blocked'
   return 'todo'
 }
@@ -1242,27 +1310,51 @@ export const classifyOutput = (
   return 'normal'
 }
 
-/** Has a worker blown the hard execution ceiling — a 暴走 to stop? Judged on its
- *  WORKING time: wall-clock since dispatch MINUS `heldMs`, the time it sat frozen
- *  on a rate-limit hold (see {@link rateLimitHoldCredit}). A quota wait is not
- *  work and must never spend the worker's budget — the 2026-07-12 loss (20m of
- *  limit + 84m of real work = 104m ⇒ reclaimed at the 90m ceiling, taking 15
- *  uncommitted files with it) is exactly what this subtraction closes.
+/** Has a worker blown the hard execution ceiling? Judged on its WORKING time:
+ *  wall-clock since dispatch MINUS `idleMs`, every span it was demonstrably NOT
+ *  working (see {@link executionCredit}). Two such spans exist, each learned the
+ *  hard way in the field:
+ *    • a RATE-LIMIT hold — frozen on a quota wall ({@link rateLimitHoldCredit}).
+ *      The 2026-07-12 loss: 20m of limit + 84m of real work = 104m ⇒ reclaimed at
+ *      the 90m ceiling, taking 15 uncommitted files with it.
+ *    • an INTEGRATION wait — READY, idle, pending the commander
+ *      ({@link integrationWaitCredit}). The 2026-07-18 loss: ready at 04:18, 差し
+ *      戻し at 04:46, judged "runaway 91m" one pass later and parked in 'blocked'
+ *      — 28 minutes of queue latency charged to the worker as work.
+ *  Neither is the worker's doing and neither may spend its budget.
  *
  *  True iff its dispatch time is known (finite, > 0) and `maxExecMs` of WORKING
  *  time has elapsed. The finite/positive guard is load-bearing: a worker with an
- *  unparseable / missing startedAt is NEVER judged runaway (no false kill on a
- *  clockless fixture). `heldMs` defaults to 0 — a worker that never waited on a
- *  limit is judged byte-for-byte as before — and a negative / non-finite credit
- *  is floored to 0 (a corrupt ledger can only ever make the check STRICTER, never
- *  grant infinite life). Pure (clock injected). */
+ *  unparseable / missing startedAt is NEVER judged over the ceiling (no false kill
+ *  on a clockless fixture). `idleMs` defaults to 0 — a worker that never waited is
+ *  judged byte-for-byte as before — and a negative / non-finite credit is floored
+ *  to 0 (a corrupt ledger can only ever make the check STRICTER, never grant
+ *  infinite life). Pure (clock injected).
+ *
+ *  NOTE this answers "over the ceiling", NOT "is a 暴走", and NOT "may be torn
+ *  down". Both of those belong to the caller, and BOTH were once described here
+ *  in terms this function cannot deliver (2026-07-20 — the comment claimed a ready
+ *  worker "is never labelled runaway", full stop, while the field produced exactly
+ *  that label):
+ *    • the LABEL is the caller's `readyAt` split — a worker the engine SAW deliver
+ *      is stopped as 'integration-wait' (card → review), one it did not is a 暴走
+ *      (card → blocked). `readyAt` is a poll observation, so a delivery made while
+ *      the engine was blind used to arrive unwitnessed and wear the 暴走 label; the
+ *      caller now also accepts the worker's own ready heartbeat — but ONLY on a
+ *      差し戻し (`reworkAt` set) — and RECORDS it, so a bare premature ready (no
+ *      commits, never 差し戻し'd) cannot fake a delivery and buy the exemption.
+ *    • the TEARDOWN is unconditional once over the ceiling — both labels stop the
+ *      worker and reclaim its worktree. Which is why the caller does not hand this
+ *      function `startedAt` after a 差し戻し: it passes the CURRENT assignment's
+ *      origin (`reworkAt`), so a re-work gets its own budget instead of being
+ *      stopped on the pass that ordered it. See monitorWorkers' ceiling check. */
 export const isRunaway = (
   startedAtMs: number,
   now: number,
   maxExecMs: number,
-  heldMs = 0,
+  idleMs = 0,
 ): boolean => {
-  const credit = Number.isFinite(heldMs) ? Math.max(0, heldMs) : 0
+  const credit = Number.isFinite(idleMs) ? Math.max(0, idleMs) : 0
   return Number.isFinite(startedAtMs) && startedAtMs > 0 && now - startedAtMs - credit >= maxExecMs
 }
 
@@ -1275,10 +1367,17 @@ export const isRunaway = (
  *  (a different move), cleared the moment a move lands, escalated + surfaced once
  *  `attempts` crosses {@link MOVE_STUCK_MAX_RETRIES}. In-memory only. */
 export interface StuckMove {
-  intent: 'review' | 'done' | 'recover'
+  intent: 'review' | 'done' | 'recover' | 'recover-review'
   attempts: number
   branch: string
   taskTitle: string
+  /** For `intent:'recover-review'` ONLY — WHICH ceiling shape the original stop
+   *  was, carried across the retry. The retry rebuilds the recovery from scratch
+   *  on a later pass, and without this it fell back to the default 「差し戻し後の
+   *  再作業」 verb: a 'capped-wait' or 'work' stop would log 「再作業 0m」 and then,
+   *  one line later, claim a re-work that never happened — the exact contradiction
+   *  02章 §5.6 forbids and this branch's own test pins. */
+  shape?: 'rework' | 'capped-wait' | 'work'
 }
 
 /** A live ProjectEngine. Exported so the dispatch-pass unit test can drive a
@@ -1394,9 +1493,45 @@ export interface ProjectEngine {
    *                     {@link MANAGER_RESUME_GRACE_MS} to boot + beat before re-judging.
    *    - `fatalFired` — the 'manager-unrevivable' escalation is one-shot per episode
    *                     (cleared when the desk recovers / no work waits).
+   *    - `nudges` / `lastNudgeAt` — the SEPARATE budget for poking a desk that is up but
+   *                     quiet (2026-07-18). Deliberately not merged with `attempts`: a
+   *                     live desk is not a failed resurrection, must never spawn a second
+   *                     desk, and must never reach 'manager-unrevivable' (完了条件2+3).
    *  Optional (absent ⇒ zero, lazy-init) for older-build / test-literal backfill. In-memory
    *  only — a restart relaunches the engine OFF anyway, so the reflex starts disarmed. */
-  managerResume?: { attempts: number; lastWakeAt: number; fatalFired: boolean }
+  managerResume?: {
+    attempts: number
+    lastWakeAt: number
+    fatalFired: boolean
+    nudges?: number
+    lastNudgeAt?: number
+    /** One-shot "it ignored every nudge" log per episode (cleared with the rest). */
+    unresponsiveLogged?: boolean
+    /** Has the desk we last SPAWNED ever been seen genuinely working ('active')?
+     *
+     *  Cleared on every spawn, set the first time presence reads 'active'. It is what
+     *  separates "a desk exists" from "our resurrection actually WORKED", and without it
+     *  the give-up guard cannot fire: 'idle' resets `attempts` (a live desk really does
+     *  falsify "unrevivable"), so a desk that boots and dies over and over — never doing
+     *  any work — would be resurrected forever with no escalation and no log line.
+     *  Absent ⇒ treated as PROVEN, so a desk we never spawned (the owner's own, started by
+     *  hand) can never be escalated about. */
+    provenSinceWake?: boolean
+    /** Did the LAST wake actually SPAWN a desk (wakeManager ⇒ true), or fail to for want
+     *  of a usable model tier (false — every allowed tier cooling/masked)? It is ONE of the
+     *  two signals that separate a TRANSIENT give-up (a quota wall that lifts on its own —
+     *  no desk was ever seated, so retrying costs ZERO tokens) from a PERMANENT one (a desk
+     *  that spawns and dies on arrival — a boot-crash bug; retrying just burns a desk each
+     *  time, which is exactly what the give-up guard exists to stop). Re-armed after the
+     *  backoff (完了条件2) when this reads `false` OR the give-up check finds every allowed
+     *  tier currently unusable (`spawnBlock` — 2026-07-22: this bit alone missed the case
+     *  where the LAST wake's probe passed and a desk WAS seated, but it then died on arrival
+     *  for the same quota reason a `false` here would have shown). Absent ⇒ treated as
+     *  spawned (permanent), the conservative default. Reset with the rest of this object on
+     *  a full disarm (swarmCards.length === 0) — a stale `true`/`false` must never judge a
+     *  NEW episode's first give-up on a PREVIOUS episode's outcome. */
+    lastWakeSpawned?: boolean
+  }
   /** How many times each card (taskId) has been RE-QUEUED after a lost worker —
    *  the {@link recoveryColumn} retry budget. Bumped on a 'todo' requeue, reset
    *  when the card is parked in 'blocked' (so a human requeue starts fresh) or
@@ -1476,6 +1611,20 @@ export interface ProjectEngine {
    *  worker leaves the live set. Optional (older-build backfill). In-memory
    *  only. */
   rateLimitHeldMs?: Map<string, number>
+  /** Per-worker (keyed by terminalId) INTEGRATION-WAIT stamp: the epoch ms this
+   *  worker was promoted to 'review' and started WAITING for the commander to
+   *  integrate it. Set by {@link beginIntegrationWait} on every promote, banked +
+   *  cleared by {@link endIntegrationWait} when a 差し戻し sends the card back to
+   *  'doing'. A ready worker is IDLE, not working — see {@link integrationWaitMs}.
+   *  Optional (older-build backfill). In-memory only. */
+  integrationWaitSince?: Map<string, number>
+  /** Per-worker (keyed by terminalId) BANKED integration wait, in ms: the total
+   *  time this worker sat READY, waiting for the commander to integrate it.
+   *  Credited back to its execution clock so 統合待ち never spends the MAX_EXEC_MS
+   *  budget (the 2026-07-18 loss — see {@link integrationWaitCredit}). Added to on
+   *  every 差し戻し ({@link endIntegrationWait}), dropped when the worker leaves
+   *  the live set. Optional (older-build backfill). In-memory only. */
+  integrationWaitMs?: Map<string, number>
   /** Per-worker (keyed by terminalId) LIMIT-SCREEN clock (quota-detection fast
    *  path): the epoch ms a rate-limit notice was FIRST sighted holding this
    *  worker's screen. Unlike `rateLimited.since` (stamped only once the worker
@@ -1619,6 +1768,8 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       nudges: new Map(),
       rateLimited: new Map(),
       rateLimitHeldMs: new Map(),
+      integrationWaitSince: new Map(),
+      integrationWaitMs: new Map(),
       permissionWaits: new Map(),
       questionRaised: new Map(),
       questionWaits: new Map(),
@@ -1657,6 +1808,8 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.nudges ??= new Map()
     engine.rateLimited ??= new Map()
     engine.rateLimitHeldMs ??= new Map()
+    engine.integrationWaitSince ??= new Map()
+    engine.integrationWaitMs ??= new Map()
     engine.limitScreen ??= new Map()
     engine.integrateInFlight ??= false
     engine.permissionWaits ??= new Map()
@@ -1863,10 +2016,33 @@ const recordKeptMove = (
   intent: StuckMove['intent'],
   branch: string,
   taskTitle: string,
+  /** For 'recover-review': the ceiling shape to restore on the retry (see
+   *  StuckMove.shape). Omitted for every other intent. */
+  shape?: StuckMove['shape'],
 ): number => {
   const prev = engine.stuckMoves.get(taskId)
+  // The counter is PER INTENT: a different intent restarts it at 1, because the
+  // retry budget it feeds (MOVE_STUCK_MAX_RETRIES → the 'move-stuck' anomaly)
+  // asks "how many times has THIS move failed", and two intents are two moves.
+  //
+  // CAUTION (2026-07-19 review): that also means an ALTERNATING intent sequence
+  // for one card would reset the count forever and the anomaly would never fire.
+  // No reachable alternation is known — a card's intent is a function of the
+  // worker's state, which does not oscillate within a stuck-move run — and for
+  // 'recover-review' the anomaly is the ONLY escape hatch (it is deliberately
+  // excluded from the blocked escalation), so it must not be starved. If a new
+  // intent is ever added, check it cannot interleave with an existing one.
   const attempts = (prev && prev.intent === intent ? prev.attempts : 0) + 1
-  engine.stuckMoves.set(taskId, { intent, attempts, branch, taskTitle })
+  // Keep a previously recorded shape when this call does not carry one, so a
+  // re-record mid-retry cannot silently downgrade the verb back to the default.
+  const keptShape = shape ?? (prev?.intent === intent ? prev.shape : undefined)
+  engine.stuckMoves.set(taskId, {
+    intent,
+    attempts,
+    branch,
+    taskTitle,
+    ...(keptShape ? { shape: keptShape } : {}),
+  })
   return attempts
 }
 
@@ -1918,6 +2094,110 @@ const rateLimitHoldCredit = (engine: ProjectEngine, terminalId: string, now: num
   const live = from !== null && Number.isFinite(from) ? Math.max(0, now - from) : 0
   const total = (Number.isFinite(banked) ? Math.max(0, banked) : 0) + live
   return Math.min(total, HOLD_CREDIT_CAP_MS)
+}
+
+// ── Integration-wait ledger (the execution clock's OTHER credit side) ─────────
+// THE 2026-07-18 LOSS: a worker reached ready at 04:18, its card sat in 'review'
+// waiting for the commander, and at 04:46 the commander 差し戻し'd it (review→
+// doing). The very next pass judged it "runaway — worked 91m ≥ 90m execution
+// limit" and tore its worktree down, parking the card in 'blocked' — because the
+// clock still measured raw wall-clock since dispatch, so the 28 minutes it spent
+// IDLE waiting for integration were charged to it as work. The commander then
+// misread the block as a 差し戻し-limit park and burned time diagnosing it.
+//
+// 統合待ち is not the worker's doing, exactly like a rate-limit hold is not: the
+// worker is FINISHED and blocked on the commander's queue. So the engine banks
+// every wait and subtracts it, the same shape as the rate-limit ledger above.
+//
+// WHAT IS ACTUALLY MEASURED: the span between two COLUMN transitions the engine
+// itself owns — the promote that moves the card doing→review, and the 差し戻し
+// that moves it back. That is "time the card was not in 'doing'", which is the
+// engine's own definition of not-being-worked-on; it is NOT a liveness probe. A
+// PTY the owner keeps typing into while its card sits in review is credited too,
+// and so is a card parked elsewhere before coming back. That is acceptable
+// precisely because the engine does not monitor a card outside 'doing' at all —
+// such time was never on the execution clock to begin with (a review card
+// early-continues out of the monitor), so carrying it forward changes nothing.
+//
+// BOTH credits are capped, for DIFFERENT reasons (this one gained its cap on
+// 2026-07-19 — see WAIT_CREDIT_CAP_MS). A rate-limit hold is INFERRED from a
+// screen scrape, so a sticky misread could over-credit time the worker really was
+// working ON THE CARD — hence HOLD_CREDIT_CAP_MS. This credit cannot make that
+// mistake (it only ever covers time the card was outside 'doing'), but it has its
+// own: while a card sits in 'review' the monitor early-continues, so the worker is
+// unwatched, and the engine cannot tell an idle waiter from a PTY still burning
+// tokens in an /order loop. Uncapped, the burning one bought unlimited runway.
+//
+// An earlier version of this comment argued the opposite — that capping would
+// re-open the 2026-07-18 bug, because "a card left in review overnight and then
+// reworked would come back already past the ceiling". That reasoning died with
+// the reason split: the 暴走 label and the 'blocked' park are now decided by
+// `readyAt`, not by the credit, so hitting the ceiling after a long review stops
+// the worker as 'integration-wait' and sends its card to 'review' with its work
+// intact. Bounded and honest, rather than unbounded.
+
+/** BEGIN a worker's integration wait — called when its card is promoted to
+ *  'review' and it goes idle pending the commander. Idempotent: a worker already
+ *  waiting keeps its ORIGINAL stamp, so a repeated promote observation can't
+ *  restart (and thereby shorten) the wait. */
+const beginIntegrationWait = (engine: ProjectEngine, terminalId: string, now: number): void => {
+  engine.integrationWaitSince ??= new Map() // lazy backfill (older-build engine / test literal)
+  if (!engine.integrationWaitSince.has(terminalId)) engine.integrationWaitSince.set(terminalId, now)
+}
+
+/** END a worker's integration wait, BANKING its span into the execution-time
+ *  credit ledger. THE single seam that clears `engine.integrationWaitSince` —
+ *  clearing the map directly would silently drop the credit and re-open the
+ *  2026-07-18 hole, so route every release through here.
+ *
+ *  Called when a 差し戻し puts the worker back to work, and defensively before the
+ *  execution-ceiling check (an unobserved transition must never leave a stale
+ *  stamp growing). Idempotent: a worker not waiting banks nothing. A clock that
+ *  runs backwards (a fixture, an NTP step) banks 0, never a negative credit. */
+const endIntegrationWait = (engine: ProjectEngine, terminalId: string, now: number): void => {
+  const since = engine.integrationWaitSince?.get(terminalId)
+  engine.integrationWaitSince?.delete(terminalId)
+  if (since === undefined) return
+  const waited = Number.isFinite(since) ? Math.max(0, now - since) : 0
+  if (waited <= 0) return
+  engine.integrationWaitMs ??= new Map() // lazy backfill (older-build engine / test literal)
+  engine.integrationWaitMs.set(terminalId, (engine.integrationWaitMs.get(terminalId) ?? 0) + waited)
+}
+
+/** How much 統合待ち to CREDIT BACK to this worker's execution clock: everything
+ *  banked by {@link endIntegrationWait}, capped at {@link WAIT_CREDIT_CAP_MS}. A
+ *  corrupt ledger is floored to 0 — it can only ever make the check STRICTER,
+ *  never grant infinite life — and the cap does the same at the top end, so a
+ *  worker burning tokens under a review card cannot buy unlimited runway.
+ *
+ *  Reads the BANK ONLY, deliberately. An in-flight wait is not summed here because
+ *  it cannot exist at the one place this is read: the ceiling check ends the wait
+ *  (idempotently) on the line before, so any still-open stamp is already banked by
+ *  the time we look. Summing it too would have been dead arithmetic implying a
+ *  second, unexercised path. Callers must keep that order — end, then credit. */
+const integrationWaitCredit = (engine: ProjectEngine, terminalId: string): number => {
+  const banked = engine.integrationWaitMs?.get(terminalId) ?? 0
+  if (!Number.isFinite(banked)) return 0
+  return Math.min(Math.max(0, banked), WAIT_CREDIT_CAP_MS)
+}
+
+/** The FULL non-working credit for one worker's execution clock: rate-limit holds
+ *  plus 統合待ち. Both are time the worker was NOT working on this card, and the
+ *  execution ceiling judges WORKING time only ({@link isRunaway}). Returns the
+ *  parts too — the log line names each one so an owner reading "stopped at the
+ *  ceiling" can see exactly what was forgiven.
+ *
+ *  ORDERING CONTRACT: call {@link endIntegrationWait} first (see the ceiling check
+ *  in monitorWorkers). {@link integrationWaitCredit} reads the bank only, so an
+ *  un-ended wait would be silently omitted rather than credited. */
+const executionCredit = (
+  engine: ProjectEngine,
+  terminalId: string,
+  now: number,
+): { heldMs: number; waitedMs: number; creditMs: number } => {
+  const heldMs = rateLimitHoldCredit(engine, terminalId, now)
+  const waitedMs = integrationWaitCredit(engine, terminalId)
+  return { heldMs, waitedMs, creditMs: heldMs + waitedMs }
 }
 
 const emptyState = (): SwarmOrchestratorState => ({
@@ -2075,6 +2355,16 @@ export interface OrchestratorDeps {
    *  fake-deps tests keep compiling/behaving. Default (defaultDeps):
    *  openEscalation. */
   raiseQuestion?: (input: OpenEscalationInput) => Promise<unknown>
+  /** Meter a just-promoted (done-judged) worker's claude session and render the
+   *  one-line consumption summary for the journal (手数/束ね率/文脈max/出力 —
+   *  swarmTokenAudit.formatConsumptionLine), or null when the session JSONL
+   *  can't be located/read. FAIL-SAFE by contract: implementations never throw
+   *  and the promote site swallows anyway, so a missing/corrupt JSONL (or an
+   *  environment that doesn't write one) silently skips the line — it must
+   *  never disturb the promote, spawn, or monitoring. OPTIONAL: absent ⇒ no
+   *  consumption line (existing fake-deps tests unchanged). Default
+   *  (defaultDeps): the real JSONL reader via the PTY's agentSessionId. */
+  readConsumption?: (opts: { worktree: string; terminalId: string }) => Promise<string | null>
   /** Preflight `claude` before an AUTO-START engages the engine — `{ok:false}` when the
    *  CLI is missing / logged out. {@link maybeAutoStartDrain} consults it so it never flips
    *  `running` true into a spawn it knows will fail (which would make the chain — and the
@@ -2240,16 +2530,22 @@ export interface IntegrationDeps {
   //    commander when a worker is ready instead of merging itself, and RE-wakes it if
   //    it dies/hangs (card B). These seams replace the verify→lens→FF-push→land
   //    machinery on the armed path (完了条件1+2+3) and add the resuscitation reflex. ──
-  /** Is the project's commander (manager) desk up AND RESPONDING? — the guard that stops
-   *  the engine spawning a SECOND commander PTY when a healthy one is present (二重起動
-   *  防止, 完了条件2) AND the trigger that resuscitates a stopped one (完了条件2+3).
-   *  Folds TWO signals (2026-07-15 card B): a LIVE PTY on the persisted manager session
-   *  (catches a dead process) AND a FRESH manager heartbeat (catches a HUNG one — PTY
-   *  alive but silent past {@link MANAGER_HEARTBEAT_STALE_MS}). `now` is the pass clock
-   *  (injected for deterministic staleness). MUST NOT throw — an unreadable session store
-   *  ⇒ false (absent), so the safe default is to resuscitate rather than stall integration.
-   *  Default: {@link defaultIsManagerActive}. */
-  isManagerActive: (projectPath: string, now: number) => Promise<boolean>
+  /** What is the state of the project's commander (manager) desk — `'absent'` (no live
+   *  PTY: spawn one), `'idle'` (a desk is up but quiet: nudge it, NEVER spawn a second)
+   *  or `'active'` (up and demonstrably working: leave it alone)? This is the guard that
+   *  stops the engine spawning a SECOND commander PTY (二重起動防止, 完了条件2), the
+   *  trigger that resuscitates a stopped one, and — since 2026-07-18 — the seam that keeps
+   *  a LIVE-but-quiet desk out of the resurrection path entirely (完了条件1).
+   *  `now` is the pass clock (injected for deterministic staleness). `echoUntil` is the
+   *  instant up to which PTY paint must be treated as the ECHO of our own nudge rather
+   *  than life (0 = nothing to discount); see {@link defaultManagerPresence}.
+   *  MUST NOT throw — an unreadable session store ⇒ 'absent', so the safe default is to
+   *  raise a desk rather than stall integration. Default: {@link defaultManagerPresence}. */
+  managerPresence: (projectPath: string, now: number, echoUntil?: number) => Promise<ManagerPresence>
+  /** Poke the LIVE commander desk about waiting work — the `'idle'` response, and the
+   *  reason that state never spawns anything (完了条件2+5). Best-effort: false when the
+   *  PTY is gone. MUST NOT throw. Default: {@link defaultNudgeManager}. */
+  nudgeManager: (projectPath: string) => Promise<boolean>
   /** WAKE / RESUSCITATE the commander so it can decide the integration: spawn/resume the
    *  manager PTY (spawnSwarmManager — resumes the days-long integration conversation, or
    *  opens fresh; on a quota wall it DROPS the model one tier via resolveSwarmModelEffort
@@ -2338,6 +2634,23 @@ const defaultMoveToReview = (projectPath: string, taskId: string, branch: string
  *  live desk is expected to be auto-integrating, never idle-waiting for a human. */
 export const MANAGER_HEARTBEAT_STALE_MS = 10 * 60_000
 
+/** What the engine can observe about the commander's desk — see
+ *  {@link defaultManagerPresence} for why "is it there?" and "is it working?" must be
+ *  separate answers (they carry DIFFERENT engine responses: spawn vs nudge vs nothing). */
+export type ManagerPresence = 'absent' | 'idle' | 'active'
+
+/** Minimum gap between nudges to a LIVE but quiet desk. Matched to the silence window
+ *  so a nudged desk gets a full window to answer before it is poked again — and so an
+ *  owner deliberately ignoring the swarm is not spammed. */
+export const MANAGER_NUDGE_INTERVAL_MS = MANAGER_HEARTBEAT_STALE_MS
+
+/** How many times a live desk is nudged about the same waiting batch before the engine
+ *  gives up and stays quiet. A desk that is up but unresponsive to nudges is a HUMAN
+ *  matter (the owner may simply be away from it); poking it forever helps no one — and
+ *  unlike an absent desk, it is NOT a `manager-unrevivable` case (完了条件3): the desk
+ *  exists, so "the commander cannot be started" would be a lie. */
+export const MAX_MANAGER_NUDGES = 3
+
 /** After the engine wakes/resuscitates a desk, wait this long before judging it again —
  *  a freshly-`claude --resume`d commander needs to boot AND emit its first beat, and the
  *  PREVIOUS (stale) heartbeat file still reads dead until it does. Without this grace the
@@ -2351,6 +2664,27 @@ export const MANAGER_RESUME_GRACE_MS = 5 * 60_000
  *  notification instead. In-memory counter (engine.managerResume) — resets on restart,
  *  like all engine cognition. */
 export const MAX_MANAGER_RESUME_ATTEMPTS = 3
+
+/** After the give-up guard has fired ('manager-unrevivable'), wait this long since the
+ *  last wake attempt before RE-ARMING one more resuscitation cycle (完了条件2, 2026-07-20).
+ *
+ *  WHY THIS EXISTS. The give-up guard (完了条件5) exists to stop a TIGHT detect→spawn→die
+ *  loop from burning tokens forever — but "stop the tight loop" was implemented as "stop
+ *  FOREVER": once `attempts` reached the max and `fatalFired` latched, the absent branch
+ *  returned every tick and NOTHING re-woke the commander. The reset conditions
+ *  (`presence` seen active/idle, or work drains) never fire when the desk is GENUINELY
+ *  absent and work keeps waiting — so a TRANSIENT cause (every allowed tier momentarily
+ *  cooling; the account-wide wall that lifts on its own; a machine that comes back) left
+ *  integration stalled permanently after one toast the owner might have missed
+ *  (observed shape 2026-07-20: 11 desks, then a wedged give-up state).
+ *
+ *  So the guard now stops the LOOP without stopping RECOVERY: after this backoff it lets
+ *  ONE more resuscitation through. The fatal NOTIFICATION stays one-shot (`fatalFired`
+ *  is NOT reset here) so the owner is alerted once per episode, not every cycle — only a
+ *  desk that actually comes up clears it. Burn is bounded to one wake per this interval,
+ *  and a wake with no usable tier (woke=false) spawns nothing at all. Deliberately much
+ *  longer than {@link MANAGER_RESUME_GRACE_MS}: the point is a slow retry, not a loop. */
+export const MANAGER_UNREVIVABLE_RETRY_MS = 30 * 60_000
 
 /** The commander's own heartbeat file — a FIXED `manager.json` in the SAME per-repo dir
  *  the workers beat into (`~/.openground/swarm/<repoKey>/`, 完了条件1: 心拍の在処). Keyed
@@ -2412,19 +2746,222 @@ export const readManagerHeartbeatAt = async (projectPath: string): Promise<numbe
 export const isManagerHeartbeatFresh = (at: number | null, now: number): boolean =>
   at == null || now - at < MANAGER_HEARTBEAT_STALE_MS
 
-/** "Is the commander desk up AND responding?" ({@link IntegrationDeps.isManagerActive}).
- *  Two signals ANDed (完了条件2 — detect process death AND hang):
- *    1. a LIVE PTY on the persisted manager session (swarmSessions + isClaudeSessionLive)
- *       — catches a DEAD process (PTY gone), and
- *    2. a FRESH manager heartbeat — catches a HUNG one (PTY alive but silent past the
- *       stale window). Fail-open on a never-written beat (see isManagerHeartbeatFresh).
- *  NEVER throws: an unreadable session store (unregistered path, torn home) ⇒ false, so
- *  the engine resuscitates a fresh desk rather than silently stall integration. */
-const defaultIsManagerActive = async (projectPath: string, now: number): Promise<boolean> => {
+/** DISPLAY snapshot of the commander heartbeat — the full record (phase / note /
+ *  updatedAt) plus a server-clock freshness read, for GET /api/swarm/orchestrator's
+ *  `manager` field (the Swarm tab's "検品中/待機中" presence line — the post-worker
+ *  quiet minutes explained). READ-ONLY and SEPARATE from the resurrection reflex:
+ *  {@link readManagerHeartbeatAt} + {@link isManagerHeartbeatFresh} (whose null =
+ *  fresh fail-open serves reviving, not rendering) are untouched — here an absent /
+ *  unreadable / malformed file is simply `null` ("nothing to show", the UI degrades
+ *  to its standby wording). Never throws. `now` injected for deterministic tests. */
+export const readManagerHeartbeatInfo = async (
+  projectPath: string,
+  now: number = Date.now(),
+): Promise<SwarmManagerHeartbeat | null> => {
+  const file = await managerHeartbeatFile(projectPath)
+  if (!file) return null
+  try {
+    const j = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+    if (typeof j.updatedAt !== 'string') return null
+    const at = Date.parse(j.updatedAt)
+    if (!Number.isFinite(at)) return null
+    const ageMs = Math.max(0, now - at) // clamp — a skewed future stamp reads as "just now"
+    return {
+      updatedAt: j.updatedAt,
+      ageMs,
+      fresh: ageMs < MANAGER_HEARTBEAT_STALE_MS,
+      ...(typeof j.phase === 'string' && j.phase ? { phase: j.phase } : {}),
+      ...(typeof j.note === 'string' && j.note ? { note: j.note } : {}),
+    }
+  } catch {
+    return null // unreadable / torn / hand-corrupted — nothing to show (fail-safe)
+  }
+}
+
+/** Newest mtime of the commander session's own claude transcript, or null when there
+ *  is none / it can't be stat'd. The THIRD activity channel: claude appends an event
+ *  to `~/.claude/projects/<cwd>/<id>.jsonl` for every turn, so a growing transcript
+ *  proves the conversation is progressing even across a moment when the TUI happens
+ *  not to be repainting. Never throws (a torn ~/.claude just contributes no signal). */
+const managerTranscriptAt = async (cwd: string, sessionId: string): Promise<number | null> => {
+  try {
+    const st = await stat(sessionJsonlPath(cwd, sessionId))
+    return st.isFile() ? st.mtimeMs : null
+  } catch {
+    return null
+  }
+}
+
+/** What the engine believes about the commander's desk ({@link IntegrationDeps.managerPresence}).
+ *
+ *  THREE states, because "present" and "engaged" are different questions and the
+ *  engine's response to each must differ (the 2026-07-18 incident is exactly what
+ *  conflating them costs):
+ *    - `'absent'` — no live PTY holds the persisted manager session. There is NO desk.
+ *      The only state that may SPAWN one, and therefore the only state that can count
+ *      toward `manager-unrevivable` (完了条件3).
+ *    - `'idle'`  — a desk IS up, but nothing says it is engaging with the waiting work
+ *      (no fresh beat, no recent paint, no transcript growth). NEVER spawn a second
+ *      desk here — nudge the one that exists (完了条件2+5).
+ *    - `'active'` — a desk is up AND there is positive evidence of life. Leave it alone.
+ *
+ *  WHY the extra channels (完了条件1). The old probe ANDed a live PTY with heartbeat
+ *  freshness, and that AND is a trap: `manager.json` is written only while the
+ *  commander does heavy INTEGRATION work (the /og-manage protocol beats per phase), so
+ *  a desk that is merely talking with the owner — or one that just booted and ran
+ *  「状況」 — falls silent past the 10-minute window while being perfectly healthy. The
+ *  fail-open for a NEVER-written beat did not save it: once any beat has landed the
+ *  file exists forever, so every repo that has ever integrated once is permanently
+ *  exposed. Observed 2026-07-18 05:44–05:59: three resurrections of a LIVE, working
+ *  commander, then a false `manager-unrevivable` fatal, plus a pile of orphaned desks.
+ *  So liveness now folds in evidence the PTY itself produces — `lastOutputAt` (claude
+ *  repaints while it works and echoes keystrokes) and the session transcript's mtime —
+ *  and the heartbeat becomes ONE of three positive signals rather than a veto.
+ *
+ *  NEVER throws: an unreadable session store (unregistered path, torn home) ⇒ 'absent',
+ *  so the engine raises a desk rather than silently stalling integration. */
+export const defaultManagerPresence = async (
+  projectPath: string,
+  now: number,
+  // The PTY probe is injected (house style, cf. resolveSwarmSession's `isLive`) so the
+  // file-driven half — real sessions store, real manager.json, real transcript — is
+  // testable end-to-end without spawning a claude.
+  //
+  // `echoUntil` (0 = nothing to discount) disqualifies PTY paint at or before that instant
+  // as evidence of life, because it is OUR OWN nudge coming back: writing a line into the
+  // desk makes claude's TUI repaint, which stamps `lastOutputAt` whether or not anything
+  // processed the prompt. Without it the poke is self-refuting — nudge → echo → 'active' →
+  // budget reset → nudge again, forever, and the "3 pokes then say so once" contract
+  // (03章 §7-10) can never fire (measured: 10+ pokes where 3 is promised). This is the
+  // SAME trap the worker stall path already guards with {@link STALL_ECHO_GUARD_MS}
+  // ("output within echoGuardMs after our nudge is the TUI repaint, not life") — the
+  // manager path simply had not inherited it. Only the PTY channel is discounted: a
+  // heartbeat and a transcript append are never produced by an echo, so a desk that
+  // genuinely answers the nudge still reads 'active' and still refunds its budget.
+  deps: {
+    activity?: (agentSessionId: string) => ClaudeSessionActivity
+    echoUntil?: number
+    /** The POOL's live-commander-desk lookup (injected for tests) — the fallback
+     *  authority when the session store does not name a desk that exists. */
+    liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
+  } = {},
+): Promise<ManagerPresence> => {
   try {
     const rec = (await readSwarmSessions(projectPath)).manager
-    if (!rec || !isClaudeSessionLive(rec.sessionId)) return false // dead / absent PTY
-    return isManagerHeartbeatFresh(await readManagerHeartbeatAt(projectPath), now) // hung?
+    const pty = rec
+      ? (deps.activity ?? claudeSessionActivity)(rec.sessionId)
+      : { live: false, lastOutputAt: null, terminalId: null }
+    // The record's desk is gone (or there is no record). BEFORE concluding there is
+    // no desk, ASK THE POOL (2026-07-19: eleven desks, none of them dead).
+    //
+    // 'absent' drives the only spawn, so reading it wrongly is what builds a twin —
+    // and this probe used to read it from ONE slot in a store that every spawn
+    // overwrites and whose write failure is swallowed (swarmManager). A desk whose
+    // id has been overwritten keeps running while presence, asking only about the id
+    // on file, calls it absent forever: engine spawns a replacement, that one's id
+    // takes the slot, and the previous desk joins the pile. The desks were never
+    // dead — they were UNNAMED. This is the hole 03 §2.3 recorded on 2026-07-19
+    // (「登録されていない卓は presence から見えない」), closed here at its source.
+    //
+    // The pool cannot desynchronise from itself, so a labelled commander desk found
+    // there is proof a desk EXISTS — which is exactly and only what 'absent' claims
+    // the absence of. Reconciling the store is spawnSwarmManager's job (it holds the
+    // write path); presence stays a pure read and simply stops lying.
+    const orphan = pty.live
+      ? null
+      : ((deps.liveDesks ?? listLiveDesksIn)(projectPath, MANAGER_DESK_LABEL)[0] ?? null)
+    if (!pty.live && !orphan) return 'absent' // no desk anywhere — the ONLY spawn trigger
+    // A desk EXISTS. Is anything moving? Any ONE positive signal is enough — these are
+    // alternative evidence of the same fact, never requirements to be ANDed (the AND is
+    // precisely what broke). The heartbeat keeps its own documented rule, including the
+    // never-beat fail-open: a live desk that has never beat is a hand-started desk.
+    // A beat that EXISTS and is fresh is positive evidence. A beat that has NEVER been
+    // written is not: `isManagerHeartbeatFresh` calls null "fresh" so the old single-bit
+    // probe would not tear down a hand-started desk, but that fail-open predates the three
+    // states. Honouring it here would short-circuit every live desk on a repo that has
+    // never integrated straight to 'active' — the PTY and transcript channels would never
+    // be consulted and such a desk could never be nudged at all. It is safe to drop
+    // precisely because 'idle' no longer tears anything down: the worst case is now a poke.
+    const beatAt = await readManagerHeartbeatAt(projectPath)
+    if (beatAt !== null && isManagerHeartbeatFresh(beatAt, now)) return 'active'
+    // The beat exists and went stale — which on its own means nothing (the commander only
+    // beats while integrating). Ask the PTY itself before concluding anything.
+    // NOTE (test hygiene): this reaches Claude Code's own transcript tree, which
+    // `transcript.ts` resolves from `homedir()` — NOT from OPENGROUND_HOME. The suite's
+    // `src/test/setup-home.ts` isolates OPENGROUND_HOME only and passes HOME through, so
+    // this stat really does hit the developer's live ~/.claude/projects/ during tests. It
+    // is a read-only stat against a fixture-fixed session uuid that no real session will
+    // ever own, so it neither flakes nor writes anything today — but it is the reason the
+    // presence tests should be run with HOME pointed at a throwaway dir. (Isolating HOME
+    // inside setup-home.ts would close this properly and probably also stop the separately
+    // observed real-~/.claude/settings.json pollution, but it re-anchors ~17 homedir()
+    // call sites suite-wide — its own change, not this one's.)
+    //
+    // Read the ORPHAN's own channels when it is the desk we found: its session id and
+    // this project's path are what name its transcript, and its own PTY paint is the
+    // only paint that says anything about IT. Falling back to the stale record's here
+    // would judge the desk that exists by the activity of one that does not.
+    const deskCwd = orphan ? projectPath : rec!.cwd
+    const deskSessionId = orphan ? (orphan.agentSessionId ?? '') : rec!.sessionId
+    const fileAt = deskSessionId ? await managerTranscriptAt(deskCwd, deskSessionId) : null
+    // Paint that is only our own nudge bouncing back is not life (see `echoUntil` above).
+    // The transcript is left untouched by that discount — claude appends a real turn there
+    // only when it actually processes something, so it is the honest half of the OR.
+    const echoUntil = deps.echoUntil ?? 0
+    const painted = (orphan ? orphan.lastOutputAt : pty.lastOutputAt) ?? 0
+    const realPaint = echoUntil > 0 && painted <= echoUntil ? 0 : painted
+    const newest = Math.max(realPaint, fileAt ?? 0)
+    return newest > 0 && now - newest < MANAGER_HEARTBEAT_STALE_MS ? 'active' : 'idle'
+  } catch {
+    return 'absent'
+  }
+}
+
+/** Poke the LIVE commander desk so it picks up waiting review work — the response to
+ *  `'idle'`, and the reason that state never spawns anything (完了条件2+5).
+ *
+ *  ESC + one short instruction line + CR over the raw PTY write path — the FULL
+ *  {@link defaultEscalate} sequence, not just its tail. The payload is a CONSTANT — no
+ *  card-derived text reaches the PTY here, so there is no control-byte injection surface
+ *  to strip.
+ *
+ *  WHY THE LEADING ESC (and why "the PTY echoes keystrokes" is not enough on its own).
+ *  The obvious safety argument — a desk someone is actively typing into paints, so it
+ *  reads 'active' and is never nudged — only covers the owner typing RIGHT NOW. It does
+ *  not cover a prompt typed and then LEFT SITTING: that paint ages out after
+ *  {@link MANAGER_HEARTBEAT_STALE_MS}, the desk reads 'idle', and a bare line+CR would
+ *  append to the half-written text and SUBMIT the two concatenated — on a desk running
+ *  with `--dangerously-skip-permissions` (swarmManager.ts), i.e. with no approval gate to
+ *  catch the malformed result. Our own ESC clears that pending input (and interrupts a
+ *  generation in flight) before we type, exactly as the worker escalation does; the
+ *  {@link STALL_ESCALATE_DELAY_MS} pause lets it settle. `sleep` is DI'd (default: real
+ *  timer) so a unit test need not wait.
+ *
+ *  Best-effort: false when the session/PTY is gone (nothing to poke), or when either
+ *  write misses — same both-writes-landed rule as defaultEscalate. */
+export const defaultNudgeManager = async (
+  projectPath: string,
+  // `activity` is injected on the same seam defaultManagerPresence uses, so the
+  // file-driven half is testable without a real PTY pool.
+  deps?: {
+    write?: typeof writeInput
+    sleep?: (ms: number) => Promise<void>
+    activity?: (agentSessionId: string) => ClaudeSessionActivity
+  },
+): Promise<boolean> => {
+  const write = deps?.write ?? writeInput
+  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  try {
+    const rec = (await readSwarmSessions(projectPath)).manager
+    if (!rec) return false
+    const { terminalId } = (deps?.activity ?? claudeSessionActivity)(rec.sessionId)
+    if (!terminalId) return false
+    if (!write(terminalId, '\x1b')) return false
+    await sleep(STALL_ESCALATE_DELAY_MS)
+    return write(
+      terminalId,
+      '統合待ちのカードがあります。「状況」を実行して review 列を確認し、統合の判断をしてください。\r',
+    )
   } catch {
     return false
   }
@@ -2457,7 +2994,7 @@ const defaultWakeManager = async (
     projectPath,
     branch: cards[0]?.branch,
     taskTitle: cards[0]?.title || undefined,
-    detail: `review に ${n} 件の統合待ち — 司令官を起こしました。統合を判断してください (${list})`,
+    detail: `review に ${n} 件の統合待ち — マネージャーを起こしました。統合を判断してください (${list})`,
   }).catch(() => {})
   return true
 }
@@ -2958,12 +3495,17 @@ export const tscCheck: VerifyCheck = {
       }
     }
     try {
-      await execFile(tscBin, ['--noEmit'], {
-        cwd: worktreeDir,
-        timeout: 180_000,
-        maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env },
-      })
+      // withGateEnv: tsc reads the WORKTREE's tsconfig, which can `extends` an
+      // arbitrary module from the branch — so this is untrusted code too, and it
+      // gets a throwaway OPENGROUND_HOME like every other gate spawn (gateProcess.ts).
+      await withGateEnv((env) =>
+        execFile(tscBin, ['--noEmit'], {
+          cwd: worktreeDir,
+          timeout: 180_000,
+          maxBuffer: 16 * 1024 * 1024,
+          env,
+        }),
+      )
       return { ok: true, output: '' }
     } catch (e: unknown) {
       const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
@@ -2994,13 +3536,22 @@ export const tscCheck: VerifyCheck = {
  *  safety net (server/routes/__tests__/swarmSafety.routes.test.ts) is ALSO a trigger:
  *  the unit net (swarmSafety.test.ts) is already caught by the swarm*.ts glob, but the
  *  route net lives outside it — without this, a branch deleting/weakening JUST that
- *  file would never trip the gate. */
+ *  file would never trip the gate. The same reasoning adds the gate-env family
+ *  (2026-07-19): `gateProcess.ts` holds the untrusted-child env policy but is not
+ *  named `swarm*`, and its tests live in two more places outside every glob above —
+ *  so without these entries a branch that gutted the policy, or deleted the tests
+ *  that pin it, would touch NO swarm path and the safety gate would never fire.
+ *  Membership in {@link SWARM_SAFETY_TESTS} only makes deletion RED once the gate
+ *  actually runs; that gate has to be triggered first. */
 const SWARM_CODE_PATHS: readonly RegExp[] = [
   /^src\/lib\/server\/swarm[^/]*\.ts$/,
   /^server\/routes\/swarm\.ts$/,
   /^server\/routes\/project\.ts$/,
   /^server\/routes\/__tests__\/swarmSafety[^/]*$/,
   /^src\/components\/canvas\/modules\/Swarm[^/]*$/,
+  /^src\/lib\/server\/gate(Process|Env)[^/]*$/,
+  /^server\/__tests__\/gateEnvParity\.test\.ts$/,
+  /^electron\/gateEnv\.js$/,
 ]
 
 /** Does this changed-file set (repo-relative paths) touch any swarm code? Pure — the
@@ -3108,11 +3659,22 @@ const defaultChangedPaths = async (
   }
 }
 
-/** The swarm safety regression suite (the A1 net, card 8d778645). Running these two
- *  files green proves the swarm's self-protection invariants (A–D) still hold. */
+/** The swarm safety regression suite (the A1 net, card 8d778645). Running these
+ *  files green proves the swarm's self-protection invariants (A–D) still hold.
+ *  Membership here buys a file the EXISTENCE tamper guard in {@link swarmSafetyCheck}
+ *  (deleting it is RED, not a vacuous pass) — so a test only belongs in this list if
+ *  its DELETION would silently re-open a hole. gateEnv.test.ts qualifies: it is the
+ *  only pin on the untrusted-child env handoff, and its source-text wiring check is
+ *  what catches a spawn site reverting to a raw `{ ...process.env }` (2026-07-19). */
 export const SWARM_SAFETY_TESTS: readonly string[] = [
   'src/lib/server/swarmSafety.test.ts',
   'server/routes/__tests__/swarmSafety.routes.test.ts',
+  'src/lib/server/gateEnv.test.ts',
+  // The ONLY pin on the two-copy env policy (gateProcess.ts ⟷ electron/gateEnv.js)
+  // and on the producer/verifier assignment. Delete it and the copies drift in
+  // silence — which is exactly the membership rule above. It spawns nothing, so it
+  // costs the gate almost nothing (unlike gateEnvTamper.test.ts, deliberately out).
+  'server/__tests__/gateEnvParity.test.ts',
 ]
 
 // The gate's fork-pool-safe runner now lives in ./gateProcess (swarmSelfSupply needs it
@@ -3125,10 +3687,13 @@ export { runGateProcess }
  *  the suite, so a project that isn't OPEN GROUND's own source (no such files) is
  *  never gated. `run` executes the suite with the project's own vitest INSIDE the
  *  rebased worktree (node_modules symlinked by makeVerify); a RED suite blocks the
- *  merge. The suite re-pins OPENGROUND_HOME to a tmp dir itself (src/test/setup-home.ts
- *  runs as a vitest setupFile before any test module loads), so it never touches the
- *  user's real ~/.openground even though the engine runs with the real home in its
- *  env. A missing vitest binary (project not installed) is RED — an unverified swarm
+ *  merge. The spawn goes through {@link withGateEnv}, so the child gets a THROWAWAY
+ *  OPENGROUND_HOME the engine mkdtemp'd — the real home is never handed over.
+ *  (Until 2026-07-19 this comment claimed the run was safe because the suite
+ *  "re-pins OPENGROUND_HOME itself" via src/test/setup-home.ts. That was circular:
+ *  setup-home.ts and the vitest.config.ts that loads it live IN THE WORKTREE, i.e.
+ *  inside the very artifact being judged — see gateProcess.ts's header.)
+ *  A missing vitest binary (project not installed) is RED — an unverified swarm
  *  change is never waved through (mirrors tscCheck's no-node_modules stance). */
 export const swarmSafetyCheck: VerifyCheck = {
   applicable: async (projectPath) =>
@@ -3160,12 +3725,14 @@ export const swarmSafetyCheck: VerifyCheck = {
       }
     }
     try {
-      await runGateProcess(vitestBin, ['run', ...SWARM_SAFETY_TESTS], {
-        cwd: worktreeDir,
-        timeout: 240_000,
-        maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env },
-      })
+      await withGateEnv((env) =>
+        runGateProcess(vitestBin, ['run', ...SWARM_SAFETY_TESTS], {
+          cwd: worktreeDir,
+          timeout: 240_000,
+          maxBuffer: 16 * 1024 * 1024,
+          env,
+        }),
+      )
       return { ok: true, output: '' }
     } catch (e: unknown) {
       const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
@@ -3244,12 +3811,14 @@ export const lintCheck: VerifyCheck = {
       }
     }
     try {
-      await runGateProcess(eslintBin, ['.', '--ext', '.ts,.tsx'], {
-        cwd: worktreeDir,
-        timeout: 180_000,
-        maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env },
-      })
+      await withGateEnv((env) =>
+        runGateProcess(eslintBin, ['.', '--ext', '.ts,.tsx'], {
+          cwd: worktreeDir,
+          timeout: 180_000,
+          maxBuffer: 16 * 1024 * 1024,
+          env,
+        }),
+      )
       return { ok: true, output: '' }
     } catch (e: unknown) {
       const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
@@ -3276,11 +3845,13 @@ const VITEST_CONFIG_FILES: readonly string[] = [
 
 /** `npm test` (vitest run — the FULL suite) wired as a merge-gate {@link VerifyCheck}. Runs
  *  EVERY test the project has against the to-be-landed tree, so a swarm change that breaks
- *  ANY test (not just the swarm-safety subset B2 gated on) cannot auto-merge. The suite
- *  re-pins OPENGROUND_HOME to a tmp dir itself (src/test/setup-home.ts runs as a vitest
- *  setupFile before any test module loads), so it never touches the user's real
- *  ~/.openground even though the engine runs with the real home in env — exactly like
- *  swarmSafetyCheck. `applicable` is a HAS-TESTS test (a vitest/vite config present); `run`
+ *  ANY test (not just the swarm-safety subset B2 gated on) cannot auto-merge. Spawned
+ *  through {@link withGateEnv} — a throwaway OPENGROUND_HOME chosen by the ENGINE, so
+ *  the user's real ~/.openground is never in the child's env at all. This is the check
+ *  with the widest blast radius (it runs every test file the branch ships, under the
+ *  branch's own vitest.config.ts), which is why the pre-2026-07-19 "the suite isolates
+ *  itself" assumption was the wrong shape here first — gateProcess.ts's header has the
+ *  full argument. `applicable` is a HAS-TESTS test (a vitest/vite config present); `run`
  *  reports RED when vitest is absent (mirrors tscCheck). The full suite is HEAVY — it runs
  *  at most once per new commit per card (makeVerify is memoized by tip in runIntegratePass),
  *  the deliberate cost of the quality floor the goal asks for. */
@@ -3304,12 +3875,14 @@ export const testCheck: VerifyCheck = {
       }
     }
     try {
-      await runGateProcess(vitestBin, ['run'], {
-        cwd: worktreeDir,
-        timeout: 600_000,
-        maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env },
-      })
+      await withGateEnv((env) =>
+        runGateProcess(vitestBin, ['run'], {
+          cwd: worktreeDir,
+          timeout: 600_000,
+          maxBuffer: 32 * 1024 * 1024,
+          env,
+        }),
+      )
       return { ok: true, output: '' }
     } catch (e: unknown) {
       const out = `${(e as { stdout?: string })?.stdout ?? ''}\n${(e as { stderr?: string })?.stderr ?? ''}`.trim()
@@ -4344,6 +4917,25 @@ const defaultCleanup = async (
  *  on the REAL classify / integrate / cleanup / commit-count probes (overriding
  *  only the board + spawn + liveness seams with in-memory fakes) — so the engine's
  *  risky git path is exercised against a real repo, not only the unit fakes. */
+/** Default consumption reader (card swarm-token): the worker PTY's
+ *  `--session-id` (terminal pool, survives exit until sweep) names its session
+ *  JSONL under the worktree's hyphenated dir — the same derivation
+ *  transcript.ts owns. Null at every miss (PTY gone from the pool, no
+ *  agentSessionId, JSONL absent/unreadable) — the promote site treats null as
+ *  "skip the line", so this can never disturb the pass. */
+const defaultReadConsumption = async (opts: {
+  worktree: string
+  terminalId: string
+}): Promise<string | null> => {
+  try {
+    const sid = getTerminal(opts.terminalId)?.agentSessionId
+    if (!sid) return null
+    return await readWorkerConsumptionLine(sessionJsonlPath(opts.worktree, sid))
+  } catch {
+    return null
+  }
+}
+
 export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   fetchTasks: defaultFetchTasks,
   moveToDoing: defaultMoveToDoing,
@@ -4359,6 +4951,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   escalate: defaultEscalate,
   recentOutput: defaultRecentOutput,
   raiseQuestion: openEscalation,
+  readConsumption: defaultReadConsumption,
   fetchReview: defaultFetchReview,
   prepareTarget: defaultPrepareTarget,
   classify: classifyBranch,
@@ -4381,9 +4974,11 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   cleanup: defaultCleanup,
   killPty: killTerminal,
   instructRework: defaultInstructRework,
-  // Manager-only integration (2026-07-15): the engine wakes the commander instead
-  // of merging. isManagerActive gates the double-launch; wakeManager spawns the desk.
-  isManagerActive: defaultIsManagerActive,
+  // Manager-only integration (2026-07-15): the engine wakes the commander instead of
+  // merging. managerPresence decides WHICH response the desk needs (spawn / nudge /
+  // nothing); wakeManager spawns, nudgeManager pokes a live one (2026-07-18).
+  managerPresence: (p, now, echoUntil) => defaultManagerPresence(p, now, { echoUntil }),
+  nudgeManager: defaultNudgeManager,
   wakeManager: defaultWakeManager,
   worktreeExists: defaultWorktreeExists,
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
@@ -4463,19 +5058,40 @@ const monitorWorkers = async (
     card: ProjectTask | undefined,
     probe: WorkerProbe,
     reason: WorkerRecoveryReason = 'crash',
+    /** For 'integration-wait' ONLY: WHICH of the three shapes this stop is (see the
+     *  ceiling check). One stop writes TWO journal lines — the ceiling's own line
+     *  and this recovery line — and 「両方が同じ事実を言っていること」 is the
+     *  requirement (02章 §5.6). Deriving the verb from `reason` alone broke it: the
+     *  ceiling line said 「上限の原因は待ち時間であって作業ではない」 while this one
+     *  still said 「差し戻し後の再作業で作業上限に到達」, one line below. Undefined
+     *  keeps the re-worked wording (a caller that does not know cannot be one of the
+     *  ceiling shapes). */
+    shape?: 'rework' | 'capped-wait' | 'work',
   ): Promise<boolean> => {
+    // The 'integration-wait' verb must describe what ACTUALLY happened, not what
+    // the reason is named after. Two shapes reach it (02章 §5.6): 差し戻し後の
+    // 再作業で予算を使い切った, and 統合待ちが控除上限を超えただけで再作業はして
+    // いない. Writing 「統合待ちのまま」 — or narrating a re-work that never
+    // happened — reproduces the 2026-07-18 misreading in a new shape, which is the
+    // failure this whole reason exists to prevent.
     const verb =
       reason === 'stall'
         ? 'stalled — reclaimed'
         : reason === 'runaway'
           ? 'runaway (hit execution-time limit) — stopped'
-          : reason === 'rate-limit'
-            ? 'rate/usage-limited too long — requeued'
-            : reason === 'permission'
-              ? 'permission/trust prompt unresolved — parked'
-              : reason === 'question'
-                ? 'free-text question unanswered too long — parked'
-                : 'lost'
+          : reason === 'integration-wait'
+            ? shape === 'capped-wait'
+              ? '統合待ちが控除上限を超過 — 停止(暴走でも再作業超過でもない: ready 済みの成果がブランチにある)'
+              : shape === 'work'
+                ? '実作業が作業上限に到達 — 停止(待ち時間が原因ではない・暴走でもない: ready 済みの成果がブランチにある)'
+                : '差し戻し後の再作業で作業上限に到達 — 停止(暴走ではない: ready 済みの成果がブランチにある)'
+            : reason === 'rate-limit'
+              ? 'rate/usage-limited too long — requeued'
+              : reason === 'permission'
+                ? 'permission/trust prompt unresolved — parked'
+                : reason === 'question'
+                  ? 'free-text question unanswered too long — parked'
+                  : 'lost'
     let teardown: { removed: boolean; reason?: string; wip?: WipCommitResult } = { removed: false }
     try {
       teardown = await deps.recoverWorker({
@@ -4519,7 +5135,13 @@ const monitorWorkers = async (
     let col = recoveryColumn(probe, requeues, RECOVER_MAX_REQUEUE, reason)
     let moved = false
     try {
-      moved = await deps.recoverCard(engine.path, w.taskId, col)
+      // 'review' rides moveToReview, not recoverCard: it is a forward promotion of
+      // a branch that HAS commits, and moveToReview is the seam that also stamps
+      // the branch on the card (the durable handle the integration stage merges).
+      moved =
+        col === 'review'
+          ? await deps.moveToReview(engine.path, w.taskId, w.branch)
+          : await deps.recoverCard(engine.path, w.taskId, col)
     } catch {
       moved = false
     }
@@ -4529,9 +5151,26 @@ const monitorWorkers = async (
     // park it for a human instead of gently requeueing it forever. (If the write
     // ITSELF keeps failing the card can't move at all — the 'move-stuck' anomaly
     // then surfaces it; see detectAnomalies.)
+    //
+    // 'integration-wait' is EXEMPT from that escalation: parking a ready worker's
+    // card in the owner's column is precisely the harm this reason exists to
+    // prevent, and a kept write is the engine's problem, not the owner's. It stays
+    // in 'doing' and retries (the 'move-stuck' anomaly surfaces it) — never blocked.
     if (!moved) {
-      const attempts = recordKeptMove(engine, w.taskId, 'recover', w.branch, w.taskTitle)
-      if (attempts >= MOVE_STUCK_MAX_RETRIES && col !== 'blocked') {
+      // Record WHICH recovery is stuck. 'recover-review' is load-bearing, not
+      // cosmetic: the next pass reads it back to retry this recovery AS ITSELF
+      // (see the !alive branch in monitorWorkers). Without it the retry decays
+      // into a plain 'crash' recovery, whose stale `ready` heartbeat rule parks
+      // the card in 'blocked' — reintroducing the 2026-07-18 harm through the
+      // back door whenever a Board write happens to fail.
+      const intent = reason === 'integration-wait' ? 'recover-review' : 'recover'
+      // Carry the SHAPE across the retry too, not just the intent. The retry
+      // rebuilds this recovery from scratch on a later pass; with only the intent
+      // restored it fell back to the default 「差し戻し後の再作業」 verb, so a
+      // 'capped-wait' / 'work' stop logged 「再作業 0m」 and then contradicted
+      // itself one line later (02章 §5.6 forbids exactly that).
+      const attempts = recordKeptMove(engine, w.taskId, intent, w.branch, w.taskTitle, shape)
+      if (attempts >= MOVE_STUCK_MAX_RETRIES && col !== 'blocked' && reason !== 'integration-wait') {
         col = 'blocked'
         try {
           moved = await deps.recoverCard(engine.path, w.taskId, 'blocked')
@@ -4560,7 +5199,10 @@ const monitorWorkers = async (
     // work is lost). Only crash/stall (and the budget-driven cases) touch it.
     if (reason !== 'rate-limit') {
       if (col === 'todo') engine.recoveries.set(w.taskId, requeues + 1)
-      else engine.recoveries.delete(w.taskId) // parked — a human requeue starts fresh
+      // Parked ('blocked') — a human requeue starts fresh. Promoted ('review', the
+      // integration-wait path) — the card moved FORWARD with work in hand, so it
+      // clears its budget exactly like an ordinary promote does.
+      else engine.recoveries.delete(w.taskId)
     }
     // warn level + structured kind: 'crash' for a dead PTY, 'stall' for a reclaimed
     // silent one; runaway / rate-limit / permission ride as uncategorized-but-shown
@@ -4574,6 +5216,28 @@ const monitorWorkers = async (
       reason === 'stall' ? 'stall' : reason === 'crash' ? 'crash' : undefined,
     )
     return false
+  }
+
+  /** Is there ACTUALLY something delivered on this worker's branch — commits, or
+   *  its own ready heartbeat? Corroborates the "card is in review" claim before it
+   *  is recorded as `readyAt` (see the early-continue). Both reads are swallowed to
+   *  the conservative answer: a transient git/FS failure returns false, which only
+   *  DEFERS the stamp to the next pass — it can never mislabel a stop, because the
+   *  ceiling reads `readyAt` and not these signals. Only called when the answer can
+   *  still change something (a worker that already has `readyAt` is not re-probed),
+   *  so this adds no per-pass IO for the common case of a card sitting in review. */
+  const hasDeliverable = async (w: OrchestratorWorker): Promise<boolean> => {
+    if (w.readyAt) return true // already recorded — never re-probe, never revoke
+    try {
+      if ((await deps.countCommitsAhead(engine.path, w.branch)) > 0) return true
+    } catch {
+      /* conservative: no evidence */
+    }
+    try {
+      return (await deps.readHeartbeat(engine.path, w.branch))?.ready === true
+    } catch {
+      return false
+    }
   }
 
   for (let w of engine.workers) {
@@ -4595,6 +5259,12 @@ const monitorWorkers = async (
     // 落とす — 差し戻し前の古い readyToMerge:true では re-promote されず(下の freshSign
     // ガード)、reworkAt より新しい心拍が来て初めて再昇格する。
     if (w.stage === 'done' && card && columnOf(card) === 'doing') {
+      // 統合待ちの終わり — BANK the idle span before the worker resumes working, so
+      // the execution ceiling below judges WORK, not queue latency. Without this the
+      // whole wait rides on as if it were work: on 2026-07-18 a worker ready at 04:18
+      // was 差し戻し'd at 04:46 and stopped one pass later as "runaway 91m", its
+      // worktree destroyed and its card parked in 'blocked'. (endIntegrationWait.)
+      endIntegrationWait(engine, w.terminalId, now)
       w = { ...w, stage: 'running', reworkAt: new Date(now).toISOString() }
       logLine(
         engine,
@@ -4605,9 +5275,46 @@ const monitorWorkers = async (
 
     // Already promoted, or the card already sits in review/done → terminal. Keep
     // showing 'done' while the PTY lingers; an exit is what frees the slot.
-    if (w.stage === 'done' || (card && (columnOf(card) === 'review' || columnOf(card) === 'done'))) {
-      if (alive) next.push({ ...w, stage: 'done' })
-      else logLine(engine, 'info', `done worker closed — slot freed: ${shorten(w.taskTitle)}`, 'routine')
+    //
+    // "DELIVERED" IS A COLUMN FACT, NOT A WRITE RECEIPT (2026-07-18). The ledger
+    // below (`readyAt` + the 統合待ち clock) is bound to WHERE THE CARD IS, not to
+    // whose write moved it there. Stamping it only inside the engine's own promote
+    // branch left the commander's route off the books entirely — and that route is
+    // the COMMON one: og-manage instructs the commander to `move <id> review` as
+    // soon as a worker reports READY, so the hand-move usually beats the promote
+    // tick. Such a worker went stage:'done' with NO readyAt and NO wait clock, and
+    // the next 差し戻し dropped it straight back into the original harm ("runaway
+    // 91m" → worktree destroyed → card parked in 'blocked'). Binding it to the
+    // column puts promote-moved and hand-moved cards on ONE ledger. (The 差し戻し
+    // side above already observes external moves; only this BEGIN side was
+    // asymmetric.) 'done' counts too: a card the commander advances straight past
+    // review is no less delivered, and a later rework of it must not read as 暴走.
+    const delivered = !!card && (columnOf(card) === 'review' || columnOf(card) === 'done')
+    if (w.stage === 'done' || delivered) {
+      if (alive) {
+        // THE COLUMN IS A CLAIM, NOT A RECEIPT (2026-07-19). Anyone can drag a card
+        // to 'review'; that says a human BELIEVES work was delivered. `readyAt` is
+        // load-bearing in the other direction — it is the sole thing standing
+        // between a worker and the 暴走 label — so stamping it on the claim alone
+        // makes the ceiling FAIL OPEN: park an untouched card in review once, drag
+        // it back, and that worker can never be called a 暴走 again. It would then
+        // run for hours with zero commits, escape the 'blocked' park, burn an empty
+        // branch into the card, and tell the owner 「統合可能な成果を一度出して
+        // います」 — a flat untruth, which is the very harm this card exists to end.
+        //
+        // So corroborate the claim before recording it: SOMETHING must exist —
+        // commits on the branch, or the worker's own ready heartbeat. This is a
+        // NECESSARY condition, not a sufficient one; `commitsAhead` alone was tried
+        // as a witness AT THE CEILING and rightly reverted (workers are told to
+        // commit before declaring ready, so commits are the normal state of a
+        // working worker — see the ceiling check). Requiring it HERE is safe in a
+        // way that trusting it there was not, because a failed read merely defers
+        // the stamp to the next pass instead of mislabelling a stop.
+        const corroborated = delivered && (await hasDeliverable(w))
+        if (corroborated) beginIntegrationWait(engine, w.terminalId, now)
+        const readyAt = corroborated ? (w.readyAt ?? new Date(now).toISOString()) : w.readyAt
+        next.push({ ...w, stage: 'done', readyAt })
+      } else logLine(engine, 'info', `done worker closed — slot freed: ${shorten(w.taskTitle)}`, 'routine')
       continue
     }
 
@@ -4677,12 +5384,33 @@ const monitorWorkers = async (
       }
       if (moved) {
         logLine(engine, 'info', `promoted to review: ${shorten(w.taskTitle)} → ${w.branch}`, 'promote')
+        // Consumption meter (card swarm-token): the done moment is the one point
+        // the card's cost is complete, so record its one-line summary here. No
+        // structured kind — the line has no metrics counter (classifyMetricEvent
+        // maps it to null) and stays visible in the journal. Await keeps journal
+        // order deterministic (a worker's JSONL is a few MB — tens of ms); every
+        // failure path resolves null / is swallowed, so an unreadable JSONL can
+        // never keep a promote (or the pass) from completing.
+        if (deps.readConsumption) {
+          try {
+            const line = await deps.readConsumption({ worktree: w.worktree, terminalId: w.terminalId })
+            if (line) logLine(engine, 'info', `consumption: ${line} — ${shorten(w.taskTitle)}`)
+          } catch {
+            /* fail-safe: no consumption line, promote already landed */
+          }
+        }
         engine.recoveries.delete(w.taskId) // succeeded — drop any prior retry budget
         clearKeptMove(engine, w.taskId) // the review move landed — forget any stuck tracking
+        // The worker is now READY and IDLE — start its 統合待ち clock so the wait for
+        // the commander is credited back rather than charged to it as work, and mark
+        // that it has DELIVERED (readyAt, set once) so the execution ceiling can never
+        // label it a 暴走 or park its card in 'blocked'. (2026-07-18.)
+        beginIntegrationWait(engine, w.terminalId, now)
+        const readyAt = w.readyAt ?? new Date(now).toISOString()
         // Keep a lingering PTY as 'done' (UI shows it; its exit frees the slot);
         // a worker that already exited has nothing left to count. Clear reworkAt — the card
         // left doing for review, so the re-promote suppression is no longer relevant.
-        if (alive) next.push(withHeartbeat({ ...w, stage: 'done', reworkAt: undefined }, heartbeat))
+        if (alive) next.push(withHeartbeat({ ...w, stage: 'done', reworkAt: undefined, readyAt }, heartbeat))
       } else {
         // Board write kept — keep the worker (card still in 'doing') and retry next
         // pass; don't claim 'done' until the move lands. Track it so a worker that
@@ -4690,7 +5418,23 @@ const monitorWorkers = async (
         // 'move-stuck' anomaly past the budget instead of a silent warn loop.
         recordKeptMove(engine, w.taskId, 'review', w.branch, w.taskTitle)
         logLine(engine, 'warn', `review move kept (will retry): ${shorten(w.taskTitle)}`)
-        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        // DELIVERY IS ESTABLISHED HERE EVEN THOUGH THE WRITE FAILED. We only reach
+        // this branch with promote === true — the engine's own strongest statement
+        // that this worker delivered (commits ahead + a heartbeat newer than any
+        // 差し戻し). Withholding `readyAt` until the Board write lands repeats the
+        // very mistake MF-1 fixed on the hand-move path: `countCommitsAhead` /
+        // `readHeartbeat` failures are swallowed to 0/null, so ONE transient read
+        // flips promote to false on a later pass and the worker then meets the
+        // ceiling with no `readyAt` → labelled 暴走 → card parked in 'blocked'.
+        // (Reproduced.) The wait clock stays closed: the card really is still in
+        // 'doing', so this worker is not idle in 統合待ち and must keep being
+        // charged for the time — only the "has EVER delivered" fact is recorded.
+        next.push(
+          withHeartbeat(
+            { ...w, stage: 'running', readyAt: w.readyAt ?? new Date(now).toISOString() },
+            heartbeat,
+          ),
+        )
       }
       continue
     }
@@ -4699,12 +5443,37 @@ const monitorWorkers = async (
     // its worktree/PTY down and return its card to the board ('todo' to retry,
     // 'blocked' to park) instead of stranding it in 'doing' as the old conservative
     // default did (a zombie card no worker was draining, plus a leaked worktree). A
-    // crash still never FAKES progress — recoveryColumn never promotes to review.
+    // crash still never FAKES progress — recoveryColumn sends a CRASH to todo or
+    // blocked, never to review. ('review' is reachable there, but only for the
+    // 'integration-wait' reason below, where the branch really does hold delivered
+    // work — not from this path.)
     // recoverLost logs the recovery with the 'crash' kind so the owner sees the
     // fallen-over worker (not buried as 'routine') — the observability the anomaly
     // stage and the crash log give, now with the teardown + requeue that fixes it.
     if (!alive) {
-      if (await recoverLost(w, card, { alive, commitsAhead, heartbeat })) next.push(w)
+      // A KEPT integration-wait recovery must retry as itself. Its PTY is already
+      // gone (torn down when the ceiling fired), so without this it would arrive
+      // here as an ordinary 'crash' — and recoveryColumn's "heartbeat ready ⇒
+      // blocked" rule would park the card in the owner's column on the stale
+      // pre-差し戻し heartbeat. Exactly the 2026-07-18 harm, one Board-write
+      // failure away. (recordKeptMove stamps the intent; pruneStuckMoves drops it
+      // the moment the card leaves 'doing'.)
+      const pending = engine.stuckMoves.get(w.taskId)
+      const pendingReason: WorkerRecoveryReason =
+        pending?.intent === 'recover-review' ? 'integration-wait' : 'crash'
+      // Restore the SHAPE as well. Passing only the reason left `shape` undefined,
+      // which defaults to the 「差し戻し後の再作業」 verb — so a retried
+      // 'capped-wait' / 'work' stop invented a re-work in its recovery line.
+      if (
+        await recoverLost(
+          w,
+          card,
+          { alive, commitsAhead, heartbeat },
+          pendingReason,
+          pendingReason === 'integration-wait' ? pending?.shape : undefined,
+        )
+      )
+        next.push(w)
       continue
     }
 
@@ -4720,19 +5489,116 @@ const monitorWorkers = async (
     // is auto-accepted, and anything else takes the existing nudge→reclaim path.
     const startedMs = Date.parse(w.startedAt)
 
-    // (1) RUNAWAY — wall-clock since dispatch past MAX_EXEC_MS. Checked FIRST and
-    // INDEPENDENT of liveness: a worker streaming output forever (an infinite
-    // /order loop, a task too big) still overruns, and is the one case a silence
-    // detector can never catch. Stop it (teardown + → 'blocked': a re-run would
-    // just overrun again, so a human looks). Clear all per-worker bookkeeping so a
+    // (1) EXECUTION CEILING — working time since dispatch past MAX_EXEC_MS.
+    // Checked FIRST and INDEPENDENT of liveness: a worker streaming output forever
+    // (an infinite /order loop, a task too big) still overruns, and is the one case
+    // a silence detector can never catch. Clear all per-worker bookkeeping so a
     // reclaimed terminalId never carries stale state into a future spawn.
-    // The runaway clock is the WORKING clock: repay every rate-limit hold this
-    // worker sat through (banked + any still in flight, capped at
-    // HOLD_CREDIT_CAP_MS) before comparing against the ceiling. A quota wait is
-    // not 暴走 — charging it to the worker is what destroyed 47KB of finished work
-    // on 2026-07-12 (see MAX_EXEC_MS / rateLimitHoldCredit).
-    const heldMs = rateLimitHoldCredit(engine, w.terminalId, now)
-    if (isRunaway(startedMs, now, MAX_EXEC_MS, heldMs)) {
+    //
+    // The clock is the WORKING clock: repay every span this worker demonstrably
+    // was NOT working before comparing against the ceiling — rate-limit holds
+    // (banked + in flight, capped at HOLD_CREDIT_CAP_MS) AND 統合待ち (idle in
+    // review, pending the commander). Charging non-work to the worker is what
+    // destroyed 47KB of finished work on 2026-07-12 (quota wait) and tore down a
+    // ready worker as "runaway 91m" on 2026-07-18 (integration wait). See
+    // MAX_EXEC_MS / executionCredit.
+    //
+    // Ending the 統合待ち here is DEFENSIVE and idempotent: the 差し戻し observation
+    // above is the semantic seam, but if any transition were ever missed, a stale
+    // stamp must not keep growing once the worker is back at work.
+    endIntegrationWait(engine, w.terminalId, now)
+    const { heldMs, waitedMs, creditMs } = executionCredit(engine, w.terminalId, now)
+    // The RAW wait, before the cap — captured here because the ceiling branch below
+    // clears the ledger before it builds its message, and the honest version of
+    // "why did this stop" needs both numbers: what was waited and what was forgiven.
+    const rawWaitedMs = engine.integrationWaitMs?.get(w.terminalId) ?? 0
+
+    // ── THE CEILING JUDGES THE CURRENT ASSIGNMENT, NOT THE WORKER'S WHOLE LIFE ──
+    // A 差し戻し is a NEW assignment: the commander looked at delivered work and
+    // asked for more. Running the clock from `startedAt` across that boundary
+    // charged the re-work for everything that came before it, so a worker
+    // 差し戻し'd anywhere near its ceiling crossed it on the very pass that
+    // OBSERVED the 差し戻し — the two lines land in the same tick, ~150ms apart.
+    // 2026-07-20, twice: 「差し戻しを観測 — worker を再作業中へ」 immediately
+    // followed by 「worked 478m ≥ 90m」 → stopped → worktree removed → card
+    // 'blocked'. Zero minutes of re-work, and the card cannot even re-dispatch
+    // itself afterwards (selectDispatch reads 'todo' only), so the 差し戻し ends
+    // in a dead end rather than a fix.
+    //
+    // The 統合待ち credit could never have covered this. It changes the LABEL and
+    // the card's destination, not the teardown, and it is in-memory + poll
+    // observed — a restart, a blind spot, or (as on 0720) an engine running older
+    // code leaves the ledger empty, which is the incident's 「0m credited back」.
+    // The origin needs neither: `reworkAt` is stamped by the observation block
+    // above, in THIS pass, from the card's own column move.
+    //
+    // GATED ON DELIVERY so it cannot fail open. Otherwise dragging a card through
+    // review and back would buy a worker that has produced NOTHING a fresh 90m,
+    // every time — the same "fail open" the readyAt corroboration exists to stop.
+    // The witness is `readyAt`, or the worker's own ready heartbeat. NOT
+    // `commitsAhead`: workers are told to commit before declaring ready, so
+    // commits are the normal state of a WORKING worker (tried and reverted
+    // 2026-07-19 — see the reason split below).
+    //
+    // RECORD the heartbeat witness, don't just read it. `readyAt` is the roster's
+    // durable memory of "delivered once"; the heartbeat proving it is the worker's
+    // own file and it does NOT stay ready — the worker rewrites it to false as
+    // soon as it resumes on the 差し戻し (02章 §5.6). Reading without recording
+    // would grant the budget on one pass and revoke it on the next, and with a 3s
+    // tick that is not a fix at all — the worktree would die three seconds later.
+    //
+    // ONLY for a worker that IS re-working. The stamp is an input to the re-work
+    // budget, so it is taken exactly where that budget applies. Stamping on the
+    // heartbeat alone — every pass, for any worker — would hand the 暴走 exemption
+    // to one that declared ready prematurely and then looped, which is the failure
+    // mode the ceiling exists to catch. `reworkAt` means a human looked at this
+    // worker's output and asked for more, and that is the corroboration.
+    if (w.reworkAt && !w.readyAt && heartbeat?.ready === true)
+      w = { ...w, readyAt: new Date(now).toISOString() }
+    const reworkFromMs = w.readyAt && w.reworkAt ? Date.parse(w.reworkAt) : Number.NaN
+    // `Math.max` keeps a clock that runs backwards (a fixture, an NTP step) from
+    // moving the origin EARLIER and handing out more budget than dispatch did; an
+    // unparseable startedAt stays unparseable, so isRunaway's finite/positive
+    // guard still refuses to judge a clockless worker.
+    const budgetFromMs =
+      Number.isFinite(startedMs) && Number.isFinite(reworkFromMs) ? Math.max(startedMs, reworkFromMs) : startedMs
+    // Credit only what the NEW origin does not already exclude. The 統合待ち bank
+    // is closed by the 差し戻し by construction (endIntegrationWait runs there), so
+    // every banked minute is pre-rework — subtracting it again would forgive the
+    // same minutes twice and let a re-work run to 2× its budget. Rate-limit holds
+    // can fall on either side, and crediting one that predates the 差し戻し is only
+    // ever lenient (it is capped), so they ride through unchanged.
+    const budgetCreditMs = budgetFromMs === startedMs ? creditMs : heldMs
+    if (isRunaway(budgetFromMs, now, MAX_EXEC_MS, budgetCreditMs)) {
+      // A worker that has ALREADY reached ready is NOT a 暴走: it produced
+      // integrable, committed work, so the failure mode this ceiling defends
+      // against (a task too big, a loop that never lands anything) is disproven.
+      // It is stopped all the same — the slot is real and the ceiling keeps its
+      // teeth — but under its own reason, so the log says what actually happened
+      // and its card goes to 'review' (the commander's queue) instead of the
+      // owner's 'blocked' column. 2026-07-18: the mislabel cost the commander a
+      // diagnosis cycle and the blocked park made its recovery plan impossible.
+      // ONE witness only — `readyAt`. It is a POLL OBSERVATION, so it
+      // exists only if the engine happened to be watching when this worker's card
+      // passed through review, and it is NOT watching while stopped — so a worker
+      // can deliver, be hand-moved to review, be 差し戻し'd and be back at work
+      // entirely in the blind, then arrive here bare. That gap is REAL (measured)
+      // and deliberately LEFT OPEN — see §5.6 「エンジン盲目区間の穴」. It is left
+      // open because the obvious patch is worse than the hole:
+      //
+      // `commitsAhead > 0` was tried as a "durable witness" and REVERTED on
+      // 2026-07-19. It looks like evidence of delivery and is not: workers are
+      // instructed to commit BEFORE declaring ready (「完了ゲートに入る前に必ず WIP
+      // コミット」 — it is in every /order dispatch), so commits-ahead is the
+      // NORMAL state of a working worker, not a mark of completion. Keying on it
+      // meant only a worker that had committed literally nothing could ever be
+      // called a 暴走: the card-too-big worker that commits scaffolding at 10m and
+      // then spins for 110m sailed into 'review' wearing 「暴走ではありません」,
+      // and the owner-facing text asserted a 差し戻し that never happened. That
+      // trades a rare false negative for a routine false positive and dissolves
+      // the defense. `readyAt` stays the ONLY witness: the engine says a worker
+      // delivered only when it SAW the delivery.
+      const reason: WorkerRecoveryReason = w.readyAt ? 'integration-wait' : 'runaway'
       engine.nudges.delete(w.terminalId)
       engine.rateLimited.delete(w.terminalId)
       engine.rateLimitHeldMs?.delete(w.terminalId)
@@ -4740,29 +5606,156 @@ const monitorWorkers = async (
       engine.permissionWaits.delete(w.terminalId)
       engine.questionRaised?.delete(w.terminalId)
       engine.questionWaits?.delete(w.terminalId)
+      engine.integrationWaitMs?.delete(w.terminalId)
       const ranMin = Math.floor((now - startedMs) / 60_000)
       const heldMin = Math.floor(heldMs / 60_000)
-      const workedMin = Math.floor((now - startedMs - heldMs) / 60_000)
+      const waitedMin = Math.floor(waitedMs / 60_000)
+      // The CHARGED time — the number the ceiling actually compared, so 「worked
+      // Xm ≥ 90m」 can never be a figure the check did not use. For a re-working
+      // worker that is the time since the 差し戻し, not since dispatch; `ranMin`
+      // above still reports the whole life, and the two differ on exactly the
+      // workers whose budget was restarted.
+      const workedMin = Math.floor((now - budgetFromMs - budgetCreditMs) / 60_000)
       const limitMin = Math.floor(MAX_EXEC_MS / 60_000)
+      const capMin = Math.floor(WAIT_CREDIT_CAP_MS / 60_000)
+      // What was forgiven, spelled out — an owner reading "stopped at the ceiling"
+      // must be able to see WHY the numbers don't add up to wall-clock.
+      // A re-work budget does not CREDIT the queue time — it excludes it by starting
+      // the clock at the 差し戻し. Reporting it as 「credited back」 would name a
+      // subtraction the judgement never performed, and on a long queue the forgiven
+      // figure would dwarf the charged one and read as the reason for the stop.
+      const creditNote =
+        budgetFromMs === startedMs
+          ? `alive ${ranMin}m; ${heldMin}m rate-limit hold + ${waitedMin}m 統合待ち credited back`
+          : `alive ${ranMin}m; 計上は差し戻し以降のみ(統合待ち ${waitedMin}m は計上対象外) + ${heldMin}m rate-limit hold credited back`
+      // SAY ONLY WHAT ACTUALLY HAPPENED — the single rule this whole card exists to
+      // enforce. A ready worker reaches this check in TWO very different ways, and
+      // `readyAt` cannot tell them apart because it only means "delivered once":
+      //
+      //  (a) 差し戻され、実際に再作業して予算を使い切った.
+      //  (b) 再作業していない. Either the card simply queued past the credit cap (a
+      //      careful 63-hour weekend review is enough at the 8h default), or a KEPT
+      //      promote stamped `readyAt` while the worker stayed 'running' and a later
+      //      transient read dropped the promote. What pushed it over the ceiling was
+      //      uncredited WAITING, not work.
+      //
+      // The discriminator is the RE-WORK DURATION, not `reworkAt`'s presence. In the
+      // 63-hour case the commander DOES 差し戻し — the engine observes it, stamps
+      // `reworkAt`, and tears the worker down in the SAME pass — so `reworkAt` is set
+      // while the worker re-worked for zero minutes. Keying on the stamp would still
+      // narrate "差し戻し後の再作業で上限に到達" about 55 hours of weekend queue time.
+      //
+      // (`readyAt` is stamped at THREE sites, and only two take the worker to
+      // stage:'done' — the promote and the early-continue that sees the card already
+      // in review/done. The third is the KEPT promote, which stamps while the worker
+      // stays 'running' and its card never leaves 'doing'. An earlier comment here
+      // claimed 'done' was the only route and 差し戻し the only way back out; the kept
+      // promote falsifies both.)
+      const reworkAtMs = w.reworkAt ? Date.parse(w.reworkAt) : Number.NaN
+      const reworkedMs = Number.isFinite(reworkAtMs) ? Math.max(0, now - reworkAtMs) : 0
+      const reworkedMin = Math.floor(reworkedMs / 60_000)
+      const rawWaitedMin = Math.floor(Math.max(0, rawWaitedMs) / 60_000)
+      const reworked = reworkedMs >= 60_000
+      // "The ceiling came from WAITING" is only true if the wait actually LOST
+      // something to the cap. Keying it on `rawWaited > 0` was wrong and not rarely
+      // so: the tick is 3s, so a worker 差し戻し'd while already near the ceiling
+      // crosses it within the first minute, lands in `reworkedMs < 60_000`, and
+      // would announce 「上限の原因は待ち時間であって作業ではない」 after a 20-minute
+      // wait against a 480-minute cap — nothing was truncated, and the 90 minutes
+      // were real work. Only an OVER-CAP wait puts uncredited waiting on the clock.
+      // …and it is only ASKABLE on the clock that actually spent the wait. A worker
+      // judged from its 差し戻し never had the queue on its clock at all, so blaming
+      // the queue there would be the same fiction in a new shape.
+      //
+      // In steady state that makes 'capped-wait' UNREACHABLE, and knowingly so: a
+      // banked wait implies a 差し戻し (only a corroborated review card opens the
+      // bank, and only that observation closes it), and the same observation stamps
+      // `reworkAt`. The predicate is kept rather than deleted because the ledger is
+      // engine state that outlives a module swap — a roster entry carried across a
+      // self-update can hold a bank with no `reworkAt` — and because it is still the
+      // honest test for 「the cap truncated something」 if that state appears.
+      const capped = budgetFromMs === startedMs && rawWaitedMs > WAIT_CREDIT_CAP_MS
+      // THE THREE HONEST SHAPES of an integration-wait stop. Everything the owner
+      // and the commander read is chosen by this one value, so it must name the
+      // actual cause rather than a proxy for it:
+      //   'rework'      — 差し戻し後に実際に再作業して予算を使い切った
+      //   'capped-wait' — 統合待ちが控除上限を超え、その超過分が計上されて上限に達した
+      //   'work'        — 待ちは全額控除され再作業もしていない。上限に達したのは
+      //                   純粋に実作業。kept promote(待ち 0 分・カードは doing の
+      //                   まま)もここに入る — 待ちが記録されていない worker は、
+      //                   定義上ずっと働いていたのだから。
+      const shape: SwarmFatalNotification['execTimeoutShape'] = reworked
+        ? 'rework'
+        : capped
+          ? 'capped-wait'
+          : 'work'
       logLine(
         engine,
         'warn',
-        `worker runaway — worked ${workedMin}m ≥ ${limitMin}m execution limit (alive ${ranMin}m; ${heldMin}m of rate-limit hold credited back): ${w.branch} (${shorten(w.taskTitle)})`,
+        reason !== 'integration-wait'
+          ? `worker runaway — worked ${workedMin}m ≥ ${limitMin}m execution limit (${creditNote}): ${w.branch} (${shorten(w.taskTitle)})`
+          : shape === 'rework'
+            ? `worker over execution budget while RE-WORKING after 差し戻し — worked ${workedMin}m ≥ ${limitMin}m (${creditNote}). 暴走ではない(ready 済みの成果がブランチにある) — card → review: ${w.branch} (${shorten(w.taskTitle)})`
+            : shape === 'capped-wait'
+              ? `worker stopped after a LONG integration queue — waited ${rawWaitedMin}m, only ${capMin}m creditable, so charged time ${workedMin}m ≥ ${limitMin}m (${creditNote}). 再作業 ${reworkedMin}m — 上限の原因は待ち時間であって作業ではない・暴走でもない — card → review: ${w.branch} (${shorten(w.taskTitle)})`
+              : `worker over execution budget doing REAL WORK — worked ${workedMin}m ≥ ${limitMin}m (${creditNote}; waited ${rawWaitedMin}m, fully credited). 再作業 ${reworkedMin}m — ready 済みなので暴走ではない — card → review: ${w.branch} (${shorten(w.taskTitle)})`,
       )
       // Escalation safety valve (exec-timeout): a worker overran the execution-time
-      // ceiling and is being force-reclaimed/parked — a human should know (a re-run
-      // would just overrun again). Enqueue the EDGE event; runEnginePass drains +
-      // pushes it exactly once after the pass settles.
+      // ceiling and is being force-reclaimed — a human should know. Enqueue the EDGE
+      // event; runEnginePass drains + pushes it exactly once after the pass settles.
+      // The three cases need DIFFERENT words. A never-ready worker would just overrun
+      // again on re-run (a human decides). One that was 差し戻し'd and blew the budget
+      // re-working needs the commander to look at a branch whose tip is UNVERIFIED —
+      // the re-work was cut off mid-flight and its remainder salvaged as a WIP commit,
+      // so "統合してください" without that caveat invites landing a half-finished
+      // 差し戻し. One that merely waited too long re-worked NOTHING: its tip is what it
+      // was at ready, and the only thing that could have moved it is a WIP commit of
+      // stray uncommitted changes (reported on its own log line when it happens).
       engine.pendingFatal.push({
         event: 'exec-timeout',
-        detail: `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち rate-limit 待ち ${heldMin}分は控除済み）→ 強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`,
+        // The flavor travels WITH the event: the overseer raises one S3 signal for
+        // both, and the owner-facing question it builds must not offer "split it up
+        // and retry" for a worker whose branch already holds delivered work (that
+        // answer would ride into the card's next dispatch). See SwarmFatalNotification.
+        execTimeoutKind: reason === 'integration-wait' ? 'integration-wait' : 'runaway',
+        // …and WHICH of the three shapes it is, so every downstream surface tells
+        // the same story. A boolean could not: it collapsed 'work' into 'capped-wait'
+        // and the owner read 「順番待ちが長引いた」 about a worker that had waited
+        // zero minutes and worked the whole time.
+        execTimeoutShape: reason === 'integration-wait' ? shape : undefined,
+        detail:
+          reason !== 'integration-wait'
+            ? `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち rate-limit 待ち ${heldMin}分・統合待ち ${waitedMin}分は控除済み）→ 強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`
+            : shape === 'rework'
+              ? `一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限 ${limitMin}分 に到達（実作業 ${workedMin}分・通算 ${ranMin}分／うち rate-limit 待ち ${heldMin}分・統合待ち ${waitedMin}分は控除済み）→ 停止。暴走ではありません（統合可能な成果を一度出しています）。カードは review へ戻します。ただし再作業は途中で打ち切られ、未コミット分は WIP コミットで保全されるだけなので、ブランチ ${w.branch} の先端は未検証です — そのまま統合せず、まず差分を確認してください。`
+              : shape === 'capped-wait'
+                ? `一度 ready に到達したワーカーが、統合待ちが長引いたため停止しました（統合待ち ${rawWaitedMin}分 のうち控除できるのは上限 ${capMin}分 まで。超過分が計上され、判定時間 ${workedMin}分 が上限 ${limitMin}分 に達しました／通算 ${ranMin}分）。上限に達した原因は待ち時間であって作業ではありません — このワーカーの再作業は ${reworkedMin}分 です。暴走でもありません。ブランチ ${w.branch} の先端は ready 到達時のままなので、そのまま統合を判断できます（停止時に未コミットの変更があった場合のみ WIP コミットが 1 つ乗ります — engine log の WIP 行で分かります）。カードは review に残ります。`
+                : `一度 ready に到達したワーカーが、作業上限 ${limitMin}分 に到達したため停止しました（実作業 ${workedMin}分・通算 ${ranMin}分／統合待ち ${rawWaitedMin}分 は全額控除済み・再作業 ${reworkedMin}分）。待ち時間が原因ではありません — 上限に達したのは実作業です。暴走でもありません（統合可能な成果を一度出しています）。カードは review へ移します。ブランチ ${w.branch} の先端は打ち切り時点のもので未検証です — そのまま統合せず、まず差分を確認してください。`,
         projectPath: engine.path,
         taskId: card?.id,
         branch: w.branch,
         taskTitle: w.taskTitle,
-        logHint: '司令塔の engine log を確認してください（worker runaway の警告行）。',
+        logHint:
+          reason !== 'integration-wait'
+            ? '司令塔の engine log を確認してください（worker runaway の警告行）。'
+            : shape === 'rework'
+              ? '司令塔の engine log を確認してください（worker over execution budget while RE-WORKING の警告行）。'
+              : shape === 'capped-wait'
+                ? '司令塔の engine log を確認してください（worker stopped after a LONG integration queue の警告行）。'
+                : '司令塔の engine log を確認してください（worker over execution budget doing REAL WORK の警告行）。',
       })
-      if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'runaway')) next.push(w)
+      // Pass the SAME discriminator the ceiling line used, so the two journal lines
+      // this one stop emits cannot disagree (02章 §5.6).
+      if (
+        await recoverLost(
+          w,
+          card,
+          { alive, commitsAhead, heartbeat },
+          reason,
+          reason === 'integration-wait' ? shape : undefined,
+        )
+      )
+        next.push(w)
       continue
     }
 
@@ -5151,6 +6144,16 @@ const monitorWorkers = async (
       if (!liveTerminalIds.has(id)) engine.rateLimitHeldMs.delete(id)
     }
   }
+  if (engine.integrationWaitSince) {
+    for (const id of Array.from(engine.integrationWaitSince.keys())) {
+      if (!liveTerminalIds.has(id)) engine.integrationWaitSince.delete(id)
+    }
+  }
+  if (engine.integrationWaitMs) {
+    for (const id of Array.from(engine.integrationWaitMs.keys())) {
+      if (!liveTerminalIds.has(id)) engine.integrationWaitMs.delete(id)
+    }
+  }
   if (engine.limitScreen) {
     for (const id of Array.from(engine.limitScreen.keys())) {
       if (!liveTerminalIds.has(id)) engine.limitScreen.delete(id)
@@ -5191,9 +6194,13 @@ const raiseNoAllowedModelTier = async (
       projectPath: engine.path,
       question,
       context:
-        'すべてのモデル tier が使用可能モデル設定で OFF になっているため、worker / 司令官 / 補給官 / ' +
+        'すべてのモデル tier が使用可能モデル設定で OFF になっているため、worker / マネージャー / タスク窓口 / ' +
         'レビュアーのいずれも起動できず、dispatch を停止しています。cooling と違い期限で自然回復しません — ' +
         '最低1つの tier を ON に戻すまで swarm は動きません。',
+      plainQuestion:
+        'AIを動かすための「使えるモデル」の設定が、すべてオフになっています。どうしますか？\n' +
+        'A: 設定画面（使用可能モデル）で、どれか1つ以上をオンに戻す（すぐに作業が再開できます）\n' +
+        'B: このままにしておく（オンに戻すまで、すべての自動作業が止まったままです）',
       whyEscalated: 'policy',
       receiptKey: defaultReceiptKey({ projectPath: engine.path, question }),
     })
@@ -5549,10 +6556,21 @@ export const runIntegratePass = async (
   //  BUT making integration manager-only means the swarm STALLS if the commander stops
   //  — and it does stop (opus flooded by a big diff: context overflow / API error /
   //  hang — the owner's actual complaint). So the engine keeps a RESUSCITATION reflex
-  //  (card B, 完了条件1-6): with work WAITING, it checks the desk is up AND responding
-  //  (isManagerActive = live PTY + fresh heartbeat), and re-wakes a dead/hung one. The
+  //  (card B, 完了条件1-6): with work WAITING it reads the desk's PRESENCE
+  //  (managerPresence: absent / idle / active) and responds in kind — spawn only when
+  //  there is NO desk, nudge a live-but-quiet one, leave a working one alone. The
   //  engine only WAKES — it never integrates on the commander's behalf (完了条件6, reflex
-  //  ≠ judgment). A desk that keeps dying escalates instead of looping (完了条件5).
+  //  ≠ judgment). A desk that cannot be RAISED escalates instead of looping (完了条件5).
+  //
+  //  2026-07-18 CORRECTION: that probe used to be a single bit — live PTY AND a fresh
+  //  heartbeat — and the AND was a trap. The commander beats only while doing heavy
+  //  integration work, so a healthy desk (talking with the owner, or just booted and
+  //  running 「状況」) goes silent past the window and read as HUNG. The engine then
+  //  "resuscitated" a desk that was alive and working, three times, and finally fired a
+  //  FALSE 'manager-unrevivable' fatal — while piling up orphaned idle desks, because a
+  //  session held by a live PTY cannot be --resume'd so each spawn opened a new one.
+  //  Presence now folds in evidence the PTY itself emits (paint + transcript growth),
+  //  and only 'absent' may spawn (完了条件1-3).
   //
   //  ALWAYS ARMED while the engine runs (2026-07-16): the separate auto-wake toggle
   //  (the old `autoMerge` flag + POST /api/swarm/orchestrator/automerge) was RETIRED —
@@ -5561,10 +6579,10 @@ export const runIntegratePass = async (
   //  keeping. Engine ON = the wake reflex is on; engine OFF (or an app restart, which
   //  always relaunches OFF) stops it. Merge CONSENT stays per-card: the [hold] title
   //  prefix and the commander's high-risk force-hold (HIGH_RISK_PATHS) gate what
-  //  actually lands. A hand-driven desk stays safe either way: isManagerActive treats
-  //  a live, beat-fresh (or never-beat, fail-open) desk as present, so the reflex
-  //  never tears down or duplicates one — worst case it wakes a desk the owner would
-  //  have started themselves.
+  //  actually lands. A hand-driven desk stays safe either way: managerPresence reports
+  //  any desk with a live PTY as present ('active' or at worst 'idle'), and only
+  //  'absent' can spawn — so the reflex can never tear down or duplicate the owner's
+  //  own desk; worst case it wakes one the owner would have started themselves.
 
   const rs = (engine.managerResume ??= { attempts: 0, lastWakeAt: 0, fatalFired: false })
 
@@ -5574,23 +6592,162 @@ export const runIntegratePass = async (
     rs.attempts = 0
     rs.lastWakeAt = 0
     rs.fatalFired = false
+    rs.nudges = 0
+    rs.lastNudgeAt = 0
+    rs.unresponsiveLogged = false
+    // "Fully" has to include `lastWakeSpawned` too (card add3af4c, 2026-07-22 sibling
+    // fix): it is the transient-vs-permanent bit the give-up ratchet reads (below), so
+    // a stale `true` carried out of THIS episode into the next one would make a fresh
+    // episode's very first give-up read as "a desk spawned and died" even before this
+    // episode's own wake ever ran — misjudging a NEW episode on a PREVIOUS one's
+    // outcome, exactly the class of bug `provenSinceWake`'s reset comment above
+    // already warns about. Absent (the reset value) reads as "spawned" (the
+    // conservative default — see the field's own doc comment), so this can only ever
+    // make a later give-up MORE cautious, never less.
+    rs.lastWakeSpawned = undefined
+    // "Fully" has to include this one. (Reachability note, measured 2026-07-19: the
+    // end-to-end false fatal is NOT reproducible through this leak alone, because this
+    // same block zeroes `attempts`, so the refund the stale `false` blocks is a no-op, and
+    // any later spawn re-sets the flag itself. It is fixed as an INVARIANT, not a live
+    // exploit — the coupling that makes it harmless today is incidental.) `provenSinceWake` is a verdict about THE DESK WE
+    // LAST SPAWNED, so carrying a `false` into the next episode judges a new batch on a
+    // previous desk's reputation — and it does real harm, not just bookkeeping: the desk
+    // can finish an entire integration without the engine ever happening to SAMPLE it as
+    // 'active' (the probe runs on a 15s tick; a batch can drain between two of them), and
+    // then the next batch finds `provenSinceWake===false` with `lastWakeAt` cleared, so
+    // neither the boot grace nor the idle refund applies. `attempts` would climb straight
+    // to a `manager-unrevivable` fatal against a desk that is alive and answering — the
+    // EXACT harm this whole card exists to remove. Restore the default ("nothing spawned,
+    // so nothing to prove" ⇒ treated as proven, which is also what protects a desk the
+    // owner started by hand).
+    rs.provenSinceWake = true
     return
   }
 
-  // Work IS waiting. In autopilot the commander must be up AND responding to land it.
-  // isManagerActive folds in the heartbeat (card B): a live PTY silent past the stale
-  // window reads as HUNG, not present. Slow await, but no trunk mutation follows.
-  const active = await deps.isManagerActive(engine.path, now)
+  // Work IS waiting. Ask what the desk actually IS — present? engaged? gone? — rather
+  // than the old single "responding y/n" bit. Slow await, but no trunk mutation follows.
+  // Discount the echo of ANYTHING WE OURSELVES WROTE into that PTY (see
+  // defaultManagerPresence's `echoUntil`). BOTH writes count, and for the same reason:
+  //   - the nudge — else the poke refunds its own budget and a wedged desk is poked forever;
+  //   - the SPAWN — `launchClaude` writes the launch command into the fresh PTY
+  //     (claudeTerminal.ts), and the login shell echoes it back within milliseconds. That
+  //     echo alone satisfies "painted recently", so a desk that boots and then dies without
+  //     ever doing work still reads 'active' on the very next tick, which zeroes `attempts`
+  //     — and a desk that flaps (spawn → echo → die → spawn) can then NEVER reach
+  //     MAX_MANAGER_RESUME_ATTEMPTS. That silently retires the infinite-resurrection guard
+  //     for exactly the cases it exists for (context overflow / API error / boot-crash:
+  //     measured 72 spawns in 6h with zero escalation), turning the 2026-07-18 fix's
+  //     failure mode from "false fatal" into "silent token burn".
+  // Guarding only the nudge was asymmetric: the trap is identical on both writes, so the
+  // cutoff is the LATER of the two. Real work paints well past the guard and still counts.
+  const lastSelfWriteAt = Math.max(rs.lastNudgeAt ?? 0, rs.lastWakeAt ?? 0)
+  const presence = await deps.managerPresence(
+    engine.path,
+    now,
+    lastSelfWriteAt > 0 ? lastSelfWriteAt + STALL_ECHO_GUARD_MS : 0,
+  )
   if (!engine.running) return // owner stopped the engine during the probe
-  if (active) {
-    // Healthy desk on the job → reflex disarmed (a future silence starts fresh).
+  if (presence === 'active') {
+    // Healthy desk on the job → both budgets disarmed (a future silence starts fresh).
+    // This ALSO records that the last resurrection actually took (see provenSinceWake):
+    // 'active' is the only state that proves a spawned desk really came up, because it is
+    // the only one the launch echo cannot fake once that echo is discounted above.
+    rs.provenSinceWake = true
     rs.attempts = 0
     rs.fatalFired = false
+    rs.nudges = 0
+    rs.unresponsiveLogged = false
     return
   }
 
-  // Desk ABSENT (dead PTY) or HUNG (stale heartbeat). Give a freshly-woken one time to
-  // boot + emit its first beat before judging again (else the boot gap double-spawns).
+  // A desk IS up but nothing says it is engaging with the waiting work (2026-07-18).
+  // NEVER spawn here. Spawning a twin was the old behaviour and it was wrong twice over:
+  // resolveSwarmSession refuses to `--resume` a session a live PTY still holds, so the
+  // "resurrection" opened an AMNESIAC second desk, overwrote the persisted session id,
+  // and orphaned the working one — 16 idle desks and a duplicate-dispatcher hazard on
+  // one trunk (the 2026-07-15 concurrent-integration incident's shape). The desk exists;
+  // the right move is to get ITS attention, at zero token cost and with no new session.
+  if (presence === 'idle') {
+    // BOOT GRACE — a desk we JUST raised is allowed to be quiet while it starts up, and
+    // must not be touched at all until it has had its chance (完了条件2).
+    //
+    // Without this the three pieces of the 2026-07-18 work compose into a new bug that
+    // fires on EVERY resurrection: the spawn's own launch echo is discounted for
+    // STALL_ECHO_GUARD_MS (30s), so a booting desk reads 'idle'; the spawn clears
+    // `lastNudgeAt`, so the nudge throttle below is disarmed; and the poke now leads with
+    // ESC. Net effect at the very first tick after a wake (INTEGRATE_TICK_MS = 15s): the
+    // freshly resurrected commander gets an ESC through the middle of the `/og-manage`
+    // prompt it was launched with, plus an unrelated instruction. The absent branch has
+    // always had this grace (:「直前 wake から grace 未満なら return」) — it belongs here
+    // too, because "wait for a desk to finish booting" is the same requirement whether the
+    // desk is not visible yet or visible but still starting.
+    //
+    // Deliberately SEPARATE from the `lastNudgeAt` throttle below: that one paces repeat
+    // pokes at a desk that is up, this one protects a desk that is not up YET. Merging
+    // them was exactly the mistake — the spawn resets lastNudgeAt, so the throttle cannot
+    // express "just spawned".
+    if (rs.lastWakeAt > 0 && now - rs.lastWakeAt < MANAGER_RESUME_GRACE_MS) return
+
+    // The commander CAN be started — it is started. So the unrevivable budget is not
+    // merely untouched here, it is RESET: 'manager-unrevivable' means "no desk can be
+    // raised", and a live desk falsifies that outright (完了条件3).
+    //
+    // …UNLESS the desk we last spawned has never once been seen working. A PTY that only
+    // exists does not falsify "cannot be raised": `launchClaude` writes the launch line
+    // into the fresh PTY, so a boot that dies on arrival still leaves a live shell behind,
+    // and resetting on that would retire the give-up guard for the very cases it exists
+    // for (a flapping desk: spawn → die → spawn, forever, silently). Keep the budget
+    // accruing until something proves the resurrection took (完了条件3+5 together).
+    if (rs.provenSinceWake !== false) {
+      rs.attempts = 0
+      rs.fatalFired = false
+    }
+    const nudges = rs.nudges ?? 0
+    const lastNudgeAt = rs.lastNudgeAt ?? 0
+    if (nudges >= MAX_MANAGER_NUDGES) {
+      // Budget spent. The nudges were PROBES, not just reminders: a healthy claude
+      // answers a submitted prompt with output, which would have read as 'active'. A
+      // desk that ignored all of them across the full interval is genuinely not
+      // processing input — say so ONCE, in the log the commander docs tell readers to
+      // grep, then go quiet (poking a wedged TUI forever helps no one).
+      //
+      // Deliberately NOT a fatal notification: 'manager-unrevivable' means "no desk can
+      // be raised", which is false here (完了条件3), and minting a new fatal event would
+      // pull in the client allowlist + label + i18n surface this card does not own.
+      // The residual gap is recorded in docs/commander/03-integration-review.md §7.
+      if (!rs.unresponsiveLogged && lastNudgeAt > 0 && now - lastNudgeAt >= MANAGER_NUDGE_INTERVAL_MS) {
+        rs.unresponsiveLogged = true
+        logLine(
+          engine,
+          'warn',
+          `司令官の卓は起動しているが ${nudges} 回の声かけに応答しません — 卓が固まっている可能性。` +
+            `Swarm タブ → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
+          'integrate',
+        )
+      }
+      return
+    }
+    if (lastNudgeAt > 0 && now - lastNudgeAt < MANAGER_NUDGE_INTERVAL_MS) return
+    const poked = await deps.nudgeManager(engine.path)
+    // Charge the budget BEFORE the stop check: the keystrokes are already in the desk's
+    // PTY, so bailing out un-counted would let a later pass poke again with the throttle
+    // disarmed. Only the log line below is worth skipping once the owner has stopped us.
+    rs.nudges = nudges + 1
+    rs.lastNudgeAt = now
+    if (!engine.running) return
+    logLine(
+      engine,
+      'info',
+      `司令官の卓は起動しているが無音 — 蘇生せず声をかけました(${rs.nudges}/${MAX_MANAGER_NUDGES}回目` +
+        `${poked ? '' : '・PTY への書き込みに失敗'})。統合待ち ${swarmCards.length} 件`,
+      'integrate',
+    )
+    return
+  }
+
+  // presence === 'absent' — no desk at all. THIS is the resurrection path (and the only
+  // one that may fire 'manager-unrevivable'). Give a freshly-woken one time to boot and
+  // register its session before judging again (else the boot gap double-spawns).
   if (rs.lastWakeAt > 0 && now - rs.lastWakeAt < MANAGER_RESUME_GRACE_MS) return
 
   // Grace elapsed and still not responding → the last wake didn't take (or first sighting).
@@ -5604,8 +6761,8 @@ export const runIntegratePass = async (
       logLine(
         engine,
         'error',
-        `司令官が ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動で司令官卓を確認してください` +
-          `(Swarm タブ → 司令官)。統合待ち ${swarmCards.length} 件`,
+        `マネージャーが ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動でマネージャー卓を確認してください` +
+          `(Swarm タブ → マネージャー)。統合待ち ${swarmCards.length} 件`,
         'integrate',
       )
       // Best-effort escalation (bell + OS toast) — never awaited, internal-catch so a
@@ -5615,11 +6772,60 @@ export const runIntegratePass = async (
         projectPath: engine.path,
         branch: swarmCards[0]?.branch,
         taskTitle: swarmCards[0]?.title || undefined,
-        detail: `司令官が ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
-        logHint: 'Swarm タブ → 司令官 / engine log の integrate 行',
+        detail: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
+        logHint: 'Swarm タブ → マネージャー / engine log の integrate 行',
       })
     }
-    return
+    // GIVE UP THE LOOP, NOT RECOVERY (完了条件2, 2026-07-20). Returning here forever is
+    // what stalled integration: a TRANSIENT cause never resets `attempts` because the desk
+    // stays absent and work keeps waiting — the two reset conditions can't fire.
+    //
+    // But "transient" has to be earned, or re-arming resurrects a dead boot forever (the
+    // 'flapping desk' the give-up guard exists to stop). The discriminator is the LAST
+    // wake's outcome: `lastWakeSpawned === false` means no desk was ever seated — every
+    // allowed tier was cooling/masked — which is a QUOTA WALL, and quota walls LIFT (or the
+    // owner re-enables a tier). Re-arming THAT costs nothing: the next wake still finds no
+    // tier and spawns nothing (woke=false), it just keeps checking until one frees up. A
+    // desk that actually SPAWNED and died (lastWakeSpawned===true / undefined) is treated
+    // as permanent and left given-up — retrying it would burn a real desk each cycle.
+    //
+    // After the backoff, re-arm ONE cycle (fall through). `fatalFired` stays SET: the owner
+    // is alerted once per episode, not every cycle — only a desk that actually comes up
+    // ('active'/'idle') clears it.
+    //
+    // `lastWakeSpawned === false` alone misses the case this ratchet exists to close
+    // (2026-07-22, sibling of the reset above): when 3+ allowed tiers are all
+    // exhausted-but-spawnable, the LAST wake's probe can still pass (a tier that is
+    // allowed and briefly reads not-cooling), so `spawnSwarmManager` does not throw and
+    // `wakeManager` returns `true` — `lastWakeSpawned` latches PERMANENT even though the
+    // desk it seated died on arrival for the exact same quota reason
+    // (watchDeskForDeathOnArrival, swarmManager.ts) that a `false` would have. The woke
+    // bit alone cannot tell "the probe found nothing to try" apart from "the probe found
+    // something, tried it, and quota killed it anyway" — both are the SAME root cause
+    // (every allowed tier is exhausted right now), so both must re-arm.
+    //
+    // `spawnBlock` is the ONE gate this file already trusts to answer "is any allowed
+    // tier usable right now" (§3b above, dispatch's own park gate) — reading it here
+    // folds that SAME live signal into the give-up decision instead of trusting a bit
+    // that was only ever a snapshot of the PROBE, not the OUTCOME. `kind: 'all-cooling'`
+    // is a quota wall (lifts on its own); `kind: 'none-allowed'` is the owner's own
+    // switch (lifts the moment they flip it back on) — re-arming costs nothing in either
+    // case, per the same reasoning as the `lastWakeSpawned === false` leg. A desk that
+    // died for a NON-quota reason (a real boot-crash bug) leaves at least one allowed
+    // tier un-cooled, so `spawnBlock` reads `null` and this stays latched, exactly as
+    // before.
+    const transientWall = rs.lastWakeSpawned === false || spawnBlock(now, await getAllowedModelTiers()) != null
+    if (!(transientWall && rs.lastWakeAt > 0 && now - rs.lastWakeAt >= MANAGER_UNREVIVABLE_RETRY_MS))
+      return
+    rs.attempts = 0
+    logLine(
+      engine,
+      'warn',
+      `マネージャー蘇生を再試行します — 使えるモデル tier が無いまま ${Math.round((now - rs.lastWakeAt) / 60_000)} 分経過` +
+        `(quota 壁が明けていれば回復する・統合待ち ${swarmCards.length} 件)`,
+      'integrate',
+    )
+    // …fall through to the resuscitate block below.
   }
 
   // RESUSCITATE (完了条件2+3): wake/resume the commander for the whole batch at once
@@ -5634,15 +6840,34 @@ export const runIntegratePass = async (
   )
   rs.lastWakeAt = now
   rs.attempts += 1
+  // Remember whether a desk was actually seated — the transient-vs-permanent bit the
+  // give-up re-arm reads (完了条件2). false ⇒ no usable tier (a quota wall: retryable at
+  // zero cost); true ⇒ a desk spawned (a boot-crash if it then dies: not re-armed).
+  rs.lastWakeSpawned = woke
+  // A SPAWN STARTS A NEW DESK, SO IT STARTS A NEW NUDGE BUDGET. The nudge counters
+  // describe one particular desk's refusal to answer; carrying them onto its successor
+  // would silently disarm the poke reflex for a desk that never ignored anything. Usually
+  // the successor paints while booting and reads 'active' (which clears these anyway), but
+  // that self-heal is a coincidence of timing, not a guarantee: an integrate pass can hold
+  // the lane for ~20m (verify + adversarial panel), and past MANAGER_HEARTBEAT_STALE_MS the
+  // boot paint has aged out — the next probe then sees a fresh desk as 'idle' with a spent
+  // budget and, with `unresponsiveLogged` also inherited, stalls integration in SILENCE.
+  // Reset explicitly so the invariant holds on cadence rather than on luck.
+  rs.nudges = 0
+  rs.lastNudgeAt = 0
+  rs.unresponsiveLogged = false
+  // This desk has proved NOTHING yet — it must be seen 'active' before its existence is
+  // allowed to refund the give-up budget (see provenSinceWake).
+  rs.provenSinceWake = false
   const names = swarmCards.map((c) => c.branch)
   logLine(
     engine,
     woke ? 'info' : 'warn',
     (rs.attempts === 1
-      ? 'worker ready — 司令官を起こしました'
-      : `司令官が応答しないため蘇生しました(${rs.attempts}回目)`) +
+      ? 'worker ready — マネージャーを起こしました'
+      : `マネージャーが応答しないため蘇生しました(${rs.attempts}回目)`) +
       (woke ? '' : '(使えるモデル tier が無く spawn 保留 — 次 pass で再試行)') +
-      `(統合判断は司令官・engine は統合しない): ` +
+      `(統合判断はマネージャー・engine は統合しない): ` +
       `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` 他${names.length - 5}件` : ''}`,
     'integrate',
   )
@@ -5909,7 +7134,9 @@ export const detectAnomalies = async (
  *  throttle (a 'done' entry isn't wrongly pruned on the 4-of-5 ticks the
  *  integrate pass skips):
  *    - 'done'               valid only while the card is still in 'review'.
- *    - 'review' / 'recover' valid only while the card is still in 'doing'.
+ *    - 'review' / 'recover' / 'recover-review' valid only while the card is still
+ *      in 'doing'. ('recover-review' is the ready-worker retry — its card is also
+ *      still in 'doing' until the move to review lands, so it shares the rule.)
  *  A vanished (deleted) card is always pruned. Pure state mutation — no IO.
  *  Exported for the unit test (driven with a plain engine + board snapshot). */
 export const pruneStuckMoves = (engine: ProjectEngine, tasks: readonly ProjectTask[]): void => {
@@ -6067,7 +7294,7 @@ export const fireFatalNotifications = (
       branch: a.branch,
       taskTitle: a.taskTitle,
       logHint:
-        '差分を確認し、問題なければ手動統合(司令官の「マージ」)で取り込んでください。エンジンはこのカードを自動では統合しません。',
+        '差分を確認し、問題なければ手動統合(マネージャーの「マージ」)で取り込んでください。エンジンはこのカードを自動では統合しません。',
     })
   }
 
@@ -6642,9 +7869,20 @@ export const getOrchestratorState = async (
   // deliberate pause stays machine-readable even after a restart wiped the in-memory
   // engine (the 0707 twin-dispatch root cause: this state was invisible from outside).
   const stopped = await isSwarmManualStopPersisted(key)
+  // The commander's own heartbeat (display-only presence line, same pure-read
+  // discipline). Read INDEPENDENTLY of the engine: a human-opened commander desk
+  // beats into the same file whether or not an engine exists this session, so the
+  // presence line must not go dark just because the engine store is empty.
+  const manager = await readManagerHeartbeatInfo(projectPath)
   const engine = store.engines.get(key)
   if (!engine) {
-    return { ...emptyState(), autonomyRemembered: remembered, manualStop: stopped, manualStopPersisted: stopped }
+    return {
+      ...emptyState(),
+      autonomyRemembered: remembered,
+      manualStop: stopped,
+      manualStopPersisted: stopped,
+      manager,
+    }
   }
   // Read the Board cards for the lead-time KPI (read-only — never mutates). A
   // board blip just yields an empty lead time this poll; the counter-based rates
@@ -6655,7 +7893,7 @@ export const getOrchestratorState = async (
   } catch {
     tasks = []
   }
-  return stateOf(engine, deps.isAlive, tasks, remembered, stopped)
+  return { ...stateOf(engine, deps.isAlive, tasks, remembered, stopped), manager }
 }
 
 /** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the

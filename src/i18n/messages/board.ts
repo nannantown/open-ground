@@ -8,8 +8,8 @@ export const board = {
     'board.col.doing': 'In progress',
     'board.col.review': 'In review',
     'board.col.done': 'Done',
-    'board.col.blocked': 'Blocked',
-    'board.col.blocked.hint': 'Conflict / needs attention',
+    'board.col.blocked': 'Needs decision',
+    'board.col.blocked.hint': 'Waiting for your decision — nothing moves automatically',
     // Card status
     // Card reason
     // Toolbar
@@ -173,8 +173,8 @@ export const board = {
     'board.col.doing': '実行中',
     'board.col.review': 'レビュー待ち',
     'board.col.done': '完了',
-    'board.col.blocked': 'ブロック',
-    'board.col.blocked.hint': 'コンフリクト / 要対応',
+    'board.col.blocked': '判断待ち',
+    'board.col.blocked.hint': 'あなたの判断を待っています — 自動では動きません',
     // Card status
     // Card reason
     // Toolbar

@@ -44,11 +44,11 @@
 // extra gating is needed here; the server /api/swarm/* routes are owner-only too.
 
 import { useCallback, useRef, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, Gauge, MessageSquare, Power, Send } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, ClipboardCheck, Gauge, MessageSquare, Power, Send } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
-import type { SwarmEngineState } from './useSwarmEngine'
+import { commanderPresence, type SwarmEngineState } from './useSwarmEngine'
 
 /** The commander CONVERSATION (/manage) session, owned by SwarmModule (exactly
  *  like the supply session). null = not launched — the stage shows the launch
@@ -221,6 +221,13 @@ export const SwarmManagerPane = ({
       ? t('projectPanel.swarm.manager.engineRunning')
       : t('projectPanel.swarm.manager.engineStopped')
 
+  // Commander presence (the inspection line): fresh heartbeat → active, else
+  // standby (fail-safe on absent/unreadable). The review count is the inspection
+  // queue — how many finished jobs wait for the commander's check before landing.
+  const manager = engine.manager
+  const presence = commanderPresence(manager)
+  const reviewCount = engine.reviews.length
+
   // KPI roll-up (the analytics layer). "Empty" = the engine has neither logged a
   // counted event NOR completed a card this session → show the explainer instead
   // of a wall of dashes/zeros.
@@ -371,6 +378,72 @@ export const SwarmManagerPane = ({
           </div>
 
           {error && <p className="mt-2.5 text-[11px] leading-relaxed text-accent">{error}</p>}
+        </div>
+
+        {/* ── Commander presence (the inspection line) ──────────────────────────
+            Explains the post-worker quiet minutes: fresh heartbeat → "the
+            commander is working" (+ its own one-line note + last-report age);
+            stale/absent → "resting — wakes on the next finish" (fail-safe: a
+            missing/unreadable heartbeat only ever degrades to this standby
+            wording). When review cards are waiting, the inspection queue count
+            makes the worker-finish → inspection → live pipeline position
+            readable. Static readout — no controls, so the 5-state interactive
+            contract doesn't apply. Owner-plain wording (owner-surface rule,
+            2026-07-17); paper ink tokens keep 4.5:1+ contrast. */}
+        <div className="shrink-0 border-t border-line-soft px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <ClipboardCheck size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+            <span className="label-cap text-ink-faint">
+              {t('projectPanel.swarm.manager.presenceHeading')}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {/* Same beacon vocabulary as the session dots: azure = working now,
+                ink-faint = inert (resting). */}
+            <span
+              className={`h-[6px] w-[6px] shrink-0 rounded-full ${
+                presence === 'active' ? 'bg-azure' : 'bg-ink-faint'
+              }`}
+              aria-hidden
+            />
+            <span className="text-[12px] font-medium text-ink">
+              {presence === 'active'
+                ? t('projectPanel.swarm.manager.presenceActive')
+                : t('projectPanel.swarm.manager.presenceStandby')}
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] leading-snug text-ink-subtle">
+            {presence === 'active'
+              ? t('projectPanel.swarm.manager.presenceActiveHint')
+              : t('projectPanel.swarm.manager.presenceStandbyHint')}
+          </p>
+          {/* The commander's own one-line note — its self-reported "doing now"
+              (free-form, often Japanese). Shown only while fresh: a stale note
+              describes a PAST episode and would read as a live claim. */}
+          {presence === 'active' && manager?.note && (
+            <p className="mt-1.5 truncate text-[11px] text-ink-muted" title={manager.note}>
+              {manager.note}
+            </p>
+          )}
+          {/* Last-report age (server clock) — shown whenever a heartbeat exists,
+              so a resting desk still says how long ago it last spoke. */}
+          {manager && (
+            <p className="mt-0.5 text-[10px] text-ink-faint">
+              {t('projectPanel.swarm.manager.presenceLastBeat', {
+                ago: formatDuration(manager.ageMs),
+              })}
+            </p>
+          )}
+          {reviewCount > 0 && (
+            <div className="mt-2 border-t border-line-soft pt-2">
+              <div className="text-[12px] font-medium tabular-nums text-ink">
+                {t('projectPanel.swarm.manager.presenceQueue', { count: reviewCount })}
+              </div>
+              <p className="mt-0.5 text-[10px] leading-snug text-ink-faint">
+                {t('projectPanel.swarm.manager.presenceQueueHint')}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* ── KPI roll-up (the analytics layer) ─────────────────────────────────

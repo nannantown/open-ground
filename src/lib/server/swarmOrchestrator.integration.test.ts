@@ -57,6 +57,16 @@ import {
   MANAGER_HEARTBEAT_STALE_MS,
   MANAGER_RESUME_GRACE_MS,
   MAX_MANAGER_RESUME_ATTEMPTS,
+  // The presence probe itself (2026-07-18): absent / idle / active off the REAL
+  // sessions store + manager.json + transcript, with only the PTY signal injected.
+  defaultManagerPresence,
+  defaultNudgeManager,
+  STALL_ESCALATE_DELAY_MS,
+  STALL_ECHO_GUARD_MS,
+  // Commander-presence display read (検品可視化): the full heartbeat snapshot the
+  // Swarm tab renders — exercised against the REAL file + real repo key below.
+  readManagerHeartbeatInfo,
+  getOrchestratorState,
   __resetOrchestratorForTests,
   emptyMetricsCounters,
   type OrchestratorDeps,
@@ -65,6 +75,7 @@ import {
   type VerifyCheck,
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
+import { recordSwarmSession } from './swarmSessions'
 import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
@@ -97,6 +108,7 @@ interface Repo {
 }
 
 let home: string
+let savedClaudeCfg: string | undefined
 let scratch: string
 
 const setupRepo = async (): Promise<Repo> => {
@@ -285,15 +297,23 @@ const reviewClean: NonNullable<IntegrationDeps['review']> = async () => ({
 // MANAGER-ONLY INTEGRATION (2026-07-15): the integrate pass now WAKES the commander
 // instead of merging. The REAL defaultWakeManager spawns a `claude` PTY
 // (spawnSwarmManager) — an integration test must never do that — so these tests fake
-// the wake: isManagerActive:false (desk absent ⇒ the engine wakes) and wakeManager
-// records the branches it was asked to wake. Returns the recorder + the two deps to
+// the wake: managerPresence:'absent' (no desk ⇒ the engine spawns one) and wakeManager
+// records the branches it was asked to wake. nudgeManager must never fire on this path
+// (it is the LIVE-desk response) — it throws so a regression that routes an absent desk
+// through the nudge is loud rather than silent. Returns the recorder + the deps to
 // spread over defaultDeps().
-const wakeFake = (): { woke: string[]; deps: Pick<IntegrationDeps, 'isManagerActive' | 'wakeManager'> } => {
+const wakeFake = (): {
+  woke: string[]
+  deps: Pick<IntegrationDeps, 'managerPresence' | 'nudgeManager' | 'wakeManager'>
+} => {
   const woke: string[] = []
   return {
     woke,
     deps: {
-      isManagerActive: async () => false,
+      managerPresence: async () => 'absent',
+      nudgeManager: async () => {
+        throw new Error('nudgeManager must not be called when the desk is absent')
+      },
       wakeManager: async (_p, cards) => {
         for (const c of cards) woke.push(c.branch)
         return true
@@ -315,11 +335,21 @@ beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-orch-home-')))
   scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-orch-scratch-')))
   process.env.OPENGROUND_HOME = home
+  // Pin claude's config as well: this file reaches claudeTrust (via
+  // ensureClaudeFolderTrusted / removeClaudeFolderTrust), whose path is
+  // CLAUDE_CONFIG_PATH ?? homedir()/.claude.json — a homedir anchor that
+  // OPENGROUND_HOME cannot move. Unpinned, these cases read and REWRITE the
+  // user's real ~/.claude.json (their claude OAuth tokens live there).
+  // Caught 2026-07-19 by the production-home fence; it had been live and silent.
+  savedClaudeCfg = process.env.CLAUDE_CONFIG_PATH
+  process.env.CLAUDE_CONFIG_PATH = join(home, '.claude.json')
   __resetMigrationCacheForTests()
   __resetOrchestratorForTests()
 })
 afterEach(async () => {
   __resetOrchestratorForTests()
+  if (savedClaudeCfg === undefined) delete process.env.CLAUDE_CONFIG_PATH
+  else process.env.CLAUDE_CONFIG_PATH = savedClaudeCfg
   await rm(home, { recursive: true, force: true })
   await rm(scratch, { recursive: true, force: true })
 })
@@ -383,7 +413,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     // The branch's worktree + PTY are kept (the commander tears them down on merge).
     expect(await exists(worktree)).toBe(true)
     expect(killed).toEqual([]) // the engine killed no PTY — it did not land anything
-    expect(engine.log.some((l) => l.message.includes('司令官を起こしました'))).toBe(true)
+    expect(engine.log.some((l) => l.message.includes('マネージャーを起こしました'))).toBe(true)
     expect(engine.log.some((l) => l.message.startsWith('integrated (ff)'))).toBe(false)
   })
 
@@ -680,6 +710,10 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
   it('心拍を止める → 検知 → spawnSwarmManager(モック)を呼ぶ → 3連続失敗で fatal 通知', async () => {
     const { proj } = await setupRepo()
 
+    // A REAL persisted commander session — without it the presence probe short-circuits
+    // to 'absent' on the store alone and the PTY signal would never be consulted.
+    await recordSwarmSession(proj, 'manager', 'manager-session-uuid')
+
     // The commander's heartbeat is a REAL file under the isolated HOME
     // (~/.openground/swarm/<repoKey>/manager.json). It beat ONCE, then STOPPED.
     const t0 = 1_700_000_000_000
@@ -693,9 +727,15 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
     ).toBe(false)
 
     // spawnSwarmManager is the wakeManager seam — count it, NEVER launch claude. The
-    // resurrected desk never recovers (never beats again), so every grace-spaced pass
-    // re-detects the stale heartbeat and re-wakes, until the reflex gives up.
+    // resurrected desk never comes up (the PTY stays gone), so every grace-spaced pass
+    // re-detects an absent desk and re-wakes, until the reflex gives up.
     let spawnCalls = 0
+    // The commander PROCESS's existence, driven through the test (the PTY pool is
+    // process-global, so an integration test injects this one probe rather than
+    // spawning a real claude). Everything else — sessions store, manager.json,
+    // transcript — is read for real off the isolated HOME.
+    let deskLive = true
+    let deskPaintAt: number | null = null
     const fatals: SwarmFatalNotification[] = []
     const { boardDeps } = makeBoard([todoCard('a', { boardColumn: 'review', branch: 'swarm/a' })])
     const deps: OrchestratorDeps & IntegrationDeps = {
@@ -705,10 +745,23 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
       // seams the resurrection reflex doesn't exercise.
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
-      // REAL hung-detection: read the REAL heartbeat file + the REAL freshness rule
-      // (the live-PTY half of defaultIsManagerActive needs a real PTY — absent in a
-      // test — so this isolates exactly the heartbeat signal card B adds).
-      isManagerActive: async (p, now) => isManagerHeartbeatFresh(await readManagerHeartbeatAt(p), now),
+      // REAL presence detection, REAL files: defaultManagerPresence reads the actual
+      // sessions store + manager.json under the isolated HOME. Only the PTY probe is
+      // injected — `deskLive` models the commander PROCESS existing or not, which is
+      // what this test drives (present-and-beating → died → resurrected).
+      managerPresence: async (p, now) =>
+        defaultManagerPresence(p, now, {
+          activity: () => ({
+            live: deskLive,
+            lastOutputAt: deskPaintAt,
+            terminalId: deskLive ? 'pty-manager' : null,
+          }),
+        }),
+      // A desk that is GONE must be spawned, never nudged (nothing to nudge) — throw so
+      // a regression that routes 'absent' through the nudge path is loud, not silent.
+      nudgeManager: async () => {
+        throw new Error('nudgeManager must not be called when the desk is absent')
+      },
       // The spawnSwarmManager boundary (mock).
       wakeManager: async () => {
         spawnCalls += 1
@@ -724,14 +777,15 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
       await runIntegratePass(engine, deps, now)
     }
 
-    // 1) Desk STILL beating (5 min old) → healthy → NO resurrection.
+    // 1) Desk up and STILL beating (5 min old) → healthy → NO resurrection.
     await pass(t0 + 5 * 60_000)
     expect(spawnCalls).toBe(0)
 
-    // 2) Heartbeat STOPPED: `now` past the stale window → detected hung → resurrect, up
-    //    to MAX, one wake per grace window.
+    // 2) The commander PROCESS dies (PTY gone) and the heartbeat goes stale with it →
+    //    'absent' → resurrect, up to MAX, one wake per grace window.
     const STALE = MANAGER_HEARTBEAT_STALE_MS
     const GRACE = MANAGER_RESUME_GRACE_MS
+    deskLive = false
     let now = t0 + STALE + 60_000
     for (let i = 0; i < MAX_MANAGER_RESUME_ATTEMPTS; i++) {
       await pass(now)
@@ -746,14 +800,236 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
     expect(fatals.map((n) => n.event)).toEqual(['manager-unrevivable'])
     expect(fatals[0].projectPath).toBe(proj)
 
-    // 4) The commander RECOVERS (beats again) → detection clears → self-heals, and the
-    //    one-shot fatal is not re-fired.
+    // 4) The commander RECOVERS — a desk comes back up and beats again → detection
+    //    clears → self-heals, and the one-shot fatal is not re-fired.
     now += GRACE + 1000
+    deskLive = true
     expect(await writeManagerHeartbeat(proj, { phase: 'integrate' }, now)).toBe(true)
     await pass(now)
     expect(spawnCalls).toBe(MAX_MANAGER_RESUME_ATTEMPTS) // no wake — the desk is alive again
     expect(fatals).toHaveLength(1) // still one-shot
     expect(engine.managerResume?.attempts).toBe(0) // reflex disarmed by the sighting of health
+
+    // 5) THE 2026-07-18 REGRESSION, against real files: the desk is UP but has gone
+    //    quiet — the beat is now hours stale (the commander only beats while integrating)
+    //    and the PTY has not painted. The old probe ANDed live-PTY with beat freshness,
+    //    so this exact state was read as HUNG and "resuscitated" three times before
+    //    firing a FALSE fatal. It must now read 'idle': the desk is alive, so nothing is
+    //    spawned and nothing escalates.
+    now += 6 * 60 * 60_000 // hours later — far past any staleness window
+    deskPaintAt = null
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
+      }),
+    ).toBe('idle')
+    // …and one paint is enough to make it unambiguously 'active' again.
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: now - 30_000, terminalId: 'pty-manager' }),
+      }),
+    ).toBe('active')
+  })
+})
+
+// ── The echo discount ITSELF, against real files (2026-07-18) ──────────────────
+// These exist because the unit tests around echoUntil could not fail: every one of them
+// injects a managerPresence fake and re-implements the discount on the test side, so they
+// pin only that the CALLER passes a cutoff — never that defaultManagerPresence honours it.
+// Deleting the discount (`realPaint = painted`) left all 507 of them green. The rule has
+// to be asserted where it actually lives.
+describe('defaultManagerPresence — the echo discount (echoUntil) is honoured', () => {
+  it('ignores paint inside the echo window, and still counts paint past it', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', 'manager-session-uuid')
+    // A beat that EXISTS but went stale — the production shape (the commander beats only
+    // while integrating), so the verdict has to come from the PTY/transcript channels.
+    const t0 = 1_700_000_000_000
+    expect(await writeManagerHeartbeat(proj, { phase: 'integrate' }, t0)).toBe(true)
+    const now = t0 + 6 * 60 * 60_000 // hours later — far past any staleness window
+    const wroteAt = now - 60_000 // when WE last wrote into that PTY (nudge or spawn)
+    const echoUntil = wroteAt + STALL_ECHO_GUARD_MS
+
+    // (a) The desk's only paint is our own write bouncing back off the TUI. Recent, but
+    //     not life — discounting it is the whole point, and it is what lets the nudge
+    //     budget empty (§7-10) and the resurrection guard fire (§7-12).
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: wroteAt, terminalId: 'pty-manager' }),
+        echoUntil,
+      }),
+    ).toBe('idle')
+
+    // (b) Paint that lands PAST the guard is real work and must still count — otherwise
+    //     the discount would gag a desk that genuinely answered.
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: echoUntil + 1, terminalId: 'pty-manager' }),
+        echoUntil,
+      }),
+    ).toBe('active')
+
+    // (c) With nothing of ours to discount, that same early paint counts as it always did.
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: wroteAt, terminalId: 'pty-manager' }),
+        echoUntil: 0,
+      }),
+    ).toBe('active')
+  })
+})
+
+// ── A repo that has NEVER integrated still gets a usable presence verdict ──────
+describe('defaultManagerPresence — a never-written heartbeat is not evidence of health', () => {
+  it('reads a live-but-silent desk as idle even with NO manager.json (so it can be nudged)', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', 'manager-session-uuid')
+    // No writeManagerHeartbeat at all — the state of every repo before its first
+    // integration. isManagerHeartbeatFresh(null) is deliberately "fresh" (the old probe
+    // must not tear down a hand-started desk), and honouring that here would return
+    // 'active' on the beat alone, so the PTY/transcript channels would never be reached
+    // and such a desk could NEVER be poked. Dropping the fail-open is safe now that
+    // 'idle' only pokes.
+    const now = 1_700_000_000_000
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
+      }),
+    ).toBe('idle')
+    // A desk with no beat but REAL recent paint is still unambiguously working.
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: true, lastOutputAt: now - 30_000, terminalId: 'pty-manager' }),
+      }),
+    ).toBe('active')
+    // …and with no PTY at all it is still 'absent' (the spawn path is unchanged).
+    expect(
+      await defaultManagerPresence(proj, now, {
+        activity: () => ({ live: false, lastOutputAt: null, terminalId: null }),
+      }),
+    ).toBe('absent')
+  })
+})
+
+// ── The poke itself: ESC first, then the instruction (2026-07-18) ──────────────
+// A bare line+CR would append to whatever is already sitting in the desk's input box
+// and submit the concatenation — and the commander desk runs with
+// `--dangerously-skip-permissions`, so there is no approval gate to catch the mess. The
+// "a desk being typed into paints, so it reads 'active'" argument only covers typing
+// happening RIGHT NOW; a prompt typed and then LEFT ages out and reads 'idle'. So the
+// poke uses the full defaultEscalate shape (ESC → settle → instruction), not just its
+// tail. Exercised against the REAL sessions store under the isolated HOME.
+describe('defaultNudgeManager — the live-desk poke clears pending input first', () => {
+  it('writes ESC, waits STALL_ESCALATE_DELAY_MS, then the instruction + CR', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', 'manager-session-uuid')
+    const writes: string[] = []
+    const waits: number[] = []
+    const ok = await defaultNudgeManager(proj, {
+      write: (id, data) => {
+        writes.push(`${id}:${data}`)
+        return true
+      },
+      sleep: async (ms) => {
+        waits.push(ms)
+      },
+      activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
+    })
+    expect(ok).toBe(true)
+    expect(writes).toHaveLength(2)
+    expect(writes[0]).toBe('pty-manager:\x1b') // the interrupt — BEFORE any text
+    expect(writes[1]).toMatch(/\r$/) // the instruction, CR-terminated
+    expect(writes[1]).toContain('統合待ちのカードがあります')
+    expect(waits).toEqual([STALL_ESCALATE_DELAY_MS])
+  })
+
+  it('returns false without waiting or typing when the ESC write misses (PTY gone)', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', 'manager-session-uuid')
+    let slept = false
+    const writes: string[] = []
+    const ok = await defaultNudgeManager(proj, {
+      write: (_id, data) => {
+        writes.push(data)
+        return false
+      },
+      sleep: async () => {
+        slept = true
+      },
+      activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
+    })
+    expect(ok).toBe(false)
+    expect(writes).toEqual(['\x1b']) // never got as far as the instruction
+    expect(slept).toBe(false)
+  })
+})
+
+// ── Commander-presence display read (検品可視化, card 2026-07-17) ───────────────
+// The Swarm tab explains the post-worker quiet minutes ("the commander is
+// inspecting") off the SAME manager.json the resurrection reflex reads — but via
+// its OWN display snapshot: full record (phase/note/updatedAt) + a server-clock
+// freshness verdict, whole-or-null on anything unreadable (the reflex's null=fresh
+// fail-open must NOT leak into rendering, where absent = standby). Exercised
+// against the REAL file under the isolated HOME + the real repo key.
+describe('readManagerHeartbeatInfo — the presence snapshot the Swarm tab renders', () => {
+  it('reads the REAL beat back whole — phase/note pass through, freshness on the server clock', async () => {
+    const { proj } = await setupRepo()
+    const t0 = 1_700_000_000_000
+    expect(await writeManagerHeartbeat(proj, { phase: 'merge', note: '検品中 — swarm/x' }, t0)).toBe(true)
+
+    // Inside the 10-min window → fresh (active), age measured from the injected clock.
+    const fresh = await readManagerHeartbeatInfo(proj, t0 + 3 * 60_000)
+    expect(fresh).toEqual({
+      phase: 'merge',
+      note: '検品中 — swarm/x',
+      updatedAt: new Date(t0).toISOString(),
+      ageMs: 3 * 60_000,
+      fresh: true,
+    })
+
+    // Past the stale window → the SAME record, no longer fresh (standby wording).
+    const stale = await readManagerHeartbeatInfo(proj, t0 + MANAGER_HEARTBEAT_STALE_MS + 1)
+    expect(stale?.fresh).toBe(false)
+    expect(stale?.note).toBe('検品中 — swarm/x')
+
+    // A skewed FUTURE stamp clamps to "just now" — never a negative age.
+    const skewed = await readManagerHeartbeatInfo(proj, t0 - 60_000)
+    expect(skewed?.ageMs).toBe(0)
+    expect(skewed?.fresh).toBe(true)
+  })
+
+  it('degrades to null on absent / corrupt / non-repo — nothing to show, never a throw (完了条件4)', async () => {
+    const { proj } = await setupRepo()
+    // Never beat → null (display "standby"), NOT the reflex's null=fresh fail-open.
+    expect(await readManagerHeartbeatInfo(proj)).toBeNull()
+    // Hand-corrupted file → null (fail-safe).
+    expect(await writeManagerHeartbeat(proj, { phase: 'merge' })).toBe(true)
+    const file = join(home, 'swarm')
+    const { readdirSync } = await import('fs')
+    const repoDir = readdirSync(file)[0]
+    await writeFile(join(file, repoDir, 'manager.json'), '{ torn')
+    expect(await readManagerHeartbeatInfo(proj)).toBeNull()
+    // A path that is not a git repo (no repo key derivable) → null.
+    expect(await readManagerHeartbeatInfo(join(scratch, 'not-a-repo'))).toBeNull()
+  })
+
+  it('getOrchestratorState CARRIES the presence — even with NO engine this session (restart reality)', async () => {
+    const { proj } = await setupRepo()
+    const t0 = Date.now()
+    expect(await writeManagerHeartbeat(proj, { phase: 'status', note: '統合完了・待機' }, t0)).toBe(true)
+
+    // No engine was ever started for this project (exactly the post-restart state):
+    // the empty stopped state still carries the commander heartbeat, because a
+    // human-opened desk beats without an engine and the presence line must show it.
+    const state = await getOrchestratorState(proj)
+    expect(state.running).toBe(false)
+    expect(state.manager?.phase).toBe('status')
+    expect(state.manager?.note).toBe('統合完了・待機')
+    expect(state.manager?.fresh).toBe(true) // just written — well inside the window
+
+    // And a project with NO heartbeat reads back null (absent, not an error).
+    const { proj: bare } = await setupRepoMaster()
+    expect((await getOrchestratorState(bare)).manager).toBeNull()
   })
 })
 
@@ -843,17 +1119,17 @@ describe('touchesSwarmPaths — the swarm-code path matcher', () => {
 })
 
 describe('swarmSafetyCheck — the real swarm-safety suite runner', () => {
-  it('applicable: true only when BOTH safety test files are present', async () => {
+  it('applicable: true only when EVERY safety test file is present', async () => {
     const empty = await realpath(await mkdtemp(join(scratch, 'ss-empty-')))
     expect(await swarmSafetyCheck.applicable(empty)).toBe(false) // no files → not OPEN GROUND's source
-    // both files present (empty stubs) → applicable
+    // every file present (empty stubs) → applicable
     const has = await realpath(await mkdtemp(join(scratch, 'ss-has-')))
     for (const t of SWARM_SAFETY_TESTS) {
       await mkdir(dirname(join(has, t)), { recursive: true })
       await writeFile(join(has, t), '')
     }
     expect(await swarmSafetyCheck.applicable(has)).toBe(true)
-    // only ONE of the two present → NOT applicable (an incomplete net is not the net)
+    // only ONE of them present → NOT applicable (an incomplete net is not the net)
     const partial = await realpath(await mkdtemp(join(scratch, 'ss-partial-')))
     await mkdir(dirname(join(partial, SWARM_SAFETY_TESTS[0])), { recursive: true })
     await writeFile(join(partial, SWARM_SAFETY_TESTS[0]), '')
@@ -865,14 +1141,14 @@ describe('swarmSafetyCheck — the real swarm-safety suite runner', () => {
     // survivors — vitest would silently skip the missing file, so run() guards on it.
     const dir = await realpath(await mkdtemp(join(scratch, 'ss-tampered-')))
     await mkdir(dirname(join(dir, SWARM_SAFETY_TESTS[0])), { recursive: true })
-    await writeFile(join(dir, SWARM_SAFETY_TESTS[0]), '') // only ONE of the two present
+    await writeFile(join(dir, SWARM_SAFETY_TESTS[0]), '') // only ONE of them present
     const r = await swarmSafetyCheck.run(dir)
     expect(r.ok).toBe(false)
     expect(r.output).toMatch(/safety test missing/)
   })
 
   it('run: RED when vitest is unavailable (uninstalled project) — never waved through', async () => {
-    // Net intact (both files present) but no node_modules/.bin/vitest → still RED.
+    // Net intact (every file present) but no node_modules/.bin/vitest → still RED.
     const dir = await realpath(await mkdtemp(join(scratch, 'ss-novitest-')))
     for (const t of SWARM_SAFETY_TESTS) {
       await mkdir(dirname(join(dir, t)), { recursive: true })

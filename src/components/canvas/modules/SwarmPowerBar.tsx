@@ -16,8 +16,8 @@
 // PURELY PRESENTATIONAL: the power composition (start engine + launch commander
 // + launch supply, each idempotent) lives in SwarmModule, which owns those
 // actions; these pieces render the state + the switch and call `onToggle`.
-// Auto-integrate stays a SEPARATE switch on the commander dashboard (default
-// off) — this switch never touches it.
+// (No separate auto-integrate switch exists — retired 2026-07-16. The engine
+// never pushes; waking the commander for ready work rides the engine ON state.)
 //
 // SECURITY: rendered only inside SwarmModule, itself behind the owner+toggle
 // gate; the /api/swarm/* routes the composition calls are owner-only too. No

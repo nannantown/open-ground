@@ -84,10 +84,12 @@ import {
   gateFromFlags,
   isModuleIdEnabled,
   nativeDescriptors,
+  tabLabel,
   type ModuleGate,
   type TabDef,
 } from '@/components/canvas/moduleRegistry'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
+import { PersonaModule } from '@/components/canvas/modules/PersonaModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { usePlayback } from '@/lib/playback/playbackStore'
 import { PlaybackEq } from '@/components/canvas/PlaybackEq'
@@ -118,7 +120,11 @@ const isMvpVisibleTab = isModuleIdEnabled
 // Module-level constant so the `experiments` fallback (used when the prop is
 // undefined, e.g. a non-owner render) is referentially stable across renders —
 // see moduleGate's useMemo below, which depends on `experiments` by identity.
-const NO_EXPERIMENT_FLAGS: ExperimentFlags = { swarm: false, sandbox: false }
+const NO_EXPERIMENT_FLAGS: ExperimentFlags = {
+  swarm: false,
+  sandbox: false,
+  persona: false,
+}
 
 // The single right-click action a tab in the row offers: 'detach' a custom tab
 // (non-destructive, the module stays in the library) or 'disable' a built-in
@@ -1070,10 +1076,12 @@ const OwnedProjectBody = ({
     const hidden = new Set(data?.disabledModules ?? [])
     return nativeDescriptors(moduleGate).map(d => ({
       id: d.id,
-      label: d.label,
+      // Same resolution as the tab row, so a localised tab reads identically in
+      // both places (see tabLabel / TabDef.labelKey).
+      label: tabLabel(d, t),
       enabled: !hidden.has(d.id),
     }))
-  }, [data?.disabledModules, moduleGate])
+  }, [data?.disabledModules, moduleGate, t])
   // The single right-click action for a tab in the row (see TabRowAction).
   // null = no menu: the role can't manage it, or it's the last remaining tab
   // (the floor invariant — never strand a project with zero visible tabs).
@@ -2459,6 +2467,14 @@ const OwnedProjectBody = ({
         // builds the real orchestration UI; this mounted placeholder is what the
         // gate makes appear when the owner turns the experiment on.
         <SwarmModule project={project} />
+      ) : view === 'persona' && experiments?.persona ? (
+        // Owner-only experiment, gated exactly like Swarm above: re-checking the
+        // flag HERE (not just relying on the hidden tab) means a forged
+        // `view: 'persona'` from a stale/hostile localStorage value never mounts
+        // the surface for a non-owner — and the fallback effect then moves the
+        // view off it. Load-bearing here specifically: this tab reads the
+        // owner's personal corpus.
+        <PersonaModule />
       ) : isCustomTabId(view) ? (
         // Custom tab: the module's component in a sandboxed iframe, plus the
         // owner's claude sidebar. Keyed by module id so switching between two
@@ -3350,7 +3366,7 @@ const ViewTabs = ({
               <span className="pointer-events-none absolute -left-2 top-1 bottom-1 w-0.5 bg-accent" />
             )}
             {m.icon}
-            <span>{m.label}</span>
+            <span>{tabLabel(m, t)}</span>
             {tabPlayback && (
               <span
                 title={tabPlayback.title ?? 'Playing'}

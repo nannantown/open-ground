@@ -9,7 +9,9 @@
 // existing importers (and tests) keep their path.
 
 import { spawn } from 'child_process'
-import { basename } from 'path'
+import { mkdtemp, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { basename, join } from 'path'
 
 /** A child-process runner for any engine stage that spawns a tool which itself FORKS a
  *  worker pool — the merge gate's two vitest suites + eslint, and the self-supply
@@ -136,3 +138,162 @@ export const runGateProcess = (
       })
     })
   })
+
+// ── The untrusted-child environment (2026-07-19) ──────────────────────────────
+//
+// THE HOLE THIS CLOSES. Every gate/scanner spawn in this repo runs CODE THAT
+// COMES FROM THE ARTIFACT BEING JUDGED: eslint loads the worktree's .eslintrc and
+// its plugins, vitest loads the worktree's `vitest.config.ts` and every file in
+// its `setupFiles` — arbitrary execution at CONFIG-LOAD time, before a single
+// assertion runs. Those spawns used to be handed `{ ...process.env }`, i.e. the
+// engine's real `OPENGROUND_HOME`, and the comment at each site argued this was
+// safe because the suite "re-pins OPENGROUND_HOME to a tmp dir itself
+// (src/test/setup-home.ts runs as a vitest setupFile before any test module
+// loads)".
+//
+// That argument is CIRCULAR. `setup-home.ts` and the `vitest.config.ts` that
+// loads it BOTH LIVE IN THE WORKTREE — they are part of the untrusted artifact.
+// The engine was handing the production home to untrusted code and depending on
+// that same untrusted code to disarm itself. No malice is required to break it:
+// a branch that merely drops `setupFiles` in a bad rebase points the entire
+// suite at the owner's real ~/.openground.
+//
+// THE INVERSION. The engine decides instead of asking. It mkdtemps a throwaway
+// home and hands THAT over, so the production path never enters the child's env
+// at all. An honest branch is unaffected (its setup-home re-points
+// OPENGROUND_HOME at its own tmp dir — tmp → tmp, same as today); a branch whose
+// isolation is gone still cannot NAME the real home, because it was never told
+// it. Proven end-to-end against deliberately tampered fixtures in
+// gateEnv.test.ts.
+//
+// WHAT THIS IS NOT. This is an ENV-HANDOFF control, not a sandbox. `HOME` itself
+// is deliberately left alone (~20 server modules resolve real paths through
+// `homedir()` — ~/.claude transcripts, trust, skills, hooks — and the suite's own
+// git-backed tests need the owner's git identity), so code that ACTIVELY deletes
+// the injected var can still derive `homedir()/.openground`. Confining that
+// requires OS-level confinement (the `sandbox` experiment, docs/SANDBOX_EXPERIMENT.md),
+// not another in-process assertion. Reasoning + the rejected alternatives:
+// docs/commander/03-integration-review.md §2.9.
+//
+// SCOPE — VERIFIERS ONLY. Every TS caller here only INSPECTS the tree (tsc,
+// eslint, vitest, the self-supply scanners), so stripping is free. A step that
+// PRODUCES the shipped artifact must not be starved of its build inputs — see
+// electron/gateEnv.js `buildProducerEnv`, which exempts the public BAKED_KEYS for
+// `npm run build`. If a producer step is ever added on this side, it needs the
+// same exemption.
+
+/** mkdtemp prefix for the throwaway home handed to gate/scanner children. Exported
+ *  so a test can assert the child was pointed at OUR dir and not merely at "some
+ *  tmp dir" it made for itself. */
+export const GATE_HOME_PREFIX = 'openground-gate-home-'
+
+/** Env vars that hand a child a POINTER INTO THE OWNER'S REAL DATA. Each is
+ *  REDIRECTED into the throwaway home rather than deleted, because deleting is
+ *  strictly worse here: every one of these readers falls back to a
+ *  `homedir()`-derived production path when its var is unset
+ *  (`paths.ts openGroundHome` → ~/.openground; `youCorpus.defaultAutoMemoryDir` →
+ *  ~/.claude/projects/<key>/memory). Unsetting would hand over the real path by
+ *  omission — the exact failure mode this module exists to remove. */
+export const gateRedirects = (home: string): Record<string, string> => ({
+  OPENGROUND_HOME: home,
+  OPENGROUND_MEMORY_DIR: join(home, 'memory'),
+  OPENGROUND_CONCEPT_PATH: join(home, 'CONCEPT.md'),
+  // Same class, found in review round 3: claudeTrust.ts resolves
+  // `CLAUDE_CONFIG_PATH || join(homedir(), '.claude.json')` and WRITES to it
+  // (trusted-folder entries). It is not in src/test/setup-home.ts either — the
+  // suite relies on each test stubbing it — so an untrusted branch's test could
+  // reach the owner's real ~/.claude.json. Redirect, don't unset: unset is the
+  // homedir fallback. (Every existing test sets it in beforeEach, so pointing it
+  // at the throwaway home changes nothing for an honest branch.)
+  CLAUDE_CONFIG_PATH: join(home, 'claude.json'),
+})
+
+/** Secrets + identity that the engine's own process really does carry (the owner's
+ *  dev shell exports them; a claude session launched from inside the packaged app
+ *  inherits the Electron server's live env) and that untrusted branch code has no
+ *  business receiving.
+ *
+ *  This list is deliberately THE SAME SET `src/test/setup-home.ts` deletes at the
+ *  top of every suite — which is the same anti-pattern in miniature: the untrusted
+ *  artifact scrubbing the engine's secrets on the engine's behalf. Stripping them
+ *  HERE makes the guarantee independent of the branch, and changes nothing for an
+ *  honest one (its setup-home deletes them anyway, so no green test can depend on
+ *  them being set). */
+/** Secrets + AUTHORITY: never handed to untrusted code, and never bakeable.
+ *  MIRRORS `GATE_ENV_FORBIDDEN` in electron/secretPolicy.js (a TS server module
+ *  cannot import electron/); the parity test pins the two equal. */
+export const GATE_ENV_FORBIDDEN: readonly string[] = [
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'SUPABASE_FEEDBACK_TABLE',
+  'SUPABASE_MODULES_TABLE',
+  'SUPABASE_ROLES_TABLE',
+  'SUPABASE_SUBMISSIONS_TABLE',
+  'FEEDBACK_ADMIN_EMAILS',
+  'MODULE_ADMIN_EMAILS',
+  'OPENGROUND_OWNER_EMAILS',
+  'OPENGROUND_TESTER_EMAILS',
+  // The local-owner bypass that unlocks every owner-gated route (swarmGate.ts).
+  'OPENGROUND_LOCAL_OWNER',
+]
+
+/** PUBLIC values stripped from a verifier for TEST HERMETICITY only — the same set
+ *  `src/test/setup-home.ts` deletes. They are legitimately baked into the shipped
+ *  app and handed BACK to producer steps, which is why they must not live in
+ *  {@link GATE_ENV_FORBIDDEN}: the bake guard rejects everything forbidden, and
+ *  rejecting these would make `npm run build` emit an empty runtime-config.json.
+ *  MIRRORS `GATE_ENV_HERMETIC` in electron/secretPolicy.js. */
+export const GATE_ENV_HERMETIC: readonly string[] = [
+  'SUPABASE_URL',
+  'SUPABASE_ANON_KEY',
+  'OPENGROUND_REALTIME',
+  'OPENGROUND_COLLAB_WS_URL',
+]
+
+/** Everything a verifier child has stripped by NAME LIST. Kept as one exported
+ *  array so existing importers keep working. */
+export const GATE_ENV_STRIPPED: readonly string[] = [...GATE_ENV_FORBIDDEN, ...GATE_ENV_HERMETIC]
+
+/** Catch-all for secret-NAMED vars no hand list has caught up with — a hand list is
+ *  always behind. Round 2 found `OPENGROUND_COLLAB_TICKET_SECRET` (the HMAC shared
+ *  secret worker/README.md tells the owner to put in .env.local) missing from the
+ *  list; round 4 found the pattern itself blind to the names most likely to exist
+ *  on a developer machine — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+ *  `AWS_ACCESS_KEY_ID`, `api_key`, `MY_CREDENTIALS`, `DB_PASSWD`, `SIGNING_KEY` —
+ *  because it knew nothing of KEY / CREDENTIAL / PASSWD. Substring + `/i`, so
+ *  camelCase (`supabaseAuthToken`) is covered. False positives cost a verifier
+ *  nothing; producers are protected by the BAKED_KEYS exemption.
+ *  MIRRORS `SECRET_NAME_RE` in electron/secretPolicy.js — pinned by the parity test. */
+export const SECRET_NAME_RE = /SERVICE_ROLE|SECRET|PASSWORD|PASSWD|PRIVATE|TOKEN|KEY|CREDENTIAL/i
+
+/** Is this env var stripped from an untrusted child? (list OR secret-shaped name)
+ *  MUST match `isStrippedKey` in electron/gateEnv.js. */
+export const isStrippedKey = (key: string): boolean =>
+  GATE_ENV_STRIPPED.includes(key) || SECRET_NAME_RE.test(key)
+
+/** Build the env for a child that runs untrusted project code: `base` with every
+ *  production-data pointer REDIRECTED into `home` and every secret STRIPPED. Pure
+ *  (no I/O, no mutation of `base`) so the policy itself is unit-testable without
+ *  spawning anything. */
+export const gateEnvFor = (home: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = { ...base, ...gateRedirects(home) }
+  // Iterate the ENV, not the list: the secret-name catch-all can only see keys
+  // that are actually present. (No `keep` here — every TS site is a verifier.)
+  for (const key of Object.keys(env)) if (isStrippedKey(key)) delete env[key]
+  return env
+}
+
+/** Run `fn` with a freshly-mkdtemp'd throwaway home wired into a gate env, and
+ *  remove that home afterwards on EVERY path (including a thrown/rejected `fn` —
+ *  the rejection is re-thrown unchanged so each check's existing
+ *  `catch (e) { …e.stdout… }` tail-capture keeps working). The child is already
+ *  awaited-and-reaped by {@link runGateProcess} / execFile before the cleanup
+ *  runs; a cleanup failure is swallowed (a leftover tmp dir must never turn a
+ *  green gate red). */
+export const withGateEnv = async <T>(fn: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> => {
+  const home = await mkdtemp(join(tmpdir(), GATE_HOME_PREFIX))
+  try {
+    return await fn(gateEnvFor(home))
+  } finally {
+    await rm(home, { recursive: true, force: true }).catch(() => {})
+  }
+}

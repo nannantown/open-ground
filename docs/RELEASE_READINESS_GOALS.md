@@ -39,14 +39,14 @@
 | C-1 | swarm 機能の可視化 / API 到達 | (現状)owner ロール + `experiments.swarm` ON。(公開後)GAP-1 で設計する opt-in | 不可視・403 | 設定は永続(ロール必須) | ✅ 閉じている(開き方は未設計 = GAP-1) |
 | C-2 | worker の自動 dispatch(drain/自動運転) | Swarm UI から owner が明示 start(`POST /api/swarm/orchestrator/start`) | OFF | **OFF に戻る**(in-memory。`Settings.swarmAutonomyOn` は「前回 ON だった」の表示専用 — auto-resume しない) | ✅ |
 | C-3 | boot 時の全プロジェクト auto-drain | env `OPENGROUND_SWARM_AUTODRAIN=1`(strict opt-in) | OFF(回帰テストで pin: unset ⇒ off) | env 次第 | ✅(`server/index.ts` — release blocker カード eadb25e6 で既定 OFF 化済み) |
-| C-4 | **origin/main への自動統合 push**(autoMerge) | owner の arm 操作(`POST .../automerge`) | OFF | **OFF に戻る**(in-memory) | ✅ 機構は充足(粒度の設計判断 = GAP-5) |
+| C-4 | **origin trunk への統合 push(land)+ worker ready 時の司令官自動起こし** | エンジンに push 経路は無い(2026-07-15 撤去・回帰テスト固定)。起こし反射はエンジン start(C-2)に常時同乗(2026-07-16 に独立トグル `POST .../automerge` を廃止 — 起こすだけで trunk は動かない)。**trunk を動かすのは司令官(claude セッション)の統合だけ**で、カード単位の `[hold]` prefix + 高リスク force-hold が承認ゲート | 経路なし / (起こしは)エンジン OFF なら止まる | エンジンごと **OFF に戻る**(独立の永続フラグ無し) | ✅(粒度は GAP-5 で決着 — カード単位) |
 | C-5 | self-supply(エンジン自案カード)の dispatch | arm(既定 OFF・in-memory)**かつ** per-card の owner 承認(`selfSupplyApproved`) | OFF | OFF に戻る | ✅ |
 | C-6 | リモートブランチ削除 / `branch -D` 強制削除 | 呼び出し毎の明示 `deleteRemote:true` / `force:true` — 自律経路(janitor)は絶対に渡さない | しない | — | ✅ |
 | C-7 | リリース(公開リポへの push / Release publish) | `/release` スキルの RED ZONE — 各段で人間承認 | 自動化なし | — | ✅(恒久境界 — TARGET-STATE §5) |
 | C-8 | その他の不可逆操作(プロジェクト delete、model mask 変更、escalation answer 等) | [TARGET-STATE §5](commander/TARGET-STATE.md) の「人間承認が必須で残る操作」8 項目 — **理想状態でも自動化しない恒久の境界線** | — | — | ✅(本書はこの境界に完全に従う) |
 
-**autoMerge(C-4)が同意したときに起きることの全容**(これ以上のことは起きない — 開示文書 GAP-10 の骨子):
-push 先は **origin のリモート trunk のみ**(リモート trunk が無い repo は `skipped` = 手動統合のまま。ユーザーのローカル checkout の main は動かさない)。push は **plain push のみ**(`--force` 全形態なし — 非 fast-forward はリモートに拒否させ、それを受け入れる)。対象は **エンジン自身の `swarm/*` ブランチのみ**。統合前に検証ゲート(tsc → lint → swarm-safety → full test、rebase 済み使い捨て worktree で緑必須)と**敵対レビュー全員一致**を通過したものだけが land する。conflict は `--abort` — 自動解決しない。以上すべて回帰テスト固定(不変条件 A/D + 品質フロア — [SWARM_SAFETY_INVARIANTS.md](SWARM_SAFETY_INVARIANTS.md))。
+**統合(C-4)まわりで起きることの全容**(これ以上のことは起きない — 開示文書 GAP-10 の骨子。2026-07-15 マネージャ専任化 + 2026-07-16 autoMerge トグル廃止に追随):
+**エンジン自身は push しない** — verify・敵対レビュー・FF push の旧 land 機構は撤去され、レンズ結果や engine 判断だけで trunk が動く経路は**構造的にゼロ**(回帰テスト「WAKES the commander and NEVER FF-pushes」で固定)。エンジンが単独で行うのは「review に ready な `swarm/*` カードがあり司令官の卓が不在なら、司令官(claude セッション)を起こす」**だけ**で、起こしても trunk は 1bit も動かない。trunk が動くのは**司令官が統合を判断して plain push したときのみ**(`--force` 全形態なし・対象は `swarm/*` ブランチのみ・conflict は自動解決せず停止 — og-manage スキル「マージ」規律)。カード単位の同意 = タイトル先頭 `[hold]`(承認待ち)+ 高リスクパス force-hold は司令官が常時尊重する。正典: [commander/03-integration-review.md](commander/03-integration-review.md)。
 
 ### 2.2 現状カバー済みの棚卸し
 
@@ -55,8 +55,8 @@ push 先は **origin のリモート trunk のみ**(リモート trunk が無い
 | 機構 | 何を封じるか | 実装の芯 |
 |---|---|---|
 | owner gate(二重: UI experiment + API 403) | 非 owner の swarm 到達そのもの。**第一の封じ込め** — 現状の一般ユーザー保護の実体 | `roles.ts` / `experiments.ts` / `server/routes/swarm.ts`(不変条件 C — ライブルート表 sweep で新規ルートの gate 漏れも検出) |
-| 4 トグル既定 OFF + 再起動リセット | 「入れただけで勝手に動く」の全否定。drain / autoMerge / selfSupply / overseer すべて in-memory・restart で OFF | `swarmOrchestrator.ts`(`autoMerge:false` 初期化、`manualStopPersisted` は auto-start **抑止**側にのみ永続) |
-| 統合エンジンの構造制約 | force-push・履歴破壊・他人のブランチ・ローカル main 書き換えの**構造的不可能性** | `swarmIntegrate.ts`(不変条件 A/D。plain push・swarm/* 限定・no-remote-trunk は skip・conflict abort) |
+| 3 トグル既定 OFF + 再起動リセット | 「入れただけで勝手に動く」の全否定。drain / selfSupply / overseer すべて in-memory・restart で OFF(旧 autoMerge トグルは 2026-07-16 に**フィールドごと廃止** — 司令官起こしは engine ON に常時同乗し、engine と一緒に OFF へ戻る) | `swarmOrchestrator.ts`(`manualStopPersisted` は auto-start **抑止**側にのみ永続) |
+| 統合経路の構造制約 | 第一制約: **エンジンに trunk push 経路が無い**(2026-07-15 撤去・回帰テスト「NEVER FF-pushes」)。残存コード(read-only 分類 + dormant な integrateBranch)にも force-push・履歴破壊・他人のブランチ・ローカル main 書き換えの**構造的不可能性**は維持 | `swarmIntegrate.ts`(不変条件 A/D。plain push・swarm/* 限定・no-remote-trunk は skip・conflict abort) |
 | L4 決定論ガード(worker 限定 PreToolUse veto) | 暴走 worker の push 全形態・履歴 nuke・write-roots 外書き込み — `--dangerously-skip-permissions` でも生存する唯一の veto。POSIX lexer の構造解析で evasion 経路(stdin プログラム、eval、alias、inline-code、xargs 未知動詞 fail-closed 等)も封鎖。**配線も spawn 時 fail-closed**(GAP-2 根治 2026-07-11 — `ensureGuardWiring` 検証 NG なら worker spawn 拒否) | `scripts/openground-guard.js`(不変条件 E。`OPENGROUND_GUARD=1` の worker/overseer-brain だけを police — manager は信頼された human-in-the-loop として no-op、これは設計)+ `swarmWorker.spawnSwarmWorker` の配線ゲート(不変条件 E-FAILCLOSED) |
 | worktree teardown 境界 | 掃除がユーザーの repo 本体・central 外を消すこと | `swarmWorker.removeSwarmWorktree`(不変条件 B — `force:true` でも越境不能) |
 | overseer C-core | 監督ノード自体の暴走。overseer コードは **git 操作を一切持たず**、不可逆操作は reversibility 判定で owner 承認 escalation へ fail-closed。大脳(claude 点火)は guard L4 無条件 + macOS では sandbox L3 無条件 | `swarmOverseer.ts` / `swarmOverseerBrain.ts` / `swarmReversibility.ts`([commander/06](commander/06-overseer-escalations.md)) |
@@ -70,7 +70,7 @@ push 先は **origin のリモート trunk のみ**(リモート trunk が無い
 1. **GAP-1**: swarm を一般ユーザーに**開く**ゲートモデルが未設計(現状の安全は「閉じている」ことに依存)。
 2. **GAP-2**: ~~L4 ガードの**配線**が fail-open~~ → **根治済み(2026-07-11)**: `spawnSwarmWorker` が worktree 作成前に `ensureGuardWiring()`(hooksInstall.ts)で配線+guard 実体の期待版一致を検証し、NG なら `GuardWiringError` で spawn 拒否 + `'guard-unwired'` 通知(fail-closed)。boot の `installHooks()` は第一防衛に降格(失敗しても無ガード worker は生まれない — worker 拒否に縮退)。回帰ネット = swarmSafety.test.ts INVARIANT E-FAILCLOSED。詳細は [SWARM_SAFETY_INVARIANTS.md §E](SWARM_SAFETY_INVARIANTS.md) / [commander/02 §2.5](commander/02-worker-lifecycle.md)。
 3. **GAP-7**: Windows には L3(OS サンドボックス)相当が無い — L4 単層になる(macOS 限定の `sandbox-exec`)。
-4. **GAP-5**: autoMerge の同意粒度はセッション単位 arm(push 毎確認ではない)。非破壊とはいえ、一般ユーザー向けの既定としてこの粒度でよいかは設計判断が未実施(TARGET-STATE §5 の「再起動 OFF の設計判断」と同根)。
+4. **GAP-5**: ✅ **決着(2026-07-16)**: ~~autoMerge の同意粒度はセッション単位 arm~~ — autoMerge トグル自体が廃止され「セッション単位 arm」という粒度は消滅。統合の同意は**カード単位**(`[hold]` prefix + 高リスク force-hold)+ エンジン start(C-2)に確定([TARGET-STATE §5](commander/TARGET-STATE.md))。
 5. **GAP-6**: `SWARM_MANAGER=1` に関する旧仕様の記述(「manager も guard が block する」)がコメント/文書に残存 — 現物(manager は no-op)とのドリフト。
 
 ---
@@ -132,9 +132,11 @@ npx tsc --noEmit && npm run lint && npm test
 #     未ログイン状態で全 /api/swarm ルートが 403(routes sweep テストが同等を常時検証)
 npx vitest run server/routes/__tests__/swarmSafety.routes.test.ts
 
-# (3) トグルの再起動リセット: サーバ再起動後に autoMerge/selfSupply/overseer が全て false
-curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{running, autoMerge}'
-# → 再起動直後は running=false / autoMerge=false でなければ回帰
+# (3) トグルの再起動リセット: サーバ再起動後にエンジンごと OFF(running/selfSupply/overseer が全て false)
+#     autoMerge フィールドは 2026-07-16 撤去 — 応答に存在しないのが正常(出てきたら回帰)
+curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{running, selfSupply, overseer, autoMerge}'
+# → 再起動直後は running=false / selfSupply=false / overseer=false / autoMerge=null でなければ回帰
+#   (司令官の自動起こしは running に常時同乗 — running=false ならエンジンと一緒に止まっている)
 
 # (4) L4 ガードの牙(worker スコープで push が exit 2) — E2E テストがプロセス exit code を assert
 npx vitest run src/lib/server/swarmSafety.test.ts
@@ -149,7 +151,7 @@ grep -n "'--force'" src/lib/server/swarmIntegrate.ts
 画面操作の確認(手動・リリース毎に 1 回):
 - [ ] 新規 HOME(`OPENGROUND_HOME` を空 dir に向ける)で起動 → Swarm タブが**存在しない**こと・何も自動起動しないことを目視
 - [ ] owner で swarm 有効化 → 自動運転 OFF のまま worker が 1 体も湧かないこと
-- [ ] autoMerge を arm せず worker を 1 巡させ、review 列止まり(push ゼロ)を `git log origin/main` で確認
+- [ ] worker を 1 巡させ、**エンジン由来の push がゼロ**(カードは review 列止まり・trunk が動くのは司令官の land だけ)を `git log origin/main` で確認 — エンジンに push 経路が無いことの実機確認(トグル廃止後は「arm せず」という前提操作自体が存在しない)
 
 ### 4.2 macOS 配布物
 
@@ -172,7 +174,7 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 4. [ ] Terminal タブで claude を起動 → **対話できる**(入力/出力/Ctrl-C/リサイズ)— ConPTY 検証の本丸
 5. [ ] app-context 自動注入が効いているか確認(PS バージョン別: 5.1 と 7 の両方で。5.1 で欠けるなら GAP-3-4 起票)
 6. [ ] claude の subscription 認証・課金経路が macOS と同一であることを確認
-7. [ ] (owner 設定で)swarm 有効化 → worker 1 体 spawn → 心拍 → commit → 統合(autoMerge arm)まで 1 巡
+7. [ ] (owner 設定で)swarm 有効化 → worker 1 体 spawn → 心拍 → commit → 統合(ready で司令官が自動で起こされ land する — 起こし反射はエンジン ON で常時)まで 1 巡
 8. [ ] worker セッション内で `git push` を試させ **ブロックされる**こと(L4 の実機確認)
 9. [ ] アプリ終了 → 再起動 → トグル全 OFF・自動 spawn ゼロを確認
 
@@ -193,14 +195,14 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 | **GAP-1** | **swarm 一般開放のゲートモデル未設計**。現状の安全は owner gate で「閉じている」ことに依存 — 一般ユーザーが使える形(誰でも自分のマシンでは有効化できる)への転換は、認証要件・opt-in UI・同意フローすべて未設計。最上流の設計判断 | 新規インストールのユーザーが、(設計次第でログインの上)Settings の明示 opt-in **のみ**で Swarm タブが出現し API が 200 になる。opt-in UI は C-4 の開示文(§2.1)を表示して同意を取る。opt-in しない限り現状どおり不可視・403。安全レビュー(敵対)通過 |
 | **GAP-2** | ✅ **根治済み(2026-07-11 — GAP消化の正はBoard)**。~~L4 ガード配線が fail-open~~ — `spawnSwarmWorker` が spawn 前に `ensureGuardWiring()` で「PreToolUse 配線 + guard 実体の期待版 byte 一致」を検証(1 回の installHooks self-heal → 読み戻し再検証)し、不成立なら `GuardWiringError` で **spawn 拒否** + `'guard-unwired'` bell/OS 通知 | 達成: 全 spawn 経路(engine/route/RESTART)が門を通過。配線を意図的に壊すテスト = swarmSafety.test.ts **INVARIANT E-FAILCLOSED**(F1〜F6、negative control 込み)が拒否・no-worktree・通知を assert |
 | **GAP-3** | **Windows 実機 E2E 未検証**(§3.2 ⚠️ の 4 点 — ConPTY / claude CLI subscription / PS5.1 quote / swarm 1 巡)。[DISTRIBUTION.md §6](DISTRIBUTION.md) が「not yet hardware-validated」と明記したまま | §4.3 のチェックリスト 9 項目が実 Windows で全部 ✓(結果を DISTRIBUTION.md §6 に反映し「hardware-validated」へ書き換え)。PS5.1 で app-context が欠けるなら、修正または「PowerShell 7 必須」の明示要件化 |
-| **GAP-10** | **同意の開示が無い**。swarm 有効化・autoMerge arm の場で「何が自動で起きるか/絶対に起きないか」をユーザーに説明する文書/UI が存在しない(アプリ内マニュアルに swarm 章なし) | swarm opt-in と autoMerge arm の UI に §2.1 C-4 開示文が組み込まれ、アプリ内マニュアルに swarm 章(バイリンガル)が追加される。開示内容が SWARM_SAFETY_INVARIANTS.md と矛盾しないことをレビューで確認 |
+| **GAP-10** | **同意の開示の組込みが未完**。開示文書そのものは存在するようになった(アプリ内マニュアル Swarm 章(バイリンガル・§2.1 C-4 骨子と同期)+ Settings の Swarm 実験 hint — 2026-07-17 に autoMerge トグル廃止へ追随済み)が、GAP-1 の opt-in フローに「有効化の場での同意取得」としてまだ組み込まれていない | swarm opt-in(GAP-1 で設計する UI)が §2.1 C-4 開示文を有効化の場で表示して同意を取る。開示内容が SWARM_SAFETY_INVARIANTS.md と矛盾しないことをレビューで確認 |
 
 ### 🟡 設計判断が必要(ブロッカーかはオーナーの判断次第 — 判断自体を起票する)
 
 | # | ギャップ | 起票の種 |
 |---|---|---|
 | **GAP-4** | **Windows コード署名なし** → SmartScreen 警告。技術的には README 開示済みで動作に支障なし — 「一般公開の第一印象」として許容するかは事業判断(証明書コスト/EV 検討) | 判断カード: 署名する(証明書取得 + release.yml 組込み)or「初回警告あり」を公開告知に明記する、の二択を決める |
-| **GAP-5** | **autoMerge 同意粒度**: セッション単位 arm(push 毎確認なし)+ 再起動 OFF。owner の道具としては適正だが、一般ユーザー既定としての適否は未判断([TARGET-STATE §5](commander/TARGET-STATE.md) の永続化議論と同根 — §1/§2 実測後に着手が正順) | 判断カード: 一般ユーザーの autoMerge は (a) 現状粒度 (b) push 毎確認 (c) 機能自体を advanced 扱いで隠す、を決めて GAP-10 の開示文に反映 |
+| **GAP-5** | ✅ **決着(2026-07-16 — autoMerge トグル廃止で粒度問題ごと解消)**: ~~セッション単位 arm の適否~~ → エンジンは push しない(経路撤去)ので「push の arm 粒度」という問いが消滅。統合の同意は**カード単位**(`[hold]` prefix + 高リスク force-hold — 司令官の統合規約)+ エンジン start(C-2)に確定 | 達成: [TARGET-STATE §5](commander/TARGET-STATE.md) 条件 2 に正典化。開示文(GAP-10 のマニュアル/Settings)へは 2026-07-17 追随済み |
 | **GAP-7** | **Windows は L3(OS サンドボックス)不在** — worker/overseer brain の封じ込めが L4 単層。guard header 明記の残存穴(既存 gitconfig alias 等)が Windows では OS 層で拾えない | 判断カード: Windows 相当の L3(AppContainer/Job Object 等)を実装する or「Windows は L4 単層」を受容しリスクを GAP-10 開示に含める、を決める |
 | **GAP-8** | **og-manage(人間コマンダー体験)が bash/curl 依存** — Windows 素の PowerShell で壊れる(エンジン無人運転は無傷)。swarm 込み公開で「コマンダー」をどの OS で謳うか未定義 | 判断カード: og-manage スキルの PowerShell 対応 or「コマンダー運用は macOS/Git Bash 環境推奨」の明示、を決める。心拍スクリプト(swarm-beat.sh)の Windows worker 代替も同カードで扱う(§3.3) |
 
@@ -209,7 +211,7 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 | # | ギャップ | 起票の種 |
 |---|---|---|
 | **GAP-6** | `SWARM_MANAGER=1` の旧仕様記述(「SWARM_MANAGER=1 が guard を発火させる/block する」)がコメントに残存 — 現物(guard は `OPENGROUND_GUARD=1` の worker 限定・manager は信頼につき no-op)とのドリフト | 該当箇所(`claudeTerminal.ts` の「fires only on SWARM_MANAGER=1」コメント / `swarmManager.test.ts`・`swarmSupply.test.ts` の「guard blocks」コメント / `server/routes/swarm.ts` 等)を現行仕様の記述に更新(`swarmManager.ts` 本体は更新済み)。SWARM_CODE_PATHS に触れるため docs/commander/ 追随込み |
-| **GAP-9** | **TARGET-STATE §1〜§5 の実運用実測が未了**(実装は main 入り済み・◐ 状態)。特に §5「autoMerge armed 7 日間で凍結ゼロ・二重統合ゼロ」は、一般ユーザーに autoMerge を渡す前の信頼性実績としてそのまま使える | [TARGET-STATE §7](commander/TARGET-STATE.md) のチェックリストを実測で ✓ にする(それぞれの到達判定コマンドが正典)。本書 §1 の公開判定は「§5 の 7 日間実測 ✓」を安全実績の必要条件として参照する |
+| **GAP-9** | **TARGET-STATE §1〜§5 の実運用実測が未了**(実装は main 入り済み・◐ 状態)。特に §5「エンジン ON 7 日間で ready 放置ゼロ・engine 由来の main FF ゼロ・蘇生反射が実事象で機能」は、一般ユーザーに swarm を渡す前の信頼性実績としてそのまま使える | [TARGET-STATE §7](commander/TARGET-STATE.md) のチェックリストを実測で ✓ にする(それぞれの到達判定コマンドが正典)。本書 §1 の公開判定は「§5 の 7 日間実測 ✓」を安全実績の必要条件として参照する |
 
 ---
 
@@ -220,8 +222,8 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 - [ ] §4.2 macOS 配布物検証 OK(現状ほぼ到達 — リリース毎の実施のみ)
 - [ ] §4.3 Windows 実機 QA 9 項目 ✓(= GAP-3 解消、DISTRIBUTION.md §6 を hardware-validated に書き換え)
 - [ ] GAP-10 の同意開示がアプリ内に存在
-- [ ] GAP-4/5/7/8 の判断カードがすべて「決着」(実装または受容の明文化)
-- [ ] GAP-9: TARGET-STATE §7 の 6 条件 ✓(少なくとも §5 の autoMerge 7 日間実測)
+- [ ] GAP-4/7/8 の判断カードがすべて「決着」(実装または受容の明文化 — GAP-5 は 2026-07-16 決着済み)
+- [ ] GAP-9: TARGET-STATE §7 の 6 条件 ✓(少なくとも §5 のエンジン ON 7 日間実測)
 - [ ] 公開リリース自体は `/release` RED ZONE フローで人間承認(恒久 — 本書があっても自動化しない)
 
 ---

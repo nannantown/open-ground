@@ -16,7 +16,7 @@ import type { ExperimentFlags, ExperimentsResponse } from '@/lib/types'
 
 // Fail-closed defaults: nothing eligible, every flag off. Matches the shipped /
 // signed-out / non-owner state until the first fetch resolves.
-const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false }
+const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false, persona: false }
 
 export interface ExperimentsState {
   /** The user may toggle experiments at all (owner). Gates the settings toggle. */
@@ -63,6 +63,7 @@ export function useExperiments(): ExperimentsState {
       const next: ExperimentFlags = {
         swarm: body.flags?.swarm === true,
         sandbox: body.flags?.sandbox === true,
+        persona: body.flags?.persona === true,
       }
       const prev = flagsRef.current
       const unchanged = (Object.keys(next) as (keyof ExperimentFlags)[]).every(

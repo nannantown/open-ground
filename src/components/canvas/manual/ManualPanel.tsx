@@ -315,7 +315,7 @@ function BoardDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
     { label: { en: 'In progress', ja: '実行中' }, cards: 1 },
     { label: { en: 'In review', ja: 'レビュー待ち' }, opt: true, cards: 1 },
     { label: { en: 'Done', ja: '完了' }, cards: 2 },
-    { label: { en: 'Blocked', ja: 'ブロック' }, cards: 0 },
+    { label: { en: 'Needs decision', ja: '判断待ち' }, cards: 0 },
   ]
   return (
     <div className="flex gap-2 overflow-x-auto">

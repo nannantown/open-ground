@@ -1,16 +1,82 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, rename, stat, unlink } from 'fs/promises'
+import { assertTestHomeIsolated } from './testHomeGuard'
 
 // The OPEN GROUND home directory. Defaults to ~/.openground but can be
 // redirected via the OPENGROUND_HOME env var. Tests set OPENGROUND_HOME to a
 // throwaway tmp dir (see src/test/setup-home.ts) so the suite never reads or
 // writes the real ~/.openground — a regression that once let `dismiss all`
 // wipe a user's actual run history during a test run.
-export const openGroundHome = () => process.env.OPENGROUND_HOME || join(homedir(), '.openground')
+//
+// THIS FUNCTION IS THE CHOKE POINT. Every path below is built from it, so the
+// fail-closed fence sits here and nowhere else: under a test process the
+// resolved home MUST canonicalize under the OS temp dir, or this throws — reads
+// included. It is inert in production (see testHomeGuard.ts for the full
+// contract and the 2026-07-18 incident that forced it).
+//
+// The env var is re-read per call BY DESIGN (tests re-point it per case), which
+// is exactly why the check has to live at the resolution seam rather than at
+// startup: the value can change between any two calls, and before the fence a
+// single `delete process.env.OPENGROUND_HOME` silently retargeted every
+// subsequent read AND write at the user's real ~/.openground.
+//
+// TWO FAILURE MODES, TWO CHECKS — and the second does NOT imply the first.
+// An independent fix (M2) landed here first and guarded only the UNSET case:
+// `if (!explicit && process.env.VITEST) throw`. Both halves are load-bearing:
+//   • UNSET — the ~/.openground fallback aims every write at the user's real
+//     data. Not hypothetical: a `npm test` run rewrote the live settings.json
+//     with storeSettingsRace.test.ts's literals (archiveDirName '_arc',
+//     projectsMigratedAt '2026-01-02T03:04:05.000Z'). Under vitest an unset
+//     value can only mean a test cleared it, because src/test/setup-home.ts
+//     always pins it — historically an afterEach doing `delete
+//     process.env.OPENGROUND_HOME`, whose effect outlives its own file since
+//     vitest reuses worker processes. This is also the leading explanation for
+//     the 2026-07-18 registry loss: registry.test.ts and collabLink.test.ts
+//     write `setSettings({ projects: [] })`, which against the real home empties
+//     the registry and leaves only whatever entries that test then creates.
+//   • SET, BUT AIMED AT REAL DATA — a non-empty value satisfies an unset-only
+//     check while still resolving into ~/.openground (directly, or via a tmp
+//     symlink pointing back at it), and so does a relative or whitespace-only
+//     value. The destination check catches all of these.
+//
+// THE MERGE ORIGINALLY GOT THIS WRONG. It dropped the unset branch, reasoning
+// that the destination check subsumes it ("unset → ~/.openground → outside tmp
+// → throws"). Adversarial review refuted that on 2026-07-19 WITH A REPRODUCTION:
+// seven test files re-pin process.env.HOME to a throwaway dir, and inside that
+// window `join(homedir(), '.openground')` lands UNDER tmp, so every destination
+// condition passes and an unset OPENGROUND_HOME resolved silently. No data was
+// at risk (the fake home absorbed it) — but the DETECTION was gone, in exactly
+// the configuration the contract claims is covered. `requireExplicitPin` keeps
+// M2's half as its own condition instead of deriving it. Do not "simplify" it
+// back: the derivation is false, and it reads true.
+export const openGroundHome = () => {
+  const home = process.env.OPENGROUND_HOME || join(homedir(), '.openground')
+  assertTestHomeIsolated(home, 'openGroundHome()', { requireExplicitPin: true })
+  return home
+}
 
 export const settingsFile = () => join(openGroundHome(), 'settings.json')
 export const canvasFile = () => join(openGroundHome(), 'canvas.json')
+// GENERATIONAL BACKUPS of the two irreplaceable home files above — the registry
+// (settings.json `projects`, which is also the validateProjectPath allowlist)
+// and the Ground card layout (canvas.json). One subdir per protected file; see
+// src/lib/server/homeBackup.ts for the write hook and the pruning policy.
+//
+// WHY THIS EXISTS: on 2026-07-18 the registry shrank 45 → 3 entries and the card
+// layout was lost. settings.json was recoverable ONLY because an orphaned
+// `.settings.json.tmp-27332-1` from a crashed atomic write happened to still be
+// lying in the home dir; canvas.json had no such luck and its card positions were
+// gone for good. Recovery must not depend on that kind of accident.
+export const backupsRootDir = () => join(openGroundHome(), 'backups')
+// Integrity watermark — the "what the registry looked like last boot" record the
+// startup damage check compares against, plus its already-alerted marker so a
+// damaged file re-alerts once, not on every launch. Its OWN file, deliberately
+// NOT a field in settings.json: this check must stay readable and writable when
+// settings.json is the very thing that looks wrong, and a watermark is app STATE,
+// not a user preference (the same rule that keeps notifications.json out of
+// settings). See src/lib/server/homeIntegrity.ts.
+export const integrityFile = () => join(openGroundHome(), 'integrity.json')
 // The OPTIONAL app-account session (Supabase Auth tokens). Written 0600 by
 // src/lib/server/authStore.ts. This is the APP's own login — NOT the Claude CLI
 // subscription token — and it gates nothing today (see docs/BILLING_PLAN.md).
@@ -47,6 +113,12 @@ export const swarmQuotaFile = () => join(openGroundHome(), 'swarm-quota.json')
 // when it got stuck") — one small text file per escalation, referenced by the
 // record's screenshotRef and unlinked when the record is pruned.
 export const escalationShotsDir = () => join(openGroundHome(), 'escalation-shots')
+// The daily fuel report's persisted sentinel (card swarm-token-blocked): the
+// "already reported today" date, the analysis window's right edge, the previous
+// summary (for the 前回比 line) and the open improvement-proposal card ref (the
+// dedup guard). App STATE, not a preference — its own file for the same reasons
+// as swarm-quota.json above. See src/lib/server/dailyFuelReport.ts.
+export const dailyFuelReportFile = () => join(openGroundHome(), 'daily-fuel-report.json')
 // The proxy's externalised JUDGMENT AXIS ("あなたの判断軸"). A single,
 // self-describing markdown file assembled from CONCEPT.md + the OPEN GROUND
 // auto-memory + hand-added judgments, written 0600 — it can be injected at proxy
@@ -56,6 +128,14 @@ export const escalationShotsDir = () => join(openGroundHome(), 'escalation-shots
 // docs/YOU_CORPUS_PLAN.md.
 export const youCorpusFile = () => join(openGroundHome(), 'you-corpus.md')
 export const youCorpusAdditionsFile = () => join(openGroundHome(), 'you-corpus-additions.json')
+// The INTERVIEW LOOP's once-a-day state (ペルソナタブの「今日の1問」). Holds the
+// question asked on each local day plus the subject keys already covered, so the
+// 1-question-a-day cap and the "never re-ask the same observation" rule both
+// survive a restart. PERSONAL like the corpus itself (it quotes the owner's own
+// board activity) — app home only, never a repo. The ANSWERS are not stored here:
+// they go to the corpus through appendJudgment, which stays the single record.
+// See src/lib/server/personaInterview.ts.
+export const personaInterviewFile = () => join(openGroundHome(), 'persona-interview.json')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental
@@ -114,6 +194,12 @@ export const serverLogPath = () => join(openGroundHome(), 'server.log')
 // codename get carried forward in one hop.
 let homeReady: Promise<void> | null = null
 export const ensureOpenGroundHome = async () => {
+  // EVICT ON REJECTION (see the .catch below). `??=` alone caches a REJECTED
+  // promise forever: one throw — a transient FS error, or the test-home fence
+  // firing on the first call — and every later ensureOpenGroundHome() in this
+  // process re-rejects with the stale error, wedging every store read/write
+  // even after the cause is fixed. registry.ts:39-42 already learned this
+  // (it would "wedge GET /api/projects at 500 forever"); paths.ts had not.
   homeReady ??= (async () => {
     const fresh = openGroundHome()
     if (!(await exists(fresh))) {
@@ -121,6 +207,25 @@ export const ensureOpenGroundHome = async () => {
       for (const legacyName of ['.hove', '.pmmap']) {
         const legacy = join(homedir(), legacyName)
         if (await exists(legacy)) {
+          // FENCE THE SOURCE, NOT JUST THE DESTINATION. `fresh` is checked by
+          // openGroundHome() above; `legacy` is a SECOND, homedir()-anchored
+          // path that OPENGROUND_HOME cannot move — the same "the guard and the
+          // writer read different env vars" asymmetry that caused 2026-07-18,
+          // sitting inside the choke-point file itself.
+          //
+          // The failure it prevents: a test pins OPENGROUND_HOME at a tmp path
+          // it never creates (swarmJanitor / swarmIntegrationLock /
+          // swarmWorkerRegistry all do — this file's own fence comments name
+          // them), so `exists(fresh)` is false, and this loop then MOVES the
+          // user's real ~/.hove or ~/.pmmap into that tmpdir, where the test's
+          // afterEach recursively deletes it. A rename, not a copy: the data is
+          // simply gone.
+          //
+          // Asserted only INSIDE this branch, so the common case (no legacy dir
+          // — neither exists on a modern machine) stays a no-op and unpinned
+          // tests are not failed for a migration that would never have run. A
+          // legitimate migration test that pins HOME to a tmpdir still passes.
+          assertTestHomeIsolated(legacy, 'paths legacy migration (homedir()/<legacy>)')
           try {
             await rename(legacy, fresh)
             break
@@ -147,7 +252,10 @@ export const ensureOpenGroundHome = async () => {
         }
       }
     }
-  })()
+  })().catch((err) => {
+    homeReady = null // self-heal: the next call retries instead of re-throwing
+    throw err
+  })
   return homeReady
 }
 

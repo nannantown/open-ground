@@ -4,6 +4,10 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { installOgManageSkill, OG_MANAGE_SKILL_MARKER } from './ogManageSkill'
 import { __setHookSourceModuleDirForTests } from './hooksInstall'
+import {
+  SPECIALIST_NO_SOURCE_MARKER,
+  SPECIALIST_REVIEW_MANAGER_CLAUSES,
+} from './swarmSpecialistReview'
 
 // The installer's ownership contract, exercised against a throwaway tmpdir —
 // never the real ~/.claude (source AND target are injected via the test-only
@@ -95,8 +99,9 @@ describe('installOgManageSkill', () => {
       await expect(stat(dst)).rejects.toThrow() // target never created
     } finally {
       __setHookSourceModuleDirForTests(null)
-      if (savedOg === undefined) delete process.env.OPENGROUND_HOME
-      else process.env.OPENGROUND_HOME = savedOg
+      // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+      // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+      if (savedOg !== undefined) process.env.OPENGROUND_HOME = savedOg
     }
   })
 })
@@ -123,6 +128,58 @@ describe('shipped skill source (skills/og-manage/SKILL.md)', () => {
     for (const banned of ['swarm-pane.sh', 'swarm-cockpit.sh', 'swarm-watch.sh', 'swarm-respawn.sh', 'swarm-janitor.sh', 'swarm-new.sh', 'swarm-dispatch.sh']) {
       expect(text).not.toContain(banned)
     }
+  })
+
+  // POSITION IS THE MECHANISM (adversarial review 2026-07-19, MUST-FIX 1).
+  // These pins used to toContain against the WHOLE file, which asserts only that
+  // the words exist somewhere — the reviewer moved the entire block into an
+  // 「## 付録(未使用メモ)」 heading at EOF and all 12 tests stayed green. But the
+  // commander's half of this mechanism IS "it is in front of your eyes while you
+  // read 手順4 during an integration"; a clause parked in an appendix is not
+  // wired in at all. So slice 手順4 out and assert against the SLICE.
+  //
+  // Both anchors are verified unique in the shipped file (1 occurrence each);
+  // if either stops matching, the slice throws rather than silently degrading to
+  // an empty string that would make every toContain below fail confusingly.
+  const STEP4_START = '4. **独立レビュー(敵対・必須)**'
+  const STEP4_END = '5. `git -C <wt> merge-base --is-ancestor origin/main HEAD`'
+  const mergeStep4 = (text: string): string => {
+    const start = text.indexOf(STEP4_START)
+    const end = text.indexOf(STEP4_END, start + 1)
+    if (start < 0 || end <= start) {
+      throw new Error(
+        `SKILL.md 「マージ」手順4 のスライスに失敗 (start=${start}, end=${end}). ` +
+          'アンカー行を編集したなら、この定数も一緒に直すこと。',
+      )
+    }
+    return text.slice(start, end)
+  }
+
+  // The commander is prose-driven, so its half of the specialist-review
+  // procedure lives in this markdown while the worker's half is a TypeScript
+  // constant. SPECIALIST_REVIEW_MANAGER_CLAUSES is the seam between them: each
+  // entry must appear verbatim IN 手順4, so the two surfaces cannot drift apart
+  // and the text cannot drift out of the step it governs.
+  //
+  // ⚠ Same caveat as the HIGH_RISK_PATHS pin this mirrors: a verbatim pin proves
+  // the WORDS are present and WHERE, not that the commander obeyed them.
+  it('carries the specialist-review procedure inside the 「マージ」 review step (手順4)', async () => {
+    const step4 = mergeStep4(await readFile(shippedPath, 'utf8'))
+    for (const clause of SPECIALIST_REVIEW_MANAGER_CLAUSES) {
+      expect(step4).toContain(clause)
+    }
+  })
+
+  it('keeps the fetch-failure degrade from eroding the review gate’s fail-CLOSED', async () => {
+    const step4 = mergeStep4(await readFile(shippedPath, 'utf8'))
+    // Both rules must survive in the same step: the pre-existing stop-and-report
+    // on a broken reviewer, and the new continue-with-marker on an unreachable
+    // source. Losing the first is the regression this card must not introduce.
+    // Sliced for the same reason as above — "in the same step" is the claim, so
+    // the whole-file check was not testing it.
+    expect(step4).toContain('**fail-CLOSED**: レビュアーがエラー/空 verdict なら1回だけ再試行→ダメなら止めて報告')
+    expect(step4).toContain('「レビューできなかった」を「クリーン」と同一視しない')
+    expect(step4).toContain(SPECIALIST_NO_SOURCE_MARKER)
   })
 
   it('drives the app HTTP API for every commander action', async () => {

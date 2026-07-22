@@ -29,11 +29,11 @@ export const projectPanel = {
     'projectPanel.swarm.title': 'Swarm orchestration',
     'projectPanel.swarm.body': 'Run a team of Claude sessions across your projects from one surface. This is an early experiment, off by default.',
     // Master power switch (SwarmPowerBar) — the SINGLE Start/Stop for the whole
-    // Swarm tab. ON starts the autonomous engine AND launches the commander +
+    // Swarm tab. ON starts the autonomous engine AND launches the manager +
     // supply conversations together (idempotent); OFF only halts new dispatch
     // (running workers finish, worktrees are kept). The status shows running /
-    // stopped + how many workers are live. (Auto-integrate stays a separate
-    // switch on the commander dashboard, default off.)
+    // stopped + how many workers are live. (No separate auto-integrate switch —
+    // retired 2026-07-16; the engine never pushes.)
     'projectPanel.swarm.power.label': 'Swarm',
     'projectPanel.swarm.power.start': 'Start',
     'projectPanel.swarm.power.stop': 'Stop',
@@ -45,7 +45,7 @@ export const projectPanel = {
     'projectPanel.swarm.power.offline': 'Not available yet',
     'projectPanel.swarm.power.workers': '{count} workers',
     'projectPanel.swarm.power.hint':
-      'Start the engine, commander, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
+      'Start the engine, manager, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
     // Restart reminder (autonomyRemembered) — autonomy is NEVER auto-resumed on
     // relaunch; if it was on last session the banner offers a one-click resume.
     'projectPanel.swarm.autonomyReminder':
@@ -72,7 +72,7 @@ export const projectPanel = {
       'No swarm role ever launches on a model switched off here — it survives restarts, unlike a rate-limit cooldown.',
     'projectPanel.swarm.models.last': 'At least one model must stay on',
     // OFF / first-run onboarding (SwarmOnboarding) — the SINGLE centered screen
-    // shown while the swarm is fully idle (engine stopped + no supply / commander
+    // shown while the swarm is fully idle (engine stopped + no supply / manager
     // / worker sessions). It explains the three roles and how a request flows
     // through them BEFORE the owner presses Start. Role NAMES reuse the existing
     // supply / manager / worker keys above; only this flow + role-summary copy is
@@ -96,18 +96,18 @@ export const projectPanel = {
     'projectPanel.swarm.onboarding.roleWorker':
       'A `claude` session that builds one card in its own isolated worktree, then hands it back for review.',
     'projectPanel.swarm.onboarding.startNote':
-      'Press Start: the engine, supply officer and commander all come up together and begin draining the Board automatically. (Stopping later halts new dispatch only — running workers finish.)',
+      'Press Start: the engine, supply officer and manager all come up together and begin draining the Board automatically. (Stopping later halts new dispatch only — running workers finish.)',
     // Workers list. Manual hand-dispatch was removed (the to-do rail is gone —
     // browse todos on the Board tab); workers are started by the autonomous
-    // engine (the master power switch above) or the commander session.
-    'projectPanel.swarm.workersEmpty': 'No workers running yet. Start the swarm with the switch above (or ask the commander) to dispatch one — each gets its own isolated worktree and `claude` session.',
+    // engine (the master power switch above) or the manager session.
+    'projectPanel.swarm.workersEmpty': 'No workers running yet. Start the swarm with the switch above (or ask the manager) to dispatch one — each gets its own isolated worktree and `claude` session.',
     'projectPanel.swarm.statusWorking': 'Working',
     'projectPanel.swarm.statusWaiting': 'Waiting',
     'projectPanel.swarm.statusStarting': 'Starting…',
     'projectPanel.swarm.statusExited': 'Exited',
     // Exit overlay (ClaudeTerminalPane) — a dead PTY shows "session ended ·
     // Restart" instead of a black screen + raw error. Shared by all three swarm
-    // roles (supply / commander / worker); the role decides which API relaunches.
+    // roles (supply / manager / worker); the role decides which API relaunches.
     'projectPanel.swarm.sessionEnded': 'Session ended',
     'projectPanel.swarm.sessionExitCode': 'exit code {code}',
     'projectPanel.swarm.restart': 'Restart',
@@ -121,7 +121,7 @@ export const projectPanel = {
     'projectPanel.swarm.engineOwned': 'Engine',
     'projectPanel.swarm.engineOwnedHint':
       'The autonomous engine spawned and owns this worker — manage it from the Manager tab.',
-    // Supply officer (補給官) — the conversation desk that turns the user's
+    // Supply officer (タスク窓口) — the conversation desk that turns the user's
     // requests into Board:todo cards. Writes the Board only; never edits code.
     'projectPanel.swarm.workersTab': 'Workers',
     'projectPanel.swarm.supply.tab': 'Supply',
@@ -137,14 +137,14 @@ export const projectPanel = {
       'The supply officer files your requests as Board to-do cards — it never edits code or dispatches workers.',
     'projectPanel.swarm.supply.stop': 'Stop',
     'projectPanel.swarm.supply.stopping': 'Stopping…',
-    // Commander (司令官) dashboard — the third Swarm view: the worker-monitor +
+    // Manager (マネージャー) dashboard — the third Swarm view: the worker-monitor +
     // integration-control surface. Drives the autonomous orchestration engine
     // (start/stop · overseer), lets each worker's live screen open inline,
     // and shows the engine's live log. (Board pipeline tallies live on the Board.)
-    // (The auto-wake-the-commander toggle was retired 2026-07-16 — with the engine
-    // ON, a ready worker always wakes the commander desk; the engine never merges.)
+    // (The auto-wake-the-manager toggle was retired 2026-07-16 — with the engine
+    // ON, a ready worker always wakes the manager desk; the engine never merges.)
     'projectPanel.swarm.manager.tab': 'Manager',
-    'projectPanel.swarm.manager.badge': 'Commander',
+    'projectPanel.swarm.manager.badge': 'Manager',
     'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
     'projectPanel.swarm.manager.overseerHint':
       'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. Turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
@@ -201,31 +201,32 @@ export const projectPanel = {
     'projectPanel.swarm.manager.moveStuckReview': 'worker finished, stuck in Doing',
     'projectPanel.swarm.manager.moveStuckDone': 'landed on the trunk, stuck in Review',
     'projectPanel.swarm.manager.moveStuckRecover': 'lost worker, stuck in Doing',
+    'projectPanel.swarm.manager.moveStuckRecoverReview': 'finished worker stopped, could not return to Review',
     // Review resolution — take a stuck (conflict / failing-verify) card out of review.
     'projectPanel.swarm.manager.resolvePrompt': 'Resolve:',
     'projectPanel.swarm.manager.resolvePark': 'Park',
     'projectPanel.swarm.manager.resolveParkHint':
-      'Move this card to Blocked and take its branch over by hand (rebase in a terminal), then mark it done.',
+      'Move this card to Needs decision and take its branch over by hand (rebase in a terminal), then mark it done.',
     'projectPanel.swarm.manager.resolveRequeue': 'Requeue',
     'projectPanel.swarm.manager.resolveRequeueHint':
       'Move this card back to To do so a fresh worker re-attempts it off the current trunk.',
     'projectPanel.swarm.manager.logOnlyRoutine': 'Only routine bookkeeping so far — switch to All to see it.',
     'projectPanel.swarm.manager.logEmpty':
       'No engine events yet. Turn on Autonomy to let the engine drain the Board.',
-    // Commander command bar — issue an order to /manage without focusing the xterm.
-    'projectPanel.swarm.manager.command': 'Command the commander',
+    // Manager command bar — issue an order to /manage without focusing the xterm.
+    'projectPanel.swarm.manager.command': 'Command the manager',
     'projectPanel.swarm.manager.commandPlaceholder':
-      'Tell the commander what to do… (Enter to send, Shift+Enter for a new line)',
+      'Tell the manager what to do… (Enter to send, Shift+Enter for a new line)',
     'projectPanel.swarm.manager.send': 'Send',
     'projectPanel.swarm.manager.quickStatus': 'Status',
     'projectPanel.swarm.manager.quickMerge': 'Merge',
     'projectPanel.swarm.manager.quickClean': 'Clean up',
-    // Commander conversation (/manage) — the human-in-the-loop counterpart to
+    // Manager conversation (/manage) — the human-in-the-loop counterpart to
     // the autonomous engine: a `claude` you talk to (status / merge / advise),
     // launched in the primary checkout (no worktree, like supply). It shares the
     // tab with the engine controls + worker monitor + log.
     'projectPanel.swarm.manager.engineHeading': 'Engine',
-    // KPI roll-up (the analytics layer) — the commander dashboard's "is the swarm
+    // KPI roll-up (the analytics layer) — the manager dashboard's "is the swarm
     // getting better?" panel: lead time + rework / conflict / worker-success rates.
     'projectPanel.swarm.manager.kpiHeading': 'Metrics',
     'projectPanel.swarm.manager.kpiLeadTime': 'Lead time',
@@ -243,20 +244,35 @@ export const projectPanel = {
     'projectPanel.swarm.manager.consumptionDispatchedHint': 'Workers spawned since the engine started',
     'projectPanel.swarm.manager.consumptionOverLimit':
       'Over budget — the loop has dispatched {dispatched} / {limit} workers this session. Check it.',
-    'projectPanel.swarm.manager.conversationTitle': 'Talk to the commander',
+    // Manager presence (the inspection line) — explains the quiet minutes after
+    // a worker finishes: the manager checks the work before it goes live. Fed by
+    // the manager heartbeat file via the orchestrator poll; owner-plain wording
+    // (the 2026-07-17 owner-surface rule): everyday language, no jargon.
+    'projectPanel.swarm.manager.presenceHeading': 'Inspection',
+    'projectPanel.swarm.manager.presenceActive': 'The manager is working',
+    'projectPanel.swarm.manager.presenceActiveHint':
+      'It is checking finished work and putting it into the main code. This usually takes a few minutes per job.',
+    'projectPanel.swarm.manager.presenceStandby': 'The manager is resting',
+    'projectPanel.swarm.manager.presenceStandbyHint':
+      'It wakes up on its own the next time a worker finishes something — no action needed.',
+    'projectPanel.swarm.manager.presenceQueue': 'Waiting for inspection: {count}',
+    'projectPanel.swarm.manager.presenceQueueHint':
+      'Finished work goes live only after the manager checks it.',
+    'projectPanel.swarm.manager.presenceLastBeat': 'Last report {ago} ago',
+    'projectPanel.swarm.manager.conversationTitle': 'Talk to the manager',
     'projectPanel.swarm.manager.conversationEmpty':
-      'Start a `claude` commander running /manage in this project. Ask it for status, to integrate finished branches (fast-forward / rebase only), to clean up, or for advice. It runs in the primary checkout — no worktree — alongside the autonomous engine.',
-    'projectPanel.swarm.manager.launch': 'Start commander',
+      'Start a `claude` manager running /manage in this project. Ask it for status, to integrate finished branches (fast-forward / rebase only), to clean up, or for advice. It runs in the primary checkout — no worktree — alongside the autonomous engine.',
+    'projectPanel.swarm.manager.launch': 'Start manager',
     'projectPanel.swarm.manager.launching': 'Starting…',
-    'projectPanel.swarm.manager.launchFailed': "Couldn't start the commander: {error}",
+    'projectPanel.swarm.manager.launchFailed': "Couldn't start the manager: {error}",
     'projectPanel.swarm.manager.stop': 'Stop',
     'projectPanel.swarm.manager.stopping': 'Stopping…',
     'projectPanel.swarm.manager.stopWorkerHint':
-      'Stop this worker — tear down its worktree and `claude`, and park its card in Blocked.',
-    'projectPanel.swarm.manager.conversationIdentity': 'Commander · /manage',
+      'Stop this worker — tear down its worktree and `claude`, and park its card in Needs decision.',
+    'projectPanel.swarm.manager.conversationIdentity': 'Manager · /manage',
     'projectPanel.swarm.manager.conversationHint':
-      'The commander monitors workers and integrates finished branches — talk to it here.',
-    'projectPanel.swarm.manager.backToCommander': 'Back to commander',
+      'The manager monitors workers and integrates finished branches — talk to it here.',
+    'projectPanel.swarm.manager.backToCommander': 'Back to manager',
     // Overseer tab (監督) — where the swarm's messages to the owner live: the
     // escalation inbox (esc.* below) + the needs-attention feed (fatal events +
     // engine anomalies, carried over from the removed Flow tab). Read when
@@ -266,9 +282,9 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.alertsHeading': 'Needs attention',
     'projectPanel.swarm.overseer.emptyTitle': 'Nothing needs you',
     'projectPanel.swarm.overseer.emptyBody':
-      "Questions the swarm escalates to you and fatal events land here. Arm the overseer from the Commander tab's Overseer switch while the swarm runs.",
+      "Questions the swarm escalates to you and fatal events land here. Arm the overseer from the Manager tab's Overseer switch while the swarm runs.",
     'projectPanel.swarm.overseer.ago': '{age} ago',
-    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'Card retried too many times — parked in Blocked',
+    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'Card retried too many times — parked in Needs decision',
     'projectPanel.swarm.overseer.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
     'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'Review panel indecisive — merge withheld, needs a human',
     'projectPanel.swarm.overseer.anomalyHighRiskHold': 'High-risk paths touched — auto-merge withheld, merge manually',
@@ -288,10 +304,13 @@ export const projectPanel = {
     'projectPanel.swarm.esc.title': 'Escalations — waiting for your answer',
     'projectPanel.swarm.esc.whyIrreversible': 'Irreversible',
     'projectPanel.swarm.esc.whyInsufficientInfo': 'Needs your knowledge',
-    'projectPanel.swarm.esc.whyPolicy': 'Policy',
+    // Same reason as the ja string: name what is being ASKED OF the reader, not the
+    // internal classification. This badge marks "your area, your call".
+    'projectPanel.swarm.esc.whyPolicy': 'Your call',
     'projectPanel.swarm.esc.proxyDraft': 'Proxy draft · confidence {confidence}',
     'projectPanel.swarm.esc.abstention': 'The proxy abstained — it lacks your context here.',
     'projectPanel.swarm.esc.useDraft': 'Use draft',
+    'projectPanel.swarm.esc.techDetails': 'Technical details',
     'projectPanel.swarm.esc.screenshot': "Worker's screen at the time",
     'projectPanel.swarm.esc.answerPlaceholder': 'Your answer…',
     'projectPanel.swarm.esc.answerSend': 'Answer & resume',
@@ -602,10 +621,10 @@ export const projectPanel = {
     'projectPanel.swarm.title': 'Swarm オーケストレーション',
     'projectPanel.swarm.body': '複数プロジェクトにまたがる Claude セッションのチームを 1 つの画面から動かします。これは初期の実験で、既定ではオフです。',
     // 電源スイッチ（SwarmPowerBar）— Swarm タブ全体の単一の開始/停止。オンで自律
-    // エンジンを起動し、司令官＋補給官の対話もまとめて起動（冪等）。オフは新規の
+    // エンジンを起動し、マネージャー＋タスク窓口の対話もまとめて起動（冪等）。オフは新規の
     // 振り分けを止めるだけ（走行中の worker は完走・worktree は温存）。状態として
-    // 稼働中/停止中＋稼働ワーカー数を表示。（自動統合は司令官ダッシュボードの別
-    // スイッチのまま・既定オフ。）
+    // 稼働中/停止中＋稼働ワーカー数を表示。（自動統合の別スイッチは廃止
+    // (2026-07-16) — エンジンは push しない。）
     'projectPanel.swarm.power.label': 'Swarm',
     'projectPanel.swarm.power.start': '開始',
     'projectPanel.swarm.power.stop': '停止',
@@ -616,7 +635,7 @@ export const projectPanel = {
     'projectPanel.swarm.power.offline': '未配備',
     'projectPanel.swarm.power.workers': 'ワーカー {count}',
     'projectPanel.swarm.power.hint':
-      'エンジン・司令官・補給官をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
+      'エンジン・マネージャー・タスク窓口をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
     // 再起動リマインダー（autonomyRemembered）— 再起動で自律は自動再開しない。前回 ON
     // だった場合だけ、ワンクリック再開のバナーを出す。
     'projectPanel.swarm.autonomyReminder':
@@ -643,7 +662,7 @@ export const projectPanel = {
       'OFF にしたモデルには swarm のどの役割も起動しません。rate limit の冷却と違い、再起動しても残ります。',
     'projectPanel.swarm.models.last': '最低1つは ON にしてください',
     // OFF・初回オンボーディング（SwarmOnboarding）— swarm が完全に待機状態（エンジン
-    // 停止かつ補給官／司令官／worker セッションなし）のとき中央に出す1枚。3つの役割
+    // 停止かつタスク窓口／マネージャー／worker セッションなし）のとき中央に出す1枚。3つの役割
     // と、要望がそこをどう流れるかを「開始」前に説明する。役割の名称は上の supply /
     // manager / worker キーを流用し、ここで新規なのはフロー＋役割サマリの文言のみ
     // （重複文言は増やさない・条件3）。
@@ -666,16 +685,16 @@ export const projectPanel = {
     'projectPanel.swarm.onboarding.roleWorker':
       '1枚のカードを自分専用の隔離 worktree で実装し、review に戻す `claude` セッションです。',
     'projectPanel.swarm.onboarding.startNote':
-      '「開始」を押すと、エンジン・補給官・司令官がまとめて立ち上がり、Board を自動で回し始めます。（あとで停止しても新規の振り分けが止まるだけで、走行中の worker は完走します。）',
+      '「開始」を押すと、エンジン・タスク窓口・マネージャーがまとめて立ち上がり、Board を自動で回し始めます。（あとで停止しても新規の振り分けが止まるだけで、走行中の worker は完走します。）',
     // Workers リスト。手動の「振る」は撤去（todo 一覧は Board タブへ一本化）。
-    // worker は自律エンジン（上の電源スイッチ）または司令官セッションが起動します。
-    'projectPanel.swarm.workersEmpty': 'worker はまだ動いていません。上のスイッチで Swarm を開始する（または司令官に頼む）と振り分けが始まります — それぞれに隔離された worktree と `claude` セッションが割り当てられます。',
+    // worker は自律エンジン（上の電源スイッチ）またはマネージャーセッションが起動します。
+    'projectPanel.swarm.workersEmpty': 'worker はまだ動いていません。上のスイッチで Swarm を開始する（またはマネージャーに頼む）と振り分けが始まります — それぞれに隔離された worktree と `claude` セッションが割り当てられます。',
     'projectPanel.swarm.statusWorking': '稼働中',
     'projectPanel.swarm.statusWaiting': '待機中',
     'projectPanel.swarm.statusStarting': '起動中…',
     'projectPanel.swarm.statusExited': '終了',
     // 終了オーバーレイ（ClaudeTerminalPane）— 落ちた PTY は黒画面＋生エラーでなく
-    // 「セッション終了 · 再起動」を出す。3ロール（補給官／司令官／worker）共通で、
+    // 「セッション終了 · 再起動」を出す。3ロール（タスク窓口／マネージャー／worker）共通で、
     // どの API で立て直すかはロール側が決める。
     'projectPanel.swarm.sessionEnded': 'セッションが終了しました',
     'projectPanel.swarm.sessionExitCode': '終了コード {code}',
@@ -689,31 +708,31 @@ export const projectPanel = {
     'projectPanel.swarm.forceFailed': 'worktree を撤去できませんでした: {reason}。必要なら手動で削除してください。',
     'projectPanel.swarm.engineOwned': 'エンジン',
     'projectPanel.swarm.engineOwnedHint':
-      '自律エンジンが起動・管理している worker です — 操作は司令官タブから行ってください。',
-    // Supply officer (補給官) — 要望を Board:todo カードに積む対話デスク。
+      '自律エンジンが起動・管理している worker です — 操作はマネージャータブから行ってください。',
+    // Supply officer (タスク窓口) — 要望を Board:todo カードに積む対話デスク。
     // Board に書くだけで、コードは編集しない。
     'projectPanel.swarm.workersTab': 'ワーカー',
-    'projectPanel.swarm.supply.tab': '補給官',
-    'projectPanel.swarm.supply.badge': '補給官（PM）',
+    'projectPanel.swarm.supply.tab': 'タスク窓口',
+    'projectPanel.swarm.supply.badge': 'タスク窓口（PM）',
     'projectPanel.swarm.supply.title': '要望を todo カードに変える',
     'projectPanel.swarm.supply.empty':
-      '補給官と話してください。あいまいな要望を観測可能な todo カードに整えて、左の Board に積む `claude` の PM です。Board に書くだけで、コードの編集や worker への割り当てはしません。',
-    'projectPanel.swarm.supply.launch': '補給官を起動',
+      'タスク窓口と話してください。あいまいな要望を観測可能な todo カードに整えて、左の Board に積む `claude` の PM です。Board に書くだけで、コードの編集や worker への割り当てはしません。',
+    'projectPanel.swarm.supply.launch': 'タスク窓口を起動',
     'projectPanel.swarm.supply.launching': '起動中…',
-    'projectPanel.swarm.supply.launchFailed': '補給官を起動できませんでした: {error}',
-    'projectPanel.swarm.supply.identity': '補給官 · todo に供給',
+    'projectPanel.swarm.supply.launchFailed': 'タスク窓口を起動できませんでした: {error}',
+    'projectPanel.swarm.supply.identity': 'タスク窓口 · todo に供給',
     'projectPanel.swarm.supply.hint':
-      '補給官は要望を Board の todo カードに積みます（コードの編集や worker への割り当てはしません）。',
+      'タスク窓口は要望を Board の todo カードに積みます（コードの編集や worker への割り当てはしません）。',
     'projectPanel.swarm.supply.stop': '停止',
     'projectPanel.swarm.supply.stopping': '停止中…',
-    // 司令官（commander）ダッシュボード — Swarm の3つ目のビュー。worker 監視＋統合
+    // マネージャー（manager）ダッシュボード — Swarm の3つ目のビュー。worker 監視＋統合
     // コントロールの面。自律オーケストレーションエンジン（起動/停止・監督）を
     // 操作し、各 worker のライブ画面をその場で開け、エンジンのライブログを見せる。
     // （Board のパイプライン件数は Board タブで見る。）
-    // （「司令官を自動で起こす」トグルは 2026-07-16 に廃止 — エンジン ON なら worker の
-    // ready で常に司令官を起こす。エンジン自身は統合しない。）
-    'projectPanel.swarm.manager.tab': '司令官',
-    'projectPanel.swarm.manager.badge': '司令官',
+    // （「マネージャーを自動で起こす」トグルは 2026-07-16 に廃止 — エンジン ON なら worker の
+    // ready で常にマネージャーを起こす。エンジン自身は統合しない。）
+    'projectPanel.swarm.manager.tab': 'マネージャー',
+    'projectPanel.swarm.manager.badge': 'マネージャー',
     'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
     'projectPanel.swarm.manager.overseerHint':
       'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
@@ -769,30 +788,31 @@ export const projectPanel = {
     'projectPanel.swarm.manager.moveStuckReview': 'worker 完了済みだが doing で滞留',
     'projectPanel.swarm.manager.moveStuckDone': 'trunk へ統合済みだが review で滞留',
     'projectPanel.swarm.manager.moveStuckRecover': 'worker 消失だが doing で滞留',
+    'projectPanel.swarm.manager.moveStuckRecoverReview': '完了済み worker を停止したが review へ戻せず滞留',
     // Review 解決 — 滞留した（衝突／検証失敗）カードを review から退避させる。
     'projectPanel.swarm.manager.resolvePrompt': '解決:',
     'projectPanel.swarm.manager.resolvePark': '保留',
     'projectPanel.swarm.manager.resolveParkHint':
-      'このカードを Blocked に移し、ブランチを手動で解決（ターミナルで rebase）してから done にします。',
+      'このカードを判断待ちに移し、ブランチを手動で解決（ターミナルで rebase）してから done にします。',
     'projectPanel.swarm.manager.resolveRequeue': 'やり直す',
     'projectPanel.swarm.manager.resolveRequeueHint':
       'このカードを To do に戻し、新しい worker が現在の trunk から再挑戦します。',
     'projectPanel.swarm.manager.logOnlyRoutine': 'いまは定常処理のみ — 「すべて」で表示します。',
     'projectPanel.swarm.manager.logEmpty':
       'まだエンジンのイベントはありません。自律をオンにすると、エンジンが Board を drain します。',
-    // 司令官への命令バー — xterm にフォーカスせず /manage に指示を出す。
-    'projectPanel.swarm.manager.command': '司令官に指示',
+    // マネージャーへの命令バー — xterm にフォーカスせず /manage に指示を出す。
+    'projectPanel.swarm.manager.command': 'マネージャーに指示',
     'projectPanel.swarm.manager.commandPlaceholder':
-      '司令官への指示を入力…（Enter で送信・Shift+Enter で改行）',
+      'マネージャーへの指示を入力…（Enter で送信・Shift+Enter で改行）',
     'projectPanel.swarm.manager.send': '送信',
     'projectPanel.swarm.manager.quickStatus': '状況',
     'projectPanel.swarm.manager.quickMerge': 'マージ',
     'projectPanel.swarm.manager.quickClean': '掃除',
-    // 司令官との対話（/manage）— 自律エンジンの human-in-the-loop 対。状況/統合/
+    // マネージャーとの対話（/manage）— 自律エンジンの human-in-the-loop 対。状況/統合/
     // 相談を頼める対話型 `claude` を primary checkout に起動する（worktree なし・
     // supply と同型）。エンジン制御＋worker 監視＋ログと同じタブに同居する。
     'projectPanel.swarm.manager.engineHeading': 'エンジン',
-    // KPI 集計（分析レイヤ）— 司令官ダッシュボードの「swarm は良くなっているか」
+    // KPI 集計（分析レイヤ）— マネージャーダッシュボードの「swarm は良くなっているか」
     // パネル: リードタイム＋差し戻し / コンフリクト / worker 成功率。
     'projectPanel.swarm.manager.kpiHeading': 'メトリクス',
     'projectPanel.swarm.manager.kpiLeadTime': 'リードタイム',
@@ -810,19 +830,33 @@ export const projectPanel = {
     'projectPanel.swarm.manager.consumptionDispatchedHint': 'エンジン起動以降に spawn した worker 数',
     'projectPanel.swarm.manager.consumptionOverLimit':
       '上限超過 — ループはこのセッションで {dispatched} / {limit} 件の worker を起動しました。確認してください。',
-    'projectPanel.swarm.manager.conversationTitle': '司令官と対話する',
+    // マネージャーの動き(検品の現在地)— worker 完了後の「静かな数分」の説明: 仕上がった
+    // 作業はマネージャーの検品を通ってから本番に反映される。心拍ファイル(manager.json)を
+    // orchestrator poll 経由で表示。オーナー向け平易文(2026-07-17 規約): 生活言語で。
+    'projectPanel.swarm.manager.presenceHeading': '検品',
+    'projectPanel.swarm.manager.presenceActive': 'マネージャーが動いています',
+    'projectPanel.swarm.manager.presenceActiveHint':
+      '仕上がった作業を検品して、本番のコードに反映しています。1件あたり数分かかるのが普通です。',
+    'projectPanel.swarm.manager.presenceStandby': 'マネージャーは休んでいます',
+    'projectPanel.swarm.manager.presenceStandbyHint':
+      '次に worker の作業が仕上がると自動で起きます — 何もしなくて大丈夫です。',
+    'projectPanel.swarm.manager.presenceQueue': '検品待ち: {count} 件',
+    'projectPanel.swarm.manager.presenceQueueHint':
+      '仕上がった作業は、マネージャーの検品を通ってから本番に反映されます。',
+    'projectPanel.swarm.manager.presenceLastBeat': '最終報告 {ago}前',
+    'projectPanel.swarm.manager.conversationTitle': 'マネージャーと対話する',
     'projectPanel.swarm.manager.conversationEmpty':
-      'このプロジェクトで /manage を実行する `claude` 司令官を起動します。状況確認・完了ブランチの統合（早送り/rebase のみ）・掃除・相談を頼めます。primary checkout で動き（worktree なし）、上の自律エンジンと並行して働きます。',
-    'projectPanel.swarm.manager.launch': '司令官を起動',
+      'このプロジェクトで /manage を実行する `claude` マネージャーを起動します。状況確認・完了ブランチの統合（早送り/rebase のみ）・掃除・相談を頼めます。primary checkout で動き（worktree なし）、上の自律エンジンと並行して働きます。',
+    'projectPanel.swarm.manager.launch': 'マネージャーを起動',
     'projectPanel.swarm.manager.launching': '起動中…',
-    'projectPanel.swarm.manager.launchFailed': '司令官を起動できませんでした: {error}',
+    'projectPanel.swarm.manager.launchFailed': 'マネージャーを起動できませんでした: {error}',
     'projectPanel.swarm.manager.stop': '停止',
     'projectPanel.swarm.manager.stopping': '停止中…',
-    'projectPanel.swarm.manager.stopWorkerHint': 'この worker を停止 — worktree と `claude` を片付け、カードを Blocked に戻します。',
-    'projectPanel.swarm.manager.conversationIdentity': '司令官 · /manage',
+    'projectPanel.swarm.manager.stopWorkerHint': 'この worker を停止 — worktree と `claude` を片付け、カードを判断待ちに戻します。',
+    'projectPanel.swarm.manager.conversationIdentity': 'マネージャー · /manage',
     'projectPanel.swarm.manager.conversationHint':
-      '司令官は worker を監視し、完了ブランチを統合します。ここで対話してください。',
-    'projectPanel.swarm.manager.backToCommander': '司令官に戻る',
+      'マネージャーは worker を監視し、完了ブランチを統合します。ここで対話してください。',
+    'projectPanel.swarm.manager.backToCommander': 'マネージャーに戻る',
     // 監督タブ — swarm からあなたへのメッセージが集まる場所: エスカレーション
     // 受信箱（下の esc.*）＋要注意フィード（致命イベント＋エンジン anomaly —
     // 削除した Flow タブから移設）。開いた時に読む — 他のサブビューには
@@ -832,9 +866,9 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.alertsHeading': '要注意',
     'projectPanel.swarm.overseer.emptyTitle': 'いま対応が要るものはありません',
     'projectPanel.swarm.overseer.emptyBody':
-      'swarm があなたに上げた質問と致命イベントがここに届きます。稼働中の監督（あなたの代理）は司令官タブの「監督」スイッチでオンにします。',
+      'swarm があなたに上げた質問と致命イベントがここに届きます。稼働中の監督（あなたの代理）はマネージャータブの「監督」スイッチでオンにします。',
     'projectPanel.swarm.overseer.ago': '{age} 前',
-    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'リトライ上限超過 — blocked に退避',
+    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'リトライ上限超過 — 判断待ちに退避',
     'projectPanel.swarm.overseer.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
     'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'レビューパネル決着せず — 統合保留・人間の確認待ち',
     'projectPanel.swarm.overseer.anomalyHighRiskHold': '高リスクパスに接触 — 自動統合を保留・手動マージ待ち',
@@ -854,10 +888,14 @@ export const projectPanel = {
     'projectPanel.swarm.esc.title': 'エスカレーション — あなたの回答待ち',
     'projectPanel.swarm.esc.whyIrreversible': '不可逆',
     'projectPanel.swarm.esc.whyInsufficientInfo': '情報不足',
-    'projectPanel.swarm.esc.whyPolicy': 'ポリシー',
+    // 「ポリシー」は非エンジニアのオーナーには何のことか伝わらない。この why が付くのは
+    // 「あなたの領域だから、あなたが決める」ケース(ESCALATE OWNER のルーティング判定と
+    // 恒久境界)なので、分類名ではなく“何を求められているか”を出す。
+    'projectPanel.swarm.esc.whyPolicy': 'あなたが決めること',
     'projectPanel.swarm.esc.proxyDraft': 'proxy の暫定回答 · 確信度 {confidence}',
     'projectPanel.swarm.esc.abstention': 'proxy は回答を保留しました（あなたの情報が不足）。',
     'projectPanel.swarm.esc.useDraft': '暫定回答を使う',
+    'projectPanel.swarm.esc.techDetails': '技術的な詳細',
     'projectPanel.swarm.esc.screenshot': 'その時の worker 画面',
     'projectPanel.swarm.esc.answerPlaceholder': '回答を入力…',
     'projectPanel.swarm.esc.answerSend': '回答して再開',

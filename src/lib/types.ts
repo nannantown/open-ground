@@ -163,8 +163,11 @@ export interface Settings {
  *  `sandbox` = wrap OPEN GROUND-launched `claude` in a macOS Seatbelt sandbox
  *  (cwd-confined writes + credential read-denies) and run it prompt-free
  *  (permission bypass) — the OS sandbox is the safety net (macOS only; see
- *  src/lib/server/sandbox.ts + docs/SANDBOX_EXPERIMENT.md). */
-export type ExperimentId = 'swarm' | 'sandbox'
+ *  src/lib/server/sandbox.ts + docs/SANDBOX_EXPERIMENT.md);
+ *  `persona` = the Persona tab, where the owner reads and corrects the
+ *  you-corpus that the overseer runs on (src/components/canvas/modules/
+ *  PersonaModule.tsx + src/lib/server/youCorpus.ts). */
+export type ExperimentId = 'swarm' | 'sandbox' | 'persona'
 
 /** Resolved open/closed state for every experiment, keyed by id. TRUE only when
  *  the user is the owner AND has turned that experiment on. */
@@ -996,6 +999,23 @@ export interface SpawnSwarmWorkerResponse {
 export interface RemoveSwarmWorktreeResponse {
   removed: boolean
   reason?: string
+  /** Present on a CONFIRMED non-force removal (the commander's post-merge sweep
+   *  lane — og-manage §マージ step 7): the commander-integration detection that
+   *  reconnects the engine self-update trigger (selfUpdateOnIntegrate.ts). */
+  selfUpdate?: SelfUpdateFireResult
+}
+
+/** Result of the commander-integration detection that runs after a confirmed
+ *  non-force worker-worktree removal (selfUpdateOnIntegrate.ts): did the removed
+ *  worker's branch turn out to be integrated, and did the self-update trigger
+ *  actually fire. */
+export interface SelfUpdateFireResult {
+  /** The removed worker's branch tip was reachable from the trunk (origin/main,
+   *  else local main) — i.e. the commander integrated it before cleaning up. */
+  detected: boolean
+  /** The engine self-update IPC trigger actually fired — requires the armed
+   *  own-source run (selfUpdateSignal.ts gates); false in every other context. */
+  requested: boolean
 }
 
 /** POST /api/swarm/supply — a spawned in-app SUPPLY (補給官) session: the claude
@@ -1033,6 +1053,13 @@ export interface SpawnSwarmManagerResponse {
    *  NOT. That is why a resumed commander is ordered to re-read the Board and the
    *  worker list before it says anything (swarmManager.MANAGER_RESUME_INJECTION). */
   resumed: boolean
+  /** true ⇒ NOTHING was spawned: a commander desk was already live in this
+   *  project, so `terminalId` names THAT desk. The one-desk-per-project invariant
+   *  (swarmManager.spawnSwarmManager) — a project may never hold two commanders,
+   *  because two desks integrating one trunk is the 2026-07-15
+   *  concurrent-integration hazard, and eleven of them accumulated on 2026-07-19.
+   *  Absent/false ⇒ a desk was launched. */
+  reused?: boolean
 }
 
 /** The coarse lifecycle stage the COMMANDER engine reports for one of its
@@ -1100,6 +1127,21 @@ export interface OrchestratorWorker {
    *  wall-clock). Cleared on a fresh-heartbeat promote. In-memory only; absent for a
    *  never-reworked worker. */
   reworkAt?: string
+  /** ISO timestamp this worker FIRST reached ready — the pass its card was first
+   *  OBSERVED sitting in 'review'/'done'. Bound to WHERE THE CARD IS, not to whose
+   *  write moved it there: the engine's own promote and a commander hand-move
+   *  (`move <id> review`, og-manage's documented first move on READY, which usually
+   *  beats the promote tick) both stamp it. Set once and never cleared (a 差し戻し
+   *  sends the card back, but the fact that this worker already produced integrable,
+   *  committed work stands). The engine's "has this worker ever delivered?" flag: a
+   *  worker
+   *  carrying it is NEVER labelled a 暴走 (runaway) and its card is never parked in
+   *  the owner's 'blocked' column by the execution-ceiling path — see
+   *  swarmOrchestrator's `integration-wait` recovery reason (2026-07-18: a ready
+   *  worker was torn down as "runaway 91m" because its 28 minutes of 統合待ち
+   *  counted as work, and its card landed in blocked). In-memory only; absent for
+   *  a worker that has not finished anything yet. */
+  readyAt?: string
 }
 
 /** One row of GET /api/swarm/workers — the SERVER-TRUTH worker list. Built by
@@ -1183,13 +1225,15 @@ export interface OrchestratorLogLine {
 }
 
 /** Read-only integration readiness of ONE review-column card whose branch the
- *  commander engine could land (Card③). Computed each pass WITHOUT mutating git
- *  so the dashboard can show "統合可" while auto-integrate is OFF (the default).
+ *  commander could land (Card③). Computed each pass WITHOUT mutating git so
+ *  the dashboard can show "統合可" while the engine itself never lands anything
+ *  (integration is the commander's — the engine only wakes it; the old
+ *  auto-integrate toggle was retired 2026-07-16).
  *   - 'ff'       → a clean fast-forward (or already merged) — finalizable now.
  *   - 'rebase'   → diverged from the trunk; needs a rebase (which MAY conflict).
- *   - 'conflict' → an actual auto-integration attempt hit a rebase conflict and
- *                  was aborted; needs manual integration (mirrors the card's
- *                  integrationConflict stamp).
+ *   - 'conflict' → an integration attempt hit a rebase conflict and was
+ *                  aborted; needs manual integration (mirrors the card's
+ *                  persisted integrationConflict stamp).
  *   - 'unknown'  → not judgeable (no remote trunk, tip missing, git error). */
 export type OrchestratorReviewStatus = 'ff' | 'rebase' | 'conflict' | 'unknown'
 
@@ -1248,9 +1292,14 @@ export interface OrchestratorReview {
  *                         branch LANDED on the trunk but its card is stuck in
  *                         'review' (`intent:'done'` — "done なのに review"), or a
  *                         lost worker's card couldn't be re-homed out of 'doing'
- *                         (`intent:'recover'` — "dead なのに doing"). The engine
- *                         keeps retrying (and escalates a recoverable case to
- *                         'blocked'); this surfaces the ones a human must move.
+ *                         (`intent:'recover'` — "dead なのに doing"), or a worker
+ *                         that had ALREADY reached ready hit the execution ceiling
+ *                         and its card couldn't be returned to 'review'
+ *                         (`intent:'recover-review'`). The engine keeps retrying
+ *                         (and escalates a recoverable case to 'blocked' — never
+ *                         the 'recover-review' one, whose whole point is that a
+ *                         ready worker's card must not land in the owner's column);
+ *                         this surfaces the ones a human must move.
  *   - 'review-panel-failed' — the adversarial review panel could not produce a
  *                         decisive verdict (zero must-fix/clean votes, or no
  *                         majority) even after its retry budget, so the card is
@@ -1291,9 +1340,10 @@ export interface OrchestratorAnomaly {
    *  "no heartbeat for N min" without a second clock). */
   staleMinutes?: number
   /** For 'move-stuck': WHICH column move is stuck, so the pane can say exactly
-   *  what zombied ('review' = stuck in doing, 'done' = stuck in review, 'recover'
+   *  what zombied ('review' = stuck in doing, 'done' = stuck in review,
+   *  'recover-review' = a READY worker's card stuck in doing, 'recover'
    *  = a lost worker stuck in doing). */
-  intent?: 'review' | 'done' | 'recover'
+  intent?: 'review' | 'done' | 'recover' | 'recover-review'
   /** For 'move-stuck': how many consecutive writes were kept (display-only).
    *  For 'rework-exhausted': how many times the card bounced review→doing before
    *  the loop guard parked it in 'blocked' (display-only).
@@ -1365,6 +1415,34 @@ export interface SwarmConsumption {
    *  consumption ceiling; the UI warns the owner to check it. A soft nudge, never
    *  a hard stop (the engine keeps running). */
   overLimit: boolean
+}
+
+/** The commander desk's own heartbeat, as GET /api/swarm/orchestrator surfaces it
+ *  (the `manager` field) — a read-only snapshot of the FIXED per-repo file
+ *  `~/.openground/swarm/<repoKey>/manager.json` the commander beats into while it
+ *  inspects/integrates (the SAME file the resurrection reflex reads). Exists so the
+ *  Swarm tab can EXPLAIN the quiet minutes after a worker finishes ("the commander
+ *  is inspecting") instead of looking dead — the 2026-07-17 misread. DISPLAY-ONLY:
+ *  this never feeds the resurrection reflex's own health judgement
+ *  (defaultManagerPresence / isManagerHeartbeatFresh — untouched). Note the reflex no
+ *  longer treats a stale beat as death on its own (2026-07-18): the commander beats only
+ *  while integrating, so silence here means "not integrating", NOT "hung". */
+export interface SwarmManagerHeartbeat {
+  /** The commander's self-reported phase (`status` / `merge` / …) — free-form,
+   *  display-only. Absent when the beat carried none. */
+  phase?: string
+  /** The commander's one-line "what I'm doing now" note — free-form, display-only.
+   *  Absent when the beat carried none. */
+  note?: string
+  /** When it last beat (ISO 8601, as written in the file). */
+  updatedAt: string
+  /** How long ago that was, measured on the SERVER clock (now − updatedAt, clamped
+   *  ≥ 0) — so the client never mixes its own clock into the freshness read. */
+  ageMs: number
+  /** `ageMs < MANAGER_HEARTBEAT_STALE_MS` (10 min — the same window the
+   *  resurrection reflex uses to call a desk hung), computed server-side: true ⇒
+   *  the commander is actively working right now. */
+  fresh: boolean
 }
 
 /** GET/POST /api/swarm/orchestrator{,/start,/stop} — the commander
@@ -1448,6 +1526,16 @@ export interface SwarmOrchestratorState {
    *  carries a warn line on park enter and an info line on lift) and through
    *  this field on the status API; no dedicated UI renders it yet. */
   parkUntil?: number
+  /** The commander desk's own heartbeat — see {@link SwarmManagerHeartbeat}. The
+   *  Swarm tab renders it as the "inspection" presence line (稼働中/待機中), so the
+   *  post-worker quiet minutes read as the commander inspecting, not a dead swarm.
+   *  `null` / absent = no heartbeat to show (never written, unreadable, or a
+   *  non-repo path) — the UI degrades to the standby wording (fail-safe). Carried
+   *  by the GET poll (getOrchestratorState); the action endpoints' ack responses
+   *  may omit it (optional), and the next poll refills it. Whether the desk is a
+   *  human-opened conversation or the engine-woken integrator is NOT distinguished
+   *  — the file is shared, so this is "the last active commander desk" on purpose. */
+  manager?: SwarmManagerHeartbeat | null
 }
 
 // ── swarm janitor (residual-cleanup) ─────────────────────────────────────────
@@ -1619,6 +1707,20 @@ export interface ProjectTask {
    *  再利用されても差し戻し回数が持ち越されないように — 3点セット: types.ts /
    *  ProjectTaskSchema / server/routes/project.ts rework loop + setColumn done/todo)。 */
   reworkCount?: number
+  /** Set by the DAILY FUEL REPORT (`dailyFuelReport.ts`) on the improvement
+   *  proposal it files into `blocked` on a degraded day. Its presence marks
+   *  provenance AND is the dedup key: the report scans the target Board for an
+   *  OPEN (non-done) card carrying it and files nothing when one exists — the
+   *  same Board-truth dedup `openSelfSupplyKeys` does for self-supply, and the
+   *  reason a lost/unwritable sentinel can no longer pile duplicate proposals
+   *  into blocked.
+   *
+   *  Deliberately NOT `selfSupplyKey`: that field ALSO gates dispatch
+   *  (selectDispatch holds the card until `selfSupplyApproved`), which would
+   *  break this lane's approval contract — here the owner's MOVE to todo *is*
+   *  the approval, so a card sitting in todo must be dispatchable. Shared data.
+   *  (3点セット: types.ts / schemas.ts ProjectTaskSchema / the report's scan.) */
+  fuelProposalKey?: string
 }
 
 /** Board card dispatch priority (in-app swarm). Absent ⇒ treated as 'normal'.
@@ -2088,6 +2190,22 @@ export type SwarmFatalEvent =
   | 'review-panel-failed'
   | 'high-risk-hold'
   | 'manager-unrevivable'
+  // 'data-integrity' is NOT a swarm event: it is the boot-time home-data damage
+  // check (src/lib/server/homeIntegrity.ts) reporting that settings.json /
+  // canvas.json lost entries, became unreadable, or picked up a test fixture
+  // value. It sits on the FATAL channel deliberately:
+  //   - the fatal row renders with a warning triangle and accent colour, while
+  //     the info row is a muted "nothing broke, someone should look" inbox
+  //     item — the owner's project registry vanishing must not look like a
+  //     pending question (it did, before);
+  //   - `logHint` gives it somewhere to print WHERE the backups are, which is
+  //     the whole point of telling them at all.
+  // A dedicated NotificationKind would be more honest still, but an unknown kind
+  // renders as an INVISIBLE row that nonetheless bumps the unread badge
+  // (NotificationPanel returns null in its default branch) — a phantom unread
+  // nobody can clear. Precedent for non-swarm events here: 'rollback' and
+  // 'canary-failed' are Electron self-update events.
+  | 'data-integrity'
 
 /** The payload of a 'swarm-fatal' notification — carries WHAT happened, WHICH
  *  card/branch it concerns, and a POINTER to the engine log so the notification
@@ -2109,6 +2227,43 @@ export interface SwarmFatalNotification {
   /** Where to dig in — a one-line pointer to the engine log / commander pane, so
    *  the notification is a 導線 (not a dead end). */
   logHint?: string
+  /** For 'exec-timeout' ONLY — WHICH flavor of ceiling stop this was, because the
+   *  two need OPPOSITE owner-facing questions and one event carries both:
+   *   • 'runaway'          — never reached ready. Re-running it whole would just
+   *                          overrun again, so "split it up and retry, or drop it"
+   *                          is the right ask.
+   *   • 'integration-wait' — HAD reached ready, was 差し戻し'd, and blew the budget
+   *                          re-working. Its branch holds integrable work and the
+   *                          card is back in 'review', so the judgement belongs to
+   *                          the commander (verify the diff → land or 差し戻し),
+   *                          NOT the owner. Asking the owner to "split it up and
+   *                          retry" here is actively wrong: an answered escalation
+   *                          whose worker is gone rides into the card's NEXT
+   *                          dispatch as a directive (swarmEscalations'
+   *                          deliverAnswer → recordEscalationAnswerForNextDispatch),
+   *                          so that answer would order a fresh worker to redo work
+   *                          that is already delivered. 2026-07-18 harm (c) — a
+   *                          judgement-free card piled into the owner's queue.
+   *  Absent on every other event (and on older persisted notifications). */
+  execTimeoutKind?: 'runaway' | 'integration-wait'
+  /** For `execTimeoutKind: 'integration-wait'` ONLY — WHY the ceiling was reached.
+   *  `readyAt` cannot answer this on its own (it only means "delivered once"), and
+   *  neither can a boolean: there are THREE causes, and every one of them reads as
+   *  a lie when told as another.
+   *   • 'rework'      — 差し戻し'd and actually burned the budget re-working. Its
+   *                     tip is UNVERIFIED (the re-work was cut off mid-flight).
+   *   • 'capped-wait' — the card queued longer than {@link WAIT_CREDIT_CAP_MS}
+   *                     forgives (a careful 63-hour weekend review is enough), so
+   *                     uncredited WAITING put it over. It re-worked nothing; its
+   *                     tip is what it was at ready.
+   *   • 'work'        — the wait was fully credited (or there was none at all, as
+   *                     on the kept-promote route where the card never left
+   *                     'doing') and nothing was re-worked: the ceiling came from
+   *                     REAL WORK. Saying 「順番待ちが長引いた」 here is false —
+   *                     this worker worked the entire time.
+   *  Absent on every other event, and on notifications persisted before this
+   *  field existed. */
+  execTimeoutShape?: 'rework' | 'capped-wait' | 'work'
 }
 
 /** Which INFO-grade (non-fatal) swarm event fired. Unlike {@link SwarmFatalEvent}
@@ -2124,15 +2279,44 @@ export interface SwarmFatalNotification {
  *                              commander desk to decide the integration
  *                              (2026-07-15 manager-only integration; the engine no
  *                              longer merges — swarmOrchestrator runIntegratePass).
+ *   • 'self-update-requested' — the commander's post-merge worktree sweep was
+ *                              detected as an integration landing on the trunk,
+ *                              and the engine self-update cycle (rebuild→canary→
+ *                              switch) was actually requested — the app is about
+ *                              to replace itself (selfUpdateOnIntegrate.ts; only
+ *                              fires in armed own-source runs).
+ *   • 'daily-fuel-report'   — the once-a-day swarm fuel report (card
+ *                              swarm-token-blocked): a DETERMINISTIC (zero-LLM)
+ *                              summary of the sessions that finished since the
+ *                              last report — cards / median turns / bundle rate /
+ *                              max context / total output + the 前回比 line. On a
+ *                              degraded day the detail also notes the improvement
+ *                              proposal card auto-filed into the Board's blocked
+ *                              column (owner approval = moving it to todo).
+ *   • 'session-limit'       — one of the OWNER'S OWN conversation desks (a
+ *                              Terminal-tab pane, Board 実行, the commander /
+ *                              supply desks) stopped because its model's usage
+ *                              limit was reached. Nothing is broken and nothing
+ *                              auto-recovers: that conversation simply waits until
+ *                              the owner switches models. Raised by
+ *                              ownerDeskLimit.ts — the gap the 2026-07-18 event
+ *                              exposed, where the engine rescued its own workers
+ *                              (hold → requeue → tier demotion) while the owner's
+ *                              desk sat dead until they happened to look at it.
  *  ('escalation-open' fires from swarmEscalations.ts, 'manager-woke' from the
- *  engine's integrate pass; the other three are reserved for the overseer
- *  brainstem (C-core) so this union is additive.) */
+ *  engine's integrate pass, 'self-update-requested' from the worktree-remove
+ *  path, 'daily-fuel-report' from dailyFuelReport.ts's app-uptime loop,
+ *  'session-limit' from the owner-desk model-limit watch; the other three are
+ *  reserved for the overseer brainstem (C-core) so this union is additive.) */
 export type SwarmInfoEvent =
   | 'escalation-open'
   | 'escalation-reminder'
   | 'review-idle'
   | 'overseer-throttled'
   | 'manager-woke'
+  | 'self-update-requested'
+  | 'daily-fuel-report'
+  | 'session-limit'
 
 /** The payload of a 'swarm-info' notification — the info-grade sibling of
  *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,
@@ -2239,6 +2423,16 @@ export interface Escalation {
   question: string
   /** Why this is being asked + what is at stake (the decision's context). */
   context: string
+  /** 平易文 — the same question rendered for a NON-PROGRAMMER owner (direct
+   *  owner feedback 2026-07-17: 「escalation の質問の意味が毎回わからない」).
+   *  Three mandatory elements when authored: ① what needs deciding, in 1–2
+   *  sentences ② the options (A/B…) ③ what each choice leads to, in everyday
+   *  language. Technical detail (file:line / branch / logs) stays in
+   *  `question`/`context`, which the UI folds behind this text. Optional for
+   *  backward compat — records predating this field (and worker-authored
+   *  raises, whose question text is itself written plainly per the /order
+   *  worker rules) fall back to `question` in the UI. */
+  plainQuestion?: string
   /** Path to the PTY-tail capture taken when the escalation was raised (what the
    *  worker's screen showed) — a small text file under
    *  ~/.openground/escalation-shots/, unlinked when the record is pruned. */
@@ -2702,6 +2896,13 @@ export interface ManualJudgment {
   tags?: string[]
   context?: string
   addedAt: string
+  /** Set when this judgment CORRECTS an earlier one: that judgment's `id`.
+   *  `context` carries a human-readable quote of the corrected note (what the
+   *  owner and the overseer actually read), but a quote is capped and can
+   *  repeat — this is the exact link, so the chain stays followable no matter
+   *  how the prose is worded. Absent on a plain note, and on every correction
+   *  written before this field existed. */
+  correctsId?: string
 }
 
 /** Lightweight result of assembling/appending (POST /api/you-corpus/rebuild and
@@ -2716,6 +2917,13 @@ export interface YouCorpusMeta {
   manualCount: number
   conceptIncluded: boolean
   businessVisionIncluded: boolean
+  /** true when assembly REFUSED to overwrite the existing corpus because no
+   *  mechanical source (auto-memory / CONCEPT.md) resolved while the existing
+   *  file was built with them — a source-resolution failure, not real emptiness.
+   *  The on-disk corpus is untouched; the other fields describe it. */
+  skipped?: boolean
+  /** Human-readable reason accompanying `skipped` (also logged server-side). */
+  warning?: string
 }
 
 /** GET /api/you-corpus — status of the assembled corpus + which sources are
@@ -2740,4 +2948,92 @@ export interface YouCorpusStatus {
 export interface YouCorpusAppendResponse {
   judgment: ManualJudgment
   meta: YouCorpusMeta
+}
+
+/** GET /api/you-corpus/judgments — the hand-added judgments as STRUCTURED
+ *  records, newest first. The assembled you-corpus.md renders the same set as
+ *  prose for the proxy to read; this is the shape a UI needs to show them one
+ *  per card (date, tags, and the note a correction carries) and is why the
+ *  Persona tab does not have to parse the rendered markdown back apart. */
+export interface YouCorpusJudgmentsResponse {
+  judgments: ManualJudgment[]
+}
+
+// ─── The interview loop (ペルソナタブの「今日の1問」) ─────────────────────────
+// One question a day, generated FROM the owner's own recorded work — never a
+// personality quiz. Engine: src/lib/server/personaInterview.ts.
+
+/** Which observation produced a question. Every kind names a concrete, DURABLE
+ *  fact (an escalation's timestamps, a card's column/rework counter) — there is
+ *  no generic/"about you" kind, and adding one would defeat the point of the
+ *  loop. Recorded on the question so an answer lands in the corpus tagged with
+ *  what prompted it. */
+export type PersonaQuestionKind =
+  | 'decision-speed-contrast'
+  | 'escalation-answer-rule'
+  | 'escalation-dismissed'
+  | 'escalation-long-open'
+  | 'corpus-gap'
+  | 'card-rework'
+  | 'card-approved'
+  | 'card-stale-blocked'
+  | 'todo-passed-over'
+
+/** The question asked on one local day.
+ *
+ *  The rendered TEXT is stored, not an i18n key plus slots: this is an artifact
+ *  with a lifetime (asked → answered → written into the corpus), so its wording
+ *  must be frozen at generation time. Re-rendering later through a since-edited
+ *  template would misquote what the owner was actually asked — the same reason
+ *  `Escalation.question` is a stored string. */
+export interface PersonaQuestion {
+  id: string
+  /** Local 'YYYY-MM-DD' this question belongs to (the once-a-day key). */
+  date: string
+  kind: PersonaQuestionKind
+  /** Stable key for the OBSERVATION behind the question (not the wording), so
+   *  the same situation is never asked about twice even across restarts. */
+  subjectKey: string
+  /** The question, frozen at generation. JA is what reaches the corpus — the
+   *  corpus is the owner's own, and the escalation write-back is Japanese too. */
+  textJa: string
+  textEn: string
+  createdAt: string
+  status: 'open' | 'answered' | 'skipped'
+  /** Set when answered or skipped. The ANSWER TEXT is deliberately not stored
+   *  here — it goes to the corpus via appendJudgment, which stays its one home. */
+  resolvedAt?: string
+}
+
+/** ~/.openground/persona-interview.json — the persisted once-a-day state. */
+export interface PersonaInterviewState {
+  version: 1
+  /** Local 'YYYY-MM-DD' of the last day a question was generated. Bumped even
+   *  when generation found NO material, so a barren day is not retried all day. */
+  lastAskedDate: string
+  /** The question for `lastAskedDate`, or null when that day yielded none. */
+  today: PersonaQuestion | null
+  /** subjectKeys already asked about, newest last, capped. The dedup memory. */
+  askedSubjects: string[]
+}
+
+/** GET/POST /api/you-corpus/interview — today's question, if there is one.
+ *
+ *  `reason` explains a null question so the tab can say something true instead
+ *  of implying the loop is broken:
+ *  - 'no-material' — the day WAS swept and the owner's records held nothing to
+ *    ask about (the honest empty state).
+ *  - 'not-generated' — the day has not been swept yet. Only the read-only GET
+ *    can report this; the POST sweeps before answering. The two must stay
+ *    distinct: reporting "nothing to ask" for a day nobody looked at is the
+ *    same false claim `questionLoaded` and `showNotes` exist to prevent. */
+export interface PersonaInterviewResponse {
+  question: PersonaQuestion | null
+  reason?: 'no-material' | 'not-generated'
+  /** Set on the ANSWER path when the judgment was saved but the file the
+   *  stand-in actually reads could not be rebuilt (YouCorpusMeta.skipped). The
+   *  tab must not say "your stand-in has this now" in that case — the note form
+   *  already tells the truth here (persona.meta.stale) and this carries the same
+   *  signal for the question. */
+  corpusStale?: boolean
 }

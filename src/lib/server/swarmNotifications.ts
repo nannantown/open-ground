@@ -25,8 +25,11 @@ import type {
 } from '../types'
 
 /** Keep only the newest few — these are urgent one-offs, not a log. A small cap
- *  bounds the file and the bell list; older fatal events scroll off (the engine
- *  log keeps the full history). */
+ *  bounds the file and the bell list; older events scroll off (the engine log
+ *  keeps the full history).
+ *
+ *  PER KIND, not overall (see {@link capNotificationsByKind}): fatal records and
+ *  info records share this file but must not compete for the same slots. */
 export const SWARM_NOTIFICATIONS_CAP = 50
 
 interface SwarmNotificationsState {
@@ -57,14 +60,48 @@ export const listSwarmNotifications = async (): Promise<AppNotification[]> => {
 // each other. Keeps advancing even if one write throws.
 let chain: Promise<unknown> = Promise.resolve()
 
-/** Append one notification, capped to the newest {@link SWARM_NOTIFICATIONS_CAP}. */
+/**
+ * Keep the newest {@link SWARM_NOTIFICATIONS_CAP} **of each kind**, newest-first
+ * overall. Pure.
+ *
+ * WHY PER KIND. Every record used to share one 50-slot list, so a steady trickle
+ * of routine info notices evicted rare fatal ones purely by being more recent.
+ * That is exactly backwards: the fatal lane is the unmanned swarm's safety valve
+ * (rework-exhausted / all-workers-down / canary-failed / data-integrity), and the
+ * daily fuel report posts one info record EVERY day by design — including on
+ * quiet days, which is the point of it. Left shared, a single fatal event would
+ * be pushed off the bell after ~50 quiet days with nothing else happening, and
+ * sooner once escalations and overseer notices mix in. Partitioning is the fix
+ * that keeps both lanes bounded; the alternatives were worse:
+ *   • dropping the healthy-day report — that IS the feature (a report that
+ *     arrives daily is how the owner distinguishes "nothing finished" from "the
+ *     loop died"), and it would only postpone the collision, not remove it;
+ *   • exempting fatal from eviction — unbounded growth, and the file is read
+ *     whole on every append.
+ * An unknown/absent kind is partitioned under its own bucket, so a future kind
+ * inherits the same isolation without touching this function.
+ */
+export const capNotificationsByKind = (items: readonly AppNotification[]): AppNotification[] => {
+  const sorted = [...items].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+  const perKind = new Map<string, number>()
+  const kept: AppNotification[] = []
+  for (const it of sorted) {
+    const bucket = it.kind ?? 'unknown'
+    const n = perKind.get(bucket) ?? 0
+    if (n >= SWARM_NOTIFICATIONS_CAP) continue
+    perKind.set(bucket, n + 1)
+    kept.push(it)
+  }
+  return kept
+}
+
+/** Append one notification, keeping the newest {@link SWARM_NOTIFICATIONS_CAP}
+ *  PER KIND (so info traffic can never evict a fatal record — see
+ *  {@link capNotificationsByKind}). */
 export const appendSwarmNotification = async (app: AppNotification): Promise<void> => {
   const run = chain.then(async () => {
     const state = await readState()
-    const items = [...state.items, app]
-    // Cap by recency — keep the newest N (sort desc, slice, the file stays bounded).
-    items.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-    const capped = items.slice(0, SWARM_NOTIFICATIONS_CAP)
+    const capped = capNotificationsByKind([...state.items, app])
     await atomicWriteJson(swarmNotificationsFile(), { items: capped } satisfies SwarmNotificationsState)
   })
   chain = run.catch(() => {})
@@ -84,6 +121,10 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   'review-panel-failed': 'Swarm — review panel failed (merge withheld)',
   'high-risk-hold': 'Swarm — high-risk paths (awaiting manual merge)',
   'manager-unrevivable': 'Swarm — commander keeps dying (check it manually)',
+  // Plain Japanese on purpose: unlike every other entry here (read by the
+  // operator), this one is read by the OWNER, who is not a programmer, and it is
+  // about their own data going missing. See homeIntegrity.ts.
+  'data-integrity': 'データが減っているようです',
 }
 
 /** The OS toast (title + body) for a fatal event. Body carries WHAT happened, the
@@ -152,6 +193,11 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   'review-idle': 'Swarm — review cards await integration',
   'overseer-throttled': 'Swarm — overseer throttled (usage cap)',
   'manager-woke': 'Swarm — commander woken to decide an integration',
+  'self-update-requested': 'Swarm — engine self-update cycle requested',
+  'daily-fuel-report': 'Swarm — daily fuel report',
+  // Not a swarm event at all — the OWNER'S OWN conversation stopped. Titled for
+  // what the owner sees on the toast, not for the subsystem that noticed.
+  'session-limit': 'Claude — your conversation stopped (usage limit)',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

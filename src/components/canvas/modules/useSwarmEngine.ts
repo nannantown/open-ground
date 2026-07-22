@@ -83,6 +83,36 @@ export interface EngineReview {
   status: EngineReviewStatus
 }
 
+/** The commander desk's own heartbeat — mirrors the server's SwarmManagerHeartbeat
+ *  (the `manager` field of GET /api/swarm/orchestrator). Display-only: it renders
+ *  the "inspection" presence line that explains the quiet minutes after a worker
+ *  finishes (the commander inspecting/landing work). `fresh` and `ageMs` are
+ *  SERVER-computed (server clock), so the client never mixes its own clock in. */
+export interface EngineManagerHeartbeat {
+  /** Self-reported phase (`status` / `merge` / …) — free-form, display-only. */
+  phase?: string
+  /** One-line "what I'm doing now" note — free-form, display-only. */
+  note?: string
+  /** When it last beat (ISO 8601). */
+  updatedAt: string
+  /** How long ago, on the server clock (≥ 0). */
+  ageMs: number
+  /** Beat within the 10-min freshness window ⇒ the commander is active now. */
+  fresh: boolean
+}
+
+/** Commander presence (the inspection line) — explains the quiet minutes after a
+ *  worker finishes: while the commander desk inspects/lands the work its heartbeat
+ *  stays fresh, so the tab can SAY "the commander is working" instead of looking
+ *  dead (the 2026-07-17 misread). PURE so the two-state rule is unit-tested: ONLY
+ *  a server-confirmed fresh heartbeat reads as active; a stale, absent, or
+ *  unreadable one degrades to standby — never an error (fail-safe). Which desk
+ *  (human-opened vs engine-woken) is not distinguished — the heartbeat file is
+ *  shared, so this is "the last active commander desk" by design. */
+export type CommanderPresence = 'active' | 'standby'
+export const commanderPresence = (manager: EngineManagerHeartbeat | null): CommanderPresence =>
+  manager?.fresh ? 'active' : 'standby'
+
 /** A state inconsistency the engine detected (mirrors the server's
  *  OrchestratorAnomaly) — surfaced as a warning so a drift the autonomy loop
  *  can't self-heal is noticed (条件2). */
@@ -107,8 +137,10 @@ export interface EngineAnomaly {
   staleMinutes?: number
   /** 'move-stuck' only — WHICH column move is stuck ('review' = a finished worker
    *  stuck in doing, 'done' = a landed branch stuck in review, 'recover' = a lost
-   *  worker stuck in doing), so the pane can name the exact zombie. */
-  intent?: 'review' | 'done' | 'recover'
+   *  worker stuck in doing, 'recover-review' = a ready worker stopped at the
+   *  execution ceiling whose card could not be returned to review), so the pane
+   *  can name the exact zombie. */
+  intent?: 'review' | 'done' | 'recover' | 'recover-review'
   /** 'move-stuck' — consecutive kept writes; 'rework-exhausted' — review→doing
    *  bounces before parking; 'review-panel-failed' — consecutive indecisive
    *  panels before re-spawning stopped (display-only). */
@@ -194,6 +226,11 @@ export interface SwarmEngineState {
    *  `!running && autonomyRemembered`. Surfaced even before an engine exists this
    *  session (right after a restart). */
   autonomyRemembered: boolean
+  /** The commander desk's heartbeat (see {@link EngineManagerHeartbeat}), or null
+   *  when there is none to show (never written / unreadable / an action-ack
+   *  response that omits it — the GET poll refills it within seconds). The UI
+   *  degrades to the standby wording on null — never an error (fail-safe). */
+  manager: EngineManagerHeartbeat | null
 }
 
 export const EMPTY_KPIS: EngineKpis = {
@@ -224,6 +261,7 @@ export const DEFAULT_ENGINE: SwarmEngineState = {
   kpis: EMPTY_KPIS,
   consumption: EMPTY_CONSUMPTION,
   autonomyRemembered: false,
+  manager: null,
 }
 
 const KNOWN_LEVELS: ReadonlySet<string> = new Set(['info', 'warn', 'error'])
@@ -239,7 +277,16 @@ const KNOWN_ANOMALY_KINDS: ReadonlySet<string> = new Set([
   'orphan-doing', 'worktree-missing', 'worker-stale', 'no-heartbeat', 'move-stuck',
   'rework-exhausted', 'review-panel-failed', 'high-risk-hold',
 ])
-const KNOWN_MOVE_INTENTS: ReadonlySet<string> = new Set(['review', 'done', 'recover'])
+// Same lockstep rule as KNOWN_ANOMALY_KINDS above, and it was broken the same way
+// on 2026-07-18: 'recover-review' was added to the type, to MOVE_INTENT_LABEL and
+// to both locales, but NOT here — so this filter stripped it, `a.intent` went
+// undefined, and the pane fell back to the bare generic label. That intent is the
+// ONLY surface for a ready worker whose card could not be returned to 'review'
+// (it is deliberately excluded from the blocked escalation), so dropping it hid
+// the state entirely. Keep in lockstep with EngineAnomaly['intent'].
+const KNOWN_MOVE_INTENTS: ReadonlySet<string> = new Set([
+  'review', 'done', 'recover', 'recover-review',
+])
 
 /** Coerce the untrusted KPI roll-up — every field defended (a forged shape can
  *  answer the route). A non-finite rate → null (a dash, never a fake 0%); a
@@ -392,6 +439,24 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
         .slice(0, 50) // cap — defensive against a forged huge list
     : []
 
+  // The commander heartbeat (display-only presence line). Coerced whole-or-null:
+  // a record missing/forging its updatedAt, ageMs, or fresh is dropped entirely —
+  // the standby wording is the fail-safe direction (never a fake "active now").
+  const manager = ((): EngineManagerHeartbeat | null => {
+    const m = o.manager
+    if (!m || typeof m !== 'object') return null
+    const r = m as Record<string, unknown>
+    if (typeof r.updatedAt !== 'string' || !r.updatedAt) return null
+    if (typeof r.ageMs !== 'number' || !Number.isFinite(r.ageMs) || r.ageMs < 0) return null
+    return {
+      updatedAt: r.updatedAt,
+      ageMs: r.ageMs,
+      fresh: r.fresh === true,
+      ...(typeof r.phase === 'string' && r.phase ? { phase: r.phase } : {}),
+      ...(typeof r.note === 'string' && r.note ? { note: r.note } : {}),
+    }
+  })()
+
   return {
     running: o.running === true,
     // Strict boolean like `running`: a forged / absent value folds to FALSE — the
@@ -406,6 +471,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     kpis: sanitizeKpis(o.kpis),
     consumption: sanitizeConsumption(o.consumption),
     autonomyRemembered: o.autonomyRemembered === true,
+    manager,
   }
 }
 

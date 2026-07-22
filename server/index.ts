@@ -16,10 +16,13 @@ import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/serve
 import { installLockdownFetchGuard } from '@/lib/server/lockdown'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
+import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
 import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
 import { warmTierProbeAtBoot } from '@/lib/server/swarmTierProbe'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
+import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
+import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
 
@@ -68,6 +71,29 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOSTNAME }, (info
 // only Electron observes). Fail-safe — a no-op unless we're the forked engine with
 // an IPC channel (prod). The OUTWARD half (server→Electron OS toast) is osNotify.ts.
 registerIncomingNotifications()
+
+// HOME-DATA DAMAGE CHECK — compare settings.json (the project registry) and
+// canvas.json (the card layout) against the watermark this check itself recorded
+// last boot, and WARN if entries vanished or a test fixture value landed in the
+// real home. On 2026-07-18 the registry silently went 45 → 3 entries; nothing
+// noticed, and by the time it was found by hand the card layout was already
+// unrecoverable. The paired half is homeBackup.ts, which now snapshots both files
+// before every overwrite so there is something to point the user at.
+//
+// READ-ONLY over the files it judges and it NEVER auto-restores (a shrink can be
+// a legitimate deletion, and silently reviving removed projects would be the same
+// bug pointed the other way) — it warns and lists restore candidates; the choice
+// is the owner's. GET /api/home-integrity serves the same report on demand.
+//
+// Fire-and-forget, never fatal: a check that can crash the cockpit is worse than
+// the damage it looks for. It is STARTED first among the boot side-effects, but
+// nothing orders it against them — it awaits I/O like everything else here, so
+// treat the read as "roughly at boot", never as "before the migration writes".
+// Correctness does not depend on that ordering: the backup hook snapshots
+// whatever any later writer replaces.
+void checkHomeIntegrity().catch((e) =>
+  console.error('[openground:hono] home integrity check failed', e),
+)
 
 // QUOTA COOLING TABLE — hydrate the persisted marks (~/.openground/swarm-quota.json)
 // into swarmQuota's in-memory table. Without this the app forgets, on every single
@@ -212,6 +238,29 @@ if (bootAutoDrainEnabled()) {
 // reload-safe. Kill-switch: OPENGROUND_TERMINAL_SWEEP=0 disables it (default ON).
 if (process.env.OPENGROUND_TERMINAL_SWEEP !== '0') {
   startTerminalSweepLoop()
+}
+
+// DAILY FUEL REPORT loop (card swarm-token-blocked) — the once-a-day,
+// DETERMINISTIC (zero-LLM, read-only) self-analysis of the swarm's session
+// JSONLs: a plain-language report to the bell every day at 09:00 local, plus —
+// on a degraded day only — one improvement-proposal card filed into the Board's
+// blocked column (owner approval = moving it to todo; the engine never
+// dispatches from blocked). Runs on APP uptime like the retention sweep —
+// independent of the swarm engine being on. Same wiring contract as the loops
+// above: real-server entry only, unref'd, reload-safe, kill-switch env.
+if (process.env.OPENGROUND_FUEL_REPORT !== '0') {
+  startDailyFuelReportLoop()
+}
+
+// OWNER-DESK MODEL-LIMIT watch — tells the owner when one of THEIR OWN claude
+// conversations (Terminal tab pane, Board 実行, commander / supply desk) stopped
+// because the model's usage limit was reached. Engine-INDEPENDENT on purpose: the
+// swarm rescues the workers it manages, so the desks left silent are precisely the
+// ones with no engine watching (the 2026-07-18 event). Notify-only — it never
+// touches the conversation. Same boot-loop shape as the sweep above (unref'd,
+// reload-safe, this entry only). Kill-switch: OPENGROUND_DESK_LIMIT_WATCH=0.
+if (process.env.OPENGROUND_DESK_LIMIT_WATCH !== '0') {
+  startOwnerDeskLimitLoop()
 }
 
 // Listen errors (chiefly EADDRINUSE on the fixed port) are a TRUE fatal: the

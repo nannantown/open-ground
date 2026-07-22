@@ -408,8 +408,9 @@ describe('self-supply — real board (isolated HOME)', () => {
     __resetMigrationCacheForTests()
   })
   afterEach(async () => {
-    if (savedHome === undefined) delete process.env.OPENGROUND_HOME
-    else process.env.OPENGROUND_HOME = savedHome
+    // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedHome !== undefined) process.env.OPENGROUND_HOME = savedHome
     __resetMigrationCacheForTests()
     await rm(home, { recursive: true, force: true })
     await rm(scratch, { recursive: true, force: true })

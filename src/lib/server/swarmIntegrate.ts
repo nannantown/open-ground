@@ -23,7 +23,8 @@
 //
 // READ-ONLY classification (classifyBranch) tells the dashboard whether a review
 // card is fast-forwardable WITHOUT mutating anything, so the engine can DISPLAY
-// "統合可" while auto-integrate is OFF (the default). It deliberately does not try
+// "統合可" while never landing anything itself (integration is the commander's —
+// the auto-integrate toggle was retired 2026-07-16). It deliberately does not try
 // to predict rebase conflicts (the host git is only guaranteed `merge-base
 // --is-ancestor`, not `merge-tree --write-tree`); the authoritative conflict
 // verdict comes from the real rebase in integrateBranch.

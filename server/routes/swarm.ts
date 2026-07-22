@@ -85,6 +85,7 @@ import {
   MAX_ESCALATION_QUESTION,
   MAX_ESCALATION_CONTEXT,
   MAX_ESCALATION_ANSWER,
+  MAX_ESCALATION_PLAIN_QUESTION,
   MAX_ESCALATION_SHORT_FIELD,
 } from '@/lib/server/swarmEscalations'
 import {
@@ -521,9 +522,14 @@ export const swarmRoutes = new Hono()
   // --- GET /api/swarm/orchestrator — the commander engine's state ------------
   // Query: ?path= . Returns SwarmOrchestratorState { running, manualStop (+ its
   // persisted half manualStopPersisted — the durable "owner stopped this by hand"
-  // record that survives a restart), workers, log, maxWorkers, … }. A project
-  // whose engine was never started reads back as a stopped empty state. Owner-only
-  // + validated, like the rest of /api/swarm/*.
+  // record that survives a restart), workers, log, maxWorkers, manager (the
+  // commander desk's own heartbeat — phase/note/updatedAt + server-clock
+  // freshness, read directly from ~/.openground/swarm/<repoKey>/manager.json so
+  // the Swarm tab can show the post-worker inspection minutes; null when never
+  // written/unreadable), … }. A project whose engine was never started reads
+  // back as a stopped empty state (the manager heartbeat still surfaces — a
+  // human-opened desk beats without an engine). Owner-only + validated, like
+  // the rest of /api/swarm/*.
   // PURE READ-ONLY (idempotent, K8): this GET is polled by BOTH the Swarm hook AND
   // the display-only Board worker-map (BoardModule), so it must NEVER mutate/spawn
   // — a GET that spawned workers was a review MUST_FIX (the Board's "never touch
@@ -781,8 +787,8 @@ export const swarmRoutes = new Hono()
     })
   })
   // --- POST /api/swarm/escalations/open — raise a question to the user -------
-  // Body: { path, question, context, whyEscalated, receiptKey?, taskId?,
-  //         branch?, terminalId?, proxyDraft? }. Idempotent on receiptKey while
+  // Body: { path, question, context, plainQuestion?, whyEscalated, receiptKey?,
+  //         taskId?, branch?, terminalId?, proxyDraft? }. Idempotent on receiptKey while
   // an 'open' record exists (returns {deduped:true} + the existing record).
   // Until C-core lands this is the manual/verification entry point; the
   // overseer will call openEscalation() in-process.
@@ -803,6 +809,11 @@ export const swarmRoutes = new Hono()
     if (!context) return c.json({ error: 'context is required' }, 400)
     if (question.length > MAX_ESCALATION_QUESTION) return c.json({ error: 'question too large' }, 400)
     if (context.length > MAX_ESCALATION_CONTEXT) return c.json({ error: 'context too large' }, 400)
+    // 平易文 — optional; when present it becomes the owner-facing primary text.
+    const plainQuestion = typeof body?.plainQuestion === 'string' ? body.plainQuestion.trim() : ''
+    if (plainQuestion.length > MAX_ESCALATION_PLAIN_QUESTION) {
+      return c.json({ error: 'plainQuestion too large' }, 400)
+    }
     const whys: EscalationWhy[] = ['irreversible', 'insufficient-info', 'policy']
     const whyEscalated = whys.find((w) => w === body?.whyEscalated)
     if (!whyEscalated) {
@@ -841,6 +852,7 @@ export const swarmRoutes = new Hono()
         projectPath: path,
         question,
         context,
+        ...(plainQuestion ? { plainQuestion } : {}),
         whyEscalated,
         receiptKey: typeof body?.receiptKey === 'string' ? body.receiptKey : undefined,
         taskId: typeof body?.taskId === 'string' ? body.taskId : undefined,

@@ -28,6 +28,11 @@ import {
 } from '@/lib/server/store'
 import { resolveExperiments } from '@/lib/server/experiments'
 import { scanProjects } from '@/lib/server/scan'
+import {
+  acknowledgeIntegrityReport,
+  listRestoreCandidatesForAll,
+  readLastIntegrityReport,
+} from '@/lib/server/homeIntegrity'
 import { writeProjectData } from '@/lib/server/projectData'
 import {
   ensureProjectsMigrated,
@@ -143,6 +148,33 @@ const suggestedDisplayName = (): Promise<string | null> => {
 }
 
 export const miscRoutes = new Hono()
+  // --- GET /api/home-integrity ----------------------------------------------
+  // The home-data damage report: what the boot check found, and — the part the
+  // owner actually needs — WHERE the restore candidates are. READ-ONLY by
+  // contract: it never restores anything (homeIntegrity rule 2), it only says
+  // what could be restored and from where.
+  //
+  // Ungated. It reports paths under the user's own ~/.openground on a
+  // loopback-only server — the same class of information GET /api/projects
+  // already returns — and putting the one surface that says "your data may be
+  // gone" behind the swarm owner check would hide it from the person it is for.
+  .get('/api/home-integrity', async (c) => {
+    const [lastReport, candidates] = await Promise.all([
+      readLastIntegrityReport(),
+      listRestoreCandidatesForAll(),
+    ])
+    return c.json({ lastReport, candidates })
+  })
+  // --- POST /api/home-integrity/acknowledge ----------------------------------
+  // "I know, this is fine now." Accepts the current state as the new baseline so
+  // the app stops reporting a loss the owner has already decided about. Writes
+  // ONLY integrity.json — never the protected files, never the backups — so the
+  // worst case is silence about something already known, and every generation
+  // stays restorable afterwards.
+  .post('/api/home-integrity/acknowledge', async (c) => {
+    const w = await acknowledgeIntegrityReport()
+    return c.json({ acknowledgedAt: w.acknowledgedAt ?? null, counts: w.counts ?? {} })
+  })
   // --- GET /api/projects ----------------------------------------------------
   .get('/api/projects', async (c) => {
     // Runs the one-shot legacy migration (existing users' projectsRoot →

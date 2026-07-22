@@ -154,6 +154,12 @@ describe('POST /api/terminal/custom-module — role gate (owner|tester) + id val
     const opts = launchClaude.mock.calls.at(-1)![0]
     expect(opts.cwd).toBe(customModuleDir(def.id))
     expect(opts.appContext).toBe(false)
+    // …and it is a desk the OWNER sits at, so the model-limit watch must see it
+    // (ownerDeskLimit.ts). Pinned here rather than only in ownerDeskWiring.test.ts
+    // because this is where the module-dir setup lives — and because without it,
+    // deleting this route's `ownerDesk: true` left the whole suite green
+    // (commander review, 2026-07-18 round 4).
+    expect(opts.ownerDesk).toBe(true)
   })
 
   it('a tester MAY launch one too (authoring is open to testers)', async () => {

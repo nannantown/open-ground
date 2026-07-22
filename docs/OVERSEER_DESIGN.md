@@ -144,13 +144,14 @@ seam のまま）、`collectClaudeUsage`（上記 M8）。
 - **D1（実装位置とトグル）: 監督は `ProjectEngine` の第3のアーム付きステージ**
   （`engine.overseer: OverseerRuntime`）。`autoMerge` / `selfSupply` と同じ
   owner-gated POST（`POST /api/swarm/orchestrator/overseer {path, enabled}` —
-  `/automerge`:400・`/selfsupply`:447 と同型）で ON・**既定 OFF・in-memory
+  `/automerge`:400・`/selfsupply`:447 と同型。**2026-07-16 に autoMerge トグルは
+  廃止され route も 404** — 現存の同型は selfSupply のみ）で ON・**既定 OFF・in-memory
   （再起動で必ず OFF・K2）**。ただし enabled の生存は autoMerge より**安全側に
   非対称**:
   - **`stopOrchestrator`（autonomy 明示 OFF）は `overseer.enabled = false` に
     落とす**（autoMerge/selfSupply は温存されるが、監督は最危険ステージなので
-    opt-in を残留させない）。autonomy を再 ON しても監督は OFF のまま —
-    毎回明示的に点け直す。
+    opt-in を残留させない。※温存対比の現物は 2026-07-16 以降 selfSupply のみ）。
+    autonomy を再 ON しても監督は OFF のまま — 毎回明示的に点け直す。
   - **auto-drain（`maybeAutoStartDrain`）が engine を再点火しても監督は
     起きない**: enabled は owner POST でのみ true になり、上記 2 経路
     （明示 OFF・再起動）で必ず false に落ちているため。K1 の「明示 ON にだけ
@@ -281,7 +282,7 @@ interface OverseerRuntime {
 | BLOCK（phase==blocked） | `blocked = !ready && (phase==='blocked' \|\| blockers 非空)`:1868 — **shell より広い**（blockers 文字列も見る）。blockers の本文は M1（心拍ファイル）から読む — 公開 state に無い（M2 注記） | blockers が自由文質問なら C2 proxy 回答→C3 注入（T1）。C4 が不可逆と判定 or C2 が abstention なら **T3**（fail-closed） |
 | NOBEAT | heartbeat null（spawn 直後は正常） | grace 内は無視。超過は既存 anomaly worker-stale が拾う |
 | DIRTY | （in-app に直接対応なし・integrate 前に git が権威） | 関与しない |
-| HELD（mergeblock sentinel） | **in-app に存在しない**（tmux 専用機構） | 監督は HELD を読まない。in-app の承認ゲートは autoMerge OFF / selfSupplyApproved / blocked 列の 3 つ（[hold] 文字列も in-app engine には無い） |
+| HELD（mergeblock sentinel） | **in-app に存在しない**（tmux 専用機構） | 監督は HELD を読まない。in-app の承認ゲートは selfSupplyApproved / blocked 列 + **カード単位の `[hold]` prefix・高リスク force-hold**（2026-07-16〜 司令官の統合規約 — [commander/03](commander/03-integration-review.md)。設計当時の「autoMerge OFF」ゲートはトグル廃止で消滅、「[hold] は in-app に無い」も同日から過去の記述） |
 
 ---
 
@@ -332,7 +333,7 @@ requeue（RECOVER_MAX_REQUEUE=1）/ rework 予算（MAX_REWORKS=2）/ conflict �
 | S4 | worker 心拍 `blockers` 非空（M1） | rising edge（blocked 化した瞬間） | **T1 (C2/C3)** | blockers 文が質問なら C2 proxy 回答→C3 注入。C4 が不可逆と判定 or C2 が abstention なら **T3**。**THROTTLED 中は大脳を経由せず、素の質問（proxyDraft なし）を直接 T3 受信箱へ**（枠枯渇＝最も人手が要る局面で判断系が沈黙する空洞を作らない） |
 | S5 | blocked 列の滞留（M3） | カード毎 **30min** 継続（`watch` Map で計測） | **T1** | 大脳が blocked カードを読み ①依存解消済みなら todo 復帰を**提案**（T3 の弱形: 受信箱でなくベル通知+実行は owner）②本人判断が要るものは T3 にまとめる。**blocked は人間判断列 — 監督が自動で列を動かさない** |
 | S6 | todo 枯渇（M3） | `todo==0 && doing==0 && review==0` が **2 tick 連続**（watch） かつ ゴール未達 | **T1→T2** | Phase2 では**実装しない方向**（§11 Q4）— 表には残すが C-core のスコープ外。実装する場合: 大脳が you-corpus のゴールと done 列から次の観測可能タスクを起草して承認ゲート付き起票 |
-| S7 | review 滞留（M3/M7） | review 列カードが **30min** 統合されない（autoMerge OFF 時・watch） | **T0'（info 通知）** | 「統合可能が溜まっています」をベル通知のみ（info 級イベント種は C1 で追加 — §10 C1 成果に計上）。受信箱には入れない |
+| S7 | review 滞留（M3/M7） | review 列カードが **30min** 統合されない（司令官が land していない間・watch。設計当時の「autoMerge OFF 時」条件はトグル廃止(2026-07-16)で消滅 — 実装は mergeable 滞留だけを見る） | **T0'（info 通知）** | 「統合可能が溜まっています」をベル通知のみ（info 級イベント種は C1 で追加 — §10 C1 成果に計上）。受信箱には入れない |
 | S8 | usage warn（M8） | `usageLevel(pct)==='warn'`（80%・% 取得済み時のみ） | **T0'** | 大脳日次 cap を半減。executionMode の切替は**提案通知のみ**（設定は owner のもの）。worker 側の並列 cap は既存 execModeMaxWorkers の領分 |
 | S9 | usage over（M8） | `usageLevel(pct)==='over'`（100%・% 取得済み時のみ。**null/idle では発火しない** — 縮退は予算 cap が担う） | **THROTTLED** | T1/T2 停止・観測継続・S4 は縮退経路で T3 直行（§5）。**入った事実を 1 回 T3' 通知**。回復（<100）で自動解除 |
 | S10 | selfUpdate `rollback` / `canary-failed`（M6） | rising edge | **T3** | 受信箱へ昇格（「エンジン自己入替が失敗し旧版で動いています」+ 文脈）。Electron 側の連続 2 回トーストは既存のまま |
@@ -455,7 +456,7 @@ interface Escalation {
    ├─ worker が LIVE → writeInput へ bracketed paste 注入（W16・着弾確認つき）
    │                    → status: injected → worker 再開
    ├─ worker 不在   → engine.reworkReasons と同型で「次回 /order に同梱」
-   └─ 共通         → appendJudgment(`Q: … → A: …`, tags:['escalation'])
+   └─ 共通         → appendJudgment(`Q: … → オーナーの回答: …`, tags:['escalation'])
                       ＝記憶への書き戻し（owner の実回答のみ・§3）
 ```
 
@@ -700,5 +701,5 @@ Board 既存カード（C1 `a8519143` / C2 `c1c0583b` / C3 `74ec0b0d` / C4 `2b6d
 | swarm-janitor.sh sweep --auto（3 段 fresh ガード） | runSwarmJanitor 配線（W6・T0'） |
 | manage skill の司令官（Opus・イベント駆動起床） | engine の dispatch/integrate パス（既に機械化済み）+ 大脳（判断だけ） |
 | supply skill + swarm-board.sh | T2: Board 承認ゲート付き起票（W2/W7） |
-| [hold] prefix（fail-open 自己申告 + 構造的 force-hold） | in-app は autoMerge OFF / selfSupplyApproved / blocked 列（[hold] は導入しない） |
+| [hold] prefix（fail-open 自己申告 + 構造的 force-hold） | in-app は selfSupplyApproved / blocked 列 +（2026-07-16〜）**カード単位の [hold] prefix・高リスク force-hold を司令官の統合規約として導入済み**（当初設計の「autoMerge OFF」ゲートはトグル廃止で消滅 — [commander/03](commander/03-integration-review.md)） |
 | mergeblock sentinel（HELD） | in-app 非導入（verify/review の tip memo が同役） |

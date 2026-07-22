@@ -36,6 +36,7 @@ const { readBakedAuthEnv } = require('./runtimeConfig')
 const { maybeResetCachesOnVersionChange } = require('./cacheReset')
 const { runStartupSequence } = require('./startup')
 const { buildServerForkEnv } = require('./forkEnv')
+const { buildProducerEnv, buildStepEnv, makeGateHome, removeGateHome } = require('./gateEnv')
 const {
   runSelfUpdateCycle,
   performEngineSwitch,
@@ -178,6 +179,14 @@ const SELF_UPDATE_TEST_STEPS = [
     // NEVER killProcessTree (which SIGKILLs only this step's own group) — else the
     // webServer orphans, squats 47876, and the next e2e fails EADDRINUSE forever.
     ownsServerGroup: true,
+    // PRODUCER — transitively. playwright.config.ts's webServer.command literally
+    // starts with `npm run build && …`, so this "test" step re-runs the build, and
+    // build:config would re-bake electron/runtime-config.json from THIS step's env.
+    // With a verifier env that rewrote the config to `{}` right before the switch,
+    // undoing runBuild's correct bake (review round 2, must-fix 1). The `unit` step
+    // runs no build, so it stays a verifier. gateEnvParity.test.ts cross-checks
+    // these flags against package.json + playwright.config.ts, so this cannot drift.
+    producer: true,
   },
 ]
 // Where the last known-good build is stashed for the duration of a cycle. OUT of the
@@ -1091,6 +1100,7 @@ function selfUpdateLog(level, msg) {
 function runBuild() {
   return new Promise((resolve) => {
     let appRoot
+    let gateHome = null
     try {
       appRoot = getAppRoot()
     } catch (err) {
@@ -1100,9 +1110,21 @@ function runBuild() {
     getEnrichedPath()
       .then((enrichedPath) => {
         selfUpdateLog('info', `rebuild: running \`npm run build\` (cwd ${appRoot})`)
+        // Throwaway OPENGROUND_HOME (gateEnv.js): `npm run build` runs the
+        // POST-MERGE tree's own package.json scripts. Same reason the canary
+        // engine below gets a scratch home — the code under test never gets the
+        // live one. Removed in settle(), and in the tail .catch if the spawn
+        // below throws synchronously (EMFILE) before settle exists.
+        //
+        // buildProducerEnv, NOT buildGateEnv: this is the one PRODUCER step, and
+        // its first stage (`build:config`) bakes BAKED_KEYS into
+        // electron/runtime-config.json. Stripping them there does not preserve
+        // the old file — it overwrites it with `{}`, silently shipping a build
+        // with sign-in and collab disabled (review round 1, must-fix 1).
+        gateHome = makeGateHome()
         const child = spawn('npm', ['run', 'build'], {
           cwd: appRoot,
-          env: { ...process.env, PATH: enrichedPath },
+          env: buildProducerEnv({ home: gateHome, extra: { PATH: enrichedPath } }),
           stdio: ['ignore', 'pipe', 'pipe'],
           // detached → own process group on POSIX, so a timeout/quit can SIGKILL the
           // WHOLE tree (npm + vite/esbuild forks), not just npm (task 402d34a0 R4).
@@ -1118,6 +1140,8 @@ function runBuild() {
           settled = true
           clearTimeout(timer)
           if (activeBuildChild === child) activeBuildChild = null
+          removeGateHome(gateHome)
+          gateHome = null
           resolve(v)
         }
         child.stdout?.on('data', (d) => process.stdout.write(`[build] ${d}`))
@@ -1129,11 +1153,26 @@ function runBuild() {
           settle(code === 0 ? { ok: true } : { ok: false, reason: `build exited ${code}` }),
         )
         timer = setTimeout(() => {
+          // Asymmetry with spawnTestStep's e2e path, on purpose: killProcessTree is
+          // a SYNCHRONOUS group SIGKILL of a tree that shares this child's group, so
+          // by the time settle() removes the gate home the tree is already gone.
+          // The e2e path defers its removal instead because gracefulGroupKill is
+          // ASYNC (SIGINT → grace → SIGKILL of a SEPARATE webServer group), so
+          // there the tree is still alive when settle() runs. Both are best-effort;
+          // the difference is whether a kill has already completed. (Round 4 nit.)
           killProcessTree(child)
           settle({ ok: false, reason: `build timed out after ${BUILD_TIMEOUT_MS / 1000}s` })
         }, BUILD_TIMEOUT_MS)
       })
-      .catch((err) => resolve({ ok: false, reason: err && err.message ? err.message : 'path error' }))
+      .catch((err) => {
+        // Reached when getEnrichedPath rejects OR when the block above threw
+        // before `settle` existed (a synchronous spawn failure such as EMFILE).
+        // In the latter case the throwaway home is already made, so clean it up
+        // here too — settle() will never run.
+        removeGateHome(gateHome)
+        gateHome = null
+        resolve({ ok: false, reason: err && err.message ? err.message : 'path error' })
+      })
   })
 }
 
@@ -1256,6 +1295,7 @@ function restoreKnownGood() {
 function spawnTestStep(step) {
   return new Promise((resolve) => {
     let appRoot
+    let gateHome = null
     try {
       appRoot = getAppRoot()
     } catch (err) {
@@ -1270,9 +1310,19 @@ function spawnTestStep(step) {
     getEnrichedPath()
       .then((enrichedPath) => {
         selfUpdateLog('info', `regression[${step.name}]: running \`${step.cmd.join(' ')}\` (cwd ${appRoot})`)
+        // Throwaway OPENGROUND_HOME (gateEnv.js). This is the step the whole
+        // control exists for: `npm test` boots the POST-MERGE tree's vitest with
+        // that tree's own vitest.config.ts + setupFiles, so "the suite isolates
+        // itself" was the landed code vouching for itself. Removed in settle().
+        //
+        // buildStepEnv, not buildGateEnv: the `e2e` step is declared a PRODUCER
+        // because playwright's webServer.command begins with `npm run build &&`.
+        // (The HOME/OPENGROUND_HOME that command pins applies only to the node
+        // server at its END — the build at its FRONT inherits what we pass here.)
+        gateHome = makeGateHome()
         const child = spawn(cmd, cmdArgs, {
           cwd: appRoot,
-          env: { ...process.env, PATH: enrichedPath },
+          env: buildStepEnv(step, { home: gateHome, extra: { PATH: enrichedPath } }),
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: process.platform !== 'win32',
           shell: process.platform === 'win32', // npm is npm.cmd on Windows
@@ -1294,6 +1344,8 @@ function spawnTestStep(step) {
           clearTimeout(timer)
           if (activeBuildChild === child) activeBuildChild = null
           if (activeE2eChild === child) activeE2eChild = null
+          removeGateHome(gateHome)
+          gateHome = null
           resolve(v)
         }
         child.stdout?.on('data', (d) => process.stdout.write(`[regression:${step.name}] ${d}`))
@@ -1309,12 +1361,34 @@ function spawnTestStep(step) {
           // (discover its separate webServer group → SIGINT → SIGKILL) else port 47876
           // orphans (M1); vitest/build share npm's group → an immediate group SIGKILL is
           // fine. Settle the gate as timed-out without awaiting the (best-effort) teardown.
-          if (ownsServerGroup) void gracefulGroupKill(child)
-          else killProcessTree(child)
+          if (ownsServerGroup) {
+            // …and hold the throwaway home until that teardown finishes. NOT because
+            // the webServer writes there — it does not; playwright.config.ts mktemps
+            // its OWN HOME/OPENGROUND_HOME for the server it boots (review round 2,
+            // nit 4 corrected this comment). The reason is narrower: this step's
+            // process tree is still alive through the SIGINT→SIGKILL escalation and
+            // still holds the dir as inherited state, so removing it from settle()
+            // would rm underneath live processes. Conservative, not load-bearing.
+            const doomed = gateHome
+            gateHome = null // settle()'s removeGateHome(null) is now a no-op
+            // .catch after .finally: `.finally` re-throws, and this promise is
+            // deliberately not awaited — without the tail catch a rejecting
+            // teardown would surface as an unhandled rejection in the MAIN
+            // process (the pre-existing `void gracefulGroupKill(child)` had no
+            // such tail because it created no derived promise).
+            void gracefulGroupKill(child)
+              .finally(() => removeGateHome(doomed))
+              .catch(() => {})
+          } else killProcessTree(child)
           settle({ ok: false, reason: `timed out after ${REGRESSION_TIMEOUT_MS / 1000}s` })
         }, REGRESSION_TIMEOUT_MS)
       })
-      .catch((err) => resolve({ ok: false, reason: err && err.message ? err.message : 'path error' }))
+      .catch((err) => {
+        // Also covers a synchronous spawn failure before `settle` existed (nit 1).
+        removeGateHome(gateHome)
+        gateHome = null
+        resolve({ ok: false, reason: err && err.message ? err.message : 'path error' })
+      })
   })
 }
 

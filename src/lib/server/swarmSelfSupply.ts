@@ -73,7 +73,7 @@
 
 import { randomUUID } from 'crypto'
 import { join } from 'path'
-import { runGateProcess } from './gateProcess'
+import { runGateProcess, withGateEnv } from './gateProcess'
 import { readProjectData, writeProjectData } from './projectData'
 import type { OrchestratorAnomaly, ProjectData, ProjectTask } from '../types'
 
@@ -415,12 +415,20 @@ export const runCapture = async (
   timeoutMs = 120_000,
 ): Promise<string> => {
   try {
-    const { stdout } = await runGateProcess(file, args, {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer: 32 * 1024 * 1024,
-      env: { ...process.env },
-    })
+    // withGateEnv (2026-07-19): the scanners are `vitest run` / `eslint` / `tsc`
+    // from the SCANNED PROJECT's node_modules, driven by that project's own
+    // configs — the same untrusted-code-execution shape as the merge gate, one
+    // step further out (cwd is the main checkout, so not even a nominal
+    // setup-home re-pin is in play). The child gets a throwaway OPENGROUND_HOME;
+    // the engine's real home is never handed over. See gateProcess.ts's header.
+    const { stdout } = await withGateEnv((env) =>
+      runGateProcess(file, args, {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: 32 * 1024 * 1024,
+        env,
+      }),
+    )
     return stdout
   } catch (e) {
     const stdout = (e as { stdout?: unknown }).stdout

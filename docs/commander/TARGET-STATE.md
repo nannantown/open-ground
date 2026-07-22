@@ -10,10 +10,10 @@
 
 | # | 理想 | 現状 | 対応カード |
 |---|---|---|---|
-| 1 | model 枯渇は 2 分以内に検知され dispatch が正しい tier に落ちる | ◐ **実装済み(`0d1f7f0`)— spawn 直後の即死は約 1.5 分(onset 窓)・稼働後は実クロック化した 10 分ゲート。実運用での検証待ち** | `4d1550d7`(done) |
+| 1 | model 枯渇は 2 分以内に検知され dispatch が正しい tier に落ちる | ✓ **実測済み(2026-07-18 実 Fable 枯渇イベント)— 早期経路 1分42秒(2 分以内)・稼働後経路 10分37秒(設計どおり実クロックで着弾)・tier 繰り下げも実観測(engine 起こしの manager が opus で起動)** | `4d1550d7`(done) |
 | 2 | ~~敵対レビューは diff サイズに依らず決着し…~~ **[SUPERSEDED 2026-07-15]** engine はもう敵対レビューをしない(統合は司令官専任・§5) | ⊘ **エンジンから撤去** — レビューは司令官の重量級レビューへ一本化 | `58335c7f`(歴史) |
-| 3 | 過去 fatal の再投函ゼロ・dismiss は再起動を跨いで効く | ◐ **実装済み(`d8431c3`+`aa9cb8d`)・実運用での検証待ち** | `c944ea69`(done) |
-| 4 | 司令塔 API は嘘をつかない(stale 心拍の解消) | ◐ **実装済み(`1f19770`、2026-07-11 main 入り)— 実運用実測待ち** | 統合済み(`1f19770`) |
+| 3 | 過去 fatal の再投函ゼロ・dismiss は再起動を跨いで効く | ✓ **実測済み(2026-07-17 re-arm 実験)— arm 前後で exec-timeout 系 escalation 33→33・全体 59→59(増殖ゼロ)** | `c944ea69`(done) |
+| 4 | 司令塔 API は嘘をつかない(stale 心拍の解消) | ✓ **実測済み(2026-07-17)— エンジン worker の API `heartbeatAt` とディスク `updatedAt` が完全一致(06:54:51Z、phase も一致)** | 統合済み(`1f19770`) |
 | 5 | **統合は司令官専任 — engine は ready 検知で司令官を起こすだけ(main を FF する経路が engine に1つも無い)+ 落ちた司令官を蘇生する反射** | ◐ **実装済み(2026-07-15 マネージャ専任化 + 2026-07-16 manager 蘇生 card B)・実運用での検証待ち** | 本カード + 蘇生 card B(§5 が正典) |
 | 6 | 司令塔ドキュメントが変更に追随する | ✓ **検知2点(verify soft-warn + og-manage 起動時の 00-INDEX §6-1 チェック)+ 起票テンプレ組込み(supply / order / og-manage、2026-07-11)実装済み+テンプレ経由の運用実績 1 件**(カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂) | 案 B(検知2点)+案 B'(テンプレ)完了。実績 1 件(2026-07-11) |
 
@@ -43,7 +43,46 @@
 
 false-kill ガードは不変(回帰テストで固定): 出力が流れる worker はサンプリングすらされず、limit 文言をソース/プランに**書くだけ**の worker は onset 窓で早期認定を拒否される。per-model 通知の 3 フレーズ(:1170-1192)と層 C(mask、d1485ea)は従来どおり。
 
-**検証待ちの間の司令塔運用**: 実際の枯渇イベントで下の到達判定を一度実測して ✓ にする。理想の「2 分以内」を設計上満たすのは **(a) の即死型**(21 分 30 秒事例の再現形)— **稼働後に limit へ当たった worker は最大 ~10 分+スクレイプ間隔**かかる(ただし確実に着く)。稼働後型で 2 分を求めるなら新カードが要る(現状その必要性を示す実測は無い)。それまで「journal に無い = 枯れていない」ではない(00-INDEX §4 — journal は 200 行 ring かつ再起動で消えるため、この原則は根治後も残る)。
+### 実測記録(2026-07-18・実 Fable 5 枯渇イベント・✓ 到達)
+
+同一時刻に 2 worker が limit に当たり、**早期経路と稼働後経路の両方が同時に実測できた**(以下すべて UTC):
+
+| worker | spawn | limit 到達(JSONL 最終活動) | journal 検知 | 差 | 経路 |
+|---|---|---|---|---|---|
+| ペルソナ①(`owner-0718-132842`) | 04:28:43 | 04:29:24 | 04:31:06 | **1分42秒** | (a) 早期(spawn+41秒 = onset 窓内) |
+| 判断ルーティング(`swarm-escalation-0718-132346`) | 04:23:47 | 04:29:27 | 04:40:04 | **10分37秒** | (b) 稼働後(spawn+5分40秒 = onset 窓外 → 10 分沈黙ゲート) |
+
+- **理想「2 分以内」は (a) で達成**(1分42秒 — 設計値「約 1.5 分」と一致)。
+- **(b) は設計どおり 10 分ゲートで着弾**。重要なのは **10 分が実クロックで到来した**こと — ②装飾再描画の根治(`limitScreen` クランプ)が効いており、根治前の実測 21 分 30 秒(04 章 §4)のような無限先送りは再現しなかった。
+- **tier 繰り下げも同一イベントで実観測**: fable cooling 中の 04:39 に engine が起こした manager は `claude-opus-4-8` で起動し正常稼働(§5 条件 3c の quota 繰り下げが実事象で機能)。両 worker は `holding (requeue after 20m)` で worktree ごと保持。
+- 枯渇の確定信号は直叩き(`claude --model fable -p` → "You've reached your Fable 5 limit")— `/usage` からは per-model 枯渇が見えない前提は不変。
+- **未カバーの穴(本イベントで判明 → 同日クローズ)**: オーナー自身が開いた対話卓(engine 管理外の claude セッション)は tier 繰り下げも通知も無く、オーナーが目視で気づいて `/model` するまで止まる。engine 管理下の worker/manager だけが救済対象という設計境界の実害 — 下記で対処済み。
+
+**検証待ちの間の司令塔運用(歴史)**: 実際の枯渇イベントで下の到達判定を一度実測して ✓ にする。理想の「2 分以内」を設計上満たすのは **(a) の即死型**(21 分 30 秒事例の再現形)— **稼働後に limit へ当たった worker は最大 ~10 分+スクレイプ間隔**かかる(ただし確実に着く)。稼働後型で 2 分を求めるなら新カードが要る(現状その必要性を示す実測は無い)。それまで「journal に無い = 枯れていない」ではない(00-INDEX §4 — journal は 200 行 ring かつ再起動で消えるため、この原則は根治後も残る)。
+
+#### 未カバーだった穴 — **オーナー自身の対話卓**(2026-07-18 に判明 → 同日クローズ)
+
+同じイベントで、この節が一度も対象にしていなかった経路が露呈した: **オーナーが開いている対話卓**(Terminal タブのペイン・Board 実行・**Swarm タブの司令官ペイン**)は `monitorWorkers` の管理外なので、上限画面
+
+```
+You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.
+```
+
+を出したまま**無救済で止まっていた**。OG は同じ文言のスクレイプを worker には実装済みだったのに、**人間が待っている卓には向けていなかった** — 「気づかず放置」が発生する唯一の残り穴。
+
+**現状: 実装済み(2026-07-18)** — `src/lib/server/ownerDeskLimit.ts`(**エンジン非依存の boot ループ**。止まる卓は誰も見ていない卓なので、エンジン非稼働でも効かねば意味がない)。
+
+| 観測可能条件 | 実装 |
+|---|---|
+| 管理外の live 対話卓の上限文言を検知する。検知ロジックは worker 用の既存実装を**再利用**(二重実装しない) | **再利用するのは「判断」で、調律つまみではない**。共有 = 文言(`swarmRateLimitText` — worker/層E と同一モジュール)+ 画面アナトミー(`@/lib/claudeScreen` — swarmQuestions / swarmEscalations と同一の枠モデル。**卓が自前の枠モデルを書いて見逃した**のが 2026-07-18 2回目の差し戻し MF-2)。一方**タイミング門の2定数は意図的に卓の自前**(`OWNER_DESK_QUIET_MS` / `OWNER_DESK_CONFIRM_MS` = 45s)— 初版は engine から import したが差し戻しで却下(engine 側は *worker* の問いに対して定義された値で、worker 都合の調律がオーナーへの通知タイミングを黙って動かす)。**数値のコピーは安全・文言のコピーが腐る**|
+| ベル + OS トーストを**1回**。文言はオーナー向け平易文(何が起きたか/どうなるか/どうすればよいか。tier・quota・rate-limit を本文に出さない) | `SwarmInfoEvent='session-limit'` で既存の swarm-info レーンに載る。本文は `buildOwnerDeskLimitDetail`(テストで語彙を固定)。⚠ **「どうすればよいか」は枯渇の種類で変わる**(2026-07-18 3回目の差し戻し MF-1): account-wide 枯渇では**全モデルが枯れている**ので `/model` は嘘の指示になり、オーナーは指示どおりにやって何も起きず**次の一手を失う**。判別は CLI 自身の remedy 行(`MODEL_SWITCH_REMEDY`)を読み返す(どのパターンが当たったかで推測しない)。⚠ **同じイベントで止まった卓は1本にまとめる**(同 MF-2。⛔ 「同じ**パス**で確定した停止を束ねる」では不足 — どのパスに落ちるかは卓ごとの沈黙窓次第で、実測 1秒ズレ→2通知・15秒ズレ→同一本文6行。窓はイベントを覆う必要がある): account-wide はほぼ全卓を止め(ただし**同時刻ではない** — 各卓は自分の実行中リクエストが着弾した時点で止まる)、`deskLabel` が付くのは司令官/補給官だけなので、卓ごとに鳴らすと**同一本文が6行**並ぶ(⚠ 根拠は**オーナーが読む側の雑音**。「cap を圧迫して fatal を押し出す」は cap の kind 別分離 `capNotificationsByKind` が main に入って以降**成立しない**) |
+| 同一セッションの同一枯渇は1回だけ(復帰後の再発は再通知) | 卓ごとの `notified` フラグ。**await の前に立てる**ので遅い/失敗した通知が2度目を許さない。⚠ **再武装は最後のフレームではなく「停止そのもの」に結ぶ**(2026-07-18 2回目の差し戻し MF-3): 不一致フレーム1枚で消すと、止まった卓でオーナーが1文字打って消すだけで 一致→不一致→一致 と往復して**同じ停止で2度目が鳴る**。`OWNER_DESK_REARM_READS`(=3)回**連続**で normal を読むまで再武装しない。**読めなかった画面は数に入れない**(証拠が無いことは回復の証拠ではない) |
+| 誤検知しない(文言を**書いただけ**の卓を検知しない) | worker と同型の門(出力45秒沈黙まで読まない/通知が45秒画面を保持して確定)に加え、卓には裏取り材料(onset窓・commit・心拍)が無いぶん **4段厳しく**: **文言**(`QUOTA_REFUSAL_PATTERNS` — 一時故障に加え素の `/usage limit/` も除外)+ **話者**(`❯`=オーナーが貼って送ったターンは弾く)+ **原因の明示**(救済行だけの一致は「救済を話題にしている」)+ **位置3方向**(`endsInQuotaRefusal` — 末尾・先頭・**一致領域の内部**)。⚠ **端点2つだけを縛る判定は「限界文言で始まり限界文言で終わる」報告文に構造的に無力**(2026-07-18 3回目の差し戻し)。⚠ **先頭は文字数では測れない** — 本物の助走 `you've ` も引用導入 `引用します: ` も7字で、日本語は英語の約2.5倍密。句読点で判定する。⚠ **生画面の文字距離で測ると機能しない**(2026-07-18 差し戻しで判明・04章 §3.7 の ⚠ が正典): 入力箱だけで 184/264/424字(80/120/200col)あり普通の画面が丸ごと 800字の尾に収まる。かつ本物307 vs 誤発火304で**クラスが重なる**ため閾値調整では直らず、締めると本物が沈黙する。3幅での回帰テストは `ownerDeskScreens.test.ts`(実 headless xterm でレンダリング) |
+| **自動でモデルを切り替えない** | deps は列挙・画面読み・通知の3つだけで、**入力の seam 自体が無い**(構造的に触れない) |
+
+機構の正典は 04 章 §3.7、監視の守備範囲は 02 章 §1 の注記。キルスイッチ `OPENGROUND_DESK_LIMIT_WATCH=0`(既定 ON)。
+
+**オーナー卓側の実測(上限表示 → ベル/トーストまで、設計上 約1.5〜2分)は次の枯渇イベント待ち。**
 
 ### 対応カード
 
@@ -59,6 +98,42 @@ grep -n "RATE_LIMIT_SCRAPE_QUIET_MS = \|RATE_LIMIT_EARLY_ONSET_MS = \|RATE_LIMIT
 grep -n "kickIntegratePass\|integrateInFlight" src/lib/server/swarmOrchestrator.ts | head -5
 grep -n "limitScreen" src/lib/server/swarmOrchestrator.ts | head -3
 # (注: terminal.ts の lastOutputAt 無条件スタンプは残存が正 — クランプは orchestrator の stallLastOut 側)
+
+# --- オーナー対話卓の穴(上の「未カバーだった穴」)が塞がっているか ---
+# 1) 監視ループが boot で起きるか
+grep -n "startOwnerDeskLimitLoop" server/index.ts src/lib/server/ownerDeskLimit.ts
+# 2) 門の2定数が「卓の自前」であること(engine から import していたら劣化 — 2026-07-18 差し戻しで
+#    却下された初版の形。worker 都合の調律がオーナー通知のタイミングを黙って動かすため)。
+#    ※ import 判定は import 文で見る — 素の名前 grep は解説コメントに当たって偽の緑になる
+grep -n "^import.*swarmOrchestrator" src/lib/server/ownerDeskLimit.ts   # ← 0 件が正
+grep -n "^export const OWNER_DESK_QUIET_MS\|^export const OWNER_DESK_CONFIRM_MS" src/lib/server/ownerDeskLimit.ts
+# 2b) 逆に「文言」と「画面アナトミー」は共有でなければ劣化(卓が自前の枠モデルを書いて
+#     本物を見逃したのが MF-2)。この2本は import されていること
+grep -n "from './swarmRateLimitText'\|from '@/lib/claudeScreen'" src/lib/server/ownerDeskLimit.ts src/lib/server/swarmRateLimitText.ts
+# 3) 文言+位置の2段になっているか(matchesQuotaExhaustion 単独なら誤検知ガードが1段外れている)
+#    卓側は kind まで要るので classifyQuotaRefusal を呼ぶ(endsInQuotaRefusal はその boolean 面)
+grep -n "classifyQuotaRefusal" src/lib/server/ownerDeskLimit.ts
+# 3a) 案内が枯渇の種類で分岐しているか — 常に /model なら MF-1 の退行(account-wide で嘘の指示)
+grep -n "model-switchable\|account-wide" src/lib/server/ownerDeskLimit.ts | head -5
+# 3a') その判別が CLI 自身の remedy 行を読み返す形か(どのパターンが当たったかで推測していないか)
+grep -n "MODEL_SWITCH_REMEDY" src/lib/server/swarmRateLimitText.ts
+# 3b) 位置を「会話本文」で測っているか — 生画面の文字距離に戻っていたら退行(§3.7 の ⚠)
+grep -n "stripScreenChrome\|OWNER_DESK_TAIL_MAX = " src/lib/server/swarmRateLimitText.ts
+# 3c) 折返し行を連結して読んでいるか(素の getTerminalScreen だと 80col で本物が沈黙する)
+grep -n "getTerminalScreenLogical" src/lib/server/ownerDeskLimit.ts src/lib/server/terminal.ts
+# 3d) 合体しているか — 卓ごとに notify していたら MF-2 の退行(同一本文がベルを埋める)
+grep -n "buildOwnerDeskLimitMergedDetail\|pending.push" src/lib/server/ownerDeskLimit.ts
+# 3d') その窓が「パス」ではなく「イベント」を覆っているか。⛔ パス単位に戻っていたら
+#      卓の停止が1秒ズレるだけで分離発火する(実測 1秒→2通知/15秒→6通知)。
+#      MERGE 定数が消えていたら退行 — テストも skew を必ず振ること(振らないと緑のまま通る)
+grep -n "OWNER_DESK_MERGE_QUIET_MS\|OWNER_DESK_MERGE_CAP_MS" src/lib/server/ownerDeskLimit.ts
+grep -n "skew" src/lib/server/ownerDeskLimit.test.ts | head -3   # ← 0 件なら穴が再発している
+# 3e) 画面が読めないとき生バッファに落としていないか(落とすと枠を認識できず静かに失明する)
+grep -n "stripAnsi" src/lib/server/terminal.ts   # ← 0 件が正
+# 4) 卓に印が付く経路(オプトイン。ここが空なら誰も監視されていない)
+grep -rn "ownerDesk: true" server/routes/terminal.ts src/lib/server/swarmManager.ts src/lib/server/swarmSupply.ts
+# 5) 事象発生後: ベルに載ったか(永続通知。トーストは消えても記録は残る。owner ログイン必須 — 非 owner は 403)
+curl -s "http://127.0.0.1:47776/api/swarm/notifications" | jq -r '.notifications[]? | select(.swarmInfo.event=="session-limit") | "\(.createdAt) \(.swarmInfo.detail)"'
 ```
 
 ---
@@ -132,7 +207,7 @@ grep -n "computeReviewTimeoutMs\|classifyAbstainCause\|REVIEW_TIMEOUT_MAX_MS" sr
 
 当時の実測(2026-07-10 根治前、06 章 §4.1 に保持): 発火源 fatal 8 件 → exec-timeout 由来 escalation 25 件(全 dismissed — 世代コピー)。
 
-**検証待ちの間の司令塔運用**: 下の到達判定(re-arm 実験)を一度実測して ✓ にする。根治後に上がる S3/S10 は「24h 窓内の未受領 occurrence」= 実発生として扱う(06 章 §5.1)。
+**実測記録(2026-07-17・✓ 到達)**: 到達判定コマンドどおり re-arm 実験を実施 — overseer OFF→ON、95 秒後に exec-timeout 系 escalation 33→33・全体 59→59 で**増殖ゼロ**。実験後 overseer は OFF に復帰。以後上がる S3/S10 は「24h 窓内の未受領 occurrence」= 実発生として扱う(06 章 §5.1)。
 
 ### 対応カード
 
@@ -174,7 +249,7 @@ jq -r '[.items[] | select(.question | contains("実行時間上限"))] | length'
 
 ### 対応カード
 
-`swarm/swarm-workers-api-heartb-*` ブランチで実装 → **`1f19770` で main 入り(2026-07-11)**。残るは到達判定コマンドでの実運用実測のみ。
+`swarm/swarm-workers-api-heartb-*` ブランチで実装 → **`1f19770` で main 入り(2026-07-11)**。**実測済み(2026-07-17・✓ 到達)**: live エンジン worker(stage:running)で API `heartbeatAt=2026-07-17T06:54:51Z` がディスク `updatedAt` と完全一致(phase=audit も一致)。
 
 ### 到達判定コマンド
 
@@ -212,13 +287,26 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
    ready 品の滞留を生んだため)。review の swarm カードがあり司令官の卓が不在/沈黙なら
    `spawnSwarmManager` で起こす。複数 ready はまとめて1回(バッチ)。統合の同意粒度は
    カード単位([hold] + 高リスク force-hold)が担う。
-3. **manager 蘇生反射(card B, 2026-07-16)** —— engine は manager の生死を監視し、止まったら蘇生する:
-   (a) **検知**は 2 信号 AND(live PTY でプロセス死・**manager 心拍**の 10 分無音でハング)、
-   (b) 死/ハングなら `spawnSwarmManager` で**蘇生**(＝二重起動もこの1判定で防ぐ)、
+3. **manager 蘇生反射(card B, 2026-07-16 / 判定を 2026-07-18 に是正)** —— engine は manager の
+   生死を監視し、**本当に**止まったら蘇生する:
+   (a) **検知**は presence 3 状態(`absent`/`idle`/`active`)。卓の存在は **live PTY 1信号**で決まり、
+      「動いている証拠」は **OR**(心拍が新鮮 **or** PTY が最近描画 **or** セッション JSONL 更新)。
+      **心拍単独では死を意味しない** —— 心拍は重い統合中しか打たれないので、対話中の健全な司令官は
+      平常運転で無音になる(2026-07-18 に AND 判定で生きた司令官を 3 回蘇生し誤 fatal を上げた実事象)、
+   (b) **`absent`(卓が無い)なら `spawnSwarmManager` で蘇生**。**`idle`(卓は在るが無音)は蘇生せず
+      nudge**(10 分間隔・3 回上限)—— live PTY が握るセッションは `--resume` 不可のため、
+      蘇生すると記憶なしの重複卓が増え動いていた卓が孤児化する(実測 idle 卓 16 本)。
+      ただし**二重起動防止を presence の「`absent` でしか spawn しない」だけに委ねない**
+      (2026-07-19/20 + 2026-07-22)—— 最終ガードは `spawnSwarmManager` 自身が持つ:
+      **PTY プールで存在を判定**し、**プロジェクト単位の spawn ロックで check-then-act を閉じる**
+      (真に同時な engine 反射 + オーナーのボタンでも卓は1つ)。03 章 §2.3 の囲みが正典、
    (c) quota 壁で落ちたなら**枯れていない tier へ繰り下げてから**蘇生(同じモデルは同じ壁)、
    (d) 起動直後に毎回落ちる場合は **3 連続失敗で諦め `manager-unrevivable` fatal** をオーナーへ上げる
-      (無限に蘇生してトークンを焚かない)。回帰テストは integration「RESURRECTION reflex, REAL
-      manager heartbeat」(実心拍を止める→検知→spawn 3回→fatal を HOME 隔離で通し)で固定。
+      (無限に蘇生してトークンを焚かない)。**この fatal の意味は「卓を起動できない」**であり、
+      `absent` 経路でしか上がらない(`idle` の間は何回パスが回っても上がらない)。回帰テストは
+      integration「RESURRECTION reflex, REAL manager heartbeat」(実ファイルで 卓在り→死→spawn 3回→
+      fatal→復帰、加えて **live だが無音 → `idle`(蘇生しない)** を HOME 隔離で通し)+ unit の
+      (a) 生きた無音卓は蘇生しない /(b) 死んだ卓は蘇生 /(c) nudge throttle+budget /(d) fatal の条件、で固定。
 4. **統合(重量級レビュー + 手動 FF push)は司令官が行う** — fail-closed 0票禁止・高リスク
    force-hold の安全網も司令官側(skills/og-manage §「マージ」)。engine 側の verify/レンズ/
    force-hold は撤去/dormant で**二重管理しない**。
@@ -252,15 +340,26 @@ for f in ~/.openground/swarm/*/*.json; do jq -r '"\(.branch)\t\(.updatedAt)"' "$
   **live PTY + 心拍鮮度(10 分無音でハング)の 2 信号 AND** に精緻化された。live だが hang した卓も
   検知され蘇生される。残るは **実運用での検証** —— 実際に固まった司令官が蘇生され、恒久障害なら fatal が
   上がる様子を見届けること(◐ → ✓ の壁)。
-- **自己更新トリガ**: engine の land 時に発火していた `requestEngineSelfUpdate` は engine が land
-  しなくなり dormant。OG 自身の swarm 統合で自己更新を回したいなら司令官の手動統合側で発火させる
-  必要がある(別カードの領分)。
+- **自己更新トリガ(再接続済み 2026-07-17)**: engine の land 時に発火していた `requestEngineSelfUpdate` は
+  マネージャ専任化で一度 dormant 化したが、**司令官の手動統合フローの掃除段へ再接続された** —
+  `POST /api/swarm/worktree/remove`(force:false — og-manage §マージ手順7「統合成立を確認してからのみ掃除」)の
+  worktree 撤去成功時に、その branch tip が trunk(origin/main、無ければ local main)から到達可能かを
+  read-only(rev-parse/merge-base のみ — fetch もしない)で再判定し、真なら発火する
+  (`selfUpdateOnIntegrate.ts` → `removeSwarmWorktree` 配線)。観測点 = remove 応答の
+  `selfUpdate.{detected,requested}` + 実発火時の bell 通知 `self-update-requested`
+  (`selfUpdateOnIntegrate.test.ts` で固定)。**engine が main を FF する経路は増えていない**(条件1不変 —
+  force:true の kill/abandon 系 teardown は判定自体を通らない)。実発火は従来どおり SELF_UPDATE_ARMED
+  環境のみ(selfUpdateSignal.ts の二重ゲート + electron 側 single-flight 不変)。既知の狭い過剰発火:
+  コミットゼロ worker の非 force 掃除も ancestor 判定を通る(spawn-base 非記録のため区別不能 — armed
+  開発ランで同一ソースの再ビルドが1回走るだけなので受容)。残るは armed 実機での実発火の実運用観測(◐)。
 
 ### 対応カード
 
 **2026-07-15 マネージャ専任化**(統合を司令官専任に)で B相を「起こすだけ」に置換 main 入り。**2026-07-16
 manager 蘇生 card B**(manager 心拍 + engine が死/ハングを検知し蘇生・quota 繰り下げ・無限ループ上限・fatal
-通知)で条件 3 を実装 main 入り。**同日の autoMerge トグル廃止**で条件 2 の「常時」化(arm 不要 —
+通知)で条件 3 を実装 main 入り。**2026-07-18 誤 fatal 修正**で条件 3(a)(b)(d) を是正 —— 心拍単独判定
+(`live PTY AND 心拍新鮮`)をやめ presence 3 状態へ。生きている司令官を死と誤判定して蘇生を連打し
+誤 fatal を上げる/重複卓を量産する経路を塞いだ(`idle` は nudge のみ・spawn は `absent` 限定)。**同日の autoMerge トグル廃止**で条件 2 の「常時」化(arm 不要 —
 `engine.autoMerge` / POST automerge / UI トグル / i18n 撤去、GAP-5 の同意粒度判断は [hold]+force-hold で
 確定)。三者で条件 1-6 の**機構は揃った** —— 残るは実運用検証(下の到達判定コマンド)。
 
@@ -268,12 +367,24 @@ manager 蘇生 card B**(manager 心拍 + engine が死/ハングを検知し蘇�
 
 ```bash
 # engine が「司令官を起こした/蘇生した」ログが出ているか(起こし反射はエンジン ON で常時 — autoMerge フィールドは 2026-07-16 撤去済み・出ない)
-curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{running, reviews, log: [.log[] | select(.message | test("司令官を起こしました|応答しないため蘇生|連続で蘇生に失敗|integrated"))] | .[-10:]}'
-# ↑ 「司令官を起こしました」「応答しないため蘇生しました(N回目)」は出る。「integrated (ff)」は
-#   engine が統合しなくなったので二度と出ない。3 連続失敗なら通知ストアに 'manager-unrevivable' fatal。
-# 司令官の心拍(蘇生反射が見ているファイル)を直読 — updatedAt が 10 分以上前ならハングと判定される。
-# 在処は固定名 manager.json(worker 心拍と同じ repo 別ディレクトリ):
+curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '{running, reviews, log: [.log[] | select(.message | test("マネージャーを起こしました|応答しないため蘇生|連続で蘇生に失敗|蘇生せず声をかけました|声かけに応答しません|integrated"))] | .[-10:]}'
+# ↑ 実際に出る文字列は「worker ready — マネージャーを起こしました」「マネージャーが応答しないため
+#   蘇生しました(N回目)」(⚠「司令官を起こしました」という行は存在しない — 旧 test 文字列はこれを
+#   取りこぼしていた)。「integrated (ff)」は engine が統合しなくなったので二度と出ない。
+#   3 連続失敗なら通知ストアに 'manager-unrevivable' fatal。
+#   2026-07-18〜: 卓が在るのに無音のときは蘇生せず「蘇生せず声をかけました(N/3回目)」が出る
+#   (この行が出ている間は spawn も fatal も起きていない=正常)。3 回使い切っても無反応なら
+#   「司令官の卓は起動しているが N 回の声かけに応答しません」が1回だけ出る(03 章 §7-10)。
+# 司令官の心拍を直読。⚠ 2026-07-18 以降、updatedAt が古いこと自体は「ハング」を意味しない —
+# 心拍は重い統合中しか打たれないので、対話中の健全な司令官は平常運転で数時間前のままになる。
+# 蘇生の判定は presence(卓を握る live PTY の有無 + 描画/JSONL 更新)側。在処は固定名 manager.json:
 jq '{role, updatedAt, phase}' ~/.openground/swarm/*/manager.json 2>/dev/null || echo "manager 心拍なし(司令官がまだ beat していない)"
+# 同じ心拍は API でも読める(検品可視化 2026-07-17 — Swarm タブの「検品」表示のデータ源。
+# fresh はサーバ時計計算・null=心拍なし。03 章 §2.3「表示面」):
+curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq '.manager'
+# 自己更新トリガの観測 — 司令官の統合掃除(worktree/remove force:false)の応答 selfUpdate を見るか、
+# 実発火の永続記録(bell 通知 'self-update-requested')を引く(unarmed 環境では requested:false が正常):
+curl -s "http://127.0.0.1:47776/api/swarm/notifications" | jq '[.notifications[] | select(.swarmInfo.event=="self-update-requested")]'
 ```
 
 ---
@@ -315,10 +426,10 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
 
 到達 = 以下がすべて ✓(各項の判定コマンドで機械的に確認できる):
 
-- [ ] §1: limit 表示 → journal 検知が 2 分以内(実事象またはテストで確認)— **実装 main 入り(`0d1f7f0`)・実測待ち**
+- [x] §1: limit 表示 → journal 検知が 2 分以内 — **実測済み(2026-07-18 実 Fable 枯渇)**: 早期経路 1分42秒 ✓ / 稼働後経路 10分37秒(設計どおり・実クロック着弾)/ tier 繰り下げ実観測。詳細は §1 の実測記録表
 - [ ] §2: 34KB 超 diff が must-fix ゼロなら統合到達・棄権に理由が残る — **実装 main 入り(`3129a58`)・実測待ち**
-- [ ] §3: overseer re-arm で過去 fatal からの新規 escalation ゼロ — **実装 main 入り(`d8431c3`+`aa9cb8d`)・実測待ち**
-- [ ] §4: エンジン worker の API `heartbeatAt` がディスク `updatedAt` と一致 — **実装 main 入り(`1f19770`)・実測待ち**
+- [x] §3: overseer re-arm で過去 fatal からの新規 escalation ゼロ — **実測済み(2026-07-17)**: 到達判定コマンドどおり arm→95秒→比較で exec-timeout 系 33→33・全体 59→59。実験後 overseer は OFF に復帰
+- [x] §4: エンジン worker の API `heartbeatAt` がディスク `updatedAt` と一致 — **実測済み(2026-07-17)**: live エンジン worker(stage:running)で API `heartbeatAt=2026-07-17T06:54:51Z` = ディスク `updatedAt`(phase=audit も一致)
 - [ ] §5: エンジン ON(起こし反射は常時 — 2026-07-16 トグル廃止)7 日間で、ready 放置ゼロ・engine 由来の main FF ゼロ・蘇生反射が実事象で機能
 - [x] §6: swarm コア変更カードに文書更新が組み込まれ、実績 1 件以上 — **仕組み**(検知2点+テンプレ組込み)実装済み+**テンプレ経由の運用実績 1 件**(2026-07-11、カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂。手動追随の前例は 2026-07-10 改訂)
 

@@ -9,6 +9,8 @@ import {
   SWARM_BASE_REF_PREFERENCE,
   WORKER_ORDER_RULES,
 } from './swarmWorker'
+import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
+import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
 
 // The git-touching parts (createSwarmWorktree / removeSwarmWorktree /
 // spawnSwarmWorker) need a registered project + a real repo + the `claude` CLI,
@@ -77,6 +79,62 @@ describe('pickBaseRef', () => {
   })
 })
 
+describe('WORKER_ORDER_RULES token discipline', () => {
+  it('carries the tool-bundling / scoped-read / tail-output / two-stage-test clauses', () => {
+    expect(WORKER_ORDER_RULES).toMatch(/【トークン規律・厳守】/)
+    expect(WORKER_ORDER_RULES).toMatch(/1応答に束ねて並列実行する/)
+    expect(WORKER_ORDER_RULES).toMatch(/範囲指定 Read か grep で当たりを付けてから読む/)
+    expect(WORKER_ORDER_RULES).toMatch(/同じファイルを読み直さない/)
+    expect(WORKER_ORDER_RULES).toMatch(/tail\/要約で受ける/)
+    expect(WORKER_ORDER_RULES).toMatch(/フルスイート\(npm test\)は完了ゲートとして最後に1回/)
+    expect(WORKER_ORDER_RULES).toMatch(/「当たり」\(対象ファイル\)があれば探索せず直行する/)
+  })
+
+  it('does not relax the completion gate or pre-ready self-commit rule', () => {
+    expect(WORKER_ORDER_RULES).toMatch(
+      /完了ゲート\(npx tsc --noEmit \/ npm test \/ lint の3点\)と ready 前セルフコミットの規約は一切緩めない/,
+    )
+  })
+})
+
+describe('WORKER_ORDER_RULES decision routing (2026-07-18 — WHO decides)', () => {
+  // The plain-language rule made an owner-bound question READABLE; this one stops
+  // the wrong question being sent at all. The wording itself is pinned in
+  // swarmDecisionRouting.test.ts — here we only pin that every spawn carries it.
+  it('appends the routing rules verbatim (every /order gets the addressing gate)', () => {
+    expect(WORKER_ORDER_RULES).toContain(DECISION_ROUTING_RULES)
+    expect(WORKER_ORDER_RULES).toContain('【判断の宛先・厳守】')
+  })
+
+  it('keeps the routing clause on the SAME single line as the rest of the order', () => {
+    expect(WORKER_ORDER_RULES).not.toMatch(/[\n\r\t]/)
+  })
+
+  it('reaches the actual injected prompt, not just the constant', () => {
+    expect(buildOrderInjection('カードの題名')).toContain(DECISION_ROUTING_RULES)
+  })
+})
+
+describe('WORKER_ORDER_RULES specialist review (2026-07-19 — HOW it is decided)', () => {
+  // The routing rules above decide a technical call is NOT the owner's — which
+  // makes this worker its receiver, and the receiver has a training cutoff. This
+  // clause makes it read the current primary source before deciding. The wording
+  // is pinned in swarmSpecialistReview.test.ts; here we pin that every spawn
+  // carries it (same split as the routing pins directly above).
+  it('appends the sourcing procedure verbatim (every /order gets it)', () => {
+    expect(WORKER_ORDER_RULES).toContain(SPECIALIST_REVIEW_RULES)
+    expect(WORKER_ORDER_RULES).toContain('【技術判断は一次資料で・厳守】')
+  })
+
+  it('reaches the actual injected prompt, not just the constant', () => {
+    expect(buildOrderInjection('カードの題名')).toContain(SPECIALIST_REVIEW_RULES)
+  })
+
+  it('keeps the whole rule-set on ONE line even with both clauses appended', () => {
+    expect(WORKER_ORDER_RULES).not.toMatch(/[\n\r\t]/)
+  })
+})
+
 describe('buildOrderInjection', () => {
   it('prefixes the slash command and the ゴール: label (worker rules appended)', () => {
     expect(buildOrderInjection('Add a logout button')).toBe(
@@ -127,6 +185,12 @@ describe('buildOrderInjection', () => {
     expect(WORKER_ORDER_RULES).toContain('done true で「停止」')
     expect(WORKER_ORDER_RULES).toContain('swarm-beat.sh')
     expect(WORKER_ORDER_RULES).toContain('30 分無心拍は anomaly')
+    // Plain-language questions (2026-07-17 owner feedback): a worker's question
+    // reaches a NON-PROGRAMMER owner verbatim — the rules must demand the
+    // 3-element 平易文 (①決めること ②選択肢 ③影響) with tech detail demoted.
+    expect(WORKER_ORDER_RULES).toContain('質問は平易文で')
+    expect(WORKER_ORDER_RULES).toContain('プログラムを書いたことがない人')
+    expect(WORKER_ORDER_RULES).toContain('選択肢')
     // ...and it rides every spawn prompt, learning-loop dispatches included.
     expect(buildOrderInjection('T', 'n').endsWith(WORKER_ORDER_RULES)).toBe(true)
     expect(buildOrderInjection('T', 'n', 'prior fail').endsWith(WORKER_ORDER_RULES)).toBe(true)
@@ -225,8 +289,22 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(base.effort).toBe('max')
   })
 
-  it('starts with Remote Control ON, named "worker" (controllable from claude.ai/mobile)', () => {
+  it('starts with Remote Control ON — legacy fixed name when no remoteName resolved', () => {
+    // remoteName absent (legacy caller / resolution failed) ⇒ the historical
+    // fixed 'worker', so Remote Control is never silently OFF.
     expect(base.remoteControl).toBe('worker')
+  })
+
+  it('threads the resolved IDENTIFIABLE Remote Control name through (opts.remoteName)', () => {
+    // spawnSwarmWorker resolves 「ワーカー <プロジェクト表示名>: <カードtitle要約>」/
+    // "Worker <project>: <task>" via resolveSwarmRemoteName so the claude.ai /
+    // mobile list reads WHICH project + WHAT card each worker is on — the fix for
+    // the wall of identical 'worker' rows (owner feedback 2026-07-18).
+    const named = workerLaunchOpts('/wt', 'sid-rc', {
+      title: 'goal',
+      remoteName: 'ワーカー 受注管理: 検品可視化',
+    })
+    expect(named.remoteControl).toBe('ワーカー 受注管理: 検品可視化')
   })
 
   it('passes NO env for a worker — the SWARM_MANAGER role TAG is commander/supply-only', () => {

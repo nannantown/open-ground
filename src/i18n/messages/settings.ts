@@ -22,8 +22,11 @@ export const settings = {
     'settings.experiments.hint': 'Early, owner-only features. Off by default; not covered by support.',
     'settings.experiments.swarm': 'Swarm orchestration',
     'settings.experiments.swarmHint':
-      'Reveals the Swarm tab and its controls for you only — nothing runs on its own. Worker dispatch, auto-integrate, and the overseer all default off and stay off until you explicitly arm each one, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
+      'Reveals the Swarm tab and its controls for you only — nothing runs on its own. Worker dispatch and the overseer both default off and stay off until you explicitly arm them, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
+    'settings.experiments.persona': 'Persona',
+    'settings.experiments.personaHint':
+      'Reveals the Persona tab for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own.',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
     // Work mode (lockdown) — the non-Anthropic egress kill switch
@@ -79,8 +82,11 @@ export const settings = {
     'settings.experiments.hint': '初期段階のオーナー限定機能です。既定はオフで、サポート対象外です。',
     'settings.experiments.swarm': 'Swarm オーケストレーション',
     'settings.experiments.swarmHint':
-      'この端末で Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・自動統合・監督はすべて既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
+      'この端末で Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・監督はどちらも既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
+    'settings.experiments.persona': 'ペルソナ',
+    'settings.experiments.personaHint':
+      'この端末でペルソナタブを可視化します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
     'settings.lockdown.heading': '業務モード',

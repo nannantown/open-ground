@@ -20,10 +20,18 @@
 //   • The SAME opts fed to the REAL buildClaudeArgv produce a --disallowed-tools
 //     argv token containing WebFetch and WebSearch (the Done-condition proof
 //     that the deny list actually reaches the claude argv).
-// The app home is mocked to a tmp dir so the scratch mkdtemp never touches the
-// real ~/.openground (feedback_tests_isolate_home).
+// The app home is PINNED (not mocked) to a tmp dir so the scratch mkdtemp never
+// touches the real ~/.openground (feedback_tests_isolate_home). It used to
+// `vi.mock('./paths')`, which is a structural bypass of the production-home
+// fence: mocking the choke point removes the check for the whole module graph,
+// so a future edit to the SUT could reach the real home with nothing left to
+// stop it. Pinning OPENGROUND_HOME gets the identical tmp home THROUGH the
+// fence. A meta-test in testHomeGuard.test.ts keeps './paths' unmocked.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 const mocks = vi.hoisted(() => ({
   launchClaude: vi.fn(),
@@ -38,15 +46,15 @@ vi.mock('./terminal', () => ({
   subscribeTerminal: mocks.subscribeTerminal,
 }))
 vi.mock('./claudeTrust', () => ({ removeClaudeFolderTrust: mocks.removeClaudeFolderTrust }))
-vi.mock('./paths', async () => {
-  const { mkdtempSync } = await import('fs')
-  const { tmpdir } = await import('os')
-  const { join } = await import('path')
-  const home = mkdtempSync(join(tmpdir(), 'og-overseer-brain-home-'))
-  return {
-    openGroundHome: () => home,
-    youCorpusFile: () => join(home, 'you-corpus.md'),
-  }
+// The tmp app home, reached through the REAL paths.ts (see the note above).
+const brainHome = mkdtempSync(join(tmpdir(), 'og-overseer-brain-home-'))
+const prevOgHome = process.env.OPENGROUND_HOME
+beforeEach(() => {
+  process.env.OPENGROUND_HOME = brainHome
+})
+afterEach(() => {
+  // Restore, never delete — an unset OPENGROUND_HOME retargets the real home.
+  if (prevOgHome !== undefined) process.env.OPENGROUND_HOME = prevOgHome
 })
 
 import {

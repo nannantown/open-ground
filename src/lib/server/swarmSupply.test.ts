@@ -48,11 +48,18 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.effort).toBe('max')
   })
 
-  it('starts with Remote Control ON, named "supply" (mirrors --remote-control supply)', () => {
-    // swarm-supply.sh runs `… --remote-control supply "/supply"`; the in-app
-    // supply officer must match so it is controllable from claude.ai / mobile
-    // with no manual toggle.
+  it('starts with Remote Control ON — legacy fixed name when no remoteName resolved', () => {
+    // remoteName absent (legacy caller / resolution failed) ⇒ the historical
+    // fixed 'supply', so Remote Control is never silently OFF.
     expect(base.remoteControl).toBe('supply')
+  })
+
+  it('threads the resolved IDENTIFIABLE Remote Control name through (opts.remoteName)', () => {
+    // spawnSwarmSupply resolves 「タスク窓口 <プロジェクト表示名>」/ "Supply officer
+    // <project>" via resolveSwarmRemoteName so the claude.ai / mobile list reads
+    // WHICH project's supply desk this is (owner feedback 2026-07-18).
+    const named = supplyLaunchOpts('/proj', 'sid-rc', { remoteName: 'タスク窓口 受注管理' })
+    expect(named.remoteControl).toBe('タスク窓口 受注管理')
   })
 
   it('delivers /supply as the positional prompt (claude runs the skill on startup)', () => {

@@ -82,6 +82,7 @@ const git = async (cwd: string, args: string[]): Promise<string> =>
 
 let scratch: string
 let savedHome: string | undefined
+let savedClaudeCfg: string | undefined
 let token = 0
 const intDir = () => join(scratch, `integrate-${token++}`)
 
@@ -95,11 +96,25 @@ beforeEach(async () => {
   const home = join(scratch, 'home')
   await mkdir(home, { recursive: true })
   process.env.OPENGROUND_HOME = home
+  // Pin claude's config too. Invariant B's teardown cases call the REAL
+  // removeSwarmWorktree, which calls removeClaudeFolderTrust → claudeTrust,
+  // whose path is CLAUDE_CONFIG_PATH ?? homedir()/.claude.json — a homedir
+  // anchor OPENGROUND_HOME cannot move. Unpinned, these tests read and REWRITE
+  // the user's real ~/.claude.json (it holds their claude OAuth tokens, so a
+  // bad write logs them out). Caught 2026-07-19 by the production-home fence
+  // the moment claudeTrust was wired to it — this had been live, and silent.
+  savedClaudeCfg = process.env.CLAUDE_CONFIG_PATH
+  process.env.CLAUDE_CONFIG_PATH = join(home, '.claude.json')
   __resetMigrationCacheForTests()
 })
 afterEach(async () => {
-  if (savedHome === undefined) delete process.env.OPENGROUND_HOME
-  else process.env.OPENGROUND_HOME = savedHome
+  // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+  // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+  if (savedHome !== undefined) process.env.OPENGROUND_HOME = savedHome
+  // CLAUDE_CONFIG_PATH legitimately has an UNSET baseline (a real machine has no
+  // override), so restore it exactly — including back to unset.
+  if (savedClaudeCfg === undefined) delete process.env.CLAUDE_CONFIG_PATH
+  else process.env.CLAUDE_CONFIG_PATH = savedClaudeCfg
   __resetMigrationCacheForTests()
   await rm(scratch, { recursive: true, force: true })
 })
@@ -1130,8 +1145,9 @@ describe('INVARIANT E-WIRING — installHooks wires the PreToolUse guard into se
     process.chdir(repoRoot)
   })
   afterEach(async () => {
-    if (savedHome === undefined) delete process.env.HOME
-    else process.env.HOME = savedHome
+    // Restore, never delete: an unset HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedHome !== undefined) process.env.HOME = savedHome
     process.chdir(savedCwd)
     await rm(tmpHome, { recursive: true, force: true })
   })
@@ -1213,10 +1229,12 @@ describe('INVARIANT E-FAILCLOSED — unverifiable guard wiring refuses the worke
     __resetGuardUnwiredNotifyThrottleForTests()
   })
   afterEach(async () => {
-    if (savedHome === undefined) delete process.env.HOME
-    else process.env.HOME = savedHome
-    if (savedOgHome === undefined) delete process.env.OPENGROUND_HOME
-    else process.env.OPENGROUND_HOME = savedOgHome
+    // Restore, never delete: an unset HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedHome !== undefined) process.env.HOME = savedHome
+    // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedOgHome !== undefined) process.env.OPENGROUND_HOME = savedOgHome
     process.chdir(savedCwd)
     await rm(tmpHome, { recursive: true, force: true })
   })

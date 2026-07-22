@@ -1,6 +1,8 @@
 # SWARM GA AUDIT — swarm 一般開放適合性監査(read-only)
 
 **監査日: 2026-07-14**(基準 = `e2c130b` / v0.11.28 — swarm ローカル解錠 `swarmGate.ts` 込みの main 系 tip)。
+
+> 【2026-07-16 追記】監査後に**マネージャ専任化**(2026-07-15)と **autoMerge トグル廃止**(2026-07-16)が main 入りし、本書が監査した「engine の push 経路」(§2.3 委譲先 2・§2.4 の発火条件・§5 の autoMerge arm 前提)は**構造ごと撤去**された: engine は今や worker が ready になったら司令官(claude セッション)を起こす**だけ**で、trunk へ push する経路を持たない(回帰テスト「WAKES the commander and NEVER FF-pushes」で固定)。trunk を動かす主体は司令官の統合のみ(同意はカード単位 `[hold]` + 高リスク force-hold)。本文の autoMerge 記述は監査時点の事実としてそのまま残す — 現在形の正典: [commander/03-integration-review.md](commander/03-integration-review.md)。
 **読者**: プロジェクトオーナーと、発見事項を個別カードに起票する補給官/司令塔。
 **この文書の役割**: swarm 機能(in-app 並列 claude オーケストレーション)を「どんなユーザーが使ってもいい」状態か、セキュリティ厳格な業務で使えるかを、**実装レベル**で監査した結果。監査のみ — 修正はしない(発見は起票の材料)。
 
@@ -133,7 +135,7 @@ swarm 実装ファイル群(swarm*.ts + server/routes/swarm.ts)の外向き通�
 - `fetch` は **6 箇所すべて `loopbackOrigin()` = `http://127.0.0.1:${PORT|47776}`**(`swarmOrchestrator.ts:2207` — 自分自身の Board API の読み書き)。https/net/axios/WebSocket/XMLHttpRequest は **0 hit**。
 - したがって swarm engine 自身がネットワークで外に出る経路は**コード上ゼロ**。外に出るのは次の 2 つの**委譲先**だけ:
   1. **claude CLI**(worker/manager/supply/overseer-brain の PTY)→ Anthropic へ。swarm 固有の追加エグレスではなく、ユーザーが claude を使う行為そのもの(subscription-only — API key 経路なし)。
-  2. **git push**(autoMerge 統合時のみ・plain push・origin の swarm/* → リモート trunk)— §2.4 のとおり既定 OFF + in-memory arm。**engine が push しないことのコード根拠は §2.4**。
+  2. **git push**(autoMerge 統合時のみ・plain push・origin の swarm/* → リモート trunk)— §2.4 のとおり既定 OFF + in-memory arm。**engine が push しないことのコード根拠は §2.4**。(2026-07-15/16 にこの経路自体が撤去 — 冒頭追記)
 - owner gate のロール解決(Supabase)は swarm ファイル群の外(`roles.ts`)— アプリ全体エグレス監査(c648634b / [SECURITY.md](SECURITY.md))の持ち分。swarm 固有分としては「ロール確認のため owner gate が Supabase に依存する」事実のみ §5 で扱う。
 
 ### 2.4 engine が push しないことのコード根拠(自分で静的確認済み)
@@ -142,7 +144,7 @@ swarm 実装ファイル群(swarm*.ts + server/routes/swarm.ts)の外向き通�
 
 - `swarmIntegrate.ts` の push 実呼び出しは **2 行のみ**: L288(FF push)と L339(rebase 後 push)。どちらも引数配列に `--force`/`-f` 無し。
 - `--force` の hit は L347 `worktree remove --force` のみ(エンジン自前の throwaway worktree 掃除 — push とは無関係)。
-- push の発火条件: autoMerge arm(既定 OFF・in-memory・再起動で OFF)+ 検証ゲート緑 + 敵対レビュー通過のみ。正典: [SWARM_SAFETY_INVARIANTS.md](SWARM_SAFETY_INVARIANTS.md) 不変条件 A/D。
+- push の発火条件: autoMerge arm(既定 OFF・in-memory・再起動で OFF)+ 検証ゲート緑 + 敵対レビュー通過のみ。正典: [SWARM_SAFETY_INVARIANTS.md](SWARM_SAFETY_INVARIANTS.md) 不変条件 A/D。(2026-07-15/16 に engine の push 発火そのものが撤去され、この静的確認の対象コードは dormant — 冒頭追記)
 
 ### 2.5 L4 ガードの実地観測(本監査セッション内)
 
@@ -194,13 +196,13 @@ swarm 実装ファイル群(swarm*.ts + server/routes/swarm.ts)の外向き通�
 
 | 観点 | 評価 | 根拠 |
 |---|---|---|
-| データのローカル完結性 | ⭕ 強い | swarm engine の egress はコード上ゼロ(§2.3 — fetch 全 6 箇所 loopback)。LLM への経路は claude CLI のみ(subscription-only・API key 経路なし)。統合はローカル git merge、push は autoMerge 明示 arm(既定 OFF・再起動 OFF)のみ |
+| データのローカル完結性 | ⭕ 強い | swarm engine の egress はコード上ゼロ(§2.3 — fetch 全 6 箇所 loopback)。LLM への経路は claude CLI のみ(subscription-only・API key 経路なし)。統合はローカル git merge、push は autoMerge 明示 arm(既定 OFF・再起動 OFF)のみ(2026-07-15/16〜は engine push 経路ゼロ・司令官の統合のみ — 冒頭追記。ローカル完結の評価は強まる方向) |
 | 機密のディスク残留 | △ 条件付き | escalation 系は 0600/0700 で自衛(§2.1)。ただしカード内容は claude transcript(`~/.claude/projects/`)に平文残留 + argv 可視(§2.2)— **FileVault 等のディスク暗号化とシングルユーザーマシンが前提条件** |
 | 認証・到達制御 | ⭕(2 経路) | 既定 = Supabase owner gate(fail-closed・オフライン初回は 'none')。ログイン不可の業務環境には **swarm ローカル解錠**(`swarmGate.ts` — settings.json 手編集/env、UI なし・HTTP 設定不能・swarm 限定)が 2026-07-14 に正典化済み — 詳細は [SECURITY.md](SECURITY.md) が正 |
 | 暴走時の機械的ガード | ⭕(macOS)/ ❓(Win) | L4 guard(worker 限定・fail-closed 配線・本監査中に実発火を観測 §2.5)+ macOS は overseer-brain に L3。Windows は L4 単層(GAP-7)かつその L4 自体が未実測(NEW-3) |
 | 可用性(プラン/CLI 依存) | ✖ 現状 | Max プラン + 新しめ CLI + `~/.claude/swarm-beat.sh` 保有(= 開発者)以外では自律ループが完走しない(NEW-1/2/4) |
 
-**条件付き利用の最小条件**(今日、リスクを理解した組織が owner 運用する場合): macOS + FileVault + シングルユーザーマシン + Max プラン + 最新 claude CLI + autoMerge/selfSupply は arm しない(review 列で人間統合)+ 機密カードを swarm に流さない運用規律。
+**条件付き利用の最小条件**(今日、リスクを理解した組織が owner 運用する場合): macOS + FileVault + シングルユーザーマシン + Max プラン + 最新 claude CLI + selfSupply は arm しない + 人手前提の統合運用は `[hold]` prefix で(autoMerge は 2026-07-16 廃止 — engine は push せず、統合は司令官。無人 land を避けたいカードはタイトル先頭 `[hold]` で承認待ちに)+ 機密カードを swarm に流さない運用規律。
 
 ---
 

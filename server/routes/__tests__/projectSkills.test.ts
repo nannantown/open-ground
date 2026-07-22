@@ -90,8 +90,10 @@ describe('GET /api/skills/global', () => {
     process.env.HOME = fakeHome
   })
   afterEach(async () => {
-    if (realHome === undefined) delete process.env.HOME
-    else process.env.HOME = realHome
+    // Restore, never delete: with HOME unset os.homedir() falls back to the
+    // passwd entry — i.e. straight back at the REAL home this block exists to
+    // avoid. See src/lib/server/testHomeGuard.ts.
+    if (realHome !== undefined) process.env.HOME = realHome
     await rm(fakeHome, { recursive: true, force: true })
   })
 

@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat, realpath } from 'fs/promises'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat, realpath, chmod } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -11,6 +11,17 @@ import {
   getCorpusStatus,
 } from './youCorpus'
 import { youCorpusFile, youCorpusAdditionsFile } from './paths'
+
+// Partial os mock: the registry-resolution tests below need homedir() to point
+// at a throwaway dir (autoMemoryDirFor computes ~/.claude/projects/… from it —
+// the real ~/.claude must NEVER be read by tests). null → the real homedir, so
+// every other test (all of which resolve sources via env overrides / explicit
+// opts and never reach homedir) is unaffected.
+let mockHomedir: string | null = null
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>()
+  return { ...actual, homedir: () => mockHomedir ?? actual.homedir() }
+})
 
 // Phase-0 proxy judgment corpus. HOME is a throwaway dir per test (so the
 // corpus + additions files start fresh and never touch the real ~/.openground),
@@ -86,6 +97,7 @@ beforeEach(async () => {
 afterEach(async () => {
   delete process.env.OPENGROUND_MEMORY_DIR
   delete process.env.OPENGROUND_CONCEPT_PATH
+  mockHomedir = null
   await rm(home, { recursive: true, force: true }).catch(() => {})
 })
 
@@ -213,6 +225,34 @@ describe('appendJudgment (the "new decision" command)', () => {
   })
 })
 
+describe('correction = append (never edit)', () => {
+  it('stores the id of the judgment being corrected, and leaves that one alone', async () => {
+    const { judgment: original } = await appendJudgment({ text: 'ORIGINAL_CALL' })
+    const { judgment: correction } = await appendJudgment({
+      text: 'WHAT_IS_ACTUALLY_TRUE',
+      context: 'Corrects an earlier note: ORIGINAL_CALL',
+      correctsId: original.id,
+    })
+    expect(correction.correctsId).toBe(original.id)
+
+    // The id has to survive the file round-trip — the reader's type guard only
+    // demands `text`, so a stricter reshaping there would silently drop it.
+    const live = await readManualJudgments()
+    expect(live.find((j) => j.text === 'WHAT_IS_ACTUALLY_TRUE')?.correctsId).toBe(original.id)
+    // The corrected note is still there, unchanged and unmarked: what the owner
+    // wrote is never rewritten, a correction is only ever stacked on top.
+    const kept = live.find((j) => j.text === 'ORIGINAL_CALL')
+    expect(kept?.id).toBe(original.id)
+    expect(kept?.correctsId).toBeUndefined()
+  })
+
+  it('leaves correctsId off a plain note', async () => {
+    const { judgment } = await appendJudgment({ text: 'JUST_A_NOTE' })
+    expect(judgment.correctsId).toBeUndefined()
+    expect('correctsId' in judgment).toBe(false)
+  })
+})
+
 describe('privacy', () => {
   it('writes both personal files 0600 (owner-only)', async () => {
     await appendJudgment({ text: 'private judgment' }) // creates both files
@@ -224,6 +264,40 @@ describe('privacy', () => {
 })
 
 describe('resilience', () => {
+  // The other half of "unreadable ≠ absent": an additions file that genuinely
+  // is not there yet must still read as empty, quietly. Without this, the fix
+  // for the unreadable case could just as easily have been over-applied into
+  // "every fresh install errors on its first visit to the tab".
+  it('an ABSENT additions file is simply empty — no error on a fresh home', async () => {
+    expect(await exists(youCorpusAdditionsFile())).toBe(false)
+    expect(await readManualJudgments()).toEqual([])
+    expect((await getCorpusStatus()).manualCount).toBe(0)
+    const meta = await assembleYouCorpus({ memoryDir: memDir, conceptPath })
+    expect(meta.manualCount).toBe(0)
+  })
+
+  // The judgment is written BEFORE the corpus is re-assembled, so a failure in
+  // the second half must not be reported as a failure of the first: the Persona
+  // tab keeps the owner's draft on error and lets them press the button again,
+  // which would write the same judgment twice.
+  it('an append whose re-assembly fails reports SAVED-but-stale, not a failure', async () => {
+    // A directory where the corpus file belongs: the additions write still
+    // succeeds, the rename that publishes the assembled corpus cannot.
+    await mkdir(youCorpusFile(), { recursive: true })
+
+    const { judgment, meta } = await appendJudgment({ text: 'SAVED_DESPITE_REBUILD_FAILURE' })
+
+    expect(judgment.text).toBe('SAVED_DESPITE_REBUILD_FAILURE')
+    // Told the truth: it landed, the file the overseer reads is stale.
+    expect(meta.skipped).toBe(true)
+    expect(meta.warning).toBeTruthy()
+    expect(meta.manualCount).toBe(1)
+
+    // And it really is on disk — exactly once.
+    const stored = await readManualJudgments()
+    expect(stored.map((j) => j.text)).toEqual(['SAVED_DESPITE_REBUILD_FAILURE'])
+  })
+
   it('tolerates a corrupted additions file during assembly (treats it as empty)', async () => {
     await writeFile(youCorpusAdditionsFile(), 'not json {{{')
     expect(await readManualJudgments()).toEqual([])
@@ -283,5 +357,391 @@ describe('readYouCorpus / getCorpusStatus', () => {
     expect(after.exists).toBe(true)
     expect(after.sizeBytes).toBeGreaterThan(0)
     expect(after.assembledAt).not.toBeNull()
+  })
+})
+
+// ─── The 2026-07-17 incident guards ──────────────────────────────────────────
+// The packaged app's server cwd is NOT the OPEN GROUND repo. A rebuild from
+// there used to resolve zero mechanical sources and overwrite a 410KB corpus
+// with a near-empty one. Two independent fixes are covered here: the fail-safe
+// (an empty assembly must not destroy a populated corpus) and the registry
+// resolution (sources resolve without any cwd at all).
+
+describe('fail-safe: empty assembly never destroys a populated corpus', () => {
+  it('a rebuild with cwd outside any repo keeps the existing corpus (skipped+warning)', async () => {
+    // A healthy corpus, built from the env-override fixtures.
+    await assembleYouCorpus()
+    const before = await readFile(youCorpusFile(), 'utf8')
+    expect(before).toContain('CONCEPT_BODY_MARKER')
+
+    // Packaged-app conditions: no env overrides, cwd pointed OUTSIDE any git
+    // repo (an explicit cwd also keeps the resolver away from the real
+    // process.cwd() checkout — hermetic).
+    delete process.env.OPENGROUND_MEMORY_DIR
+    delete process.env.OPENGROUND_CONCEPT_PATH
+    const outside = await realpath(await mkdtemp(join(tmpdir(), 'og-nonrepo-')))
+    try {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const meta = await assembleYouCorpus({ cwd: outside })
+        expect(meta.skipped).toBe(true)
+        expect(meta.warning).toMatch(/no mechanical sources/)
+        expect(warnSpy).toHaveBeenCalled()
+      } finally {
+        warnSpy.mockRestore()
+      }
+      // The load-bearing assertion: the file is byte-identical.
+      expect(await readFile(youCorpusFile(), 'utf8')).toBe(before)
+    } finally {
+      await rm(outside, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  it('appendJudgment (the escalation-answer path) preserves the corpus AND the judgment', async () => {
+    await assembleYouCorpus()
+    const before = await readFile(youCorpusFile(), 'utf8')
+
+    // Resolution "succeeds" but both sources are gone (unmounted-disk shape).
+    process.env.OPENGROUND_MEMORY_DIR = join(tmpdir(), 'og-no-such-memory-dir-xyz')
+    process.env.OPENGROUND_CONCEPT_PATH = join(tmpdir(), 'og-no-such-concept-xyz.md')
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { meta } = await appendJudgment({ text: 'ANSWER_LEARNED_MARKER' })
+      expect(meta.skipped).toBe(true)
+      expect(meta.manualCount).toBe(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    // The corpus file is untouched…
+    expect(await readFile(youCorpusFile(), 'utf8')).toBe(before)
+    // …but the judgment IS persisted in the additions file (nothing is lost —
+    // the next healthy rebuild folds it in).
+    const stored = await readManualJudgments()
+    expect(stored.map((j) => j.text)).toEqual(['ANSWER_LEARNED_MARKER'])
+  })
+
+  it('a corpus that never had mechanical sources keeps accepting manual-only assembly', async () => {
+    // Fresh-machine shape: no mechanical sources from day one.
+    delete process.env.OPENGROUND_MEMORY_DIR
+    delete process.env.OPENGROUND_CONCEPT_PATH
+    const outside = await realpath(await mkdtemp(join(tmpdir(), 'og-nonrepo-')))
+    try {
+      // First write is allowed (nothing to protect)…
+      const first = await assembleYouCorpus({ cwd: outside })
+      expect(first.skipped).toBeUndefined()
+      expect(await exists(youCorpusFile())).toBe(true)
+
+      // …and manual-only REassembly keeps landing (no false lock-out): a
+      // mechanical-source-free corpus is a legitimate state, not damage.
+      const { meta } = await appendJudgment({ text: 'MANUAL_ONLY_MARKER' })
+      expect(meta.skipped).toBeUndefined()
+      expect(meta.manualCount).toBe(1)
+      expect(await readFile(youCorpusFile(), 'utf8')).toContain('MANUAL_ONLY_MARKER')
+    } finally {
+      await rm(outside, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
+
+describe('registry resolution (cwd-independent sources)', () => {
+  let fakeHome: string
+  let repo: string
+  let outsideTmps: string[]
+
+  // A fake OPEN GROUND checkout (CONCEPT.md in the repo) + its auto-memory dir
+  // under a MOCKED homedir, registered in the project registry. No env
+  // overrides — this exercises the registry path end to end. process.cwd() IS
+  // a real git checkout while these tests run, so every assertion that the
+  // REGISTRY fixtures land in the corpus doubles as proof cwd was never used.
+  beforeEach(async () => {
+    delete process.env.OPENGROUND_MEMORY_DIR
+    delete process.env.OPENGROUND_CONCEPT_PATH
+    outsideTmps = []
+    fakeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-fake-usrhome-')))
+    mockHomedir = fakeHome
+    repo = await mkRegisteredRepo('og-fake-repo-', {
+      concept: 'REGISTRY_CONCEPT_MARKER',
+      memories: [
+        { file: 'project_business_model_vision.md', name: 'project_business_model_vision', body: 'REGISTRY_BIZ_MARKER' },
+        { file: 'feedback_reg.md', name: 'feedback_reg', body: 'REGISTRY_MEMO_MARKER' },
+      ],
+    })
+    await writeRegistry([repo])
+  })
+
+  afterEach(async () => {
+    await rm(fakeHome, { recursive: true, force: true }).catch(() => {})
+    for (const d of outsideTmps) await rm(d, { recursive: true, force: true }).catch(() => {})
+  })
+
+  // Creates a fake registered-project folder + its auto-memory dir under the
+  // mocked homedir. Returns the repo path.
+  const mkRegisteredRepo = async (
+    prefix: string,
+    fixture: { concept?: string; memories: { file: string; name: string; body: string }[] },
+  ): Promise<string> => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), prefix)))
+    outsideTmps.push(dir)
+    if (fixture.concept) await writeFile(join(dir, 'CONCEPT.md'), `# C\n${fixture.concept}\n`)
+    const mem = join(fakeHome, '.claude', 'projects', encodeClaudeProjectKey(dir), 'memory')
+    await mkdir(mem, { recursive: true })
+    for (const m of fixture.memories) {
+      await writeMemory(mem, m.file, { name: m.name, type: 'project', body: m.body })
+    }
+    return dir
+  }
+
+  const writeRegistry = (paths: string[]) =>
+    writeFile(
+      join(home, 'settings.json'),
+      JSON.stringify({
+        projects: paths.map((p, i) => ({ id: `reg-${i}`, path: p, addedAt: new Date().toISOString() })),
+      }),
+    )
+
+  it('assembles all sources from the registry with NO cwd and no env overrides', async () => {
+    const meta = await assembleYouCorpus() // ← no opts at all: the route's exact call shape
+    expect(meta.skipped).toBeUndefined()
+    expect(meta.conceptIncluded).toBe(true)
+    expect(meta.businessVisionIncluded).toBe(true)
+    expect(meta.memoryCount).toBe(2)
+
+    const text = await readFile(youCorpusFile(), 'utf8')
+    // Registry fixtures — and NOT the real checkout process.cwd() lives in.
+    expect(text).toContain('REGISTRY_CONCEPT_MARKER')
+    expect(text).toContain('REGISTRY_BIZ_MARKER')
+    expect(text).toContain('REGISTRY_MEMO_MARKER')
+  })
+
+  it('prefers the entry whose memory holds business_model_vision', async () => {
+    // A DECOY registered project that also has CONCEPT.md + memory (more notes),
+    // but no business-vision note — the vision-bearing repo must still win.
+    const decoy = await mkRegisteredRepo('og-decoy-repo-', {
+      concept: 'DECOY_CONCEPT_MARKER',
+      memories: [
+        { file: 'project_a.md', name: 'project_a', body: 'DECOY_A' },
+        { file: 'project_b.md', name: 'project_b', body: 'DECOY_B' },
+        { file: 'project_c.md', name: 'project_c', body: 'DECOY_C' },
+      ],
+    })
+    await writeRegistry([decoy, repo])
+
+    const meta = await assembleYouCorpus()
+    expect(meta.businessVisionIncluded).toBe(true)
+    const text = await readFile(youCorpusFile(), 'utf8')
+    expect(text).toContain('REGISTRY_CONCEPT_MARKER')
+    expect(text).not.toContain('DECOY_CONCEPT_MARKER')
+  })
+
+  it('getCorpusStatus reflects the registry-resolved sources', async () => {
+    const s = await getCorpusStatus()
+    expect(s.memoryDir).toBe(join(fakeHome, '.claude', 'projects', encodeClaudeProjectKey(repo), 'memory'))
+    expect(s.memoryDirExists).toBe(true)
+    expect(s.memoryCount).toBe(2)
+    expect(s.conceptPath).toBe(join(repo, 'CONCEPT.md'))
+    expect(s.conceptExists).toBe(true)
+    expect(s.businessVisionExists).toBe(true)
+  })
+
+  it('registry entries without BOTH sources never qualify (no half-matches)', async () => {
+    // concept-only and memory-only entries are skipped even when they come
+    // FIRST in the registry — only the full (CONCEPT.md + memory) entry
+    // qualifies, so a random registered project holding some CONCEPT.md can't
+    // hijack the corpus.
+    const conceptOnly = await mkRegisteredRepo('og-conceptonly-', {
+      concept: 'HALF_CONCEPT_MARKER',
+      memories: [],
+    })
+    // Drop its auto-memory dir entirely: CONCEPT.md alone must not qualify.
+    await rm(join(fakeHome, '.claude', 'projects', encodeClaudeProjectKey(conceptOnly)), {
+      recursive: true,
+      force: true,
+    })
+    const memoryOnly = await mkRegisteredRepo('og-memoryonly-', {
+      memories: [{ file: 'project_x.md', name: 'project_x', body: 'HALF_MEMORY_MARKER' }],
+    })
+    await writeRegistry([conceptOnly, memoryOnly, repo])
+
+    const meta = await assembleYouCorpus()
+    expect(meta.skipped).toBeUndefined()
+    expect(meta.conceptIncluded).toBe(true)
+    const text = await readFile(youCorpusFile(), 'utf8')
+    expect(text).toContain('REGISTRY_CONCEPT_MARKER') // the full entry won
+    expect(text).not.toContain('HALF_CONCEPT_MARKER')
+    expect(text).not.toContain('HALF_MEMORY_MARKER')
+  })
+})
+
+// ─── Unreadable ≠ absent (the tolerant-reader trap) ──────────────────────────
+// Both writers below used to collapse EVERY read failure into "the file isn't
+// there", which turns a transient/permission condition into permanent silent
+// loss: the append would write a fresh one-element array over a populated
+// additions file, and the assemble fail-safe would disarm itself and overwrite
+// a populated corpus. Only ENOENT may mean "empty"; anything else must refuse.
+//
+// chmod is the only way to make a real read fail, so these skip where it does
+// not bite: as root (permission bits are ignored) and on Windows.
+const chmodBites = process.platform !== 'win32' && process.getuid?.() !== 0
+
+describe.skipIf(!chmodBites)('an UNREADABLE file is never treated as an empty one', () => {
+  it('append REFUSES rather than clobbering an unreadable additions file', async () => {
+    await appendJudgment({ text: 'FIRST_JUDGMENT' })
+    await appendJudgment({ text: 'SECOND_JUDGMENT' })
+    const file = youCorpusAdditionsFile()
+    const before = await readFile(file, 'utf8')
+    expect(JSON.parse(before)).toHaveLength(2)
+
+    await chmod(file, 0o000)
+    try {
+      // The append must SURFACE the failure — a thrown error is recoverable,
+      // an erased history is not.
+      await expect(appendJudgment({ text: 'WOULD_HAVE_ERASED_EVERYTHING' })).rejects.toThrow()
+    } finally {
+      await chmod(file, 0o600)
+    }
+
+    // The load-bearing assertion: the prior judgments are still all there, and
+    // nothing was quietly moved aside either (a read failure is not corruption).
+    expect(await readFile(file, 'utf8')).toBe(before)
+    expect((await readManualJudgments()).map((j) => j.text)).toEqual([
+      'FIRST_JUDGMENT',
+      'SECOND_JUDGMENT',
+    ])
+    const strays = (await readdir(join(process.env.OPENGROUND_HOME as string))).filter((n) =>
+      n.includes('.corrupt-'),
+    )
+    expect(strays).toEqual([])
+  })
+
+  // The READERS have to obey the same rule as the writer above, or the two
+  // contradict each other on one file: the append refuses to touch it while the
+  // status/tab/assembly all report it as "you have written nothing yet".
+  it('readManualJudgments SURFACES an unreadable additions file instead of reporting empty', async () => {
+    await appendJudgment({ text: 'FIRST_JUDGMENT' })
+    await appendJudgment({ text: 'SECOND_JUDGMENT' })
+    const file = youCorpusAdditionsFile()
+
+    await chmod(file, 0o000)
+    try {
+      await expect(readManualJudgments()).rejects.toThrow()
+    } finally {
+      await chmod(file, 0o600)
+    }
+    // Still all there once it is readable again — the throw was about VISIBILITY,
+    // and nothing about the file changed.
+    expect((await readManualJudgments()).map((j) => j.text)).toEqual([
+      'FIRST_JUDGMENT',
+      'SECOND_JUDGMENT',
+    ])
+  })
+
+  it('getCorpusStatus REFUSES rather than reporting manualCount 0 over an unreadable file', async () => {
+    await appendJudgment({ text: 'FIRST_JUDGMENT' })
+    const file = youCorpusAdditionsFile()
+
+    await chmod(file, 0o000)
+    try {
+      // A 0 here is what the Persona tab turns into "nothing here yet" — the
+      // first-run invitation, shown to an owner whose corpus is full.
+      await expect(getCorpusStatus()).rejects.toThrow()
+    } finally {
+      await chmod(file, 0o600)
+    }
+    expect((await getCorpusStatus()).manualCount).toBe(1)
+  })
+
+  // The worst instance of the same bug: assembly does not just MISREPORT the
+  // judgments, it writes a corpus without them — silently deleting the persona
+  // from the one file the overseer reads before it judges on the owner's behalf.
+  it('assembly REFUSES rather than rewriting the corpus with the judgments dropped', async () => {
+    await appendJudgment({ text: 'FIRST_JUDGMENT' })
+    await appendJudgment({ text: 'SECOND_JUDGMENT' })
+    const corpus = youCorpusFile()
+    const before = await readFile(corpus, 'utf8')
+    expect(before).toContain('FIRST_JUDGMENT')
+    expect(before).toContain('SECOND_JUDGMENT')
+
+    // Mechanical sources still resolve, so the empty-assembly fail-safe does NOT
+    // fire — this path has to refuse on its own.
+    await chmod(youCorpusAdditionsFile(), 0o000)
+    try {
+      await expect(assembleYouCorpus()).rejects.toThrow()
+    } finally {
+      await chmod(youCorpusAdditionsFile(), 0o600)
+    }
+    // The load-bearing assertion: byte-identical. Not "still has a manual
+    // section", not "still non-empty" — unchanged.
+    expect(await readFile(corpus, 'utf8')).toBe(before)
+  })
+
+  it('the empty-assembly fail-safe REFUSES rather than overwriting an unreadable corpus', async () => {
+    await assembleYouCorpus()
+    const file = youCorpusFile()
+    const before = await readFile(file, 'utf8')
+    expect(before).toContain('CONCEPT_BODY_MARKER')
+
+    // Sources stop resolving AND the existing corpus cannot be read — the exact
+    // pairing that used to slip past the guard (unreadable → "no corpus yet" →
+    // first write is fine → a populated corpus replaced by an empty assembly,
+    // with no `skipped` flag to warn anyone).
+    process.env.OPENGROUND_MEMORY_DIR = join(tmpdir(), 'og-unreadable-no-mem')
+    process.env.OPENGROUND_CONCEPT_PATH = join(tmpdir(), 'og-unreadable-no-concept.md')
+    await chmod(file, 0o000)
+    try {
+      await expect(assembleYouCorpus()).rejects.toThrow()
+    } finally {
+      await chmod(file, 0o600)
+    }
+    expect(await readFile(file, 'utf8')).toBe(before)
+  })
+})
+
+// ─── Multi-line judgments stay inside their own bullet ───────────────────────
+// The Persona tab writes these through a textarea, so newlines are ordinary
+// input. Rendered naively, a 2nd line at column 0 ends the list item — and one
+// beginning "## " or "- " then reads as a real corpus heading / a separate
+// judgment. Because manual judgments render NEWEST FIRST, a single such note
+// would re-parent every older entry beneath it.
+describe('renderManual: multi-line text cannot break out of its entry', () => {
+  const corpusManualSection = async (): Promise<string> => {
+    const text = await readFile(youCorpusFile(), 'utf8')
+    return text.slice(text.indexOf('## 4.'))
+  }
+
+  it('indents continuation lines so a "## " second line is not a heading', async () => {
+    await appendJudgment({ text: 'OLDEST_ENTRY' })
+    await appendJudgment({ text: '価格は $8 に固定する。\n## 見出しに見える行\n- **偽エントリ**' })
+
+    const section = await corpusManualSection()
+    // Not one line of the note reaches column 0 — every continuation is
+    // indented into the bullet it belongs to.
+    expect(section).not.toMatch(/^## 見出しに見える行$/m)
+    expect(section).not.toMatch(/^- \*\*偽エントリ\*\*$/m)
+    expect(section).toMatch(/^ {2}## 見出しに見える行$/m)
+    // (the closing "**" of the whole judgment lands on its last line, so match
+    // the indented prefix rather than the exact tail)
+    expect(section).toMatch(/^ {2}- \*\*偽エントリ/m)
+    // The older entry still starts its own bullet — it was not swallowed.
+    expect(section).toMatch(/^- \*\*OLDEST_ENTRY\*\*$/m)
+    // Exactly two top-level bullets: the two judgments, nothing invented.
+    expect(section.match(/^- \*\*/gm)).toHaveLength(2)
+  })
+
+  it('indents a multi-line context (the correction path) the same way', async () => {
+    await appendJudgment({
+      text: 'CORRECTED_CALL',
+      context: '前の記述の訂正: 一行目\n## 二行目が見出しに見える',
+    })
+    const section = await corpusManualSection()
+    expect(section).not.toMatch(/^## 二行目が見出しに見える$/m)
+    expect(section).toMatch(/^ {2}## 二行目が見出しに見える$/m)
+  })
+
+  it('leaves an ordinary single-line judgment rendered exactly as before', async () => {
+    await appendJudgment({ text: 'PLAIN_ONE_LINER', tags: ['t'] })
+    const section = await corpusManualSection()
+    expect(section).toMatch(/^- \*\*PLAIN_ONE_LINER\*\*$/m)
   })
 })

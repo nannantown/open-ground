@@ -26,6 +26,7 @@ import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { atomicWriteText } from './atomicWrite'
 import { resolveHookSourceRoot } from './hooksInstall'
+import { assertTestHomeIsolated } from './testHomeGuard'
 
 /** The ownership marker burned into the shipped skill (an HTML comment right
  *  after the frontmatter). Its ABSENCE in an existing target file marks that
@@ -45,8 +46,16 @@ const sourcePath = (): { file: string | null; problem: string | null } => {
     : { file: null, problem }
 }
 
-const installedPath = (): string =>
-  join(homedir(), '.claude', 'skills', 'og-manage', 'SKILL.md')
+// FENCED (testHomeGuard.ts): installOgManageSkill() takes no required args and
+// production callers pass none (server/index.ts, swarmManager.ts), so any test
+// that reaches spawnSwarmManager would overwrite the user's REAL
+// ~/.claude/skills/og-manage/SKILL.md. Not reachable today only because
+// swarmManager.test.ts imports just the launch-opts helper — one import away.
+const installedPath = (): string => {
+  const home = homedir()
+  assertTestHomeIsolated(home, 'ogManageSkill (homedir()/.claude/skills)')
+  return join(home, '.claude', 'skills', 'og-manage', 'SKILL.md')
+}
 
 export type OgManageSkillOutcome =
   | 'installed' // target was missing — first install

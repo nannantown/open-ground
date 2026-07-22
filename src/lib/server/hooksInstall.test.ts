@@ -64,10 +64,12 @@ describe('hook source resolution — cwd-independent, worktree-refusing', () => 
   })
   afterEach(async () => {
     __setHookSourceModuleDirForTests(null)
-    if (savedHome === undefined) delete process.env.HOME
-    else process.env.HOME = savedHome
-    if (savedOgHome === undefined) delete process.env.OPENGROUND_HOME
-    else process.env.OPENGROUND_HOME = savedOgHome
+    // Restore, never delete: an unset HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedHome !== undefined) process.env.HOME = savedHome
+    // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
+    // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
+    if (savedOgHome !== undefined) process.env.OPENGROUND_HOME = savedOgHome
     process.chdir(savedCwd)
     await rm(tmpHome, { recursive: true, force: true })
   })

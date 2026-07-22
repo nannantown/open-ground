@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
-import { Terminal, Palette, Columns3, Puzzle, Network } from 'lucide-react'
+import { Terminal, Palette, Columns3, Puzzle, Network, Fingerprint } from 'lucide-react'
 import { customTabId, type ModuleId } from '@/lib/modules/ids'
 import type { ModuleDescriptor } from '@/lib/modules/descriptor'
+import type { MessageKey } from '@/i18n/messages'
 import type { ExperimentId, ExperimentFlags } from '@/lib/types'
 
 // ─── Module registry ──────────────────────────────────────────────────────
@@ -18,6 +19,13 @@ export interface TabDef {
   id: string
   label: string
   icon: ReactNode
+  /** i18n key for a TRANSLATED tab name. When set, every surface that shows the
+   *  name (the tab row, the "+" picker) renders `t(labelKey)` and falls back to
+   *  `label` only if the key is missing — so a tab's name is changed in ONE
+   *  place, in both languages. Absent ⇒ `label` is shown verbatim, which is
+   *  what the product-noun built-ins (Board / Canvas / Terminal / Swarm) and
+   *  every user-authored custom tab want. */
+  labelKey?: MessageKey
 }
 
 export interface ModuleDef extends TabDef {
@@ -61,6 +69,21 @@ export const gateFromFlags = (flags: ExperimentFlags): ModuleGate => ({
   ),
 })
 
+/** The NAME to display for a tab, in the user's language. `labelKey` wins when
+ *  the key actually resolves; otherwise the built-in English `label` does. (`t`
+ *  echoes an unknown key back verbatim, so comparing against the key is how we
+ *  detect "not translated" — without it a missing string would render as a
+ *  dotted key in the tab row.) Both the tab row and the "+" picker call this, so
+ *  a tab is named in exactly one place. */
+export const tabLabel = (
+  def: { label: string; labelKey?: MessageKey },
+  t: (key: MessageKey) => string,
+): string => {
+  if (!def.labelKey) return def.label
+  const translated = t(def.labelKey)
+  return translated === def.labelKey ? def.label : translated
+}
+
 // Tab-row metadata for a custom module: label from the fetched def, fixed
 // Puzzle icon (custom tabs don't carry their own iconography — yet).
 export const customModuleTabDef = (m: { id: string; label: string }): TabDef => ({
@@ -82,11 +105,16 @@ export const MODULES: ModuleDef[] = [
   { id: 'board', label: 'Board', icon: <Columns3 size={10} strokeWidth={2.25} />, kind: 'native', default: true },
   { id: 'canvas', label: 'Canvas', icon: <Palette size={10} strokeWidth={2.25} />, kind: 'native', default: true },
   { id: 'terminal', label: 'Terminal', icon: <Terminal size={10} strokeWidth={2.25} />, kind: 'native', default: true },
-  // Owner-only experiment (hidden by default). `experiment: 'swarm'` keeps it
-  // out of every visible surface until the swarm gate is open (owner + the
-  // settings toggle). Listed last so, when shown, it sits after the always-on
-  // defaults in registry order.
+  // Owner-only experiments (hidden by default). `experiment: <id>` keeps each
+  // out of every visible surface until that gate is open (owner + the settings
+  // toggle). Listed last so, when shown, they sit after the always-on defaults
+  // in registry order.
   { id: 'swarm', label: 'Swarm', icon: <Network size={10} strokeWidth={2.25} />, kind: 'native', default: true, experiment: 'swarm' },
+  // Persona — where the owner reads and corrects the you-corpus the overseer
+  // runs on. Its name is owner-decided product copy rather than a fixed product
+  // noun, so it carries a `labelKey`: renaming the tab in both languages is a
+  // one-key edit in src/i18n/messages/persona.ts.
+  { id: 'persona', label: 'Persona', labelKey: 'persona.tabLabel', icon: <Fingerprint size={10} strokeWidth={2.25} />, kind: 'native', default: true, experiment: 'persona' },
 ]
 
 // Whether a module is visible GLOBALLY for this user. A plain default module is
@@ -113,7 +141,15 @@ export const enabledModules = (gate: ModuleGate = NO_EXPERIMENTS): ModuleDef[] =
 export const nativeDescriptors = (
   gate: ModuleGate = NO_EXPERIMENTS,
 ): ModuleDescriptor[] =>
-  enabledModules(gate).map((m) => ({ id: m.id, kind: m.kind, label: m.label }))
+  enabledModules(gate).map((m) => ({
+    id: m.id,
+    kind: m.kind,
+    label: m.label,
+    // Carried through so the "+" picker shows the SAME translated name as the
+    // tab row (otherwise a renamed/localised tab reads one way in the row and
+    // another in the picker).
+    ...(m.labelKey ? { labelKey: m.labelKey } : {}),
+  }))
 
 // Takes any string (not just ModuleId): callers validate persisted /
 // drag-saved ids whose static type is already `string` in the custom-tabs

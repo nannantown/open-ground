@@ -25,6 +25,7 @@ import type { ProjectSkill } from '../types'
 import { launchClaude } from './claudeTerminal'
 import { killTerminal, subscribeTerminal } from './terminal'
 import { listGlobalSkills } from './projectSkills'
+import { assertTestHomeIsolated } from './testHomeGuard'
 
 export const SKILL_NAME_MARKER = 'OPENGROUND_SKILL_NAME:'
 export const SKILL_END = '::OG_SKILL_END::'
@@ -144,7 +145,12 @@ export const createGlobalSkill = async (
   if (inFlight) throw new SkillCreationBusyError()
   inFlight = true
   try {
+    // FENCED (testHomeGuard.ts): every existing test passes opts.home, but the
+    // `?? homedir()` default is what production uses (server/routes/project.ts
+    // never passes it), and this path spawns a bypass-permission claude INTO
+    // that dir. One happy-path test without opts.home would write real skills.
     const home = opts.home ?? homedir()
+    assertTestHomeIsolated(home, 'generateSkill (opts.home ?? homedir())')
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const skillsDir = join(home, '.claude', 'skills')
     // The dir may not exist yet (first global skill) — claude's cwd must exist.

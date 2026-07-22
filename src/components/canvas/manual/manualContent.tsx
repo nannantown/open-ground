@@ -295,8 +295,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'To do · In progress · In review · Done · Blocked. All five columns are always shown. Drag cards between columns; dropping into Done marks a card done.',
-          ja: '未着手 · 実行中 · レビュー待ち · 完了 · ブロック。5つの列は常に表示されます。カードは列をまたいでドラッグでき、完了に落とすとそのカードは完了扱いになります。',
+          en: 'To do · In progress · In review · Done · Needs decision. All five columns are always shown. Drag cards between columns; dropping into Done marks a card done. Needs decision is a holding lane for cards waiting on your call — nothing moves out of it automatically.',
+          ja: '未着手 · 実行中 · レビュー待ち · 完了 · 判断待ち。5つの列は常に表示されます。カードは列をまたいでドラッグでき、完了に落とすとそのカードは完了扱いになります。判断待ちはあなたの決裁を待つ保留レーンで、自動では動きません。',
         },
       },
       { kind: 'subhead', text: { en: 'Run a task', ja: 'タスクを実行する' } },
@@ -623,12 +623,12 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'bullets',
         items: [
           {
-            en: 'Worker dispatch (drain): starts only when you press the engine’s start switch in the commander tab. It stops immediately on stop, and stays stopped across a restart — it never auto-resumes.',
-            ja: 'worker 起動（drain）：司令官タブのエンジン起動スイッチを押したときだけ始まります。停止を押せば即座に止まり、再起動後も停止したままです —— 自動では再開しません。',
+            en: 'Worker dispatch (drain): starts only when you press the engine’s start switch in the Manager tab. It stops immediately on stop, and stays stopped across a restart — it never auto-resumes.',
+            ja: 'worker 起動（drain）：マネージャータブのエンジン起動スイッチを押したときだけ始まります。停止を押せば即座に止まり、再起動後も停止したままです —— 自動では再開しません。',
           },
           {
-            en: 'Auto-integrate (pushing finished work to your trunk): a separate switch, off by default. Turning it on lets the engine plain-push (never `--force`) only its own `swarm/*` branches to your project’s origin remote, and only after they pass a verify gate (typecheck → lint → safety tests → full test suite) and unanimous adversarial review. The push itself never resolves a conflict — a conflicting push is aborted and nothing lands. Instead the branch is handed back to its own autonomous worker to rebase and retry, with no human involved; only repeated rebase failures park the card (blocked) for your review. This is the entire scope of what it does.',
-            ja: '自動統合（完了した作業を本流へ push）：既定オフの別スイッチです。オンにすると、エンジンは自分自身の `swarm/*` ブランチのみを、検証ゲート（型チェック → lint → safety テスト → フルテスト）と敵対レビュー全員一致の両方を通ったあとに限り、plain push（`--force` は一切なし）でプロジェクトの origin リモートへ送ります。push 自体は衝突を解決しません — 衝突した push は中断され、何も取り込まれません。代わりに、そのブランチは同じ自律 worker に差し戻され、人手を介さず rebase して再試行します。rebase が繰り返し失敗した場合のみ、カードは blocked に退避しあなたのレビューへ回されます。これがこの機能のすべてです。',
+            en: 'Integration (landing finished work on your trunk): the engine itself never pushes — it has no code path that moves your trunk, and regression tests pin that. The one thing it does on its own while running: when a worker finishes and its card reaches review, it wakes the manager — a `claude` session you can watch in the Swarm tab — if none is alive. Waking moves nothing by itself. Your trunk changes only when that manager session reviews the branch and lands it with a plain push (never `--force`); a conflicting push is aborted and nothing lands, and cards titled `[hold]` or touching high-risk paths are always held for your explicit approval.',
+            ja: '統合（完了した作業を本流へ取り込む）：エンジン自身は push しません —— エンジンには本流を動かすコード経路そのものが無く、回帰テストがそれを固定しています。稼働中にひとりでに行うのは1つだけ：worker が作業を終えカードが review 列に届いたとき、マネージャー（Swarm タブで見られる `claude` セッション）の卓が不在なら起こします。起こすこと自体では何も動きません。本流が変わるのは、そのマネージャーセッションがブランチをレビューし、plain push（`--force` は一切なし）で取り込んだときだけです。衝突した push は中断され、何も取り込まれません。タイトルが `[hold]` のカードや高リスクなパスに触れた変更は、常にあなたの明示承認待ちとして保留されます。',
           },
           {
             en: 'Destructive git (force-push, `branch -D`, history rewrite) and other irreversible actions (deleting a project, publishing a release) are never automated by Swarm, regardless of any toggle — those always require your direct action.',
@@ -640,8 +640,8 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'note',
         tone: 'info',
         text: {
-          en: 'Both the start switch and auto-integrate live in the Commander tab and reset to off every time the app restarts — you re-arm them each session, on purpose. Note the asymmetry: stopping the start switch (worker dispatch) also stops immediately, but stopping it does NOT disarm auto-integrate — that stays armed for the next start unless you switch it off yourself.',
-          ja: '起動スイッチと自動統合はどちらも司令官タブにあり、アプリを再起動するたびに意図してオフへ戻ります —— 毎セッション、あなたが再びオンにする設計です。ただし非対称な点に注意してください：起動スイッチ（worker 起動）を止めるとその場で即座に止まりますが、それを止めても自動統合は解除されません —— 自分でオフに切り替えない限り、次回の起動でもオンのままです。',
+          en: 'The engine’s start switch lives in the Manager tab and resets to off every time the app restarts — you re-arm it each session, on purpose. It is the single master switch, and stopping it is symmetric: worker dispatch and manager wake-ups stop together, and nothing stays armed behind your back. (The separate auto-integrate switch is gone — the engine no longer has an integration path to arm.)',
+          ja: 'エンジンの起動スイッチはマネージャータブにあり、アプリを再起動するたびに意図してオフへ戻ります —— 毎セッション、あなたが再びオンにする設計です。これが唯一のマスタースイッチで、停止は対称です：worker 起動もマネージャーの自動起こしも一緒に止まり、裏でオンのまま残るものはありません。（かつての「自動統合」の別スイッチは廃止されました —— エンジンには arm すべき統合経路そのものがもう在りません。）',
         },
       },
     ],

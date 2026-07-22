@@ -216,6 +216,8 @@ export const terminalRoutes = new Hono()
         addDir,
         permissionMode: prefs.permissionMode,
         sandbox,
+        // The owner's own conversation desk — watched for a model-limit stop.
+        ownerDesk: true,
       })
       return c.json(ref.info)
     } catch (e: any) {
@@ -264,6 +266,9 @@ export const terminalRoutes = new Hono()
         // open through the OAuth round-trip) and appContext:false (no board/
         // canvas usage card — this is a bare claude the user authenticates).
         appContext: false,
+        // NOT an ownerDesk: this claude exists to complete a sign-in, and runs no
+        // model whose quota could be spent. Watching it could only ever produce a
+        // "your conversation stopped" toast about a login prompt.
       })
       return c.json(ref.info)
     } catch (e: any) {
@@ -311,6 +316,8 @@ export const terminalRoutes = new Hono()
         cols,
         rows,
         appContext: false,
+        // The owner's own conversation desk — watched for a model-limit stop.
+        ownerDesk: true,
       })
       return c.json(ref.info)
     } catch (e: any) {

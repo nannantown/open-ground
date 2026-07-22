@@ -8,14 +8,19 @@
  *
  *   npx tsx scripts/sandbox-probe.ts
  *
- * SAFE BY CONSTRUCTION: every probe runs against a THROWAWAY home + cwd under
- * tmp (built into the profile + passed as $HOME to the sandboxed command), so the
- * real ~/.ssh / ~/.claude / ~/.openground are never read or written, even if a
- * containment rule were wrong. Exits 0 iff every probe matched its expectation.
+ * SAFE BY CONSTRUCTION — with ONE stated exception: every probe but one runs
+ * against a THROWAWAY home + cwd under tmp (built into the profile + passed as
+ * $HOME to the sandboxed command), so the real ~/.ssh / ~/.claude / ~/.openground
+ * are never read or written even if a containment rule were wrong. The exception
+ * is the KEYCHAIN credential-read row, which MUST use the real home to be
+ * meaningful (the deny it guards is anchored at `<home>/Library/Keychains`);
+ * there, safety rests on the command being read-only by CHOICE — `security
+ * find-generic-password` WITHOUT `-w`, i.e. attributes only, no secret, no write.
+ * Keep it that way if you add real-home rows. Exits 0 iff every probe matched.
  */
 import { execFileSync, execFile } from 'child_process'
 import { promisify } from 'util'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, realpathSync, symlinkSync } from 'fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, realpathSync, symlinkSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { buildSandboxProfile } from '../src/lib/server/sandbox'
@@ -70,8 +75,45 @@ writeFileSync(join(mainNm, '.vite', 'deps', 'dep.js'), 'export default 1') // de
 symlinkSync(mainNm, join(cwd, 'node_modules'))
 const profilePath = join(root, 'profile.sb')
 const brainProfilePath = join(root, 'brain-profile.sb')
+// A profile built for the REAL home — used by exactly ONE probe, the login-keychain
+// read that guards the "sandboxed claude starts Not-logged-in" regression. It has to
+// be the real home: the deny that caused that bug is anchored at `<home>/Library/
+// Keychains`, so a fake-home profile could never reproduce or catch it. The only
+// command run under it is a read-only `security find-generic-password` WITHOUT `-w`
+// (attributes only — no secret is read, nothing is written).
+const realHomeProfilePath = join(root, 'realhome-profile.sb')
+// That probe must ALSO run with the real $HOME in env, not the fake one every other
+// probe gets: `security` resolves the login keychain under $HOME, so with the fake
+// home it reports "could not be found" and the row would silently SKIP forever —
+// a regression guard that can never fire (observed while writing it).
+const REAL_HOME = realpathSync(homedir())
+// Precondition for that row, resolved UNSANDBOXED: is claude actually logged in on
+// this machine? It must NOT be inferred from the sandboxed run — a kernel read-deny
+// makes the item *invisible*, so `security` reports the same "could not be found" as
+// a machine that never logged in, and a skip-on-message rule would swallow the exact
+// regression the row exists to catch (observed: with the deny re-added the row
+// SKIPPED instead of failing). Absent here = genuinely absent, the row may skip;
+// present here = the row is REQUIRED to pass.
+const claudeLoggedIn = (() => {
+  try {
+    execFileSync('/usr/bin/security', ['find-generic-password', '-s', 'Claude Code-credentials'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+})()
+// A THROWAWAY keychain inside the FAKE home, for the write half of the same rule
+// (claude persists its refreshed OAuth token back into the keychain). It is named
+// `login.keychain` on purpose: the profile scopes the write-allow to that file
+// FAMILY rather than the whole dir, so the probe has to sit in the family to test
+// the real rule. It is still entirely a throwaway under the fake home — the user's
+// actual login keychain is never opened or written by this script.
+const probeKeychain = join(HOME, 'Library', 'Keychains', 'login.keychain')
 
 const cleanup = () => {
+  try {
+    execFileSync('/usr/bin/security', ['delete-keychain', probeKeychain], { stdio: 'ignore' })
+  } catch {} // never created, or already gone
   try {
     rmSync(root, { recursive: true, force: true })
   } catch {}
@@ -87,6 +129,73 @@ const main = async (): Promise<never> => {
   // the loopback allowlist proxy remains reachable (docs/SANDBOX_EXPERIMENT.md
   // egress-proxy follow-up; wired in swarmOverseerBrain.makeOverseerBrain).
   writeFileSync(brainProfilePath, buildSandboxProfile({ cwd, home: HOME, network: 'loopback' }))
+  // See realHomeProfilePath above — real home, one read-only keychain probe.
+  writeFileSync(realHomeProfilePath, buildSandboxProfile({ cwd, home: REAL_HOME }))
+  // Create the throwaway keychain UNsandboxed (its dir must exist first), so the
+  // in-sandbox probe tests the WRITE rule rather than ENOENT on a missing parent.
+  mkdirSync(join(HOME, 'Library', 'Keychains'), { recursive: true })
+  try {
+    execFileSync('/usr/bin/security', ['create-keychain', '-p', 'probe', probeKeychain], { stdio: 'ignore' })
+  } catch {} // if this fails the probe below reports deny and the row fails loudly
+  // A stand-in for the per-UUID data-protection keychain + its keybag, which share
+  // ~/Library/Keychains with the login keychain and must stay READ-denied: the
+  // carve-in is deny-the-dir + re-allow-the-login-family, and this is what proves
+  // the deny half still bites. (Named like the real thing; entirely in the fake home.)
+  const dpDir = join(HOME, 'Library', 'Keychains', 'AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB')
+  mkdirSync(dpDir, { recursive: true })
+  writeFileSync(join(dpDir, 'keychain-2.db'), 'SENTINEL-DP-KEYCHAIN')
+  writeFileSync(join(dpDir, 'user.kb'), 'SENTINEL-KEYBAG')
+  // The DP metadata store, at depth 1 — BOTH spellings. The legacy
+  // `metadata.keychain` is not hypothetical (present on the dev machine, 0600,
+  // 2016) and was measurably read-ALLOWED while only the `-db` twin was denied:
+  // the depth regex starts at depth 2, so each needs its own literal, and a
+  // one-spelling fix looks correct until you look at the directory.
+  writeFileSync(join(HOME, 'Library', 'Keychains', 'metadata.keychain'), 'SENTINEL-DP-META-LEGACY')
+  writeFileSync(join(HOME, 'Library', 'Keychains', 'metadata.keychain-db'), 'SENTINEL-DP-META')
+  // Certificate TRUST SETTINGS — read-allowed (not a secret) but WRITE-denied,
+  // since a planted root is policy an UN-sandboxed process honours. It lives
+  // beside the keychains and is NOT matched by the login-family write regex.
+  // Absent on the dev machine, so only a fake-home stand-in can fire this row —
+  // which is exactly how the legacy-metadata gap stayed invisible.
+  writeFileSync(join(HOME, 'Library', 'Keychains', 'TrustSettings.plist'), 'SENTINEL-TRUST')
+  // BROWSER credential stores. The keychain carve-in hands a contained worker
+  // `Chrome Safe Storage` (the vault's master key); these are the vault itself.
+  // Every real profile-directory SHAPE is represented, because the depth differs
+  // per browser and per user-created profile — a deny that only covered
+  // `Chrome/Default` would leave the rest open and still look green.
+  const browserSecrets = [
+    ['Google/Chrome/Default', 'Login Data'],
+    ['Google/Chrome/Profile 1', 'Login Data'], // user-created profile (deeper name w/ space)
+    ['Google/Chrome/Default', 'Cookies'],
+    ['Google/Chrome/Default', 'Web Data'], // autofill, incl. stored cards
+    ['Microsoft Edge/Default', 'Login Data'], // shallower vendor dir
+    ['BraveSoftware/Brave-Browser/Default', 'Login Data'],
+    ['Firefox/Profiles/probe.default', 'key4.db'], // Firefox master key
+    ['Firefox/Profiles/probe.default', 'cookies.sqlite'],
+  ] as const
+  for (const [dir, file] of browserSecrets) {
+    mkdirSync(join(HOME, 'Library', 'Application Support', dir), { recursive: true })
+    writeFileSync(join(HOME, 'Library', 'Application Support', dir, file), 'SENTINEL-BROWSER-SECRET')
+  }
+  // NEGATIVE CONTROLS for the same rules: non-credential files in the very same
+  // dirs must stay READABLE. The deny is the credential DBs, not the browser
+  // dirs — claude is legitimately asked to work on a Chrome extension's source.
+  writeFileSync(join(HOME, 'Library', 'Application Support', 'Google/Chrome', 'Local State'), 'not-a-secret')
+  mkdirSync(join(HOME, 'Library', 'Application Support', 'my-extension'), { recursive: true })
+  writeFileSync(join(HOME, 'Library', 'Application Support', 'my-extension', 'index.js'), 'extension-source')
+  // Safari / NSHTTPCookieStorage — the Safari-side twin of the Chromium jars.
+  mkdirSync(join(HOME, 'Library', 'Cookies'), { recursive: true })
+  writeFileSync(join(HOME, 'Library', 'Cookies', 'Cookies.binarycookies'), 'SENTINEL-SAFARI-COOKIES')
+  // A NON-login keychain the realpath-escape probe aims at: the `login.keychain*`
+  // write regex ends in `.*`, so a `login.keychain…`-PREFIXED DIR can be created
+  // and written under. The claim under test is that this cannot be used as a
+  // springboard OUT of the family — the kernel matches the RESOLVED path.
+  writeFileSync(join(HOME, 'Library', 'Keychains', 'escape-target.keychain'), 'SENTINEL-NONLOGIN')
+  // …and the springboard dir itself, created UNSANDBOXED. An in-sandbox
+  // `mkdir && write` would exit non-zero whether the KERNEL denied the write (the
+  // thing under test) or the mkdir merely failed — a false green of exactly the
+  // kind this file already pre-creates gitdirs to avoid.
+  mkdirSync(join(HOME, 'Library', 'Keychains', 'login.keychainDIR'), { recursive: true })
   // The REAL allowlist CONNECT proxy (running UNsandboxed, as it does in the app)
   // — the brain probes tunnel through it exactly like the brain's claude would.
   const egress = await createEgressProxy({ allowHosts: BRAIN_EGRESS_ALLOW_HOSTS })
@@ -126,6 +235,10 @@ const main = async (): Promise<never> => {
     expect: Expect
     cmd: string[]
     optional?: boolean
+    /** Skip (rather than fail) when the failure output matches — for rows whose
+     *  precondition is machine state, e.g. the keychain probe on a machine where
+     *  claude was never logged in. Widens `optional`'s default tool-absent test. */
+    skipIf?: RegExp
     /** Which profile to run under (default: the worker/interactive one). */
     profile?: string
     /** Extra env for the sandboxed command (the brain probes carry HTTPS_PROXY). */
@@ -148,10 +261,12 @@ const main = async (): Promise<never> => {
       })
       return { code: 0, out: String(stdout) }
     } catch (e) {
-      const err = e as { code?: number | string; stdout?: unknown }
+      const err = e as { code?: number | string; stdout?: unknown; stderr?: unknown }
       return {
         code: typeof err.code === 'number' ? err.code : 1,
-        out: String(err.stdout ?? ''),
+        // stderr too: the tools that report a missing precondition (`security`,
+        // `command -v`) say so there, and the skip tests below match on `out`.
+        out: String(err.stdout ?? '') + String(err.stderr ?? ''),
       }
     }
   }
@@ -175,6 +290,177 @@ const main = async (): Promise<never> => {
     { name: 'READ ~/.cargo/registry/* (build data — NOT over-denied)', expect: 'allow', cmd: ['sh', '-c', 'cat $HOME/.cargo/registry/marker > /dev/null'] },
     { name: 'READ ~/.gradle/caches/* + ~/.m2/repository/* (build data)', expect: 'allow', cmd: ['sh', '-c', 'cat $HOME/.gradle/caches/marker $HOME/.m2/repository/marker > /dev/null'] },
     { name: 'READ normal file (/etc/hosts)', expect: 'allow', cmd: ['sh', '-c', 'cat /etc/hosts > /dev/null'] },
+    // KEYCHAIN — the one credential store that must stay OPEN. Denying it does not
+    // trim an exfil surface, it breaks auth outright: claude's subscription
+    // credential lives in the login keychain and Security.framework does that db's
+    // file I/O from the CLIENT process. sandbox.test.ts pins the profile TEXT; only
+    // these two rows prove the real kernel behaviour behind it.
+    //   • read  — the exact reported bug (a sandboxed `claude -p` answered
+    //     `Not logged in · Please run /login`). Needs the REAL-home profile, since
+    //     the deny that caused it is anchored at `<home>/Library/Keychains`.
+    //     Attributes only (no `-w`): no secret is read. Skips when this machine
+    //     never logged claude in.
+    //   • write — claude persists its REFRESHED OAuth token back to the item, so a
+    //     read-only carve-in would start fine and then EPERM hours later. Runs
+    //     against the THROWAWAY keychain in the fake home, never the login one.
+    {
+      name: "KEYCHAIN: read claude's credential (Not-logged-in regression)",
+      expect: 'allow',
+      // Skippable ONLY when claude was never logged in here (checked unsandboxed).
+      // When it IS logged in this row is mandatory, so a re-added deny FAILS loudly.
+      optional: !claudeLoggedIn,
+      skipIf: /could not be found in the keychain/i,
+      profile: realHomeProfilePath,
+      env: { HOME: REAL_HOME }, // see REAL_HOME — the fake home makes this row un-fireable
+      cmd: ['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials'],
+    },
+    {
+      name: 'KEYCHAIN: add item (OAuth token-refresh write path)',
+      expect: 'allow',
+      cmd: ['/usr/bin/security', 'add-generic-password', '-s', 'og-probe', '-a', 'p', '-w', 'x', probeKeychain],
+    },
+    // …and the write-allow is the login-keychain FAMILY, not the whole dir: the
+    // per-UUID data-protection keychains that share it (Safari / iCloud / app
+    // secrets) must stay write-denied. Without this row the rule could silently
+    // widen back to `(subpath …/Library/Keychains)` and nothing would notice.
+    {
+      name: 'KEYCHAIN: write a NON-login keychain path (dir is NOT wide open)',
+      expect: 'deny',
+      cmd: ['sh', '-c', w(join(HOME, 'Library', 'Keychains', 'other.keychain'))],
+    },
+    // …and the READ side of the same shape. The first cut of the launch fix dropped
+    // the dir-wide read-deny outright, which handed the co-resident
+    // data-protection keychain + keybag (Safari / iCloud / app secrets) to a
+    // contained worker. These two rows are why that cannot come back silently.
+    {
+      name: 'KEYCHAIN: read a per-UUID data-protection keychain (co-resident secrets)',
+      expect: 'deny',
+      cmd: ['sh', '-c', `cat $HOME/Library/Keychains/AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB/keychain-2.db`],
+    },
+    {
+      name: 'KEYCHAIN: read its keybag (user.kb)',
+      expect: 'deny',
+      cmd: ['sh', '-c', `cat $HOME/Library/Keychains/AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB/user.kb`],
+    },
+    // …and the DP metadata store at depth 1, in BOTH spellings. The depth regex
+    // above starts at depth 2, so these need their own literals — and the legacy
+    // spelling was measurably read-ALLOWED on the dev machine while only the `-db`
+    // twin was denied. One row per spelling so a re-narrowed fix names itself.
+    {
+      name: 'KEYCHAIN: read metadata.keychain-db (DP metadata, depth 1)',
+      expect: 'deny',
+      cmd: ['sh', '-c', 'cat $HOME/Library/Keychains/metadata.keychain-db'],
+    },
+    {
+      name: 'KEYCHAIN: read metadata.keychain (LEGACY spelling — the missed twin)',
+      expect: 'deny',
+      cmd: ['sh', '-c', 'cat $HOME/Library/Keychains/metadata.keychain'],
+    },
+    // The `login.keychain*` write regex ends in `.*`, so a `login.keychain…`-PREFIXED
+    // DIRECTORY can be created and written under (documented as accepted). What must
+    // NOT follow is using it as a springboard OUT of the family: the kernel matches
+    // the RESOLVED path, so `..` out of that dir lands on a non-family sibling and is
+    // denied. Without this row the acceptance rests on an argument; with it, on a
+    // measurement.
+    {
+      name: 'KEYCHAIN: escape the login family via a login.keychain*-prefixed dir (realpath)',
+      expect: 'deny',
+      cmd: ['sh', '-c', w('$HOME/Library/Keychains/login.keychainDIR/../escape-target.keychain')],
+    },
+    // …while writing INSIDE that dir IS allowed — the accepted half of the same
+    // trade. Pinning it keeps the row above honest: if a future tightening made the
+    // whole prefix unwritable, the escape row would still pass for the wrong reason.
+    {
+      name: 'KEYCHAIN: write INSIDE a login.keychain*-prefixed dir (accepted inert scratch)',
+      expect: 'allow',
+      cmd: ['sh', '-c', w('$HOME/Library/Keychains/login.keychainDIR/scratch')],
+    },
+    // TRUST SETTINGS — read-allowed (not a secret), WRITE-denied. A planted root
+    // certificate is policy an UN-sandboxed process honours, which makes this the
+    // sharper worry than the keychain items themselves; the login-family write
+    // regex deliberately does not reach it. Absent on the dev machine, so it can
+    // only be proven against the fake-home stand-in — the same blind spot that let
+    // the legacy-metadata gap through.
+    {
+      name: 'TRUST: write ~/Library/Keychains/TrustSettings.plist (planted root CA)',
+      expect: 'deny',
+      cmd: ['sh', '-c', w('$HOME/Library/Keychains/TrustSettings.plist')],
+    },
+    {
+      name: 'TRUST: read TrustSettings.plist (not a secret — must NOT be over-denied)',
+      expect: 'allow',
+      cmd: ['sh', '-c', 'cat $HOME/Library/Keychains/TrustSettings.plist > /dev/null'],
+    },
+    // BROWSER credential stores — the other half of the keychain carve-in's blast
+    // radius. The login keychain holds `Chrome Safe Storage` (the vault's master
+    // key) and is now reachable by design; if the vault FILES are reachable too, a
+    // contained worker with open egress lifts every saved password. One row per
+    // profile-directory SHAPE, since the depth differs per browser and per
+    // user-created profile.
+    {
+      name: 'BROWSER: read Chrome Default/Login Data (saved passwords)',
+      expect: 'deny',
+      cmd: ['sh', '-c', 'cat "$HOME/Library/Application Support/Google/Chrome/Default/Login Data"'],
+    },
+    {
+      name: 'BROWSER: read Chrome "Profile 1"/Login Data (user-created profile)',
+      expect: 'deny',
+      cmd: ['sh', '-c', 'cat "$HOME/Library/Application Support/Google/Chrome/Profile 1/Login Data"'],
+    },
+    {
+      name: 'BROWSER: read Chrome Cookies + Web Data (session tokens / stored cards)',
+      expect: 'deny',
+      cmd: [
+        'sh',
+        '-c',
+        'cat "$HOME/Library/Application Support/Google/Chrome/Default/Cookies" "$HOME/Library/Application Support/Google/Chrome/Default/Web Data"',
+      ],
+    },
+    {
+      name: 'BROWSER: read Edge + Brave Login Data (other Chromium vendors)',
+      expect: 'deny',
+      cmd: [
+        'sh',
+        '-c',
+        'cat "$HOME/Library/Application Support/Microsoft Edge/Default/Login Data" "$HOME/Library/Application Support/BraveSoftware/Brave-Browser/Default/Login Data"',
+      ],
+    },
+    {
+      name: 'BROWSER: read Firefox key4.db + cookies.sqlite (master key / cookie jar)',
+      expect: 'deny',
+      cmd: [
+        'sh',
+        '-c',
+        'cat "$HOME/Library/Application Support/Firefox/Profiles/probe.default/key4.db" "$HOME/Library/Application Support/Firefox/Profiles/probe.default/cookies.sqlite"',
+      ],
+    },
+    {
+      name: 'BROWSER: read Safari cookie jar (~/Library/Cookies)',
+      expect: 'deny',
+      cmd: ['sh', '-c', 'cat $HOME/Library/Cookies/Cookies.binarycookies'],
+    },
+    // …and the NEGATIVE controls, which are what keep the rules narrow. Without
+    // these the deny could quietly widen to a subpath of the browser dirs and every
+    // row above would still be green — while claude lost the ability to work on a
+    // Chrome extension whose source legitimately lives there.
+    {
+      name: 'BROWSER: read Chrome Local State (non-credential — must stay readable)',
+      expect: 'allow',
+      cmd: ['sh', '-c', 'cat "$HOME/Library/Application Support/Google/Chrome/Local State" > /dev/null'],
+    },
+    {
+      name: 'BROWSER: read an extension source under Application Support (NOT over-denied)',
+      expect: 'allow',
+      cmd: ['sh', '-c', 'cat "$HOME/Library/Application Support/my-extension/index.js" > /dev/null'],
+    },
+    {
+      name: 'KEYCHAIN: read the login keychain itself (depth-1, must stay readable)',
+      expect: 'allow',
+      // `security create-keychain foo.keychain` actually writes `foo.keychain-db`
+      // on current macOS, so resolve what landed — pointing at the wrong name makes
+      // this row fail with ENOENT, which the runner cannot tell from a kernel deny.
+      cmd: ['sh', '-c', `cat ${existsSync(probeKeychain) ? probeKeychain : `${probeKeychain}-db`} > /dev/null`],
+    },
     { name: 'SPAWN node + write cwd (build proxy)', expect: 'allow', cmd: ['node', '-e', `require('fs').writeFileSync(${JSON.stringify(join(cwd, 'built.js'))},'1')`] },
     // node_modules symlink (worker worktree → main checkout): reads ALLOWED (build
     // needs deps), writes DENIED — incl. the vite dev-server slices + .bin shims
@@ -282,8 +568,8 @@ const main = async (): Promise<never> => {
   const rows: string[] = []
   for (const p of probes) {
     const { code, out } = await sandboxed(p.cmd, p.profile ?? profilePath, p.env)
-    if (p.optional && code !== 0 && /not found|command not/.test(out)) {
-      rows.push(`  —  SKIP  ${p.name} (tool absent)`)
+    if (p.optional && code !== 0 && (p.skipIf ?? /not found|command not/).test(out)) {
+      rows.push(`  —  SKIP  ${p.name} (precondition absent on this machine)`)
       skipped++
       continue
     }

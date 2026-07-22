@@ -5,14 +5,16 @@ import { join } from 'path'
 import { realpath } from 'fs/promises'
 import {
   createSwarmFatalNotification,
+  createSwarmInfoNotification,
   listSwarmNotifications,
   appendSwarmNotification,
+  capNotificationsByKind,
   formatFatalNotification,
   buildFatalAppNotification,
   SWARM_NOTIFICATIONS_CAP,
 } from './swarmNotifications'
 import { swarmNotificationsFile } from './paths'
-import type { SwarmFatalNotification } from '../types'
+import type { AppNotification, SwarmFatalNotification } from '../types'
 
 // The in-app half of the escalation safety valve, exercised against an ISOLATED
 // HOME (a tmpdir) so it never touches the real ~/.openground. OS toasts are
@@ -20,6 +22,10 @@ import type { SwarmFatalNotification } from '../types'
 // — the OS payload is asserted separately through the pure formatter.
 
 let home: string
+// The suite-wide pin (src/test/setup-home.ts), restored in afterEach. NEVER
+// `delete` it: an unset OPENGROUND_HOME makes every later openGroundHome()
+// resolve to the REAL ~/.openground (the 2026-07-18 data loss).
+const prevHome = process.env.OPENGROUND_HOME
 
 beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-swarmnotif-')))
@@ -28,7 +34,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(home, { recursive: true, force: true })
-  delete process.env.OPENGROUND_HOME
+  // NOT unset — see paths.ts openGroundHome(): empty means the real
+  // ~/.openground, and worker processes are reused across test files. Restore
+  // the suite-wide pin rather than leaving the (about to be removed) temp dir
+  // in place, so the next file inherits a home that still exists.
+  if (prevHome !== undefined) process.env.OPENGROUND_HOME = prevHome
 })
 
 const fatal = (over: Partial<SwarmFatalNotification> = {}): SwarmFatalNotification => ({
@@ -78,6 +88,45 @@ describe('swarmNotifications — store round-trip (HOME-isolated)', () => {
     // The newest survived; the oldest scrolled off.
     expect(list[0].createdAt).toBe(SWARM_NOTIFICATIONS_CAP + 10)
     expect(list.some((n) => n.createdAt === 1)).toBe(false)
+  })
+
+  it('info traffic never evicts a fatal record (the cap is PER KIND)', async () => {
+    // The failure this guards (adversarial review, 2026-07-19): fatal and info
+    // shared one 50-slot list capped by recency, and the daily fuel report posts
+    // an info record EVERY day by design — including quiet days. So a single
+    // rework-exhausted / canary-failed record, the unmanned swarm's safety valve,
+    // was pushed off the bell after ~50 quiet days purely by routine traffic.
+    await createSwarmFatalNotification(fatal({ taskId: 'the-alarm' }), { os: false, now: 1 })
+    for (let i = 0; i < SWARM_NOTIFICATIONS_CAP * 2; i++) {
+      await createSwarmInfoNotification(
+        { event: 'daily-fuel-report', detail: `day ${i}` },
+        { os: false, now: 100 + i },
+      )
+    }
+    const list = await listSwarmNotifications()
+    // The alarm is the OLDEST record here and every info entry is newer — under a
+    // shared recency cap it would be the first thing gone.
+    expect(list.find((n) => n.swarmFatal?.taskId === 'the-alarm')).toBeDefined()
+    // …and info is still bounded on its own side (no unbounded growth).
+    expect(list.filter((n) => n.kind === 'swarm-info')).toHaveLength(SWARM_NOTIFICATIONS_CAP)
+  })
+
+  it('capNotificationsByKind: newest N of each kind, newest-first overall', () => {
+    const mk = (kind: 'swarm-fatal' | 'swarm-info', createdAt: number): AppNotification => ({
+      id: `${kind}:${createdAt}`,
+      kind,
+      createdAt,
+    })
+    const items = [
+      ...Array.from({ length: SWARM_NOTIFICATIONS_CAP + 5 }, (_, i) => mk('swarm-info', 1000 + i)),
+      ...Array.from({ length: 3 }, (_, i) => mk('swarm-fatal', i + 1)),
+    ]
+    const capped = capNotificationsByKind(items)
+    expect(capped.filter((n) => n.kind === 'swarm-info')).toHaveLength(SWARM_NOTIFICATIONS_CAP)
+    expect(capped.filter((n) => n.kind === 'swarm-fatal')).toHaveLength(3) // under cap → untouched
+    // Overall ordering stays newest-first (what the bell renders).
+    const stamps = capped.map((n) => n.createdAt ?? 0)
+    expect([...stamps].sort((a, b) => b - a)).toEqual(stamps)
   })
 
   it('survives a hand-corrupted file (non-array items) without crashing', async () => {

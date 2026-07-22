@@ -30,11 +30,20 @@
 // the permission-wait arm's business; "menu 誤検出ゼロ" is a Done condition).
 
 import { detectMenu } from '@/lib/claudeMenu'
+import {
+  IDLE_FOOTER_RE,
+  PLACEHOLDER_RE,
+  PROMPT_ROW_RE,
+  RULE_ROW_RE,
+  WORKING_FOOTER_RE,
+  isChromeRow,
+  lastPromptRow,
+  readInputBoxText,
+} from '@/lib/claudeScreen'
 import type { OwnerAnswer, OwnerQuestion } from './swarmOverseerBrain'
 import { answerAsOwner, runOverseerBrain } from './swarmOverseerBrain'
 import type { OpenEscalationInput } from './swarmEscalations'
 import {
-  CLAUDE_WORKING_FOOTER_RE,
   MAX_ESCALATION_CONTEXT,
   MAX_ESCALATION_QUESTION,
   buildAnswerInjection,
@@ -44,63 +53,23 @@ import {
 } from './swarmEscalations'
 import type { Escalation, EscalationWhy } from '../types'
 
-// ─── Screen anatomy (shared with the injection-landing check) ─────────────────
+// ─── Screen anatomy ──────────────────────────────────────────────────────────
+// Lives in @/lib/claudeScreen — one model of a rendered frame, shared with the
+// injection-landing check (swarmEscalations) and the owner-desk quota sensor
+// (swarmRateLimitText). It used to live here, and the copy that grew in the
+// third consumer modelled the input box wrongly; see that module's header.
+//
+// The SYMBOLS below are re-exported so this module's importers keep working. The
+// row CLASSIFICATION behind them is NOT byte-identical to the copy that lived
+// here, and saying only "re-exported" invited the reader to assume it was (round 3
+// nit). The merge WIDENED it, deliberately: the shared list also recognises the
+// `⏵⏵ accept edits on` / `Context left until auto-compact: N%` footers, and its
+// usage-meter pattern matches every `You've used N% of …` wording rather than the
+// single spelling this module carried. Every added shape is CHROME, so the one
+// direction it can move question detection is fewer furniture rows mistaken for an
+// utterance — an improvement, but an undeclared one until now.
 
-/** Idle-footer marker: claude's input box is empty and waiting for the human. */
-export const IDLE_FOOTER_RE = /\?\s+for shortcuts/i
-/** Working-footer marker: claude is mid-generation. Canonical definition lives
- *  with the landing check in swarmEscalations (W16 owns delivery). */
-const WORKING_FOOTER_RE = CLAUDE_WORKING_FOOTER_RE
-/** The input-box prompt glyph. Deliberately ONLY the exact `❯` claude renders —
- *  a looser `>` would match quoted shell output; an unrecognised future glyph
- *  makes detection return null (fail-closed), never misfire. */
-const PROMPT_ROW_RE = /^\s*❯(.*)$/
-/** A horizontal rule row (the input box's top/bottom separators). */
-const RULE_ROW_RE = /^\s*[─━]{6,}\s*$/
-/** The empty input box's occasional suggestion placeholder (`❯ Try "…"`). */
-const PLACEHOLDER_RE = /^try ["'"«]/i
-
-/** Rows that are TUI chrome, not conversation: blank, rules, footers, usage
- *  meter, MCP warnings, spinner/turn-complete lines ("✻ Brewed for 7s"), tips
- *  and tool-result gutters ("⎿ …"). Skipped when walking up from the input box
- *  looking for the assistant's last real utterance. */
-const CHROME_ROW_RES: readonly RegExp[] = [
-  /^\s*$/,
-  RULE_ROW_RE,
-  /you've used \d+% of/i,
-  /^\s*⚠/,
-  /^\s*⎿/,
-  /^\s*[✻✳✶✽✢·∗*]\s/,
-  IDLE_FOOTER_RE,
-  WORKING_FOOTER_RE,
-  /for agents\s*$/i,
-]
-
-const isChromeRow = (row: string): boolean => CHROME_ROW_RES.some((re) => re.test(row))
-
-/** Index of the LAST input-box prompt row (`❯ …`), or -1. The conversation log
- *  above may contain earlier `❯` rows (submitted user turns) — the input box is
- *  always the last one. */
-const lastPromptRow = (rows: readonly string[]): number => {
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (PROMPT_ROW_RE.test(rows[i])) return i
-  }
-  return -1
-}
-
-/** The input box's visible text: the last `❯` row's remainder plus its wrapped
- *  continuation rows (until the closing rule / end of frame), joined. */
-export const readInputBoxText = (screen: string): string | null => {
-  const rows = screen.split('\n')
-  const p = lastPromptRow(rows)
-  if (p < 0) return null
-  const parts: string[] = [rows[p].replace(PROMPT_ROW_RE, '$1')]
-  for (let i = p + 1; i < rows.length; i++) {
-    if (RULE_ROW_RE.test(rows[i]) || IDLE_FOOTER_RE.test(rows[i])) break
-    parts.push(rows[i])
-  }
-  return parts.join('\n').trim()
-}
+export { IDLE_FOOTER_RE, readInputBoxText } from '@/lib/claudeScreen'
 
 // ─── Free-text-question detection (the classifyOutput 'question' arm) ─────────
 

@@ -97,6 +97,8 @@ const json = (body: unknown): RequestInit => ({
 
 let home: string
 let proj: string
+let fakeHome: string
+let savedRealHome: string | undefined
 
 const register = async (dir: string): Promise<void> => {
   await mkdir(dir, { recursive: true })
@@ -123,6 +125,17 @@ beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-twin-home-')))
   proj = await realpath(await mkdtemp(join(tmpdir(), 'og-twin-proj-')))
   process.env.OPENGROUND_HOME = home
+  // Pin $HOME too, not just OPENGROUND_HOME. The dispatch route reaches the
+  // worker spawn path, and that path calls ensureGuardWiring → hooksInstall,
+  // whose install dirs are anchored at homedir() ON PURPOSE (hooksInstall.ts:190)
+  // — OPENGROUND_HOME cannot move them. Measured 2026-07-19 under
+  // `vitest run --no-isolate`, where the spawn hook below no longer intercepts
+  // (shared module registry): the route reached the REAL ~/.claude and the
+  // production-home fence refused it 10 times (500s). Under isolate:true the
+  // hook holds and it never gets there — i.e. this was a silent latent hole.
+  savedRealHome = process.env.HOME
+  fakeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-twin-userhome-')))
+  process.env.HOME = fakeHome
   __resetMigrationCacheForTests()
   await writeSession({
     user: { id: 'test-user', email: OWNER, provider: 'google' },
@@ -142,7 +155,11 @@ beforeEach(async () => {
 afterEach(async () => {
   __resetOrchestratorForTests()
   await clearSession()
+  // Restore, never delete: an unset HOME sends os.homedir() back to the passwd
+  // entry — i.e. the real home this block exists to keep out of reach.
+  if (savedRealHome !== undefined) process.env.HOME = savedRealHome
   await rm(home, { recursive: true, force: true })
+  await rm(fakeHome, { recursive: true, force: true })
   await rm(proj, { recursive: true, force: true })
 })
 

@@ -102,6 +102,33 @@ describe('SwarmEscalationsPane', () => {
     await waitFor(() => getByText(/deliveryQueued/))
   })
 
+  it('plainQuestion is the DEFAULT rendering — the technical original folds behind 技術的な詳細; a legacy record (no plainQuestion) falls back to question + context', async () => {
+    const plain =
+      '古いデータの置き場所を削除してよいか聞いています。A: 削除する（戻せません） B: 残す（容量を使い続けます）'
+    listPayload = [
+      escalation({ plainQuestion: plain }),
+      escalation({
+        id: 'esc-legacy',
+        receiptKey: 'rk-legacy',
+        taskId: 'card-legacy',
+        question: 'レガシーの技術質問？',
+        context: 'レガシーの文脈。',
+      }),
+    ]
+    const { getByText, getAllByText } = render(<SwarmEscalationsPane projectPath="/proj" />)
+    await waitFor(() => getByText(plain))
+
+    // The technical original is still present, one <details> fold per plain record.
+    getByText('本番キーを埋めますか？')
+    getByText('公開リポに乗るため不可逆。')
+    expect(getAllByText('projectPanel.swarm.esc.techDetails')).toHaveLength(1)
+
+    // The legacy record keeps the pre-field layout: question primary, context
+    // visible — never hidden behind a fold it can't fill.
+    getByText('レガシーの技術質問？')
+    getByText('レガシーの文脈。')
+  })
+
   it('“use draft” copies the proxy draft into the textarea; dismiss posts the id', async () => {
     listPayload = [escalation()]
     const { getByText, getByPlaceholderText } = render(<SwarmEscalationsPane projectPath="/proj" />)

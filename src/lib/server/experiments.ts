@@ -21,7 +21,8 @@
 // DIRECTLY, with no login and no experiments toggle — it is the same unlock
 // the /api/swarm routes honour, mirrored here so the Swarm tab actually
 // appears. It never touches `eligible` (the experiments toggle UI stays
-// owner-only) nor any other experiment (`sandbox` keeps requiring the owner).
+// owner-only) nor any other experiment (`sandbox` / `persona` keep requiring
+// the owner).
 
 import { getCustomTabRole } from './roles'
 import { isSwarmLocalOwnerUnlocked } from './swarmGate'
@@ -51,6 +52,10 @@ export const computeExperiments = (
         (eligible && settings.experiments?.swarm === true) ||
         opts?.swarmLocalOwner === true,
       sandbox: eligible && settings.experiments?.sandbox === true,
+      // The Persona tab reads the owner's PERSONAL corpus, so it takes the
+      // strict gate only — the swarm local unlock (a control-plane convenience
+      // for login-disabled machines) deliberately does NOT reach it.
+      persona: eligible && settings.experiments?.persona === true,
     },
   }
 }

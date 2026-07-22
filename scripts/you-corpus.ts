@@ -68,6 +68,12 @@ const main = async (): Promise<void> => {
     }
     case 'rebuild': {
       const m = await assembleYouCorpus()
+      if (m.skipped) {
+        console.error(`NOT rebuilt — ${m.warning}`)
+        console.error(`  existing corpus kept: ${m.path} (${m.sizeBytes} bytes)`)
+        process.exitCode = 1
+        break
+      }
       console.log(`rebuilt ${m.path}`)
       console.log(
         `  ${m.sizeBytes} bytes · auto-memory ${m.memoryCount} · manual ${m.manualCount} · ` +

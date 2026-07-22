@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { resolve } from 'path'
 import { Terminal as HeadlessTerminal } from '@xterm/headless'
 import { detectMenu } from '@/lib/claudeMenu'
 import type { ActiveTerminalsResponse, ClaudeBeaconStatus, TerminalPoolSweepResult } from '@/lib/types'
@@ -54,6 +55,25 @@ export interface TerminalInfo {
   // listActiveTerminalCwds (the worktree-cleanup liveness guard). Defaults to
   // false — every user-launched pane (terminal routes, Board 実行, swarm roles).
   hidden?: boolean
+  // True for an OWNER'S CONVERSATION DESK: a claude session the owner types INTO
+  // and waits on — the Terminal tab's panes, Board 実行, the commander / supply
+  // desks. These are the sessions whose silence costs the OWNER time, so they get
+  // the "your conversation hit a model limit" watch (ownerDeskLimit.ts).
+  //
+  // Deliberately OPT-IN, and deliberately NOT the inverse of `hidden`: the swarm's
+  // UNATTENDED sessions (workers, review-panel reviewers) are visible panes too,
+  // yet nobody is waiting at their keyboard and the engine already rescues them
+  // (hold → requeue → tier demotion). Notifying on those would put one toast per
+  // worker in front of the owner for a condition the machine is already handling —
+  // so the flag marks the desks a HUMAN sits at, not everything with a pane.
+  ownerDesk?: boolean
+  // For an ownerDesk — what to CALL this desk when telling the owner it stopped
+  // ("司令官", "補給官"). An account-wide model exhaustion stops every desk at
+  // once, and a notification naming only the project puts identical rows in front
+  // of the owner for different conversations. Set only where the role is
+  // unambiguous and owner-meaningful; a plain Terminal pane leaves it unset and
+  // the message names the project alone rather than inventing a machine label.
+  deskLabel?: string
 }
 
 type Listener = (chunk: string) => void
@@ -98,12 +118,38 @@ interface PtySession {
 }
 
 // Read the headless terminal's visible screen as plain text rows.
-const readScreen = (term: HeadlessTerminal): string => {
+//
+// `unwrap` rejoins CONTINUATION rows — the ones xterm created by soft-wrapping a
+// long logical line at the terminal edge — into the single line a human reads,
+// using the buffer's own `isWrapped` flag rather than guessing from row length.
+// Off by default: every historical caller (menu detection, the swarm worker arm's
+// screen scrape) is tuned against the row-per-row view and must not shift.
+//
+// It matters because the rows are joined with '\n', which the downstream
+// normalizer collapses to a SPACE — so a soft wrap lands a space in the middle of
+// whatever word straddled the edge, and any phrase spanning the wrap stops
+// matching. Measured 2026-07-18: at 80 columns the CLI's 95-character limit notice
+// wraps mid-word and "switch models with /model" no longer matches, while at 120
+// it does. The worker arm absorbs this by design (its three phrases are matched
+// independently so a surviving fragment still fires); the owner-desk sensor cannot,
+// because it also asks WHERE the match sits, and a broken final phrase moves the
+// last match dozens of characters back up the message.
+// Exported ONLY so the owner-desk regression suite reads its synthetic frames back
+// through this exact function (it renders into a headless terminal with no PTY
+// behind it, so it cannot go through getTerminalScreenLogical). It previously kept
+// a hand-copy of this loop, which is a fixture that can drift away from the code it
+// claims to pin — the failure mode that whole suite exists to catch.
+export const readScreen = (term: HeadlessTerminal, unwrap = false): string => {
   const buf = term.buffer.active
   const rows: string[] = []
   for (let y = 0; y < term.rows; y++) {
     const line = buf.getLine(buf.baseY + y)
-    rows.push(line ? line.translateToString(true) : '')
+    const text = line ? line.translateToString(true) : ''
+    if (unwrap && line?.isWrapped && rows.length > 0) {
+      rows[rows.length - 1] += text // continuation of the row above — no separator
+    } else {
+      rows.push(text)
+    }
   }
   return rows.join('\n')
 }
@@ -237,6 +283,10 @@ export const createTerminal = (opts: {
   // Headless utility session (no user-visible pane) — excluded from the Ground
   // beacon. See TerminalInfo.hidden / launchClaude's `hidden` opt.
   hidden?: boolean
+  // The owner types into this session and waits on it — see TerminalInfo.ownerDesk.
+  ownerDesk?: boolean
+  // What to call this desk in that watch's notification — see TerminalInfo.deskLabel.
+  deskLabel?: string
 }): TerminalInfo => {
   const pty = loadPty()
   const id = randomUUID()
@@ -265,6 +315,8 @@ export const createTerminal = (opts: {
     tag: opts.tag ?? 'shell',
     ...(opts.agentSessionId ? { agentSessionId: opts.agentSessionId } : {}),
     ...(opts.hidden ? { hidden: true } : {}),
+    ...(opts.ownerDesk ? { ownerDesk: true } : {}),
+    ...(opts.ownerDesk && opts.deskLabel ? { deskLabel: opts.deskLabel } : {}),
   }
 
   // Claude panes get a headless screen model for menu detection; plain shells
@@ -396,13 +448,163 @@ export const listActiveTerminalCwds = (): string[] => {
  *  utility sessions (they are real claude processes holding a real transcript open)
  *  and EXCLUDES exited-but-lingering ones (`finishedAt` set, kept ~30s so the client
  *  can drain the buffer) — that PTY is gone, so its session is free to resume. */
-export const isClaudeSessionLive = (agentSessionId: string): boolean => {
-  if (!agentSessionId) return false
-  let live = false
+export const isClaudeSessionLive = (agentSessionId: string): boolean =>
+  claudeSessionActivity(agentSessionId).live
+
+/** Liveness + ACTIVITY + the PTY to talk to, for a persisted claude session id.
+ *  The superset {@link isClaudeSessionLive} is now a thin wrapper over. */
+export interface ClaudeSessionActivity {
+  /** A live (not exited) PTY is driving this session id. */
+  live: boolean
+  /** Newest `lastOutputAt` across those PTYs, or null when none has painted yet. */
+  lastOutputAt: number | null
+  /** The live PTY to address (the newest-painting one), or null when not live. */
+  terminalId: string | null
+}
+
+/** Is a live PTY driving this session — and if so, when did it last PAINT?
+ *
+ *  `live` alone answers the RESUME seam's question ("would a second `claude
+ *  --resume` interleave-corrupt this transcript?"). The commander monitor needs
+ *  one bit more: a live desk that is merely QUIET is not a wedged desk, and
+ *  conflating the two is what made the engine declare a working commander dead and
+ *  respawn it three times (2026-07-18 — see swarmOrchestrator's manager presence
+ *  probe). `lastOutputAt` is that second channel: claude's TUI repaints while it
+ *  works (spinner, streaming tokens) and echoes the owner's keystrokes, so recent
+ *  output is POSITIVE evidence the desk is engaged rather than merely present.
+ *
+ *  Exited-but-lingering sessions (`finishedAt` set, kept ~30s so the client can
+ *  drain the buffer) are excluded — same rule as isClaudeSessionLive. Hidden
+ *  utility sessions are INCLUDED (they are real claude processes). If several live
+ *  PTYs somehow share one session id, the newest-painting one wins and its
+ *  terminal id is the one returned (the PTY a nudge must be written to). */
+export const claudeSessionActivity = (agentSessionId: string): ClaudeSessionActivity => {
+  const out: ClaudeSessionActivity = { live: false, lastOutputAt: null, terminalId: null }
+  if (!agentSessionId) return out
   sessions.forEach((s) => {
-    if (!s.info.finishedAt && s.info.agentSessionId === agentSessionId) live = true
+    if (s.info.finishedAt || s.info.agentSessionId !== agentSessionId) return
+    out.live = true
+    const at = s.info.lastOutputAt
+    if (at !== undefined && (out.lastOutputAt === null || at > out.lastOutputAt)) {
+      out.lastOutputAt = at
+      out.terminalId = s.info.id
+    }
+    // A live PTY that has never painted is still the desk to address.
+    out.terminalId ??= s.info.id
   })
-  return live
+  return out
+}
+
+/** A desk's screen with soft-wrapped rows REJOINED into the logical lines a human
+ *  reads — the surface the owner-desk model-limit watch reads (ownerDeskLimit.ts).
+ *  Identical to {@link getTerminalScreen} except for that rejoin; kept separate so
+ *  the historical screen readers (menu detection, the swarm worker arm) keep the
+ *  exact row-per-row view they were tuned against. Returns null for a session that
+ *  is gone or has no headless terminal. Read-only. */
+export const getTerminalScreenLogical = (id: string): string | null => {
+  const s = sessions.get(id)
+  if (!s?.headless) return null
+  try {
+    return readScreen(s.headless, true)
+  } catch {
+    // NO RAW-BUFFER FALLBACK, deliberately. The ring buffer carries the
+    // cursor-addressing claude interleaves, so its "rows" are not the rows a human
+    // reads — and this function's one caller CLASSIFIES rows (the desk watch walks
+    // the frame's anatomy: banner, chrome, prompt, utterance). Handing it that text
+    // does not degrade the watch, it BLINDS it: nothing is recognised as chrome, so
+    // the notice never reads as standing alone and the sensor goes quiet on exactly
+    // the event it exists for — while every layer above still sees a string and
+    // believes it looked. Null is the honest answer, and the caller already treats
+    // it as missing evidence: it neither notifies nor counts the read toward
+    // re-arming a desk it has already reported (review 2026-07-18, round 3).
+    return null
+  }
+}
+
+/** One LIVE owner conversation desk, as the model-limit watch needs to see it. */
+export interface OwnerDeskTerminal {
+  id: string
+  cwd: string
+  /** The claude session id this PTY was launched to drive — what the desks'
+   *  persisted session store (swarmSessions.ts) records, so a caller holding a
+   *  pool entry can RECONCILE the store against the pool rather than trusting
+   *  it. Absent for a desk launched without one. */
+  agentSessionId?: string
+  /** Owner-meaningful name for this desk ("司令官"), when its launcher set one —
+   *  see {@link TerminalInfo.deskLabel}. */
+  deskLabel?: string
+  /** Epoch ms of the last PTY output chunk (absent ⇒ nothing painted yet). */
+  lastOutputAt?: number
+  /** Epoch ms the PTY was spawned — the floor for the output-quiet window, so a
+   *  session that has never painted isn't treated as "quiet since 1970". */
+  startedAtMs: number
+}
+
+/** Every LIVE claude PTY the owner types into and waits on — the input to the
+ *  model-limit watch (ownerDeskLimit.ts). The {@link TerminalInfo.ownerDesk} flag
+ *  its launcher set is what selects it, so an unattended swarm session (worker /
+ *  reviewer) and a headless utility run are excluded by construction rather than
+ *  by guessing from the pane.
+ *
+ *  The other three conditions are belt-and-braces, asserted here so the watch's
+ *  contract holds on the POOL rather than on call-site discipline alone: a live
+ *  PTY (`finishedAt` unset — an exited conversation is over, not stopped), a
+ *  `claude` session (a plain shell has no model to run out of), and NOT hidden (a
+ *  headless utility run has no pane for the owner to go fix, so telling them to
+ *  type /model somewhere would be a dead end). A session that is both `ownerDesk`
+ *  and `hidden` is a contradiction; if one ever appears, this drops it instead of
+ *  notifying about a window that does not exist.
+ *
+ *  PURE READ — never touches the PTY. */
+export const listOwnerDeskTerminals = (): OwnerDeskTerminal[] => {
+  const out: OwnerDeskTerminal[] = []
+  sessions.forEach((s) => {
+    if (s.info.finishedAt || !s.info.ownerDesk) return
+    if (s.info.hidden || s.info.tag !== 'claude') return
+    const startedAtMs = Date.parse(s.info.startedAt)
+    out.push({
+      id: s.info.id,
+      cwd: s.info.cwd,
+      ...(s.info.agentSessionId ? { agentSessionId: s.info.agentSessionId } : {}),
+      ...(s.info.deskLabel ? { deskLabel: s.info.deskLabel } : {}),
+      ...(s.info.lastOutputAt !== undefined ? { lastOutputAt: s.info.lastOutputAt } : {}),
+      startedAtMs: Number.isNaN(startedAtMs) ? 0 : startedAtMs,
+    })
+  })
+  return out
+}
+
+/** Every LIVE desk PTY running in `cwd` under `deskLabel` — the POOL's OWN
+ *  answer to "does this project already have a commander desk?", newest first.
+ *
+ *  WHY THIS EXISTS (measured 2026-07-19: eleven commander desks in three hours).
+ *  Both the engine's presence probe and the resume seam asked that question of
+ *  the persisted session STORE — "is the PTY holding the recorded session id
+ *  alive?" — and the store is a single slot that every spawn overwrites
+ *  (swarmSessions.recordSwarmSession). So one swallowed write, one transient
+ *  store read fault, or one spawn racing another permanently ORPHANS a running
+ *  desk: it keeps holding a `claude` process while the engine, asking only about
+ *  the id it has on file, reads 'absent' and builds another desk beside it —
+ *  then another, every five minutes. The canonical claim that duplicates are
+ *  「構造的に起こらない」 (docs/commander/03 §2.3) held only under the unenforced
+ *  assumption that the recorded id always names the live desk.
+ *
+ *  The pool cannot desynchronise from itself, so it is the right authority for
+ *  EXISTENCE. `deskLabel` is what makes the question answerable without guessing:
+ *  it is set only by a desk launcher (swarmManager / swarmSupply), so the owner's
+ *  own hand-started `claude` in the same repo — which carries no label — is never
+ *  mistaken for a commander. That distinction is why refusing to spawn is safe
+ *  here even though AUTO-KILLING an orphan deliberately is not (03 §2.3).
+ *
+ *  Paths are compared RESOLVED: the pool stores the cwd its launcher passed, and
+ *  a caller may hold the same project through a different spelling.
+ *
+ *  PURE READ — never touches a PTY. */
+export const listLiveDesksIn = (cwd: string, deskLabel: string): OwnerDeskTerminal[] => {
+  const want = resolve(cwd)
+  return listOwnerDeskTerminals()
+    .filter((d) => d.deskLabel === deskLabel && resolve(d.cwd) === want)
+    .sort((a, b) => b.startedAtMs - a.startedAtMs)
 }
 
 /** Working/waiting judgement for a claude PTY. Pure — `now` is injected so
@@ -619,6 +821,29 @@ export const stopTerminalSweepLoop = (): void => {
     clearInterval(globalThis.__openground_terminal_sweep_timer)
     globalThis.__openground_terminal_sweep_timer = null
   }
+}
+
+/** Watch ONE PTY's exit without subscribing to its output — returns an
+ *  unsubscribe, or null when the session is already gone.
+ *
+ *  {@link subscribeTerminal} is the wrong tool for a watcher that only cares
+ *  THAT a session ended: it also registers a data listener, and a data listener
+ *  participates in the ACK flow-control accounting (a subscriber that never ACKs
+ *  can pause the PTY). A death-watch must be able to observe a desk without
+ *  changing how that desk is scheduled. Exit listeners are fired by both teardown
+ *  paths — node-pty's `onExit` and the janitor's {@link reapSession} — so an
+ *  orphan whose exit event was lost still reaches the watcher.
+ *
+ *  The callback runs INSIDE teardown, before the session is dropped from the map,
+ *  so {@link getTerminalScreen} still answers for it there. */
+export const onTerminalExit = (
+  id: string,
+  onExit: (info: TerminalInfo) => void,
+): (() => void) | null => {
+  const s = sessions.get(id)
+  if (!s) return null
+  s.exitListeners.add(onExit)
+  return () => s.exitListeners.delete(onExit)
 }
 
 export const subscribeTerminal = (
