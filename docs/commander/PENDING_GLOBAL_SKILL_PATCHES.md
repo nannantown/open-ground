@@ -1,5 +1,17 @@
 # Pending patches for out-of-repo global skills
 
+**2026-07-22 追記**: `og-manage`・`order`・`supply` の3スキルは、いまは repo 内に正典
+(`skills/og-manage/SKILL.md` / `skills/order/SKILL.md` / `skills/supply/SKILL.md`)を持ち、
+`server/index.ts` boot 時に `~/.claude/skills/*` へ idempotent に自動配備される
+(`swarmToolingInstall.ts` / `ogManageSkill.ts`)。この3スキルへの変更は**repo 内で直接
+編集し、通常の PR/統合フローで済む** — 以下のこのファイルの仕組み(pending patch を溜めて
+オーナーが手で適用)は**もう不要**。このファイルはグローバルスキルのうち repo に正典を
+持たない残り(あれば)専用として残す。
+
+---
+
+(旧本文 — 上記3スキルが repo 正典化される前の運用。参考として残す)
+
 このリポジトリ内から**直接編集できない**グローバルスキル(`~/.claude/skills/*`)に対して、
 worker/司令塔が起票した「適用すべき差分」を溜めておく置き場。**適用はマネージャー/オーナーが
 手で行う**(worker は git push 禁止・グローバル HOME を勝手に書き換えない)。

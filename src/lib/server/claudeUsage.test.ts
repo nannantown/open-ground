@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { collectClaudeUsage } from './claudeUsage'
+import { CONTEXT_WINDOW_TOKENS, collectClaudeUsage, sessionContextTokens } from './claudeUsage'
 
 // The local "~/.claude log aggregation" measurement source — one of the two
 // sources behind GET /api/usage. (The other, which is what the gauge actually
@@ -148,5 +148,51 @@ describe('collectClaudeUsage — local jsonl aggregation', () => {
     expect(u.messageCount).toBe(0)
     expect(u.currentModel).toBeNull()
     expect(u.windowStart).toBeNull()
+  })
+})
+
+// sessionContextTokens — ONE session's current context fill (card 2's main source
+// for the per-session gauge). Distinct from collectClaudeUsage's 5h QUOTA window:
+// this reads the newest assistant line of ONE session's transcript, keyed by its
+// uuid filename, and sums the tokens that turn carried in.
+describe('sessionContextTokens — one session’s current context fill', () => {
+  it('sums input + cache_read + cache_creation of the LAST assistant line', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    mkdirSync(join(dir, 'projX'), { recursive: true })
+    const opus = 'claude-opus-4-8'
+    // Keyed by the SESSION id (the filename), not the message id. Two turns; the
+    // NEWEST (last) line is the current fill. Numbers are the card-1 spike's exact
+    // readout (§3-B3): 10 + 21633 + 17205 = 38,848, which matched the CLI's own
+    // `/context` 38.8k.
+    writeFileSync(
+      join(dir, 'projX', 'sess-abc.jsonl'),
+      [
+        rec(now, 'm1', 5, { input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3 }, opus),
+        rec(now, 'm2', 1, { input_tokens: 10, cache_read_input_tokens: 21633, cache_creation_input_tokens: 17205 }, opus),
+      ].join('\n'),
+    )
+    expect(await sessionContextTokens('sess-abc', dir)).toBe(38_848)
+  })
+
+  it('is null for an unknown session, a missing dir, or an empty id', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    writeFileSync(join(dir, 'sess-1.jsonl'), rec(Date.now(), 'm', 1, { input_tokens: 5 }, 'claude-opus-4-8'))
+    expect(await sessionContextTokens('nope', dir)).toBeNull()
+    expect(await sessionContextTokens('', dir)).toBeNull()
+    expect(await sessionContextTokens('x', join(tmpdir(), 'og-usage-missing-xyz'))).toBeNull()
+  })
+
+  it('is null when the session file has no assistant line yet', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    writeFileSync(
+      join(dir, 'sess-2.jsonl'),
+      JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { content: 'hi' } }),
+    )
+    expect(await sessionContextTokens('sess-2', dir)).toBeNull()
+  })
+
+  it('pins the auto-compact denominator at 200k', () => {
+    expect(CONTEXT_WINDOW_TOKENS).toBe(200_000)
   })
 })

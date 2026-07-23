@@ -68,17 +68,18 @@ worker の在り処(ディスク):
 
 ### 2.1 経路は 3 つ、実体は 1 つ
 
-worker が生まれる経路は (a) エンジンの dispatch パス(swarmOrchestrator.ts:4938 `deps.spawnWorker` → :3155 `defaultSpawnWorker`)、(b) 手動/司令塔の `POST /api/swarm/worker`(server/routes/swarm.ts:248)、(c) UI の Restart(SwarmModule.tsx:785 — 同じ route に `worktree` 付きで POST)。**全経路が `spawnSwarmWorker`(swarmWorker.ts:571)に合流する。** 合流点の内部順序は model 解決(全 tier OFF なら `NoAllowedModelTierError` で fail-closed)→ **L4 guard 配線検証(NG なら `GuardWiringError` で fail-closed — §2.5、GAP-2 根治 2026-07-11)** → worktree 作成 → claude 起動。
+worker が生まれる経路は (a) エンジンの dispatch パス(swarmOrchestrator.ts:4938 `deps.spawnWorker` → :3155 `defaultSpawnWorker`)、(b) 手動/司令塔の `POST /api/swarm/worker`(server/routes/swarm.ts:248)、(c) UI の Restart(SwarmModule.tsx:785 — 同じ route に `worktree` 付きで POST)。**全経路が `spawnSwarmWorker`(swarmWorker.ts:571)に合流する。** 合流点の内部順序は model 解決(全 tier OFF なら `NoAllowedModelTierError` で fail-closed)→ **L4 guard 配線検証(NG なら `GuardWiringError` で fail-closed — §2.5、GAP-2 根治 2026-07-11)** → worktree 作成 → claude 起動。**claude preflight・env preflight(git/shell)・twin-dispatch ガードは HTTP ルート `POST /api/swarm/worker` だけが持つ**(下記の順序表)— (a) のエンジン dispatch パスは `spawnSwarmWorker` を直呼びするため、これら3つのゲートを一切通らない(エンジンは自分の `runDispatchPass` で別途カードを予約してから spawn するので twin-dispatch ガードは元々不要。git/shell が壊れている場合、エンジン経路は `spawnSwarmWorker` 内部の `git worktree add` 失敗で気づく — 事前の 503 という形にはならない)。
 
 `POST /api/swarm/worker` の入口で効く順序(server/routes/swarm.ts):
 
 1. swarm owner ゲート(:254 `hasSwarmOwnerAccess` — src/lib/server/swarmGate.ts。owner の app-login(サーバ永続 session)**または**サーバローカル解錠(env `OPENGROUND_LOCAL_OWNER=1` / settings.json 手編集 `swarmLocalOwner:true` — ログイン無効の業務モード用、docs/SECURITY.md)で通過、どちらも無ければ 403。リクエスト由来の値(cookie/ヘッダ/body)では絶対に開かないので、通過側もオーナーがログイン済み(か解錠済み)のマシンなら cookie 無しの curl でそのまま通る)
 2. `validateProjectPath`(:263)
 3. ゴール解決 — `taskId` があれば Board カードの title+notes が優先(:269-276)、無ければ `title`/`notes`(:277-282)。合計 8KiB 上限(:120 `MAX_GOAL`, :286-288)
-4. claude preflight(:293-294 — CLI 不在/未ログインは worktree を作る前に 503)
-5. **twin-dispatch ガード**(:308-352): fresh dispatch は カードを todo→doing に CAS で claim してから spawn(:324 `claimCardForDispatch`)。エンジンが同カードを予約中なら 409(:317, :348-351)。**RESTART は免除**(:306 `isRestart` — 既存 branch への再入場であり新 branch を作らないため)
-6. spawn(:354-371)。失敗したら claim を todo に返す(:369)
-7. 成功後、カードに branch を記録(:374 `recordCardBranch` — review/統合ステージが読む持ち手)
+4. claude preflight(:294 `claudeRunPreflight` — CLI 不在/未ログインは worktree を作る前に 503)
+5. **env preflight(git/shell)**(:303 `swarmEnvPreflight(path, { force: true })` — src/lib/server/swarmEnvPreflight.ts、2026-07-22 追加): git 未検出 / このプロジェクトが git repo でない / シェル未検出のいずれかがあれば、worktree を作る前(twin-dispatch の claim より前)に 503(`{ error, envIssues: ('gitMissing'|'notAGitRepo'|'shellMissing')[] }`)。`force:true` — キャッシュ(10秒 TTL、claudeConnection と同じ)は GET ポーリング専用で、spawn は常に最新の判定を使う(`git init` した直後に古い判定で拒否しないため)。**2つの独立オプション**(2026-07-22 レビュー2周目で分離): `requireGitRepo`(このプロジェクト自体が git repo か)は `/worker` だけ既定 true(git worktree を作るのはここだけ) — `/supply`・`/manager` は `requireGitRepo:false` で呼ぶ(:427, :489)。`requireGit`(git バイナリが存在するか)は `/worker`・`/manager` は既定 true のまま、`/supply` だけ `false`(供給官のサーバ側コードは git を一切呼ばない)。**司令官(`/og-manage`)自身の会話は git を常用する**(status/merge/branch -d — swarmManager.ts:36,73,105,235)ため `requireGit:false` にはしない — 「このプロジェクトが git repo か」は問わないが「git が入っているか」は問う、という非対称。GET `/api/swarm/preflight?path=` は `/worker` と同じ既定(requireGit:true, requireGitRepo:true)でプレーンな read を公開し、Swarm タブが起動前に**1枚のバナー**で表示する(`useSwarmEngine.ts` の poll → `SwarmModule.tsx`。バナーには「タスク受付/司令官は使える」の補足も付く — envBannerFootnoteKey)。**起動失敗の 503 も同じ id を使ってローカライズされる**(SwarmModule.tsx の envIssuesErrorMessage — 2026-07-22 レビュー2周目 must-fix: ボタン押下直後のエラーバナーが英語の生メッセージのままだった穴を閉じた)
+6. **twin-dispatch ガード**(:323-370): fresh dispatch は カードを todo→doing に CAS で claim してから spawn(:339 `claimCardForDispatch`)。エンジンが同カードを予約中なら 409(:332, :363-364)。**RESTART は免除**(:321 `isRestart` — 既存 branch への再入場であり新 branch を作らないため)
+7. spawn(:372-389)。失敗したら claim を todo に返す(:384)
+8. 成功後、カードに branch を記録(:389 `recordCardBranch` — review/統合ステージが読む持ち手)
 
 ### 2.2 worktree 作成(`createSwarmWorktree` — swarmWorker.ts:222-294)
 
@@ -127,6 +128,8 @@ claude --session-id <uuid> --dangerously-skip-permissions \
 
 **トークン規律(2026-07-18 追加、`WORKER_ORDER_RULES` 内 【トークン規律・厳守】節)**: 実測(swarm-token-audit カード)でワーカー7体全員のツール束ね率が 1.00(独立作業を1手ずつ実行・1手ごとに最大33万トークンの会話文脈を読み直す)だったため、標準指示に (a) 独立ツール呼び出しは1応答へ束ねて並列実行 (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む(全文読み禁止) (c) 同じファイルを読み直さない (d) 長い出力は tail/要約で受ける(テストは失敗時のみ詳細) (e) フルスイート(`npm test`)は完了ゲートとして最後に1回・触った範囲を先に回す (f) カードに当たり(対象ファイル)があれば探索せず直行、の6項目を焼き込んだ。**完了ゲート(`npx tsc --noEmit` / `npm test` / lint の3点)と ready 前セルフコミットの規約は不変** — 緩めているのは探索コスト・文脈量だけで、品質ゲートには一切手を付けていない。文言はピンテスト(swarmWorker.test.ts の `WORKER_ORDER_RULES token discipline`)で固定。効果判定(束ね率≥1.5・手数中央値≤120)は別カード(swarm-token-audit)が継続観測する。
 
+**(a) の既定反転(2026-07-22 追加、日次燃費日報の劣化起票から)**: 上の (a) を焼き込んで4日経っても**束ね率は 1.12 で基準(1.3)割れのまま横ばい**だった(`npm run swarm:audit` 実測)。原因は文言が**条件付きルール**だったこと — 「独立したツール呼び出しは束ねて並列実行する」は、worker が「この2手は独立だ」と**気づけた時にしか発火しない**。逐次に考える既定の思考順(1手決める→送る→結果を見て次を決める)ではその気づきに到達しないので、ルールは書いてあるのに空振りする。そこで (a) を**既定の反転**に書き換えた: 「調べものはできるだけまとめて一度に」を先頭に置き、**まとめて出すのが既定・道具1つだけの応答が許されるのは『その結果を見ないと次が決まらない時』に限る**とし、さらに**送信直前の自己点検**(「この後どうせ要る調べものは?」を洗い出して同じ応答に足す)を1つ足した。**なぜこれで指標が戻るか**: 束ね率の定義は `tool_use 数 ÷ tool_use を含む応答数`(`swarmTokenAudit.ts`)なので、比を上げる手は「1応答あたりの道具数を増やす」以外に無く、既定を反転させると単発応答が『結果依存の時だけ』に絞られて分母が減る — **同じ仕事を少ない往復で終える**ということであり、調べる量を減らすわけではない。**完了ゲート3点と ready 前セルフコミットは今回も不変**。ピンは**見出し句ではなく機構2文**に張る(`swarmWorker.test.ts` の同 describe / `pins the DEFAULT-INVERSION mechanism of (a), not just its heading`) — ①既定文「道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ」 ②送信直前の自己点検「1つだけ送りそうになったら…同じ応答に足せ」 の2文を、`(b)` 手前までを (a) 節として切り出した**その中で**見る(機構が別節へ流れて (a) が見出しだけの殻に戻る書き換えも赤になる)。⚠ **初版のピンは見出し句 `調べものはできるだけまとめて一度に` 1本きりで、機構2文を両方消してもスイート全緑だった**(2026-07-22 変異実測: 2文を削除して `swarmWorker.test.ts` を回すと **41 passed / 0 failed** — 見出し句のピンも `1応答に束ねて並列実行する` のピンも生き残る。機構ピン追加後は同じ変異で **1 failed**)。見出しは「何と呼ぶか」しか固定せず「何をさせるか」は無防備になる — **効く文がどれかを見極めてそこに張る**のがピンテストの要件で、条文が在ることの確認は代用にならない(束ね率を動かせるのは「1応答あたりの道具数」だけで、その数を実際に増やすのはこの2文)。効果は翌日以降の日次燃費日報が判定する。
+
 **技術判断は一次資料で(2026-07-19 追加、`WORKER_ORDER_RULES` 内 【技術判断は一次資料で・厳守】節)**: 前段の**判断ルーティング**(同節 `DECISION_ROUTING_RULES`・06 章 §2.3)が技術判断をオーナーの受信箱から外した結果、その**受け手が worker 自身**に確定した — そして worker の知識には学習カットオフがある。宛先だけ直すと古い答えが静かな場所に移るだけなので、受け手側に手順を負わせる: (a) 分野を1行で特定 (b) 一次資料を取り込む(**リポジトリ内の正典 docs → 公式ドキュメント(WebFetch/WebSearch)** の順) (c) 資料を根拠に判断し**資料名と版/日付**を **commit message** に記録(記録先を名指すのは、sink の無い「記録しろ」は誰も grep できず遵守が観測不能だから)。**資料が取れなければ止まらず `【資料取得できず】` と明記して internal 知識で判断**(黙って古い知識で断定するのが最悪の失敗 = fail-safe)。⚠ **発火条件は「分野」であって「迷ったか」ではない** — 古い記憶から自信満々に間違えている状態は定義上迷っていないので、「迷ったら」ゲートは**必要な時ほど開かない**(2026-07-19 敵対レビュー M2)。
 
 - 2面の**結合は非対称**(「両方が派生」と書かない): worker 面は文字列連結の**真の派生**(定数を直せば全 spawn が変わる)。司令官面(og-manage §「マージ」手順 4)は**手書きの写し**で、`SPECIALIST_REVIEW_MANAGER_CLAUSES` の verbatim ピンが握っている — 定数を直しても SKILL.md は変わらず、**テストが赤くなって人間が両側を合わせる**。
@@ -163,6 +166,8 @@ spawn 成功後、エンジンは in-memory roster に `stage: 'starting'` で p
 ```
 
 (swarm-beat.sh 実物より。repoキー導出はサーバ側 swarmJanitor.ts:280-292 / swarmOrchestrator.ts:2245-2263 と同一 — worktree の `--git-common-dir` は本体 `.git` に解決されるので、**どの worktree から打っても同じ repo ディレクトリに落ちる**)
+
+**依存**: swarm-beat.sh は同じディレクトリの **`openground-swarm-lib.sh`**(`sw_repokey`/`sw_hbdir`)を source する。両方とも repo 正典(`scripts/`)から boot 時に `~/.claude/` へ自動配備される(TARGET-STATE §5「起票テンプレ」の 0722/0723 追記)。**`~/.claude/swarm-lib.sh`(接頭辞なし)は別物** — 旧 tmux コックピット時代のユーザ手書きファイルで OG 管理外・OG は読み書きしない。「心拍が書かれない」時は `bash ~/.claude/swarm-beat.sh …` を worktree 内で直に叩き、`sw_hbdir: command not found` が出るなら配備漏れ(= `openground-swarm-lib.sh` が無い)を疑う。
 
 ### 3.2 読み手は 3 系統(それぞれ読む場所とタイミングが違う)
 
@@ -284,7 +289,7 @@ promote && w.reworkAt のとき: hbAtMs > reworkAtMs(差し戻しより厳密に
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 
-PTY 死亡・stall(両チャネル 10 分沈黙 — `STALL_SILENCE_MS` :294)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS` :366、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:5051)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:1099)で決める:
+PTY 死亡・stall(心拍・PTY 出力・**sub-agent/transcript の mtime** の 3 チャネルすべてが 10 分沈黙 — `STALL_SILENCE_MS` :294。第3チャネルは §5.4a の注)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS` :366、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:5051)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:1099)で決める:
 
 | 状況 | カードの行き先 |
 |---|---|
@@ -302,6 +307,17 @@ PTY 死亡・stall(両チャネル 10 分沈黙 — `STALL_SILENCE_MS` :294)・�
 **ただし飛び越すのは `ready` の行だけ**(2026-07-19 に射程を絞った)。心拍の **`blocked:true` は `integration-wait` より先**に評価される(:1114)。初版はここも飛び越していたため、**差し戻し後の再作業中に本物の詰まりに当たり「人手が要る」と心拍に書いた worker の申告が黙って捨てられ**、未検証の tip だけが review に上がっていた(司令官がレビュー→赤で差し戻し→同じ壁、の無限ループ)。`ready` は**前の状態の遺物**、`blocked` は**今の生の報告** — 性質が違うので扱いも違う。
 
 **どの行き先でも、teardown の前に未コミット作業は WIP コミットで branch に保全される**(§6 冒頭)。回収後に `git log <branch>` を見れば `WIP: swarm reclaim auto-save (<理由>)` が立っている(dirty が無ければ何も起きない)。
+
+### 5.4a stall 判定の第3チャネル — sub-agent/transcript mtime(2026-07-23・**7517 の worker 版**)
+
+worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起動時刻)**だけ**で測っていた。だが worker が**自前の敵対レビュー Task(sub-agent)**を回すと、親 PTY 出力も心拍(phase 境界でしか出ない)も凍り、両チャネルとも古くなる — 走っている本人は生きているのに。これは**司令官卓で 7517e4b1 が塞いだのと同じ死角**であり(03章 delivery 節: `defaultManagerDeliveryAt` が心拍/セッション JSONL/**sub-agent JSONL** の3つで測る)、worker には未適用のまま残っていた。
+
+- **実害(2026-07-22 夜〜0723 早朝・司令官が実測)**: 稼働中 worker が沈黙誤判定 → nudge(ESC で走行中の検証を中断)→ reclaim(worktree teardown + `blocked` 再ホーム)→ 空いた担当を **同一カードの二重配車** で埋める、が連鎖した(worktree 6 個が心拍を残したまま消滅・成果は branch 生存で無事だが「作業中の成果を失う」一歩手前+トークン二重消費)。
+- **修正**: `classifyStall`(:1218)/ `lastActivityMs`(:1158)に第3チャネル `agentActivityAtMs`(worker 自身の `<sessionId>.jsonl` + `<sessionId>/subagents/agent-*.jsonl` の最新 mtime。汎用コンビネータ `sessionAgentActivityAt` — manager 版 helper を再利用)を OR で加えた。sub-agent 実行中・ファイル編集中の worker を「生存」に倒す。
+- **コスト方針は司令官版と同じ**: cheap 2 チャネルで silent と出た worker **だけ** fs walk を掛ける(monitor のゲート付き backstop・`rate-limited` は sub-agent を回さないので除外)。通常 tick の追加 IO はゼロ。
+- **安全性**: ファイル mtime は**再描画では書けない**(Enter/ESC の echo は transcript も sub-agent ファイルも伸ばせない)ので echo-guard 非対象で足せる。生きた worker を生存に倒す**だけ** — 死んだ worker はファイル mtime も止まるので同じ 10 分時計で沈黙に戻り、従来どおり reclaim される(誤って「永遠に生存」にはならない)。
+- **read-only 表示との整合**: `detectAnomalies` の `worker-stale`(:7563 付近)も同チャネルを同じゲートで畳み込み、「read-only の異常表示は engine 自身の生死判定と矛盾しない」不変条件(ブロック冒頭が約束)を維持。
+- **回帰(歯)**: `swarmOrchestrator.test.ts` — 純関数 `classifyStall`「SPARES a worker … sub-agent file is fresh」(変異=`agentActivityAtMs` を外すと nudge に反転)/「does NOT let a STALE sub-agent file rescue …」、monitor「SPARES a silent-but-alive worker running a Task() sub-agent」+「MUTATION control … STALE … IS nudged」。`lastActivityMs` の第3チャネルも単体で固定。
 
 ### 5.5 実行時間上限は **いま与えられている担当分の実作業時間**で測る(2026-07-12 / 07-18 / 07-20 根治)
 

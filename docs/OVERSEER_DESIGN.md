@@ -62,6 +62,12 @@ OG の in-app swarm（swarmOrchestrator）を「ユーザーが司令塔を手�
 | K8 | **GET / read 経路に mutation を載せない** | auto-drain 差し戻し MUST_FIX の掟（getOrchestratorState は PURE、テストで固定） |
 | K9 | **不変条件 A–D**（force-push なし / central 外削除なし / owner-gate / conflict abort）と品質フロア（tsc→lint→swarm-safety→test のマージゲート）は監督のコード自身にも適用される | SWARM_SAFETY_INVARIANTS.md。§7.3 D3 の命名決定に直結 |
 
+**2026-07-22 追記(K2 について)**: engine 永続化 card 2(docs/ENGINE_PERSISTENCE_PLAN.md)で
+`desiredRunning`/`selfSupply` は再起動後に自動 resume されるようになったが、**overseer だけは
+K2 が引き続き有効** — 値は `engine.json` に書かれて記憶されるものの、boot はそれを読み戻して
+arm しない(§2 D1 の「auto-drain では起きない」相乗り規則と同じ形の防御が、再起動そのものにも
+延長された・詳細は ENGINE_PERSISTENCE_PLAN.md §2)。K2 本体の文言はこの追記対象ではない。
+
 ---
 
 ## 3. 3層モデル — 脳幹 / 大脳 / 記憶
@@ -156,9 +162,15 @@ seam のまま）、`collectClaudeUsage`（上記 M8）。
     起きない**: enabled は owner POST でのみ true になり、上記 2 経路
     （明示 OFF・再起動）で必ず false に落ちているため。K1 の「明示 ON にだけ
     相乗り」がこの 2 つの規則で構造化される。
-  - 再起動後の autonomyRemembered バナーから resume した場合も監督は OFF
-    （リマインダーは autonomy のみ・監督にリマインダーは作らない）。この
-    非対称は UI のトグル表示で可視化する（C-core）。
+  - 再起動後、engine の `desiredRunning`/`selfSupply` は docs/ENGINE_PERSISTENCE_PLAN.md
+    card 2(2026-07-22)以降 boot で自動 resume されるが、**監督(overseer)だけは
+    その対象から外れる** — `enabled` の値は `engine.json` に書かれて記憶されるが、
+    boot はそれを読み戻して arm することを**しない**(理由は ENGINE_PERSISTENCE_PLAN.md
+    §2 参照: overseer の外向き作用は大脳 PTY 起動・稼働中 worker への注入・
+    janitor の破壊的操作を含み、再起動は L9-③ の代替の無い kill switch 層のため)。
+    代わりに**値が `true` のまま復元されなかった事実を 1 クリック復帰バナーで見せる**
+    (別カード)— autonomy のリマインダーとは別の、overseer 専用のバナーになる。
+    この非対称は UI のトグル表示で可視化する(C-core)。
   - dismiss 罠（`toggleAutonomy(false)` の no-op 問題）は監督には発生しない:
     監督は engine 外の永続マーカーを持たず、enabled は engine 内 field のみ
     だから（バナー→専用 action が要る構造がそもそも無い）。

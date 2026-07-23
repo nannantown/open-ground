@@ -11,7 +11,10 @@ import { listActiveBranches } from './activeBranches'
 // isolated per-command via `-c` flags so a machine's commit.gpgsign /
 // defaultBranch can't bend these assertions.
 
-vi.setConfig({ testTimeout: 30_000 })
+// Real `git` subprocesses; kept per-file so the I/O-heavy intent stays visible
+// at the top of the file, but the value matches the canonical ceiling in
+// vitest.config.ts (60s) — a shorter value here would re-cap what it raised.
+vi.setConfig({ testTimeout: 60_000 })
 
 const execFile = promisify(execFileCb)
 

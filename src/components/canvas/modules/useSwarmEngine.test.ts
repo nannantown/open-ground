@@ -14,6 +14,7 @@ import {
   sanitizeKpis,
   sanitizeConsumption,
   sanitizeFatalNotifications,
+  sanitizeEnvIssues,
   planSwarmPower,
   commanderPresence,
   EMPTY_KPIS,
@@ -427,5 +428,29 @@ describe('sanitizeFatalNotifications — the fatal-event source (条件3)', () =
     expect(out.map((n) => n.id)).toEqual(['new', 'old'])
     expect(sanitizeFatalNotifications(null)).toEqual([])
     expect(sanitizeFatalNotifications({ notifications: 'nope' })).toEqual([])
+  })
+})
+
+// Env preflight (git/shell) — GET /api/swarm/preflight (swarmEnvPreflight). The
+// route response is untrusted like every other one here: keep only known ids so
+// a forged/unrecognized id (which the banner has no copy for) never renders an
+// empty row instead of just being dropped.
+describe('sanitizeEnvIssues — the git/shell preflight banner survives the poll', () => {
+  it('keeps every known issue id, in order', () => {
+    const out = sanitizeEnvIssues({
+      ok: false,
+      issues: [{ id: 'gitMissing' }, { id: 'notAGitRepo' }, { id: 'shellMissing' }],
+    })
+    expect(out).toEqual([{ id: 'gitMissing' }, { id: 'notAGitRepo' }, { id: 'shellMissing' }])
+  })
+
+  it('drops an unknown/malformed id and tolerates a non-array / non-object input', () => {
+    expect(sanitizeEnvIssues({ issues: [{ id: 'somethingElse' }, { id: 'gitMissing' }, 'nope', null] })).toEqual([
+      { id: 'gitMissing' },
+    ])
+    expect(sanitizeEnvIssues(null)).toEqual([])
+    expect(sanitizeEnvIssues('boom')).toEqual([])
+    expect(sanitizeEnvIssues({})).toEqual([])
+    expect(sanitizeEnvIssues({ issues: 'nope' })).toEqual([])
   })
 })

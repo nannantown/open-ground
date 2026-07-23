@@ -62,7 +62,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { readFile, stat, lstat, symlink, unlink, mkdir } from 'fs/promises'
+import { readFile, readdir, stat, lstat, symlink, unlink, mkdir } from 'fs/promises'
 import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
@@ -85,6 +85,32 @@ import {
   writeInput,
 } from './terminal'
 import { claudeRunPreflight } from './claudePreflight'
+// card 2 (docs/ENGINE_PERSISTENCE_PLAN.md) — engine intent write-through +
+// boot-time crash-loop breaker. See resumeEngines() below.
+import {
+  readEngineIntent,
+  writeEngineIntent,
+  patchEngineIntent,
+  recordEngineBoot,
+  isCrashLoopTripped,
+} from './swarmEnginePersistence'
+// card 3 (docs/ENGINE_PERSISTENCE_PLAN.md §3/§4-3) — worker roster write-through +
+// boot reconcile (reconcile-first, spawn frozen). See syncRoster() + resumeEngines().
+import {
+  reconcileRoster,
+  removeRosterEntry,
+  readRoster,
+  writeRoster,
+  // orchestrator already has a by-BRANCH defaultWorktreeExists (line ~3185); the
+  // roster probe is by raw PATH — alias to avoid the name clash.
+  defaultWorktreeExists as rosterWorktreeExists,
+  type RosterEntry,
+  type RosterReconcileDeps,
+} from './swarmWorkerRoster'
+// App version, read from package.json at BUILD time (same pattern as
+// server/routes/health.ts) — the crash-loop breaker keys its window on it so a
+// self-update's own cutover restarts don't count against the NEW build.
+import { version as APP_VERSION } from '../../../package.json'
 import {
   getSettings,
   getExecutionMode,
@@ -109,7 +135,7 @@ import { normalizeScreen, matchesRateLimit, endsInRateLimit } from './swarmRateL
 // ACTUATORS (the spawnBlock park gate). MODEL_TIER_LADDER narrows the recorded
 // launch model to a known tier; an off-ladder / unrecorded model holds the
 // worker exactly as before but marks nothing (never poison a tier by guess).
-import { markRateLimited, isModelTier, MODEL_TIER_LADDER } from './swarmQuota'
+import { markRateLimited, isModelTier, MODEL_TIER_LADDER, ensureCoolingTableLoaded } from './swarmQuota'
 // [Allowed] the owner's PERMANENT per-tier ON/OFF switch — the second, independent
 // veto. `spawnBlock` ANDs it with the cooling table and is the ONE gate both
 // actuators (dispatch + reviewer panel) consult, so a tier the owner retired can
@@ -127,6 +153,7 @@ import {
 } from './swarmWorker'
 import { centralWorktreesDir } from './paths'
 import { projectUUIDFromPath } from './projectDataPath'
+import { appendEngineJournalLine } from './engineJournal'
 import {
   resolveTarget,
   fetchTarget,
@@ -176,7 +203,7 @@ import { createSwarmFatalNotification, createSwarmInfoNotification } from './swa
 // commander when a worker is ready. These are the seams the default wake dep uses.
 import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
 import { readSwarmSessions } from './swarmSessions'
-import { sessionJsonlPath } from './transcript'
+import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
 import { readWorkerConsumptionLine } from './swarmTokenAudit'
 import { sortByPriority } from '../boardPriority'
 
@@ -1132,11 +1159,20 @@ export const lastActivityMs = (a: {
   heartbeatAt?: string
   lastOutputAt?: number | null
   startedAt?: string
+  /** Newest mtime across the worker's OWN transcript + its sub-agent transcripts
+   *  (already resolved & combined by {@link sessionAgentActivityAt}), or null/absent.
+   *  The THIRD liveness channel: a worker sitting inside ONE long turn running a
+   *  Task() sub-agent (its adversarial self-review) freezes BOTH its PTY frame and
+   *  its (sparse) heartbeat, but that file keeps growing — the worker analog of the
+   *  manager delivery clock's sub-agent channel (2026-07-23). Ignored when absent so
+   *  every existing caller/read is unchanged. */
+  agentActivityAtMs?: number | null
 }): number => {
   const cands: number[] = []
   const hb = a.heartbeatAt ? Date.parse(a.heartbeatAt) : Number.NaN
   if (Number.isFinite(hb)) cands.push(hb)
   if (typeof a.lastOutputAt === 'number' && Number.isFinite(a.lastOutputAt)) cands.push(a.lastOutputAt)
+  if (typeof a.agentActivityAtMs === 'number' && Number.isFinite(a.agentActivityAtMs)) cands.push(a.agentActivityAtMs)
   const st = a.startedAt ? Date.parse(a.startedAt) : Number.NaN
   if (Number.isFinite(st)) cands.push(st)
   return cands.length ? Math.max(...cands) : 0
@@ -1196,6 +1232,16 @@ export const classifyStall = (
     lastOutputAtMs: number | null
     /** Dispatch epoch ms — the activity floor (a just-spawned worker isn't silent). */
     startedAtMs: number
+    /** Newest mtime across the worker's OWN transcript + its sub-agent transcripts,
+     *  or null/absent. Life that leaves NO PTY output and NO heartbeat: a worker
+     *  sitting inside one long turn running a Task() sub-agent (its adversarial
+     *  self-review). Folded into `activity` like the heartbeat — deliberately NOT
+     *  echo-guarded, because an Enter/ESC repaint cannot append a transcript entry
+     *  nor grow a sub-agent file (only real work does). The worker analog of
+     *  {@link defaultManagerDeliveryAt}'s sub-agent channel (7517e4b1 fixed the
+     *  desk; 2026-07-23 fixes the worker). Resolved by the caller ONLY for a worker
+     *  the cheap channels already call silent — see the monitor's gated backstop. */
+    agentActivityAtMs?: number | null
     /** Prior nudge bookkeeping, or undefined if never nudged. */
     nudge: { count: number; lastNudgeAt: number; escalated?: boolean } | undefined
   },
@@ -1213,19 +1259,24 @@ export const classifyStall = (
     input.lastOutputAtMs !== null && count > 0 && input.lastOutputAtMs <= lastNudgeAt + p.echoGuardMs
       ? null
       : input.lastOutputAtMs
+  // The file-based liveness channel (transcript + sub-agent mtime). NOT echo-guarded:
+  // a repaint can't write these, so any freshness here is real work in flight.
+  const agentAt = input.agentActivityAtMs ?? null
   const activity = Math.max(
     input.heartbeatAtMs ?? Number.NEGATIVE_INFINITY,
     realOutput ?? Number.NEGATIVE_INFINITY,
+    agentAt ?? Number.NEGATIVE_INFINITY,
     input.startedAtMs,
   )
   const silentMs = Math.max(0, now - activity)
-  // Real recovery since the nudge/escalate — a fresh heartbeat OR real
-  // (post-echo-guard) output strictly after it. Either clears the budget; an echo
-  // can fake neither.
+  // Real recovery since the nudge/escalate — a fresh heartbeat, real (post-echo-guard)
+  // output, OR file activity (transcript/sub-agent grew) strictly after it. Any clears
+  // the budget; an echo can fake none.
   const progressed =
     count > 0 &&
     ((input.heartbeatAtMs !== null && input.heartbeatAtMs > lastNudgeAt) ||
-      (realOutput !== null && realOutput > lastNudgeAt))
+      (realOutput !== null && realOutput > lastNudgeAt) ||
+      (agentAt !== null && agentAt > lastNudgeAt))
 
   if (silentMs < p.stallMs) return { action: 'none', progressed, silentMs } // alive
   if (count > 0) {
@@ -1438,6 +1489,12 @@ export interface ProjectEngine {
   timer: ReturnType<typeof setTimeout> | null
   /** Workers the engine dispatched and still counts as live (≤ MAX_WORKERS). */
   workers: OrchestratorWorker[]
+  /** card 3 — the last roster signature written to disk (identity + stage + rework
+   *  markers of `workers`, EXCLUDING the time-varying workedMs). syncRoster() writes
+   *  the roster only when this changes, so a plain time-passing tick (no set/stage/
+   *  rework transition) does no I/O — the plan §3 "書くのは状態遷移点のみ" guard.
+   *  In-memory only; a fresh boot starts undefined so the first sync always writes. */
+  rosterSig?: string
   /** Read-only integration readiness of the review-column swarm cards, refreshed
    *  each integration pass (the "統合可" display). */
   reviews: OrchestratorReview[]
@@ -1483,6 +1540,16 @@ export interface ProjectEngine {
   highRiskHolds: Map<string, { tip: string; files: string[] }>
   /** Wall-clock (ms) of the last integration pass — the INTEGRATE_TICK_MS gate. */
   lastIntegrateAt: number
+  /** When each swarm branch now in review was FIRST SEEN waiting (branch → epoch ms) —
+   *  the OUTCOME clock behind {@link managerIntegrationStalled}. Stamped on first sight,
+   *  pruned the moment the branch leaves review (same `present` sweep as the conflict /
+   *  verify memos), so a card actually being integrated or 差し戻し-ed removes its entry
+   *  and the "oldest waiting" instant moves FORWARD by itself — progress resets the clock
+   *  without any separate bookkeeping. A newly promoted card does NOT reset it: the oldest
+   *  one is still waiting, which is the thing being measured. In-memory only, like every
+   *  other reflex (a restart relaunches the engine OFF). Optional for older-build / test
+   *  literal backfill (absent ⇒ lazy-init). */
+  reviewSeenAt?: Map<string, number>
   /** MANAGER RESURRECTION reflex state (2026-07-15 card B) — the in-memory bookkeeping
    *  that lets the engine RE-wake a stopped/hung commander without (a) double-spawning a
    *  booting desk or (b) looping forever on one that keeps dying:
@@ -1507,6 +1574,14 @@ export interface ProjectEngine {
     lastNudgeAt?: number
     /** One-shot "it ignored every nudge" log per episode (cleared with the rest). */
     unresponsiveLogged?: boolean
+    /** One-shot "the desk paints but integration is stalled" log per episode — the line
+     *  that explains why an `'active'` desk is being poked at all (2026-07-22). */
+    stallLogged?: boolean
+    /** Has the spent nudge budget already been re-armed once this episode
+     *  ({@link MANAGER_NUDGE_REARM_MS})? Caps the engine's voice at ≤6 pokes per waiting
+     *  batch — without it a batch that never drains (a card parked awaiting the owner)
+     *  would be poked every hour forever. */
+    nudgeRearmed?: boolean
     /** Has the desk we last SPAWNED ever been seen genuinely working ('active')?
      *
      *  Cleared on every spawn, set the first time presence reads 'active'. It is what
@@ -1769,6 +1844,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       rateLimited: new Map(),
       rateLimitHeldMs: new Map(),
       integrationWaitSince: new Map(),
+      reviewSeenAt: new Map(),
       integrationWaitMs: new Map(),
       permissionWaits: new Map(),
       questionRaised: new Map(),
@@ -1810,6 +1886,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.rateLimitHeldMs ??= new Map()
     engine.integrationWaitSince ??= new Map()
     engine.integrationWaitMs ??= new Map()
+    engine.reviewSeenAt ??= new Map()
     engine.limitScreen ??= new Map()
     engine.integrateInFlight ??= false
     engine.permissionWaits ??= new Map()
@@ -1988,10 +2065,15 @@ const logLine = (
   // OrchestratorLogLine.kind. Omit for a meaningful event (always shown).
   kind?: OrchestratorLogLine['kind'],
 ): void => {
-  engine.log.push({ at: new Date().toISOString(), level, message, ...(kind ? { kind } : {}) })
+  const entry: OrchestratorLogLine = { at: new Date().toISOString(), level, message, ...(kind ? { kind } : {}) }
+  engine.log.push(entry)
   if (engine.log.length > MAX_LOG_LINES) {
     engine.log.splice(0, engine.log.length - MAX_LOG_LINES)
   }
+  // Append-through to disk (survives a restart — the ring buffer above does
+  // not). Fire-and-forget: appendEngineJournalLine fails open internally, so
+  // this never delays or breaks the caller's dispatch/promote/... flow.
+  void appendEngineJournalLine(engine.path, entry)
   // Tap the SAME line into the NON-LOSSY KPI counters (the analytics layer): this
   // is the one chokepoint every dispatch/promote/integrate/conflict/crash/stall/
   // rework event already flows through, so counters survive the ring buffer above
@@ -2001,6 +2083,22 @@ const logLine = (
     engine.metrics ??= emptyMetricsCounters()
     engine.metrics[metricKey] += 1
   }
+}
+
+// card 2 (docs/ENGINE_PERSISTENCE_PLAN.md §3) — write-through the engine's
+// current intent (desiredRunning mirrors engine.running; selfSupply/overseer
+// mirror their .enabled flags) so a restart's resumeEngines() can tell "was
+// this project deliberately running" from "never started". Called at every
+// site that changes one of those three: startOrchestrator, stopOrchestrator,
+// setSelfSupply, setOverseer. FAIL-OPEN (writeEngineIntent never throws) — a
+// disk fault only loses the NEXT boot's resume, never disturbs this process.
+const persistEngineIntent = async (engine: ProjectEngine, projectPath: string): Promise<void> => {
+  const ok = await writeEngineIntent(projectPath, {
+    desiredRunning: engine.running,
+    selfSupply: engine.selfSupply.enabled,
+    overseer: engine.overseer.enabled,
+  })
+  if (!ok) logLine(engine, 'warn', 'engine intent persist failed (disk) — in-memory state unaffected')
 }
 
 // ── Stuck-move tracker (anti-zombie: bounded retry → escalate → surface) ──────
@@ -2346,6 +2444,16 @@ export interface OrchestratorDeps {
    *  usage/rate-limit WAIT or a startup permission prompt — rather than treating
    *  every quiet worker as a stall. (Card 4880e9c6 — 進まない分類.) */
   recentOutput: (terminalId: string) => string | null
+  /** Newest mtime across a worker's OWN transcript + its sub-agent transcripts
+   *  (its worktree cwd + agentSessionId), or null. The stall path's THIRD liveness
+   *  channel, resolved ONLY for a worker the cheap channels (heartbeat + PTY output)
+   *  already call silent — so a worker frozen inside a Task() sub-agent (its own
+   *  adversarial review) is not false-reclaimed while that file grows in real time.
+   *  Injected for the unit test; default reads the real ~/.claude tree. OPTIONAL:
+   *  absent ⇒ the stall path uses only the cheap channels (existing fake-deps tests
+   *  keep compiling/behaving). Default (defaultDeps): sessionAgentActivityAt. The
+   *  worker analog of {@link defaultManagerDeliveryAt}'s fix — 2026-07-23. */
+  sessionAgentActivityAt?: (cwd: string, sessionId: string) => Promise<number | null>
   /** Raise a worker's FREE-TEXT question to the escalations inbox (C3). Until
    *  C-core lands its budgeted brain pass, this is the §6 S4 THROTTLED
    *  degradation: the bare question goes straight to T3 — openEscalation is
@@ -2546,6 +2654,12 @@ export interface IntegrationDeps {
    *  reason that state never spawns anything (完了条件2+5). Best-effort: false when the
    *  PTY is gone. MUST NOT throw. Default: {@link defaultNudgeManager}. */
   nudgeManager: (projectPath: string) => Promise<boolean>
+  /** When the commander last demonstrably PRODUCED work — epoch ms, null when no channel
+   *  says anything. The evidence {@link managerIntegrationStalled} judges a paint-only
+   *  `'active'` desk against (2026-07-22). Read ONLY once the queue has already waited
+   *  past {@link MANAGER_INTEGRATION_STALL_MS}, so the ordinary tick costs nothing extra.
+   *  MUST NOT throw. Default: {@link defaultManagerDeliveryAt}. */
+  managerDeliveryAt?: (projectPath: string) => Promise<number | null>
   /** WAKE / RESUSCITATE the commander so it can decide the integration: spawn/resume the
    *  manager PTY (spawnSwarmManager — resumes the days-long integration conversation, or
    *  opens fresh; on a quota wall it DROPS the model one tier via resolveSwarmModelEffort
@@ -2651,6 +2765,60 @@ export const MANAGER_NUDGE_INTERVAL_MS = MANAGER_HEARTBEAT_STALE_MS
  *  exists, so "the commander cannot be started" would be a lie. */
 export const MAX_MANAGER_NUDGES = 3
 
+/** THE OUTCOME CLOCK (2026-07-22). How long the review queue may sit with NOTHING moving
+ *  and NO commander heartbeat before the engine speaks up — **even when the desk reads
+ *  `'active'`**.
+ *
+ *  WHY A SECOND, LONGER CLOCK EXISTS AT ALL. {@link defaultManagerPresence} answers "is
+ *  the desk alive?" and its strongest everyday channel is PTY PAINT. That is the right
+ *  answer to that question and the wrong answer to "is the integration progressing?" —
+ *  the commander is a session that says one turn and STOPS. Paint proves it spoke; it
+ *  does not prove it is still working. Measured 2026-07-22: the commander beat 統合完了 at
+ *  10:31, two workers promoted into review at 10:37/10:40, and the engine said NOTHING
+ *  until the owner woke it by hand at 11:51 — 80 minutes with four branches stacked up,
+ *  because the presence probe kept answering the question it was asked. So liveness
+ *  ('is a desk there?') now has a companion: DELIVERY ('is anything coming out of it?').
+ *
+ *  WHAT COUNTS AS DELIVERY. Not paint — paint is emitted by any TUI repaint, which is the
+ *  whole bug above. The three files of {@link defaultManagerDeliveryAt} (heartbeat,
+ *  session transcript, sub-agent transcripts) instead, because every one of them is
+ *  written only as a BY-PRODUCT OF WORK and never by a repaint.
+ *
+ *  ⚠ THE BEAT ALONE IS NOT ENOUGH — 2026-07-22 差し戻し, and the reason this comment is
+ *  long. `/og-manage` beats ONCE at the head of each branch (docs/commander/03 §3) and
+ *  then does the whole branch INSIDE ONE TURN: `npx tsc --noEmit`, `npm test` (3–12
+ *  minutes on this repo, worse under load), then adversarial reviewers via the Agent tool
+ *  (5–20 minutes, several at once on a big diff). It cannot curl a beat from inside that
+ *  turn. So "40 minutes with no beat" is the NORMAL shape of a commander doing its job,
+ *  and a beat-only rule would have ESC-interrupted running reviews — turning a fix for a
+ *  missing nudge into a machine that breaks the commander's actual work. The other two
+ *  channels are what separate that desk from a stopped one; see defaultManagerDeliveryAt.
+ *
+ *  WHY 40 MINUTES (完了条件2 — the anti-false-positive margin). A nudge leads with ESC, so
+ *  a wrong one interrupts a generation or clears typed input: the threshold must exceed
+ *  the longest gap a genuinely WORKING commander can leave across ALL THREE channels at
+ *  once. That gap is one long blocking tool call with no sub-agent running — a full
+ *  `npm test`, measured at 3–12 minutes on this repo (2026-07-22, under swarm load) —
+ *  because a sub-agent stretch keeps channel 3 moving and every other step appends a
+ *  tool_result to channel 2. 40 minutes is more than triple that. It is a ceiling on how
+ *  long a SILENT commander goes unnoticed, not a deadline for a working one — the ordinary
+ *  10-minute {@link MANAGER_HEARTBEAT_STALE_MS} path still catches every desk whose PAINT
+ *  also went quiet, which is the common case and much faster. */
+export const MANAGER_INTEGRATION_STALL_MS = 40 * 60_000
+
+/** RE-ARM the spent nudge budget once per episode after this long, while the queue is
+ *  still stalled (完了条件1, the other half of the 80-minute silence).
+ *
+ *  {@link MAX_MANAGER_NUDGES} deliberately ends in silence: a desk that ignores three
+ *  pokes is a human matter. But "the budget is spent" is a verdict about the DESK, and
+ *  the episode it belongs to only ends when review DRAINS — so a batch that never drains
+ *  (a commander that stopped, or cards parked awaiting the owner) leaves the engine mute
+ *  for as long as the batch lives, which is indistinguishable from the bug this card
+ *  fixes. One extra round, after a full hour of PROVABLE stall (no beat, nothing moving),
+ *  bounds the engine's voice at ≤6 pokes per waiting batch while removing "mute forever
+ *  with work stuck" — and the one-shot 「声かけに応答しません」 warn still fires exactly once. */
+export const MANAGER_NUDGE_REARM_MS = 60 * 60_000
+
 /** After the engine wakes/resuscitates a desk, wait this long before judging it again —
  *  a freshly-`claude --resume`d commander needs to boot AND emit its first beat, and the
  *  PREVIOUS (stale) heartbeat file still reads dead until it does. Without this grace the
@@ -2746,6 +2914,41 @@ export const readManagerHeartbeatAt = async (projectPath: string): Promise<numbe
 export const isManagerHeartbeatFresh = (at: number | null, now: number): boolean =>
   at == null || now - at < MANAGER_HEARTBEAT_STALE_MS
 
+/** Is INTEGRATION stalled — work waiting long enough that a working commander would have
+ *  produced SOMETHING by now, and nothing produced? Pure (no IO/clock) so the rule is
+ *  unit-tested directly. See {@link MANAGER_INTEGRATION_STALL_MS} for why this exists
+ *  beside the presence probe and why the window is what it is.
+ *
+ *  BOTH clocks must be past the window, and they measure different things:
+ *    - `waitingSinceMs` — when the OLDEST swarm card now in review was FIRST SEEN waiting.
+ *      Without it a card that landed one second ago would be enough to poke a desk the
+ *      owner is talking to, just because the last integration ended an hour back.
+ *    - `deliveryAtMs` — {@link defaultManagerDeliveryAt}: the newest of heartbeat /
+ *      session transcript / sub-agent transcripts. This is the half that keeps a
+ *      genuinely-integrating desk safe (完了条件2). It must NOT be the heartbeat alone:
+ *      the commander beats once per branch and then works for tens of minutes inside a
+ *      single turn, so a beat-only rule reads honest work as a stall.
+ *
+ *  `deliveryAtMs === null` (no channel has anything to say) ⇒ NOT stalled, deliberately —
+ *  the same fail-open {@link isManagerHeartbeatFresh} takes, and for the same reason: a
+ *  rule that reads "silence" off channels that were never written would poke a desk we
+ *  know nothing about. Nothing is lost: a desk that is stopped AND not painting still ages
+ *  into `'idle'` on the ordinary 10-minute path, which does not consult this at all. */
+export const managerIntegrationStalled = (input: {
+  /** Epoch ms the oldest waiting review card was first seen, or null when none waits. */
+  waitingSinceMs: number | null
+  /** Epoch ms the commander last demonstrably produced work, or null when nothing says. */
+  deliveryAtMs: number | null
+  now: number
+  /** Window override (tests). Default {@link MANAGER_INTEGRATION_STALL_MS}. */
+  stallMs?: number
+}): boolean => {
+  const stallMs = input.stallMs ?? MANAGER_INTEGRATION_STALL_MS
+  if (input.waitingSinceMs === null || input.deliveryAtMs === null) return false
+  if (input.now - input.waitingSinceMs < stallMs) return false
+  return input.now - input.deliveryAtMs >= stallMs
+}
+
 /** DISPLAY snapshot of the commander heartbeat — the full record (phase / note /
  *  updatedAt) plus a server-clock freshness read, for GET /api/swarm/orchestrator's
  *  `manager` field (the Swarm tab's "検品中/待機中" presence line — the post-worker
@@ -2789,6 +2992,155 @@ const managerTranscriptAt = async (cwd: string, sessionId: string): Promise<numb
     return st.isFile() ? st.mtimeMs : null
   } catch {
     return null
+  }
+}
+
+/** Newest mtime across the SUB-AGENT transcripts this session has spawned, or null when
+ *  there are none. The channel that proves a desk sitting inside ONE long turn is still
+ *  working (2026-07-22).
+ *
+ *  A commander integrating a branch runs its adversarial reviewers with the Agent tool,
+ *  and those turns do NOT land in the parent `<sessionId>.jsonl` — they go to
+ *  `<sessionId>/subagents/agent-*.jsonl`. So the parent transcript FREEZES for the whole
+ *  review while the desk is at its busiest. Measured on the real tree 2026-07-22: a
+ *  39-minute reviewer wrote 229 entries into its own file and that file's mtime matched
+ *  its last entry's timestamp to the second — i.e. these files are appended
+ *  INCREMENTALLY, so their mtime tracks the sub-agent's progress in real time.
+ *
+ *  Never throws: a missing dir (no sub-agent ever ran) or a torn ~/.claude simply
+ *  contributes no signal. Cheap by placement — only the stall probe calls it, and only
+ *  after the queue has already waited past MANAGER_INTEGRATION_STALL_MS. */
+const managerSubagentActivityAt = async (cwd: string, sessionId: string): Promise<number | null> => {
+  const dir = sessionSubagentsDir(cwd, sessionId)
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return null // no subagents dir — this session has never spawned one
+  }
+  let newest = 0
+  for (const name of names) {
+    if (!name.startsWith('agent-') || !name.endsWith('.jsonl')) continue
+    try {
+      const st = await stat(join(dir, name))
+      if (st.isFile() && st.mtimeMs > newest) newest = st.mtimeMs
+    } catch {
+      // a file that vanished between readdir and stat contributes nothing
+    }
+  }
+  return newest > 0 ? newest : null
+}
+
+/** Newest mtime across a claude session's OWN transcript AND its sub-agent transcripts
+ *  — the two FILE channels that keep advancing while the PTY frame and the (sparse)
+ *  heartbeat are both frozen, i.e. a session sitting inside ONE long turn running a
+ *  Task() sub-agent. Generic over any {cwd, sessionId} (the two helpers below are named
+ *  `manager*` for historical reasons but read nothing manager-specific): the manager
+ *  delivery clock ({@link defaultManagerDeliveryAt}) reads the two parts directly, and
+ *  the WORKER stall backstop reads them combined through here — the worker analog of
+ *  7517e4b1 (2026-07-23). null when neither file has anything. Never throws. */
+const sessionAgentActivityAt = async (cwd: string, sessionId: string): Promise<number | null> => {
+  const [parentAt, subAt] = await Promise.all([
+    managerTranscriptAt(cwd, sessionId),
+    managerSubagentActivityAt(cwd, sessionId),
+  ])
+  const newest = Math.max(parentAt ?? 0, subAt ?? 0)
+  return newest > 0 ? newest : null
+}
+
+/** WHICH desk is the engine talking about, and when did it last paint? The resolution
+ *  {@link defaultManagerPresence} and {@link defaultManagerDeliveryAt} must agree on —
+ *  extracted so the two probes can never judge DIFFERENT desks (the orphan fallback below
+ *  is subtle enough that a second hand-rolled copy would drift).
+ *
+ *  null ⇒ there is no desk anywhere (presence's `'absent'`). Otherwise the desk's own
+ *  cwd + session id + newest paint — the ORPHAN's when the store's record is stale, since
+ *  its session id and this project's path are what name ITS transcript, and judging the
+ *  desk that exists by the activity of one that does not is precisely the 2026-07-19 bug.
+ *  Throws only what its callers already catch (a torn session store). */
+const resolveManagerDesk = async (
+  projectPath: string,
+  deps: {
+    activity?: (agentSessionId: string) => ClaudeSessionActivity
+    liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
+  },
+): Promise<{ cwd: string; sessionId: string; paintedAt: number } | null> => {
+  const rec = (await readSwarmSessions(projectPath)).manager
+  const pty = rec
+    ? (deps.activity ?? claudeSessionActivity)(rec.sessionId)
+    : { live: false, lastOutputAt: null, terminalId: null }
+  // The record's desk is gone (or there is no record). BEFORE concluding there is
+  // no desk, ASK THE POOL (2026-07-19: eleven desks, none of them dead).
+  //
+  // 'absent' drives the only spawn, so reading it wrongly is what builds a twin —
+  // and this probe used to read it from ONE slot in a store that every spawn
+  // overwrites and whose write failure is swallowed (swarmManager). A desk whose
+  // id has been overwritten keeps running while presence, asking only about the id
+  // on file, calls it absent forever: engine spawns a replacement, that one's id
+  // takes the slot, and the previous desk joins the pile. The desks were never
+  // dead — they were UNNAMED. This is the hole 03 §2.3 recorded on 2026-07-19
+  // (「登録されていない卓は presence から見えない」), closed here at its source.
+  //
+  // The pool cannot desynchronise from itself, so a labelled commander desk found
+  // there is proof a desk EXISTS — which is exactly and only what 'absent' claims
+  // the absence of. Reconciling the store is spawnSwarmManager's job (it holds the
+  // write path); presence stays a pure read and simply stops lying.
+  const orphan = pty.live
+    ? null
+    : ((deps.liveDesks ?? listLiveDesksIn)(projectPath, MANAGER_DESK_LABEL)[0] ?? null)
+  if (!pty.live && !orphan) return null // no desk anywhere — the ONLY spawn trigger
+  return {
+    cwd: orphan ? projectPath : rec!.cwd,
+    sessionId: orphan ? (orphan.agentSessionId ?? '') : rec!.sessionId,
+    paintedAt: (orphan ? orphan.lastOutputAt : pty.lastOutputAt) ?? 0,
+  }
+}
+
+/** WHEN did the commander last demonstrably DO something — the DELIVERY clock the stall
+ *  check ({@link managerIntegrationStalled}) judges an `'active'` desk against. Epoch ms,
+ *  or null when no channel has anything to say.
+ *
+ *  The newest of THREE files, all of which are written only as a by-product of real work
+ *  (never by a repaint):
+ *    1. the commander's heartbeat — written per branch at the head of an integration;
+ *    2. the session transcript — appended per tool_use / tool_result, i.e. every step of
+ *       a turn that is running commands;
+ *    3. the SUB-AGENT transcripts — the channel that covers the long stretch where (1)
+ *       and (2) are both frozen because the desk is inside ONE turn waiting on reviewers
+ *       (see {@link managerSubagentActivityAt}).
+ *
+ *  WHY ALL THREE (the 2026-07-22 差し戻し). The first cut of this check used the heartbeat
+ *  ALONE, and that is wrong about how the commander actually works: `/og-manage` beats
+ *  ONCE at the head of each branch and then does the whole branch — `npx tsc --noEmit`,
+ *  `npm test` (3–12 minutes on this repo, worse under load), then adversarial reviewers
+ *  via the Agent tool (5–20 minutes, several at once on a big diff) — INSIDE that single
+ *  turn, during which it cannot curl a beat at all. So "40 minutes with no beat" is the
+ *  NORMAL shape of a commander doing its job, and poking it there would ESC-interrupt a
+ *  running review. Channels 2+3 are what separate that desk from one that has stopped:
+ *  a commander that spoke and stopped freezes all three at the same instant.
+ *
+ *  Never throws — an unreadable store/home just yields whatever channels did answer. */
+export const defaultManagerDeliveryAt = async (
+  projectPath: string,
+  deps: {
+    activity?: (agentSessionId: string) => ClaudeSessionActivity
+    liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
+  } = {},
+): Promise<number | null> => {
+  try {
+    const beatAt = await readManagerHeartbeatAt(projectPath)
+    const desk = await resolveManagerDesk(projectPath, deps)
+    const sid = desk?.sessionId ?? ''
+    const [parentAt, subAt] = sid
+      ? await Promise.all([
+          managerTranscriptAt(desk!.cwd, sid),
+          managerSubagentActivityAt(desk!.cwd, sid),
+        ])
+      : [null, null]
+    const newest = Math.max(beatAt ?? 0, parentAt ?? 0, subAt ?? 0)
+    return newest > 0 ? newest : null
+  } catch {
+    return null // nothing readable ⇒ no evidence ⇒ fail-open (never stalled)
   }
 }
 
@@ -2847,30 +3199,10 @@ export const defaultManagerPresence = async (
   } = {},
 ): Promise<ManagerPresence> => {
   try {
-    const rec = (await readSwarmSessions(projectPath)).manager
-    const pty = rec
-      ? (deps.activity ?? claudeSessionActivity)(rec.sessionId)
-      : { live: false, lastOutputAt: null, terminalId: null }
-    // The record's desk is gone (or there is no record). BEFORE concluding there is
-    // no desk, ASK THE POOL (2026-07-19: eleven desks, none of them dead).
-    //
-    // 'absent' drives the only spawn, so reading it wrongly is what builds a twin —
-    // and this probe used to read it from ONE slot in a store that every spawn
-    // overwrites and whose write failure is swallowed (swarmManager). A desk whose
-    // id has been overwritten keeps running while presence, asking only about the id
-    // on file, calls it absent forever: engine spawns a replacement, that one's id
-    // takes the slot, and the previous desk joins the pile. The desks were never
-    // dead — they were UNNAMED. This is the hole 03 §2.3 recorded on 2026-07-19
-    // (「登録されていない卓は presence から見えない」), closed here at its source.
-    //
-    // The pool cannot desynchronise from itself, so a labelled commander desk found
-    // there is proof a desk EXISTS — which is exactly and only what 'absent' claims
-    // the absence of. Reconciling the store is spawnSwarmManager's job (it holds the
-    // write path); presence stays a pure read and simply stops lying.
-    const orphan = pty.live
-      ? null
-      : ((deps.liveDesks ?? listLiveDesksIn)(projectPath, MANAGER_DESK_LABEL)[0] ?? null)
-    if (!pty.live && !orphan) return 'absent' // no desk anywhere — the ONLY spawn trigger
+    // WHICH desk (record's, or the pool's orphan when the record is stale) — shared with
+    // the delivery probe so the two can never judge different desks. See resolveManagerDesk.
+    const desk = await resolveManagerDesk(projectPath, deps)
+    if (!desk) return 'absent' // no desk anywhere — the ONLY spawn trigger
     // A desk EXISTS. Is anything moving? Any ONE positive signal is enough — these are
     // alternative evidence of the same fact, never requirements to be ANDed (the AND is
     // precisely what broke). The heartbeat keeps its own documented rule, including the
@@ -2897,19 +3229,15 @@ export const defaultManagerPresence = async (
     // observed real-~/.claude/settings.json pollution, but it re-anchors ~17 homedir()
     // call sites suite-wide — its own change, not this one's.)
     //
-    // Read the ORPHAN's own channels when it is the desk we found: its session id and
-    // this project's path are what name its transcript, and its own PTY paint is the
-    // only paint that says anything about IT. Falling back to the stale record's here
-    // would judge the desk that exists by the activity of one that does not.
-    const deskCwd = orphan ? projectPath : rec!.cwd
-    const deskSessionId = orphan ? (orphan.agentSessionId ?? '') : rec!.sessionId
-    const fileAt = deskSessionId ? await managerTranscriptAt(deskCwd, deskSessionId) : null
+    // `desk` already carries the ORPHAN's own channels when it is the desk we found (its
+    // session id and this project's path name ITS transcript, and its own paint is the
+    // only paint that says anything about IT) — see resolveManagerDesk.
+    const fileAt = desk.sessionId ? await managerTranscriptAt(desk.cwd, desk.sessionId) : null
     // Paint that is only our own nudge bouncing back is not life (see `echoUntil` above).
     // The transcript is left untouched by that discount — claude appends a real turn there
     // only when it actually processes something, so it is the honest half of the OR.
     const echoUntil = deps.echoUntil ?? 0
-    const painted = (orphan ? orphan.lastOutputAt : pty.lastOutputAt) ?? 0
-    const realPaint = echoUntil > 0 && painted <= echoUntil ? 0 : painted
+    const realPaint = echoUntil > 0 && desk.paintedAt <= echoUntil ? 0 : desk.paintedAt
     const newest = Math.max(realPaint, fileAt ?? 0)
     return newest > 0 && now - newest < MANAGER_HEARTBEAT_STALE_MS ? 'active' : 'idle'
   } catch {
@@ -2927,9 +3255,15 @@ export const defaultManagerPresence = async (
  *
  *  WHY THE LEADING ESC (and why "the PTY echoes keystrokes" is not enough on its own).
  *  The obvious safety argument — a desk someone is actively typing into paints, so it
- *  reads 'active' and is never nudged — only covers the owner typing RIGHT NOW. It does
- *  not cover a prompt typed and then LEFT SITTING: that paint ages out after
- *  {@link MANAGER_HEARTBEAT_STALE_MS}, the desk reads 'idle', and a bare line+CR would
+ *  reads 'active' and is never nudged — only covers the owner typing RIGHT NOW, and since
+ *  2026-07-22 it does not even cover that: a desk reading 'active' purely from paint IS
+ *  poked once the integration queue is provably stalled (see
+ *  {@link MANAGER_INTEGRATION_STALL_MS}), so "it paints, therefore we never write to it"
+ *  is no longer an invariant anywhere. What keeps that safe is the DELIVERY evidence the
+ *  stall check requires ({@link defaultManagerDeliveryAt}) plus the ESC below, not the
+ *  paint. The original hole remains too: a prompt typed and then LEFT SITTING has paint
+ *  that ages out after {@link MANAGER_HEARTBEAT_STALE_MS}, the desk reads 'idle', and a
+ *  bare line+CR would
  *  append to the half-written text and SUBMIT the two concatenated — on a desk running
  *  with `--dangerously-skip-permissions` (swarmManager.ts), i.e. with no approval gate to
  *  catch the malformed result. Our own ESC clears that pending input (and interrupts a
@@ -3542,7 +3876,14 @@ export const tscCheck: VerifyCheck = {
  *  so without these entries a branch that gutted the policy, or deleted the tests
  *  that pin it, would touch NO swarm path and the safety gate would never fire.
  *  Membership in {@link SWARM_SAFETY_TESTS} only makes deletion RED once the gate
- *  actually runs; that gate has to be triggered first. */
+ *  actually runs; that gate has to be triggered first.
+ *  `server/index.ts` (2026-07-22, card 2) is added for the same reason: it's the
+ *  ONE place `resumeEngines()` is actually wired in (the `process.send` dev/prod
+ *  gate + the boot-time call itself) — none of it lives under `swarm*.ts` or
+ *  `server/routes/swarm.ts`, so a future diff that quietly dropped the gate or
+ *  the call (re-enabling unattended resume on every `tsx watch` save, or
+ *  disabling the crash-loop-guarded resume in prod) would otherwise touch NO
+ *  path this set already watches. */
 const SWARM_CODE_PATHS: readonly RegExp[] = [
   /^src\/lib\/server\/swarm[^/]*\.ts$/,
   /^server\/routes\/swarm\.ts$/,
@@ -3552,6 +3893,7 @@ const SWARM_CODE_PATHS: readonly RegExp[] = [
   /^src\/lib\/server\/gate(Process|Env)[^/]*$/,
   /^server\/__tests__\/gateEnvParity\.test\.ts$/,
   /^electron\/gateEnv\.js$/,
+  /^server\/index\.ts$/,
 ]
 
 /** Does this changed-file set (repo-relative paths) touch any swarm code? Pure — the
@@ -4950,6 +5292,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   nudge: defaultNudge,
   escalate: defaultEscalate,
   recentOutput: defaultRecentOutput,
+  sessionAgentActivityAt,
   raiseQuestion: openEscalation,
   readConsumption: defaultReadConsumption,
   fetchReview: defaultFetchReview,
@@ -4979,6 +5322,9 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // nothing); wakeManager spawns, nudgeManager pokes a live one (2026-07-18).
   managerPresence: (p, now, echoUntil) => defaultManagerPresence(p, now, { echoUntil }),
   nudgeManager: defaultNudgeManager,
+  // The DELIVERY evidence behind the stall check (2026-07-22) — read only once the queue
+  // has already waited past MANAGER_INTEGRATION_STALL_MS, never on an ordinary tick.
+  managerDeliveryAt: (p) => defaultManagerDeliveryAt(p),
   wakeManager: defaultWakeManager,
   worktreeExists: defaultWorktreeExists,
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
@@ -5818,7 +6164,13 @@ const monitorWorkers = async (
     // Heartbeats are NOT clamped — a worker that beats is working, whatever its
     // screen shows, and stays out of every branch below via silentMs.
     const stallLastOut = limitSince !== null && lastOut !== null && lastOut > limitSince ? limitSince : lastOut
-    const stall = classifyStall(
+    const stallParams = {
+      stallMs: STALL_SILENCE_MS,
+      cooldownMs: STALL_NUDGE_COOLDOWN_MS,
+      echoGuardMs: STALL_ECHO_GUARD_MS,
+      maxNudges: STALL_MAX_NUDGES,
+    }
+    let stall = classifyStall(
       {
         heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
         lastOutputAtMs: stallLastOut,
@@ -5826,13 +6178,49 @@ const monitorWorkers = async (
         nudge: engine.nudges.get(w.terminalId),
       },
       now,
-      {
-        stallMs: STALL_SILENCE_MS,
-        cooldownMs: STALL_NUDGE_COOLDOWN_MS,
-        echoGuardMs: STALL_ECHO_GUARD_MS,
-        maxNudges: STALL_MAX_NUDGES,
-      },
+      stallParams,
     )
+
+    // ── THIRD LIVENESS CHANNEL — the worker analog of 7517e4b1 (2026-07-23) ──────
+    // The cheap channels (heartbeat + PTY output) call this worker silent — but a
+    // worker deep in ONE long turn running a Task() sub-agent (its OWN adversarial
+    // self-review) freezes BOTH of them while its transcript / sub-agent files keep
+    // growing in real time (measured on the desk 2026-07-22: a 39-min reviewer wrote
+    // 229 incremental entries; the parent transcript FROZE the whole time). Re-judge
+    // such a worker against those files so it is neither nudged (ESC would interrupt
+    // the running review) nor reclaimed (teardown + re-home → the observed twin
+    // dispatch + near-loss of in-flight work). The freshness can only ADD activity —
+    // a genuinely-dead worker's files stop growing, so its mtime goes stale on the
+    // same clock and it is still reclaimed. GATED behind the silence threshold so the
+    // fs walk runs only for the handful of workers about to be acted on, never every
+    // pass — and skipped for a rate-limited worker (silent BY DESIGN, no sub-agent).
+    if (
+      stall.silentMs >= STALL_SILENCE_MS &&
+      output !== 'rate-limited' &&
+      w.sessionId &&
+      w.worktree &&
+      deps.sessionAgentActivityAt
+    ) {
+      let agentAt: number | null = null
+      try {
+        agentAt = await deps.sessionAgentActivityAt(w.worktree, w.sessionId)
+      } catch {
+        agentAt = null // torn ~/.claude ⇒ no signal ⇒ keep the cheap verdict
+      }
+      if (agentAt !== null) {
+        stall = classifyStall(
+          {
+            heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
+            lastOutputAtMs: stallLastOut,
+            startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
+            agentActivityAtMs: agentAt,
+            nudge: engine.nudges.get(w.terminalId),
+          },
+          now,
+          stallParams,
+        )
+      }
+    }
 
     // EARLY CONFIRMATION — a worker REJECTED AT SPAWN (the 2026-07-09 shape:
     // "You've reached your Fable 5 limit." four seconds in) must not wait out the
@@ -6210,6 +6598,83 @@ const raiseNoAllowedModelTier = async (
   }
 }
 
+// ── card 3: roster write-through (state-transition-gated) ────────────────────
+
+/** Build one persisted roster row from a live worker. `workedMs` is the worker's
+ *  WORKING time (wall-clock since spawn MINUS the banked idle credits the runaway
+ *  check already deducts — {@link isRunaway}'s `idleMs`), so persisting it lets a
+ *  card-4 resume restart the runaway clock from real accumulated work instead of
+ *  zero. `tier` is the launch model alias; `card` (when the board is in hand)
+ *  refreshes reworkCount. Pure (clock injected). */
+const rosterEntryOf = (
+  engine: ProjectEngine,
+  w: OrchestratorWorker,
+  now: number,
+  card?: ProjectTask,
+): RosterEntry => {
+  const spawnAtMs = Date.parse(w.startedAt)
+  const known = Number.isFinite(spawnAtMs) && spawnAtMs > 0
+  const idle =
+    (engine.rateLimitHeldMs?.get(w.terminalId) ?? 0) + (engine.integrationWaitMs?.get(w.terminalId) ?? 0)
+  return {
+    sessionId: w.sessionId ?? '',
+    taskId: w.taskId,
+    branch: w.branch,
+    worktree: w.worktree,
+    tier: w.model ?? '',
+    spawnAt: known ? spawnAtMs : now,
+    workedMs: known ? Math.max(0, now - spawnAtMs - Math.max(0, idle)) : 0,
+    reworkCount: card?.reworkCount ?? w.reworkCount ?? 0,
+  }
+}
+
+/** A stable fingerprint of what the roster WOULD persist, EXCLUDING the time-varying
+ *  workedMs/spawnAt — so it changes iff the worker set, a stage, a rework/ready
+ *  marker, or the rework count actually transitioned. Sorted by worktree so member
+ *  order never matters. This is the "state-transition point" detector that keeps
+ *  syncRoster off the per-tick write path. */
+const rosterSignature = (workers: OrchestratorWorker[]): string =>
+  JSON.stringify(
+    workers
+      .map((w) => [
+        w.worktree,
+        w.taskId,
+        w.branch,
+        w.sessionId ?? '',
+        w.model ?? '',
+        w.stage,
+        w.reworkAt ?? '',
+        w.readyAt ?? '',
+        w.reworkCount ?? 0,
+      ])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+  )
+
+/** Write-through the roster IFF a real transition changed it (signature guard). A
+ *  no-op on an unchanged pass; on a change it persists the full set and records the
+ *  new signature — but ONLY on a successful write, so a failed (fail-open) write is
+ *  retried next pass instead of being masked by an updated signature. `byId`
+ *  refreshes each worker's cached reworkCount from its card. Never throws. */
+const syncRoster = async (
+  engine: ProjectEngine,
+  now: number,
+  byId?: Map<string, ProjectTask>,
+): Promise<void> => {
+  if (byId) {
+    for (const w of engine.workers) {
+      const card = byId.get(w.taskId)
+      if (card && typeof card.reworkCount === 'number') w.reworkCount = card.reworkCount
+    }
+  }
+  const sig = rosterSignature(engine.workers)
+  if (sig === engine.rosterSig) return
+  const ok = await writeRoster(
+    engine.path,
+    engine.workers.map((w) => rosterEntryOf(engine, w, now, byId?.get(w.taskId))),
+  )
+  if (ok) engine.rosterSig = sig
+}
+
 // ── The drain pass (the heart — exported for the unit test) ──────────────────
 
 /** ONE pass. Idempotent-ish and side-effect-bounded:
@@ -6422,6 +6887,11 @@ export const runDispatchPass = async (
         // Launch tier, for the monitor's rate-limit sighting → cooling-table
         // attribution (absent from older fakes/callers — then nothing is marked).
         ...(spawn.model ? { model: spawn.model } : {}),
+        // card 3 — capture the session UUID (for card 4's --resume) + carry the
+        // card's current 差し戻し count into the roster. Both are persisted by the
+        // end-of-pass syncRoster (this spawn changes the roster signature).
+        ...(spawn.agentSessionId ? { sessionId: spawn.agentSessionId } : {}),
+        reworkCount: fresh.reworkCount ?? 0,
       })
       // The dispatch line records WHETHER the learning-loop context was injected (有/無),
       // so a re-dispatch carrying the prior failure is visible in the engine log.
@@ -6449,6 +6919,14 @@ export const runDispatchPass = async (
     // threw goes back to being freely dispatchable, which is correct.
     for (const id of reserved) pending.delete(id)
   }
+
+  // card 3 — WRITE-THROUGH the roster ONCE per pass, AFTER every mutation (monitor
+  // reclaim/promote + this pass's spawns). The signature guard inside makes this a
+  // no-op unless the worker set / a stage / a rework marker actually changed, so a
+  // plain time-passing tick does no I/O (plan §3 "書くのは状態遷移点のみ"). Never
+  // throws (fail-open). `byId` (this pass's board read) refreshes each worker's
+  // reworkCount from its card.
+  await syncRoster(engine, now, byId)
 }
 
 // ── The integration pass (Card③ — review → done, the riskiest stage) ─────────
@@ -6518,6 +6996,18 @@ export const runIntegratePass = async (
   }
   for (const b of Array.from(engine.highRiskHolds.keys())) {
     if (!present.has(b)) engine.highRiskHolds.delete(b)
+  }
+  // The OUTCOME clock (2026-07-22): stamp每 branch the first time it is SEEN waiting in
+  // review, and drop it the moment it leaves — on the same `present` sweep, so "the queue
+  // moved" and "the clock resets" are the same event and cannot drift apart. Kept here
+  // (not in the manager block below) because it must run on EVERY pass, including the ones
+  // where the desk reads healthy: the clock has to have been ticking before it is read.
+  const reviewSeenAt = (engine.reviewSeenAt ??= new Map()) // lazy backfill (older build / test literal)
+  for (const b of Array.from(reviewSeenAt.keys())) {
+    if (!present.has(b)) reviewSeenAt.delete(b)
+  }
+  for (const c of swarmCards) {
+    if (!reviewSeenAt.has(c.branch)) reviewSeenAt.set(c.branch, now)
   }
 
   // A. Read-only readiness for the dashboard (both switch positions).
@@ -6595,6 +7085,12 @@ export const runIntegratePass = async (
     rs.nudges = 0
     rs.lastNudgeAt = 0
     rs.unresponsiveLogged = false
+    // The stall episode ends with the batch it was measured against (2026-07-22): the
+    // one-shot explain-line and the one-shot budget re-arm both belong to THIS waiting
+    // batch, so a later one starts with a full voice. (`engine.reviewSeenAt` needs no
+    // reset here — the `present` sweep above already emptied it.)
+    rs.stallLogged = false
+    rs.nudgeRearmed = false
     // "Fully" has to include `lastWakeSpawned` too (card add3af4c, 2026-07-22 sibling
     // fix): it is the transient-vs-permanent bit the give-up ratchet reads (below), so
     // a stale `true` carried out of THIS episode into the next one would make a fresh
@@ -6647,16 +7143,48 @@ export const runIntegratePass = async (
     lastSelfWriteAt > 0 ? lastSelfWriteAt + STALL_ECHO_GUARD_MS : 0,
   )
   if (!engine.running) return // owner stopped the engine during the probe
-  if (presence === 'active') {
+
+  // A desk that PAINTS is a desk that came up. Record that before anything else branches:
+  // it is a verdict about the desk we last SPAWNED (did the resurrection take?), and it is
+  // true whether or not integration is moving. Hoisted out of the healthy branch below so
+  // the stall path cannot accidentally withhold the refund and let `attempts` climb toward
+  // a false 'manager-unrevivable' against a desk that is demonstrably up (2026-07-22 nit).
+  if (presence === 'active') rs.provenSinceWake = true
+
+  // ── IS ANYTHING COMING OUT OF IT? (2026-07-22 — the 80-minute blind spot) ────────────
+  // `presence` answered "is a desk alive?", and for a session that speaks one turn and
+  // STOPS that is not the same question as "is the integration progressing?". Ask the
+  // second one separately, against evidence only real work produces — heartbeat, session
+  // transcript, sub-agent transcripts (defaultManagerDeliveryAt). Cheap by construction:
+  // the dwell half is in-memory and gates the read, so an ordinary tick touches no disk.
+  // See {@link MANAGER_INTEGRATION_STALL_MS} for the measured incident and the margins.
+  // Oldest first-sight wins. Folded rather than `Math.min(...spread)` — the spread would
+  // put one argument per waiting card on the stack, which is fine at board scale and a
+  // RangeError at no scale anyone should have to reason about.
+  let waitingSince: number | null = null
+  for (const at of Array.from(reviewSeenAt.values())) {
+    if (waitingSince === null || at < waitingSince) waitingSince = at
+  }
+  let stalled = false
+  if (waitingSince !== null && now - waitingSince >= MANAGER_INTEGRATION_STALL_MS) {
+    const deliveryAt = await (deps.managerDeliveryAt ?? defaultManagerDeliveryAt)(engine.path)
+    if (!engine.running) return // owner stopped the engine during the read
+    stalled = managerIntegrationStalled({ waitingSinceMs: waitingSince, deliveryAtMs: deliveryAt, now })
+  }
+
+  if (presence === 'active' && !stalled) {
     // Healthy desk on the job → both budgets disarmed (a future silence starts fresh).
-    // This ALSO records that the last resurrection actually took (see provenSinceWake):
-    // 'active' is the only state that proves a spawned desk really came up, because it is
-    // the only one the launch echo cannot fake once that echo is discounted above.
-    rs.provenSinceWake = true
+    // ('active' also proves the last resurrection took — the launch echo cannot fake it
+    // once discounted above — but that is now recorded on the hoisted `provenSinceWake`
+    // line, because it is equally true of an 'active' desk whose queue has stalled.)
     rs.attempts = 0
     rs.fatalFired = false
     rs.nudges = 0
     rs.unresponsiveLogged = false
+    // A desk seen working also ends the stall episode: the next silence gets the full
+    // voice back (explain-line + a fresh re-arm), exactly as it does for `nudges`.
+    rs.stallLogged = false
+    rs.nudgeRearmed = false
     return
   }
 
@@ -6667,7 +7195,31 @@ export const runIntegratePass = async (
   // and orphaned the working one — 16 idle desks and a duplicate-dispatcher hazard on
   // one trunk (the 2026-07-15 concurrent-integration incident's shape). The desk exists;
   // the right move is to get ITS attention, at zero token cost and with no new session.
-  if (presence === 'idle') {
+  //
+  // …OR the desk PAINTS but is not delivering: `stalled` (2026-07-22) routes a
+  // demonstrably-not-integrating `'active'` desk down this exact same path. Only the
+  // NUDGE gate changes, and the poke it may produce is the same bounded, throttled one a
+  // quiet desk gets.
+  //
+  // `presence === 'active' && stalled`, NOT a bare `|| stalled`: a stall is a statement
+  // about the WORK, and it goes true for an 'absent' desk too (nothing is integrating
+  // because there is no desk). Letting it capture 'absent' here would divert the
+  // resurrection path into a nudge at a PTY that does not exist — no spawn, no
+  // 'manager-unrevivable' — i.e. it would disable RECOVERY in exactly the situation this
+  // card exists to fix. The spawn condition is untouched, on purpose (カード スコープ外).
+  if (presence === 'idle' || (presence === 'active' && stalled)) {
+    // Say WHY an alive-looking desk is being poked, once per episode — otherwise the log
+    // reads as the engine contradicting its own 「無音」 wording (the desk is painting).
+    if (presence === 'active' && !rs.stallLogged) {
+      rs.stallLogged = true
+      logLine(
+        engine,
+        'warn',
+        `司令官の卓は描画しているが統合が進んでいません(統合の心拍が ${Math.round(MANAGER_INTEGRATION_STALL_MS / 60_000)} 分以上ない・` +
+          `統合待ち ${swarmCards.length} 件が ${Math.round((now - (waitingSince ?? now)) / 60_000)} 分滞留)— 声かけに切り替えます`,
+        'integrate',
+      )
+    }
     // BOOT GRACE — a desk we JUST raised is allowed to be quiet while it starts up, and
     // must not be touched at all until it has had its chance (完了条件2).
     //
@@ -6702,8 +7254,27 @@ export const runIntegratePass = async (
       rs.attempts = 0
       rs.fatalFired = false
     }
-    const nudges = rs.nudges ?? 0
+    let nudges = rs.nudges ?? 0
     const lastNudgeAt = rs.lastNudgeAt ?? 0
+    // RE-ARM ONCE (2026-07-22). "Budget spent" is a verdict about the desk, but the
+    // episode only ends when review DRAINS — so on a batch that never drains the engine
+    // went mute for the rest of the batch's life, which is the same observable silence
+    // this card exists to remove. Give back ONE round, and only on the strongest evidence
+    // available: work still stuck AND still no beat AND a full hour since the last poke.
+    // Bounded to one re-arm per episode (≤6 pokes per batch) so a card deliberately parked
+    // awaiting the owner is not poked forever. Falls through to the normal path below, so
+    // the throttle and the log line stay exactly as they are.
+    if (
+      nudges >= MAX_MANAGER_NUDGES &&
+      stalled &&
+      !rs.nudgeRearmed &&
+      lastNudgeAt > 0 &&
+      now - lastNudgeAt >= MANAGER_NUDGE_REARM_MS
+    ) {
+      rs.nudgeRearmed = true
+      rs.nudges = 0
+      nudges = 0
+    }
     if (nudges >= MAX_MANAGER_NUDGES) {
       // Budget spent. The nudges were PROBES, not just reminders: a healthy claude
       // answers a submitted prompt with output, which would have read as 'active'. A
@@ -6988,7 +7559,28 @@ export const detectAnomalies = async (
     } catch {
       lastOut = null
     }
-    const since = lastActivityMs({ heartbeatAt: w.heartbeatAt, lastOutputAt: lastOut, startedAt: w.startedAt })
+    let since = lastActivityMs({ heartbeatAt: w.heartbeatAt, lastOutputAt: lastOut, startedAt: w.startedAt })
+    // The SAME third channel the stall monitor gained (2026-07-23): before flagging a
+    // worker stale, fold in its transcript / sub-agent file mtime so a worker deep in
+    // a Task() sub-agent — silent on BOTH cheap channels but its files still growing —
+    // is not falsely reported here either. This is the invariant the block header
+    // promises: the read-only view must never contradict the engine's own liveness
+    // verdict. Gated behind the cheap staleness so the fs walk runs only for a worker
+    // already about to be flagged, never for every alive worker every pass.
+    if (
+      since > 0 &&
+      now - since >= STALE_HEARTBEAT_MS &&
+      w.sessionId &&
+      w.worktree &&
+      deps.sessionAgentActivityAt
+    ) {
+      try {
+        const agentAt = await deps.sessionAgentActivityAt(w.worktree, w.sessionId)
+        if (agentAt !== null) since = Math.max(since, agentAt)
+      } catch {
+        /* torn ~/.claude ⇒ no extra signal ⇒ keep the cheap `since` */
+      }
+    }
     if (since > 0 && now - since >= STALE_HEARTBEAT_MS) {
       out.push({
         kind: 'worker-stale',
@@ -7477,17 +8069,45 @@ export const startOrchestrator = async (
   // ...and clear its PERSISTED half too: an explicit ON always outranks the durable
   // "stopped by hand" record, so the pause never outlives the owner's consent.
   await forgetSwarmManualStop(key)
-  // Persist the owner's intent so a restart can REMIND (never auto-resume): the
-  // engine above is in-memory and always relaunches OFF, but Settings.swarmAutonomyOn
-  // survives, and next launch the Swarm UI reads it to offer a one-click resume.
-  // Idempotent; cleared by stopOrchestrator (explicit OFF / dismiss).
+  // Persist the owner's intent as a REMINDER marker (Settings.swarmAutonomyOn) —
+  // historically this was "never auto-resume, just remind", but since card 2
+  // (docs/ENGINE_PERSISTENCE_PLAN.md — see the `persistEngineIntent` call ~20
+  // lines below) a restart of THIS project now DOES auto-resume on its own via
+  // `engine.json`'s `desiredRunning`. The two markers now do different jobs:
+  // this one (`swarmAutonomyOn`) is a lightweight legacy reminder the Swarm UI
+  // can still read before any per-project engine exists; `engine.json` is the
+  // one `resumeEngines()` actually acts on. Idempotent; cleared by
+  // stopOrchestrator (explicit OFF / dismiss).
   await rememberSwarmAutonomy(key)
   if (!engine.running) {
+    // nit fix (2nd rework): backfill selfSupply from the LAST persisted intent
+    // before we (below) write a fresh full snapshot back out. Without this, an
+    // owner who manually presses ON after a SUPPRESSED boot resume (crash-loop
+    // breaker held it off, or preflight failed at boot) gets a FRESH in-memory
+    // engine whose selfSupply defaults to false — and the very act of turning
+    // the drain ON would then silently overwrite a persisted selfSupply:true
+    // with false, losing it for good even after the transient problem clears.
+    // Only ever raises false→true (never clobbers an explicit false — including
+    // one the owner set deliberately this session, which was already written
+    // back to disk by setSelfSupply and would round-trip to the same value).
+    if (!engine.selfSupply.enabled) {
+      const priorIntent = await readEngineIntent(projectPath)
+      if (priorIntent.selfSupply) engine.selfSupply.enabled = true
+    }
     engine.running = true
     // Reset the integration throttle so the first pass after a (re)start refreshes
     // the readiness display immediately — without this, a stop→start within
     // INTEGRATE_TICK_MS would leave the "統合可" snapshot stale for up to 15s.
     engine.lastIntegrateAt = 0
+    // …and DROP the review dwell clock: time the engine was OFF must not count as
+    // 「統合待ち」 (2026-07-22 差し戻し). The clock feeds the stall check, and the very
+    // first pass after a start runs immediately (lastIntegrateAt = 0 above) — so a stamp
+    // left over from before the stop would arrive already past the window and fire an ESC
+    // at a live desk ~15 seconds after the owner turned the engine back on. The owner
+    // stops the engine precisely to work at that desk by hand, which is exactly the
+    // session a stray poke would break. Re-stamped on the next pass, so the wait simply
+    // restarts from "when the engine could first see it".
+    engine.reviewSeenAt?.clear()
     // New start epoch — supersedes any stale chain still settling from a prior
     // start (whose `.finally` will see the bumped generation and not re-arm).
     const gen = (engine.generation += 1)
@@ -7499,6 +8119,11 @@ export const startOrchestrator = async (
       .catch(() => {})
       .finally(() => scheduleNext(engine, deps, gen))
   }
+  // card 2 — persist `desiredRunning:true` so a restart's resumeEngines() can
+  // bring this project back up with no owner action (docs/ENGINE_PERSISTENCE_PLAN.md
+  // §4). Fire-and-forget-safe (writeEngineIntent never throws) but awaited so a
+  // caller that immediately restarts the process still sees the write land.
+  await persistEngineIntent(engine, projectPath)
   // autonomyRemembered:true — the marker was just written above (harmless while
   // running, since the UI shows the reminder only while !running); manualStopPersisted:
   // false — the record was just cleared above.
@@ -7526,7 +8151,14 @@ export const stopOrchestrator = async (
   // to SUPPRESS an auto-start, nothing ever runs because of it.
   await rememberSwarmManualStop(key)
   const engine = store.engines.get(key)
-  if (!engine) return { ...emptyState(), manualStop: true, manualStopPersisted: true }
+  if (!engine) {
+    // card 2 — persist `desiredRunning:false` even with no in-memory engine (the
+    // common post-relaunch case: no engine exists yet, but engine.json from a
+    // PRIOR process might still say true). Without this write, a relaunch right
+    // after this OFF would still see the stale desiredRunning:true and resume.
+    await writeEngineIntent(projectPath, { desiredRunning: false, selfSupply: false, overseer: false })
+    return { ...emptyState(), manualStop: true, manualStopPersisted: true }
+  }
   // Owner EXPLICITLY paused — mark it so maybeAutoStartDrain won't auto-restart the
   // engine on the next poll's idle-slot + todo (so OFF genuinely halts new dispatch,
   // 条件2). Set even on an idempotent OFF (already stopped) so the pause intent sticks
@@ -7551,6 +8183,9 @@ export const stopOrchestrator = async (
     }
     logLine(engine, 'info', 'autonomous drain OFF')
   }
+  // card 2 — persist `desiredRunning:false` (engine.overseer/selfSupply reflect
+  // the OFF above too, overseer forced false by the D1 asymmetry).
+  await persistEngineIntent(engine, projectPath)
   // autonomyRemembered:false — the marker was just cleared above; manualStopPersisted:
   // true — the record was just written above.
   return stateOf(engine, deps.isAlive, [], false, true)
@@ -7734,6 +8369,12 @@ export const stopOrchestratorWorker = async (
     engine.reworks.delete(w.taskId) // owner halted this worker — drop its 差し戻し budget too
     engine.conflictReworks.delete(w.taskId) // ...and its conflict-委譲 budget (card 012a2848)
     engine.workers = engine.workers.filter((x) => x.terminalId !== terminalId)
+    // card 3 — teardown drops the worker's roster entry (completion condition ③).
+    // AWAITED (a quick fail-open write, never throws) so the removal is observable
+    // the instant the stop returns. Should it be lost, the worker is already gone
+    // from engine.workers, so a still-running engine's next syncRoster sees the
+    // changed signature and re-derives clean anyway.
+    await removeRosterEntry(key, w.worktree)
     const note = parked === 'blocked' ? 'card → blocked' : parked === 'kept' ? 'card move kept' : 'card left as-is'
     logLine(
       engine,
@@ -7822,7 +8463,14 @@ export const resolveOrchestratorReview = async (
         /* best-effort teardown — the card already left review, which is the point */
       }
     }
-    if (owned.length) engine.workers = engine.workers.filter((w) => !owned.includes(w))
+    if (owned.length) {
+      engine.workers = engine.workers.filter((w) => !owned.includes(w))
+      // card 3 — drop every torn-down worker's roster entry in ONE read-modify-write
+      // (completion condition ③); per-worktree removeRosterEntry calls would race the
+      // file (each reads the full set, drops one, writes — the last write wins).
+      const gone = new Set(owned.map((w) => w.worktree))
+      await writeRoster(key, (await readRoster(key)).filter((e) => !gone.has(e.worktree)))
+    }
 
     // Clear EVERY engine memo tied to this branch so a re-attempt re-classifies clean:
     // the persistent conflict stamp (reliable CLEAR), the in-memory conflict + verify
@@ -7940,6 +8588,176 @@ const defaultListProjectPaths = async (): Promise<string[]> => {
   return (projects ?? []).map((p) => p.path)
 }
 
+// ── Boot resume (card 2, docs/ENGINE_PERSISTENCE_PLAN.md §4) ──────────────────
+
+/**
+ * Called ONCE at server boot (server/index.ts): re-hydrate every registered
+ * project whose swarm engine was EXPLICITLY running before this restart
+ * (`desiredRunning` in that project's `engine.json`, written by
+ * {@link startOrchestrator} / {@link stopOrchestrator} / {@link setSelfSupply}).
+ * This is the reversal of the "restart ⇒ autonomy always OFF" default
+ * documented in 00-INDEX §2.1 — see the plan's §2 for why that default's
+ * original justification (an unattended engine could FF main) no longer holds
+ * (2026-07-15 manager-only integration closed that path structurally).
+ *
+ * Guardrails, in order:
+ *   1. CRASH-LOOP BREAKER (§4-2) — record this boot in the global ring FIRST
+ *      (so even a suppressed boot counts toward the window), then check: if
+ *      THIS APP VERSION has booted {@link isCrashLoopTripped}'s threshold+
+ *      times within its window, refuse to resume ANY project this boot and
+ *      fire ONE fatal notification. A version bump resets the window (a real
+ *      release only — an in-app self-update cutover does NOT bump the version
+ *      and its restarts DO count, on purpose: a cutover looping is itself a
+ *      crash-loop symptom, not something to exempt). {@link recordEngineBoot}
+ *      is DELIBERATELY fail-CLOSED (unlike every other write in this card): if
+ *      the boot ring itself couldn't be persisted, that is ALSO treated as
+ *      tripped — a breaker that can silently stop recording must never degrade
+ *      to "never trips" (see its own comment for why this is the one exception
+ *      to the plan's fail-open write rule).
+ *   2. Per project: `desiredRunning` must be true, AND
+ *      {@link isSwarmManualStopPersisted} must be false — the owner's explicit
+ *      pause is SUPREMACY over any auto-resume, exactly like every other
+ *      manualStop consumer in this file.
+ *   3. `claudeRunPreflight()` must pass — a project that can't spawn right now
+ *      (claude missing/logged out) just doesn't resume THIS boot; it is not a
+ *      fatal condition (the owner can always press ON by hand once fixed).
+ * Before any of the above can dispatch, this function also AWAITS the quota
+ * cooling table's hydration (`ensureCoolingTableLoaded`) — memoized with
+ * server/index.ts's own boot-time kick, so normally a no-op wait — so a
+ * resumed project's first post-boot spawn can never race ahead of "which
+ * tiers were cooling before the restart" (card cf545637).
+ *
+ * Overseer note: `intent.overseer` is intentionally NOT read here — see the
+ * comment in {@link setOverseer}. Only `desiredRunning` (the drain) and
+ * `selfSupply` are honored on resume.
+ *
+ * No roster yet (card 3 — worker write-through — doesn't exist this card), so
+ * orphaned workers from before the restart are left to the EXISTING crash/
+ * reclaim machinery (a resumed engine's own monitor pass sees the Board still
+ * disagreeing with its empty in-memory worker set and reconciles normally) —
+ * per the plan's card 2 scope note ("この段階では orphan worker は既存 reclaim
+ * に任せる").
+ *
+ * Every failure mode here is FAIL-QUIET-TO-OFF per project (a corrupt
+ * engine.json, a canonicalize throw, a preflight exception) — this function
+ * must NEVER throw and NEVER block/crash server boot; a project simply doesn't
+ * resume if anything about it can't be read cleanly.
+ */
+export const resumeEngines = async (
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+  opts?: {
+    now?: number
+    listProjectPaths?: () => Promise<string[]>
+    appVersion?: string
+    /** card 3 — the boot roster reconcile, injectable so the freeze test can prove
+     *  dispatch waits on it. Defaults to the real {@link reconcileRoster} wired to
+     *  `deps`. resumeEngines AWAITS it before kicking runEnginePass — that await IS
+     *  the spawn freeze (plan §4-3c). */
+    reconcileRoster?: (projectPath: string) => Promise<unknown>
+  },
+): Promise<{ resumed: string[]; suppressed: boolean }> => {
+  const now = opts?.now ?? Date.now()
+  const appVersion = opts?.appVersion ?? APP_VERSION
+  // card 3 — reconcile-first probe set (built from deps so the module stays
+  // decoupled). readHeartbeat → a bare `ready` boolean; a gone/unreadable worktree
+  // is `false`. Overridable via opts for the freeze test.
+  const reconcile =
+    opts?.reconcileRoster ??
+    ((projectPath: string): Promise<unknown> => {
+      const reconcileDeps: RosterReconcileDeps = {
+        fetchTasks: deps.fetchTasks,
+        countCommitsAhead: deps.countCommitsAhead,
+        heartbeatReady: async (p, branch) =>
+          (await deps.readHeartbeat(p, branch).catch(() => null))?.ready === true,
+        worktreeExists: rosterWorktreeExists,
+      }
+      return reconcileRoster(projectPath, reconcileDeps)
+    })
+  const { items, persisted } = await recordEngineBoot(appVersion, now)
+  if (!persisted) {
+    // FAIL-CLOSED (see recordEngineBoot's comment): the breaker's own memory
+    // couldn't reach disk, so this boot is treated as tripped — resuming
+    // unattended workers while the ONE safety valve against a resume-and-crash
+    // loop can't count anything would be exactly backwards.
+    await createSwarmFatalNotification({
+      event: 'engine-resume-suppressed',
+      detail:
+        '起動履歴を保存できなかったため(ディスク書き込み失敗)、安全のため swarm の自動再開を見送りました(手動でオンにできます)。',
+    }).catch(() => {})
+    return { resumed: [], suppressed: true }
+  }
+  if (isCrashLoopTripped(items, appVersion, now)) {
+    const recent = items.filter((r) => r.appVersion === appVersion && now - r.at <= 10 * 60 * 1000)
+    await createSwarmFatalNotification({
+      event: 'engine-resume-suppressed',
+      detail: `同じバージョンで短時間に${recent.length}回起動したため、念のため swarm の自動再開を見送りました。アプリを開き直しただけの場合は問題ありません — 手動でオンにできます。`,
+    }).catch(() => {})
+    return { resumed: [], suppressed: true }
+  }
+
+  // Wait for the quota cooling table to hydrate from disk BEFORE any dispatch
+  // can fire (memoized — server/index.ts already kicked this off at boot, so
+  // this is normally just awaiting that same in-flight promise, one file read
+  // for the whole process). Without this ordering guarantee a resumed
+  // project's very first post-boot spawn could race the hydration and land on
+  // a tier that was actually cooling before the restart (card cf545637's
+  // "burn a session re-learning what was already known" symptom, reopened at
+  // exactly the new resume-on-boot path this card adds).
+  await ensureCoolingTableLoaded(now)
+
+  const listProjectPaths = opts?.listProjectPaths ?? defaultListProjectPaths
+  let paths: string[] = []
+  try {
+    paths = await listProjectPaths()
+  } catch {
+    return { resumed: [], suppressed: false }
+  }
+
+  const resumed: string[] = []
+  for (const projectPath of paths) {
+    try {
+      const key = await canonicalize(projectPath)
+      const intent = await readEngineIntent(projectPath)
+      if (!intent.desiredRunning) continue
+      if (await isSwarmManualStopPersisted(key)) continue // supremacy — never override an explicit pause
+      const pre = await claudeRunPreflight()
+      if (!pre.ok) continue // this project just doesn't resume this boot
+      const engine = getOrCreateEngine(key)
+      if (engine.running) continue // already running (defensive — fresh boot never hits this)
+      engine.manualStop = false
+      engine.selfSupply.enabled = intent.selfSupply
+      if (intent.selfSupply) engine.selfSupply.lastScanAt = 0
+      engine.running = true
+      engine.lastIntegrateAt = 0
+      // card 3 — RECONCILE-FIRST, SPAWN FROZEN (plan §4-3c): classify the persisted
+      // roster against reality (worktree / git / heartbeat / Board) and prune it
+      // BEFORE runEnginePass is kicked. The `await` is the freeze — the dispatch
+      // pass (the only thing that spawns) cannot start until reconcile resolves, so
+      // a resumed project never races a fresh worker onto a card a surviving
+      // worktree still owns. Never throws (condition ④: a corrupt roster degrades to
+      // "no roster memory" and the boot proceeds).
+      await reconcile(key)
+      const gen = (engine.generation += 1)
+      logLine(engine, 'info', `engine resumed at boot (v${appVersion})`)
+      void runEnginePass(engine, deps)
+        .catch(() => {})
+        .finally(() => scheduleNext(engine, deps, gen))
+      resumed.push(key)
+    } catch {
+      // fail-quiet-to-OFF — this project's engine just doesn't resume; server
+      // boot (and every OTHER project's resume) must never be affected.
+    }
+  }
+
+  if (resumed.length) {
+    await createSwarmInfoNotification({
+      event: 'engine-resumed',
+      detail: `再起動後、${resumed.length}件のプロジェクトで自動運転を再開しました。`,
+    }).catch(() => {})
+  }
+  return { resumed, suppressed: false }
+}
+
 /** ONE server-side AUTO-DRAIN sweep: walk the registered projects and
  *  {@link maybeAutoStartDrain} each, so a todo backlog drains on an idle slot even with NO
  *  UI open. An already-running engine is driven by its own chain and is a fast no-op here
@@ -8044,6 +8862,15 @@ export const setSelfSupply = async (
     engine.selfSupply.enabled = enabled
     logLine(engine, 'info', enabled ? 'self-supply ON' : 'self-supply OFF')
     if (enabled) engine.selfSupply.lastScanAt = 0 // scan on the next tick
+    // card 2 — write-through so a restart's resumeEngines() re-arms self-supply
+    // alongside the drain (plan §2: proposed cards stay owner-approval-gated
+    // before any dispatch, so re-arming the SCAN is low-risk). PATCH only this
+    // field (not a full persistEngineIntent derived from engine.running) — a
+    // toggle can fire while `running` is false for a reason that has nothing to
+    // do with the owner's desiredRunning intent (a suppressed boot resume, a
+    // preflight failure this session), and a full write would silently stamp
+    // that unrelated false over a `desiredRunning:true` the owner never touched.
+    await patchEngineIntent(projectPath, { selfSupply: enabled })
   }
   return stateOf(engine, deps.isAlive)
 }
@@ -8078,6 +8905,19 @@ export const setOverseer = async (
     engine.overseer.enabled = enabled
     logLine(engine, 'info', enabled ? 'overseer ON' : 'overseer OFF')
     if (!enabled) engine.overseer.brainAbort?.abort() // stop a brain mid-flight
+    // card 2 — written to engine.json for observability/schema completeness, but
+    // resumeEngines() deliberately does NOT read this field back to auto-arm the
+    // overseer (see resumeEngines' comment): the D1 gate above ("must be armed
+    // WHILE running, never by a machine-driven restart") is an explicit safety
+    // invariant this session chose to KEEP rather than override — the plan
+    // (docs/ENGINE_PERSISTENCE_PLAN.md §2) flags overseer auto-resume as an
+    // OPEN [hold] question for the owner, not a settled default. If the owner
+    // decides otherwise, wiring resumeEngines to also honor this field is a
+    // small follow-up, not a redesign. PATCH only this field — see setSelfSupply's
+    // comment for why a full engine.running-derived write would be wrong here too
+    // (this gate requires engine.running to ARM, but DISARM is always allowed and
+    // can equally fire while running is false for an unrelated reason).
+    await patchEngineIntent(projectPath, { overseer: enabled })
   }
   return stateOf(engine, deps.isAlive)
 }
@@ -8089,6 +8929,18 @@ export const setOverseer = async (
 export const __resetOrchestratorForTests = (): void => {
   store.engines.forEach((e) => {
     if (e.timer) clearTimeout(e.timer)
+    // STOP the engine before dropping it from the map — otherwise a fire-and-forget
+    // runEnginePass still IN FLIGHT when a test ends re-arms scheduleNext in its
+    // `.finally` (the closure holds this same engine object, whose `running` stays
+    // true and whose `generation` still matches), leaving a self-perpetuating tick
+    // timer that is no longer in `store.engines` for any later reset to clear. Those
+    // zombie chains fire runEnginePass every TICK_MS for the rest of the vitest
+    // worker's life, congesting the event loop of every SUBSEQUENT test (which made
+    // the reconcile-first freeze test's timing flaky — 2026-07-23). Flipping
+    // `running` false AND bumping `generation` makes that trailing scheduleNext a
+    // no-op (it guards on both), so the chain dies after its current in-flight pass.
+    e.running = false
+    e.generation += 1
   })
   store.engines.clear()
 }

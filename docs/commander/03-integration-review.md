@@ -72,6 +72,11 @@
 | **生きた卓への nudge `defaultNudgeManager`**(先頭 ESC → 3秒 → 行+CR) | `src/lib/server/swarmOrchestrator.ts:2640-2666` |
 | **PTY 活動プリミティブ `claudeSessionActivity`**(live/lastOutputAt/terminalId) | `src/lib/server/terminal.ts:429-444`(`isClaudeSessionLive` :399 はこの薄いラッパ・`lastOutputAt` の更新は :297) |
 | presence/ nudge の定数 `ManagerPresence` / `MANAGER_NUDGE_INTERVAL_MS` / `MAX_MANAGER_NUDGES` | `src/lib/server/swarmOrchestrator.ts:2392,2397,2404` |
+| **統合待ちストールの規則 `managerIntegrationStalled`(2026-07-22・純関数)** | `src/lib/server/swarmOrchestrator.ts:2855`(定数 `MANAGER_INTEGRATION_STALL_MS=40分` :2725 / `MANAGER_NUDGE_REARM_MS=60分` :2738) |
+| **滞留時計 `engine.reviewSeenAt`**(branch→初回目撃時刻・review を離れた瞬間に prune) | `src/lib/server/swarmOrchestrator.ts:1496`(型) / `:6765`(stamp+prune・`present` sweep と同じ場所) |
+| **delivery 判定 `defaultManagerDeliveryAt`**(心拍 / セッション JSONL / sub-agent JSONL の最新・描画は入れない) | `src/lib/server/swarmOrchestrator.ts:3024`(sub-agent 走査 :2931 / 卓の同定 `resolveManagerDesk` :2962 — presence と共用) |
+| **声かけゲート**(`presence === 'idle' \|\| (presence === 'active' && stalled)`) | `src/lib/server/swarmOrchestrator.ts:6965` |
+| **engine ON で滞留時計を捨てる**(OFF だった時間は「統合待ち」に数えない) | `src/lib/server/swarmOrchestrator.ts:7825`(`startOrchestrator`) |
 | エコー割引の窓 `STALL_ECHO_GUARD_MS=30_000`(nudge と spawn の**両方**の書き込みに掛かる) | `src/lib/server/swarmOrchestrator.ts:312`(算出は :5902) |
 | **蘇生反射の3ガード**(idle の boot grace / idle の refund ゲート / spawn 時の証明クリア) | `src/lib/server/swarmOrchestrator.ts:5930`(grace) / `:5960`(`provenSinceWake !== false`) / `:6067`(spawn 時 false) |
 | 統合パスの2相コメント(A/B) | `src/lib/server/swarmOrchestrator.ts:5792`(A) / `:5803`(B) |
@@ -187,7 +192,8 @@ twin を作らないことを実 PTY で固定)。
 ```
 (engine.running は pass 冒頭で確認済み — 旧「autoMerge armed?」ゲートは廃止・2026-07-16)
 rs = engine.managerResume(in-memory {attempts, lastWakeAt, fatalFired, nudges, lastNudgeAt,
-                          unresponsiveLogged, provenSinceWake, lastWakeSpawned}・再起動で消える)
+                          unresponsiveLogged, provenSinceWake, lastWakeSpawned,
+                          stallLogged, nudgeRearmed}・再起動で消える)
 review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全フィールドをリセット。
                                    provenSinceWake は true に戻す=「起こした卓が無いので
                                    証明すべきものが無い」既定。lastWakeSpawned も undefined に
@@ -196,9 +202,19 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
                                    エピソードの卓の評判(=次の give-up 判定)を次バッチが引き継ぐ)
                                    して return(仕事無し=蘇生しない)
 司令官の卓は今どの状態?(managerPresence・now 注入)
-  ├ active(卓が在り、動いている証拠がある)
-  │   → provenSinceWake=true(蘇生が効いた証明)・rs.attempts=0・fatalFired=false・
-  │     nudges=0・unresponsiveLogged=false にして return
+  ★2026-07-22 追加: presence とは別に「統合待ちストール」も測る(下の ⚠ 死角を参照)。
+    stalled = 最古の review カードが 40分以上待っている(engine.reviewSeenAt・in-memory)
+              かつ delivery が 40分以上ない(managerDeliveryAt = 心拍 / セッション JSONL /
+              sub-agent JSONL の最新。**心拍だけではない** — 統合中の司令官は1ターンの中で
+              数十分 beat を打てないので、心拍だけ見ると走行中のレビューを ESC で割る)
+              どのチャネルにも記録が無い卓は fail-open で「ストールではない」
+    滞留が閾値に届くまで delivery は読まない(通常 tick の IO はゼロ)
+  ★presence が active なら provenSinceWake=true をここで立てる(stalled でも立てる —
+    「卓が上がった証明」は統合が進んでいるかとは別問題。give-up 予算の払い戻しが
+    ストール中だけ止まると false な manager-unrevivable に寄る)
+  ├ active(卓が在り、動いている証拠がある)かつ stalled でない
+  │   → rs.attempts=0・fatalFired=false・nudges=0・unresponsiveLogged=false・
+  │     stallLogged=false・nudgeRearmed=false にして return(provenSinceWake は上で設定済み)
   │     (反射 disarm・二重起動しない。lastNudgeAt は残すので直後の再沈黙は throttle が効く)
   (presence を読む時、こちらが書いたものの エコーは割り引く —
    echoUntil = max(lastNudgeAt, lastWakeAt) + STALL_ECHO_GUARD_MS(30秒)。
@@ -208,6 +224,9 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
    起動即死の卓が active に化けて蘇生ガードが死ぬ(§7-12)。割引対象は PTY 描画のみで、
    心拍と transcript 追記はエコーでは起きないため本当に働いている卓は従来どおり active)
   ├ idle(卓は在るが無音) ★2026-07-18 で新設 — ここでは絶対に spawn しない
+  │   **または active だが stalled**(描画はあるが統合が進んでいない)★2026-07-22
+  │   → active+stalled のときは「描画しているが統合が進んでいません(…)— 声かけに切り替えます」を
+  │     1回だけ warn ログ(stallLogged。「無音」と書くと描画中の卓では矛盾に読めるため別文言)
   │   → 直前 wake から grace(5分)未満? ─Yes→ return(何もしない・声もかけない)
   │     ★2026-07-19 追加。起動直後の卓はエコー割引で必ず idle に見えるうえ、spawn が
   │     lastNudgeAt を 0 に戻すので nudge throttle も効かない。このガードが無いと
@@ -218,7 +237,13 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
   │     (卓が在る以上「起動できない」は偽なので fatal 予算を戻す。ただし
   │      蘇生した卓が一度も active と読まれていなければ戻さない —— 起動即死でも
   │      login shell は残るので「PTY が在る」は起動成功の証明にならない・§7-12)
-  │     nudges が上限(3)到達? ─Yes→ 最後の nudge から interval 経過していれば
+  │     nudges が上限(3)到達? ─Yes→ ★2026-07-22 stalled かつ 未再アーム かつ 最後の nudge から
+  │                                  MANAGER_NUDGE_REARM_MS(60分)経過なら nudges=0 に**1回だけ
+  │                                  再アーム**して下へ落ちる(episode 上限=計6回)。
+  │                                  「予算切れ」は卓への判定だが episode が終わるのは review が
+  │                                  空になった時なので、空にならないバッチでは engine が
+  │                                  そのバッチの寿命ぶん黙る=この死角と同じ観測になっていた
+  │                                  ─(再アーム条件を満たさない)→ 最後の nudge から interval 経過していれば
   │                                  「N 回の声かけに応答しません」を1回だけ warn ログ → return
   │                                  (以後は黙る=人間の領分・§7-10)
   │     直前 nudge から interval(10分)未満? ─Yes→ return
@@ -258,6 +283,70 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
              nudges=0・lastNudgeAt=0・unresponsiveLogged=false(新しい卓=新しい nudge 予算)
 ```
 
+> **⚠ 「描画=生きている」は「統合が進んでいる」ではない — 喋った直後に停止する死角(2026-07-22・実測80分)。**
+> presence が日常的に頼る positive 証拠は **PTY の描画**で、これは「卓が生きているか」への正しい答えだが
+> 「統合が進んでいるか」への答えではない。司令官は**1ターン喋って止まる**セッションなので、描画は
+> 「さっき喋った」ことしか証明しない。実測(2026-07-22): 10:31 に司令官が統合完了の心拍 → 10:37/10:40 に
+> worker が review へ promote → **engine は一度も声をかけず 11:51 にオーナーが手で起こすまで放置**
+> (review に4本積んだまま)。engine 自体は正常で、同日 5 回は正しく声をかけている —— **死角に入った時だけ来ない。**
+>
+> 修正は presence の3状態には触れず(2026-07-20 の大改修を維持)、**「声かけを出す条件」だけ**に第2の問いを足した:
+> *卓から何か出てきているか?*(= delivery)。材料は**作業の副産物としてしか書かれない3つのファイル**の
+> 最新時刻(`defaultManagerDeliveryAt`)——**描画は入れない**(TUI の再描画で立つ = この死角そのもの):
+> 1. **心拍** — §3 の手順どおり**各ブランチの頭で1回**打つ。
+> 2. **セッション JSONL** — tool_use / tool_result ごとに追記される。
+> 3. **sub-agent の JSONL** — `~/.claude/projects/<cwd>/<sessionId>/subagents/agent-*.jsonl`。
+>
+> **⚠ 心拍「だけ」では駄目 — 2026-07-22 の差し戻しで是正**。司令官は心拍を各ブランチの頭で**1回**打った後、
+> その1本ぶんの作業(`npx tsc --noEmit` / `npm test` = このリポで3〜12分・敵対レビュアーを Agent ツールで
+> 5〜20分・大 diff なら複数体)を**1ターンの中**で走らせる。**ターンの中にいる間は curl で beat を打てない**ので、
+> 「40分無心拍」は**働いている司令官の通常形**である。心拍だけを見る版は、走行中のレビュー sub-agent を
+> ESC で中断していた(= 死角を直すつもりで司令官の実作業を壊す)。上の 2. と 3. がその卓と「止まった卓」を分ける:
+> - sub-agent 実行中は 1. と 2. が同時に凍るが、3. は**実行中ずっと伸びる**。実測(2026-07-22・実ツリー):
+>   39分走ったレビュアーが 229 エントリを書き、そのファイルの mtime は最後のエントリの timestamp と
+>   **秒単位で一致**していた(= 逐次追記されており、mtime が進捗をリアルタイムに追う)。
+> - **喋って止まった卓は3つ同時に凍る** —— これが実測インシデントで、だから検知できる。
+>
+> **閾値 40 分の根拠(逆振れ防止・完了条件2)**: 働いている司令官が**3チャネル全部**を空けうる最大幅を超える必要がある。
+> その最大幅は「sub-agent が走っていない長い1コマンド」= `npm test` フル(実測3〜12分・swarm 負荷下)で、
+> それ以外の手順は tool_result ごとに 2. を、レビュー中は 3. を動かす。40分はその**3倍以上**。
+> **これは「止まった司令官が見過ごされる上限」であって、働いている司令官への締切ではない** —— 描画も止まった卓は
+> 従来どおり10分の `MANAGER_HEARTBEAT_STALE_MS` 経路で拾う(そちらが常道で速い)。
+> 滞留側の条件(最古カードが40分以上待っている)も必須: これが無いと「前の統合ラウンドが1時間前に終わった」
+> というだけで、promote した瞬間にオーナーと会話中の卓へ ESC が飛ぶ。
+>
+> **engine が OFF だった時間は滞留に数えない**(2026-07-22 差し戻し・`startOrchestrator` が `reviewSeenAt` を
+> clear)。オーナーが engine を止めるのは**その卓で手作業をするため**で、その間は誰も心拍を打たない。
+> 時計を止めなければ、ON にした直後の pass(`lastIntegrateAt=0` なので即時)が既に窓を超えていて、
+> **オーナーが今使っているセッションにいきなり ESC が飛ぶ**。
+>
+> 回帰テストは2方向とも `swarmOrchestrator.test.ts`(「(1) a desk that PAINTS but stops DELIVERING…」=
+> 描画があっても飛ぶ / 「(2) a commander that is ACTUALLY integrating…」= delivery が続く限り6時間でも飛ばない)。
+> ファイル実物を使う delivery 側は `swarmOrchestrator.integration.test.ts`
+> (`describe('defaultManagerDeliveryAt — sub-agent transcripts count as work')`・$HOME を捨てdirに固定)。
+> **変異5方向を実測**(いずれも Edit で逆変異 → `git status` 空で復元証明):
+>
+> | 変異 | 赤になるテスト |
+> |---|---|
+> | 声かけゲートから `\|\| (presence === 'active' && stalled)` を外す | (1) (2b) (4) (6) (8) |
+> | `managerIntegrationStalled` から delivery 条件を外す | (2) (2b) (6) + 純関数 |
+> | ゲートを素の `\|\| stalled` に戻す(absent を巻き込む) | (7) + 既存の FLAPPING / SHELL |
+> | `defaultManagerDeliveryAt` から sub-agent チャネルを外す | 「returns the NEWEST of…」(delta 39分 = 働いている卓を停止と誤判定) |
+> | `startOrchestrator` の `reviewSeenAt.clear()` を外す | 「startOrchestrator DROPS the review dwell clock」 |
+>
+> ⚠ **ゲートは `presence === 'active' && stalled` であって `|| stalled` ではない**(実装時に一度踏んだ穴)。
+> ストールは**仕事についての判定**なので卓が `absent`(死んでいて統合が進みようがない)でも真になる。
+> 素の `|| stalled` にすると、卓が死んだまま40分待った瞬間に**蘇生パスが声かけパスに横取りされ**、
+> 存在しない PTY を突くだけで spawn も `manager-unrevivable` も出なくなる —— この死角を直すはずが
+> 「復旧そのものを殺す」ほうへ逆振れする。回帰テスト「(7) a stall NEVER diverts the resurrection path」。
+>
+> **worker 版(対)— 02章 §5.4a(2026-07-23)**: この delivery クロックと**同じ死角が worker の stall 判定にも残っていた**
+> (worker 生死は `lastActivityMs` = max(心拍, PTY 出力, 起動時刻)だけで、sub-agent/transcript の mtime を見ていなかった)。
+> busy worker(自前の敵対レビュー Task を回している)を沈黙誤判定 → nudge(ESC で中断)→ reclaim(worktree teardown +
+> `blocked` 再ホーム)→ **同一カードの二重配車**、が 2026-07-22 夜に実際に起きた。修正は本節と同型 —— `classifyStall` /
+> `lastActivityMs` に第3チャネル `agentActivityAtMs`(`sessionAgentActivityAt` = worker 自身の transcript + sub-agent
+> JSONL の最新 mtime)を足し、**silent と出た worker だけに** fs walk を掛ける(コスト方針も本節と同じ)。歯は 02章 §5.4a。
+
 > **⚠ 二重起動防止は presence だけに委ねない — spawn 側もプールで単一性を担保する(2026-07-19/20)。**
 > presence の `absent` 判定は「起こすべきか」を決めるが、それを撃てるのは engine の反射だけではない
 > ——オーナーの「司令官」ボタン(`POST /api/swarm/manager`)も同じ `spawnSwarmManager` を呼ぶ。だから
@@ -273,6 +362,17 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
 > `swarmSessions.integration.test.ts`(実 live 卓で2回目 spawn が `reused:true`・launch は1本のまま・
 > 記録が live 卓へ reconcile される)。**「同一プロジェクトに司令官卓は同時に2つ以上存在しない」が
 > この不変条件**。
+>
+> **⚠ プールの「live」だけでは半分足りない場合がある — プロセステーブルで裏取りする(2026-07-22)。**
+> プールの `finishedAt` は node-pty の**非同期** `onExit` でスタンプされるため、Restart 操作
+> (DELETE でそのターミナルを殺し、直後に POST で再起動)がこの窓に入ると、`listLiveDesksIn` は
+> **OS がすでに reap 済みの卓を「live」のまま返す**ことがある。`adoptLiveDesk` はここで
+> `terminal.isTerminalProcessAlive`(signal 0 で実プロセスを確認)を通し、確認が取れたエントリだけを
+> 採用する — 通らなければ「卓なし」として扱い、呼び出し元が新しい卓を立てる。実害の窓は1イベント
+> ループ分に限られる(node-pty 側の reap と JS 側の onExit コールバックの間)上、`startTerminalSweepLoop`
+> の孤児掃除が独自にこれを自己治癒するので、恒久的な機能不全ではない — この確認はその狭い窓を
+> 閉じるだけ。EXISTENCE の権威は依然として「プール」だが、**プールの答えは無条件には信じず、
+> プロセステーブルで裏取りしてから使う**、が正しい要約。
 
 > **⚠ プールを読むだけでは半分 — check-then-act は lock で閉じた(2026-07-22)。**
 > 上のガードは **読み(`listLiveDesksIn`)と行い(`launchClaude`)が離れている** = 典型的な
@@ -341,10 +441,24 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
      (nudge / spawn の起動コマンド)のエコーなら証拠に数えない(§7-10 / §7-12)。
   異常時(セッションストアが読めない等)は `absent` へ倒す(統合を黙って止めるより卓を立てる)。
   **`idle` は「死」ではない** —— 卓が在る以上、二重起動も fatal もしない。
+  ⚠ **`active` は「働いている」ではない(2026-07-22 追加)**。上の 3 信号のうち描画は「さっき喋った」
+  しか証明せず、司令官は喋った直後に停止する。だから**声かけの判定だけ**、presence とは別に
+  「統合待ちストール」(`managerIntegrationStalled`: 最古カードが 40 分待ち **かつ** delivery が
+  40 分無い。delivery = 心拍 / セッション JSONL / **sub-agent JSONL** の最新)を測り、成立したら
+  `active` でも `idle` と同じ経路へ落とす。**spawn の条件は一切変えていない**(`absent` のみ)。
+  詳細と閾値の根拠は上の ⚠ ブロック(死角)を参照。
 - **`idle` の応答 = nudge(2026-07-18・完了条件2+5)**: 生きている卓の PTY へ
   **先頭 ESC → 3 秒 → 定数1行+CR** を書く(worker の stall escalation と同じ conduit・同じ作法)。
   `MANAGER_NUDGE_INTERVAL_MS`(**10分**)間隔・`MAX_MANAGER_NUDGES`(**3回**)上限で、使い切ったら
-  黙る(応じない卓は人間の領分)。さらに**蘇生直後は boot grace(5分)の間いっさい打たない**
+  黙る(応じない卓は人間の領分)。⚠ ただし**ストールが続いている間だけ、60分ごとに1回だけ予算を
+  再アーム**する(`MANAGER_NUDGE_REARM_MS`・2026-07-22)——「予算切れ」は卓への判定なのに episode が
+  終わるのは review が空になった時なので、空にならないバッチでは engine がバッチの寿命ぶん黙って
+  しまい、この死角と同じ観測になっていた。再アームは episode 1 回きり(= 1バッチ最大6回)。
+  オーナー承認待ちで居座るカードを永久に突き続けないための上限。
+  ⚠ **再アームは「ストール中」限定なので、delivery が一切読めない卓(どのチャネルにも記録が無い)
+  では効かない**(`managerIntegrationStalled` が fail-open で false を返すため)。その卓では
+  従来どおり「3回突いたら黙る」。「絶対に黙らない」わけではない —— 黙らないのは
+  **ストールが証明できている間だけ**、という設計。さらに**蘇生直後は boot grace(5分)の間いっさい打たない**
   (起動中の卓の初期プロンプト処理を ESC で割らないため)。
   **⚠ 先頭 ESC の意味 = オーナーの打ちかけ入力は消える**(2026-07-19 訂正)。以前ここには
   「打鍵は PTY にエコーされるので打鍵中の卓は `active` と判定され nudge されない」と書いてあったが、
@@ -681,8 +795,13 @@ reason に折り込まれる per-lens summary は `3129a58` 以降 **`lens=absta
 なく(むしろ「エンジン ON・起こし OFF」の中途半端な既定が ready 品の滞留を生んだ — 実運用で観測)、
 **エンジンを ON にすれば起こし反射は常に効く**。OFF にしたければエンジンごと止める(それが
 グローバル stop)。旧 `POST /api/swarm/orchestrator/automerge` は**撤去済み(404)** — 回帰テスト
-(`server/routes/__tests__/swarm.test.ts`)が 404 をピンしている。再起動セマンティクスは
-エンジン自体の「再起動で必ず OFF」に乗るだけで、独立の永続フラグは無い。
+(`server/routes/__tests__/swarm.test.ts`)が 404 をピンしている。~~再起動セマンティクスは
+エンジン自体の「再起動で必ず OFF」に乗るだけで、独立の永続フラグは無い。~~ **旧知識(2026-07-22
+撤回)**: エンジン自体が「再起動で必ず OFF」でなくなった(desiredRunning が boot で自動復元 —
+docs/ENGINE_PERSISTENCE_PLAN.md card 2)ので、この起こし反射も**明示的に ON にしていたプロジェクト
+では再起動を跨いで無人で武装されたまま**になる。独立の永続フラグは今も無い(相乗りする先の
+`running` 自体が永続化された、という違い)。「起こし反射が動いた = 誰かが今このセッションで
+ON にした」と決めつけないこと — 前回セッションの意図が resume で戻っただけのことがある。
 統合の**同意はカード単位**で表現する: タイトル先頭 `[hold]`(承認待ち)+ 高リスク force-hold
 (`HIGH_RISK_PATHS` — 君の手動統合規約 og-manage §「マージ」手順 0)。
 君が常時卓に居る運用でも害は無い — **live PTY のある卓は presence 判定が `active` か `idle` を返し、

@@ -109,6 +109,12 @@ export const escalationsFile = () => join(openGroundHome(), 'escalations.json')
 // (c) store.ts → swarmAllowedModels.ts → swarmQuota.ts already, so swarmQuota
 // importing store.ts would be an import CYCLE. See swarmQuotaStore.ts.
 export const swarmQuotaFile = () => join(openGroundHome(), 'swarm-quota.json')
+// Boot-history RING (card 2, docs/ENGINE_PERSISTENCE_PLAN.md §4-2): the
+// crash-loop breaker's memory — {at, appVersion} per server boot, newest last,
+// capped small. Global (not per-project): a boot is a process-wide event, and the
+// breaker's question ("did THIS version just restart 3× in 10 minutes") is
+// process-wide too. See src/lib/server/swarmEnginePersistence.ts.
+export const engineBootsFile = () => join(openGroundHome(), 'engine-boots.json')
 // PTY-tail captures attached to escalations ("what the worker's screen showed
 // when it got stuck") — one small text file per escalation, referenced by the
 // record's screenshotRef and unlinked when the record is pruned.

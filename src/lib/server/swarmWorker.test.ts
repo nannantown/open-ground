@@ -83,6 +83,7 @@ describe('WORKER_ORDER_RULES token discipline', () => {
   it('carries the tool-bundling / scoped-read / tail-output / two-stage-test clauses', () => {
     expect(WORKER_ORDER_RULES).toMatch(/【トークン規律・厳守】/)
     expect(WORKER_ORDER_RULES).toMatch(/1応答に束ねて並列実行する/)
+    expect(WORKER_ORDER_RULES).toMatch(/調べものはできるだけまとめて一度に/)
     expect(WORKER_ORDER_RULES).toMatch(/範囲指定 Read か grep で当たりを付けてから読む/)
     expect(WORKER_ORDER_RULES).toMatch(/同じファイルを読み直さない/)
     expect(WORKER_ORDER_RULES).toMatch(/tail\/要約で受ける/)
@@ -93,6 +94,42 @@ describe('WORKER_ORDER_RULES token discipline', () => {
   it('does not relax the completion gate or pre-ready self-commit rule', () => {
     expect(WORKER_ORDER_RULES).toMatch(
       /完了ゲート\(npx tsc --noEmit \/ npm test \/ lint の3点\)と ready 前セルフコミットの規約は一切緩めない/,
+    )
+  })
+
+  // 2026-07-22 の (a) 書き換えは「条件付きルール → 既定の反転」だった。効くのは
+  // 見出し句ではなく、その下の機構2文 — ①単発応答を『その結果を見ないと次が決まらない
+  // 時』だけに絞る既定文 と ②送信直前の自己点検 — である。束ね率の定義は
+  // `tool_use 数 ÷ tool_use を含む応答数`(swarmTokenAudit.ts)なので比を動かせるのは
+  // 「1応答あたりの道具数」だけで、その数を実際に増やすのはこの2文だからだ。
+  // ⚠ 当初のピンは見出し句 `調べものはできるだけまとめて一度に` 1本きりで、機構2文は
+  // **両方消してもスイート全緑**だった(= スローガンだけが守られ、効く部分は無防備)。
+  // 見出しは「何と呼ぶか」しか固定しない。ここで固定するのは「何をさせるか」の方。
+  // 併せて (b) 手前までを (a) 節として切り出し、機構が **(a) の中に在る**ことまで
+  // 見る — 別の節へ流れて (a) が見出しだけの殻に戻る書き換えも赤にするため。
+  it('pins the DEFAULT-INVERSION mechanism of (a), not just its heading', () => {
+    const blockStart = WORKER_ORDER_RULES.indexOf('【トークン規律・厳守】')
+    const blockEnd = WORKER_ORDER_RULES.indexOf('【質問は平易文で・厳守】')
+    expect(blockStart).toBeGreaterThan(-1)
+    expect(blockEnd).toBeGreaterThan(blockStart)
+    const tokenBlock = WORKER_ORDER_RULES.slice(blockStart, blockEnd)
+
+    const aStart = tokenBlock.indexOf('(a) ')
+    const aEnd = tokenBlock.indexOf(' (b) ')
+    expect(aStart).toBeGreaterThan(-1)
+    expect(aEnd).toBeGreaterThan(aStart) // 切り出しの健全性: (a)(b) の順序が壊れたら赤
+    const clauseA = tokenBlock.slice(aStart, aEnd)
+
+    expect(clauseA).toContain('調べものはできるだけまとめて一度に')
+    // ① 既定の反転そのもの — 束ねるのが既定で、単発は結果依存の時だけの例外
+    expect(clauseA).toContain('既定は「まとめて出す」側だと考えろ')
+    expect(clauseA).toContain(
+      '道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ',
+    )
+    // ② 既定を行動に変える送信直前の自己点検(これが無いと既定文は心構えで終わる)
+    expect(clauseA).toContain('1つだけ送りそうになったら')
+    expect(clauseA).toContain(
+      '送信する前に「この後どうせ要る調べものは?」を先に洗い出して同じ応答に足せ',
     )
   })
 })

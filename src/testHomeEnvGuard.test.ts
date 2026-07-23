@@ -1274,6 +1274,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'fenced',
     why: 'installs ~/.claude/skills/og-manage/SKILL.md — fenced before it builds the path',
   },
+  'src/lib/server/swarmToolingInstall.ts': {
+    tier: 'fenced',
+    why: 'installs ~/.claude/skills/order+supply SKILL.md and ~/.claude/swarm-beat.sh+openground-swarm-lib.sh — fenced (assertTestHomeIsolated) before it builds any target path, same pattern as ogManageSkill.ts',
+  },
   'src/lib/server/__fixtures__/tempRootPoisonProbe.ts': {
     tier: 'fenced',
     why: "the fence's own probe fixture: asks assertTestHomeIsolated for a verdict on each anchor, writes nothing",
@@ -1341,6 +1345,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   'src/lib/server/swarmSessions.integration.test.ts': {
     tier: 'writes-elsewhere',
     why: 'same, via a shell fixture that writes $HOME/.claude/projects with $HOME pinned to a temp dir',
+  },
+  'src/lib/server/swarmOrchestrator.integration.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'pins $HOME (og-claude-home temp) + CLAUDE_CONFIG_PATH (<og-orch-home>/.claude.json temp) to test the manager subagent-activity mtime signal (card 7517e4b1); every write lands under a mkdtemp temp, never the real ~/.claude',
   },
   'src/lib/server/youCorpus.test.ts': {
     tier: 'writes-elsewhere',
@@ -1410,6 +1418,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   'src/lib/server/ogManageSkill.test.ts': {
     tier: 'writes-elsewhere',
     why: 'installs the skill into <tmp>/home/.claude/skills to test the marker/upgrade logic',
+  },
+  'src/lib/server/swarmToolingInstall.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'installs order/supply skills + swarm-beat.sh/openground-swarm-lib.sh into <tmp>/home/.claude to test the marker/upgrade logic — same pattern as ogManageSkill.test.ts',
   },
   'src/lib/server/projectSkills.test.ts': {
     tier: 'writes-elsewhere',

@@ -47,6 +47,7 @@ const {
 } = require('./selfUpdate')
 const { hasLiveForkedChildren, applyDownloadedUpdate } = require('./autoUpdate')
 const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown } = require('./lockdown')
+const { decideCrashResponse } = require('./crashRespawn')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -287,6 +288,9 @@ let mainWindow = null
 /** @type {import('child_process').ChildProcess | null} */
 let serverChild = null
 let isQuitting = false
+// Crash timestamps (ms epoch) for the crash-loop breaker (docs/ENGINE_PERSISTENCE_PLAN.md
+// §6, card 5) — an unbounded ring pruned to the 10-minute window by decideCrashResponse.
+let crashRespawnTimestamps = []
 
 // ---------------------------------------------------------------------------
 // Deep links — the `openground://` custom scheme (Figma-style invite links,
@@ -723,7 +727,7 @@ function getAppRoot() {
 // OPENGROUND_SOURCE_ROOT are spread AFTER it (neither touches the collab WS-URL
 // lock, so the token-relay invariant is preserved).
 // ---------------------------------------------------------------------------
-async function forkEngine({ port, bootId, sourceRoot, home, label }) {
+async function forkEngine({ port, bootId, sourceRoot, home, label, bootKind }) {
   const serverPath = resolveServerBundle()
   if (!serverPath) {
     throw new Error(
@@ -754,6 +758,7 @@ async function forkEngine({ port, bootId, sourceRoot, home, label }) {
       }),
       ...(sourceRoot ? { OPENGROUND_SOURCE_ROOT: sourceRoot } : {}),
       ...(home ? { OPENGROUND_HOME: home } : {}),
+      OPENGROUND_BOOT_KIND: bootKind || 'normal',
     },
   })
 
@@ -768,7 +773,7 @@ async function forkEngine({ port, bootId, sourceRoot, home, label }) {
 // the self-update IPC trigger listener, and records it as serverChild. When
 // self-update is armed we pass OPENGROUND_SOURCE_ROOT so this engine (and only
 // this engine) can request the next cycle.
-async function spawnLiveEngine({ bootId }) {
+async function spawnLiveEngine({ bootId, bootKind }) {
   // PUBLIC build-time config (login + collab) — logged once so a dogfood run can
   // confirm the baked config reached the fork. (Full rationale on forkEnv.js.)
   const bakedAuthEnv = readBakedAuthEnv()
@@ -784,43 +789,67 @@ async function spawnLiveEngine({ bootId }) {
     bootId,
     sourceRoot: SELF_UPDATE_ARMED ? getAppRoot() : undefined,
     label: 'hono',
+    bootKind,
   })
 
   child.on('exit', (code, signal) => {
     serverChild = null
     // An unexpected death (not during our own quit, and not while we are
-    // deliberately tearing the old engine down for a self-update cutover) is
-    // fatal — there is no server to talk to. Surface it rather than leave a
-    // blank window. During a cutover, isSwitching suppresses this so the
-    // intentional stop of the OLD engine (and the teardown of a failed new engine
-    // during rollback) never pops the dialog — but a real crash during the
-    // rebuild/canary phases, when isSwitching is false, still surfaces as fatal (R3).
-    if (!isQuitting && !isSwitching) {
-      // app.exit(1) below does NOT fire before-quit, so synchronously reap any
-      // in-flight self-update children FIRST — otherwise a live-engine crash mid
-      // rebuild/regression would orphan the (detached) vitest fork pool and saturate
-      // the machine, the exact hazard MUST-FIX1's group-kill exists to prevent. No-op
-      // on a normal run (these refs are null unless a self-update is in flight).
-      killProcessTree(activeBuildChild)
-      // The e2e (playwright) child spawns its webServer in a separate group.
-      // gracefulGroupKill SYNCHRONOUSLY discovers that group and SIGINTs it here; the
-      // node webServer exits on SIGINT, so port 47876 frees even though app.exit below
-      // won't wait for the grace/escalation (a plain SIGKILL of only G1 would orphan it,
-      // review-B M1).
-      gracefulGroupKill(activeE2eChild)
-      if (activeCanaryHandle && activeCanaryHandle.child) {
-        try {
-          activeCanaryHandle.child.kill('SIGKILL')
-        } catch {
-          /* already gone */
-        }
+    // deliberately tearing the old engine down for a self-update cutover) needs
+    // a decision — respawn or fatal. During a cutover, isSwitching suppresses
+    // this so the intentional stop of the OLD engine (and the teardown of a
+    // failed new engine during rollback) never triggers either path — but a
+    // real crash during the rebuild/canary phases, when isSwitching is false,
+    // still goes through the decision below (R3).
+    if (isQuitting || isSwitching) return
+
+    // app.exit(1) (fatal path) does NOT fire before-quit, so synchronously reap
+    // any in-flight self-update children FIRST — otherwise a live-engine crash
+    // mid rebuild/regression would orphan the (detached) vitest fork pool and
+    // saturate the machine, the exact hazard MUST-FIX1's group-kill exists to
+    // prevent. No-op on a normal run (these refs are null unless a self-update
+    // is in flight). Reap unconditionally — a respawn must not carry the old
+    // cycle's orphans forward either (ENGINE_PERSISTENCE_PLAN §6, card 5).
+    killProcessTree(activeBuildChild)
+    // The e2e (playwright) child spawns its webServer in a separate group.
+    // gracefulGroupKill SYNCHRONOUSLY discovers that group and SIGINTs it here; the
+    // node webServer exits on SIGINT, so port 47876 frees even though app.exit below
+    // won't wait for the grace/escalation (a plain SIGKILL of only G1 would orphan it,
+    // review-B M1).
+    gracefulGroupKill(activeE2eChild)
+    if (activeCanaryHandle && activeCanaryHandle.child) {
+      try {
+        activeCanaryHandle.child.kill('SIGKILL')
+      } catch {
+        /* already gone */
       }
-      dialog.showErrorBox(
-        'OPEN GROUND',
-        `The OPEN GROUND server exited unexpectedly (code=${code} signal=${signal}).`
-      )
-      app.exit(1)
     }
+
+    const decision = decideCrashResponse({
+      timestamps: crashRespawnTimestamps,
+      now: Date.now(),
+      isQuitting,
+      isSwitching,
+    })
+    crashRespawnTimestamps = decision.timestamps || crashRespawnTimestamps
+
+    if (decision.action === 'respawn') {
+      console.log(
+        `[openground] server exited unexpectedly (code=${code} signal=${signal}) — ` +
+          `respawning in ${decision.delayMs}ms (crash-loop breaker: ${crashRespawnTimestamps.length}/3 in this 10-minute window)`
+      )
+      setTimeout(() => {
+        void attemptCrashRespawn()
+      }, decision.delayMs)
+      return
+    }
+
+    dialog.showErrorBox(
+      'OPEN GROUND',
+      `The OPEN GROUND server exited unexpectedly (code=${code} signal=${signal}) too many times ` +
+        `in a short window (crash-loop breaker tripped) — giving up.`
+    )
+    app.exit(1)
   })
 
   // The forked server asks us to self-update over IPC after it lands a
@@ -833,7 +862,34 @@ async function spawnLiveEngine({ bootId }) {
 
 // Thin wrapper kept for start(): the initial live engine carries BOOT_ID.
 async function spawnServerChild() {
-  return spawnLiveEngine({ bootId: BOOT_ID })
+  return spawnLiveEngine({ bootId: BOOT_ID, bootKind: 'normal' })
+}
+
+// Crash-loop breaker respawn (ENGINE_PERSISTENCE_PLAN.md §6, card 5): fork a fresh
+// live engine with a NEW bootId (mirrors the self-update canary's own-bootId
+// pattern — waitForReady's default watchChild picks up the new child the instant
+// spawnLiveEngine sets serverChild) tagged OPENGROUND_BOOT_KIND=crash-respawn so
+// server-side boot (§4-2's breaker) can tell a real crash apart from a normal
+// launch. Reloads the renderer once healthy — it reuses the same health-wait the
+// renderer shows during a cold start, so no separate "restarting" UI is needed.
+// If the respawn itself fails to come up, that's unrecoverable — fall through to
+// the same fatal dialog the exhausted-window path uses.
+async function attemptCrashRespawn() {
+  try {
+    await spawnLiveEngine({ bootId: crypto.randomUUID(), bootKind: 'crash-respawn' })
+    await waitForReady((body) => body && body.app === 'openground')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.loadURL(MODE === 'dev' ? DEV_URL : BASE_URL)
+    }
+  } catch (err) {
+    dialog.showErrorBox(
+      'OPEN GROUND',
+      `The OPEN GROUND server could not be restarted after a crash: ${
+        err && err.message ? err.message : String(err)
+      }`
+    )
+    app.exit(1)
+  }
 }
 
 // Graceful teardown for ANY forked child: SIGTERM, wait up to `graceMs`, then

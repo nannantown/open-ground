@@ -57,8 +57,8 @@ import {
   resolveSwarmRemoteName,
 } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
-import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
-import { listLiveDesksIn, onTerminalExit, getTerminalScreen } from './terminal'
+import { resolveSwarmSession, recordSwarmSession, forgetSwarmSessionIf } from './swarmSessions'
+import { listLiveDesksIn, onTerminalExit, getTerminalScreen, isTerminalProcessAlive } from './terminal'
 import { matchesQuotaExhaustion, normalizeScreen } from './swarmRateLimitText'
 import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
@@ -92,15 +92,31 @@ export const MANAGER_DESK_LABEL = '司令官'
  *  before it opens its mouth — re-read the Board.
  *
  *  WHY this is not optional. Everything the commander believed when it was last
- *  awake is now suspect, and in two different ways:
- *    - Its ENGINE knowledge is not just stale but GONE: the orchestrator's roster,
- *      review state and quota cooling are in-memory and die with the process (01
- *      章 §2 / 00-INDEX §2). The conversation survives the restart; the engine's
- *      認知 does not. A commander that keeps talking about "the three workers I
- *      dispatched" is describing a world that no longer exists.
+ *  awake is now suspect, in THREE different ways (updated 2026-07-22, card 2 —
+ *  docs/ENGINE_PERSISTENCE_PLAN.md — see 01 章 §7.3/§7.4 for the canonical
+ *  picture; this comment must not drift from it the way the string below once
+ *  did):
+ *    - Its per-worker ENGINE knowledge (roster / reviews / journal / KPI) is
+ *      GONE — those are still in-memory-only (worker roster write-through is a
+ *      SEPARATE, not-yet-built card 3). A commander that keeps talking about
+ *      "the three workers I dispatched" is describing a world that no longer
+ *      exists for THAT detail.
+ *    - Its ENGINE ON/OFF state may or may not be what it remembers, in EITHER
+ *      direction: `running` (and `selfSupply`) can now come back on its OWN,
+ *      with no owner action, if the project's `engine.json` said
+ *      `desiredRunning:true` before the restart (boot's `resumeEngines()` —
+ *      the reversal of the old "restart always turns autonomy off" rule). So
+ *      `running:true` right now might be the SAME engine picking up where it
+ *      left off, not something the commander (or the owner) just switched on
+ *      — and conversely a stopped engine or a suppressed resume (crash-loop
+ *      breaker) means the OLD intent did NOT survive. Neither can be assumed;
+ *      read it.
  *    - The CODE may have changed underneath it — an OPEN GROUND restart is usually
  *      a RELEASE. Cards it remembers as `doing` may be merged; its own file:line
  *      references may have shifted.
+ *  (quota cooling is NOT in this list — it has been persisted to disk since
+ *  2026-07-13 and survives a restart on its own; this comment used to claim
+ *  otherwise, which was already stale before card 2.)
  *  So the resumed session is told to run 「状況」 FIRST — the skill's own status
  *  routine (GET /api/swarm/workers + /api/swarm/orchestrator + git + Board 列の
  *  突き合わせ), i.e. the existing read-the-world logic, not a new one — and report
@@ -111,7 +127,7 @@ export const MANAGER_DESK_LABEL = '司令官'
  *  risks being split / collapsed into a `[Pasted text]` chip where `/og-manage` is
  *  never parsed as a command. */
 export const MANAGER_RESUME_INJECTION =
-  '/og-manage セッション再開: アプリ再起動をまたいで前回の会話を復元した。記憶をそのまま前提にするな — エンジンの in-memory 状態(worker roster・review・quota)は再起動で全消えし、再起動はたいていリリースなのでコード自体も変わっている。最初にやることは1つだけ: 「状況」を頭から実行し、Board の実体(todo/doing/review)・worker 一覧・エンジン状態を API と git で読み直して、その結果だけを根拠に現状を報告する。前回の認識との食い違いがあれば現物(API/git)を正とし、食い違った点を明示すること。'
+  '/og-manage セッション再開: アプリ再起動をまたいで前回の会話を復元した。記憶をそのまま前提にするな — worker roster・review・journal は再起動で全消えし(card 3 未着手)、再起動はたいていリリースなのでコード自体も変わっている。エンジンの running/selfSupply は前回 ON だった意図が自動で戻っていることがある(boot 時の自動再開・owner の手動停止があれば戻らない)ので、今の running が「誰かが今つけた」のか「前回の意図が生き残った」のかは決めつけるな。最初にやることは1つだけ: 「状況」を頭から実行し、Board の実体(todo/doing/review)・worker 一覧・エンジン状態を API と git で読み直して、その結果だけを根拠に現状を報告する。前回の認識との食い違いがあれば現物(API/git)を正とし、食い違った点を明示すること。'
 
 /** How long after launch a commander desk's death still counts as DEATH ON
  *  ARRIVAL — i.e. as evidence about the TIER rather than about the work.
@@ -146,15 +162,44 @@ export const DESK_DOA_WINDOW_MS = 90_000
  *  desk died young" is not evidence about the tier; "the desk said the tier is
  *  spent" is.
  *
+ *  ALSO FORGETS THE STALE SESSION POINTER — BUT ONLY FOR A FRESH DESK. A FRESH
+ *  desk (wasResumed=false) that dies quoting a quota refusal leaves behind a
+ *  transcript containing nothing but that refusal, and the session record
+ *  recordSwarmSession just wrote still names it; left alone, the NEXT commander
+ *  launch's resolveSwarmSession would see that dead-but-loadable one-liner and
+ *  `--resume` it instead of opening a real fresh desk. forgetSwarmSessionIf is
+ *  compare-and-delete (keyed on the exact sessionId this watch was armed for),
+ *  so a LATER launch that already recorded a good session over this one is
+ *  never clobbered.
+ *
+ *  A RESUMED desk (wasResumed=true) must NEVER be forgotten this way: its
+ *  transcript is days of real integration history plus one refusal line, and
+ *  `--resume` on it is exactly the memory the commander is supposed to keep
+ *  (docs/commander/00-INDEX.md's "conversation history survives restarts"
+ *  guarantee). Forgetting it here would trade a working `--resume` for a wiped
+ *  memory to save nothing — the next launch mints a session that has forgotten
+ *  everything instead of resuming one that remembers everything but a refusal.
+ *
  *  Best-effort throughout: a missing screen, an unreadable pool entry or a
- *  non-ladder model string all mean "learned nothing", never a thrown spawn. */
+ *  non-ladder model string all mean "learned nothing", never a thrown spawn.
+ *
+ *  MANAGER-ONLY, despite the generic name: the session-forget branch hardcodes
+ *  the `'manager'` role (swarmSessions.SwarmSessionRole), because the only
+ *  caller today is the commander's own launch path. If a future caller ever
+ *  arms this watch for the SUPPLY desk, that hardcoded role must become a
+ *  parameter first — otherwise a supply-desk DOA death would silently forget
+ *  the COMMANDER's session record instead of its own. */
 export const watchDeskForDeathOnArrival = (
   terminalId: string,
   tier: string,
+  projectPath: string,
+  agentSessionId: string,
+  wasResumed: boolean,
   deps: {
     watch?: typeof onTerminalExit
     screen?: (id: string) => string | null
     now?: () => number
+    forget?: typeof forgetSwarmSessionIf
   } = {},
 ): void => {
   if (!isModelTier(tier)) return // never cool an arbitrary model string
@@ -171,6 +216,13 @@ export const watchDeskForDeathOnArrival = (
         `[swarmManager] 司令官卓が tier '${tier}' の枯渇で起動即死 — ` +
           `${tier} を ${new Date(until).toISOString()} まで冷却(次の起動は1段下の tier)`,
       )
+      // A resumed session's transcript is real history, not just a refusal —
+      // never drop the pointer to it (see the header above).
+      if (!wasResumed) {
+        void (deps.forget ?? forgetSwarmSessionIf)(projectPath, 'manager', agentSessionId).catch(
+          () => {},
+        )
+      }
     } catch {
       /* learning is best-effort; a fault here must never surface as a spawn error */
     }
@@ -285,12 +337,22 @@ export const managerLaunchOpts = (
  *  and can therefore NEVER create a second desk. That is why the timeout path in
  *  {@link spawnSwarmManager} may call it without holding the spawn lock. */
 const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResponse | null> => {
+  const alive = isTerminalProcessAlive
   const liveDesks = listLiveDesksIn(projectPath, MANAGER_DESK_LABEL)
-  const existing = liveDesks[0]
+  // The pool's `finishedAt` is stamped by an ASYNCHRONOUS onExit, so right after a
+  // kill (the Restart button: DELETE the terminal, then POST a respawn) the pool
+  // can still list a desk that the OS has already reaped. Confirming with the
+  // process table (signal 0) before trusting an entry closes that window — see
+  // isTerminalProcessAlive's own header for the incident this guards against.
+  // Count only the entries that are ACTUALLY alive — a pool entry the OS has
+  // already reaped (still listed because `finishedAt` hasn't landed yet) must
+  // not inflate this into a false "close your extra desks" warning to the owner.
+  const aliveDesks = liveDesks.filter((d) => alive(d.id))
+  const existing = aliveDesks[0]
   if (!existing) return null
-  if (liveDesks.length > 1)
+  if (aliveDesks.length > 1)
     console.warn(
-      `[swarmManager] ${liveDesks.length} live commander desks in ${projectPath} — ` +
+      `[swarmManager] ${aliveDesks.length} live commander desks in ${projectPath} — ` +
         '本来1卓のみ。余分な卓は Terminal タブから閉じてください(自動 kill はしない)',
     )
   if (existing.agentSessionId) {
@@ -519,7 +581,13 @@ const launchNewDesk = async (
   )
   // Arm the death-watch BEFORE anything else can await: a tier this dry refuses in
   // 1.4–3.8s (measured 2026-07-19), which is well inside the store write below.
-  watchDeskForDeathOnArrival(ref.terminalId, me.model)
+  watchDeskForDeathOnArrival(
+    ref.terminalId,
+    me.model,
+    opts.projectPath,
+    session.agentSessionId,
+    session.resume,
+  )
   // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
   // commander its memory on the following launch (it starts fresh — the old
   // behaviour), and must NEVER turn a successfully-spawned PTY into a 500.

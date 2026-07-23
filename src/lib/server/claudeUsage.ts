@@ -1,7 +1,14 @@
 import { readdir, readFile, stat } from 'fs/promises'
 import { homedir } from 'os'
-import { join } from 'path'
+import { basename, join } from 'path'
 import type { ClaudeUsage } from '../types'
+
+/** Claude Code's max context window, in tokens. The auto-compact denominator for
+ *  the per-session gauge: `% used = contextTokens ÷ this`. Pinned at 200k by the
+ *  card-1 spike, where the JSONL usage sum (38,848) matched the CLI's own
+ *  `/context` readout (`38.8k/200k`) exactly. 【一次資料】 code.claude.com/docs
+ *  context-window.md ("200,000 tokens"), via docs/CONTEXT_MANAGEMENT_PLAN.md §A1. */
+export const CONTEXT_WINDOW_TOKENS = 200_000
 
 const WINDOW_HOURS = 5
 const WINDOW_MS = WINDOW_HOURS * 60 * 60 * 1000
@@ -168,4 +175,57 @@ export const collectClaudeUsage = async (
     byModel,
     currentModel,
   }
+}
+
+/** The context-window FILL for one claude session, in tokens: the sum its LAST
+ *  assistant turn reported carrying (`input + cache_read + cache_creation`) — the
+ *  same number the CLI's own `/context` prints (verified equal to `38.8k/200k` in
+ *  the card-1 spike, 2026-07-23). This is the ALWAYS-ON source for the per-session
+ *  context gauge; the on-screen footnote only appears near the limit
+ *  (claudeScreen.extractContextLeftPct is that near-limit alarm).
+ *
+ *  Distinct from {@link collectClaudeUsage}, which sums a whole 5-hour QUOTA
+ *  window across every session — this is ONE session's current fill, a different
+ *  measure (spike §5: "既存 UsageHud はクォータ枠であってセッション長ではない").
+ *
+ *  claude keys each session's transcript by its uuid (`<sessionId>.jsonl`), so the
+ *  file is found by basename without knowing its cwd-encoded parent dir. Reads the
+ *  NEWEST assistant line's usage (each turn's usage reflects the whole context it
+ *  carried in, so the last line is the current fill). Returns null when no such
+ *  file / assistant line exists yet. `projectsDir` is injectable for tests.
+ *  Requires transcript ON — the OG server (not a child of claude) runs with it on
+ *  (spike §3-B3). */
+export const sessionContextTokens = async (
+  sessionId: string,
+  projectsDir: string = claudeProjectsDir(),
+): Promise<number | null> => {
+  if (!sessionId) return null
+  let files: string[]
+  try {
+    files = await walkJsonl(projectsDir)
+  } catch {
+    return null
+  }
+  const target = files.find((f) => basename(f) === `${sessionId}.jsonl`)
+  if (!target) return null
+
+  let raw: string
+  try {
+    raw = await readFile(target, 'utf8')
+  } catch {
+    return null
+  }
+  // Walk from the end so a long transcript costs one parse, not a full scan.
+  const lines = raw.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const parsed = parseLine(lines[i])
+    if (!parsed) continue
+    const u = parsed.usage
+    return (
+      (u.input_tokens ?? 0) +
+      (u.cache_read_input_tokens ?? 0) +
+      (u.cache_creation_input_tokens ?? 0)
+    )
+  }
+  return null
 }

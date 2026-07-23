@@ -23,7 +23,7 @@
 //   (5) a `blocked`-column card is NEVER dispatched.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, mkdir, rm, realpath, writeFile, stat } from 'fs/promises'
+import { mkdtemp, mkdir, rm, realpath, writeFile, stat, utimes } from 'fs/promises'
 import { existsSync, readFileSync, rmSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
@@ -60,6 +60,8 @@ import {
   // The presence probe itself (2026-07-18): absent / idle / active off the REAL
   // sessions store + manager.json + transcript, with only the PTY signal injected.
   defaultManagerPresence,
+  defaultManagerDeliveryAt,
+  managerIntegrationStalled,
   defaultNudgeManager,
   STALL_ESCALATE_DELAY_MS,
   STALL_ECHO_GUARD_MS,
@@ -76,6 +78,7 @@ import {
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
 import { recordSwarmSession } from './swarmSessions'
+import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
 import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
 import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
@@ -879,6 +882,106 @@ describe('defaultManagerPresence — the echo discount (echoUntil) is honoured',
   })
 })
 
+// ── DELIVERY evidence: what the stall check judges a painting desk against ─────
+//    (2026-07-22 差し戻し). The first cut used the HEARTBEAT ALONE, which is wrong
+//    about how the commander works: /og-manage beats once at the head of a branch and
+//    then runs tsc + npm test + adversarial reviewers INSIDE that one turn, unable to
+//    curl a beat for tens of minutes. Judging it on the beat would ESC-interrupt the
+//    reviewers it is running. Real files here, because the whole point is which files
+//    claude actually writes while working.
+describe('defaultManagerDeliveryAt — sub-agent transcripts count as work (the 差し戻し)', () => {
+  // homedir() is where claude's transcript tree lives, and OPENGROUND_HOME cannot move
+  // it — so pin $HOME (POSIX os.homedir() honours it) rather than writing into the
+  // developer's real ~/.claude.
+  let savedHome: string | undefined
+  let fakeHome: string
+  beforeEach(async () => {
+    savedHome = process.env.HOME
+    fakeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-claude-home-')))
+    process.env.HOME = fakeHome
+  })
+  afterEach(async () => {
+    // Restore the captured $HOME — never `delete process.env.HOME`: unsetting it
+    // aims every later write in this worker at the user's REAL home (the
+    // 2026-07-18 data-loss vector the testHomeEnvGuard forbids). Under vitest
+    // $HOME is always set, so savedHome is always a string; the guard is fine
+    // with a plain restore.
+    if (savedHome !== undefined) process.env.HOME = savedHome
+    await rm(fakeHome, { recursive: true, force: true })
+  })
+
+  const SID = 'manager-session-uuid'
+  const touch = async (file: string, at: number) => {
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, '{}\n')
+    await utimes(file, new Date(at), new Date(at))
+  }
+
+  it('returns the NEWEST of heartbeat / session transcript / sub-agent transcripts', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', SID)
+    const t = Date.parse('2026-07-22T10:31:00Z')
+    // The exact shape of a commander mid-branch: it beat at the head 45 minutes ago, its
+    // own transcript froze when it launched the reviewers 40 minutes ago, and only the
+    // sub-agent files have moved since (measured: they are appended incrementally).
+    await writeManagerHeartbeat(proj, { phase: 'merge' }, t - 45 * 60_000)
+    await touch(sessionJsonlPath(proj, SID), t - 40 * 60_000)
+    await touch(join(sessionSubagentsDir(proj, SID), 'agent-abc123.jsonl'), t - 60_000)
+    const at = await defaultManagerDeliveryAt(proj, {
+      activity: () => ({ live: true, lastOutputAt: t, terminalId: 'pty-manager' }),
+    })
+    expect(at).not.toBeNull()
+    // The reviewer's file is the newest → the desk is WORKING, and by a wide margin the
+    // stall window would otherwise have declared it stopped.
+    expect(Math.abs(at! - (t - 60_000))).toBeLessThan(1500)
+    // …and PAINT is not in the mix at all: `lastOutputAt: t` is newer than everything
+    // above, and the answer must still be the sub-agent's mtime. Paint reading as
+    // delivery is the exact bug this whole card exists to remove.
+    expect(at!).toBeLessThan(t)
+  })
+
+  it('falls back to the heartbeat when no transcript exists, and is null when nothing does', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', SID)
+    const t = Date.parse('2026-07-22T10:31:00Z')
+    // Nothing written anywhere ⇒ no evidence ⇒ null (the fail-open: never "stalled").
+    expect(
+      await defaultManagerDeliveryAt(proj, {
+        activity: () => ({ live: true, lastOutputAt: t, terminalId: 'pty-manager' }),
+      }),
+    ).toBeNull()
+    // A beat alone still answers — the channel is not dropped, only joined by the others.
+    await writeManagerHeartbeat(proj, { phase: 'merge' }, t)
+    const at = await defaultManagerDeliveryAt(proj, {
+      activity: () => ({ live: true, lastOutputAt: t, terminalId: 'pty-manager' }),
+    })
+    expect(Math.abs(at! - t)).toBeLessThan(1500)
+  })
+
+  it('a desk that SPOKE AND STOPPED freezes every channel at once — the incident, detected', async () => {
+    const { proj } = await setupRepo()
+    await recordSwarmSession(proj, 'manager', SID)
+    // 10:31 統合完了: beat, transcript and (finished) reviewer files all stamp 10:31 and
+    // then nothing moves, while the TUI keeps the desk looking 'active'. 11:11 is where
+    // the 40-minute window puts the poke — versus 11:51 when the owner did it by hand.
+    const spokeAt = Date.parse('2026-07-22T10:31:00Z')
+    await writeManagerHeartbeat(proj, { phase: 'merge' }, spokeAt)
+    await touch(sessionJsonlPath(proj, SID), spokeAt)
+    await touch(join(sessionSubagentsDir(proj, SID), 'agent-abc123.jsonl'), spokeAt)
+    const at = await defaultManagerDeliveryAt(proj, {
+      activity: () => ({ live: true, lastOutputAt: Date.parse('2026-07-22T11:11:00Z'), terminalId: 'p' }),
+    })
+    expect(Math.abs(at! - spokeAt)).toBeLessThan(1500)
+    expect(
+      managerIntegrationStalled({
+        waitingSinceMs: Date.parse('2026-07-22T10:37:00Z'), // the first promotion
+        deliveryAtMs: at,
+        now: Date.parse('2026-07-22T11:17:00Z'), // 40 min after the cards landed
+      }),
+    ).toBe(true)
+  })
+})
+
 // ── A repo that has NEVER integrated still gets a usable presence verdict ──────
 describe('defaultManagerPresence — a never-written heartbeat is not evidence of health', () => {
   it('reads a live-but-silent desk as idle even with NO manager.json (so it can be nudged)', async () => {
@@ -1103,6 +1206,11 @@ describe('touchesSwarmPaths — the swarm-code path matcher', () => {
     expect(touchesSwarmPaths(['server/routes/__tests__/swarmSafety.routes.test.ts'])).toBe(true) // the route net
     expect(touchesSwarmPaths(['src/components/canvas/modules/SwarmModule.tsx'])).toBe(true)
     expect(touchesSwarmPaths(['src/components/canvas/modules/SwarmSupplyPane.tsx'])).toBe(true)
+    // server/index.ts (2026-07-22, card 2) — the one place resumeEngines() is
+    // wired in (the process.send gate + the boot-time call), outside every
+    // other glob above; without this entry a diff dropping that wiring would
+    // touch NO swarm path and never trip the safety gate.
+    expect(touchesSwarmPaths(['server/index.ts'])).toBe(true)
     // one swarm file among many unrelated ones → still true
     expect(touchesSwarmPaths(['README.md', 'src/lib/server/swarmWorker.ts'])).toBe(true)
     // unrelated → false (condition 3: these branches must not be slowed)

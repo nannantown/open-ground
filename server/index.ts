@@ -17,7 +17,7 @@ import { installLockdownFetchGuard } from '@/lib/server/lockdown'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
 import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
-import { startAutoDrainLoop, bootAutoDrainEnabled } from '@/lib/server/swarmOrchestrator'
+import { startAutoDrainLoop, bootAutoDrainEnabled, resumeEngines } from '@/lib/server/swarmOrchestrator'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
 import { warmTierProbeAtBoot } from '@/lib/server/swarmTierProbe'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
@@ -25,6 +25,7 @@ import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
+import { installSwarmTooling } from '@/lib/server/swarmToolingInstall'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
@@ -203,7 +204,54 @@ void (async () => {
   } catch (e) {
     console.error('[openground:hono] og-manage skill install failed', e)
   }
+  // Worker-facing swarm toolkit — /order・/supply スキルと swarm-beat.sh(+openground-swarm-lib.sh)
+  // を ~/.claude へ同じ idempotent install で配備する。無いと、OG を新規インストール
+  // した環境で spawn した worker が自分の /order も心拍コマンドも解決できない。
+  try {
+    const results = await installSwarmTooling()
+    for (const { name, result: r } of results) {
+      if (r.outcome === 'installed' || r.outcome === 'refreshed') {
+        console.log(`[openground:hono] swarm tooling ${name} ${r.outcome}: ${r.path}`)
+      }
+      // kept-user means the shipped source has DRIFTED from the user's copy but we
+      // never overwrite it (ownership contract) — log it so that drift is at least
+      // visible, instead of silently never surfacing again.
+      if (r.outcome === 'kept-user') {
+        console.log(`[openground:hono] swarm tooling ${name} kept-user (not overwritten — marker missing): ${r.path}`)
+      }
+      if (r.outcome === 'error') console.error(`[openground:hono] swarm tooling ${name} install: ${r.error}`)
+    }
+  } catch (e) {
+    console.error('[openground:hono] swarm tooling install failed', e)
+  }
 })()
+
+// ENGINE RESUME (card 2, docs/ENGINE_PERSISTENCE_PLAN.md §4) — re-hydrate any
+// registered project whose swarm engine was EXPLICITLY running before this
+// boot (that project's engine.json `desiredRunning`, written by
+// startOrchestrator/stopOrchestrator). This is DIFFERENT from the AUTO-DRAIN
+// loop below: auto-drain is "spin up ANY project sitting on an idle todo",
+// strict opt-in via OPENGROUND_SWARM_AUTODRAIN; this is "put back EXACTLY what
+// the owner had already turned on", gated by the crash-loop breaker (10-minute
+// window / 3 boots same version ⇒ suppress + fatal notify) and by the owner's
+// persisted manual-stop record (supremacy — an explicit pause always wins).
+//
+// GATED ON `process.send` — the SAME "are we the real forked prod engine?"
+// test osNotify.ts already uses (sendOsNotification's own doc comment: "in dev
+// tsx, vitest, or a bare node run there is no parent listening"). Only the
+// packaged app's Electron-forked server has that IPC channel; `tsx watch`
+// (`npm run dev` / `dev:server` / `electron:dev`) re-executes this ENTIRE
+// module on every file save, and without this gate that would mean: (a) real
+// claude PTYs spawn on every dev save for a project the developer had ON, (b)
+// a normal save cadence (a few per 10 minutes) trips the crash-loop breaker
+// and spams a fatal bell + OS toast, worsening every single save after the
+// first three. Both would land on the DEVELOPER, not a real crash scenario —
+// this module's own dev workflow was the one at risk, exactly the thing card 2
+// must never make worse. Fire-and-forget after boot; resumeEngines() is
+// fail-quiet-to-OFF per project and never throws.
+if (typeof process.send === 'function') {
+  void resumeEngines().catch((e) => console.error('[openground:hono] engine resume failed', e))
+}
 
 // AUTO-DRAIN background loop (card cf545637) — the UI-INDEPENDENT server-side tick that
 // auto-starts any registered project's stopped engine sitting on a todo backlog + idle
@@ -221,8 +269,13 @@ void (async () => {
 // No opt-in ⇒ no background drain, so a fresh install or a plain relaunch stays completely
 // idle until the user explicitly asks for the swarm. The predicate is the exported
 // `bootAutoDrainEnabled` (pinned by a regression test to "unset ⇒ off"): it is the only
-// process-wide, role-INDEPENDENT spawn switch, so its default is what protects a
-// non-owner user from any launch-time auto-run.
+// process-wide, role-INDEPENDENT spawn switch that can start a project the owner has
+// NEVER turned on. (card 2's resumeEngines() above is a DIFFERENT kind of switch —
+// it never starts anything the owner did not already opt into for that SPECIFIC
+// project, so it does not need this same "unset ⇒ off" default; the two are
+// deliberately not the same gate. Neither is a security boundary on its own — see
+// swarmGate.ts's "feature-VISIBILITY flag, not a security boundary" — this comment
+// is about accidental auto-run, not about bypassing the owner gate.)
 if (bootAutoDrainEnabled()) {
   startAutoDrainLoop()
 }

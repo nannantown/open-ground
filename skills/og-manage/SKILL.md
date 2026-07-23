@@ -305,7 +305,16 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
    `anomalies` / `escalations`(質問インボックス)/ conflict 滞留を人間に橋渡しする
    (滞留 review の退避は `review/resolve`)。**エンジン稼働中に手動 dispatch をしない**。
 4. 「止めて」で `POST …/stop`(稼働中 worker は残る — 個別停止は `worker/stop`)。停止で起こし反射も
-   止まる。エンジンは**アプリ再起動で必ず OFF に戻る**(安全側)。再開はユーザーの明示 ON だけ。
+   止まる。停止(`manualStop`)はアプリ再起動を跨いで**必ず有効**(値は永続され、常に最優先で守られる)。
+   ~~エンジンはアプリ再起動で必ず OFF に戻る(安全側)。再開はユーザーの明示 ON だけ。~~
+   **旧知識(2026-07-22 撤回)**: **明示的に ON にしていたプロジェクトは、アプリ再起動後 "人手ゼロで"
+   自動的に運転を再開する**(desiredRunning の boot 復元・docs/ENGINE_PERSISTENCE_PLAN.md card 2)。
+   よって resume したセッションでは、まだ「状況」を実行する前の running の値を**前回セッションでの
+   自分の操作の記憶と決めつけない** — 誰も何もしていなくても running:true のことがある。判断材料は
+   常に「状況」で読み直した現物(GET /api/swarm/orchestrator・journal の `engine resumed at boot` 行)
+   であって、この文の記述や記憶ではない。例外は 2 つ: ①`manualStop`(このセッションで自分が押した
+   停止)は今までどおり必ず有効 ②同一バージョンで短時間に何度も再起動すると crash-loop breaker が
+   自動再開を見送る(ベル通知 `engine-resume-suppressed` が出る — その場合は running:false のまま)。
 - エンジンを使わない見張りは **nudge 駆動**(ユーザーの「状況」「マージ」に応答)が基本。
   自発の定期巡回を張るなら長間隔(60分)の保険だけ — 短間隔ポーリングでトークンを焚かない。
 

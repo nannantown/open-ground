@@ -11,9 +11,11 @@ import { checkMergedBranches } from './mergedBranches'
 // best-effort `git fetch origin <target>` inside checkMergedBranches simply
 // fails silently — exactly the offline path the module promises to survive.
 
-// Real `git` subprocesses flake under the 5s default when the machine is
-// loaded; generous ceiling, passing tests still finish well under it.
-vi.setConfig({ testTimeout: 30_000 })
+// Real `git` subprocesses are wall-clock bound and stretch badly when the
+// machine is loaded. Kept per-file so the I/O-heavy intent stays visible, but
+// the value now matches the canonical ceiling in vitest.config.ts (60s) — a
+// shorter value here would silently re-cap what that config just raised.
+vi.setConfig({ testTimeout: 60_000 })
 
 const execFile = promisify(execFileCb)
 

@@ -45,10 +45,12 @@ vi.setConfig({ testTimeout: 60_000 })
 const mocks = vi.hoisted(() => ({
   launchClaude: vi.fn(),
   listLiveDesksIn: vi.fn(),
-  onTerminalExit: vi.fn(() => () => {}),
-  getTerminalScreen: vi.fn(() => null),
+  onTerminalExit: vi.fn((_id: string, _onExit: () => void) => () => {}),
+  getTerminalScreen: vi.fn((_id: string): string | null => null),
+  isTerminalProcessAlive: vi.fn((_id: string) => true),
   resolveSwarmSession: vi.fn(),
   recordSwarmSession: vi.fn(async () => {}),
+  forgetSwarmSessionIf: vi.fn(async () => false),
   installOgManageSkill: vi.fn(async () => ({ outcome: 'installed' as const, path: '/tmp/skill' })),
   resolveSwarmModelEffortProbed: vi.fn(),
   resolveSwarmRemoteName: vi.fn(async () => 'manager'),
@@ -59,10 +61,12 @@ vi.mock('./terminal', () => ({
   listLiveDesksIn: mocks.listLiveDesksIn,
   onTerminalExit: mocks.onTerminalExit,
   getTerminalScreen: mocks.getTerminalScreen,
+  isTerminalProcessAlive: mocks.isTerminalProcessAlive,
 }))
 vi.mock('./swarmSessions', () => ({
   resolveSwarmSession: mocks.resolveSwarmSession,
   recordSwarmSession: mocks.recordSwarmSession,
+  forgetSwarmSessionIf: mocks.forgetSwarmSessionIf,
 }))
 vi.mock('./ogManageSkill', () => ({ installOgManageSkill: mocks.installOgManageSkill }))
 vi.mock('./swarmLaunch', async (importOriginal) => ({
@@ -308,6 +312,30 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
     // heals the desync presence reads as 'absent').
     expect(mocks.recordSwarmSession).toHaveBeenCalledWith(PROJ, 'manager', 'sid-live')
   })
+
+  it('a pool entry the OS has already reaped is never adopted — a fresh desk spawns instead (MF3)', async () => {
+    // The Restart race: killTerminal signals the process but `finishedAt` is
+    // stamped by an asynchronous onExit, so for the narrow window before that
+    // callback fires the pool can still list a desk the OS has already reaped.
+    // isTerminalProcessAlive is the caller's confirmation against the process
+    // table — without it, the owner's Restart button (DELETE then immediately
+    // POST a respawn) can be answered with the very pane it just killed instead
+    // of a working new one.
+    pool.push({
+      id: 'dead-but-listed',
+      cwd: PROJ,
+      agentSessionId: 'sid-dying',
+      deskLabel: MANAGER_DESK_LABEL,
+      startedAtMs: 1,
+    })
+    mocks.isTerminalProcessAlive.mockImplementation((id: string) => id !== 'dead-but-listed')
+
+    const r = await spawnSwarmManager({ projectPath: PROJ })
+
+    expect(mocks.launchClaude).toHaveBeenCalledTimes(1) // spawned fresh, did not adopt the corpse
+    expect(r.terminalId).not.toBe('dead-but-listed')
+    expect(r.reused).toBeUndefined()
+  })
 })
 
 describe('spawnSwarmManager — waiting out a holder that never settles', () => {
@@ -357,5 +385,68 @@ describe('spawnSwarmManager — waiting out a holder that never settles', () => 
     gate.resolve({ model: 'opus', effort: 'max' })
     await wedged
     expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('spawnSwarmManager — wires session.resume through to the DOA watch (pins the must-fix, not just the unit)', () => {
+  // swarmManager.test.ts pins watchDeskForDeathOnArrival's OWN resume/fresh branch
+  // in isolation, calling it directly. That proves the function is correct but
+  // NOT that launchNewDesk actually hands it the resolver's real `resume` value —
+  // a refactor of that call site (argument reorder, destructuring change) could
+  // silently drop it and every existing test would stay green, because none of
+  // them go through spawnSwarmManager's real wiring end to end. These do: they
+  // drive a real spawn, capture the exit callback launchNewDesk registers via
+  // onTerminalExit, fire it as a quota-refusal death, and assert on
+  // forgetSwarmSessionIf — the one observable side effect resume/fresh actually
+  // changes.
+  const FABLE_NOTICE =
+    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+
+  /** Capture the exit callback launchNewDesk registers for the desk it just
+   *  spawned, so the test can fire a DOA death itself. Restored after each test
+   *  so this describe's choreography can never leak into a sibling test. */
+  const captureExitCallback = () => {
+    let cb: (() => void) | null = null
+    mocks.onTerminalExit.mockImplementationOnce((_id: string, onExit: () => void) => {
+      cb = onExit
+      return () => {}
+    })
+    return () => {
+      if (!cb) throw new Error('onTerminalExit was never called — no watch was armed')
+      cb()
+    }
+  }
+
+  afterEach(() => {
+    mocks.onTerminalExit.mockImplementation(() => () => {})
+    mocks.getTerminalScreen.mockReturnValue(null)
+  })
+
+  it('a RESUMED desk (session.resume=true) that dies of quota does NOT forget its session — the must-fix, driven through the real spawn path', async () => {
+    mocks.resolveSwarmSession.mockResolvedValueOnce({
+      agentSessionId: 'sid-days-of-history',
+      resume: true,
+    })
+    mocks.getTerminalScreen.mockReturnValueOnce(FABLE_NOTICE)
+    const fireDeath = captureExitCallback()
+
+    await spawnSwarmManager({ projectPath: PROJ })
+    fireDeath()
+
+    expect(mocks.forgetSwarmSessionIf).not.toHaveBeenCalled()
+  })
+
+  it('a FRESH desk (session.resume=false) that dies of quota DOES forget its (refusal-only) session — driven through the real spawn path', async () => {
+    mocks.resolveSwarmSession.mockResolvedValueOnce({
+      agentSessionId: 'sid-refusal-only',
+      resume: false,
+    })
+    mocks.getTerminalScreen.mockReturnValueOnce(FABLE_NOTICE)
+    const fireDeath = captureExitCallback()
+
+    await spawnSwarmManager({ projectPath: PROJ })
+    fireDeath()
+
+    expect(mocks.forgetSwarmSessionIf).toHaveBeenCalledWith(PROJ, 'manager', 'sid-refusal-only')
   })
 })

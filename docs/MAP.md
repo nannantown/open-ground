@@ -77,7 +77,9 @@
   tsx watch reload を生存(新規 in-memory 状態もこのパターンを踏襲する)
 - `claudeTerminal.ts`(`launchClaude` — claude PTY 起動・`--session-id`・taskWorktrees の
   `--add-dir` 事前許可)/ `pastePrompt.ts`(bracketed paste・UNSENT 挿入)/ `cliResolve.ts`(claude 実体解決)
-- `claudeConnection.ts` / `claudePreflight.ts` / `terminalProjects.ts`(active 一覧→Ground beacon)/
+- `claudeConnection.ts` / `claudePreflight.ts` / `swarmEnvPreflight.ts`(git/shell 前提 —
+  git 不在・非 git repo・シェル不在を worker/supply/manager spawn 前にゲート、
+  `GET /api/swarm/preflight` で Swarm タブに1枚のバナー表示) / `terminalProjects.ts`(active 一覧→Ground beacon)/
   `src/lib/claudeMenu.ts`(client 側 — 権限メニュー検出→数字送信)
 - `src/lib/claudeScreen.ts` — **描画済み claude TUI 1画面のアナトミー**(どの行が CLI の
   furniture でどの行が会話か)を集約した pure leaf。`swarmQuestions`(質問検出)/
@@ -124,6 +126,17 @@
 - 入口だけ: `swarmOrchestrator.ts`(エンジン tick)/ `swarmWorker.ts` / `swarmLaunch.ts`(spawn・
   モデル/effort/リモコン名解決)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
   `swarmQuota.ts` / route: `server/routes/swarm.ts` / UI: `modules/SwarmModule.tsx` + `useSwarmEngine.ts`
+- **エンジンの再起動永続化**(2026-07-22, card 2): `swarmEnginePersistence.ts`(engine intent
+  write-through `~/.openground/projects/<uuid>/engine.json` + crash-loop breaker ring
+  `~/.openground/engine-boots.json`) + `swarmOrchestrator.ts` の `resumeEngines()`(server 起動時に
+  `server/index.ts` から fire-and-forget で呼ばれる)。設計正典 = `docs/ENGINE_PERSISTENCE_PLAN.md`
+- **worker roster の write-through + boot 照合**(2026-07-23, card 3): `swarmWorkerRoster.ts`
+  (roster を心拍の隣 `~/.openground/swarm/<repoキー>/roster.json` へ write-through — sessionId /
+  taskId / branch / worktree / tier / spawnAt / workedMs / reworkCount。状態遷移点のみ書く
+  signature-guard・fail-open write / fail-quiet read)+ `swarmOrchestrator.ts` の `syncRoster()`
+  (dispatch pass 末尾)・`resumeEngines()` の**照合先行・spawn 凍結**(`reconcileRoster` を dispatch
+  前に await)。boot 分類 4 分岐 = worktree 消滅 / ready / 作業途中(resume 候補) / カード消滅。
+  実際の `--resume` 会話復元は card 4(未着手)。設計正典 = `docs/ENGINE_PERSISTENCE_PLAN.md` §3/§4-3
 - 子プロセスの env: テスト/ビルド/lint を回す spawn は **必ず** `gateProcess.ts` の `withGateEnv`
   (electron 側は `electron/gateEnv.js` の `buildGateEnv`)を通す — 使い捨て `OPENGROUND_HOME` を
   engine が注入する統制。env を丸ごと渡すと `gateEnv.test.ts` の source pin が RED。
@@ -143,6 +156,19 @@
   一次資料を取り込む・取得失敗は `【資料取得できず】` で degrade)。どちらも WORKER_ORDER_RULES
   (`swarmWorker.ts`)に追記され、後者は `skills/og-manage/SKILL.md`「マージ」手順4 とも同一正典。
   テスト: 同名 `*.test.ts` + `ogManageSkill.test.ts`(出荷 SKILL.md への verbatim 照合)
+- worker/補給官の道具(`/order`・`/supply` スキルと心拍 `swarm-beat.sh`+`openground-swarm-lib.sh`)は
+  `~/.claude/` へ boot 自動配備される: `managedFileInstall.ts`(og-manage/order/supply/script
+  共通の idempotent installer — missing→install / marker+差分→refresh / marker無→kept-user)
+  を `ogManageSkill.ts` と `swarmToolingInstall.ts` の両方が使う。正典テキストは repo の
+  `skills/order/SKILL.md` `skills/supply/SKILL.md` `scripts/swarm-beat.sh`
+  `scripts/openground-swarm-lib.sh`(tmux 依存ゼロ)。配備 seam は
+  `server/index.ts` の boot IIFE(`installSwarmTooling()`)。テスト: `swarmToolingInstall.test.ts`
+- 罠: シェル補助の配備名は `openground-` 接頭辞つき(`SWARM_LIB_BASENAME`)。ユーザの
+  `~/.claude/swarm-lib.sh` は**旧 tmux コックピット版(手書き・12 関数)で OG 管理外**、
+  ~/.claude 配下の別スクリプト群が source している。同名で配備すると kept-user が外れた
+  瞬間に 10 関数が消えて静かに壊れるので、**配備先はこの名前に戻さない**(回帰テスト
+  `swarmToolingInstall.test.ts` の describe「legacy ~/.claude/swarm-lib.sh collision」)。
+  `scripts/swarm-beat.sh` の source 行と `package.json` の `build.files` も同名で追随が要る
 - 消費計測: `swarmTokenAudit.ts`(カード単位の 手数/束ね率/文脈max/出力・read-only)+ CLI
   `scripts/swarm-token-audit.ts`(`npm run swarm:audit`)。worker done 時に `consumption:` 行が
   journal に載る(orchestrator の promote 点・fail-safe で skip 可)。既定走査 = 全project の worker

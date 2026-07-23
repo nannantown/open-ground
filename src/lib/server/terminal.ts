@@ -705,6 +705,39 @@ const defaultIsAlive = (pid: number): boolean => {
   }
 }
 
+/** Is the PTY behind `terminalId` REALLY still running — asked of the operating
+ *  system, not of the pool's bookkeeping?
+ *
+ *  `finishedAt` is stamped by the asynchronous `onExit` handler, so between
+ *  {@link killTerminal} sending the signal and that handler firing, the pool
+ *  still reports the session as live (`listOwnerDeskTerminals`/`listLiveDesksIn`
+ *  filter only on `finishedAt`). A caller that treats "live" as "usable" inside
+ *  that window can hand back a terminal that is already gone — e.g. the
+ *  commander's Restart button awaits DELETE then immediately POSTs a respawn,
+ *  and the single-desk adoption gate (swarmManager.adoptLiveDesk) can answer
+ *  with the very desk the DELETE just killed, handing back a dead pane instead
+ *  of spawning a fresh one. In practice the window is one event-loop hop
+ *  (node-pty has already reaped the child; only the JS-side onExit callback is
+ *  pending) and `startTerminalSweepLoop`'s orphan sweep would self-heal it
+ *  within its own poll interval regardless — this closes the narrow immediate
+ *  window rather than a lasting outage. Signal 0 closes it because it reflects
+ *  the process table rather than our own record of it.
+ *
+ *  Answers `false` for an unknown id or one already stamped exited. A session
+ *  with no real numeric pid (test fixtures) is reported ALIVE — absence of a
+ *  pid is missing evidence, not evidence of death, matching the pool's own
+ *  sweeper. `isAlive` is injectable for tests. */
+export const isTerminalProcessAlive = (
+  terminalId: string,
+  isAlive: (pid: number) => boolean = defaultIsAlive,
+): boolean => {
+  const s = sessions.get(terminalId)
+  if (!s || s.info.finishedAt) return false
+  const pid = (s.pty as { pid?: unknown } | null)?.pid
+  if (typeof pid !== 'number' || pid <= 0) return true
+  return isAlive(pid)
+}
+
 /** Tear down ONE pool entry idempotently and drop it from the map. Mirrors the
  *  onExit teardown so it's safe whether or not onExit already ran:
  *   - exited-but-lingering session → fields are already cleared; just delete.

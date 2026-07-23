@@ -23,7 +23,8 @@ import {
 
 // The blank-override case runs REAL detection (process PATH → login shell →
 // known paths) — on a machine with no editor that can take several seconds.
-vi.setConfig({ testTimeout: 30_000 })
+// Value matches the canonical ceiling in vitest.config.ts (60s).
+vi.setConfig({ testTimeout: 60_000 })
 
 describe('parseEditorCmd (OPENGROUND_EDITOR_CMD → argv)', () => {
   it('splits on whitespace; first token is the command', () => {

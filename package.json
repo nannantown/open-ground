@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.32",
+  "version": "0.11.33",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -101,7 +101,11 @@
       "dist-web/**",
       "scripts/openground-hook.js",
       "scripts/openground-guard.js",
+      "scripts/swarm-beat.sh",
+      "scripts/openground-swarm-lib.sh",
       "skills/og-manage/SKILL.md",
+      "skills/order/SKILL.md",
+      "skills/supply/SKILL.md",
       "src/designs/**",
       "node_modules/node-pty/**"
     ],

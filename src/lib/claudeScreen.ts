@@ -111,6 +111,28 @@ export const CHROME_ROW_RES: readonly RegExp[] = [
 /** Is this row TUI chrome rather than conversation? */
 export const isChromeRow = (row: string): boolean => CHROME_ROW_RES.some((re) => re.test(row))
 
+/** The auto-compact footnote's "context left" percent, read from a rendered frame
+ *  — or null when the footnote isn't on screen. claude paints
+ *  `Context left until auto-compact: N%` only as the window APPROACHES the limit,
+ *  so a null is the ordinary low-context case, not an error: the always-on
+ *  per-session gauge reads JSONL usage instead (claudeUsage.sessionContextTokens),
+ *  and this footnote is the near-limit ALARM cross-check (card-1 spike, §3-B3 —
+ *  at 19% used the footnote was absent in every capture).
+ *
+ *  This salvages the number the {@link CHROME_ROW_RES} classifier at
+ *  {@link isChromeRow} drops from the conversation — reading it does NOT change
+ *  what counts as chrome: the footnote row stays chrome (still hidden from the
+ *  transcript), the classifier regex is untouched, this just reads the value
+ *  before it is discarded. Deliberately a SEPARATE regex from the classifier's
+ *  (which carries no capture group) so extending extraction cannot perturb the
+ *  display-exclusion behaviour. Pure. */
+export const extractContextLeftPct = (screen: string): number | null => {
+  const m = screen.match(/context left until auto-compact:\s*(\d+)\s*%/i)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) ? n : null
+}
+
 /** A box-drawn banner row (`│ ✻ Welcome to Claude Code! │`) — the welcome frame,
  *  the one place the CLI really does draw a bordered box. Recognised by both
  *  ends being box-drawing glyphs (U+2500–U+257F). */

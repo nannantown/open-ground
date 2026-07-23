@@ -84,6 +84,8 @@ spawn 経路(5+1)と fail-closed の実装箇所は §5.4。
 | **自動(司令官卓の起動即死・DOA、2026-07-19)** | `markRateLimited` | swarmManager.ts(`watchDeskForDeathOnArrival` — 立てた卓が 90s 以内にクォータ拒否で死んだときだけ。§5.8.6) |
 | 手動 API | `markCoolingUntil` / `clearCooling` | server/routes/swarm.ts(cool / uncool) |
 
+**2.2.1 DOA はもう1つ書く — セッションレコードの compare-and-delete(2026-07-22)。** `watchDeskForDeathOnArrival` は tier cooling を書くのと同じ死亡確認で、**FRESH セッション(`--session-id`、resume していない卓)に限り** `swarmSessions.forgetSwarmSessionIf` でそのセッションレコードも消す。理由: フレッシュな卓がクォータ拒否1行だけを吐いて死ぬと、そのレコードは「拒否1行しかない transcript」を指したまま残り、次回起動の `resolveSwarmSession` がそれを resumable と誤認して枯渇通知だけの会話を `--resume` してしまう。**RESUME していた卓は対象外** — その transcript は数日分の統合履歴+拒否1行であり、00 章 §2.1 の「会話履歴は生き残る」保証を守るため、forget は呼ばれない(`watchDeskForDeathOnArrival` に渡す `wasResumed` フラグで分岐)。`forgetSwarmSessionIf` 自体は compare-and-delete(sessionId 一致時のみ削除)なので、消そうとした後に別の spawn が同じロールへ良いセッションを上書きしていた場合はそれを守る。詳細は §5.8.6。
+
 mutation 3関数とも `markTouched()` + `schedulePersist()` を呼ぶ(swarmQuota.ts:385-396 / 411-416 / 433-437)ので、**どの呼出元から書いてもミラーされる**。**5本目の呼出元を足すのは自由だが、mutation 関数を経由しない直接書込は禁止** — ミラーを忘れた mutation は「次の再起動で黙って消える mark」になり、これはまさに永続化が塞いだバグそのもの。`clearCooling`(uncool)も**削除がミラーされる** — でないと起動 hydrate が、オーナーが解除したばかりの mark を律儀に読み戻してしまう。
 
 ### 2.3 markRateLimited の上書き挙動 — **newest wins(max() ではない)**
@@ -739,7 +741,11 @@ r to retry
 
 **真因2(予測は fail-open で漏れる)**: プローブは**予測**で、8s 窓超過・bin 未解決・壁が verdict と spawn の数秒の間に立った等で**必ず漏れる経路**がある。漏れると卓が枯れ tier に着席して即死し、engine の記録上の反応は「5分後にまた同じ tier で起こす」だけ(壁がどこにも書かれていないから)。
 
-**修正2 — 死骸から学ぶ第2防壁(`watchDeskForDeathOnArrival`、swarmManager.ts)**: 卓を立てた直後に PTY の exit を監視(`onTerminalExit` — 出力購読なしの死活監視で ACK フロー制御に載らない)。`DESK_DOA_WINDOW_MS`(**90s**)以内に**クォータ拒否文言**(`matchesQuotaExhaustion` — 層Eと同じ極性・§5.8.2.1)を画面に残して死んだら、その tier を `markRateLimited`(層A書込・第2.2の自動経路)で冷やす。**予測(probe)より outcome(死んだ卓)の方が強い証拠で、しかもタダ**(卓が既に払った)。⚠ **クォータ拒否文言だけが冷やす** — crash / ^D / 一時529 で死んだ卓は健全 tier を巻き込まない(mark は20分×全 spawn 経路に効く)。窓を超えて生きた卓の後の死は tier について何も語らない(据え置き)。回帰: `swarmManager.test.ts`(窓内 quota死→冷却 / 非quota死→冷却せず / 窓超過死→冷却せず / screen欠→冷却せず / 非ladder→watch を張らない)。
+**修正2 — 死骸から学ぶ第2防壁(`watchDeskForDeathOnArrival`、swarmManager.ts)**: 卓を立てた直後に PTY の exit を監視(`onTerminalExit` — 出力購読なしの死活監視で ACK フロー制御に載らない)。`DESK_DOA_WINDOW_MS`(**90s**)以内に**クォータ拒否文言**(`matchesQuotaExhaustion` — 層Eと同じ極性・§5.8.2.1)を画面に残して死んだら、その tier を `markRateLimited`(層A書込・第2.2の自動経路)で冷やす。**予測(probe)より outcome(死んだ卓)の方が強い証拠で、しかもタダ**(卓が既に払った)。⚠ **クォータ拒否文言だけが冷やす** — crash / ^D / 一時529 で死んだ卓は健全 tier を巻き込まない(mark は20分×全 spawn 経路に効く)。窓を超えて生きた卓の後の死は tier について何も語らない(据え置き)。
+
+**2026-07-22 追記 — 同じ死亡確認がセッションレコードの後始末も兼ねる**: `watchDeskForDeathOnArrival` は tier cooling と同時に、**FRESH セッション(resume していない卓)に限り** `swarmSessions.forgetSwarmSessionIf` でそのセッションレコードを compare-and-delete する(§2.2.1)。**RESUME していた卓は対象外** — `wasResumed` 引数で分岐し、00 章 §2.1 の「会話履歴は生き残る」保証を壊さない。この配線は unit(`watchDeskForDeathOnArrival` を直接呼ぶ)だけでなく、`spawnSwarmManager` の実 spawn 経路を通した end-to-end テストでも pin されている(下記回帰リスト参照) — `launchNewDesk` が resolver の `resume` 値を watch へ渡し損ねるリファクタが unit テストだけでは検出できないため。
+
+回帰: `swarmManager.test.ts`(窓内 quota死→冷却 / 非quota死→冷却せず / 窓超過死→冷却せず / screen欠→冷却せず / 非ladder→watch を張らない / FRESH死→session forget / RESUMED死→session維持 / quota以外の死→session不可侵)、`swarmManager.spawn.test.ts`(実 spawn 経路を通した resume=true→forget されない・resume=false→forget される の end-to-end pin)。
 
 **真因3(presence が死んだ卓を absent と読み、次の ready で再 spawn)**: これは Fable 枯渇とは独立の増殖経路で、03 章 §2.3 が正典(記録スロットの desync → 生きた卓を「無名」化 → absent → twin)。7/20 に Fable 無関係でも11卓が再発したのはこの経路。
 

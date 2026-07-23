@@ -121,6 +121,13 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   'review-panel-failed': 'Swarm — review panel failed (merge withheld)',
   'high-risk-hold': 'Swarm — high-risk paths (awaiting manual merge)',
   'manager-unrevivable': 'Swarm — commander keeps dying (check it manually)',
+  // Fires from TWO distinct causes (swarmOrchestrator.ts resumeEngines): the
+  // crash-loop breaker tripping (repeated restarts) OR the breaker's own boot
+  // ring failing to persist (a disk fault — e.g. a first-ever launch before a
+  // must-fix 2026-07-22 rework fixed the missing ensureOpenGroundHome() call).
+  // The title stays cause-agnostic on purpose; `detail` (built per-call at the
+  // fire site) is what actually says which one happened.
+  'engine-resume-suppressed': 'Swarm — auto-resume paused',
   // Plain Japanese on purpose: unlike every other entry here (read by the
   // operator), this one is read by the OWNER, who is not a programmer, and it is
   // about their own data going missing. See homeIntegrity.ts.
@@ -198,6 +205,7 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   // Not a swarm event at all — the OWNER'S OWN conversation stopped. Titled for
   // what the owner sees on the toast, not for the subsystem that noticed.
   'session-limit': 'Claude — your conversation stopped (usage limit)',
+  'engine-resumed': 'Swarm — auto-resumed after restart',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

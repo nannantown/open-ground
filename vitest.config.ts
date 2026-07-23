@@ -25,6 +25,46 @@ export default defineConfig({
     // setup-dom: register @testing-library/jest-dom matchers + RTL auto-cleanup
     //   (a no-op in node-environment tests; see the file's note).
     setupFiles: ['./src/test/setup-home.ts', './src/test/setup-dom.ts'],
+    // ── Timeouts ──────────────────────────────────────────────────────────
+    // Vitest's own defaults are testTimeout 5_000 / hookTimeout 10_000 in the
+    // node environment (vitest 4.1.7; https://vitest.dev/config/testtimeout,
+    // checked 2026-07-23). Those defaults DO NOT fit this repo — do not
+    // "clean up" these two lines back to the default.
+    //
+    // Why: most tests under src/lib/server + server/ are real I/O — mkdtemp,
+    // real fs writes, realpath canonicalization, and in the swarm/git suites
+    // actual `git` child processes. At idle each finishes in ~200-400ms, but
+    // they are wall-clock bound, so under CPU contention they stretch 14-20x
+    // (measured 2026-07-20). Contention is the NORMAL state here, not an
+    // exception: the swarm engine keeps several claude workers and reviewer
+    // sub-agents running while a suite is being verified.
+    //
+    // What the 5s default actually cost (measured 2026-07-23, load avg 5-7):
+    //   - an UNMODIFIED origin/main reported 400 failing tests; the very same
+    //     commit was 285 files / 5711 passed / 0 failed a few hours earlier
+    //     at idle.
+    //   - the failures were nondeterministic: re-running one file on its own
+    //     failed a DIFFERENT test each run (slowest took 7125ms). That is a
+    //     stopwatch result, not a regression — but it reads exactly like
+    //     "main is broken" and sent the commander into a ~40min hunt (three
+    //     full-suite runs + a bisect) for a bug that never existed.
+    // 60_000 is >8x the worst run observed under normal load (7.2s), so an
+    // ordinary load spike is very unlikely to reach it. It does NOT make timeouts
+    // impossible: under pathological oversubscription (the whole 285-file suite
+    // running several times over at once) an unfenced fs-heavy test has been seen
+    // to hit 60000ms too — the fix kills the 5s CHRONIC flap, it doesn't promise
+    // zero timeouts at any load. It is also the value the 15 files that had
+    // already self-defended with `vi.setConfig` converged on — hoisted here so
+    // all ~285 files get it instead of 5%.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
+    // The guard that keeps a 60s ceiling from hiding a genuine hang: the
+    // default reporter prints any test slower than this in yellow. Vitest's
+    // default (300ms) would flag nearly every I/O test here = no signal at
+    // all. 10s sits above the worst load-induced runtime observed (7.2s) and
+    // 6x below the timeout, so a test drifting toward a real hang becomes
+    // visible long before it starts failing.
+    slowTestThreshold: 10_000,
     // Test files share the same `@/*` path alias as the app does
     // (tsconfig.json `paths`). Without this, imports like
     // `from '@/lib/types'` fail in test files.

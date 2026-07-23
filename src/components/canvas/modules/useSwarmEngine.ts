@@ -16,7 +16,7 @@
 // available:false + DEFAULT_ENGINE, never a scary error) — the same contract the
 // manager pane had before, just relocated.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import type { SwarmWorkerRecord } from '@/lib/types'
@@ -556,6 +556,42 @@ export const sanitizeFatalNotifications = (raw: unknown): SwarmFatalView[] => {
   return out
 }
 
+// ── Env preflight (git/shell) — mirrors the server's SwarmEnvIssue/Result
+// (src/lib/server/swarmEnvPreflight.ts). The SAME check the worker/supply/
+// manager spawn routes gate on, polled here as a plain read so the Swarm tab
+// can show every unmet prerequisite as ONE banner before the owner ever
+// presses a launch button, instead of only discovering it as a failed spawn.
+export type SwarmEnvIssueId = 'gitMissing' | 'notAGitRepo' | 'shellMissing'
+
+export interface SwarmEnvIssue {
+  id: SwarmEnvIssueId
+}
+
+// Exported so a client call site that only gets the terse 503 body shape
+// (`{ envIssues: string[] }` — see the /worker /supply /manager spawn routes)
+// can validate ids itself without duplicating this list (SwarmModule.tsx's
+// envIssuesErrorMessage).
+export const KNOWN_ENV_ISSUE_IDS: ReadonlySet<string> = new Set([
+  'gitMissing', 'notAGitRepo', 'shellMissing',
+])
+
+// The route response is untrusted like every other one — keep only known ids
+// (an id the client has no copy for would render as an empty banner row).
+export const sanitizeEnvIssues = (raw: unknown): SwarmEnvIssue[] => {
+  if (!raw || typeof raw !== 'object') return []
+  const arr = (raw as Record<string, unknown>).issues
+  if (!Array.isArray(arr)) return []
+  const out: SwarmEnvIssue[] = []
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue
+    const id = (item as Record<string, unknown>).id
+    if (typeof id === 'string' && KNOWN_ENV_ISSUE_IDS.has(id)) {
+      out.push({ id: id as SwarmEnvIssueId })
+    }
+  }
+  return out
+}
+
 const KNOWN_ORCH_STAGES: ReadonlySet<string> = new Set(['starting', 'running', 'done'])
 
 // GET /api/swarm/workers is the SERVER-TRUTH worker list (project_swarm_worker_registry):
@@ -651,7 +687,7 @@ export const planSwarmPower = (on: boolean, s: SwarmPowerInputs): SwarmPowerPlan
 
 // Poll cadence matches SwarmModule's other polls (Ground beacon / Board): every
 // 5s, skipped while hidden, re-polled on focus.
-const ENGINE_POLL_MS = 5_000
+export const ENGINE_POLL_MS = 5_000
 
 export interface UseSwarmEngine {
   /** Latest engine state (DEFAULT_ENGINE until the route answers). */
@@ -675,6 +711,11 @@ export interface UseSwarmEngine {
   /** The overseer was armed WITHOUT the sandbox experiment (L3) — the manager pane
    *  shows a reduced-containment note. False whenever the overseer is off. */
   sandboxWarning: boolean
+  /** Unmet git/shell prerequisites for spawning a swarm session in this project
+   *  (GET /api/swarm/preflight — swarmEnvPreflight, the same gate the worker/
+   *  supply/manager spawn routes enforce). Empty when everything checks out or
+   *  the route hasn't answered yet (never blocks rendering on this alone). */
+  envIssues: SwarmEnvIssue[]
   /** Autonomy switch (Card①) — start/stop the drain+dispatch loop. */
   toggleAutonomy: (next: boolean) => void
   /** Dismiss the restart "autonomy was on — resume?" reminder without resuming:
@@ -717,6 +758,24 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // reduced-containment note. Set from the overseer toggle response; cleared when the
   // overseer is off. Advisory only (the structural READ-ONLY design + budget hold).
   const [sandboxWarning, setSandboxWarning] = useState(false)
+  // Unmet git/shell prerequisites (GET /api/swarm/preflight), polled alongside
+  // the engine state below (one interval, one more endpoint).
+  const [envIssues, setEnvIssues] = useState<SwarmEnvIssue[]>([])
+
+  // ── Poll concurrency guards ──────────────────────────────────────────────
+  // The poll's OWN in-flight flag. Deliberately NOT `busy`: `busy` means "a
+  // start/stop/overseer round-trip is in flight" (and is a dep of the poll
+  // effect below), which says nothing about whether a poll lap is still
+  // running. Merging the two would break the toggle guard's meaning.
+  const pollInFlightRef = useRef(false)
+  // Per-lap generation. Every lap stamps itself and the poll effect's cleanup
+  // bumps the counter; a lap applies its setState only while its stamp is still
+  // the newest, so a slow lap landing after a newer one can't clobber it. This
+  // generalizes React's per-effect cleanup flag (react.dev "Synchronizing with
+  // Effects" — "it doesn't matter in which order the requests complete"): that
+  // flag is per-EFFECT and is therefore blind to the lap-vs-lap race that
+  // overlapping ticks INSIDE one effect create.
+  const pollSeqRef = useRef(0)
 
   // Reset when the hook is reused for another project (SwarmModule keeps one
   // instance across project switches, like the worker/supply state it resets).
@@ -727,76 +786,121 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     setAvailable(false)
     setBusy(false)
     setError(null)
+    setEnvIssues([])
   }, [projectPath])
 
   // Poll the orchestrator state. A non-ok response (the route 404s on an old
   // server) or a throw → available:false + DEFAULT_ENGINE, never an unhandled
   // error. We skip while a toggle is mid-flight so its authoritative response
   // isn't clobbered by a stale read landing a moment later.
+  //
+  // The reads are INDEPENDENT routes, so they fire in PARALLEL and land as one
+  // snapshot. Serial awaits made a lap cost the SUM of four fs-reading routes;
+  // under swarm load (load average 5-7, where pure I/O in this repo stretches to
+  // 5-7s — measured in card d44b5ff0) that exceeds ENGINE_POLL_MS and laps start
+  // overlapping — exactly when the commander is busiest.
   useEffect(() => {
-    let cancelled = false
     const poll = async () => {
       if (document.hidden) return
-      // 1) Engine orchestrator state (semantics unchanged — ok ⇒ available + state,
-      //    non-ok / throw ⇒ not available). No early return: the notifications fetch
-      //    below is INDEPENDENT and must run even when the engine route is offline.
-      try {
-        const res = await fetch(`/api/swarm/orchestrator?path=${encodeURIComponent(projectPath)}`)
-        if (!cancelled) {
-          if (!res.ok) {
-            setAvailable(false)
-          } else {
-            const state = sanitizeEngineState(await res.json())
-            if (!cancelled) {
-              setAvailable(true)
-              setEngine(state)
-            }
+      // One lap at a time: a tick arriving while the previous lap is still in
+      // flight is DROPPED, not queued.
+      if (pollInFlightRef.current) return
+      pollInFlightRef.current = true
+      const seq = ++pollSeqRef.current
+      // Each read absorbs its OWN failure and returns the state update to apply.
+      // The per-read contract is unchanged (non-ok / throw ⇒ not-available /
+      // empty); what changes is that one dead or slow route can no longer hold
+      // up — nor take down — the others.
+      const readEngine = async (): Promise<() => void> => {
+        // 1) Engine orchestrator state (ok ⇒ available + state, non-ok / throw ⇒
+        //    not available — the engine snapshot itself is left untouched).
+        try {
+          const res = await fetch(`/api/swarm/orchestrator?path=${encodeURIComponent(projectPath)}`)
+          if (!res.ok) return () => setAvailable(false)
+          const state = sanitizeEngineState(await res.json())
+          return () => {
+            setAvailable(true)
+            setEngine(state)
           }
+        } catch {
+          return () => setAvailable(false)
         }
-      } catch {
-        if (!cancelled) setAvailable(false)
       }
-      // 1b) DRAIN-TICK: since card eadb25e6 the server side is a PURE idempotent state
-      //     read — it no longer auto-starts a stopped engine (autonomy is strict opt-in
-      //     via the Start toggle → POST /orchestrator/start; merely having this pane
-      //     open must not spin up workers). The POST is kept for back-compat with older
-      //     servers and as the seam a future consent-carrying tick would ride.
-      //     Fire-and-forget + owner-gated: a 403/404/throw is harmless. Skipped while a
-      //     toggle is in flight (this runs inside the busy-guarded poll), so it never
-      //     fights a manual ON/OFF.
-      void fetch('/api/swarm/orchestrator/drain-tick', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: projectPath }),
-      }).catch(() => {})
-      // 2) Persisted fatal-event notifications for THIS project (条件3) — the
-      //    escalation valve's authoritative source. Owner-gated; a 403 / 404 / throw
-      //    ⇒ empty (never an error). App-global self-update fatals (rollback /
-      //    canary-failed) carry no projectPath, so they pass the filter and surface
-      //    in the loop view too; other projects' card-rooted fatals are filtered out.
-      try {
-        const res = await fetch('/api/swarm/notifications')
-        if (!cancelled) {
-          setFatalNotifications(
-            res.ok
-              ? sanitizeFatalNotifications(await res.json()).filter(
-                  (n) => !n.projectPath || n.projectPath === projectPath,
-                )
-              : [],
-          )
+      const readFatals = async (): Promise<() => void> => {
+        // 2) Persisted fatal-event notifications for THIS project (条件3) — the
+        //    escalation valve's authoritative source. Owner-gated; a 403 / 404 /
+        //    throw ⇒ empty (never an error). App-global self-update fatals
+        //    (rollback / canary-failed) carry no projectPath, so they pass the
+        //    filter and surface in the loop view too; other projects' card-rooted
+        //    fatals are filtered out.
+        try {
+          const res = await fetch('/api/swarm/notifications')
+          const next = res.ok
+            ? sanitizeFatalNotifications(await res.json()).filter(
+                (n) => !n.projectPath || n.projectPath === projectPath,
+              )
+            : []
+          return () => setFatalNotifications(next)
+        } catch {
+          return () => setFatalNotifications([])
         }
-      } catch {
-        if (!cancelled) setFatalNotifications([])
       }
-      // 3) The SERVER-TRUTH worker list (GET /api/swarm/workers) — independent of
-      //    the two fetches above, same owner-gated / non-ok-degrades-to-empty
-      //    contract. Polled here (not a second interval) so the worker tab and
-      //    the manager dashboard share this one snapshot too.
+      const readWorkers = async (): Promise<() => void> => {
+        // 3) The SERVER-TRUTH worker list (GET /api/swarm/workers) — same
+        //    owner-gated / non-ok-degrades-to-empty contract. Polled here (not a
+        //    second interval) so the worker tab and the manager dashboard share
+        //    this one snapshot too.
+        try {
+          const res = await fetch(`/api/swarm/workers?path=${encodeURIComponent(projectPath)}`)
+          const next = res.ok ? sanitizeSwarmWorkers(await res.json()) : []
+          return () => setRealWorkers(next)
+        } catch {
+          return () => setRealWorkers([])
+        }
+      }
+      const readEnv = async (): Promise<() => void> => {
+        // 4) Env preflight (git/shell) — the SAME gate the worker/supply/manager
+        //    spawn routes enforce, polled here as a plain read so the Swarm tab
+        //    can show every unmet prerequisite as ONE banner before the owner
+        //    presses a launch button. Same owner-gated / non-ok-degrades-to-empty
+        //    contract; folded into the parallel lap below (not a trailing await)
+        //    so it shares the generation guard instead of the removed `cancelled`
+        //    flag.
+        try {
+          const res = await fetch(`/api/swarm/preflight?path=${encodeURIComponent(projectPath)}`)
+          const next = res.ok ? sanitizeEnvIssues(await res.json()) : []
+          return () => setEnvIssues(next)
+        } catch {
+          return () => setEnvIssues([])
+        }
+      }
       try {
-        const res = await fetch(`/api/swarm/workers?path=${encodeURIComponent(projectPath)}`)
-        if (!cancelled) setRealWorkers(res.ok ? sanitizeSwarmWorkers(await res.json()) : [])
-      } catch {
-        if (!cancelled) setRealWorkers([])
+        // 1b) DRAIN-TICK: since card eadb25e6 the server side is a PURE idempotent
+        //     state read — it no longer auto-starts a stopped engine (autonomy is
+        //     strict opt-in via the Start toggle → POST /orchestrator/start; merely
+        //     having this pane open must not spin up workers). The POST is kept for
+        //     back-compat with older servers and as the seam a future
+        //     consent-carrying tick would ride. Fire-and-forget + owner-gated: a
+        //     403/404/throw is harmless, and being a pure read it needs no ordering
+        //     against the GETs beside it. Skipped while a toggle is in flight (this
+        //     runs inside the busy-guarded poll), so it never fights a manual ON/OFF.
+        void fetch('/api/swarm/orchestrator/drain-tick', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: projectPath }),
+        }).catch(() => {})
+        // allSettled, not all: a reader that throws despite its own try/catch (a
+        // sanitize bug, say) must not swallow its siblings' results.
+        const settled = await Promise.allSettled([readEngine(), readFatals(), readWorkers(), readEnv()])
+        // A lap superseded by a newer generation applies NOTHING. This replaces
+        // the old effect-wide `cancelled` flag (same job for the cleanup case)
+        // and additionally covers the lap-vs-lap race it was blind to.
+        if (seq !== pollSeqRef.current) return
+        for (const r of settled) if (r.status === 'fulfilled') r.value()
+      } finally {
+        // Release the slot only while we still own it: a superseded lap must not
+        // clear the flag out from under the newer lap that replaced it.
+        if (seq === pollSeqRef.current) pollInFlightRef.current = false
       }
     }
     // The effect re-runs when `busy` flips (it's a dep so the interval closure
@@ -813,7 +917,16 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     }
     window.addEventListener('focus', onFocus)
     return () => {
-      cancelled = true
+      // Retire every lap of THIS effect (bump the generation) and free the
+      // in-flight slot so the next effect can poll immediately — a retired lap
+      // can no longer setState, so the brief overlap is harmless.
+      // The lint rule warns that `pollSeqRef.current` may have changed since the
+      // effect ran — here that is exactly the point: this is a generation
+      // counter, not a handle on a rendered node, and we WANT to advance
+      // whatever the newest value is at teardown time.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      pollSeqRef.current++
+      pollInFlightRef.current = false
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
     }
@@ -997,6 +1110,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     busy,
     error,
     sandboxWarning,
+    envIssues,
     toggleAutonomy: (next) => void toggleAutonomy(next),
     dismissAutonomyReminder: () => void dismissAutonomyReminder(),
     toggleOverseer: (next) => void toggleOverseer(next),

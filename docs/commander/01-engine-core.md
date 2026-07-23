@@ -9,7 +9,7 @@
 
 ## 0. 司令塔が最初に知るべき 4 つの真実
 
-1. **エンジンは丸ごと in-memory。** 全状態は `globalThis.__openground_swarm_orchestrator` 上の `Map<projectPath, ProjectEngine>`(:1520-1534)で、**プロセス再起動で全部消える**(worker roster・rework 予算・journal・KPI・全部)。ディスクに残るのは Settings の 2 フラグ(`swarmAutonomyOn` = 「前回 ON だった」リマインダー :5805、`swarmManualStop` = 「手で止めた」記録 :5848)とカード側の stamp(`branch` / `integrationConflict`)だけ。再起動後のエンジンは必ず `running:false` で、**再起動前に走っていた worker の PTY・worktree・branch・心拍ファイルは生きたまま「エンジン外」になる**(§2 の寿命列)。
+1. **エンジンは丸ごと in-memory。** 全状態は `globalThis.__openground_swarm_orchestrator` 上の `Map<projectPath, ProjectEngine>`(:1520-1534)で、**プロセス再起動で全部消える**(worker roster・rework 予算・journal・KPI・全部)。ディスクに残るのは Settings の 2 フラグ(`swarmAutonomyOn` = 「前回 ON だった」リマインダー :5805、`swarmManualStop` = 「手で止めた」記録 :5848)とカード側の stamp(`branch` / `integrationConflict`)だけ。~~再起動後のエンジンは必ず `running:false` で~~、**追記(2026-07-22, card 2 — docs/ENGINE_PERSISTENCE_PLAN.md)**: この一文は **撤回**。`desiredRunning:true` で明示的に走っていたプロジェクトは、その project の `engine.json`(`~/.openground/projects/<uuid>/engine.json`)を根拠に boot の `resumeEngines()` が人手ゼロで `running:true` へ戻す(owner の `manualStop` 永続記録が常に勝つ・同一バージョンで短時間に再起動が繰り返されたら crash-loop breaker が抑止)。詳細は §2.1(改訂版)・00-INDEX §2.1。**再起動前に走っていた worker の PTY・worktree・branch・心拍ファイルは生きたまま「エンジン外」になる**点(§2 の寿命列)は変わらない — worker roster 自体の write-through は別カード(card 3、未着手)。
 2. **tick はキューではない。** 3 秒の setTimeout チェーン(:5753-5766)が 1 pass ずつ直列に回し、`passInFlight`(:1320)は「pass 実行中に来た別の起動要求を **bail させる**」再入ガード — 待ち行列ではない。遅い pass の間に予定されていた tick は**消える**(次にチェーンが arm されるのは今の pass の `.finally`)。
 3. ~~**統合パスは pass の中で直列 await される**~~ — **`0d1f7f0`(2026-07-10)で歴史になった**。当時は `runEnginePass` が dispatch → integrate の順に await し(:5681-5682)、integrate の中の verify(tsc timeout 180s :2530-2535 / vitest run timeout 600s :2790-2795 をインライン await)と敵対レビュー(lens レビュアー 4 体 × timeout 5 分 :3240)が走っている間、**monitor は一切走らなかった** — quota 検知・stall 検知・promote が数分飢餓した(§7.1、実測 2026-07-09・カード `4d1550d7` → `0d1f7f0` で done)。**現在**: integrate は `kickIntegratePass` で tick の脇に fire-and-forget 化され(`integrateInFlight` 再入ガード)、monitor は verify/panel 中も 3 秒 tick で回る。Board/workers を書く区間だけ `runExclusive` で直列化。正典 = 03 章 §2.1/§2.4(0d1f7f0 基準の行番号つき)。
 4. **二重 dispatch 封鎖は両方向**(cc7c60e)。エンジン→手動の窓は「picks **全件を spawn 前に予約**」(`pendingDispatch` :4520-4522)+ 手動 route が `isCardDispatchInFlight`(:1626)を照会して塞ぎ、手動→エンジンの窓は「**spawn 直前に board を読み直して todo 再検証**」(:4543-4558)で塞ぐ。エンジン vs エンジンは `passInFlight` + `runExclusive` + generation ガードの三重(§3)。
@@ -57,7 +57,7 @@ scheduleNext(TICK_MS=3s) ──▶ runEnginePass
 | フィールド(行) | 意味 | 消えたときの影響 / 永続の半身 |
 |---|---|---|
 | `path` :1296 | canonicalize 済み project path = engine のキー | — |
-| `running` :1298 | 自律 drain チェーンが予約されている間 true | **再起動で必ず false**(自動再開なし)。半身: `Settings.swarmAutonomyOn`(リマインダー表示のみ :6181) |
+| `running` :1298 | 自律 drain チェーンが予約されている間 true | ~~再起動で必ず false(自動再開なし)~~ **旧知識(2026-07-22 card 2 で撤回)** — `desiredRunning:true` だった project は boot の `resumeEngines()` が自動で `running:true` へ戻す(owner の `manualStop` が勝つ・crash-loop breaker あり。§0/§7.4 改訂版)。半身: `Settings.swarmAutonomyOn`(リマインダー表示のみ :6181)+ 新設 `engine.json`(`desiredRunning` — 実際に resume を駆動する側はこちら) |
 | `manualStop` :1309 | owner が明示 OFF した(auto-drain 抑止) | 半身: `Settings.swarmManualStop`(:5848 で書き :5800 で消す。`maybeAutoStartDrain` :5932 と `stateOf` :1858 が読む — 0707 twin-dispatch の根本対策) |
 | ~~`autoMerge`~~ | **フィールドごと撤去(2026-07-16)** — 旧「司令官自動起こし」の arm。起こし反射は `running` に常時同乗になった(トグル無し・03 章 §2.3) | —(存在しない。GET 応答にも出ない) |
 | `passInFlight` :1320 | pass 実行中フラグ = **二重 pass 防止の bail であってキューではない** | — |
@@ -82,8 +82,8 @@ scheduleNext(TICK_MS=3s) ──▶ runEnginePass
 | `questionRaised` :1445 / `questionWaits` :1453 | 自由文質問の escalation 受付キー / hold 時計(`QUESTION_GRACE_MS` :372) | 同上 |
 | `log` :1455 | journal ring buffer(`MAX_LOG_LINES`=200 :201、`logLine` :1762) | **再起動で全消え** — 過去の dispatch/integrate 履歴は git log とカードにしか残らない |
 | `anomalies` :1458 | 直近 pass の検出結果(毎 pass 再構築 :5693) | — |
-| `selfSupply` :1463 | 自己補給 runtime(armed + throttle + 日次 cap)。既定 OFF | 再起動で OFF(fail-safe) |
-| `overseer` :1471 | 監督ノード runtime。既定 OFF・**明示 stop で disarm される非対称**(:5863-5866) | 再起動で OFF(K2)。auto-drain 再点火では決して arm されない(:6393-6396) |
+| `selfSupply` :1463 | 自己補給 runtime(armed + throttle + 日次 cap)。既定 OFF | ~~再起動で OFF(fail-safe)~~ **旧知識(2026-07-22 card 2)** — `engine.json` の `selfSupply` が true なら drain 再開と同時に自動で再武装する(提案カードは引き続き owner 承認ゲート済みなので risk は低いと判断)。**`overseer` は対象外のまま** — 大脳 PTY 起動・worker 注入・janitor の破壊的操作を直接駆動し、再起動が代替の無い kill switch 層(OVERSEER_DESIGN.md K2/L9-③)であることを優先し、engine.json には値を書くが boot では読まない(意図的な非対称。plan §2 の [hold] 論点は 2026-07-22 の設計レビューで確定 — §7.4 に詳細) |
+| `overseer` :1471 | 監督ノード runtime。既定 OFF・**明示 stop で disarm される非対称**(:5863-5866) | 再起動で OFF(K2)。auto-drain 再点火では決して arm されない(:6393-6396)。**boot resume(2026-07-22 card 2)でも同じ** — `engine.json` には値を書くが `resumeEngines()` は読まない(意図的な唯一の例外。selfSupply/running との非対称は上表 :85 参照) |
 | `notified` :1477 | 状態由来 FATAL の rising-edge dedup(解消で忘れて再発なら再通知 :5644-5652) | 消えると持続中の fatal が 1 回再通知(無害) |
 | `pendingFatal` :1482 | monitor が enqueue した one-shot FATAL(例: exec-timeout :4017)。pass 末尾で drain(:5605-5608) | 消えると未送の通知が失われる |
 | `metrics` :1487 | KPI 生涯カウンタ(`logLine` の choke point で bump :1779-1783) | 再起動でゼロ(per-session roll-up) |
@@ -251,13 +251,43 @@ deps の実体(defaultDeps :4411): `countCommitsAhead` は project ごとに解�
 
 同じ 2026-07-09、CLI の per-model 枯渇文言 "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model." は当時の `RATE_LIMIT_PATTERNS` のどれにも一致せず、**検知ゼロ → fable が冷却されず dispatch が枯れ tier に再突入し続けた**(stall + 空レビューパネル)。現 tip では文言 3 フラグメントぶんのパターンが追加済み(:1132-1154 — TUI の折り返しで 1 フラグメントしか画面に残らないケースも拾う)。regression fixture がテストに固定されている。詳細は 04 章。
 
-### 7.3 再起動 = エンジン全消え、だが worker は生きている
+### 7.3 再起動 = エンジンの認知は消えるが、明示的な意図は resume する(2026-07-22 改訂・card 2)
 
-§0.1 / §2 の帰結。再起動後に `GET /api/swarm/orchestrator` が空(running:false, workers:[])でも、**前セッションの worker PTY・worktree・branch・心拍は生きている**。それらは `GET /api/swarm/workers`(server-truth: PTY ∪ roster ∪ 心拍ファイルの統合 :501)には出る。「orchestrator が空 = worker がいない」と誤読して worktree を掃除すると生きた作業を殺す(02 章 §6 の削除経路表を先に読むこと)。
+**旧見出しは「再起動 = エンジン全消え、だが worker は生きている」だった。前半は撤回。**
+§0.1 / §2 の `ProjectEngine` の中身(worker roster / reviews / journal / KPI 等)は今も再起動で**全消え**(card 3 = roster の write-through が未着手のため)。だが `running`(drain の ON/OFF そのもの)は**もう「必ず false」ではない** —
+`desiredRunning:true` だったプロジェクトは、boot の `resumeEngines()`(`swarmOrchestrator.ts`)が
+`~/.openground/projects/<uuid>/engine.json` を根拠に人手ゼロで `running:true` へ戻す。優先順位:
+①owner の `manualStop` 永続記録が最優先(常に勝つ)②同一バージョンで短時間に再起動が繰り返されたら
+crash-loop breaker(`swarmEnginePersistence.ts`)が抑止して代わりに fatal 通知 ③`claudeRunPreflight`
+に落ちたプロジェクトだけその boot は resume しない(fail-quiet — fatal ではない)。resume した/しな
+かった事実はベル通知(`engine-resumed`)で必ず視認できる。**「orchestrator が空(running:false) =
+今回誰も ON にしていない」という誤読は今後も成り立つが、「running:true = 誰かが今この session で
+ON にした」という誤読は成り立たなくなった** — 前回セッションの意図が resume で戻っただけかもしれない。
+まず「状況」で GET /api/swarm/orchestrator と engine.json どちらを見ても、resume 由来か手動操作かは
+journal の `engine resumed at boot (v…)` 行で見分けられる。
 
-### 7.4 「手で止めた」は永続、他は揮発
+⚠ **この自動再開が実際に走るのは、Electron がフォークした本番サーバだけ**(`process.send` の
+IPC 有無で判定 — `server/index.ts`)。`npm run dev` / `dev:server` / `electron:dev`(`tsx watch`)では
+**わざと走らない**(保存のたびに実 worker を dispatch させないための意図的なゲート)。**dev で検証中の
+司令官が running:false を見ても「壊れている」ではない** — dev はそもそも resume の対象外。実機での
+自動再開を確認したいときは `npm run electron:prod` かパッケージ済み `.app` で見ること。
 
-`stopOrchestrator` は `Settings.swarmManualStop` を**engine 不在でも**書く(:5843-5848)ので、再起動後も `manualStop:true / manualStopPersisted:true` が GET に出る(:1858, :6185-6188)。一方 `selfSupply` / `overseer` は揮発で再起動後 OFF。**「前回 ON だったから今も ON のはず」は成立しない**(旧 `autoMerge` も同じ揮発モデルだったが 2026-07-16 にフィールドごと撤去 — 司令官起こしは `running` に常時同乗)。overseer はさらに非対称で、明示 stop が disarm し(:5863-5866)、running 中しか arm できない(:6393-6396)。
+`GET /api/swarm/orchestrator` が空(running:false, workers:[])のときは従来どおり、**前セッションの
+worker PTY・worktree・branch・心拍は生きている**。それらは `GET /api/swarm/workers`(server-truth:
+PTY ∪ roster ∪ 心拍ファイルの統合 :501)には出る。「orchestrator が空 = worker がいない」と誤読して
+worktree を掃除すると生きた作業を殺す(02 章 §6 の削除経路表を先に読むこと)。
+
+### 7.4 「手で止めた」は永続、selfSupply は resume で戻る、overseer だけ値を覚えて起こさない(2026-07-22 改訂・確定版)
+
+`stopOrchestrator` は `Settings.swarmManualStop` を**engine 不在でも**書く(:5843-5848)ので、再起動後も `manualStop:true / manualStopPersisted:true` が GET に出る(:1858, :6185-6188)。
+
+**`selfSupply`(card 2, 2026-07-22 以降)**: ~~揮発で再起動後 OFF~~ は旧知識。`engine.json` 経由で `running` と一緒に resume する(§2 :85 参照)。「前回 selfSupply が ON だったから今も ON のはず」は resume 後は**成立する**。
+
+**`overseer`(2026-07-22, 設計レビューで [hold] 論点が確定)**: 今も再起動で必ず OFF に戻る。ただし**揮発ではなくなった** — `enabled` の値は `engine.json` に書かれて記憶されるが、boot 時にそれを読み戻して arm することは**しない**(意図的)。「前回 overseer が ON だったから今も ON のはず」は今も**成立しない**——毎セッション明示的な再武装が必要。代わりに値が失われていないことを 1 クリック復帰バナー(別カード)で見せる。
+
+**なぜ非対称か**: selfSupply の出力は per-card 承認ゲート(`selfSupplyApproved`)で不活性 — 提案カードが積まれるだけで dispatch はされない。overseer は大脳(claude PTY)の起動・稼働中 worker への文字列注入・janitor の破壊的操作(`git branch -d` / 心拍 unlink)を**直接駆動**し、かつ再起動は OVERSEER_DESIGN.md K2/L9-③ が定める「代替の無い kill switch 層」— overseer の自動再開だけがこの層を無効化してしまう。設計の経緯は docs/ENGINE_PERSISTENCE_PLAN.md §2、正典は OVERSEER_DESIGN.md K2(2026-07-22 追記あり)。
+
+(旧 `autoMerge` フィールドも overseer と同じ揮発モデルだったが 2026-07-16 にフィールドごと撤去 — 司令官起こしは `running` に常時同乗。overseer はさらに、明示 stop が disarm し(:5863-5866)、running 中しか arm できない(:6393-6396)。)
 
 ### 7.5 passInFlight / pendingDispatch は外から見えない
 

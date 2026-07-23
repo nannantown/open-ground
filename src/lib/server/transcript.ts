@@ -16,7 +16,14 @@ import { claudeDirName } from './claudeProjectDir'
 //   - Top-level interactive sessions write to
 //     ~/.claude/projects/<canonical-cwd-with-/-.-space-as-dash>/<session-id>.jsonl
 //   - macOS `/tmp` → `/private/tmp`: must realpath cwd before hyphenating.
-//   - Subagent JSONLs live under <session-id>/subagents/ — ignored here.
+//   - Subagent JSONLs live under <session-id>/subagents/agent-*.jsonl — not READ
+//     here (this module reads the main conversation), but their PATH is exported:
+//     see sessionSubagentsDir. Re-measured 2026-07-22: they are appended
+//     INCREMENTALLY while the sub-agent runs (a 39-minute reviewer wrote 229
+//     entries, and the file's mtime matched its last entry's timestamp to the
+//     second), which makes their mtime the only file-backed proof that a desk
+//     sitting in one long turn is still working. swarmOrchestrator's stall probe
+//     depends on exactly that.
 // ---------------------------------------------------------------------------
 
 const claudeProjectsRoot = () => join(homedir(), '.claude', 'projects')
@@ -28,6 +35,13 @@ const sessionDir = (cwd: string): string =>
  *  path would be free to drift from claude's actual storage layout). */
 export const sessionJsonlPath = (cwd: string, sessionId: string): string =>
   join(sessionDir(cwd), `${sessionId}.jsonl`)
+
+/** Where claude keeps the SUB-AGENT transcripts a session spawns (`agent-*.jsonl`).
+ *  A sibling of {@link sessionJsonlPath} so the storage layout stays derived in ONE
+ *  place. The directory may not exist (a session that never ran a sub-agent) — callers
+ *  treat a missing dir as "no sub-agent activity", never as an error. */
+export const sessionSubagentsDir = (cwd: string, sessionId: string): string =>
+  join(sessionDir(cwd), sessionId, 'subagents')
 
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
 

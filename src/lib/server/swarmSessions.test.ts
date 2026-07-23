@@ -38,6 +38,7 @@ import {
   recordSwarmSession,
   resolveSwarmSession,
   isSessionResumable,
+  forgetSwarmSessionIf,
   type SwarmSessionsFile,
 } from './swarmSessions'
 
@@ -170,6 +171,46 @@ describe('swarmSessions (desk session persistence + resume)', () => {
     await recordSwarmSession(proj, 'manager', '22222222-2222-4222-8222-222222222222')
     const store = await readSwarmSessions(proj)
     expect(store.manager?.sessionId).toBe('22222222-2222-4222-8222-222222222222')
+  })
+
+  // ── forgetSwarmSessionIf: compare-and-delete, never a blind delete ────────
+
+  it('forgetSwarmSessionIf drops the record when it still names the given sessionId', async () => {
+    await recordSwarmSession(proj, 'manager', 'a1111111-1111-4111-8111-111111111111')
+    const dropped = await forgetSwarmSessionIf(proj, 'manager', 'a1111111-1111-4111-8111-111111111111')
+    expect(dropped).toBe(true)
+    expect((await readSwarmSessions(proj)).manager).toBeUndefined()
+  })
+
+  it('forgetSwarmSessionIf is a NO-OP when the record was superseded by a later launch (the guard the mutant kills)', async () => {
+    await recordSwarmSession(proj, 'manager', 'b1111111-1111-4111-8111-111111111111')
+    // A later launch already recorded a good session over the one this caller is
+    // trying to forget — e.g. a slow DOA-death callback racing a fresh spawn.
+    await recordSwarmSession(proj, 'manager', 'c2222222-2222-4222-8222-222222222222')
+    const dropped = await forgetSwarmSessionIf(proj, 'manager', 'b1111111-1111-4111-8111-111111111111')
+    expect(dropped).toBe(false)
+    // The healthy, later session must survive untouched — a blind delete here would
+    // strand the desk it belongs to exactly like the 2026-07-19 storm.
+    expect((await readSwarmSessions(proj)).manager?.sessionId).toBe(
+      'c2222222-2222-4222-8222-222222222222',
+    )
+  })
+
+  it('forgetSwarmSessionIf leaves the sibling role untouched', async () => {
+    await recordSwarmSession(proj, 'manager', 'd1111111-1111-4111-8111-111111111111')
+    await recordSwarmSession(proj, 'supply', 'e2222222-2222-4222-8222-222222222222')
+    await forgetSwarmSessionIf(proj, 'manager', 'd1111111-1111-4111-8111-111111111111')
+    const store = await readSwarmSessions(proj)
+    expect(store.manager).toBeUndefined()
+    expect(store.supply?.sessionId).toBe('e2222222-2222-4222-8222-222222222222')
+  })
+
+  it('forgetSwarmSessionIf never throws for an unregistered project (best-effort cleanup)', async () => {
+    const stranger = join(scratch, 'never-registered-forget')
+    await mkdir(stranger, { recursive: true })
+    await expect(
+      forgetSwarmSessionIf(stranger, 'manager', 'f1111111-1111-4111-8111-111111111111'),
+    ).resolves.toBe(false)
   })
 
   // ── fail-open: never let a bad record block the desk (goal condition 4) ───

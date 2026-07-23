@@ -3,6 +3,7 @@ import { Terminal as HeadlessTerminal } from '@xterm/headless'
 import {
   WORKING_FOOTER_RE,
   conversationRows,
+  extractContextLeftPct,
   inputBoxStart,
   isBannerRow,
   isChromeRow,
@@ -1205,6 +1206,28 @@ describe('claudeScreen anatomy contracts', () => {
     expect(utteranceBlocks(['❯ a turn the owner sent']).map((b) => b.speaker)).toEqual(['owner'])
     expect(utteranceBlocks(['⏺ a turn claude produced']).map((b) => b.speaker)).toEqual(['claude'])
     expect(utteranceBlocks(['a bare system notice']).map((b) => b.speaker)).toEqual(['unknown'])
+  })
+
+  it('extracts the auto-compact footnote percent (card 2 — the near-limit alarm source)', () => {
+    // Read from the SAME real rendered footer the classifier hides (FOOTERS[1],
+    // captured 2026-07-18): `  Context left until auto-compact: 12%`.
+    const footer = FOOTERS[1]
+    expect(footer).toContain('Context left until auto-compact: 12%') // fixture guard
+    expect(extractContextLeftPct(['⏺ hi', '', ...box(120), ...FOOTERS].join('\n'))).toBe(12)
+    expect(extractContextLeftPct(footer)).toBe(12)
+    // A frame with no footnote (the ordinary low-context case, most of a session)
+    // is null — NOT 0 — so a consumer can tell "unknown" from "empty".
+    expect(extractContextLeftPct(['⏺ hi', '', ...box(120)].join('\n'))).toBeNull()
+    expect(extractContextLeftPct('')).toBeNull()
+  })
+
+  it('TOOTH: extracting the footnote does NOT change what counts as chrome', () => {
+    // The footnote row is still chrome — still dropped from the conversation. Adding
+    // the value extractor above must not perturb the display-exclusion behaviour
+    // (card 2 完了条件: 表示除外は不変). Pins both the predicate and the effect.
+    const footer = FOOTERS[1]
+    expect(isChromeRow(footer)).toBe(true)
+    expect(conv(['⏺ hi', '', footer, ...box(120)])).toEqual(['⏺ hi'])
   })
 })
 

@@ -52,6 +52,9 @@ import {
   MANAGER_UNREVIVABLE_RETRY_MS,
   MAX_MANAGER_NUDGES,
   MANAGER_NUDGE_INTERVAL_MS,
+  MANAGER_INTEGRATION_STALL_MS,
+  MANAGER_NUDGE_REARM_MS,
+  managerIntegrationStalled,
   type ManagerPresence,
   runEnginePass,
   stopOrchestrator,
@@ -247,6 +250,7 @@ const makeDeps = (init: {
   //   recover still succeeds) — models a requeue that won't land so the engine escalates (blocked退避)
   outputs?: Map<string, number> // terminalId → PTY lastOutputAt epoch ms (absent → null)
   screens?: Map<string, string> // terminalId → current screen text (absent → null = 'normal')
+  agentActivity?: Map<string, number> // worktree cwd → newest transcript/sub-agent mtime (absent → null)
   raiseFails?: boolean // make deps.raiseQuestion throw (fs/notify fault)
   spawnModel?: string // model alias the fake spawn reports launching with (quota attribution)
 }): OrchestratorDeps & {
@@ -272,6 +276,7 @@ const makeDeps = (init: {
   const heartbeats = init.heartbeats ?? new Map<string, HeartbeatSign>()
   const outputs = init.outputs ?? new Map<string, number>()
   const screens = init.screens ?? new Map<string, string>()
+  const agentActivity = init.agentActivity ?? new Map<string, number>()
   const spawned: { taskId: string; priorFailure?: string }[] = []
   const moves: { taskId: string; branch: string }[] = []
   const reviews: { taskId: string; branch: string }[] = []
@@ -376,6 +381,10 @@ const makeDeps = (init: {
     // reads as 'normal' = ordinary work). Drives the rate-limit / permission-wait /
     // question classification.
     recentOutput: (terminalId) => screens.get(terminalId) ?? null,
+    // The THIRD liveness channel: newest transcript/sub-agent mtime for a worker's
+    // worktree cwd (absent → null = no file signal, so the cheap verdict stands).
+    // Drives the stall backstop that spares a worker running a Task() sub-agent.
+    sessionAgentActivityAt: async (cwd) => agentActivity.get(cwd) ?? null,
     // Record a raised free-text question (C3 THROTTLED path). Throws when
     // raiseFails is set, so the "forget key + retry next pass" path is tested.
     raiseQuestion: async (inputIn: OpenEscalationInput) => {
@@ -856,6 +865,15 @@ describe('lastActivityMs — newest sign of life across both liveness channels',
   it('returns 0 when nothing resolves (so a no-timestamp worker reads as silent)', () => {
     expect(lastActivityMs({ heartbeatAt: '', lastOutputAt: null, startedAt: '' })).toBe(0)
   })
+  it('lets a fresh sub-agent/transcript mtime outweigh an old heartbeat+output (deep in a Task() sub-agent = alive)', () => {
+    expect(
+      lastActivityMs({ heartbeatAt: iso(T - 600_000), lastOutputAt: T - 600_000, startedAt: iso(T - 700_000), agentActivityAtMs: T }),
+    ).toBe(T)
+  })
+  it('ignores a null/garbage agent-activity stamp (no false life)', () => {
+    expect(lastActivityMs({ startedAt: iso(T), agentActivityAtMs: null })).toBe(T)
+    expect(lastActivityMs({ startedAt: iso(T), agentActivityAtMs: Number.NaN })).toBe(T)
+  })
 })
 
 describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
@@ -962,6 +980,40 @@ describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
     )
     expect(r.action).toBe('reclaim')
     expect(r.progressed).toBe(false)
+  })
+
+  // ── THIRD CHANNEL (transcript/sub-agent mtime) — the worker analog of 7517e4b1 ──
+  // A worker silent on heartbeat AND PTY but running a Task() sub-agent (its own
+  // adversarial review) is ALIVE: its transcript/sub-agent file grows while both cheap
+  // channels freeze. These are the TEETH — dropping agentActivityAtMs (the mutation)
+  // flips the verdict back to the nudge→reclaim ladder that lost the worktree.
+  it('SPARES a worker silent on both cheap channels when its sub-agent file is fresh (no nudge)', () => {
+    const withAgent = classifyStall({ ...silentInput(), agentActivityAtMs: NOW - 1000 }, NOW, P)
+    expect(withAgent.action).toBe('none')
+    expect(withAgent.silentMs).toBeLessThan(P.stallMs)
+    // MUTATION: same worker, signal removed ⇒ the reclaim ladder starts (nudge #1).
+    expect(classifyStall(silentInput(), NOW, P).action).toBe('nudge')
+  })
+  it('does NOT let a STALE sub-agent file rescue a genuinely-dead worker (still RECLAIMS)', () => {
+    // File mtime is as old as the other channels (nothing grows — the worker died) ⇒
+    // still silent ⇒ the escalation proceeds exactly as if the channel were absent.
+    const dead = {
+      ...silentInput({ count: 2, lastNudgeAt: NOW - P.cooldownMs - 1, escalated: true }),
+      agentActivityAtMs: oldStart,
+    }
+    expect(classifyStall(dead, NOW, P).action).toBe('reclaim')
+  })
+  it('is NOT echo-guarded: sub-agent growth right after a nudge counts as life (a repaint cannot write it)', () => {
+    // Unlike PTY output, a transcript/sub-agent file cannot be stamped by the Enter
+    // echo — so freshness within echoGuardMs of the nudge is REAL work, not the echo.
+    const lastNudgeAt = NOW - 60_000
+    const r = classifyStall(
+      { heartbeatAtMs: null, lastOutputAtMs: null, startedAtMs: oldStart, agentActivityAtMs: lastNudgeAt + 1000, nudge: { count: 1, lastNudgeAt } },
+      NOW,
+      P,
+    )
+    expect(r.action).toBe('none')
+    expect(r.progressed).toBe(true) // growth past the nudge ⇒ recovery ⇒ budget cleared
   })
 })
 
@@ -1633,10 +1685,32 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
         '/proj-dismiss-after-restart',
         '/proj-seeded-remember',
         '/proj-store-helpers',
+        '/proj-restart-drops-dwell',
       ]) {
         await forgetSwarmAutonomy(await canonicalize(p))
       }
     })
+
+    it('startOrchestrator DROPS the review dwell clock — engine-OFF time is not 「統合待ち」 (2026-07-22)', async () => {
+      // The clock feeds the manager stall check, and the first pass after a start runs
+      // immediately (lastIntegrateAt is zeroed here too). A stamp carried across the stop
+      // would therefore arrive ALREADY past the 40-minute window and fire an ESC at the
+      // desk the owner stopped the engine to use by hand. Nothing beats while they work
+      // there, so delivery is stale as well — both halves of the rule would be satisfied.
+      const engine = newEngine({ running: false })
+      engine.path = await canonicalize('/proj-restart-drops-dwell')
+      engine.reviewSeenAt = new Map([['swarm/a', 1_000]]) // stamped before the stop
+      __seedEngineForTests(engine)
+      await startOrchestrator(engine.path, fullDeps({ cards: [] }))
+      expect(engine.running).toBe(true)
+      expect(engine.reviewSeenAt.size).toBe(0) // ← the wait restarts from the restart
+      expect(engine.lastIntegrateAt).toBe(0) // (the sibling reset this one rides beside)
+      // 60s, not vitest's 5s default: startOrchestrator writes settings and kicks a real
+      // pass, so this test is IO-bound like its siblings here — measured 9s alone and
+      // >19s while another worker's suite held the machine at load ~9. A 5s budget makes
+      // it a load thermometer rather than an assertion (the flake class recorded in
+      // vitest.config's sibling files).
+    }, 60_000)
 
     it('startOrchestrator (Autonomy ON) PERSISTS the marker so a restart can remind', async () => {
       const key = await canonicalize('/proj-remember-start')
@@ -3099,6 +3173,40 @@ describe('runDispatchPass — monitor: stall self-healing', () => {
     expect(deps.nudged).toHaveLength(0)
     expect(deps.tornDown).toHaveLength(0)
     expect(engine.workers[0].stage).toBe('running')
+  })
+
+  // ── THIRD LIVENESS CHANNEL at the monitor — the worker analog of 7517e4b1 ────────
+  // The confirmed root cause (2026-07-23): a worker deep in a Task() sub-agent (its own
+  // adversarial self-review) freezes BOTH cheap channels — heartbeat beats only at phase
+  // boundaries, and the PTY frame is frozen on the sub-agent — while its sub-agent
+  // transcript grows in real time. The pre-fix engine read only those two channels, so it
+  // NUDGED (ESC = interrupt the running review) then RECLAIMED (worktree teardown +
+  // re-home to blocked → the observed twin dispatch). These two tests are the behavioral
+  // TEETH: fresh file ⇒ spared; mutate the file to stale ⇒ the old nudge fires again.
+  it('SPARES a silent-but-alive worker running a Task() sub-agent (fresh transcript/sub-agent mtime)', async () => {
+    const now = T0 + STALL_SILENCE_MS + 1
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, sessionId: 'sess-a' })],
+    })
+    // No heartbeat, no PTY output → cheap-silent — but its sub-agent file grew 1s ago.
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], agentActivity: new Map([['/wt/a', now - 1000]]) })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.nudged).toHaveLength(0) // NOT nudged — ESC would interrupt the live review
+    expect(deps.tornDown).toHaveLength(0) // NOT reclaimed — no worktree loss, no twin
+    expect(deps.board.get('a')?.boardColumn).toBe('doing') // card still draining
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.nudges.has('pty-a-1')).toBe(false) // no stall bookkeeping opened
+  })
+  it('MUTATION control: the same silent worker with a STALE sub-agent mtime IS nudged (the signal is load-bearing)', async () => {
+    const now = T0 + STALL_SILENCE_MS + 1
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, sessionId: 'sess-a' })],
+    })
+    // File mtime is as old as dispatch (no sub-agent running / worker died) → no rescue.
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], agentActivity: new Map([['/wt/a', T0]]) })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.nudged).toEqual(['pty-a-1']) // stale file ⇒ ordinary stall ⇒ nudged
+    expect(engine.nudges.get('pty-a-1')?.count).toBe(1)
   })
 
   it('clears the nudge budget when a nudge revives the worker (a post-nudge heartbeat)', async () => {
@@ -5121,6 +5229,13 @@ const makeIntDeps = (init: {
   wakeFails?: boolean
   /** nudgeManager returns false — the live desk's PTY vanished mid-poke. */
   nudgeFails?: boolean
+  // The DELIVERY evidence (2026-07-22): when the commander last demonstrably PRODUCED
+  // work — the newest of heartbeat / session transcript / sub-agent transcripts (see
+  // defaultManagerDeliveryAt). A number, or a function of the pass clock for a desk that
+  // keeps working while it integrates. Default null = "no channel says anything", which
+  // {@link managerIntegrationStalled} treats as NOT stalled — so every pre-existing
+  // assertion in this file keeps meaning exactly what it meant.
+  managerDeliveryAt?: number | ((now: number) => number | null) | null
 }): IntegrationDeps & {
   integrated: string[]
   moved: string[]
@@ -5142,6 +5257,8 @@ const makeIntDeps = (init: {
   /** Every nudge sent to a LIVE desk (2026-07-18) — the counterpart of wakeCalls: a
    *  nudge must never coincide with a spawn for the same episode. */
   nudged: string[]
+  /** Heartbeat reads (2026-07-22) — 0 unless the dwell clock opened the stall window. */
+  readonly deliveryReads: number
   echoUntils: number[]
   // Fatal escalations the RESUSCITATION reflex fired (完了条件5, event
   // 'manager-unrevivable') — captured via the `notify` seam.
@@ -5174,6 +5291,12 @@ const makeIntDeps = (init: {
   const echoUntils: number[] = []
   const notifications: SwarmFatalNotification[] = []
   let managerChecks = 0
+  /** How many times the pass consulted the heartbeat (the DELIVERY channel). It must stay
+   *  0 on an ordinary tick — the dwell clock is in-memory and gates this read. */
+  let deliveryReads = 0
+  /** The pass clock of the LAST presence probe, so the heartbeat fake can answer relative
+   *  to it (presence is always consulted immediately before the beat read). */
+  let lastNow = 0
   const dropReview = (taskId: string) => {
     const i = reviews.findIndex((c) => c.id === taskId)
     if (i >= 0) reviews.splice(i, 1)
@@ -5213,6 +5336,9 @@ const makeIntDeps = (init: {
     notifications,
     get managerChecks() {
       return managerChecks
+    },
+    get deliveryReads() {
+      return deliveryReads
     },
     ...(reviewConfigured ? { review: reviewDep } : {}),
     pathsChecked,
@@ -5292,6 +5418,7 @@ const makeIntDeps = (init: {
     // managerPresence is the timeless default.
     managerPresence: async (_p, now, echoUntil) => {
       managerChecks += 1
+      lastNow = now
       echoUntils.push(echoUntil ?? 0)
       if (init.managerPresenceFn) return init.managerPresenceFn(now, echoUntil ?? 0)
       return init.managerPresence ?? 'absent'
@@ -5302,6 +5429,14 @@ const makeIntDeps = (init: {
     nudgeManager: async (p) => {
       nudged.push(p)
       return !init.nudgeFails
+    },
+    // Evidence the commander actually PRODUCED something (heartbeat / session transcript /
+    // sub-agent transcripts) — paint proves only that a TUI repainted. Stubbed so no real
+    // file is read.
+    managerDeliveryAt: async (_p: string) => {
+      deliveryReads += 1
+      const b = init.managerDeliveryAt
+      return typeof b === 'function' ? b(lastNow) : (b ?? null)
     },
     // The spawnSwarmManager boundary (defaultWakeManager wraps spawnSwarmManager +
     // the info notification). wakeFails ⇒ false = a FAILED resurrection (no usable
@@ -5841,6 +5976,256 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     // Once the grace is over and it is STILL quiet, the poke is due as before.
     await passAt(engine, deps, T0 + MANAGER_RESUME_GRACE_MS + 1)
     expect(deps.nudged).toHaveLength(1)
+  })
+
+  // ── THE 「喋った直後に停止する」 BLIND SPOT (2026-07-22, 実測80分). presence answers
+  //    "is a desk alive?" and its everyday channel is PTY PAINT — which the commander
+  //    produces by SPEAKING ONE TURN and then stopping. Measured: beat 統合完了 10:31,
+  //    workers promoted 10:37/10:40, engine silent until the owner woke it at 11:51 with
+  //    four branches stacked in review. The fix adds a SECOND question — is anything
+  //    coming OUT of the desk? — judged on the one channel only real integration work
+  //    writes: the commander's own heartbeat. Both directions are pinned here. ──
+
+  it('(1) a desk that PAINTS but stops DELIVERING is poked once the queue stalls — the 80-minute blind spot', async () => {
+    const engine = newEngine()
+    // The incident's exact shape: the last beat is minutes OLD when the cards land, and
+    // the desk reads 'active' forever after because a TUI that repainted is still "alive".
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b')],
+      managerPresence: 'active',
+      managerDeliveryAt:T0 - 6 * 60_000, // 統合完了 six minutes before the promotions
+    })
+    await passAt(engine, deps, T0)
+    expect(deps.nudged).toEqual([]) // nothing has waited yet — a working desk is left alone
+    expect(deps.deliveryReads).toBe(0) // and an ordinary tick never even reads the evidence files
+    // Just under the window: still silent. A commander mid-branch may pause this long.
+    await passAt(engine, deps, T0 + MANAGER_INTEGRATION_STALL_MS - 1)
+    expect(deps.nudged).toEqual([])
+    // Past it — work has sat the full window and the desk has not beaten once. SPEAK.
+    await passAt(engine, deps, T0 + MANAGER_INTEGRATION_STALL_MS)
+    expect(deps.nudged).toEqual([engine.path]) // ← THE fix: paint no longer buys silence
+    expect(deps.wakeCalls).toEqual([]) // still never a second desk (the desk IS up)
+    expect(deps.notifications).toEqual([]) // and still never a fatal (完了条件3)
+    // The log has to explain itself — 「無音」 would read as a contradiction here.
+    expect(engine.log.some((l) => l.message.includes('描画しているが統合が進んでいません'))).toBe(true)
+  })
+
+  it('(2) a commander that is ACTUALLY integrating is never interrupted — delivery is the discriminator', async () => {
+    const engine = newEngine()
+    // A real round holds cards in review for HOURS, and the desk's work looks like this:
+    // ONE beat at the head of a branch, then tsc + `npm test` (3–12 min) + adversarial
+    // reviewers via the Agent tool (5–20 min) INSIDE a single turn — during which it
+    // cannot curl a beat at all. What keeps moving is the transcript and the sub-agent
+    // files, so delivery stays fresh even though the BEAT is long stale. Judging this desk
+    // on the beat alone (the first cut of this fix, 差し戻し 2026-07-22) would ESC the
+    // reviewers it is running. The fake models the worst realistic gap: a full `npm test`
+    // with no sub-agent alive, 12 minutes of silence on every file.
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a'), reviewCard('b', 'swarm/b')],
+      managerPresence: 'active',
+      managerDeliveryAt: (now) => now - 12 * 60_000,
+    })
+    for (let i = 0; i <= 12; i++) await passAt(engine, deps, T0 + i * 30 * 60_000) // six hours
+    expect(deps.nudged).toEqual([]) // ← 完了条件2: no false poke, however long the queue is
+    expect(deps.wakeCalls).toEqual([])
+    expect(engine.managerResume?.nudges ?? 0).toBe(0)
+    expect(engine.log.some((l) => l.message.includes('統合が進んでいません'))).toBe(false)
+    // The desk being demonstrably up must ALSO keep refunding the give-up budget, or a
+    // long integration would drift toward a false 'manager-unrevivable' (2026-07-22 nit).
+    expect(engine.managerResume?.provenSinceWake).toBe(true)
+  })
+
+  it('(2b) even a desk whose BEAT is hours old is left alone while its sub-agents move', async () => {
+    // The same failure the 差し戻し caught, stated as the boundary: delivery just inside
+    // the window is silence, just outside it is a poke. Nothing else differs — so this
+    // pins that the rule reads DELIVERY and not the beat.
+    const quiet = newEngine()
+    const working = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt: (now) => now - (MANAGER_INTEGRATION_STALL_MS - 1),
+    })
+    await passAt(quiet, working, T0)
+    await passAt(quiet, working, T0 + MANAGER_INTEGRATION_STALL_MS)
+    expect(working.nudged).toEqual([])
+    const stopped = newEngine()
+    const dead = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt: (now) => now - MANAGER_INTEGRATION_STALL_MS,
+    })
+    await passAt(stopped, dead, T0)
+    await passAt(stopped, dead, T0 + MANAGER_INTEGRATION_STALL_MS)
+    expect(dead.nudged).toEqual([stopped.path])
+  })
+
+  it('(3) a card that JUST landed never triggers a poke, however old the last beat is', async () => {
+    // The dwell half of the rule. Without it, a desk the owner is talking to would take an
+    // ESC the instant a worker promotes, purely because the previous round ended long ago.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt:T0 - 24 * 60 * 60_000, // yesterday
+    })
+    await passAt(engine, deps, T0)
+    expect(deps.nudged).toEqual([])
+    expect(deps.deliveryReads).toBe(0) // the in-memory dwell clock gates the read — no IO at all
+  })
+
+  it('(4) integration PROGRESS restarts the clock — it measures the OLDEST card, not the queue', async () => {
+    // A queue that is never EMPTY but is MOVING is a commander doing its job. The clock is
+    // per-branch and pruned on the same sweep that forgets the conflict/verify memos, so a
+    // card leaving review carries its entry out with it.
+    const engine = newEngine()
+    const beat = T0 - 60_000
+    const first = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt:beat,
+    })
+    await passAt(engine, first, T0)
+    expect(engine.reviewSeenAt?.get('swarm/a')).toBe(T0)
+    // 30 minutes on: 'a' has been integrated and 'b' has arrived in its place.
+    const later = T0 + 30 * 60_000
+    const second = makeIntDeps({
+      reviews: [reviewCard('b', 'swarm/b')],
+      managerPresence: 'active',
+      managerDeliveryAt:beat,
+    })
+    await passAt(engine, second, later)
+    expect(engine.reviewSeenAt?.has('swarm/a')).toBe(false) // pruned with the card
+    expect(engine.reviewSeenAt?.get('swarm/b')).toBe(later)
+    // 20 minutes later 'a' would have been 50 minutes old (past the window); 'b' is 20.
+    await passAt(engine, second, later + 20 * 60_000)
+    expect(second.nudged).toEqual([])
+    // 'b' still gets there on its OWN clock — the reset delays the poke, never cancels it.
+    await passAt(engine, second, later + MANAGER_INTEGRATION_STALL_MS)
+    expect(second.nudged).toEqual([engine.path])
+  })
+
+  it('(5) the spent nudge budget is RE-ARMED once while the queue is still stuck — never mute forever', async () => {
+    const engine = newEngine()
+    // "Budget spent" is a verdict about the DESK, but the episode only ends when review
+    // DRAINS — so on a batch that never drains the engine used to go mute for the rest of
+    // that batch's life, which is the same observable silence as the bug itself.
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      managerDeliveryAt:T0 - MANAGER_INTEGRATION_STALL_MS, // stopped before the card even landed
+    })
+    for (let i = 0; i < MAX_MANAGER_NUDGES; i++) await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES) // budget spent the ordinary way
+    const lastNudge = T0 + (MAX_MANAGER_NUDGES - 1) * MANAGER_NUDGE_INTERVAL_MS
+    // Inside the backoff: silent. The budget still means something.
+    await passAt(engine, deps, lastNudge + MANAGER_NUDGE_REARM_MS - 1)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+    // A full hour of PROVABLE stall later (nothing moved, no beat) → one round given back.
+    await passAt(engine, deps, lastNudge + MANAGER_NUDGE_REARM_MS)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES + 1)
+    // …and exactly one, however long the batch is parked: ≤6 pokes, then a human matter.
+    for (let i = 1; i <= 60; i++) {
+      await passAt(engine, deps, lastNudge + MANAGER_NUDGE_REARM_MS + i * MANAGER_NUDGE_INTERVAL_MS)
+    }
+    expect(deps.nudged).toHaveLength(2 * MAX_MANAGER_NUDGES)
+    expect(deps.wakeCalls).toEqual([]) // and the re-arm never spilled into a spawn…
+    expect(deps.notifications).toEqual([]) // …nor into a fatal (the desk is up — 完了条件3)
+  })
+
+  it('(6) a desk seen WORKING ends the stall episode — the next silence gets the full voice back', async () => {
+    const engine = newEngine()
+    const stuck = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt:T0 - 60_000,
+    })
+    await passAt(engine, stuck, T0) // the card lands — the dwell clock starts here
+    await passAt(engine, stuck, T0 + MANAGER_INTEGRATION_STALL_MS)
+    expect(stuck.nudged).toHaveLength(1)
+    expect(engine.managerResume?.stallLogged).toBe(true)
+    // The commander picks the work up and beats again → the episode is over.
+    const working = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt:(now) => now,
+    })
+    await passAt(engine, working, T0 + MANAGER_INTEGRATION_STALL_MS + 60_000)
+    expect(working.nudged).toEqual([])
+    expect(engine.managerResume?.nudges).toBe(0)
+    expect(engine.managerResume?.stallLogged).toBe(false)
+    expect(engine.managerResume?.nudgeRearmed).toBe(false)
+  })
+
+  it('(7) a stall NEVER diverts the resurrection path — an ABSENT desk is still spawned', async () => {
+    // A stall is a statement about the WORK, and it is true of a desk that is GONE too
+    // (nothing is integrating because there is nothing to integrate with). If the stall
+    // gate captured 'absent' as well as 'active', the pass would nudge a PTY that does not
+    // exist — no spawn, no 'manager-unrevivable' — disabling recovery in exactly the
+    // situation this card exists to fix. The card's scope is the NUDGE condition only.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'absent',
+      managerDeliveryAt:T0 - MANAGER_INTEGRATION_STALL_MS, // long stopped: the stall IS satisfied
+    })
+    await passAt(engine, deps, T0) // the card lands; the desk is already gone
+    expect(deps.wakeCalls).toHaveLength(1)
+    // Far past the stall window, with the desk still absent: the reflex must keep spawning
+    // on its own schedule and still escalate when it gives up.
+    for (let i = 1; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) {
+      await passAt(engine, deps, T0 + MANAGER_INTEGRATION_STALL_MS + i * MANAGER_RESUME_GRACE_MS)
+    }
+    expect(deps.wakeCalls).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS)
+    expect(deps.nudged).toEqual([]) // never poked at a desk that is not there
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unrevivable'])
+  })
+
+  it('(8) time the engine was OFF is not 「統合待ち」 — a restart never ESCs a live desk', async () => {
+    // The owner stops the engine precisely in order to work at the commander desk by hand
+    // (observed 2026-07-22: several OFF/ON cycles during an incident). Nothing beats while
+    // they do. If the dwell clock kept running across the stop, the FIRST pass after the
+    // restart — which is immediate, because startOrchestrator zeroes lastIntegrateAt —
+    // would already be past the window and fire an ESC into the session they are using.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt: T0 - 60_000,
+    })
+    await passAt(engine, deps, T0) // the card is seen while the engine is ON
+    expect(engine.reviewSeenAt?.get('swarm/a')).toBe(T0)
+    // Engine OFF for well over the stall window, then ON again. The ON transition drops
+    // the clock — that half is pinned on the REAL startOrchestrator in the auto-start
+    // describe ('startOrchestrator DROPS the review dwell clock…'); here we pin what the
+    // PASS does with a dropped clock, which is the half that decides the poke.
+    const backAt = T0 + 3 * MANAGER_INTEGRATION_STALL_MS
+    engine.running = false
+    engine.reviewSeenAt?.clear()
+    engine.running = true
+    await passAt(engine, deps, backAt)
+    expect(deps.nudged).toEqual([]) // ← the fix: the wait restarts from the restart
+    expect(engine.reviewSeenAt?.get('swarm/a')).toBe(backAt)
+    // …and the card is not forgiven either — it simply waits its full window from here.
+    await passAt(engine, deps, backAt + MANAGER_INTEGRATION_STALL_MS)
+    expect(deps.nudged).toEqual([engine.path])
+  })
+
+  it('managerIntegrationStalled — the rule itself (pure)', () => {
+    const now = T0
+    const S = MANAGER_INTEGRATION_STALL_MS
+    // Both clocks past the window ⇒ stalled.
+    expect(managerIntegrationStalled({ waitingSinceMs: now - S, deliveryAtMs: now - S, now })).toBe(true)
+    // Work waiting but the desk IS producing (beat / transcript / sub-agent append) ⇒
+    // integrating, not stalled (完了条件2 — and the 2026-07-22 差し戻し in one line).
+    expect(managerIntegrationStalled({ waitingSinceMs: now - 10 * S, deliveryAtMs: now - S + 1, now })).toBe(false)
+    // Nothing produced for ages but the work only just arrived ⇒ nothing to say yet.
+    expect(managerIntegrationStalled({ waitingSinceMs: now - S + 1, deliveryAtMs: now - 10 * S, now })).toBe(false)
+    // Nothing waiting at all ⇒ never stalled.
+    expect(managerIntegrationStalled({ waitingSinceMs: null, deliveryAtMs: now - 10 * S, now })).toBe(false)
+    // NO channel has anything to say ⇒ fail-open, same as isManagerHeartbeatFresh: we know
+    // nothing about this desk, so we do not poke it. It is still covered by the ordinary
+    // paint-goes-quiet 'idle' path.
+    expect(managerIntegrationStalled({ waitingSinceMs: now - 10 * S, deliveryAtMs: null, now })).toBe(false)
   })
 
   it('a desk that only ever leaves a SHELL behind still reaches manager-unrevivable (provenSinceWake)', async () => {

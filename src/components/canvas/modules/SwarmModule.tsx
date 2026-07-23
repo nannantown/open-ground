@@ -64,7 +64,8 @@ import { SwarmOverseerPane } from './SwarmOverseerPane'
 import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
 import { ExecutionModeMenu } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
-import { useSwarmEngine, planSwarmPower } from './useSwarmEngine'
+import { useSwarmEngine, planSwarmPower, KNOWN_ENV_ISSUE_IDS } from './useSwarmEngine'
+import type { SwarmEnvIssueId } from './useSwarmEngine'
 
 // Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
 // to fill the area when there are few (1 worker → full width) but never shrinks
@@ -182,6 +183,46 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
 // local alias keeps the many existing `MainView` references unchanged.
 type MainView = SwarmPaneId
 
+/** A failed worker/supply/manager spawn's 503 body carries `envIssues: string[]`
+ *  (see server/routes/swarm.ts — the git/shell env-preflight gate,
+ *  swarmEnvPreflight.ts). Map it to the SAME localized copy the poll-driven
+ *  banner uses (`projectPanel.swarm.envPreflight.<id>`), so a launch failure the
+ *  owner sees IMMEDIATELY after pressing a button reads in plain language too —
+ *  not the route's raw English `body.error` (2026-07-22 review round 2: that
+ *  literal string, including a `git init` instruction, was reaching the error
+ *  banner untranslated). Returns null when `envIssues` is absent/empty/unknown,
+ *  so the caller falls back to `body.error` for every OTHER kind of failure. */
+const envIssuesErrorMessage = (
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  envIssues: unknown,
+): string | null => {
+  if (!Array.isArray(envIssues)) return null
+  const known = envIssues.filter(
+    (id): id is SwarmEnvIssueId => typeof id === 'string' && KNOWN_ENV_ISSUE_IDS.has(id),
+  )
+  if (known.length === 0) return null
+  return known.map((id) => t(`projectPanel.swarm.envPreflight.${id}`)).join(' ')
+}
+
+/** The env-preflight banner's i18n key for "what still works" (2026-07-22
+ *  review, nit6): a non-git PROJECT (`notAGitRepo`) only blocks starting new
+ *  workers — supply and the commander both run in the primary checkout and
+ *  never touch git, so they still work. A missing git BINARY (`gitMissing`)
+ *  additionally blocks the commander (its /og-manage conversation runs git
+ *  constantly), leaving only supply. `shellMissing` blocks all three (nothing
+ *  can open a PTY at all), so there is nothing reassuring left to say. Without
+ *  this, a banner reading "this project can't start AI workers yet" on one of
+ *  the 15/42 non-git registered projects (measured 2026-07-22) reads as
+ *  "nothing here works", when in fact the task desk and commander are fine.
+ *  Returns null when there is nothing to add (no issues, or shellMissing). */
+const envBannerFootnoteKey = (issues: readonly { id: SwarmEnvIssueId }[]): string | null => {
+  if (issues.length === 0) return null
+  if (issues.some((i) => i.id === 'shellMissing')) return null
+  if (issues.some((i) => i.id === 'gitMissing')) return 'projectPanel.swarm.envPreflight.footnoteSupplyOnly'
+  if (issues.some((i) => i.id === 'notAGitRepo')) return 'projectPanel.swarm.envPreflight.footnoteSupplyAndManager'
+  return null
+}
+
 export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
 
@@ -268,7 +309,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     dismissAutonomyReminder,
     toggleOverseer,
     sandboxWarning: engineSandboxWarning,
+    envIssues,
   } = useSwarmEngine(project.path)
+
+  // The env-preflight banner is dismissible (条件: nit5, 2026-07-22 review) —
+  // keyed by the SET of issue ids currently shown, not a plain boolean, so
+  // dismissing "git missing" doesn't also hide a DIFFERENT issue that appears
+  // later (e.g. shell trouble surfacing after git gets fixed) — that re-shows
+  // the banner instead of leaving it silently gone.
+  const [dismissedEnvIssuesKey, setDismissedEnvIssuesKey] = useState<string | null>(null)
+  const envIssuesKey = envIssues.map((i) => i.id).sort().join(',')
+  const showEnvBanner = envIssues.length > 0 && dismissedEnvIssuesKey !== envIssuesKey
 
   // PTY ids ever seen alive by the active poll. If an id was seen and then drops
   // out of the poll, the PTY died — used by statusOf so a missed SSE 'exit'
@@ -298,6 +349,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setPendingRestarts(new Map())
     setRemovedWorktrees(new Set())
     setEscCount(0)
+    setDismissedEnvIssuesKey(null)
     seenRef.current = new Set()
   }, [project.id])
 
@@ -554,8 +606,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         body: JSON.stringify({ path: project.path }),
       })
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body?.error || `HTTP ${res.status}`)
+        const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
+        throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
       }
       const spawn = (await res.json()) as SpawnSwarmSupplyResponse
       const next: SwarmSupply = {
@@ -618,8 +670,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         body: JSON.stringify({ path: project.path }),
       })
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body?.error || `HTTP ${res.status}`)
+        const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
+        throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
       }
       const spawn = (await res.json()) as SpawnSwarmManagerResponse
       const next: SwarmManager = {
@@ -703,8 +755,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         body: JSON.stringify({ path: project.path }),
       })
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body?.error || `HTTP ${res.status}`)
+        const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
+        throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
       }
       const spawn = (await res.json()) as SpawnSwarmSupplyResponse
       const next: SwarmSupply = {
@@ -741,8 +793,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         body: JSON.stringify({ path: project.path }),
       })
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body?.error || `HTTP ${res.status}`)
+        const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
+        throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
       }
       const spawn = (await res.json()) as SpawnSwarmManagerResponse
       const next: SwarmManager = {
@@ -798,8 +850,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           }),
         })
         if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string }
-          throw new Error(body?.error || `HTTP ${res.status}`)
+          const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
+          throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
         }
         const spawn = (await res.json()) as SpawnSwarmWorkerResponse
         setPendingRestarts((prev) => new Map(prev).set(worker.worktree, spawn.terminalId))
@@ -1069,6 +1121,42 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           onToggle={powerSwarm}
         />
       </div>
+      {/* Env preflight (git/shell) — ONE banner listing every unmet prerequisite
+          (GET /api/swarm/preflight, the same gate the worker/supply/manager spawn
+          routes enforce), so a missing git / non-repo project / missing shell is
+          visible up front instead of only surfacing as a failed-launch error. */}
+      {showEnvBanner && (
+        <div className="flex shrink-0 items-start gap-3 border-b border-line-soft bg-bg px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-medium leading-relaxed text-accent">
+              {t('projectPanel.swarm.envPreflight.title')}
+            </p>
+            <ul className="mt-1 list-disc pl-4">
+              {envIssues.map((issue) => (
+                <li key={issue.id} className="text-[11px] leading-relaxed text-ink-subtle">
+                  {t(`projectPanel.swarm.envPreflight.${issue.id}`)}
+                </li>
+              ))}
+            </ul>
+            {(() => {
+              const footnoteKey = envBannerFootnoteKey(envIssues)
+              return footnoteKey ? (
+                <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">{t(footnoteKey)}</p>
+              ) : null
+            })()}
+          </div>
+          <button
+            type="button"
+            onClick={() => setDismissedEnvIssuesKey(envIssuesKey)}
+            aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            title={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X size={12} strokeWidth={2} />
+          </button>
+        </div>
+      )}
+
       {/* A transient action error (worker terminate / restart, supply・commander
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}

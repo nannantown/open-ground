@@ -69,6 +69,14 @@ vi.mock('@/lib/server/claudePreflight', () => ({
   claudeRunPreflight: async () => ({ ok: true }),
 }))
 
+// This suite's fixture project is a plain tmpdir (no `git init` — the spawn
+// itself is faked below, so nothing here needs a real repo). Stub the env
+// preflight (git/shell) the same way, or every route call 503s before ever
+// reaching the twin-dispatch race this file exists to test.
+vi.mock('@/lib/server/swarmEnvPreflight', () => ({
+  swarmEnvPreflight: async () => ({ ok: true, issues: [] }),
+}))
+
 // Only the spawn is faked (no worktree, no PTY); the rest of swarmWorker — and
 // every other module that imports it — keeps its real implementation.
 vi.mock('@/lib/server/swarmWorker', async (importOriginal) => {

@@ -52,6 +52,28 @@ export const projectPanel = {
       'Autonomy was on for this project last session. It relaunched OFF — nothing is running.',
     'projectPanel.swarm.autonomyReminder.resume': 'Resume',
     'projectPanel.swarm.autonomyReminder.dismiss': 'Dismiss',
+    // Env preflight (git/shell) — GET /api/swarm/preflight (swarmEnvPreflight),
+    // the same gate the worker/supply/manager spawn routes enforce. Shown as ONE
+    // banner listing every unmet prerequisite; ids mirror SwarmEnvIssueId. Plain
+    // language for a non-programmer owner (完了条件5): what's missing, how it
+    // gets fixed (never a command for the owner to type), what becomes possible
+    // once it is.
+    'projectPanel.swarm.envPreflight.title':
+      "This project can't start AI workers yet:",
+    'projectPanel.swarm.envPreflight.gitMissing':
+      "A tool called git, which workers need to make their own private working copy of this project, isn't installed on this computer. Ask someone technical to install it for you — once it's done, workers will be able to start here.",
+    'projectPanel.swarm.envPreflight.notAGitRepo':
+      "This project folder hasn't been set up to track changes (with a tool called git), which workers need in order to make their own private working copy to work in. Ask someone technical to set that up for this folder — once it's done, workers will be able to start here.",
+    'projectPanel.swarm.envPreflight.shellMissing':
+      "Something this computer needs to open a working session couldn't be found — this points to a problem with the computer itself, not this project. Ask someone technical to look into it — once it's fixed, workers, the task desk, and the commander will all be able to start.",
+    // Footnote: which parts of swarm still work despite the issue(s) above —
+    // without this, the title alone ("can't start AI workers yet") reads as
+    // "nothing here works", when the task desk (and often the commander) are
+    // unaffected. See envBannerFootnoteKey in SwarmModule.tsx for which applies.
+    'projectPanel.swarm.envPreflight.footnoteSupplyOnly':
+      'The task desk still works, so you can keep filing work for later. Workers and the commander need this fixed first.',
+    'projectPanel.swarm.envPreflight.footnoteSupplyAndManager':
+      'The task desk and the commander still work. Only starting new AI workers needs this fixed first.',
     // Execution mode (token budget) — one switch for every swarm launch (card 68d8e00f).
     'projectPanel.swarm.mode.label': 'Mode',
     'projectPanel.swarm.mode.max': 'Max',
@@ -642,6 +664,25 @@ export const projectPanel = {
       '前回このプロジェクトで自律ドレインが ON でした。再起動で OFF になっています（何も動いていません）。',
     'projectPanel.swarm.autonomyReminder.resume': '再開',
     'projectPanel.swarm.autonomyReminder.dismiss': '閉じる',
+    // 環境の事前チェック(git/shell) — GET /api/swarm/preflight(swarmEnvPreflight)。
+    // worker/supply/manager の起動ルートと同じ判定を、起動前に1枚のバナーで表示する。
+    // 完了条件5: 非プログラマ向けの平易文(①何が足りないか ②どうすれば直るか(オー
+    // ナーにコマンドは打たせない) ③直るとどうなるか)。
+    'projectPanel.swarm.envPreflight.title': 'このプロジェクトでは、まだ AI ワーカーを起動できません:',
+    'projectPanel.swarm.envPreflight.gitMissing':
+      'ワーカーがこのプロジェクトの作業用コピーを自分専用に作るのに必要な「git」という道具が、このパソコンに入っていません。詳しい方にインストールをお願いしてください — 入れば、このプロジェクトでもワーカーが動かせるようになります。',
+    'projectPanel.swarm.envPreflight.notAGitRepo':
+      'このプロジェクトのフォルダは、ワーカーが作業用コピーを作るのに必要な「変更を記録する仕組み(git)」の準備がまだできていません。詳しい方にこのフォルダの設定をお願いしてください — 済めば、このプロジェクトでもワーカーが動かせるようになります。',
+    'projectPanel.swarm.envPreflight.shellMissing':
+      '作業を開始するためにこのパソコンに必要なものが見つかりませんでした — これはこのプロジェクトではなく、パソコン自体の問題です。詳しい方に調べてもらってください — 直れば、ワーカー・タスク受付・司令官のすべてが起動できるようになります。',
+    // 補足: 上の問題があっても swarm のどの部分は使えるか(これが無いと「AI ワーカー
+    // を起動できません」という見出しだけで「何もできない」と誤読される — タスク受付・
+    // 司令官は多くの場合影響を受けない)。どの補足を出すかは SwarmModule.tsx の
+    // envBannerFootnoteKey を参照。
+    'projectPanel.swarm.envPreflight.footnoteSupplyOnly':
+      'タスク受付は引き続き使えるので、あとで対応する作業を登録しておけます。ワーカーと司令官はこの問題が直ってから使えます。',
+    'projectPanel.swarm.envPreflight.footnoteSupplyAndManager':
+      'タスク受付と司令官は引き続き使えます。新しく AI ワーカーを起動することだけが、この問題が直るまでできません。',
     // 実行モード（トークン節約）— swarm 起動全体に効く1スイッチ（card 68d8e00f）。
     'projectPanel.swarm.mode.label': 'モード',
     'projectPanel.swarm.mode.max': '最大出力',

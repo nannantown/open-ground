@@ -178,12 +178,21 @@ describe('watchDeskForDeathOnArrival — learn the tier wall from a desk that di
     }
   }
 
+  const noForget = async () => false
+  const FRESH = false // wasResumed
+  const RESUMED = true
+
   beforeEach(() => __resetQuotaForTest())
 
   it('a desk that dies INSIDE the window saying its tier is spent COOLS that tier', () => {
     const w = captureWatch()
     let clock = NOW
-    watchDeskForDeathOnArrival('t1', 'fable', { watch: w.watch, screen: () => FABLE_NOTICE, now: () => clock })
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-1', FRESH, {
+      watch: w.watch,
+      screen: () => FABLE_NOTICE,
+      now: () => clock,
+      forget: noForget,
+    })
     clock = NOW + 2_000 // refused ~2s after opening (measured 1.4–3.8s)
     w.fire()
     expect(isTierCooling('fable', clock)).toBe(true)
@@ -192,10 +201,11 @@ describe('watchDeskForDeathOnArrival — learn the tier wall from a desk that di
   it('a desk that dies of something OTHER than quota does NOT cool the tier (a crash ≠ a wall)', () => {
     const w = captureWatch()
     let clock = NOW
-    watchDeskForDeathOnArrival('t1', 'fable', {
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-1', FRESH, {
       watch: w.watch,
       screen: () => 'panic: runtime out of memory',
       now: () => clock,
+      forget: noForget,
     })
     clock = NOW + 2_000
     w.fire()
@@ -205,7 +215,12 @@ describe('watchDeskForDeathOnArrival — learn the tier wall from a desk that di
   it('a desk that OUTLIVED the window says nothing about its tier — its later death is not a wall', () => {
     const w = captureWatch()
     let clock = NOW
-    watchDeskForDeathOnArrival('t1', 'fable', { watch: w.watch, screen: () => FABLE_NOTICE, now: () => clock })
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-1', FRESH, {
+      watch: w.watch,
+      screen: () => FABLE_NOTICE,
+      now: () => clock,
+      forget: noForget,
+    })
     clock = NOW + DESK_DOA_WINDOW_MS + 1 // it did real work, THEN exited
     w.fire()
     expect(isTierCooling('fable', clock)).toBe(false)
@@ -214,7 +229,12 @@ describe('watchDeskForDeathOnArrival — learn the tier wall from a desk that di
   it('a missing screen cools nothing (best-effort — learned nothing, never a throw)', () => {
     const w = captureWatch()
     let clock = NOW
-    watchDeskForDeathOnArrival('t1', 'fable', { watch: w.watch, screen: () => null, now: () => clock })
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-1', FRESH, {
+      watch: w.watch,
+      screen: () => null,
+      now: () => clock,
+      forget: noForget,
+    })
     clock = NOW + 2_000
     w.fire()
     expect(isTierCooling('fable', clock)).toBe(false)
@@ -222,7 +242,70 @@ describe('watchDeskForDeathOnArrival — learn the tier wall from a desk that di
 
   it('a non-ladder model string is never watched nor cooled (only real tiers cool)', () => {
     const w = captureWatch()
-    watchDeskForDeathOnArrival('t1', 'gpt-5', { watch: w.watch, screen: () => FABLE_NOTICE, now: () => NOW })
+    watchDeskForDeathOnArrival('t1', 'gpt-5', '/repo', 'sid-1', FRESH, {
+      watch: w.watch,
+      screen: () => FABLE_NOTICE,
+      now: () => NOW,
+      forget: noForget,
+    })
     expect(w.registered()).toBe(false) // returned before ever arming the watch
+  })
+
+  it('a FRESH desk that dies quoting a spent tier forgets its stale (refusal-only) session pointer', () => {
+    const w = captureWatch()
+    let clock = NOW
+    let forgotten: [string, string, string] | null = null
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-quota-death', FRESH, {
+      watch: w.watch,
+      screen: () => FABLE_NOTICE,
+      now: () => clock,
+      forget: async (projectPath, role, sessionId) => {
+        forgotten = [projectPath, role, sessionId]
+        return true
+      },
+    })
+    clock = NOW + 2_000
+    w.fire()
+    expect(forgotten).toEqual(['/repo', 'manager', 'sid-quota-death'])
+  })
+
+  it('a RESUMED desk that dies quoting a spent tier does NOT forget its session — its transcript is real history, not just a refusal', () => {
+    const w = captureWatch()
+    let clock = NOW
+    let forgetCalled = false
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-days-of-history', RESUMED, {
+      watch: w.watch,
+      screen: () => FABLE_NOTICE,
+      now: () => clock,
+      forget: async () => {
+        forgetCalled = true
+        return true
+      },
+    })
+    clock = NOW + 2_000
+    w.fire()
+    // The tier still cools (that part is unconditional)…
+    expect(isTierCooling('fable', clock)).toBe(true)
+    // …but the days of accumulated conversation the session id points at must
+    // survive so the NEXT launch can still `--resume` it.
+    expect(forgetCalled).toBe(false)
+  })
+
+  it('a desk that dies of something other than quota does NOT touch the session pointer', () => {
+    const w = captureWatch()
+    let clock = NOW
+    let forgetCalled = false
+    watchDeskForDeathOnArrival('t1', 'fable', '/repo', 'sid-1', FRESH, {
+      watch: w.watch,
+      screen: () => 'panic: runtime out of memory',
+      now: () => clock,
+      forget: async () => {
+        forgetCalled = true
+        return true
+      },
+    })
+    clock = NOW + 2_000
+    w.fire()
+    expect(forgetCalled).toBe(false)
   })
 })

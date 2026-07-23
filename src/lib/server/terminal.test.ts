@@ -15,6 +15,7 @@ import {
   unregisterFlowStream,
   pickShell,
   sweepTerminalPool,
+  isTerminalProcessAlive,
   startTerminalSweepLoop,
   stopTerminalSweepLoop,
   TERMINAL_LINGER_SWEEP_MS,
@@ -899,6 +900,44 @@ describe('sweepTerminalPool — reaps dead pool entries, never kills', () => {
   it('default lingerMs is the documented 60s safety-net constant (> the 30s onExit timer)', () => {
     expect(TERMINAL_LINGER_SWEEP_MS).toBe(60_000)
     expect(TERMINAL_LINGER_SWEEP_MS).toBeGreaterThan(30_000)
+  })
+})
+
+describe('isTerminalProcessAlive — OS-confirmed liveness (the Restart-race guard, MF3)', () => {
+  const fake = (
+    id: string,
+    opts: { finishedAt?: string; pid?: number } = {},
+  ): FakeSessionShape & { pty: { pid?: number } } => {
+    const s = fakeSession(id, '/tmp/p', opts.finishedAt ? { finishedAt: opts.finishedAt } : {}) as
+      FakeSessionShape & { pty: { pid?: number } }
+    s.pty = opts.pid !== undefined ? { pid: opts.pid } : {}
+    return s
+  }
+
+  it('an unknown terminal id is never alive', () => {
+    expect(isTerminalProcessAlive('nope')).toBe(false)
+  })
+
+  it('a session already stamped finishedAt is never alive, even if a pid check would say yes', () => {
+    state().sessions.set('done', fake('done', { finishedAt: new Date().toISOString(), pid: 111 }))
+    expect(isTerminalProcessAlive('done', () => true)).toBe(false)
+  })
+
+  it('defers to the injected isAlive for a session carrying a real pid', () => {
+    state().sessions.set('live', fake('live', { pid: 222 }))
+    expect(isTerminalProcessAlive('live', () => true)).toBe(true)
+    state().sessions.set('dead', fake('dead', { pid: 333 }))
+    expect(isTerminalProcessAlive('dead', () => false)).toBe(false)
+  })
+
+  it('a session WITHOUT a real numeric pid is reported ALIVE — absence of evidence is not evidence of death (the guard the mutant kills)', () => {
+    // The bare test/legacy fixture shape: pty:{} carries no pid at all. Flipping
+    // this branch to `false` would make isTerminalProcessAlive reap sessions it
+    // cannot actually verify — the same class of over-eager reap sweepTerminalPool
+    // deliberately avoids for the identical fixture shape (see the sibling
+    // describe above).
+    state().sessions.set('bare', fake('bare'))
+    expect(isTerminalProcessAlive('bare', () => false)).toBe(true)
   })
 })
 

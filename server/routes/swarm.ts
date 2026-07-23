@@ -55,6 +55,7 @@ import {
   ProjectDataConflictError,
 } from '@/lib/server/projectData'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
+import { swarmEnvPreflight } from '@/lib/server/swarmEnvPreflight'
 import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
@@ -293,6 +294,20 @@ export const swarmRoutes = new Hono()
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
 
+    // Env preflight (git/shell): a worker spawn creates a git worktree
+    // (createSwarmWorktree) and runs a PTY through a shell — checked BEFORE the
+    // twin-dispatch claim below, so a missing prerequisite never claims a Board
+    // card off the todo queue for a spawn that can't succeed. force:true — the
+    // 10s cache is for the GET poll only; a spawn must never refuse on a stale
+    // "not ready" answer the owner just fixed (e.g. ran `git init` moments ago).
+    const envPre = await swarmEnvPreflight(path, { force: true })
+    if (!envPre.ok) {
+      return c.json(
+        { error: envPre.issues.map((i) => i.message).join(' '), envIssues: envPre.issues.map((i) => i.id) },
+        503,
+      )
+    }
+
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     const hint = typeof body?.hint === 'string' ? body.hint : undefined
@@ -405,6 +420,20 @@ export const swarmRoutes = new Hono()
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
 
+    // Env preflight (git/shell): supply runs a PTY through a shell in the
+    // project's PRIMARY checkout and NEVER calls git at all (no worktree, no
+    // status/merge) — so requireGit:false AND requireGitRepo:false, or a
+    // non-git registered project (measured 2026-07-22: 15 of 42) would lose a
+    // feature that never needed git, or a git-less machine would block a
+    // feature that never needed git installed either.
+    const envPre = await swarmEnvPreflight(path, { force: true, requireGit: false, requireGitRepo: false })
+    if (!envPre.ok) {
+      return c.json(
+        { error: envPre.issues.map((i) => i.message).join(' '), envIssues: envPre.issues.map((i) => i.id) },
+        503,
+      )
+    }
+
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     try {
@@ -453,6 +482,21 @@ export const swarmRoutes = new Hono()
     // OAuth browser and orphan a PTY. Same machine-readable 503 as /supply.
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
+
+    // Env preflight (git/shell): the /og-manage CONVERSATION this launches runs
+    // git constantly (status/merge/branch -d — swarmManager.ts), so unlike
+    // /supply this still requires git to be INSTALLED (requireGit stays at its
+    // true default); it only skips the "is this project itself a git repo"
+    // check (requireGitRepo:false) — the commander desk's own server code never
+    // shells out to git, only the claude session it launches does, and that
+    // session's git commands run in the project's primary checkout regardless.
+    const envPre = await swarmEnvPreflight(path, { force: true, requireGitRepo: false })
+    if (!envPre.ok) {
+      return c.json(
+        { error: envPre.issues.map((i) => i.message).join(' '), envIssues: envPre.issues.map((i) => i.id) },
+        503,
+      )
+    }
 
     const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
     const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
@@ -556,6 +600,22 @@ export const swarmRoutes = new Hono()
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json({ workers: await listSwarmWorkers(path) })
+  })
+  // --- GET /api/swarm/preflight — the git/shell env gate, surfaced up front --
+  // Query: ?path= . Returns { ok, issues: [{ id, message }] } from
+  // swarmEnvPreflight, exposed as a plain read so the Swarm tab can show every
+  // unmet prerequisite BEFORE the owner ever presses a launch button, instead of
+  // only discovering it as a failed-spawn 503. Uses the DEFAULT (requireGitRepo:
+  // true) — the /worker view — since worker dispatch is the swarm's core
+  // capability; a non-git project still gets supply/manager (they pass
+  // requireGitRepo:false and are unaffected by a notAGitRepo answer here).
+  // PURE READ-ONLY, owner-only + validated like the rest of /api/swarm/*.
+  .get('/api/swarm/preflight', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    const path = c.req.query('path') ?? ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await swarmEnvPreflight(path))
   })
   // --- POST /api/swarm/orchestrator/drain-tick — the Swarm surface's tick -----
   // Body: { path }. A pure idempotent state read of the (possibly never-started)

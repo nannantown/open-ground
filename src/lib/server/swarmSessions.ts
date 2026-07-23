@@ -172,6 +172,57 @@ export const recordSwarmSession = async (
   })
 }
 
+/** Drop `role`'s record — but ONLY if it still names `sessionId`. The
+ *  compare-and-delete matters more than the delete: by the time a caller learns
+ *  its session was worthless, a LATER launch may already have recorded a good
+ *  one over it, and clearing that would strand a healthy desk.
+ *
+ *  The one caller is the dead-on-arrival watch (swarmManager.watchDeskForDeathOnArrival),
+ *  and ONLY for a FRESH desk that died quoting a quota refusal: its transcript
+ *  contains nothing but that refusal, and leaving the record pointing at it would
+ *  make the NEXT commander `--resume` a one-line conversation about being out of
+ *  quota. Forgetting it is the honest state — the next launch opens a fresh desk.
+ *  (A RESUMED desk's transcript is real history plus one refusal line and must
+ *  never be forgotten this way — the caller enforces that distinction, not this
+ *  function.)
+ *
+ *  Shares recordSwarmSession's per-file serialisation, so the read-modify-write
+ *  cannot interleave with a concurrent record for the sibling role. Never
+ *  throws: losing this cleanup costs a stale pointer, never a launch.
+ *
+ *  ORDERING NOTE: the caller arms its exit-watch BEFORE recordSwarmSession's
+ *  write lands (measured DOA deaths take 1.4–3.8s; the write is milliseconds),
+ *  so in theory a desk could die and fire this forget before the record naming
+ *  it even exists — the compare-and-delete would then no-op, and the SUBSEQUENT
+ *  record write persists the now-dead session id, leaving the same stale pointer
+ *  this function exists to clear. Not observed in practice (the ordering above),
+ *  and a regression here only reverts to pre-2026-07-22 behaviour, not a new
+ *  failure mode — not worth a lock over, but worth knowing if this ever needs
+ *  tightening. */
+export const forgetSwarmSessionIf = async (
+  projectPath: string,
+  role: SwarmSessionRole,
+  sessionId: string,
+): Promise<boolean> => {
+  try {
+    // No mkdir before the read-modify-write (unlike recordSwarmSession): a delete
+    // only ever matters when the file — and thus its directory — already exists;
+    // an absent store has nothing to forget and readSwarmSessions handles that
+    // by returning {}.
+    const file = await projectDataFile(projectPath, SWARM_SESSIONS_FILE)
+    return await serialise(file, async () => {
+      const current = await readSwarmSessions(projectPath)
+      if (current[role]?.sessionId !== sessionId) return false // superseded — leave it alone
+      const next = { ...current }
+      delete next[role]
+      await atomicWriteJson(file, next)
+      return true
+    })
+  } catch {
+    return false
+  }
+}
+
 // ── the fail-open probe ─────────────────────────────────────────────────────
 
 // Only the HEAD of the transcript is read: a months-old commander session is a

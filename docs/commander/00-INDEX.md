@@ -124,8 +124,8 @@ flowchart TB
 
 | | 再起動後 |
 |---|---|
-| 司令官・補給官の**会話履歴** | ✅ **生き残る**(resume) |
-| エンジンの **in-memory 認知**(worker roster / reviews) | ❌ **全消え**。自動運転も必ず OFF に戻る(安全側) |
+| 司令官・補給官の**会話履歴** | ✅ **生き残る**(resume)。※ resume した卓が起動即死してもこの履歴は消されない — DOA のセッション破棄(04 §2.2.1)は resume していないフレッシュな卓限定 |
+| エンジンの **in-memory 認知**(worker roster / reviews) | ◐ **roster は 2026-07-23 card 3 以降ディスクに write-through される**(`~/.openground/swarm/<repoキー>/roster.json` — 心拍の隣・sessionId/taskId/branch/worktree/tier/spawnAt/workedMs/reworkCount を状態遷移点で保存)。boot 時 `resumeEngines()` が**照合先行・spawn 凍結**でその roster を現実(worktree/git/心拍/Board)と突合し 4 分岐に分類する(worktree 消滅=破棄 / ready=司令官 wake に委ねる / 作業途中=resume 候補として温存 / カード消滅=既存 reclaim)。※ただし**この段階では死んだ PTY を実際に `claude --resume` で再接続はしない**(それは card 4・未着手)— 再起動直後の in-memory roster はまだ空で、生き残った worker は `GET /api/swarm/workers` に**エンジン外 worker** として出る。**reviews は永続しない**(導出で足りる・初回 integrate pass で再計算 — 設計 §3)。ただし**自動運転(desiredRunning)は 2026-07-22 card 2 以降 OFF に戻らない** — その project の `engine.json`(`~/.openground/projects/<uuid>/engine.json`)が `desiredRunning:true` かつ owner の手動停止記録(`Settings.swarmManualStop`)が無ければ boot 時 `resumeEngines()` が人手ゼロで自動再開する(同一バージョンで 10 分に 3 boot 以上のときだけ crash-loop breaker が抑止 + fatal 通知)。「再起動 = 自動運転は必ず OFF」は**旧知識**(00-INDEX 自身の記述だったが撤回)— resume した司令官が見る running:true は「今回 resume 直後に自分で入れた」でなく「前回セッションの意図が生き残った」場合がある。⚠ **自動再開が実際に走るのは Electron がフォークした本番サーバだけ**(`process.send` ゲート)— `npm run dev` 系(`tsx watch`)では意図的に走らない。dev で running:false を見ても壊れているわけではない(01 章 §7.3) |
 | **quota 冷却テーブル**(層A) | ✅ **生き残る**(2026-07-13 永続化 — `~/.openground/swarm-quota.json`。04 章 §2.1.1)。**「再起動後は冷却が空が正常」は旧知識** |
 | Board / branch / 心拍 / escalations(**永続体**) | ✅ ディスクに在る = 唯一の足場 |
 | **コード自体** | ⚠️ 変わっている可能性大 — 再起動はたいてい**リリース**。各章の file:line も疑う(§6) |
@@ -172,10 +172,12 @@ flowchart TB
 | `GET /api/swarm/quota` の `tiers[]` | ❌ 単独では信じるな | mask 盲目(04 章 §2.6)。「cooling:false = 使える」ではない |
 | `GET /api/swarm/quota` の `launchTier` | ✅ | 唯一 mask+冷却の両方を通した値(server/routes/swarm.ts:129) |
 | `GET /api/swarm/orchestrator` の `workers` 空 | ❌ 「worker 不在」と読むな | roster ∩ PTY 生存のみ(swarmOrchestrator.ts:1923)。再起動後のエンジン外 worker は `GET /api/swarm/workers` に出る(01 章 §7.3) |
-| engine log(journal) | ⚠️ 「無い」を証明しない | 200 行 ring buffer(swarmOrchestrator.ts:201)+ 再起動で全消え。「journal に無い = 起きていない」ではない(01 章 §7.6) |
-| journal に rate-limit 行が無い | ❌ 無実の証明にならない | `0d1f7f0` で根治 — spawn 直後の即死は約 1.5 分で検知(onset 窓)、稼働後の limit は実クロック化した 10 分ゲート(装飾再描画による無限先送りは根絶。TARGET-STATE §1・実測待ち)。加えて **journal 自体が 200 行 ring + 再起動で全消え**なので「無い」は今も無実を証明しない。疑ったら worker 画面と /usage を自分で見る |
+| Swarm タブの一覧表示(worker 一覧 / エンジン状態 / fatal 通知) | ✅(2026-07-23 根治)**ただし最大 5 秒古い** | UI の poll は 4 ルートを**並列**で読み、周回に in-flight ガードと世代番号を持つ(`src/components/canvas/modules/useSwarmEngine.ts`・回帰テストは同ディレクトリ `useSwarmEngine.poll.test.tsx`)。**それ以前は直列 await + ポーリング自身のガード無し**(`if (!busy)` はトグル用フラグで周回の実行中を意味しない)で、1 周が `ENGINE_POLL_MS`(5s)を超えると周回が重なり、**遅れて返った古い周回が新しい表示を上書き**した。踏むのは swarm 稼働中の load 5〜7 の帯(本リポの純 I/O が 5〜7 秒に伸びる — カード d44b5ff0)= **まさに司令官が忙しい時**で、「一瞬古い値に戻る」「消したはずのエスカレーションが復活する」「止めたはずのエンジンが running に見える」という**操作が効いていないように見える**形で出た。現在は古い周回の setState は捨てられる。ただしポーリングである以上**表示は最大 5 秒古い** — 操作直後の食い違いは 5 秒待つか `GET` を自分で叩いて裏取り |
+| engine log(journal・API/UI 表示) | ⚠️ 「無い」を証明しない | 200 行 ring buffer(swarmOrchestrator.ts:201・API 契約は不変)+ 再起動で全消え。「journal に無い = 起きていない」ではない(01 章 §7.6)。**2026-07-22 緩和(card 1・ENGINE_PERSISTENCE_PLAN.md)**: `logLine` の同じ行が `~/.openground/projects/<uuid>/engine-journal.jsonl` へ append-through されるようになった(`src/lib/server/engineJournal.ts`)。**再起動を跨いだ事後診断はこの JSONL を見よ** — ring とは別ファイルで API には出ない。5MB で `.1` に 1 世代だけローテ、追記失敗は fail-open(エンジンは止めない)なので JSONL 側にも「無い」が絶対の証明にはならない(ENOSPC・ローテ境界の欠落等) |
+| journal に rate-limit 行が無い | ❌ 無実の証明にならない | `0d1f7f0` で根治 — spawn 直後の即死は約 1.5 分で検知(onset 窓)、稼働後の limit は実クロック化した 10 分ゲート(装飾再描画による無限先送りは根絶。TARGET-STATE §1・実測待ち)。加えて **journal(ring)自体が 200 行 + 再起動で全消え**なので「無い」は今も無実を証明しない。疑ったら worker 画面と /usage を自分で見る(再起動を跨ぐなら上の engine-journal.jsonl も確認) |
 | `manualStop` / `manualStopPersisted` | ✅ | 唯一 Settings に永続される engine 状態(swarmOrchestrator.ts:6155, :6239) |
-| `selfSupply` / `overseer` の ON | ⚠️ 現プロセス限り | in-memory・再起動で必ず OFF(01 章 §7.4)。「前回 ON だったから今も ON」は成立しない。(`autoMerge` フィールドは 2026-07-16 撤去 — 司令官の自動起こしはエンジン ON で常時) |
+| `selfSupply` の ON | ✅(2026-07-22 card 2 以降) | `engine.json` から boot 時に自動 resume される — 「前回 ON だったから今も ON」は**成立するようになった**(01 章 §7.4)。提案カードは per-card `selfSupplyApproved` ゲートで依然 owner 承認必須 |
+| `overseer` の ON | ⚠️ 現プロセス限り | 値は `engine.json` に書かれ**記憶される**が、boot はそれを読み戻して arm**しない** — 再起動で必ず OFF(01 章 §7.4)。「前回 ON だったから今も ON」は overseer に限って今も成立しない(理由: 大脳 PTY 起動・worker PTY 注入・janitor の破壊的操作を直接駆動し、再起動が代替の無い kill switch 層 — OVERSEER_DESIGN.md K2/L9-③・ENGINE_PERSISTENCE_PLAN.md §2)。(`autoMerge` フィールドは 2026-07-16 撤去 — 司令官の自動起こしはエンジン ON で常時) |
 | escalation の `branch` / `taskId` / スクリーンショット | ⚠️ 起票時点のスナップショット | 現在の実在は git / tasks.json で裏取り(06 章 §5.2 の 3 点セット) |
 | S3(exec-timeout)escalation | ⚠️ 実発生として裏取り | `d8431c3`+`aa9cb8d` 以降は 24h 窓内の未受領 occurrence のみ上がる(06 章 §3.6 — 過去分の再投函は根絶済み。当時の実測 8 件→25 件増殖は §4.1 の歴史)。branch/カードの実在は 06 章 §5.2 で裏取り |
 | カードの `reworkCount` | ⚠️ 全体像ではない | カウンタは 3 系統(API verb / engine in-memory / swarm-board.sh)で干渉しない(05 章 §2.4)。「エンジンが差し戻したのに 0」は正常 |

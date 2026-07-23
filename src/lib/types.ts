@@ -1142,6 +1142,17 @@ export interface OrchestratorWorker {
    *  counted as work, and its card landed in blocked). In-memory only; absent for
    *  a worker that has not finished anything yet. */
   readyAt?: string
+  /** The worker's `claude --session-id` UUID (swarmWorker's agentSessionId),
+   *  captured at spawn. Card 3 (docs/ENGINE_PERSISTENCE_PLAN.md §3) persists it in
+   *  the roster so a restart's card-4 `claude --resume` can reattach the same
+   *  conversation; the engine itself never reads it back. Absent on workers spawned
+   *  before this was recorded (older fakes/callers). In-memory + roster only. */
+  sessionId?: string
+  /** How many 差し戻し (rework) rounds this worker's card has taken — snapshotted
+   *  from the card's `reworkCount` when the Board is in hand, else the last cached
+   *  value. Card 3 persists it in the roster (plan §3). Display/accounting only;
+   *  never gates the engine. Absent until first observed. In-memory + roster only. */
+  reworkCount?: number
 }
 
 /** One row of GET /api/swarm/workers — the SERVER-TRUTH worker list. Built by
@@ -1900,6 +1911,16 @@ export interface ClaudeActivity {
    *  it. Absent when no registered project owns the cwd (a free shell in ~/),
    *  and on a server predating this field. */
   projectId?: string
+  /** How much of this session's context window is still FREE, as a 0–100 percent
+   *  (100 = empty, small = near auto-compact). Resolved server-side per pane: the
+   *  always-on source is the session's JSONL usage sum
+   *  (`input + cache_read + cache_creation ÷ 200k`, the card-1 spike's main
+   *  source), and the on-screen `Context left until auto-compact: N%` footnote
+   *  overrides it when present (it only appears near the limit — a sharper alarm).
+   *  This is a SIGNAL for the gauge (card 5) and task-boundary hint (card 3), NOT
+   *  a compaction trigger — native auto-compact still owns that. `null` when no
+   *  transcript line is found yet; absent on a server predating this field. */
+  contextLeftPct?: number | null
 }
 
 /** Response of GET /api/terminal/active. `cwds` keeps the original "any PTY
@@ -2190,6 +2211,15 @@ export type SwarmFatalEvent =
   | 'review-panel-failed'
   | 'high-risk-hold'
   | 'manager-unrevivable'
+  // 'engine-resume-suppressed' (docs/ENGINE_PERSISTENCE_PLAN.md §4-2, card 2): the
+  // boot-time crash-loop breaker tripped — this build restarted
+  // BREAKER_THRESHOLD+ times inside the trailing window, so resumeEngines()
+  // refused to auto-resume ANY project's engine this boot (fail-safe: a
+  // newly-shipped build looping is exactly when unattended auto-resume is most
+  // dangerous). The owner can still turn autonomy back on by hand from the Swarm
+  // pane; nothing is lost, only deferred. Fires from swarmOrchestrator.ts
+  // (resumeEngines), never per-project (projectPath/taskId/branch absent).
+  | 'engine-resume-suppressed'
   // 'data-integrity' is NOT a swarm event: it is the boot-time home-data damage
   // check (src/lib/server/homeIntegrity.ts) reporting that settings.json /
   // canvas.json lost entries, became unreadable, or picked up a test fixture
@@ -2307,7 +2337,17 @@ export interface SwarmFatalNotification {
  *  engine's integrate pass, 'self-update-requested' from the worktree-remove
  *  path, 'daily-fuel-report' from dailyFuelReport.ts's app-uptime loop,
  *  'session-limit' from the owner-desk model-limit watch; the other three are
- *  reserved for the overseer brainstem (C-core) so this union is additive.) */
+ *  reserved for the overseer brainstem (C-core) so this union is additive.)
+ *   • 'engine-resumed'      — docs/ENGINE_PERSISTENCE_PLAN.md §4 (card 2): boot's
+ *                              resumeEngines() found ≥1 project whose engine was
+ *                              explicitly running before this restart
+ *                              (`desiredRunning` in that project's engine.json,
+ *                              manual-stop not set, crash-loop breaker not
+ *                              tripped) and resumed it with NO owner action —
+ *                              the "re-hydrated across a restart" fact the plan
+ *                              says must always be visible (§4-4 "再起動を跨いだ
+ *                              事実をオーナーが必ず視認できる"), fired ONCE per
+ *                              boot summarizing every project resumed. */
 export type SwarmInfoEvent =
   | 'escalation-open'
   | 'escalation-reminder'
@@ -2317,6 +2357,7 @@ export type SwarmInfoEvent =
   | 'self-update-requested'
   | 'daily-fuel-report'
   | 'session-limit'
+  | 'engine-resumed'
 
 /** The payload of a 'swarm-info' notification — the info-grade sibling of
  *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,

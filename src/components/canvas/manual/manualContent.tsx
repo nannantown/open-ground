@@ -614,8 +614,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'Swarm is hidden by default. Enable it from Settings → Experiments → Swarm orchestration. This only reveals the Swarm tab and its controls for you — nothing runs automatically. Every autonomous action inside stays off until you explicitly arm it, and turns back off the moment the app restarts.',
-          ja: 'Swarm は既定では非表示です。設定 → 実験的機能 → Swarm オーケストレーション で有効化してください。これは Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。中の自律的な操作はすべて、あなたが個別に明示オンにするまで動かず、アプリを再起動すると自動でオフに戻ります。',
+          en: 'Swarm is hidden by default. Enable it from Settings → Experiments → Swarm orchestration. This only reveals the Swarm tab and its controls for you — nothing runs automatically. Every autonomous action inside stays off until you explicitly arm it. Once armed, worker dispatch now survives an app restart — see the next section for exactly what that means and does not mean.',
+          ja: 'Swarm は既定では非表示です。設定 → 実験的機能 → Swarm オーケストレーション で有効化してください。これは Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。中の自律的な操作はすべて、あなたが個別に明示オンにするまで動きません。一度オンにすると、worker 起動はアプリの再起動をまたいで生き残るようになりました —— 具体的に何がどうなるかは次の節で説明します。',
         },
       },
       { kind: 'subhead', text: { en: 'What starts on its own — and what never does', ja: 'ひとりでに始まるもの、絶対に始まらないもの' } },
@@ -623,8 +623,8 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'bullets',
         items: [
           {
-            en: 'Worker dispatch (drain): starts only when you press the engine’s start switch in the Manager tab. It stops immediately on stop, and stays stopped across a restart — it never auto-resumes.',
-            ja: 'worker 起動（drain）：マネージャータブのエンジン起動スイッチを押したときだけ始まります。停止を押せば即座に止まり、再起動後も停止したままです —— 自動では再開しません。',
+            en: 'Worker dispatch (drain): starts only when you press the engine’s start switch in the Manager tab. It stops immediately on stop, and stays stopped across a restart — it never auto-resumes. (That "never auto-resumes" is about a project you explicitly stopped — it still applies. A project you had left switched ON is different: it now resumes automatically after a restart, with no action from you, unless you had stopped it or the app itself has been restarting repeatedly, in which case it stays off and you get a notification.)',
+            ja: 'worker 起動（drain）：マネージャータブのエンジン起動スイッチを押したときだけ始まります。停止を押せば即座に止まり、再起動後も停止したままです —— 自動では再開しません。（この「自動では再開しません」は、あなたが明示的に停止していたプロジェクトについての話で、これは今も変わりません。一方、オンにしたままだったプロジェクトは話が別です —— アプリの再起動後、あなたが何もしなくても自動的に再開するようになりました。停止していた場合や、アプリ自体が短時間に繰り返し再起動している場合は例外で、その場合はオフのままになり通知が届きます。）',
           },
           {
             en: 'Integration (landing finished work on your trunk): the engine itself never pushes — it has no code path that moves your trunk, and regression tests pin that. The one thing it does on its own while running: when a worker finishes and its card reaches review, it wakes the manager — a `claude` session you can watch in the Swarm tab — if none is alive. Waking moves nothing by itself. Your trunk changes only when that manager session reviews the branch and lands it with a plain push (never `--force`); a conflicting push is aborted and nothing lands, and cards titled `[hold]` or touching high-risk paths are always held for your explicit approval.',
@@ -640,8 +640,8 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'note',
         tone: 'info',
         text: {
-          en: 'The engine’s start switch lives in the Manager tab and resets to off every time the app restarts — you re-arm it each session, on purpose. It is the single master switch, and stopping it is symmetric: worker dispatch and manager wake-ups stop together, and nothing stays armed behind your back. (The separate auto-integrate switch is gone — the engine no longer has an integration path to arm.)',
-          ja: 'エンジンの起動スイッチはマネージャータブにあり、アプリを再起動するたびに意図してオフへ戻ります —— 毎セッション、あなたが再びオンにする設計です。これが唯一のマスタースイッチで、停止は対称です：worker 起動もマネージャーの自動起こしも一緒に止まり、裏でオンのまま残るものはありません。（かつての「自動統合」の別スイッチは廃止されました —— エンジンには arm すべき統合経路そのものがもう在りません。）',
+          en: 'The engine’s start switch lives in the Manager tab. It is the single master switch, and stopping it is symmetric: worker dispatch and manager wake-ups stop together, and pressing stop always sticks — even across a restart, nothing you stopped comes back on by itself. What changed: the switch itself is no longer reset to off by an app restart. If you left it ON, it comes back ON by itself after a restart, with no action from you — you do not need to re-arm it every session anymore. (An app that keeps restarting in a short window is treated as suspect and held off instead, with a notification, so a broken update can’t spin up workers unattended forever.) (The separate auto-integrate switch is gone — the engine no longer has an integration path to arm.)',
+          ja: 'エンジンの起動スイッチはマネージャータブにあります。これが唯一のマスタースイッチで、停止は対称です：worker 起動もマネージャーの自動起こしも一緒に止まり、一度停止を押せば——再起動をまたいでも——あなたが止めたものが勝手に戻ることはありません。変わったのはここです：このスイッチ自体は、もうアプリの再起動でオフに戻されなくなりました。オンにしたままにしていた場合、再起動後にあなたが何もしなくても自動的にオンへ戻ります —— 毎セッション再びオンにする必要はもう無くなりました。（短時間にアプリが繰り返し再起動している場合は「怪しい」とみなされ、通知とともに自動再開が見送られます —— 壊れた更新が無人のまま worker を延々と立ち上げ続けることがないように。）（かつての「自動統合」の別スイッチは廃止されました —— エンジンには arm すべき統合経路そのものがもう在りません。）',
         },
       },
     ],
