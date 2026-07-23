@@ -24,7 +24,7 @@
 | 項目 | 値 |
 |---|---|
 | claude CLI 実バージョン | **2.1.218 (Claude Code)** |
-| 検証プロジェクト | `/Users/kokinaniwa/projects/test`(UUID 06c90656)|
+| 検証プロジェクト | `/Users/you/projects/test`(UUID 06c90656)|
 | 手法 | **本番コード経路を直叩き**するスクレイプ無し検証ハーネス(tsx)。`launchClaude()` で実 claude PTY を起動 → `seedPrompt()`(= `writeInput(id, text + '\r')`、**素の input + Enter**、bracketed paste は使わない)でスラッシュコマンド送信 → `getTerminalScreen()` / `getTerminalScreenLogical()`(headless xterm)で画面キャプチャ。HTTP サーバも共有 `~/.openground` も一切触らない(プロセス内で node-pty を直接駆動)。|
 | モデル | `haiku`(TUI 機構の検証なので最安・挙動は model 非依存)|
 | 画面キャプチャ実体 | `scratchpad/ctx-spike/*.screen.txt` / `*.logical.txt`(各段) |
