@@ -510,7 +510,9 @@ curl -s -X POST "$API/api/project/merged-branches" -H 'content-type: application
 ## 10. 司令官・補給官の会話 resume(2026-07-12)
 
 司令官と補給官は**日をまたいで育つ会話**であり、使い捨ての worker とは性質が逆
-(worker は 1 ゴール 1 worktree 1 セッションで、忘れてよい)。にもかかわらず 2026-07-12 まで、
+(worker は 1 ゴール 1 worktree 1 セッション。§10.5 のとおり **card 4 で worker の会話も
+再起動を生き延びる**が、それは**同じゴールの続き**に限られ — 役割デスクのように日をまたいで
+育つことはない)。にもかかわらず 2026-07-12 まで、
 両者は起動のたびに `crypto.randomUUID()` を `--session-id` に渡していた。つまり
 **OPEN GROUND を再起動するたび(= リリースのたび)に、司令官も補給官も記憶喪失で立ち上がっていた**。
 
@@ -526,7 +528,7 @@ curl -s -X POST "$API/api/project/merged-branches" -H 'content-type: application
 | ファイル | `~/.openground/projects/<projectUUID>/swarm-sessions.json` |
 | なぜ中央 dir か | CLAUDE.md の原則(per-project data はユーザーの repo に書かない)。**tasks.json とは別ファイル**なのも意図的 — git 共有モードでは tasks.json が repo に移動するが、session id は**このマシンの `~/.claude` を指す個人状態**で、共有しても相手は開けない |
 | 形 | `{"manager":{"sessionId":"<uuid>","cwd":"<起動時の絶対パス>","updatedAt":"<ISO>"}, "supply":{…}}` |
-| 対象ロール | `supply` / `manager` **のみ**(`SWARM_SESSION_ROLES`)。worker は意図的に対象外 |
+| 対象ロール | `supply` / `manager` **のみ**(`SWARM_SESSION_ROLES`)。worker はこのファイルの対象外 — worker の session id は**ゴールに束縛**され(worker teardown で消える)、日をまたぐ役割デスクの生涯会話とは別物だから。worker の会話 resume は roster.json(card 3)+ `--resume` respawn(card 4・§10.5)が担う |
 | 書き込み | 毎起動(resume でも `updatedAt` を打ち直す)。supply と manager が 1 ファイルを共有するため read-modify-write は**パス単位で直列化**(同時起動でも片方のキーが消えない) |
 | tier 全滅時 | `NoAllowedModelTierError` は **record より前**に throw(04 章 §2.6)。spawn を拒んだのに「存在しない会話の id」を書き残すことはない |
 
@@ -540,7 +542,13 @@ curl -s -X POST "$API/api/project/merged-branches" -H 'content-type: application
 続ける(00-INDEX §2.1 の表が正典):
 
 - **会話履歴** → ✅ 生き残る(resume)
-- **エンジンの in-memory 認知**(worker roster / reviews / 自動運転 ON) → ❌ **全消え**(01 章 §2)
+- **自動運転の意図 / worker roster** → ✅ **永続化された**(card 2 = `desiredRunning`・card 3 = roster.json)。
+  再起動後は `resumeEngines()` が意図を読み戻して自動運転を再開し、**生存 worker の会話を `--resume` で
+  継ぎ直す**(card 4・§10.5)。**だが「roster に居た」=「今も生きている」ではない** — reconcile が
+  worktree/git/Board と突き合わせ、消えた worktree・既に ready・カード消滅の 3 種は roster から落として
+  既存 reclaim に回す(生き残るのは作業途中の resume 候補だけ)。まだ「実在しない worker の話をするな」は
+  効いている — ただし根拠は「全消えするから」ではなく「reconcile が現物と照合するから」に変わった
+- **reviews[](A相分類)** → ❌ **消える**(導出。初回 integrate pass で再計算 — 永続しない)
 - **quota 冷却テーブル**(層A) → ✅ **生き残る**(2026-07-13 永続化。04 章 §2.1.1)
 - **Board / branch / 心拍 / escalations**(永続体) → ✅ ディスクに在る = **唯一の足場**
 - **コード自体** → ⚠️ 変わっている可能性大(再起動はたいていリリース)。各章の file:line も疑う
@@ -588,3 +596,44 @@ wc -l ~/.claude/projects/$DIR/$SID.jsonl
 curl -s -X POST "$API/api/swarm/manager" -H 'content-type: application/json' \
   -d "{\"path\":\"$P\"}" | jq '{terminalId, agentSessionId, resumed}'
 ```
+
+### 10.5 worker の会話 resume(ゴールを跨がない・card 4)
+
+§10.1 の「worker は対象外」は **swarm-sessions.json の話**であって「worker は resume されない」の意味では
+ない。**card 4(`ENGINE_PERSISTENCE_PLAN.md` §5)以降、作業途中の worker の会話も再起動を生き延びる** —
+ただし司令官/補給官の生涯デスクとは**根本的に境界が違う**:
+
+- **ゴールを跨がない。** worker は 1 ゴール 1 worktree 1 セッションのまま。resume が復元するのは
+  「**同じゴールの続き**」だけで、ゴールが終われば(teardown)session id ごと消える。役割デスクのように
+  日をまたいで別の仕事へ持ち越すことはない。
+- **在処が違う。** session id は roster.json(`~/.openground/swarm/<repoキー>/roster.json`・card 3 が
+  spawn 時に write-through)に載る。swarm-sessions.json には**入れない**(§10.1 の理由)。
+- **証明してからしか resume しない(§10.3 と同じ哲学の共有ヘルパ)。** boot の reconcile が出した
+  **resume 候補**(作業途中+worktree 生存)ごとに、`swarmTranscriptProof.ts` の
+  `proveTranscriptLoadable` で transcript の実在・非空・パース可能を確認する。ここに**孤児検査**が
+  加わる: SIGKILL で server だけ死ぬと子 claude が孤児として生き残り同じ JSONL に書き続けうるので、
+  **mtime が直近(既定 10 秒)なら resume しない**(2 プロセスが 1 transcript に追記すると壊れる)。
+- **証明できなければ必ず fallback = 既存 crash reclaim。** 欠損/空/孤児 mtime/spawn 失敗はどれも
+  「最悪でも今日と同じ」= worktree の未コミットを WIP 保全して差し戻し。resume は upside のみで、
+  downside を作らない。
+- **前提ゲートは素通りしない。** resume の respawn も通常 spawn と同じ `claudeRunPreflight` +
+  `ensureGuardWiring`(L4)を通る。新しい抜け道は無い。
+- **採用は syncRoster より前(落とし穴)。** `resumeEngines()` は reconcile の結果を **runEnginePass を
+  kick する前**に `engine.workers` へ採用する。そうしないと最初の dispatch pass 末尾の `syncRoster` が
+  空の workers で roster.json を `[]` に上書きし、resume 対象が 1 tick も生きずに消える(b745aeb3 nit#1)。
+  採用が先だからこそ、生存 worker のカードに二重 spawn もしない(dispatch は `engine.workers` の taskId を
+  除外する)。
+- **実行時間の予算は「停止時間」を含まない(2026-07-24)。** 控除台帳は in-memory なので再起動で空に
+  なる。resume した worker の起点を元の dispatch 時刻のまま採ると**アプリが止まっていた時間まで実作業
+  として課金され、最初の monitor pass で暴走判定 → worktree 解体**になる。起点は `now − workedMs`
+  (roster.json の台帳)で、停止時間は課金せず実作業ぶんだけ引き継ぐ。その台帳が数えるのは**今の担当ぶん**
+  (差し戻し済みなら差し戻し以降)であって生涯ではない — 生涯だと差し戻し中の worker が再起動で解体される。
+  詳細と clamp は **02 章 §5.5(d)**
+- 復元された worker には `WORKER_RESUME_INJECTION`(`swarmWorker.ts`)が入る:「再起動で端末は死んだが
+  会話は復元された。元の /order ゴールと Board を読み直し、心拍を打ち直してから続行。この行を新しい
+  ゴールと取り違えるな」。`SUPPLY_RESUME_INJECTION` / `MANAGER_RESUME_INJECTION` の妹。
+
+**司令官への含意**: 再起動後に doing のカードに worker がぶら下がっていても、それは card 4 が会話ごと
+継ぎ直した**正当な続き**かもしれない(勝手に kill/差し戻ししない)。逆に worktree が消えていた・既に
+ready だった worker は resume されず reclaim 経路に乗る。どちらも「状況」で Board と roster を読み直せば
+判る — 現物が正、という §10.2 の原則は不変。

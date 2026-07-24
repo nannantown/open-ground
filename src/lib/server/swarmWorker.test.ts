@@ -8,7 +8,9 @@ import {
   workerLaunchOpts,
   SWARM_BASE_REF_PREFERENCE,
   WORKER_ORDER_RULES,
+  WORKER_RESUME_INJECTION,
 } from './swarmWorker'
+import { buildClaudeArgv } from './claudeTerminal'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
 
@@ -379,5 +381,72 @@ describe('workerLaunchOpts (worker launch contract)', () => {
     expect(o.initialPrompt).toContain('/order ゴール: Title — and notes')
     expect(o.initialPrompt).toContain('前回の差し戻し理由')
     expect(o.initialPrompt).toContain('TS2345')
+  })
+})
+
+// ── card 4: worker conversation resume (--resume) ────────────────────────────
+describe('WORKER_RESUME_INJECTION (card 4 — the resume prompt)', () => {
+  it('is a SINGLE slash-command line (the buildOrderInjection delivery contract)', () => {
+    // ONE line so the whole thing lands as one slash-command argument (no [Pasted
+    // text] chip). Same constraint as the sisters MANAGER_/SUPPLY_RESUME_INJECTION.
+    expect(WORKER_RESUME_INJECTION).not.toMatch(/[\n\r\t]/)
+    expect(WORKER_RESUME_INJECTION.startsWith('/order ')).toBe(true)
+  })
+
+  it('re-orients the worker WITHOUT reading as a new goal', () => {
+    expect(WORKER_RESUME_INJECTION).toContain('セッション再開')
+    // the crux: the REAL goal is in history — do not treat this line as the goal
+    expect(WORKER_RESUME_INJECTION).toContain('新しいゴールと取り違えるな')
+    expect(WORKER_RESUME_INJECTION).toContain('完了条件は変わっていない')
+    // re-read the Board + re-beat before continuing
+    expect(WORKER_RESUME_INJECTION).toContain('swarm-beat.sh')
+    expect(WORKER_RESUME_INJECTION).toContain('git push')
+  })
+})
+
+describe('workerLaunchOpts — resume branch (card 4)', () => {
+  it('resume:true ⇒ --resume flag + WORKER_RESUME_INJECTION, reusing the persisted session id', () => {
+    const o = workerLaunchOpts('/wt', 'persisted-sid', { title: 'Add logout', resume: true })
+    // launchClaude/buildClaudeArgv emits --resume off exactly this bit
+    expect(o.resume).toBe(true)
+    // the persisted id is what claude re-attaches
+    expect(o.agentSessionId).toBe('persisted-sid')
+    // the resume prompt, NOT the /order goal (the goal is already in history)
+    expect(o.initialPrompt).toBe(WORKER_RESUME_INJECTION)
+  })
+
+  it('condition ③: a resume opens NO bypass — the L4 guard, MCP block, and bypass mode still ride', () => {
+    // The resume path must not strip the worker's containment (plan §5 "新しい抜け道
+    // を作らない"). Same launch guards as a fresh spawn. MUTATION: drop any of these
+    // from the resume branch of workerLaunchOpts and this goes RED.
+    const o = workerLaunchOpts('/wt', 'persisted-sid', { title: 't', resume: true })
+    expect(o.guard).toEqual({ writeRoots: ['/wt'] })
+    expect(o.strictMcpConfig).toBe(true)
+    expect(o.permissionMode).toBe('bypass')
+  })
+
+  it('a fresh (non-resume) launch is byte-for-byte unchanged — /order goal, no resume flag', () => {
+    const o = workerLaunchOpts('/wt', 'fresh-sid', { title: 'Add logout' })
+    expect(o.resume).toBeUndefined()
+    expect(o.initialPrompt).toBe('/order ゴール: Add logout' + WORKER_ORDER_RULES)
+  })
+
+  it('the resume launch opts actually produce a `--resume <id>` argv (via buildClaudeArgv)', () => {
+    // This is completion condition ①: a proven resume yields a `--resume` spawn.
+    // workerLaunchOpts → LaunchClaudeOpts → buildClaudeArgv is the whole arg path.
+    const o = workerLaunchOpts('/wt', 'persisted-sid', { title: 't', resume: true })
+    const argv = buildClaudeArgv(o, null)
+    const i = argv.indexOf('--resume')
+    expect(i).toBeGreaterThanOrEqual(0)
+    expect(argv[i + 1]).toBe('persisted-sid')
+    // and NOT the fresh-session flag
+    expect(argv).not.toContain('--session-id')
+  })
+
+  it('a fresh launch yields `--session-id`, never `--resume`', () => {
+    const o = workerLaunchOpts('/wt', 'fresh-sid', { title: 't' })
+    const argv = buildClaudeArgv(o, null)
+    expect(argv).toContain('--session-id')
+    expect(argv).not.toContain('--resume')
   })
 })

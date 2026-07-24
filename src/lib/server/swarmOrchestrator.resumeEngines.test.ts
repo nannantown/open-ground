@@ -8,6 +8,8 @@ import {
   getOrchestratorState,
   startOrchestrator,
   defaultDeps,
+  resumeStartedAtMs,
+  MAX_EXEC_MS,
   __resetOrchestratorForTests,
   type OrchestratorDeps,
   type IntegrationDeps,
@@ -361,5 +363,285 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
 
     expect(fetchedBeforeReconcileResolved).toBe(false) // FROZEN — the reconcile-first order held
     expect(spawnCalls).toHaveLength(1) // …and dispatch DID proceed once reconcile resolved
+  })
+})
+
+// ── card 4: worker conversation resume (--resume respawn) ────────────────────
+// resumeEngines now CONSUMES reconcile's `resumeCandidates`: each proven one is
+// `--resume`-respawned into the SAME worktree and adopted into engine.workers
+// BEFORE the first pass. These drive that wiring with injected reconcile + proof +
+// spawnWorker fakes (no real ~/.claude JSONL, no real PTY).
+describe('resumeEngines — worker conversation resume (card 4)', () => {
+  const ENTRY = {
+    sessionId: 'sess-1111-2222-3333-4444',
+    taskId: 'card-1',
+    branch: 'swarm/resume-1',
+    worktree: '/central/wt/resume-1',
+    tier: 'fable',
+    spawnAt: 1_700_000_000_000,
+    workedMs: 42_000,
+    reworkCount: 2,
+  }
+  // A full RosterReconcileResult with just the resume candidates filled in.
+  const reconcileYielding = (candidates: (typeof ENTRY)[]) => async () => ({
+    resumeCandidates: candidates,
+    ready: [],
+    vanished: [],
+    cardGone: [],
+  })
+
+  // A spawnWorker spy: a RESUME call carries resumeSessionId (→ agentSessionId), a
+  // FRESH dispatch call does not — so a twin is visible as a call with no resumeId.
+  const spawnSpy = () => {
+    const calls: Array<{ resumeSessionId?: string; worktree?: string; title: string }> = []
+    const fn = async (opts: {
+      title: string
+      worktree?: string
+      resumeSessionId?: string
+    }): Promise<Awaited<ReturnType<OrchestratorDeps['spawnWorker']>>> => {
+      calls.push({ resumeSessionId: opts.resumeSessionId, worktree: opts.worktree, title: opts.title })
+      return {
+        terminalId: opts.resumeSessionId ? 't-resume' : 't-fresh',
+        agentSessionId: opts.resumeSessionId ?? 'fresh-sid',
+        worktree: opts.worktree ?? '/central/wt/fresh',
+        branch: opts.resumeSessionId ? ENTRY.branch : 'swarm/fresh',
+        model: 'fable',
+      }
+    }
+    return { calls, fn }
+  }
+
+  // Deps with a live pool (isAlive→true so an adopted worker survives + shows in the
+  // state view) + inert board writes. Callers override spawnWorker / fetchTasks.
+  const liveDeps = (
+    over: Partial<OrchestratorDeps & IntegrationDeps & AnomalyDeps> = {},
+  ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
+    ...defaultDeps(),
+    fetchTasks: async () => [],
+    isAlive: () => true,
+    moveToDoing: async () => true,
+    countCommitsAhead: async () => 0,
+    readHeartbeat: async () => null,
+    ...over,
+  })
+
+  it('condition ①: a PROVEN candidate is `--resume` respawned (persisted id + SAME worktree) and adopted into engine.workers', async () => {
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    const spy = spawnSpy()
+    const deps = liveDeps({
+      spawnWorker: spy.fn,
+      // card in 'doing' ⇒ the fired pass neither reclaims (alive) nor twin-dispatches.
+      fetchTasks: async () => [{ id: 'card-1', title: 'resume me', boardColumn: 'doing' } as never],
+    })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => true,
+    })
+    // the --resume intent reached the spawn: persisted session id + the SAME worktree
+    expect(spy.calls).toHaveLength(1)
+    expect(spy.calls[0].resumeSessionId).toBe(ENTRY.sessionId)
+    expect(spy.calls[0].worktree).toBe(ENTRY.worktree)
+    // adopted into engine.workers (state view; isAlive→true surfaces it)
+    const state = await getOrchestratorState(projA, liveDeps())
+    const w = state.workers.find((x) => x.taskId === 'card-1')
+    expect(w).toBeTruthy()
+    expect(w?.sessionId).toBe(ENTRY.sessionId)
+    expect(w?.branch).toBe(ENTRY.branch)
+    expect(w?.reworkCount).toBe(ENTRY.reworkCount) // carried across the restart
+  })
+
+  it('condition ②: an UNPROVEN candidate (missing/empty/orphan-fresh transcript) FALLS BACK — no --resume, left to crash reclaim', async () => {
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    const spy = spawnSpy()
+    await resumeEngines(liveDeps({ spawnWorker: spy.fn }), {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => false, // transcript missing / empty / orphan-fresh
+    })
+    expect(spy.calls).toHaveLength(0) // no resume spawn — the card falls to reclaim
+    const state = await getOrchestratorState(projA, liveDeps())
+    expect(state.workers.find((x) => x.taskId === 'card-1')).toBeUndefined()
+  })
+
+  it('a candidate with NO captured session id cannot resume — no spawn (older roster row / lost id)', async () => {
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    const spy = spawnSpy()
+    await resumeEngines(liveDeps({ spawnWorker: spy.fn }), {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([{ ...ENTRY, sessionId: '' }]),
+      proveResumable: async () => true, // even if "provable", no id ⇒ nothing to --resume
+    })
+    expect(spy.calls).toHaveLength(0)
+  })
+
+  it('a resume spawn that THROWS (a preflight / guard-wiring refusal, a gone worktree) falls back WITHOUT crashing the boot', async () => {
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    const throwingSpawn = async (): Promise<Awaited<ReturnType<OrchestratorDeps['spawnWorker']>>> => {
+      throw new Error('L4 guard wiring failed verification — worker spawn refused')
+    }
+    const result = await resumeEngines(liveDeps({ spawnWorker: throwingSpawn }), {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => true,
+    })
+    // the engine still RESUMED (the drain) — only the worker fell to reclaim
+    expect(result.resumed).toContain(await canonicalize(projA))
+    const state = await getOrchestratorState(projA, liveDeps())
+    expect(state.workers.find((x) => x.taskId === 'card-1')).toBeUndefined()
+  })
+
+  it('condition ③ (preflight gate): a project whose claude preflight FAILS never reaches resume — no spawn', async () => {
+    // Resume adoption sits DOWNSTREAM of the per-project claudeRunPreflight gate
+    // (and the resume spawn itself re-preflights via defaultSpawnWorker + arms the
+    // L4 guard via spawnSwarmWorker). MUTATION: drop `if (!pre.ok) continue` in
+    // resumeEngines and this project would resume + spawn despite no usable claude
+    // ⇒ RED.
+    preflightMock.ok = false
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    const spy = spawnSpy()
+    const result = await resumeEngines(liveDeps({ spawnWorker: spy.fn }), {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => true,
+    })
+    expect(result.resumed).toHaveLength(0) // preflight failed ⇒ project skipped
+    expect(spy.calls).toHaveLength(0) // …so no resume spawn
+  })
+
+  it('地雷 (b745aeb3 nit#1): a still-TODO resume candidate is adopted BEFORE the first dispatch pass, so it is NOT twin-spawned', async () => {
+    // A resume candidate whose card is TODO (a human moved it back) is ALSO
+    // dispatchable — so the order matters. Correct code adopts the resumed worker
+    // into engine.workers first, so the fired dispatch pass COUNTS card-1 and skips
+    // it: exactly ONE spawn (the --resume), one worker. TEETH: move
+    // `adoptResumeCandidates` to AFTER `void runEnginePass(engine, deps)` (or drop
+    // it) and the pass dispatches a FRESH twin onto card-1 → a SECOND spawn with no
+    // resumeSessionId + a 2nd worker ⇒ this goes RED.
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    const spy = spawnSpy()
+    const deps = liveDeps({
+      spawnWorker: spy.fn,
+      fetchTasks: async () => [{ id: 'card-1', title: 'resume me', boardColumn: 'todo' } as never],
+    })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => true,
+    })
+    // Let the fired runEnginePass run its full monitor+dispatch pass — a twin would
+    // spawn HERE under the mutation. Hop-count drain (immune to machine load), like
+    // the freeze test above.
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 0))
+    expect(spy.calls).toHaveLength(1) // only the --resume; no fresh twin on card-1
+    expect(spy.calls[0].resumeSessionId).toBe(ENTRY.sessionId)
+    const state = await getOrchestratorState(
+      projA,
+      liveDeps({ fetchTasks: async () => [{ id: 'card-1', title: 'x', boardColumn: 'todo' } as never] }),
+    )
+    expect(state.workers.filter((x) => x.taskId === 'card-1')).toHaveLength(1)
+  })
+
+  // ── must-fix (2026-07-24 敵対レビュー): the resumed worker's execution BUDGET ──
+  // isRunaway measures MAX_EXEC_MS from the adopted `startedAt`, and the credits that
+  // repay idleness (rateLimitHeldMs / integrationWaitMs) are IN-MEMORY ⇒ empty after a
+  // restart. Anchoring at the raw `spawnAt` therefore bills the app's DOWNTIME as
+  // execution time: worker dispatched 20:00, worked 20m, app closed overnight, resumed
+  // 08:00 ⇒ "12h20m old" ⇒ 暴走 on the FIRST monitor pass ⇒ worktree torn down + card
+  // parked in blocked. main has no such destruction (it never resumes, so a surviving
+  // `doing` card is left alone), so that would break plan §5's "worst case = same as
+  // today". resumeStartedAtMs anchors at `now - workedMs` (card 3's ledger) instead.
+  //
+  // Both boot tests hold the worker BUSY (fresh output + fresh heartbeat) so the STALL
+  // arm is silent and the only reachable recovery is the execution ceiling — that
+  // keeps what each assertion pins unambiguous.
+  const busyDeps = (
+    over: Partial<OrchestratorDeps & IntegrationDeps & AnomalyDeps> = {},
+  ): OrchestratorDeps & IntegrationDeps & AnomalyDeps =>
+    liveDeps({
+      lastOutputAt: () => Date.now() - 1_000,
+      readHeartbeat: async () => ({ ready: false, blocked: false, at: new Date(Date.now() - 1_000).toISOString() }),
+      ...over,
+    })
+
+  /** Drive one REAL boot: adopt `entry`, then let the fired dispatch pass run far
+   *  enough to have ruled on the resumed worker. The board carries a SECOND, todo card
+   *  whose FRESH spawn is the terminator — monitorWorkers runs BEFORE dispatch
+   *  (swarmOrchestrator.ts:6730), so observing that fresh spawn proves the monitor has
+   *  already decided about card-1. No wall-clock wait ⇒ immune to machine load, and it
+   *  fires on BOTH branches (a torn-down worker still leaves card-2 dispatchable), so a
+   *  regression fails on the assertion instead of hanging. */
+  const bootAndAwaitMonitor = async (entry: typeof ENTRY) => {
+    const recoveredCards: { taskId: string; column: string }[] = []
+    const tornDown: string[] = []
+    let signalFresh = (): void => {}
+    const freshSpawned = new Promise<void>((r) => {
+      signalFresh = r
+    })
+    const spy = spawnSpy()
+    const deps = busyDeps({
+      spawnWorker: async (opts) => {
+        const res = await spy.fn(opts)
+        if (!opts.resumeSessionId) signalFresh() // the terminator: monitor is already past
+        return res
+      },
+      fetchTasks: async () => [
+        { id: 'card-1', title: 'resume me', boardColumn: 'doing' } as never,
+        { id: 'card-2', title: 'terminator', boardColumn: 'todo' } as never,
+      ],
+      recoverCard: async (_p, taskId, column) => {
+        recoveredCards.push({ taskId, column })
+        return true
+      },
+      recoverWorker: async ({ worktree }) => {
+        tornDown.push(worktree)
+        return { removed: true }
+      },
+    })
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([entry]),
+      proveResumable: async () => true,
+    })
+    await freshSpawned
+    return { recoveredCards, tornDown, spy }
+  }
+
+  it("must-fix: a RESUMED worker is NOT judged 暴走 on its first monitor pass — the app's DOWNTIME is not billed as execution time", async () => {
+    // ENTRY.spawnAt is ~2.7 years back (the app was closed for that span), but card 3's
+    // ledger says this worker only ever WORKED one minute.
+    // TEETH (measured 2026-07-24): restore `startedAt: new Date(entry.spawnAt || now)`
+    // in adoptResumeCandidates and the first pass reads the worker as 2.7 years old ⇒
+    // 暴走 ⇒ tornDown ['/central/wt/resume-1'] + card-1 recovered to 'blocked' ⇒ RED.
+    const { recoveredCards, tornDown } = await bootAndAwaitMonitor({ ...ENTRY, workedMs: 60_000 })
+    expect(tornDown).toEqual([]) // the worktree (and its uncommitted work) survives
+    expect(recoveredCards).toEqual([]) // the card stays in doing — never parked in blocked
+  })
+
+  it('…and the restart is NOT an amnesty: a worker whose PERSISTED work already exceeds the ceiling is still judged 暴走 on the first pass', async () => {
+    // The other direction of the same anchor — carrying workedMs forward is what stops a
+    // restart from resetting the runaway clock and handing out an unbounded fresh budget.
+    // TEETH (measured 2026-07-24): "fix" the must-fix by resetting the clock instead
+    // (`startedAt: new Date(now)`) and this worker looks 0m old ⇒ no 暴走 ⇒ both
+    // assertions go RED. So the pair pins the anchor to exactly `now - workedMs`.
+    const { recoveredCards, tornDown } = await bootAndAwaitMonitor({ ...ENTRY, workedMs: MAX_EXEC_MS + 60_000 })
+    expect(tornDown).toEqual([ENTRY.worktree])
+    expect(recoveredCards).toEqual([{ taskId: 'card-1', column: 'blocked' }])
+  })
+
+  it('resumeStartedAtMs: the carried credit is CLAMPED to the real elapsed span (a corrupt ledger can never claim more budget than wall-clock)', () => {
+    const now = 1_800_000_000_000
+    const e = (over: Partial<typeof ENTRY>) => ({ ...ENTRY, ...over })
+    // ordinary resume: anchored at accumulated WORK, not at dispatch
+    expect(resumeStartedAtMs(e({ spawnAt: now - 3 * 3_600_000, workedMs: 60_000 }), now)).toBe(now - 60_000)
+    // an inflated/corrupt ledger clamps to elapsed ⇒ at worst the ORIGINAL spawnAt, never older
+    expect(resumeStartedAtMs(e({ spawnAt: now - 600_000, workedMs: 9_999_999_999 }), now)).toBe(now - 600_000)
+    // no ledger (a roster row predating card 3) ⇒ a fresh budget — the same one the
+    // crash reclaim this resume replaces would have given
+    expect(resumeStartedAtMs(e({ spawnAt: now - 600_000, workedMs: 0 }), now)).toBe(now)
+    // a never-recorded spawnAt degrades to `now`, not to 1970
+    expect(resumeStartedAtMs(e({ spawnAt: 0, workedMs: 60_000 }), now)).toBe(now)
+    // a clock that ran backwards cannot mint budget
+    expect(resumeStartedAtMs(e({ spawnAt: now + 60_000, workedMs: 60_000 }), now)).toBe(now)
   })
 })

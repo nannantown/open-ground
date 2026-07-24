@@ -34,12 +34,12 @@
 // behaviour. The desk ALWAYS launches.
 
 import { randomUUID } from 'crypto'
-import { mkdir, open, stat, readFile } from 'fs/promises'
+import { mkdir, readFile } from 'fs/promises'
 import { dirname } from 'path'
 import { atomicWriteJson } from './atomicWrite'
 import { claudeDirName } from './claudeProjectDir'
 import { projectDataFile } from './projectDataPath'
-import { sessionJsonlPath } from './transcript'
+import { isTranscriptLoadable } from './swarmTranscriptProof'
 import { isClaudeSessionLive } from './terminal'
 
 /** The per-project central file holding the desks' session ids. */
@@ -225,11 +225,6 @@ export const forgetSwarmSessionIf = async (
 
 // ── the fail-open probe ─────────────────────────────────────────────────────
 
-// Only the HEAD of the transcript is read: a months-old commander session is a
-// multi-MB JSONL and this runs on every desk launch. One parseable event in the
-// first chunk is all the evidence we need that claude wrote a real session here.
-const PROBE_BYTES = 64 * 1024
-
 /** Can `claude --resume <sessionId>` actually LOAD this session from `cwd`?
  *
  *  This is the fail-open gate (goal condition 4). claude keeps its own transcript
@@ -237,37 +232,15 @@ const PROBE_BYTES = 64 * 1024
  *  (pruned, a fresh machine, ~/.claude wiped), empty, or truncated to garbage,
  *  `--resume` errors out and the desk would never come up. So we PROVE the session
  *  is loadable before asking for it — anything else is a `false`, and the caller
- *  mints a fresh id instead of gambling the launch. */
-export const isSessionResumable = async (cwd: string, sessionId: string): Promise<boolean> => {
-  const path = sessionJsonlPath(cwd, sessionId)
-  let fh: Awaited<ReturnType<typeof open>> | undefined
-  try {
-    const st = await stat(path)
-    if (!st.isFile() || st.size === 0) return false
-    fh = await open(path, 'r')
-    const buf = Buffer.alloc(Math.min(PROBE_BYTES, st.size))
-    const { bytesRead } = await fh.read(buf, 0, buf.length, 0)
-    const lines = buf.subarray(0, bytesRead).toString('utf8').split('\n')
-    // We stopped short of EOF ⇒ the last line is very likely cut mid-JSON. Drop it
-    // so a truncated read can't be mistaken for a corrupt transcript (and, on a
-    // file we DID read whole, keep it — a final line may have no trailing newline).
-    if (bytesRead < st.size) lines.pop()
-    return lines.some((line) => {
-      const t = line.trim()
-      if (!t) return false
-      try {
-        const ev: unknown = JSON.parse(t)
-        return !!ev && typeof ev === 'object'
-      } catch {
-        return false
-      }
-    })
-  } catch {
-    return false // missing / unreadable — fail-open to a fresh session
-  } finally {
-    await fh?.close().catch(() => {})
-  }
-}
+ *  mints a fresh id instead of gambling the launch.
+ *
+ *  The proof itself now lives in the SHARED helper {@link isTranscriptLoadable}
+ *  (swarmTranscriptProof.ts), extracted so the worker-conversation resume (card 4 —
+ *  ENGINE_PERSISTENCE_PLAN §5) checks loadability the SAME way instead of a second
+ *  copy. This desk path is the NO-orphan-window variant: the still-open hazard is
+ *  covered here by the live-PTY `isLive` check in {@link resolveSwarmSession}, so
+ *  it needs only the plain exists/non-empty/parseable proof. */
+export const isSessionResumable = isTranscriptLoadable
 
 // ── the seam the desks call ─────────────────────────────────────────────────
 

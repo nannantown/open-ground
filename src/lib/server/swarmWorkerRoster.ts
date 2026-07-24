@@ -41,10 +41,16 @@ import type { ProjectTask } from '../types'
  *    teardown (plan §3 note — it never enters swarm-sessions.json's role-desk file).
  *  - `tier` — the CLI `--model` alias the worker launched on (OrchestratorWorker.model).
  *  - `spawnAt` — epoch ms of dispatch (parsed from startedAt).
- *  - `workedMs` — accumulated WORKING time (wall-clock since spawn minus the banked
- *    idle credits), snapshotted at each state-transition write. Persisting it is
+ *  - `workedMs` — accumulated WORKING time ON THE CURRENT ASSIGNMENT (wall-clock from
+ *    the execution ceiling's own origin — the 差し戻し when there is one, else the
+ *    spawn — minus the banked idle credits that origin does not already exclude),
+ *    snapshotted at each state-transition write. Persisting it is
  *    what stops a restart from resetting the runaway clock to zero and handing the
- *    worker an unbounded fresh budget (plan §3). It is transition-granular, NOT
+ *    worker an unbounded fresh budget (plan §3). A DURATION, never an absolute
+ *    re-work timestamp: that is what keeps the app's downtime off the clock. It is
+ *    also why it is per-assignment — a resumed worker has no `reworkAt` left to move
+ *    the origin, so a lifetime ledger would tear down a 差し戻し中 worker on the first
+ *    pass after a restart (02章 §5.5(c)(d)). It is transition-granular, NOT
  *    per-tick (plan §3: "書くのは状態遷移点のみ") — so it can lag reality by the time
  *    since the last transition, which only ever makes a resumed clock MORE lenient
  *    by a bounded amount; the per-tick write the plan explicitly rejects is the cost

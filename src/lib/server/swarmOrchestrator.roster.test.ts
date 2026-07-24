@@ -7,6 +7,9 @@ import { join } from 'path'
 import {
   runDispatchPass,
   stopOrchestratorWorker,
+  resumeStartedAtMs,
+  isRunaway,
+  MAX_EXEC_MS,
   __seedEngineForTests,
   __resetOrchestratorForTests,
   defaultDeps,
@@ -190,6 +193,139 @@ describe('card 3 wiring — write-through on dispatch (runDispatchPass → syncR
     // A second, identical pass must NOT change the signature (⇒ no second write).
     await runDispatchPass(engine, deps, Date.now() + 5_000)
     expect(engine.rosterSig).toBe(sigAfterFirst)
+  })
+})
+
+// must-fix #2 (2026-07-24 adversarial review). The ledger a resume adopts must be
+// the CURRENT ASSIGNMENT's work, not the worker's lifetime — a resumed worker has no
+// `reworkAt` left to move the origin a second time, so a lifetime ledger re-charges a
+// 差し戻し中 worker for everything before its 差し戻し and re-runs the 2026-07-20
+// accident (§5.5(c)) with the RESTART as the trigger. Both halves are pinned here:
+// the ledger the live pass writes, and the boot verdict that reads it.
+describe('card 3 ledger — the roster records the CURRENT assignment, not the lifetime (must-fix #2)', () => {
+  // The reviewer's measured shape: dispatched 200m ago, delivered 10m ago, 差し戻し 5m
+  // ago. 200m > MAX_EXEC_MS (90m default) — the accident needs nothing more exotic.
+  const reworkedWorker = (now: number): OrchestratorWorker =>
+    worker({
+      terminalId: 'pty-c1',
+      worktree: join(scratch, 'wt', 'c1'),
+      branch: 'swarm/c1',
+      startedAt: new Date(now - 200 * 60_000).toISOString(),
+      readyAt: new Date(now - 10 * 60_000).toISOString(),
+      reworkAt: new Date(now - 5 * 60_000).toISOString(),
+    })
+
+  const doingCard = (): ProjectTask =>
+    ({ id: 'c1', title: 'Roster me', boardColumn: 'doing', branch: 'swarm/c1' }) as unknown as ProjectTask
+
+  const quietDeps = (card: ProjectTask) =>
+    stubDeps({
+      fetchTasks: async () => [card],
+      isAlive: () => true,
+      countCommitsAhead: async () => 1,
+      readHeartbeat: async () => null,
+    })
+
+  it('a 差し戻し中 worker whose LIFETIME already exceeds the ceiling banks only the re-work span', async () => {
+    const now = Date.now()
+    const engine = newEngine({ path: project, running: true, workers: [reworkedWorker(now)] })
+    await runDispatchPass(engine, quietDeps(doingCard()), now)
+
+    // The live pass keeps it — the re-work budget (§5.5(c)) already worked before
+    // this fix. What was wrong was only what it wrote down.
+    expect(engine.workers).toHaveLength(1)
+
+    const roster = await readRoster(project)
+    expect(roster).toHaveLength(1)
+    // ~5m (the re-work span), NOT ~200m (the lifetime). Bounded on both sides so the
+    // opposite mistake — banking zero, i.e. a fresh budget every write — fails too.
+    expect(roster[0].workedMs).toBeGreaterThanOrEqual(4 * 60_000)
+    expect(roster[0].workedMs).toBeLessThanOrEqual(6 * 60_000)
+    expect(roster[0].workedMs).toBeLessThan(MAX_EXEC_MS)
+    // `spawnAt` still points at the real dispatch — it is resumeStartedAtMs' clamp.
+    expect(now - roster[0].spawnAt).toBeGreaterThanOrEqual(199 * 60_000)
+  })
+
+  it('…so the first monitor pass AFTER a restart does not judge it 暴走 (no teardown, card stays out of blocked)', async () => {
+    const now = Date.now()
+    const engine = newEngine({ path: project, running: true, workers: [reworkedWorker(now)] })
+    await runDispatchPass(engine, quietDeps(doingCard()), now)
+    const [entry] = await readRoster(project)
+
+    // An hour of downtime, then the boot that adopts this row (resumeEngines).
+    const boot = now + 60 * 60_000
+    expect(isRunaway(resumeStartedAtMs(entry, boot), boot, MAX_EXEC_MS, 0)).toBe(false)
+    // And the downtime itself is not billed: the adopted anchor is `boot - workedMs`.
+    expect(boot - resumeStartedAtMs(entry, boot)).toBeLessThanOrEqual(6 * 60_000)
+  })
+
+  it('the RESTART IS STILL NOT AN AMNESTY: a worker that really burned the ceiling on its CURRENT assignment is judged 暴走 after the restart', async () => {
+    const now = Date.now()
+    // Same 200m worker, no 差し戻し — nobody gave it a new assignment, so the whole
+    // 200m is its current one. This is the direction the fix must NOT loosen.
+    const w = worker({
+      terminalId: 'pty-c1',
+      worktree: join(scratch, 'wt', 'c1'),
+      branch: 'swarm/c1',
+      startedAt: new Date(now - 200 * 60_000).toISOString(),
+    })
+    const engine = newEngine({ path: project, running: true, workers: [w] })
+    // It is torn down live (that is the ceiling doing its job) — the roster row is
+    // written from the same pass, so read what the ledger said about it.
+    await runDispatchPass(engine, quietDeps(doingCard()), now)
+
+    const boot = now + 60 * 60_000
+    const entry: RosterEntry = {
+      sessionId: 'sess-abc',
+      taskId: 'c1',
+      branch: 'swarm/c1',
+      worktree: join(scratch, 'wt', 'c1'),
+      tier: 'fable',
+      spawnAt: now - 200 * 60_000,
+      workedMs: 200 * 60_000, // what rosterEntryOf banks with no 差し戻し in play
+      reworkCount: 0,
+    }
+    expect(isRunaway(resumeStartedAtMs(entry, boot), boot, MAX_EXEC_MS, 0)).toBe(true)
+  })
+
+  it('when the origin MOVED, the 統合待ち bank is not deducted a second time (the ledger cannot bank 2× the budget)', async () => {
+    const now = Date.now()
+    const engine = newEngine({
+      path: project,
+      running: true,
+      workers: [reworkedWorker(now)],
+      // 60m banked in review — closed BY the 差し戻し, so it is entirely pre-rework.
+      // Subtracting it from a re-work-origin ledger would forgive it twice and bank
+      // ~0, handing the resumed worker a fresh full budget every restart.
+      integrationWaitMs: new Map([['pty-c1', 60 * 60_000]]),
+    })
+    await runDispatchPass(engine, quietDeps(doingCard()), now)
+
+    const roster = await readRoster(project)
+    expect(roster).toHaveLength(1)
+    expect(roster[0].workedMs).toBeGreaterThanOrEqual(4 * 60_000)
+    expect(roster[0].workedMs).toBeLessThanOrEqual(6 * 60_000)
+  })
+
+  it('a card merely WALKED THROUGH review (no delivery witness) does not reset the ledger — the anti-fail-open gate is the same `readyAt` the ceiling uses', async () => {
+    const now = Date.now()
+    // reworkAt but NO readyAt: someone dragged the card review→doing without the
+    // worker ever delivering. The ceiling refuses to move its origin here, and so
+    // must the ledger — otherwise a round trip through review buys a fresh budget.
+    const w = worker({
+      terminalId: 'pty-c1',
+      worktree: join(scratch, 'wt', 'c1'),
+      branch: 'swarm/c1',
+      startedAt: new Date(now - 200 * 60_000).toISOString(),
+      reworkAt: new Date(now - 5 * 60_000).toISOString(),
+    })
+    const engine = newEngine({ path: project, running: true, workers: [w] })
+    await runDispatchPass(engine, quietDeps(doingCard()), now)
+
+    const roster = await readRoster(project)
+    // Either the ceiling already tore it down (no row at all), or the row it wrote
+    // still says ~200m. What must NEVER happen is a ~5m row granting a fresh budget.
+    if (roster.length) expect(roster[0].workedMs).toBeGreaterThan(MAX_EXEC_MS)
   })
 })
 

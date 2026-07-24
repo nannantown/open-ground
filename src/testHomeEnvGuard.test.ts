@@ -1346,6 +1346,14 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: 'same, via a shell fixture that writes $HOME/.claude/projects with $HOME pinned to a temp dir',
   },
+  'src/lib/server/swarmTranscriptProof.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'fabricates $HOME/.claude/projects/<cwd>/<id>.jsonl transcripts with $HOME pinned to a mkdtemp claudeHome, to prove a resumed worker really owns its session — every write lands in that temp, never the real ~/.claude',
+  },
+  'src/lib/server/swarmOrchestrator.ts': {
+    tier: 'writes-elsewhere',
+    why: "READS ~/.claude only as mtimes — the manager/worker liveness 3rd channel stats the session transcript and subagents/agent-*.jsonl (sessionAgentActivityAt / managerSubagentActivityAt) to tell 'busy in a sub-agent' from 'dead'; it never opens or writes them. Every mutation this file performs lands under ~/.openground (roster, heartbeats, engine.json), never the real ~/.claude",
+  },
   'src/lib/server/swarmOrchestrator.integration.test.ts': {
     tier: 'writes-elsewhere',
     why: 'pins $HOME (og-claude-home temp) + CLAUDE_CONFIG_PATH (<og-orch-home>/.claude.json temp) to test the manager subagent-activity mtime signal (card 7517e4b1); every write lands under a mkdtemp temp, never the real ~/.claude',

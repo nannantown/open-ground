@@ -214,6 +214,25 @@ export const buildOrderInjection = (title: string, notes?: string, priorFailure?
 // The goal text is still built single-line by buildOrderInjection (above) so the
 // whole goal is one slash-command argument.
 
+/** The positional prompt handed to a worker that is RESUMED across an app restart
+ *  (card 4 — ENGINE_PERSISTENCE_PLAN §5). The sister of MANAGER_RESUME_INJECTION /
+ *  SUPPLY_RESUME_INJECTION: same `/<skill> セッション再開: …` shape, ONE line (the
+ *  buildOrderInjection delivery contract), and re-invokes `/order` so the worker
+ *  re-orients on its own discipline.
+ *
+ *  The crucial difference from a fresh dispatch: a resumed worker's REAL goal is
+ *  already in its restored conversation history (the original `/order ゴール: …`),
+ *  so this text must NOT read as a new goal — it explicitly tells the worker to
+ *  re-read its ORIGINAL goal + the (unchanged) completion conditions from history,
+ *  re-read the Board (its card may have moved / been 差し戻し while the engine was
+ *  down), re-beat, and only THEN continue the in-progress work. The resume DOES NOT
+ *  cross goals (plan §3): the same goal survives the process restart in the same
+ *  worktree — it never becomes a role desk that outlives goals. Code may have
+ *  changed (a restart is usually a release), so it is told to re-verify before
+ *  entering any uncommitted continuation. */
+export const WORKER_RESUME_INJECTION =
+  '/order セッション再開: アプリ再起動をまたいで(たいていリリース)前回の会話が復元された。端末(PTY)は一度死んだが、worktree の作業も会話履歴もそのまま残っている。あなたが今まで進めていた元の /order ゴールは履歴の中にある — この行を新しいゴールと取り違えるな。続行する前に必ず順に: ①履歴内の元の /order ゴールと完了条件を読み直す(完了条件は変わっていない)②自分のカードが Board のどの列にいるか・差し戻しが付いていないかを API と git で読み直す ③心拍を打ち直す(bash ~/.claude/swarm-beat.sh <phase> false "再開・現状確認中")。そのうえで中断した作業を続ける。再起動でコード自体が変わっている可能性があるので、未コミットの続きに入る前に git status と関連テストで worktree の現状を確かめること。git push は従来どおり全形態禁止・統合は司令塔に委ねる。'
+
 // ── Worktree lifecycle ──────────────────────────────────────────────────────
 
 export interface SwarmWorktree {
@@ -434,6 +453,18 @@ export interface SpawnSwarmWorkerOpts {
    *  the project's central worktrees dir (resolveExistingSwarmWorktree); throws
    *  otherwise. Omitted (a fresh dispatch) = create a new worktree off the trunk. */
   worktree?: string
+  /** CONVERSATION RESUME (card 4 — ENGINE_PERSISTENCE_PLAN §5): the worker's
+   *  PERSISTED `--session-id` UUID (roster.sessionId, captured at the original
+   *  spawn). Present ⇒ this is a boot re-hydration of an in-progress worker: reuse
+   *  it as claude's session id and launch with `--resume <id>` + the
+   *  {@link WORKER_RESUME_INJECTION} prompt, so the same conversation continues in
+   *  the SAME worktree instead of starting fresh. ALWAYS paired with `worktree`
+   *  (the restart path — you can only resume a conversation whose worktree is still
+   *  on disk). Omitted ⇒ a fresh session id is minted (unchanged fresh-dispatch
+   *  behaviour). The caller (resumeEngines) only sets it after PROVING the
+   *  transcript is loadable (swarmTranscriptProof); this module still runs the same
+   *  preflight + guard-wiring gates, so resume opens no new bypass. */
+  resumeSessionId?: string
   /** LEARNING LOOP (card fdf714ef): the reason this SAME card was previously
    *  差し戻し / rolled back (RED verify / review must-fix). Appended to the /order
    *  so a RE-DISPATCHED card's fresh worker doesn't repeat the failure. Omitted on
@@ -485,6 +516,11 @@ export const workerLaunchOpts = (
     // (resolveSwarmRemoteName — role + project display name + card title).
     // Optional so the pure builder stays legacy-compatible: absent ⇒ 'worker'.
     remoteName?: string
+    // CONVERSATION RESUME (card 4): true ⇒ launch with `--resume <agentSessionId>`
+    // (agentSessionId being the PERSISTED roster session id) and the
+    // WORKER_RESUME_INJECTION prompt instead of a fresh `--session-id` + /order
+    // goal. Mirrors launchManager/launchSupply's `opts.resume` shape.
+    resume?: boolean
   },
   // Mode-resolved model/effort (see resolveSwarmModelEffort). Omitted ⇒ swarmLaunchDefaults
   // keeps the historical opus/max, so any non-mode-aware caller is unchanged.
@@ -524,7 +560,14 @@ export const workerLaunchOpts = (
   env: opts.env,
   cols: opts.cols,
   rows: opts.rows,
-  initialPrompt: buildOrderInjection(opts.title, opts.notes, opts.priorFailure),
+  // RESUME (card 4): `--resume <agentSessionId>` + the resume injection so the same
+  // conversation continues; else a fresh `--session-id` + the /order goal. The
+  // `resume` flag rides launchClaude → buildClaudeArgv (claudeTerminal.ts) which
+  // emits `--resume` vs `--session-id` off exactly this bit.
+  ...(opts.resume ? { resume: true } : {}),
+  initialPrompt: opts.resume
+    ? WORKER_RESUME_INJECTION
+    : buildOrderInjection(opts.title, opts.notes, opts.priorFailure),
 })
 
 /** Thrown when the L4 guard wiring cannot be VERIFIED at spawn time (GAP-2).
@@ -624,7 +667,11 @@ export const spawnSwarmWorker = async (
   const { worktree, branch } = opts.worktree
     ? await resolveExistingSwarmWorktree(opts.projectPath, opts.worktree)
     : await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
-  const agentSessionId = randomUUID()
+  // RESUME (card 4): reuse the PERSISTED session id so `--resume <id>` reattaches
+  // the same conversation; else mint a fresh one (unchanged). resumeSessionId only
+  // arrives on the restart path (always paired with opts.worktree above), and only
+  // after resumeEngines PROVED the transcript is loadable.
+  const agentSessionId = opts.resumeSessionId ?? randomUUID()
   // Owner-only sandbox gate, resolved SERVER-side (owner role && the toggle) —
   // never from the dispatch request. When open, the worker's already-bypass run
   // is wrapped in a Seatbelt sandbox confined to its worktree; the repo's shared
@@ -649,6 +696,9 @@ export const spawnSwarmWorker = async (
         remoteName,
         sandbox,
         sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
+        // card 4 — a persisted session id means "resume this conversation"; the
+        // flag drives workerLaunchOpts to `--resume` + WORKER_RESUME_INJECTION.
+        resume: !!opts.resumeSessionId,
       },
       me,
     ),

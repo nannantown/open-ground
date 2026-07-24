@@ -106,7 +106,12 @@ import {
   defaultWorktreeExists as rosterWorktreeExists,
   type RosterEntry,
   type RosterReconcileDeps,
+  type RosterReconcileResult,
 } from './swarmWorkerRoster'
+// card 4 (ENGINE_PERSISTENCE_PLAN §5) — the SHARED transcript-loadable proof (same
+// one swarmSessions' isSessionResumable uses), with the SIGKILL-orphan mtime guard
+// enabled for the worker resume path. See adoptResumeCandidates().
+import { proveTranscriptLoadable, ORPHAN_MTIME_WINDOW_MS } from './swarmTranscriptProof'
 // App version, read from package.json at BUILD time (same pattern as
 // server/routes/health.ts) — the crash-loop breaker keys its window on it so a
 // self-update's own cutover restarts don't count against the NEW build.
@@ -2382,6 +2387,11 @@ export interface OrchestratorDeps {
     notes?: string
     hint?: string
     priorFailure?: string
+    // card 4 (ENGINE_PERSISTENCE_PLAN §5) — the boot RESUME path: re-enter this
+    // EXISTING worktree and `--resume` the persisted conversation instead of
+    // creating a fresh one. Both omitted on a normal dispatch (unchanged).
+    worktree?: string
+    resumeSessionId?: string
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
   isAlive: (terminalId: string) => boolean
@@ -3497,6 +3507,10 @@ const defaultSpawnWorker = async (opts: {
   notes?: string
   hint?: string
   priorFailure?: string
+  // card 4 — carried straight through to spawnSwarmWorker (the RESTART worktree +
+  // `--resume` path). preflight + guard wiring still run for a resume, so no bypass.
+  worktree?: string
+  resumeSessionId?: string
 }): Promise<SpawnSwarmWorkerResponse> => {
   const pre = await claudeRunPreflight()
   if (!pre.ok) throw new Error(pre.body.error || 'claude not ready')
@@ -6601,11 +6615,32 @@ const raiseNoAllowedModelTier = async (
 // ── card 3: roster write-through (state-transition-gated) ────────────────────
 
 /** Build one persisted roster row from a live worker. `workedMs` is the worker's
- *  WORKING time (wall-clock since spawn MINUS the banked idle credits the runaway
- *  check already deducts — {@link isRunaway}'s `idleMs`), so persisting it lets a
- *  card-4 resume restart the runaway clock from real accumulated work instead of
- *  zero. `tier` is the launch model alias; `card` (when the board is in hand)
- *  refreshes reworkCount. Pure (clock injected). */
+ *  WORKING time ON ITS CURRENT ASSIGNMENT — wall-clock from the SAME origin the
+ *  execution ceiling measures ({@link monitorWorkers}'s `budgetFromMs`: the 差し戻し
+ *  (`reworkAt`, corroborated by `readyAt`) when there is one, else the spawn) MINUS
+ *  the banked idle credits that origin does not already exclude ({@link isRunaway}'s
+ *  `idleMs`). Persisting it lets a card-4 resume restart the runaway clock from real
+ *  accumulated work instead of zero. `tier` is the launch model alias; `card` (when
+ *  the board is in hand) refreshes reworkCount. Pure (clock injected).
+ *
+ *  WHY THE ORIGIN MUST TRACK THE CEILING'S — the 2026-07-24 must-fix #2. The ledger
+ *  is what a resume adopts as its `startedAt` ({@link resumeStartedAtMs}), and a
+ *  resumed worker carries NO `reworkAt` (that stamp is engine memory, not roster
+ *  state), so nothing downstream can move the origin a second time. A LIFETIME
+ *  ledger therefore re-charges a RE-WORKING worker for everything before its
+ *  差し戻し the moment the app restarts: a worker dispatched 200m ago and 差し戻し'd
+ *  5m ago survives the ceiling for as long as the app stays up (§5.5(c)) and is then
+ *  judged 暴走 on the FIRST monitor pass after a restart — worktree torn down, card
+ *  parked in 'blocked'. That is the 2026-07-20 accident §5.5(c) closed, re-triggered
+ *  by the restart instead of by the 差し戻し observation, and it is a destruction
+ *  main does not have (main never resumes, so a surviving 'doing' card is left
+ *  alone) — exactly what plan §5's "worst case = same as today" forbids.
+ *
+ *  PERSISTING `reworkAt` ITSELF would fix that direction and break the other one:
+ *  an absolute re-work timestamp re-bills the app's DOWNTIME as execution time,
+ *  which is the defect {@link resumeStartedAtMs} exists to prevent. The ledger is
+ *  a DURATION for exactly that reason — it is the only shape that survives a
+ *  restart without charging for it. */
 const rosterEntryOf = (
   engine: ProjectEngine,
   w: OrchestratorWorker,
@@ -6614,16 +6649,30 @@ const rosterEntryOf = (
 ): RosterEntry => {
   const spawnAtMs = Date.parse(w.startedAt)
   const known = Number.isFinite(spawnAtMs) && spawnAtMs > 0
-  const idle =
-    (engine.rateLimitHeldMs?.get(w.terminalId) ?? 0) + (engine.integrationWaitMs?.get(w.terminalId) ?? 0)
+  const heldMs = Math.max(0, engine.rateLimitHeldMs?.get(w.terminalId) ?? 0)
+  const waitedMs = Math.max(0, engine.integrationWaitMs?.get(w.terminalId) ?? 0)
+  // The ceiling's origin, re-derived (monitorWorkers :5918-5924): a 差し戻し moves it,
+  // and ONLY when delivery corroborates it (`readyAt` — the same anti-fail-open gate,
+  // so a card walked through review buys no ledger reset either). `Math.max` keeps a
+  // backwards clock from moving the origin EARLIER, matching the ceiling exactly.
+  const reworkFromMs = w.readyAt && w.reworkAt ? Date.parse(w.reworkAt) : Number.NaN
+  const budgetFromMs = known && Number.isFinite(reworkFromMs) ? Math.max(spawnAtMs, reworkFromMs) : spawnAtMs
+  // Credit only what the NEW origin does not already exclude — the ceiling's own
+  // split (:5931). The 統合待ち bank is closed BY the 差し戻し, so every banked minute
+  // is pre-rework: subtracting it again would forgive the same minutes twice and let
+  // a re-work bank a ledger that runs to 2× its budget.
+  const idle = budgetFromMs === spawnAtMs ? heldMs + waitedMs : heldMs
   return {
     sessionId: w.sessionId ?? '',
     taskId: w.taskId,
     branch: w.branch,
     worktree: w.worktree,
     tier: w.model ?? '',
+    // `spawnAt` stays the ORIGINAL dispatch even when the origin moved: it is only
+    // ever read as resumeStartedAtMs' clamp ceiling ("never claim more credit than
+    // wall-clock"), and a re-work ledger is always ≤ that span by construction.
     spawnAt: known ? spawnAtMs : now,
-    workedMs: known ? Math.max(0, now - spawnAtMs - Math.max(0, idle)) : 0,
+    workedMs: known ? Math.max(0, now - budgetFromMs - idle) : 0,
     reworkCount: card?.reworkCount ?? w.reworkCount ?? 0,
   }
 }
@@ -8590,6 +8639,145 @@ const defaultListProjectPaths = async (): Promise<string[]> => {
 
 // ── Boot resume (card 2, docs/ENGINE_PERSISTENCE_PLAN.md §4) ──────────────────
 
+/** The `startedAt` (epoch ms) a RESUMED worker is adopted with — i.e. where its
+ *  execution-time budget starts counting. `now - workedMs`, clamped to the real span
+ *  since dispatch. Pure (clock injected).
+ *
+ *  WHY NOT THE ORIGINAL `spawnAt` (the 2026-07-24 must-fix): {@link isRunaway}
+ *  measures MAX_EXEC_MS from `startedAt`, and the credits that repay idleness
+ *  (`rateLimitHeldMs` / `integrationWaitMs`) are IN-MEMORY — empty after a restart.
+ *  Anchoring at the raw spawnAt therefore bills the app's DOWNTIME as execution time:
+ *  a worker dispatched at 20:00 that worked 20m before the app was closed overnight
+ *  and resumed at 08:00 is "12h20m old" ⇒ 暴走 on its FIRST monitor pass ⇒ worktree
+ *  torn down, card parked in blocked. That is a destruction main does not have (main
+ *  never resumes, so a surviving `doing` card is simply left alone), which is exactly
+ *  what plan §5's "worst case = same as today" forbids.
+ *
+ *  The clamp keeps BOTH directions honest:
+ *   - carrying `workedMs` (card 3's ledger — {@link rosterEntryOf}, wall-clock minus
+ *     banked idle) forward means a restart never resets the clock to zero and hands
+ *     out an unbounded fresh budget; a worker that has really burned its budget is
+ *     still judged 暴走 on the first pass.
+ *   - bounding it by the elapsed span since dispatch means a corrupt/inflated ledger
+ *     can never claim MORE credit than wall-clock reality; at worst the anchor is the
+ *     original spawnAt (never older).
+ *   - a 0/absent ledger (a roster row predating card 3) yields `now` — a fresh budget,
+ *     the same one the crash reclaim this resume replaces would have given.
+ *
+ *  The accounting closes on the next syncRoster: rosterEntryOf re-derives
+ *  `spawnAt = startedAt` and `workedMs = now2 - budgetFrom - idle` from this very
+ *  anchor — and a resumed worker has no `reworkAt`, so its `budgetFrom` IS this
+ *  anchor. That is also why the ledger it reads is per-assignment and not lifetime
+ *  ({@link rosterEntryOf}'s 2nd must-fix note): the origin can only move once, on the
+ *  live side, so whatever the ledger says is what the resumed budget becomes. */
+export const resumeStartedAtMs = (entry: RosterEntry, now: number): number => {
+  const elapsed = now - (entry.spawnAt || now)
+  return now - Math.max(0, Math.min(entry.workedMs, elapsed))
+}
+
+/** card 4 (ENGINE_PERSISTENCE_PLAN §5) — turn a boot roster reconcile's
+ *  `resumeCandidates` (the in-progress workers whose worktree + card survived the
+ *  restart) into LIVE, adopted engine workers by `--resume`-respawning each PROVEN
+ *  one. Called by {@link resumeEngines} AFTER reconcile and BEFORE runEnginePass —
+ *  and that ORDER is the whole point (b745aeb3 nit#1 / investigation ed1b93af):
+ *
+ *   - runEnginePass ends with syncRoster(), which write-throughs engine.workers to
+ *     roster.json. If engine.workers were still EMPTY there it would clobber the
+ *     candidates reconcile just persisted back to `[]` — the resume target would not
+ *     survive one tick. Adopting FIRST means the first syncRoster writes the resumed
+ *     workers, not an empty set.
+ *   - the dispatch pass excludes cards already owned by a worker in engine.workers
+ *     (countedIds → selectDispatch). Adopting FIRST is therefore also what stops a
+ *     fresh worker being TWIN-spawned onto a card a surviving worktree still owns.
+ *
+ *  For each candidate: PROVE the transcript is loadable (`prove` — missing / empty /
+ *  orphan-fresh mtime ⇒ skip, the card falls to the EXISTING crash reclaim), then
+ *  respawn via `deps.spawnWorker` with the RESTART worktree + resumeSessionId (which
+ *  routes through the SAME claudeRunPreflight + ensureGuardWiring gates — no new
+ *  bypass). On success push an OrchestratorWorker anchored by {@link resumeStartedAtMs}
+ *  — at ACCUMULATED WORK, so the runaway clock keeps counting across the restart
+ *  instead of resetting to zero (plan §3 — a resumed worker is never handed a fresh
+ *  unbounded budget) WITHOUT billing the app's downtime as work. A candidate
+ *  with no sessionId, a failed proof, or a thrown spawn is left to crash reclaim
+ *  ("worst case = same as today", plan §5). Never throws — one bad candidate never
+ *  aborts the others. */
+const adoptResumeCandidates = async (
+  engine: ProjectEngine,
+  reconciled: RosterReconcileResult | void,
+  deps: OrchestratorDeps,
+  prove: (worktree: string, sessionId: string) => Promise<boolean>,
+  now: number,
+): Promise<void> => {
+  const candidates = reconciled?.resumeCandidates ?? []
+  if (!candidates.length) return
+  // One tolerant board read for the display titles / remote-control names — the
+  // resume prompt (WORKER_RESUME_INJECTION) carries no goal, so a missing title only
+  // degrades display, never correctness.
+  let titleById = new Map<string, string>()
+  try {
+    titleById = new Map((await deps.fetchTasks(engine.path)).map((t) => [t.id, t.title ?? '']))
+  } catch {
+    /* titles stay empty — display-only */
+  }
+  let resumed = 0
+  for (const entry of candidates) {
+    // No captured session id ⇒ can't `--resume` (a roster row predating card 3, or a
+    // lost id) → leave it to crash reclaim.
+    if (!entry.sessionId) continue
+    let ok = false
+    try {
+      ok = await prove(entry.worktree, entry.sessionId)
+    } catch {
+      ok = false // a proof fault fails-open to fallback
+    }
+    if (!ok) {
+      logLine(
+        engine,
+        'info',
+        `resume declined (transcript unproven) → reclaim: ${shorten(titleById.get(entry.taskId) || entry.branch)}`,
+        'routine',
+      )
+      continue
+    }
+    const title = titleById.get(entry.taskId) ?? ''
+    let spawn: SpawnSwarmWorkerResponse
+    try {
+      spawn = await deps.spawnWorker({
+        projectPath: engine.path,
+        title,
+        hint: title,
+        worktree: entry.worktree,
+        resumeSessionId: entry.sessionId,
+      })
+    } catch (e) {
+      // A refused/failed resume spawn (preflight, guard wiring, a gone worktree) is
+      // NOT fatal — the card falls to the existing crash reclaim, same as today.
+      logLine(engine, 'warn', `resume spawn failed → reclaim: ${shorten(title || entry.branch)} — ${errMsg(e)}`, 'dispatch')
+      continue
+    }
+    engine.workers.push({
+      terminalId: spawn.terminalId,
+      branch: spawn.branch,
+      worktree: spawn.worktree,
+      taskId: entry.taskId,
+      taskTitle: title,
+      // Anchor the runaway clock at ACCUMULATED WORK — `now - workedMs` — NOT at the
+      // original dispatch. See {@link resumeStartedAtMs} for why the difference is a
+      // torn-down worktree.
+      startedAt: new Date(resumeStartedAtMs(entry, now)).toISOString(),
+      stage: 'starting',
+      ...(spawn.model ? { model: spawn.model } : {}),
+      ...(spawn.agentSessionId ? { sessionId: spawn.agentSessionId } : {}),
+      reworkCount: entry.reworkCount,
+    })
+    resumed += 1
+    logLine(engine, 'info', `worker resumed (--resume): ${shorten(title || entry.branch)} → ${spawn.branch}`, 'dispatch')
+  }
+  if (resumed) {
+    logLine(engine, 'info', `${resumed} worker(s) resumed across restart (conversation restored)`, 'routine')
+  }
+}
+
 /**
  * Called ONCE at server boot (server/index.ts): re-hydrate every registered
  * project whose swarm engine was EXPLICITLY running before this restart
@@ -8631,12 +8819,16 @@ const defaultListProjectPaths = async (): Promise<string[]> => {
  * comment in {@link setOverseer}. Only `desiredRunning` (the drain) and
  * `selfSupply` are honored on resume.
  *
- * No roster yet (card 3 — worker write-through — doesn't exist this card), so
- * orphaned workers from before the restart are left to the EXISTING crash/
- * reclaim machinery (a resumed engine's own monitor pass sees the Board still
- * disagreeing with its empty in-memory worker set and reconciles normally) —
- * per the plan's card 2 scope note ("この段階では orphan worker は既存 reclaim
- * に任せる").
+ * Worker resume (cards 3+4): the persisted roster is reconciled against reality
+ * (worktree / git / heartbeat / Board — reconcileRoster), and each surviving
+ * IN-PROGRESS worker whose transcript is PROVABLY loadable is `--resume`-respawned
+ * into the SAME worktree and adopted into engine.workers BEFORE the first pass
+ * ({@link adoptResumeCandidates}). Anything that can't be proven — a vanished
+ * worktree, a delivered/lost card, a missing/empty/orphan-fresh transcript, a
+ * refused spawn — FALLS BACK to the existing crash/reclaim machinery (a resumed
+ * engine's monitor pass sees the Board disagreeing with its in-memory worker set
+ * and reconciles normally), so a worker is always "worst case = same as today"
+ * (plan §5).
  *
  * Every failure mode here is FAIL-QUIET-TO-OFF per project (a corrupt
  * engine.json, a canonicalize throw, a preflight exception) — this function
@@ -8652,8 +8844,15 @@ export const resumeEngines = async (
     /** card 3 — the boot roster reconcile, injectable so the freeze test can prove
      *  dispatch waits on it. Defaults to the real {@link reconcileRoster} wired to
      *  `deps`. resumeEngines AWAITS it before kicking runEnginePass — that await IS
-     *  the spawn freeze (plan §4-3c). */
-    reconcileRoster?: (projectPath: string) => Promise<unknown>
+     *  the spawn freeze (plan §4-3c). card 4 CONSUMES its `resumeCandidates` (below).
+     *  `void` return ⇒ no candidates (card 2/3 injections + the freeze test). */
+    reconcileRoster?: (projectPath: string) => Promise<RosterReconcileResult | void>
+    /** card 4 (ENGINE_PERSISTENCE_PLAN §5) — the transcript-loadable proof for a
+     *  resume candidate, injectable so the resume-wiring test drives the
+     *  proven/fallback branches without a real ~/.claude JSONL. Defaults to the
+     *  SHARED {@link proveTranscriptLoadable} with the SIGKILL-orphan mtime window
+     *  ON. `true` ⇒ `--resume`; `false` ⇒ fall back to crash reclaim. */
+    proveResumable?: (worktree: string, sessionId: string) => Promise<boolean>
   },
 ): Promise<{ resumed: string[]; suppressed: boolean }> => {
   const now = opts?.now ?? Date.now()
@@ -8663,7 +8862,7 @@ export const resumeEngines = async (
   // is `false`. Overridable via opts for the freeze test.
   const reconcile =
     opts?.reconcileRoster ??
-    ((projectPath: string): Promise<unknown> => {
+    ((projectPath: string): Promise<RosterReconcileResult> => {
       const reconcileDeps: RosterReconcileDeps = {
         fetchTasks: deps.fetchTasks,
         countCommitsAhead: deps.countCommitsAhead,
@@ -8673,6 +8872,16 @@ export const resumeEngines = async (
       }
       return reconcileRoster(projectPath, reconcileDeps)
     })
+  // card 4 — the transcript proof gate for a resume candidate. Default = the shared
+  // probe with the SIGKILL-orphan mtime window ON (a transcript touched within it is
+  // presumed still-being-written by an orphaned claude, so fall back). Injectable.
+  const prove =
+    opts?.proveResumable ??
+    ((worktree: string, sessionId: string): Promise<boolean> =>
+      proveTranscriptLoadable(worktree, sessionId, {
+        now,
+        orphanWindowMs: ORPHAN_MTIME_WINDOW_MS,
+      }).then((p) => p.loadable))
   const { items, persisted } = await recordEngineBoot(appVersion, now)
   if (!persisted) {
     // FAIL-CLOSED (see recordEngineBoot's comment): the breaker's own memory
@@ -8736,7 +8945,15 @@ export const resumeEngines = async (
       // a resumed project never races a fresh worker onto a card a surviving
       // worktree still owns. Never throws (condition ④: a corrupt roster degrades to
       // "no roster memory" and the boot proceeds).
-      await reconcile(key)
+      const reconciled = await reconcile(key)
+      // card 4 — ADOPT the surviving in-progress workers: `--resume`-respawn each
+      // PROVEN one into engine.workers BEFORE runEnginePass is kicked. This ordering
+      // is load-bearing (see adoptResumeCandidates' header): the pass ends with
+      // syncRoster, which would otherwise write an EMPTY engine.workers over the
+      // roster reconcile just persisted; and the pass's dispatch would twin-spawn a
+      // still-live worker's card unless that card is already counted (its worker in
+      // engine.workers). Awaited ⇒ this adoption is inside the spawn freeze too.
+      await adoptResumeCandidates(engine, reconciled, deps, prove, now)
       const gen = (engine.generation += 1)
       logLine(engine, 'info', `engine resumed at boot (v${appVersion})`)
       void runEnginePass(engine, deps)
