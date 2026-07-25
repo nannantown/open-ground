@@ -52,6 +52,28 @@ export const projectPanel = {
       'Autonomy was on for this project last session. It relaunched OFF — nothing is running.',
     'projectPanel.swarm.autonomyReminder.resume': 'Resume',
     'projectPanel.swarm.autonomyReminder.dismiss': 'Dismiss',
+    // Restored notice (autonomyResumed) — the OTHER half of the reminder above. A
+    // restart now brings the drain back on its own, so the "resume?" prompt (gated on
+    // !running) never fires for a restored project; without this line the restoration
+    // would happen in silence. Shown only when the BOOT restored it — never after a
+    // plain manual ON.
+    'projectPanel.swarm.autonomyRestored':
+      'Autonomy was on last session, so it started again automatically after the restart.',
+    // Overseer restore banner (overseerRemembered, card 2b). The supervisor is the ONE
+    // switch a restart never brings back — deliberately, because it does more than
+    // watch. Plain language for a non-programmer owner: what it does when it is on, so
+    // the owner presses the button KNOWING what they are turning back on.
+    'projectPanel.swarm.overseerReminder':
+      'The supervisor was on last session. After the restart it stays off until you turn it back on.',
+    'projectPanel.swarm.overseerReminder.effects':
+      'When on, the supervisor does more than send you messages: it starts up an AI on its own, steps in and gives instructions to work already in progress, and tidies up finished work.',
+    'projectPanel.swarm.overseerReminder.needsAutonomy':
+      'Turn autonomy on first, then you can bring the supervisor back.',
+    'projectPanel.swarm.overseerReminder.restore': 'Turn it back on',
+    // Its own label rather than a bare "Dismiss": this [×] can sit right under the
+    // autonomy notice's [×], and two identically-named buttons in a row are
+    // ambiguous to anyone navigating by screen reader.
+    'projectPanel.swarm.overseerReminder.dismiss': 'Dismiss the supervisor notice',
     // Env preflight (git/shell) — GET /api/swarm/preflight (swarmEnvPreflight),
     // the same gate the worker/supply/manager spawn routes enforce. Shown as ONE
     // banner listing every unmet prerequisite; ids mirror SwarmEnvIssueId. Plain
@@ -584,6 +606,32 @@ export const projectPanel = {
     'projectPanel.closeTerminal': 'Close terminal',
     'projectPanel.newTerminal': 'New terminal',
     'projectPanel.new': 'New',
+    // Context fuel gauge (per pane) + its manual escape hatch. Written for a
+    // reader who has never used a terminal: no "context window", no "tokens".
+    'projectPanel.contextGauge.label': 'Context',
+    'projectPanel.contextGauge.readingWindow': '{pct}% of the room still free',
+    'projectPanel.contextGauge.readingFootnote': '{pct}% left before it summarises itself',
+    'projectPanel.contextGauge.readingNone': 'Nothing to read yet',
+    'projectPanel.contextGauge.hintWindow':
+      'How much room this conversation still has. Claude summarises on its own when it fills up — you do not have to do anything.',
+    'projectPanel.contextGauge.hintFootnote':
+      'Claude is about to summarise this conversation by itself. Nothing is thrown away — it keeps a summary and carries on.',
+    'projectPanel.contextGauge.hintNone':
+      'No Claude session in this pane yet, so there is nothing to measure.',
+    'projectPanel.contextGauge.compact': 'Compact now',
+    'projectPanel.contextGauge.compactHint': 'Summarise the conversation to free up room.',
+    'projectPanel.contextGauge.focusLabel': 'What the summary should keep (optional)',
+    'projectPanel.contextGauge.focusPlaceholder': 'e.g. keep the payment work',
+    'projectPanel.contextGauge.clear': 'Clear and continue',
+    'projectPanel.contextGauge.clearHint': 'Start a clean conversation in this same pane.',
+    'projectPanel.contextGauge.fresh': 'New session',
+    'projectPanel.contextGauge.freshHint': 'Restart Claude here from scratch.',
+    'projectPanel.contextGauge.sending': 'Sending…',
+    'projectPanel.contextGauge.outcome.ok': 'Done.',
+    'projectPanel.contextGauge.outcome.busy':
+      'Claude is working right now — try again once it stops.',
+    'projectPanel.contextGauge.outcome.gone': 'This session has already ended.',
+    'projectPanel.contextGauge.outcome.error': 'That did not go through. Please try again.',
     'projectPanel.renameTerminal': 'Double-click to rename',
     'projectPanel.launchClaude': 'Launch Claude',
     'projectPanel.launchingClaude': 'Launching…',
@@ -664,6 +712,24 @@ export const projectPanel = {
       '前回このプロジェクトで自律ドレインが ON でした。再起動で OFF になっています（何も動いていません）。',
     'projectPanel.swarm.autonomyReminder.resume': '再開',
     'projectPanel.swarm.autonomyReminder.dismiss': '閉じる',
+    // 復元のお知らせ(autonomyResumed)— 上のリマインダーのもう半分。再起動で自動運転が
+    // ひとりでに戻るようになったため、!running を条件にした「再開しますか?」は復元された
+    // プロジェクトでは出ない。この1行が無いと復元が黙って起きる。手動 ON では出さず、
+    // 起動時に復元されたときだけ出す。
+    'projectPanel.swarm.autonomyRestored':
+      '前回このプロジェクトで自動運転が ON だったので、再起動のあと自動でまた動き出しています。',
+    // 監督の復帰バナー(overseerRemembered・card 2b)。監督は再起動で戻さない唯一のスイッチ
+    // ——「見ているだけ」ではないので意図的にそうしている。オーナー(非プログラマ)向けの
+    // 平易文で「ONにすると何をするのか」を書き、理由を分かった上で押せるようにする。
+    'projectPanel.swarm.overseerReminder':
+      '前回は監督もオンでした。再起動のあとはオフのままなので、必要なら戻してください。',
+    'projectPanel.swarm.overseerReminder.effects':
+      '監督はオンのあいだ、お知らせを出すだけではありません。自分で AI を立ち上げ、すでに進んでいる作業に横から指示を入れ、終わった作業の後片付けもします。',
+    'projectPanel.swarm.overseerReminder.needsAutonomy': '先に自動運転をオンにすると、監督を戻せます。',
+    'projectPanel.swarm.overseerReminder.restore': '戻す',
+    // 単なる「閉じる」にしないのは、autonomy の復元通知の [×] と縦に並びうるため。
+    // 同名ボタンが連続すると読み上げでどちらか分からない。
+    'projectPanel.swarm.overseerReminder.dismiss': '監督のお知らせを閉じる',
     // 環境の事前チェック(git/shell) — GET /api/swarm/preflight(swarmEnvPreflight)。
     // worker/supply/manager の起動ルートと同じ判定を、起動前に1枚のバナーで表示する。
     // 完了条件5: 非プログラマ向けの平易文(①何が足りないか ②どうすれば直るか(オー
@@ -1185,6 +1251,32 @@ export const projectPanel = {
     'projectPanel.closeTerminal': 'ターミナルを閉じる',
     'projectPanel.newTerminal': '新しいターミナル',
     'projectPanel.new': '新規',
+    // コンテキスト燃料ゲージ(ペインごと)と手動の逃げ道。ターミナルを触ったことが
+    // ない人が読む前提の文面 — 「コンテキストウィンドウ」「トークン」は使わない。
+    'projectPanel.contextGauge.label': 'コンテキスト',
+    'projectPanel.contextGauge.readingWindow': '空きは残り {pct}%',
+    'projectPanel.contextGauge.readingFootnote': '自動で要約するまで残り {pct}%',
+    'projectPanel.contextGauge.readingNone': 'まだ計測できていません',
+    'projectPanel.contextGauge.hintWindow':
+      'この会話にどれだけ余裕があるかです。いっぱいになると Claude が自分で要約するので、何もしなくて構いません。',
+    'projectPanel.contextGauge.hintFootnote':
+      'まもなく Claude が自分でこの会話を要約します。捨てられるわけではなく、要約を残して続きます。',
+    'projectPanel.contextGauge.hintNone':
+      'このペインにはまだ Claude のセッションがないので、測るものがありません。',
+    'projectPanel.contextGauge.compact': '今すぐ圧縮',
+    'projectPanel.contextGauge.compactHint': '会話を要約して空きを作ります。',
+    'projectPanel.contextGauge.focusLabel': '要約に残したいこと(任意)',
+    'projectPanel.contextGauge.focusPlaceholder': '例: 決済まわりの作業を残す',
+    'projectPanel.contextGauge.clear': 'クリアして継続',
+    'projectPanel.contextGauge.clearHint': '同じペインで、まっさらな会話を始めます。',
+    'projectPanel.contextGauge.fresh': '新規セッション',
+    'projectPanel.contextGauge.freshHint': 'このペインの Claude を起動し直します。',
+    'projectPanel.contextGauge.sending': '送信中…',
+    'projectPanel.contextGauge.outcome.ok': '完了しました。',
+    'projectPanel.contextGauge.outcome.busy':
+      'いま Claude が作業中です。止まってからもう一度押してください。',
+    'projectPanel.contextGauge.outcome.gone': 'このセッションはすでに終了しています。',
+    'projectPanel.contextGauge.outcome.error': 'うまくいきませんでした。もう一度お試しください。',
     'projectPanel.renameTerminal': 'ダブルクリックで名前を変更',
     'projectPanel.launchClaude': 'Claude を起動',
     'projectPanel.launchingClaude': '起動中…',

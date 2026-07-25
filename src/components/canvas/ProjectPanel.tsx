@@ -40,6 +40,7 @@ import type {
   CleanWorktreesResult,
   CustomModuleDef,
   ExperimentFlags,
+  ActiveTerminalsResponse,
 } from '@/lib/types'
 import { api } from '@/lib/api-client'
 import {
@@ -63,7 +64,10 @@ import { reconcileExternalData } from '@/lib/projectDataReconcile'
 import {
   TerminalPane,
   type TerminalInfo,
+  type TerminalPaneHandle,
 } from '@/components/canvas/TerminalPane'
+import { ContextGauge, type ContextAction } from '@/components/canvas/ContextGauge'
+import { slashOutcome, type ContextActionOutcome, type ContextLeftSource } from '@/lib/contextGauge'
 import { BoardTaskTerminal } from '@/components/canvas/TaskTerminal'
 import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
@@ -225,6 +229,10 @@ const saveTaskTerminals = (path: string, map: Record<string, string>) => {
 // width broke "press New → halves"). MAX caps how many PTYs one project can
 // spawn at once.
 const MAX_TERMINALS = 6
+// How often the Terminal tab re-reads each pane's context fuel gauge. Slower
+// than the Ground's 5s status beacon on purpose: the reading only moves once
+// per claude turn, and resolving it costs the server a transcript read per pane.
+const CONTEXT_POLL_MS = 10_000
 const paneWidthPct = (count: number) => 100 / Math.min(Math.max(count, 1), 4)
 
 interface Props {
@@ -1296,6 +1304,82 @@ const OwnedProjectBody = ({
   // tab header with that pane's `zsh · cols×rows` instead of waiting for its
   // next info event.
   const terminalInfoMapRef = useRef<Record<string, TerminalInfo | null>>({})
+  // Slot → its live PTY id, mirrored into STATE (the map above is a ref, which
+  // can't repaint the context gauge). null once that pane's session has exited.
+  const [terminalPtyIds, setTerminalPtyIds] = useState<Record<string, string | null>>({})
+  // Slot → its pane's imperative handle, so the gauge's "new session" can swap
+  // the pane onto a fresh claude without ProjectPanel learning the slot's
+  // session-key bookkeeping (that stays inside TerminalPane).
+  const termPaneRefs = useRef<Record<string, TerminalPaneHandle | null>>({})
+  // PTY id → context reading, from the same beacon the Ground card polls
+  // (GET /api/terminal/active). Polled ONLY while the Terminal tab is the open
+  // view and the window is visible: the server resolves each pane's reading by
+  // reading claude transcripts, so a tab nobody is looking at must not keep
+  // paying for it. Panes absent from the map have no claude session.
+  const [contextByPty, setContextByPty] = useState<
+    Record<string, { pct: number | null; source: ContextLeftSource | null }>
+  >({})
+  useEffect(() => {
+    if (view !== 'terminal' || !project?.path) return
+    let cancelled = false
+    const load = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      try {
+        const r = await fetch('/api/terminal/active')
+        if (!r.ok) return
+        const body = (await r.json()) as ActiveTerminalsResponse
+        if (cancelled) return
+        const next: Record<string, { pct: number | null; source: ContextLeftSource | null }> = {}
+        for (const c of body.claude ?? []) {
+          next[c.id] = { pct: c.contextLeftPct ?? null, source: c.contextLeftSource ?? null }
+        }
+        setContextByPty(next)
+      } catch {
+        // Transient beacon failure: keep the last reading rather than blanking
+        // the gauge — a dropped poll is not evidence the session ended.
+      }
+    }
+    void load()
+    const timer = setInterval(() => void load(), CONTEXT_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [view, project?.path])
+
+  // One press of the gauge's escape hatch. `compact` / `clear` type a slash
+  // command into the pane's LIVE session (the server owns the allowlist and the
+  // mid-turn refusal); `fresh` replaces the session outright.
+  const runContextAction = async (
+    slotId: string,
+    action: ContextAction,
+    focus?: string,
+  ): Promise<ContextActionOutcome> => {
+    if (action === 'fresh') {
+      const handle = termPaneRefs.current[slotId]
+      if (!handle) return 'error'
+      try {
+        await handle.restartClaude()
+        return 'ok'
+      } catch {
+        return 'error'
+      }
+    }
+    const ptyId = terminalPtyIds[slotId]
+    if (!ptyId) return 'gone'
+    try {
+      const r = await fetch(`/api/terminal/${encodeURIComponent(ptyId)}/slash`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // `focus` rides along only when the user typed one; the server
+        // sanitises it to a single typed line and ignores it for /clear.
+        body: JSON.stringify(focus ? { command: action, focus } : { command: action }),
+      })
+      return slashOutcome(r.status)
+    } catch {
+      return 'error'
+    }
+  }
   // Live OSC title per pane (slot id → title) — what's running in the pane,
   // straight from the PTY stream (Claude Code emits a topic summary as an OSC
   // title escape; xterm parses it). NOT persisted: the SSE replay buffer
@@ -2299,6 +2383,11 @@ const OwnedProjectBody = ({
                 ? terminalOscTitles[slot.id]
                 : undefined
             const headerTitle = paneHeaderTitle(oscTitle, slot.label)
+            // Undefined = this pane has no claude session (a plain shell, or
+            // one that has exited): the gauge shows its idle track and the two
+            // "send into the session" buttons are disabled.
+            const panePtyId = terminalPtyIds[slot.id]
+            const contextReading = panePtyId ? contextByPty[panePtyId] : undefined
             return (
               <div
                 key={slot.id}
@@ -2378,6 +2467,16 @@ const OwnedProjectBody = ({
                       {headerTitle}
                     </span>
                   )}
+                  {/* Context fuel gauge — a thin bar in the tab, detail + the
+                   *  manual escape hatch on press. Sits left of the close
+                   *  button so the row still ends with the affordance users
+                   *  reach for by muscle memory. */}
+                  <ContextGauge
+                    leftPct={contextReading?.pct}
+                    source={contextReading?.source}
+                    hasSession={!!contextReading}
+                    onAction={(action, focus) => runContextAction(slot.id, action, focus)}
+                  />
                   {canClose && (
                     <button
                       onMouseDown={e => e.stopPropagation()}
@@ -2400,12 +2499,24 @@ const OwnedProjectBody = ({
                 <div className="min-h-0 flex-1">
                   <TerminalPane
                     key={slot.id}
+                    ref={el => {
+                      termPaneRefs.current[slot.id] = el
+                    }}
                     projectPath={project.path}
                     slotKey={slot.id}
                     onInfo={inf => {
                       terminalInfoMapRef.current[slot.id] = inf
                       if (activeTerminalSlotRef.current === slot.id)
                         setTerminalInfo(inf)
+                      // Mirror the live PTY id into state for the gauge. A pane
+                      // that has exited reports its info WITH finishedAt — that
+                      // is "no session", not a session to measure.
+                      setTerminalPtyIds(prev => {
+                        const next = inf && !inf.finishedAt ? inf.id : null
+                        return prev[slot.id] === next
+                          ? prev
+                          : { ...prev, [slot.id]: next }
+                      })
                     }}
                     onTitle={title =>
                       setTerminalOscTitles(prev => {

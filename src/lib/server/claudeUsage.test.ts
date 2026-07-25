@@ -2,7 +2,12 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { CONTEXT_WINDOW_TOKENS, collectClaudeUsage, sessionContextTokens } from './claudeUsage'
+import {
+  CONTEXT_WINDOW_TOKENS,
+  collectClaudeUsage,
+  resetJsonlWalkMemo,
+  sessionContextTokens,
+} from './claudeUsage'
 
 // The local "~/.claude log aggregation" measurement source — one of the two
 // sources behind GET /api/usage. (The other, which is what the gauge actually
@@ -194,5 +199,59 @@ describe('sessionContextTokens — one session’s current context fill', () => 
 
   it('pins the auto-compact denominator at 200k', () => {
     expect(CONTEXT_WINDOW_TOKENS).toBe(200_000)
+  })
+
+  // The context gauge polls the beacon, and the beacon resolves EVERY live
+  // claude pane — so without memoisation one recursive listing of
+  // ~/.claude/projects ran per pane per tick (the card-2 integration review's
+  // hand-off #2). The listing is therefore reused for a few seconds.
+  //
+  // Its ONE observable cost is asserted here rather than left implicit: a
+  // session file created inside that window is not listed yet, so a brand-new
+  // session reads as "no number yet" for a tick. (The FILE behind a listed path
+  // is still read fresh every call — see the next case — so a live session's
+  // token count is never stale, which is the property that actually matters.)
+  // Delete the memo and this case goes red: the new file would resolve at once.
+  it('reuses the directory listing for a few seconds (new files land a tick late)', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    resetJsonlWalkMemo()
+    writeFileSync(
+      join(dir, 'sess-first.jsonl'),
+      rec(now, 'm1', 1, { input_tokens: 100 }, 'claude-opus-4-8'),
+    )
+    expect(await sessionContextTokens('sess-first', dir)).toBe(100)
+
+    // Appears AFTER the listing was taken — invisible until the memo expires.
+    writeFileSync(
+      join(dir, 'sess-second.jsonl'),
+      rec(now, 'm2', 1, { input_tokens: 200 }, 'claude-opus-4-8'),
+    )
+    expect(await sessionContextTokens('sess-second', dir)).toBeNull()
+
+    // …and the reset seam (what a test mutating one directory across ticks
+    // reaches for) makes it visible immediately.
+    resetJsonlWalkMemo()
+    expect(await sessionContextTokens('sess-second', dir)).toBe(200)
+  })
+
+  it('re-reads a listed file every call, so a live session is never stale', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    resetJsonlWalkMemo()
+    const file = join(dir, 'sess-live.jsonl')
+    writeFileSync(file, rec(now, 'm1', 1, { input_tokens: 100 }, 'claude-opus-4-8'))
+    expect(await sessionContextTokens('sess-live', dir)).toBe(100)
+
+    // Same path, new turn appended (m2 is the NEWER line): the memo holds
+    // PATHS, not contents.
+    writeFileSync(
+      file,
+      [
+        rec(now, 'm1', 1, { input_tokens: 100 }, 'claude-opus-4-8'),
+        rec(now, 'm2', 0, { input_tokens: 4_200 }, 'claude-opus-4-8'),
+      ].join('\n'),
+    )
+    expect(await sessionContextTokens('sess-live', dir)).toBe(4_200)
   })
 })

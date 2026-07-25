@@ -25,6 +25,7 @@ import { getModule } from '@/lib/server/customModules'
 import { projectDataDir, projectUUIDFromPath } from '@/lib/server/projectDataPath'
 import { attachProjectIds } from '@/lib/server/terminalProjects'
 import { attachContextLeftPct } from '@/lib/server/sessionContext'
+import { sendClaudeSlash } from '@/lib/server/claudeSlash'
 import { Hono } from 'hono'
 import { readProjectData, validateProjectPath } from '@/lib/server/projectData'
 import {
@@ -35,6 +36,7 @@ import {
   listActiveTerminals,
   resizeTerminal,
   writeInput,
+  setTerminalTaskId,
 } from '@/lib/server/terminal'
 import { launchClaude, launchOptsFromPrefs } from '@/lib/server/claudeTerminal'
 import { isExperimentEnabled } from '@/lib/server/experiments'
@@ -219,6 +221,11 @@ export const terminalRoutes = new Hono()
         sandbox,
         // The owner's own conversation desk — watched for a model-limit stop.
         ownerDesk: true,
+        // Bind the pane to the card it is running, so the task-boundary context
+        // clear can find exactly this pane when the card lands in `done`
+        // (boundaryClear.ts). Empty on a plain session — which is what keeps a
+        // non-card pane out of every clear.
+        ...(taskId ? { taskId } : {}),
       })
       return c.json(ref.info)
     } catch (e: any) {
@@ -368,6 +375,27 @@ export const terminalRoutes = new Hono()
     if (!ok) return c.json({ error: 'not found or finished' }, 404)
     return c.json({ ok: true })
   })
+  // --- POST /api/terminal/:id/slash — the context gauge's escape hatch ------
+  // Types one of claude's OWN slash commands into a live claude pane and hits
+  // Enter: `/compact` (optionally with a focus hint) or `/clear`. Deliberately
+  // NOT folded into /input — that route writes whatever it is given, while this
+  // one is an allowlist of two commands with the pre-send safety the spike
+  // recorded (line-kill first, refuse mid-turn). All of that lives in
+  // src/lib/server/claudeSlash.ts; this is the adapter.
+  //   400 unknown command · 404 no such live pane · 409 claude is mid-turn.
+  .post('/api/terminal/:id/slash', async (c) => {
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const res = sendClaudeSlash(c.req.param('id'), body?.command, body?.focus)
+    if (res.ok) return c.json({ ok: true })
+    if (res.reason === 'unknown-command') return c.json({ error: res.reason }, 400)
+    if (res.reason === 'not-found') return c.json({ error: res.reason }, 404)
+    return c.json({ error: res.reason }, 409)
+  })
   // --- POST /api/terminal/:id/paste-task — inject a Board task prompt -------
   // Into a LIVE claude PTY's input box, via bracketed paste, WITHOUT sending
   // it: the server re-reads the task from tasks.json (the card may have been
@@ -426,6 +454,11 @@ export const terminalRoutes = new Hono()
     // Bracketed paste, no trailing newline: insert, never auto-send.
     const ok = writeInput(id, bracketedPaste(prompt))
     if (!ok) return c.json({ error: 'not found or finished' }, 404)
+    // This pane is now working on this card, so it becomes the pane the card's
+    // task-boundary clear targets (boundaryClear.ts). Bound on a SUCCESSFUL
+    // paste only — a rejected paste must not leave the pane marked as owned by
+    // a card whose prompt never arrived.
+    setTerminalTaskId(id, taskId)
     return c.json({ ok: true })
   })
   // --- POST /api/terminal/:id/paste-custom-module — brush-up prompt ----------

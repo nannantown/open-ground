@@ -1117,16 +1117,30 @@ export type TeardownReason = WorkerRecoveryReason | 'stopped' | 'rework'
  *      the time ceiling WITHOUT ever producing integrable work would just overrun
  *      again on retry, and a prompt bypass can't clear means the environment is
  *      wrong. Park, don't loop.
- *  Otherwise (crash / stall — a possibly-transient failure) the heartbeat + retry
- *  budget decide, exactly as before:
+ *  Otherwise (crash / stall — a possibly-transient failure) the heartbeat +
+ *  COMMITTED-WORK signal + retry budget decide:
  *    • heartbeat `ready` ⇒ 'blocked' — it DECLARED itself done yet has nothing
  *      integrable; re-running a finished task is wrong, a human checks why.
  *    • heartbeat `blocked` ⇒ 'blocked' — it reported a real blocker; a human
  *      unblocks it (auto-retry would just hit the same wall).
+ *    • COMMITTED WORK (`commitsAhead > 0`) ⇒ 'blocked' — the worker committed
+ *      integrable work onto its swarm/* branch before it fell over. Requeuing to
+ *      'todo' re-dispatches a FRESH branch which OVERWRITES the card's branch field
+ *      (defaultRecoverCard keeps the branch, but the next dispatch's todo→doing move
+ *      stamps the new one), orphaning the committed branch and paying tokens to
+ *      re-implement work already on disk — the 2026-07-22/23 twin-dispatch (two
+ *      near-identical swarm branches for ONE card, observed after a batch of workers
+ *      crashed mid-gate with their work committed). Park so the commander ADOPTS the
+ *      committed branch (or 差し戻し's a trivial commit back to todo). This is the
+ *      same "never auto-redo work the engine can already see" principle as the
+ *      `ready ⇒ blocked` rule above; a BARE crash (0 commits) still auto-retries via
+ *      the budget below — an empty branch has nothing to orphan. (rate-limit /
+ *      runaway / permission / question / integration-wait all returned ABOVE, so
+ *      this rule only ever governs a plain crash or stall.)
  *    • retry budget spent (`requeues >= maxRequeues`) ⇒ 'blocked' — a card that
  *      reliably kills its worker escalates instead of spinning forever.
- *    • otherwise (a BARE crash/kill: dead, no completion/blocker sign, budget
- *      left) ⇒ 'todo' — a transient failure gets one more autonomous attempt.
+ *    • otherwise (a BARE crash/kill: dead, no completion/blocker sign, no committed
+ *      work, budget left) ⇒ 'todo' — a transient failure gets one more attempt.
  *  Pure (no IO, no clock). */
 export const recoveryColumn = (
   probe: WorkerProbe,
@@ -1149,6 +1163,16 @@ export const recoveryColumn = (
   // commander's queue, never the owner's column.
   if (reason === 'integration-wait') return 'review'
   if (probe.heartbeat?.ready === true) return 'blocked'
+  // COMMITTED WORK ⇒ 'blocked', NOT 'todo' (2026-07-23 twin-dispatch root cause).
+  // A crash/stall whose branch already carries commits ahead of trunk did REAL work
+  // before it fell over. Auto-requeuing to 'todo' lets the next dispatch mint a FRESH
+  // swarm/* branch and stamp it onto the card (todo→doing), orphaning the committed
+  // branch and spending tokens to redo what is already on disk — exactly the observed
+  // twin (d44b5ff0 / 5c286c48 each grew two near-identical branches, one card). Park
+  // it so the commander adopts the committed branch instead. Mirrors `ready ⇒ blocked`
+  // above: never auto-redo work the engine can see already exists. A BARE crash
+  // (commitsAhead === 0) still auto-retries via the budget below — nothing to orphan.
+  if (probe.commitsAhead > 0) return 'blocked'
   if (requeues >= maxRequeues) return 'blocked'
   return 'todo'
 }
@@ -1455,6 +1479,16 @@ export interface ProjectEngine {
    *  pause survives a restart, and which the state API surfaces so "stopped by hand"
    *  is machine-readable from outside (the 0707 twin-dispatch root cause). */
   manualStop?: boolean
+  /** card 2b — this engine is `running` because the BOOT RESUME brought it back
+   *  (`resumeEngines` honoured the persisted `desiredRunning:true`), not because
+   *  the owner pressed ON in this session. Purely informational: the Swarm UI
+   *  renders a "your last session's autonomy was restored" notice off it, since
+   *  card 2 made the old `!running` restart reminder unreachable in exactly this
+   *  case. In-memory only, and CLEARED by either power-switch action
+   *  (startOrchestrator / stopOrchestrator) — after the owner touches the switch
+   *  the engine's state is theirs, not a restored one. Optional (absent ⇒ not a
+   *  resumed engine), so every existing engine literal in the tests stays valid. */
+  autonomyResumed?: boolean
   /** True while a pass is mid-flight — the re-entrancy guard that GUARANTEES no two
    *  passes ever overlap (twin-dispatch defense). The setTimeout chain already
    *  serializes the SCHEDULED passes, but a stop→start within a slow pass's await
@@ -2317,6 +2351,8 @@ const emptyState = (): SwarmOrchestratorState => ({
   kpis: emptyKpis(),
   consumption: emptyConsumption(),
   autonomyRemembered: false,
+  autonomyResumed: false,
+  overseerRemembered: false,
 })
 
 /** Public state snapshot. Reports only *live* workers (a dead PTY is filtered
@@ -2339,6 +2375,14 @@ const stateOf = (
   // literal by start/stop (which just wrote it). Defaulted false for the remaining
   // toggle endpoints, exactly like autonomyRemembered above.
   manualStopPersisted = false,
+  // card 2b — the RAW `overseer` value from this project's engine.json, resolved
+  // async by the caller (getOrchestratorState reads it via readEngineIntent; the
+  // sites that WRITE the field pass what they just wrote). Defaulted false for the
+  // remaining toggle endpoints, exactly like autonomyRemembered above — their ack
+  // is superseded by the next 5s poll. NEVER an auto-arm input: the only consumer
+  // is the UI's one-click restore banner (resumeEngines still ignores the field —
+  // OVERSEER_DESIGN.md K2 / L9-③).
+  overseerRemembered = false,
 ): SwarmOrchestratorState => {
   // Resolve the live worker set ONCE — both the reported `workers` array and the
   // consumption snapshot (activeWorkers / activeRunMs) read from it.
@@ -2360,6 +2404,8 @@ const stateOf = (
     kpis: computeSwarmKpis({ counters, tasks, log: engine.log }),
     consumption: computeSwarmConsumption({ liveWorkers: live, counters, limit: DISPATCH_BUDGET }),
     autonomyRemembered,
+    autonomyResumed: engine.autonomyResumed === true,
+    overseerRemembered,
     ...(engine.parkUntil != null ? { parkUntil: engine.parkUntil } : {}),
   }
 }
@@ -8128,6 +8174,16 @@ export const startOrchestrator = async (
   // one `resumeEngines()` actually acts on. Idempotent; cleared by
   // stopOrchestrator (explicit OFF / dismiss).
   await rememberSwarmAutonomy(key)
+  // Read the LAST persisted intent ONCE, here — before the pass kick below, and
+  // before the write at the bottom. Two callers need it (selfSupply backfill,
+  // card 2b's overseer record) and the position is load-bearing twice over:
+  //   · it must not sit AFTER the fire-and-forget `runEnginePass` kick — every await
+  //     there is time the kicked pass gets to stamp `lastIntegrateAt` /
+  //     `reviewSeenAt` before this function returns, which is exactly the
+  //     restart-drops-the-dwell-clock contract its own test pins (2026-07-22);
+  //   · reading it ONCE keeps the write below a single `writeEngineIntent`, so this
+  //     path costs no more disk than it did before card 2b.
+  const priorIntent = await readEngineIntent(projectPath)
   if (!engine.running) {
     // nit fix (2nd rework): backfill selfSupply from the LAST persisted intent
     // before we (below) write a fresh full snapshot back out. Without this, an
@@ -8139,10 +8195,7 @@ export const startOrchestrator = async (
     // Only ever raises false→true (never clobbers an explicit false — including
     // one the owner set deliberately this session, which was already written
     // back to disk by setSelfSupply and would round-trip to the same value).
-    if (!engine.selfSupply.enabled) {
-      const priorIntent = await readEngineIntent(projectPath)
-      if (priorIntent.selfSupply) engine.selfSupply.enabled = true
-    }
+    if (!engine.selfSupply.enabled && priorIntent.selfSupply) engine.selfSupply.enabled = true
     engine.running = true
     // Reset the integration throttle so the first pass after a (re)start refreshes
     // the readiness display immediately — without this, a stop→start within
@@ -8168,15 +8221,41 @@ export const startOrchestrator = async (
       .catch(() => {})
       .finally(() => scheduleNext(engine, deps, gen))
   }
+  // The owner touched the power switch — whatever this engine's `running` now is,
+  // it is THEIR state, not a restored one. Clear the boot-resume marker so the UI's
+  // "restored from last session" notice can't outlive the fact it reports (card 2b).
+  engine.autonomyResumed = false
   // card 2 — persist `desiredRunning:true` so a restart's resumeEngines() can
   // bring this project back up with no owner action (docs/ENGINE_PERSISTENCE_PLAN.md
-  // §4). Fire-and-forget-safe (writeEngineIntent never throws) but awaited so a
+  // §4). Fire-and-forget-safe (patchEngineIntent never throws) but awaited so a
   // caller that immediately restarts the process still sees the write land.
-  await persistEngineIntent(engine, projectPath)
+  //
+  // card 2b — `overseer` is carried over from the value read above instead of being
+  // derived from THIS engine's in-memory `.enabled` (what persistEngineIntent does).
+  // On a fresh post-restart engine that flag is false, so the old full write ERASED
+  // the disk record the one-click restore banner reads — in the exact path where it
+  // matters most (a boot whose resume was suppressed by the crash-loop breaker or
+  // preflight: the owner sees both banners and presses 再開 first). Turning autonomy
+  // ON says nothing about the overseer; it is a SEPARATE toggle the owner arms on its
+  // own, and the only site that legitimately clears its intent is the explicit OFF
+  // (stopOrchestrator's D1 asymmetry). resumeEngines still never reads the field, so
+  // preserving it changes NO resume behaviour — only whether the banner survives long
+  // enough to be pressed. The OR keeps the record honest in the idempotent-ON case
+  // (already armed ⇒ true even if a prior write had been lost to a disk fault).
+  const rememberedOverseer = engine.overseer.enabled || priorIntent.overseer
+  const persisted = await writeEngineIntent(projectPath, {
+    desiredRunning: engine.running,
+    selfSupply: engine.selfSupply.enabled,
+    overseer: rememberedOverseer,
+  })
+  if (!persisted) {
+    logLine(engine, 'warn', 'engine intent persist failed (disk) — in-memory state unaffected')
+  }
   // autonomyRemembered:true — the marker was just written above (harmless while
   // running, since the UI shows the reminder only while !running); manualStopPersisted:
-  // false — the record was just cleared above.
-  return stateOf(engine, deps.isAlive, [], true, false)
+  // false — the record was just cleared above; overseerRemembered — the value just
+  // written, i.e. the record this call deliberately PRESERVED rather than derived.
+  return stateOf(engine, deps.isAlive, [], true, false, rememberedOverseer)
 }
 
 /** Turn the autonomous drain OFF (idempotent). Cancels the pending pass and
@@ -8206,6 +8285,9 @@ export const stopOrchestrator = async (
     // PRIOR process might still say true). Without this write, a relaunch right
     // after this OFF would still see the stale desiredRunning:true and resume.
     await writeEngineIntent(projectPath, { desiredRunning: false, selfSupply: false, overseer: false })
+    // overseerRemembered / autonomyResumed stay false via emptyState() — the write
+    // above just cleared the overseer intent (D1: an explicit OFF forgets it), and
+    // there is no engine to have been resumed.
     return { ...emptyState(), manualStop: true, manualStopPersisted: true }
   }
   // Owner EXPLICITLY paused — mark it so maybeAutoStartDrain won't auto-restart the
@@ -8232,12 +8314,17 @@ export const stopOrchestrator = async (
     }
     logLine(engine, 'info', 'autonomous drain OFF')
   }
+  // The owner touched the power switch — clear the boot-resume marker (card 2b),
+  // same reasoning as startOrchestrator: this state is theirs now.
+  engine.autonomyResumed = false
   // card 2 — persist `desiredRunning:false` (engine.overseer/selfSupply reflect
   // the OFF above too, overseer forced false by the D1 asymmetry).
   await persistEngineIntent(engine, projectPath)
   // autonomyRemembered:false — the marker was just cleared above; manualStopPersisted:
-  // true — the record was just written above.
-  return stateOf(engine, deps.isAlive, [], false, true)
+  // true — the record was just written above; overseerRemembered:false — the D1
+  // asymmetry above disarmed the overseer and the write mirrored that to disk, so
+  // there is deliberately nothing left to restore.
+  return stateOf(engine, deps.isAlive, [], false, true, false)
 }
 
 // ── Auto-start (card cf545637 — todo 自動 drain / "idle worker + todo" デッドロック根治) ──
@@ -8571,6 +8658,14 @@ export const getOrchestratorState = async (
   // beats into the same file whether or not an engine exists this session, so the
   // presence line must not go dark just because the engine store is empty.
   const manager = await readManagerHeartbeatInfo(projectPath)
+  // card 2b — the RAW persisted overseer intent (engine.json). Read on the SAME pure-read
+  // discipline as the two markers above, and BEFORE the engine lookup for the same reason:
+  // right after a restart there is no in-memory engine, and that is precisely when the
+  // one-click restore banner has to appear. This is a REMINDER read only — the boot path
+  // (resumeEngines) still never reads this field back to arm the overseer, because a
+  // restart is the one kill switch layer with no substitute (OVERSEER_DESIGN.md K2 /
+  // L9-③). readEngineIntent never throws (fail-quiet-to-OFF ⇒ no banner on a bad disk).
+  const overseerIntent = (await readEngineIntent(projectPath)).overseer
   const engine = store.engines.get(key)
   if (!engine) {
     return {
@@ -8578,6 +8673,7 @@ export const getOrchestratorState = async (
       autonomyRemembered: remembered,
       manualStop: stopped,
       manualStopPersisted: stopped,
+      overseerRemembered: overseerIntent,
       manager,
     }
   }
@@ -8590,7 +8686,7 @@ export const getOrchestratorState = async (
   } catch {
     tasks = []
   }
-  return { ...stateOf(engine, deps.isAlive, tasks, remembered, stopped), manager }
+  return { ...stateOf(engine, deps.isAlive, tasks, remembered, stopped, overseerIntent), manager }
 }
 
 /** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the
@@ -8937,6 +9033,12 @@ export const resumeEngines = async (
       engine.selfSupply.enabled = intent.selfSupply
       if (intent.selfSupply) engine.selfSupply.lastScanAt = 0
       engine.running = true
+      // card 2b — mark this as a RESTORED engine (not an owner ON this session), so
+      // the Swarm UI can say so. Card 2 made the old `!running` restart reminder
+      // unreachable for a resumed project; this is what puts the fact back on screen.
+      // Display only — nothing in the engine branches on it. Either power-switch
+      // action clears it.
+      engine.autonomyResumed = true
       engine.lastIntegrateAt = 0
       // card 3 — RECONCILE-FIRST, SPAWN FROZEN (plan §4-3c): classify the persisted
       // roster against reality (worktree / git / heartbeat / Board) and prune it
@@ -9116,7 +9218,10 @@ export const setOverseer = async (
   // can never find a pre-armed engine. DISARMING (enabled:false) is always allowed.
   if (enabled && !engine.running) {
     logLine(engine, 'warn', 'overseer arm ignored — autonomy is OFF (turn the engine ON first)')
-    return stateOf(engine, deps.isAlive)
+    // The arm was REFUSED, so the persisted reminder is untouched — report it as it
+    // still stands on disk (card 2b) instead of blanking the restore banner on a
+    // refusal. Fail-quiet: an unreadable engine.json just means no banner.
+    return stateOf(engine, deps.isAlive, [], false, false, (await readEngineIntent(projectPath)).overseer)
   }
   if (engine.overseer.enabled !== enabled) {
     engine.overseer.enabled = enabled
@@ -9136,7 +9241,52 @@ export const setOverseer = async (
     // can equally fire while running is false for an unrelated reason).
     await patchEngineIntent(projectPath, { overseer: enabled })
   }
-  return stateOf(engine, deps.isAlive)
+  // overseerRemembered mirrors what the disk now says. Reported unconditionally (not
+  // only inside the `changed` branch): an IDEMPOTENT arm still leaves a true record,
+  // and an idempotent disarm still leaves a false one.
+  return stateOf(engine, deps.isAlive, [], false, false, enabled)
+}
+
+/** card 2b — DISMISS the overseer restore reminder: forget the persisted
+ *  `overseer:true` in this project's engine.json, WITHOUT touching any arm state.
+ *  The [×] on the one-click restore banner (OVERSEER_DESIGN.md:161's visible
+ *  surface) — "I saw it, don't ask again".
+ *
+ *  WHY THIS IS ITS OWN ACTION and not `setOverseer(path, false)` — the d1d6d704
+ *  MUST-FIX, verbatim, one toggle over: while the banner is up the overseer is by
+ *  definition NOT armed (`engine.overseer.enabled === false`), so setOverseer(false)
+ *  would find `enabled !== enabled` FALSE, skip its whole body — including the
+ *  `patchEngineIntent` — and change nothing at all. The disk would still say
+ *  `overseer:true`, the next poll would re-surface the banner, and [×] would be a
+ *  no-op the owner could press forever. This function writes the field directly, so
+ *  the dismissal is a real, observable state change.
+ *
+ *  Deliberately does NOT touch: `engine.overseer.enabled` (already false — and
+ *  disarming is not what [×] means), `desiredRunning` / `selfSupply` (patch touches
+ *  only its own field — a running engine must keep running when the owner declines
+ *  a banner), and the arm CONDITIONS (this card adds a display, never a new way in).
+ *  Idempotent and safe with no in-memory engine (the common post-restart case):
+ *  the write path is disk-only. FAIL-OPEN like every other intent write. */
+export const dismissOverseerReminder = async (
+  projectPath: string,
+  deps: OrchestratorDeps = defaultDeps(),
+): Promise<SwarmOrchestratorState> => {
+  const key = await canonicalize(projectPath)
+  await patchEngineIntent(projectPath, { overseer: false })
+  const engine = store.engines.get(key)
+  // No engine this session (right after a restart — the case the banner exists for):
+  // report the same shape getOrchestratorState would, minus the reminder just cleared.
+  if (!engine) {
+    const stopped = await isSwarmManualStopPersisted(key)
+    return {
+      ...emptyState(),
+      autonomyRemembered: await isSwarmAutonomyRemembered(key),
+      manualStop: stopped,
+      manualStopPersisted: stopped,
+    }
+  }
+  logLine(engine, 'info', 'overseer restore reminder dismissed by owner')
+  return stateOf(engine, deps.isAlive, [], false, false, false)
 }
 
 // ── Test seam ────────────────────────────────────────────────────────────────

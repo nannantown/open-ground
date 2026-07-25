@@ -95,6 +95,11 @@ import {
   startDescribeJob,
 } from '@/lib/server/generateDescription'
 import { generateTaskTitle } from '@/lib/server/generateTaskTitle'
+import {
+  requestBoundaryClear,
+  cancelBoundaryClear,
+  startBoundaryClearLoop,
+} from '@/lib/server/boundaryClear'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -852,9 +857,28 @@ export const projectRoutes = new Hono()
   const setBranchResults: TaskMutationResult[] = []
   const setIntegrationConflictResults: TaskMutationResult[] = []
   const reworkResults: ReworkResult[] = []
+  // Cards that CROSSED the `done` boundary in this request — the task-boundary
+  // context clear's trigger (boundaryClear.ts). Collected as TRANSITIONS, not as
+  // final states: a card already sitting in `done` that gets re-saved for an
+  // unrelated field must not re-clear a pane the owner has since started reusing.
+  // Reassigned (never appended to) at the top of the mutate closure, because
+  // mutateProjectData may re-run its callback when it retries behind the lock —
+  // appending would double-count and, worse, resurrect a transition the retry
+  // no longer sees.
+  let enteredDone: string[] = []
+  let leftDone: string[] = []
 
   try {
     const saved = await mutateProjectData(body.path, (data) => {
+      // Fresh per attempt — see the declaration above for why this is an
+      // assignment and not a push.
+      enteredDone = []
+      leftDone = []
+      // Snapshot the pre-mutation column of every card so the `done` crossings
+      // can be read off at the end regardless of which batch (setColumn,
+      // markDone, rework) moved them.
+      const columnBefore = new Map(data.tasks.map((t) => [t.id, t.boardColumn]))
+
       for (const raw of body.add ?? []) {
         const title = raw.trim()
         if (!title) continue
@@ -1012,6 +1036,16 @@ export const projectRoutes = new Hono()
         )
         reworkResults.push({ id, ok: true, column, count })
       }
+
+      // One place to read the crossings off, after every batch has had its say —
+      // so a request that both moves a card to `done` and reworks it back lands
+      // on the NET result rather than queuing a clear the same request undid.
+      for (const t of data.tasks) {
+        const before = columnBefore.get(t.id)
+        if (before === undefined) continue // added in this request — no crossing
+        if (before !== 'done' && t.boardColumn === 'done') enteredDone.push(t.id)
+        else if (before === 'done' && t.boardColumn !== 'done') leftDone.push(t.id)
+      }
     })
     // `results` only carries keys the caller actually sent — a request that
     // never touched setBranch gets no setBranch key, so an existing consumer
@@ -1019,6 +1053,15 @@ export const projectRoutes = new Hono()
     // it didn't use. Spread onto `saved` (never replacing it) so every
     // existing reader of the plain ProjectData shape (`.tasks`, `.updatedAt`,
     // …) is unaffected — this is purely additive.
+    // Task-boundary context clear — fired only AFTER the mutation is durably
+    // saved, so a card that failed to persist never clears a pane. Queue-only and
+    // synchronous: requestBoundaryClear registers an intent, and the background
+    // pass sends `/clear` once the pane is actually idle. Nothing here writes to
+    // a PTY, so this cannot slow down or fail the Board response.
+    for (const id of leftDone) cancelBoundaryClear(id)
+    for (const id of enteredDone) requestBoundaryClear(id)
+    if (enteredDone.length) startBoundaryClearLoop()
+
     const results: Record<string, TaskMutationResult[]> = {}
     if (body.setColumn) results.setColumn = setColumnResults
     if (body.setBranch) results.setBranch = setBranchResults

@@ -299,10 +299,13 @@ PTY 死亡・stall(心拍・PTY 出力・**sub-agent/transcript の mtime** の 
 | runaway / permission / question | blocked(人手) |
 | 心拍 ready なのに成果ゼロ | blocked(「完了宣言したのに統合物が無い」= 人が見る) |
 | 心拍 blocked | blocked |
-| リトライ予算切れ(`RECOVER_MAX_REQUEUE=1` :235) | blocked |
-| それ以外の bare crash | todo(もう 1 回だけ自動再試行) |
+| **crash/stall で branch に commit 済み作業がある(`commitsAhead>0`)** | **blocked**(2026-07-23 twin 根治 — 下記) |
+| リトライ予算切れ(`RECOVER_MAX_REQUEUE=1` :250) | blocked |
+| それ以外の **bare** crash/stall(commit ゼロ) | todo(もう 1 回だけ自動再試行 — 孤児化する作業が無い) |
 
-`integration-wait` の行だけ **判定順が特別**(:1117): 心拍 `ready` / 予算切れ の行より**先**に評価される。そうしないと差し戻し前の古い `ready===true` 心拍が下の行に拾われて blocked に落ちる — それが 2026-07-18 事故そのもの。
+`integration-wait` の行だけ **判定順が特別**(:1132): 心拍 `ready` / `commitsAhead>0` / 予算切れ の行より**先**に評価される。そうしないと差し戻し前の古い `ready===true` 心拍が下の行に拾われて blocked に落ちる — それが 2026-07-18 事故そのもの。
+
+**`commitsAhead>0 ⇒ blocked` は 2026-07-23 の twin-dispatch(二重配車)根治**(`recoveryColumn` :1113、rate-limit / runaway / permission / question / integration-wait より後・予算切れより前に評価)。それまで crash/stall は「bare crash → todo」の 1 行しか無く、**commit 済みの作業を持つ worker まで todo に戻していた**。todo に戻すと次の dispatch pass が**新しい swarm ブランチを mint してカードの branch フィールドを上書きする**(`defaultRecoverCard` は branch を触らないが、todo→doing の move が新 branch を刻む)ので、commit 済みの旧 branch は**孤児化**し、同じ実装が別 worker で**再実行**される = **token の二重消費**。実観測(2026-07-22 夜〜0723 早朝): カード d44b5ff0(vitest)と 5c286c48(swarm-lib)がそれぞれ**ほぼ同一実装の 2 ブランチ**に増殖(古い方は孤児・カードは新しい方を指す)。孤児ブランチの先端は `WIP: swarm reclaim auto-save` **ではなく** worker 自身の正規コミット(`WIP(test): vitest testTimeout 60s` / `fix(swarm): 配備先改名`)だった = **worker は作業を commit 済みで回収された**(salvage ではなく worker の規律コミットのおかげで成果が生存)。修正後は commit 済み作業を持つ worker は blocked に park され、**司令官が既存 branch を引き取る**(または trivial なら差し戻しで todo へ)。bare crash(commit ゼロ)は従来通り todo で自動再試行 — 孤児化する作業が無いから。
 
 **ただし飛び越すのは `ready` の行だけ**(2026-07-19 に射程を絞った)。心拍の **`blocked:true` は `integration-wait` より先**に評価される(:1114)。初版はここも飛び越していたため、**差し戻し後の再作業中に本物の詰まりに当たり「人手が要る」と心拍に書いた worker の申告が黙って捨てられ**、未検証の tip だけが review に上がっていた(司令官がレビュー→赤で差し戻し→同じ壁、の無限ループ)。`ready` は**前の状態の遺物**、`blocked` は**今の生の報告** — 性質が違うので扱いも違う。
 
@@ -516,6 +519,30 @@ janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を�
 - WIP コミットは **未検証**(`--no-verify`、完了ゲート未通過)。統合前に必ず人/エンジンが verify する
 - **経路 1・7(エンジン外の API)には保全が無い** — soft(force 無し)は dirty を拒否して守るが、**force Terminate は未コミット物ごと消す**
 - だから規律は変わらない: **worker はフェーズの境目ごとに自分でコミットする**(§2.4 の `/order` 注入に焼き込み済み)。司令塔が worker を止める前に確認すべきは「branch にコミットが乗っているか」であって「worktree が綺麗か」ではない
+
+### 実測(2026-07-22 夜〜0723 早朝「稼働中 worker の worktree が消え + 同一カードが二重配車」)
+
+**観測**: (異常1)心拍 10 体分が残るのに worktree は 4 つしか無く、消えた 6 つはディレクトリごと消滅(`git worktree list` からも脱落)・対応する `swarm/*` branch は全て生存。(異常2)カード d44b5ff0(vitest)と 5c286c48(swarm-lib)がそれぞれ**ほぼ同一実装の 2 branch**に増殖(古い方は孤児)。消えた worktree の worker はいずれも phase=testing/verify/gate/done・terminalId=null。
+
+**司令官の初期仮説(= 却下)**: 「再起動 → boot reconcile が roster に無い worktree を後始末で削除 → カードが担当なしに見える → 再配車」。**コードで反証される**:
+
+- **エンジン roster は in-memory**(§7.6)。再起動後 `resumeEngines`(swarmOrchestrator.ts:8409)は roster を**空**で立て直す(worker write-through は未実装 — resumeEngines 内コメント「No roster yet … orphaned workers … left to the EXISTING crash/reclaim machinery」)。
+- monitor(`monitorWorkers`)は**その roster を反復する**。空なら**回収対象が無い** — 再起動後のエンジンは孤児 doing カードを reclaim しない。
+- 孤児 doing カードを見る経路は `detectAnomalies` の **`orphan-doing`(:7392-7408)だけ**で、これは **read-only の通知**(`recoverCard` dep を持たない)。カードを todo に戻したり worktree を消したりしない。`all-workers-down`(:7669)も通知のみ。
+- boot の retention sweep(`sweepCrossRepoResidue` → `pruneOrphanCentralWorktrees` — retention.ts:252、server/index.ts:145 が起動時に発火)は **`git worktree list` に無い** かつ **effectively-empty(`.git` gitfile 以外に中身が無い)** の orphan **dir** しか消さない(`rm`)。稼働中/コミット済みの worktree は list に載り中身もあるので**絶対に対象外**(不確定なものは `warned` に積んで残す=fail-safe)。
+- ⇒ **boot/board 駆動で稼働 worktree を消す経路も、孤児 doing を再配車する経路も存在しない。**
+
+**真犯人(= 経路 3・monitor crash-recovery、alive engine 上)**: worktree 削除と再配車は**すべて roster 駆動の monitor**が起こす。連鎖はこう(全て**エンジンが生きていて roster に worker が居る**間に起きる。再起動は無関係):
+
+1. worker がフェーズ境目で作業を**自分でコミット**(clean tree・commitsAhead>0)。
+2. その `claude` PTY が **exit**(個別の crash / 上限 / kill — 一括再起動ではない。再起動なら roster が空になり monitor は回収できない)。
+3. monitor: カードは doing・PTY 死亡・promote 不能 → **crash 判定** → `recoverLost` → `commitWipBeforeTeardown`(clean なので no-op)→ **worktree を force 削除**(branch はコミット済みなので温存)。
+4. `recoveryColumn` が **todo**(旧仕様: bare crash も commit 済みも一律 todo)→ `recoverCard('todo')`。
+5. 次の dispatch が todo カードを拾い**新 branch を鋳造**して doing に刻む → カードの branch が上書き → **旧 branch 孤児化・作業再実装 = twin**。
+
+**決定的証拠**: 孤児 branch(0722)の先端は `WIP: swarm reclaim auto-save` **ではなく** worker 自身の正規コミット(`WIP(test): vitest testTimeout 60s` / `fix(swarm): 配備先改名`)。つまり worker は**作業をコミット済みで回収された**(salvage が救ったのではなく worker の規律コミットのおかげで成果が生存 = 異常1で成果が無事だった理由)。
+
+**根治(2026-07-23)**: `recoveryColumn` に **`commitsAhead>0 ⇒ blocked`** を追加(§5.4 の表)。commit 済み作業を持つ crash/stall は todo で盲目再実行せず blocked に park し、**司令官が既存 branch を引き取る**。bare crash(commit ゼロ)は従来通り todo。回帰テスト: `recoveryColumn` 単体(crash/stall × commitsAhead>0 → blocked、bare → todo、rate-limit 免除)+ `detectAnomalies`「worktree loss は claim を外さない(orphan-doing は read-only・doing カードは selectDispatch の候補にならない)」+ integration「commitWipBeforeTeardown は git が読めないと fail-closed で worktree 温存」。**claim ガードは元から健全**(権威は doing 列であって worktree 実在ではない — selectDispatch は列で弾く)。twin は「ガードのすり抜け」ではなく「回収が commit 済みカードを todo に戻したこと」が原因だった。
 
 ### RESTART(worktree 指定)の意味
 

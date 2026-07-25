@@ -50,6 +50,44 @@ const walkJsonl = async (root: string): Promise<string[]> => {
   return out
 }
 
+// How long one recursive listing of ~/.claude/projects may be reused.
+//
+// WHY THIS EXISTS: the per-session context gauge (card 5) reads the beacon every
+// 5s, and the beacon resolves EVERY live claude pane — so an unmemoized walk ran
+// once per pane per tick. On a heavy ~/.claude with four panes open that is four
+// full recursive traversals every five seconds, forever, for a number that moves
+// once a turn (flagged at card-2 integration, 2026-07-23).
+//
+// Staleness is harmless in BOTH directions: the memo holds a list of PATHS, and
+// the file each path points at is still read fresh every call, so a live session's
+// token count is never stale. Only the LISTING ages — i.e. a session file created
+// in the last few seconds may be missed, which reads as "no number yet" for one
+// tick and resolves on the next. That is the same null the gauge already shows
+// before a session's first assistant turn.
+const WALK_MEMO_MS = 4_000
+
+let walkMemo: { root: string; at: number; files: Promise<string[]> } | null = null
+
+/** {@link walkJsonl} with a few seconds of memoisation, keyed by root so a
+ *  different directory (every test uses its own tmpdir) always recomputes. A
+ *  rejected walk is evicted immediately rather than cached as a poison pill. */
+const walkJsonlMemo = (root: string): Promise<string[]> => {
+  const now = Date.now()
+  if (walkMemo && walkMemo.root === root && now - walkMemo.at < WALK_MEMO_MS) return walkMemo.files
+  const files = walkJsonl(root)
+  const entry = { root, at: now, files }
+  walkMemo = entry
+  files.catch(() => {
+    if (walkMemo === entry) walkMemo = null
+  })
+  return files
+}
+
+/** Drop the listing memo — for tests that mutate one directory across ticks. */
+export const resetJsonlWalkMemo = (): void => {
+  walkMemo = null
+}
+
 const parseLine = (raw: string): UsageLine | null => {
   if (!raw || raw[0] !== '{') return null
   // Cheap pre-filter: only assistant messages carry a usage block.
@@ -202,7 +240,9 @@ export const sessionContextTokens = async (
   if (!sessionId) return null
   let files: string[]
   try {
-    files = await walkJsonl(projectsDir)
+    // Memoised listing (see WALK_MEMO_MS): the beacon calls this once per live
+    // pane every few seconds, and they all want the same directory tree.
+    files = await walkJsonlMemo(projectsDir)
   } catch {
     return null
   }

@@ -52,6 +52,14 @@ export interface Settings {
    *  model has run. Idempotency keys off THIS (not `projects.length`), so a user
    *  who later removes every project is never re-scanned from the old root. */
   projectsMigratedAt?: string
+  /** Sentinel: set once the "Compact Instructions" section has been added to
+   *  `~/.claude/CLAUDE.md` (compactInstructionsInstall.ts). Its ABSENCE is the
+   *  only thing that licenses adding the block; once set, a missing block means
+   *  the user deleted it and OPEN GROUND stays out permanently. (A lost or
+   *  corrupted settings.json therefore costs one re-add — chosen over the
+   *  alternative of never installing on a fresh machine.) Server-owned, and
+   *  deliberately NOT in USER_SETTINGS_KEYS. */
+  compactInstructionsInstalledAt?: string
   /** Sentinel: set once the one-shot "Share via Git" evacuation has run —
    *  legacy in-repo `.openground/` data is copied back to the central store, so
    *  the (now-removed) feature never reads the repo again. */
@@ -1528,6 +1536,35 @@ export interface SwarmOrchestratorState {
    *  dismiss). Independent of `running`; the reminder shows only while
    *  `!running && autonomyRemembered`. */
   autonomyRemembered: boolean
+  /** True when THIS session's engine was brought back by the boot resume
+   *  (`resumeEngines` — the persisted `desiredRunning:true`), not by an owner
+   *  action in this session. In-memory only, cleared the moment the owner
+   *  touches the power switch either way (start / stop), so it never outlives
+   *  the fact it reports.
+   *
+   *  WHY IT EXISTS (card 2b): once card 2 made a restart RESUME the drain, the
+   *  restart reminder — gated on `!running` — stopped rendering for exactly the
+   *  case it was written for, and the "your last session's autonomy is back"
+   *  fact went silent. `autonomyRemembered && running` cannot substitute: it is
+   *  equally true after a plain manual ON, which restored nothing. This flag
+   *  distinguishes the two, so the UI can say "restored" only when it is. */
+  autonomyResumed: boolean
+  /** The RAW `overseer` value persisted in this project's `engine.json`
+   *  (`EngineIntent.overseer`) — i.e. "the overseer was armed when this project's
+   *  engine last wrote its intent". A REMINDER, never an auto-arm: `resumeEngines`
+   *  deliberately never reads this field back to arm the overseer (its outward
+   *  effects — waking a one-off brain, typing into a running worker's session,
+   *  deleting branches / heartbeats — make a restart the one kill switch with no
+   *  substitute layer; OVERSEER_DESIGN.md K2 / L9-③). The Swarm UI reads it to
+   *  offer a ONE-CLICK restore banner while `overseerRemembered && !overseer`
+   *  (card 2b), which is the surface OVERSEER_DESIGN.md:161 asks for.
+   *
+   *  Surfaced even before an engine exists this session (read straight off disk).
+   *  Cleared by the dedicated dismiss action (see `dismissOverseerReminder`) and
+   *  by an explicit autonomy OFF; re-set whenever the overseer is armed.
+   *  The remaining action endpoints report `false` (their ack is superseded by
+   *  the next 5s poll) — exactly like {@link autonomyRemembered}. */
+  overseerRemembered: boolean
   /** QUOTA PARK (card 0add9d30) — epoch ms of the earliest model-tier reset while
    *  EVERY tier is cooling (swarmQuota.allCoolingUntil), or absent when at least
    *  one tier has headroom. While set, the engine holds ALL new dispatch (no
@@ -1921,6 +1958,13 @@ export interface ClaudeActivity {
    *  a compaction trigger — native auto-compact still owns that. `null` when no
    *  transcript line is found yet; absent on a server predating this field. */
   contextLeftPct?: number | null
+  /** WHICH reading produced `contextLeftPct` — the two have different
+   *  denominators, so a gauge cannot colour or label the number without it:
+   *  `'jsonl'` = free space in the 200k window (the always-on source),
+   *  `'footnote'` = distance to the AUTO-COMPACT threshold, which claude only
+   *  paints near that threshold (so even a comfortable-looking N is an alarm).
+   *  `null` alongside a null reading; absent on a server predating this field. */
+  contextLeftSource?: 'jsonl' | 'footnote' | null
 }
 
 /** Response of GET /api/terminal/active. `cwds` keeps the original "any PTY

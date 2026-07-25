@@ -23,6 +23,12 @@ import { useT } from '@/i18n/I18nContext'
 export interface TerminalPaneHandle {
   /** Kill the current PTY and start a fresh shell session. */
   restart: () => void
+  /** Swap this pane onto a BRAND-NEW `claude` session (the context gauge's
+   *  "new session" escape hatch): launch one via POST /api/terminal/claude,
+   *  re-point the slot at it, then kill the PTY it replaced. Rejects — leaving
+   *  the pane untouched — when the launch fails (claude missing / signed out),
+   *  so the caller can surface that instead of a silently dead pane. */
+  restartClaude: () => Promise<void>
   /** Write raw bytes to the PTY stdin (caller appends '\r' to run a command). */
   sendText: (text: string) => void
 }
@@ -592,6 +598,35 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     setReloadKey(k => k + 1)
   }, [projectPath, slotKey])
 
+  // Fresh `claude` in THIS pane. Deliberately ordered launch → adopt → kill:
+  // the slot only lets go of its old PTY once a replacement exists, so a failed
+  // launch (claude missing / signed out — the route answers 503) leaves the
+  // user's session exactly as it was and the error reaches the caller.
+  const restartClaude = useCallback(async () => {
+    const host = hostRef.current
+    const cols = host ? Math.max(40, Math.floor(host.clientWidth / 9)) : 100
+    const rows = host ? Math.max(10, Math.floor(host.clientHeight / 18)) : 30
+    const r = await fetch('/api/terminal/claude', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: projectPath, cols, rows }),
+    })
+    if (!r.ok) {
+      const e = (await r.json().catch(() => ({}))) as { error?: string }
+      throw new Error(e.error ?? r.statusText)
+    }
+    const inf = (await r.json()) as TerminalInfo
+    const old = sessionIdRef.current
+    localStorage.setItem(sessionKey(projectPath, slotKey), inf.id)
+    sessionIdRef.current = inf.id
+    setReloadKey(k => k + 1)
+    if (old && old !== inf.id) {
+      try {
+        await api.api.terminal[':id'].$delete({ param: { id: old } })
+      } catch {}
+    }
+  }, [projectPath, slotKey])
+
   const sendText = useCallback((text: string) => {
     const id = sessionIdRef.current
     if (!id) return
@@ -603,7 +638,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     try { termRef.current?.focus() } catch {}
   }, [])
 
-  useImperativeHandle(ref, () => ({ restart, sendText }), [restart, sendText])
+  useImperativeHandle(
+    ref,
+    () => ({ restart, restartClaude, sendText }),
+    [restart, restartClaude, sendText],
+  )
 
   return (
     <div className="flex h-full w-full min-h-0 flex-col bg-[#1a1a1a]">

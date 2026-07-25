@@ -37,6 +37,8 @@ const emptyEngineState: SwarmOrchestratorState = {
     overLimit: false,
   },
   autonomyRemembered: false,
+  autonomyResumed: false,
+  overseerRemembered: false,
 }
 
 const engineWorker = (over: Partial<OrchestratorWorker> = {}): OrchestratorWorker => ({

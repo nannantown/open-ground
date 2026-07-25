@@ -108,6 +108,10 @@ export interface LaunchClaudeOpts {
   // reviewers) and every headless utility run stay silent, since the engine
   // already handles their limits (hold → requeue → tier demotion).
   ownerDesk?: boolean
+  // The Board card this session runs (the 実行 path) — carried onto the pool
+  // entry as TerminalInfo.taskId, which is what lets the task-boundary context
+  // clear (boundaryClear.ts) find THIS pane when that card lands in `done`.
+  taskId?: string
   // For an ownerDesk — what to CALL this desk in that notification ("司令官").
   // See TerminalInfo.deskLabel: an account-wide exhaustion stops every desk at
   // once, so the message has to say WHICH conversation stopped.
@@ -495,6 +499,8 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
     // with the name it should use for this desk when it does.
     ...(opts.ownerDesk ? { ownerDesk: true } : {}),
     ...(opts.ownerDesk && opts.deskLabel ? { deskLabel: opts.deskLabel } : {}),
+    // The Board card this pane runs — the task-boundary clear's only handle on it.
+    ...(opts.taskId ? { taskId: opts.taskId } : {}),
   })
 
   // Route the positional prompt through a temp file (see buildClaudeArgv §2):

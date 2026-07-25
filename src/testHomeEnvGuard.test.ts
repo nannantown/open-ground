@@ -1278,12 +1278,20 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'fenced',
     why: 'installs ~/.claude/skills/order+supply SKILL.md and ~/.claude/swarm-beat.sh+openground-swarm-lib.sh — fenced (assertTestHomeIsolated) before it builds any target path, same pattern as ogManageSkill.ts',
   },
+  'src/lib/server/compactInstructionsInstall.ts': {
+    tier: 'fenced',
+    why: 'installs the native "# Compact Instructions" section into ~/.claude/CLAUDE.md — fenced (assertTestHomeIsolated) before it builds the target path, same pattern as swarmToolingInstall.ts. It edits a file the USER writes in, so an unfenced test run would rewrite real personal instructions',
+  },
   'src/lib/server/__fixtures__/tempRootPoisonProbe.ts': {
     tier: 'fenced',
     why: "the fence's own probe fixture: asks assertTestHomeIsolated for a verdict on each anchor, writes nothing",
   },
 
   // ── read-only (VERIFIED: zero fs-mutation calls in the file) ──
+  'src/lib/server/autoCompactGuard.ts': {
+    tier: 'read-only',
+    why: "reads ~/.claude/settings.json to report whether native auto-compact was turned off — deliberately never writes it back (the knob is undocumented and the file is the user's), so the tier is the design, not an accident. Fenced at the resolve anyway, since an unpinned test would read the developer's real config",
+  },
   'src/lib/server/transcript.ts': {
     tier: 'read-only',
     why: "reads claude's session JSONLs under ~/.claude/projects for generateDescription's marker poll",
@@ -1430,6 +1438,14 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   'src/lib/server/swarmToolingInstall.test.ts': {
     tier: 'writes-elsewhere',
     why: 'installs order/supply skills + swarm-beat.sh/openground-swarm-lib.sh into <tmp>/home/.claude to test the marker/upgrade logic — same pattern as ogManageSkill.test.ts',
+  },
+  'src/lib/server/compactInstructionsInstall.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'installs the Compact Instructions block into <tmp>/home/.claude/CLAUDE.md (homeDir is injected) to test the block-ownership contract — same pattern as swarmToolingInstall.test.ts',
+  },
+  'src/lib/server/autoCompactGuard.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'seeds <tmp>/home/.claude/settings.json (HOME pinned to a tmpdir) to test the auto-compact disable detection — the module under test only reads',
   },
   'src/lib/server/projectSkills.test.ts': {
     tier: 'writes-elsewhere',

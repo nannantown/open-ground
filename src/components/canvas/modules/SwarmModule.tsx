@@ -38,7 +38,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { Network, Inbox, Boxes, Gauge, ShieldCheck, X, Power, type LucideIcon } from 'lucide-react'
+import { Network, Inbox, Boxes, Gauge, ShieldCheck, X, Power, Eye, type LucideIcon } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -308,9 +308,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     toggleAutonomy,
     dismissAutonomyReminder,
     toggleOverseer,
+    dismissOverseerReminder,
     sandboxWarning: engineSandboxWarning,
     envIssues,
   } = useSwarmEngine(project.path)
+
+  // The "autonomy was restored by the restart" notice (card 2b) is dismissed LOCALLY
+  // — unlike the two banners below it, there is no server marker to clear here. The
+  // persisted `swarmAutonomyOn` must STAY (it is what restores the engine on the next
+  // boot as well), and the stop-POST the resume reminder dismisses with would halt a
+  // healthy running engine. A notice, not a decision: hiding it for this session is
+  // the whole of what [×] means.
+  const [restoredNoticeDismissed, setRestoredNoticeDismissed] = useState(false)
 
   // The env-preflight banner is dismissible (条件: nit5, 2026-07-22 review) —
   // keyed by the SET of issue ids currently shown, not a plain boolean, so
@@ -1166,10 +1175,36 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         </p>
       )}
 
-      {/* Restart reminder (autonomyRemembered) — the engine is in-memory and always
-          relaunches OFF; if the owner had autonomy ON last session, offer a one-click
-          resume (never auto-resumed). Dismiss clears the persisted marker (toggleAutonomy
-          false → forgetSwarmAutonomy). Shown only while !running && autonomyRemembered. */}
+      {/* Restart notice (autonomyResumed, card 2b) — the OTHER half of the reminder
+          below. Since card 2 a restart RESTORES the drain by itself, so the "resume?"
+          prompt (gated on !running) never fires for a restored project and the
+          restoration used to happen in silence. Keyed off autonomyResumed, NOT
+          `autonomyRemembered && running`: that pair is equally true after a plain manual
+          ON, which restored nothing. Dismiss is LOCAL on purpose — the persisted marker
+          must stay (it is what restores the engine on the NEXT boot too), and the stop-
+          POST the reminder below uses would STOP a healthy running engine here. */}
+      {engine.autonomyResumed && engine.running && !restoredNoticeDismissed && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
+          <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted">
+            {t('projectPanel.swarm.autonomyRestored')}
+          </span>
+          <button
+            type="button"
+            onClick={() => setRestoredNoticeDismissed(true)}
+            aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            title={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X size={12} strokeWidth={2} />
+          </button>
+        </div>
+      )}
+
+      {/* Restart reminder (autonomyRemembered) — shown when the drain is NOT running
+          despite the owner having had it on: either the boot resume was suppressed
+          (crash-loop breaker / preflight) or this is a build where resume doesn't run.
+          Offer a one-click resume (never auto-resumed). Dismiss clears the persisted
+          marker (toggleAutonomy false → forgetSwarmAutonomy). */}
       {engine.autonomyRemembered && !engine.running && (
         <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
           <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted">
@@ -1190,6 +1225,59 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             disabled={engineBusy}
             aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
             title={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X size={12} strokeWidth={2} />
+          </button>
+        </div>
+      )}
+
+      {/* Overseer restore banner (overseerRemembered, card 2b) — the ASYMMETRY made
+          visible, which is what OVERSEER_DESIGN.md:161 asks for. Autonomy and
+          self-supply come back on their own after a restart; the supervisor never
+          does, deliberately — it wakes an AI, types into running work and deletes
+          finished branches, and a restart is the one kill switch for that with no
+          substitute layer (K2 / L9-③). So instead of arming it, we say so and offer
+          one click. The plain-language line spells out those effects (no jargon) so
+          the owner presses the button KNOWING what comes back on.
+          Shown while the record says "was on" and it is NOT currently armed.
+          [×] goes through its OWN action — toggleOverseer(false) would be a
+          guaranteed no-op here (already disarmed ⇒ nothing written ⇒ banner returns
+          on the next poll: the d1d6d704 dismiss trap). */}
+      {engine.overseerRemembered && !engine.overseer && (
+        <div className="flex shrink-0 items-start gap-3 border-b border-line-soft bg-bg px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] leading-relaxed text-ink-muted">
+              {t('projectPanel.swarm.overseerReminder')}
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+              {t('projectPanel.swarm.overseerReminder.effects')}
+            </p>
+            {/* Arming REQUIRES a running engine (the D1 gate the server enforces —
+                this card adds a display, never a new way in). Say why the button is
+                dimmed rather than letting the click silently do nothing. */}
+            {!engine.running && (
+              <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                {t('projectPanel.swarm.overseerReminder.needsAutonomy')}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => toggleOverseer(true)}
+            disabled={engineBusy || !engineAvailable || !engine.running}
+            title={!engine.running ? t('projectPanel.swarm.overseerReminder.needsAutonomy') : undefined}
+            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <Eye size={12} strokeWidth={2.25} aria-hidden />
+            {t('projectPanel.swarm.overseerReminder.restore')}
+          </button>
+          <button
+            type="button"
+            onClick={() => dismissOverseerReminder()}
+            disabled={engineBusy}
+            aria-label={t('projectPanel.swarm.overseerReminder.dismiss')}
+            title={t('projectPanel.swarm.overseerReminder.dismiss')}
             className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <X size={12} strokeWidth={2} />

@@ -70,6 +70,7 @@ import {
   drainTickOrchestrator,
   setSelfSupply,
   setOverseer,
+  dismissOverseerReminder,
   writeManagerHeartbeat,
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
@@ -798,6 +799,26 @@ export const swarmRoutes = new Hono()
     // sandboxed regardless of the owner experiment, so no warning fires there.
     const sandboxWarning = body.enabled && !brainSandboxAvailable()
     return c.json({ ...state, sandboxWarning })
+  })
+  // --- POST /api/swarm/orchestrator/overseer/dismiss — forget the restore reminder --
+  // Body: { path }. card 2b: clears the persisted `overseer:true` in engine.json so the
+  // one-click restore banner stops appearing. Arms NOTHING and disarms nothing — it is
+  // purely "I saw it, don't ask again". A SEPARATE endpoint from …/overseer on purpose:
+  // POSTing { enabled:false } there is a NO-OP while the banner is up (the overseer is
+  // already disarmed, so setOverseer's change-guard skips the persist) — the d1d6d704
+  // dismiss trap. Owner-only + validated, like the rest of /api/swarm/* (K3).
+  .post('/api/swarm/orchestrator/overseer/dismiss', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await dismissOverseerReminder(path))
   })
   // --- POST /api/swarm/orchestrator/selfsupply/approve — approve a proposed card --
   // Body: { path, cardId }. The owner green-lights ONE self-supplied (engine-

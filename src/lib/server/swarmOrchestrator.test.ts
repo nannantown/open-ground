@@ -843,6 +843,29 @@ describe('recoveryColumn — where a LOST worker’s card goes', () => {
     expect(recoveryColumn(p(), 0, 1, 'stall')).toBe('todo')
     expect(recoveryColumn(p(), 1, 1, 'stall')).toBe('blocked')
   })
+
+  // 2026-07-23 twin-dispatch root cause: a crash/stall whose branch ALREADY carries
+  // committed work must PARK (blocked), not auto-retry (todo). Requeuing to todo lets
+  // the next dispatch mint a FRESH swarm/* branch and stamp it onto the card,
+  // orphaning the committed branch and re-implementing it as a twin (observed:
+  // d44b5ff0 / 5c286c48 each grew two near-identical branches for ONE card).
+  it('parks a CRASH with committed work in blocked — never an orphan-branch twin', () => {
+    expect(recoveryColumn(p({ commitsAhead: 3 }), 0, 1, 'crash')).toBe('blocked')
+    // Budget-left is irrelevant once there is committed work to orphan (default reason
+    // is 'crash', so the un-reasoned call must park it too).
+    expect(recoveryColumn(p({ commitsAhead: 1 }), 0, 1)).toBe('blocked')
+  })
+  it('parks a STALL with committed work in blocked too', () => {
+    expect(recoveryColumn(p({ commitsAhead: 2 }), 0, 1, 'stall')).toBe('blocked')
+  })
+  it('a BARE crash/stall (0 commits) still auto-retries to todo — nothing committed to orphan', () => {
+    expect(recoveryColumn(p({ commitsAhead: 0 }), 0, 1, 'crash')).toBe('todo')
+    expect(recoveryColumn(p({ commitsAhead: 0 }), 0, 1, 'stall')).toBe('todo')
+  })
+  it('a RATE-LIMIT with committed work stays on todo (transient — self-heals, exempt from the park rule)', () => {
+    expect(recoveryColumn(p({ commitsAhead: 5 }), 0, 1, 'rate-limit')).toBe('todo')
+    expect(recoveryColumn(p({ commitsAhead: 5 }), 5, 1, 'rate-limit')).toBe('todo')
+  })
 })
 
 describe('lastActivityMs — newest sign of life across both liveness channels', () => {
@@ -7316,6 +7339,24 @@ describe('detectAnomalies — state inconsistency detection', () => {
     expect(out).toEqual([
       { kind: 'orphan-doing', ref: 'orph', branch: 'swarm/orph', taskTitle: 'task orph' },
     ])
+  })
+
+  it('worktree loss NEVER un-claims a doing card: orphan-doing is READ-ONLY + the card stays undispatchable (2026-07-23 twin-dispatch)', async () => {
+    // The commander's hypothesis was that a lost worktree lets the card slip the claim
+    // guard and get re-dispatched (a twin). It cannot: the claim authority is the doing
+    // COLUMN, not worktree existence. detectAnomalies SURFACES the loss for the
+    // commander…
+    const engine = newEngine({ workers: [] })
+    const doing = card('t', { boardColumn: 'doing', branch: 'swarm/t' })
+    const tasks = [doing]
+    const out = await detectAnomalies(engine, tasks, depsWith(new Set()), NOW)
+    expect(out).toEqual([{ kind: 'orphan-doing', ref: 't', branch: 'swarm/t', taskTitle: 'task t' }])
+    // …but it is READ-ONLY (no recoverCard dep exists on it): the card is untouched,
+    // still 'doing', never quietly moved to todo behind the guard's back.
+    expect(doing.boardColumn).toBe('doing')
+    // …and the dispatch guard keys on the COLUMN, not the (now-missing) worktree, so a
+    // doing card is never a candidate — worktree loss ALONE can never leak a re-dispatch.
+    expect(selectDispatch(tasks, new Set(), 10)).toEqual([])
   })
 
   it('does NOT flag a doing card whose worktree still exists (an uncounted manual worker owns it)', async () => {

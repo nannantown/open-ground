@@ -74,6 +74,17 @@ export interface TerminalInfo {
   // unambiguous and owner-meaningful; a plain Terminal pane leaves it unset and
   // the message names the project alone rather than inventing a machine label.
   deskLabel?: string
+  // The Board card this session is working on — set by the card's 実行 (Run)
+  // launch and by paste-task (injecting a card's prompt into a live pane makes
+  // that pane the card's pane from then on).
+  //
+  // This is the ONLY link from a Board card to a live PTY, and the task-boundary
+  // context clear (boundaryClear.ts) is why it has to exist: a card landing in
+  // `done` must clear the pane THAT CARD ran in and no other. Resolving by cwd
+  // instead would sweep every pane in the project — including one the owner has
+  // unrelated work sitting in — which is exactly the mis-clear the card's teeth
+  // forbid. Unset on a plain Terminal pane, so such a pane is never a target.
+  taskId?: string
 }
 
 type Listener = (chunk: string) => void
@@ -287,6 +298,8 @@ export const createTerminal = (opts: {
   ownerDesk?: boolean
   // What to call this desk in that watch's notification — see TerminalInfo.deskLabel.
   deskLabel?: string
+  // The Board card this session runs — see TerminalInfo.taskId.
+  taskId?: string
 }): TerminalInfo => {
   const pty = loadPty()
   const id = randomUUID()
@@ -317,6 +330,7 @@ export const createTerminal = (opts: {
     ...(opts.hidden ? { hidden: true } : {}),
     ...(opts.ownerDesk ? { ownerDesk: true } : {}),
     ...(opts.ownerDesk && opts.deskLabel ? { deskLabel: opts.deskLabel } : {}),
+    ...(opts.taskId ? { taskId: opts.taskId } : {}),
   }
 
   // Claude panes get a headless screen model for menu detection; plain shells
@@ -620,6 +634,48 @@ export const claudeStatus = (info: TerminalInfo, now: number): ClaudeBeaconStatu
     return 'working'
   }
   return 'waiting'
+}
+
+/** A live claude pane bound to a Board card, with everything the task-boundary
+ *  clear needs to decide whether it may send `/clear` right now. */
+export interface TaskBoundPane {
+  id: string
+  /** `working` = the spinner is repainting (mid-turn). */
+  status: ClaudeBeaconStatus
+  /** A TUI menu (permission prompt etc.) is open — keystrokes would answer IT. */
+  menuOpen: boolean
+}
+
+/** Every LIVE claude pane bound to `taskId`. PURE READ — never touches a PTY.
+ *
+ *  Hidden utility sessions (auto-title / auto-description) are excluded for the
+ *  same reason they are excluded from the beacon: they are machine-owned one-offs
+ *  the user never opened a pane for, and clearing one would be a no-op at best.
+ *  Panes that have exited are excluded — there is nothing left to clear. */
+export const listPanesForTask = (taskId: string, now: number): TaskBoundPane[] => {
+  if (!taskId) return []
+  const panes: TaskBoundPane[] = []
+  sessions.forEach((s) => {
+    if (s.info.finishedAt || s.info.hidden) return
+    if (s.info.tag !== 'claude' || s.info.taskId !== taskId) return
+    panes.push({
+      id: s.info.id,
+      status: claudeStatus(s.info, now),
+      menuOpen: s.info.menuOpen === true,
+    })
+  })
+  return panes
+}
+
+/** Bind a LIVE pane to a Board card — the paste-task path: injecting a card's
+ *  prompt into an existing session makes that session the card's session from
+ *  then on (and un-binds it from whatever card it carried before). Returns false
+ *  for an unknown or already-exited pane. */
+export const setTerminalTaskId = (id: string, taskId: string): boolean => {
+  const s = sessions.get(id)
+  if (!s || s.info.finishedAt) return false
+  s.info.taskId = taskId
+  return true
 }
 
 /** Full payload of GET /api/terminal/active: the `cwds` list (any live USER PTY —

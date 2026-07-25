@@ -149,6 +149,12 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 //   projectsRoot        — deprecated legacy-migration input (a path)
 //   projectsMigratedAt  — one-shot legacy-migration sentinel (server-owned)
 //   shareEvacuatedAt    — one-shot share-evacuation sentinel (server-owned)
+//   compactInstructionsInstalledAt
+//                       — one-shot CLAUDE.md section sentinel (server-owned).
+//                         A forged body must never fake it (OG would then never
+//                         install on a fresh machine) nor erase it (OG would
+//                         re-add a block the user deleted from their own file)
+
 //   swarmAutonomyOn     — server-owned (startOrchestrator/stopOrchestrator only);
 //                         a forged body must never mark a project "autonomy on"
 //   swarmManualStop     — server-owned (stopOrchestrator/startOrchestrator only);

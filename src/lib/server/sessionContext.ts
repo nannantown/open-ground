@@ -18,6 +18,7 @@
 // live PTY pool or a real ~/.claude transcript.
 
 import type { ActiveTerminalsResponse } from '@/lib/types'
+import type { ContextLeftSource } from '@/lib/contextGauge'
 import { extractContextLeftPct } from '@/lib/claudeScreen'
 import { getTerminal, getTerminalScreen } from './terminal'
 import { CONTEXT_WINDOW_TOKENS, sessionContextTokens } from './claudeUsage'
@@ -40,30 +41,44 @@ const defaultDeps: ContextLeftDeps = {
   contextTokens: sessionContextTokens,
 }
 
+/** A pane's reading, WITH the scale it is on. The two sources have different
+ *  denominators — 'footnote' counts down to the auto-compact threshold, 'jsonl'
+ *  to the 200k window — so a consumer that colours or labels the number has to
+ *  know which one it got (see src/lib/contextGauge.ts). */
+export interface ContextLeftReading {
+  pct: number
+  source: ContextLeftSource
+}
+
 /** One pane's context-left %: the on-screen footnote wins when present (near-limit
  *  alarm), else the JSONL usage estimate (the always-on main source). null when
  *  neither yields a number (no footnote AND no transcript line yet). */
-export const paneContextLeftPct = async (
+export const paneContextLeft = async (
   terminalId: string,
   deps: ContextLeftDeps = defaultDeps,
   projectsDir?: string,
-): Promise<number | null> => {
+): Promise<ContextLeftReading | null> => {
   const screen = deps.getScreen(terminalId)
   const footnote = screen ? extractContextLeftPct(screen) : null
-  if (footnote != null) return clampPct(footnote)
+  if (footnote != null) return { pct: clampPct(footnote), source: 'footnote' }
 
   const sessionId = deps.getSessionId(terminalId)
   if (!sessionId) return null
   const usedTokens = await deps.contextTokens(sessionId, projectsDir)
   if (usedTokens == null) return null
-  return clampPct(Math.round((1 - usedTokens / CONTEXT_WINDOW_TOKENS) * 100))
+  return {
+    pct: clampPct(Math.round((1 - usedTokens / CONTEXT_WINDOW_TOKENS) * 100)),
+    source: 'jsonl',
+  }
 }
 
 /** Copy of `res` whose every claude entry carries `contextLeftPct` (a number, or
- *  null when unknown — the card's contract: "なければ null"). Best-effort per pane:
- *  a resolver fault degrades that one pane to null rather than failing the whole
- *  beacon. Panes are resolved concurrently. `deps`/`projectsDir` are injected for
- *  tests; production reads the live pool and the real ~/.claude transcripts. */
+ *  null when unknown — the card's contract: "なければ null") plus the
+ *  `contextLeftSource` that produced it (null alongside a null reading), so the
+ *  gauge can label/colour the two scales apart. Best-effort per pane: a resolver
+ *  fault degrades that one pane to null rather than failing the whole beacon.
+ *  Panes are resolved concurrently. `deps`/`projectsDir` are injected for tests;
+ *  production reads the live pool and the real ~/.claude transcripts. */
 export const attachContextLeftPct = async (
   res: ActiveTerminalsResponse,
   deps: ContextLeftDeps = defaultDeps,
@@ -72,13 +87,17 @@ export const attachContextLeftPct = async (
   if (res.claude.length === 0) return res
   const claude = await Promise.all(
     res.claude.map(async (a) => {
-      let contextLeftPct: number | null = null
+      let reading: ContextLeftReading | null = null
       try {
-        contextLeftPct = await paneContextLeftPct(a.id, deps, projectsDir)
+        reading = await paneContextLeft(a.id, deps, projectsDir)
       } catch {
-        contextLeftPct = null
+        reading = null
       }
-      return { ...a, contextLeftPct }
+      return {
+        ...a,
+        contextLeftPct: reading?.pct ?? null,
+        contextLeftSource: reading?.source ?? null,
+      }
     }),
   )
   return { ...res, claude }

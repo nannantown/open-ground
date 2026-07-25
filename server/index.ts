@@ -26,6 +26,7 @@ import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
 import { installSwarmTooling } from '@/lib/server/swarmToolingInstall'
+import { installCompactInstructions } from '@/lib/server/compactInstructionsInstall'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
@@ -223,6 +224,30 @@ void (async () => {
     }
   } catch (e) {
     console.error('[openground:hono] swarm tooling install failed', e)
+  }
+  // Context management (docs/CONTEXT_MANAGEMENT_PLAN.md §4) — put the native
+  // "Compact Instructions" section into ~/.claude/CLAUDE.md so Claude Code's own
+  // compactor keeps the changed files / open work / last test result in the
+  // summary. OG writes no compression logic; this only deploys the text. Added
+  // once (settings sentinel), version-followed while our marker is there, and a
+  // user-authored section of the same kind always wins.
+  try {
+    const { result: r } = await installCompactInstructions()
+    if (r.outcome === 'installed' || r.outcome === 'refreshed') {
+      console.log(`[openground:hono] compact instructions ${r.outcome}: ${r.path}`)
+    }
+    if (r.outcome === 'kept-user') {
+      console.log(`[openground:hono] compact instructions kept-user (you already have a "Compact Instructions" section): ${r.path}`)
+    }
+    if (r.outcome === 'kept-symlink') {
+      console.log(`[openground:hono] compact instructions kept-symlink (that path is a symlink — left to your dotfiles setup): ${r.path}`)
+    }
+    if (r.outcome === 'opted-out') {
+      console.log(`[openground:hono] compact instructions opted-out (section removed by hand — leaving it out): ${r.path}`)
+    }
+    if (r.outcome === 'error') console.error(`[openground:hono] compact instructions install: ${r.error}`)
+  } catch (e) {
+    console.error('[openground:hono] compact instructions install failed', e)
   }
 })()
 

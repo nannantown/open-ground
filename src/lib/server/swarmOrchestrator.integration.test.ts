@@ -34,6 +34,7 @@ import {
   runDispatchPass,
   runIntegratePass,
   defaultDeps,
+  commitWipBeforeTeardown,
   makeVerify,
   makeAdversarialReview,
   tscCheck,
@@ -630,6 +631,34 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(await exists(worktree)).toBe(false)
     expect(await deps.countCommitsAhead(proj, branch)).toBe(0) // ← nothing invented
     expect(engine.log.some((l) => l.message.includes('auto-saved as a WIP commit'))).toBe(false)
+  })
+
+  it('FAIL-CLOSED: keeps the worktree (failed:true) when git status is UNAVAILABLE — never removes unprovable work', async () => {
+    // The load-bearing CC2 invariant (未コミットの成果がある worktree は絶対に消さない):
+    // teardown force-removes the tree, so the ONLY guard is that commitWipBeforeTeardown
+    // proves it clean (or commits it) FIRST. When git cannot even report status the
+    // guard must FAIL CLOSED — report `failed` so the caller KEEPS the tree — never
+    // "unreadable ⇒ clean ⇒ remove" (a fail-closed check that silently degrades to
+    // fail-open is the exact trap in reference_failclosed_guard_defeated_by_tolerant_reader).
+    const dir = await mkdtemp(join(tmpdir(), 'og-wip-brokengit-'))
+    try {
+      await writeFile(join(dir, 'work.ts'), 'export const answer = 42\n') // real, uncommitted work
+      // A broken gitfile: `git status` follows the gitdir pointer, finds nothing, and
+      // errors — deterministically, independent of any parent repo above tmpdir.
+      await writeFile(join(dir, '.git'), 'gitdir: /openground/no/such/gitdir\n')
+      const res = await commitWipBeforeTeardown(dir, 'crash')
+      expect(res.failed).toBe(true) // ← unprovable ⇒ KEEP (defaultRecoverWorker won't remove)
+      expect(res.committed).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is a safe NO-OP (not failed) when the worktree is already GONE — nothing to save, nothing to keep', async () => {
+    // Distinct from the fail-closed case: a pruned/never-created tree is not a failure
+    // — the idempotent teardown must be allowed to proceed, not stall on a phantom.
+    const res = await commitWipBeforeTeardown(join(tmpdir(), 'og-wip-absent-zzzzzz'), 'crash')
+    expect(res).toEqual({ committed: false })
   })
 
   it('(a)+(3) RECLAIMS a STALLED (alive but silent) worker: nudges, then REAL worktree torn down + card requeued', async () => {

@@ -169,6 +169,27 @@
   瞬間に 10 関数が消えて静かに壊れるので、**配備先はこの名前に戻さない**(回帰テスト
   `swarmToolingInstall.test.ts` の describe「legacy ~/.claude/swarm-lib.sh collision」)。
   `scripts/swarm-beat.sh` の source 行と `package.json` の `build.files` も同名で追随が要る
+- コンテキスト圧縮の指示配備: `compactInstructionsInstall.ts` が native の
+  `# Compact Instructions` セクションを **`~/.claude/CLAUDE.md`** へ入れる(圧縮ロジックは
+  100% Claude Code 側・OG は文言配備だけ)。ファイル全体ではなく**マーカー付き block** を
+  所有する `installManagedSection`(`managedFileInstall.ts` の2つ目の flavour)を使う —
+  ユーザ自身が書くファイルなので、block 外は1バイトも触らない。追加は
+  `settings.compactInstructionsInstalledAt` で**一度きり**(以後 block が無い=ユーザが消した
+  =恒久 opt-out)、ユーザ自作の同名見出しがあれば `kept-user`。配備先が**プロジェクトの
+  CLAUDE.md ではない**のは、OG がユーザの作業ツリーに書かない原則と、git 追跡ファイルを
+  汚さないため。seam は `server/index.ts` boot IIFE。
+  テスト: `compactInstructionsInstall.test.ts` / 実測は `docs/CONTEXT_MANAGEMENT_PLAN.md` §3-A2実測
+- **タスク境界の自動 `/clear`**: `boundaryClear.ts`。**圧縮は 100% native(auto-compact)に委譲し、
+  OG は独自の `/compact` トリガを持たない** — OG が足すのは native に見えない
+  「Board のカードが終わった」だけ。カードが `done` に**遷移**すると(`server/routes/project.ts`
+  の setColumn/markDone/rework 経路)、そのカードに紐づくペイン(`TerminalInfo.taskId` —
+  **cwd では解決しない**。同プロジェクトの無関係ペインを巻き込むため)へ
+  `Ctrl-U` + `/clear` を送る。作業中(`working` / `menuOpen`)は**スキップせず待つ**(120s で expire)。
+  `menuOpen` は `claudeStatus` が `waiting` を返すので status と別判定 — でないと権限プロンプトに打ち込む。
+  auto-compact を OG が切っていないことは `autoCompactGuard.ts` + ソース走査の歯で固定。
+  テスト: `boundaryClear.test.ts` / `autoCompactGuard.test.ts` /
+  `server/routes/__tests__/boundaryClearRoute.test.ts`(実ルート経由の end-to-end)。
+  正典 = `docs/CONTEXT_MANAGEMENT_PLAN.md` **§7**
 - 消費計測: `swarmTokenAudit.ts`(カード単位の 手数/束ね率/文脈max/出力・read-only)+ CLI
   `scripts/swarm-token-audit.ts`(`npm run swarm:audit`)。worker done 時に `consumption:` 行が
   journal に載る(orchestrator の promote 点・fail-safe で skip 可)。既定走査 = 全project の worker

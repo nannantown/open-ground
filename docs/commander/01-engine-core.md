@@ -283,7 +283,17 @@ worktree を掃除すると生きた作業を殺す(02 章 §6 の削除経路�
 
 **`selfSupply`(card 2, 2026-07-22 以降)**: ~~揮発で再起動後 OFF~~ は旧知識。`engine.json` 経由で `running` と一緒に resume する(§2 :85 参照)。「前回 selfSupply が ON だったから今も ON のはず」は resume 後は**成立する**。
 
-**`overseer`(2026-07-22, 設計レビューで [hold] 論点が確定)**: 今も再起動で必ず OFF に戻る。ただし**揮発ではなくなった** — `enabled` の値は `engine.json` に書かれて記憶されるが、boot 時にそれを読み戻して arm することは**しない**(意図的)。「前回 overseer が ON だったから今も ON のはず」は今も**成立しない**——毎セッション明示的な再武装が必要。代わりに値が失われていないことを 1 クリック復帰バナー(別カード)で見せる。
+**`overseer`(2026-07-22, 設計レビューで [hold] 論点が確定)**: 今も再起動で必ず OFF に戻る。ただし**揮発ではなくなった** — `enabled` の値は `engine.json` に書かれて記憶されるが、boot 時にそれを読み戻して arm することは**しない**(意図的)。「前回 overseer が ON だったから今も ON のはず」は今も**成立しない**——毎セッション明示的な再武装が必要。
+
+**その非対称は画面に出る(card 2b, 2026-07-24 実装済み)**: 黙って落とすのではなく、Swarm 画面の上部に「前回は監督もオンでした → [戻す] [監督のお知らせを閉じる]」のバナーが出る。司令官が見るべき点は 3 つ:
+
+- **`GET /api/swarm/orchestrator` に `overseerRemembered` が増えた** — `engine.json` の `overseer` の**生値**。engine が in-memory に無くても(再起動直後がまさにそれ)ディスクから読んで返す。`overseer`(今 arm されているか)とは**別物** — バナー条件は `overseerRemembered && !overseer`。この値は**表示専用で、arm の入力には決してならない**(`resumeEngines()` は相変わらず読まない)。
+- **[戻す] は `POST …/overseer {enabled:true}`** — 実際に arm する。D1 ゲート(engine が running でなければ arm 拒否)は**据え置き**なので、自動運転 OFF のときボタンは disabled になり「先に自動運転をオンにすると、監督を戻せます」と出る。
+- **[×] は専用の `POST /api/swarm/orchestrator/overseer/dismiss`**(`dismissOverseerReminder` — `engine.json` の `overseer` だけを false に patch。arm 状態にも `desiredRunning`/`selfSupply` にも触らない)。⚠ `…/overseer {enabled:false}` で代用してはいけない — バナーが出ている時点で overseer は既に disarm 済みなので `setOverseer` の変更ガードに弾かれて**何も書かれず**、次の poll でバナーが戻る(autonomy バナーで実際に起きた `d1d6d704` の no-op 罠と同型)。
+
+**もう一つの副作用も塞いだ(card 2b)**: `startOrchestrator` は今も全書き(`writeEngineIntent` — 3フィールド)だが、書き込む `overseer` を「その時点の in-memory `.enabled`」だけから導出するのをやめ、**先にディスクの現値を読んで OR を取る**ようになった(`engine.overseer.enabled || priorIntent.overseer`)。以前は in-memory 由来の false で上書きしていたため、resume が抑止された boot(crash-loop breaker / preflight 失敗)で owner が先に「再開」を押すと、押した瞬間に復帰バナーの根拠が消えていた。resume は元々このフィールドを読まないので、値を残しても**再開挙動は一切変わらない**。
+
+> ⚠️ **この `readEngineIntent` は `runEnginePass` の kick より前でなければならない**(`swarmOrchestrator.ts` の clear → kick の順序)。kick の後ろに置くと `await` が1つ増え、**engine ON で滞留時計(`reviewSeenAt`)をクリアする契約**(§7.4 / 7517e4b1)が壊れて、ON 直後に生きた司令官卓へ声かけ(ESC 付き)が飛ぶ。`patchEngineIntent` に「戻す」と内部で read が1回増えて同じ回帰を踏むので、**全書き+事前 read というこの形を崩さないこと**(2026-07-24 `4e218a46` で実際に踏んで直した回帰)。歯は `swarmOrchestrator.test.ts` の「startOrchestrator DROPS the review dwell clock」。
 
 **なぜ非対称か**: selfSupply の出力は per-card 承認ゲート(`selfSupplyApproved`)で不活性 — 提案カードが積まれるだけで dispatch はされない。overseer は大脳(claude PTY)の起動・稼働中 worker への文字列注入・janitor の破壊的操作(`git branch -d` / 心拍 unlink)を**直接駆動**し、かつ再起動は OVERSEER_DESIGN.md K2/L9-③ が定める「代替の無い kill switch 層」— overseer の自動再開だけがこの層を無効化してしまう。設計の経緯は docs/ENGINE_PERSISTENCE_PLAN.md §2、正典は OVERSEER_DESIGN.md K2(2026-07-22 追記あり)。
 
