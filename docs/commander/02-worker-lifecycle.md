@@ -643,4 +643,193 @@ curl -s -X POST http://127.0.0.1:47776/api/swarm/worker \
 
 ---
 
+## 10. worker の死に方と見分け方(2026-07 exitCode 調査)
+
+**背景**: 2026-07-23〜25、worker が起動から ~1 時間前後で死ぬ現象が繰り返し観測された(1 枚のカードに
+twin ブランチが最大 7 本生える副作用付き — twin 増殖そのものは 0.11.36 で別途根治済み。
+`commitsAhead>0` の crash/stall を `todo` でなく `blocked` へ park する変更)。だが**死因そのものは
+長らく特定不能だった** — PTY 層(terminal.ts)は `proc.onExit` で `exitCode` を捕捉して
+`TerminalInfo.exitCode` / `finishedAt` に持っていたのに、エンジンの reclaim 経路
+(`recoverWorker` → `recoverLost` の crash ログ行)がそれを一切読まずに握り潰していた。
+`grep -n exitCode src/lib/server/swarmOrchestrator.ts` が 0 件だったのがその実証。
+
+### 10.1 直った内容(本カード)
+
+#### node-pty が実際に返す形(実測。ここが全ての前提)
+
+分類を読む前に**この表を頭に入れる**。本カードの初版は「OOM は exitCode 137 で届く」と推測して
+書かれ、そのせいで**シグナル死を全部 `clean` と報告する**実装になっていた(2026-07-27 の敵対
+レビューで発覚)。実測は本 repo 同梱の node-pty **1.2.0-beta.14** に対し、実 PTY を起動して
+実シグナルを送って取得したもの:
+
+**⚠ 最重要 — PTY の直下は `claude` ではない。** `terminal.ts` が起動するのは
+`pickShell()`(= `OPENGROUND_TERMINAL_SHELL` → `$SHELL` → `/bin/zsh`。**Windows では
+`powershell.exe`**)で、`claudeTerminal.ts` がその標準入力に `OPENGROUND_OWNED=1 <argv> ; exit`
+を書き込む。つまり **`claude` はシェルの前景ジョブ**。ジョブを kill してもシェルは死なず、
+`exit` を実行して **POSIX の `128+n` 規約で自分の終了ステータスとして中継**する。だから
+**本番ではシグナル欄は空**で、非 0 の exitCode だけが残る。(`bash -l` でも同一と実測。
+**Windows は 128+n の規約が無いので、以下の読み方は POSIX 限定**。)
+
+**⚠ ただし SIGINT(2) と SIGQUIT(3) は例外**(実測): これらを受けると zsh はコマンドリストの
+残りを中断するので **`; exit` が実行されず、PTY はそもそも終了しない**。よって SIGINT で
+死んだ claude は **crash 回収にならず「沈黙(stall)」として現れる**。§10.2 の読み方に
+該当行が無いのはこのためで、**「回収は stall なのに worker は死んでいる」ときは SIGINT 系を疑う**。
+
+**A. PTY 直下に直接シグナルを送った場合**(素朴なプローブが測るのはこれ):
+
+| 死に方 | node-pty の報告 |
+|---|---|
+| SIGKILL(9) | `{exitCode: 0, signal: 9}` |
+| SIGTERM(15) | `{exitCode: 0, signal: 15}` |
+| SIGHUP(1) | `{exitCode: 0, signal: 1}` |
+| SIGSEGV(11) | `{exitCode: 0, signal: 11}` |
+
+**B. 本番の形**(`zsh -l` + 前景ジョブ。**worker が実際に死ぬときはこちら**):
+
+| 死に方 | node-pty の報告 |
+|---|---|
+| **`claude` が OOM kill(SIGKILL)** | **`{exitCode: 137, signal: 0}`** ← 128+9 |
+| `claude` が SIGTERM | `{exitCode: 143, signal: 0}` ← 128+15 |
+| `claude` が SIGSEGV | `{exitCode: 139, signal: 0}` ← 128+11 |
+| `claude` が正常終了 | `{exitCode: 0, signal: 0}` |
+| `claude` が `exit 3` | `{exitCode: 3, signal: 0}` |
+| **`pty.kill()`(= エンジン自身の kill)** | `{exitCode: 1, signal: 0}` ← シェル自身の終了 |
+
+要点は4つ:
+1. **A の形では、シグナル死は必ず `exitCode 0` + 非 0 signal で届く**(`waitpid` の `WIFEXITED` と
+   `WIFSIGNALED` は排他で、node-pty の native 層は前者でのみ `exit_code`、後者でのみ `signal_code`
+   を埋める)。よって **signal の判定を `exitCode === 0` の clean 判定より先に置かなければ、
+   シグナル死は全部 clean に化ける**。
+2. **B の形(本番)では signal 欄は 0 のまま、`128+n` が exitCode に載る。** よって
+   **`137`/`143` を「自発終了だから abnormal」と扱ってはいけない** —— それをやると
+   **本機能が捕まえるべき唯一の本命(OOM)を取り逃がす**。実際に一度そう実装して退行させた
+   (2026-07-27)。分類は **A と B の両方**を見る必要がある。
+3. `signal` は**常に数値**で、通常終了では `0`(`undefined` ではない)。だから `signal !== undefined`
+   で保存を判定すると、正常終了のたびに `signal=0` が付いて意味を持たない。**`signal > 0` のときだけ**保存する。
+4. **測るときは本番と同じ構成で測る。** 「PTY を1本立ててシグナルを送る」だけでは A しか見えず、
+   B(=実際に起きること)を見落とす。これがこの節の最大の教訓。
+
+- `terminal.ts`: `onExit` が `signal` も拾って `TerminalInfo.exitSignal` に保存する(従来は `exitCode` のみ)。
+- `swarmOrchestrator.ts`: `defaultRecoverWorker` が **kill する前に** 対象 PTY の `exitCode`/`exitSignal` を
+  読み、reclaim の戻り値(`exitInfo`)に載せる。載せる条件は**2つとも満たすとき**:
+  - `reason:'crash'`(PTY が自分で死んでいた場合)。`stall`/`runaway` など **エンジン自身がこれから
+    殺す** ケースでは、まだ生きているので死因は存在しない。
+  - **かつ `alreadyTornDown` が false**。⚠ **`reason === 'crash'` だけでは足りない**
+    (2026-07-27 レビュー指摘): reclaim の Board 書込みが kept になると、`TICK_MS`(3秒)後の再試行が
+    同じ回収を `recover` intent から組み直し、**reason は 'crash' に戻る**。その時 PTY はまだプールの
+    linger 窓に居て、**1周回前に自分が送った kill の exit** を持っている(本番実測では
+    `killTerminal` → `pty.kill()` は **`{exitCode:1, signal:0}`** — ログインシェルが SIGHUP を
+    受けて自分で終了する形)。放置すると stall 回収が `exitCode=1 (abnormal)` を worker の
+    死因として journal に書く。呼び出し側(`recoverLost`)が
+    **`TEARDOWN_INTENTS.has(stuckMoves.get(taskId)?.intent)`** を渡して拒否する
+    (単なる `stuckMoves.has()` では**不足** — teardown を伴わない `review` intent も拾って
+    しまい、初回の本物の死因を捨てる)。
+- 純関数 `classifyWorkerExit(code, signal)` を追加(swarmOrchestrator.ts) — 4 分類。
+  **判定順が仕様の一部**(signal を最初に見る):
+  - `signal-kill` — 次の**どちらか**。A と B の両方を見ないと本番の OOM を取り逃がす:
+    - **非 0 の signal が付いている**(形 A。9/15 限定ではない — SIGHUP(1)/SIGABRT(6)/
+      SIGSEGV(11) も `exitCode 0` で届くので、限定すると clean に化ける)
+    - **`exitCode` が `129`〜`159`**(形 B = シェルが中継した `128+n`。**`137`=OOM / `143`=SIGTERM /
+      `139`=SIGSEGV**。`128` 自体は `n≥1` を満たさないので除外)
+  - `clean`(signal 無し・`exitCode 0` — claude/シェルが自分で正常終了)
+  - `abnormal`(signal 無し・非 0 かつ `128+n` バンド外の `exitCode` — `1`/`3`/`127` など)
+  - `unknown`(`exitCode` が取得できなかった — reclaim 時点で PTY セッションが
+    `onExit` の 30 秒 delete タイマー(terminal.ts)で既に消えていたケース。
+    ⚠ **これは珍しくない** — 端末プールは `globalThis` 上の in-memory なので、
+    **サーバ再起動の直後はプールが空**なまま roster から worker が復元される。
+    その状態で回収が走ると**全部 `unknown` になる**。死因を調べている最中に
+    再起動を挟むと、まさにその瞬間だけ何も残らない)
+- crash reclaim の journal **3 行すべて**(`worker lost — card → …` / `worker lost — slot freed` /
+  **`worker … but card move kept (will retry)`**)の末尾に
+  `· exitCode=<code> [signal=<n>] (<category>)` が付くようになった。**今後 worker が死んだら、まず
+  journal のこの一行を見ればよい** — §8 の検証コマンド集と同じ流儀で `GET /api/swarm/workers` の
+  journal、またはサーバログの `[warn][crash]` 行を読む。
+
+テスト(`swarmOrchestrator.test.ts`):
+- `classifyWorkerExit` describe — **実測した形だけ**を pin。形 A: `{0,9}`/`{0,15}`/`{0,1}`/
+  `{0,6}`/`{0,11}` ⇒ signal-kill。**形 B(本番): `{137,0}`/`{143,0}`/`{139,0}` ⇒ signal-kill**。
+  `{0,0}` ⇒ clean、`{1,0}`/`{3,0}`/`{127,0}`/`{128,0}`/`{160,0}` ⇒ abnormal。
+  初版は `classifyWorkerExit(1, 9)` という **node-pty が返し得ない形**を pin していたため、
+  順序バグをちょうど回避して緑のまま通っていた。**発生し得ない入力を pin しない**。
+- `defaultRecoverWorker — never attributes OUR OWN kill to the worker` describe — ゲート本体を
+  実関数で固定(`worktree: ''` で早期 return する性質を使い、端末プールは注入シームで差し替え)。
+- `tells recoverWorker when a RETRY is re-tearing-down a worker we already killed` — 呼び出し側が
+  再試行時に `alreadyTornDown: true` を渡すことを、kept Board 書込みの再現で固定。
+- `records the dead PTY exit info in the crash journal line` の parametrized test —
+  `{0,9}`/`{0,15}`/`{0,-}`/`{137,-}`/`{3,-}`/`{null,-}` の 6 ケースで journal 行の文言を固定。
+- 上記の修正は**ミューテーション試験で歯を実証済み** — 各修正を戻すと該当テストが赤になる
+  (独立再現の実測: 分類の順序戻し=4件 / 128+n バンド削除=3件 / ゲートを `has()` に戻す=1件 /
+  呼び出し側フラグ削除=1件 / kept-write 行の exitNote 削除=1件)。件数は実行時のケース数で
+  変わるので、**「落ちること」自体が要件**であって件数は目安。
+
+### 10.2 過去分の死因調査(exitCode 記録が無かった期間 — JSONL 法医学)
+
+この修正が入る前に死んだ worker の exitCode はどこにも残っていない。唯一残る手がかりは
+**worktree を消しても消えない claude セッション JSONL**(`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`)。
+2026-07-24 に死んだ ctx-4/ctx-5 系の twin worker 4 本を次のコマンドで拾い、末尾を読んだ:
+
+```bash
+ls -t ~/.claude/projects/*openground*worktrees*/*.jsonl   # 新しい順
+# 各ファイルの生存時間・最終 usage・killed マーカーを見る
+grep -o '"timestamp":"[^"]*"' <file> | head -1   # セッション開始
+grep -o '"timestamp":"[^"]*"' <file> | tail -1   # セッション最終行(≒死亡時刻)
+grep -o '"cache_read_input_tokens":[0-9]*' <file> | tail -1   # 死亡直前の会話トークン量
+grep -c '"status":"killed"' <file>               # background task が外部終了フラグを持つか
+```
+
+**観測(n=4、いずれも 2026-07-24 死亡)**:
+
+| 生存時間 | 死亡直前 cache_read_input_tokens | `"status":"killed"` 件数 |
+|---|---|---|
+| 約 1h30m | 245,802〜246,615 | **17 件**(background bash task が末尾で一斉に `killed`/`stopped` — 全て同一タイムスタンプ) |
+| 約 47min | 219,952 | 0 |
+| 約 55min | 186,132 | 0 |
+| 約 27min | 157,056 | 0 |
+
+**仮説の判定(潰した/残った)**:
+
+- **(a) コンテキスト枯渇 — 保留(否定はできないが n=4 では確証もない)**: 死亡直前の
+  cache_read_input_tokens は 157k〜246k とバラつきが大きく、最長生存(1h30m)ケースだけが唯一
+  200k を明確に超えていた。他 3 件は 200k 未満で死んでおり、「200k 天井到達=即死」と単純に言い切れる
+  証拠にはならない。ただし 4 件中どれも決して低くない水準(最短の 27min ケースでも 157k)で、
+  「会話が長く育つほど死にやすい」傾向自体は否定されない。
+- **(b) モデル quota/レート制限 — 今回のサンプルでは否定**: 4 件とも画面末尾/ログに
+  レート制限・quota 文言は見つからなかった(`rate limit` / `overloaded` / `429` の類は 0 件)。
+- **(c) OOM / 外部 kill — 支持する材料が 1 件だけある**: 最長生存ケースだけ、最後の実コンテンツの
+  約 3 分後に background bash task が軒並み `"status":"killed"` / `"summary":"... was stopped"` を
+  記録していた(全エントリが同一タイムスタンプ = セッション終了時に一括で書かれた形)。これは
+  「シェルごと外部シグナルで終わらされた」時に典型的な痕跡だが、n=1 であり、かつ **この修正が入る前は
+  そもそも exitCode 自体が残っていない**ため、SIGKILL(OOM)なのか SIGTERM(何らかの正常終了処理)
+  なのか、あるいはエンジン自身の reclaim(`killTerminal` → SIGHUP)が引き金だったのかを区別できない。
+  **今後同じ現象が起きたら、journal の `exitCode=… signal=…` 欄がこの仮説に直接白黒つける。**
+  読み方は §10.1 の実測表のとおり(**推測しないこと**。この節は 2 度書き換わっている: 初版は
+  137/143 を OOM の印と書き、次の版はそれを「出ない形」と断じて `abnormal` に落とした。**実測では
+  137/143 こそ本番で OOM が出る形**で、後者の断定が誤りだった):
+  - **`exitCode=137 (signal-kill)`** … **本番で OOM が出る形**(128+9)。**仮説 (c) を最有力に**。
+    ⚠ ただし `129`〜`159` は「シェルが中継した 128+n」と「プログラムが自分でその値で終了した」を
+    **原理的に区別できない**(実測: `exit 130` はそのまま `130` として届く)。それでも
+    バンドを採るのは、**誤検知はラベルを1つ間違えるだけだが、見逃すと機能そのものが死ぬ**から
+  - `exitCode=143 (signal-kill)` … 128+15 = SIGTERM。明示的な終了指示
+  - `exitCode=139 (signal-kill)` … 128+11 = SIGSEGV。claude の異常終了
+  - `exitCode=0 signal=9 (signal-kill)` … **シェルごと殺された**形(A)。プロセスグループ全体への
+    `kill -9` や、OOM がグループを一掃した場合に実際に出る(実測)。構成の異常ではない
+  - `exitCode=null (unknown)` … 回収時点で端末プールにセッションが無かった。**サーバ再起動を
+    挟むと全部これになる**(§10.1 の `unknown` の注記)。死因の情報は取れないので、
+    JSONL 法医学(§10.2 冒頭の手順)に戻る
+  - `exitCode=1 (abnormal)` … **エンジン自身の `pty.kill()` と同じ形**。自分の回収が引き金で
+    ないことを先に確認する(`alreadyTornDown` により再試行由来の自分の kill は journal に出ない)
+  - その他の非 0 (`abnormal`) … claude CLI 自体のクラッシュ(仮説 d)を疑う
+  - `exitCode=0 (clean)` … 自分から正常終了した = 落ちたのではない。仮説 (a) の
+    「文脈が伸びてセッションを畳んだ」側を疑う
+- **(d) claude CLI 自体のクラッシュ — 今回のサンプルでは否定**: 4 件ともスタックトレースや
+  CLI 側の異常終了ログは見つからなかった。
+
+**結論**: 現時点のサンプル(n=4)では **どの仮説も確定できない** — 唯一支持材料が出たのは (c) だが
+n=1 で、しかも exitCode 記録が無い時代のデータなので事後推定の域を出ない。これが本カードの動機その
+ものであり、10.1 の修正が入った今後は次に同じ現象が起きた瞬間に journal の exitCode/signal/分類を
+読むだけで (a)〜(d) のどれかに実測で白黒つけられる。**対策の実装は本カードのスコープ外**(観測可能に
+すること自体がゴール)。
+
+---
+
 *この文書は docs/commander/ シリーズの第 2 章。心拍プロトコルの書式は swarm-beat.sh(~/.claude/ 配下・repo 外)と同期しており、サーバ側の読み手 3 系統(§3.2)のどれかを変える時は本章の該当節を更新すること。*

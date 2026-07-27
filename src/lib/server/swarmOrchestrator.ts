@@ -1037,6 +1037,101 @@ export interface WorkerProbe {
   heartbeat: HeartbeatSign | null
 }
 
+/** Coarse cause bucket for a dead worker's PTY exit — the only diagnosable trace
+ *  left once a crash is reclaimed (2026-07 investigation: workers were observed
+ *  dying unattended ~1h into a run with no recorded cause). Four buckets:
+ *   - 'signal-kill' — the process was killed by a SIGNAL (OS OOM-kill, an external
+ *                      kill, or a fatal fault like SIGSEGV). NOT self-inflicted.
+ *   - 'clean'       — exited on its own with status 0.
+ *   - 'abnormal'    — exited on its own with a non-zero status (a real crash /
+ *                      uncaught error).
+ *   - 'unknown'     — no exit code could be captured at all (the PTY session was
+ *                      already gone by the time we looked — e.g. deleted by the
+ *                      onExit timer before the reclaim ran).
+ *
+ *  ⚠ SIGNAL IS CHECKED FIRST, AND THAT ORDER IS THE WHOLE POINT. A signal death
+ *  arrives as `exitCode 0` PLUS a non-zero signal, never as 137/143 — waitpid's
+ *  WIFEXITED and WIFSIGNALED are mutually exclusive, and node-pty's native layer
+ *  (unix/pty.cc) zero-initialises ExitEvent then fills exit_code only under the
+ *  former and signal_code only under the latter. So a `exitCode === 0 ⇒ clean`
+ *  test placed first swallows EVERY signal kill and reports the OOM this module
+ *  exists to catch as a voluntary clean exit.
+ *
+ *  ⚠ AND THE SIGNAL FIELD IS USUALLY EMPTY IN PRODUCTION ANYWAY. The PTY's direct
+ *  child is NOT `claude` — terminal.ts spawns a login shell (`zsh -l`) and
+ *  claudeTerminal.ts writes `OPENGROUND_OWNED=1 <argv> ; exit` into its stdin, so
+ *  `claude` runs as a FOREGROUND JOB. Killing that job does not kill the PTY child:
+ *  the shell SURVIVES the signal, runs `exit`, and relays the death as its own
+ *  status — the POSIX `128+n` convention. So the signal never reaches node-pty at
+ *  all and we see a plain non-zero exitCode.
+ *
+ *  MEASURED, both arrangements, this repo's node-pty (1.2.0-beta.14), real signals:
+ *
+ *    A. bare PTY child signalled directly (what a naive probe measures):
+ *       SIGKILL(9)→{0,9}  SIGTERM(15)→{0,15}  SIGHUP(1)→{0,1}  SIGSEGV(11)→{0,11}
+ *
+ *    B. PRODUCTION shape — `zsh -l` + foreground job (what actually happens):
+ *       claude OOM-killed (SIGKILL) → {exitCode:137, signal:0}   ← 128+9
+ *       claude SIGTERMed            → {exitCode:143, signal:0}   ← 128+15
+ *       claude exits 0              → {exitCode:0,   signal:0}
+ *       claude exits 3              → {exitCode:3,   signal:0}
+ *       pty.kill() (killTerminal)   → {exitCode:1,   signal:0}   ← shell's own exit
+ *
+ *  Hence BOTH shapes must be recognised. Treating 137/143 as an ordinary non-zero
+ *  exit — as an earlier revision of this function did — files the production OOM,
+ *  the single case this module exists to catch, under 'abnormal' and sends the
+ *  investigator after a CLI crash instead. Reading only the signal field is just as
+ *  wrong in the other direction.
+ *
+ *  Any non-zero signal counts, not just 9/15: SIGHUP(1), SIGSEGV(11), SIGABRT(6)
+ *  all arrive with exitCode 0 in arrangement A and would otherwise read 'clean'. */
+export type WorkerExitCategory = 'clean' | 'signal-kill' | 'abnormal' | 'unknown'
+
+/** The stuckMoves intents that are recorded AFTER a teardown already ran (see the
+ *  alreadyTornDown call site). 'review' is deliberately absent: the promote path
+ *  records it without ever tearing a worker down.
+ *  ('recover-review' is belt-and-braces — such a kept move always maps back to
+ *  reason 'integration-wait', which is not 'crash', so the gate never reaches it.
+ *  Listed anyway so the set reads as "every post-teardown intent".) */
+const TEARDOWN_INTENTS: ReadonlySet<string> = new Set(['recover', 'recover-review'])
+
+/** Exit statuses a POSIX shell uses to relay "my foreground job was killed by
+ *  signal n" — the shape production actually produces (arrangement B above).
+ *  128+1(SIGHUP) … 128+31 covers every standard signal; anything at or above 128
+ *  is a relayed death rather than a status the job chose. 128 itself is excluded:
+ *  it is not a valid 128+n (n≥1) and appears as an ordinary status.
+ *
+ *  ⚠ TWO KNOWN IMPRECISIONS, both accepted deliberately:
+ *   - A program that CHOOSES a status in this band (`exit 130`) is indistinguishable
+ *     from a relay — measured, it reads 'signal-kill'.
+ *   - The band is a POSIX convention. On Windows the shell is powershell.exe and
+ *     128+n means nothing, so a status that lands here is mislabelled.
+ *  Both are false POSITIVES: they put a death in the wrong bucket. The alternative —
+ *  narrowing the band — reintroduces the false NEGATIVE that made the whole feature
+ *  useless (the production OOM read 'abnormal'). A mislabelled bucket costs one
+ *  wrong guess; a missed kill costs the investigation. Err toward catching it. */
+const SHELL_RELAYED_SIGNAL_MIN = 129
+const SHELL_RELAYED_SIGNAL_MAX = 159 // 128 + 31 (Darwin NSIG=32)
+
+export const classifyWorkerExit = (
+  exitCode: number | null | undefined,
+  exitSignal?: number,
+): WorkerExitCategory => {
+  // Signal first — see the ordering note above. A directly-signalled PTY child
+  // reports exitCode 0, so any `exitCode === 0` shortcut placed before this is a bug.
+  if (typeof exitSignal === 'number' && exitSignal > 0) return 'signal-kill'
+  if (exitCode === null || exitCode === undefined) return 'unknown'
+  if (exitCode === 0) return 'clean'
+  // …then the shell-relayed form. In production the signal never reaches node-pty
+  // (the login shell absorbs it and exits 128+n), so WITHOUT this branch a real OOM
+  // reads 'abnormal' and the investigator is pointed at a CLI crash. MEASURED:
+  // claude OOM-killed under `zsh -l` ⇒ exitCode 137.
+  if (exitCode >= SHELL_RELAYED_SIGNAL_MIN && exitCode <= SHELL_RELAYED_SIGNAL_MAX) {
+    return 'signal-kill'
+  }
+  return 'abnormal'
+}
+
 /** Pure verdict for one worker from its probe (no IO, no clock — `startupElapsed`
  *  is passed in). The DONE rule is deliberately CONSERVATIVE ("壊れていない時だけ
  *  前進"): promote a card doing→review ONLY when the branch has integrable commits
@@ -2476,7 +2571,20 @@ export interface OrchestratorDeps {
     worktree: string
     terminalId: string
     reason?: TeardownReason
-  }) => Promise<{ removed: boolean; reason?: string; wip?: WipCommitResult }>
+    /** An EARLIER pass already tore this worker down (its Board write was kept and
+     *  the recovery is being retried). The PTY's exit is then OUR kill, not the
+     *  worker's death — implementations must not report it as exitInfo. */
+    alreadyTornDown?: boolean
+  }) => Promise<{
+    removed: boolean
+    reason?: string
+    wip?: WipCommitResult
+    /** The dead PTY's own exit code/signal, captured BEFORE this call's kill —
+     *  i.e. only populated when the process had ALREADY died on its own (a real
+     *  crash), never for a worker we are killing ourselves (stall reclaim /
+     *  owner stop), so it can't be misread as "why we killed it". */
+    exitInfo?: { code: number | null; signal?: number }
+  }>
   /** Epoch ms of the worker PTY's last output chunk (terminal.ts stamps it on
    *  every onData), or null when unknown / it has produced none yet. The SECOND
    *  liveness channel beside the heartbeat: a worker streaming tokens is alive even
@@ -2684,7 +2792,20 @@ export interface IntegrationDeps {
     worktree: string
     terminalId: string
     reason?: TeardownReason
-  }) => Promise<{ removed: boolean; reason?: string; wip?: WipCommitResult }>
+    /** An EARLIER pass already tore this worker down (its Board write was kept and
+     *  the recovery is being retried). The PTY's exit is then OUR kill, not the
+     *  worker's death — implementations must not report it as exitInfo. */
+    alreadyTornDown?: boolean
+  }) => Promise<{
+    removed: boolean
+    reason?: string
+    wip?: WipCommitResult
+    /** The dead PTY's own exit code/signal, captured BEFORE this call's kill —
+     *  i.e. only populated when the process had ALREADY died on its own (a real
+     *  crash), never for a worker we are killing ourselves (stall reclaim /
+     *  owner stop), so it can't be misread as "why we killed it". */
+    exitInfo?: { code: number | null; signal?: number }
+  }>
   /** Tell a LIVE worker (over its PTY) WHY its card was sent back and to fix it
    *  IN PLACE — one line written to its terminal so a review→doing 差し戻し actually
    *  restarts work instead of leaving an idle (post-done) worker untouched.
@@ -3696,18 +3817,70 @@ export const commitWipBeforeTeardown = async (
  *  If that salvage commit FAILS the worktree is KEPT, not destroyed: the work in
  *  it is unrecoverable, a leftover worktree is not. Branch is intentionally KEPT
  *  (see the dep doc). Never throws — a failure is reported for the log. */
-const defaultRecoverWorker = async (opts: {
-  projectPath: string
-  worktree: string
-  terminalId: string
-  reason?: TeardownReason
-}): Promise<{ removed: boolean; reason?: string; wip?: WipCommitResult }> => {
+export const defaultRecoverWorker = async (
+  opts: {
+    projectPath: string
+    worktree: string
+    terminalId: string
+    reason?: TeardownReason
+    /** TRUE when an EARLIER pass already ran this teardown for the same worker (its
+     *  Board write was kept, so the recovery is being retried). The PTY was killed
+     *  back then, so whatever exit it now reports is OUR OWN kill — recording it
+     *  would fabricate a cause of death. See the exitInfo gate below. */
+    alreadyTornDown?: boolean
+  },
+  // Terminal-pool seam, injected the same way defaultNudgeManager takes its
+  // write/sleep: it makes the exitInfo gate unit-testable without a real PTY
+  // (pass `worktree: ''` and the function returns right after computing it).
+  termDeps?: { getTerminal?: typeof getTerminal; killTerminal?: typeof killTerminal },
+): Promise<{
+  removed: boolean
+  reason?: string
+  wip?: WipCommitResult
+  exitInfo?: { code: number | null; signal?: number }
+}> => {
+  const readTerminal = termDeps?.getTerminal ?? getTerminal
+  const endTerminal = termDeps?.killTerminal ?? killTerminal
+  // Read BEFORE killTerminal — a PTY that is still alive has no exitCode yet, and
+  // one we are about to kill ourselves must not have ITS exit mistaken for the
+  // reason it died. Only meaningful for a reclaim of an ALREADY-dead worker
+  // ('crash', the default): for every other reason (stall/runaway/stopped/…) WE
+  // are the one about to kill it, so there is no "cause of death" to record yet.
+  //
+  // ⚠ `reason === 'crash'` ALONE IS NOT ENOUGH (2026-07-27 review). When a
+  // reclaim's Board write is kept, the retry one pass later (TICK_MS = 3s)
+  // rebuilds the recovery with a 'recover' intent, which maps back to reason
+  // 'crash' — while the PTY is still in the pool's post-exit linger window,
+  // carrying the exit of the SIGHUP *we* sent during the first pass. A stall
+  // reclaim would then journal that kill (measured: `exitCode=1` under the
+  // production framing — the login shell catches SIGHUP and exits itself) as the
+  // worker's own cause of
+  // death. `alreadyTornDown` is the caller's answer to "did we already kill this
+  // one?", and it vetoes the record outright.
+  const preKill = readTerminal(opts.terminalId)
+  const isCrashReclaim = (opts.reason ?? 'crash') === 'crash' && !opts.alreadyTornDown
+  const exitInfo = !isCrashReclaim
+    ? undefined
+    : preKill?.finishedAt
+      ? {
+          code: preKill.exitCode ?? null,
+          // Only a REAL signal is a signal (measured: node-pty reports signal 0 —
+          // not undefined — for every voluntary exit, so an `!== undefined` test
+          // would stamp `signal=0` on every clean line and say nothing).
+          ...(typeof preKill.exitSignal === 'number' && preKill.exitSignal > 0
+            ? { signal: preKill.exitSignal }
+            : {}),
+        }
+      // The PTY session is gone entirely (its post-exit delete timer fired before
+      // this reclaim got to it) — it died, but its exit code went with it. This is
+      // the 'unknown' case classifyWorkerExit exists for.
+      : { code: null }
   try {
-    killTerminal(opts.terminalId)
+    endTerminal(opts.terminalId)
   } catch {
     /* already dead / absent — the worktree teardown below is what matters */
   }
-  if (!opts.worktree) return { removed: false, reason: 'no worktree path on record' }
+  if (!opts.worktree) return { removed: false, reason: 'no worktree path on record', exitInfo }
   // Kill FIRST, then salvage: a dead PTY can't keep writing into the tree we are
   // about to snapshot.
   let wip: WipCommitResult = { committed: false }
@@ -3721,13 +3894,14 @@ const defaultRecoverWorker = async (opts: {
       removed: false,
       reason: `uncommitted work could not be saved (${wip.reason ?? '?'}) — worktree kept`,
       wip,
+      exitInfo,
     }
   }
   try {
     const res = await removeSwarmWorktree(opts.projectPath, opts.worktree, { force: true })
-    return { ...res, wip }
+    return { ...res, wip, exitInfo }
   } catch (e) {
-    return { removed: false, reason: errMsg(e), wip }
+    return { removed: false, reason: errMsg(e), wip, exitInfo }
   }
 }
 
@@ -5498,18 +5672,42 @@ const monitorWorkers = async (
                 : reason === 'question'
                   ? 'free-text question unanswered too long — parked'
                   : 'lost'
-    let teardown: { removed: boolean; reason?: string; wip?: WipCommitResult } = { removed: false }
+    let teardown: {
+      removed: boolean
+      reason?: string
+      wip?: WipCommitResult
+      exitInfo?: { code: number | null; signal?: number }
+    } = { removed: false }
     try {
       teardown = await deps.recoverWorker({
         projectPath: engine.path,
         worktree: w.worktree,
         terminalId: w.terminalId,
         reason, // rides into the salvage commit's message (commitWipBeforeTeardown)
+        // A kept RECOVERY move means an EARLIER pass already ran this very teardown
+        // (recoverWorker runs before the Board write that got kept), so the PTY we
+        // are about to inspect was killed by US — suppress the exit record rather
+        // than attribute our own kill to the worker.
+        //
+        // ⚠ MUST be the intent, not `stuckMoves.has()` (2026-07-27 review): the map
+        // has a SECOND writer — the promote path records intent 'review' when a
+        // doing→review write is kept, and NO teardown ran there. Keying on mere
+        // presence would drop the cause of death of a worker whose review move was
+        // kept and which then genuinely died on its FIRST reclaim.
+        alreadyTornDown: TEARDOWN_INTENTS.has(engine.stuckMoves.get(w.taskId)?.intent ?? ''),
       })
     } catch {
       /* reported via teardown.removed=false below */
     }
     const keptNote = teardown.removed ? '' : ` · worktree kept (${teardown.reason ?? '?'})`
+    // Surfaces the PTY's OWN exit code/signal for a 'crash' recovery — this is the
+    // only place a dead worker's death cause is ever recorded (in-memory TerminalInfo
+    // is gone once the session is swept), so without it "worker crashed" carries no
+    // diagnosable trace of WHY (e.g. 137/SIGKILL ⇒ OOM-killed vs a clean non-zero exit).
+    const exitNote =
+      teardown.exitInfo !== undefined
+        ? ` · exitCode=${teardown.exitInfo.code ?? 'null'}${teardown.exitInfo.signal !== undefined ? ` signal=${teardown.exitInfo.signal}` : ''} (${classifyWorkerExit(teardown.exitInfo.code, teardown.exitInfo.signal)})`
+        : ''
     // SALVAGE SURFACED (2026-07-12 全損): the reclaimed worktree held uncommitted
     // work and it was committed to the worker's branch instead of being destroyed.
     // The commander MUST see this — a re-dispatch of the same card branches fresh,
@@ -5531,7 +5729,7 @@ const monitorWorkers = async (
       logLine(
         engine,
         'info',
-        `worker ${verb} — slot freed: ${w.branch} (${shorten(w.taskTitle)})${keptNote}${wipNote}`,
+        `worker ${verb} — slot freed: ${w.branch} (${shorten(w.taskTitle)})${keptNote}${wipNote}${exitNote}`,
         'routine',
       )
       return false
@@ -5593,7 +5791,15 @@ const monitorWorkers = async (
       logLine(
         engine,
         'warn',
-        `worker ${verb} but card move kept (will retry): ${w.branch} (${shorten(w.taskTitle)})`,
+        // ${exitNote} MUST be here too, not only on the two terminal lines
+        // (2026-07-27 review). This is the FIRST pass of a reclaim whose Board write
+        // was kept, and it is the ONLY pass that still sees the worker's real exit:
+        // every later pass is vetoed by `alreadyTornDown`, which cannot tell "we
+        // killed a live PTY last pass" (stall — veto correct) from "we found an
+        // already-dead one" (crash — the exit is the WORKER'S). Dropping the note
+        // here loses a genuine crash's cause of death permanently, in precisely the
+        // kept-write scenario that veto exists for.
+        `worker ${verb} but card move kept (will retry): ${w.branch} (${shorten(w.taskTitle)})${exitNote}`,
       )
       return true
     }
@@ -5618,7 +5824,7 @@ const monitorWorkers = async (
     logLine(
       engine,
       'warn',
-      `worker ${verb} — card → ${col}: ${w.branch} (${shorten(w.taskTitle)})${keptNote}${wipNote}`,
+      `worker ${verb} — card → ${col}: ${w.branch} (${shorten(w.taskTitle)})${keptNote}${wipNote}${exitNote}`,
       reason === 'stall' ? 'stall' : reason === 'crash' ? 'crash' : undefined,
     )
     return false

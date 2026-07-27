@@ -35,6 +35,9 @@ import {
   declaredFiles,
   contentKey,
   classifyWorker,
+  classifyWorkerExit,
+  defaultRecoverWorker,
+  type TeardownReason,
   classifyStall,
   defaultEscalate,
   lastActivityMs,
@@ -253,12 +256,17 @@ const makeDeps = (init: {
   agentActivity?: Map<string, number> // worktree cwd → newest transcript/sub-agent mtime (absent → null)
   raiseFails?: boolean // make deps.raiseQuestion throw (fs/notify fault)
   spawnModel?: string // model alias the fake spawn reports launching with (quota attribution)
+  exitInfos?: Map<string, { code: number | null; signal?: number }> // taskId → the dead PTY's
+  //   own exit code/signal, as recoverWorker would report it for a 'crash' reclaim
 }): OrchestratorDeps & {
   spawned: { taskId: string; priorFailure?: string }[]
   moves: { taskId: string; branch: string }[]
   reviews: { taskId: string; branch: string }[]
   recovered: { taskId: string; column: 'todo' | 'blocked' }[]
   tornDown: { terminalId: string; worktree: string }[]
+  /** FULL opts each recoverWorker call received — kept separate from `tornDown`
+   *  so existing toEqual assertions on that array stay exact. */
+  teardownOpts: { terminalId: string; reason?: string; alreadyTornDown?: boolean }[]
   nudged: string[] // terminalIds nudged (Enter), in order
   escalated: { terminalId: string; taskTitle: string }[] // ESC+continue escalations, in order
   raised: OpenEscalationInput[] // questions raised to the T3 inbox, in order
@@ -282,10 +290,15 @@ const makeDeps = (init: {
   const reviews: { taskId: string; branch: string }[] = []
   const recovered: { taskId: string; column: 'todo' | 'blocked' }[] = []
   const tornDown: { terminalId: string; worktree: string }[] = []
+  const teardownOpts: { terminalId: string; reason?: string; alreadyTornDown?: boolean }[] = []
   const nudged: string[] = []
   const escalated: { terminalId: string; taskTitle: string }[] = []
   const raised: OpenEscalationInput[] = []
+  const exitInfos = init.exitInfos ?? new Map<string, { code: number | null; signal?: number }>()
   const idOf = (branch: string) => branch.replace(/^swarm\//, '')
+  // terminalId is always `pty-${taskId}-${n}` (see spawnWorker below) — recover the
+  // taskId back out of it so recoverWorker can look up its exitInfo.
+  const taskIdOfTerminal = (terminalId: string) => terminalId.match(/^pty-(.+)-\d+$/)?.[1]
   let n = 0
   return {
     spawned,
@@ -293,6 +306,7 @@ const makeDeps = (init: {
     reviews,
     recovered,
     tornDown,
+    teardownOpts,
     nudged,
     escalated,
     raised,
@@ -358,9 +372,16 @@ const makeDeps = (init: {
       }
       return true
     },
-    recoverWorker: async ({ terminalId, worktree }) => {
+    recoverWorker: async ({ terminalId, worktree, reason, alreadyTornDown }) => {
       tornDown.push({ terminalId, worktree })
-      return { removed: true }
+      teardownOpts.push({ terminalId, reason, alreadyTornDown })
+      const taskId = taskIdOfTerminal(terminalId)
+      // Honour the SAME gate the real defaultRecoverWorker applies, or engine-level
+      // journal assertions are vacuous: a fixture that always returns exitInfo makes
+      // "the exit reached the journal" true no matter what the gate does.
+      const gated = (reason ?? 'crash') !== 'crash' || alreadyTornDown === true
+      const exitInfo = !gated && taskId ? exitInfos.get(taskId) : undefined
+      return { removed: true, ...(exitInfo ? { exitInfo } : {}) }
     },
     // PTY output epoch, keyed by terminalId (absent → null = no output signal, so
     // the stall monitor falls back to heartbeat/startedAt). Default: none.
@@ -766,6 +787,126 @@ describe('classifyWorker — the conservative DONE judgement', () => {
     expect(
       classifyWorker(probe({ alive: true, commitsAhead: 0, heartbeat: { ready: false, blocked: false } }), false).stage,
     ).toBe('running')
+  })
+})
+
+describe('classifyWorkerExit — coarse cause bucket for a dead worker PTY', () => {
+  // The shapes below are MEASURED against this repo's node-pty (1.2.0-beta.14) by
+  // spawning real PTYs and sending real signals — not inferred. waitpid's WIFEXITED
+  // and WIFSIGNALED are mutually exclusive, so a signal death OF THE PTY'S DIRECT
+  // CHILD arrives as `exitCode 0` plus a non-zero signal (list A below). ⚠ That is
+  // NOT what production produces — there the direct child is the login shell and the
+  // kill is relayed as 128+n; see the SHELL-RELAYED test further down:
+  //   SIGKILL(9)→{0,9}  SIGTERM(15)→{0,15}  SIGHUP(1)→{0,1}  SIGSEGV(11)→{0,11}
+  //   exit 0→{0,0}  exit 3→{3,0}  exit 137→{137,0}
+  // (⚠ `pty.kill()` is NOT in list A under the production framing: the login
+  //  shell catches SIGHUP and exits on its own, measured as {1,0}. See table B
+  //  in docs/commander/02-worker-lifecycle.md §10.1.)
+  // An earlier version of this suite pinned `classifyWorkerExit(1, 9)` — a shape
+  // node-pty cannot produce — which is exactly why it stayed green while every real
+  // signal kill was being classified 'clean'. Every case here is a real shape.
+
+  it('is "signal-kill" for a REAL signal death — the shape node-pty actually emits', () => {
+    // exitCode 0 + signal n. This is the case the bucket exists for (OOM ⇒ SIGKILL);
+    // it must win over the exitCode-0 clean test, not be swallowed by it.
+    expect(classifyWorkerExit(0, 9)).toBe('signal-kill') // SIGKILL — OOM / external kill
+    expect(classifyWorkerExit(0, 15)).toBe('signal-kill') // SIGTERM
+  })
+
+  it('is "signal-kill" for ANY non-zero signal, not just 9/15', () => {
+    // These also arrive with exitCode 0, so a 9/15-only test launders them to 'clean'.
+    expect(classifyWorkerExit(0, 1)).toBe('signal-kill') // SIGHUP (what pty.kill() sends)
+    expect(classifyWorkerExit(0, 6)).toBe('signal-kill') // SIGABRT
+    expect(classifyWorkerExit(0, 11)).toBe('signal-kill') // SIGSEGV
+  })
+
+  it('is "clean" for a voluntary exit 0 — signal 0 is NOT a signal', () => {
+    expect(classifyWorkerExit(0)).toBe('clean') // no signal reported at all
+    expect(classifyWorkerExit(0, 0)).toBe('clean') // node-pty's real "no signal" value
+  })
+
+  it('is "signal-kill" for the SHELL-RELAYED 128+n form — the shape production really emits', () => {
+    // THE PRODUCTION CASE. The PTY child is `zsh -l`, not claude; claude is a
+    // foreground job. Killing the job leaves the shell alive to run `; exit`, so the
+    // signal is relayed as 128+n and node-pty reports signal 0. MEASURED under the
+    // real launch framing (`zsh -l` + `OPENGROUND_OWNED=1 <cmd> ; exit`):
+    //   claude OOM-killed → {137, 0}   claude SIGTERMed → {143, 0}
+    // An earlier revision filed these as 'abnormal', which sent the investigator
+    // after a CLI crash while the truth was an OOM.
+    expect(classifyWorkerExit(137, 0)).toBe('signal-kill') // 128+9  SIGKILL / OOM
+    expect(classifyWorkerExit(143, 0)).toBe('signal-kill') // 128+15 SIGTERM
+    expect(classifyWorkerExit(139, 0)).toBe('signal-kill') // 128+11 SIGSEGV
+    expect(classifyWorkerExit(129, 0)).toBe('signal-kill') // 128+1  SIGHUP (band floor)
+    expect(classifyWorkerExit(159, 0)).toBe('signal-kill') // 128+31 (band ceiling)
+  })
+
+  it('is "abnormal" for a voluntary non-zero exit OUTSIDE the 128+n band', () => {
+    expect(classifyWorkerExit(1, 0)).toBe('abnormal')
+    expect(classifyWorkerExit(3, 0)).toBe('abnormal')
+    expect(classifyWorkerExit(127, 0)).toBe('abnormal') // command not found
+    expect(classifyWorkerExit(128, 0)).toBe('abnormal') // 128 is not a valid 128+n
+    expect(classifyWorkerExit(160, 0)).toBe('abnormal') // just past the band
+  })
+
+  it('is "unknown" when no exit code could be captured at all', () => {
+    expect(classifyWorkerExit(null)).toBe('unknown')
+    expect(classifyWorkerExit(undefined)).toBe('unknown')
+  })
+})
+
+describe('defaultRecoverWorker — never attributes OUR OWN kill to the worker', () => {
+  // The gate that decides whether a reclaim records a cause of death at all. Runs
+  // the real function with `worktree: ''`, which returns immediately after the gate
+  // (no git, no filesystem), and a fake terminal pool injected on the termDeps seam.
+  const deadPty = (info: { exitCode?: number; exitSignal?: number }) => ({
+    getTerminal: (() => ({ finishedAt: '2026-07-27T00:00:00.000Z', ...info })) as never,
+    killTerminal: (() => true) as never,
+  })
+
+  const run = (
+    opts: { reason?: TeardownReason; alreadyTornDown?: boolean },
+    info: { exitCode?: number; exitSignal?: number } = { exitCode: 0, exitSignal: 1 },
+  ) =>
+    defaultRecoverWorker(
+      { projectPath: '/p', worktree: '', terminalId: 't1', ...opts },
+      deadPty(info),
+    )
+
+  it('records the exit for a genuine crash reclaim', async () => {
+    const r = await run({ reason: 'crash' }, { exitCode: 0, exitSignal: 9 })
+    expect(r.exitInfo).toEqual({ code: 0, signal: 9 })
+  })
+
+  it('records NOTHING when an earlier pass already tore this worker down', async () => {
+    // THE 2026-07-27 REVIEW FINDING. A kept Board write makes the next pass rebuild
+    // the recovery as reason 'crash', while the PTY still lingers carrying the exit
+    // of the kill *we* sent a pass earlier — measured under the production
+    // framing, `pty.kill()` surfaces as {exitCode:1, signal:0} (the login shell
+    // catches SIGHUP and exits itself), NOT as {0,1}.
+    // Without this veto a stall reclaim journals `exitCode=1 (abnormal)` as the
+    // worker's cause of death.
+    const r = await run({ reason: 'crash', alreadyTornDown: true }, { exitCode: 0, exitSignal: 1 })
+    expect(r.exitInfo).toBeUndefined()
+  })
+
+  it('records nothing for a reason where WE do the killing', async () => {
+    for (const reason of ['stall', 'runaway', 'stopped', 'rework'] as const) {
+      const r = await run({ reason })
+      expect(r.exitInfo, `reason=${reason}`).toBeUndefined()
+    }
+  })
+
+  it('omits the signal field for a voluntary exit — node-pty reports signal 0, not undefined', async () => {
+    const r = await run({ reason: 'crash' }, { exitCode: 3, exitSignal: 0 })
+    expect(r.exitInfo).toEqual({ code: 3 }) // no `signal: 0` noise on every clean line
+  })
+
+  it('falls back to unknown when the PTY session is gone entirely', async () => {
+    const r = await defaultRecoverWorker(
+      { projectPath: '/p', worktree: '', terminalId: 't1', reason: 'crash' },
+      { getTerminal: (() => null) as never, killTerminal: (() => true) as never },
+    )
+    expect(r.exitInfo).toEqual({ code: null })
   })
 })
 
@@ -2097,6 +2238,136 @@ describe('runDispatchPass — drain + dispatch', () => {
     const crash = engine.log.find((l) => l.message.startsWith('worker lost — card →'))
     expect(crash?.kind).toBe('crash')
     expect(crash?.level).toBe('warn')
+  })
+
+  // Shapes are the ones node-pty really emits (measured — see the classifyWorkerExit
+  // describe above). BOTH arrangements appear here on purpose: {0,signal} is a direct
+  // kill of the PTY child, {137,0}/{143,0} is the SHELL-RELAYED form production
+  // actually yields when claude — a foreground job — is killed.
+  it.each([
+    [0, 9, 'exitCode=0 signal=9', '(signal-kill)'], // SIGKILL — the OOM shape
+    [0, 15, 'exitCode=0 signal=15', '(signal-kill)'], // SIGTERM
+    [0, undefined, 'exitCode=0', '(clean)'],
+    [137, undefined, 'exitCode=137', '(signal-kill)'], // PRODUCTION OOM shape (128+9)
+    [3, undefined, 'exitCode=3', '(abnormal)'], // voluntary non-zero
+    [null, undefined, 'exitCode=null', '(unknown)'],
+  ] as const)(
+    'records the dead PTY exit info in the crash journal line (exitCode=%s)',
+    async (code, signal, expectedExit, expectedCategory) => {
+      // 2026-07 investigation card: before this, a crashed worker's exitCode was
+      // captured on TerminalInfo (terminal.ts) but never carried into the reclaim
+      // journal — so a worker dying unattended left no diagnosable trace of WHY.
+      const dead = new Set<string>()
+      const exitInfos = new Map([['a', { code, ...(signal !== undefined ? { signal } : {}) }]])
+      const deps = makeDeps({ cards: [card('a', { boardOrder: 0 })], dead, exitInfos })
+      const engine = newEngine()
+
+      await runDispatchPass(engine, deps)
+      dead.add('a')
+      await runDispatchPass(engine, deps)
+
+      const crash = engine.log.find((l) => l.message.startsWith('worker lost — card →'))
+      expect(crash?.kind).toBe('crash')
+      expect(crash?.message).toContain(expectedExit)
+      expect(crash?.message).toContain(expectedCategory)
+    },
+  )
+
+  it('tells recoverWorker when a RETRY is re-tearing-down a worker we already killed', async () => {
+    // The call-site half of the 2026-07-27 review finding. Pass 1 reclaims and its
+    // Board write is KEPT (recoverFails), so a kept move is recorded and the worker
+    // stays on the roster. Pass 2 rebuilds the recovery — and must flag that the
+    // teardown already ran, or the gate inside defaultRecoverWorker will read back
+    // the exit of OUR OWN kill and journal it as the worker's cause of death.
+    const dead = new Set<string>()
+    const deps = makeDeps({
+      cards: [card('a', { boardOrder: 0 })],
+      dead,
+      recoverFails: new Set(['a']), // first recover move is kept
+    })
+    const engine = newEngine()
+
+    await runDispatchPass(engine, deps) // dispatch
+    dead.add('a')
+    await runDispatchPass(engine, deps) // pass 1 — reclaim, Board write kept
+    await runDispatchPass(engine, deps) // pass 2 — retry of the same recovery
+
+    expect(deps.teardownOpts.length).toBeGreaterThanOrEqual(2)
+    // First teardown: a genuine crash reclaim — the exit IS the worker's.
+    expect(deps.teardownOpts[0]?.alreadyTornDown).toBeFalsy()
+    // Every teardown after it is a retry of that same reclaim: flagged, so no
+    // cause of death is fabricated from the SIGHUP we sent on pass 1.
+    for (const t of deps.teardownOpts.slice(1)) expect(t.alreadyTornDown).toBe(true)
+  })
+
+  it('records the cause of death on the KEPT-WRITE line — the only pass that still sees it', async () => {
+    // 2026-07-27 review, blocking regression. `alreadyTornDown` cannot distinguish
+    // "pass 1 killed a LIVE pty" (stall — veto right) from "pass 1 found an
+    // ALREADY-DEAD one" (crash — the exit is the worker's), so every pass after the
+    // first is vetoed. If the kept-write line ALSO omits the exit, a genuine crash
+    // whose Board write is kept loses its cause of death PERMANENTLY — in exactly
+    // the scenario the veto was added for.
+    const dead = new Set<string>()
+    const deps = makeDeps({
+      cards: [card('a', { boardOrder: 0 })],
+      dead,
+      exitInfos: new Map([['a', { code: 137 }]]), // production OOM shape (128+9)
+      recoverFails: new Set(['a']), // …and the recovery Board write is KEPT
+    })
+    const engine = newEngine()
+
+    await runDispatchPass(engine, deps)
+    dead.add('a')
+    await runDispatchPass(engine, deps) // reclaim; Board write kept
+    await runDispatchPass(engine, deps) // retry (vetoed — carries no exit of its own)
+
+    const kept = engine.log.find((l) => l.message.includes('card move kept (will retry)'))
+    expect(kept?.message).toContain('exitCode=137')
+    expect(kept?.message).toContain('(signal-kill)')
+    // …and it survives ONLY because of that line: the retry pass is vetoed, so the
+    // terminal line carries nothing. (The fixture honours the same gate as
+    // defaultRecoverWorker, so this is not vacuous.)
+    expect(deps.teardownOpts.at(-1)?.alreadyTornDown).toBe(true)
+    const terminal = engine.log.filter((l) => l.message.includes('card → '))
+    for (const l of terminal) expect(l.message).not.toContain('exitCode=')
+  })
+
+  it('still records the cause of death when a kept PROMOTE move (no teardown) precedes the crash', async () => {
+    // The false-negative half of the same gate. `engine.stuckMoves` has TWO writers:
+    // the recovery path (after a teardown) and the PROMOTE path (doing→review write
+    // kept — no teardown ran, the PTY may still be alive). Keying the veto on mere
+    // presence would drop the cause of death of a worker whose review move was kept
+    // and which then genuinely died on its FIRST reclaim — exactly the diagnosis
+    // this feature exists to preserve. The veto must key on the recovery intents.
+    const dead = new Set<string>()
+    const commits = new Map([['a', 2]]) // has integrable work → promote is attempted
+    const heartbeats = new Map<string, HeartbeatSign>([['a', { ready: true, blocked: false }]])
+    const deps = makeDeps({
+      cards: [card('a', { boardOrder: 0 })],
+      dead,
+      commits,
+      heartbeats,
+      reviewFails: new Set(['a']), // …but the doing→review write is KEPT
+    })
+    const engine = newEngine()
+
+    await runDispatchPass(engine, deps) // dispatch
+    await runDispatchPass(engine, deps) // promote attempted, review write kept
+    expect(deps.teardownOpts).toHaveLength(0) // nothing was torn down yet
+    expect(engine.stuckMoves.get('a')?.intent).toBe('review')
+
+    // The promote verdict then FLIPS to false — the documented, reproduced case
+    // where countCommitsAhead / readHeartbeat fails and is swallowed to 0 / null.
+    // That is what routes this worker down the crash-reclaim path instead of
+    // retrying the promote, with a 'review' kept move already on the books.
+    commits.set('a', 0)
+    heartbeats.delete('a')
+    dead.add('a') // …and it genuinely dies
+    await runDispatchPass(engine, deps)
+
+    expect(deps.teardownOpts.length).toBeGreaterThanOrEqual(1)
+    // First-ever teardown for this worker ⇒ its exit IS its own. Must not be vetoed.
+    expect(deps.teardownOpts[0]?.alreadyTornDown).toBeFalsy()
   })
 
   it('tags the card-gone slot-free as routine bookkeeping (no actionable crash to surface)', async () => {

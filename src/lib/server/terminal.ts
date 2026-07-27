@@ -30,6 +30,21 @@ export interface TerminalInfo {
   startedAt: string
   finishedAt?: string
   exitCode?: number
+  // The signal number that terminated the PTY's shell, when the shell was killed
+  // BY a signal (e.g. 9 = SIGKILL, commonly an OS OOM-kill; 1 = SIGHUP). Captured so
+  // a worker that dies unattended (no human watching the pane) leaves a diagnosable
+  // trace instead of just "died, cause unknown" (swarm workers are unattended
+  // `claude` PTYs; before this field existed there was no way to tell an OOM-kill
+  // from a crash from an intentional teardown after the fact).
+  //
+  // Left UNDEFINED for a voluntary exit. ⚠ node-pty does not do that for us: it
+  // reports `signal: 0` — a number, not undefined — on every plain exit (measured
+  // on 1.2.0-beta.14). Storing that verbatim would stamp a meaningless `signal=0`
+  // on every clean teardown, so the capture below keeps only a REAL signal (> 0).
+  // A signal death also always arrives with `exitCode: 0` (WIFEXITED and
+  // WIFSIGNALED are mutually exclusive) — hence this field, and not the exit code,
+  // is what identifies a kill. See classifyWorkerExit (swarmOrchestrator.ts).
+  exitSignal?: number
   // Marks PTYs that host a `claude` interactive session (vs. a free user
   // shell) so callers can route observer wiring, UI affordances, and buffer
   // sizing differently. Defaults to 'shell'.
@@ -369,8 +384,12 @@ export const createTerminal = (opts: {
       try { l(chunk) } catch {}
     }
   })
-  proc.onExit(({ exitCode }: { exitCode: number }) => {
+  proc.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
     info.exitCode = exitCode ?? 0
+    // `> 0`, not `!== undefined`: node-pty reports signal 0 for a voluntary exit
+    // (measured), so the looser test would set exitSignal on EVERY exit and make
+    // the field meaningless. See the exitSignal doc on TerminalInfo.
+    if (typeof signal === 'number' && signal > 0) info.exitSignal = signal
     info.finishedAt = new Date().toISOString()
     if (session.menuTimer) { clearTimeout(session.menuTimer); session.menuTimer = null }
     info.menuOpen = false
