@@ -23,7 +23,7 @@
 //   (5) a `blocked`-column card is NEVER dispatched.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, mkdir, rm, realpath, writeFile, stat, utimes } from 'fs/promises'
+import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, stat, utimes } from 'fs/promises'
 import { existsSync, readFileSync, rmSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
@@ -62,6 +62,7 @@ import {
   // sessions store + manager.json + transcript, with only the PTY signal injected.
   defaultManagerPresence,
   defaultManagerDeliveryAt,
+  sessionBackgroundTaskAt,
   managerIntegrationStalled,
   defaultNudgeManager,
   STALL_ESCALATE_DELAY_MS,
@@ -1008,6 +1009,266 @@ describe('defaultManagerDeliveryAt — sub-agent transcripts count as work (the 
         now: Date.parse('2026-07-22T11:17:00Z'), // 40 min after the cards landed
       }),
     ).toBe(true)
+  })
+})
+
+// ── The FOURTH liveness channel: a background task in flight (2026-07-27) ──────
+//    Real transcript records, because the ONLY thing this resolver knows is which
+//    records claude actually writes — the shapes below are transcribed from the two
+//    workers the engine killed on 2026-07-27 (gap-7 / gap-4), not invented. If claude
+//    ever renames `run_in_background` or the `<tool-use-id>` notification block, THIS
+//    is the test that must fail, loudly, instead of the channel silently going dark and
+//    the reclaim ladder quietly resuming.
+describe('sessionBackgroundTaskAt — the in-flight completion gate, read from the transcript', () => {
+  let savedHome: string | undefined
+  let fakeHome: string
+  beforeEach(async () => {
+    savedHome = process.env.HOME
+    fakeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-claude-home-')))
+    process.env.HOME = fakeHome
+  })
+  afterEach(async () => {
+    // Never `delete process.env.HOME` — see the note in the delivery block above.
+    if (savedHome !== undefined) process.env.HOME = savedHome
+    await rm(fakeHome, { recursive: true, force: true })
+  })
+
+  const SID = 'worker-session-uuid'
+  const CWD = '/tmp/og-worker-worktree'
+  const START = Date.parse('2026-07-27T10:00:52.003Z') // gap-7's real launch stamp
+  const TOOL_ID = 'toolu_012rtVNy8uKsWUfPSjKYwgD5' // …and its real tool_use id
+
+  /** An `assistant` record launching a background Bash — the START marker. */
+  const bgStart = (id: string, atIso: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: atIso,
+      sessionId: SID,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Running the full suite; I will report when it finishes.' },
+          { type: 'tool_use', id, name: 'Bash', input: { command: 'npm test > /tmp/out 2>&1', run_in_background: true } },
+        ],
+      },
+    })
+
+  /** A `queue-operation` carrying the task notification — the END marker. `status` is
+   *  cosmetic here on purpose: completed / failed / killed all mean NOT PENDING. */
+  const bgEnd = (id: string, atIso: string, status = 'completed') =>
+    JSON.stringify({
+      type: 'queue-operation',
+      operation: 'enqueue',
+      timestamp: atIso,
+      sessionId: SID,
+      content: `<task-notification>\n<task-id>b65agguu1</task-id>\n<tool-use-id>${id}</tool-use-id>\n<status>${status}</status>\n</task-notification>`,
+    })
+
+  /** Ordinary traffic the scan must ignore (and must not choke on). */
+  const noise = [
+    JSON.stringify({ type: 'user', timestamp: '2026-07-27T10:00:34.735Z', message: { role: 'user', content: 'go' } }),
+    JSON.stringify({ type: 'system', subtype: 'turn_duration', timestamp: '2026-07-27T10:00:58.132Z', durationMs: 1000 }),
+    JSON.stringify({ type: 'last-prompt', sessionId: SID, lastPrompt: 'go' }), // no timestamp at all
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-07-27T09:59:00.000Z',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_fg', name: 'Bash', input: { command: 'git status' } }] },
+    }), // FOREGROUND Bash — no run_in_background ⇒ not a background task
+  ]
+
+  const writeTranscript = async (lines: string[]) => {
+    const file = sessionJsonlPath(CWD, SID)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, lines.join('\n') + '\n')
+  }
+
+  it('returns the START stamp of a task with no completion notification (the killed workers exactly)', async () => {
+    // gap-7's transcript as the engine saw it at 10:16: the launch is on disk, the
+    // notification is NOT — because the suite was still running. The engine had every
+    // byte it needed to know the worker was alive; it just never looked.
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z')])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(START)
+  })
+
+  it('returns null once the notification names that tool-use id (completed, failed OR killed)', async () => {
+    for (const status of ['completed', 'failed', 'killed']) {
+      await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z'), bgEnd(TOOL_ID, '2026-07-27T10:20:33.084Z', status)])
+      expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull()
+    }
+  })
+
+  it('returns the NEWEST unresolved task, so one that never reports back cannot SHADOW a fresh one', async () => {
+    // The hole this pins: a worker leaves a long-lived background task unresolved (a dev
+    // server, a `tail -f`, anything whose notification was lost) and then runs its
+    // completion gate. Answering with the OLDEST would report a task that started hours
+    // ago, blow the grace, and reclaim the worker MID-TEST — the exact bug, reopened.
+    const fresh = Date.parse('2026-07-27T10:00:52.003Z')
+    await writeTranscript([
+      bgStart('toolu_devserver', '2026-07-27T06:00:00.000Z'), // never acknowledged
+      bgStart('toolu_npmtest', '2026-07-27T10:00:52.003Z'), // the completion gate, running
+    ])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(fresh)
+  })
+
+  it('a resolved fresh task does NOT hide an older one that is still in flight', async () => {
+    // The converse: newest-unresolved means RESOLVED tasks are skipped entirely, so the
+    // still-running older one is what answers — the worker is genuinely still busy.
+    const older = Date.parse('2026-07-27T09:30:00.000Z')
+    await writeTranscript([
+      bgStart('toolu_older', '2026-07-27T09:30:00.000Z'),
+      bgStart('toolu_newer', '2026-07-27T10:00:52.003Z'),
+      bgEnd('toolu_newer', '2026-07-27T10:05:00.000Z'),
+    ])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(older)
+  })
+
+  it('ignores foreground tools and non-task traffic (no false life)', async () => {
+    await writeTranscript(noise)
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull()
+  })
+
+  // ── START B: the harness backgrounds a foreground Bash on timeout ───────────────
+  // The shape the FIRST cut of this channel could not see, and the reason it still let
+  // workers die: the `tool_use` record has NO `run_in_background` key — nothing about it
+  // says "background". Only the tool_result announcing the move does. Transcribed from
+  // gap-4's own record (toolu_016eNGirNrZE6cYbt7vX382s: foreground 08:50:49, auto-moved
+  // 09:00:56, finished 09:20:52 — a 20-minute `npm test` the first parser was blind to).
+  const AUTO_ID = 'toolu_016eNGirNrZE6cYbt7vX382s'
+  const AUTO_MOVED_AT = Date.parse('2026-07-27T09:00:56.695Z')
+
+  /** The FOREGROUND launch — note `input` has no `run_in_background` at all. */
+  const fgStart = (id: string, atIso: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: atIso,
+      sessionId: SID,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'npm test 2>&1 | tail -20', description: 'Full suite', timeout: 600000 } }],
+      },
+    })
+
+  /** The tool_result that announces the auto-move — the ONLY evidence this is now a
+   *  background task. Verbatim wording from the real transcript. */
+  const autoMoved = (id: string, atIso: string) =>
+    JSON.stringify({
+      type: 'user',
+      timestamp: atIso,
+      sessionId: SID,
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: id,
+            content: `Command did not complete within its 600s timeout and was moved to the background (ID: b919f2uwt). Output is being written to: /tmp/out`,
+          },
+        ],
+      },
+    })
+
+  it('detects an AUTO-BACKGROUNDED task — the tool_use has no run_in_background at all', async () => {
+    await writeTranscript([...noise, fgStart(AUTO_ID, '2026-07-27T08:50:49.782Z'), autoMoved(AUTO_ID, '2026-07-27T09:00:56.695Z')])
+    // Stamped when it BECAME a background task, not when the foreground command began:
+    // until the move, the foreground Bash was holding the turn open.
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(AUTO_MOVED_AT)
+  })
+
+  it('an auto-backgrounded task is resolved by the SAME notification shape (no END change needed)', async () => {
+    // It keeps its original tool_use id, so the `<tool-use-id>` match works unchanged —
+    // this is what made the fix a start-side-only change.
+    await writeTranscript([
+      ...noise,
+      fgStart(AUTO_ID, '2026-07-27T08:50:49.782Z'),
+      autoMoved(AUTO_ID, '2026-07-27T09:00:56.695Z'),
+      bgEnd(AUTO_ID, '2026-07-27T09:20:52.923Z'),
+    ])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull()
+  })
+
+  it('does NOT mistake a tool_result that merely QUOTES the phrase for a real auto-move', async () => {
+    // A tool_result is also what `Read` returns, so "was moved to the background" appearing
+    // in a result is prose, not evidence. A phantom start never resolves — it would hand a
+    // genuinely stuck worker the entire grace. The survey found three such results already
+    // on disk (transcript dumps, and the investigation for this very fix), and the doc that
+    // explains this channel quotes the phrase too. Hence the anchored sentence match.
+    const quoting = (text: string) =>
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2026-07-27T09:00:56.695Z',
+        sessionId: SID,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_read_1', content: text }] },
+      })
+    for (const text of [
+      '=== rec 226 (the tool_use with NO run_in_background) ===\nwas moved to the background', // a real impostor, verbatim
+      '   1\t// the CLI says it was moved to the background when it times out', // a Read of source
+      'Some log line. Command did not complete within its 600s timeout and was moved to the background (ID: b1).', // not at the start
+    ]) {
+      await writeTranscript([...noise, quoting(text)])
+      expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull()
+    }
+    // …while the genuine announcement — the whole result text, from its first character —
+    // is still recognised. (Timeout values seen on disk: 120/180/300/420/600s.)
+    await writeTranscript([...noise, fgStart(AUTO_ID, '2026-07-27T08:50:49.782Z'), autoMoved(AUTO_ID, '2026-07-27T09:00:56.695Z')])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(AUTO_MOVED_AT)
+  })
+
+  it('a foreground Bash that never times out is NOT a background task (no false life)', async () => {
+    // The mutation control for the above: same launch record, no auto-move announcement.
+    await writeTranscript([...noise, fgStart(AUTO_ID, '2026-07-27T08:50:49.782Z')])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull()
+  })
+
+  it('re-reads only when (size, mtime) change — the memo the 3s tick depends on', async () => {
+    // The stall gate keeps this resolver being called EVERY 3s tick for the whole grace,
+    // against a worker that is (by definition of the case) appending nothing — so without
+    // a memo it re-parses the same multi-MB file ~900 times per worker. This pins both
+    // halves: that the memo exists, and exactly what invalidates it.
+    const file = sessionJsonlPath(CWD, SID)
+    const LATER = Date.parse('2026-07-27T11:00:52.003Z')
+    // Two versions with IDENTICAL byte length (only the hour digit differs), so `size`
+    // cannot distinguish them and `mtime` is the whole test. Both mtimes are STAMPED
+    // explicitly rather than restored — a filesystem's sub-millisecond mtime cannot be
+    // round-tripped through a Date, so "set both to the same value" is the only way to
+    // make byte-identical staleness reproducible.
+    const pinned = new Date('2026-07-27T12:00:00.000Z')
+    const bumped = new Date('2026-07-27T12:00:02.000Z')
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z')])
+    await utimes(file, pinned, pinned)
+    const sizeA = (await stat(file)).size
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(START)
+
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T11:00:52.003Z')])
+    await utimes(file, pinned, pinned) // same size AND same mtime ⇒ indistinguishable
+    expect((await stat(file)).size).toBe(sizeA)
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(START) // MEMO HIT (stale by construction)
+
+    await utimes(file, pinned, bumped) // what a real append would do
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(LATER) // invalidated → re-parsed
+  })
+
+  it('an ordinary append (the completion notification landing) invalidates the memo', async () => {
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z')])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(START)
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z'), bgEnd(TOOL_ID, '2026-07-27T10:20:33.084Z')])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull() // the real-world transition
+  })
+
+  it('a vanished transcript drops the memoised answer (a torn-down worker is not remembered alive)', async () => {
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z')])
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(START)
+    await rm(sessionJsonlPath(CWD, SID))
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBeNull()
+  })
+
+  it('never throws: a missing transcript, or a half-written trailing line, yields no signal', async () => {
+    // Missing file — a worker whose session has not written yet.
+    expect(await sessionBackgroundTaskAt(CWD, 'no-such-session')).toBeNull()
+    // A torn last line (claude appending as we read) must not lose the records before it.
+    await writeTranscript([...noise, bgStart(TOOL_ID, '2026-07-27T10:00:52.003Z')])
+    const file = sessionJsonlPath(CWD, SID)
+    await writeFile(file, (await readFile(file, 'utf8')) + '{"type":"queue-operation","content":"<task-noti')
+    expect(await sessionBackgroundTaskAt(CWD, SID)).toBe(START)
   })
 })
 

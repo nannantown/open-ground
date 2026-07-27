@@ -137,6 +137,21 @@
   (dispatch pass 末尾)・`resumeEngines()` の**照合先行・spawn 凍結**(`reconcileRoster` を dispatch
   前に await)。boot 分類 4 分岐 = worktree 消滅 / ready / 作業途中(resume 候補) / カード消滅。
   実際の `--resume` 会話復元は card 4(未着手)。設計正典 = `docs/ENGINE_PERSISTENCE_PLAN.md` §3/§4-3
+- **stall 判定の生存チャネルは 4 本**(すべて `swarmOrchestrator.ts` 内。①心拍 ②PTY 出力
+  ③transcript/sub-agent mtime = `sessionAgentActivityAt`(2026-07-23) ④**実行中の背景タスク** =
+  `sessionBackgroundTaskAt`(2026-07-27)。畳み込みは `lastActivityMs` / `classifyStall`、上限は
+  `backgroundTaskAliveAt` + `BG_TASK_GRACE_MS`(90分 = `MAX_EXEC_MS` と同値))。**④が無かった間、エンジンは完了ゲートを
+  背景で回して待っている健全な worker を殺していた** — ③は「1ターン内で Task() を回す」形専用で、
+  ターンが終わって通知を待つ形は救えない。④は claude の session JSONL を読む。⚠ **開始は2形式**
+  — 明示(`run_in_background:true` の tool_use)と、**前景 Bash が timeout で自動背景化された形**
+  (この tool_use には `run_in_background` キーが無い = 初版が見落として実データで 6 件殺し続けて
+  いた形)。⚠ 証拠は **`Command did not complete within its <n>s timeout and was moved to the
+  background (ID: …)` という文全体**であって `was moved to the background` という語句ではない —
+  後者は散文にも現れる(実測: 5 件が語句だけ一致し、うち1件は司令官の差し戻し指示文そのもの)。
+  緩めると**解決しない幽霊タスク**が生まれ、死んだ worker に猶予を丸ごと渡してしまう。終了は両者共通で
+  `queue-operation` が同じ `<tool-use-id>` を名指す。
+  正典 = commander/02 §5.4b。法医学ツール = `scripts/verify-bg-channel-on-real-transcripts.mts`
+  (stall reclaim された worker の transcript を渡すと BEFORE/AFTER を再現)
 - 子プロセスの env: テスト/ビルド/lint を回す spawn は **必ず** `gateProcess.ts` の `withGateEnv`
   (electron 側は `electron/gateEnv.js` の `buildGateEnv`)を通す — 使い捨て `OPENGROUND_HOME` を
   engine が注入する統制。env を丸ごと渡すと `gateEnv.test.ts` の source pin が RED。

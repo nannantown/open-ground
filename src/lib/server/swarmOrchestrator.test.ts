@@ -41,6 +41,10 @@ import {
   classifyStall,
   defaultEscalate,
   lastActivityMs,
+  backgroundTaskAliveAt,
+  BG_TASK_GRACE_MS,
+  sessionBackgroundTaskAt,
+  defaultDeps,
   detectAnomalies,
   fireFatalNotifications,
   pruneStuckMoves,
@@ -254,6 +258,7 @@ const makeDeps = (init: {
   outputs?: Map<string, number> // terminalId → PTY lastOutputAt epoch ms (absent → null)
   screens?: Map<string, string> // terminalId → current screen text (absent → null = 'normal')
   agentActivity?: Map<string, number> // worktree cwd → newest transcript/sub-agent mtime (absent → null)
+  bgTasks?: Map<string, number> // worktree cwd → START of the newest in-flight background task (absent → null = none running)
   raiseFails?: boolean // make deps.raiseQuestion throw (fs/notify fault)
   spawnModel?: string // model alias the fake spawn reports launching with (quota attribution)
   exitInfos?: Map<string, { code: number | null; signal?: number }> // taskId → the dead PTY's
@@ -285,6 +290,7 @@ const makeDeps = (init: {
   const outputs = init.outputs ?? new Map<string, number>()
   const screens = init.screens ?? new Map<string, string>()
   const agentActivity = init.agentActivity ?? new Map<string, number>()
+  const bgTasks = init.bgTasks ?? new Map<string, number>()
   const spawned: { taskId: string; priorFailure?: string }[] = []
   const moves: { taskId: string; branch: string }[] = []
   const reviews: { taskId: string; branch: string }[] = []
@@ -406,6 +412,10 @@ const makeDeps = (init: {
     // worktree cwd (absent → null = no file signal, so the cheap verdict stands).
     // Drives the stall backstop that spares a worker running a Task() sub-agent.
     sessionAgentActivityAt: async (cwd) => agentActivity.get(cwd) ?? null,
+    // The FOURTH liveness channel: START of the NEWEST background task still in flight
+    // for a worker's worktree cwd (absent → null = nothing running, cheap verdict stands).
+    // Drives the backstop that spares a worker waiting on a background completion gate.
+    sessionBackgroundTaskAt: async (cwd) => bgTasks.get(cwd) ?? null,
     // Record a raised free-text question (C3 THROTTLED path). Throws when
     // raiseFails is set, so the "forget key + retry next pass" path is tested.
     raiseQuestion: async (inputIn: OpenEscalationInput) => {
@@ -1038,6 +1048,72 @@ describe('lastActivityMs — newest sign of life across both liveness channels',
     expect(lastActivityMs({ startedAt: iso(T), agentActivityAtMs: null })).toBe(T)
     expect(lastActivityMs({ startedAt: iso(T), agentActivityAtMs: Number.NaN })).toBe(T)
   })
+  it('lets an IN-FLIGHT BACKGROUND TASK outweigh every frozen channel (waiting on the gate = alive)', () => {
+    // The 2026-07-27 shape: the worker launched `npm test` in the background, said it
+    // would report back, and ENDED ITS TURN — so heartbeat, PTY and transcript mtime
+    // all froze 20 minutes ago together. The fourth channel is the only life left.
+    expect(
+      lastActivityMs({
+        heartbeatAt: iso(T - 1_200_000),
+        lastOutputAt: T - 1_200_000,
+        startedAt: iso(T - 3_600_000),
+        agentActivityAtMs: T - 1_200_000,
+        bgTaskAliveAtMs: T,
+      }),
+    ).toBe(T)
+  })
+  it('ignores a null/garbage background-task stamp (no false life)', () => {
+    expect(lastActivityMs({ startedAt: iso(T), bgTaskAliveAtMs: null })).toBe(T)
+    expect(lastActivityMs({ startedAt: iso(T), bgTaskAliveAtMs: Number.NaN })).toBe(T)
+  })
+})
+
+// ── The FOURTH channel's cap — the one place BG_TASK_GRACE_MS is enforced ──────────
+// "A background task is in flight" must buy a REPRIEVE, never an exemption: a worker
+// wedged with a task stuck in flight has to rejoin the ordinary ladder eventually.
+describe('backgroundTaskAliveAt — in-flight background task, capped', () => {
+  const NOW = Date.parse('2026-07-27T10:20:00Z')
+  const GRACE = 10 * 60_000
+
+  it('reports life NOW while a task is in flight and inside the grace', () => {
+    expect(backgroundTaskAliveAt(NOW - 60_000, NOW, GRACE)).toBe(NOW)
+    expect(backgroundTaskAliveAt(NOW - GRACE, NOW, GRACE)).toBe(NOW) // inclusive edge
+  })
+  it('STOPS believing a task that has been in flight past the grace', () => {
+    expect(backgroundTaskAliveAt(NOW - GRACE - 1, NOW, GRACE)).toBeNull()
+  })
+  it('is null when nothing is in flight, or the stamp is unusable', () => {
+    expect(backgroundTaskAliveAt(null, NOW, GRACE)).toBeNull()
+    expect(backgroundTaskAliveAt(undefined, NOW, GRACE)).toBeNull()
+    expect(backgroundTaskAliveAt(Number.NaN, NOW, GRACE)).toBeNull()
+  })
+  it('defaults to BG_TASK_GRACE_MS — equal to MAX_EXEC_MS, covering all 484 surveyed tasks', () => {
+    // The grace is deliberately the SAME as the execution-time limit: an in-flight task
+    // answers "is it alive?", and "how long may it live?" already has an owner
+    // (MAX_EXEC_MS, counted in real work). A larger grace could change no outcome; the
+    // first cut's 45 min was measurably still killing workers — the 2026-07-27 survey of
+    // 484 background tasks found 4 whose in-flight silence exceeded 45 min (worst 86.1m,
+    // and that one ended `killed`, so it is a LOWER bound).
+    expect(BG_TASK_GRACE_MS).toBe(MAX_EXEC_MS)
+    expect(backgroundTaskAliveAt(NOW - Math.round(86.1 * 60_000), NOW)).toBe(NOW) // the surveyed worst case
+    expect(backgroundTaskAliveAt(NOW - BG_TASK_GRACE_MS - 1, NOW)).toBeNull()
+  })
+})
+
+// ── The wiring that makes the channels EXIST in production ────────────────────────
+// Both file-backed channels are OPTIONAL deps: absent ⇒ the stall path silently falls
+// back to the two cheap channels. So deleting one line from defaultDeps() ships the
+// whole fix INERT — and every behavioural test still passes, because they all inject
+// their own fakes. Measured on this branch: removing `sessionBackgroundTaskAt,` from
+// defaultDeps left 614/614 green. These assertions are the only thing that fails.
+describe('defaultDeps — the file-backed liveness channels are actually wired', () => {
+  it('wires the FOURTH channel (background task) to the real resolver', () => {
+    expect(defaultDeps().sessionBackgroundTaskAt).toBe(sessionBackgroundTaskAt)
+  })
+  it('wires the THIRD channel (transcript / sub-agent mtime) too', () => {
+    // Not exported, so identity is out of reach — presence is what deletion removes.
+    expect(typeof defaultDeps().sessionAgentActivityAt).toBe('function')
+  })
 })
 
 describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
@@ -1178,6 +1254,54 @@ describe('classifyStall — nudge-then-reclaim escalation (echo-proof)', () => {
     )
     expect(r.action).toBe('none')
     expect(r.progressed).toBe(true) // growth past the nudge ⇒ recovery ⇒ budget cleared
+  })
+
+  // ── FOURTH CHANNEL (background task in flight) — the 2026-07-27 false-kill ────────
+  // The worker did everything right: started `npm test` in the background, said "I'll
+  // report when it finishes", ended its turn, and waited. That freezes ALL THREE cheap
+  // channels at once — including the third, which was built for the OPPOSITE shape (one
+  // long turn). Four healthy workers were reclaimed like this in a morning. These are the
+  // TEETH: drop bgTaskAliveAtMs and every case below falls back to the reclaim ladder.
+  it('SPARES a worker whose completion gate is running in the background (all 3 cheap channels frozen)', () => {
+    const waiting = classifyStall(
+      { ...silentInput(), agentActivityAtMs: oldStart, bgTaskAliveAtMs: NOW },
+      NOW,
+      P,
+    )
+    expect(waiting.action).toBe('none')
+    expect(waiting.silentMs).toBe(0) // an in-flight task is life RIGHT NOW, not stale evidence
+    // MUTATION: same worker, background task removed ⇒ the ladder that killed them starts.
+    expect(classifyStall({ ...silentInput(), agentActivityAtMs: oldStart }, NOW, P).action).toBe('nudge')
+  })
+  it('still RECLAIMS a silent worker with NO background task (the gate is not loosened)', () => {
+    // The whole point of the card: add the missing evidence, do not weaken stall detection.
+    // Nothing in flight ⇒ bgTaskAliveAtMs is null ⇒ byte-for-byte the old verdict.
+    const dead = silentInput({ count: 2, lastNudgeAt: NOW - P.cooldownMs - 1, escalated: true })
+    expect(classifyStall(dead, NOW, P).action).toBe('reclaim')
+    expect(classifyStall({ ...dead, bgTaskAliveAtMs: null }, NOW, P).action).toBe('reclaim')
+  })
+  it('returns to the stall ladder once the background task ENDS and silence continues', () => {
+    // The task finished (or blew past BG_TASK_GRACE_MS): backgroundTaskAliveAt yields
+    // null, the channel drops out, and a worker that stays quiet is judged exactly as
+    // before. An in-flight task can never make a worker immortal.
+    const stillQuiet = { ...silentInput(), agentActivityAtMs: oldStart, bgTaskAliveAtMs: null }
+    expect(classifyStall(stillQuiet, NOW, P).action).toBe('nudge')
+    expect(classifyStall({ ...stillQuiet, ...silentInput({ count: 2, lastNudgeAt: NOW - P.cooldownMs - 1, escalated: true }) }, NOW, P).action).toBe(
+      'reclaim',
+    )
+  })
+  it('does NOT count an in-flight task as `progressed` (it cannot clear a nudge budget)', () => {
+    // bgTaskAliveAtMs is `now` by construction, so treating it as recovery would reset
+    // the budget every pass. It never needs to: silentMs is already 0, so the first gate
+    // answers 'none' long before the budget is consulted.
+    const lastNudgeAt = NOW - 60_000
+    const r = classifyStall(
+      { heartbeatAtMs: null, lastOutputAtMs: null, startedAtMs: oldStart, bgTaskAliveAtMs: NOW, nudge: { count: 1, lastNudgeAt } },
+      NOW,
+      P,
+    )
+    expect(r.action).toBe('none')
+    expect(r.progressed).toBe(false)
   })
 })
 
@@ -3501,6 +3625,76 @@ describe('runDispatchPass — monitor: stall self-healing', () => {
     await runDispatchPass(engine, deps, now)
     expect(deps.nudged).toEqual(['pty-a-1']) // stale file ⇒ ordinary stall ⇒ nudged
     expect(engine.nudges.get('pty-a-1')?.count).toBe(1)
+  })
+
+  // ── FOURTH LIVENESS CHANNEL at the monitor — the 2026-07-27 false-kill ───────────
+  // The worker launched `npm test` in the background, said "I'll report when it
+  // finishes", and ENDED ITS TURN — which freezes the heartbeat, the PTY frame AND the
+  // transcript mtime at the same instant (the third channel covers the OPPOSITE shape:
+  // one long turn). Four healthy workers were nudged (ESC) and reclaimed like this in
+  // one morning, killing the very test runs they were waiting on. These tests pin the
+  // WIRING — a pure-function fix that never reaches deps would leave the bug live.
+  it('SPARES a worker waiting on a background completion gate (all three cheap channels frozen)', async () => {
+    const now = T0 + STALL_SILENCE_MS + 1
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, sessionId: 'sess-a' })],
+    })
+    // No heartbeat, no PTY output, and the transcript froze when the turn ended — but
+    // `npm test` has been running in the background since just after dispatch.
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      agentActivity: new Map([['/wt/a', T0]]),
+      bgTasks: new Map([['/wt/a', T0]]),
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.nudged).toHaveLength(0) // NOT nudged — ESC would kill the running suite
+    expect(deps.tornDown).toHaveLength(0) // NOT reclaimed — the incident, prevented
+    expect(deps.board.get('a')?.boardColumn).toBe('doing') // card not re-homed to blocked
+    expect(engine.nudges.has('pty-a-1')).toBe(false) // no stall bookkeeping opened
+  })
+  it('MUTATION control: the same silent worker with NO background task IS nudged (detection not loosened)', async () => {
+    const now = T0 + STALL_SILENCE_MS + 1
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, sessionId: 'sess-a' })],
+    })
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'doing' })], agentActivity: new Map([['/wt/a', T0]]) })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.nudged).toEqual(['pty-a-1']) // nothing in flight ⇒ ordinary stall ⇒ nudged
+    expect(engine.nudges.get('pty-a-1')?.count).toBe(1)
+  })
+  it('the reprieve is NOT immortality: a task stuck in flight past the grace still ends in teardown', async () => {
+    // The grace equals MAX_EXEC_MS deliberately (see BG_TASK_GRACE_MS): an in-flight task
+    // answers "is it alive?", while "how long may it live?" belongs to the execution-time
+    // limit. This test is what that claim looks like from outside — push the clock past
+    // the grace with the task STILL unresolved and the worker is reclaimed anyway, by the
+    // clock that owns the question. (Which is also why the grace expiring on its own is
+    // unobservable here: MAX_EXEC_MS always gets there first. The expiry itself is pinned
+    // on the pure `backgroundTaskAliveAt` above.)
+    const now = T0 + BG_TASK_GRACE_MS + 60_000
+    const engine = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, sessionId: 'sess-a' })],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      agentActivity: new Map([['/wt/a', T0]]),
+      bgTasks: new Map([['/wt/a', T0]]), // started at dispatch, never reported back
+    })
+    await runDispatchPass(engine, deps, now)
+    expect(deps.tornDown.map((t) => t.terminalId)).toEqual(['pty-a-1'])
+    expect(engine.workers).toHaveLength(0)
+    // MUTATION control: one minute EARLIER — inside both clocks — and it is still spared,
+    // so the teardown above is a real boundary and not a worker that was never protected.
+    const engine2 = newEngine({
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, sessionId: 'sess-a' })],
+    })
+    const deps2 = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      agentActivity: new Map([['/wt/a', T0]]),
+      bgTasks: new Map([['/wt/a', T0]]),
+    })
+    await runDispatchPass(engine2, deps2, T0 + BG_TASK_GRACE_MS - 60_000)
+    expect(deps2.tornDown).toHaveLength(0)
+    expect(deps2.nudged).toHaveLength(0)
   })
 
   it('clears the nudge budget when a nudge revives the worker (a post-nudge heartbeat)', async () => {

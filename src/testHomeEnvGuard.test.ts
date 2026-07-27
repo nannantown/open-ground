@@ -1360,7 +1360,7 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   },
   'src/lib/server/swarmOrchestrator.ts': {
     tier: 'writes-elsewhere',
-    why: "READS ~/.claude only as mtimes — the manager/worker liveness 3rd channel stats the session transcript and subagents/agent-*.jsonl (sessionAgentActivityAt / managerSubagentActivityAt) to tell 'busy in a sub-agent' from 'dead'; it never opens or writes them. Every mutation this file performs lands under ~/.openground (roster, heartbeats, engine.json), never the real ~/.claude",
+    why: "READS ~/.claude, never writes it. Two shapes: (a) the 3rd liveness channel STATS the session transcript and subagents/agent-*.jsonl for mtimes (sessionAgentActivityAt / managerSubagentActivityAt) to tell 'busy in a sub-agent' from 'dead'; (b) the 4th channel (sessionBackgroundTaskAt) OPENS AND READS the session transcript in full to find an in-flight background task, memoising the derived answer in a process-global keyed by (path, size, mtimeMs) — bytes are read, nothing is written, and the memo holds a derived timestamp, not file contents. Every mutation this file performs lands under ~/.openground (roster, heartbeats, engine.json), never the real ~/.claude",
   },
   'src/lib/server/swarmOrchestrator.integration.test.ts': {
     tier: 'writes-elsewhere',

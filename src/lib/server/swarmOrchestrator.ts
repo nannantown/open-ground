@@ -351,6 +351,10 @@ export const STALL_ECHO_GUARD_MS = 30_000
  *  recovery (2026-07-02): ESC, ~3s settle, then a short continue instruction + CR. */
 export const STALL_ESCALATE_DELAY_MS = 3_000
 
+// The FOURTH liveness channel's safety valve — BG_TASK_GRACE_MS — is NOT here with the
+// other STALL_* constants: it is defined next to MAX_EXEC_MS (below `envMinutesMs`),
+// because the two numbers are deliberately equal and the reason is the design itself.
+
 /** Read a minutes-valued tunable from the environment, clamped to a sane band,
  *  falling back to `defMin` when unset / unparseable. The "定数化・調整可"
  *  (constant-ised AND adjustable) contract for the non-progress thresholds: the
@@ -396,6 +400,59 @@ const envInt = (name: string, def: number, min: number, max: number): number => 
  *  that fix is {@link commitWipBeforeTeardown} — no reclaim, for ANY reason, may
  *  destroy uncommitted work again.) */
 export const MAX_EXEC_MS = envMinutesMs('OPENGROUND_SWARM_MAX_EXEC_MIN', 90, 10, 600)
+
+/** A worker with a BACKGROUND TASK still in flight counts as ALIVE for this long from
+ *  that task's start — the FOURTH liveness channel's safety valve (see
+ *  {@link sessionBackgroundTaskAt} for what "in flight" is read from).
+ *
+ *  WHY THE CHANNEL EXISTS (the 2026-07-27 false-kill). A worker running its completion
+ *  gate does exactly the RIGHT thing: it starts `npm test` as a BACKGROUND task, says
+ *  "I'll report when it finishes", and ENDS ITS TURN to wait for the notification. That
+ *  is correct practice — and it freezes all three cheap channels AT ONCE: the heartbeat
+ *  (beaten only at phase boundaries), the PTY frame (nothing repaints), and the
+ *  transcript / sub-agent mtimes (the turn is OVER, so no file grows — the third channel
+ *  was built for a worker inside ONE LONG turn, which is the opposite case). Ten minutes
+ *  later the monitor called it silent, nudged twice, and RECLAIMED it. Four workers died
+ *  this way in one morning, all in `phase: verify`; their transcripts end with the
+ *  completion notification landing at the same minute as the reclaim, carrying
+ *  `<status>killed</status>`. The engine killed the very tests it was waiting for.
+ *
+ *  WHY IT EQUALS {@link MAX_EXEC_MS} (90 min), and why the first cut's 45 was wrong.
+ *  That 45 came from "2× the worst run I measured" — but the sample was the THREE tasks
+ *  in the two transcripts that motivated the fix, and 2026-07-27's wider survey (484
+ *  background tasks across 435 worker transcripts on this disk;
+ *  `scripts/verify-bg-channel-on-real-transcripts.mts --survey`) shows that window was
+ *  not the tail. ⚠ DERIVE FROM TASK **DURATION**, NOT FROM SILENCE — this cap is
+ *  compared against `now − bgStartedAtMs`, i.e. how long the TASK has been in flight,
+ *  not how long the transcript has been quiet. The first cut derived it from the
+ *  silence column and landed 4 minutes short; see the script header
+ *  (`verify-bg-channel-on-real-transcripts.mts`) for that off-by-one-metric.
+ *  Task DURATION, in flight (the metric this constant is actually compared to):
+ *      p50 2.0m   p90 18.8m   p99 52.6m   max 98.1m
+ *  and every one of the long ones ended `killed` — i.e. they are LOWER BOUNDS. Tasks
+ *  that would still lose the channel: **3 at a 45-min grace, 0 at 60, 0 at 90**.
+ *  (For reference the SILENCE column — what the third channel would have seen — is
+ *   p50 0.7m / p90 10.0m / p99 42.3m / max 86.1m. It is NOT what this cap measures.)
+ *
+ *  So the honest number is not "2× a worst case" — it is a question about WHOSE job the
+ *  ceiling is. An in-flight background task answers "is this worker alive?", which is
+ *  the only question the stall monitor asks. "How long may it live?" is a different
+ *  question, and this engine already has an owner for it: the execution-time limit
+ *  (MAX_EXEC_MS, counted in real work — §5.5). Setting the grace EQUAL to it says
+ *  exactly that: while a task is in flight the stall path never pre-empts the execution
+ *  path, and the worker is bounded by the clock that was designed to bound it. A larger
+ *  grace could not change any outcome (MAX_EXEC_MS fires first); a smaller one only
+ *  reintroduces false kills — which is what 45 was measurably still doing.
+ *
+ *  It remains a CAP, not a licence. A worker wedged with a task stuck in flight loses
+ *  the channel here and then takes the ordinary escalation — nudge, cooldown, nudge,
+ *  cooldown, escalate, cooldown — i.e. 3×STALL_NUDGE_COOLDOWN_MS ≈ 9 min more (the
+ *  10-min detection window is already spent). Worst case ≈ 99 min from the task's start,
+ *  and in practice less, because MAX_EXEC_MS reaches the same worker first.
+ *
+ *  Adjustable like every other non-progress threshold (the "定数化・調整可" contract) —
+ *  the first cut made this the one bare literal in the family. */
+export const BG_TASK_GRACE_MS = envMinutesMs('OPENGROUND_SWARM_BG_TASK_GRACE_MIN', 90, 5, 600)
 
 /** CEILING on the rate-limit credit one worker may subtract from its execution
  *  clock. Without it, a worker cycling limit → work → limit → … could defer the
@@ -1272,6 +1329,24 @@ export const recoveryColumn = (
   return 'todo'
 }
 
+/** Does a worker's in-flight BACKGROUND TASK still count as life right now? Returns
+ *  `now` — positive evidence of life at this instant — when a background task that
+ *  started at `bgStartedAtMs` is still unresolved AND still inside `graceMs`; null
+ *  otherwise (nothing in flight, or something in flight so long we stop believing it).
+ *
+ *  The ONE place the fourth channel's cap lives, so the stall monitor and the read-only
+ *  worker-stale anomaly can never disagree about it — the same reason
+ *  {@link lastActivityMs} is shared. See {@link BG_TASK_GRACE_MS} for what the channel
+ *  is and why the grace is 90 minutes. Pure. */
+export const backgroundTaskAliveAt = (
+  bgStartedAtMs: number | null | undefined,
+  now: number,
+  graceMs: number = BG_TASK_GRACE_MS,
+): number | null =>
+  typeof bgStartedAtMs === 'number' && Number.isFinite(bgStartedAtMs) && now - bgStartedAtMs <= graceMs
+    ? now
+    : null
+
 /** The most recent sign of life from a worker (epoch ms) across BOTH liveness
  *  channels — its heartbeat and its PTY's last output — with its dispatch time as
  *  the floor. Unparseable / missing stamps are ignored; 0 only when nothing at all
@@ -1291,12 +1366,22 @@ export const lastActivityMs = (a: {
    *  manager delivery clock's sub-agent channel (2026-07-23). Ignored when absent so
    *  every existing caller/read is unchanged. */
   agentActivityAtMs?: number | null
+  /** `now` while a BACKGROUND TASK is in flight and inside its grace, else null —
+   *  already capped by {@link backgroundTaskAliveAt}. The FOURTH liveness channel,
+   *  and the only one that covers a worker whose TURN HAS ENDED: it launched its
+   *  completion gate in the background, said "I'll report when it finishes", and is
+   *  waiting for the notification. That freezes the other three at once (no beat, no
+   *  repaint, no file growth — the turn is over), which is exactly how the engine came
+   *  to reclaim four healthy workers on 2026-07-27. Ignored when absent so every
+   *  existing caller/read is unchanged. */
+  bgTaskAliveAtMs?: number | null
 }): number => {
   const cands: number[] = []
   const hb = a.heartbeatAt ? Date.parse(a.heartbeatAt) : Number.NaN
   if (Number.isFinite(hb)) cands.push(hb)
   if (typeof a.lastOutputAt === 'number' && Number.isFinite(a.lastOutputAt)) cands.push(a.lastOutputAt)
   if (typeof a.agentActivityAtMs === 'number' && Number.isFinite(a.agentActivityAtMs)) cands.push(a.agentActivityAtMs)
+  if (typeof a.bgTaskAliveAtMs === 'number' && Number.isFinite(a.bgTaskAliveAtMs)) cands.push(a.bgTaskAliveAtMs)
   const st = a.startedAt ? Date.parse(a.startedAt) : Number.NaN
   if (Number.isFinite(st)) cands.push(st)
   return cands.length ? Math.max(...cands) : 0
@@ -1366,6 +1451,16 @@ export const classifyStall = (
      *  desk; 2026-07-23 fixes the worker). Resolved by the caller ONLY for a worker
      *  the cheap channels already call silent — see the monitor's gated backstop. */
     agentActivityAtMs?: number | null
+    /** `now` while a BACKGROUND TASK is in flight and inside its grace, else null —
+     *  already capped by {@link backgroundTaskAliveAt}. The FOURTH channel, and the
+     *  only one that survives the worker ENDING ITS TURN: a worker that launched
+     *  `npm test` in the background and is waiting for the completion notification
+     *  emits no beat, no repaint and no file growth, yet is doing precisely what the
+     *  completion gate demands. Folded into `activity` like the others and likewise
+     *  NOT echo-guarded — an Enter/ESC repaint cannot start a background task. See
+     *  {@link BG_TASK_GRACE_MS} for the 2026-07-27 false-kill this closes. Resolved by
+     *  the caller ONLY for a worker the cheap channels already call silent. */
+    bgTaskAliveAtMs?: number | null
     /** Prior nudge bookkeeping, or undefined if never nudged. */
     nudge: { count: number; lastNudgeAt: number; escalated?: boolean } | undefined
   },
@@ -1386,16 +1481,27 @@ export const classifyStall = (
   // The file-based liveness channel (transcript + sub-agent mtime). NOT echo-guarded:
   // a repaint can't write these, so any freshness here is real work in flight.
   const agentAt = input.agentActivityAtMs ?? null
+  // The BACKGROUND-TASK channel (already capped at BG_TASK_GRACE_MS by the caller):
+  // `now` while a task is genuinely in flight, so it zeroes silentMs for exactly as
+  // long as we are willing to believe that task is still running — and not one tick
+  // longer. Deliberately NOT echo-guarded for the same reason as agentAt: a repaint
+  // cannot start a background task.
+  const bgAliveAt = input.bgTaskAliveAtMs ?? null
   const activity = Math.max(
     input.heartbeatAtMs ?? Number.NEGATIVE_INFINITY,
     realOutput ?? Number.NEGATIVE_INFINITY,
     agentAt ?? Number.NEGATIVE_INFINITY,
+    bgAliveAt ?? Number.NEGATIVE_INFINITY,
     input.startedAtMs,
   )
   const silentMs = Math.max(0, now - activity)
   // Real recovery since the nudge/escalate — a fresh heartbeat, real (post-echo-guard)
   // output, OR file activity (transcript/sub-agent grew) strictly after it. Any clears
-  // the budget; an echo can fake none.
+  // the budget; an echo can fake none. The background-task channel is deliberately NOT
+  // a `progressed` signal: it is `now` by construction, so counting it would clear the
+  // nudge budget on every pass for as long as a task sits in flight — and it cannot
+  // matter anyway, since an in-flight task already makes silentMs 0 (the gate below
+  // returns 'none' before the budget is ever consulted).
   const progressed =
     count > 0 &&
     ((input.heartbeatAtMs !== null && input.heartbeatAtMs > lastNudgeAt) ||
@@ -2618,6 +2724,17 @@ export interface OrchestratorDeps {
    *  keep compiling/behaving). Default (defaultDeps): sessionAgentActivityAt. The
    *  worker analog of {@link defaultManagerDeliveryAt}'s fix — 2026-07-23. */
   sessionAgentActivityAt?: (cwd: string, sessionId: string) => Promise<number | null>
+  /** Start time of the worker's NEWEST still-unresolved BACKGROUND TASK (its worktree
+   *  cwd + agentSessionId), or null when none is in flight. The stall path's FOURTH
+   *  liveness channel, resolved ONLY for a worker the first three already call silent
+   *  — so a worker that launched its completion gate in the background, ended its turn
+   *  (correctly) and is waiting for the notification is not false-reclaimed while the
+   *  suite runs. Injected for the unit test; default reads the real ~/.claude
+   *  transcript. OPTIONAL: absent ⇒ the stall path behaves exactly as before (existing
+   *  fake-deps tests keep compiling/behaving). Default (defaultDeps):
+   *  sessionBackgroundTaskAt. Closes the 2026-07-27 false-kill — see
+   *  {@link BG_TASK_GRACE_MS}. */
+  sessionBackgroundTaskAt?: (cwd: string, sessionId: string) => Promise<number | null>
   /** Raise a worker's FREE-TEXT question to the escalations inbox (C3). Until
    *  C-core lands its budgeted brain pass, this is the §6 S4 THROTTLED
    *  degradation: the bare question goes straight to T3 — openEscalation is
@@ -3223,6 +3340,228 @@ const sessionAgentActivityAt = async (cwd: string, sessionId: string): Promise<n
   ])
   const newest = Math.max(parentAt ?? 0, subAt ?? 0)
   return newest > 0 ? newest : null
+}
+
+/** Regex over ONE `queue-operation` record's content: every tool-use id the task
+ *  notification names. A notification is written when a background task REACHES AN END
+ *  — completed, failed or killed — so an id appearing here is an id no longer in
+ *  flight. Module-scope (not rebuilt per line); `exec`-looped rather than `matchAll`
+ *  so the scan never depends on downlevel-iteration settings. */
+const BG_TASK_NOTIFICATION_ID_RE = /<tool-use-id>([^<]+)<\/tool-use-id>/g
+
+/** The (few) transcript fields {@link sessionBackgroundTaskAt} reads. Deliberately all
+ *  optional and `unknown`-ish: this is FOREIGN data written by another program, so every
+ *  field is checked at the use site rather than trusted from a cast. */
+type TranscriptRecord = {
+  type?: unknown
+  timestamp?: unknown
+  /** queue-operation only — the `<task-notification>` block. */
+  content?: unknown
+  /** assistant: the `tool_use` blocks. user: the `tool_result` blocks. */
+  message?: {
+    content?: {
+      type?: unknown
+      /** tool_use: the id the notification will name. */
+      id?: unknown
+      input?: { run_in_background?: unknown }
+      /** tool_result: the id of the tool_use it answers. */
+      tool_use_id?: unknown
+      /** tool_result: the CLI's reply text (a string in every sample; an array of
+       *  blocks is tolerated defensively). */
+      content?: unknown
+    }[]
+  }
+}
+
+/** The CLI's announcement that a FOREGROUND Bash outran its `timeout` and the harness
+ *  moved it to the background by itself. Surveyed across every worker transcript on this
+ *  disk (2026-07-27): 44 genuine occurrences, ONE spelling, always the WHOLE result text
+ *  — "Command did not complete within its <N>s timeout and was moved to the background
+ *  (ID: …). Output is being written to: …" (the observed timeouts were 120/180/300/420/600s).
+ *
+ *  ANCHORED, and not merely a `was moved to the background` substring, because that
+ *  substring is not evidence — it is PROSE. A `tool_result` is also what a `Read` returns,
+ *  so any file quoting the phrase becomes a phantom background task that never resolves
+ *  and hands a genuinely stuck worker the full grace. Not hypothetical: the same survey
+ *  found THREE tool_results already matching the loose form on this disk (two dumps of a
+ *  transcript, one the investigation for this very fix), and the doc you are reading about
+ *  it — 02-worker-lifecycle §5.4b — quotes the phrase too. Requiring the sentence from its
+ *  first character rejects all of them and keeps all 44 real ones. */
+const BG_TASK_AUTO_MOVE_RE = /^Command did not complete within its \S+ timeout and was moved to the background \(ID: /
+
+/** A `tool_result` block's text. A plain string in every sample on this disk; the array
+ *  form (`[{type:'text',text}]`) is tolerated so a CLI change cannot silently blind
+ *  START B — the failure mode would be invisible (no error, just a worker killed again). */
+const toolResultText = (content: unknown): string => {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  let out = ''
+  for (const b of content) {
+    const t = (b as { text?: unknown } | null)?.text
+    if (typeof t === 'string') out += t
+  }
+  return out
+}
+
+/** Last answer per transcript path, keyed by the bytes that produced it.
+ *
+ *  Not a cache for speed's sake — a correctness-neutral memo. The stall gate keeps
+ *  {@link sessionBackgroundTaskAt} being called every 3s tick for the WHOLE grace, and
+ *  the worker it is asking about is (by the very definition of the case) appending
+ *  nothing, so every one of those reads returns a byte-identical file. `(size, mtimeMs)`
+ *  changing is what a new record looks like; anything else re-uses the answer.
+ *
+ *  Bounded by the number of distinct worker transcripts a boot ever probes, and entries
+ *  are dropped as soon as a file stops stat-ing (teardown). Kept on `globalThis` with
+ *  the rest of the engine's in-memory state so `tsx watch` reloads don't multiply it. */
+const bgTaskMemo: Map<string, { sig: string; at: number | null }> = ((
+  globalThis as { __openground_bgTaskMemo?: Map<string, { sig: string; at: number | null }> }
+).__openground_bgTaskMemo ??= new Map())
+
+/** WHEN did the worker's NEWEST still-unresolved BACKGROUND TASK start (epoch ms), or
+ *  null when none is in flight — the FOURTH liveness channel's raw signal, the one that
+ *  proves a worker with a FINISHED TURN is still working.
+ *
+ *  WHAT IT READS (verified against real killed workers' transcripts, 2026-07-27 —
+ *  no constant or record name here is guessed):
+ *    • START A — EXPLICIT. An `assistant` record whose `message.content[]` holds a
+ *               `{type:'tool_use', id:'toolu_…', input:{run_in_background:true}}`.
+ *               Its record `timestamp` is when the task was launched.
+ *    • START B — AUTO-BACKGROUNDED, and the reason the first cut of this channel still
+ *               let workers die. A FOREGROUND Bash that outruns its `timeout` is moved
+ *               to the background BY THE HARNESS, and that `tool_use` record has NO
+ *               `run_in_background` key at all — nothing about it says "background".
+ *               The evidence is a `user` record whose `message.content[]` holds a
+ *               `{type:'tool_result', tool_use_id:'toolu_…'}` whose text matches
+ *               {@link BG_TASK_AUTO_MOVE_RE}. Its record `timestamp` is when the task
+ *               BECAME a background task — which is the moment that matters here, since
+ *               up to then the foreground Bash was holding the turn open (and feeding
+ *               the third channel). Measured on this disk: 44 tasks are born this way,
+ *               8 of them went on to fall silent past the stall gate, and 6 past the
+ *               reclaim point — i.e. reading only START A leaves the SAME false kill
+ *               live for ~15% of the exposure. gap-4, one of the two workers used to
+ *               validate the original fix, has one in its own record:
+ *               `toolu_016eNGirNrZE6cYbt7vX382s` — foreground at 08:50:49, auto-moved
+ *               at 09:00:56, finished at 09:20:52. A full `npm test` ran in the
+ *               background for 20 minutes and the first parser could not see it.
+ *    • END    — a `queue-operation` record whose `content` is the `<task-notification>`
+ *               block naming that same `<tool-use-id>`. Both `enqueue` (the notification
+ *               is created the moment the task ends) and `remove`/`dequeue` (it was
+ *               delivered or dropped) carry the id, and ALL of them mean the same thing
+ *               here: that task is no longer pending. **Identical for both START forms**
+ *               — an auto-moved task keeps its original tool_use id, so the END side
+ *               needed no change (confirmed on gap-4's record above).
+ *  The pairing is exact and was confirmed end to end — gap-7's last background
+ *  `npm test` (`toolu_012rtVNy8uKsWUfPSjKYwgD5`, started 10:00:52) is named by the
+ *  `queue-operation` at 10:20:33 carrying `<status>killed</status>`, which is the
+ *  instant the engine reclaimed it.
+ *
+ *  KNOWN UNCOVERED SLICE: a worker RESUMED into a new session file whose task started in
+ *  the PREVIOUS one has a start this cannot see, so it loses the channel. Safe-side (the
+ *  worker is judged exactly as it was before this channel existed), and left alone
+ *  deliberately — stitching sessions would mean trusting a resume chain to decide a kill.
+ *
+ *  A start with no matching end is IN FLIGHT. The NEWEST such start is returned. The
+ *  tempting alternative — the oldest, so the cap always judges the longest-running task
+ *  — has a hole that reopens the very bug this closes: ONE task that never reports back
+ *  (a background dev server, a `tail -f`, anything killed in a way that lost its
+ *  notification) would SHADOW every later task forever, and 90 minutes on the worker
+ *  would lose the channel while genuinely running its tests. The newest has no such
+ *  hole, and it cannot be abused: emitting a fresh `tool_use` requires the worker to be
+ *  awake and working — that IS life, and it grows the transcript besides. A worker that
+ *  has actually died launches nothing more, so its last task ages out of the grace on
+ *  exactly the same clock and the ordinary escalation resumes.
+ *
+ *  COST. Only lines containing one of three marker substrings are JSON-parsed at all
+ *  (20 of 815 lines in the 1.27 MB sample). But the read itself is O(file), the gate
+ *  above stays OPEN for the whole grace, and `monitorWorkers` ticks every 3s — so a
+ *  naive implementation re-reads the same bytes ~1800 times per worker per grace
+ *  (measured: 3.7ms at 1.27 MB, 12-14ms at 5-6 MB, 57ms at 18.8 MB — and real worker
+ *  transcripts DO reach 6 MB). Six such workers would spend ~80ms of the main thread
+ *  every 3s tick, on the same process that is streaming PTY output over SSE. Hence
+ *  {@link bgTaskMemo}: a worker waiting on a background task is by definition APPENDING
+ *  NOTHING, so `(size, mtimeMs)` identify the bytes and the repeat scans are free.
+ *
+ *  Never throws: an unreadable / torn file simply contributes no signal, which leaves
+ *  the previous verdict standing. */
+export const sessionBackgroundTaskAt = async (cwd: string, sessionId: string): Promise<number | null> => {
+  const path = sessionJsonlPath(cwd, sessionId)
+  // Identify the BYTES before reading them. A worker sitting on a background task has
+  // ended its turn and is appending nothing, so an unchanged (size, mtime) means an
+  // unchanged answer — which is exactly the case the gate keeps us in for 90 minutes.
+  let sig = ''
+  try {
+    const st = await stat(path)
+    sig = `${st.size}:${st.mtimeMs}`
+    const memo = bgTaskMemo.get(path)
+    if (memo && memo.sig === sig) return memo.at
+  } catch {
+    bgTaskMemo.delete(path) // vanished ⇒ drop any stale answer
+    return null
+  }
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return null // no transcript (or a torn ~/.claude) ⇒ no signal
+  }
+  const startedAt = new Map<string, number>()
+  const ended = new Set<string>()
+  for (const line of text.split('\n')) {
+    // Substring pre-filter FIRST — JSON.parse on every line of a multi-MB transcript
+    // is the only thing that could make this probe expensive.
+    const maybeStart = line.includes('run_in_background')
+    const maybeAutoStart = line.includes('moved to the background')
+    const maybeEnd = line.includes('queue-operation')
+    if (!maybeStart && !maybeAutoStart && !maybeEnd) continue
+    let rec: TranscriptRecord
+    try {
+      rec = JSON.parse(line) as TranscriptRecord
+    } catch {
+      continue // a half-written trailing line while claude appends — skip it
+    }
+    if (rec?.type === 'queue-operation') {
+      const content = typeof rec.content === 'string' ? rec.content : ''
+      BG_TASK_NOTIFICATION_ID_RE.lastIndex = 0
+      let m: RegExpExecArray | null
+      while ((m = BG_TASK_NOTIFICATION_ID_RE.exec(content)) !== null) ended.add(m[1])
+      continue
+    }
+    if (rec?.type !== 'assistant' && rec?.type !== 'user') continue
+    const at = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) : Number.NaN
+    if (!Number.isFinite(at)) continue
+    const parts = Array.isArray(rec.message?.content) ? rec.message.content : []
+    for (const part of parts) {
+      // START A — launched as a background task outright.
+      if (
+        part?.type === 'tool_use' &&
+        part.input?.run_in_background === true &&
+        typeof part.id === 'string' &&
+        !startedAt.has(part.id) // ids are unique per tool_use; keep the first stamp
+      ) {
+        startedAt.set(part.id, at)
+        continue
+      }
+      // START B — a foreground Bash the harness moved to the background on timeout.
+      // Keyed by the tool_use it answers, stamped when the MOVE happened (before that
+      // the foreground command was holding the turn open, so the worker was not silent).
+      if (
+        part?.type === 'tool_result' &&
+        typeof part.tool_use_id === 'string' &&
+        !startedAt.has(part.tool_use_id) &&
+        BG_TASK_AUTO_MOVE_RE.test(toolResultText(part.content))
+      ) {
+        startedAt.set(part.tool_use_id, at)
+      }
+    }
+  }
+  let newest: number | null = null
+  startedAt.forEach((at, id) => {
+    if (ended.has(id)) return
+    if (newest === null || at > newest) newest = at
+  })
+  bgTaskMemo.set(path, { sig, at: newest })
+  return newest
 }
 
 /** WHICH desk is the engine talking about, and when did it last paint? The resolution
@@ -5527,6 +5866,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   escalate: defaultEscalate,
   recentOutput: defaultRecentOutput,
   sessionAgentActivityAt,
+  sessionBackgroundTaskAt,
   raiseQuestion: openEscalation,
   readConsumption: defaultReadConsumption,
   fetchReview: defaultFetchReview,
@@ -6436,7 +6776,19 @@ const monitorWorkers = async (
       echoGuardMs: STALL_ECHO_GUARD_MS,
       maxNudges: STALL_MAX_NUDGES,
     }
-    let stall = classifyStall(
+    // The CHEAP verdict (heartbeat + PTY only). Kept as its own value because two
+    // consumers want DIFFERENT questions answered:
+    //   • the stall LADDER below asks "is this worker alive?" — every channel counts,
+    //     so it reads the re-classified `stall`;
+    //   • the permission-wait / question arms ask "is this worker sitting UNATTENDED at
+    //     a prompt / waiting on the owner?" — a background task running elsewhere is no
+    //     answer to that, so they read `cheapStall`. Folding the fourth channel into
+    //     those arms (the first cut did) means a worker that hits a trust dialog, or
+    //     asks the owner a question, while a `node serve.js` / watch loop sits unresolved
+    //     in its transcript gets NEITHER the auto-accept nor the C3 escalation for the
+    //     whole grace. Measured on this disk: 32 of 484 background tasks (~7%) never
+    //     report back, so that is not a hypothetical.
+    const cheapStall = classifyStall(
       {
         heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
         lastOutputAtMs: stallLastOut,
@@ -6446,6 +6798,7 @@ const monitorWorkers = async (
       now,
       stallParams,
     )
+    let stall = cheapStall
 
     // ── THIRD LIVENESS CHANNEL — the worker analog of 7517e4b1 (2026-07-23) ──────
     // The cheap channels (heartbeat + PTY output) call this worker silent — but a
@@ -6460,26 +6813,53 @@ const monitorWorkers = async (
     // same clock and it is still reclaimed. GATED behind the silence threshold so the
     // fs walk runs only for the handful of workers about to be acted on, never every
     // pass — and skipped for a rate-limited worker (silent BY DESIGN, no sub-agent).
+    //
+    // ── FOURTH LIVENESS CHANNEL — the background task (2026-07-27) ───────────────
+    // The third channel covers a worker inside ONE LONG turn. It cannot cover the
+    // OPPOSITE and far more common shape: a worker that started its completion gate
+    // (`npm test`) as a BACKGROUND task, announced "I'll report when it finishes",
+    // and correctly ENDED ITS TURN to wait for the notification. That worker beats
+    // nothing (no phase change), paints nothing (the TUI is idle), and grows no file
+    // (the turn is over) — all three channels freeze together for the 20+ minutes a
+    // saturated full suite takes, and the monitor reclaimed it at ~16. Four healthy
+    // workers died this way in one morning; their transcripts show the engine killing
+    // the very test runs they were waiting on. The in-flight task IS the proof of
+    // life, and it is right there in the transcript — see sessionBackgroundTaskAt for
+    // the records, BG_TASK_GRACE_MS for the cap that keeps this a REPRIEVE and not an
+    // exemption.
+    //
+    // Both file channels are resolved under the SAME gate and folded into ONE
+    // re-classification: a genuinely dead worker grows no file AND has no task in
+    // flight, so it still crosses the same threshold on the same clock and is still
+    // reclaimed. Skipped for a rate-limited worker (silent BY DESIGN).
     if (
       stall.silentMs >= STALL_SILENCE_MS &&
       output !== 'rate-limited' &&
       w.sessionId &&
       w.worktree &&
-      deps.sessionAgentActivityAt
+      (deps.sessionAgentActivityAt || deps.sessionBackgroundTaskAt)
     ) {
       let agentAt: number | null = null
+      let bgStartedAt: number | null = null
       try {
-        agentAt = await deps.sessionAgentActivityAt(w.worktree, w.sessionId)
+        agentAt = deps.sessionAgentActivityAt ? await deps.sessionAgentActivityAt(w.worktree, w.sessionId) : null
       } catch {
         agentAt = null // torn ~/.claude ⇒ no signal ⇒ keep the cheap verdict
       }
-      if (agentAt !== null) {
+      try {
+        bgStartedAt = deps.sessionBackgroundTaskAt ? await deps.sessionBackgroundTaskAt(w.worktree, w.sessionId) : null
+      } catch {
+        bgStartedAt = null // ditto — an unreadable transcript never RESCUES and never CONDEMNS
+      }
+      const bgAliveAt = backgroundTaskAliveAt(bgStartedAt, now, BG_TASK_GRACE_MS)
+      if (agentAt !== null || bgAliveAt !== null) {
         stall = classifyStall(
           {
             heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
             lastOutputAtMs: stallLastOut,
             startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
             agentActivityAtMs: agentAt,
+            bgTaskAliveAtMs: bgAliveAt,
             nudge: engine.nudges.get(w.terminalId),
           },
           now,
@@ -6577,7 +6957,13 @@ const monitorWorkers = async (
     // never classified, never Enter-nudged, never reclaimed. (`screen`/`output`
     // were sampled above — a worker this silent always crossed the scrape-quiet
     // lull, so the sample is never missing here.)
-    if (stall.silentMs >= STALL_SILENCE_MS) {
+    //
+    // Gated on `cheapStall`, NOT the background-task-aware `stall`: these two arms are
+    // about an INTERVENTION the worker needs (take the trust dialog's default / put the
+    // question in front of the owner), not about whether it is alive. A task running in
+    // the background answers the liveness question and nothing else — muting the owner's
+    // inbox behind it would be a new bug wearing this fix's clothes.
+    if (cheapStall.silentMs >= STALL_SILENCE_MS) {
       // PERMISSION-WAIT — silent at a trust/permission prompt that slipped past
       // bypass (--dangerously-skip-permissions should suppress every prompt; this
       // is the backstop). AUTO-ACCEPT once (Enter takes the trust dialog's default
@@ -7873,13 +8259,26 @@ export const detectAnomalies = async (
       now - since >= STALE_HEARTBEAT_MS &&
       w.sessionId &&
       w.worktree &&
-      deps.sessionAgentActivityAt
+      (deps.sessionAgentActivityAt || deps.sessionBackgroundTaskAt)
     ) {
       try {
-        const agentAt = await deps.sessionAgentActivityAt(w.worktree, w.sessionId)
+        const agentAt = deps.sessionAgentActivityAt ? await deps.sessionAgentActivityAt(w.worktree, w.sessionId) : null
         if (agentAt !== null) since = Math.max(since, agentAt)
       } catch {
         /* torn ~/.claude ⇒ no extra signal ⇒ keep the cheap `since` */
+      }
+      // And the SAME fourth channel the stall monitor gained (2026-07-27): a worker
+      // waiting on a background completion gate is silent on all three cheap channels
+      // by design, so without this the read-only view would report it 'worker-stale'
+      // and contradict the engine — the exact invariant this block promises.
+      try {
+        const bgStartedAt = deps.sessionBackgroundTaskAt
+          ? await deps.sessionBackgroundTaskAt(w.worktree, w.sessionId)
+          : null
+        const bgAliveAt = backgroundTaskAliveAt(bgStartedAt, now, BG_TASK_GRACE_MS)
+        if (bgAliveAt !== null) since = Math.max(since, bgAliveAt)
+      } catch {
+        /* ditto */
       }
     }
     if (since > 0 && now - since >= STALE_HEARTBEAT_MS) {

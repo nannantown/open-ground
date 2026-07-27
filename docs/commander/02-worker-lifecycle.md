@@ -289,7 +289,7 @@ promote && w.reworkAt のとき: hbAtMs > reworkAtMs(差し戻しより厳密に
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 
-PTY 死亡・stall(心拍・PTY 出力・**sub-agent/transcript の mtime** の 3 チャネルすべてが 10 分沈黙 — `STALL_SILENCE_MS` :294。第3チャネルは §5.4a の注)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS` :366、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:5051)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:1099)で決める:
+PTY 死亡・stall(心拍・PTY 出力・**sub-agent/transcript の mtime**・**実行中の背景タスク** の 4 チャネルすべてが 10 分沈黙 — `STALL_SILENCE_MS` :294。第3チャネルは §5.4a、**第4チャネル(背景タスク)は §5.4b** — 完了ゲートを背景で回して待っている worker を殺していた誤判定への対処。カバー範囲の限界も同節)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS` :366、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:5051)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:1099)で決める:
 
 | 状況 | カードの行き先 |
 |---|---|
@@ -321,6 +321,145 @@ worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起�
 - **安全性**: ファイル mtime は**再描画では書けない**(Enter/ESC の echo は transcript も sub-agent ファイルも伸ばせない)ので echo-guard 非対象で足せる。生きた worker を生存に倒す**だけ** — 死んだ worker はファイル mtime も止まるので同じ 10 分時計で沈黙に戻り、従来どおり reclaim される(誤って「永遠に生存」にはならない)。
 - **read-only 表示との整合**: `detectAnomalies` の `worker-stale`(:7563 付近)も同チャネルを同じゲートで畳み込み、「read-only の異常表示は engine 自身の生死判定と矛盾しない」不変条件(ブロック冒頭が約束)を維持。
 - **回帰(歯)**: `swarmOrchestrator.test.ts` — 純関数 `classifyStall`「SPARES a worker … sub-agent file is fresh」(変異=`agentActivityAtMs` を外すと nudge に反転)/「does NOT let a STALE sub-agent file rescue …」、monitor「SPARES a silent-but-alive worker running a Task() sub-agent」+「MUTATION control … STALE … IS nudged」。`lastActivityMs` の第3チャネルも単体で固定。
+
+> **⚠ 猶予が覆うのは stall のはしごだけ**(2026-07-27 最終レビュー N3)。permission-wait と
+> question の腕は `cheapStall`(安い2チャネル)で判定するようにしたので、**背景タスク待ちの
+> worker でも従来どおり発火する** — 背景で待っている間に画面が `question` と判定されれば
+> `QUESTION_GRACE_MS` 後に `blocked` へ退避しうる。これは意図した設計(オーナーへの質問を
+> 最大90分伏せないため)。副作用として、**第3チャネルが生きている worker でもこの2腕が
+> 抑止されなくなった**(以前は抑止されていた) — より正しい方向だが、第4チャネル以外への
+> 挙動変更なので明記しておく。2026-07-27 の被害4体は stall の腕を通っており、この経路ではない。
+
+### 5.4b stall 判定の第4チャネル — **実行中の背景タスク**(2026-07-27・**worker は一度も死んでいなかった**)
+
+> **カバー範囲の宣言(「根治」とは名乗らない)。** このチャネルが見るのは
+> **worker 自身のセッションファイルに開始が残っている背景タスク**だけ。ディスク上の
+> 484 タスクを集計した限りでは、既定の猶予(90 分)でこのチャネルの選択によって殺される
+> タスクは **0 件**だが、それは「観測できた範囲で」であって永久保証ではない。
+> **未カバーが 2 つ残っている**(下記): resume で前セッションに開始があるタスク、および
+> claude 側が開始・完了レコードの形を変えた場合。後者はテストが赤くなって気づける形にしてある。
+
+> **この節は「worker が死ぬ」という長年の誤解の訂正でもある。** §10 が扱う exitCode 由来の
+> crash とは**別経路** — こちらは crash ではなく **stall 誤判定**で、**エンジンが、正しく
+> 待っている worker を kill していた**。
+
+**症状の形**。完了ゲート(`npm test` 等)を回す worker は**正しい作法**を踏む:
+
+1. テストを **背景タスク**で起動する
+2. 「終わったら報告します」と言って**ターンを終える**
+3. 完了通知を待つ
+
+この 2 の瞬間に、既存 3 チャネルが**同時に凍る**:
+
+| チャネル | 凍る理由 |
+|---|---|
+| `heartbeatAt` | 段階が変わらないので打たれない(心拍は phase 遷移時だけ) |
+| `lastOutputAt` | PTY は何も描画しない |
+| `agentActivityAtMs`(§5.4a) | **ターンが終わっている**ので transcript が伸びない |
+
+第3チャネルは「**1 ターン内で** Task() を回す worker」を救うために足したもので、**ターンが
+終わっているこの形は原理的に救えない**(むしろ真逆の形)。結果、`STALL_SILENCE_MS`(10 分)
+→ nudge 2 回(`STALL_NUDGE_COOLDOWN_MS` 3 分)→ escalate → **合計 ~16-20 分で reclaim**。
+
+- **実害(2026-07-27・司令官が実測)**: 固まって見えた worker **4 体が全員 `phase: verify`**
+  (= テストを走らせる段階)。偶然ではない。2 体のセッション JSONL の末尾が**完全に同じ形**だった:
+  最後の実発話 → `stop_reason: end_turn` → Stop hook → `turn_duration` でターン終了 → **約 20 分後、
+  背景タスクの完了通知(`queue-operation` enqueue)が届いたまさにその瞬間**に reclaim。しかも
+  その通知の中身は `<status>killed</status> Background command … was stopped` — **エンジンが、
+  自分が待たせていたテストを殺した**証拠がそのまま残っていた。
+- **悪循環**: worker を増やす → CPU 飽和 → テストが長引く → 10 分の閾値を超える → 殺される →
+  やり直しでさらに CPU 逼迫。**全カードが止まっていた真因はこれ**。
+- **修正**: 第4チャネル `bgTaskAliveAtMs` を `classifyStall` / `lastActivityMs` に OR で追加。
+  解決元は `sessionBackgroundTaskAt`(`sessionAgentActivityAt` の隣)。
+  **判定材料は推測せず現物 JSONL から確定させた**:
+  - **開始A(明示)** = `assistant` レコードの `message.content[]` にある
+    `{type:'tool_use', id:'toolu_…', input:{run_in_background:true}}`(レコードの `timestamp` が起動時刻)
+  - **開始B(自動背景化)** = ⚠ **背景タスクの生まれ方はもう1つある。** 前景 Bash が `timeout` を
+    超えると **Claude Code が自動で背景へ移す**。その `tool_use` レコードには
+    **`run_in_background` キーが存在しない** — 「背景」と読める情報がどこにも無い。証拠は
+    `user` レコードの `{type:'tool_result', tool_use_id:'toolu_…'}` の本文が
+    **`Command did not complete within its <n>s timeout and was moved to the background (ID: …)`
+    という文全体**に一致すること(そのレコードの `timestamp` が背景化した瞬間 =
+    ここから worker はターンを終えられる)。**初版はこれを見ておらず、実データで 44 件中 6 件が
+    同じ誤 kill を受け続ける状態だった**(検証に使った gap-4 自身の記録の中にもあった:
+    `toolu_016eNGirNrZE6cYbt7vX382s` — 08:50:49 前景起動 → 09:00:56 自動背景化 → 09:20:52 完了。
+    フルテストが 20 分背景で走っていたのに初版のパーサには見えなかった)
+  - **終了(両形式で共通)** = `queue-operation` レコードの `content`(`<task-notification>` ブロック)が
+    **同じ `<tool-use-id>` を名指す**。`enqueue` / `remove` / `dequeue` のいずれでも、
+    `completed` / `failed` / `killed` のいずれでも「もう pending ではない」= 終了
+  - 開始があって終了が無い = **実行中**。返すのは**最新**の実行中タスクの開始時刻。
+    ⚠ **最古ではない** — 最古にすると「通知を返さないタスク(背景 dev サーバ・`tail -f`・
+    通知を取り逃した kill)が 1 本あるだけで、以後のタスクを永久に**覆い隠す**」穴が開き、
+    猶予切れ後にはテスト実行中の worker がまたチャネルを失う = **同じバグの再発**。
+    最新に猶予更新の悪用余地は無い(新しい `tool_use` を出せるのは起きて動いている
+    証拠そのもので、transcript も伸びる。本当に死んだ worker は次を起こせないので
+    最後のタスクが同じ時計で猶予切れになる)
+- **上限(安全弁)**: `BG_TASK_GRACE_MS`(既定 **90 分** = `MAX_EXEC_MS` と同値・env
+  `OPENGROUND_SWARM_BG_TASK_GRACE_MIN` で可変)。
+  - ⚠ **初版の「45 分 = 実測最悪の 2 倍」は誤り**だった。根拠にした 3 データ点は正確だが、
+    それは**修正の動機になった 2 ファイルの中だけを見た窓**であって尾部ではない。ディスク上の
+    **484 タスク / 435 worker transcript** を機械集計すると(`--survey`)、猶予が比較される量は
+    **タスクの実行時間**(`now − 開始`)であって沈黙長ではなく、その分布は
+    **p50 2.0分 / p90 18.8分 / p99 52.6分 / 最大 98.1分**。45 分では **3 件が依然この
+    チャネルの選択によって殺される**(60 分・90 分では 0 件)。
+  - **なぜ 90 = `MAX_EXEC_MS` か**(「最悪値×係数」で決めない)。実行中の背景タスクが答えるのは
+    **「この worker は生きているか」**だけで、それが stall 監視の唯一の問い。
+    **「どれだけ生きてよいか」は別の問いで、このエンジンには既に担当がいる** — 実作業時間で
+    測る実行上限(`MAX_EXEC_MS`・§5.5)。猶予をそれと**同値**にすることは
+    「背景タスクが走っている間、stall 経路は実行上限を**先回りしない**」という宣言そのもの。
+    実測でも裏が取れている: 90 分を超えて走った 2 タスクは、どちらも worker 側が既に
+    `MAX_EXEC_MS` を超過していた(worker 年齢 115.3分 / 115.8分)= **runaway 経路の持ち物**で、
+    猶予をいくら伸ばしても結果は変わらない。**90 分は「これ以上増やしても何も変わらなくなる点」**。
+  - これは**猶予であって免除ではない**: 詰まったまま猶予を超えたタスクはチャネルを失い、
+    通常の escalation(nudge→cooldown→nudge→cooldown→escalate→cooldown =
+    3×`STALL_NUDGE_COOLDOWN_MS` ≈ **9 分**。10 分の検知窓は既に消費済み)に戻る = タスク開始から
+    最悪 **~99 分**。実際にはそれより早く `MAX_EXEC_MS` が同じ worker に到達する。
+  - ⚠ **この種の閾値を「空いているマシン」で測って決めてはいけない。** 同じフルスイートを
+    engine 停止中(非飽和)に回すと **90 秒**、swarm 飽和下では **20 分超** — **約 13 倍**開く
+    (どちらも 2026-07-27 に本 repo で実測)。10 分という元の `STALL_SILENCE_MS` は非飽和時の
+    体感としては妥当に見えるが、**エンジンが仕事をしている時の実態と桁が違う**。これが
+    「worker を増やす → 飽和 → テストが伸びる → 閾値を割る → 殺す → やり直しでさらに飽和」の
+    悪循環を生んでいた。閾値を触るときは**必ず飽和下の実測**を根拠にすること。
+- **コスト**: 事前 substring 絞り込み(3 マーカーのいずれかを含む行だけ `JSON.parse` — 1.27MB・
+  815 行で 20 行のみ)+ §5.4a と同じく **cheap チャネルが silent と出た worker だけ**に掛かる。
+  - ⚠ **ただし「1 回あたり」だけ見ると誤る。** ゲートは *安い方の* チャネルで計算した沈黙で開くので
+    **猶予の間ずっと開きっぱなし**で、`monitorWorkers` は 3 秒 tick = **1 worker あたり約 1800 回**
+    読み直す計算になる。読み込み自体は O(ファイル)で、実測 **3.7ms@1.27MB / 12–14ms@5–6MB /
+    57ms@18.8MB**(実 transcript は 6MB に達する)。6 体 × 6MB なら **3 秒ごとに約 80ms** メイン
+    スレッド(PTY の SSE を配っているのと同じプロセス)を塞ぐ。
+  - **だから `(size, mtimeMs)` でメモ化してある**: 背景タスクを待っている worker は定義上
+    **何も追記していない**ので、2 回目以降はバイト同一 = 再パースは証明可能に無駄。実際の追記
+    (完了通知の着弾)は size か mtime を必ず動かすので取りこぼさない。
+- **read-only 表示との整合**: `detectAnomalies` の `worker-stale` にも同じチャネルを同じゲートで
+  畳み込み済み(§5.4a と同じ不変条件)。
+- ⚠ **猶予を適用するのは stall ラダーだけ** — permission-wait / question の腕は**安い方の沈黙**
+  (`cheapStall`)で判定する。この 2 腕は「生きているか」ではなく**「人手の介入が要るか」**を
+  問うており、背景でタスクが走っていることはその答えにならない。両者を混ぜると、
+  **解決しない背景タスク**(`node serve.js` / watch ループ = 484 件中 32 件・約 7%)を抱えた
+  worker が trust ダイアログに当たっても自動 Enter を受けられず、**オーナーへの質問(C3
+  エスカレーション)も最大 90 分届かない**。
+- ⚠ **カバーできない 2 つ目のスライス**: **resume で新しいセッションファイルに移った worker** は、
+  前セッションに開始レコードがあるタスクを見られずチャネルを失う。安全側(このチャネルが無かった
+  頃と同じ扱いに戻るだけ)なので穴ではないが、意図的に手を付けていない — セッションの連鎖を
+  信用して kill/生存を決める作りにはしたくないため。
+- **回帰(歯)**: `swarmOrchestrator.test.ts` — `classifyStall`「SPARES a worker whose completion
+  gate is running in the background」(変異=`bgTaskAliveAtMs` を外すと nudge に反転)/「still
+  RECLAIMS a silent worker with NO background task」(緩めていないことの証明)/「returns to the
+  stall ladder once the background task ENDS」、`backgroundTaskAliveAt` の上限、`lastActivityMs`
+  の第4チャネル。`swarmOrchestrator.integration.test.ts` — `sessionBackgroundTaskAt` を
+  **実レコード形状**で固定(**開始A・開始B の両形式**+ END は両者共通であること。claude が
+  `run_in_background` / `<tool-use-id>` / `was moved to the background` を改名したらここが落ちる =
+  チャネルが黙って死ぬのを防ぐ)+ メモ化の無効化条件。
+  - ⚠ **配線そのものにも歯が要る**(実測で判明): 両ファイルチャネルは **optional dep** なので、
+    `defaultDeps()` から `sessionBackgroundTaskAt,` の **1 行を消すと修正まるごと不活性で出荷**
+    されるのに、**振る舞いテストは 614/614 緑のまま**だった(全部が自前の fake を注入するため)。
+    `defaultDeps — the file-backed liveness channels are actually wired` がその 1 行を守る。
+  - `scripts/verify-bg-channel-on-real-transcripts.mts` は**ディスク上の全 worker transcript**を
+    捨て HOME に複製して reclaim 時点の見え方を再構成し、`BEFORE='reclaim'(バグ) →
+    AFTER='none'(救済)` を**本番関数だけ**で再現する。全 435 ファイル走査で at-risk 35 件
+    (うち自動背景化 6 件)がすべて救済または「実行上限の持ち物」として説明可能:
+    `npx tsx scripts/verify-bg-channel-on-real-transcripts.mts ~/.claude/projects/*worktrees*/*.jsonl`
+    (`--survey` を付けると猶予の再導出に使った集計が出る)。
 
 ### 5.5 実行時間上限は **いま与えられている担当分の実作業時間**で測る(2026-07-12 / 07-18 / 07-20 根治)
 
@@ -645,11 +784,21 @@ curl -s -X POST http://127.0.0.1:47776/api/swarm/worker \
 
 ## 10. worker の死に方と見分け方(2026-07 exitCode 調査)
 
-**背景**: 2026-07-23〜25、worker が起動から ~1 時間前後で死ぬ現象が繰り返し観測された(1 枚のカードに
+> **⚠ まず読む — 「worker が死ぬ」の大半は死んでいなかった(2026-07-27 訂正)。**
+> 長らく「worker が起動から ~1 時間前後で**死ぬ**」と言われてきたが、2026-07-27 の実測で
+> **その主要因は crash ではなく stall 誤判定**だったことが確定した。**worker は一度も死んで
+> おらず、エンジンが、正しく待っている worker を kill していた**(完了ゲートを背景タスクで
+> 回してターンを終え、通知を待っていた worker を「沈黙」と誤判定 — 根治と証拠は **§5.4b**)。
+> 本章 §10 が扱うのは**それとは別経路の、本物のプロセス死(crash)**である。
+> **切り分け**: エンジン log が `worker stalled — reclaimed` なら §5.4b の系統(プロセスは生きて
+> いた)、`worker lost`(PTY 死亡)+ exitCode 付きなら本節の系統。
+
+**背景**: 2026-07-23〜25、worker が起動から ~1 時間前後で消える現象が繰り返し観測された(1 枚のカードに
 twin ブランチが最大 7 本生える副作用付き — twin 増殖そのものは 0.11.36 で別途根治済み。
-`commitsAhead>0` の crash/stall を `todo` でなく `blocked` へ park する変更)。だが**死因そのものは
-長らく特定不能だった** — PTY 層(terminal.ts)は `proc.onExit` で `exitCode` を捕捉して
-`TerminalInfo.exitCode` / `finishedAt` に持っていたのに、エンジンの reclaim 経路
+`commitsAhead>0` の crash/stall を `todo` でなく `blocked` へ park する変更)。**この観測は 2 つの
+別現象が混ざっていた**: 本物のプロセス死(本節)と、stall 誤判定による強制回収(§5.4b)。
+本物の死のほうも**死因そのものは長らく特定不能だった** — PTY 層(terminal.ts)は `proc.onExit` で
+`exitCode` を捕捉して `TerminalInfo.exitCode` / `finishedAt` に持っていたのに、エンジンの reclaim 経路
 (`recoverWorker` → `recoverLost` の crash ログ行)がそれを一切読まずに握り潰していた。
 `grep -n exitCode src/lib/server/swarmOrchestrator.ts` が 0 件だったのがその実証。
 
