@@ -28,7 +28,7 @@ artifacts on your own laptop. Two GitHub Actions workflows live in
   - a **macOS** job on a `macos` runner produces a **signed + notarized
     arm64 `.dmg`** (+ `latest-mac.yml`),
   - a **Windows** job on a native `windows` runner produces an **NSIS
-    `.exe`** (+ `latest.yml`). Windows is **unsigned** (see §6).
+    `.exe`** (+ `latest.yml`). Windows is **unsigned by decision** (see §6).
 
 > ⚠️ **The release tag goes to `open-ground`, NOT `origin` (PMmap).** The
 > signing secrets and the working `release.yml` live in **open-ground**; PMmap
@@ -393,7 +393,7 @@ Both anti-footgun shapes are regression-locked by
 
 ---
 
-## 6. Windows (UNSIGNED — built on native CI, not yet hardware-validated)
+## 6. Windows (UNSIGNED **by decision** — built on native CI, not yet hardware-validated)
 
 Windows is now a **real build target**: the CI release pipeline (§0) builds
 the Windows NSIS `.exe` on a **native Windows runner** and publishes it to
@@ -421,17 +421,48 @@ true`) and uses **`build/icon.ico`** (now present). `asar: false` is kept
 > path. Use the native Windows CI runner (§0) — it's also closer to the
 > environment users actually run.
 
-### Unsigned → SmartScreen (what end users see)
+### Unsigned → SmartScreen (accepted policy, not an open TODO)
 
-There is **no Windows code-signing certificate**, so the `.exe` is
-**unsigned**. On first launch Windows SmartScreen shows a blue *"Windows
-protected your PC"* dialog. To proceed, the user:
+There is **no Windows code-signing certificate**, and **we are not buying
+one** — owner decision, **2026-07-27** ("初回警告出すための証明書買わない").
+The `.exe` therefore ships **unsigned**, and that is the intended steady
+state, not a gap waiting to be closed. Do not add signing to `release.yml`
+and do not spend on a certificate (incl. EV) without a *new* owner decision;
+the question is only worth re-opening if Windows becomes a seriously-sold
+platform. Tracking row: [RELEASE_READINESS_GOALS.md §5
+GAP-4](RELEASE_READINESS_GOALS.md).
+
+Because the binary carries no signature and no SmartScreen reputation, the
+first launch shows a blue *"Windows protected your PC"* dialog reporting an
+unrecognized publisher. To proceed, the user:
 
 1. clicks **More info**, then
 2. clicks **Run anyway**.
 
-This is a one-time bypass per download. Document it for end users (the README
-covers it) so the warning doesn't look like the app is broken or malicious.
+This is a one-time bypass per download; nothing else about the app is
+impaired.
+
+**Accepting the warning means disclosing it** — shipping an unexpected
+warning silently is exactly what makes an app look broken or malicious. The
+fact is stated, in plain language, in:
+
+- **`landing/index.html`** (the public page) — hero download notes, **JA +
+  EN**: the always-visible caveat says the build isn't signed and will warn on
+  first launch; the Windows-only `.win-note` adds the *More info → Run anyway*
+  walk-through.
+- **`README.md`** §Install / §Platform support — the same one-time bypass.
+- this section.
+
+Keep those three in sync if the wording changes. **Do not** "fix" the warning
+with installer tricks — the policy is to state it honestly.
+
+> **Source note:** Microsoft Learn documents the *behavior* — a file or
+> signature with no established reputation gets a warning ([Microsoft Defender
+> SmartScreen
+> overview](https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/),
+> ms.date 2026-04-23) — but does not publish the dialog's verbatim strings.
+> The quoted title and button labels above are the long-standing shipping UI
+> text; treat them as approximate until confirmed on real hardware (GAP-3).
 
 ### Obsolete: the batch-runner-era Windows fixes
 

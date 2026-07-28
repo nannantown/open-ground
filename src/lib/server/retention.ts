@@ -3,6 +3,7 @@ import { promisify } from 'util'
 import { readFile, readdir, rm, rmdir, stat, unlink } from 'fs/promises'
 import { isAbsolute, join } from 'path'
 import { canonicalize } from './canonicalize'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { centralWorktreesDir, openGroundHome, projectsDataRootDir, runsDir } from './paths'
 import { projectDataDir } from './projectDataPath'
 import { getSettings } from './store'
@@ -117,6 +118,7 @@ const execFile = promisify(execFileCb)
 // House convention (swarmJanitor / swarmIntegrate / mergedBranches): git never
 // hangs on a credential prompt and gets a hard timeout.
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, {
       cwd,

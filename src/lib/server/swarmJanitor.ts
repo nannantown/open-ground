@@ -32,6 +32,7 @@ import { readdir, readFile, stat, unlink } from 'fs/promises'
 import { basename, dirname, join, resolve } from 'path'
 import { createHash } from 'crypto'
 import { canonicalize } from './canonicalize'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { openGroundHome } from './paths'
 import { checkMergedBranches } from './mergedBranches'
 import { isSwarmBranch, resolveTarget } from './swarmIntegrate'
@@ -55,6 +56,7 @@ const GIT_OPTS = {
 
 /** Run git in `cwd`; null on any failure (no git, not a repo, bad ref…). */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout
@@ -66,6 +68,7 @@ const git = async (cwd: string, args: string[]): Promise<string | null> => {
 /** Run git capturing only success/failure (for deletes/pushes where we just
  *  need "did it work"). */
 const gitOk = async (cwd: string, args: string[]): Promise<boolean> => {
+  if (!isGitRepoRoot(cwd)) return false // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     await execFile('git', args, { cwd, ...GIT_OPTS })
     return true

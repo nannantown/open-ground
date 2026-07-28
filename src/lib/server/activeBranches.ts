@@ -9,12 +9,14 @@
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { parseWorktreePorcelain } from './worktreeCleanup'
+import { isGitRepoRoot } from './gitRepoGuard'
 import type { ActiveBranchesResponse } from '../types'
 
 const execFile = promisify(execFileCb)
 
 /** Run git in the project dir; null on any failure (no git, not a repo, …). */
 async function git(cwd: string, args: string[]): Promise<string | null> {
+  if (!isGitRepoRoot(cwd)) return null // never spawn git in a non-repo/vanishing cwd (gitRepoGuard)
   try {
     const { stdout } = await execFile('git', args, { cwd })
     return stdout

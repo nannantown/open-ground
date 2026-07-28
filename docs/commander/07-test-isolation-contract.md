@@ -1266,6 +1266,165 @@ teeth だけだった。
 > 同一かを疑う**。検出パターンの議論より先に、列挙の非対称が穴を作る。そして
 > **列挙を共有する**のがコメントで注意を促すより強い — ズレようがなくなる。
 
+### 4.15 第11ラウンド(2026-07-28)— **teeth 自身が3世代にわたって誤った条件を踏んでいた**
+
+`testHomeGuard.test.ts` の 6 件(いずれも「throw するはず」の側)が open-ground の
+CI で毎回赤。**実測(`gh run view --log-failed`、`ci.yml`・`ubuntu-latest`・`npm test`):
+0.11.32 から 0.11.38(この修正時点の最新)まで 7 リリース連続**、いずれも同一の
+`src/lib/server/testHomeGuard.test.ts (47 tests | 6 failed)` シグネチャ。0.11.31 以前には
+出ない。「0.11.36 / 0.11.37 の 2 リリース」という当初の申告は過小、後続レビューで出た
+「0.11.36 は出ていない」という訂正案も誤り — **両方とも実測ログを見ずに書かれていた**。
+release ジョブ自体は success なので配布は止まらず、**本章の安全網だけが CI で検証され
+ない**状態が7リリース続いていた。
+
+**柵は正しい。**バグはテスト側のヘルパー `unsafeWorld()` にあり、しかも**3世代連続で
+誤った**——「不安全ホームを本当に安全でない場所に置く」という一点を、3回とも別の形で
+外した。
+
+**ラウンド1(〜2026-07-28)**: 不安全ホームを**実 tmp の中に mkdtemp** し、`TMPDIR` を
+兄弟サブディレクトリへ stub して「temp の外」に見せていた。`tempRoots()` は非 win32 で
+`/tmp` を**ハードコードで足す**(§2.1 の `vi.mock('os')` 対策)ため、ラウンド1の構成を
+**そのまま**(`TMPDIR` stub 込みで)再現して実測すると:
+
+| OS | 実 tmpdir(`outer` 生成時) | unsafeHome の実際の場所 | 柵の判定 |
+|---|---|---|---|
+| macOS | `/var/folders/…` | `/private/var/folders/…/home` | どの root にも該当せず → **不安全**(正しく throw)|
+| **Linux(CI)** | **`/tmp`** | **`/tmp/…/home`** | **`/tmp` 配下 = 安全** → **throw しない** |
+
+`TMPDIR` stub は `fakeTmp`(兄弟パス)だけを temp 扱いにする効果しか持たず、
+`unsafeHome` 自身の判定は「`outer` が生成された瞬間の実 tmpdir が `/tmp` かどうか」で
+決まる——Linux では tmpdir() 自体が `/tmp` なのでハードコード分岐にそのまま乗り、macOS
+では `/var/folders` なので乗らない。**macOS が緑だったのは OS 配置の偶然**であり、
+`/tmp/...` を安全と判定するのは柵として正しいので、**柵は1行も変えていない**。
+
+再現(1 コマンド、実測): `TMPDIR=/tmp npx vitest run src/lib/server/testHomeGuard.test.ts`
+→ **6 failed / 41 passed**(CI と同一の 6 件・同一理由)。TMPDIR 無しなら 47 緑。
+
+**ラウンド2(同日、最初の修正)**: unsafeHome を repo root の `REPO_PROBE_PREFIX` 配下
+(= §4.11 が「temp でない唯一の書込み可能地点」と定めた場所)に移した。ラウンド1の
+失敗モードは消えたが、**別の条件が冗長な backstop として隠れる新しい穴**を開けた。
+
+⚠ **この段落は当初「条件2で弾かれ条件1には届かない」と書かれていたが、実測で誤りと
+判明し訂正した**(差し戻し2回目)。`testHomeGuard.ts` の条件順序は**条件1(:352)が
+条件2(:358)より先**であり、無変異のまま repo-root アンカーを直接 `testHomeProblem()`
+に渡すと(このワークツリー自身から実測)**条件1のメッセージが返る**——ラウンド3の
+`/var/tmp` アンカーと同じ返り値。つまりラウンド2でも条件1は毎回きちんと発火していた。
+
+本当の欠陥はこう: swarm worker のチェックアウトは
+`~/.openground/projects/<uuid>/worktrees/…` 配下にあるため、そこでの repo-root パスは
+条件1に**加えて**条件2(`isSamePathOrUnder(canon, REAL_OPENGROUND_HOME)`)**にも**
+マッチしてしまう。条件2は普段は姿を見せない**冗長な backstop**——ところが統合レビューが
+`testHomeGuard.ts` の `if (!isUnderTempRoot(home))` を
+`if (false && !isUnderTempRoot(home))` に変異させ(**条件1を丸ごと無効化**)て実測した
+ところ、ラウンド2の版で `testHomeGuard.test.ts` は **両方の TMPDIR 環境で 47 passed /
+0 failed のまま**だった——条件1が死んだ瞬間に条件2が代わりに拾い、外から見える結果
+(throw する/しない)は何も変わらなかった。
+
+ラウンド2で足した前提 assert(`isUnderTempRoot(unsafeHome) === false`)は嘘を言っていた
+わけではなく、実際に真だった。欠けていたのは別の問い——「条件1が**唯一の**拒否理由か」
+——であり、それを確かめていなかったので、条件1が壊れても気づける形になっていなかった。
+
+**ラウンド3(本ラウンド、修正)**: unsafeHome のアンカーを **`/var/tmp`** に置き直した。
+実測(このワークツリーから、`TMPDIR=/tmp` と既定の両方)で以下の**3条件すべて**を
+同時に満たすことを確認済み:
+
+- `tempRoots()`(`tmpdir()`/`TMPDIR`/`TMP`/`TEMP` に加えハードコード `/tmp` のみ)には
+  一度も含まれない — `/var/tmp` はここに無い
+- `REAL_OPENGROUND_HOME` の外
+- `PASSWD_HOMEDIR` / `EFFECTIVE_HOMEDIR` の両方の外
+
+結果、`testHomeProblem('/var/tmp/og-fence-unsafe-<id>', {})` は条件1のメッセージ
+(`"the resolved home is outside every OS temp root (canonical: …)"`)をそのまま返す。
+**この world を使う消費側ケース全部を個別に実測**した結果(installHooks の `$HOME` stub
+ケース・legacy 移行の `vi.resetModules()` 再 import ケースを含む)、**全ケースが条件1で
+弾かれる**ことを確認した——`$HOME` stub や module reset は条件1の判定([`testHomeProblem`]
+内で最初に評価される)に一切影響しない(条件1は `$HOME` を参照しない)ため。したがって
+「一部のケースは条件2/3の teeth」という分割は不要で、**アンカー1つで全ケースに条件1の
+teeth が均一に乗る**。
+
+`/var/tmp` を採用するにあたり実測で潰した3点:
+1. `TMPDIR=/var/tmp` という環境では `/var/tmp` 自体が `tempRoots()` に入るため条件1が
+   発火しなくなる——実測: その環境で `testHomeProblem()` は `null`(問題なし)を返す。
+   これは前提 assert(`toMatch(/outside every OS temp root/)`)が `null` に対して**大きな
+   声で失敗する**ことで検知される(黙って無力化はしない)。
+2. `/var/tmp` は再起動をまたいで残る共有・sticky ディレクトリなので、予測可能な名前は
+   他ユーザ/前回実行の残骸に黙って乗る危険がある——`mkdtemp('/var/tmp/og-fence-unsafe-')`
+   で OS 保証の一意な名前を発行させ(2行上の `tempOuter` と同じプリミティブ)、
+   pid+counter の手組みは廃止(差し戻し2回目で反映)。掃除方針は他の tmp world と同じ
+   (`cleanup()` で必ず `rm`、残るのは実行が kill された場合のみ)。
+3. `$HOME` を `/var/tmp` 配下へ stub して module を再 import すると
+   `EFFECTIVE_HOME_IS_TEMPORARY` が true になり得る(`homeIsThrowaway()` が
+   `TRUSTED_TEMP_PREFIXES` に含まれる `/var/tmp` を throwaway と見なすため)が、実測では
+   これは無関係——条件1が常に先に発火するため、条件3のこの抑制が効く場面は今回のケース
+   群には存在しない。
+
+「実体が不要なケース」(:832 `refuses a non-tmp $HOME through the same one fence` — path を
+渡すだけで一切ファイルシステムに触れない)は `unsafeWorld()` から独立した footprint ゼロ
+のヘルパー `outsideAnyHome()`(`/` 直下・作成しない)へ移した。**setSettings のケースは
+移していない**——`/` 直下は非 root では書けないため、そこへ移すと「柵が拒否した」ではなく
+「権限が無くて書けなかった」で `assertNeverCreated` が通ってしまい、teeth が偽物になる。
+
+同型のバグを inline で抱えていた legacy 移行ケース(実 `~/.hove` を動かさない teeth)は
+引き続き `unsafeWorld()` を共有させている——2つのコピーは prefix も作る対象も違うので
+「同一だった」は言い過ぎで、正しくは**構成が同型だった**(同じ「実 tmp の中に不安全
+ホームを作る」誤りを2箇所で別々に踏んでいた)。
+
+**teeth(実測、最終形)**: 前提を assert に落とし(`testHomeProblem(unsafeHome, {})` が
+条件1のメッセージ文言そのものにマッチすること)、`if (false &&
+!isUnderTempRoot(home))` 変異を最終形の `unsafeWorld()`(`/var/tmp` アンカー)に対して
+再実測:
+
+| 環境 | 修正後(変異なし) | 条件1無効化の変異 |
+|---|---|---|
+| `TMPDIR=/tmp` | 47 passed | **6 failed / 41 passed** |
+| TMPDIR なし(macOS) | 47 passed | **6 failed / 41 passed** |
+
+ラウンド2の同じ変異は両環境とも 47 passed / 0 failed(teeth 無し)だった——**両OSで
+赤になる**のがラウンド3で初めて成立した性質であり、ラウンド1の「アンカーのみを実 tmp 内
+へ戻す(TMPDIR stub は戻さない)」という単純化した変異でも両OS赤になるが、これは
+**トートロジー**(`mkdtemp(join(tmpdir(), …))` の直下に作れば tmpdir() の定義上
+必ず temp 扱いになる)であり、ラウンド1の実際の構成(TMPDIR stub込み)を厳密に再現した
+場合は macOS で条件1の前提が**真に成立してしまう**(上表参照)ため、「前提を assert すれば
+書いた人の机の上でその日に落ちる」という主張はラウンド1の実際の構成には**適用できない**
+——macOS では本当に安全なホームが作られていたから。この教訓が刺さるのはラウンド2
+(条件2の混入)であり、ラウンド1(OS配置依存)ではない。書き分けが必要。
+
+なお `src/testHomeEnvGuard.test.ts` の repo-tree write sweep self-check コメント
+(「sanctioned なサイトは1本(:444 相当)だけ残る」)は、ラウンド2で `unsafeWorld()` が
+repo root に書き込んでいた間は不正確になっていたが、ラウンド3で `/var/tmp` へ移したことで
+repo 木への書き込みが再びゼロになり、**コメントは何も変更せずに正しさへ復帰した**——
+コメント自体を直す必要はない(実測: `sanctionedSites` は元の1件に戻る)。
+
+> **教訓**: teeth の「不安全な入力」は、**env を細工して不安全に見せるのではなく、
+> 実際に不安全な場所に置く**——だけでは足りない。「実際に不安全な場所」が**どの条件で
+> 弾かれるか**まで実測しないと、複数の拒否条件を持つ柵では「拒否はされるが狙った条件では
+> ない」という形で同じ穴が再発する(ラウンド2がまさにそれ)。teeth の実測は
+> 「throw するか」ではなく「**どの理由で** throw するか」まで見る。
+
+**ラウンド4(差し戻し2回目、本ラウンド)**: ラウンド3の前提 assert
+(`testHomeProblem(unsafeHome, {}) が条件1のメッセージを返す`)には、**それ自身が
+ラウンド2と同じ穴**があった。ラウンド2の repo-root アンカーに対しても
+`testHomeProblem()` は条件1のメッセージを返す(上の訂正どおり)ため、この assert は
+**ラウンド2とラウンド3を区別できない**——将来誰かがアンカーを repo root や `~/` 配下へ
+戻しても、この assert は緑のまま通り、teeth だけが静かに死ぬ(ラウンド2とまったく
+同じ形)。
+
+追加した `assertOnlyCondition1()` は「条件1のメッセージが返る」に加えて「条件2・条件3
+どちらもこのパスにマッチしない」——**条件1が唯一の拒否理由である**——ことまで実測
+assert 化する。既存の `assertReachesCondition3()`(執筆時点で :765-785 相当、逆方向の
+目的で同じパターンを持つ——後続の編集で行番号は動きうるので目安)を鏡写しにした。
+`unsafeWorld()` と、実体を持たない
+`outsideAnyHome()`(footprint ゼロで docstring だけが保証を主張し、コード側には何の
+assert も無かった非対称)の両方に適用。
+
+実測で検証: `unsafeHome` を一時的に `mkdtemp(join(REPO_ROOT, REPO_PROBE_PREFIX))`
+(ラウンド2と同じアンカー)へ戻すと、新しい `assertOnlyCondition1()` が「これは
+round-2 バグそのもの」と名指しして 5 failed で落ちることを確認。元へ戻し
+`git status --porcelain` 空を確認済み。
+
+最終形で `if (false && !isUnderTempRoot(home))` を再実測(両アサート込みの完成形):
+`TMPDIR=/tmp`・既定 TMPDIR の両方で **6 failed / 41 passed**(ラウンド3の値を維持)。
+
 ---
 
 ## 5. 検証コマンド(疑ったら自分の目で)
@@ -1398,3 +1557,159 @@ python3 -c "import json;d=json.load(open('$HOME/.openground/settings.json'));pri
    した。**ソースを読むガードに全称主張は付けられない** — 綴りは無限に作れる。全称を
    主張したければ、値でも綴りでもなく**結果(残骸・実際に起きた副作用)**を見るしかない。
    文書には必ず**守備範囲と、その外側**を書く。
+
+---
+
+## 7. 第2のクラス — テストが**マシンそのもの**を壊す(2026-07-28)
+
+§1〜§6 は「テストがユーザーの**データ**を壊せない構造」だった。この節は同じ
+テスト隔離の傘の下にある**別クラス**を扱う: テストが漏らした**実プロセス**が
+OS を詰まらせ、**再起動するまで復旧できない**状態にする経路。
+
+### 7.1 事故 — 症状は「claude code が重い」だった
+
+オーナーからの申告は「claude code が重すぎる」。**OPEN GROUND の話ですらなかった**
+— 素の Alacritty でも固まり、resume で上げ直しても再発した。実測でこうなっていた:
+
+- `launchd`(PPID=1)を親に持つ **`git` が 41 個**、最長 **5 時間 35 分** 経過、全て
+  **U(uninterruptible)状態**。load average ≈ 5。
+- 各プロセスの cwd は `og-resume-a-*` / `og-resume-b-*` / `og-overseer-banner-*`
+  — つまり **swarm ユニットテストの `mkdtemp` 一時 dir**(既に削除済み)。
+
+指紋になる 1 行(**この節の唯一の診断コマンド**):
+
+```bash
+ps -axo pid,ppid,stat,command | awk '$2==1 && $3 ~ /^[UD]/ && /git/' | wc -l
+```
+
+0 以外なら該当。**親が launchd なので、OG や claude を再起動しても消えない** —
+これが「resume しても直らない」の正体で、アプリ側をいくら疑っても外れる。
+
+### 7.2 因果連鎖(5 段)
+
+1. `swarmOrchestrator.resumeEngines.test.ts` /
+   `swarmOrchestrator.overseerReminder.test.ts` が、orchestrator / overseer 経由で
+   **本物の git**(`fetch origin`・`for-each-ref refs/heads/swarm`・
+   `rev-parse --git-common-dir`・`symbolic-ref`)を **git リポではない**一時 dir で起動する。
+2. `resumeEngines()` は最後に `void runEnginePass(engine, deps)` を
+   **fire-and-forget** で撃つ(意図的な設計 — boot を待たせないため)。テストの
+   assert は数ミリ秒で終わり、**in-flight の pass は誰も待っていない**。
+3. `afterEach` の `rm(tempdir, {recursive:true})` が、**git がまだ走っている最中に
+   その cwd を消す**。
+4. cwd(vnode)を失った git がカーネル内で **U 状態に落ち、二度と戻らない**。
+5. 孤児が積み上がり、run queue を詰まらせてマシン全体をフリーズさせる。
+
+### 7.3 なぜ「timeout を付ける」では直らないか(実測)
+
+**この節で一番間違えやすい点。** 対症療法に見える 2 つが**どちらも無効**だと実測で確定した:
+
+- **`execFile` の `timeout` は効かない。** `swarmJanitor.ts` の `GIT_OPTS` は事故当時
+  **既に `timeout: 60_000` を持っていた**。それでも 5 時間ハングした。Node は時間が来たら
+  kill を送って自分は諦め null を返すが、**実プロセスは wedge したまま**残る。
+- **`SIGKILL` も効かない。** PID を 1 つ選んで `kill -9` → **生存を確認**。U 状態の
+  プロセスはカーネル syscall から戻らないので、**シグナルが配送されない**。
+
+したがって **timeout を伸ばす / kill で掃除する系の対処は全部ハズレ**。
+そして `rm` は timeout より先に勝つので、timeout をいくら短くしても競走に勝てない。
+
+### 7.4 契約(いま保証されていること)
+
+**`.git` を持たない cwd では、swarm は git を spawn しない。**
+
+単一実装 `src/lib/server/gitRepoGuard.ts`:
+
+```ts
+export const isGitRepoRoot = (cwd: string): boolean => existsSync(join(cwd, '.git'))
+```
+
+これを **swarm 系の全 git ヘルパの冒頭**(`git` / `gitOk` / `gitExit` / `gitOut` /
+`branchOfWorktree`)に置き、非リポなら **既存の失敗値**(`null` / `false` /
+`'unknown'`)をそのまま返す。適用先 13 ファイル: `activeBranches` / `branchChanges` /
+`gitBranches` / `mergedBranches` / `retention` / `reviewWorktree` /
+`selfUpdateOnIntegrate` / `swarmIntegrate` / `swarmJanitor` / `swarmOrchestrator` /
+`swarmWorker` / `swarmWorkerRegistry` / `worktreeCleanup`。
+
+- **本番の挙動は不変** — 本番の cwd は常に実リポ(プロジェクト / worktree)。
+- **既存の失敗時セマンティクスと等価**なので、呼び出し側の分岐は 1 行も変えていない。
+- `existsSync` 1 回の stat は、それが防ぐ**プロセス spawn より桁で安い**。
+
+**意図的に非適用の 2 箇所**(ここを「漏れ」と誤認して足すと壊れる):
+
+| 非適用 | 理由 |
+|---|---|
+| `swarmEnvPreflight` の `git --version` | cwd に依存しない存在確認。リポ判定は無意味 |
+| `youCorpus` の `rev-parse --git-common-dir` / `--show-toplevel` | **任意の cwd から上へ遡上してリポ根を探す**のが仕様。root 限定ガードを付けるとサブディレクトリで誤って null になる |
+
+### 7.5 teeth — 「守りたい事象を起こして赤くなるか」
+
+§6-7 の掟どおり、**値ではなく結果(実際の副作用)**を見る。手順:
+
+```bash
+# 1) 実行前の孤児数を数える
+ps -axo pid,ppid,stat,command | awk '$2==1 && $3 ~ /^[UD]/ && /git/' | wc -l
+# 2) 事故を起こしていた 2 ファイルを回す
+npx vitest run src/lib/server/swarmOrchestrator.resumeEngines.test.ts \
+               src/lib/server/swarmOrchestrator.overseerReminder.test.ts
+# 3) 「実行中に新しく git が生まれたか」を etime で見る(数分台のエントリが在れば漏れている)
+ps -axo etime,stat,pid,command | grep -w git | grep -v grep | sort | head
+```
+
+2026-07-28 の実測: 38 tests pass、**etime の最短が実行時刻よりはるかに古い**
+= 新規 spawn ゼロ。ガードを外せば同じ手順で数分台の `U` が湧く(= 赤くなる)。
+
+> **注意**: この teeth は **プロセス表を見る**ので、他のテストや作業が同時に git を
+> 回していると読み違える。孤児が既に溜まっている環境では **実行前後の差分**で見ること
+> (総数は再起動するまで減らない)。
+
+### 7.6 守備範囲と、**その外側**(§6-7b)
+
+**これは予防であって、掃除ではない。**
+
+- **既に U 状態に落ちた孤児は、このガードでは 1 個も消えない。** OS 再起動が唯一の
+  手段(sudo でも不可)。事故当日も、修正の実証と再起動は**別作業**として扱った。
+- **リポ根限定。** 見ているのは `<cwd>/.git` だけなので、**サブディレクトリを cwd に
+  渡す呼び出しには使えない**(だから `youCorpus` は非適用 = §7.4 の表)。swarm の cwd が
+  常にリポ根(プロジェクト / worktree)であることに依存している — その前提が崩れる
+  呼び出しを足すなら、このガードは付けられない。
+- **git 以外の子プロセスは無防備。** 同じ「cwd を消されて U 状態」は原理的に
+  `tsc` / `lint` / `vitest` / `claude` PTY でも起こりうる。今回塞いだのは git だけ。
+- **fire-and-forget そのものは残っている。** テストは今も in-flight pass を待たない
+  (§7.2-2 は設計として正しい)。**git を掴まなくなっただけ**なので、実リソースを掴む
+  dep を新しく足せば**同じクラスが再発する**。新しい dep を足すときは
+  「テスト終了後に走り続けても安全か」を必ず自問する。
+
+### 7.6b 検知(2026-07-28 追加)— 気づくまでの5時間半を閉じる
+
+§7.6 のとおり**掃除はできない**。できるのは**早く気づくこと**で、そこが今回いちばん
+高くついた(修正は分かれば速かった。高かったのは「何かおかしい」→「原因はこれ」の距離)。
+
+`src/lib/server/stuckProcessWatch.ts` がサーバ boot で **1 回だけ**スキャンし、
+**孤児(PPID=1) × 中断不能(U/D) × 一定時間経過**の 3 条件を満たすプロセスが
+`STUCK_MIN_COUNT`(3)以上あれば info 通知(`event:'stuck-processes'`)を上げる。
+
+- **報告専用**。掃除アクションは**意図的に置かない** — 消す方法が存在しない(§7.3)以上、
+  「直そうとして毎回失敗するのに成功したように見える」コードにしかならない。
+- **1 条件だけを見る**。ディスク/メモリ/温度は見ない — 健康ダッシュボードではなく、
+  「OG 自身が作りうる × 静かに劣化する × 対処が再起動ただ一つ」の状態だけを見る。
+- **閾値の根拠**: 年齢 10 分(数秒の D 状態はただのディスク待ちで正常)。個数 3(1〜2 個は
+  実測で体感ゼロ。かつ野外の唯一の誤検知候補 —— 切断された SMB/NFS 共有 —— を吸収する)。
+- **privacy**: `comm`(実行ファイル)だけを読む。`command`(argv)は worker のプロンプト全文を
+  抱えているので通知に載せない。
+- **Windows は no-op**(`ps` と U 状態は Unix の概念)。
+- 文言はオーナー基準の平易文(「動かなくなった処理が N 個…再起動すると消えます」)。
+  **kill を勧めない**ことをテストで pin してある(効かないと実測済みだから)。
+
+teeth: `stuckProcessWatch.test.ts`(21 件)が判定を**壊れたマシンを再現せずに**全部押さえる
+(事故当日の ps 出力をテキストとして再生)。`npx tsx scripts/probe-stuck-process-watch.mts` は
+「今は黙る / 当日のテーブルなら鳴る」を 1 コマンドで実証する。
+なお `findStuckProcesses` の「健全なら git はゼロ」ケースは **gitRepoGuard の回帰 teeth**
+でもある — スイートを回して赤くなったら、また何かが子プロセスを漏らしている。
+
+### 7.7 掟(§6 への追補)
+
+8. **swarm から新しく git を呼ぶときは `isGitRepoRoot` ガードを通す。**
+   例外を作るなら §7.4 の表に 1 行足して理由を書く(黙って外さない)。
+9. **「重い / 固まる」の申告が来たら、アプリを疑う前に §7.1 の 1 行を打つ。**
+   OG も claude も無実で、犯人が過去のテストの残骸ということがある。
+10. **U 状態を見たら kill を試さない。** 時間の無駄だと実測済み(§7.3)。
+   予防はコード側、復旧は再起動、と割り切る。

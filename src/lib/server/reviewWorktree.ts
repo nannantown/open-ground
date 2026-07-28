@@ -21,6 +21,7 @@ import { mkdir, realpath } from 'fs/promises'
 import { join, sep } from 'path'
 import { createHash } from 'crypto'
 import { centralWorktreesDir } from './paths'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 
 const execFile = promisify(execFileCb)
@@ -75,6 +76,7 @@ export const reviewWorktreeName = (branch: string): string =>
   createHash('sha1').update(branch).digest('hex').slice(0, 6)
 
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout

@@ -36,6 +36,7 @@
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { sanitizeBranch } from './reviewWorktree'
+import { isGitRepoRoot } from './gitRepoGuard'
 
 const execFile = promisify(execFileCb)
 
@@ -70,6 +71,7 @@ export const isSwarmBranch = (branch: string): boolean =>
 
 /** Run git in `cwd`; null on any failure (no git, not a repo, bad ref…). */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout
@@ -85,6 +87,7 @@ const gitExit = async (
   cwd: string,
   args: string[],
 ): Promise<{ ok: boolean; code: number | null }> => {
+  if (!isGitRepoRoot(cwd)) return { ok: false, code: null } // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     await execFile('git', args, { cwd, ...GIT_OPTS })
     return { ok: true, code: 0 }

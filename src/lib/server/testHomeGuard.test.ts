@@ -16,6 +16,7 @@ import {
   isTestProcess,
   isUnderTempRoot,
   productionHome,
+  testHomeProblem,
   TRUSTED_TEMP_PREFIXES,
 } from './testHomeGuard'
 
@@ -67,12 +68,14 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
 // throws and names this file. That containment is why src/testHomeEnvGuard.test.ts
 // exempts this path from its repo-wide `delete` grep.
 
-// Where the ONE remaining repo-root probe below builds its throwaway dir, and
-// under what name. Both halves are load-bearing; neither is free to drift.
-// (There were two. The other one — the "fake real home" for the TMPDIR-poisoning
-// cases — no longer creates anything at all: it needs a path, not a directory,
-// and anchoring it at the repo root was actively masking what it tested from
-// inside a swarm worktree. See fakeRealHome() below.)
+// Where the repo-root probes below build their throwaway dirs, and under what
+// name. Both halves are load-bearing; neither is free to drift.
+// (The count moves in both directions. The "fake real home" for the
+// TMPDIR-poisoning cases left: it needs a path, not a directory, and anchoring
+// it at the repo root was actively masking what it tested from inside a swarm
+// worktree — see fakeRealHome() below. unsafeWorld() briefly moved here too on
+// 2026-07-28, for the same reason and with the same masking effect — see its
+// docstring for both that round and the /var/tmp anchor that replaced it.)
 //
 //   REPO_ROOT — resolved from THIS FILE, never from process.cwd(). A probe that
 //     must read as "not temp" has to be built somewhere that is not temp (every
@@ -127,36 +130,302 @@ const assertNeverCreated = async (p: string, what: string) => {
 }
 
 /**
- * A throwaway world with its own idea of where "temp" is, so a case can hold a
- * path the fence MUST refuse without going anywhere near the user's data.
+ * A throwaway world with two halves that are what they claim BY LOCATION, so a
+ * case can hold a path the fence MUST refuse without going anywhere near the
+ * user's data: `tmp` really is inside the OS temp dir, `unsafeHome` really is
+ * outside every temp root, AND outside condition 2's real ~/.openground and
+ * condition 3's two real homes — so condition 1 is not just A reason
+ * `testHomeProblem()` rejects it, it is the ONLY reason. That distinction is
+ * not cosmetic: it is what "the fence has teeth" means here, and this world
+ * has carried that claim wrong THREE times before landing.
  *
- * Everything lives under one mkdtemp dir; TMPDIR is then stubbed at its `tmp/`
- * SUBdirectory. From the fence's point of view `unsafeHome` is therefore not
- * under any temp root — structurally identical to a real, populated $HOME — and
- * `tmp/` is a legitimate temp location.
+ * ROUND 1 (until 2026-07-28): both halves lived under ONE mkdtemp in the real
+ * temp dir, and the "unsafe" half was made to READ as non-temp by stubbing
+ * TMPDIR at a sibling subdirectory — shrinking the fence's notion of "temp"
+ * around a path that was in fact inside it. MEASURED, faithfully reproducing
+ * round 1's exact construction (`outer` built from the REAL tmpdir() BEFORE the
+ * TMPDIR stub, matching the historical code exactly, not a simplified stand-in):
+ * on Linux CI `outer` lands under `/tmp` because tmpdir() itself IS `/tmp`
+ * there — the hardcoded `/tmp` entry in tempRoots() (added on every non-win32
+ * platform for the `vi.mock('os')` case) matches it regardless of any TMPDIR
+ * stub, so the "unsafe" home reads as safe and the fence correctly ALLOWED it.
+ * On macOS, `outer` lands under `/var/folders/…` — not `/tmp` — so it stays
+ * unmatched and the round-1 premise (`isUnderTempRoot(unsafeHome) === false`)
+ * is TRUE THERE, full construction included: this bug could not have been
+ * caught by strengthening the premise assert alone on a macOS machine, because
+ * the premise really did hold. Confirmed CI-failing on `ci.yml` (ubuntu-latest,
+ * `npm test`) for SEVEN consecutive releases — 0.11.32 through 0.11.38, the
+ * latest at the time of this fix — via `gh run view --log-failed`, all showing
+ * the identical `src/lib/server/testHomeGuard.test.ts (47 tests | 6 failed)`
+ * signature (0.11.31 and earlier: no such failure). The narrower claim "any
+ * construction anchored under `mkdtemp(join(tmpdir(), …))` is trivially unsafe
+ * on every platform" is ALSO true and easy to mis-cite as "round 1 reproduced"
+ * — it is not the same claim, because that construction is missing the TMPDIR
+ * stub that made round 1's `fakeTmp` half legitimate; see the mutation note
+ * below for where that distinction actually matters.
  *
- * This indirection is not decoration. The first version of these cases used
- * `join(homedir(), '.openground-fence-probe-*')` as the stand-in for "unsafe",
- * which silently stops being unsafe when the runner isolates HOME — and
- * `HOME=$(mktemp -d) npm test` is exactly how this contract says to run the
+ * ROUND 2 (2026-07-28, same day): moved `unsafeHome` to the repo root under
+ * REPO_PROBE_PREFIX. This did NOT skip condition 1 — condition 1 is checked
+ * FIRST in testHomeProblem() (testHomeGuard.ts:352, condition 2 is :358), and a
+ * repo-root path under a swarm worker's checkout is genuinely outside every
+ * temp root, so `testHomeProblem()` returned CONDITION 1's message for it too,
+ * unmutated, exactly as it does for the round-3 anchor below (RE-MEASURED
+ * directly from this worktree to confirm: both the repo-root anchor and this
+ * file's own `/var/tmp` anchor return the identical "outside every OS temp
+ * root" message when queried without any mutation). The round-2 premise assert
+ * (`isUnderTempRoot(unsafeHome) === false`) was checking exactly this, and it
+ * was TRUE — it was not a false premise.
+ *
+ * What round 2 actually got wrong: the repo-root anchor is a swarm worker's
+ * checkout, which sits under `~/.openground/projects/<uuid>/worktrees/…` — SO
+ * IT IS *ALSO* MATCHED BY CONDITION 2 (`isSamePathOrUnder(canon,
+ * REAL_OPENGROUND_HOME)`). Condition 2 is a REDUNDANT BACKSTOP for that one
+ * anchor, invisible as long as condition 1 keeps firing — until something
+ * removes condition 1. MEASURED (integration review, from this worktree):
+ * mutate `if (!isUnderTempRoot(home))` to `if (false && !isUnderTempRoot(home))`
+ * in testHomeGuard.ts — i.e. disable condition 1 outright — and the round-2
+ * commit's `testHomeGuard.test.ts` still ran 47 passed / 0 failed, in both
+ * TMPDIR states: condition 2 silently caught what condition 1 used to. The
+ * premise that was MISSING was not "does condition 1 fire" (it did) but "is
+ * condition 1 the ONLY thing that would fire" — round 2 never asked that, so a
+ * later refactor (or the deliberate mutation used to test this) could remove
+ * condition 1 and nothing here would notice.
+ *
+ * THE FIX (round 3): anchor `unsafeHome` at `/var/tmp`, MEASURED (not assumed)
+ * to satisfy all three constraints AT ONCE, and — this is what round 2 skipped
+ * — measured to satisfy them EXCLUSIVELY: outside tempRoots() (which only ever
+ * holds tmpdir()/TMPDIR/TMP/TEMP plus a hardcoded `/tmp`, never `/var/tmp`),
+ * outside REAL_OPENGROUND_HOME, and outside both PASSWD_HOMEDIR and
+ * EFFECTIVE_HOMEDIR — so testHomeProblem() reaches condition 1 AND nothing
+ * downstream would also match if condition 1 vanished:
+ *
+ *   testHomeProblem('/var/tmp/og-fence-unsafe-<random>', {})
+ *   → "the resolved home is outside every OS temp root (canonical: …)"
+ *
+ * measured under both `TMPDIR=/tmp` and the default TMPDIR, from this worktree
+ * (i.e. anchored under ~/.openground exactly like a swarm worker). MEASURED
+ * PER CONSUMING CASE too, not just for the bare anchor — every test that builds
+ * on this world was independently reproduced (same stubs, same call sequence)
+ * and every one of them hits condition 1 as the exclusive reason, including
+ * "installHooks() writes NOTHING…" (:847) and the legacy-migration test
+ * (:886), which stub `$HOME` to `unsafeHome` and, in the legacy case,
+ * `vi.resetModules()` before re-importing — neither changes which condition
+ * fires, because condition 1 is evaluated FIRST and does not depend on `$HOME`
+ * at all. So this world does not need a "condition 1 for some cases,
+ * condition 2/3 for others" split: every case gets condition-1 teeth from the
+ * one anchor, uniformly.
+ *
+ * mutate-and-rerun on the FINAL design confirms this: the same
+ * `if (false && !isUnderTempRoot(home))` mutation now goes 6 failed / 41 passed
+ * on BOTH `TMPDIR=/tmp` and the default TMPDIR (measured) — a result round 2
+ * could not produce in either environment, because round 2's anchor kept
+ * condition 2 as a silent backstop and this one does not.
+ *
+ * `/var/tmp` is not a fresh assumption about this codebase: TRUSTED_TEMP_PREFIXES
+ * (below) and sandbox.ts already both treat it as a real, standard path.
+ * `npm test` executes ONLY on `ubuntu-latest` (.github/workflows/ci.yml);
+ * win-build-check.yml is a compile-only check with no test step, so `/var/tmp`
+ * not existing on a Windows CI runner never reaches this file. It CAN reach a
+ * developer running `npm test` locally on Windows, though — as
+ * `mkdtemp('/var/tmp/og-fence-unsafe-')` below, not as a hand-joined path:
+ * MEASURED, `mkdtemp()` does NOT create a missing parent directory (unlike
+ * `mkdir(…, { recursive: true })`) — it ENOENTs if `/var/tmp` does not exist.
+ * So on a Windows box without a `\var\tmp`, this throws BEFORE the premise
+ * assert is ever reached, and every case built on unsafeWorld() (6 of them)
+ * goes red with that ENOENT. Nothing passes silently and no leftover is ever
+ * created — the failure mode is loud, not a quiet gap. Whether `\var\tmp`
+ * actually exists on a real Windows dev machine is NOT measured here; if it
+ * does, this is moot (condition 1 fires exactly as on POSIX); if it does not,
+ * the suite goes red with a clear ENOENT rather than a mysterious one.
+ *
+ * THREE THINGS ABOUT `/var/tmp` SPECIFICALLY, addressed rather than assumed:
+ *
+ *  1. A runner that sets `TMPDIR=/var/tmp` would put `/var/tmp` INTO
+ *     tempRoots() (via the `TMPDIR` env read, independent of the hardcoded
+ *     `/tmp` entry), so `unsafeHome` would then read as SAFE and condition 1
+ *     would not fire. MEASURED: `testHomeProblem()` on a `/var/tmp`-anchored
+ *     path under `TMPDIR=/var/tmp` returns `null` (no problem at all) — which
+ *     is exactly what makes the premise assert below FAIL LOUDLY (`toMatch`
+ *     against `null` is a clear assertion failure, not a silent pass). The
+ *     premise is the safety valve for this environment, not a workaround.
+ *  2. `/var/tmp` is sticky, multi-user, and NOT cleared on reboot (unlike a
+ *     tmpfs `/tmp`). A predictable name there risks silently reusing another
+ *     run's (or another user's) leftover directory — `mkdtemp()` avoids the
+ *     question entirely by asking the OS for an atomically-unique name, the
+ *     same primitive already used for `tempOuter` two lines below, rather than
+ *     hand-rolling one from pid + a counter. Every consumer removes its own
+ *     world in `cleanup()` (see below — both halves removed independently, so
+ *     one failing does not strand the other), so a leftover here means a run
+ *     was killed mid-test, not routine growth — same policy as every other tmp
+ *     world in this file.
+ *  3. Stubbing `$HOME` to a `/var/tmp` path (installHooks, legacy migration)
+ *     makes `EFFECTIVE_HOME_IS_TEMPORARY` true for any module graph that
+ *     re-imports afterward (`homeIsThrowaway()` checks TRUSTED_TEMP_PREFIXES,
+ *     which lists `/var/tmp`) — condition 3's effective-home branch would be
+ *     suppressed in that fresh module graph. MEASURED: it never matters here,
+ *     because condition 1 already fires first, on the unmodified `unsafeHome`,
+ *     before any per-test stub or module reset runs (this world's own premise
+ *     check happens at construction time, ahead of anything the caller does
+ *     with it). Documented so a future reader does not "fix" a redundancy that
+ *     is not there.
+ *
+ * The premise below asserts BOTH that condition 1's message comes back AND
+ * that conditions 2 and 3 do not ALSO match this path (mirrors
+ * assertReachesCondition3() below, aimed at the opposite goal) — asserting the
+ * message alone is what round 2 already had and it was not enough, because the
+ * round-2 anchor produced the exact same message while condition 2 sat behind
+ * it unexercised.
+ *
+ * Building the world locally (rather than pointing at a fixed real path like
+ * `homedir()`) is not decoration either. The very first version of these cases
+ * used `join(homedir(), '.openground-fence-probe-*')` as the stand-in for
+ * "unsafe", which silently stops being unsafe when the runner isolates HOME —
+ * and `HOME=$(mktemp -d) npm test` is exactly how this contract says to run the
  * suite. Seven cases passed for the wrong reason in one environment and failed
- * in the other. The world is built locally so both environments agree.
+ * in the other.
  */
+
+/**
+ * The premise unsafeWorld() and outsideAnyHome() both rest on: not merely
+ * "testHomeProblem() returns condition 1's message" (round 2's repo-root
+ * anchor did too, unmutated — see the docstring above), but that condition 1
+ * is the ONLY thing that would reject this path. If condition 2 or 3 ALSO
+ * matches, disabling condition 1 alone — by mutation, or by a future refactor
+ * — falls through to one of them as a silent backstop and every case built on
+ * this world keeps passing with condition 1 dead, which is exactly what
+ * happened in round 2. Mirrors assertReachesCondition3() below, built for the
+ * opposite goal (that one wants condition 3 to be reachable; this one wants
+ * conditions 2 and 3 to be UNreachable).
+ *
+ * This assert is deliberately STRICTER than the fence itself, on purpose: the
+ * fence's own condition 3 is SUPPRESSED per-home by PASSWD_HOME_IS_TEMPORARY /
+ * EFFECTIVE_HOME_IS_TEMPORARY (both memoized at import), and userInfo()/
+ * homedir() here are called live at THIS call site rather than read from the
+ * fence's import-time capture. So the direction this can be wrong in is only
+ * one way: this assert can go red while the fence would actually have a
+ * working backstop (a false alarm, safe to investigate) — it structurally
+ * cannot go green while the fence's backstop is silently missing. If a future
+ * anchor change makes this assert fail, that is the correct first place for
+ * the lie to surface, not a place where the lie could hide.
+ */
+const assertOnlyCondition1 = (home: string) => {
+  const canon = canonicalizePath(home)
+  expect(
+    testHomeProblem(home, {}),
+    `the "unsafe" home (${home}) did not return CONDITION 1's message (outside every OS temp ` +
+      `root). Either it is not rejected at all (e.g. a runner with TMPDIR=/var/tmp, which puts ` +
+      `/var/tmp itself into tempRoots()) or it is rejected by a different condition first — ` +
+      `either way, every case built on this world would keep passing even with condition 1 ` +
+      `dead. Do NOT relax the fence to make this pass — find a new anchor.`,
+  ).toMatch(/outside every OS temp root/)
+  expect(
+    isSamePathOrUnder(canon, canonicalizePath(productionHome())),
+    `the "unsafe" home (${canon}) sits inside the real ${productionHome()} (condition 2), so ` +
+      `disabling condition 1 alone would fall through to condition 2 as a SILENT BACKSTOP — this ` +
+      `is exactly the round-2 bug: a repo-root anchor under a swarm worktree returns condition ` +
+      `1's message too, but condition 2 ALSO matches it, so a mutation that kills condition 1 ` +
+      `goes unnoticed. This assertion is what round 2 was missing.`,
+  ).toBe(false)
+  expect(
+    isSamePathOrUnder(canon, canonicalizePath(userInfo().homedir)),
+    `the "unsafe" home (${canon}) sits inside the real user's home (condition 3), which would ` +
+      `be the same silent-backstop problem as condition 2 above.`,
+  ).toBe(false)
+  expect(
+    isSamePathOrUnder(canon, canonicalizePath(homedir())),
+    `the "unsafe" home (${canon}) sits inside this process's $HOME (condition 3's other half), ` +
+      `which would be the same silent-backstop problem as condition 2 above.`,
+  ).toBe(false)
+}
+
+let unsafeWorldSeq = 0
+
 const unsafeWorld = async () => {
-  const outer = await realpath(await mkdtemp(join(tmpdir(), 'og-fence-world-')))
-  const fakeTmp = join(outer, 'tmp')
-  const unsafeHome = join(outer, 'home')
-  await mkdir(fakeTmp, { recursive: true })
-  await mkdir(unsafeHome, { recursive: true })
-  vi.stubEnv('TMPDIR', fakeTmp)
-  return {
-    outer,
-    /** A legitimate temp location under the stubbed TMPDIR. */
-    tmp: fakeTmp,
-    /** Outside every temp root — what the fence must refuse. */
-    unsafeHome,
-    cleanup: () => rm(outer, { recursive: true, force: true }),
+  // The legitimate-temp half: a real mkdtemp under the real tmpdir(), so
+  // "this is under a temp root" is true by location and not by env.
+  const tempOuter = await realpath(await mkdtemp(join(tmpdir(), 'og-fence-world-')))
+  const fakeTmp = join(tempOuter, 'tmp')
+  // The unsafe half IS pre-created (empty), via mkdtemp for the same reason as
+  // tempOuter above — an OS-guaranteed unique name, not a hand-rolled one, on
+  // a directory that is shared/sticky and outlives a reboot (see point 2 in
+  // the docstring above). Pre-creation is not decoration either: "refuses a
+  // path outside tmp even when reached through a symlink under tmp" and
+  // "re-validates every call" both `symlink(w.unsafeHome, …)` and then rely on
+  // the fence dereferencing THROUGH that symlink. canonicalizePath()'s
+  // missing-leaf tolerance only walks up the LEXICAL path when realpathSync()
+  // fails — a symlink whose target does not exist is exactly that failure, so
+  // a non-existent unsafeHome makes canonicalizePath silently stop at the
+  // symlink's own location instead of following it, and the fence never sees
+  // the unsafe target at all. MEASURED: with unsafeHome left uncreated, both
+  // symlink cases break LOUDLY (2 red, `expected [Function] to throw an error`
+  // — the assertion itself fails because the fence, with nothing to
+  // dereference through, does not throw), not silently — pre-creation is
+  // required for these two cases to test what they claim, and skipping it is
+  // self-correcting rather than a silent hole. No case here requires
+  // unsafeHome ITSELF to be absent; the one precondition check in this file
+  // (`existsSync` in "setSettings rejects…") is on a SUBpath (`join(unsafeHome,
+  // '.openground')`), which stays absent regardless.
+  const unsafeHome = await mkdtemp('/var/tmp/og-fence-unsafe-')
+  const cleanup = async () => {
+    // Independent, not `await a(); await b()`: one throwing must not strand
+    // the other, especially the /var/tmp half, which outlives a reboot.
+    const results = await Promise.allSettled([
+      rm(tempOuter, { recursive: true, force: true }),
+      rm(unsafeHome, { recursive: true, force: true }),
+    ])
+    for (const r of results) if (r.status === 'rejected') throw r.reason
   }
+  try {
+    await mkdir(fakeTmp, { recursive: true })
+    assertOnlyCondition1(unsafeHome)
+    expect(
+      isUnderTempRoot(fakeTmp),
+      `the legitimate-temp half (${fakeTmp}) is NOT under a temp root, so the cases that ` +
+        `require a PIN THAT PASSES would go red for a reason that has nothing to do with ` +
+        `what they test.`,
+    ).toBe(true)
+  } catch (err) {
+    await cleanup()
+    throw err
+  }
+  return {
+    /** A real temp location — what the fence must accept. */
+    tmp: fakeTmp,
+    /** Outside every temp root — what the fence must refuse (condition 1). */
+    unsafeHome,
+    /**
+     * Populates `<unsafeHome>/<dir>/<file>` and returns that directory, so a
+     * case can hand the fence a home that is not just outside temp but LOOKS
+     * lived-in.
+     */
+    seed: async (dir: string, file: string, contents: string) => {
+      await mkdir(join(unsafeHome, dir), { recursive: true })
+      await writeFile(join(unsafeHome, dir, file), contents)
+      return join(unsafeHome, dir)
+    },
+    cleanup,
+  }
+}
+
+/**
+ * The zero-footprint sibling of unsafeWorld(): a path with the same
+ * exclusively-condition-1 guarantee as unsafeWorld() — asserted via the same
+ * assertOnlyCondition1(), not just claimed — but never written to disk at all,
+ * for the one case that only ever hands the path to `assertTestHomeIsolated()`
+ * directly and touches no filesystem. Anchored at `/` rather than `/var/tmp`
+ * specifically so this helper can never be reached for a case that DOES write
+ * (a non-root process cannot mkdir at `/`, which would make
+ * `assertNeverCreated`-style checks pass for the wrong reason — by
+ * permission, not by the fence — exactly the trap the setSettings case above
+ * must avoid, which is why THAT case stays on the real unsafeWorld() instead).
+ * Nothing is ever created here, so — unlike unsafeWorld()'s /var/tmp half — a
+ * plain pid + counter is enough for a distinct name; there is no leftover to
+ * collide with.
+ */
+const outsideAnyHome = () => {
+  const home = join('/', `og-fence-outside-${process.pid}-${unsafeWorldSeq++}`)
+  assertOnlyCondition1(home)
+  return home
 }
 
 let savedHome: string | undefined
@@ -255,12 +524,12 @@ describe('writes never reach a non-tmp home', () => {
   it('setSettings rejects AND creates nothing on disk', async () => {
     const w = await unsafeWorld()
     try {
-      const target = join(w.unsafeHome, '.openground')
-      expect(existsSync(target), 'precondition: target must not pre-exist').toBe(false)
-      process.env.OPENGROUND_HOME = target
+      const probeHome = join(w.unsafeHome, '.openground')
+      expect(existsSync(probeHome), 'precondition: target must not pre-exist').toBe(false)
+      process.env.OPENGROUND_HOME = probeHome
       await expect(setSettings({ archiveDirName: '_fence_probe' })).rejects.toThrow(/REFUSING/)
       // The real assertion: not "it threw" but "nothing was written".
-      await assertNeverCreated(target, 'setSettings')
+      await assertNeverCreated(probeHome, 'setSettings')
     } finally {
       await w.cleanup()
     }
@@ -330,6 +599,16 @@ describe('shapes the real suite actually uses', () => {
 describe('non-tmp homes are refused even when they exist', () => {
   it('refuses an existing directory outside tmpdir', async () => {
     // Built at the repo root under the gitignored probe prefix — see REPO_ROOT.
+    // KNOWN, OUT OF SCOPE for the 2026-07-28 fix above: from a swarm worktree
+    // this anchor is ALSO caught by condition 2 (same shape as round 2's bug —
+    // see unsafeWorld()'s docstring), so disabling condition 1 alone would not
+    // turn this case red — condition 2 backstops it exactly like it backstopped
+    // round 2, even though the assertion below DOES route through the fence's
+    // full message (`assertTestHomeIsolated(...).toThrow(/REFUSING/)`, not just
+    // `isUnderTempRoot()`). Not fixed here because REPO_ROOT is the one
+    // legitimate non-temp anchor this suite is allowed to write to (§4.11) — an
+    // exclusivity fix would need the same /var/tmp-style anchor as
+    // unsafeWorld(), which is a separate change from what this card covers.
     const outside = await mkdtemp(join(REPO_ROOT, REPO_PROBE_PREFIX))
     try {
       expect(isUnderTempRoot(outside)).toBe(false)
@@ -716,19 +995,18 @@ describe('TRUSTED_TEMP_PREFIXES is pinned — the list this fence trusts by cons
 describe('the homedir()-anchored mirror (hooksInstall)', () => {
   // paths.openGroundHome()'s fence cannot cover these: hooksInstall anchors its
   // install dirs at homedir() on purpose, so OPENGROUND_HOME does not move them.
-  it('refuses a non-tmp $HOME through the same one fence', async () => {
-    const w = await unsafeWorld()
-    try {
-      expect(() =>
-        assertTestHomeIsolated(w.unsafeHome, 'hooksInstall (homedir-anchored)'),
-      ).toThrow(/REFUSING/)
-      // …and its FIX line must point at $HOME, not OPENGROUND_HOME.
-      expect(() =>
-        assertTestHomeIsolated(w.unsafeHome, 'hooksInstall (homedir-anchored)'),
-      ).toThrow(/Pin process\.env\.HOME/)
-    } finally {
-      await w.cleanup()
-    }
+  it('refuses a non-tmp $HOME through the same one fence', () => {
+    // Only ever hands a path to assertTestHomeIsolated() directly — no
+    // filesystem touched by this call at all — so it needs outsideAnyHome(),
+    // not the full unsafeWorld(): zero footprint, same condition-1 guarantee.
+    const unsafeHome = outsideAnyHome()
+    expect(() =>
+      assertTestHomeIsolated(unsafeHome, 'hooksInstall (homedir-anchored)'),
+    ).toThrow(/REFUSING/)
+    // …and its FIX line must point at $HOME, not OPENGROUND_HOME.
+    expect(() =>
+      assertTestHomeIsolated(unsafeHome, 'hooksInstall (homedir-anchored)'),
+    ).toThrow(/Pin process\.env\.HOME/)
   })
 
   it('installHooks() writes NOTHING when $HOME is not isolated', async () => {
@@ -760,26 +1038,26 @@ describe('the legacy-codename migration cannot move the real ~/.hove or ~/.pmmap
   // all do exactly that — would MOVE the user's real ~/.hove into the tmpdir,
   // where afterEach deletes it recursively. A rename, not a copy.
   //
-  // This test never goes near the real home. It builds a fake one and shrinks
-  // the temp-root set around it (TMPDIR is stubbed at a SUBdirectory), so the
-  // fake home is "not under tmp" from the fence's point of view — the same
-  // shape as a real unpinned $HOME, with nothing of the user's at stake.
+  // This test never goes near the real home: it builds a fake one that is
+  // genuinely outside every temp root — the same shape as a real unpinned
+  // $HOME, with nothing of the user's at stake.
+  //
+  // It used to build that fake home the way unsafeWorld() did, inside the real
+  // temp dir with TMPDIR stubbed at a sibling subdirectory, and it went red on
+  // Linux for the same reason and in the same run. It now shares unsafeWorld()
+  // instead of carrying a second copy of the same construction — one copy is
+  // the standing rule in this chapter, and this pair is why: the copies did not
+  // even drift, they were identical, and one fix had to be written twice.
   it('throws instead of renaming, and leaves the legacy dir untouched', async () => {
-    const outer = await realpath(await mkdtemp(join(tmpdir(), 'og-legacy-')))
+    const w = await unsafeWorld()
     try {
-      const innerTmp = join(outer, 'tmp')
-      const fakeHome = join(outer, 'home')
-      const legacy = join(fakeHome, '.hove')
-      await mkdir(innerTmp, { recursive: true })
-      await mkdir(legacy, { recursive: true })
-      await writeFile(join(legacy, 'settings.json'), '{"projects":[{"id":"real"}]}')
+      const legacy = await w.seed('.hove', 'settings.json', '{"projects":[{"id":"real"}]}')
 
-      // Temp roots become {innerTmp, /tmp} — fakeHome is under NEITHER.
-      vi.stubEnv('TMPDIR', innerTmp)
-      vi.stubEnv('HOME', fakeHome)
+      vi.stubEnv('HOME', w.unsafeHome)
       // A destination that IS under a temp root and does NOT exist — the exact
-      // precondition that arms the migration branch.
-      vi.stubEnv('OPENGROUND_HOME', join(innerTmp, 'never-created-home'))
+      // precondition that arms the migration branch. The SOURCE it then reaches
+      // for, join(homedir(), '.hove'), is the one the fence must refuse.
+      vi.stubEnv('OPENGROUND_HOME', join(w.tmp, 'never-created-home'))
 
       // Fresh module graph: ensureOpenGroundHome memoizes, and testHomeGuard
       // samples the real home at import. Both must see the stubbed world.
@@ -793,7 +1071,7 @@ describe('the legacy-codename migration cannot move the real ~/.hove or ~/.pmmap
     } finally {
       vi.unstubAllEnvs()
       vi.resetModules()
-      await rm(outer, { recursive: true, force: true })
+      await w.cleanup()
     }
   })
 })

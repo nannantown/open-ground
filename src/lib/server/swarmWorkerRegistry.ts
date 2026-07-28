@@ -21,6 +21,7 @@ import { promisify } from 'util'
 import { readdir, readFile } from 'fs/promises'
 import { join } from 'path'
 import { openGroundHome, centralWorktreesDir } from './paths'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { projectUUIDFromPath } from './projectDataPath'
@@ -40,6 +41,7 @@ const GIT_OPTS = { timeout: 5_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '
  *  PTY the heartbeat/engine sources don't already name — a real worktree always
  *  has a real branch, so this is cheap and reliable when it succeeds. */
 const branchOfWorktree = async (cwd: string): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       cwd,

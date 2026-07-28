@@ -23,6 +23,7 @@ import type {
   FileDiffScope,
 } from '../types'
 import { sanitizeBranch } from './reviewWorktree'
+import { isGitRepoRoot } from './gitRepoGuard'
 
 const execFile = promisify(execFileCb)
 
@@ -37,6 +38,7 @@ const GIT_OPTS = {
 
 /** Run git in the project dir; null on any failure (no git, not a repo, …). */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout

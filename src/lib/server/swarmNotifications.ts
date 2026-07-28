@@ -206,6 +206,9 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   // what the owner sees on the toast, not for the subsystem that noticed.
   'session-limit': 'Claude — your conversation stopped (usage limit)',
   'engine-resumed': 'Swarm — auto-resumed after restart',
+  // Also not a swarm event: the MACHINE is accumulating un-killable processes
+  // (stuckProcessWatch.ts). Titled for what the owner sees, not the subsystem.
+  'stuck-processes': 'Machine — stuck processes are piling up (restart clears them)',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

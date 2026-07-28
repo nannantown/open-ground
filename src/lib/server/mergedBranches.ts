@@ -23,6 +23,7 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import type { MergedBranchStatus } from '../types'
 import { sanitizeBranch } from './reviewWorktree'
+import { isGitRepoRoot } from './gitRepoGuard'
 
 const execFile = promisify(execFileCb)
 
@@ -35,6 +36,7 @@ const GIT_OPTS = {
 }
 
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout
@@ -82,6 +84,7 @@ const noUnmergedPatches = async (
   tip: string,
   target: string,
 ): Promise<boolean> => {
+  if (!isGitRepoRoot(cwd)) return false // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', ['cherry', target, tip], { cwd, ...GIT_OPTS })
     return stdout
@@ -102,6 +105,7 @@ const isAncestor = async (
   tip: string,
   target: string,
 ): Promise<MergedBranchStatus> => {
+  if (!isGitRepoRoot(cwd)) return 'unknown' // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     await execFile('git', ['merge-base', '--is-ancestor', tip, target], { cwd, ...GIT_OPTS })
     return 'merged'

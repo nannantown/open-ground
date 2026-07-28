@@ -64,6 +64,7 @@
 | 司令官が**存在しない worker の話をする** / 前回の認識のまま喋る | §2.1 + 05 章 §10.2 — resume で会話は復元されるがエンジンの認知は消えている。「状況」で読み直させる |
 | 司令官・補給官が**毎回記憶喪失**で立ち上がる(resume されない) | 05 章 §10.3 — fail-open の理由コード(`none`/`moved`/`live`/`missing`/`store`)。応答の `resumed` とサーバ log の `[swarmSessions]` 行で判別 |
 | **テスト実行が本番データを壊した / `~/.openground` のプロジェクトが消えた / settings に見覚えのない値が入っている** | 07 章 — 2026-07-18 の事故の全容と現在の契約。**まず `npx vitest run src/lib/server/testHomeGuard.test.ts src/testHomeEnvGuard.test.ts`(47 + 51 = 98 件)が緑か**を確認(§5)。**素の grep に「0 件」を期待しないこと** — 2026-07-19 以降 0 にはならず(実測 5 ファイル 17 行・規約を説明する散文とエラー文が正当に持っている)、しかも `--include="*.ts" src server` は §4.14 で塞いだ盲点そのもの(scripts/electron/worker の JS を素通りする)。静的な再発防止の正典はこの 2 ファイルのテストで、除外理由はそこに符号化されている。緑でも「テストが緑だから安全」は証拠にならない — §4 の teeth 手順で外して赤くなることを確かめる |
+| **マシン全体が重い / claude code が固まる(OG を閉じても・素の端末でも・resume しても再発)** | 07 章 **§7**(2026-07-28)— **アプリは無実の可能性が高い**。真因は swarm テストが漏らした**孤児 `git`**(親が launchd・**U 状態**)が run queue を詰まらせること。診断は 1 行: `ps -axo pid,ppid,stat,command \| awk '$2==1 && $3 ~ /^[UD]/ && /git/' \| wc -l` → 0 以外なら該当。**`kill -9` も `execFile` の `timeout` も効かない**(実測 §7.3)ので掃除は **OS 再起動が唯一**。予防はコード側で完了(`gitRepoGuard` = 非リポに git を spawn しない・§7.4)。新しく git を呼ぶなら §7.7 の掟 8 |
 | リポジトリ外のグローバルスキル(`~/.claude/skills/supply` 等)に適用すべき差分が溜まっている | [PENDING_GLOBAL_SKILL_PATCHES.md](PENDING_GLOBAL_SKILL_PATCHES.md) — worker は書けないので、マネージャー/オーナーが手で適用してから節を消す置き場 |
 
 ---

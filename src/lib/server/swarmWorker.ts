@@ -27,6 +27,7 @@ import { lstat, mkdir, stat, symlink, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { centralWorktreesDir } from './paths'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
@@ -60,6 +61,7 @@ const GIT_OPTS = {
 
 /** Run git in `cwd`; null on any failure (no git, not a repo, …). */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout
@@ -183,9 +185,57 @@ const flattenOneLine = (s: string): string =>
  *  reaches that noticing: it decides one call, sends it, then decides the next.
  *  So the clause now flips the DEFAULT (batch unless the next call depends on
  *  this result) and adds a pre-send self-check, which is what actually converts
- *  the same work into fewer round-trips. Nothing about the completion gate moves. */
+ *  the same work into fewer round-trips. Nothing about the completion gate moves.
+ *
+ *  WHY (g) WAS ADDED (2026-07-28, from the daily fuel report's proposal card): a
+ *  re-measure over the NEXT report's own window (same formula, read-only) showed
+ *  BOTH flagged metrics still out of bounds after the (a) rewrite — 束ね率 1.185
+ *  (floor 1.3) and 文脈max 39.2万 (ceiling 30万) — while 手数 median 87.5 was
+ *  healthy. The decisive reading: all 8 cards in that window had
+ *  `sidechainOutputTokens === 0`, i.e. not one worker had offloaded a single
+ *  lookup. The meter SKIPS sidechain responses outright (swarmTokenAudit.ts —
+ *  a sidechain response `continue`s before turns/toolTurns/toolUses/maxContext are
+ *  touched). ⚠ WHAT THAT DOES TO EACH METRIC IS NOT ONE-DIRECTIONAL, and an earlier
+ *  draft of this comment claimed the ratio "can only rise" — it does not:
+ *    文脈max — falls under EVERY trigger (what the subagent read never lands in the
+ *      parent's context). This is (g)'s unconditional win and the fuel card's
+ *      「文脈」 item is answered here.
+ *    束ね率 — MIXED. Trigger ② (an unfocused grep = genuinely sequential probing) is
+ *      the UP direction: folding k single-tool research turns into ONE Task leaves
+ *      the bundle SURPLUS (toolUses − toolTurns) unchanged while shrinking the
+ *      denominator by k−1, so 1 + surplus/denominator rises — on the window's worst
+ *      card that is 239/210 = 1.14 → 190/161 = 1.18 (⚠ ARITHMETIC ILLUSTRATION, not
+ *      a measurement: it assumes 49 of that card's 210 turns were foldable singles).
+ *      Trigger ① (3+ files crossed) is the DOWN direction. Its counterfactual is NOT
+ *      b single turns — under (a) it is ONE response carrying b Reads (toolTurns +1,
+ *      toolUses +b); routing that to a Task makes the same one response carry ONE
+ *      tool (toolTurns +1, toolUses +1). The denominator does not move and the
+ *      numerator loses b−1, so the ratio FALLS by n(b−1)/T — from 1.185, b=3 firing
+ *      on 3% of tool turns lands at 1.125 (b=4 → 1.095). Worse than "mixed": ① is
+ *      mandatory and more specific than (a), so at b≥3 it WINS — it caps exactly the
+ *      high-bundle responses (a) exists to produce. The (a)-wiring sentence does not
+ *      rescue it: that one covers SEVERAL independent lookups at once, while ① fires
+ *      when ONE lookup spans 3+ files, so only a single Task goes out.
+ *  That is why the clause now carries a PRECEDENCE sentence: when the worker can
+ *  already name the lines (file:line known), (a)'s batched read wins and ① does NOT
+ *  fire; ① is for "I must read because I do not know where to look". That narrows
+ *  the DOWN path to genuinely exploratory reads — where the parent would have burned
+ *  many single-tool turns anyway, i.e. the UP case — but does NOT delete it: a worker
+ *  who would have batched b≥3 exploratory reads still loses b−1. THE NET SIGN IS NOT
+ *  DERIVABLE from the definition; only the daily fuel report settles it, and until it
+ *  does, (g) STAYS ON THE SUSPECT LIST for any 束ね率 drop.
+ *  It is phrased as an EXPLICIT ORDER, not a permission, because the harness
+ *  default is to hold subagents back unless the user asked for one — and the
+ *  worker's "user" is this very order, so a soft 「使ってよい」 would keep firing at
+ *  zero (it already did: the sourcing block's existing 「重い調査は sub-agent へ」
+ *  produced 0 sidechain turns in 8 cards, because it is scoped to primary-source
+ *  reading and leaves 「重い」 to the worker's judgment). Its triggers are therefore
+ *  OBSERVABLE (3+ files / unfocused grep / reading logs) for exactly the reason (a)
+ *  had to be rewritten: a rule that first asks the worker to judge a lookup "heavy"
+ *  fires only once it has already noticed — the step that never happens. Nothing
+ *  about the completion gate moves: offload the LOOKUP, never the judgment. */
 export const WORKER_ORDER_RULES =
-  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。【コミットは早く・こまめに】フェーズの境目ごとに必ず git commit を打て。特に完了ゲート(npm test / tsc / lint)に入る前は必ず WIP コミットを打ってから回すこと — 実行時間上限を超えた worker は worktree ごと強制回収されるので、未コミットのまま長い検証に入ると作業が消える(2026-07-12 に実際に 47KB 全損した)。実装→WIPコミット→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。【トークン規律・厳守】少ない手数・小さい文脈で進めろ(完了ゲートは緩めない): (a) 調べものはできるだけまとめて一度に — 独立したツール呼び出し(複数ファイルの読み・独立コマンド)は1応答に束ねて並列実行する。既定は「まとめて出す」側だと考えろ: 道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ。1つだけ送りそうになったら、送信する前に「この後どうせ要る調べものは?」を先に洗い出して同じ応答に足せ(複数ファイルの Read・複数パターンの grep・互いに依存しない確認コマンドは、まとめて1応答で出す) (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む — 大きいファイルの全文読みはしない (c) 同じファイルを読み直さない(必要な行は最初に控える) (d) 長い出力のコマンドは tail/要約で受ける(テストは失敗時のみ詳細) (e) テストは触った範囲を先に回し、フルスイート(npm test)は完了ゲートとして最後に1回 (f) カードに「当たり」(対象ファイル)があれば探索せず直行する。完了ゲート(npx tsc --noEmit / npm test / lint の3点)と ready 前セルフコミットの規約は一切緩めない。【質問は平易文で・厳守】オーナーに判断を仰ぐ質問(心拍 blocker の文面・画面上での質問)は、そのまま質問インボックスに届く。読むのはプログラムを書いたことがない人 — 必ず次の3要素で書く: ①何を決めてほしいのか1〜2文 ②選択肢(A/B など) ③それぞれを選ぶと何がどうなるか(暮らしの言葉で)。file:line・branch名・エラーログなどの技術詳細は質問文の末尾に括弧で添える(先頭に置かない)。' +
+  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。【コミットは早く・こまめに】フェーズの境目ごとに必ず git commit を打て。特に完了ゲート(npm test / tsc / lint)に入る前は必ず WIP コミットを打ってから回すこと — 実行時間上限を超えた worker は worktree ごと強制回収されるので、未コミットのまま長い検証に入ると作業が消える(2026-07-12 に実際に 47KB 全損した)。実装→WIPコミット→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。【トークン規律・厳守】少ない手数・小さい文脈で進めろ(完了ゲートは緩めない): (a) 調べものはできるだけまとめて一度に — 独立したツール呼び出し(複数ファイルの読み・独立コマンド)は1応答に束ねて並列実行する。既定は「まとめて出す」側だと考えろ: 道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ。1つだけ送りそうになったら、送信する前に「この後どうせ要る調べものは?」を先に洗い出して同じ応答に足せ(複数ファイルの Read・複数パターンの grep・互いに依存しない確認コマンドは、まとめて1応答で出す) (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む — 大きいファイルの全文読みはしない (c) 同じファイルを読み直さない(必要な行は最初に控える) (d) 長い出力のコマンドは tail/要約で受ける(テストは失敗時のみ詳細) (e) テストは触った範囲を先に回し、フルスイート(npm test)は完了ゲートとして最後に1回 (f) カードに「当たり」(対象ファイル)があれば探索せず直行する。 (g) 長い調べものは自分で読まず subagent に投げる — これは「使ってもよい」ではなく明示指示だ(エージェント起動を控える既定より、このカードの指示が優先する)。次のどれかに当てはまったら、自分で読み始める前に Task ツールで subagent を1手起こせ: ①3ファイル以上を横断して読む必要がある ②grep の当たりが絞れず探索になる ③ログ・テスト出力・大きな生成物を読み解く。ただし①が (a) とぶつかったら (a) が勝つ — 読む場所が既に file:line で特定できているなら subagent に投げず (a) どおり1応答にまとめて読め。①が発火するのは「どこを読めばいいか分からないから読む」= 探索になる時だけだ。受け取るのは要点だけにしろ(file:line と結論 — 全文を戻させるな)。独立した調べものが複数あるなら Task も同じ応答にまとめて出す。投げるのは調査だけで、判断・実装・完了ゲートは自分でやる。完了ゲート(npx tsc --noEmit / npm test / lint の3点)と ready 前セルフコミットの規約は一切緩めない。【質問は平易文で・厳守】オーナーに判断を仰ぐ質問(心拍 blocker の文面・画面上での質問)は、そのまま質問インボックスに届く。読むのはプログラムを書いたことがない人 — 必ず次の3要素で書く: ①何を決めてほしいのか1〜2文 ②選択肢(A/B など) ③それぞれを選ぶと何がどうなるか(暮らしの言葉で)。file:line・branch名・エラーログなどの技術詳細は質問文の末尾に括弧で添える(先頭に置かない)。' +
   DECISION_ROUTING_RULES +
   SPECIALIST_REVIEW_RULES
 

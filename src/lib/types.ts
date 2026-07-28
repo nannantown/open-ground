@@ -2402,6 +2402,9 @@ export type SwarmInfoEvent =
   | 'daily-fuel-report'
   | 'session-limit'
   | 'engine-resumed'
+  /** Not a swarm event either (cf. 'session-limit'): the MACHINE has accumulated
+   *  orphaned, un-killable processes. See stuckProcessWatch.ts + 07 章 §7. */
+  | 'stuck-processes'
 
 /** The payload of a 'swarm-info' notification — the info-grade sibling of
  *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,

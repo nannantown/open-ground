@@ -15,7 +15,8 @@ import { pruneOldAttachments, pruneOldRunFiles, sweepCrossRepoResidue, RAW_RETEN
 import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/server/swarmEscalations'
 import { installLockdownFetchGuard } from '@/lib/server/lockdown'
 import { getSettings } from '@/lib/server/store'
-import { registerIncomingNotifications } from '@/lib/server/swarmNotifications'
+import { registerIncomingNotifications, createSwarmInfoNotification } from '@/lib/server/swarmNotifications'
+import { checkStuckProcessesOnce, summarizeByCommand } from '@/lib/server/stuckProcessWatch'
 import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
 import { startAutoDrainLoop, bootAutoDrainEnabled, resumeEngines } from '@/lib/server/swarmOrchestrator'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
@@ -158,6 +159,33 @@ void (async () => {
     }
   } catch (e) {
     console.error('[openground:hono] retention sweep failed', e)
+  }
+})()
+
+// STUCK-PROCESS WATCH — the one machine state OPEN GROUND can create and NOTHING
+// can clean up: orphaned subprocesses wedged in uninterruptible sleep (a deleted
+// cwd is the known trigger — docs/commander/07-test-isolation-contract.md §7).
+// They ignore SIGKILL and survive every app restart, so they accumulate silently
+// and surface only as "the machine feels heavy" — 2026-07-28 cost 5h35m of a
+// degraded machine before anyone connected symptom to cause. The engineering
+// cause is fixed (gitRepoGuard); this closes the DETECTION gap for whatever
+// wedges next. Report-only by contract: a restart is the ONLY remedy, so there
+// is deliberately no cleanup action (see the module header). Fire-and-forget,
+// never blocks boot, silent below the count/age floor and a no-op on Windows.
+void (async () => {
+  try {
+    const stuck = await checkStuckProcessesOnce({
+      notify: (detail) =>
+        createSwarmInfoNotification({ event: 'stuck-processes', detail }).catch(() => {}),
+    })
+    if (stuck.length) {
+      console.warn(
+        `[openground:hono] stuck processes: ${stuck.length} orphaned + uninterruptible ` +
+          `(${summarizeByCommand(stuck)}) — only a machine restart clears these`,
+      )
+    }
+  } catch {
+    /* a health check must never break boot */
   }
 })()
 

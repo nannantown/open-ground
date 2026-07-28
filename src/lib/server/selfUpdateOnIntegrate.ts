@@ -44,6 +44,7 @@
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { requestEngineSelfUpdate } from './selfUpdateSignal'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { createSwarmInfoNotification } from './swarmNotifications'
 import type { SelfUpdateFireResult } from '../types'
 
@@ -53,6 +54,7 @@ const execFile = promisify(execFileCb)
  *  env is composed per call so tests that re-point HOME/env mid-suite are not
  *  frozen out by a module-load snapshot. */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, {
       cwd,

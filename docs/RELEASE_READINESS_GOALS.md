@@ -20,11 +20,13 @@
 
 ## 1. ゴール宣言
 
-> **OPEN GROUND を、Windows/macOS の一般ユーザーが配布物(署名+公証済み .dmg / NSIS .exe)をインストールして初回起動したとき、(a) swarm を含む一切の自律挙動が「ユーザー自身の明示的な有効化操作」を経てのみ動き出し、(b) swarm 稼働中であっても、ユーザーの明示同意なしには自動マージ・自動プッシュ・破壊的 git 操作が一切起きないことが機械的ガードと回帰テストで保証され、(c) その保証と中核体験(PTY での claude 対話実行、worker 起動〜統合)が両 OS の実機で end-to-end 検証済みであり、(d) swarm を有効化するユーザーが「何が自動で起きるか/絶対に起きないか」を有効化の場で理解・同意できる — この 4 点が揃った状態を「一般公開可能」と定義する。**
+> **OPEN GROUND を、Windows/macOS の一般ユーザーが配布物(署名+公証済み .dmg / 未署名の NSIS .exe — Windows を署名しないことは 2026-07-27 のオーナー決定。§5 GAP-4)をインストールして初回起動したとき、(a) swarm を含む一切の自律挙動が「ユーザー自身の明示的な有効化操作」を経てのみ動き出し、(b) swarm 稼働中であっても、ユーザーの明示同意なしには自動マージ・自動プッシュ・破壊的 git 操作が一切起きないことが機械的ガードと回帰テストで保証され、(c) その保証と中核体験(PTY での claude 対話実行、worker 起動〜統合)が両 OS の実機で end-to-end 検証済みであり、(d) swarm を有効化するユーザーが「何が自動で起きるか/絶対に起きないか」を有効化の場で理解・同意できる — この 4 点が揃った状態を「一般公開可能」と定義する。**
 
 前提の確認(2026-07-11 時点の最重要事実): **現状の配布物では swarm は一般ユーザーに到達不能**である。UI は owner-only experiment(`moduleRegistry.tsx` の `experiment: 'swarm'` + `experiments.ts` = owner ロール AND `settings.experiments.swarm`、fail-closed)、API は全 `/api/swarm/*` ルートが owner gate で 403(不変条件 C)、そして**バイナリに owner は焼き込まれていない**(`roles.ts` — Supabase `og_roles` に行がなければ `'none'`)。つまり今日リリースしても一般ユーザーに swarm 事故は構造的に起きない — 代わりに **swarm 機能も存在しない**。「swarm 込み公開」とはこのゲートを**意図して開く**ことであり、開き方の設計(§5 GAP-1)が本ゴールの最上流にある。
 
 【2026-07-14 更新】上の「到達不能」は「**明示的なローカル opt-in がない限り**到達不能」に変わった: swarm ローカル解錠(`swarmGate.ts` — 手編集 settings.json `swarmLocalOwner:true` / env `OPENGROUND_LOCAL_OWNER=1`、UI なし・既定 OFF・HTTP からは設定不能・swarm 限定スコープ、docs/SECURITY.md)が入り、ログイン無効の業務モードでも(そして知っていれば任意のユーザーでも)自機の swarm を開けられる。GAP-1 の「開き方」の UI なし先行実装に相当し、(a) の「ユーザー自身の明示的な有効化操作」要件は満たすが、(d) の同意開示 UI は未提供のまま — GAP-1 本体(opt-in UI + 開示文)は依然オープン。
+
+**【2026-07-27 更新 — このゴール宣言は当面「保留」】** オーナー決定により **swarm は一般開放しない**(owner 限定を継続。理由 = swarm がまだ安定していない。再評価条件 3 点と全文は §5 GAP-1)。よって上の「swarm 込み一般公開」は**今は目指していない状態**であり、§5 の 🔴 行(GAP-3 / GAP-10)は「開くと決めた日に必要になるもの」として据え置く。**OG 本体の一般配布はこれとは独立に継続している** — macOS / Windows 向けの配布物は毎リリース出ており、swarm はその中で owner gate の内側に閉じたまま。したがって Windows ユーザー向けの開示(§5 GAP-4 = 未署名・初回警告)は swarm の判断とは無関係に**今すぐ必要**であり、実施済み。
 
 ---
 
@@ -36,7 +38,7 @@
 
 | # | 挙動 | 必要な明示同意 | 既定 | プロセス再起動後 | 現状 |
 |---|---|---|---|---|---|
-| C-1 | swarm 機能の可視化 / API 到達 | (現状)owner ロール + `experiments.swarm` ON。(公開後)GAP-1 で設計する opt-in | 不可視・403 | 設定は永続(ロール必須) | ✅ 閉じている(開き方は未設計 = GAP-1) |
+| C-1 | swarm 機能の可視化 / API 到達 | (現状)owner ロール + `experiments.swarm` ON。~~(公開後)GAP-1 で設計する opt-in~~ → **開かない**(2026-07-27 オーナー決定・§5 GAP-1) | 不可視・403 | 設定は永続(ロール必須) | ✅ 閉じている(**閉じたままが当面の正式方針** = GAP-1 決着) |
 | C-2 | worker の自動 dispatch(drain/自動運転) | Swarm UI から owner が明示 start(`POST /api/swarm/orchestrator/start`) | OFF | **OFF に戻る**(in-memory。`Settings.swarmAutonomyOn` は「前回 ON だった」の表示専用 — auto-resume しない) | ✅ |
 | C-3 | boot 時の全プロジェクト auto-drain | env `OPENGROUND_SWARM_AUTODRAIN=1`(strict opt-in) | OFF(回帰テストで pin: unset ⇒ off) | env 次第 | ✅(`server/index.ts` — release blocker カード eadb25e6 で既定 OFF 化済み) |
 | C-4 | **origin trunk への統合 push(land)+ worker ready 時の司令官自動起こし** | エンジンに push 経路は無い(2026-07-15 撤去・回帰テスト固定)。起こし反射はエンジン start(C-2)に常時同乗(2026-07-16 に独立トグル `POST .../automerge` を廃止 — 起こすだけで trunk は動かない)。**trunk を動かすのは司令官(claude セッション)の統合だけ**で、カード単位の `[hold]` prefix + 高リスク force-hold が承認ゲート | 経路なし / (起こしは)エンジン OFF なら止まる | エンジンごと **OFF に戻る**(独立の永続フラグ無し) | ✅(粒度は GAP-5 で決着 — カード単位) |
@@ -67,9 +69,9 @@
 
 ### 2.3 未カバー(公開までに埋める・§5 に起票の種)
 
-1. **GAP-1**: swarm を一般ユーザーに**開く**ゲートモデルが未設計(現状の安全は「閉じている」ことに依存)。
+1. **GAP-1**: ~~swarm を一般ユーザーに**開く**ゲートモデルが未設計~~ → **決着(2026-07-27 オーナー決定): 開かない**(owner 限定を継続)。したがって「閉じていることに依存した安全」が当面の正式な設計。再評価条件 3 点は §5 GAP-1 行。
 2. **GAP-2**: ~~L4 ガードの**配線**が fail-open~~ → **根治済み(2026-07-11)**: `spawnSwarmWorker` が worktree 作成前に `ensureGuardWiring()`(hooksInstall.ts)で配線+guard 実体の期待版一致を検証し、NG なら `GuardWiringError` で spawn 拒否 + `'guard-unwired'` 通知(fail-closed)。boot の `installHooks()` は第一防衛に降格(失敗しても無ガード worker は生まれない — worker 拒否に縮退)。回帰ネット = swarmSafety.test.ts INVARIANT E-FAILCLOSED。詳細は [SWARM_SAFETY_INVARIANTS.md §E](SWARM_SAFETY_INVARIANTS.md) / [commander/02 §2.5](commander/02-worker-lifecycle.md)。
-3. **GAP-7**: Windows には L3(OS サンドボックス)相当が無い — L4 単層になる(macOS 限定の `sandbox-exec`)。
+3. **GAP-7**: Windows には L3(OS サンドボックス)相当が無い — L4 単層になる(macOS 限定の `sandbox-exec`)。**受容決定済み(2026-07-27)** — 埋めるのではなく開示する。
 4. **GAP-5**: ✅ **決着(2026-07-16)**: ~~autoMerge の同意粒度はセッション単位 arm~~ — autoMerge トグル自体が廃止され「セッション単位 arm」という粒度は消滅。統合の同意は**カード単位**(`[hold]` prefix + 高リスク force-hold)+ エンジン start(C-2)に確定([TARGET-STATE §5](commander/TARGET-STATE.md))。
 5. **GAP-6**: `SWARM_MANAGER=1` に関する旧仕様の記述(「manager も guard が block する」)がコメント/文書に残存 — 現物(manager は no-op)とのドリフト。
 
@@ -103,9 +105,9 @@
 4. 上記を含む**対話ターミナル happy path 一式**と **swarm worker 起動〜統合の E2E**。
 
 **❌ 未実装 / Windows に存在しない**:
-- **コード署名なし** → SmartScreen 警告(「More info」→「Run anyway」、README 開示済み)— GAP-4。
-- **L3 sandbox / overseer brain の OS 封じ込め**(darwin 限定)— GAP-7。
-- **og-manage コマンダースキルの中身が bash/curl 一色** — Windows 素の PowerShell では `curl` が `Invoke-WebRequest` alias で壊れる(人間コマンダー体験のみ。エンジンの無人運転は API/git/launchClaude 経由なので無傷)— GAP-8。
+- **コード署名なし** → SmartScreen 警告(「More info」→「Run anyway」)— **GAP-4 決着済み(2026-07-27 オーナー決定: 証明書は買わない)**。以後これは「未実装」ではなく**受容した仕様**であり、開示が実装の代わり: README + `landing/index.html`(JA/EN 平易文)+ [DISTRIBUTION.md §6](DISTRIBUTION.md) の 3 箇所に明記済み。
+- **L3 sandbox / overseer brain の OS 封じ込め**(darwin 限定)— **GAP-7 受容済み(2026-07-27)**: Windows は L4 単層のまま。開示は GAP-7 カード側で `docs/SANDBOX_EXPERIMENT.md` + GAP-10 開示文へ。
+- **og-manage コマンダースキルの中身が bash/curl 一色** — Windows 素の PowerShell では `curl` が `Invoke-WebRequest` alias で壊れる(人間コマンダー体験のみ。エンジンの無人運転は API/git/launchClaude 経由なので無傷)— **GAP-8 受容済み(2026-07-27)**: PowerShell 対応はせず「コマンダー運用は macOS / Git Bash 前提」を明示する方針。
 - `lsof` ポート競合診断(win はスキップ・汎用エラーのみ)— 軽微、非ブロッカー。
 
 ### 3.3 swarm 機能そのもののクロスプラットフォーム判定
@@ -188,23 +190,25 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 
 現時点(2026-07-11)で §1 のゴール宣言を満たしていない項目。**優先度 = 公開ブロッカーか否か**で仕分ける。各項目は独立カードとして起票する(本書は実装しない)。カード化の際は[起票テンプレの docs 追随ルール](commander/TARGET-STATE.md)(SWARM_CODE_PATHS に触れるなら docs/commander/ 更新を完了条件に含める)に従うこと。
 
+> **【2026-07-27 更新】判断系ギャップは全部決着した。** GAP-1(オーナー決定: **swarm は一般開放しない**)/ GAP-4(オーナー決定: **Windows 署名証明書は買わない・初回警告を明記**)/ GAP-7・GAP-8(司令官決定: **受容**)。GAP-1 が「開かない」に決まったことで、**§1 の「swarm 込み一般公開」というゴール宣言そのものが保留**になっている — 残る 🔴 行(GAP-3 / GAP-10)は「開くと決めた日に必要になるもの」であって、今の配布(swarm は owner gate の内側)を止めているわけではない。**GAP 消化状況の正は Board**、本書はその写し。
+
 ### 🔴 公開ブロッカー(これが埋まるまで「swarm 込み一般公開」はしない)
 
 | # | ギャップ | 起票の種(観測可能な完了条件案) |
 |---|---|---|
-| **GAP-1** | **swarm 一般開放のゲートモデル未設計**。現状の安全は owner gate で「閉じている」ことに依存 — 一般ユーザーが使える形(誰でも自分のマシンでは有効化できる)への転換は、認証要件・opt-in UI・同意フローすべて未設計。最上流の設計判断 | 新規インストールのユーザーが、(設計次第でログインの上)Settings の明示 opt-in **のみ**で Swarm タブが出現し API が 200 になる。opt-in UI は C-4 の開示文(§2.1)を表示して同意を取る。opt-in しない限り現状どおり不可視・403。安全レビュー(敵対)通過 |
+| **GAP-1** | ✅ **決着(2026-07-27 — オーナー決定「まだ swarm 安定してないのでオーナーだけ」)**: ~~一般開放のゲートモデル未設計~~ → **決定済み: 一般開放しない(オーナー限定継続)**。owner gate で閉じたまま運用し、一般ユーザーが自分のマシンで有効化できる形(認証要件・opt-in UI・同意フロー)は**作らない**。根拠は安定性 — 2026-07-23〜27 だけでも worker が ~1 時間で死ぬ / twin ブランチが 1 カードに 7 本生える / 完了通知が最大 40 分遅れる、が実観測されている | **再評価条件(この 3 点が揃うまで再検討しない)**: ① **worker 死亡の原因解明**(理由不明に死ぬ問題の解消。死因記録は 0.11.37 で実装済み — 次の死亡で原因が判明してから) ② **twin 増殖の停止確認**(0.11.36 の根治後、実運用で再発しないこと) ③ **完了通知遅延の解消**。揃った時点で**新しいカードとして起票し直す**。それまで §1 の「swarm 込み一般公開」宣言と GAP-10 の opt-in 組込みは**保留** |
 | **GAP-2** | ✅ **根治済み(2026-07-11 — GAP消化の正はBoard)**。~~L4 ガード配線が fail-open~~ — `spawnSwarmWorker` が spawn 前に `ensureGuardWiring()` で「PreToolUse 配線 + guard 実体の期待版 byte 一致」を検証(1 回の installHooks self-heal → 読み戻し再検証)し、不成立なら `GuardWiringError` で **spawn 拒否** + `'guard-unwired'` bell/OS 通知 | 達成: 全 spawn 経路(engine/route/RESTART)が門を通過。配線を意図的に壊すテスト = swarmSafety.test.ts **INVARIANT E-FAILCLOSED**(F1〜F6、negative control 込み)が拒否・no-worktree・通知を assert |
 | **GAP-3** | **Windows 実機 E2E 未検証**(§3.2 ⚠️ の 4 点 — ConPTY / claude CLI subscription / PS5.1 quote / swarm 1 巡)。[DISTRIBUTION.md §6](DISTRIBUTION.md) が「not yet hardware-validated」と明記したまま | §4.3 のチェックリスト 9 項目が実 Windows で全部 ✓(結果を DISTRIBUTION.md §6 に反映し「hardware-validated」へ書き換え)。PS5.1 で app-context が欠けるなら、修正または「PowerShell 7 必須」の明示要件化 |
 | **GAP-10** | **同意の開示の組込みが未完**。開示文書そのものは存在するようになった(アプリ内マニュアル Swarm 章(バイリンガル・§2.1 C-4 骨子と同期)+ Settings の Swarm 実験 hint — 2026-07-17 に autoMerge トグル廃止へ追随済み)が、GAP-1 の opt-in フローに「有効化の場での同意取得」としてまだ組み込まれていない | swarm opt-in(GAP-1 で設計する UI)が §2.1 C-4 開示文を有効化の場で表示して同意を取る。開示内容が SWARM_SAFETY_INVARIANTS.md と矛盾しないことをレビューで確認 |
 
-### 🟡 設計判断が必要(ブロッカーかはオーナーの判断次第 — 判断自体を起票する)
+### 🟡 設計判断が必要 → **2026-07-27 に GAP-4 / GAP-5 / GAP-7 / GAP-8 すべて決着**(この表に未決の判断は残っていない)
 
 | # | ギャップ | 起票の種 |
 |---|---|---|
-| **GAP-4** | **Windows コード署名なし** → SmartScreen 警告。技術的には README 開示済みで動作に支障なし — 「一般公開の第一印象」として許容するかは事業判断(証明書コスト/EV 検討) | 判断カード: 署名する(証明書取得 + release.yml 組込み)or「初回警告あり」を公開告知に明記する、の二択を決める |
+| **GAP-4** | ✅ **決着(2026-07-27 — オーナー決定「初回警告出すための証明書買わない」)**: ~~署名するかの事業判断~~ → **受容(決定済み)**。Windows 版は**未署名のまま配布**し、SmartScreen の初回警告が出ることを**公開告知に明記**する(二択の (b))。証明書取得(EV 含む)と `release.yml` への署名組込みは**やらない** — 再検討は Windows を本格的に売り出す段になってから | 達成: 明記が 3 箇所に入っている — ① `landing/index.html` のヒーロー注記(**JA/EN 両方**・非プログラマ向けの平易文。常時表示の caveat が「未署名 → 初回警告」を述べ、Windows 訪問者だけに出る `.win-note` が「詳細情報 → 実行」の手順を補う) ② `README.md` §Install / §Platform support ③ [DISTRIBUTION.md §6](DISTRIBUTION.md)「Unsigned → SmartScreen (accepted policy, not an open TODO)」。**landing の公開デプロイは手動**(`npm run deploy:landing` — オーナー判断)なので、ファイル反映と公開は別イベント |
 | **GAP-5** | ✅ **決着(2026-07-16 — autoMerge トグル廃止で粒度問題ごと解消)**: ~~セッション単位 arm の適否~~ → エンジンは push しない(経路撤去)ので「push の arm 粒度」という問いが消滅。統合の同意は**カード単位**(`[hold]` prefix + 高リスク force-hold — 司令官の統合規約)+ エンジン start(C-2)に確定 | 達成: [TARGET-STATE §5](commander/TARGET-STATE.md) 条件 2 に正典化。開示文(GAP-10 のマニュアル/Settings)へは 2026-07-17 追随済み |
-| **GAP-7** | **Windows は L3(OS サンドボックス)不在** — worker/overseer brain の封じ込めが L4 単層。guard header 明記の残存穴(既存 gitconfig alias 等)が Windows では OS 層で拾えない | 判断カード: Windows 相当の L3(AppContainer/Job Object 等)を実装する or「Windows は L4 単層」を受容しリスクを GAP-10 開示に含める、を決める |
-| **GAP-8** | **og-manage(人間コマンダー体験)が bash/curl 依存** — Windows 素の PowerShell で壊れる(エンジン無人運転は無傷)。swarm 込み公開で「コマンダー」をどの OS で謳うか未定義 | 判断カード: og-manage スキルの PowerShell 対応 or「コマンダー運用は macOS/Git Bash 環境推奨」の明示、を決める。心拍スクリプト(swarm-beat.sh)の Windows worker 代替も同カードで扱う(§3.3) |
+| **GAP-7** | ✅ **受容(方針決定済み・2026-07-27 司令官決定)**: ~~L3 を実装するかの判断~~ → **Windows は L4 単層のまま受容**。AppContainer 相当は新規機構の設計から必要で、受益(封じ込め対象に触れるのはオーナー 1 人の 1 台)に対し費用が過大。**GAP-1 の「一般開放しない」決定がこの受容を補強する**(worker/overseer brain は owner 限定の隠し機能で一般ユーザーに到達経路が無い) | 残作業(**GAP-7 カード側**): 「Windows は L4 単層・L3(OS サンドボックス)相当は無い」とその意味(worker 暴走時の封じ込めが 1 層になる)を `docs/SANDBOX_EXPERIMENT.md` 該当章と GAP-10 の開示文に明記。**swarm を開放する判断(GAP-1)の際はこの受容を再評価する** |
+| **GAP-8** | ✅ **受容(方針決定済み・2026-07-27 司令官決定)**: ~~PowerShell 対応するかの判断~~ → **PowerShell 対応はしない。推奨環境を明示する**。og-manage は swarm の一部 = owner 限定なので Windows 対応の受益者が現状ゼロ、かつ**エンジンの無人運転は Windows でも無傷**(壊れるのは人間コマンダー運用だけ)。心拍スクリプト(`swarm-beat.sh`)の Windows 代替も**同じ判断で実装しない** | 残作業(**GAP-8 カード側**): 「コマンダー運用(og-manage)は macOS / Git Bash 環境が前提。素の PowerShell では動かない。エンジンの無人運転は Windows でも動作する」を [DISTRIBUTION.md](DISTRIBUTION.md) と [commander/00-INDEX.md](commander/00-INDEX.md) に明記(心拍スクリプトの但し書き込み) |
 
 ### 🟢 品質・追随(公開ブロッカーではないが、公開前に済ませたい)
 
@@ -217,12 +221,12 @@ xcrun stapler validate "/Applications/OPEN GROUND.app"
 
 ## 6. 到達判定サマリ(この表が全部 ✓ になったら §1 を宣言できる)
 
-- [ ] §2.1 同意レイヤ C-1〜C-8 がすべて実装+テスト+実機確認済み(C-1 の開き方 = GAP-1、配線 = GAP-2)
+- [ ] §2.1 同意レイヤ C-1〜C-8 がすべて実装+テスト+実機確認済み(C-1 の開き方 = GAP-1 → **2026-07-27 に「開かない」で決着したため、この行は §1 のゴール宣言ごと保留**、配線 = GAP-2)
 - [ ] §4.1 安全性チェックが緑(3 点セット + sweep + 再起動リセット + L4 exit 2 + force 不在)
 - [ ] §4.2 macOS 配布物検証 OK(現状ほぼ到達 — リリース毎の実施のみ)
 - [ ] §4.3 Windows 実機 QA 9 項目 ✓(= GAP-3 解消、DISTRIBUTION.md §6 を hardware-validated に書き換え)
 - [ ] GAP-10 の同意開示がアプリ内に存在
-- [ ] GAP-4/7/8 の判断カードがすべて「決着」(実装または受容の明文化 — GAP-5 は 2026-07-16 決着済み)
+- [x] GAP-4/7/8 の判断カードがすべて「決着」— **2026-07-27 に 3 件とも受容で決着**(GAP-4 = 証明書買わない・初回警告を明記 / GAP-7 = Windows L4 単層を受容 / GAP-8 = og-manage は macOS・Git Bash 前提を明示)。GAP-5 は 2026-07-16 決着済み。※ GAP-7 / GAP-8 の**開示文の書き込み**は各カード側に残作業あり(§5 参照)
 - [ ] GAP-9: TARGET-STATE §7 の 6 条件 ✓(少なくとも §5 のエンジン ON 7 日間実測) — **2026-07-22 時点で 5/6 到達**(§1 §2 §3 §4 §6 ✓)。**残るは §5 のみ** = エンジン ON 7 日間の連続実績。7/19〜20 の司令官卓増殖(誤蘇生)対応でエンジンを複数回 OFF にしたため未達。増殖の真因は 0.11.32 で根治済み(PTY プールを存在の権威に + 同時 spawn の TOCTOU をロックで封鎖)なので、**再カウントは 0.11.32 での ON 継続開始日から**。§2 は 2026-07-19〜21 の手動統合で実測(1 レビュー単位 85KB が棄権なし・must-fix ゼロで統合到達)
 - [ ] 公開リリース自体は `/release` RED ZONE フローで人間承認(恒久 — 本書があっても自動化しない)
 

@@ -207,6 +207,7 @@ import { createSwarmFatalNotification, createSwarmInfoNotification } from './swa
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
 import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
 import { readWorkerConsumptionLine } from './swarmTokenAudit'
@@ -3859,6 +3860,7 @@ const GIT_OPTS = {
 /** Run git in `cwd`; trimmed stdout, or null on any failure (no git, not a repo,
  *  bad ref, …). */
 const gitOut = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout.trim()
@@ -5596,16 +5598,18 @@ export const makeAdversarialReview = (
     // budget. Sizing failure ⇒ null ⇒ budget as if large (fail toward waiting,
     // never toward the freeze).
     let diffBytes: number | null = null
-    try {
-      const { stdout } = await execFile('git', ['diff', `${targetRef}...${tip}`], {
-        cwd: projectPath,
-        timeout: 30_000,
-        maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      })
-      diffBytes = Buffer.byteLength(stdout, 'utf8')
-    } catch {
-      /* unsizable — keep null */
+    if (isGitRepoRoot(projectPath)) {
+      try {
+        const { stdout } = await execFile('git', ['diff', `${targetRef}...${tip}`], {
+          cwd: projectPath,
+          timeout: 30_000,
+          maxBuffer: 32 * 1024 * 1024,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        })
+        diffBytes = Buffer.byteLength(stdout, 'utf8')
+      } catch {
+        /* unsizable — keep null */
+      }
     }
     const perReviewerTimeoutMs = computeReviewTimeoutMs(timeoutMs, diffBytes)
     // SPAWN PARK: no tier is both enabled and cooled-down ⇒ a reviewer `claude`
@@ -5816,14 +5820,16 @@ const defaultCleanup = async (
   if (!res.removed) return { removed: false, reason: res.reason }
   // Branch ref deletion is best-effort: -D (we have external proof it landed on
   // the trunk; local `main` may be behind, so -d could wrongly refuse).
-  try {
-    await execFile('git', ['branch', '-D', branch], {
-      cwd: projectPath,
-      timeout: 30_000,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    })
-  } catch {
-    /* branch already gone / never existed — the worktree teardown is what matters */
+  if (isGitRepoRoot(projectPath)) {
+    try {
+      await execFile('git', ['branch', '-D', branch], {
+        cwd: projectPath,
+        timeout: 30_000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      })
+    } catch {
+      /* branch already gone / never existed — the worktree teardown is what matters */
+    }
   }
   return { removed: true }
 }

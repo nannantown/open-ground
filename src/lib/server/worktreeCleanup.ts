@@ -21,6 +21,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { listActiveTerminalCwds } from './terminal'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { promisify } from 'util'
 import { sep } from 'path'
 import { canonicalize } from './canonicalize'
@@ -33,6 +34,7 @@ const execFile = promisify(execFileCb)
 
 /** Run git in `cwd`; null on any failure (no git, not a repo, …). */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
   try {
     const { stdout } = await execFile('git', args, { cwd })
     return stdout
