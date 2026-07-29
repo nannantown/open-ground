@@ -51,7 +51,7 @@ import type {
 import { appendCanvasElements, hashElementSource, updateCanvasElementSource } from './canvasData'
 import { claudeRunPreflight } from './claudePreflight'
 import { launchClaude } from './claudeTerminal'
-import { killTerminal, subscribeTerminal } from './terminal'
+import { killTerminal, killTerminalsByCwdAndWait, subscribeTerminal } from './terminal'
 
 // ── Completion marker ────────────────────────────────────────────────────────
 
@@ -575,6 +575,17 @@ export const generateCanvasElements = async (
     })
     return parseGeneratedElements(content)
   } finally {
+    // Wait for claude to actually be GONE before removing the directory it is
+    // running in (2026-07-29). runFileTask's own `finally` only SENDS the kill —
+    // node-pty's signal is asynchronous — so this recursive delete used to land
+    // while the session was still live. A cwd deleted under a running process is
+    // how a process (or one of the `git` calls claude makes) ends up wedged in
+    // uninterruptible sleep, unreachable by any signal for the rest of the
+    // machine's uptime (07 章 §7). The handoff dir IS the session's cwd, so
+    // waiting on that cwd is exact. Best-effort: if it will not die we still
+    // remove — a tmp dir must not leak forever — but by then the kill has been
+    // escalated to SIGKILL and the odds are far better than not waiting at all.
+    await killTerminalsByCwdAndWait(dir).catch(() => false)
     await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
 }
@@ -640,6 +651,10 @@ export const tweakScreenSource = async (
     }
     return { source: content }
   } finally {
+    // Same as the generate path above: confirm the session is gone before
+    // deleting the directory it runs in (07 章 §7 — a cwd removed under a live
+    // process is how an un-killable wedge is made).
+    await killTerminalsByCwdAndWait(dir).catch(() => false)
     await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
 }

@@ -767,6 +767,85 @@ export const killTerminalsByCwd = (cwd: string): number => {
   return killed
 }
 
+/**
+ * Kill every PTY in `cwd` and WAIT until the operating system agrees they are
+ * gone — the version to use before DELETING that directory.
+ *
+ * WHY WAITING IS THE WHOLE POINT (2026-07-29). {@link killTerminalsByCwd} only
+ * SENDS a signal: node-pty's `kill()` is `process.kill(pid, 'SIGHUP')` and
+ * returns immediately, while `finishedAt` is stamped later by the async `onExit`.
+ * Callers then ran their destructive step on the next line — `git worktree
+ * remove`, `rm -rf` — while `claude` was still very much alive inside that
+ * directory. Deleting the cwd out from under a running process is exactly what
+ * puts it (or one of the `git` processes claude spawns constantly) into
+ * uninterruptible sleep, where neither SIGKILL nor a timeout can ever reach it
+ * again — the un-killable orphan class of 07 章 §7, reproduced by our own
+ * teardown path.
+ *
+ * WHY WE WAIT ON THE SHELL'S PID and do not group-kill (measured on this
+ * machine, node-pty 1.2.0-beta.14 / darwin):
+ *   • The PTY child (`zsh -l`) is a SESSION LEADER (pid == pgid == sid), but
+ *     zsh's job control puts each foreground job in its OWN process group. So
+ *     `process.kill(-ptyPid, …)` reaches only the shell — never claude. node-pty
+ *     exposes no pgid kill either.
+ *   • What actually reaches the descendants is the KERNEL: when the session
+ *     leader dies, SIGHUP goes to the terminal's foreground process group.
+ *     Verified: a grandchild `sleep` under zsh disappeared on `pty.kill()`.
+ *   • Therefore the shell's pid leaving the process table IS the evidence that
+ *     the kernel delivered that hangup. That is what this waits for.
+ *   • Anything that deliberately LEFT the session (`nohup … & disown`, `setsid`)
+ *     is unreachable by construction — no signal can find it. The contract is
+ *     honestly "the PTY and its foreground descendants", not "everything".
+ *
+ * Bounded by `timeoutMs` and escalated ONCE to SIGKILL at the halfway mark.
+ * Returns `true` only when every matching pid is confirmed gone; `false` means
+ * the caller must treat the directory as still occupied and NOT delete it.
+ */
+export const killTerminalsByCwdAndWait = async (
+  cwd: string,
+  opts: {
+    timeoutMs?: number
+    pollMs?: number
+    isAlive?: (pid: number) => boolean
+    now?: () => number
+  } = {},
+): Promise<boolean> => {
+  const timeoutMs = opts.timeoutMs ?? 5_000
+  const pollMs = opts.pollMs ?? 50
+  const isAlive = opts.isAlive ?? defaultIsAlive
+  const now = opts.now ?? Date.now
+
+  const pids: number[] = []
+  sessions.forEach((s) => {
+    if (s.info.finishedAt || s.info.cwd !== cwd) return
+    const pid = (s.pty as { pid?: unknown } | null)?.pid
+    if (typeof pid === 'number' && pid > 0) pids.push(pid)
+    try { s.pty.kill() } catch {}
+  })
+  // Nothing real to wait for (no session, or fixtures without pids) — the
+  // signals, if any, are already sent.
+  if (!pids.length) return true
+
+  const deadline = now() + timeoutMs
+  const escalateAt = now() + Math.floor(timeoutMs / 2)
+  let escalated = false
+  for (;;) {
+    const remaining = pids.filter((p) => isAlive(p))
+    if (!remaining.length) return true
+    if (now() >= deadline) return false
+    if (!escalated && now() >= escalateAt) {
+      escalated = true
+      // SIGKILL the shell. Its descendants still get the kernel's hangup, because
+      // the control process terminating is what triggers it — the signal we use
+      // on the leader does not change that.
+      for (const p of remaining) {
+        try { process.kill(p, 'SIGKILL') } catch { /* already gone */ }
+      }
+    }
+    await new Promise((r) => setTimeout(r, pollMs))
+  }
+}
+
 /** Liveness probe for a PTY pid: signal 0 doesn't deliver a signal, it only
  *  checks the process exists. ESRCH ⇒ gone (reap it); EPERM ⇒ exists but not
  *  ours (alive — keep). Anything else (e.g. EINVAL) is treated as alive so we
@@ -811,6 +890,38 @@ export const isTerminalProcessAlive = (
   const pid = (s.pty as { pid?: unknown } | null)?.pid
   if (typeof pid !== 'number' || pid <= 0) return true
   return isAlive(pid)
+}
+
+/** Wait until ONE terminal's process is really gone, after someone has already
+ *  signalled it. Bounded; escalates once to SIGKILL at the halfway mark, exactly
+ *  like {@link killTerminalsByCwdAndWait} (see that function for why waiting on
+ *  the shell's pid is the only reliable evidence that the kernel hung up on its
+ *  descendants). Returns false on timeout. An unknown id / a fixture session
+ *  without a pid resolves true immediately — absence of a process to wait for is
+ *  not a failure. */
+export const waitForTerminalGone = async (
+  terminalId: string,
+  opts: { timeoutMs?: number; pollMs?: number; isAlive?: (pid: number) => boolean; now?: () => number } = {},
+): Promise<boolean> => {
+  const timeoutMs = opts.timeoutMs ?? 5_000
+  const pollMs = opts.pollMs ?? 50
+  const isAlive = opts.isAlive ?? defaultIsAlive
+  const now = opts.now ?? Date.now
+  const s = sessions.get(terminalId)
+  const pid = (s?.pty as { pid?: unknown } | null)?.pid
+  if (typeof pid !== 'number' || pid <= 0) return true
+  const deadline = now() + timeoutMs
+  const escalateAt = now() + Math.floor(timeoutMs / 2)
+  let escalated = false
+  for (;;) {
+    if (!isAlive(pid)) return true
+    if (now() >= deadline) return false
+    if (!escalated && now() >= escalateAt) {
+      escalated = true
+      try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    }
+    await new Promise((r) => setTimeout(r, pollMs))
+  }
 }
 
 /** Tear down ONE pool entry idempotently and drop it from the map. Mirrors the

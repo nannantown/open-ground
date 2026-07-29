@@ -246,6 +246,12 @@ const hydrateCoolingTable = async (now: number): Promise<void> => {
     if (until <= now) continue // elapsed ⇒ available (lazy expiry, same as isTierCooling)
     if (state.cooling.has(tier)) continue // a live mark is newer than the disk
     if (state.touched?.has(tier)) continue // …and so is a live REMOVAL (rule 2)
+    // NOT clamped here on purpose: this path's `now` is not guaranteed to be a
+    // real wall clock (the write-triggered load has no clock of its own), so
+    // clamping against it would corrupt legitimate stored marks. The clamp lives
+    // where an inflated value is CREATED — resolveCoolingUntil — which is the only
+    // place that can produce one. A mark written before that fix expires on its
+    // own within a day; nothing keeps producing new ones.
     state.cooling.set(tier, until)
   }
 }
@@ -306,8 +312,25 @@ export const parseResetLabel = (
     if (meridiem === 'am' && hour === 12) hour = 0
     const d = new Date(now)
     d.setHours(hour, min, 0, 0)
-    // Already past today ⇒ it means tomorrow's clock (parseCliReset's rule).
-    if (d.getTime() <= now) d.setDate(d.getDate() + 1)
+    // ALREADY PAST TODAY ⇒ the SCREEN IS STALE, not "it means tomorrow" (2026-07-29).
+    //
+    // This used to roll forward a day, and that reading is what turned a
+    // 20-minute cooling into a ~23-hour one. The screen text does not change when
+    // the limit lifts — the worker's PTY still reads "resets at 3pm" at 3:10pm —
+    // and every pass re-parses it against the CURRENT clock. So the same
+    // unchanged frame yielded 20 minutes at 14:40 and tomorrow-3pm at 15:10, and
+    // that figure was mirrored to disk: the tier stayed parked for a day across
+    // restarts, the ladder walked past it, and the engine looked like it had
+    // simply stopped dispatching, with nothing in any log saying why.
+    //
+    // A bare clock carries no date, so "a time that already passed today" is
+    // indistinguishable from stale text — and stale is by far the likelier
+    // reading of a LIVE screen. Returning null lets the resolver fall through to
+    // its next source (A5, then the flat grace), which is the conservative answer:
+    // worst case the engine retries early and re-learns the truth from a fresh
+    // frame. A genuine future time today ("resets at 3pm" seen at 2pm) is
+    // unaffected — that is the case this branch actually exists for.
+    if (d.getTime() <= now) return null
     return d.getTime()
   }
 
@@ -408,7 +431,24 @@ export const markRateLimited = (
     now: number
   },
 ): number => {
-  const until = resolveCoolingUntil(opts)
+  const resolved = resolveCoolingUntil(opts)
+  // NEVER PUSH AN EXISTING DEADLINE LATER (2026-07-29).
+  //
+  // Every pass re-resolves from the worker's CURRENT screen, and a bare clock
+  // label ("resets at 3pm") is re-interpreted against the clock each time —
+  // parseResetLabel's rule being "if that time already passed today, it means
+  // tomorrow". So the same unchanged screen, read once at 14:40 and again at
+  // 15:10, yields 20 minutes and then ~23 HOURS. The later figure is mirrored to
+  // disk, so the tier stays parked for a day across restarts, the ladder walks
+  // past it, and the engine looks like it simply stopped dispatching — with
+  // nothing in any log saying why.
+  //
+  // While a mark is still in the future, keep the EARLIER deadline. Erring early
+  // costs one retry that re-learns the truth from a fresh screen; erring late
+  // costs a day of a tier nobody can use. An elapsed mark is not extended either
+  // — it is simply replaced, which is how a genuine second rate-limit still cools.
+  const existing = state.cooling.get(tier)
+  const until = existing != null && existing > opts.now ? Math.min(existing, resolved) : resolved
   markTouched(tier)
   state.cooling.set(tier, until)
   void schedulePersist()

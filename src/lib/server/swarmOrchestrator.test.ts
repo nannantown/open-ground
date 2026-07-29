@@ -2937,6 +2937,32 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
     a5Mock.current = null
   })
 
+  it('a ladder that goes dry MID-PASS stops the fill loop — later picks are not seated into a wall', async () => {
+    // 2026-07-29. `spawnBlock` is evaluated ONCE at the top of the pass, but the
+    // state it reads changes DURING the fill loop: the pre-launch probe cools a
+    // tier the moment it finds a wall, and each spawn can hit a limit that cools
+    // the next rung. A pass that began with headroom could therefore walk the
+    // whole ladder dry on card 1 and still seat cards 2..N — every one into a
+    // wall, burning a session each. (resolveAvailableTierProbed does not stop
+    // them: having probed every rung dry it falls back to the sync walk, which
+    // returns a COOLING tier rather than null, and the spawn path only refuses
+    // on null.)
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a'), card('b'), card('c')] })
+    const realSpawn = deps.spawnWorker
+    deps.spawnWorker = (async (...args: Parameters<typeof realSpawn>) => {
+      // The FIRST spawn discovers the wall — exactly what the probe does.
+      for (const tier of MODEL_TIER_LADDER) markCoolingUntil(tier, T0 + 30 * 60_000)
+      return realSpawn(...args)
+    }) as typeof realSpawn
+    await runDispatchPass(engine, deps, T0)
+
+    // Card 'a' got out before the ladder went dry; 'b' and 'c' must stay in todo.
+    // Pre-fix all three were seated.
+    expect(deps.spawned.map((s) => s.taskId)).toEqual(['a'])
+    expect(engine.log.some((l) => l.message.includes('dispatch halted mid-pass'))).toBe(true)
+  })
+
   it('dispatch records the spawn-resolved model on the worker (the attribution the sensor reads)', async () => {
     const engine = newEngine()
     const deps = makeDeps({ cards: [card('a')], spawnModel: 'sonnet' })

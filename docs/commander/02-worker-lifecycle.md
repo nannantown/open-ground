@@ -32,6 +32,63 @@
 | worktree 一覧/clean の route | `server/routes/project.ts` | `GET /api/project/worktrees`(:449) / `POST /api/project/worktrees/clean`(:458) |
 | UI(Swarm タブの Terminate/Restart) | `src/components/canvas/modules/SwarmModule.tsx` | terminate(:433) / `restartWorker`(:774) |
 | 心拍の書き手(worker 自身が叩く) | `~/.claude/swarm-beat.sh`(repo 外・各マシンにインストール済み) | branch/worktree/task/phase/blockers/readyToMerge/updatedAt を 1 ファイルに上書き |
+| 「心拍とは何か」の単一正典(スイープ2箇所が共用) | `src/lib/server/swarmHeartbeatFiles.ts` | `isSweepableHeartbeat` / `NON_HEARTBEAT_FILES` |
+
+> **心拍ディレクトリは共有(2026-07-29 に明文化)。** `~/.openground/swarm/<repoキー>/`
+> は心拍だけの置き場では**ない**。同居人は4つ:
+>
+> | ファイル | 中身 | 書き手 |
+> |---|---|---|
+> | `<branch名変換>.json` | worker 心拍 | `swarm-beat.sh`(worker 自身) |
+> | `roster.json` | エンジンの worker roster(再起動をまたぐ記憶) | `swarmWorkerRoster.ts` |
+> | `manager.json` | 司令官の心拍(蘇生反射の入力・03章 §2.3) | `swarmOrchestrator.ts` |
+> | `integration.lock` | 統合ロック(`.json` ではないのでスイープ対象外) | `swarmIntegrationLock.ts` |
+>
+> **事故(2026-07-29 に発見・同日根治)**: 2つのスイープ — `sweepSwarmHeartbeats`
+> (監督 W6・15分ごと)と `retention.pruneGhostHeartbeats`(boot・48h) — が `*.json`
+> を総なめし、「**branch も worktree も無い = 正体不明の孤児 → 削除**」という
+> 消極形の判定をしていた。`roster.json` と `manager.json` はまさにその形なので、
+> **エンジンが自分の記憶を自分で食っていた**。しかも roster.json は状態遷移時に
+> しか書かれない(署名が変わらなければ書かない)ので、worker が黙々と作業している
+> 静穏帯では mtime が15分を超え、**毎 tick 削除条件が成立**した。
+>
+> 結果: roster 消失 → `reconcileRoster` が `[]` に縮退 → `adoptResumeCandidates`
+> が no-op → 生きている worker が再起動後に孤児化・`workedMs`(暴走時計)が
+> リセット・カードが `doing` に取り残される。manager.json 消失 → 蘇生反射が
+> 「心拍なし」と読み、fail-open 設計ゆえに**固まった司令官を二度と蘇生しない**。
+>
+> **現在の規則は極性が逆**: 「心拍だと**肯定できる**もの(branch か worktree の
+> キーを持つ)だけが削除候補」。名前の denylist を主策にしないのは、**この不具合
+> 自体が denylist の欠落**だから(roster も manager もスイープを書いた後に入居した)
+> — 次の入居者でまた同じ事故になる。名前は「parse できない場合」の副次ゲートに
+> のみ使う。判定は `swarmHeartbeatFiles.ts` に集約(2箇所に複製すると再びドリフトする)。
+
+> **roster を壊すもう2つの経路も同日に塞いだ(2026-07-29)。** 上の「掃除役が消す」
+> とは別に、**エンジン自身が壊す**経路が2つあった。どちらも共通の型は
+> **「知らないこと」を「無いという証拠」としてディスクに焼き付けていた**こと。
+>
+> | 経路 | 何が起きていたか | 現在 |
+> |---|---|---|
+> | **未照合エンジンの全上書き**(`syncRoster`) | `syncRoster` は全上書きで `rosterSig` は初期値なし ⇒ 新品エンジンの初回遷移で必ず書く。だが照合(reconcile)するのは `resumeEngines` **だけ**。`startOrchestrator`(オーナーが自動運転 ON)と `maybeAutoStartDrain` は照合を通らないので、初回 pass が `{"workers":[]}` を**生きている worker の行の上に**書いた。しかもこの経路に落ちるのは**resume が飛ばされた時**(boot 時 `desiredRunning:false` / crash-loop breaker が抑止 — その通知自体が「手動でオンに」と誘導する / preflight 失敗)= **card 3/4 が救うはずだった状況そのもの** | `engine.rosterReconciled` が false の間は**マージのみ**(自分が知らない行はそのまま残す)。照合済みなら従来どおり全上書き(=剪定も可能) |
+> | **Board 読み失敗で全消し**(`reconcileRoster`) | Board 読みが失敗すると「全カードが消滅した」と解釈し、全行を `card-gone` に落として**空の roster を書き戻していた**。boot 直後(loopback API がまだ起きていない)の一過性の失敗が、**生きている全 worker の記憶を永久に破壊**した | 読み失敗は**何の結論も出さない** — 空の結果を返して採用を凍結しつつ、**ディスクのファイルは触らない**(次の boot で再挑戦できる) |
+>
+> **回収パスの誤判定3件も同日に根治(2026-07-29)。** 共通の型は
+> 「**await をまたいで変わった現実ではなく、await 前の前提のまま判断していた**」。
+>
+> | 誤判定 | 何が起きていたか | 現在 |
+> |---|---|---|
+> | **detached HEAD の WIP 保全**(`commitWipBeforeTeardown`) | `git commit` の終了コードだけを成功の証拠にしていた。rebase 途中などで HEAD が外れていると commit は成功するが**どのブランチからも到達できず**、直後の `git worktree remove --force` で唯一の参照が消える。しかも `committed:true` を返すので、呼び出し元は**保全できたと信じて**木ごと消していた(= 「回収は未コミットの成果を絶対に壊さない」という §6 の契約が、成功を報告しながら壊していた) | HEAD がブランチに繋がっていることを確認してから成功と報告。繋がっていなければ **fail-closed**(worktree を残す)。成功時は `branch` を返す(到達可能性の証明) |
+> | **保全コミットが twin ガードをすり抜ける**(`recoverLost`) | `probe` は teardown の**前**に取るので、teardown 中に増えた保全コミットが `commitsAhead` に反映されない。twin 根治(`commitsAhead>0 ⇒ blocked`)がゼロのまま評価され、**カードが todo に戻って次の dispatch が twin を生む** — よりによって「いま保全を書き込んだ側のブランチ」を孤児にする | 保全が実ブランチに載った場合(`wip.branch` がある)だけ +1 して判定に渡す |
+> | **boot 復帰の凍結窓で停止スイッチが無視される**(`resumeEngines`) | 手動停止/preflight の判定は reconcile の**前**に一度だけ。reconcile は worktree の stat・エントリ毎の git・Board 読みで**数秒〜数分**かかる。その窓で押された OFF は読まれず、**停止済みエンジンに claude PTY を spawn**していた。しかも `scheduleNext` は `running` を尊重するので tick 連鎖は始まらず、**誰も監視しない worker** が走る(stall 検知も暴走時計も回収も無い) | reconcile 直後に停止スイッチを再読し、押されていれば `running=false` + 世代バンプで**中止** |
+
+> **差し戻し中 worker の永久孤児化も同時に根治。** `swarm-beat.sh` の
+> `readyToMerge` は**一度立つと下りない(sticky)**ので、差し戻された worker
+> (カードは `doing` に戻り、同じ worker が working 継続)も「ready」と報告し続ける。
+> boot 照合はこれを**配達済み**と分類して roster から行を捨てていた。すると
+> そのカードは誰の持ち物でもなくなる(`selectDispatch` は `todo` しか読まず、
+> crash 回収は `engine.workers` 起点)ので、**生きた worktree の隣で `doing` に
+> 永久放置**された。現在は `cardInReview`(**Board が実際に review に居ると
+> 言っているか**)を AND 条件に加え、worker の自己申告だけでは配達済みにしない。
 | 共有型 | `src/lib/types.ts` | `OrchestratorWorker`(:1080-1138) / `SwarmWorkerRecord`(:1156-1181) |
 
 > **監視の守備範囲(2026-07-18 に明文化)**: 本章の機構 — 心拍・stall 検知・nudge・rate-limit hold・runaway・回収 — は **`monitorWorkers` が握っている worker にしか効かない**。オーナー自身が開いている対話卓(Terminal タブのペイン・Board 実行・**司令官/補給官の卓**)はどれも**この機構の対象外**で、止まっても心拍も出さないし誰も回収しない。

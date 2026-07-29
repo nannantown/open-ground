@@ -176,3 +176,92 @@ export const checkStuckProcessesOnce = async (opts?: {
   if (opts?.notify) await opts.notify(describeStuckProcesses(procs)).catch(() => {})
   return procs
 }
+
+// ── Periodic watch (2026-07-29) ──────────────────────────────────────────────
+//
+// The first cut scanned ONCE, at boot. That is the one moment the count is
+// guaranteed to be LOW: orphans accumulate WHILE the app runs (every swarm test
+// run, every reclaim), so a boot-only check reports yesterday's news and then
+// goes blind for the rest of the session — it would not have caught the
+// 2026-07-28 incident, which built up over hours of uptime. Re-scan on a timer.
+
+/** How often the periodic watch re-scans. Long: the condition is measured in
+ *  tens of minutes (nothing is "suddenly" stuck for 10+ minutes), and one `ps`
+ *  per interval should stay invisible. */
+export const STUCK_WATCH_INTERVAL_MS = 10 * 60_000
+
+/** How long before the SAME ongoing accumulation may notify again. The set never
+ *  shrinks on its own (only a restart clears it), so without this the owner would
+ *  get the same bell every interval until they rebooted — which trains them to
+ *  ignore it. */
+export const STUCK_RENOTIFY_MS = 6 * 60 * 60_000
+
+interface WatchState {
+  timer?: ReturnType<typeof setInterval>
+  /** Count at the last notification, and when — the anti-nag memory. */
+  lastNotifiedCount?: number
+  lastNotifiedAt?: number
+}
+const watch: WatchState = {}
+
+/** Reset the anti-nag memory (tests only). */
+export const __resetStuckWatchForTests = (): void => {
+  watch.lastNotifiedCount = undefined
+  watch.lastNotifiedAt = undefined
+}
+
+/** Should this scan notify? Pure, so the anti-nag rule is testable without
+ *  timers: speak the first time, then only when the leak has GROWN, and never
+ *  more than once per {@link STUCK_RENOTIFY_MS}. A count back under the floor
+ *  ends the episode and re-arms. */
+export const shouldNotifyStuck = (
+  count: number,
+  now: number,
+  prev: { count?: number; at?: number },
+  minCount = STUCK_MIN_COUNT,
+  renotifyMs = STUCK_RENOTIFY_MS,
+): boolean => {
+  if (count < minCount) return false
+  if (prev.count === undefined || prev.at === undefined) return true
+  if (count <= prev.count) return false // not growing — say nothing
+  return now - prev.at >= renotifyMs
+}
+
+/** ONE periodic pass. Exported so a test can drive it without the timer. */
+export const runStuckProcessWatchPass = async (opts?: {
+  notify?: (detail: string) => Promise<unknown>
+  now?: () => number
+  find?: () => Promise<StuckProcess[]>
+}): Promise<StuckProcess[]> => {
+  const procs = await (opts?.find ?? (() => findStuckProcesses()))()
+  const now = (opts?.now ?? Date.now)()
+  if (
+    shouldNotifyStuck(procs.length, now, { count: watch.lastNotifiedCount, at: watch.lastNotifiedAt })
+  ) {
+    watch.lastNotifiedCount = procs.length
+    watch.lastNotifiedAt = now
+    if (opts?.notify) await opts.notify(describeStuckProcesses(procs)).catch(() => {})
+  }
+  if (procs.length < STUCK_MIN_COUNT) __resetStuckWatchForTests() // episode over — re-arm
+  return procs
+}
+
+/** Start the periodic watch (idempotent). Runs one pass immediately, then every
+ *  `intervalMs`. `unref` so it can never hold the process open. */
+export const startStuckProcessWatchLoop = (
+  intervalMs = STUCK_WATCH_INTERVAL_MS,
+  opts?: { notify?: (detail: string) => Promise<unknown> },
+): void => {
+  if (watch.timer) return
+  void runStuckProcessWatchPass(opts).catch(() => {})
+  watch.timer = setInterval(() => {
+    void runStuckProcessWatchPass(opts).catch(() => {})
+  }, intervalMs)
+  watch.timer.unref?.()
+}
+
+/** Stop the periodic watch (tests / shutdown). */
+export const stopStuckProcessWatchLoop = (): void => {
+  if (watch.timer) clearInterval(watch.timer)
+  watch.timer = undefined
+}

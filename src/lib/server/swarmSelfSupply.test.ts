@@ -37,6 +37,7 @@ import {
   parseEslintFindings,
   parseVitestFindings,
   parseTodoFindings,
+  defaultSelfSupplyDeps,
   openSelfSupplyKeys,
   initSelfSupplyRuntime,
   defaultBoard,
@@ -676,5 +677,57 @@ describe('self-supply off-tick execution (kickSelfSupplyPass + scanInFlight)', (
     kickSelfSupplyPass(e, log, hostile, CFG)
     expect(await waitUntil(() => lines.some((l) => /pass errored/.test(l.message)))).toBe(true)
     expect(e.selfSupply.scanInFlight).toBe(false)
+  })
+})
+
+// ── gitRepoGuard wiring: the ONE self-supply scanner that spawns `git` ────────
+// 2026-07-28 (07 章 §7): a `git` whose cwd is not a repo walks the filesystem
+// UPWARD looking for one, and if that cwd is removed mid-walk it wedges in
+// uninterruptible sleep — un-killable, un-timeout-able, cleared only by a reboot.
+// gitRepoGuard closed that across the swarm git helpers, but `scanTodoComments`
+// reaches `git` through runGateProcess (a raw spawn), so it was NOT covered —
+// in the ONE loop that runs unattended, on a timer, forever.
+//
+// TEETH — this pins the ACT (no spawn), not a value. The observable difference:
+// a directory that is NOT a repo root but sits UNDER one. Raw `git grep` there
+// succeeds by walking up to the parent repo and returns its TODOs (measured);
+// the guarded scanner returns [] because it never starts git at all. Delete the
+// `isGitRepoRoot(p) ?` gate and the second case goes red. Load-independent (no
+// timing, no process-table inspection).
+describe('scanTodoComments — gitRepoGuard is wired into the real scanner', () => {
+  const gitIn = async (cwd: string, args: string[]) => {
+    const { execFile } = await import('child_process')
+    const { promisify } = await import('util')
+    await promisify(execFile)('git', args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+  }
+  let root = ''
+
+  beforeEach(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'og-todo-guard-')))
+    await mkdir(join(root, 'sub'), { recursive: true })
+    await gitIn(root, ['init', '-q', '-b', 'main', '.'])
+    await gitIn(root, ['config', 'user.email', 'dev@test'])
+    await gitIn(root, ['config', 'user.name', 'Dev'])
+    const { writeFile } = await import('fs/promises')
+    await writeFile(join(root, 'sub', 'a.ts'), 'const a = 1 // TODO: fix me\n')
+    await gitIn(root, ['add', '-A'])
+    await gitIn(root, ['commit', '-m', 'base'])
+  })
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('a real repo ROOT still scans — the guard is inert where it belongs', async () => {
+    const found = await defaultSelfSupplyDeps().scanTodoComments(root)
+    expect(found.length).toBeGreaterThan(0)
+    expect(found.some((f) => f.key.includes('a.ts'))).toBe(true)
+  })
+
+  it('a NON-repo-root cwd yields [] — git is never spawned, so it cannot wedge', async () => {
+    // `sub/` has no .git. Raw `git grep` here WOULD succeed (it walks up to the
+    // parent repo and reports a.ts — verified by hand); the guard means no
+    // process is started at all. Non-empty here ⇒ the gate is gone.
+    const found = await defaultSelfSupplyDeps().scanTodoComments(join(root, 'sub'))
+    expect(found).toEqual([])
   })
 })

@@ -185,15 +185,29 @@ export interface RosterReality {
   cardActive: boolean
   branchAhead: boolean
   heartbeatReady: boolean
+  /** Is the card sitting in `review` — i.e. has the work actually been HANDED OVER?
+   *  Load-bearing because `heartbeatReady` is STICKY: `swarm-beat.sh` writes
+   *  `readyToMerge:true` once and never unsets it, so a worker whose card was sent
+   *  back (差し戻し → the card returns to `doing` and the SAME worker keeps working)
+   *  still reports ready forever. Without this, that worker classified as
+   *  'ready' — "delivered, drop the row" — and its row was pruned from the roster
+   *  while the worker was mid-rework. Nothing then owned the card: selectDispatch
+   *  only reads `todo`, and crash reclaim only walks `engine.workers`, so the card
+   *  sat in `doing` permanently with a live worktree nobody would ever collect. */
+  cardInReview: boolean
 }
 
 /** Pure classifier (plan §4-3b). Precedence is load-bearing: worktree existence is
  *  checked first (a gone worktree is 'vanished' no matter what the Board says), then
- *  the card, then readiness, else in-progress. */
+ *  the card, then readiness, else in-progress.
+ *
+ *  'ready' requires the BOARD to agree that the work was handed over
+ *  (`cardInReview`), not just the worker's own sticky heartbeat — see
+ *  {@link RosterReality.cardInReview}. */
 export const classifyRosterEntry = (reality: RosterReality): RosterEntryClass => {
   if (!reality.worktreeExists) return 'vanished'
   if (!reality.cardActive) return 'card-gone'
-  if (reality.branchAhead && reality.heartbeatReady) return 'ready'
+  if (reality.branchAhead && reality.heartbeatReady && reality.cardInReview) return 'ready'
   return 'in-progress'
 }
 
@@ -258,15 +272,24 @@ export const reconcileRoster = async (
     const entries = await readRoster(projectPath)
     if (!entries.length) return EMPTY_RECONCILE
 
-    // One Board read for the whole roster (card lookup by id). A read failure ⇒
-    // treat every card as absent (cardActive:false) rather than throw — the
-    // conservative degrade (entries drop to 'card-gone', existing reclaim handles
-    // the cards) beats aborting the resume.
+    // One Board read for the whole roster (card lookup by id).
+    //
+    // A read FAILURE is not evidence of anything. This used to degrade to "every
+    // card reads as gone", which sounds conservative but is the opposite: every
+    // entry then classified 'card-gone' and the prune below wrote the roster back
+    // EMPTY — a transient Board blip at boot (the loopback API not up yet, a
+    // momentarily locked file) permanently destroyed the memory of every live
+    // worker, and the next boot had nothing left to recover from. Absence of
+    // evidence was being written to disk as evidence of absence.
+    //
+    // Now a failed read ABORTS the reconcile: return the empty result (so the
+    // caller adopts nobody this boot — the same freeze it already handles) while
+    // leaving the on-disk roster untouched, so the NEXT boot can still recover.
     let byId = new Map<string, ProjectTask>()
     try {
       byId = new Map((await deps.fetchTasks(projectPath)).map((t) => [t.id, t]))
     } catch {
-      /* byId stays empty — every card reads as gone */
+      return EMPTY_RECONCILE // roster on disk is preserved for the next attempt
     }
 
     const result: RosterReconcileResult = {
@@ -282,17 +305,27 @@ export const reconcileRoster = async (
       // they'd only fail anyway, and this keeps a 'vanished' fixture from needing
       // to stub them.
       let cardActive = false
+      let cardInReview = false
       let branchAhead = false
       let heartbeatReady = false
       if (worktreeExists) {
         const card = entry.taskId ? byId.get(entry.taskId) : undefined
         cardActive = !!card && ACTIVE_COLUMNS.has(columnOf(card))
+        // Where the card actually SITS decides whether the work was handed over —
+        // the worker's own `readyToMerge` is sticky and survives a 差し戻し.
+        cardInReview = !!card && columnOf(card) === 'review'
         if (cardActive) {
           branchAhead = (await deps.countCommitsAhead(projectPath, entry.branch).catch(() => 0)) > 0
           heartbeatReady = await deps.heartbeatReady(projectPath, entry.branch).catch(() => false)
         }
       }
-      const klass = classifyRosterEntry({ worktreeExists, cardActive, branchAhead, heartbeatReady })
+      const klass = classifyRosterEntry({
+        worktreeExists,
+        cardActive,
+        branchAhead,
+        heartbeatReady,
+        cardInReview,
+      })
       switch (klass) {
         case 'vanished':
           result.vanished.push(entry)

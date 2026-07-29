@@ -679,3 +679,53 @@ describe('persistence — the cooling table survives a process restart', () => {
     })
   })
 })
+
+// ── A re-read of the SAME screen must not push the deadline later (0729) ────
+// Every pass re-resolves from the worker's CURRENT screen, and a bare clock
+// label ("resets at 3pm") is re-interpreted against the clock each time —
+// parseResetLabel's rule being "if that time already passed today, it means
+// tomorrow". The same unchanged screen therefore yields 20 minutes at 14:40 and
+// ~23 HOURS at 15:10. That figure is mirrored to disk, so the tier stays parked
+// for a day across restarts and the engine looks like it just stopped
+// dispatching, with nothing in any log saying why.
+describe('markRateLimited — an existing deadline is never pushed LATER', () => {
+  const at = (h: number, m: number) => {
+    const d = new Date(1_700_000_000_000)
+    d.setHours(h, m, 0, 0)
+    return d.getTime()
+  }
+
+  it('keeps the earlier deadline when the same bare-clock screen is re-read', () => {
+    __resetQuotaForTest()
+    const screen = 'usage limit reached — resets at 3pm'
+    const first = markRateLimited('sonnet', { ptyText: screen, now: at(14, 40) })
+    expect(first - at(14, 40)).toBeLessThanOrEqual(25 * 60_000) // ~20 min
+
+    // 15:10 — 3pm has passed, so a fresh parse rolls to TOMORROW 3pm (~23h).
+    const second = markRateLimited('sonnet', { ptyText: screen, now: at(15, 10) })
+    // The stale clock is DISCARDED (not rolled to tomorrow), so the resolver
+    // falls through to the flat grace — a short, self-correcting wait.
+    // Pre-fix `second` was ~23h out and the tier was parked for the day.
+    expect(second - at(15, 10)).toBeLessThan(60 * 60_000)
+    expect(second).toBeGreaterThan(at(15, 10))
+  })
+
+  it('an ELAPSED mark is replaced, so a genuine second rate-limit still cools', () => {
+    __resetQuotaForTest()
+    const first = markRateLimited('haiku', { ptyText: 'resets in 5 minutes', now: at(10, 0) })
+    // An hour later the first window is long gone; a NEW limit must take effect.
+    const second = markRateLimited('haiku', { ptyText: 'resets in 30 minutes', now: at(11, 0) })
+    expect(second).toBeGreaterThan(first)
+    expect(isTierCooling('haiku', at(11, 5))).toBe(true)
+  })
+
+  it('a LEGITIMATE multi-day horizon (weekly reset) is not truncated', () => {
+    __resetQuotaForTest()
+    const now = at(9, 0)
+    const weekly = new Date(now + 5 * 24 * 60 * 60_000).toISOString()
+    const until = markRateLimited('fable', { a5ResetsAt: weekly, now })
+    // Weekly windows are days out — clamping these to 24h (an earlier attempt at
+    // this fix) silently told the engine a dry tier was ready.
+    expect(until - now).toBeGreaterThan(4 * 24 * 60 * 60_000)
+  })
+})

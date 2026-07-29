@@ -16,7 +16,8 @@ import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/serve
 import { installLockdownFetchGuard } from '@/lib/server/lockdown'
 import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications, createSwarmInfoNotification } from '@/lib/server/swarmNotifications'
-import { checkStuckProcessesOnce, summarizeByCommand } from '@/lib/server/stuckProcessWatch'
+import { startStuckProcessWatchLoop } from '@/lib/server/stuckProcessWatch'
+import { installGateGroupReaper } from '@/lib/server/gateProcess'
 import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
 import { startAutoDrainLoop, bootAutoDrainEnabled, resumeEngines } from '@/lib/server/swarmOrchestrator'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
@@ -172,22 +173,28 @@ void (async () => {
 // wedges next. Report-only by contract: a restart is the ONLY remedy, so there
 // is deliberately no cleanup action (see the module header). Fire-and-forget,
 // never blocks boot, silent below the count/age floor and a no-op on Windows.
-void (async () => {
-  try {
-    const stuck = await checkStuckProcessesOnce({
-      notify: (detail) =>
-        createSwarmInfoNotification({ event: 'stuck-processes', detail }).catch(() => {}),
-    })
-    if (stuck.length) {
-      console.warn(
-        `[openground:hono] stuck processes: ${stuck.length} orphaned + uninterruptible ` +
-          `(${summarizeByCommand(stuck)}) — only a machine restart clears these`,
-      )
-    }
-  } catch {
-    /* a health check must never break boot */
-  }
-})()
+// PERIODIC, not boot-once (2026-07-29). Boot is the one moment the count is
+// guaranteed to be LOW — orphans accumulate WHILE the app runs, so a single
+// startup scan reports yesterday's news and then goes blind. Repeats are
+// suppressed unless the leak GROWS (STUCK_RENOTIFY_MS), because the set never
+// shrinks until a restart and a per-interval bell would train the owner to
+// ignore it. Kill-switch: OPENGROUND_STUCK_WATCH=0.
+if (process.env.OPENGROUND_STUCK_WATCH !== '0') {
+  startStuckProcessWatchLoop(undefined, {
+    notify: (detail) =>
+      createSwarmInfoNotification({ event: 'stuck-processes', detail }).catch(() => {}),
+  })
+}
+
+// GATE-CHILD SHUTDOWN REAPER — runGateProcess spawns its vitest/eslint children
+// DETACHED (their own process group) so it can group-kill the fork pool. The cost
+// is that they also survive US: nothing signals a detached child when the server
+// dies, so an Electron quit or a fatal exit mid-gate leaves a whole vitest pool
+// running with no parent — and if its worktree is removed underneath it, that is
+// the un-killable U-state class of 07 章 §7. Installed HERE ONLY (the real-server
+// entry): importing gateProcess inside a vitest worker must not change that
+// worker's signal handling. Idempotent, no-op on Windows.
+installGateGroupReaper()
 
 // HOOK INSTALL — idempotently wire OPEN GROUND's Claude Code hooks into the
 // user's ~/.claude/settings.json at boot. This is the ONLY automatic caller

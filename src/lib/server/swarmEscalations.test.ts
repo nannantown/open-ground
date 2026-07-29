@@ -1017,3 +1017,85 @@ describe('pasteStillInInputBox — the landing check', () => {
     expect(pasteStillInInputBox('❯ something', '   ')).toBe(false)
   })
 })
+// ── LOCK ORDER: the permanent deadlock (engine tick × owner answer) ──────────
+// Two locks exist in this process: L1 = this module's single-flight `chain`,
+// L2 = swarmOrchestrator's per-engine critical section (runExclusive). The tick
+// holds L2 for its whole body and raises questions through it (L2 → L1), which
+// is structural. answerEscalation used to hold L1 across the delivery leg and
+// reach L2 from inside it (deliverAnswer → recordEscalationAnswerForNextDispatch)
+// — the exact opposite order. With both in flight, each waited on the other with
+// no timeout: the engine AND the inbox froze permanently, silently.
+//
+// TEETH — this reproduces the cycle rather than asserting on shape:
+//   • the injected `queueForNextDispatch` stands in for "takes L2": it blocks
+//     until the tick's own escalation has been recorded;
+//   • the tick stands in for "holds L2 while taking L1": it opens an escalation
+//     and only then releases L2.
+// Post-fix the chain is released before delivery, so the tick's open proceeds,
+// L2 frees, and both settle. Pre-fix neither can advance and this test TIMES OUT
+// (its own 15s cap, well under the suite's) — deadlock is not a value you can
+// assert, only a thing that fails to finish.
+describe('lock order — an owner answer during an engine tick must not deadlock', () => {
+  it('answer (L1) + tick (L2→L1) both settle', { timeout: 15_000 }, async () => {
+    const { notify } = makeNotify()
+    // No terminalId ⇒ delivery takes the `queued` lane, which is the one that
+    // reaches the orchestrator (L2) — the deadlocking edge.
+    const { escalation } = await openEscalation(openInput({ taskId: 'card-lock' }), { notify })
+
+    let releaseL2: () => void = () => {}
+    const l2Free = new Promise<void>((r) => (releaseL2 = r))
+    let queued = false
+
+    const answering = answerEscalation(escalation.id, '進めてよい', {
+      isPathAllowed: async () => true,
+      canInjectInto: async () => false,
+      queueForNextDispatch: async () => {
+        // Standing in for recordEscalationAnswerForNextDispatch: needs L2.
+        await l2Free
+        queued = true
+      },
+    })
+
+    // Let the answer reach its delivery leg (pre-fix: still holding L1).
+    await new Promise((r) => setTimeout(r, 30))
+
+    // The tick: holds L2, raises a question (needs L1), then releases L2.
+    const ticking = openEscalation(openInput({ taskId: 'card-tick', question: 'tick の質問？' }), {
+      notify,
+    }).then(() => releaseL2())
+
+    const [res] = await Promise.all([answering, ticking])
+    expect(queued).toBe(true)
+    expect(res.delivery).toBe('queued')
+    expect(res.escalation.status).toBe('answered')
+  })
+
+  it('a concurrent second answer to the SAME record does not interleave into the PTY', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(openInput({ terminalId: 'pty-lock' }), { notify })
+
+    let inFlight = 0
+    let maxConcurrent = 0
+    const deps = {
+      isPathAllowed: async () => true,
+      canInjectInto: async () => true,
+      writeToTerminal: async () => {
+        inFlight += 1
+        maxConcurrent = Math.max(maxConcurrent, inFlight)
+        await new Promise((r) => setTimeout(r, 25))
+        inFlight -= 1
+        return true
+      },
+      readScreen: async () => '',
+    } as unknown as Parameters<typeof answerEscalation>[2]
+
+    const [a, b] = await Promise.all([
+      answerEscalation(escalation.id, '答え1', deps),
+      answerEscalation(escalation.id, '答え2', deps),
+    ])
+    // Exactly one delivery ran; the other saw the in-flight guard (or the
+    // already-injected no-op). Never two pastes into the same prompt.
+    expect(maxConcurrent).toBeLessThanOrEqual(1)
+    expect([a.delivery, b.delivery].filter((d) => d === 'injected').length).toBeLessThanOrEqual(1)
+  })
+})

@@ -225,6 +225,14 @@ export interface OverseerRuntime {
   lastEscalateAt: number
   /** W6 sub-cycle: last janitor run time. */
   lastJanitorAt: number
+  /** A janitor sweep is running RIGHT NOW, beside the tick that fired it. The
+   *  sweep is fire-and-forget (it used to be awaited INSIDE the pass — see the
+   *  call site), so a later tick could otherwise start a second one on top of
+   *  the first: two concurrent `git worktree remove` / branch deletes over the
+   *  same repo. Check-and-set SYNCHRONOUSLY before the first await, cleared in
+   *  `finally` — the same shape as the engine's own `passInFlight`. In-memory
+   *  only; a restart clears it, which is correct (nothing is sweeping). */
+  janitorInFlight?: boolean
   /** S9 edge memory: true while THROTTLED, so entering fires the T3' notice ONCE and
    *  recovery is silent (§5). */
   throttled: boolean
@@ -617,9 +625,32 @@ export const runOverseerPass = async (
     if (doSubcycle) await detectInboxStale(engine, ov, log, deps, now, config, fired, activeSeen)
 
     // 6. Janitor (W6, T0') — low-frequency residual cleanup while OBSERVING.
-    if (now - ov.lastJanitorAt >= config.janitorMs) {
+    //
+    // OFF-TICK (2026-07-29). This used to be `await`ed here, inside the overseer
+    // pass, which itself runs inside runEnginePass while `passInFlight` is held.
+    // The sweep is a `git fetch` (60s timeout) plus a git spawn per local and
+    // remote swarm branch — tens of seconds to minutes on a busy repo — and for
+    // that whole time EVERY 3s tick bailed on passInFlight: no monitor, so no
+    // stall detection, no crash detection, no runaway clock, no quota sighting.
+    // The engine went blind exactly while the overseer was meant to be watching.
+    // integrate (kickIntegratePass) and self-supply (kickSelfSupplyPass) were
+    // moved off the tick for this same reason; the janitor was the one left.
+    //
+    // Fired and forgotten instead, with a synchronous in-flight guard so a later
+    // tick cannot stack a second sweep on the same repo. `lastJanitorAt` is
+    // stamped BEFORE the spawn (not after it completes) so the 15-minute cadence
+    // measures start-to-start and a slow sweep cannot compress the next interval.
+    // NOTE this keeps the overseer's K1 invariant intact: it still has no driver
+    // of its own — the tick decides WHEN, it just no longer waits for the result.
+    if (!ov.janitorInFlight && now - ov.lastJanitorAt >= config.janitorMs) {
       ov.lastJanitorAt = now
-      await deps.runJanitor(engine.path).catch((e) => log('warn', `overseer: janitor errored — ${errMsg(e)}`))
+      ov.janitorInFlight = true
+      void deps
+        .runJanitor(engine.path)
+        .catch((e) => log('warn', `overseer: janitor errored — ${errMsg(e)}`))
+        .finally(() => {
+          ov.janitorInFlight = false
+        })
     }
 
     // Prune seen/watch for conditions no longer active — so a resolved condition drops

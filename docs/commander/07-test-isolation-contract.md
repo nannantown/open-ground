@@ -1638,7 +1638,26 @@ export const isGitRepoRoot = (cwd: string): boolean => existsSync(join(cwd, '.gi
 | 非適用 | 理由 |
 |---|---|
 | `swarmEnvPreflight` の `git --version` | cwd に依存しない存在確認。リポ判定は無意味 |
+| `swarmEnvPreflight` の `rev-parse --is-inside-work-tree` | **git 自身に「リポか」を聞くのが目的**。ガードを付けると聞く前に答えを決めることになる。cwd は登録済みプロジェクト(安定 dir) |
 | `youCorpus` の `rev-parse --git-common-dir` / `--show-toplevel` | **任意の cwd から上へ遡上してリポ根を探す**のが仕様。root 限定ガードを付けるとサブディレクトリで誤って null になる |
+| `swarmJanitor` / `swarmOrchestrator` の `swarmRepoKey`(`rev-parse --git-common-dir`) | 同上 — ただし**無防備ではなく `isUnderGitRepo` で守る**(下記) |
+
+> **2026-07-29 の追補 — 遡上する呼び出し用の第2の述語 `isUnderGitRepo`。**
+> 上の「非適用」を無防備の意味にしないため、遡上が仕様の呼び出しには専用の
+> 述語を用意した(`gitRepoGuard.ts`)。**cwd が存在しなければ即 false**(= §7.2 の
+> 消えた cwd に spawn しない、という肝心の保護は保つ)うえで、`.git` を上へ探す。
+> 純 fs のみで、何も spawn しない。
+>
+> 適用先は **`swarmRepoKey` の2箇所だけ**(janitor 側 `gitAllowingRepoWalk` /
+> orchestrator 側の同名関数)。ここを root 限定にしていたため、**リポの
+> サブディレクトリを登録したプロジェクトで心拍ディレクトリ一式(worker 心拍・
+> roster.json・manager.json)が丸ごと到達不能**になっていた(= 生きたリポなのに
+> エンジンの記憶がゼロ)。
+>
+> **広げてはいけない。** `isGitRepoRoot` こそが「非リポに git を spawn しない」
+> 契約の実体で、便利だからと一般の git ヘルパをこちらに差し替えた瞬間に §7.4 が
+> 崩れる。実際 `swarmSelfSupply.test.ts` の歯(サブディレクトリでは `[]`)が赤く
+> なるので、逸脱は自動で気づける。
 
 ### 7.5 teeth — 「守りたい事象を起こして赤くなるか」
 
@@ -1673,6 +1692,50 @@ ps -axo etime,stat,pid,command | grep -w git | grep -v grep | sort | head
   呼び出しを足すなら、このガードは付けられない。
 - **git 以外の子プロセスは無防備。** 同じ「cwd を消されて U 状態」は原理的に
   `tsc` / `lint` / `vitest` / `claude` PTY でも起こりうる。今回塞いだのは git だけ。
+  → **2026-07-29 に一部前進**: OG 自身の撤去パスが作っていた分は塞いだ(§7.8)。
+
+### 7.8 自分の撤去パスが同じ wedge を作っていた(2026-07-29)
+
+§7.2 は「テストが cwd を消す」話だったが、**本番の撤去パスが同じことをしていた**。
+共通の誤りは1つ — **シグナルを送ったことを、プロセスが死んだこととして扱っていた**。
+
+`node-pty` の `kill()` は `process.kill(pid,'SIGHUP')` を投げて即 return し、
+`finishedAt` は非同期の `onExit` が後から刻む。呼び出し側はその**次の行**で破壊操作を
+していた:
+
+| 場所 | 破壊操作 | 直し方 |
+|---|---|---|
+| `swarmWorker.removeSwarmWorktree` | `git worktree remove` | `killTerminalsByCwdAndWait` で死を確認。**確認できなければ撤去を拒否**して次回に回す |
+| `canvasAi`(生成 / tweak の2箇所) | 一時 dir の `rm -rf` | 同上(こちらは最終的に削除する — tmp を永久リークさせないため) |
+| `swarmOrchestrator.defaultRecoverWorker` | WIP 保全の `git add -A` | `waitForTerminalGone`。待たないと**半端な木をスナップショット**し、claude の git と `index.lock` を奪い合う |
+
+**なぜ「シェルの pid が消えるのを待つ」のが正解か(実機計測 2026-07-29,
+node-pty 1.2.0-beta.14 / darwin)**:
+
+- PTY 直下の `zsh -l` はセッションリーダ(pid == pgid == sid)だが、**zsh の
+  ジョブ制御で前景ジョブは自分のプロセスグループを持つ**。したがって
+  `process.kill(-ptyPid, …)` は**シェルにしか届かず claude には届かない**。
+  node-pty 側に pgid kill も無い。
+- 実際に子孫へ届いているのは**カーネル**。セッションリーダが死ぬと制御端末の
+  前景プロセスグループへ SIGHUP が飛ぶ(実測: zsh 配下の孫 `sleep` が消えた)。
+- ゆえに **シェルの pid がプロセステーブルから消えたこと**が、カーネルが子孫に
+  ハングアップを配送した証拠になる。待つべきはこれ。
+- **負の pid への kill は採らない** — 届かないうえ、pid 再利用で無関係な
+  グループを撃つ危険がある。
+- **セッションを抜けたもの(`nohup … & disown` / `setsid`)には原理的に届かない**
+  (実測: ppid=1 で永久生存 = §7.1 の孤児と同じ形)。契約は正直に
+  「**PTY とその前景子孫まで**」と書く。
+
+待機はすべて上限付き(既定5秒)で、中間で1度だけ SIGKILL に格上げする
+(SIGKILL でも「制御プロセスの終了」なので前景グループへの SIGHUP は同様に飛ぶ)。
+
+**同時に塞いだ増殖経路**: `spawnSwarmWorker` は「worktree 作成より前で fail-closed
+だから孤児は残らない」と2箇所のコメントで宣言していたが、`launchClaude` だけが
+その**外**にあった。throw すると worktree と `swarm/*` ブランチが残り、
+`runDispatchPass` にバックオフが無い(3秒 tick・catch して continue)ため
+**1つの恒常的な失敗が3秒ごとの worktree+ブランチ生成に化けた**(自動で回収する
+機構も無い)。現在は try/catch で、**この呼び出しが作った分だけ**を撤去する
+(RESTART パスの既存 worktree は絶対に触らない)。
 - **fire-and-forget そのものは残っている。** テストは今も in-flight pass を待たない
   (§7.2-2 は設計として正しい)。**git を掴まなくなっただけ**なので、実リソースを掴む
   dep を新しく足せば**同じクラスが再発する**。新しい dep を足すときは
@@ -1683,9 +1746,18 @@ ps -axo etime,stat,pid,command | grep -w git | grep -v grep | sort | head
 §7.6 のとおり**掃除はできない**。できるのは**早く気づくこと**で、そこが今回いちばん
 高くついた(修正は分かれば速かった。高かったのは「何かおかしい」→「原因はこれ」の距離)。
 
-`src/lib/server/stuckProcessWatch.ts` がサーバ boot で **1 回だけ**スキャンし、
+`src/lib/server/stuckProcessWatch.ts` が **10 分ごと**にスキャンし、
 **孤児(PPID=1) × 中断不能(U/D) × 一定時間経過**の 3 条件を満たすプロセスが
 `STUCK_MIN_COUNT`(3)以上あれば info 通知(`event:'stuck-processes'`)を上げる。
+
+> **boot 1 回では見えなかった(2026-07-29 に定期化)。** 初版は起動時に 1 回だけ
+> 走らせていたが、**起動直後こそ数がいちばん少ないことが保証される瞬間**で、
+> 孤児は**アプリが動いている間に**溜まる(テスト実行のたび・回収のたび)。
+> 1 回きりの検査は「昨日のニュース」を報告してその後セッション中ずっと盲目になる
+> — 実際、0728 の事故(数時間の稼働で 41 個)は初版では**捕まえられなかった**。
+> 再通知は**増えたときだけ**(`STUCK_RENOTIFY_MS` = 6 時間)。集合は再起動まで
+> 減らないので、毎回鳴らすと「無視する習慣」を育ててしまう。
+> 停止スイッチ: `OPENGROUND_STUCK_WATCH=0`。
 
 - **報告専用**。掃除アクションは**意図的に置かない** — 消す方法が存在しない(§7.3)以上、
   「直そうとして毎回失敗するのに成功したように見える」コードにしかならない。
@@ -1698,6 +1770,16 @@ ps -axo etime,stat,pid,command | grep -w git | grep -v grep | sort | head
 - **Windows は no-op**(`ps` と U 状態は Unix の概念)。
 - 文言はオーナー基準の平易文(「動かなくなった処理が N 個…再起動すると消えます」)。
   **kill を勧めない**ことをテストで pin してある(効かないと実測済みだから)。
+
+**孤児を作らない側も同日に塞いだ**: `gateProcess` は fork プール(vitest/eslint)を
+グループ kill するため `detached: true` で spawn する — これは**必要で外せない**が、
+代償として**子はサーバより長生きする**。detached な子はこちらのプロセスグループに
+居ないので、サーバが死んでも何も届かない(終了シグナルも 'close' も `settle` も
+`reapGroup` も)。統合ゲートの `vitest run` が自分のエンジンより長生きし、その
+worktree が撤去されれば §7.2 の wedge を新規生産する。現在は**実行中のグループを
+登録**しておき、`installGateGroupReaper()`(本番エントリからのみ設置)が
+`exit` / `SIGTERM` / `SIGINT` で一括 SIGKILL する。**サーバ自身の SIGKILL は
+捕捉不能なので構造上カバー外** — その残余がまさに検知の担当。
 
 teeth: `stuckProcessWatch.test.ts`(21 件)が判定を**壊れたマシンを再現せずに**全部押さえる
 (事故当日の ps 出力をテキストとして再生)。`npx tsx scripts/probe-stuck-process-watch.mts` は

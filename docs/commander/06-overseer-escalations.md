@@ -337,9 +337,47 @@ watchdog: brain が 5min+60s 超過 → 強制解放+null 合成 :523-539
 3. S4(worker 質問 → 大脳 or bare raise)             :585
 4. S5/S7(tasks があるときだけ)                      :588-600
 5. S11(subcycle のみ)                               :604
-6. janitor(15min ごと、force/deleteRemote なし)      :607-610
+6. janitor(15min ごと、force/deleteRemote なし)      :607-610  ← **await しない(下記)**
 prune seen/watch                                      :617
 ```
+
+> **janitor は tick の外(2026-07-29 — それ以前は await していた)。** 掃除は
+> `git fetch`(60s timeout)+ swarm ブランチ1本ごとの git spawn で、数十秒〜数分かかる。
+> これを pass の中で `await` していたため、その間 `passInFlight` を握ったままとなり
+> **3 秒 tick が全部 bail** = monitor が完全停止していた(stall 検知も crash 検知も
+> 暴走クロックも quota 検出も止まる)。**監督が見ているはずの時間帯に、エンジンが
+> いちばん盲目**という倒錯。integrate(`kickIntegratePass`)と self-supply
+> (`kickSelfSupplyPass`)は同じ理由で既に tick 外へ出ており、janitor だけが残っていた。
+> 現在は撃ちっぱなし + 同期の `janitorInFlight` ガード(後続 tick が同じリポに 2 本目の
+> 掃除を重ねない)。`lastJanitorAt` は**開始時**に刻むので 15 分は start-to-start。
+> K1(監督は自前のドライバを持たない)は不変 — tick が「いつ」を決める点は同じで、
+> 結果を待たなくなっただけ。
+
+### 3.1b ロック順序 — engine → escalations の一方向だけ(2026-07-29)
+
+プロセス内に 2 つのロックがある:
+
+| | 実体 | 粒度 |
+|---|---|---|
+| **L1** | `swarmEscalations.ts` の単一フライト `chain` | モジュール全体で 1 本 |
+| **L2** | `swarmOrchestrator` の per-engine critical section(`runExclusive`) | エンジンごと |
+
+**許されるのは L2 → L1 の一方向だけ。** tick は L2 を保持したまま `monitorWorkers` から
+`deps.raiseQuestion`(= `openEscalation` = L1)を呼ぶ — これは構造で、外せない。
+
+かつて `answerEscalation` は L1 を保持したまま配送レグ(`deliverAnswer` →
+`recordEscalationAnswerForNextDispatch` = **L2**)を呼んでいた。完全な逆順で、
+オーナーが tick 実行中に回答すると**双方が相手を無期限に待ち、エンジンと受信箱が
+同時に永久停止**した(どちらの await にも timeout は無く、ログにも何も出ない)。
+
+現在の形: `answerEscalation` は 3 相に割れている。**PHASE 1**(chain 内)= 検証・回答の
+永続化・you-corpus 書き戻しまで(**ファイルの read-modify-write のみ**)、**PHASE 2**
+(chain 解放後)= 配送、**PHASE 3** = `markInjected` で `'injected'` 遷移だけを**ディスクを
+読み直して**書く(配送中に並行 open が追記したレコードを踏み潰さないため)。
+
+**掟**: `enqueue()` のブロックの中で PTY 注入も orchestrator 呼び出しもしない。
+配送が chain の外に出た代償として同一レコードへの並行配送が可能になるので、
+`deliveringIds`(プロセス内メモリ)が同じ PTY への bracketed paste の交錯を防ぐ。
 
 ### 3.2 S4 → 大脳 → mailbox → 配送(T1 の全経路)
 
@@ -596,12 +634,14 @@ sub-cycle は raise 見送り、`:927-932`)。また当時の detail-in-key 設�
 
 ### 4.4 その他の運用注意
 
-- **通知ストア cap 50 の押し出し**: 賑やかな期間は逆方向の問題が起きる — 未対応の exec-timeout
-  fatal が info 通知(S11 の 6h リマインダー等)に押し出されて消えると、**S3 の発火源ごと消える**
-  (escalation が立っていればそちらは残る。fatal だけが消える)。「通知ストアに無い = 起きて
-  いない」ではない。engine log が全履歴(`swarmNotifications.ts:27-29`)。
-- **S11 自体が通知ストアを埋める**: open を放置すると 6h ごとに info record が積まれ、cap 50 を
-  消費していく(前項の押し出しを加速)。
+- **通知ストア cap 50 の押し出し**: 未対応の exec-timeout fatal が**同じ kind の新しい fatal**
+  に押し出されて消えると、**S3 の発火源ごと消える**(escalation が立っていればそちらは残る)。
+  「通知ストアに無い = 起きていない」ではない。engine log が全履歴(`swarmNotifications.ts:27-29`)。
+  ⚠ **訂正(2026-07-29)**: ここは以前「info 通知(S11 の 6h リマインダー等)に押し出されて」と
+  書いていたが、**cap は 2026-07-19 に kind 別へ分離済み**(`capNotificationsByKind`・§3.4)なので
+  **info が fatal を押し出すことはもう起きない**。押し出しは同じ kind の中でだけ起きる。
+- **S11 自体が通知ストアを埋める**: open を放置すると 6h ごとに info record が積まれる。ただし
+  上記のとおり**消費するのは info 側の 50 枠だけ**で、fatal の枠には触れない。
 - **overseer の状態はすべて in-memory**: GET state の `overseer:true` は「今のプロセスで arm
   されている」以上の意味を持たない。再起動後は必ず false(K2、`swarmOverseer.ts:23-25`)。
 - **注入(W16)の 3 条件**を満たさない answer は queued/skipped に落ちる: 対象 PTY が claude
@@ -684,6 +724,8 @@ sub-cycle は raise 見送り、`:927-932`)。また当時の detail-in-key 設�
 7. **通知 cap 50 押し出しで fatal の証跡が消える**(§4.4)— 「S3 が上がらない = 問題ない」とは
    言えない構造。全履歴は engine log(in-memory ring)と escalations 側の record のみ。
    24h 窓の導入で「押し出される前に読まれる」保証も無い(窓と cap は独立)。
+   ただし押し出すのは**同じ kind の新しい fatal だけ**(cap は kind 別・§3.4) — info が
+   fatal を流す経路は 2026-07-19 に塞がれている。
 
 ## 7. 検証コマンド集(そのまま打てる形)
 

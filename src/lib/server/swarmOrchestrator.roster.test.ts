@@ -360,3 +360,95 @@ describe('card 3 wiring — teardown removes the roster entry (condition ③)', 
     expect(roster.map((e) => e.worktree)).toEqual([other.worktree]) // only c1 removed
   })
 })
+
+// ── An engine that never RECONCILED must not erase what it never looked at ────
+// syncRoster is a FULL OVERWRITE and `rosterSig` starts undefined, so a fresh
+// engine's first transition always writes. That is right for an engine that came
+// up through resumeEngines (it reconciled first, so an empty roster genuinely
+// means "nobody survived") — but resumeEngines is the ONLY path that reconciles.
+// startOrchestrator (the owner pressing 自動運転 ON) and maybeAutoStartDrain kick
+// a pass on a fresh, empty engine, and those run exactly when resume was SKIPPED:
+// desiredRunning:false at boot, the crash-loop breaker suppressing resume (whose
+// own notice tells the owner to switch it on by hand), or a failed preflight.
+// The first pass then stamped {"workers":[]} over the rows of workers still alive
+// on disk — and with the memory gone nothing could adopt them ever again.
+describe('card 3 — an UNRECONCILED engine merges, never erases (2026-07-29)', () => {
+  it('carries through roster rows it does not know about', async () => {
+    // A worker persisted by a PREVIOUS run of the app, still alive on disk.
+    const survivor: RosterEntry = {
+      sessionId: 'sess-survivor',
+      taskId: 'c-old',
+      branch: 'swarm/old',
+      worktree: join(scratch, 'wt', 'old'),
+      tier: 'sonnet',
+      spawnAt: 1,
+      workedMs: 60_000,
+      reworkCount: 0,
+    }
+    await writeRoster(project, [survivor])
+
+    // A brand-new engine — the 自動運転 ON / auto-drain shape: never reconciled.
+    const engine = newEngine({ path: project, running: true })
+    expect(engine.rosterReconciled).toBeFalsy()
+
+    const card: ProjectTask = { id: 'c-new', title: 'New', boardColumn: 'todo' } as unknown as ProjectTask
+    await runDispatchPass(
+      engine,
+      stubDeps({
+        fetchTasks: async () => [card],
+        spawnWorker: async () => ({
+          terminalId: 'pty-new',
+          agentSessionId: 'sess-new',
+          worktree: join(scratch, 'wt', 'new'),
+          branch: 'swarm/new',
+          model: 'fable',
+        }),
+      }),
+      Date.now(),
+    )
+
+    const roster = await readRoster(project)
+    const worktrees = roster.map((r) => r.worktree).sort()
+    // The survivor is STILL THERE alongside the newly dispatched worker.
+    // Pre-fix this was [wt/new] only — the survivor was erased by an engine that
+    // had never once looked at the file.
+    expect(worktrees).toEqual([join(scratch, 'wt', 'new'), join(scratch, 'wt', 'old')].sort())
+    expect(roster.find((r) => r.worktree === survivor.worktree)?.workedMs).toBe(60_000)
+  })
+
+  it('a RECONCILED engine still overwrites wholesale (pruning stays possible)', async () => {
+    const stale: RosterEntry = {
+      sessionId: 'sess-stale',
+      taskId: 'c-stale',
+      branch: 'swarm/stale',
+      worktree: join(scratch, 'wt', 'stale'),
+      tier: 'sonnet',
+      spawnAt: 1,
+      workedMs: 5,
+      reworkCount: 0,
+    }
+    await writeRoster(project, [stale])
+
+    const engine = newEngine({ path: project, running: true })
+    engine.rosterReconciled = true // what resumeEngines sets after reconcileRoster
+
+    const card: ProjectTask = { id: 'c-new', title: 'New', boardColumn: 'todo' } as unknown as ProjectTask
+    await runDispatchPass(
+      engine,
+      stubDeps({
+        fetchTasks: async () => [card],
+        spawnWorker: async () => ({
+          terminalId: 'pty-new2',
+          agentSessionId: 'sess-new2',
+          worktree: join(scratch, 'wt', 'new2'),
+          branch: 'swarm/new2',
+          model: 'fable',
+        }),
+      }),
+      Date.now(),
+    )
+
+    // Reconcile already decided the stale row is gone — so it stays gone.
+    expect((await readRoster(project)).map((r) => r.worktree)).toEqual([join(scratch, 'wt', 'new2')])
+  })
+})

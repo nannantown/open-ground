@@ -29,6 +29,20 @@ export interface EngineIntent {
   desiredRunning: boolean
   selfSupply: boolean
   overseer: boolean
+  /** The UTC day (`YYYY-MM-DD`) `selfSupplyDayCount` is counting, and the count
+   *  itself — self-supply's DAILY CAP, the guard that bounds how many cards the
+   *  engine may propose to itself in a day.
+   *
+   *  PERSISTED SINCE 2026-07-29, and the asymmetry is why: `enabled` was already
+   *  restored at boot while the counter lived only in memory, so every restart
+   *  re-armed self-supply with a FRESH daily budget. The engine restarts on every
+   *  self-update — i.e. exactly when it has been improving itself — so the cap
+   *  that exists to stop a runaway was being reset by the very loop it bounds,
+   *  and each round re-spawns the full scan (tsc + eslint + a whole `vitest run`).
+   *  Absent/0 reads as "no count yet", so an older engine.json degrades to today's
+   *  budget rather than to an unbounded one. */
+  selfSupplyDayKey?: string
+  selfSupplyDayCount?: number
   /** epoch ms of the write — display/debug only, never read as a decision input. */
   updatedAt: number
 }
@@ -53,6 +67,10 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
       desiredRunning: parsed.desiredRunning === true,
       selfSupply: parsed.selfSupply === true,
       overseer: parsed.overseer === true,
+      ...(typeof parsed.selfSupplyDayKey === 'string' ? { selfSupplyDayKey: parsed.selfSupplyDayKey } : {}),
+      ...(typeof parsed.selfSupplyDayCount === 'number' && parsed.selfSupplyDayCount >= 0
+        ? { selfSupplyDayCount: parsed.selfSupplyDayCount }
+        : {}),
       updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
     }
   } catch {

@@ -203,6 +203,47 @@ const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
   return run
 }
 
+// ─── LOCK ORDER — the permanent deadlock this shape exists to prevent ─────────
+// There are TWO locks in this process:
+//   L1 = the `chain` above (single-flight over the escalations JSON, module-wide)
+//   L2 = swarmOrchestrator's per-engine critical section (`runExclusive`)
+// Only ONE direction is legal: **L2 → L1**. The engine tick holds L2 for its
+// whole body and calls openEscalation (= L1) from monitorWorkers via
+// `deps.raiseQuestion` — that direction is structural and cannot be removed.
+// Therefore NOTHING may hold L1 while taking L2. answerEscalation used to do
+// exactly that (enqueue() → deliverAnswer → recordEscalationAnswerForNextDispatch
+// = runExclusive): an owner answering while a tick was in flight left both sides
+// waiting on each other forever — the engine AND the inbox frozen, with no
+// timeout on either await and nothing in any log to say why.
+// THE RULE: inside enqueue(), do file read-modify-write ONLY. No PTY injection,
+// no orchestrator call, no import of swarmOrchestrator. Delivery happens after
+// the chain has been released (see answerEscalation's two phases).
+
+/** Persist ONLY the 'injected' transition, re-reading from disk first.
+ *  Delivery now runs OUTSIDE the chain, so the `all` array read before delivery
+ *  is stale by the time we come back — writing it wholesale would clobber any
+ *  record a concurrent openEscalation appended (the inbox is append-only and
+ *  uncapped BY DESIGN: losing an unanswered irreversible decision violates K6).
+ *  Re-read, find by id, write that one field. A record that vanished meanwhile
+ *  is a no-op — the delivery itself already happened. */
+const markInjected = async (id: string, injectedAt: string): Promise<void> =>
+  enqueue(async () => {
+    const { all, known } = await readForWrite()
+    const fresh = known.find((e) => e.id === id)
+    if (!fresh) return
+    fresh.status = 'injected'
+    fresh.injectedAt = injectedAt
+    await persist(all)
+  })
+
+/** Records whose DELIVERY leg is in flight right now. The chain used to
+ *  serialise delivery as a side effect of covering it; now that delivery is
+ *  outside, two concurrent answers to the same record would interleave their
+ *  bracketed-paste writes into the same worker PTY (a spliced prompt the worker
+ *  then acts on). In-memory only — a restart correctly clears it, because
+ *  nothing is in flight after a restart. */
+const deliveringIds = new Set<string>()
+
 // fsync — the inbox is the ONE durable record of unanswered irreversible
 // decisions (the notification side channels are best-effort); a power cut must
 // not surface a 0-byte file. mode 0600: questions/answers are personal data
@@ -655,11 +696,17 @@ export interface AnswerEscalationDeps {
 }
 
 /** The delivery leg, shared by the first answer and a re-delivery retry:
- *  inject into the live worker PTY ('injected', persisting the promotion), or
- *  queue for the card's next dispatch, or skip when there is nothing to
- *  deliver to. The record must already carry `answer`. */
+ *  inject into the live worker PTY ('injected'), or queue for the card's next
+ *  dispatch, or skip when there is nothing to deliver to. The record must
+ *  already carry `answer`.
+ *
+ *  MUST RUN OUTSIDE THE CHAIN (see the LOCK ORDER note above): the `queued` lane
+ *  calls into swarmOrchestrator, which takes L2 — holding L1 across that is the
+ *  deadlock. This function therefore does NOT persist; it only reports what it
+ *  did. The caller re-enters the chain via {@link markInjected} to record an
+ *  'injected' promotion, so the write is a fresh read-modify-write of one field
+ *  rather than a write-back of a now-stale array. */
 const deliverAnswer = async (
-  all: unknown[],
   record: Escalation,
   deps: AnswerEscalationDeps | undefined,
 ): Promise<EscalationDelivery> => {
@@ -683,9 +730,10 @@ const deliverAnswer = async (
       deps,
     ))
   ) {
+    // The 'injected' PROMOTION is persisted by the caller (markInjected) — this
+    // leg runs outside the chain and must not write the array it never read.
     record.status = 'injected'
     record.injectedAt = (deps?.now?.() ?? new Date()).toISOString()
-    await persist(all)
     return 'injected'
   }
   if (record.taskId) {
@@ -744,7 +792,13 @@ export const answerEscalation = async (
   const text = (answer ?? '').trim().slice(0, MAX_ESCALATION_ANSWER)
   if (!text) throw new Error('answer is required')
 
-  return enqueue(async () => {
+  // PHASE 1 — under the chain (L1): validate + persist + learn. File
+  // read-modify-write ONLY; nothing here may reach the orchestrator (L2).
+  // Returns either a finished answer, or the record that still needs delivering.
+  const staged = await enqueue(async (): Promise<
+    | { done: true; escalation: Escalation; delivery: EscalationDelivery; memoryWritten: boolean }
+    | { done: false; record: Escalation; memoryWritten: boolean }
+  > => {
     await ensureOpenGroundHome()
     const { all, known } = await readForWrite()
     const record = known.find((e) => e.id === id)
@@ -755,15 +809,14 @@ export const answerEscalation = async (
     if (record.status === 'injected') {
       // Fully delivered — nothing to redo (the first answer is already inside
       // the worker's context).
-      return { escalation: record, delivery: 'skipped' as const, memoryWritten: false }
+      return { done: true, escalation: record, delivery: 'skipped' as const, memoryWritten: false }
     }
     if (record.status === 'answered') {
       // RE-DELIVERY: the decision is already recorded (and learned); a re-POST
       // retries only the delivery leg. Without this escape hatch an 'answered'
       // record whose delivery was lost (crash / dead PTY at first attempt)
       // would be a permanent dead end behind the idempotent no-op.
-      const delivery = await deliverAnswer(all, record, deps)
-      return { escalation: record, delivery, memoryWritten: false }
+      return { done: false, record, memoryWritten: false }
     }
 
     // (1) Persist the answer FIRST — a crash below never loses the decision.
@@ -805,10 +858,40 @@ export const answerEscalation = async (
       /* best-effort — reported via memoryWritten */
     }
 
-    // (3) Deliver.
-    const delivery = await deliverAnswer(all, record, deps)
-    return { escalation: record, delivery, memoryWritten }
+    return { done: false, record, memoryWritten }
   })
+
+  if (staged.done) {
+    return {
+      escalation: staged.escalation,
+      delivery: staged.delivery,
+      memoryWritten: staged.memoryWritten,
+    }
+  }
+
+  // PHASE 2 — the chain is RELEASED. Only now may we touch the PTY or the
+  // orchestrator (L2). The answer is already durable on disk, so a crash here
+  // loses nothing: the record sits at 'answered' and the re-delivery escape
+  // hatch above retries this leg.
+  const { record, memoryWritten } = staged
+  if (deliveringIds.has(record.id)) {
+    // A delivery for this very record is in flight; a second bracketed paste
+    // would interleave inside the same worker's prompt. The first one stands.
+    return { escalation: record, delivery: 'skipped' as const, memoryWritten }
+  }
+  deliveringIds.add(record.id)
+  let delivery: EscalationDelivery
+  try {
+    delivery = await deliverAnswer(record, deps)
+  } finally {
+    deliveringIds.delete(record.id)
+  }
+  // PHASE 3 — record the promotion, back under the chain, as a fresh
+  // read-modify-write of the ONE field (see markInjected).
+  if (delivery === 'injected' && record.injectedAt) {
+    await markInjected(record.id, record.injectedAt).catch(() => {})
+  }
+  return { escalation: record, delivery, memoryWritten }
 }
 
 // ─── Dismiss (close unanswered) ───────────────────────────────────────────────

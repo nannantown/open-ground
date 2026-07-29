@@ -9,6 +9,8 @@ import {
   getTerminal,
   getTerminalScreen,
   killTerminalsByCwd,
+  killTerminalsByCwdAndWait,
+  waitForTerminalGone,
   registerFlowStream,
   trackFlowSent,
   ackFlowStream,
@@ -1033,5 +1035,76 @@ describe('startTerminalSweepLoop — the server-side sweep is actually wired to 
   it('default sweep interval is a sane sub-minute cadence', () => {
     expect(TERMINAL_SWEEP_INTERVAL_MS).toBe(30_000)
     expect(TERMINAL_SWEEP_INTERVAL_MS).toBeLessThanOrEqual(60_000)
+  })
+})
+
+// ── Killing is asynchronous; DELETING the cwd is not (2026-07-29) ────────────
+// node-pty's kill() is `process.kill(pid, 'SIGHUP')` and returns at once, while
+// `finishedAt` is stamped later by an async onExit. Callers that removed the
+// worktree / tmp dir on the very next line were deleting a directory a live
+// `claude` was sitting in — and claude runs `git` constantly, so the delete
+// lands mid-run and wedges that git in uninterruptible sleep, where no signal
+// and no timeout can ever reach it (07 章 §7). These wait for the OS to agree.
+//
+// Waiting on the SHELL's pid is the right signal (measured on this machine):
+// zsh's job control puts claude in its OWN process group, so a negative-pid
+// group kill never reaches it; what reaches it is the kernel's SIGHUP to the
+// foreground group when the session leader dies. The leader leaving the process
+// table is therefore the evidence that hangup was delivered.
+describe('killTerminalsByCwdAndWait / waitForTerminalGone', () => {
+  const withPid = (id: string, cwd: string, pid: number) => {
+    const s = fakeSession(id, cwd)
+    ;(s.pty as Record<string, unknown>).pid = pid
+    ;(s.pty as Record<string, unknown>).kill = () => {}
+    return s
+  }
+
+  it('returns true only once the process has actually left the table', async () => {
+    state().sessions.set('t1', withPid('t1', '/w', 4242))
+    let alive = true
+    const p = killTerminalsByCwdAndWait('/w', { pollMs: 5, isAlive: () => alive })
+    // Still alive ⇒ must NOT have resolved yet. Pre-fix (fire-and-forget) the
+    // caller simply proceeded to delete the directory at this instant.
+    let settled = false
+    void p.then(() => (settled = true))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(settled).toBe(false)
+
+    alive = false // the shell finally exits
+    expect(await p).toBe(true)
+  })
+
+  it('returns FALSE on timeout — the caller must not delete the directory', async () => {
+    state().sessions.set('t2', withPid('t2', '/w2', 4243))
+    expect(await killTerminalsByCwdAndWait('/w2', { timeoutMs: 40, pollMs: 5, isAlive: () => true })).toBe(false)
+  })
+
+  it('escalates to SIGKILL once at the halfway mark', async () => {
+    state().sessions.set('t3', withPid('t3', '/w3', 4244))
+    const kills: [number, string][] = []
+    const realKill = process.kill.bind(process)
+    const spy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string) => {
+      kills.push([pid, String(sig)])
+      return true
+    }) as typeof realKill)
+    try {
+      await killTerminalsByCwdAndWait('/w3', { timeoutMs: 60, pollMs: 5, isAlive: () => true })
+    } finally {
+      spy.mockRestore()
+    }
+    // Exactly one escalation, aimed at the pid (never a negative/group pid —
+    // pid reuse would make that a loaded gun, and it does not reach claude anyway).
+    expect(kills.filter(([, sig]) => sig === 'SIGKILL')).toEqual([[4244, 'SIGKILL']])
+  })
+
+  it('no matching session ⇒ true immediately (nothing to wait for is not a failure)', async () => {
+    expect(await killTerminalsByCwdAndWait('/nobody', { isAlive: () => true })).toBe(true)
+    expect(await waitForTerminalGone('no-such-id', { isAlive: () => true })).toBe(true)
+  })
+
+  it('waitForTerminalGone follows the same rule for a single terminal', async () => {
+    state().sessions.set('t4', withPid('t4', '/w4', 4245))
+    expect(await waitForTerminalGone('t4', { timeoutMs: 40, pollMs: 5, isAlive: () => true })).toBe(false)
+    expect(await waitForTerminalGone('t4', { pollMs: 5, isAlive: () => false })).toBe(true)
   })
 })

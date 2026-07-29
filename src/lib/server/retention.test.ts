@@ -391,6 +391,31 @@ describe('cross-repo residue sweep', () => {
       expect(report.removedFiles).toEqual([f])
     })
 
+    // TENANCY (2026-07-29) — the boot-time twin of the janitor hole. roster.json
+    // and manager.json share this directory and carry no `worktree`, so both were
+    // deleted here after 48h AT BOOT — the exact moment resume reads them.
+    it('NEVER prunes roster.json / manager.json, however old (they are not heartbeats)', async () => {
+      const roster = await writeHeartbeat('k-tenancy', 'roster.json', { workers: [] }, OLD())
+      const mgr = await writeHeartbeat(
+        'k-tenancy',
+        'manager.json',
+        { role: 'manager', updatedAt: OLD().toISOString() },
+        OLD(),
+      )
+      const ghost = await writeHeartbeat(
+        'k-tenancy',
+        'swarm-x.json',
+        { branch: 'swarm/x', worktree: join(scratch, 'gone'), updatedAt: OLD().toISOString() },
+        OLD(),
+      )
+
+      const report = await pruneGhostHeartbeats()
+
+      expect(report.removedFiles).toEqual([ghost]) // the real ghost, and only it
+      expect(await exists(roster)).toBe(true)
+      expect(await exists(mgr)).toBe(true)
+    })
+
     it('never touches non-.json files; a dir holding one is never removed', async () => {
       const note = await writeHeartbeat('k-6', 'README.txt', 'keep me', OLD())
       const ghost = await writeHeartbeat('k-6', 'g.json', { worktree: join(scratch, 'gone') }, OLD())

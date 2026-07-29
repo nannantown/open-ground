@@ -250,3 +250,49 @@ describe('swarmEnginePersistence — crash-loop breaker ring', () => {
     }
   })
 })
+
+// ── The daily self-supply cap must survive a restart (2026-07-29) ────────────
+// `selfSupply.enabled` was already restored at boot while the DAILY COUNTER
+// lived only in memory, so every restart re-armed self-supply with a fresh
+// budget. The engine restarts on every self-update — i.e. exactly when it has
+// been proposing work to itself — so the guard that exists to bound a runaway
+// was being reset by the very loop it bounds, and each round re-spawns the full
+// scan (tsc + eslint + a whole `vitest run`).
+describe('EngineIntent — the self-supply daily budget round-trips', () => {
+  it('persists and restores dayKey + dayCount', async () => {
+    await writeEngineIntent(projDir, {
+      desiredRunning: true,
+      selfSupply: true,
+      overseer: false,
+      selfSupplyDayKey: '2026-07-29',
+      selfSupplyDayCount: 4,
+    })
+    const back = await readEngineIntent(projDir)
+    expect(back.selfSupplyDayKey).toBe('2026-07-29')
+    expect(back.selfSupplyDayCount).toBe(4)
+  })
+
+  it('an OLDER engine.json without the fields degrades to "no count yet", never to unbounded', async () => {
+    const dir = projectCentralDir(uuid)
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, 'engine.json'),
+      JSON.stringify({ desiredRunning: true, selfSupply: true, overseer: false, updatedAt: 1 }),
+      'utf8',
+    )
+    const back = await readEngineIntent(projDir)
+    expect(back.selfSupply).toBe(true)
+    expect(back.selfSupplyDayCount).toBeUndefined() // ⇒ today's budget, not an unbounded one
+  })
+
+  it('a corrupt/negative count is ignored rather than trusted', async () => {
+    await writeEngineIntent(projDir, {
+      desiredRunning: true,
+      selfSupply: true,
+      overseer: false,
+      selfSupplyDayKey: '2026-07-29',
+      selfSupplyDayCount: -5,
+    })
+    expect((await readEngineIntent(projDir)).selfSupplyDayCount).toBeUndefined()
+  })
+})

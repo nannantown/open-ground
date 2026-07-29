@@ -278,6 +278,48 @@ describe('sweepSwarmHeartbeats', () => {
     expect(res.swept).toEqual(['swarm-zombie.json'])
   })
 
+  // TENANCY (2026-07-29) — this directory is SHARED: the engine's own roster.json
+  // and the commander's manager.json live beside the worker heartbeats. Neither
+  // carries branch/worktree, which the old rule read as "unidentifiable orphan →
+  // reap", so this sweep ate the engine's own memory every 15 minutes while the
+  // overseer observed — precisely when resume matters most. TEETH: these fail if
+  // the polarity is flipped back to "delete what we cannot recognise".
+  it('NEVER sweeps roster.json — the engine\'s own worker memory lives here', async () => {
+    const { project } = await makeRemote()
+    const key = (await swarmRepoKey(project))!
+    const dir = join(process.env.OPENGROUND_HOME!, 'swarm', key)
+    await mkdir(dir, { recursive: true })
+    const roster = join(dir, 'roster.json')
+    // The real shape: no branch, no worktree, no updatedAt — and deliberately
+    // ancient, because roster.json is only rewritten on a state TRANSITION, so a
+    // worker quietly working for hours leaves it far past any stale window.
+    await writeFile(roster, JSON.stringify({ workers: [{ branch: 'swarm/x', taskId: 't1' }] }))
+    const veryOld = new Date(Date.parse('2020-01-01T00:00:00Z'))
+    await utimes(roster, veryOld, veryOld)
+
+    const res = await sweepSwarmHeartbeats(project, { now: Date.parse('2026-06-25T12:00:00Z') })
+
+    expect(res.swept).not.toContain('roster.json')
+    expect(res.kept).toContain('roster.json')
+    expect(await stat(roster).then(() => true).catch(() => false)).toBe(true)
+  })
+
+  it("NEVER sweeps manager.json — the commander's heartbeat drives the revival reflex", async () => {
+    const { project } = await makeRemote()
+    const key = (await swarmRepoKey(project))!
+    const dir = join(process.env.OPENGROUND_HOME!, 'swarm', key)
+    await mkdir(dir, { recursive: true })
+    const mgr = join(dir, 'manager.json')
+    await writeFile(mgr, JSON.stringify({ role: 'manager', updatedAt: '2020-01-01T00:00:00Z' }))
+    const veryOld = new Date(Date.parse('2020-01-01T00:00:00Z'))
+    await utimes(mgr, veryOld, veryOld)
+
+    const res = await sweepSwarmHeartbeats(project, { now: Date.parse('2026-06-25T12:00:00Z') })
+
+    expect(res.swept).not.toContain('manager.json')
+    expect(await stat(mgr).then(() => true).catch(() => false)).toBe(true)
+  })
+
   it('keeps a corrupt-but-RECENT heartbeat (mid-write), sweeps a corrupt-and-OLD one', async () => {
     const { project } = await makeRemote()
     const key = (await swarmRepoKey(project))!
@@ -346,5 +388,40 @@ describe('runSwarmJanitor', () => {
     expect(report.heartbeats.swept).toEqual(['swarm-old.json'])
     // Empty terminal pool (no fake sessions injected here) ⇒ nothing swept.
     expect(report.terminals).toEqual({ swept: [], kept: 0 })
+  })
+})
+
+// ── swarmRepoKey must resolve from BELOW the repo root (2026-07-29) ──────────
+// gitRepoGuard's isGitRepoRoot is the right rule for the general git helpers,
+// but `rev-parse --git-common-dir` exists precisely to walk UPWARD. Gating it on
+// the root check made a project registered as a SUB-DIRECTORY of a repo return
+// null — and with it the entire per-repo state directory: every worker
+// heartbeat, roster.json, and the commander's manager.json. The engine then ran
+// a live repo as if it had no memory at all.
+describe('swarmRepoKey — resolves from a sub-directory, refuses a vanished dir', () => {
+  it('a sub-directory of a repo resolves to the SAME key as the root', async () => {
+    const { project } = await makeRemote()
+    const sub = join(project, 'packages', 'app')
+    await mkdir(sub, { recursive: true })
+
+    const rootKey = await swarmRepoKey(project)
+    const subKey = await swarmRepoKey(sub)
+
+    expect(rootKey).toBeTruthy()
+    // Same repo ⇒ same heartbeat dir. If these diverge, the writer and the
+    // reader look in different places and every heartbeat is invisible.
+    expect(subKey).toBe(rootKey)
+  })
+
+  it('a directory that does not exist yields null — git is never spawned into it', async () => {
+    // The wedge case (07 章 §7): spawning into a removed cwd is what puts git in
+    // uninterruptible sleep, where neither SIGKILL nor a timeout can reach it.
+    expect(await swarmRepoKey(join(scratch, 'never-existed'))).toBeNull()
+  })
+
+  it('a real directory that is not in any repo yields null', async () => {
+    const plain = join(scratch, 'not-a-repo')
+    await mkdir(plain, { recursive: true })
+    expect(await swarmRepoKey(plain)).toBeNull()
   })
 })

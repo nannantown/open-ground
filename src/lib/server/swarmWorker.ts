@@ -31,7 +31,7 @@ import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
-import { killTerminalsByCwd } from './terminal'
+import { killTerminalsByCwdAndWait } from './terminal'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
@@ -415,10 +415,24 @@ export const removeSwarmWorktree = async (
   // below (selfUpdateOnIntegrate.ts).
   const integrationSnap = opts.force ? null : await snapshotWorktreeBranch(worktree)
   // Kill any live PTY in the worktree first, by the EXACT spawn-returned path —
-  // that is the cwd recorded on the PTY (killTerminalsByCwd exact-matches), so
-  // the canonicalized form would silently miss under a symlinked home. The
-  // session then lingers but drops out of the live-cwd set.
-  killTerminalsByCwd(worktree)
+  // that is the cwd recorded on the PTY (exact match), so the canonicalized form
+  // would silently miss under a symlinked home.
+  //
+  // AND WAIT FOR IT TO ACTUALLY DIE (2026-07-29). This used to be the
+  // fire-and-forget killTerminalsByCwd, whose signal is asynchronous: the very
+  // next lines then removed the directory while `claude` was still running in it.
+  // claude spawns `git` constantly (status/diff/log), so a delete landing mid-run
+  // is the textbook way to wedge a process in uninterruptible sleep, where no
+  // signal and no timeout can reach it again (07 章 §7) — our own teardown
+  // manufacturing the un-killable orphans we spent 2026-07-28 rooting out.
+  // A worker teardown is not urgent; five seconds of certainty is cheap.
+  const ptyGone = await killTerminalsByCwdAndWait(worktree)
+  if (!ptyGone) {
+    // Still occupied. Refusing is the safe answer: the caller retries (the
+    // engine's next pass, the commander's next sweep) and the worktree stays
+    // intact meanwhile. Deleting anyway is what created the wedge.
+    return { removed: false, reason: 'a session is still running in this worktree' }
+  }
   // Drop the node_modules convenience symlink before removing: under a
   // `node_modules/` (trailing-slash) .gitignore — the dominant convention — the
   // SYMLINK reads as UNTRACKED (the pattern matches directories only), which
@@ -737,22 +751,50 @@ export const spawnSwarmWorker = async (
   // resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名 'worker' で
   // spawn は通る。
   const remoteName = await resolveSwarmRemoteName('worker', opts.projectPath, opts.title)
-  const ref = launchClaude(
-    workerLaunchOpts(
-      worktree,
-      agentSessionId,
-      {
-        ...opts,
-        remoteName,
-        sandbox,
-        sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
-        // card 4 — a persisted session id means "resume this conversation"; the
-        // flag drives workerLaunchOpts to `--resume` + WORKER_RESUME_INJECTION.
-        resume: !!opts.resumeSessionId,
-      },
-      me,
-    ),
-  )
+  // SPAWN FAILURE MUST NOT LEAK THE WORKTREE (2026-07-29).
+  //
+  // Everything ABOVE the worktree creation fails closed, and two comments in this
+  // file say so — but launchClaude sits BELOW it and was outside that invariant.
+  // When it throws (claude missing from PATH, a PTY that will not open, a
+  // sandbox profile rejected) the worktree AND its `swarm/*` branch were already
+  // on disk and nothing removed them. runDispatchPass has no backoff — it catches
+  // and continues on a 3s tick — so ONE persistent failure minted a fresh
+  // worktree + branch EVERY THREE SECONDS, and nothing collects them
+  // automatically (cleanProjectWorktrees is a manual HTTP route). A repo could
+  // accumulate hundreds of them overnight.
+  //
+  // On the RESTART path (opts.worktree) the worktree pre-existed this call and
+  // holds the worker's real work — it is never ours to remove.
+  const freshlyCreated = !opts.worktree
+  let ref: ReturnType<typeof launchClaude>
+  try {
+    ref = launchClaude(
+      workerLaunchOpts(
+        worktree,
+        agentSessionId,
+        {
+          ...opts,
+          remoteName,
+          sandbox,
+          sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
+          // card 4 — a persisted session id means "resume this conversation"; the
+          // flag drives workerLaunchOpts to `--resume` + WORKER_RESUME_INJECTION.
+          resume: !!opts.resumeSessionId,
+        },
+        me,
+      ),
+    )
+  } catch (e) {
+    if (freshlyCreated) {
+      // Best-effort teardown of what THIS call made. force:true because there is
+      // nothing to preserve — no session ever started, so the tree is exactly as
+      // `git worktree add` left it. Failures are swallowed: the spawn error is
+      // the one worth propagating.
+      await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
+      await git(opts.projectPath, ['branch', '-D', branch])
+    }
+    throw e
+  }
   // `model` rides back so the orchestrator can attribute a later rate-limit
   // sighting on this worker to the RIGHT quota tier (swarmQuota cooling table).
   return { terminalId: ref.terminalId, agentSessionId, worktree, branch, model: me.model }

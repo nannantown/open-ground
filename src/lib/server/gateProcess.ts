@@ -13,6 +13,81 @@ import { mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { basename, join } from 'path'
 
+// ── Shutdown reaper for in-flight gate groups (2026-07-29) ───────────────────
+//
+// `detached: true` below is LOAD-BEARING and stays: it is what makes the
+// negative-pid SIGKILL reach the whole fork pool. Its cost is that the child
+// also survives US — a detached child is in no process group of ours, so when
+// the SERVER dies it receives nothing: no terminal signal, no 'close', no
+// `settle`, no reapGroup. A merge-gate `vitest run` then outlives its own engine
+// with its forks intact, and if its worktree is removed underneath it that is
+// precisely the "cwd deleted while it runs" shape that wedges a process in
+// uninterruptible sleep, where SIGKILL no longer reaches it (07 章 §7).
+//
+// So: remember every LIVE group, and offer one SYNCHRONOUS call that kills them
+// all. Detection (stuckProcessWatch) is the last resort; this is the prevention.
+declare global {
+  // On globalThis: a `tsx watch` reload re-evaluates this module, but the
+  // children it already spawned are still running and still ours to reap.
+  // eslint-disable-next-line no-var
+  var __openground_gate_groups: Set<number> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_gate_reaper_installed: boolean | undefined
+}
+
+const liveGateGroups: Set<number> =
+  globalThis.__openground_gate_groups ?? (globalThis.__openground_gate_groups = new Set())
+
+/** SIGKILL every gate group still in flight. SYNCHRONOUS by requirement — it runs
+ *  inside `process.on('exit')`, where nothing async can be awaited. Idempotent
+ *  (the set is drained as it goes); returns how many groups were signalled. Same
+ *  negative-pid-then-direct fallback as {@link runGateProcess}'s own reapGroup. */
+export const reapAllGateGroups = (): number => {
+  let killed = 0
+  for (const pid of Array.from(liveGateGroups)) {
+    liveGateGroups.delete(pid)
+    try {
+      if (process.platform !== 'win32') process.kill(-pid, 'SIGKILL')
+      else process.kill(pid, 'SIGKILL')
+      killed += 1
+    } catch {
+      try {
+        process.kill(pid, 'SIGKILL')
+        killed += 1
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  return killed
+}
+
+/** Wire the reaper to THIS process's death. Call ONCE, and only from the real
+ *  server entry — importing this module in a vitest worker or a script must not
+ *  change that process's signal disposition. Idempotent; no-op on win32.
+ *
+ *  BOTH handlers are required and neither suffices alone: 'exit' does NOT run on
+ *  a default SIGTERM (Node terminates without it), and SIGTERM is the likely path
+ *  — Electron SIGTERMs the forked server on quit. Installing a SIGTERM/SIGINT
+ *  listener SUPPRESSES Node's default termination, so each handler must exit
+ *  itself; 128+signum keeps the status a shell sees honest. A SIGKILL of the
+ *  server is uncatchable and stays uncovered by construction — that residue is
+ *  exactly what stuckProcessWatch is for. */
+export const installGateGroupReaper = (): void => {
+  if (globalThis.__openground_gate_reaper_installed) return
+  globalThis.__openground_gate_reaper_installed = true
+  if (process.platform === 'win32') return
+  process.on('exit', () => {
+    reapAllGateGroups()
+  })
+  const onSignal = (code: number) => () => {
+    reapAllGateGroups()
+    process.exit(code)
+  }
+  process.on('SIGTERM', onSignal(143))
+  process.on('SIGINT', onSignal(130))
+}
+
 /** A child-process runner for any engine stage that spawns a tool which itself FORKS a
  *  worker pool — the merge gate's two vitest suites + eslint, and the self-supply
  *  scanners (vitest / eslint / tsc). It differs from `execFile` in exactly
@@ -48,6 +123,10 @@ export const runGateProcess = (
     // detached → the child leads its own process group (pgid == pid on POSIX), so a later kill
     // of -pid reaches the WHOLE group (the child + its vitest/eslint forks).
     const child = spawn(bin, [...args], { cwd: opts.cwd, env: opts.env, detached: true })
+    // Registered for the SHUTDOWN reaper below: between here and `settle` this
+    // group is reachable by nothing but us — that is exactly what `detached`
+    // bought — so if the SERVER dies in this window nobody will ever kill it.
+    if (typeof child.pid === 'number') liveGateGroups.add(child.pid)
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -83,6 +162,10 @@ export const runGateProcess = (
       // own forks (this is then a no-op), but the defensive group kill guarantees no straggler
       // fork survives the gate regardless of how the run ended.
       reapGroup()
+      // Deregistered only AFTER the group kill, so a shutdown racing this settle
+      // still finds the pid and fires a harmless second SIGKILL rather than
+      // missing a live group.
+      if (typeof child.pid === 'number') liveGateGroups.delete(child.pid)
       emit()
     }
 

@@ -158,6 +158,32 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     expect(state.running).toBe(false)
   })
 
+  it('an OFF pressed DURING the reconcile aborts the resume — no spawn into a stopped engine', async () => {
+    // 2026-07-29. The manual-stop / preflight checks happen BEFORE the reconcile,
+    // and the reconcile is not instant: it stats worktrees, shells out to git per
+    // roster entry, and reads the Board over loopback — seconds to minutes. An
+    // owner who opens the app and immediately switches 自動運転 OFF lands inside
+    // that window. The loop then adopted-and-respawned `claude` PTYs into an
+    // engine the owner had just stopped — and because scheduleNext DOES honour
+    // `running`, the tick chain never started, so those workers ran with NOBODY
+    // monitoring them (no stall detection, no runaway clock, no reclaim).
+    const keyA = await canonicalize(projA)
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+
+    const result = await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      // The owner presses OFF while the reconcile is in flight.
+      reconcileRoster: async () => {
+        await rememberSwarmManualStop(keyA)
+      },
+    })
+
+    expect(result.resumed).not.toContain(keyA)
+    const state = await getOrchestratorState(projA, safeDeps())
+    expect(state.running).toBe(false)
+    await forgetSwarmManualStop(keyA)
+  })
+
   it('a preflight failure skips resume without throwing (fail-quiet, not fatal)', async () => {
     preflightMock.ok = false
     await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })

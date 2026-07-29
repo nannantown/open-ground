@@ -44,6 +44,10 @@ vi.mock('./terminal', () => ({
     return { info: { finishedAt: null }, unsubscribe }
   },
   killTerminal: () => killTerminal(),
+  // Added 2026-07-29: canvasAi now WAITS for the session to be gone before
+  // deleting the handoff dir it runs in (07 章 §7.8 — a cwd removed under a live
+  // process is how an un-killable wedge is made). Nothing is really spawned here.
+  killTerminalsByCwdAndWait: async () => true,
 }))
 
 import {

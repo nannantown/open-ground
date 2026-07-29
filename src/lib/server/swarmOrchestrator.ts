@@ -79,6 +79,7 @@ import {
   getTerminal,
   getTerminalScreen,
   killTerminal,
+  waitForTerminalGone,
   listLiveDesksIn,
   type OwnerDeskTerminal,
   subscribeTerminal,
@@ -207,7 +208,7 @@ import { createSwarmFatalNotification, createSwarmInfoNotification } from './swa
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
 import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
-import { isGitRepoRoot } from './gitRepoGuard'
+import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
 import { readWorkerConsumptionLine } from './swarmTokenAudit'
@@ -1698,6 +1699,13 @@ export interface ProjectEngine {
    *  both reading the same pre-spawn worker set and dispatching the same card
    *  twice. runEnginePass check-and-sets this synchronously at entry, so the second
    *  pass bails before it can spawn. In-memory only. */
+  /** Has THIS engine reconciled its persisted roster against reality yet?
+   *  Only resumeEngines does that (reconcileRoster → adoptResumeCandidates), so
+   *  engines started by startOrchestrator / maybeAutoStartDrain run with `false`.
+   *  syncRoster reads it to decide whether an empty in-memory roster is EVIDENCE
+   *  ("reconciled, nobody survived" ⇒ may overwrite) or merely IGNORANCE
+   *  ("never looked" ⇒ must merge, never erase). See syncRoster. */
+  rosterReconciled?: boolean
   passInFlight: boolean
   /** True while an INTEGRATE pass is mid-flight — its own re-entrancy guard, now
    *  that the (slow: per-card tsc/vitest verify + a diff-scaled adversarial
@@ -2338,6 +2346,13 @@ const persistEngineIntent = async (engine: ProjectEngine, projectPath: string): 
     desiredRunning: engine.running,
     selfSupply: engine.selfSupply.enabled,
     overseer: engine.overseer.enabled,
+    // The daily cap rides along (2026-07-29). `enabled` was already restored at
+    // boot while the COUNTER lived only in memory, so every restart re-armed
+    // self-supply with a fresh day's budget — and the engine restarts on every
+    // self-update, i.e. exactly when it has been improving itself. The guard that
+    // exists to stop a runaway was being reset by the loop it bounds.
+    selfSupplyDayKey: engine.selfSupply.dayKey,
+    selfSupplyDayCount: engine.selfSupply.dayCount,
   })
   if (!ok) logLine(engine, 'warn', 'engine intent persist failed (disk) — in-memory state unaffected')
 }
@@ -3869,6 +3884,19 @@ const gitOut = async (cwd: string, args: string[]): Promise<string | null> => {
   }
 }
 
+/** git for the ONE call that must locate the repo root from a path possibly
+ *  BELOW it (`rev-parse --git-common-dir`). Gated on {@link isUnderGitRepo}
+ *  rather than the root check — see swarmRepoKey. Nothing else may use it. */
+const gitAllowingRepoWalk = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isUnderGitRepo(cwd)) return null
+  try {
+    const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
+    return stdout.trim()
+  } catch {
+    return null
+  }
+}
+
 /** Trunk refs a `swarm/*` branch is measured against, most- to least-preferred,
  *  RESOLVED for THIS project rather than hardcoded to origin/main. `resolveTarget`
  *  is the SAME trunk resolver the integrate stage uses (an explicit override, else
@@ -3919,7 +3947,15 @@ const heartbeatKeyCache = new Map<string, string>()
 const swarmRepoKey = async (projectPath: string): Promise<string | null> => {
   const cached = heartbeatKeyCache.get(projectPath)
   if (cached) return cached
-  const commonDir = await gitOut(projectPath, ['rev-parse', '--git-common-dir'])
+  // NOT gitOut: its isGitRepoRoot gate is correct everywhere else, but this call
+  // exists to walk UPWARD to the repo root, so a project registered as a
+  // sub-directory of a repo returned null — losing the whole per-repo state dir
+  // (heartbeats / roster.json / manager.json). isUnderGitRepo allows the walk and
+  // still refuses a vanished cwd (the 07 章 §7 wedge). Mirror of swarmJanitor's
+  // gitAllowingRepoWalk — the two keys MUST agree or the writer and the reader
+  // look in different directories.
+  if (!isUnderGitRepo(projectPath)) return null
+  const commonDir = await gitAllowingRepoWalk(projectPath, ['rev-parse', '--git-common-dir'])
   if (commonDir === null) return null
   // Absolutize (it's repo-relative from the main checkout) + resolve symlinks,
   // exactly like swarm-beat's `cd "$cdir" && pwd -P`.
@@ -4058,6 +4094,12 @@ export interface WipCommitResult {
   failed?: boolean
   /** Detail for the log (short sha on success, the git failure otherwise). */
   reason?: string
+  /** The branch the salvage commit landed ON — present only when `committed`.
+   *  Proof that the commit is REACHABLE (a detached-HEAD commit is not, and is
+   *  reported as `failed` instead — see commitWipBeforeTeardown), and what lets
+   *  the caller count it toward the branch's commits-ahead before deciding the
+   *  card's recovery column. */
+  branch?: string
 }
 
 /** COMMIT whatever a reclaimed worker left UNCOMMITTED, onto its own `swarm/*`
@@ -4146,8 +4188,35 @@ export const commitWipBeforeTeardown = async (
   }
   if (out === null) return { committed: false, failed: true, reason: 'git commit failed' }
 
+  // A COMMIT IS NOT A RESCUE UNLESS A BRANCH CAN REACH IT (2026-07-29).
+  //
+  // `git commit` succeeding proves the objects were written — not that anything
+  // will still point at them a second later. On a DETACHED HEAD (a worker
+  // interrupted mid-rebase, mid-bisect, or on an explicit `git checkout <sha>`)
+  // the commit lands on no branch at all, and the caller's very next act is
+  // `git worktree remove --force`, which drops the only reference. The work is
+  // then unreachable — recoverable in principle from the reflog of a directory
+  // that no longer exists, i.e. not recoverable. And because we returned
+  // `committed:true`, the caller believed the salvage had WORKED and tore the
+  // tree down with confidence. That is worse than not trying: this function's
+  // entire contract (02 章 §6 — "no reclaim, for ANY reason, may destroy
+  // uncommitted work again") was reporting success while doing the destroying.
+  //
+  // So: report success only when HEAD is attached to a branch that now contains
+  // the commit. Otherwise fail CLOSED — `failed:true` keeps the worktree, and the
+  // work survives in a directory a human can still open.
+  const branchRef = await gitOut(worktree, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  if (branchRef === null || !branchRef.trim()) {
+    return {
+      committed: false,
+      failed: true,
+      reason:
+        'detached HEAD — the salvage commit is on no branch and would be unreachable after teardown',
+    }
+  }
+
   const sha = await gitOut(worktree, ['rev-parse', '--short', 'HEAD'])
-  return { committed: true, reason: sha ?? undefined }
+  return { committed: true, branch: branchRef.trim(), reason: sha ?? undefined }
 }
 
 /** Tear down a lost/stopped worker's worktree + PTY. Kills the PTY by id FIRST
@@ -4224,6 +4293,17 @@ export const defaultRecoverWorker = async (
   if (!opts.worktree) return { removed: false, reason: 'no worktree path on record', exitInfo }
   // Kill FIRST, then salvage: a dead PTY can't keep writing into the tree we are
   // about to snapshot.
+  //
+  // …but the kill above only SENDS a signal (node-pty returns immediately; the
+  // exit is stamped later by an async handler), so "then salvage" used to start
+  // while claude was still running (2026-07-29). Two concrete harms: the
+  // `git add -A` snapshot captures a half-written tree, and our git runs against
+  // the same index as the git calls claude is still making (index.lock
+  // contention). Wait for the process to actually leave the table — that is also
+  // the evidence the kernel delivered its hangup to claude, which is what makes
+  // the tree quiescent. Bounded; on timeout we proceed anyway, because losing the
+  // WIP salvage entirely is worse than snapshotting a possibly-torn tree.
+  await waitForTerminalGone(opts.terminalId).catch(() => false)
   let wip: WipCommitResult = { committed: false }
   try {
     wip = await commitWipBeforeTeardown(opts.worktree, opts.reason ?? 'stopped')
@@ -6082,7 +6162,21 @@ const monitorWorkers = async (
     }
 
     const requeues = engine.recoveries.get(w.taskId) ?? 0
-    let col = recoveryColumn(probe, requeues, RECOVER_MAX_REQUEUE, reason)
+    // COUNT THE SALVAGE COMMIT (2026-07-29). `probe` was taken BEFORE the
+    // teardown, so it cannot know that the teardown just added a WIP commit to
+    // this worker's branch. recoveryColumn's twin fix keys on exactly that number
+    // — `commitsAhead > 0 ⇒ blocked` — because a card whose branch already holds
+    // commits must NOT go back to `todo`, where the next dispatch mints a SECOND
+    // worktree/branch for the same work and orphans the first (the twin class,
+    // 0723). Feeding it the stale zero re-opened that door for precisely the
+    // workers whose branches we had just written to. The salvage is only counted
+    // when it landed on a real branch (`wip.branch`) — a detached-HEAD attempt is
+    // reported as `failed` and adds nothing reachable.
+    const salvaged = teardown.wip?.committed && teardown.wip.branch ? 1 : 0
+    const probeForColumn = salvaged
+      ? { ...probe, commitsAhead: (probe.commitsAhead ?? 0) + salvaged }
+      : probe
+    let col = recoveryColumn(probeForColumn, requeues, RECOVER_MAX_REQUEUE, reason)
     let moved = false
     try {
       // 'review' rides moveToReview, not recoverCard: it is a forward promotion of
@@ -7361,10 +7455,34 @@ const syncRoster = async (
   }
   const sig = rosterSignature(engine.workers)
   if (sig === engine.rosterSig) return
-  const ok = await writeRoster(
-    engine.path,
-    engine.workers.map((w) => rosterEntryOf(engine, w, now, byId?.get(w.taskId))),
-  )
+  // NEVER write an EMPTY roster from an engine that has not reconciled.
+  //
+  // This is a FULL OVERWRITE, and `rosterSig` starts undefined, so a brand-new
+  // engine's very first pass always writes — `rosterSignature([])` is `"[]"`,
+  // which differs from `undefined`. That is correct for an engine that came up
+  // through resumeEngines (it reconciled first, so an empty in-memory roster
+  // genuinely means "nobody survived"). But resumeEngines is the ONLY path that
+  // reconciles: startOrchestrator (the owner pressing 自動運転 ON) and
+  // maybeAutoStartDrain both kick a pass on a fresh, empty engine — and those are
+  // reached exactly when resume was SKIPPED (desiredRunning:false at boot, the
+  // crash-loop breaker suppressing resume — whose own notice tells the owner to
+  // turn it on by hand — or a failed claude preflight). The first pass then
+  // stamped `{"workers":[]}` over the roster of workers that are still alive on
+  // disk, and with the memory gone nothing could ever adopt them: their cards sat
+  // in `doing` forever beside live worktrees.
+  //
+  // So: an engine that never reconciled may only ADD to what is on disk, never
+  // erase it. Rows it does not know about are carried through untouched; the next
+  // real reconcile (the next boot resume) is what is allowed to prune them.
+  const rows = engine.workers.map((w) => rosterEntryOf(engine, w, now, byId?.get(w.taskId)))
+  let next = rows
+  if (!engine.rosterReconciled) {
+    const onDisk = await readRoster(engine.path).catch(() => [])
+    const mine = new Set(rows.map((r) => r.worktree))
+    const carried = onDisk.filter((r) => !mine.has(r.worktree))
+    if (carried.length) next = [...rows, ...carried]
+  }
+  const ok = await writeRoster(engine.path, next)
   if (ok) engine.rosterSig = sig
 }
 
@@ -7523,6 +7641,30 @@ export const runDispatchPass = async (
   try {
     for (const card of picks) {
       if (!engine.running) return // a stop mid-pass halts promptly (finally releases)
+      // RE-CHECK THE QUOTA PARK GATE PER CARD (2026-07-29).
+      //
+      // `spawnBlock` is evaluated ONCE, at the top of the pass — but the state it
+      // reads changes DURING this loop: the pre-launch probe cools a tier the
+      // moment it finds a wall, and each spawn can hit a limit that cools the next
+      // rung. So a pass that began with headroom could walk the whole ladder dry
+      // on card 1 and still seat cards 2..N — up to the full worker cap — every one
+      // of them into a wall, burning a session each. (resolveAvailableTierProbed
+      // does not stop them: having probed every rung dry it falls back to the sync
+      // walk, which returns a COOLING tier rather than null, and the spawn path
+      // only refuses on null.) One cheap re-read per card closes it; the remaining
+      // picks are simply left in `todo` for the next tick, which is what park means.
+      // The pass's own `now`, not Date.now() — this module is clock-injected
+      // throughout, and marks written during the pass are stamped relative to it.
+      const midBlock = spawnBlock(now, await getAllowedModelTiers())
+      if (midBlock) {
+        logLine(
+          engine,
+          'info',
+          `dispatch halted mid-pass — every model tier is now ${midBlock.kind === 'none-allowed' ? 'switched OFF' : 'cooling'}; remaining cards stay in todo`,
+          'routine',
+        )
+        return
+      }
       const title = card.title ?? ''
       const notes = typeof card.notes === 'string' ? card.notes : undefined
       // LEARNING LOOP (card fdf714ef): if this SAME card was previously 差し戻し /
@@ -8711,6 +8853,10 @@ export const runEnginePass = async (
         engine,
         (level, message) => logLine(engine, level, message, 'routine'),
         deps.selfSupplyDeps,
+        undefined,
+        // Persist the daily counter after a pass that proposed cards, so a
+        // restart cannot hand self-supply a fresh budget (guard 3).
+        () => persistEngineIntent(engine, engine.path),
       )
     }
   } finally {
@@ -9643,6 +9789,14 @@ export const resumeEngines = async (
       engine.manualStop = false
       engine.selfSupply.enabled = intent.selfSupply
       if (intent.selfSupply) engine.selfSupply.lastScanAt = 0
+      // Restore the daily budget ALREADY SPENT (see EngineIntent). Without this a
+      // restart handed self-supply a fresh cap; the day-key check inside the pass
+      // still rolls it over when the UTC day actually changed, so restoring a
+      // stale key is harmless.
+      if (intent.selfSupplyDayKey) engine.selfSupply.dayKey = intent.selfSupplyDayKey
+      if (typeof intent.selfSupplyDayCount === 'number') {
+        engine.selfSupply.dayCount = intent.selfSupplyDayCount
+      }
       engine.running = true
       // card 2b — mark this as a RESTORED engine (not an owner ON this session), so
       // the Swarm UI can say so. Card 2 made the old `!running` restart reminder
@@ -9659,6 +9813,25 @@ export const resumeEngines = async (
       // worktree still owns. Never throws (condition ④: a corrupt roster degrades to
       // "no roster memory" and the boot proceeds).
       const reconciled = await reconcile(key)
+      // From here this engine's in-memory roster IS the reconciled truth, so
+      // syncRoster may overwrite the file wholesale (including with an empty set).
+      engine.rosterReconciled = true
+      // RE-READ THE OWNER'S STOP SWITCH (2026-07-29). The checks at the top of
+      // this iteration — manual-stop, preflight — were taken BEFORE the reconcile,
+      // and the reconcile is not instant: it stats worktrees, shells out to git per
+      // entry, and reads the Board over loopback. Seconds to minutes. An owner who
+      // opens the app and immediately switches 自動運転 OFF lands inside that window,
+      // and this loop went on to adopt-and-respawn `claude` PTYs into an engine the
+      // owner had just stopped. Worse than merely ignoring the switch: `scheduleNext`
+      // DOES honour `running`, so the chain never starts — the freshly spawned
+      // workers run with NOBODY monitoring them (no stall detection, no runaway
+      // clock, no reclaim). Checking again here costs one file read.
+      if (await isSwarmManualStopPersisted(key)) {
+        engine.running = false
+        engine.generation += 1 // any in-flight scheduleNext from this boot is void
+        logLine(engine, 'info', 'boot resume aborted — owner stopped autonomy during reconcile')
+        continue
+      }
       // card 4 — ADOPT the surviving in-progress workers: `--resume`-respawn each
       // PROVEN one into engine.workers BEFORE runEnginePass is kicked. This ordering
       // is load-bearing (see adoptResumeCandidates' header): the pass ends with

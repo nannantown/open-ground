@@ -8,10 +8,18 @@
 //   low-value cards, or cards that dispatch themselves into an infinite churn.
 //   FOUR independent guards bound it, every one fail-safe:
 //     1. OFF BY DEFAULT — `engine.selfSupply.enabled` starts false and is only
-//        ever flipped by the owner-gated route (setSelfSupply). Ignition waits for
-//        the rest of the safety net (regression gate + rollback + notifications)
-//        to land; until armed, this stage does NOTHING. A server restart re-arms
-//        OFF (the flag is in-memory) — fail-safe to silent.
+//        ever flipped by the owner-gated route (setSelfSupply). Until armed, this
+//        stage does NOTHING.
+//        ⚠ A RESTART IS NOT A KILL SWITCH (corrected 2026-07-29). This used to
+//        read "a server restart re-arms OFF (the flag is in-memory) — fail-safe
+//        to silent", and that stopped being true when boot resume landed:
+//        resumeEngines restores `enabled` from engine.json, and the first pass
+//        after a restart runs with `lastScanAt` reset, i.e. IMMEDIATELY. A
+//        commander who reads this comment and reaches for a restart to stop a
+//        runaway would be doing the one thing that guarantees another scan.
+//        The only way to stop it is explicit: setSelfSupply(false) (or stopping
+//        the engine). The real fail-safe is guard 2 below — every proposed card
+//        needs the owner's approval before anything can dispatch it.
 //     2. PER-CARD OWNER APPROVAL — a proposed card carries `selfSupplyKey` and
 //        `selfSupplyApproved:false`. selectDispatch SKIPS such a card until the
 //        owner approves it (approveSelfSupplyCard → selfSupplyApproved:true). So
@@ -74,6 +82,7 @@
 import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { runGateProcess, withGateEnv } from './gateProcess'
+import { isGitRepoRoot } from './gitRepoGuard'
 import { readProjectData, writeProjectData } from './projectData'
 import type { OrchestratorAnomaly, ProjectData, ProjectTask } from '../types'
 
@@ -455,8 +464,19 @@ export const defaultSelfSupplyDeps = (): SelfSupplyDeps =>
       ),
     scanTestFailures: async (p) =>
       parseVitestFindings(await runCapture(p, binIn(p, 'vitest'), ['run', '--reporter=json'], 240_000)),
+    // gitRepoGuard (2026-07-28 §7.4): this is the ONE self-supply scanner that
+    // spawns `git`, and `git grep` in a NON-repo walks the filesystem upward
+    // looking for one — the exact shape that wedges in uninterruptible sleep when
+    // the cwd is removed underneath it (07 章 §7.2). Every OTHER scanner here runs
+    // a binary out of the project's own node_modules/.bin and simply fails to
+    // start when absent, so `git` is the only one that needs the gate. A non-repo
+    // project yields no TODO findings — the same degraded result the raw call
+    // produced anyway ("not a git repository" → empty stdout → []), reached
+    // WITHOUT putting a process on the machine that nothing can kill.
     scanTodoComments: async (p) =>
-      parseTodoFindings(await runCapture(p, 'git', ['grep', '-n', '-I', '-E', '(TODO|FIXME)'])),
+      isGitRepoRoot(p)
+        ? parseTodoFindings(await runCapture(p, 'git', ['grep', '-n', '-I', '-E', '(TODO|FIXME)']))
+        : [],
   })
 
 // ── The pass ─────────────────────────────────────────────────────────────────
@@ -658,10 +678,23 @@ export const kickSelfSupplyPass = (
   log: SelfSupplyLog = NOOP_LOG,
   deps: SelfSupplyDeps = defaultSelfSupplyDeps(),
   config: SelfSupplyConfig = DEFAULT_SELF_SUPPLY_CONFIG,
+  /** Called after a pass that actually PROPOSED something, so the caller can
+   *  persist the daily counter (guard 3). Optional — the orchestrator supplies
+   *  it; unit tests that drive the pass directly do not need it. Awaited inside
+   *  the same fire-and-forget chain, so a slow write cannot block the tick. */
+  onProposed?: () => Promise<void> | void,
 ): void => {
-  void runSelfSupplyPass(engine, log, deps, config).catch((e) =>
-    log('warn', `self-supply: pass errored — ${e instanceof Error ? e.message : String(e)}`),
-  )
+  void runSelfSupplyPass(engine, log, deps, config)
+    .then(async (out) => {
+      // Persist ONLY when the count moved. The daily cap used to live purely in
+      // memory while `enabled` was restored at boot, so every restart handed
+      // self-supply a fresh budget — and the engine restarts on every
+      // self-update, i.e. exactly when it has been proposing work to itself.
+      if (out.proposed.length && onProposed) await onProposed()
+    })
+    .catch((e) =>
+      log('warn', `self-supply: pass errored — ${e instanceof Error ? e.message : String(e)}`),
+    )
 }
 
 // ── Owner approval (the per-card dispatch gate, guard 2) ──────────────────────

@@ -4,6 +4,7 @@ import { readFile, readdir, rm, rmdir, stat, unlink } from 'fs/promises'
 import { isAbsolute, join } from 'path'
 import { canonicalize } from './canonicalize'
 import { isGitRepoRoot } from './gitRepoGuard'
+import { isSweepableHeartbeat } from './swarmHeartbeatFiles'
 import { centralWorktreesDir, openGroundHome, projectsDataRootDir, runsDir } from './paths'
 import { projectDataDir } from './projectDataPath'
 import { getSettings } from './store'
@@ -176,19 +177,37 @@ export const pruneGhostHeartbeats = async (
         const st = await stat(full)
         if (!st.isFile()) continue
         let worktree: string | undefined
+        // RAW field presence, kept separate from the validated value below: the
+        // tenancy gate asks "does this file carry a heartbeat's fields", while
+        // liveness asks "is the path usable". A relative worktree answers yes to
+        // the first and no to the second — a malformed HEARTBEAT, still sweepable.
+        let rawWorktree: string | null = null
+        let branch: string | null = null
         let updatedMs = NaN
+        let parsed = false
         try {
           const j = JSON.parse(await readFile(full, 'utf8')) as {
             worktree?: unknown
+            branch?: unknown
             updatedAt?: unknown
           }
+          parsed = true
+          if (typeof j.worktree === 'string') rawWorktree = j.worktree
           // A relative/empty `worktree` is a malformed/foreign file — no
           // liveness signal (the writer always emits `pwd -P`).
           if (typeof j.worktree === 'string' && isAbsolute(j.worktree)) worktree = j.worktree
+          if (typeof j.branch === 'string') branch = j.branch
           if (typeof j.updatedAt === 'string') updatedMs = Date.parse(j.updatedAt)
         } catch {
           /* corrupt → no worktree signal; age alone governs below */
         }
+        // TENANCY GATE (2026-07-29) — the SAME hole this sweep's 15-minute
+        // sibling had (swarmJanitor.sweepSwarmHeartbeats): this directory also
+        // holds the engine's roster.json and the commander's manager.json, and
+        // neither carries a `worktree`, so both were deleted here after 48h at
+        // BOOT — the one moment resume depends on them. Only a file positively
+        // recognisable as a worker heartbeat is a candidate.
+        if (!isSweepableHeartbeat(f, parsed, { branch, worktree: rawWorktree })) continue
         if (worktree && (await pathExists(worktree))) continue // live workplace → keep
         // Age basis: the NEWEST of file mtime / the heartbeat's own updatedAt,
         // so either signal being fresh protects the file.

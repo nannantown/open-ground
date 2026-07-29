@@ -32,7 +32,8 @@ import { readdir, readFile, stat, unlink } from 'fs/promises'
 import { basename, dirname, join, resolve } from 'path'
 import { createHash } from 'crypto'
 import { canonicalize } from './canonicalize'
-import { isGitRepoRoot } from './gitRepoGuard'
+import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
+import { isSweepableHeartbeat } from './swarmHeartbeatFiles'
 import { openGroundHome } from './paths'
 import { checkMergedBranches } from './mergedBranches'
 import { isSwarmBranch, resolveTarget } from './swarmIntegrate'
@@ -57,6 +58,20 @@ const GIT_OPTS = {
 /** Run git in `cwd`; null on any failure (no git, not a repo, bad ref…). */
 const git = async (cwd: string, args: string[]): Promise<string | null> => {
   if (!isGitRepoRoot(cwd)) return null // gitRepoGuard: never spawn git in a non-repo/vanishing cwd
+  try {
+    const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
+    return stdout
+  } catch {
+    return null
+  }
+}
+
+/** git for the ONE call whose purpose is to locate the repo root from a path
+ *  that may sit BELOW it (`rev-parse --git-common-dir`). Gated on
+ *  {@link isUnderGitRepo} instead of isGitRepoRoot — see swarmRepoKey. Never use
+ *  this for anything else: the root gate is what keeps git out of non-repos. */
+const gitAllowingRepoWalk = async (cwd: string, args: string[]): Promise<string | null> => {
+  if (!isUnderGitRepo(cwd)) return null
   try {
     const { stdout } = await execFile('git', args, { cwd, ...GIT_OPTS })
     return stdout
@@ -281,7 +296,14 @@ export const sweepSwarmBranches = async (
  *  null when `projectPath` isn't a git repo. Exported so tests can locate the
  *  exact heartbeat dir the sweep will read. */
 export const swarmRepoKey = async (projectPath: string): Promise<string | null> => {
-  const commonDir = await git(projectPath, ['rev-parse', '--git-common-dir'])
+  // Deliberately NOT the shared `git()` helper: its isGitRepoRoot gate is the
+  // right rule for every other call, but this one's whole job is to walk UPWARD
+  // and find the repo root, so a project registered as a SUB-DIRECTORY of a repo
+  // was returning null here — taking the entire per-repo state directory
+  // (heartbeats, roster.json, manager.json) with it. isUnderGitRepo keeps the
+  // wedge protection (a vanished cwd never spawns) while allowing the walk.
+  if (!isUnderGitRepo(projectPath)) return null
+  const commonDir = await gitAllowingRepoWalk(projectPath, ['rev-parse', '--git-common-dir'])
   if (commonDir === null) return null
   let abs: string
   try {
@@ -335,18 +357,32 @@ export const sweepSwarmHeartbeats = async (
     let branch: string | null = null
     let worktree: string | null = null
     let updatedMs = NaN
+    let parsed = false
     try {
       const j = JSON.parse(await readFile(full, 'utf8')) as {
         branch?: unknown
         worktree?: unknown
         updatedAt?: unknown
       }
+      parsed = true
       if (typeof j.branch === 'string') branch = j.branch
       if (typeof j.worktree === 'string') worktree = j.worktree
       if (typeof j.updatedAt === 'string') updatedMs = Date.parse(j.updatedAt)
     } catch {
       // Corrupt/unreadable → can't trust its contents; fall through with branch
       // and worktree treated as gone, freshness from the file's mtime.
+    }
+    // TENANCY GATE (2026-07-29) — this directory is shared: the engine's own
+    // roster.json and the commander's manager.json live beside the worker
+    // heartbeats. Only a file we can POSITIVELY recognise as a heartbeat is a
+    // deletion candidate; everything else is skipped outright, whatever its age.
+    // Before this, "no branch and no worktree" was read as "unidentifiable
+    // orphan → reap", which is exactly the shape of roster.json and
+    // manager.json — so this sweep ate the engine's own memory every 15 minutes
+    // (see swarmHeartbeatFiles.ts for the full post-mortem).
+    if (!isSweepableHeartbeat(file, parsed, { branch, worktree })) {
+      kept.push(file)
+      continue
     }
     // Freshness: prefer the heartbeat's own updatedAt; fall back to file mtime so
     // a corrupt-but-recent file (mid-write) is still protected.
@@ -373,8 +409,10 @@ export const sweepSwarmHeartbeats = async (
       }
     }
     const treeGone = worktree ? !(await pathExists(worktree)) : false
-    // No checkable liveness signal at all (corrupt / foreign file) → staleness
-    // alone governs, so a stale unparseable file is still reaped.
+    // No checkable liveness signal at all → only reachable now for a file that
+    // FAILED TO PARSE (the tenancy gate above already returned every parsed file
+    // without branch/worktree), so this stays what it always was: a stale
+    // unreadable corpse is reaped.
     const noSignal = !branch && !worktree
 
     if (stale && (branchGone || treeGone || noSignal)) {

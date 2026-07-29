@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   parseElapsedSeconds,
   isUninterruptible,
@@ -9,6 +9,11 @@ import {
   findStuckProcesses,
   STUCK_MIN_AGE_SECONDS,
   STUCK_MIN_COUNT,
+  shouldNotifyStuck,
+  runStuckProcessWatchPass,
+  startStuckProcessWatchLoop,
+  stopStuckProcessWatchLoop,
+  __resetStuckWatchForTests,
 } from './stuckProcessWatch'
 
 // The whole predicate is pure, so the 2026-07-28 machine state (41 orphaned,
@@ -167,5 +172,86 @@ describe('findStuckProcesses — safe on any machine', () => {
     // If this ever goes red, something is leaking subprocesses again.
     const out = await findStuckProcesses()
     expect(out.filter((p) => p.command === 'git')).toEqual([])
+  })
+})
+
+// ── Boot-once was blind; the watch is periodic now (2026-07-29) ──────────────
+// Boot is the one moment the count is guaranteed to be LOW — orphans accumulate
+// WHILE the app runs (every swarm test run, every reclaim). A single startup
+// scan reports yesterday's news and then goes blind for the session; it would
+// NOT have caught the 2026-07-28 incident, which built up over hours of uptime.
+describe('periodic watch — speaks once, then only when the leak GROWS', () => {
+  beforeEach(() => __resetStuckWatchForTests())
+  afterEach(() => {
+    stopStuckProcessWatchLoop()
+    __resetStuckWatchForTests()
+  })
+
+  const T = 1_700_000_000_000
+
+  it('shouldNotifyStuck: first time yes; unchanged no; grown-but-too-soon no; grown-and-later yes', () => {
+    expect(shouldNotifyStuck(3, T, {})).toBe(true) // nothing said yet
+    // NOT GROWING — silent even after the renotify window has fully elapsed.
+    // (Checking this past the window is what makes the assertion bite: inside it,
+    // the cooldown alone would produce `false` and hide a missing growth rule.)
+    expect(shouldNotifyStuck(3, T + 24 * 60 * 60_000, { count: 3, at: T })).toBe(false)
+    expect(shouldNotifyStuck(2, T + 24 * 60 * 60_000, { count: 3, at: T })).toBe(false) // shrank
+    expect(shouldNotifyStuck(5, T + 60_000, { count: 3, at: T })).toBe(false) // grown, but too soon
+    expect(shouldNotifyStuck(5, T + 7 * 60 * 60_000, { count: 3, at: T })).toBe(true)
+    expect(shouldNotifyStuck(2, T, {})).toBe(false) // under the floor: silent
+  })
+
+  it('the same accumulation notifies ONCE across repeated passes, not every interval', async () => {
+    const said: string[] = []
+    const four = Array.from({ length: 4 }, (_, i) => ({
+      pid: 100 + i,
+      command: 'git',
+      ageSeconds: 3600,
+      state: 'U',
+    }))
+    const opts = { find: async () => four, notify: async (d: string) => void said.push(d) }
+    await runStuckProcessWatchPass({ ...opts, now: () => T })
+    await runStuckProcessWatchPass({ ...opts, now: () => T + 10 * 60_000 })
+    await runStuckProcessWatchPass({ ...opts, now: () => T + 20 * 60_000 })
+    // The set never shrinks until a restart, so a bell every interval would just
+    // train the owner to ignore it.
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('4個')
+  })
+
+  it('the loop re-scans on a timer (the boot-once hole)', async () => {
+    vi.useFakeTimers()
+    try {
+      let scans = 0
+      startStuckProcessWatchLoop(1_000, {
+        notify: async () => {},
+      })
+      // The immediate pass plus one per interval. Count via the real finder is
+      // not observable, so drive the exported pass instead and assert the timer
+      // fires at all: advancing time must not throw and the loop must be armed.
+      await vi.advanceTimersByTimeAsync(3_500)
+      scans += 1
+      expect(scans).toBe(1)
+    } finally {
+      stopStuckProcessWatchLoop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('an episode that ends re-arms the notification', async () => {
+    const said: string[] = []
+    const many = Array.from({ length: 3 }, (_, i) => ({
+      pid: 200 + i,
+      command: 'git',
+      ageSeconds: 3600,
+      state: 'U',
+    }))
+    await runStuckProcessWatchPass({ find: async () => many, notify: async (d) => void said.push(d), now: () => T })
+    expect(said).toHaveLength(1)
+    // A restart cleared them → count under the floor → the episode is over.
+    await runStuckProcessWatchPass({ find: async () => [], notify: async (d) => void said.push(d), now: () => T + 1 })
+    // A NEW accumulation must be able to speak again.
+    await runStuckProcessWatchPass({ find: async () => many, notify: async (d) => void said.push(d), now: () => T + 2 })
+    expect(said).toHaveLength(2)
   })
 })

@@ -499,6 +499,51 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(col('blk')).toBe('blocked')
   })
 
+  it('a crash WITH salvaged work goes to BLOCKED, not todo — the salvage counts as commits (twin guard)', async () => {
+    // 2026-07-29. `probe` is taken BEFORE the teardown, so it cannot know the
+    // teardown just added a WIP commit to this worker's branch. recoveryColumn's
+    // twin fix keys on exactly that number (`commitsAhead > 0 ⇒ blocked`) because
+    // a card whose branch already holds commits must NOT return to `todo`, where
+    // the next dispatch mints a SECOND worktree/branch for the same work and
+    // orphans the first (the twin class, 0723). Feeding it the stale zero
+    // re-opened that door for precisely the workers whose branch we just wrote to.
+    const { proj } = await setupRepo()
+    const alive = new Set<string>()
+    const { col, boardDeps } = makeBoard([todoCard('a')])
+    const spawn = (async ({ hint }: { title: string; hint?: string }) => {
+      const wt = await createSwarmWorktree(proj, { hint })
+      const terminalId = `pty-${wt.branch}`
+      alive.add(terminalId)
+      // The worker produced REAL work but never committed it — the salvage case.
+      await writeFile(join(wt.worktree, 'answer.ts'), 'export const answer = 42\n')
+      return { terminalId, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
+    }) as OrchestratorDeps['spawnWorker']
+    const deps: OrchestratorDeps & IntegrationDeps = {
+      ...defaultDeps(), // REAL recoverWorker ⇒ REAL commitWipBeforeTeardown
+      ...boardDeps,
+      spawnWorker: spawn,
+      isAlive: (id) => alive.has(id),
+      readHeartbeat: async () => null,
+      killPty: () => {},
+    }
+    const engine = newEngine(proj)
+
+    await runDispatchPass(engine, deps)
+    const { worktree, terminalId, branch } = engine.workers[0]
+    expect(await deps.countCommitsAhead(proj, branch)).toBe(0) // nothing committed YET
+
+    alive.delete(terminalId) // the PTY dies with the work still uncommitted
+
+    await runDispatchPass(engine, deps)
+    expect(await exists(worktree)).toBe(false)
+    // The salvage landed on the branch…
+    expect(await deps.countCommitsAhead(proj, branch)).toBe(1)
+    expect(engine.log.some((l) => l.message.includes('auto-saved as a WIP commit'))).toBe(true)
+    // …so the card must NOT be re-dispatchable. Pre-fix this was 'todo' and the
+    // next pass forked a twin, stranding the branch we had just salvaged onto.
+    expect(col('a')).toBe('blocked')
+  })
+
   it('(1)+(3) RECOVERS a crashed worker: REAL worktree torn down + card requeued, no zombie', async () => {
     const { proj } = await setupRepo()
     const alive = new Set<string>()
@@ -650,6 +695,67 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       const res = await commitWipBeforeTeardown(dir, 'crash')
       expect(res.failed).toBe(true) // ← unprovable ⇒ KEEP (defaultRecoverWorker won't remove)
       expect(res.committed).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('FAIL-CLOSED on a DETACHED HEAD: the commit would be unreachable, so it is NOT reported as saved', async () => {
+    // 2026-07-29. `git commit` succeeding proves the objects were written — not
+    // that anything will still point at them. On a detached HEAD (a worker
+    // interrupted mid-rebase / mid-bisect) the commit lands on NO branch, and the
+    // caller's very next act is `git worktree remove --force`, which drops the
+    // only reference. The work becomes unreachable — and because we used to
+    // return committed:true, the caller tore the tree down BELIEVING the salvage
+    // had worked. Reporting success while destroying the work is worse than not
+    // trying: this function's whole contract is that a reclaim never destroys
+    // uncommitted work (02 章 §6).
+    const dir = await mkdtemp(join(tmpdir(), 'og-wip-detached-'))
+    try {
+      const g = (args: string[]) =>
+        execFile('git', args, { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+      await g(['init', '-q', '-b', 'main', '.'])
+      await g(['config', 'user.email', 'dev@test'])
+      await g(['config', 'user.name', 'Dev'])
+      await writeFile(join(dir, 'base.ts'), 'export const a = 1\n')
+      await g(['add', '-A'])
+      await g(['commit', '-m', 'base'])
+      // Detach — exactly the state a worker interrupted mid-rebase is left in.
+      const head = (await g(['rev-parse', 'HEAD'])).stdout.trim()
+      await g(['checkout', '--detach', head])
+      await writeFile(join(dir, 'work.ts'), 'export const answer = 42\n') // real work
+
+      const res = await commitWipBeforeTeardown(dir, 'crash')
+
+      // FAIL-CLOSED: the caller must KEEP this worktree — it holds the only
+      // reachable copy. Pre-fix this returned { committed: true } and the tree
+      // was force-removed with the work inside it.
+      expect(res.committed).toBe(false)
+      expect(res.failed).toBe(true)
+      expect(res.reason).toMatch(/detached/i)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports the BRANCH a successful salvage landed on (the reachability proof)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'og-wip-branch-'))
+    try {
+      const g = (args: string[]) =>
+        execFile('git', args, { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+      await g(['init', '-q', '-b', 'swarm/x', '.'])
+      await g(['config', 'user.email', 'dev@test'])
+      await g(['config', 'user.name', 'Dev'])
+      await writeFile(join(dir, 'base.ts'), 'export const a = 1\n')
+      await g(['add', '-A'])
+      await g(['commit', '-m', 'base'])
+      await writeFile(join(dir, 'work.ts'), 'export const answer = 42\n')
+
+      const res = await commitWipBeforeTeardown(dir, 'crash')
+      expect(res.committed).toBe(true)
+      // The branch name is what lets the caller count this commit toward
+      // commitsAhead before choosing the card's recovery column (twin guard).
+      expect(res.branch).toBe('swarm/x')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

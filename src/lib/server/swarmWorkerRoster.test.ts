@@ -142,31 +142,31 @@ describe('swarmWorkerRoster — persistence (card 3)', () => {
 describe('swarmWorkerRoster — classifyRosterEntry (pure, condition ①)', () => {
   it('vanished worktree wins over everything (precedence #1)', () => {
     expect(
-      classifyRosterEntry({ worktreeExists: false, cardActive: true, branchAhead: true, heartbeatReady: true }),
+      classifyRosterEntry({ worktreeExists: false, cardActive: true, branchAhead: true, heartbeatReady: true, cardInReview: false }),
     ).toBe('vanished')
     // TEETH: worktree-gone AND card-gone must still be 'vanished' (the worktree check
     // is FIRST). Swap the two guards in classifyRosterEntry and THIS case flips to
     // 'card-gone' — the discriminating case the all-true variant above can't catch.
     expect(
-      classifyRosterEntry({ worktreeExists: false, cardActive: false, branchAhead: false, heartbeatReady: false }),
+      classifyRosterEntry({ worktreeExists: false, cardActive: false, branchAhead: false, heartbeatReady: false, cardInReview: false }),
     ).toBe('vanished')
   })
   it('card gone (worktree alive) → card-gone (precedence #2)', () => {
     expect(
-      classifyRosterEntry({ worktreeExists: true, cardActive: false, branchAhead: true, heartbeatReady: true }),
+      classifyRosterEntry({ worktreeExists: true, cardActive: false, branchAhead: true, heartbeatReady: true, cardInReview: false }),
     ).toBe('card-gone')
   })
   it('branch ahead + heartbeat ready → ready (precedence #3)', () => {
     expect(
-      classifyRosterEntry({ worktreeExists: true, cardActive: true, branchAhead: true, heartbeatReady: true }),
+      classifyRosterEntry({ worktreeExists: true, cardActive: true, branchAhead: true, heartbeatReady: true, cardInReview: true }),
     ).toBe('ready')
   })
   it('alive + active + not-yet-ready → in-progress (resume candidate, default)', () => {
     expect(
-      classifyRosterEntry({ worktreeExists: true, cardActive: true, branchAhead: true, heartbeatReady: false }),
+      classifyRosterEntry({ worktreeExists: true, cardActive: true, branchAhead: true, heartbeatReady: false, cardInReview: false }),
     ).toBe('in-progress')
     expect(
-      classifyRosterEntry({ worktreeExists: true, cardActive: true, branchAhead: false, heartbeatReady: true }),
+      classifyRosterEntry({ worktreeExists: true, cardActive: true, branchAhead: false, heartbeatReady: true, cardInReview: false }),
     ).toBe('in-progress')
   })
 })
@@ -231,7 +231,16 @@ describe('swarmWorkerRoster — reconcileRoster (boot, condition ①/④)', () =
     expect(result).toEqual({ resumeCandidates: [], ready: [], vanished: [], cardGone: [] })
   })
 
-  it('a Board read failure degrades every card to card-gone (conservative), never throws', async () => {
+  // CONTRACT CHANGED (2026-07-29). This case used to assert that a Board read
+  // failure "degrades every card to card-gone (conservative)" — and the prune at
+  // the end of reconcileRoster then wrote the roster back EMPTY. That is the
+  // opposite of conservative: a transient blip at boot (the loopback API not up
+  // yet) permanently destroyed the memory of every LIVE worker, and the next boot
+  // had nothing left to recover from. Absence of evidence was persisted as
+  // evidence of absence. A failed read now concludes NOTHING and preserves the
+  // file; the empty result still freezes adoption for this boot, which the caller
+  // already handles.
+  it('a Board read failure concludes NOTHING and never throws', async () => {
     const e = entry({ worktree: join(scratch, 'wt', 'x'), branch: 'swarm/x', taskId: 'c-x' })
     await writeRoster(project, [e])
     const deps: RosterReconcileDeps = {
@@ -240,9 +249,77 @@ describe('swarmWorkerRoster — reconcileRoster (boot, condition ①/④)', () =
       },
       countCommitsAhead: async () => 3,
       heartbeatReady: async () => true,
-      worktreeExists: async () => true, // worktree alive, but no board → card unknown → gone
+      worktreeExists: async () => true,
     }
     const result = await reconcileRoster(project, deps)
-    expect(result.cardGone.map((e) => e.taskId)).toEqual(['c-x'])
+    expect(result.cardGone).toEqual([]) // no verdict was reached about any card
+    expect(result.resumeCandidates).toEqual([])
+    expect(await readRoster(project)).toHaveLength(1) // and the memory survives
+  })
+})
+
+// ── 束B: two ways the roster was destroyed by NON-evidence (2026-07-29) ───────
+describe('reconcileRoster — a Board blip must not erase the roster', () => {
+  it('a failed Board read leaves the file INTACT and adopts nobody', async () => {
+    const entry: RosterEntry = {
+      sessionId: 's1',
+      taskId: 'card-1',
+      branch: 'swarm/a',
+      worktree: join(scratch, 'wt-a'),
+      tier: 'sonnet',
+      spawnAt: 1,
+      workedMs: 10,
+      reworkCount: 0,
+    }
+    await writeRoster(project, [entry])
+
+    const res = await reconcileRoster(project, {
+      // The blip: the loopback Board API is not up yet at boot.
+      fetchTasks: async () => {
+        throw new Error('ECONNREFUSED')
+      },
+      countCommitsAhead: async () => 1,
+      heartbeatReady: async () => false,
+      worktreeExists: async () => true,
+    })
+
+    // Nobody is adopted this boot (the caller's freeze already handles that)…
+    expect(res.resumeCandidates).toEqual([])
+    expect(res.cardGone).toEqual([]) // …and NOTHING was concluded about the cards
+    // …but the memory survives, so the NEXT boot can still recover the worker.
+    // Pre-fix this read back as [] — a transient blip was written to disk as
+    // "every card is gone", permanently.
+    expect(await readRoster(project)).toHaveLength(1)
+  })
+})
+
+describe('classifyRosterEntry — a sticky ready heartbeat is not a handover', () => {
+  it('card back in doing (差し戻し) + stale ready heartbeat → in-progress, NOT ready', () => {
+    // swarm-beat.sh writes readyToMerge:true once and never unsets it, so a
+    // worker that delivered, got sent back, and is working again still reports
+    // ready. Pre-fix that read as 'ready' → the row was pruned → the doing card
+    // had no owner (selectDispatch reads todo only; reclaim walks engine.workers)
+    // and sat there forever beside a live worktree.
+    expect(
+      classifyRosterEntry({
+        worktreeExists: true,
+        cardActive: true,
+        branchAhead: true,
+        heartbeatReady: true,
+        cardInReview: false,
+      }),
+    ).toBe('in-progress')
+  })
+
+  it('card actually in review + ready heartbeat → ready (the real handover)', () => {
+    expect(
+      classifyRosterEntry({
+        worktreeExists: true,
+        cardActive: true,
+        branchAhead: true,
+        heartbeatReady: true,
+        cardInReview: true,
+      }),
+    ).toBe('ready')
   })
 })

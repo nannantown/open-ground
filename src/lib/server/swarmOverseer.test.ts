@@ -1460,3 +1460,52 @@ describe('overseer — S8 usage warn halves the brain cap', () => {
     expect(calls.answerAsOwner).toHaveLength(0)
   })
 })
+
+// ── W6 janitor is OFF-TICK (2026-07-29) ──────────────────────────────────────
+// The sweep is a `git fetch` (60s timeout) plus a git spawn per swarm branch.
+// It used to be `await`ed inside this pass, which runs inside runEnginePass
+// while `passInFlight` is held — so for the whole sweep EVERY 3s tick bailed:
+// no monitor, no stall/crash detection, no runaway clock, no quota sighting.
+// The engine went blind precisely while the overseer was supposed to be
+// watching. integrate and self-supply were moved off the tick for this same
+// reason; the janitor was the one left behind.
+//
+// TEETH — pins the ACT (the pass does not wait), not a duration: the injected
+// janitor never settles, so an awaiting implementation can never return and the
+// test times out. Also pins the guard that fire-and-forget newly requires: a
+// second tick must not stack a second sweep on the same repo.
+describe('overseer janitor — fired, not awaited', () => {
+  it('the pass RETURNS while the sweep is still running (no tick starvation)', async () => {
+    const calls = makeCalls()
+    let started = 0
+    const deps = makeDeps(calls, {
+      // Never settles: an `await` here would hang the pass forever.
+      runJanitor: async () => {
+        started += 1
+        return new Promise(() => {}) as unknown as Record<string, never>
+      },
+    })
+    const engine = makeEngine({ overseer: armed({ lastJanitorAt: 0 }) })
+    const out = await runOverseerPass(engine, [], () => {}, deps)
+    expect(out.ran).toBe(true) // pre-fix: never reached — the test times out
+    expect(started).toBe(1)
+  })
+
+  it('a later tick does NOT stack a second sweep while one is in flight', async () => {
+    const calls = makeCalls()
+    let started = 0
+    const deps = makeDeps(calls, {
+      runJanitor: async () => {
+        started += 1
+        return new Promise(() => {}) as unknown as Record<string, never>
+      },
+      // Every pass is past the cadence, so only the in-flight guard can hold it.
+      now: () => 9_000_000_000_000,
+    })
+    const engine = makeEngine({ overseer: armed({ lastJanitorAt: 0 }) })
+    await runOverseerPass(engine, [], () => {}, deps)
+    await runOverseerPass(engine, [], () => {}, deps)
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(started).toBe(1)
+  })
+})
