@@ -402,6 +402,73 @@ paths carry Windows-specific branches (see below). What is **not** yet done is
 end-to-end validation on real Windows hardware — so treat Windows as *shipping
 but provisional*, not *fully verified*.
 
+> **Commander operation (og-manage) is macOS / Git Bash only (decided
+> 2026-07-27, GAP-8).** `og-manage` — the human-commander experience for
+> swarm — is a single skill file (`skills/og-manage/SKILL.md`) whose
+> procedures are bash/curl one-liners, and it breaks under a plain Windows
+> PowerShell: there is no bash to run those lines, and in **Windows
+> PowerShell 5.1 `curl` is an alias of `Invoke-WebRequest`** (per its
+> reference page's Notes), so a `curl -s -X POST -d …` line binds to a
+> different cmdlet that accepts different parameters — the curl flags do
+> not bind, so it does not work as curl. (PowerShell 7 dropped that alias —
+> its Notes list only `iwr`. A real `curl.exe` *does* ship with Windows 10
+> — curl.se dates that to insider build 17063, so the first generally
+> available release carrying it is 1803 — but under 5.1 that rescues
+> nothing: PowerShell resolves names in the order **Alias → Function →
+> Cmdlet → external executable**, so the built-in `curl` alias shadows any
+> `curl.exe` on PATH. The bash half is unconditional either way.) This is a deliberate scope decision, not a bug: swarm is
+> an owner-only hidden feature, so there are currently zero Windows users of
+> the human-commander flow, and PowerShell support would mean rewriting
+> every bash/curl call for a benefit no one collects yet.
+>
+> **The unattended engine is a narrower claim than "unaffected".** The
+> engine's **server-side code** (worker spawn / integrate / janitor /
+> overseer) carries **no bash dependency** — but the way a worker says
+> "I'm done" is the **bash script `scripts/swarm-beat.sh`** (which a worker
+> invokes at its installed path, `~/.claude/swarm-beat.sh`), the only writer
+> of the heartbeat's `readyToMerge` flag (there is no HTTP worker-beat
+> route — `POST /api/swarm/manager/beat` is the commander desk's own).
+> Since `classifyWorker` promotes doing→review only on that `ready` signal
+> (or on a dead PTY — but a `claude` TUI normally lingers after `/order`
+> finishes, so the stall path dominates in practice), a worker on a
+> bash-less Windows can commit but never
+> self-declare: it stalls, gets reclaimed, and — having `commitsAhead > 0` —
+> retreats to `blocked`. **Running the unattended loop on Windows therefore
+> also needs Git Bash**, and even then this path, like the rest of §6,
+> remains **unvalidated on real Windows hardware** (see the caveats below).
+>
+> **And Git Bash may not be sufficient.** The heartbeat directory's key is
+> derived *twice, independently*, and the two derivations are assumed to
+> produce the same string: bash's `sw_repokey()`
+> (`scripts/openground-swarm-lib.sh:23-29`) hashes `cd "$cdir" && pwd -P`,
+> while Node's `swarmRepoKey()` (`src/lib/server/swarmOrchestrator.ts:3917-3934`)
+> hashes `canonicalize(resolve(projectPath, commonDir))` — the comment there
+> names the coupling outright ("exactly like swarm-beat's `cd "$cdir" &&
+> pwd -P`"). Under Git Bash (MSYS) `pwd -P` yields `/c/Users/…` while Node's
+> `resolve` yields `C:\Users\…`, so the sha1 inputs — and therefore the keys
+> — can diverge: the worker would write `~/.openground/swarm/<keyA>/` while
+> the engine reads `<keyB>/`, and `ready` never arrives. `sw_repokey` also
+> needs `shasum` on PATH; without it `scripts/swarm-beat.sh:27` exits 1 and
+> **no heartbeat is written at all** (whether Git for Windows ships `shasum`
+> is unconfirmed). Nobody has run any of this on Windows — **look here
+> first** when someone does.
+> The `swarm-beat.sh` worker-heartbeat script gets the same call as
+> og-manage: no PowerShell port, same rationale. See
+> [RELEASE_READINESS_GOALS.md §5 GAP-8](RELEASE_READINESS_GOALS.md) and
+> [commander/00-INDEX.md](commander/00-INDEX.md).
+> [SWARM_GA_AUDIT.md §1.4 A-1](SWARM_GA_AUDIT.md) reaches the same
+> `breaks / critical` verdict on this bash dependency but **scopes it
+> wider** — it argues the same hole opens for non-developer users on
+> *macOS* too, and that GAP-8 should be widened to "every non-developer
+> environment on every OS". Note that A-1's premise ① (`swarm-beat.sh` is
+> the developer's private file, not shipped) is **obsolete**: the app
+> self-installs it at boot (`swarmToolingInstall.ts`, and the script is
+> listed in electron-builder's `build.files`), so **deployment is solved —
+> only the bash dependency remains**. That correction was written back into
+> the audit itself on 2026-07-28 (§1.4 A-1 and the NEW-4 row); its §0 🔴
+> count and §5 availability row still carry the old premise and need a
+> separate re-evaluation.
+
 ### How it's built
 
 In CI (recommended), the `windows` job in `release.yml` runs
@@ -511,6 +578,12 @@ until someone runs them:
 - **PowerShell command quoting**: multi-line prompt arguments with embedded
   quotes/newlines, typed through a PTY-driven PowerShell command line, are
   fragile and unverified. May mangle prompts.
+- **swarm worker heartbeat (needs Git Bash) and the commander flow**: the
+  unattended loop's only completion signal is the bash script
+  `~/.claude/swarm-beat.sh`, so running it on Windows requires **Git Bash**
+  (decided 2026-07-27, GAP-8 — no PowerShell port). Neither that Git-Bash
+  path nor the `og-manage` commander flow has been exercised on real
+  Windows hardware; see the GAP-8 note at the top of this section.
 
 These are the honest open items. Until a real Windows run confirms them,
 Windows is best treated as a community-supported best-effort build, not a

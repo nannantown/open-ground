@@ -25,6 +25,27 @@ export default defineConfig({
     // setup-dom: register @testing-library/jest-dom matchers + RTL auto-cleanup
     //   (a no-op in node-environment tests; see the file's note).
     setupFiles: ['./src/test/setup-home.ts', './src/test/setup-dom.ts'],
+    // ── Timezone ──────────────────────────────────────────────────────────
+    // PIN THE RUNNER'S TIMEZONE TO CI's. Do not remove this to "use the real
+    // local time" — a local run that disagrees with CI is the whole problem.
+    //
+    // Measured 2026-07-29: three `swarmQuota.test.ts` cases were green on the
+    // author's machine (Asia/Tokyo) and red on every CI run for 4 consecutive
+    // pushes, INCLUDING the 0.11.40 release commit. The cause was not the code:
+    // `parseResetLabel`'s bare-clock branch resolves through `setHours`, i.e. in
+    // LOCAL time, and the fixture compared it against a hardcoded "3pm". The
+    // injected clock reads 07:13 in Asia/Tokyo (3pm ahead) but 22:13 in UTC
+    // (3pm long past), so the two environments genuinely disagreed. A full
+    // `npm test` at green is the release gate, so this shipped.
+    //
+    // ubuntu-latest runners are UTC, so UTC here makes "green locally" mean
+    // "green on CI" for anything that touches a wall clock. It does NOT make a
+    // test timezone-INDEPENDENT — it makes the whole fleet agree on one zone.
+    // Logic that must hold in every zone still has to say so itself (build the
+    // expected value from the injected clock, as swarmQuota.test.ts's
+    // `atLocalHour` now does), because pinning proves nothing about zones the
+    // suite never runs in.
+    env: { TZ: 'UTC' },
     // ── Timeouts ──────────────────────────────────────────────────────────
     // Vitest's own defaults are testTimeout 5_000 / hookTimeout 10_000 in the
     // node environment (vitest 4.1.7; https://vitest.dev/config/testtimeout,

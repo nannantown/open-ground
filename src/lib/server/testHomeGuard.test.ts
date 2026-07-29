@@ -15,6 +15,7 @@ import {
   isSamePathOrUnder,
   isTestProcess,
   isUnderTempRoot,
+  passwdHome,
   productionHome,
   testHomeProblem,
   TRUSTED_TEMP_PREFIXES,
@@ -326,8 +327,14 @@ const assertOnlyCondition1 = (home: string) => {
       `1's message too, but condition 2 ALSO matches it, so a mutation that kills condition 1 ` +
       `goes unnoticed. This assertion is what round 2 was missing.`,
   ).toBe(false)
+  // passwdHome(), not a direct userInfo() call: userInfo() throws on a
+  // container with no passwd entry for this uid (same trap testHomeGuard.ts's
+  // own passwdHome() docstring names), and this helper claims to mirror the
+  // fence's judgement — so it should fail the SAME way the fence does
+  // (falling back to homedir()) rather than crashing this assert alone with a
+  // bare, unactionable exception while the fence itself stays fine.
   expect(
-    isSamePathOrUnder(canon, canonicalizePath(userInfo().homedir)),
+    isSamePathOrUnder(canon, canonicalizePath(passwdHome())),
     `the "unsafe" home (${canon}) sits inside the real user's home (condition 3), which would ` +
       `be the same silent-backstop problem as condition 2 above.`,
   ).toBe(false)
@@ -339,6 +346,28 @@ const assertOnlyCondition1 = (home: string) => {
 }
 
 let unsafeWorldSeq = 0
+
+/**
+ * Removes every given path independently — `Promise.allSettled`, not
+ * `await a(); await b()`: one throwing (e.g. permission denied) must not
+ * strand a sibling, especially the /var/tmp half, which outlives a reboot.
+ *
+ * Failures are reported TOGETHER, not just the first one: a bare
+ * `for (…) if (rejected) throw r.reason` throws on the FIRST rejection and
+ * silently drops every reason after it — exactly backwards for a helper
+ * whose whole point is "don't let one failure hide another". If `/var/tmp`
+ * is the one left behind, its reason must survive alongside the other's.
+ */
+const cleanupPaths = async (paths: string[]) => {
+  const results = await Promise.allSettled(paths.map((p) => rm(p, { recursive: true, force: true })))
+  const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+  if (failures.length === 0) return
+  if (failures.length === 1) throw failures[0].reason
+  throw new AggregateError(
+    failures.map((f) => f.reason),
+    `${failures.length}/${paths.length} cleanup path(s) failed: ${paths.join(', ')}`,
+  )
+}
 
 const unsafeWorld = async () => {
   // The legitimate-temp half: a real mkdtemp under the real tmpdir(), so
@@ -365,15 +394,20 @@ const unsafeWorld = async () => {
   // unsafeHome ITSELF to be absent; the one precondition check in this file
   // (`existsSync` in "setSettings rejects…") is on a SUBpath (`join(unsafeHome,
   // '.openground')`), which stays absent regardless.
-  const unsafeHome = await mkdtemp('/var/tmp/og-fence-unsafe-')
-  const cleanup = async () => {
-    // Independent, not `await a(); await b()`: one throwing must not strand
-    // the other, especially the /var/tmp half, which outlives a reboot.
-    const results = await Promise.allSettled([
-      rm(tempOuter, { recursive: true, force: true }),
-      rm(unsafeHome, { recursive: true, force: true }),
-    ])
-    for (const r of results) if (r.status === 'rejected') throw r.reason
+  //
+  // Created in its OWN try/catch, separate from the steps below: this mkdtemp
+  // targets /var/tmp specifically (not the real tmpdir()), so an environment
+  // where /var/tmp does not exist or is not writable throws HERE — and at
+  // this point nothing has a handle on `tempOuter` yet to clean it up. Without
+  // this try/catch that throw escaped as a bare, un-actionable ENOENT/EACCES
+  // AND leaked `tempOuter` forever, breaking the "every precondition here
+  // fails loud and clean" contract every other case in this file follows.
+  let unsafeHome: string
+  try {
+    unsafeHome = await mkdtemp('/var/tmp/og-fence-unsafe-')
+  } catch (err) {
+    await cleanupPaths([tempOuter])
+    throw err
   }
   try {
     await mkdir(fakeTmp, { recursive: true })
@@ -385,7 +419,7 @@ const unsafeWorld = async () => {
         `what they test.`,
     ).toBe(true)
   } catch (err) {
-    await cleanup()
+    await cleanupPaths([tempOuter, unsafeHome])
     throw err
   }
   return {
@@ -403,7 +437,7 @@ const unsafeWorld = async () => {
       await writeFile(join(unsafeHome, dir, file), contents)
       return join(unsafeHome, dir)
     },
-    cleanup,
+    cleanup: () => cleanupPaths([tempOuter, unsafeHome]),
   }
 }
 

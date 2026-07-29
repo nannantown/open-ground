@@ -76,6 +76,9 @@
 | **滞留時計 `engine.reviewSeenAt`**(branch→初回目撃時刻・review を離れた瞬間に prune) | `src/lib/server/swarmOrchestrator.ts:1496`(型) / `:6765`(stamp+prune・`present` sweep と同じ場所) |
 | **delivery 判定 `defaultManagerDeliveryAt`**(心拍 / セッション JSONL / sub-agent JSONL の最新・描画は入れない) | `src/lib/server/swarmOrchestrator.ts:3024`(sub-agent 走査 :2931 / 卓の同定 `resolveManagerDesk` :2962 — presence と共用) |
 | **声かけゲート**(`presence === 'idle' \|\| (presence === 'active' && stalled)`) | `src/lib/server/swarmOrchestrator.ts:6965` |
+| **★通知チャネルの安全条件 `noticeDeliverable`**(純関数・生成中でない かつ 入力欄が空) | `src/lib/server/swarmOrchestrator.ts:3929`(画面モデルは `src/lib/claudeScreen.ts` の `isGenerating` :239 / `readInputBoxText` :159 — **変更せず利用**) |
+| **★通知の送信 `defaultNotifyManagerReady`**(ESC も Ctrl-U も送らない・1行1回) | `src/lib/server/swarmOrchestrator.ts:3957`(文面 `managerNoticeText` :3894 / ブランチ名の無害化 :3878) |
+| **★通知のキュー `engine.managerNotice`**(1枠・新しい方が勝つ・review が空なら破棄) | `src/lib/server/swarmOrchestrator.ts:1810`(型) / `:7870`(完了イベントの検出) / `:7998`(提示・蘇生反射より前) |
 | **engine ON で滞留時計を捨てる**(OFF だった時間は「統合待ち」に数えない) | `src/lib/server/swarmOrchestrator.ts:7825`(`startOrchestrator`) |
 | エコー割引の窓 `STALL_ECHO_GUARD_MS=30_000`(nudge と spawn の**両方**の書き込みに掛かる) | `src/lib/server/swarmOrchestrator.ts:312`(算出は :5902) |
 | **蘇生反射の3ガード**(idle の boot grace / idle の refund ゲート / spawn 時の証明クリア) | `src/lib/server/swarmOrchestrator.ts:5930`(grace) / `:5960`(`provenSinceWake !== false`) / `:6067`(spawn 時 false) |
@@ -187,6 +190,64 @@ twin を作らないことを実 PTY で固定)。
 > session id が上書きされて**動いていた卓が孤児化**した(実測: 本体 repo cwd に idle な claude
 > 16 本滞留)。同一 repo に dispatcher が複数生まれる危険=2026-07-15 の並行統合事故と同型。
 
+> **★2026-07-27 — 「worker が終わった」を伝える道を作った(本節で2番目に大きい変更)。**
+> それまで **この製品には「worker 完了 → 司令官に伝える」専用の経路が無かった。** 代わりに
+> 使われていたのが下の蘇生反射で、これは review 列を**状態**として眺め(「溜まっている」)、
+> **司令官がハングしていないか疑う**装置である。つまり通知を事故検知装置に兼務させていた。
+> 帰結は3つとも設計どおりで、どれも通知には向かない:
+> - **完了イベントを持たない** — 「今 ready になった」瞬間を誰も受け取らない
+> - **疑わしいときしか動かない** — 健全な司令官には触らない(= 正常時ほど伝わらない)
+> - **急がない** — 事故検知が目的なので4本のゲートが直列している
+>
+> **実測(2026-07-27)**: worker が review へ昇格 00:05:47 → 声かけが届いた 00:44:20 =
+> **38分33秒**。全部仕様どおり。オーナーが手で「状況」と打つのが最短、という状態だった。
+>
+> **ゲートを短くするのは禁止**(2026-07-18 の事故の再発)。声かけの実体は **先頭に ESC**
+> を送るので、打ちかけの入力を消し生成中なら中断する —— **この破壊性が4本のゲートの根拠**
+> である。だから短くするのではなく、**壊さない別の道**を足した:
+>
+> **通知チャネル(`defaultNotifyManagerReady`)** — 蘇生とは別の seam・別の関数・別の呼び出し位置。
+> - **トリガは状態でなくイベント**: `reviewSeenAt` にブランチが**初めて**載った pass が
+>   「worker が今 ready になった」瞬間そのもの。そこで `engine.managerNotice` に積む。
+> - **ゲートは時間でなく画面**: `noticeDeliverable(screen)`(純関数)が次の3つ**全部**を
+>   満たすときだけ true。
+>   **①生成中でない**(`isGenerating` — ctx ゲージの手動 /compact が本番で使っている同じ判定)
+>   **②入力欄が空**(`readInputBoxText(screen) === ''`)。
+>   **`null`(入力欄が読めない=起動中/描画途中)は「空」ではない** —— 証拠が無いので書かない。
+>   **③メニューが出ていない**(`detectMenu(screen) === null` — 端末プールが `menuOpen` に
+>   使っているのと同じ検出器)。**選択肢が出ている間、キー入力は「選択」であって発言ではない** ——
+>   1行+CR は**カーソル位置の項目を確定してしまう**。①②を満たしたまま害を為せる唯一の経路。
+> - **ESC も Ctrl-U も送らない。** ②が ESC の代わり。打ちかけがあるなら書かずに待つ
+>   (ESC を送らない以上、書けば打ちかけと連結して submit されてしまう)。
+> - **1行1回だけ書く。** ブランチ名はカード由来=**外部データ**なので制御文字を除去してから
+>   打つ(生 CR が混ざると早期 submit されて残りが別プロンプトとして走る。司令官卓は
+>   `--dangerously-skip-permissions` なので承認ゲートが無い)。
+> - **落とさない(B)**: 送れなかった通知は**捨てずに積んだまま**、毎 pass 再提示する。
+>   だから生成中に ready になっても、**生成が終わった次の周回(15秒)で届く**。
+>   **キューは1枠・新しい方が勝つ**(溜め込むと卓が空いた瞬間に何行も撃ち込むことになる)。
+> - **予算もスロットルも無い** — 持てない代わりに**害を為せない**(上の2条件を満たす卓にしか
+>   書かない)。review が空になれば未送の通知は**破棄**する(古い報せを後から届けない)。
+> - **自分の書込みは presence のエコー割引に入れる**(`rs.lastNoticeAt`)。入れないと
+>   通知が固まった卓を「生きている」に化けさせ、nudge 予算を定期的に払い戻して**蘇生ガードを
+>   無音で退役させる** —— nudge / spawn と同じ罠(下の echoUntil の囲み)。
+> - **4本のゲート(10分/5分/10分/3回)は蘇生経路のまま一切変えていない。**
+>
+> **前提の実測(2026-07-27・本番サーバ 0.11.37)。** `isGenerating` は worker 卓では実証済み
+> だったが**司令官卓では未検証**だったので、卓に一切書き込まずに測った(SSE `init` の replay を
+> headless xterm に再生し、本番と同じ `readScreen` に通す — `scripts/probe-desk-screen.mts`)。
+>
+> | 卓 | 状況 | `isGenerating` | 標本 |
+> |---|---|---|---|
+> | 司令官卓 | ターン終了で待機 | **false** | 50 |
+> | 司令官卓 | 生成中 | **true** | 10 |
+> | 捨て卓 | 日本語を未送信で入力中(1行) | **false** | 1 |
+> | 捨て卓 | 同・入力欄が3行に折り返し | **false** | 1 |
+> | 捨て卓 | 入力欄に `esc to interrupt` を打鍵 | **false** | 1 |
+>
+> 最後の1行が効いている理由: `isGenerating` は**入力欄より下(フッター領域)しか読まない**ので、
+> 会話や入力欄に同じ文言が現れても busy に化けない。日本語が false になるのは正しい —— だから
+> こそ①だけでは足りず、**②の入力欄チェックが要る**(日本語を打ちかけの卓は「生成中でない」)。
+
 今の B相は:
 
 ```
@@ -200,7 +261,17 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
                                    戻す(2026-07-22・カード add3af4c)=「起こした卓が無いので
                                    一過性/永続の判定材料も無い」既定。ここを1つでも落とすと前
                                    エピソードの卓の評判(=次の give-up 判定)を次バッチが引き継ぐ)
-                                   して return(仕事無し=蘇生しない)
+                                   して return(仕事無し=蘇生しない。★2026-07-27 追加:
+                                   未送の managerNotice もここで破棄 — 古い報せを後から届けない)
+★2026-07-27 通知チャネル(蘇生反射より前・presence を読む前・どのゲートの外側)
+  reviewSeenAt に初めて載ったブランチがある? ─Yes→ engine.managerNotice に積む(1枠・新しい方が勝つ)
+  managerNotice が在る? ─Yes→ notifyManagerReady を毎 pass 提示
+      卓の画面が noticeDeliverable?(生成中でない かつ 入力欄が空 —— null は空でない)
+        ├ Yes → 1行+CR を書く(**ESC も Ctrl-U も送らない**)・managerNotice=null・
+        │        rs.lastNoticeAt=now(下の echoUntil に入る)・info ログ
+        └ No  → **何も書かず積んだまま**(次 pass = 15秒後に再提示 = 生成終了の直後に届く)
+  (ここは健全な卓にこそ届ける道。下の蘇生反射は active な卓から即 return するので、
+   通知をそちらに載せていた頃は「正常な司令官ほど伝わらない」が起きていた=38分33秒)
 司令官の卓は今どの状態?(managerPresence・now 注入)
   ★2026-07-22 追加: presence とは別に「統合待ちストール」も測る(下の ⚠ 死角を参照)。
     stalled = 最古の review カードが 40分以上待っている(engine.reviewSeenAt・in-memory)
@@ -217,8 +288,8 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
   │     stallLogged=false・nudgeRearmed=false にして return(provenSinceWake は上で設定済み)
   │     (反射 disarm・二重起動しない。lastNudgeAt は残すので直後の再沈黙は throttle が効く)
   (presence を読む時、こちらが書いたものの エコーは割り引く —
-   echoUntil = max(lastNudgeAt, lastWakeAt) + STALL_ECHO_GUARD_MS(30秒)。
-   nudge も spawn も PTY への書き込みで、どちらもエコーで lastOutputAt を上げる
+   echoUntil = max(lastNudgeAt, lastWakeAt, lastNoticeAt★2026-07-27) + STALL_ECHO_GUARD_MS(30秒)。
+   nudge も spawn も 通知 も PTY への書き込みで、どれもエコーで lastOutputAt を上げる
    (spawn は launchClaude が起動コマンドを writeInput するため・claudeTerminal.ts:544)。
    割り引かないと nudge→エコー→active→予算 0 復帰→nudge… の無限ループ(§7-10)や、
    起動即死の卓が active に化けて蘇生ガードが死ぬ(§7-12)。割引対象は PTY 描画のみで、

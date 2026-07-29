@@ -137,8 +137,15 @@ export const isSamePathOrUnder = (candidate: string, root: string): boolean => {
  * without `userInfo` (editorDetect.test.ts does this), or a container with no
  * passwd entry. Falling back is fine: it lands on the previous behaviour rather
  * than on "no baseline at all".
+ *
+ * Exported ONLY so testHomeGuard.test.ts can call the same safe accessor
+ * instead of reaching for the raw, throwing `userInfo()` directly (same
+ * reasoning as the `TRUSTED_TEMP_PREFIXES` export above) — read-only data for
+ * the test to reuse, not a seam for it to branch on. The fence's own
+ * judgement (testHomeProblem below) still resolves everything itself; this
+ * export changes nothing about what gets refused.
  */
-const passwdHome = (): string => {
+export const passwdHome = (): string => {
   try {
     const info = typeof userInfo === 'function' ? userInfo() : null
     const h = info?.homedir

@@ -27,7 +27,7 @@
 
 ## 0. 結論サマリ
 
-**判定: 現状の配布物は「一般ユーザーに safe by absence」— swarm は owner gate(+ 明示ローカル解錠 `swarmGate.ts`)で既定到達不能なので、今日リリースしても一般ユーザーに swarm 事故は起きない(= [RELEASE_READINESS_GOALS §1 前提の確認](RELEASE_READINESS_GOALS.md)と一致)。しかしゲートを開いた瞬間に成立しない開発者環境前提が複数ある** — 🔴 は 4 件: 心拍の `~/.claude/swarm-beat.sh` 依存(A-1/NEW-4 — 全 OS の非開発者で自律ループが完走しない)、プラン別モデル可用性の未検知(M-1/NEW-1 — Pro プランで worker 滞留ループ)、CLI 最低バージョン検査ゼロ(C-1/NEW-2)、L4 guard の Windows 実効性未実測(P-3/NEW-3)。全台帳は §4。
+**判定: 現状の配布物は「一般ユーザーに safe by absence」— swarm は owner gate(+ 明示ローカル解錠 `swarmGate.ts`)で既定到達不能なので、今日リリースしても一般ユーザーに swarm 事故は起きない(= [RELEASE_READINESS_GOALS §1 前提の確認](RELEASE_READINESS_GOALS.md)と一致)。しかしゲートを開いた瞬間に成立しない開発者環境前提が複数ある** — 🔴 は 4 件: 心拍の `~/.claude/swarm-beat.sh` 依存(A-1/NEW-4 — 全 OS の非開発者で自律ループが完走しない。**※2026-07-28: この 1 件目は前提が陳腐化** — スクリプトは boot 時に自己配備されるので残る依存は bash のみ。§1.4 A-1 の追記参照・🔴 件数の再評価は未実施)、プラン別モデル可用性の未検知(M-1/NEW-1 — Pro プランで worker 滞留ループ)、CLI 最低バージョン検査ゼロ(C-1/NEW-2)、L4 guard の Windows 実効性未実測(P-3/NEW-3)。全台帳は §4。
 
 **セキュリティ厳格な業務利用の可否**(§5 に詳細): データフローは「ローカル完結 + 唯一の LLM egress は claude CLI 自身」で、業務コードが第三者 SaaS に送られる経路は swarm 固有には無い(§2.3 — engine の fetch 全 6 箇所が loopback)。ログイン不可環境にはローカル解錠([SECURITY.md](SECURITY.md))が既にある。判断点は (a) カード内容が claude transcript(`~/.claude/projects/`)と argv に平文で出る(§2.2 — ディスク暗号化とシングルユーザーマシン前提)、(b) 可用性の開発者前提(上記 🔴)。**結論: owner 個人の道具としては利用可・組織向け一般開放は 🔴 解消まで不可。**
 
@@ -83,6 +83,8 @@
 3. **ready の単一ソース**: `swarmOrchestrator.ts:985` `const ready = probe.heartbeat?.ready === true`、`:2353` `j.readyToMerge === true`、`swarmWorkerRegistry.ts:197/235/255` — worker の「統合可」は heartbeat ファイルの `readyToMerge` **のみ**から判定される。
 
 **縮退の程度**: 生存判定は PTY 出力(`lastOutputAt`)で代替される(`swarmOrchestrator.ts:5960-5978` — total silence subsumes never-beat)ので「即死」ではない。しかし worker が完了しても ready が永遠に立たず、**カードは doing に滞留 → 実行時間上限で強制回収**が既定の結末になる。**verdict: breaks / severity: critical**。[RELEASE_READINESS_GOALS §3.3](RELEASE_READINESS_GOALS.md) は Windows worker の心拍手段としてのみ言及(GAP-8 に包含)しているが、**macOS の一般ユーザーにも同じ穴が開く**(スクリプトを持っているのは開発者だけ)— GAP-8 のスコープを「全 OS の非開発者環境」に広げるべき。
+
+**⚠ 2026-07-28 追記(GAP-8 カードでの確認 — 前提①は陳腐化)**: 上記 1. の「このスクリプトは開発者マシンの私物(OPEN GROUND は配布しない)」は**もう成り立たない**。`swarm-beat.sh`(+ `openground-swarm-lib.sh` / `/order` / `/supply` スキル)は **boot 時にアプリが `~/.claude/` へ自己配備する** — `installSwarmTooling()`(`src/lib/server/swarmToolingInstall.ts:73` に `swarm-beat.sh` の配備先定義)を `server/index.ts:212` が起動シーケンスで呼び、実体は electron-builder の `build.files`(`package.json:104`)で配布物に同梱済み。よって**「スクリプトを持っているのは開発者だけ」を根拠とする macOS 一般ユーザーの穴は塞がっている**(= NEW-4 の対処案のうち「guard 同様の自己インストール」が実装された形)。残る依存は **bash そのもの**(bash の無い素の Windows)だけで、verdict: breaks / critical はその範囲でのみ有効。**未追随(本カードの範囲外・再評価は別カード)**: §0 の「🔴 は 4 件」1 件目の説明・§4 の NEW-4 行・§5 の可用性行。
 
 **A-2 — guard は自己インストール(ok・ただし開示事項)**: L4 guard は swarm-beat.sh と違い**アプリが自己インストール**する: `hooksInstall.ts` が `scripts/openground-guard.js` を `~/.openground/guard/` にコピー(sandbox プロファイルが write-deny する場所)し、**ユーザーの global `~/.claude/settings.json` に PreToolUse hook を upsert**(バックアップ `settings.json.openground.bak` 作成)。in-app 経路の依存としては健全だが、「アプリがユーザーのグローバル claude 設定を書き換える」行為自体は GA 時の開示事項(hook は `OPENGROUND_GUARD=1` セッション以外 no-op なので通常の claude 使用への影響はゲート済み — guard ヘッダの WORKER-ONLY gate)。
 
@@ -178,7 +180,7 @@ swarm 実装ファイル群(swarm*.ts + server/routes/swarm.ts)の外向き通�
 | **NEW-1** | 🔴 | プラン別モデル可用性の検知機構なし(§1.1 M-1)。Pro プランで fable dispatch → probe/sensor とも素通り → worker 滞留ループ | `claudeConnection().plan` を ladder 初期 mask に反映(pro ⇒ fable OFF 等)or プラン拒否文言を probe の wall 判定に追加。**先行して Pro アカウント実測カード**(拒否の実文言確定)が必要 |
 | **NEW-2** | 🔴 | claude CLI の最低バージョン検査ゼロ + `--remote-control` 常時 ON(§1.2 C-1)。古 CLI で worker 即死 | swarm 有効化/worker spawn 前に `claude --version` を検査し、最低要求版未満は spawn 拒否 + 明示エラー(fail-closed)。最低要求版を docs に明記 |
 | **NEW-3** | 🔴(Win) | L4 guard の PowerShell 構文対応が未実測 — 「全 block」か「veto すり抜け」か不明(§1.6 P-3)。すり抜けなら不変条件 E が Windows で無効 | [RRG §4.3](RELEASE_READINESS_GOALS.md) の Windows 実機 QA 8 項(push block 確認)に「**PowerShell 固有構文での evasion 試行**(`&` call operator / `Invoke-Expression` / `-EncodedCommand` 等)」を追加し、block されることを確認 — されないなら Windows swarm は L4 成立まで封印 |
-| **NEW-4** | 🔴 | worker 心拍手段が開発者私物 `~/.claude/swarm-beat.sh` のみ — **全 OS の非開発者**で自律ループが完走しない(§1.4 A-1)。GAP-8 は Windows の問題として扱うが実際は全員 | in-app 心拍経路の新設(例: `POST /api/swarm/beat` + worker プロンプトへの curl/組込コマンド指示、または guard 同様の自己インストール)。非開発者 HOME での worker 1 巡 E2E が緑 |
+| **NEW-4** | 🔴 | worker 心拍手段が開発者私物 `~/.claude/swarm-beat.sh` のみ — **全 OS の非開発者**で自律ループが完走しない(§1.4 A-1)。GAP-8 は Windows の問題として扱うが実際は全員 | in-app 心拍経路の新設(例: `POST /api/swarm/beat` + worker プロンプトへの curl/組込コマンド指示、または guard 同様の自己インストール)。非開発者 HOME での worker 1 巡 E2E が緑。**※2026-07-28: 対処案のうち「guard 同様の自己インストール」は実装済み**(`swarmToolingInstall.ts:73` + `server/index.ts:212` の boot install・`package.json:104` で同梱) — 「私物なので持っていない」前提は消え、残る未解決は **bash 依存のみ**。🔴 の格付け自体が要再評価(§1.4 A-1 の 07-28 追記) |
 | **NEW-5** | 🟡 | worker セッションの git commit が ambient identity 依存(§1.3 G-2) | worker spawn env に `GIT_COMMITTER/AUTHOR_*` fallback を注入(engine 側 G-1 と同型)し、identity 未設定 HOME での worker commit 成功をテスト固定 |
 | **NEW-6** | 🟡(Win) | node_modules symlink が Windows で失敗 → 完了ゲート(npm test/tsc)が回らず品質フロアが静かに縮退(§1.6 P-2) | Windows は junction(`symlink(…, 'junction')`)へ fallback。失敗時は worker プロンプトに「検証ゲート不可」を明示注入して silent 縮退を殺す |
 | **NEW-7** | 🟢 | quota/rate-limit 検知が CLI 英語文言に密結合(§1.1 M-4 / C-5)— CLI 改版で保護が黙って消える | リリースチェックリストに「CLI 更新時の refusal 文言再実測」を追加([RRG §4.1](RELEASE_READINESS_GOALS.md) への追記提案) |
@@ -200,7 +202,7 @@ swarm 実装ファイル群(swarm*.ts + server/routes/swarm.ts)の外向き通�
 | 機密のディスク残留 | △ 条件付き | escalation 系は 0600/0700 で自衛(§2.1)。ただしカード内容は claude transcript(`~/.claude/projects/`)に平文残留 + argv 可視(§2.2)— **FileVault 等のディスク暗号化とシングルユーザーマシンが前提条件** |
 | 認証・到達制御 | ⭕(2 経路) | 既定 = Supabase owner gate(fail-closed・オフライン初回は 'none')。ログイン不可の業務環境には **swarm ローカル解錠**(`swarmGate.ts` — settings.json 手編集/env、UI なし・HTTP 設定不能・swarm 限定)が 2026-07-14 に正典化済み — 詳細は [SECURITY.md](SECURITY.md) が正 |
 | 暴走時の機械的ガード | ⭕(macOS)/ ❓(Win) | L4 guard(worker 限定・fail-closed 配線・本監査中に実発火を観測 §2.5)+ macOS は overseer-brain に L3。Windows は L4 単層(GAP-7)かつその L4 自体が未実測(NEW-3) |
-| 可用性(プラン/CLI 依存) | ✖ 現状 | Max プラン + 新しめ CLI + `~/.claude/swarm-beat.sh` 保有(= 開発者)以外では自律ループが完走しない(NEW-1/2/4) |
+| 可用性(プラン/CLI 依存) | ✖ 現状 | Max プラン + 新しめ CLI + `~/.claude/swarm-beat.sh` 保有(= 開発者)以外では自律ループが完走しない(NEW-1/2/4)。**※2026-07-28: 「保有」条件は解消済み**(boot 時に自己配備 — §1.4 A-1 追記) — 残るのは bash の有無(bash の無い素の Windows)と NEW-1/2 |
 
 **条件付き利用の最小条件**(今日、リスクを理解した組織が owner 運用する場合): macOS + FileVault + シングルユーザーマシン + Max プラン + 最新 claude CLI + selfSupply は arm しない + 人手前提の統合運用は `[hold]` prefix で(autoMerge は 2026-07-16 廃止 — engine は push せず、統合は司令官。無人 land を避けたいカードはタイトル先頭 `[hold]` で承認待ちに)+ 機密カードを swarm に流さない運用規律。
 

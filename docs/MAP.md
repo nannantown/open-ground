@@ -137,6 +137,14 @@
   (dispatch pass 末尾)・`resumeEngines()` の**照合先行・spawn 凍結**(`reconcileRoster` を dispatch
   前に await)。boot 分類 4 分岐 = worktree 消滅 / ready / 作業途中(resume 候補) / カード消滅。
   実際の `--resume` 会話復元は card 4(未着手)。設計正典 = `docs/ENGINE_PERSISTENCE_PLAN.md` §3/§4-3
+- **「worker が完了した」を司令官へ伝える道は蘇生反射とは別**(2026-07-27・`swarmOrchestrator.ts`)。
+  トリガ = `reviewSeenAt` に**初めて**載った瞬間(= 完了イベント)、キュー = `engine.managerNotice`
+  (1枠・新しい方が勝つ・review から消えたブランチは prune)、送信 = `defaultNotifyManagerReady`。
+  **送信可否は時間でなく画面** — `noticeDeliverable`(生成中でない・入力欄が空・メニューが出ていない。`isGenerating` /
+  `readInputBoxText` = `src/lib/claudeScreen.ts`)。**ESC も Ctrl-U も送らない**ので打ちかけを壊さない。
+  ⚠ **蘇生の nudge(`defaultNudgeManager`)と混同しない** — あちらは ESC を先に送る破壊的な操作で、
+  4本のゲート(10分/5分/10分/3回)はその破壊性の代償。ここを「遅いから」と短くするのは
+  2026-07-18 の事故(生きた卓を3回蘇生し誤 fatal)の再発。正典 = commander/03 §2.3
 - **stall 判定の生存チャネルは 4 本**(すべて `swarmOrchestrator.ts` 内。①心拍 ②PTY 出力
   ③transcript/sub-agent mtime = `sessionAgentActivityAt`(2026-07-23) ④**実行中の背景タスク** =
   `sessionBackgroundTaskAt`(2026-07-27)。畳み込みは `lastActivityMs` / `classifyStall`、上限は
@@ -358,11 +366,15 @@
   tmpdir 配下でなければ **throw(読み取りも例外にしない)**。homedir アンカーの `hooksInstall.ts`
   (`guardedHomedir`)だけは構造的に choke point 外なので同じ fence をミラー。pin と犯人特定 =
   `src/test/setup-home.ts`(+ `setup-dom.ts` / `registerProject.ts`)。回帰 = `testHomeGuard.test.ts`
+  **落とし穴 — `tmpdir()` の実体が OS で違う**: `tempRoots()` は非 win32 で `/tmp` を
+  ハードコードで足すので、Linux(CI)では「実 tmp の中に建てた不安全ホーム」が安全と判定され、
+  macOS(`/var/folders/…`)でだけ緑になる。temp まわりの teeth は必ず `TMPDIR=/tmp` でも回すこと
+  (7 リリース分 CI で赤のまま気づかれなかった実績 — [07 章 §4.15](commander/07-test-isolation-contract.md))
 - **作業ツリー隔離**(守る対象が違う): `src/test/repoRootFence.ts`(`setup-home.ts` が装着)。
   毎テスト後に repo 直下を listing 比較し、`.gitignore` が覆わない新規エントリで落とす —
   dirty ツリーは swarm 統合を止めるため。repo 直下に throwaway を作ってよいのは
   `REPO_PROBE_PREFIX`(= `.og-fence-probe-`・同 file が単一宣言)配下のみ
-- **静的ガード = `src/testHomeEnvGuard.test.ts`**(fence とは別レイヤの再発防止 sweep・51 件)。
+- **静的ガード = `src/testHomeEnvGuard.test.ts`**(fence とは別レイヤの再発防止 sweep・52 件)。
   ①home var の unset 復活 ②`~/.openground` の第2解決式 ③**`~/.claude` アンカー 38 件の
   常設インベントリ**(tier = fenced / read-only / writes-elsewhere・各主張をソースから毎回検証。
   新しいアンカーは UNDECLARED で赤)。**列挙は 1 本**(`repoSourceFiles` → 拡張子判定は

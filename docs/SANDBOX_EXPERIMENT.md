@@ -23,7 +23,10 @@ Settings → **Advanced** → **Experiments** → **Sandbox Claude (macOS)** →
 (The Experiments section is invisible to non-owners — see *Gating* below.)
 
 Off-darwin the toggle still persists but `launchClaude` no-ops it, so nothing
-changes.
+changes — **on Windows there is no L3 at all**, by decision (2026-07-27), and
+containment falls to the single L4 layer. See *[Windows — there is no L3
+here](#windows--there-is-no-l3-here-accepted-single-layer-l4-2026-07-27)* below;
+that section is the honest accounting of what a Windows install does not get.
 
 ---
 
@@ -584,6 +587,118 @@ the mkdir merely failed, so preconditions are built **unsandboxed** (as the gitd
 rows already did); and `TrustSettings.plist` is **absent** on the dev machine, so
 it can only be exercised against a fake-home stand-in — the same blind spot that
 let the legacy-`metadata.keychain` gap through in the first place.
+
+---
+
+## Windows — there is no L3 here (accepted: single-layer L4, 2026-07-27)
+
+**Decision (2026-07-27): do not build a Windows L3. Accept that Windows
+containment is single-layer L4, and say so out loud.** This is GAP-7 in
+[RELEASE_READINESS_GOALS.md §5](RELEASE_READINESS_GOALS.md), and it is an
+*accepted* gap, not a fixed one — it is disclosed (GAP-10) and it must be
+re-decided if swarm is ever opened past the owner (GAP-1).
+
+Everything else in this document is macOS-only. On Windows the `claude` OPEN
+GROUND launches — an interactive swarm worker, or the overseer brain — gets
+**no OS-level confinement whatsoever**. What is left:
+
+- **L4, the deterministic PreToolUse guard** (`scripts/openground-guard.js`,
+  [invariant E](SWARM_SAFETY_INVARIANTS.md)) — installed on Windows too
+  (`hooksInstall.ts` handles the win32 quoting) and there the *only* mechanical
+  stop. Installed, not proven: see the unmeasured-lexer note below.
+- Structural constraints that are not a sandbox: the engine has no trunk push
+  path at all, the brain gets no repo (fresh empty scratch cwd, READ-ONLY
+  prompt, `--disallowed-tools`), worktree teardown cannot cross the central
+  dir.
+
+**What "single-layer" means, concretely.** The guard's own header is honest
+about the holes it cannot see — a `git` alias already sitting in the user's
+`~/.gitconfig`, a command reached from a live process the hook never observes.
+On macOS such a hole *can* still land on the kernel: for a worker whenever this
+experiment is on, and for the overseer brain regardless of the owner experiment
+(`brainSandboxAvailable()` — darwin **and** `/usr/bin/sandbox-exec` present;
+Apple removing it is the one future that probe guards, and arming the overseer
+without it surfaces `sandboxWarning`). Then the write outside `cwd` is denied,
+`~/.ssh` is unreadable, and the brain reaches the network only through the
+loopback allowlist proxy.
+
+Be exact about the size of that delta, in both directions — L3 is **not** a
+read-jail even on macOS (reads stay broad except the re-denied secret stores,
+and the login keychain is *deliberately* reachable — see *Security model &
+honest limits* above). What a Windows install loses is precisely: **write
+confinement, the secret-store read denials, and the brain's egress close.** What
+it does *not* lose, because macOS never had it either, is protection of ordinary
+files from being read. **On Windows that same guard hole is the end of the line,
+and there is no toggle that would change it.** A runaway worker there
+can read the whole user profile (`%USERPROFILE%\.ssh`, cloud credential files,
+the browser credential stores — see *Browser credential stores* above) and write
+anywhere the user can; the brain gets no structural egress close, so only its
+prompt, its tool mask, and L4 sit between it and the network. The one existing
+in-product signal for this: arming the overseer on a host where
+`brainSandboxAvailable()` is false returns `sandboxWarning:true`
+(`server/routes/swarm.ts`) — the reduced containment is surfaced, not hidden.
+
+Worse, that single layer is **itself unmeasured on Windows**. Per
+[SWARM_GA_AUDIT.md](SWARM_GA_AUDIT.md) NEW-3 / P-3 (which grepped the 2055-line
+guard and found **zero** win32/PowerShell branches), it is a POSIX lexer, so
+under a PowerShell worker it either fail-closed-blocks everything (worker cannot
+progress) or parses PowerShell as something else and lets constructs through
+(invariant E silently holed) — and which of the two has never been observed on
+real hardware. So the honest statement is not "one layer instead of two" but
+**"one layer instead of two, and that one is unverified on this OS."** Measuring
+it is [RELEASE_READINESS_GOALS §4.3](RELEASE_READINESS_GOALS.md)'s Windows QA
+job, not this card's.
+
+**Why we are not implementing it.** A cost judgement — not a claim that Windows
+lacks isolation primitives:
+
+- Windows **does** have **AppContainer isolation** (credential / device / file /
+  network / process / window isolation, least-privilege by default). But it is
+  an **API, not a wrapper command**: you create a per-user, per-app profile with
+  capability SIDs via `CreateAppContainerProfile` (`userenv.h` / `Userenv.dll`,
+  Windows 8+ desktop apps) and then launch into the returned AppContainer SID.
+  There is no documented `sandbox-exec` equivalent — nothing to prepend to an
+  argv. macOS L3 is *exactly* one prepended argv (`wrapWithSandboxExec` →
+  `/usr/bin/sandbox-exec -f <profile>`, `sandbox.ts`); the Windows equivalent
+  means new native machinery on the spawn path (node-pty / ConPTY), a
+  hand-authored capability set, and a second profile language to keep in sync
+  with the SBPL one — new mechanism, from design.
+- **Job objects are not a sandbox either** — the other primitive GAP-7 named. A
+  job object groups processes and enforces *resource* limits (working set,
+  priority, CPU rate, end-of-job time), UI restrictions, accounting, and
+  `TerminateJobObject`. It carries **no filesystem / registry access confinement
+  and no credential isolation**, and since Vista security limits must be set
+  per-process rather than job-wide. It would help *kill* a runaway process tree
+  — it would not stop that tree from reading `~/.ssh`, which is the L3 job.
+- **Windows Sandbox is not a substitute.** It is a Hyper-V–based disposable VM:
+  Pro / Enterprise / Education editions only (**not Home**), one instance at a
+  time, host-installed software is absent inside it, and all state is discarded
+  on close. N parallel workers, each needing the user's actual repo and the
+  user's own `claude` install, do not fit that shape.
+- The population being protected is **one machine**. Everything that would be
+  confined (swarm workers, overseer brain) is reachable only through the
+  owner-only hidden `swarm` experiment (+ the explicit, UI-less local unlock in
+  `swarmGate.ts`). General users have no path to it, so the real exposure today
+  is the owner's own host, with the owner watching. New native machinery for
+  that population does not earn its cost.
+
+**Re-evaluation trigger (do not lose this).** The acceptance rests entirely on
+"nobody but the owner can reach it". When GAP-1 — the gate model that opens
+swarm to general users — is designed, this decision is one of its inputs and
+**must be decided again**: a general Windows user running unattended workers
+would have one (unverified) layer where a macOS user has two. Opening swarm on
+Windows without either implementing L3 or measuring L4 there would ship the
+weaker half silently.
+
+【一次資料】 Microsoft Learn: *AppContainer isolation*
+(`learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation`,
+ms.date 2025-07-08) · *CreateAppContainerProfile function (userenv.h)*
+(`learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-createappcontainerprofile`,
+ms.date 2024-11-26) · *Job Objects*
+(`learn.microsoft.com/en-us/windows/win32/procthread/job-objects`,
+ms.date 2025-07-14) · *Windows Sandbox*
+(`learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/`,
+ms.date 2026-03-29). Retrieved 2026-07-28.
 
 ---
 

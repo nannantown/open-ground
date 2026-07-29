@@ -26,12 +26,34 @@ import { ensureOpenGroundHome, swarmQuotaFile } from './paths'
 // A single FIXED injected clock — every function takes `now`, so nothing here
 // touches the wall clock and each case is fully deterministic (Done ④). The
 // cooling-table cases use absolute `until` values (markCoolingUntil) so they are
-// timezone-independent; only the bare-clock label parsing is asserted by
-// PROPERTY (>= now, within 24h) since setHours resolves in local time.
+// timezone-independent.
 const NOW = 1_700_000_000_000
 const SEC = 1000
 const MIN = 60_000
 const HOUR = 3_600_000
+
+/** `NOW` pinned to a LOCAL wall-clock hour — the bare-clock cases below must be
+ *  built from this, never from the raw `NOW`.
+ *
+ *  `parseResetLabel`'s bare-clock branch resolves through `setHours`, i.e. in
+ *  the RUNNER's timezone, so "is 3pm later than NOW?" has a different answer per
+ *  timezone: `NOW` is 07:13 in Asia/Tokyo (3pm still ahead) but 22:13 in UTC
+ *  (3pm long gone). While the branch rolled a passed clock forward a day the
+ *  answer was always "a future time" and the difference stayed invisible — the
+ *  2026-07-29 change to return null instead (a passed bare clock means the SCREEN
+ *  IS STALE, see swarmQuota.ts) made it visible as 3 tests that were green on the
+ *  author's machine and red on CI. The label was the TZ-dependent part all along,
+ *  not the assertion.
+ *
+ *  Anchoring `now` to local noon removes the dependency for real: 3pm is two
+ *  hours later and 9am two hours earlier IN EVERY TIMEZONE, because both sides of
+ *  the comparison are now expressed in the same local frame. */
+const atLocalHour = (hour: number): number => {
+  const d = new Date(NOW)
+  d.setHours(hour, 0, 0, 0)
+  return d.getTime()
+}
+const LOCAL_NOON = atLocalHour(12)
 
 // The cooling table lives on globalThis (shared across the process), so reset it
 // between cases to stay order-independent.
@@ -148,15 +170,33 @@ describe('parseResetLabel — relative / bare-clock / absolute, clock injected',
     expect(parseResetLabel('in 2 hours', NOW)).toBe(NOW + 2 * HOUR)
   })
 
-  it('bare clock ⇒ a future time within 24h (property — TZ-independent)', () => {
-    const t = parseResetLabel('3pm', NOW)
+  it('a bare clock STILL AHEAD today ⇒ that time today (property — TZ-independent)', () => {
+    // 3pm against local noon — ahead in every timezone (see LOCAL_NOON).
+    const t = parseResetLabel('3pm', LOCAL_NOON)
     expect(t).not.toBeNull()
-    expect(t!).toBeGreaterThan(NOW)
-    expect(t!).toBeLessThanOrEqual(NOW + 24 * HOUR)
+    expect(t!).toBeGreaterThan(LOCAL_NOON)
+    expect(t!).toBeLessThanOrEqual(LOCAL_NOON + 24 * HOUR)
+  })
+
+  it('a bare clock ALREADY PASSED today ⇒ null (stale screen, NOT tomorrow)', () => {
+    // The other half of the 2026-07-29 rule, and the half with no coverage before
+    // (the old branch rolled forward a day, so this could not be observed). A
+    // worker's PTY keeps showing "resets at 3pm" at 3:10pm — reading that as
+    // tomorrow-3pm parked the tier for ~23h and mirrored the figure to disk.
+    // null lets resolveCoolingUntil fall through to A5 / the flat grace instead.
+    expect(parseResetLabel('9am', LOCAL_NOON)).toBeNull()
   })
 
   it('different clocks give different times', () => {
-    expect(parseResetLabel('3pm', NOW)).not.toBe(parseResetLabel('3am', NOW))
+    // Both must be AHEAD of the injected clock, else one is null by the rule
+    // above and this compares nothing: anchor at local midnight-plus-one so 3am
+    // and 3pm are both still to come today, in every timezone.
+    const earlyMorning = atLocalHour(1)
+    const pm = parseResetLabel('3pm', earlyMorning)
+    const am = parseResetLabel('3am', earlyMorning)
+    expect(pm).not.toBeNull()
+    expect(am).not.toBeNull()
+    expect(pm).not.toBe(am)
   })
 
   it('absolute ISO ⇒ Date.parse', () => {
@@ -191,13 +231,25 @@ describe('extractPtyResetUntil — pull a reset time out of a claude screen', ()
   })
 
   it('absolute "limit resets at 3pm (Asia/Tokyo)." ⇒ future within 24h', () => {
+    // LOCAL_NOON, not NOW: this reaches parseResetLabel's bare-clock branch, so
+    // it inherits the same timezone trap — see LOCAL_NOON's note.
     const t = extractPtyResetUntil(
       'Claude usage limit reached. Your limit resets at 3pm (Asia/Tokyo).',
-      NOW,
+      LOCAL_NOON,
     )
     expect(t).not.toBeNull()
-    expect(t!).toBeGreaterThan(NOW)
-    expect(t!).toBeLessThanOrEqual(NOW + 24 * HOUR)
+    expect(t!).toBeGreaterThan(LOCAL_NOON)
+    expect(t!).toBeLessThanOrEqual(LOCAL_NOON + 24 * HOUR)
+  })
+
+  it('a screen whose reset clock ALREADY PASSED reads as stale ⇒ null (falls through)', () => {
+    // The engine re-parses the SAME unchanged frame every pass. Once its clock is
+    // behind, the frame is evidence of nothing — the resolver must not turn it
+    // into a ~23h park. (Companion to the parseResetLabel case above, asserted
+    // here at the screen level because that is where the stale frame lives.)
+    expect(
+      extractPtyResetUntil('Claude usage limit reached. Your limit resets at 9am (Asia/Tokyo).', LOCAL_NOON),
+    ).toBeNull()
   })
 })
 

@@ -72,6 +72,13 @@ import { atomicWriteJson } from './atomicWrite'
 // vitest/eslint scanners, and a back-import would close a cycle. Re-exported
 // below so existing importers of `runGateProcess` keep their path.
 import { runGateProcess, withGateEnv } from './gateProcess'
+// The SCREEN model — read-only, client-safe, and shared with the ctx gauge's manual
+// compact button (claudeSlash.ts). `isGenerating` is what lets the NOTICE channel be
+// fast without being destructive; `readInputBoxText` is what replaces its ESC.
+import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
+// The numbered-option chooser detector the terminal pool already uses for `menuOpen`.
+// While a menu is up, keystrokes are SELECTION — a notice would pick an option.
+import { detectMenu } from '@/lib/claudeMenu'
 import { openGroundHome } from './paths'
 import {
   claudeSessionActivity,
@@ -1799,6 +1806,24 @@ export interface ProjectEngine {
    *  other reflex (a restart relaunches the engine OFF). Optional for older-build / test
    *  literal backfill (absent ⇒ lazy-init). */
   reviewSeenAt?: Map<string, number>
+  /** The PENDING "a worker is ready" NOTICE — the delivery channel (2026-07-27) that
+   *  exists purely to TELL the commander, as against the nudge that exists to REVIVE it.
+   *
+   *  Queued the pass a branch is FIRST seen waiting in review (the completion EVENT the
+   *  engine never used to have), and cleared the pass it is delivered. Holds only WHICH
+   *  branches are the news — how many are waiting is read fresh at delivery, since a
+   *  notice may have waited out a long generation. Pruned against the review column on
+   *  the same sweep as {@link reviewSeenAt}, so it can never announce a branch the
+   *  commander has already integrated. ONE SLOT, newest wins: the payload is
+   *  "work is waiting, go look",
+   *  so a second arrival before the first is delivered simply refreshes it — nothing is
+   *  lost by not queueing both, and an unbounded queue would let a long generation turn
+   *  into a burst of lines typed at the desk the moment it frees up.
+   *
+   *  Undelivered is the normal resting state, not an error: the desk may be mid-turn or
+   *  hold half-typed text, and both mean "not now, try the next tick" (15s). In-memory
+   *  only, like every other reflex. */
+  managerNotice?: { branches: string[]; queuedAt: number } | null
   /** MANAGER RESURRECTION reflex state (2026-07-15 card B) — the in-memory bookkeeping
    *  that lets the engine RE-wake a stopped/hung commander without (a) double-spawning a
    *  booting desk or (b) looping forever on one that keeps dying:
@@ -1823,6 +1848,14 @@ export interface ProjectEngine {
     lastNudgeAt?: number
     /** One-shot "it ignored every nudge" log per episode (cleared with the rest). */
     unresponsiveLogged?: boolean
+    /** Wall-clock (ms) of the last NOTICE we typed into the desk (2026-07-27). Not a
+     *  budget — the notice has none — but a SELF-WRITE instant, and it has to join
+     *  `lastNudgeAt` / `lastWakeAt` in the echo cutoff the presence probe is handed.
+     *  Our own keystrokes make claude's TUI repaint, which stamps `lastOutputAt`
+     *  whether or not anything processed them; counting that as life would let a
+     *  notice refund the nudge budget of a WEDGED desk and silently retire the
+     *  resuscitation guard (the exact trap `echoUntil` was added for). */
+    lastNoticeAt?: number
     /** One-shot "the desk paints but integration is stalled" log per episode — the line
      *  that explains why an `'active'` desk is being poked at all (2026-07-22). */
     stallLogged?: boolean
@@ -2964,6 +2997,20 @@ export interface IntegrationDeps {
    *  reason that state never spawns anything (完了条件2+5). Best-effort: false when the
    *  PTY is gone. MUST NOT throw. Default: {@link defaultNudgeManager}. */
   nudgeManager: (projectPath: string) => Promise<boolean>
+  /** TELL the live commander a worker just finished — the NOTICE channel (2026-07-27),
+   *  the thing this product did not have and whose absence cost 38 minutes.
+   *
+   *  Separate seam from {@link nudgeManager} on purpose: that one REVIVES a desk that
+   *  looks hung and sends ESC to get through, so it must stay behind the four slow
+   *  gates; this one merely SPEAKS to a healthy desk and is therefore allowed to be
+   *  immediate — it writes only when the screen shows a desk that is neither generating
+   *  nor holding half-typed input. Returns true iff the line actually landed; false is
+   *  always "not now, still queued" (the caller re-offers it next pass), never "give
+   *  up". MUST NOT throw. Default: {@link defaultNotifyManagerReady}. */
+  notifyManagerReady?: (
+    projectPath: string,
+    notice: { branches: readonly string[]; total: number },
+  ) => Promise<boolean>
   /** When the commander last demonstrably PRODUCED work — epoch ms, null when no channel
    *  says anything. The evidence {@link managerIntegrationStalled} judges a paint-only
    *  `'active'` desk against (2026-07-22). Read ONLY once the queue has already waited
@@ -3828,6 +3875,141 @@ export const defaultNudgeManager = async (
       terminalId,
       '統合待ちのカードがあります。「状況」を実行して review 列を確認し、統合の判断をしてください。\r',
     )
+  } catch {
+    return false
+  }
+}
+
+/** How much of a branch list the notice may name before it is summarised. Three is
+ *  what the wake notification already shows, kept identical so the two surfaces read
+ *  the same. */
+const NOTICE_BRANCHES_SHOWN = 3
+
+/** Longest branch name the notice will type. A branch is BOARD DATA, not a constant —
+ *  it reaches this module from a card's `branch` field — so it is treated as untrusted
+ *  text on its way to a raw PTY write. */
+const NOTICE_BRANCH_MAX = 60
+
+/** A branch name made safe to TYPE. Every control character becomes a space, runs of
+ *  whitespace collapse, and the result is capped.
+ *
+ *  The nudge above can state that its payload is a CONSTANT and stop there; this one
+ *  cannot, because it names the branches that are waiting. A raw CR inside a branch
+ *  would submit the line early and run the remainder as its own prompt — at a desk
+ *  launched with `--dangerously-skip-permissions`, i.e. with no approval gate behind
+ *  it. Same discipline as `sanitizeSlashArg` in claudeSlash.ts, for the same reason. */
+const sanitizeNoticeText = (raw: string): string =>
+  // Codepoint test rather than a control-character REGEX on purpose: writing the class
+  // out puts literal control bytes in this file, which makes `grep` treat the whole
+  // module as binary and silently return nothing — a booby-trap for the next reader
+  // diagnosing this code (measured while writing it).
+  Array.from(raw)
+    .map((ch) => {
+      const cp = ch.codePointAt(0) ?? 0
+      return cp < 0x20 || cp === 0x7f ? ' ' : ch
+    })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, NOTICE_BRANCH_MAX)
+
+/** The line the notice types. Pure, so the wording is assertable without a PTY. */
+export const managerNoticeText = (branches: readonly string[], total: number): string => {
+  const named = branches
+    .slice(0, NOTICE_BRANCHES_SHOWN)
+    .map(sanitizeNoticeText)
+    .filter((b) => b.length > 0)
+  const list = named.join(', ') + (branches.length > named.length ? ` 他${branches.length - named.length}件` : '')
+  return (
+    `worker が完了しました — review に統合待ちが ${total} 件あります` +
+    `${list ? `(${list})` : ''}。「状況」で確認して統合の判断をしてください。`
+  )
+}
+
+/** MAY a notice be typed into this screen right now? The load-bearing safety property
+ *  of the whole channel, kept PURE so it is assertable against a frame literal.
+ *
+ *  Three refusals, and together they are what stands in for the nudge's ESC:
+ *
+ *    1. NOT GENERATING — {@link isGenerating}, the same probe the ctx gauge's manual
+ *       compact button already gates on in production (claudeSlash.ts). A pure
+ *       negative: an unreadable or unfamiliar footer degrades to "not busy", so the
+ *       worst case is the keystroke the owner would have typed themselves, never a
+ *       sensor that goes quiet. Verified against a LIVE commander desk before this was
+ *       written (2026-07-27): waiting ⇒ false, mid-turn ⇒ true, Japanese sitting unsent
+ *       in the box ⇒ false — including when the box wraps to three rows, and when the
+ *       literal footer phrase is typed into the box.
+ *    2. INPUT BOX EMPTY — and empty as a POSITIVE reading, `=== ''`, never `null`.
+ *       A desk holding half-typed text would otherwise have our line CONCATENATED onto
+ *       it and the two submitted together — exactly the damage the nudge's ESC exists
+ *       to pre-empt, and exactly what this channel promises not to do. `null` means no
+ *       input box could be found on the frame at all (a desk still booting, or one
+ *       caught mid-repaint), and writing into that lands the text in a shell prompt or
+ *       in claude's own launch line. No box read ⇒ no evidence ⇒ do not write.
+ *    3. NO MENU OPEN — {@link detectMenu}, the same numbered-option detector the pool
+ *       already runs to drive a pane's `menuOpen` status (terminal.ts). While a chooser
+ *       is up (`/model`, a theme picker, a trust dialog) the TUI reads keystrokes as
+ *       SELECTION, so our line-plus-CR would not be a message at all — it would pick
+ *       whatever option the cursor sits on and confirm it. That is the one way this
+ *       channel could still do damage while satisfying (1) and (2), and it is not
+ *       hypothetical: a menu frame has no reason to also lack an input box.
+ *
+ *  All three refusals mean the SAME thing to the caller — "not now" — and none loses the
+ *  notice: it stays queued and the next tick (15s) asks again. */
+export const noticeDeliverable = (screen: string | null | undefined): boolean =>
+  !isGenerating(screen) && readInputBoxText(screen ?? '') === '' && detectMenu(screen ?? '') === null
+
+/** TELL the live commander desk that a worker just finished — the delivery channel B
+ *  (2026-07-27), and the reason the 38-minute lag existed at all.
+ *
+ *  ── WHY THIS IS NOT THE NUDGE ──────────────────────────────────────────────────
+ *  {@link defaultNudgeManager} answers a different question: "this desk looks hung,
+ *  wake it". It leads with ESC because a hung desk may be mid-generation or holding
+ *  half-typed text, and getting through is worth destroying both. That destructiveness
+ *  is the entire justification for the four conservative gates in front of it
+ *  (10min stale → 5min grace → 10min interval → 3 pokes), and those gates are what
+ *  made a HEALTHY commander the slowest one to hear about finished work: measured
+ *  2026-07-27, a worker promoted to review at 00:05:47 and the desk was spoken to at
+ *  00:44:20 — 38m33s, all of it by design, because the only channel available was an
+ *  accident-recovery reflex being asked to carry routine news.
+ *
+ *  This channel carries the news instead, so it may be fast precisely because it is
+ *  HARMLESS. It NEVER sends ESC and never sends Ctrl-U. It writes exactly ONE line, and
+ *  only when {@link noticeDeliverable} says the screen shows a desk with nothing to
+ *  lose — see there for what the two refusals are and why they replace the ESC.
+ *
+ *  A refusal never loses the notice: the caller keeps it queued
+ *  (ProjectEngine.managerNotice) and re-offers it every pass, so a notice raised
+ *  mid-generation lands on the first tick after the turn ends.
+ *
+ *  Best-effort, never throws: false when there is no desk, no live PTY, no readable
+ *  screen, or the write missed. False always means "still queued", never "give up". */
+export const defaultNotifyManagerReady = async (
+  projectPath: string,
+  notice: { branches: readonly string[]; total: number },
+  // Injected on the same seam defaultNudgeManager / defaultManagerPresence use, so the
+  // whole path is unit-testable against a screen literal with no PTY pool and no
+  // registered project in sight.
+  deps?: {
+    write?: typeof writeInput
+    activity?: (agentSessionId: string) => ClaudeSessionActivity
+    getScreen?: (terminalId: string) => string | null
+    sessions?: typeof readSwarmSessions
+  },
+): Promise<boolean> => {
+  const write = deps?.write ?? writeInput
+  const getScreen = deps?.getScreen ?? getTerminalScreen
+  try {
+    // The RECORD's desk, deliberately — the same lookup defaultNudgeManager uses, so the
+    // two writers can never type into different desks. (An orphan desk the pool knows but
+    // the store does not is visible to `presence` and not to either writer; closing that
+    // is a change to the nudge path too, and belongs with it rather than here.)
+    const rec = (await (deps?.sessions ?? readSwarmSessions)(projectPath)).manager
+    if (!rec) return false
+    const { terminalId } = (deps?.activity ?? claudeSessionActivity)(rec.sessionId)
+    if (!terminalId) return false
+    if (!noticeDeliverable(getScreen(terminalId))) return false // busy / half-typed — keep it queued
+    return write(terminalId, `${managerNoticeText(notice.branches, notice.total)}\r`)
   } catch {
     return false
   }
@@ -5982,6 +6164,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // nothing); wakeManager spawns, nudgeManager pokes a live one (2026-07-18).
   managerPresence: (p, now, echoUntil) => defaultManagerPresence(p, now, { echoUntil }),
   nudgeManager: defaultNudgeManager,
+  notifyManagerReady: (p, notice) => defaultNotifyManagerReady(p, notice),
   // The DELIVERY evidence behind the stall check (2026-07-22) — read only once the queue
   // has already waited past MANAGER_INTEGRATION_STALL_MS, never on an ordinary tick.
   managerDeliveryAt: (p) => defaultManagerDeliveryAt(p),
@@ -7841,8 +8024,33 @@ export const runIntegratePass = async (
   for (const b of Array.from(reviewSeenAt.keys())) {
     if (!present.has(b)) reviewSeenAt.delete(b)
   }
+  // THE COMPLETION EVENT (2026-07-27). A branch appearing here for the FIRST time is
+  // precisely "a worker just became ready" — the instant the engine has always had and
+  // never used. Everything downstream read the review column as a STATE ("something is
+  // piled up, is the desk hung?") and so could only ever react slowly and suspiciously;
+  // this reads it as an EVENT and hands it to the notice channel below.
+  const freshlyReady: string[] = []
   for (const c of swarmCards) {
-    if (!reviewSeenAt.has(c.branch)) reviewSeenAt.set(c.branch, now)
+    if (!reviewSeenAt.has(c.branch)) {
+      reviewSeenAt.set(c.branch, now)
+      freshlyReady.push(c.branch)
+    }
+  }
+  // A notice can sit undelivered for a while (the desk may be mid-turn), so prune it on
+  // the SAME `present` sweep as the clock above: a branch the commander has meanwhile
+  // integrated must not still be announced as news. If nothing it names survives, the
+  // notice has nothing left to say — anything else still in review was announced by its
+  // own notice when it arrived — so drop it rather than deliver a report about branches
+  // that are gone.
+  if (engine.managerNotice) {
+    const live = engine.managerNotice.branches.filter((b) => present.has(b))
+    engine.managerNotice = live.length > 0 ? { ...engine.managerNotice, branches: live } : null
+  }
+  // ONE SLOT, newest wins (see ProjectEngine.managerNotice). A fresh arrival while an
+  // earlier notice is still undeliverable REPLACES it rather than queueing behind it:
+  // the message is "go look at review", so the newer one says everything the older did.
+  if (freshlyReady.length > 0) {
+    engine.managerNotice = { branches: freshlyReady, queuedAt: now }
   }
 
   // A. Read-only readiness for the dashboard (both switch positions).
@@ -7952,7 +8160,53 @@ export const runIntegratePass = async (
     // so nothing to prove" ⇒ treated as proven, which is also what protects a desk the
     // owner started by hand).
     rs.provenSinceWake = true
+    // Nothing is waiting, so there is nothing to tell anyone. Drop a notice that never
+    // found a quiet moment rather than delivering stale news at the next one: the cards
+    // it names have already been integrated or moved on.
+    engine.managerNotice = null
     return
+  }
+
+  // ── C. THE NOTICE (2026-07-27) — tell the commander, at once, without breaking it ────
+  //
+  //  Deliberately BEFORE the presence probe and OUTSIDE every gate below, because the
+  //  desk this most needs to reach is the HEALTHY one. The resurrection machinery that
+  //  follows is an accident-recovery reflex: it fires only on a desk it suspects of
+  //  hanging, and a commander that is awake and between turns is the case it is most
+  //  careful never to touch (`presence === 'active' && !stalled` returns immediately).
+  //  That is correct for a reflex that ESCs its way in, and it is why routine news
+  //  routed through it took 38m33s to arrive on 2026-07-27. Routine news gets its own
+  //  road; the reflex keeps its four gates untouched.
+  //
+  //  Retried EVERY pass while queued, which is what makes B ("生成中でも失われない")
+  //  true: refusals are cheap (an in-memory screen read, no disk) and the retry cadence
+  //  is INTEGRATE_TICK_MS, so the notice lands on the first tick after the desk goes
+  //  quiet. Not throttled and given no budget of its own — it does not need one, because
+  //  it cannot do harm: it writes only to a desk that {@link noticeDeliverable} says has
+  //  nothing in flight, nothing half-typed and no chooser open, and it is raised only by
+  //  a real arrival.
+  if (engine.managerNotice && deps.notifyManagerReady) {
+    const pending = engine.managerNotice
+    // `total` is read HERE, not at queue time: the queue may have waited out a long
+    // generation, and the number the commander is asked to act on has to be the number
+    // that is actually waiting now.
+    const total = swarmCards.length
+    const delivered = await deps
+      .notifyManagerReady(engine.path, { branches: pending.branches, total })
+      .catch(() => false)
+    if (!engine.running) return // owner stopped the engine during the write
+    if (delivered) {
+      engine.managerNotice = null
+      // A SELF-WRITE instant, not a budget — the presence probe below must discount the
+      // repaint our own keystrokes cause (see managerResume.lastNoticeAt).
+      rs.lastNoticeAt = now
+      logLine(
+        engine,
+        'info',
+        `worker 完了を司令官の卓に通知しました(統合待ち ${total} 件・${Math.round((now - pending.queuedAt) / 1000)}秒で到達)`,
+        'integrate',
+      )
+    }
   }
 
   // Work IS waiting. Ask what the desk actually IS — present? engaged? gone? — rather
@@ -7969,9 +8223,15 @@ export const runIntegratePass = async (
   //     for exactly the cases it exists for (context overflow / API error / boot-crash:
   //     measured 72 spawns in 6h with zero escalation), turning the 2026-07-18 fix's
   //     failure mode from "false fatal" into "silent token burn".
-  // Guarding only the nudge was asymmetric: the trap is identical on both writes, so the
-  // cutoff is the LATER of the two. Real work paints well past the guard and still counts.
-  const lastSelfWriteAt = Math.max(rs.lastNudgeAt ?? 0, rs.lastWakeAt ?? 0)
+  //   - the NOTICE (2026-07-27) — the third writer, and subject to the identical trap:
+  //     its line makes the TUI repaint immediately, and since a notice fires on every
+  //     worker completion it would keep stamping "alive" onto a desk that is wedged,
+  //     refunding the nudge budget on a fixed cadence and quietly retiring the
+  //     resuscitation guard. Being harmless to the DESK does not make it honest
+  //     EVIDENCE about the desk.
+  // Guarding only the nudge was asymmetric: the trap is identical on all three writes, so
+  // the cutoff is the LATEST of them. Real work paints well past the guard and still counts.
+  const lastSelfWriteAt = Math.max(rs.lastNudgeAt ?? 0, rs.lastWakeAt ?? 0, rs.lastNoticeAt ?? 0)
   const presence = await deps.managerPresence(
     engine.path,
     now,
@@ -8967,6 +9227,12 @@ export const startOrchestrator = async (
     // session a stray poke would break. Re-stamped on the next pass, so the wait simply
     // restarts from "when the engine could first see it".
     engine.reviewSeenAt?.clear()
+    // …and with it any notice queued before the stop. Clearing `reviewSeenAt` re-arms
+    // every waiting branch as "freshly ready", so the first pass raises a CURRENT notice
+    // anyway; keeping the old one would only risk naming branches that moved while the
+    // engine was off. (Same reasoning, same line: the stop/start boundary is where stale
+    // in-memory beliefs about the review queue are dropped.)
+    engine.managerNotice = null
     // New start epoch — supersedes any stale chain still settling from a prior
     // start (whose `.finally` will see the bumped generation and not re-arm).
     const gen = (engine.generation += 1)
