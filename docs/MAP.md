@@ -101,8 +101,42 @@
 - UI: `src/components/canvas/` の `TerminalPane.tsx`(xterm 描画)/ `ClaudeTerminalPane.tsx` /
   `EmbeddedClaudeTerminal.tsx` / `TaskTerminal.tsx`
 - テスト: `terminal.test.ts` / `claudeTerminal.test.ts` / `routes/__tests__/paste*.test.ts` / `runTaskLaunch.test.ts`
-- 罠: subscription-only — API key 経路を作らない・提案しない。描画性能(WebGL / coalescing /
-  ACK フロー制御)は設計契約がある — `TerminalPane.tsx` / `terminal.ts` のコメントを読んでから触る。
+- 罠: **正典 = `claudeTerminal.ts` 冒頭「THE TWO RULES」**(8つの launcher が全部ここを指す)。
+  **①subscription-only**(API key 経路を作らない・提案しない)と**②PTY-only**(`claude -p` を
+  実行経路にしない)は**別のルール・別の理由**。⚠ 0730 以前は「PTY だからサブスクに課金される」と
+  1つに融合させていたが**それは誤り** — 実測で `-p` もサブスク(`apiKeySource:"none"` /
+  `/usage` が "using your subscription" / seven_day rate_limit_event)。②が生きている理由は
+  課金ではなく **(a)課金はポリシーで戻りうる (b)`--remote-control` は REPL 専用=非PTYで黙って
+  死ぬ (c)センサー群が描画画面前提 (d)シェルが逃げ道**。(a)(b) は我々の裁量外。
+  描画性能(WebGL / coalescing / ACK フロー制御)は設計契約がある —
+  `TerminalPane.tsx` / `terminal.ts` のコメントを読んでから触る。
+- **スクレイプをやめる選択肢の調査**: `docs/SDK_CLIENT_INVESTIGATION.md`(0729-0730)。
+  ⚠ **この文書の「移行はしない」結論は 0730 夜のオーナー決定で worker については覆っている**
+  (実装済み・§5 参照)。以下は当時の推論として保持 —
+  結論=**Agent SDK への移行はしない**。**最上位の理由は規約**(§12・一次情報): Agent SDK 公式ドキュメントが
+  「第三者開発者が自社プロダクトに claude.ai ログイン/レート制限を使うのは不可 —
+  **Agent SDK で作ったエージェントを含む**」と名指しし、API キーを使えと指示している。
+  API キーは subscription-only を壊すので選べない。⚠ **技術的に動くこと(実測で動く)は許可ではない**。
+  PTY 経路は同文書で名指しされておらず "ordinary use of Claude Code" 側に近い、という非対称が根拠。
+  以下は規約と独立に成り立つ副次理由 —
+  SDK でもリモコンは作れる(`/bridge` の `createCodeSession`→`fetchRemoteCredentials`→
+  `attachBridgeSession`)が、`--remote-control` **1行**が**`@alpha` API の自前運用**
+  (認証/epoch/SSE seq/heartbeat)に変わる。alpha は「破壊的変更でメジャーを上げない」と
+  明記＝パッチで壊れうる。**手放せない機能をそこに乗せない**。
+  ⚠ `--remote-control` フラグ自体は SDK/print 経路では効かない(実測3件: initialize が
+  `remote_control_auto_enable:false` / `-p --remote-control --debug` でブリッジ活動ゼロ /
+  `extraArgs` 経由でもゼロ)。**代わりに JSONL で解ける**:
+  ★**CLI 自身の文言は JSONL に `isApiErrorMessage: true` 付きで記録される**(全JSONL走査で実測・
+  該当249ファイル — `You've reached your Fable 5 limit` 158回 / `session limit` 74回 /
+  `API Error: 529 Overloaded` / `Not logged in` ほか)。**引用にはこのマーカーが付かない**ので、
+  上の罠④(529 が通知に畳み込まれて沈黙)と `swarmRateLimitText.ts:401` の誤検知クラス
+  (=司令官が worker 画面を引用する日常業務)が**位置ではなく構造**で解ける。
+  移せるのはクォータ/APIエラーの腕まで — **idle 状態判定と権限メニュー検出は画面が要る**
+  (ただし swarm 全ロールは `permissionMode:'bypass'` なのでメニューは出ない)。
+  ⚠ `claude -p` は 2.1.220 では**サブスク課金**(実測4証拠)だが、これは**ポリシーであって
+  アーキテクチャではない**(過去に課金ルールが存在し後に消えた) — 実行経路を賭けないこと。
+  ⚠ 中断の判別は `terminal_reason`(`aborted_streaming`)で見る — **`subtype` は本物のエラーでも
+  `success` になる**。
 
 ## 4. Canvas — デザイン/ブレストの無限キャンバス
 - UI 本体: `src/components/canvas/` の `CanvasWorkspace.tsx`(タブ・複数キャンバス・ドック)/
@@ -123,6 +157,20 @@
 ## 5. Swarm — 並列 worker エンジン(詳細は docs/commander/)
 - **診断・改修の前に `docs/commander/00-INDEX.md`**(症状→章の直行表)。理想形 = `TARGET-STATE.md`。
   安全不変条件 = `docs/SWARM_SAFETY_INVARIANTS.md` + `src/lib/server/swarmSafety.test.ts`(触る前に緑確認)
+- **worker の SDK ランタイム(実装済み・既定 OFF)**: 入口は
+  `workerRuntime.ts`(WorkerRuntime seam・`workerKey`・pty/sdk 実装)/
+  `sdkSession.ts`(プール・queryFn DI)/ `sdkEvents.ts`(メッセージ蒸留の一枚岩)/
+  `sdkGuardHook.ts`(**A3/L4 veto の in-process 再武装・全失敗経路が deny**)/
+  `swarmWorkerSdk.ts`(launch plan + preflight)/ `swarmWorkerRuntimeDial.ts`(ダイヤル)/
+  route `server/routes/sdkSession.ts`(SSE・**二重ゲート**)/ UI `modules/SdkWorkerPane.tsx`。
+  ⚠ **SDK は filesystem settings を読まない → 素朴に spawn すると guard が黙って消える**。
+  ⚠ **`terminalId` は SDK worker では空**。worker を鍵で引くときは `workerKey(w)`。
+  kill switch = `Settings.swarmWorkerRuntime.mode` を `'pty'` に戻すだけ。
+  設計と実測台帳: `docs/SDK_WORKER_MIGRATION_PLAN.md`
+  (0730 オーナー決定 — worker から段階導入・既定 pty のダイヤル併存・PTY コードは消さない)。
+  センサー対応表 §5 / ガード配線の非自明点 §4-G(**SDK は既定で settings をロードしない →
+  素朴に spawn すると A3/L4 guard が黙って消える**・fail-closed 必須) / カード分割 §12。
+  調査の正典は `SDK_CLIENT_INVESTIGATION.md`(実測台帳・「しない」だった旧結論の上書き経緯込み)
 - 入口だけ: `swarmOrchestrator.ts`(エンジン tick)/ `swarmWorker.ts` / `swarmLaunch.ts`(spawn・
   モデル/effort/リモコン名解決)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
   `swarmQuota.ts` / route: `server/routes/swarm.ts` / UI: `modules/SwarmModule.tsx` + `useSwarmEngine.ts`

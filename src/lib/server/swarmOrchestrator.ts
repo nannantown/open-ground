@@ -136,6 +136,7 @@ import {
   isSwarmManualStopPersisted,
 } from './store'
 import { launchClaude } from './claudeTerminal'
+import { runtimeOf, workerKey, workerRuntimeKind, type WorkerHandle } from './workerRuntime'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTierProbed } from './swarmLaunch'
 // The limit-wording detector, extracted to swarmRateLimitText.ts (2026-07-13) so
@@ -2614,7 +2615,7 @@ const emptyState = (): SwarmOrchestratorState => ({
  *  the full lead-time figure), so no caller is forced to fetch the board. */
 const stateOf = (
   engine: ProjectEngine,
-  isAlive: (id: string) => boolean,
+  isAlive: (w: WorkerHandle) => boolean,
   tasks: readonly ProjectTask[] = [],
   // The persisted "autonomy was on last session" reminder flag — resolved async by
   // the caller (getOrchestratorState reads Settings.swarmAutonomyOn). Defaulted false
@@ -2636,7 +2637,7 @@ const stateOf = (
 ): SwarmOrchestratorState => {
   // Resolve the live worker set ONCE — both the reported `workers` array and the
   // consumption snapshot (activeWorkers / activeRunMs) read from it.
-  const live = engine.workers.filter((w) => isAlive(w.terminalId))
+  const live = engine.workers.filter((w) => isAlive(w))
   const counters = engine.metrics ?? emptyMetricsCounters()
   return {
     running: engine.running,
@@ -2688,9 +2689,13 @@ export interface OrchestratorDeps {
     // creating a fresh one. Both omitted on a normal dispatch (unchanged).
     worktree?: string
     resumeSessionId?: string
+    /** The engine's current roster — read ONLY to count live SDK worker slots
+     *  when the runtime dial is on (docs/SDK_WORKER_MIGRATION_PLAN.md §8).
+     *  Optional so every existing fake keeps compiling unchanged. */
+    liveWorkers?: readonly WorkerHandle[]
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
-  isAlive: (terminalId: string) => boolean
+  isAlive: (w: WorkerHandle) => boolean
   /** Commits the worker's `swarm/*` branch carries ahead of trunk — the
    *  "branch is ready" signal. 0 on any failure (conservative: no proof of
    *  work ⇒ no promotion). Probed from the shared repo by branch ref, so it
@@ -2744,25 +2749,31 @@ export interface OrchestratorDeps {
    *  every onData), or null when unknown / it has produced none yet. The SECOND
    *  liveness channel beside the heartbeat: a worker streaming tokens is alive even
    *  between heartbeats, so a stall requires BOTH to fall silent. (Stall detection.) */
-  lastOutputAt: (terminalId: string) => number | null
+  lastOutputAt: (w: WorkerHandle) => number | null
   /** NUDGE a silent worker: send a bare Enter (CR) to its PTY to submit a prompt
    *  left unsent / un-stick a waiting TUI — the cheap first recovery before a
    *  reclaim. Returns false when the PTY is gone. Workers run permissionMode:
    *  'bypass' (no permission menus), so a stray Enter cannot approve anything.
    *  (Stall recovery.) */
-  nudge: (terminalId: string) => boolean
+  nudge: (w: WorkerHandle) => boolean
   /** ESCALATE a worker that stayed silent past the whole nudge budget: ESC
    *  (interrupt) then, after a short settle, a one-line continue instruction
    *  naming `taskTitle` — tried exactly ONCE (see {@link classifyStall}) before a
    *  still-silent worker is reclaimed. Returns false when the PTY is gone or
    *  either write failed. (Stall recovery escalation, 2026-07.) */
-  escalate: (terminalId: string, taskTitle: string) => Promise<boolean>
-  /** The worker PTY's CURRENT visible screen as plain text (the headless `claude`
-   *  TUI frame), or null when unknown. Read-only. The orchestrator classifies it
-   *  (classifyOutput) to tell WHY a non-promoting worker isn't progressing — a
-   *  usage/rate-limit WAIT or a startup permission prompt — rather than treating
-   *  every quiet worker as a stall. (Card 4880e9c6 — 進まない分類.) */
-  recentOutput: (terminalId: string) => string | null
+  escalate: (w: WorkerHandle, taskTitle: string) => Promise<boolean>
+  /** The worker's CURRENT recent output as plain text, or null when unknown.
+   *  Read-only. The orchestrator classifies it (classifyOutput) to tell WHY a
+   *  non-promoting worker isn't progressing — a usage/rate-limit WAIT or a
+   *  startup permission prompt — rather than treating every quiet worker as a
+   *  stall. (Card 4880e9c6 — 進まない分類.)
+   *
+   *  Takes the WORKER, not a terminal id: what "recent output" means depends on
+   *  how the worker is running (a rendered TUI frame for a PTY worker; distilled
+   *  events for an SDK one), and that choice belongs to workerRuntime, not here.
+   *  Default: `runtimeOf(w).recentOutput(w)`, which for a PTY worker is the same
+   *  `getTerminalScreen(w.terminalId)` call it always was. */
+  recentOutput: (w: WorkerHandle) => string | null
   /** Newest mtime across a worker's OWN transcript + its sub-agent transcripts
    *  (its worktree cwd + agentSessionId), or null. The stall path's THIRD liveness
    *  channel, resolved ONLY for a worker the cheap channels (heartbeat + PTY output)
@@ -2927,12 +2938,16 @@ export interface IntegrationDeps {
   markConflict: (projectPath: string, taskId: string, value: boolean) => Promise<boolean>
   /** Tear down a landed branch's worktree + delete the branch (best-effort). */
   cleanup: (projectPath: string, branch: string) => Promise<{ removed: boolean; reason?: string }>
-  /** Kill a just-landed worker's `claude` PTY by terminal id (post-integration
-   *  teardown). cleanup() already kills any PTY by cwd; this is the by-id
+  /** Stop a just-landed worker's `claude` (post-integration teardown).
+   *  cleanup() already kills any PTY by cwd; this is the by-handle
    *  belt-and-suspenders for the symlinked-home edge case a cwd match can miss,
    *  and it lets the engine free the slot IMMEDIATELY (no waiting for the next
-   *  monitor pass to notice the PTY died). Default: killTerminal. */
-  killPty: (terminalId: string) => void
+   *  monitor pass to notice the process died).
+   *  Default: `runtimeOf(w).kill(w)` — killTerminal for a PTY worker.
+   *  ⚠ Currently DECLARED AND DEFAULTED BUT NEVER CALLED (verified 2026-07-30):
+   *  the cwd-based cleanup() covers the live paths. Kept because the contract is
+   *  the right one and the by-handle form is what an SDK worker will need. */
+  killPty: (w: WorkerHandle) => void
   // ── 差し戻し(rework)用 — レビューで must-fix が出たカードを review→doing に戻して
   //    worker を再作業させるため runIntegratePass が使う seam。moveToDoing /
   //    recoverCard / isAlive / recoverWorker は OrchestratorDeps と同型・同実体
@@ -2949,7 +2964,7 @@ export interface IntegrationDeps {
   /** Is this worker's PTY still alive? — picks the 差し戻し strategy: a LIVE worker is
    *  continued in place (review→doing + 修正指示); a DEAD one is re-dispatched
    *  (review→todo). (Same dep as OrchestratorDeps.isAlive.) */
-  isAlive: (terminalId: string) => boolean
+  isAlive: (w: WorkerHandle) => boolean
   /** Tear down a worker's worktree + PTY (KEEPS its branch) — used to clean up a
    *  parked / re-dispatched worker on 差し戻し. Uncommitted work is salvaged onto the
    *  branch first (see OrchestratorDeps.recoverWorker — same dep, same contract). */
@@ -4243,12 +4258,9 @@ const defaultSpawnWorker = async (opts: {
   return spawnSwarmWorker(opts)
 }
 
-const isWorkerAlive = (terminalId: string): boolean => {
-  const info = getTerminal(terminalId)
-  // A session lingers ~30s after exit with finishedAt set (terminal.ts) so the
-  // client can drain the buffer; an exited-but-lingering PTY is NOT a live slot.
-  return !!info && !info.finishedAt
-}
+// (isWorkerAlive / defaultLastOutputAt / defaultNudge lived here until 2026-07-30.
+//  Their bodies moved VERBATIM into workerRuntime.ptyWorkerRuntime so the engine
+//  asks the runtime instead of the PTY pool — see docs/SDK_WORKER_MIGRATION_PLAN.md.)
 
 /** Move a lost/stopped worker's card to a recovery column through the project's
  *  own Board HTTP API (the same write seam as the dispatch/promotion moves —
@@ -4508,16 +4520,6 @@ export const defaultRecoverWorker = async (
   }
 }
 
-/** The worker PTY's last-output epoch (terminal.ts tracks it per session), or null
- *  when the PTY is unknown / has produced no output yet. The stall monitor's
- *  second liveness channel. */
-const defaultLastOutputAt = (terminalId: string): number | null =>
-  getTerminal(terminalId)?.lastOutputAt ?? null
-
-/** Send a bare Enter (CR) to a worker's PTY — the stall nudge. writeInput returns
- *  false when the session is gone/finished (nothing to wake). */
-const defaultNudge = (terminalId: string): boolean => writeInput(terminalId, '\r')
-
 // Control bytes that must never reach the raw PTY write below: taskTitle is
 // card-derived and attacker-reachable in git-shared mode (a teammate writes the
 // card JSON) — the same threat pastePrompt.ts's ESC strip closes for the paste
@@ -4543,23 +4545,32 @@ const ESCALATE_CONTROL_BYTES = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u0080-\u009f]/g
  *  a live PTY; `sleep` is DI'd (default: real timer) so a unit test can skip the
  *  real delay. */
 export const defaultEscalate = async (
-  terminalId: string,
+  w: WorkerHandle,
   taskTitle: string,
   deps?: { write?: typeof writeInput; sleep?: (ms: number) => Promise<void> },
 ): Promise<boolean> => {
-  const write = deps?.write ?? writeInput
-  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
-  if (!write(terminalId, '\x1b')) return false
-  await sleep(STALL_ESCALATE_DELAY_MS)
   const safeTitle = taskTitle.replace(ESCALATE_CONTROL_BYTES, '').replace(/\s+/g, ' ').trim()
   const line = `続けてください。${safeTitle} のゴールを続行。完了条件: 実装+テスト緑+コミット。`
+
+  // An SDK worker has no input box to clear and no CR to submit: the message IS
+  // the turn. The ESC + delay + CR dance below exists ONLY because a PTY has a
+  // half-typed line to dismiss first — the mechanism the migration removes.
+  if (workerRuntimeKind(w) === 'sdk') return runtimeOf(w).say(w, line)
+
+  const write = deps?.write ?? writeInput
+  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const terminalId = workerKey(w)
+  if (!write(terminalId, '\x1b')) return false
+  await sleep(STALL_ESCALATE_DELAY_MS)
   return write(terminalId, `${line}\r`)
 }
 
-/** The worker PTY's current visible screen (headless `claude` TUI frame), or null
- *  — the source classifyOutput inspects to spot a rate-limit wait / permission
- *  prompt. Read-only (terminal.ts reconstructs the frame without touching the PTY). */
-const defaultRecentOutput = (terminalId: string): string | null => getTerminalScreen(terminalId)
+/** The worker's current recent output, or null — the source classifyOutput
+ *  inspects to spot a rate-limit wait / permission prompt. Read-only.
+ *  Routed through workerRuntime so the meaning of "recent output" follows HOW
+ *  the worker runs; for a PTY worker this is byte-for-byte the previous
+ *  behaviour (terminal.ts reconstructs the frame without touching the PTY). */
+const defaultRecentOutput = (w: WorkerHandle): string | null => runtimeOf(w).recentOutput(w)
 
 /** Send a LIVE worker a one-line 差し戻し instruction over its PTY (the rework
  *  conduit's "fix in place" message): collapse the reason to a SINGLE line (a raw
@@ -5210,10 +5221,11 @@ export const makeVerify =
 // the verify gate — verify = "does it build / do the safety tests pass", review =
 // "is the change actually correct" (a human-judgment fact-check no test encodes).
 //
-// SUBSCRIPTION-ONLY (read claudeTerminal.ts top comment): every reviewer is a real
-// interactive PTY (launchClaude), so it bills the user's Claude subscription pool,
-// NEVER the programmatic credit pool — `claude -p` is FORBIDDEN here (same contract
-// as the workers / generateDescription).
+// PTY-ONLY + SUBSCRIPTION-ONLY (canonical: claudeTerminal.ts "THE TWO RULES"):
+// every reviewer is a real interactive PTY (launchClaude) — `claude -p` is
+// FORBIDDEN here (same contract as the workers / generateDescription). ⚠ The
+// reason is NOT billing; that rationale was measured wrong on 2026-07-30 (-p
+// bills the subscription too). Read the canonical block before changing this.
 
 /** One reviewer's verdict on a to-be-landed branch. */
 export type ReviewVote = 'must-fix' | 'clean'
@@ -6124,14 +6136,14 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   moveToDoing: defaultMoveToDoing,
   moveToReview: defaultMoveToReview,
   spawnWorker: defaultSpawnWorker,
-  isAlive: isWorkerAlive,
+  isAlive: (w) => runtimeOf(w).isAlive(w),
   countCommitsAhead: defaultCountCommitsAhead,
   readHeartbeat: defaultReadHeartbeat,
   recoverCard: defaultRecoverCard,
   recoverWorker: defaultRecoverWorker,
-  lastOutputAt: defaultLastOutputAt,
-  nudge: defaultNudge,
-  escalate: defaultEscalate,
+  lastOutputAt: (w) => runtimeOf(w).lastOutputAt(w),
+  nudge: (w) => runtimeOf(w).nudge(w),
+  escalate: (w, taskTitle) => defaultEscalate(w, taskTitle),
   recentOutput: defaultRecentOutput,
   sessionAgentActivityAt,
   sessionBackgroundTaskAt,
@@ -6157,7 +6169,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   moveToDone: defaultMoveToDone,
   markConflict: defaultMarkConflict,
   cleanup: defaultCleanup,
-  killPty: killTerminal,
+  killPty: (w) => runtimeOf(w).kill(w),
   instructRework: defaultInstructRework,
   // Manager-only integration (2026-07-15): the engine wakes the commander instead of
   // merging. managerPresence decides WHICH response the desk needs (spawn / nudge /
@@ -6480,7 +6492,7 @@ const monitorWorkers = async (
       next.push(w) // a stop mid-pass: keep the rest untouched
       continue
     }
-    const alive = deps.isAlive(w.terminalId)
+    const alive = deps.isAlive(w)
     const card = byId.get(w.taskId)
 
     // 外部差し戻しの観測(Board API / UI ドラッグ): roster は 'done'(このカードは一度
@@ -6499,7 +6511,7 @@ const monitorWorkers = async (
       // whole wait rides on as if it were work: on 2026-07-18 a worker ready at 04:18
       // was 差し戻し'd at 04:46 and stopped one pass later as "runaway 91m", its
       // worktree destroyed and its card parked in 'blocked'. (endIntegrationWait.)
-      endIntegrationWait(engine, w.terminalId, now)
+      endIntegrationWait(engine, workerKey(w), now)
       w = { ...w, stage: 'running', reworkAt: new Date(now).toISOString() }
       logLine(
         engine,
@@ -6546,7 +6558,7 @@ const monitorWorkers = async (
         // way that trusting it there was not, because a failed read merely defers
         // the stamp to the next pass instead of mislabelling a stop.
         const corroborated = delivered && (await hasDeliverable(w))
-        if (corroborated) beginIntegrationWait(engine, w.terminalId, now)
+        if (corroborated) beginIntegrationWait(engine, workerKey(w), now)
         const readyAt = corroborated ? (w.readyAt ?? new Date(now).toISOString()) : w.readyAt
         next.push({ ...w, stage: 'done', readyAt })
       } else logLine(engine, 'info', `done worker closed — slot freed: ${shorten(w.taskTitle)}`, 'routine')
@@ -6640,7 +6652,7 @@ const monitorWorkers = async (
         // the commander is credited back rather than charged to it as work, and mark
         // that it has DELIVERED (readyAt, set once) so the execution ceiling can never
         // label it a 暴走 or park its card in 'blocked'. (2026-07-18.)
-        beginIntegrationWait(engine, w.terminalId, now)
+        beginIntegrationWait(engine, workerKey(w), now)
         const readyAt = w.readyAt ?? new Date(now).toISOString()
         // Keep a lingering PTY as 'done' (UI shows it; its exit frees the slot);
         // a worker that already exited has nothing left to count. Clear reworkAt — the card
@@ -6741,12 +6753,12 @@ const monitorWorkers = async (
     // Ending the 統合待ち here is DEFENSIVE and idempotent: the 差し戻し observation
     // above is the semantic seam, but if any transition were ever missed, a stale
     // stamp must not keep growing once the worker is back at work.
-    endIntegrationWait(engine, w.terminalId, now)
-    const { heldMs, waitedMs, creditMs } = executionCredit(engine, w.terminalId, now)
+    endIntegrationWait(engine, workerKey(w), now)
+    const { heldMs, waitedMs, creditMs } = executionCredit(engine, workerKey(w), now)
     // The RAW wait, before the cap — captured here because the ceiling branch below
     // clears the ledger before it builds its message, and the honest version of
     // "why did this stop" needs both numbers: what was waited and what was forgiven.
-    const rawWaitedMs = engine.integrationWaitMs?.get(w.terminalId) ?? 0
+    const rawWaitedMs = engine.integrationWaitMs?.get(workerKey(w)) ?? 0
 
     // ── THE CEILING JUDGES THE CURRENT ASSIGNMENT, NOT THE WORKER'S WHOLE LIFE ──
     // A 差し戻し is a NEW assignment: the commander looked at delivered work and
@@ -6834,14 +6846,14 @@ const monitorWorkers = async (
       // the defense. `readyAt` stays the ONLY witness: the engine says a worker
       // delivered only when it SAW the delivery.
       const reason: WorkerRecoveryReason = w.readyAt ? 'integration-wait' : 'runaway'
-      engine.nudges.delete(w.terminalId)
-      engine.rateLimited.delete(w.terminalId)
-      engine.rateLimitHeldMs?.delete(w.terminalId)
-      engine.limitScreen?.delete(w.terminalId)
-      engine.permissionWaits.delete(w.terminalId)
-      engine.questionRaised?.delete(w.terminalId)
-      engine.questionWaits?.delete(w.terminalId)
-      engine.integrationWaitMs?.delete(w.terminalId)
+      engine.nudges.delete(workerKey(w))
+      engine.rateLimited.delete(workerKey(w))
+      engine.rateLimitHeldMs?.delete(workerKey(w))
+      engine.limitScreen?.delete(workerKey(w))
+      engine.permissionWaits.delete(workerKey(w))
+      engine.questionRaised?.delete(workerKey(w))
+      engine.questionWaits?.delete(workerKey(w))
+      engine.integrationWaitMs?.delete(workerKey(w))
       const ranMin = Math.floor((now - startedMs) / 60_000)
       const heldMin = Math.floor(heldMs / 60_000)
       const waitedMin = Math.floor(waitedMs / 60_000)
@@ -7001,7 +7013,7 @@ const monitorWorkers = async (
     // untouched — exactly the "never interrupt a working worker" contract.
     let lastOut: number | null = null
     try {
-      lastOut = deps.lastOutputAt(w.terminalId)
+      lastOut = deps.lastOutputAt(w)
     } catch {
       /* unknown → no output signal; heartbeat + startedAt still apply */
     }
@@ -7027,12 +7039,12 @@ const monitorWorkers = async (
       now - Math.max(lastOut ?? Number.NEGATIVE_INFINITY, Number.isFinite(startedMs) ? startedMs : 0)
     const sampleScreen =
       outQuietMs >= RATE_LIMIT_SCRAPE_QUIET_MS ||
-      engine.limitScreen.has(w.terminalId) ||
-      engine.rateLimited.has(w.terminalId)
+      engine.limitScreen.has(workerKey(w)) ||
+      engine.rateLimited.has(workerKey(w))
     let screen: string | null = null
     if (sampleScreen) {
       try {
-        screen = deps.recentOutput(w.terminalId)
+        screen = deps.recentOutput(w)
       } catch {
         /* unknown → classifyOutput('normal') → ordinary stall handling below */
       }
@@ -7040,12 +7052,12 @@ const monitorWorkers = async (
     const output = classifyOutput(screen)
     if (sampleScreen) {
       if (output === 'rate-limited') {
-        if (!engine.limitScreen.has(w.terminalId)) engine.limitScreen.set(w.terminalId, now)
+        if (!engine.limitScreen.has(workerKey(w))) engine.limitScreen.set(workerKey(w), now)
       } else {
-        engine.limitScreen.delete(w.terminalId)
+        engine.limitScreen.delete(workerKey(w))
       }
     }
-    const limitSince = engine.limitScreen.get(w.terminalId) ?? null
+    const limitSince = engine.limitScreen.get(workerKey(w)) ?? null
 
     // Clamp the stall clock's output channel to the notice's onset: output that
     // lands WHILE the limit notice holds the screen is a decorative repaint, not
@@ -7076,7 +7088,7 @@ const monitorWorkers = async (
         heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
         lastOutputAtMs: stallLastOut,
         startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
-        nudge: engine.nudges.get(w.terminalId),
+        nudge: engine.nudges.get(workerKey(w)),
       },
       now,
       stallParams,
@@ -7143,7 +7155,7 @@ const monitorWorkers = async (
             startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
             agentActivityAtMs: agentAt,
             bgTaskAliveAtMs: bgAliveAt,
-            nudge: engine.nudges.get(w.terminalId),
+            nudge: engine.nudges.get(workerKey(w)),
           },
           now,
           stallParams,
@@ -7185,9 +7197,9 @@ const monitorWorkers = async (
     // once its screen stops reading rate-limited the clamp dissolves with the
     // clock, and the hold clears below the moment a sampled screen reads normal.
     if (output === 'rate-limited' && (stall.silentMs >= STALL_SILENCE_MS || earlyLimitConfirmed)) {
-      engine.permissionWaits.delete(w.terminalId)
-      engine.nudges.delete(w.terminalId)
-      const rl = engine.rateLimited.get(w.terminalId)
+      engine.permissionWaits.delete(workerKey(w))
+      engine.nudges.delete(workerKey(w))
+      const rl = engine.rateLimited.get(workerKey(w))
       if (!rl) {
         // `since` — the CONFIRMED-hold stamp: drives the RATE_LIMIT_GRACE_MS
         // requeue clock (unchanged).
@@ -7195,7 +7207,7 @@ const monitorWorkers = async (
         // BEGAN there, and the execution-time credit must repay the whole wait,
         // not just its confirmed tail (confirmation can take up to
         // STALL_SILENCE_MS). Falls back to `now` when the screen clock is unset.
-        engine.rateLimited.set(w.terminalId, { since: now, holdSince: limitSince ?? now })
+        engine.rateLimited.set(workerKey(w), { since: now, holdSince: limitSince ?? now })
         // QUOTA SENSOR (the one production write into swarmQuota's cooling
         // table): attribute this sighting to the tier the worker launched on,
         // so dispatch drops a tier — or parks when every tier is dry — instead
@@ -7225,7 +7237,7 @@ const monitorWorkers = async (
         // again is plainly working — never reclaim it on a stale sighting. The
         // decorative-toast case stays covered: one repaint delays the requeue by
         // at most one scrape-quiet window, it can't cancel it.
-        endRateLimitHold(engine, w.terminalId, now)
+        endRateLimitHold(engine, workerKey(w), now)
         if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'rate-limit')) next.push(w)
         continue
       }
@@ -7255,24 +7267,24 @@ const monitorWorkers = async (
       // and loops). commitsAhead===0 gate: a worker that already produced integrable
       // work is not stuck at a boot dialog, so it takes the ordinary stall path.
       if (output === 'permission-wait' && commitsAhead === 0) {
-        endRateLimitHold(engine, w.terminalId, now) // hold (if any) ended — bank it
-        engine.nudges.delete(w.terminalId)
-        const pw = engine.permissionWaits.get(w.terminalId)
+        endRateLimitHold(engine, workerKey(w), now) // hold (if any) ended — bank it
+        engine.nudges.delete(workerKey(w))
+        const pw = engine.permissionWaits.get(workerKey(w))
         if (!pw) {
           let sent = false
           try {
-            sent = deps.nudge(w.terminalId)
+            sent = deps.nudge(w)
           } catch {
             sent = false
           }
-          engine.permissionWaits.set(w.terminalId, { since: now, accepted: sent })
+          engine.permissionWaits.set(workerKey(w), { since: now, accepted: sent })
           logLine(
             engine,
             'warn',
             `worker permission/trust prompt — auto-accepted (Enter)${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
           )
         } else if (now - pw.since >= PERMISSION_WAIT_GRACE_MS) {
-          engine.permissionWaits.delete(w.terminalId)
+          engine.permissionWaits.delete(workerKey(w))
           if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'permission')) next.push(w)
           continue
         }
@@ -7301,9 +7313,9 @@ const monitorWorkers = async (
       // 'blocked'. An unanswered real question, or a courtesy/rhetorical "?"
       // false-positive, must not squat the slot until the 90-min runaway ceiling.
       if (output === 'question') {
-        endRateLimitHold(engine, w.terminalId, now) // hold (if any) ended — bank it
-        engine.permissionWaits.delete(w.terminalId)
-        engine.nudges.delete(w.terminalId)
+        endRateLimitHold(engine, workerKey(w), now) // hold (if any) ended — bank it
+        engine.permissionWaits.delete(workerKey(w))
+        engine.nudges.delete(workerKey(w))
         // Lazy backfill (beside ensureEngine's): a plain engine literal from an
         // older build / a test fixture must still get once-per-question raising.
         engine.questionRaised ??= new Map()
@@ -7315,8 +7327,8 @@ const monitorWorkers = async (
             taskId: card?.id,
             question: q.question,
           })
-          if (engine.questionRaised.get(w.terminalId) !== receiptKey) {
-            engine.questionRaised.set(w.terminalId, receiptKey)
+          if (engine.questionRaised.get(workerKey(w)) !== receiptKey) {
+            engine.questionRaised.set(workerKey(w), receiptKey)
             try {
               await deps.raiseQuestion({
                 projectPath: engine.path,
@@ -7336,7 +7348,7 @@ const monitorWorkers = async (
             } catch (e) {
               // Raise failed (fs/notify hiccup) → forget the key so the next
               // pass retries; the hold itself is unaffected.
-              engine.questionRaised?.delete(w.terminalId)
+              engine.questionRaised?.delete(workerKey(w))
               logLine(engine, 'warn', `question raise failed (will retry next pass): ${errMsg(e)}`)
             }
           }
@@ -7346,12 +7358,12 @@ const monitorWorkers = async (
         // slot — the raised question persists in the escalations inbox, and
         // 'blocked' is the human lane (no auto-respawn re-asking). Mirrors the
         // rate-limit / permission grace arms.
-        const qw = engine.questionWaits.get(w.terminalId)
+        const qw = engine.questionWaits.get(workerKey(w))
         if (!qw) {
-          engine.questionWaits.set(w.terminalId, { since: now })
+          engine.questionWaits.set(workerKey(w), { since: now })
         } else if (now - qw.since >= QUESTION_GRACE_MS) {
-          engine.questionWaits.delete(w.terminalId)
-          engine.questionRaised?.delete(w.terminalId)
+          engine.questionWaits.delete(workerKey(w))
+          engine.questionRaised?.delete(workerKey(w))
           if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'question')) next.push(w)
           continue
         }
@@ -7371,12 +7383,12 @@ const monitorWorkers = async (
     // credit ledger — THIS is the release path a worker takes when a quota wait
     // lifts and it resumes, and the one whose span the runaway check must repay
     // (2026-07-12: 20m of wait charged to a worker that then worked 84m).
-    endRateLimitHold(engine, w.terminalId, now)
-    engine.permissionWaits.delete(w.terminalId)
-    engine.questionRaised?.delete(w.terminalId)
-    engine.questionWaits?.delete(w.terminalId)
+    endRateLimitHold(engine, workerKey(w), now)
+    engine.permissionWaits.delete(workerKey(w))
+    engine.questionRaised?.delete(workerKey(w))
+    engine.questionWaits?.delete(workerKey(w))
     if (stall.action === 'reclaim') {
-      engine.nudges.delete(w.terminalId)
+      engine.nudges.delete(workerKey(w))
       // A silent worker is reclaimed like a crash: recoveryColumn (via recoverLost)
       // sends a bare hang to 'todo' (one retry) or 'blocked' (budget spent), never
       // to review — a stall NEVER fakes progress.
@@ -7389,11 +7401,11 @@ const monitorWorkers = async (
       // before falling through to reclaim on the pass after this one.
       let sent = false
       try {
-        sent = await deps.escalate(w.terminalId, w.taskTitle)
+        sent = await deps.escalate(w, w.taskTitle)
       } catch {
         sent = false
       }
-      engine.nudges.set(w.terminalId, { count: STALL_MAX_NUDGES, lastNudgeAt: now, escalated: true })
+      engine.nudges.set(workerKey(w), { count: STALL_MAX_NUDGES, lastNudgeAt: now, escalated: true })
       logLine(
         engine,
         'warn',
@@ -7407,12 +7419,12 @@ const monitorWorkers = async (
     if (stall.action === 'nudge') {
       let sent = false
       try {
-        sent = deps.nudge(w.terminalId)
+        sent = deps.nudge(w)
       } catch {
         sent = false
       }
-      const count = (engine.nudges.get(w.terminalId)?.count ?? 0) + 1
-      engine.nudges.set(w.terminalId, { count, lastNudgeAt: now })
+      const count = (engine.nudges.get(workerKey(w))?.count ?? 0) + 1
+      engine.nudges.set(workerKey(w), { count, lastNudgeAt: now })
       logLine(
         engine,
         'warn',
@@ -7420,11 +7432,11 @@ const monitorWorkers = async (
           `${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
         'stall',
       )
-    } else if (stall.progressed && engine.nudges.has(w.terminalId)) {
+    } else if (stall.progressed && engine.nudges.has(workerKey(w))) {
       // Real progress since the nudge (a fresh heartbeat OR sustained output past
       // the echo guard) proves the Enter woke it — clear the budget so a LATER,
       // independent stall gets the full nudge allowance again.
-      engine.nudges.delete(w.terminalId)
+      engine.nudges.delete(workerKey(w))
       logLine(engine, 'info', `worker recovered after nudge: ${w.branch} (${shorten(w.taskTitle)})`, 'routine')
     }
     next.push(withHeartbeat({ ...w, stage }, heartbeat))
@@ -7452,7 +7464,7 @@ const monitorWorkers = async (
   // the fast path for the common cases). terminalId is unique per spawn, so a stale
   // entry would never be reused either — pruning here keeps every map bounded by the
   // LIVE worker count, not the all-time spawn count.
-  const liveTerminalIds = new Set(next.map((w) => w.terminalId))
+  const liveTerminalIds = new Set(next.map((w) => workerKey(w)))
   for (const id of Array.from(engine.nudges.keys())) {
     if (!liveTerminalIds.has(id)) engine.nudges.delete(id)
   }
@@ -7570,8 +7582,8 @@ const rosterEntryOf = (
 ): RosterEntry => {
   const spawnAtMs = Date.parse(w.startedAt)
   const known = Number.isFinite(spawnAtMs) && spawnAtMs > 0
-  const heldMs = Math.max(0, engine.rateLimitHeldMs?.get(w.terminalId) ?? 0)
-  const waitedMs = Math.max(0, engine.integrationWaitMs?.get(w.terminalId) ?? 0)
+  const heldMs = Math.max(0, engine.rateLimitHeldMs?.get(workerKey(w)) ?? 0)
+  const waitedMs = Math.max(0, engine.integrationWaitMs?.get(workerKey(w)) ?? 0)
   // The ceiling's origin, re-derived (monitorWorkers :5918-5924): a 差し戻し moves it,
   // and ONLY when delivery corroborates it (`readyAt` — the same anti-fail-open gate,
   // so a card walked through review buys no ledger reset either). `Math.max` keeps a
@@ -7770,7 +7782,7 @@ export const runDispatchPass = async (
   //    LIVE worker (a 'done' worker whose PTY still lingers still holds its slot —
   //    the integration stage frees it by tearing the worktree down); a dead
   //    worker kept only to retry a board write does not.
-  const live = engine.workers.filter((w) => deps.isAlive(w.terminalId)).length
+  const live = engine.workers.filter((w) => deps.isAlive(w)).length
   // selectDispatch owns ALL dispatch gates (column / id / content-dup / same-file
   // serialization), so it takes the FULL board, not just the todo slice: it needs
   // the doing-column cards to know which conflict surfaces are already claimed.
@@ -7883,7 +7895,7 @@ export const runDispatchPass = async (
 
       let spawn: SpawnSwarmWorkerResponse
       try {
-        spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title, priorFailure })
+        spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title, priorFailure, liveWorkers: engine.workers })
       } catch (e) {
         logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
         continue
@@ -7902,6 +7914,11 @@ export const runDispatchPass = async (
         taskTitle: title,
         startedAt: new Date().toISOString(),
         stage: 'starting',
+        // HOW it was launched. Absent ⇒ 'pty', so an older fake/caller that does
+        // not report a runtime keeps meaning what it always meant. The handles
+        // are mutually exclusive by invariant (workerRuntime.ts).
+        ...(spawn.runtime === 'sdk' ? { runtime: 'sdk' as const } : {}),
+        ...(spawn.sdkSessionId ? { sdkSessionId: spawn.sdkSessionId } : {}),
         // Launch tier, for the monitor's rate-limit sighting → cooling-table
         // attribution (absent from older fakes/callers — then nothing is marked).
         ...(spawn.model ? { model: spawn.model } : {}),
@@ -8618,7 +8635,7 @@ export const detectAnomalies = async (
   now: number,
 ): Promise<OrchestratorAnomaly[]> => {
   const out: OrchestratorAnomaly[] = []
-  const liveWorkers = engine.workers.filter((w) => deps.isAlive(w.terminalId))
+  const liveWorkers = engine.workers.filter((w) => deps.isAlive(w))
   const countedTaskIds = new Set(engine.workers.map((w) => w.taskId))
 
   // Worker-rooted checks: each counted+alive worker's worktree + heartbeat age.
@@ -8644,13 +8661,13 @@ export const detectAnomalies = async (
     // stale' ("no heartbeat for N min", i.e. likely hung) would be misleading
     // noise. Skip it here; its dedicated log line already says why it is paused.
     // (Card 4880e9c6 — keep the anomaly view honest about WAIT vs HANG.)
-    if (engine.rateLimited.has(w.terminalId) || engine.permissionWaits.has(w.terminalId)) continue
+    if (engine.rateLimited.has(workerKey(w)) || engine.permissionWaits.has(workerKey(w))) continue
     // Silence across BOTH channels (heartbeat + PTY output) — the same activity
     // notion the stall monitor uses, so a worker streaming output (alive to the
     // engine) is never falsely flagged stale here.
     let lastOut: number | null = null
     try {
-      lastOut = deps.lastOutputAt(w.terminalId)
+      lastOut = deps.lastOutputAt(w)
     } catch {
       lastOut = null
     }
@@ -8999,7 +9016,7 @@ export const fireFatalNotifications = (
   }
 
   // 2c. all-workers-down — running, zero live workers, yet 'doing' swarm work left.
-  const liveWorkers = engine.workers.filter((w) => deps.isAlive(w.terminalId))
+  const liveWorkers = engine.workers.filter((w) => deps.isAlive(w))
   if (engine.running && liveWorkers.length === 0) {
     const doing = tasks.filter(
       (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
@@ -9414,7 +9431,7 @@ export const maybeAutoStartDrain = async (
   if (engine.running || engine.passInFlight || engine.manualStop) return false
   // The SAME idle-capacity + independent-backlog math runDispatchPass uses, so the
   // auto-start decision agrees exactly with what a running pass would dispatch.
-  const live = engine.workers.filter((w) => deps.isAlive(w.terminalId)).length
+  const live = engine.workers.filter((w) => deps.isAlive(w)).length
   const countedIds = new Set(engine.workers.map((w) => w.taskId))
   const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
   const target = computeTargetWorkers({
@@ -9867,6 +9884,7 @@ const adoptResumeCandidates = async (
         hint: title,
         worktree: entry.worktree,
         resumeSessionId: entry.sessionId,
+        liveWorkers: engine.workers,
       })
     } catch (e) {
       // A refused/failed resume spawn (preflight, guard wiring, a gone worktree) is
@@ -9885,6 +9903,8 @@ const adoptResumeCandidates = async (
       // torn-down worktree.
       startedAt: new Date(resumeStartedAtMs(entry, now)).toISOString(),
       stage: 'starting',
+      ...(spawn.runtime === 'sdk' ? { runtime: 'sdk' as const } : {}),
+      ...(spawn.sdkSessionId ? { sdkSessionId: spawn.sdkSessionId } : {}),
       ...(spawn.model ? { model: spawn.model } : {}),
       ...(spawn.agentSessionId ? { sessionId: spawn.agentSessionId } : {}),
       reworkCount: entry.reworkCount,

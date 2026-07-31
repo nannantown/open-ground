@@ -78,7 +78,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$sid" ]; then
-  dir=$(pwd -P | sed 's/[/. ]/-/g')
+  dir=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
   mkdir -p "$HOME/.claude/projects/$dir"
   printf '{"type":"system","subtype":"init","sessionId":"%s"}\\n' "$sid" >> "$HOME/.claude/projects/$dir/$sid.jsonl"
 fi
@@ -107,7 +107,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$sid" ]; then
-  dir=$(pwd -P | sed 's/[/. ]/-/g')
+  dir=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
   mkdir -p "$HOME/.claude/projects/$dir"
   printf '{"type":"system","subtype":"init","sessionId":"%s"}\\n' "$sid" >> "$HOME/.claude/projects/$dir/$sid.jsonl"
 fi

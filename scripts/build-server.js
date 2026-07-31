@@ -40,7 +40,23 @@ esbuild
     // collabMirror WebSocket polyfill for Electron's Node 20, which lacks a
     // global WebSocket) doesn't fail on the unresolvable optional requires;
     // at runtime the try/catch falls back to the pure-JS paths.
-    external: ['node-pty', 'fsevents', 'bufferutil', 'utf-8-validate'],
+    // @anthropic-ai/claude-agent-sdk is external for the SAME reason node-pty is:
+    // it locates and spawns a native `claude` binary, and it does so with
+    // `require.resolve` from its OWN package directory. Bundled, that resolution
+    // has no package directory to resolve from — the SDK's own README documents
+    // this failure for compiled bundles. OPEN GROUND always passes
+    // `pathToClaudeCodeExecutable` (subscription-only: it must be the USER'S
+    // claude, never the SDK's bundled copy), so that path is not load-bearing
+    // here — but bundling a 4MB SDK for an OFF-by-default feature, and defeating
+    // the deliberate lazy `require()` in sdkSession.ts while doing it, is not
+    // something to leave to chance. Verified 2026-07-31: bundled it was inlined.
+    external: [
+      'node-pty',
+      'fsevents',
+      'bufferutil',
+      'utf-8-validate',
+      '@anthropic-ai/claude-agent-sdk',
+    ],
     // `@/*` → `src/*` (mirrors tsconfig paths) so server/routes/*.ts imports of
     // '@/lib/server/*' resolve during bundling.
     alias: {

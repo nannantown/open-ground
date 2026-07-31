@@ -121,6 +121,24 @@ export interface Settings {
    *  for the week" stays told. At least one tier must stay ON — `setUserSettings`
    *  refuses an all-OFF patch (a swarm with no model can only park). User-settable. */
   swarmAllowedModels?: Partial<SwarmAllowedModels>
+  /** WHICH RUNTIME a newly dispatched swarm worker runs on.
+   *
+   *  This is the kill switch for the Agent SDK worker migration
+   *  (docs/SDK_WORKER_MIGRATION_PLAN.md). Absent / `mode:'pty'` ⇒ every worker
+   *  is a PTY worker, exactly as before — that is the shipped default and the
+   *  state to return to if anything about the SDK path misbehaves. Flipping it
+   *  back does NOT disturb workers already running; it only decides what the
+   *  NEXT dispatch builds, and the roster records each worker's own runtime so
+   *  a mixed fleet stays coherent across a restart.
+   *
+   *  `sdkMaxWorkers` caps how many SDK workers may be live at once (default 1).
+   *  Deliberately small: the point of the first stage is to run ONE SDK worker
+   *  beside PTY ones, same engine, same day, and compare — not to convert the
+   *  fleet before there is evidence. */
+  swarmWorkerRuntime?: {
+    mode: 'pty' | 'sdk'
+    sdkMaxWorkers?: number
+  }
   /** The owner's chosen left-to-right order of the Swarm tab's sub-view strip
    *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー / 監督). PERSONAL UI
    *  state, kept central in `~/.openground/settings.json` (never the user's
@@ -993,6 +1011,12 @@ export interface SpawnSwarmWorkerResponse {
   agentSessionId: string
   worktree: string
   branch: string
+  /** HOW this worker was actually launched. ABSENT ⇒ `'pty'` (the default and,
+   *  unless the owner flips the dial, the only value ever produced). */
+  runtime?: 'pty' | 'sdk'
+  /** The Agent SDK session id, present ONLY for `runtime: 'sdk'`. The caller
+   *  records it on the roster; `terminalId` is empty for such a worker. */
+  sdkSessionId?: string
   /** The CLI `--model` alias this worker's `claude` was actually launched with
    *  (mode-resolved THROUGH the quota fallback — see resolveSwarmModelEffort).
    *  The engine records it on its {@link OrchestratorWorker} so a later
@@ -1088,6 +1112,15 @@ export type OrchestratorWorkerStage = 'starting' | 'running' | 'done'
 export interface OrchestratorWorker {
   /** The worker's `claude` PTY id (liveness key — getTerminal). */
   terminalId: string
+  /** HOW this worker's `claude` is running. ABSENT ⇒ `'pty'` — every worker
+   *  written before this field existed is a PTY one, and the resolver
+   *  (`workerRuntime.workerRuntimeKind`) treats absence as such. See
+   *  docs/SDK_WORKER_MIGRATION_PLAN.md. */
+  runtime?: 'pty' | 'sdk'
+  /** The Agent SDK session id, present ONLY for `runtime: 'sdk'`. The identity
+   *  invariant (workerRuntime.ts) is: pty ⇔ terminalId, sdk ⇔ sdkSessionId —
+   *  never both, never a prefix-encoded single field. */
+  sdkSessionId?: string
   /** The `swarm/*` branch the worker checked out (recorded on the card too, as
    *  the durable handle the integration stage merges). */
   branch: string
@@ -1179,6 +1212,11 @@ export interface SwarmWorkerRecord {
   branch: string
   /** The worker's `claude` PTY id, present only while that PTY is alive. */
   terminalId?: string
+  /** HOW this worker's `claude` is running. ABSENT ⇒ `'pty'`, so a roster.json
+   *  written before this field existed keeps meaning what it meant. */
+  runtime?: 'pty' | 'sdk'
+  /** The Agent SDK session id, present ONLY for `runtime: 'sdk'`. */
+  sdkSessionId?: string
   /** The Board card this worker drains, when known (engine-dispatched, or a
    *  curl caller that passed `taskId`). */
   taskId?: string

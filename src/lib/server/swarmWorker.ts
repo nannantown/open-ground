@@ -44,7 +44,11 @@ import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { ensureGuardWiring } from './hooksInstall'
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { snapshotWorktreeBranch, fireSelfUpdateIfIntegrated } from './selfUpdateOnIntegrate'
-import { getExecutionMode, getAllowedModelTiers } from './store'
+import { getExecutionMode, getAllowedModelTiers, getWorkerRuntimeDial } from './store'
+import { chooseWorkerRuntime } from './swarmWorkerRuntimeDial'
+import { sdkWorkerLaunchPlan, SdkWorkerUnavailableError } from './swarmWorkerSdk'
+import { spawnSdkSession } from './sdkSession'
+import type { WorkerHandle } from './workerRuntime'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
 import type { ClaudeEffort } from '../types'
@@ -504,6 +508,11 @@ export interface SpawnSwarmWorkerOpts {
   /** Board goal — typically a card's title (+ notes). Injected as the /order. */
   title: string
   notes?: string
+  /** The engine's CURRENT roster, used only to count live SDK worker slots
+   *  (docs/SDK_WORKER_MIGRATION_PLAN.md §8). Absent ⇒ counted as zero, which is
+   *  correct for the curl-direct spawn path (no engine roster exists there) and
+   *  harmless while the runtime dial ships OFF. */
+  liveWorkers?: readonly WorkerHandle[]
   /** Optional branch-name decoration (uniqueness comes from the timestamp). */
   hint?: string
   /** Extra env for the claude invocation — the commander/supply SWARM_MANAGER=1
@@ -766,6 +775,69 @@ export const spawnSwarmWorker = async (
   // On the RESTART path (opts.worktree) the worktree pre-existed this call and
   // holds the worker's real work — it is never ours to remove.
   const freshlyCreated = !opts.worktree
+
+  // ── RUNTIME CHOICE (docs/SDK_WORKER_MIGRATION_PLAN.md §8) ──────────────────
+  // Which way this worker's `claude` is driven. The dial ships OFF, and every
+  // reason to not use the SDK degrades to the PTY path rather than refusing the
+  // dispatch — a worker that would have run fine must never be blocked because
+  // an experimental runtime could not be established. The one thing that must
+  // not happen is the reverse (an SDK worker with an unverified veto), which is
+  // why the guard proof is part of chooseWorkerRuntime, not a later check.
+  const choice = chooseWorkerRuntime({
+    settings: { swarmWorkerRuntime: await getWorkerRuntimeDial() },
+    workers: opts.liveWorkers ?? [],
+    worktree,
+  })
+  if (choice.fellBackBecause) {
+    // Say it out loud. A silent fallback is how a migration ends up "not
+    // working" with nobody able to explain why.
+    console.warn(`[swarm] ${choice.fellBackBecause}`)
+  }
+
+  if (choice.runtime === 'sdk') {
+    const claudeBin = choice.preflight?.claudeBin
+    // Belt and braces: chooseWorkerRuntime only returns 'sdk' when the preflight
+    // resolved a binary, but an SDK worker without the USER'S claude would break
+    // the subscription-only rule silently, so it fails closed here too.
+    if (!claudeBin) throw new SdkWorkerUnavailableError(['no claude binary resolved for an SDK worker'])
+    const built = sdkWorkerLaunchPlan({
+      worktree,
+      agentSessionId,
+      title: opts.title,
+      notes: opts.notes,
+      priorFailure: opts.priorFailure,
+      resume: !!opts.resumeSessionId,
+      me,
+      claudeBin,
+    })
+    for (const w of built.warnings) console.warn(`[swarm] ${w}`)
+    let session: ReturnType<typeof spawnSdkSession>
+    try {
+      session = spawnSdkSession({
+        cwd: worktree,
+        options: built.options,
+        initialPrompt: built.initialPrompt,
+      })
+    } catch (e) {
+      if (freshlyCreated) {
+        await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
+        await git(opts.projectPath, ['branch', '-D', branch])
+      }
+      throw e
+    }
+    // terminalId is EMPTY for an SDK worker: the identity invariant is
+    // pty ⇔ terminalId / sdk ⇔ sdkSessionId (workerRuntime.ts), never both.
+    return {
+      terminalId: '',
+      runtime: 'sdk',
+      sdkSessionId: session.id,
+      agentSessionId,
+      worktree,
+      branch,
+      model: me.model,
+    }
+  }
+
   let ref: ReturnType<typeof launchClaude>
   try {
     ref = launchClaude(

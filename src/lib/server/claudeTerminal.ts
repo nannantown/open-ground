@@ -13,11 +13,54 @@ import { buildSandboxProfile, wrapWithSandboxExec } from './sandbox'
 import { CLAUDE_EFFORTS, type ClaudeEffort, type ProjectLaunchPrefs } from '../types'
 
 // Launches `claude` interactively inside a PTY hosted by OPEN GROUND.
-// This is the post-2026-06-15 replacement for spawning `claude -p` directly:
-// because the PTY exposes a real TTY to claude, the session bills against the
-// user's Claude subscription rate-limit pool, not the new programmatic credit
-// pool. The user types in xterm.js; OPEN GROUND observes the session JSONL
+// The user types in xterm.js; OPEN GROUND observes the session JSONL
 // (~/.claude/projects/<cwd-hyphenated>/<session-id>.jsonl) for state.
+//
+// ═══ THE TWO RULES (CANONICAL — every other launcher cites this block) ═══════
+//
+// They are SEPARATE rules with SEPARATE reasons. The pre-2026-07-30 version of
+// this comment fused them into one ("the PTY is what makes it bill the
+// subscription"), and that fusion was wrong — see rule 2.
+//
+// ── RULE 1 · SUBSCRIPTION-ONLY — never an API key ───────────────────────────
+// OPEN GROUND only ever drives the user's own `claude` CLI on their OAuth login.
+// No ANTHROPIC_API_KEY path, no `setup-token` long-lived token (those are
+// inference-only), and none may be added or proposed. Unchanged, and unrelated
+// to how claude is spawned.
+//
+// ── RULE 2 · PTY-ONLY — never `claude -p` as an execution path ──────────────
+// EVERY claude OPEN GROUND starts — desks, workers, the commander, the one-off
+// title / description / skill / canvas runs — starts inside a real PTY.
+// `claude -p` / execFile('claude', …) is FORBIDDEN as an execution path.
+//
+// ⚠ THE ORIGINAL REASON FOR RULE 2 WAS WRONG. IT STILL HOLDS, FOR OTHER REASONS.
+// This block used to say a real TTY is what bills the subscription pool instead
+// of "the new programmatic credit pool". Measured 2026-07-30 on CLI 2.1.220,
+// that is false — `claude -p` runs on the subscription too: `/usage` under -p
+// prints "You are currently using your subscription", apiKeySource is "none",
+// the stream carries a seven_day rate_limit_event, and the account reports
+// subscriptionType "Claude Max" / apiProvider "firstParty". The discriminator is
+// the AUTH METHOD (rule 1), not the presence of a TTY.
+//
+// DO NOT read that as "so -p is fine now". Rule 2 stands on four legs:
+//   1. BILLING IS POLICY, NOT ARCHITECTURE. A rule that -p billed separately DID
+//      exist once and was later removed. It can return, and it would return
+//      silently — on the owner's own quota. Don't bet the execution path on it.
+//   2. REMOTE CONTROL IS REPL-ONLY. swarmLaunch gives every role
+//      `--remote-control <name>`, and the owner drives the COMMANDER desk from
+//      their phone daily. The flag does nothing outside an interactive REPL
+//      (measured 3 ways — docs/SDK_CLIENT_INVESTIGATION.md §8-A). A non-PTY path
+//      drops it silently: no error, the desk just stops answering the phone.
+//   3. THE SENSORS ASSUME A RENDERED SCREEN. ownerDeskLimit / swarmRateLimitText
+//      / swarmQuestions / claudeMenu / the Ground "Terminal" beacon all read a
+//      frame, not a stream.
+//   4. THE SHELL IS THE ESCAPE HATCH. claude runs inside a login shell, so
+//      quitting it leaves a live shell in the worktree.
+// Legs 3–4 are ours to change if we choose. Legs 1–2 are not.
+//
+// The full survey — what a non-PTY (Agent SDK) path would gain and lose, with
+// the measurements behind all of the above — is docs/SDK_CLIENT_INVESTIGATION.md.
+// ════════════════════════════════════════════════════════════════════════════
 
 export type ClaudePermissionMode =
   | 'plan'

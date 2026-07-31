@@ -328,23 +328,28 @@ const rowNamesTier = (label: string, tier: string): boolean =>
  *  through:
  *    • `session` / `weekAll` — the ACCOUNT-WIDE slots. They cap every model at
  *      once, so the top tier is dry whenever they are.
- *    • `weekModels` — the per-model weekly rows (`Current week (<Model> only)`),
- *      matched to {@link SWARM_LAUNCH_MODEL} by label ({@link rowNamesTier}).
- *      The only reading that COULD see the top tier run dry alone — and it is
- *      DORMANT: the `claude` shipping today (2.1.207) prints NO per-model row.
- *      Where 2.1.196 rendered one, a "Per-model breakdown unavailable (rate
- *      limited — try again in a moment)" placeholder now sits, so `weekModels`
- *      is ALWAYS empty in practice and this branch never fires (live render
- *      captured 2026-07-13 04:5xZ: two rows, zero occurrences of "only").
+ *    • `weekModels` — the per-model weekly rows, matched to
+ *      {@link SWARM_LAUNCH_MODEL} by label ({@link rowNamesTier}). The only
+ *      reading that can see the top tier run dry ALONE, and as of claude 2.1.220
+ *      it is LIVE again: the row is printed as `Current week (Fable)` (2.1.196
+ *      printed `Current week (Sonnet only)`; 2.1.207 in between printed none and
+ *      showed a "Per-model breakdown unavailable" placeholder instead).
  *
- *  So this predicate does NOT catch a fable-only wall today. At 03:04Z that same
- *  day `claude` refused every fable launch ("You've reached your Fable 5 limit")
- *  while the scrape read session 3% / weekAll 63% and carried no row that could
- *  say otherwise — /usage simply cannot express it. The reading above is wired
- *  for the day the row comes back; the signal that DOES observe the wall is the
- *  CLI's own refusal string (`claude --model <tier> -p …` — one second, and no
- *  tokens at all when the tier is dry). That probe is a separate card; see
- *  docs/commander/04-quota-models.md §5.7.
+ *  ⚠ HISTORY, because the stale version of this comment outlived the facts twice.
+ *  This branch was dead from 2.1.207 through 2026-07-30 — first because the CLI
+ *  genuinely stopped printing the row, then because it came BACK in a new shape
+ *  (`(Fable)`, no "only") that claudeUsageCli's pattern still required the suffix
+ *  to match. Both times the comment here said "always empty in practice" and was
+ *  believed. The concrete cost: on 2026-07-13 03:04Z `claude` refused every fable
+ *  launch ("You've reached your Fable 5 limit") while the scrape read session 3% /
+ *  weekAll 63%, and this predicate could not say so.
+ *  **Re-verify against a LIVE render before trusting any claim about what /usage
+ *  prints — a fixture is not evidence.** (Fixed 2026-07-30; see
+ *  claudeUsageCli.findModelWeeks.)
+ *
+ *  The CLI's own refusal string (`claude --model <tier> -p …` — one second, no
+ *  tokens when the tier is dry) remains a valid independent signal and is a
+ *  separate card; see docs/commander/04-quota-models.md §5.7.
  *
  *  A per-model row for a DIFFERENT tier (a dry `Sonnet only` while fable has
  *  headroom) is deliberately ignored here: this predicate answers one question —

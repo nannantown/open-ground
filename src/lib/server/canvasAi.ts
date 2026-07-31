@@ -7,9 +7,11 @@
 //   - tweakScreenSource: claude patches ONE screen/mock's source per an
 //     instruction aimed at a picked element inside its rendered iframe.
 //
-// SUBSCRIPTION-ONLY (read claudeTerminal.ts top comment): claude MUST run
-// inside a real PTY via launchClaude so it bills the user's Claude
-// subscription pool. `claude -p` / execFile('claude', ...) is FORBIDDEN here.
+// PTY-ONLY + SUBSCRIPTION-ONLY (canonical: claudeTerminal.ts "THE TWO RULES").
+// claude MUST run inside a real PTY via launchClaude; `claude -p` /
+// execFile('claude', ...) is FORBIDDEN here. ⚠ The reason is NOT billing — that
+// rationale was measured wrong on 2026-07-30 (-p bills the subscription too).
+// Read the canonical block before "simplifying" this to -p.
 //
 // FILE HANDOFF, NOT PTY SCRAPE: unlike generateDescription.ts (whose payload
 // is one short sentence), the payloads here are JSON / JSX source — scraping

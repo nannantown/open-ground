@@ -165,6 +165,21 @@ export const projectPanel = {
     'projectPanel.swarm.engineOwned': 'Engine',
     'projectPanel.swarm.engineOwnedHint':
       'The autonomous engine spawned and owns this worker — manage it from the Manager tab.',
+    // Agent SDK worker tile (docs/SDK_WORKER_MIGRATION_PLAN.md). A worker running
+    // on the SDK runtime has no terminal screen — the tile renders its distilled
+    // event stream instead.
+    'projectPanel.swarm.sdk.badgeHint':
+      'This worker runs on the Agent SDK runtime, not a terminal. Its transcript is shown instead of a screen.',
+    'projectPanel.swarm.sdk.statusQuotaParked': 'Quota wait',
+    'projectPanel.swarm.sdk.statusFailed': 'Failed',
+    'projectPanel.swarm.sdk.interrupt': 'Stop the current turn (the session stays open)',
+    'projectPanel.swarm.sdk.send': 'Send',
+    'projectPanel.swarm.sdk.placeholder': 'Say something to this worker…',
+    'projectPanel.swarm.sdk.empty': 'Waiting for the first turn…',
+    'projectPanel.swarm.sdk.thinking': 'thought',
+    'projectPanel.swarm.sdk.rateLimit': 'Usage',
+    'projectPanel.swarm.sdk.truncated':
+      'Older lines were dropped — this transcript starts mid-conversation.',
     // Supply officer (タスク窓口) — the conversation desk that turns the user's
     // requests into Board:todo cards. Writes the Board only; never edits code.
     'projectPanel.swarm.workersTab': 'Workers',
@@ -816,6 +831,20 @@ export const projectPanel = {
     'projectPanel.swarm.engineOwned': 'エンジン',
     'projectPanel.swarm.engineOwnedHint':
       '自律エンジンが起動・管理している worker です — 操作はマネージャータブから行ってください。',
+    // Agent SDK worker のタイル(docs/SDK_WORKER_MIGRATION_PLAN.md)。SDK ランタイムで
+    // 動く worker には端末画面が無いので、蒸留したイベント列を表示する。
+    'projectPanel.swarm.sdk.badgeHint':
+      'この worker は端末ではなく Agent SDK ランタイムで動いています。画面の代わりに会話の記録を表示します。',
+    'projectPanel.swarm.sdk.statusQuotaParked': '上限待ち',
+    'projectPanel.swarm.sdk.statusFailed': '失敗',
+    'projectPanel.swarm.sdk.interrupt': '今のターンを止める(セッションは続きます)',
+    'projectPanel.swarm.sdk.send': '送信',
+    'projectPanel.swarm.sdk.placeholder': 'この worker に話しかける…',
+    'projectPanel.swarm.sdk.empty': '最初のターンを待っています…',
+    'projectPanel.swarm.sdk.thinking': '思考',
+    'projectPanel.swarm.sdk.rateLimit': '使用量',
+    'projectPanel.swarm.sdk.truncated':
+      '古い行は破棄されました — この記録は会話の途中から始まっています。',
     // Supply officer (タスク窓口) — 要望を Board:todo カードに積む対話デスク。
     // Board に書くだけで、コードは編集しない。
     'projectPanel.swarm.workersTab': 'ワーカー',

@@ -22,6 +22,7 @@ import { miscRoutes } from './routes/misc'
 import { terminalRoutes } from './routes/terminal'
 import { swarmRoutes } from './routes/swarm'
 import { sseRoutes } from './routes/sse'
+import { sdkSessionRoutes } from './routes/sdkSession'
 import { feedbackRoutes } from './routes/feedback'
 import { authRoutes } from './routes/auth'
 import { customModulesRoutes } from './routes/customModules'
@@ -113,6 +114,7 @@ export const createApp = () => {
     .route('/', terminalRoutes)  // F — terminal CRUD (dynamic :id)
     .route('/', swarmRoutes)     // F2 — in-app swarm worker spawn + worktree lifecycle
     .route('/', sseRoutes)       // SSE — terminal stream
+    .route('/', sdkSessionRoutes) // F3 — Agent SDK worker sessions (docs/SDK_WORKER_MIGRATION_PLAN.md)
     .route('/', feedbackRoutes)  // G — in-app feedback proxy (env-gated)
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)
     .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)

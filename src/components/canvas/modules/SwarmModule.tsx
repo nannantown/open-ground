@@ -58,6 +58,7 @@ import type {
 import { SWARM_PANE_IDS } from '@/lib/types'
 import { effectiveTabOrder, moveTab } from '@/lib/modules/tabOrder'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
+import { SdkWorkerPane } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { SwarmOverseerPane } from './SwarmOverseerPane'
@@ -1438,6 +1439,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                     minHeight: MIN_TILE_HEIGHT,
                   }}
                 >
+                  {w.runtime === 'sdk' && w.sdkSessionId ? (
+                    // An SDK worker has no terminal to render — its tile shows
+                    // the distilled event stream instead. Same header vocabulary,
+                    // so a mixed fleet still reads as one fleet.
+                    <SdkWorkerPane
+                      sdkSessionId={w.sdkSessionId}
+                      projectPath={project.path}
+                      branch={w.branch}
+                      taskTitle={w.taskTitle ?? w.note ?? ''}
+                      source={isEngine ? 'engine' : 'manual'}
+                    />
+                  ) : (
                   <SwarmWorkerPane
                     terminalId={w.terminalId}
                     branch={w.branch}
@@ -1451,6 +1464,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                     onTerminate={!isEngine ? () => void terminate(w) : undefined}
                     onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
                   />
+                  )}
                 </div>
               )
             })}

@@ -3,9 +3,10 @@
 // `claude` CLI in ~/.claude/skills and scraping a completion marker out of the
 // PTY OUTPUT STREAM. Same one-off-PTY pattern as generateDescription.ts.
 //
-// SUBSCRIPTION-ONLY (read claudeTerminal.ts top comment): claude MUST run inside
-// a real PTY so it bills the user's Claude subscription pool, NOT the
-// programmatic credit pool. `claude -p` / execFile('claude', …) is FORBIDDEN.
+// PTY-ONLY + SUBSCRIPTION-ONLY (canonical: claudeTerminal.ts "THE TWO RULES").
+// claude MUST run inside a real PTY; `claude -p` / execFile('claude', …) is
+// FORBIDDEN. ⚠ The reason is NOT billing — that rationale was measured wrong on
+// 2026-07-30 (-p bills the subscription too). Read the canonical block first.
 //
 // Unlike describe (read-only), this session WRITES: it creates one skill
 // directory under cwd. It runs with `bypass` (--dangerously-skip-permissions)

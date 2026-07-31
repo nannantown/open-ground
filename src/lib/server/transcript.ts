@@ -46,7 +46,9 @@ export const sessionSubagentsDir = (cwd: string, sessionId: string): string =>
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
 
 // Condense a tool_use input into one readable detail string.
-const summarizeInput = (name: string, input: any): string => {
+// Exported so the SDK event distiller (sdkEvents.ts) renders a tool call the
+// SAME way this does — two spellings of "🔧 Edit foo/bar.ts" would drift.
+export const summarizeInput = (name: string, input: any): string => {
   if (!input || typeof input !== 'object') return ''
   switch (name) {
     case 'Edit':

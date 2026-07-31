@@ -58,9 +58,16 @@ fi
 
 # --- locate claude's session JSONL for THIS cwd ----------------------------
 # Mirror claudeDirName(): realpath the cwd (collapses /tmp -> /private/tmp on
-# macOS) then replace '/', '.', and space with '-'.
+# macOS) then replace EVERY non-alphanumeric character with '-'.
+#
+# ⚠ This is the SECOND implementation of that rule (claudeProjectDir.ts is the
+# first), and the two drifting apart is exactly how this fixture broke on
+# 2026-07-30: the TS side was corrected to hyphenate '_' and this one was not,
+# so the fake wrote its JSONL somewhere the reader no longer looked. macOS
+# tmpdir() is `/var/folders/<x>/<y_z_...>/T/`, so the underscore is not exotic
+# here — it is in every temp path on the machine. Keep the two in step.
 cwd=$(pwd -P)
-dir=$(printf '%s' "$cwd" | sed 's/[/. ]/-/g')
+dir=$(printf '%s' "$cwd" | sed 's/[^a-zA-Z0-9]/-/g')
 projdir="$HOME/.claude/projects/$dir"
 mkdir -p "$projdir"
 jsonl="$projdir/$sid.jsonl"

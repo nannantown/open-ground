@@ -375,9 +375,12 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       ...boardDeps,
       ...wake.deps,
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
-      isAlive: (id) => alive.has(id),
+      isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: (id) => {
+      // killPty now takes the WORKER (workerRuntime seam), not a bare id. For a
+      // PTY worker the key IS terminalId, so the assertions are unchanged.
+      killPty: (w) => {
+        const id = w.terminalId!
         killed.push(id)
         alive.delete(id)
       },
@@ -440,7 +443,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       ...boardDeps,
       ...wake.deps,
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
-      isAlive: (id) => alive.has(id),
+      isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
       killPty: () => {},
     }
@@ -488,7 +491,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
         spawned.push(o.title)
         return baseSpawn(o)
       },
-      isAlive: (id) => alive.has(id),
+      isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
       killPty: () => {},
     }
@@ -522,7 +525,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       ...defaultDeps(), // REAL recoverWorker ⇒ REAL commitWipBeforeTeardown
       ...boardDeps,
       spawnWorker: spawn,
-      isAlive: (id) => alive.has(id),
+      isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
       killPty: () => {},
     }
@@ -562,7 +565,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       ...defaultDeps(), // REAL recoverWorker (removeSwarmWorktree) + countCommitsAhead
       ...boardDeps, // board-backed recoverCard (no HTTP server in the test)
       spawnWorker: spawn,
-      isAlive: (id) => alive.has(id),
+      isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
       killPty: () => {},
     }
@@ -664,7 +667,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       ...defaultDeps(),
       ...boardDeps,
       spawnWorker: spawn,
-      isAlive: (id) => alive.has(id),
+      isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
       killPty: () => {},
     }
@@ -787,14 +790,15 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       isAlive: () => true, // ALIVE throughout — exercises the STALL path, not the crash path
       readHeartbeat: async () => null, // never beats
       lastOutputAt: () => null, // never emits output → silent on BOTH channels
-      nudge: (id) => {
+      nudge: (w) => {
+        const id = w.terminalId!
         nudged.push(id)
         return true
       },
       // Fake (no real ESC write / no real 3s delay) so the escalation step stays
       // deterministic and fast in this integration test.
-      escalate: async (id) => {
-        escalated.push(id)
+      escalate: async (w) => {
+        escalated.push(w.terminalId!)
         return true
       },
       killPty: () => {},

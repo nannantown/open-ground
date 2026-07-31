@@ -370,7 +370,7 @@ const makeDeps = (init: {
     },
     countCommitsAhead: async (_path, branch) => commits.get(idOf(branch)) ?? 0,
     readHeartbeat: async (_path, branch) => heartbeats.get(idOf(branch)) ?? null,
-    isAlive: (terminalId) => !Array.from(dead).some((id) => terminalId.includes(`pty-${id}-`)),
+    isAlive: (w) => !Array.from(dead).some((id) => w.terminalId!.includes(`pty-${id}-`)),
     recoverCard: async (_path, taskId, column) => {
       if (recoverFails.has(taskId)) {
         recoverFails.delete(taskId) // only the FIRST recover move fails
@@ -400,23 +400,26 @@ const makeDeps = (init: {
     },
     // PTY output epoch, keyed by terminalId (absent → null = no output signal, so
     // the stall monitor falls back to heartbeat/startedAt). Default: none.
-    lastOutputAt: (terminalId) => outputs.get(terminalId) ?? null,
+    lastOutputAt: (w) => outputs.get(w.terminalId!) ?? null,
     // Record the Enter-nudge; the fake worker stays as silent as the test set it
     // (outputs/heartbeats unchanged) unless the test mutates those between passes.
-    nudge: (terminalId) => {
+    nudge: (w) => {
+      const terminalId = w.terminalId!
       nudged.push(terminalId)
       return true
     },
     // Record the ESC+continue escalation; like `nudge` above the fake worker stays
     // silent unless the test mutates outputs/heartbeats between passes.
-    escalate: async (terminalId, taskTitle) => {
-      escalated.push({ terminalId, taskTitle })
+    escalate: async (w, taskTitle) => {
+      escalated.push({ terminalId: w.terminalId!, taskTitle })
       return true
     },
     // Current screen text, keyed by terminalId (absent → null, which classifyOutput
     // reads as 'normal' = ordinary work). Drives the rate-limit / permission-wait /
     // question classification.
-    recentOutput: (terminalId) => screens.get(terminalId) ?? null,
+    // Takes the WORKER now (workerRuntime seam); for a PTY worker the screen is
+    // still keyed by terminalId, so this fake behaves exactly as before.
+    recentOutput: (w) => screens.get(w.terminalId!) ?? null,
     // The THIRD liveness channel: newest transcript/sub-agent mtime for a worker's
     // worktree cwd (absent → null = no file signal, so the cheap verdict stands).
     // Drives the stall backstop that spares a worker running a Task() sub-agent.
@@ -1318,7 +1321,7 @@ describe('defaultEscalate — ESC + continue-instruction (stall escalation)', ()
   it('writes ESC, waits STALL_ESCALATE_DELAY_MS, then a one-line continue instruction + CR', async () => {
     const writes: string[] = []
     const waits: number[] = []
-    const ok = await defaultEscalate('pty-a-1', 'my task', {
+    const ok = await defaultEscalate({ terminalId: 'pty-a-1' }, 'my task', {
       write: (id, data) => {
         writes.push(`${id}:${data}`)
         return true
@@ -1337,7 +1340,7 @@ describe('defaultEscalate — ESC + continue-instruction (stall escalation)', ()
   it('returns false without waiting/writing the follow-up when the ESC write fails (PTY gone)', async () => {
     const writes: string[] = []
     let slept = false
-    const ok = await defaultEscalate('pty-gone', 'x', {
+    const ok = await defaultEscalate({ terminalId: 'pty-gone' }, 'x', {
       write: () => false,
       sleep: async () => {
         slept = true
@@ -1349,7 +1352,7 @@ describe('defaultEscalate — ESC + continue-instruction (stall escalation)', ()
   })
   it('returns false when only the follow-up write fails (ESC landed, worker died mid-escalation)', async () => {
     let calls = 0
-    const ok = await defaultEscalate('pty-a-1', 'x', {
+    const ok = await defaultEscalate({ terminalId: 'pty-a-1' }, 'x', {
       write: () => {
         calls += 1
         return calls === 1 // ESC succeeds, the follow-up fails
@@ -1365,7 +1368,7 @@ describe('defaultEscalate — ESC + continue-instruction (stall escalation)', ()
     // not less, so it must never survive into the write.
     const writes: string[] = []
     const malicious = 'evil\x1b[201~\x9bmore'
-    await defaultEscalate('pty-a-1', malicious, {
+    await defaultEscalate({ terminalId: 'pty-a-1' }, malicious, {
       write: (id, data) => {
         writes.push(data)
         return true
@@ -1381,7 +1384,7 @@ describe('defaultEscalate — ESC + continue-instruction (stall escalation)', ()
   })
   it('collapses an embedded newline in taskTitle to a space (never a bare submit mid-line)', async () => {
     const writes: string[] = []
-    await defaultEscalate('pty-a-1', 'line one\nline two', {
+    await defaultEscalate({ terminalId: 'pty-a-1' }, 'line one\nline two', {
       write: (id, data) => {
         writes.push(data)
         return true
@@ -3220,7 +3223,7 @@ describe('runDispatchPass — dynamic worker scaling (card ea369937)', () => {
     await runDispatchPass(engine, deps)
     // MAX+3 independent todos, yet the engine pins at MAX (暴走防止 — never exceeds).
     expect(deps.spawned).toHaveLength(ORCHESTRATOR_MAX_WORKERS)
-    expect(engine.workers.filter((w) => deps.isAlive(w.terminalId))).toHaveLength(
+    expect(engine.workers.filter((w) => deps.isAlive(w))).toHaveLength(
       ORCHESTRATOR_MAX_WORKERS,
     )
     expect(scaleLines(engine)).toHaveLength(1)
@@ -3247,7 +3250,7 @@ describe('runDispatchPass — dynamic worker scaling (card ea369937)', () => {
     }
     await runDispatchPass(engine, deps)
     // Now riding the cap, with a SECOND, distinct scale line recording the climb.
-    expect(engine.workers.filter((w) => deps.isAlive(w.terminalId))).toHaveLength(
+    expect(engine.workers.filter((w) => deps.isAlive(w))).toHaveLength(
       ORCHESTRATOR_MAX_WORKERS,
     )
     const lines = scaleLines(engine)
@@ -5917,8 +5920,8 @@ const makeIntDeps = (init: {
       cleaned.push(branch)
       return { removed: true }
     },
-    killPty: (terminalId) => {
-      killed.push(terminalId)
+    killPty: (w) => {
+      killed.push(w.terminalId!)
     },
     // 差し戻し(rework)seam — review→doing 移動 / recovery 移動 / worker liveness /
     // teardown / 修正指示。runIntegratePass の reworkOrPark が使う。
@@ -5940,7 +5943,7 @@ const makeIntDeps = (init: {
       dropReview(taskId)
       return true
     },
-    isAlive: (terminalId) => !dead.has(terminalId),
+    isAlive: (w) => !dead.has(w.terminalId!),
     recoverWorker: async ({ terminalId }) => {
       tornDown.push(terminalId)
       return { removed: true }
@@ -8084,7 +8087,7 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
       return true
     },
     recoverWorker: async () => ({ removed: true }),
-    isAlive: (id) => !over.deadIds.has(id),
+    isAlive: (w) => !over.deadIds.has(w.terminalId!),
     lastOutputAt: () => null,
     nudge: () => true,
     escalate: async () => true,
@@ -8265,7 +8268,7 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
         tornDown.push(terminalId)
         return { removed: true }
       },
-      isAlive: (id) => !tornDown.includes(id), // a torn-down PTY reads dead
+      isAlive: (w) => !tornDown.includes(w.terminalId!), // a torn-down PTY reads dead
       lastOutputAt: () => Date.now(), // both workers streaming ⇒ never stall-reclaimed
       nudge: () => true,
       escalate: async () => true,
@@ -8332,7 +8335,7 @@ describe('detectAnomalies — state inconsistency detection', () => {
     alive?: Set<string>,
   ): OrchestratorDeps & AnomalyDeps => ({
     ...makeDeps({ cards: [] }),
-    isAlive: (id) => (alive ? alive.has(id) : true),
+    isAlive: (w) => (alive ? alive.has(w.terminalId!) : true),
     worktreeExists: async (_p, branch) => treesPresent.has(branch),
   })
 
@@ -8971,7 +8974,7 @@ describe('fireFatalNotifications — fatal events push, normal passes are silent
     const alive = opts.alive ?? new Set<string>()
     const fired: SwarmFatalNotification[] = []
     const deps = {
-      isAlive: (id: string) => alive.has(id),
+      isAlive: (w: { terminalId?: string }) => alive.has(w.terminalId!),
       notify: opts.withNotify === false ? undefined : (n: SwarmFatalNotification) => fired.push(n),
     }
     fireFatalNotifications(engine, tasks, deps, 0)

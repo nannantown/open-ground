@@ -262,6 +262,20 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
 export const getAllowedModelTiers = async (): Promise<SwarmAllowedModels> =>
   normalizeAllowedModels((await getSettings()).swarmAllowedModels)
 
+// ─── Swarm worker runtime dial (Settings.swarmWorkerRuntime) ─────────────────
+// The kill switch for the Agent SDK worker migration. Read through here rather
+// than straight from getSettings so the "absent ⇒ pty" default lives in ONE
+// place: a missing, partial or hand-corrupted field must degrade to the shipped
+// PTY behaviour, never to an experimental runtime.
+export const getWorkerRuntimeDial = async (): Promise<{
+  mode: 'pty' | 'sdk'
+  sdkMaxWorkers?: number
+}> => {
+  const raw = (await getSettings()).swarmWorkerRuntime
+  const mode = raw?.mode === 'sdk' ? 'sdk' : 'pty'
+  return { mode, ...(typeof raw?.sdkMaxWorkers === 'number' ? { sdkMaxWorkers: raw.sdkMaxWorkers } : {}) }
+}
+
 // ─── Swarm autonomy "remembered ON" set (Settings.swarmAutonomyOn) ────────────
 // The ONLY autonomy state that survives a restart — a REMINDER, never an
 // auto-resume (the engine is in-memory and always relaunches OFF). Added when the

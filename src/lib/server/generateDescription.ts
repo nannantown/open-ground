@@ -4,10 +4,11 @@
 // the PTY OUTPUT STREAM. Same pattern as generateTaskTitle.ts — read its top
 // comment for the full rationale.
 //
-// SUBSCRIPTION-ONLY (read claudeTerminal.ts top comment): claude MUST run
-// inside a real PTY so it bills the user's Claude subscription pool, NOT the
-// programmatic credit pool. `claude -p` / execFile('claude', ...) is FORBIDDEN
-// here.
+// PTY-ONLY + SUBSCRIPTION-ONLY (canonical: claudeTerminal.ts "THE TWO RULES").
+// claude MUST run inside a real PTY; `claude -p` / execFile('claude', ...) is
+// FORBIDDEN here. ⚠ The reason is NOT billing — that rationale was measured
+// wrong on 2026-07-30 (-p bills the subscription too). Read the canonical block
+// before "simplifying" this to -p.
 //
 // WHY THE PTY STREAM, NOT THE SESSION JSONL: claude ≥2.1.169 no longer writes
 // the per-session transcript for these one-off sessions — the old JSONL-polling

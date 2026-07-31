@@ -54,6 +54,7 @@ import type { SwarmInfoNotification, SwarmFatalNotification, EscalationStatus } 
 // this file must never import a VALUE back. The readHeartbeat/isAlive VALUES the pass
 // needs are handed in through OverseerDeps (the orchestrator already owns them).
 import type { HeartbeatSign } from './swarmOrchestrator'
+import type { WorkerHandle } from './workerRuntime'
 import {
   answerAsOwner as realAnswerAsOwner,
   makeOverseerBrain,
@@ -296,7 +297,7 @@ export interface TimedSwarmFatal {
 export interface OverseerDeps {
   now: () => number
   /** From the orchestrator's own deps (it already reads these each pass). */
-  isAlive: (terminalId: string) => boolean
+  isAlive: (w: WorkerHandle) => boolean
   readHeartbeat: (projectPath: string, branch: string) => Promise<HeartbeatSign | null>
   /** C2 — proxy-you brain. Resolves answer|escalate; NEVER throws. `signal` aborts it
    *  on owner OFF / teardown. */
@@ -339,7 +340,7 @@ export interface OverseerDeps {
  *  wiring. The brain runner is built per-call at the mode-resolved overseer tier
  *  (resolveSwarmModelEffort(mode, 'overseer') — manager-grade, D4). */
 export const defaultOverseerDeps = (io: {
-  isAlive: (terminalId: string) => boolean
+  isAlive: (w: WorkerHandle) => boolean
   readHeartbeat: (projectPath: string, branch: string) => Promise<HeartbeatSign | null>
 }): OverseerDeps => ({
   now: () => Date.now(),
@@ -776,7 +777,7 @@ const detectWorkerQuestions = async (
   fired: OverseerSignalId[],
   activeSeen: Set<string>,
 ): Promise<void> => {
-  const live = engine.workers.filter((w) => deps.isAlive(w.terminalId))
+  const live = engine.workers.filter((w) => deps.isAlive(w))
   for (const w of live) {
     const hb = await deps.readHeartbeat(engine.path, w.branch).catch(() => null)
     if (!hb?.blocked) continue

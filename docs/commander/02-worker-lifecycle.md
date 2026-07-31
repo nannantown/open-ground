@@ -158,6 +158,39 @@ worktree の `node_modules` は**本体 checkout の `node_modules` への symli
 - **キーチェーンを開けた代償は「claude のトークンが読める」ではなく「login keychain の item が全部読める」**(2026-07-19 敵対レビュー2巡目)。普通のマシンの login keychain には `Chrome Safe Storage` = **ブラウザ保存パスワードの保管庫マスター鍵**が入っている。鍵側は塞げない(塞ぐと起動不能に戻る)が、保管庫の**ファイル側**は塞げるので塞いである — Chromium 系(`Login Data`/`Cookies`/`Web Data`)・Firefox 系(`key4.db`/`logins.json`/`cookies.sqlite`)・Safari(`~/Library/Cookies`)を read-deny。**ブラウザのディレクトリごと deny してはいけない**(Chrome 拡張のソースは Application Support 配下にあり、claude が正当に触る) — negative control の probe 行がその退化を検出する。worker のトークン持ち出しを本当に閉じるのは `network:'loopback'` + egress proxy であって、ファイルルールではない
 - 削除時は symlink を先に unlink する(swarmWorker.ts:342-354 — `node_modules/` 形式の .gitignore は「ディレクトリのみ」マッチなので **symlink は untracked 扱い**になり、非 force 削除と定期 sweep を永久にブロックするため)
 
+### 2.4-0 【新設 2026-07-30】worker には**ランタイムが 2 種類**ある
+
+`spawnSwarmWorker` は起動の直前に `chooseWorkerRuntime`(swarmWorkerRuntimeDial.ts)を
+呼び、その worker を **PTY** で動かすか **Agent SDK** で動かすかを決める。
+**既定は PTY** で、設定 `Settings.swarmWorkerRuntime.mode` が `'sdk'` のときだけ
+SDK が選ばれうる(枠は `sdkMaxWorkers`、既定 1)。設計は
+`docs/SDK_WORKER_MIGRATION_PLAN.md`。
+
+司令塔が知っておくべきことは 3 つだけ:
+
+1. **識別**: `runtime` フィールド。**不在 ⇒ `'pty'`**(既存 roster.json はそのまま
+   読める)。ハンドルは排他 — pty ⇔ `terminalId` / sdk ⇔ `sdkSessionId`。
+   SDK worker の `terminalId` は**空文字**なので、`terminalId` で worker を探す
+   コードは SDK worker を見つけられない。`workerKey(w)`(workerRuntime.ts)を使う。
+2. **見る場所**: SDK worker に端末画面は無い。Swarm タブのタイルは
+   `SdkWorkerPane` に切り替わり、構造化トランスクリプトを表示する。
+   HTTP で見るなら `GET /api/sdk-session/:id/stream?path=`(SSE)。
+   `GET /api/terminal/active` には出ない。
+3. **降格は正常**: ダイヤルが `'sdk'` でも、枠が埋まっている / preflight が
+   通らない場合は **PTY にフォールバックして dispatch は続行する**(理由は
+   サーバログに出る)。「SDK のはずが PTY で上がった」は障害ではない。
+   逆に **veto を検証できない SDK worker は絶対に上げない**(fail-closed)。
+
+**戻し方(kill switch)**: `settings.json` の `swarmWorkerRuntime.mode` を `'pty'` に
+戻すだけ。走行中の worker には触れず、次の dispatch から PTY に戻る。
+
+以下 2.4〜2.6 は **PTY worker** の話。SDK worker の起動オプションは
+`swarmWorkerSdk.sdkWorkerLaunchPlan` が組み、対応関係は設計書 §4 の表にある。
+⚠ 最重要の非自明点: **Agent SDK は filesystem settings をロードしないので、
+グローバル settings.json に入っている guard hook は発火しない**。SDK worker の
+A3/L4 veto は `sdkGuardHook.ts` が in-process で武装し直している(同じ
+`openground-guard.js` の `evaluate` を呼ぶ — ルールの複製は無い)。
+
 ### 2.4 claude 起動フラグ(worker の場合)
 
 `workerLaunchOpts`(swarmWorker.ts:455-538)→ `launchClaude`(claudeTerminal.ts:479)→ `buildClaudeArgv`(claudeTerminal.ts:275-370)。実際に組み上がる argv:

@@ -6,8 +6,9 @@ import { assertTestHomeIsolated } from './testHomeGuard'
 // claude 2.1.167+ shows a BLOCKING "Is this a project you created or one you
 // trust?" prompt the first time it starts in a directory it hasn't seen —
 // and `--dangerously-skip-permissions` does NOT skip it (only `-p` print mode
-// does, which we deliberately avoid because it bills the programmatic credit
-// pool instead of the subscription rate-limit pool — see claudeTerminal.ts).
+// does, which we deliberately avoid — see claudeTerminal.ts "THE TWO RULES".
+// ⚠ NOT for the billing reason that used to be written here: -p bills the
+// subscription too, measured 2026-07-30. The rule holds on other legs).
 //
 // Our runs launch claude inside a HIDDEN PTY, so nobody can answer that prompt:
 // the PTY wedges, claude never starts a session (no JSONL transcript), and the

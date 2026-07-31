@@ -26,8 +26,10 @@
 //     no PTY.
 //   makeOverseerBrain(opts) / runOverseerBrain — the REAL runner: one-off `claude`
 //     PTY per OVERSEER_DESIGN §5 D4 (empty scratch cwd, strict-mcp-config, corpus
-//     read by PATH, 5-min timeout, marker-scrape, echo-safe, finally-kill). It is
-//     the SUBSCRIPTION path (a real TTY) — never `claude -p` / an API key.
+//     read by PATH, 5-min timeout, marker-scrape, echo-safe, finally-kill).
+//     A real PTY — never `claude -p` / an API key. Canonical reasons:
+//     claudeTerminal.ts "THE TWO RULES" (⚠ not billing; that was measured wrong
+//     on 2026-07-30 — -p bills the subscription too).
 //
 // This file OWNS NO budget/throttle/single-flight (OVERSEER_DESIGN §10 C2: "純
 // primitive"): those belong to the overseer core (C-core), so C2 stays

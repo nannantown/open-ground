@@ -39,7 +39,7 @@ export interface CliUsageSlot {
   resetsAt: string
 }
 
-/** A `Current week (<Model> only)` row — a weekly cap that belongs to ONE model
+/** A `Current week (<Model>)` row — a weekly cap that belongs to ONE model
  *  instead of the account-wide pool. `model` is the label VERBATIM from the TUI
  *  ("Sonnet", "Fable 5", "Opus"), never normalised against a hard-coded list:
  *  WHICH model gets its own weekly row depends on the account's plan and moves
@@ -54,21 +54,20 @@ export interface CliUsage {
   weekAll: CliUsageSlot | null
   /** EVERY per-model weekly row the render carried, in TUI order.
    *
-   *  ⚠ EMPTY IN PRACTICE TODAY — this is a DORMANT reading, not a live one. The
-   *  `claude` shipping now (2.1.207) renders NO per-model row: where 2.1.196
-   *  printed `Current week (Sonnet only)`, a "Per-model breakdown unavailable
-   *  (rate limited — try again in a moment)" placeholder sits instead (live
-   *  render captured 2026-07-13 04:5xZ — two rows, zero occurrences of "only").
-   *  So a model whose OWN weekly quota is spent while the account-wide slots
-   *  still look healthy — `claude` refusing every launch with "You've reached
-   *  your Fable 5 limit" at 03:04Z that day, with `session` at 3% and `weekAll`
-   *  at 63% — is NOT visible here, and cannot be: /usage does not say it. The
-   *  parser is wired for the day the row returns; the signal that actually sees
-   *  such a wall is the CLI's own refusal string (`claude --model <tier> -p`).
+   *  LIVE as of claude 2.1.220 (`Current week (Fable)`). It has not always been:
+   *  2.1.196 printed the row with an "only" suffix, 2.1.207 printed none at all,
+   *  2.1.220 brought it back suffix-less. This is the ONLY reading that can show
+   *  a model whose OWN weekly quota is spent while the account-wide slots still
+   *  look healthy — the 2026-07-13 wall ("You've reached your Fable 5 limit" at
+   *  session 3% / weekAll 63%) is exactly that shape.
+   *
+   *  ⚠ `[]` is a legitimate value (a plan with no per-model row, an older CLI, an
+   *  older cached payload) — do NOT read it as "the parser is fine". It was `[]`
+   *  for a whole release cycle BECAUSE the pattern was stale. Check a live render.
    *
    *  Optional so every pre-existing `CliUsage` literal (other layers' tests,
    *  older cached payloads) stays valid; the parser and {@link emptyCliUsage}
-   *  always populate it (with `[]`, which is the CORRECT value today). */
+   *  always populate it. */
   weekModels?: CliUsageModelSlot[]
   capturedAt: string
   /** Outcome of the most recent fetch attempt — drives the HUD's
@@ -209,23 +208,50 @@ const findSection = (header: string, clean: string): CliUsageSlot | null => {
   return { pct, resetsAt: cleanResetsAt(m[2]) }
 }
 
-// Every `Current week (<Model> only)` row — see CliUsage.weekModels: today's CLI
-// prints none, so this returns [] on every real scrape. It exists so the reading
-// is already in place if the rows come back (they were there in 2.1.196).
+// Every per-model weekly row. THREE builds, three behaviours (all observed):
+//   • 2.1.196 — `Current week (Sonnet only)`
+//   • 2.1.207 — no row at all; a "Per-model breakdown unavailable" placeholder
+//   • 2.1.220 — `Current week (Fable)`  ← the "only" suffix is GONE
+// The label now comes from the API's `weekly_scoped` field and there is no
+// `only)` format string left in the 2.1.220 binary (verified 2026-07-30 against
+// the binary's strings AND a live `/usage` capture).
 //
-// The model name is CAPTURED, never matched against a fixed list — the row read
-// "Sonnet only" on that build, and which model owns a weekly cap is a property of
-// the account's plan. An account could render more than one, so all rows are
-// scanned rather than the first: a dry flagship must stay visible even when a
-// cheaper tier's row comes first.
+// BOTH suffix shapes are accepted. OG drives whatever `claude` is on the user's
+// machine, so reading only the newest shape would just move the blindness to
+// older CLIs.
 //
-// The trailing "only)" is also what separates these rows from the account-wide
-// "Current week (all models)" one: that parenthetical never ends in "only", and
-// `[^)]` can't cross the closing paren, so the all-models header can never be
-// mistaken for a per-model row.
+// ⚠ WHY THIS WAS BROKEN, AND WHY IT MATTERED. The pattern used to REQUIRE
+// "only", so on 2.1.220 it read [] from a render that HAD the row — and
+// swarmLaunch.isTopTierExhaustedByUsage's per-model arm was dead: a flagship
+// whose OWN weekly quota is spent while the account-wide slots look healthy was
+// invisible, which is the exact wall observed 2026-07-13 ("You've reached your
+// Fable 5 limit" at session 3% / weekAll 63%). The comment here even said "today's
+// CLI prints none" — true when written, and it kept being believed after the row
+// returned. Re-verify against a LIVE render before trusting any claim in this
+// block; a fixture is not evidence (that mistake cost a whole worker once).
+//
+// The model name is CAPTURED, never matched against a fixed list — which model
+// owns a weekly cap is a property of the account's plan and moves with each new
+// flagship. An account could render more than one, so all rows are scanned rather
+// than the first: a dry flagship must stay visible even when a cheaper tier's row
+// comes first.
+//
+// ⚠ THE "only" SUFFIX USED TO BE THE GUARD against the account-wide
+// `Current week (all models)` row — that parenthetical never ended in "only", so
+// the pattern excluded it for free. With the suffix now OPTIONAL that is gone,
+// and the label has to be excluded EXPLICITLY (below). Without the exclusion the
+// account-wide row parses as a model literally named "all models" and
+// isTopTierExhaustedByUsage starts steering on the account-wide number.
+const ACCOUNT_WIDE_LABEL = 'allmodels'
+
+// Space-insensitive compare: the TUI's ANSI-strip welds words, so the very row we
+// must exclude arrives as "(allmodels)" as often as "(all models)".
+const isAccountWideLabel = (model: string): boolean =>
+  model.replace(/\s+/g, '').toLowerCase() === ACCOUNT_WIDE_LABEL
+
 const findModelWeeks = (clean: string): CliUsageModelSlot[] => {
   const re = new RegExp(
-    `Current\\s*week\\s*\\(\\s*([^)]{1,40}?)\\s*only\\s*\\)${SECTION_BODY}`,
+    `Current\\s*week\\s*\\(\\s*([^)]{1,40}?)\\s*(?:only\\s*)?\\)${SECTION_BODY}`,
     'gi',
   )
   const rows: CliUsageModelSlot[] = []
@@ -237,6 +263,7 @@ const findModelWeeks = (clean: string): CliUsageModelSlot[] => {
     const model = m[1].replace(/\s+/g, ' ').trim()
     const pct = Number(m[2])
     if (!model || !Number.isFinite(pct)) continue
+    if (isAccountWideLabel(model)) continue
     rows.push({ model, pct, resetsAt: cleanResetsAt(m[3]) })
   }
   return rows
