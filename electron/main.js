@@ -25,7 +25,7 @@
 // so dev only requires app === 'openground'. Prod requires the exact bootId,
 // exactly like the shell launcher's STEP 6.
 
-const { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, session, shell, Notification } = require('electron')
 const path = require('path')
 const http = require('http')
 const net = require('net')
@@ -46,8 +46,16 @@ const {
   runRegressionSteps,
 } = require('./selfUpdate')
 const { hasLiveForkedChildren, applyDownloadedUpdate } = require('./autoUpdate')
-const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown } = require('./lockdown')
+const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath } = require('./lockdown')
 const { decideCrashResponse } = require('./crashRespawn')
+const {
+  RELEASE_NOTES_URL,
+  languageFromSettingsRaw,
+  buildAppMenuTemplate,
+  manualCheckPrecondition,
+  manualCheckOutcome,
+  updateDialogText,
+} = require('./updateMenu')
 
 // ---------------------------------------------------------------------------
 // Constants — mirror scripts/openground-launch.sh.
@@ -1740,6 +1748,12 @@ async function start() {
   // filtered (a lockdown machine must not even leak the boot-time requests).
   installLockdownWebRequestGuard()
 
+  // The application menu is global (not window-bound), and on macOS it is on
+  // screen the moment the app is frontmost — before any window exists. Install it
+  // first so there is never a frame where the default Electron menu (no "Check
+  // for Updates…", "Learn More" pointing at electronjs.org) is what the user sees.
+  installApplicationMenu()
+
   createWindow()
 
   try {
@@ -1832,10 +1846,162 @@ async function start() {
 // Policy (deliberately conservative): we auto-DOWNLOAD updates and NOTIFY, but
 // we do NOT auto-restart. quitAndInstall mid-run would kill in-flight `claude`
 // child processes / a running run queue, so applying the update is left to an
-// explicit user action (here: a dialog button on 'update-downloaded'). The
+// explicit user action (a dialog button on 'update-downloaded'). The
 // minimal contract is "download + tell the user"; the restart is opt-in.
+//
+// The user-INITIATED counterpart is the menu's "Check for Updates…"
+// (checkForUpdatesInteractive below, decisions in electron/updateMenu.js). Every
+// path above is the app deciding to act ON the user, and all of them are silent
+// unless something was downloaded — so without the menu item there was no way to
+// ASK, and no way to see the two honest answers ("you are current", "work mode is
+// suppressing checks"), which were console.log lines in a packaged app.
 // ---------------------------------------------------------------------------
 const AUTO_UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4h
+
+// The live electron-updater handle, hoisted so the MENU's manual check can reach
+// it. Null in dev / unpackaged (initAutoUpdater never loads the module there) and
+// null if the require fails — both of which the precondition below answers for.
+let autoUpdaterHandle = null
+// The update already downloaded and waiting for a restart, if the user chose
+// "Later" — `{ version }`, or null when there is none. A manual check must offer
+// THAT restart rather than re-asking GitHub about an update already on disk. It is
+// an object rather than a bare string so "we have one" survives a missing version.
+let downloadedUpdate = null
+// Guard against two manual checks racing two dialogs.
+let manualCheckInFlight = false
+
+/** The app's own UI language, re-read per dialog so a change in Settings takes
+ *  effect without an app restart (the same per-use freshness lockdown.js uses).
+ *  Any read/parse failure falls back to English rather than costing the dialog. */
+function updateDialogLanguage() {
+  try {
+    return languageFromSettingsRaw(require('fs').readFileSync(settingsFilePath(), 'utf8'))
+  } catch {
+    return 'en'
+  }
+}
+
+/** Show one update dialog in the app's language. Returns showMessageBox's promise
+ *  so callers can branch on the button ('downloaded' is the only multi-button kind). */
+function showUpdateDialog(kind, opts) {
+  const t = updateDialogText(updateDialogLanguage(), kind, opts || {})
+  return dialog.showMessageBox(mainWindow || undefined, {
+    type: kind === 'error' ? 'warning' : 'info',
+    title: 'OPEN GROUND',
+    message: t.message,
+    detail: t.detail,
+    ...(t.buttons ? { buttons: t.buttons, defaultId: t.defaultId, cancelId: t.cancelId } : {}),
+  })
+}
+
+/**
+ * Offer the restart that applies a downloaded update. Reached two ways — the
+ * 'update-downloaded' event (the app telling the user) and the menu's manual
+ * check when an update is already waiting (the user asking) — so it lives in one
+ * place: the same prompt and, critically, the same teardown-then-quitAndInstall
+ * ordering (electron/autoUpdate.js) whichever door the user came through.
+ */
+function promptRestartForUpdate(version) {
+  return showUpdateDialog('downloaded', { version })
+    .then((res) => {
+      if (res.response !== 0) return
+      // Tear the forked server down FIRST, then quitAndInstall. Otherwise the
+      // before-quit handler preventDefault()s quitAndInstall's quit and replaces
+      // it with a plain app.quit() — the update downloads but is never applied, so
+      // "Restart now" appears to do nothing (observed 2026-06-25). Settling
+      // shutdownServerChild first leaves serverChild null/killed by the time
+      // quitAndInstall fires, so before-quit no longer intercepts it. The ordered
+      // sequence lives in electron/autoUpdate.js, locked by autoUpdate.test.ts.
+      applyDownloadedUpdate({
+        setQuitting: (v) => {
+          isQuitting = v
+        },
+        shutdownServerChild,
+        quitAndInstall: () => autoUpdaterHandle && autoUpdaterHandle.quitAndInstall(),
+      }).catch(() => {})
+    })
+    .catch(() => {})
+}
+
+/**
+ * The menu's "Check for Updates…" — the ONLY update path the user initiates.
+ *
+ * Every branch ends in a dialog. That is the whole point: the background checks
+ * are silent by design (an OS notification only when something was downloaded),
+ * so "am I current?" and "why has nothing updated?" had no answer short of
+ * reading a packaged app's stdout. A manual check that could return silently
+ * would be indistinguishable from a broken one.
+ *
+ * The decision itself is pure (electron/updateMenu.js, locked by
+ * updateMenu.test.ts); this function is only its side effects.
+ */
+async function checkForUpdatesInteractive() {
+  const decision = manualCheckPrecondition({
+    packaged: app.isPackaged,
+    lockdown: isLockdownEnabled(),
+    updateDownloaded: Boolean(downloadedUpdate),
+    inFlight: manualCheckInFlight,
+  })
+  if (decision === 'restart') {
+    await promptRestartForUpdate(downloadedUpdate.version)
+    return
+  }
+  if (decision !== 'check') {
+    await showUpdateDialog(decision, {})
+    return
+  }
+  if (!autoUpdaterHandle) {
+    await showUpdateDialog('unavailable', {})
+    return
+  }
+
+  manualCheckInFlight = true
+  try {
+    // checkForUpdates(), NOT checkForUpdatesAndNotify(): the notify variant fires an
+    // OS notification of its own, which on top of our dialog would tell the user the
+    // same thing twice.
+    const result = await autoUpdaterHandle.checkForUpdates()
+    const outcome = manualCheckOutcome({ result, currentVersion: app.getVersion() })
+    // autoDownload means a small update can finish DURING the check — in which case
+    // 'update-downloaded' already put the restart prompt on screen. Don't stack a
+    // second dialog behind it.
+    if (outcome.kind === 'downloading' && downloadedUpdate) return
+    await showUpdateDialog(outcome.kind, { version: outcome.version })
+  } catch (err) {
+    await showUpdateDialog('error', { error: err && err.message ? err.message : String(err) })
+  } finally {
+    manualCheckInFlight = false
+  }
+}
+
+/**
+ * Replace Electron's default application menu with ours.
+ *
+ * The ONLY functional addition is "Check for Updates…" (plus a Release Notes
+ * link); everything else is `role:`-driven, which reproduces Electron's defaults
+ * exactly — so Cmd+C / Cmd+V / DevTools / Minimize are untouched. The About /
+ * Hide / Quit labels are spelled with the product name because `app.name` is the
+ * lowercase package name ("openground"), and renaming the app itself is NOT an
+ * option: app.name is what userData's path is derived from.
+ */
+function installApplicationMenu() {
+  // Same reason: the About panel would otherwise be titled "openground".
+  app.setAboutPanelOptions({ applicationName: 'OPEN GROUND', applicationVersion: app.getVersion() })
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(
+      buildAppMenuTemplate({
+        appName: 'OPEN GROUND',
+        isMac: process.platform === 'darwin',
+        onCheckForUpdates: () => {
+          void checkForUpdatesInteractive()
+        },
+        onOpenReleaseNotes: () => {
+          void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
+        },
+      }),
+    ),
+  )
+}
 
 function initAutoUpdater() {
   if (!app.isPackaged) return // dev / unpackaged: never touch electron-updater.
@@ -1847,6 +2013,7 @@ function initAutoUpdater() {
     console.error('[updater] electron-updater unavailable:', err && err.message)
     return
   }
+  autoUpdaterHandle = autoUpdater
 
   // We drive the "apply" step ourselves (a dialog button), so disable the
   // built-in auto-install-on-quit — otherwise a downloaded update would also
@@ -1871,41 +2038,14 @@ function initAutoUpdater() {
     console.log(`[updater] downloading ${Math.round(p.percent)}%`)
   })
   autoUpdater.on('update-downloaded', (info) => {
-    const version = (info && info.version) || 'a new version'
-    console.log('[updater] update downloaded:', version)
-    // Notify only — do NOT auto-restart (could kill an in-flight run). Offer
-    // the restart as an explicit choice; default to "Later".
-    dialog
-      .showMessageBox(mainWindow || undefined, {
-        type: 'info',
-        buttons: ['Restart now', 'Later'],
-        defaultId: 1,
-        cancelId: 1,
-        title: 'OPEN GROUND',
-        message: `OPEN GROUND ${version} has been downloaded.`,
-        detail:
-          'Restart to apply the update. If a run is in progress, choose "Later" ' +
-          'and restart once it finishes.',
-      })
-      .then((res) => {
-        if (res.response === 0) {
-          // Tear the forked server down FIRST, then quitAndInstall. Otherwise the
-          // before-quit handler preventDefault()s quitAndInstall's quit and replaces
-          // it with a plain app.quit() — the update downloads but is never applied, so
-          // "Restart now" appears to do nothing (observed 2026-06-25). Settling
-          // shutdownServerChild first leaves serverChild null/killed by the time
-          // quitAndInstall fires, so before-quit no longer intercepts it. The ordered
-          // sequence lives in electron/autoUpdate.js, locked by autoUpdate.test.ts.
-          applyDownloadedUpdate({
-            setQuitting: (v) => {
-              isQuitting = v
-            },
-            shutdownServerChild,
-            quitAndInstall: () => autoUpdater.quitAndInstall(),
-          }).catch(() => {})
-        }
-      })
-      .catch(() => {})
+    const version = (info && info.version) || ''
+    console.log('[updater] update downloaded:', version || '(unknown version)')
+    // Remember it: if the user picks "Later", the menu's manual check must offer
+    // THIS restart instead of asking GitHub again about an update already on disk.
+    downloadedUpdate = { version }
+    // Notify only — do NOT auto-restart (could kill an in-flight claude session).
+    // Offer the restart as an explicit choice; default to "Later".
+    void promptRestartForUpdate(version)
   })
 
   // Kick off an initial check, then poll every 4h. checkForUpdatesAndNotify

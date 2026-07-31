@@ -318,12 +318,24 @@
 - `electron/main.js`(Hono fork・bootId health 照合・login-shell PATH 解決・single instance)
 - `selfUpdate.js`(swarm 統合後の自己再ビルド+canary+rollback)/ `autoUpdate.js`(配布 update)/
   `lockdown.js` / `forkEnv.js` / `startup.js` / `preload.js` / `runtimeConfig.js` / `cacheReset.js`
+- アプリメニュー + 手動アップデート確認: `electron/updateMenu.js`(メニュー雛形・確認の前提判定・
+  結果の読み方・日英ダイアログ文言はすべて純関数)。main.js 側は `installApplicationMenu()` /
+  `checkForUpdatesInteractive()` / `promptRestartForUpdate()` だけ。**メニュー表記は英語固定**
+  (macOS がシステム言語で描く About/Services/Edit と混ざるため)、**ダイアログだけ
+  settings.language に追随**。既定メニューを置き換えるので `role: 'editMenu'` 等を落とすと
+  ⌘C/⌘V が消える — テストが見張る(`server/__tests__/updateMenu.test.ts`)
 - ビルド: `scripts/build-server.js`(esbuild → `server/dist/index.cjs`)/ vite → `dist-web/`。
   署名: `scripts/sign-and-notarize.sh` / `verify-dmg.sh`
 - 配布: `docs/DISTRIBUTION.md` — 2リポ構成(origin=PMmap 開発・open-ground 公開、tag vX.Y.Z で CI)
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で
   意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`。
+- 罠(2026-07-31 実観測): **`node_modules/electron/dist/Electron.app` が macOS に
+  マルウェア判定されてゴミ箱に消える**。`npx electron` は SIGKILL → 直後に `.app` が消滅、
+  再展開しても同じ(zip 自体は正規 — `checksums.json` の SHA-256 と一致)。未 notarize の
+  Electron 31 に対する XProtect の誤検知で、**署名+notarize 済みの配布 .app は無関係**。
+  つまり `npm run electron:dev` はこの機体では起動しない — メニューまわりの検証は
+  Electron を起動せず純関数テストで行う(それが `updateMenu.js` を純関数に割った理由でもある)。
 
 ## 9. i18n — 日英バイリンガル
 - `src/i18n/I18nContext.tsx`(provider)+ `src/i18n/messages/`(領域別辞書: board / canvas /
