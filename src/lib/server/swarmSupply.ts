@@ -2,11 +2,25 @@
 // `swarm-supply.sh`. It is the "supply officer (補給官)" primitive of the OPEN
 // GROUND swarm port (docs / auto-memory project_inapp_swarm_port): the user's
 // CONVERSATION DESK. Given a registered project it launches ONE interactive
-// `claude` PTY in the project's PRIMARY checkout running the `/supply` skill,
-// which listens to the user's vague requests, sharpens each into an OBSERVABLE
-// task, and files it into the project's Board `todo` column (via the Board HTTP
-// API / swarm-board.sh). It does NOT dispatch workers and does NOT merge — it
-// only fills the queue; the human (or a future manager) drains todo → workers.
+// `claude` PTY in the project's PRIMARY checkout running the `/supply` skill.
+//
+// TWO duties, and the second one is why this desk must STAY a PTY:
+//   1. INTAKE — listen to the user's vague requests, sharpen each into an
+//      OBSERVABLE task, file it into the Board `todo` column (Board HTTP API).
+//   2. STATUS (2026-07-31) — answer 「今どうなってる?」 by READING the swarm:
+//      GET /api/swarm/workers + /api/swarm/orchestrator + /api/project +
+//      the escalation inbox, reported in plain, non-programmer Japanese. Read
+//      only: it never dispatches, merges, moves a column past `todo`, or
+//      switches the engine — those stay the commander's.
+//
+// WHY DUTY 2 LIVES HERE. This desk is the OWNER'S PHONE WINDOW: it is launched
+// with Remote Control ON under an identifiable name (「タスク窓口 <project>」), so
+// it is the one desk reachable from claude.ai / a phone. The COMMANDER can now
+// run on the Agent SDK runtime, which has no terminal and therefore no Remote
+// Control — so if this desk could only take orders, the owner would keep phone
+// ORDERING and lose phone MONITORING. Duty 2 closes that, and is the stated
+// precondition for moving the commander off the PTY at all
+// (docs/SDK_CLIENT_INVESTIGATION.md §13-A, SDK_WORKER_MIGRATION_PLAN.md §14).
 //
 // Unlike a WORKER (swarmWorker.ts) the supply officer gets NO worktree: it
 // operates on the primary checkout — it only READS the repo + writes the

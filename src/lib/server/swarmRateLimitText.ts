@@ -608,6 +608,23 @@ export const classifyQuotaRefusal = (
 const refusalKind = (text: string): QuotaRefusalKind =>
   MODEL_SWITCH_REMEDY.test(normalizeScreen(text)) ? 'model-switchable' : 'account-wide'
 
+/** {@link refusalKind} for a caller that ALREADY knows the text is a refusal.
+ *
+ *  The SDK runtime is that caller: `claude` hands its usage-limit message over
+ *  the protocol and sdkEvents recognises it with the SDK's OWN exported prefix
+ *  list, so by the time this is asked, "is it a refusal?" has been answered by
+ *  the CLI vendor rather than inferred from a picture. What remains is which
+ *  kind of stop it is, and that judgement must not be forked per runtime — an
+ *  SDK desk and a PTY desk showing the same wording have to give the owner the
+ *  same advice.
+ *
+ *  ⚠ Do NOT reach for this from a screen reader. {@link classifyQuotaRefusal}'s
+ *  nine rejections (is the desk generating, is the notice the LAST utterance,
+ *  how far above the prompt, …) are what stop a desk that merely PRINTED the
+ *  wording from being called stopped. This entry point has none of them, by
+ *  design, because a protocol message has no position to be wrong about. */
+export const quotaRefusalKindOfText = (text: string): QuotaRefusalKind => refusalKind(text)
+
 /** Did `claude` STOP on a spent quota? The boolean face of
  *  {@link classifyQuotaRefusal}, for callers that only gate on the fact of a stop.
  *  One implementation, so the two can never disagree about what a stop is. */

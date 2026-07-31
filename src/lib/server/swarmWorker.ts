@@ -815,6 +815,8 @@ export const spawnSwarmWorker = async (
     try {
       session = spawnSdkSession({
         cwd: worktree,
+        role: 'worker',
+        agentSessionId,
         options: built.options,
         initialPrompt: built.initialPrompt,
       })

@@ -152,6 +152,22 @@ engine は `globalThis` 上のプロジェクト別シングルトンで、**全
 
 ### 2.3 B相 — 司令官を起こす・落ちたら蘇生する(エンジン ON で常時 — 2026-07-16 トグル廃止)
 
+> **⚠ 2026-07-31(stage 3) — 司令官の卓は2種類ある。** `Settings.swarmManagerRuntime.mode`
+> が `'sdk'` なら司令官は **Agent SDK セッション**で、**PTY プールに一切現れない**。だから
+> 本節の presence・声かけ・蘇生は、terminal.ts を直に叩くのではなく
+> **`swarmManagerRuntime.ts`(`listManagerDesks` / `managerDeskForSession` /
+> `sayToManagerDesk`)を通す**。PTY プールだけを見る実装に戻すと、**健全な SDK 卓が毎パス
+> `absent` と読まれ、5 分ごとに二卓目が立つ** —— 下で塞いだ 0719 の 11 卓事故と同じ形を、
+> 競合ではなく**構造**として作り込むことになる。
+> - **声かけの ESC は SDK 卓では送らない**(§2.3 の「打ちかけを消す」問題そのものが無い。
+>   mid-turn の push は CLI がキューし、受理は同期で分かる)。
+> - **SDK 卓に画面は無い**(`managerDeskScreen` は null)。null を「何も出ていない」と読むと
+>   正しい結論に誤った理由で辿り着く。クォータ停止の等価な証拠は自分のストリームの
+>   `quota_refusal` イベント(`sdkDeskLimit.ts`)。
+> - **リモコンは消える**。外からの窓口は **PTY のまま残す補給官**。これが stage 3 の前提で、
+>   補給官が「状況」を答えられないうちにダイヤルを回すと外から監視できなくなる。
+> 正典は `docs/SDK_WORKER_MIGRATION_PLAN.md` §13-B。
+
 **2026-07-15〜。エンジンはもう統合しない。** B相の旧全体(高リスク hold・verify・敵対レビュー・
 lock・FF push・land・掃除・reworkOrPark・delegateConflict)は**撤去された**。そのうえで
 **2026-07-16 の card B** が、単発の「起こす memo(handoffs)」を **蘇生反射の状態機械**に置き換えた。

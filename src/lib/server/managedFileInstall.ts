@@ -11,21 +11,49 @@
 //   - target WITHOUT the marker            → user-authored file that happens to
 //     share the name; NEVER overwritten ('kept-user'). Removing the marker is the
 //     documented way for a user to take ownership of the file.
+//   - target WITHOUT the marker, but its SHA-256 is one of `adoptDigests`
+//                                          → a PRE-MARKER vintage of our OWN
+//     shipped file; claimed and rewritten ('adopted'). See below for why.
+//
+// WHY `adoptDigests` EXISTS (2026-07-31). The marker was introduced AFTER some
+// of these files had already been installed by hand from the tmux-cockpit era
+// (skills/order, skills/supply). To the marker test those copies are
+// indistinguishable from a user's own file, so they were shielded as
+// 'kept-user' — permanently. The effect was silent and real: the /supply skill
+// shipped on 2026-07-22 (which removed the tmux assumptions) never reached the
+// machine, so the in-app supply desk kept reading a protocol telling it that it
+// lives in a tmux pane at `Ctrl-b 2`, and the /order skill kept its removed
+// "auto-fire on 「ガチでやって」" clause. An installer whose updates silently do
+// not apply is worse than one that refuses loudly.
+//
+// The fix does NOT weaken the shield. Only byte sequences OPEN GROUND can NAME
+// as its own prior output are claimed; any hand-edit changes the digest and the
+// file stays kept-user forever after. Adding a digest is therefore an explicit,
+// auditable claim of authorship — never a heuristic.
 
 // A SECOND flavour lives at the bottom of this file: `installManagedSection`,
 // which owns a marked BLOCK inside a file the user also writes in (their
 // ~/.claude/CLAUDE.md). Same ownership vocabulary, different unit — see there.
 
 import { readFile, mkdir, stat, lstat } from 'fs/promises'
+import { createHash } from 'crypto'
 import { dirname } from 'path'
 import { atomicWriteText } from './atomicWrite'
 
 export type ManagedFileOutcome =
   | 'installed' // target was missing — first install
   | 'refreshed' // target was ours (marker) and stale — rewritten to the shipped text
+  | 'adopted' // target was a PRE-MARKER vintage of ours (adoptDigests) — claimed + rewritten
   | 'unchanged' // target was ours and already byte-identical
   | 'kept-user' // target exists WITHOUT our marker — user-authored, never touched
   | 'error' // source unreadable / write failed — reported, never thrown
+
+/** SHA-256 of `text` as lowercase hex — the fingerprint an `adoptDigests` entry
+ *  is matched against. Exported so the tooling module's digest list can be
+ *  regenerated (and pinned by a test) with the same function that checks it,
+ *  rather than a shell one-liner that might disagree about encoding. */
+export const managedFileDigest = (text: string): string =>
+  createHash('sha256').update(text, 'utf8').digest('hex')
 
 export interface ManagedFileResult {
   outcome: ManagedFileOutcome
@@ -42,8 +70,12 @@ export const installManagedFile = async (opts: {
   target: string
   marker: string
   mode?: number
+  /** SHA-256 digests (lowercase hex) of PREVIOUSLY SHIPPED versions of this same
+   *  file that predate the marker. A target matching one of these is ours, not
+   *  the user's, and is adopted rather than shielded — see the header. */
+  adoptDigests?: readonly string[]
 }): Promise<ManagedFileResult> => {
-  const { source, target, marker, mode } = opts
+  const { source, target, marker, mode, adoptDigests } = opts
 
   let desired: string
   try {
@@ -94,11 +126,18 @@ export const installManagedFile = async (opts: {
     existing = null
   }
 
+  let adopted = false
   if (existing !== null) {
     if (!existing.includes(marker)) {
-      return { outcome: 'kept-user', path: target }
-    }
-    if (existing === desired) {
+      // The marker is absent. Either this is the user's own file, or it is one
+      // of OUR OWN copies from before the marker existed — and only the digest
+      // list can tell them apart. Nothing else may: a "looks like our text"
+      // heuristic would eventually overwrite prose somebody wrote.
+      if (!(adoptDigests ?? []).includes(managedFileDigest(existing))) {
+        return { outcome: 'kept-user', path: target }
+      }
+      adopted = true
+    } else if (existing === desired) {
       return { outcome: 'unchanged', path: target }
     }
   }
@@ -113,7 +152,10 @@ export const installManagedFile = async (opts: {
       error: `install failed: ${e instanceof Error ? e.message : String(e)}`,
     }
   }
-  return { outcome: existing === null ? 'installed' : 'refreshed', path: target }
+  return {
+    outcome: existing === null ? 'installed' : adopted ? 'adopted' : 'refreshed',
+    path: target,
+  }
 }
 
 // ─── Section flavour ─────────────────────────────────────────────────────────

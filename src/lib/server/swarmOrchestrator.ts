@@ -216,6 +216,11 @@ import { createSwarmFatalNotification, createSwarmInfoNotification } from './swa
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
 import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
+import {
+  listManagerDesks,
+  managerDeskForSession,
+  sayToManagerDesk,
+} from './swarmManagerRuntime'
 import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
@@ -3657,6 +3662,7 @@ const resolveManagerDesk = async (
   deps: {
     activity?: (agentSessionId: string) => ClaudeSessionActivity
     liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
+    managerDesks?: typeof listManagerDesks
   },
 ): Promise<{ cwd: string; sessionId: string; paintedAt: number } | null> => {
   const rec = (await readSwarmSessions(projectPath)).manager
@@ -3679,9 +3685,17 @@ const resolveManagerDesk = async (
   // there is proof a desk EXISTS — which is exactly and only what 'absent' claims
   // the absence of. Reconciling the store is spawnSwarmManager's job (it holds the
   // write path); presence stays a pure read and simply stops lying.
+  //
+  // BOTH POOLS since stage 3. An SDK commander is in no PTY pool at all, so a
+  // PTY-only sweep here would call a perfectly healthy desk 'absent' and ask for
+  // a replacement EVERY PASS — the eleven-desk incident reproduced exactly, this
+  // time by construction rather than by a store desync. `listManagerDesks` is the
+  // one place that knows where commander desks can live.
   const orphan = pty.live
     ? null
-    : ((deps.liveDesks ?? listLiveDesksIn)(projectPath, MANAGER_DESK_LABEL)[0] ?? null)
+    : ((deps.managerDesks ?? listManagerDesks)(projectPath, {
+        ...(deps.liveDesks ? { ptyDesks: deps.liveDesks } : {}),
+      })[0] ?? null)
   if (!pty.live && !orphan) return null // no desk anywhere — the ONLY spawn trigger
   return {
     cwd: orphan ? projectPath : rec!.cwd,
@@ -3867,6 +3881,12 @@ export const defaultManagerPresence = async (
  *
  *  Best-effort: false when the session/PTY is gone (nothing to poke), or when either
  *  write misses — same both-writes-landed rule as defaultEscalate. */
+/** What the stall nudge SAYS. A shared constant because two runtimes now deliver
+ *  it by different means and the owner must read the same sentence either way —
+ *  a divergence here would be invisible until someone compared two transcripts. */
+export const MANAGER_STALL_NUDGE_TEXT =
+  '統合待ちのカードがあります。「状況」を実行して review 列を確認し、統合の判断をしてください。'
+
 export const defaultNudgeManager = async (
   projectPath: string,
   // `activity` is injected on the same seam defaultManagerPresence uses, so the
@@ -3875,6 +3895,8 @@ export const defaultNudgeManager = async (
     write?: typeof writeInput
     sleep?: (ms: number) => Promise<void>
     activity?: (agentSessionId: string) => ClaudeSessionActivity
+    desk?: typeof managerDeskForSession
+    say?: typeof sayToManagerDesk
   },
 ): Promise<boolean> => {
   const write = deps?.write ?? writeInput
@@ -3882,14 +3904,21 @@ export const defaultNudgeManager = async (
   try {
     const rec = (await readSwarmSessions(projectPath)).manager
     if (!rec) return false
-    const { terminalId } = (deps?.activity ?? claudeSessionActivity)(rec.sessionId)
-    if (!terminalId) return false
-    if (!write(terminalId, '\x1b')) return false
+    const desk = (deps?.desk ?? managerDeskForSession)(rec.sessionId, projectPath, {
+      ...(deps?.activity ? { activity: deps.activity } : {}),
+    })
+    if (!desk) return false
+    // An SDK desk has NO screen to clear and no draft to protect, so the ESC
+    // (and the pause that lets it land) is skipped entirely rather than sent
+    // into a stream that has no notion of it. The push is queued by the CLI even
+    // mid-generation, and its acceptance comes back synchronously — the whole
+    // reason this path had to be a two-step dance on a PTY.
+    if (desk.runtime === 'sdk') {
+      return (deps?.say ?? sayToManagerDesk)(desk, MANAGER_STALL_NUDGE_TEXT).ok
+    }
+    if (!write(desk.handleId, '\x1b')) return false
     await sleep(STALL_ESCALATE_DELAY_MS)
-    return write(
-      terminalId,
-      '統合待ちのカードがあります。「状況」を実行して review 列を確認し、統合の判断をしてください。\r',
-    )
+    return write(desk.handleId, `${MANAGER_STALL_NUDGE_TEXT}\r`)
   } catch {
     return false
   }
@@ -4010,9 +4039,10 @@ export const defaultNotifyManagerReady = async (
     activity?: (agentSessionId: string) => ClaudeSessionActivity
     getScreen?: (terminalId: string) => string | null
     sessions?: typeof readSwarmSessions
+    desk?: typeof managerDeskForSession
+    say?: typeof sayToManagerDesk
   },
 ): Promise<boolean> => {
-  const write = deps?.write ?? writeInput
   const getScreen = deps?.getScreen ?? getTerminalScreen
   try {
     // The RECORD's desk, deliberately — the same lookup defaultNudgeManager uses, so the
@@ -4021,10 +4051,26 @@ export const defaultNotifyManagerReady = async (
     // is a change to the nudge path too, and belongs with it rather than here.)
     const rec = (await (deps?.sessions ?? readSwarmSessions)(projectPath)).manager
     if (!rec) return false
-    const { terminalId } = (deps?.activity ?? claudeSessionActivity)(rec.sessionId)
-    if (!terminalId) return false
-    if (!noticeDeliverable(getScreen(terminalId))) return false // busy / half-typed — keep it queued
-    return write(terminalId, `${managerNoticeText(notice.branches, notice.total)}\r`)
+    const desk = (deps?.desk ?? managerDeskForSession)(rec.sessionId, projectPath, {
+      ...(deps?.activity ? { activity: deps.activity } : {}),
+    })
+    if (!desk) return false
+    // `noticeDeliverable` is handed to the seam rather than applied here, so the
+    // PTY arm keeps its two refusals byte-for-byte while the SDK arm — which has
+    // no screen and no draft that a notice could clobber — simply does not
+    // consult it. (Not "consults it and always passes": an SDK desk has no state
+    // in which the notice must be withheld, and pretending otherwise would
+    // reintroduce a queue that never drains.)
+    const res = (deps?.say ?? sayToManagerDesk)(
+      desk,
+      managerNoticeText(notice.branches, notice.total),
+      {
+        screen: getScreen,
+        deliverable: noticeDeliverable,
+        ...(deps?.write ? { write: deps.write } : {}),
+      },
+    )
+    return res.ok
   } catch {
     return false
   }

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   sdkWorkerLaunchPlan,
   sdkWorkerPreflight,
-  sdkWorkerEnv,
+  sdkSessionEnv,
   SDK_WORKER_MIN_CLI_VERSION,
 } from './swarmWorkerSdk'
 import { workerLaunchOpts } from './swarmWorker'
@@ -128,9 +128,9 @@ describe('sdkWorkerLaunchPlan — parity with the PTY worker contract', () => {
   })
 })
 
-describe('sdkWorkerEnv', () => {
+describe('sdkSessionEnv', () => {
   it('strips the child-session markers a nested claude would inherit', () => {
-    const e = sdkWorkerEnv({
+    const e = sdkSessionEnv({
       PATH: '/usr/bin',
       CLAUDE_CODE_ENTRYPOINT: 'cli',
       CLAUDE_CODE_SESSION_ID: 'abc',
@@ -141,7 +141,7 @@ describe('sdkWorkerEnv', () => {
   })
 
   it('drops undefined values rather than passing them through', () => {
-    expect(sdkWorkerEnv({ A: undefined, B: 'b' } as NodeJS.ProcessEnv)).toEqual({ B: 'b' })
+    expect(sdkSessionEnv({ A: undefined, B: 'b' } as NodeJS.ProcessEnv)).toEqual({ B: 'b' })
   })
 
   it('is what the launch plan uses', () => {

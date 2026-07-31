@@ -134,7 +134,12 @@ const saveSupply = (projectId: string, supply: SwarmSupply | null) => {
 // the autonomous orchestrator engine (which has no PTY of its own) — this is the
 // conversational commander the owner talks to.
 interface SwarmManager {
+  /** PTY commander ⇒ its terminal id. SDK commander ⇒ '' (the identity
+   *  invariant: pty ⇔ terminalId, sdk ⇔ sdkSessionId, never both). */
   terminalId: string
+  /** Absent ⇒ 'pty' — every record persisted before the commander dial existed. */
+  runtime?: 'pty' | 'sdk'
+  sdkSessionId?: string
   agentSessionId: string
   startedAt: string
 }
@@ -152,14 +157,40 @@ const loadManager = (projectId: string): SwarmManager | null => {
     if (!o || typeof o !== 'object') return null
     const r = o as Record<string, unknown>
     if (typeof r.terminalId !== 'string') return null
+    // An SDK record is only usable if it carries the handle it is addressed by;
+    // a forged or torn one saying 'sdk' with no session id would render a pane
+    // pointed at nothing. Fall back to 'pty' — the shape every old record has.
+    const sdkSessionId = typeof r.sdkSessionId === 'string' ? r.sdkSessionId : ''
+    const runtime: 'pty' | 'sdk' = r.runtime === 'sdk' && sdkSessionId ? 'sdk' : 'pty'
     return {
       terminalId: String(r.terminalId),
+      runtime,
+      ...(runtime === 'sdk' ? { sdkSessionId } : {}),
       agentSessionId: typeof r.agentSessionId === 'string' ? r.agentSessionId : '',
       startedAt: typeof r.startedAt === 'string' ? r.startedAt : '',
     }
   } catch {
     return null
   }
+}
+
+/** Tear down whichever runtime carries the commander desk.
+ *
+ *  Best-effort on purpose (both branches swallow): the UI drops its record
+ *  either way, and a stop that 404s because the desk is already gone must not
+ *  leave the owner staring at a session they cannot close. Branches on
+ *  `runtime`, never on "which id happens to be non-empty" — the two pools take
+ *  different ids and mixing them up would silently kill someone else's pane. */
+const stopCommanderDesk = async (manager: SwarmManager, projectPath: string): Promise<void> => {
+  if (manager.runtime === 'sdk' && manager.sdkSessionId) {
+    await fetch(
+      `/api/sdk-session/${encodeURIComponent(manager.sdkSessionId)}?path=${encodeURIComponent(projectPath)}`,
+      { method: 'DELETE' },
+    ).catch(() => {})
+    return
+  }
+  if (!manager.terminalId) return
+  await api.api.terminal[':id'].$delete({ param: { id: manager.terminalId } }).catch(() => {})
 }
 
 const saveManager = (projectId: string, manager: SwarmManager | null) => {
@@ -686,6 +717,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       const spawn = (await res.json()) as SpawnSwarmManagerResponse
       const next: SwarmManager = {
         terminalId: spawn.terminalId,
+        runtime: spawn.runtime ?? 'pty',
+        ...(spawn.sdkSessionId ? { sdkSessionId: spawn.sdkSessionId } : {}),
         agentSessionId: spawn.agentSessionId,
         startedAt: new Date().toISOString(),
       }
@@ -712,7 +745,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setManagerBusy(true)
     setError(null)
     try {
-      await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
+      await stopCommanderDesk(manager, project.path)
     } finally {
       setManager(null)
       saveManager(project.id, null)
@@ -725,7 +758,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       seenRef.current.delete(term)
       setManagerBusy(false)
     }
-  }, [manager, managerBusy, project.id])
+  }, [manager, managerBusy, project.id, project.path])
 
   // Drop a now-dead PTY id from the exited/seen bookkeeping so a relaunched
   // session starts clean and exitedIds never grows unbounded. `keep` is the
@@ -794,9 +827,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setManagerBusy(true)
     setError(null)
     try {
-      // Best-effort kill the old PTY first (see restartSupply) so a transient
-      // probe false positive can't orphan a still-running commander.
-      if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
+      // Best-effort stop the old desk first (see restartSupply) so a transient
+      // probe false positive can't orphan a still-running commander. Whichever
+      // runtime it was on — the one-desk-per-project guard spans both pools, so
+      // leaving an SDK desk alive here would make the respawn ADOPT it and the
+      // owner's Restart would silently do nothing.
+      if (manager) await stopCommanderDesk(manager, project.path)
       const res = await fetch('/api/swarm/manager', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -809,6 +845,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       const spawn = (await res.json()) as SpawnSwarmManagerResponse
       const next: SwarmManager = {
         terminalId: spawn.terminalId,
+        runtime: spawn.runtime ?? 'pty',
+        ...(spawn.sdkSessionId ? { sdkSessionId: spawn.sdkSessionId } : {}),
         agentSessionId: spawn.agentSessionId,
         startedAt: new Date().toISOString(),
       }
@@ -1379,8 +1417,21 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           // live on the worker tab; the Board pipeline tallies on the Board tab.
           <div className="min-h-0 flex-1">
             <SwarmManagerPane
+              projectPath={project.path}
               session={
-                manager ? { terminalId: manager.terminalId, status: statusOfPty(manager.terminalId) } : null
+                manager
+                  ? {
+                      terminalId: manager.terminalId,
+                      ...(manager.runtime === 'sdk' && manager.sdkSessionId
+                        ? { runtime: 'sdk' as const, sdkSessionId: manager.sdkSessionId }
+                        : { runtime: 'pty' as const }),
+                      // The PTY poll cannot see an SDK desk, so asking it about
+                      // one would report 'exited' for a healthy commander. The
+                      // SDK tile reads its own status off its event stream.
+                      status:
+                        manager.runtime === 'sdk' ? 'working' : statusOfPty(manager.terminalId),
+                    }
+                  : null
               }
               sessionBusy={managerBusy}
               onLaunchSession={() => void launchManager()}

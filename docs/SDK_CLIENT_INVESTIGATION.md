@@ -614,10 +614,55 @@ worker が SDK なら**そもそも画面を読まないので消える**
 
 ---
 
+### 13-E. 実装した（2026-07-31）— 前提と本体の順序どおり
+
+§13 は設計の話だったので、実装で分かったことを記録する。**結論は変わらなかった**が、
+前提の1つが実は壊れていた。
+
+**① 補給官への役割移設は、スキルが実機に届いていなかった。** `~/.claude/skills/supply`
+は marker 導入前に手配備された無マーカー版で、`installManagedFile` の kept-user シールドに
+恒久的に守られていた ⇒ 0722 に出した「tmux 依存の除去」も届かず、補給官は当日まで
+**「あなたは tmux コックピットの `Ctrl-b 2` に居る」**と書かれた手順書を読んでいた。
+同じ穴に `/order`（worker の手順書）と `swarm-beat.sh`（全 worker の心拍）も落ちていた。
+`adoptDigests`（自分の出力だと**名指しできるバイト列**だけ adopt）で根治。
+**教訓**: 「配ったから届いている」は仮定。届いたかを見るコマンドが無いなら、それは
+検証していないのと同じ（`scripts/verify-skill-install.mts` を新設した理由）。
+
+**② SDK でスキルは解決するのか。** §13 の全体が「司令官は `/og-manage` である」に
+乗っているのに、そこを測っていなかった。PTY では TUI が展開するスラッシュコマンドが、
+SDK では**ただのスラッシュで始まる user メッセージ**になる。実測:
+
+| 問い | 実測 |
+|---|---|
+| slash commands は見えるか | **95 本**。`/og-manage` を含む。`Skill` ツールも出る |
+| 最初のメッセージに `/og-manage` を渡すと読み込むか | **読み込む**。禁止 git 操作を verbatim で答えた |
+| Claude Code の system prompt は付くか | **付かない**（「You are a Claude agent, built on Anthropic's Claude Agent SDK」）。`preset:'claude_code'` を渡しても同じ |
+| `append` は届くか | **届く** ⇒ app-context カードはこれで明示注入（司令官の道具は丸ごと `curl $OG/api/...` なので必須配線） |
+
+⚠ **argv / stdin の捕捉では答えが出ない。** system prompt は argv に乗らず、SDK は CLI の
+ハンドシェイク応答**後**にしか options を送らないので、スタブプロセスでは何も観測できない。
+最初にそれをやって空振りした（`scripts/probe-sdk-system-prompt.mts` に失敗として記録）。
+
+**③ 「今より良くなる」の②③は実装で確定した。** 声かけから ESC ダンスが消え（打ちかけを
+消す問題が存在しない・受理が同期で分かる）、クォータ検知は画面サンプリング（静穏窓・確認窓・
+3読み再武装）を持たないイベント購読になった。①（電話に出る卓が司令塔をやめる）は
+ダイヤルを ON にした時点で成立する。
+
+---
+
+
 ## 付録: 調査に使ったもの
 
 - `~/.local/share/claude/versions/2.1.220`（CLI バイナリの文字列解析）
 - `@anthropic-ai/claude-agent-sdk@0.3.220` の `sdk.d.ts` / `bridge.d.ts`
+- **リポジトリ内**（再実行できる — 主張の裏取りに使う）:
+  `scripts/probe-sdk-guard-hooks.mts` / `probe-sdk-session-semantics.mts`（stage 0）/
+  `probe-sdk-system-prompt.mts`（system prompt と append・**argv 捕捉が空振りする理由も記録**）/
+  `probe-sdk-skill-resolution.mts`（`/og-manage` が SDK で解決するか）/
+  `probe-sdk-manager-launch.mts`（**本番の launch plan で SDK 司令官を実際に起こす** —
+  0731 実測: preflight ok / app-context 1149 chars / `/og-manage` を読み込み
+  health・workers・orchestrator・escalations を自力で取得）/
+  `verify-skill-install.mts`（配ったスキルが実機に届いたか）
 - 使い捨て実測スクリプト（scratchpad・リポジトリ外）:
   `probe.mjs`（双方向・権限・スラッシュ）/ `probe2.mjs`（resume・中断・subagent）/
   `spike1.mjs`（中断の判別）/ `spike2.mjs`（同時接続）/ `spike3.mjs`（subagent 承認）

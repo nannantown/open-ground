@@ -487,13 +487,75 @@ swarmWorkerRuntime?: {
 
 ---
 
+## 13-B. stage 3 — 司令官の SDK 化（2026-07-31 完了・既定 OFF）
+
+前提だった「補給官＝電話窓口の役割拡張」を先に済ませ（下記 A）、その上で司令官を
+移した（B）。ダイヤルは **`Settings.swarmManagerRuntime.mode`（既定 `'pty'`）** で
+worker のダイヤルとは**別**：回すと失うものが違うから分けてある。
+
+### A. 補給官が電話窓口になる（PTY のまま）
+
+外から要るのは**監視と注文だけ**なので、リモコンの効く卓が1つ残れば足りる。補給官には
+`todo` に積む役目しか無かったので、**読み取り専用の状況報告**と**司令官への中継**を足した
+（`skills/supply/SKILL.md`）:
+
+| 語彙 | 何をする | 書き込み |
+|---|---|---|
+| 「状況」 | workers / orchestrator / project / escalations を GET → 平易な日本語に読み替え | なし |
+| 「質問に答える」 | `escalations?status=open` の `plainQuestion` を読み上げ → `answer` を投函 | ユーザーの判断のみ |
+| 「司令官に伝えて」 | `POST /api/swarm/manager/say` で1文中継（卓は立てない） | なし |
+
+境界は変えていない：**列を進めない・worker を起こさない・エンジンを触らない**。目と口
+であって手ではない。
+
+⚠ **配信路が壊れていた**（同日に発見・根治）。`~/.claude/skills/{order,supply}` と
+`swarm-beat.sh` は marker 導入前に手配備された無マーカー版で、kept-user シールドに
+恒久的に守られていた ⇒ 0722 に出した「tmux 依存の除去」が9日間実機に届いておらず、
+補給官は「あなたは tmux コックピットの `Ctrl-b 2` に居る」と書かれた手順書を読んでいた。
+`installManagedFile` の `adoptDigests`（自分の出力だと**名指しできるバイト列**だけ adopt）
+で根治。確認は `npx tsx scripts/verify-skill-install.mts`。
+
+### B. 司令官の SDK 化
+
+先に実測してから作った（推測で作らない）:
+
+| 問い | 実測 | 出典 |
+|---|---|---|
+| SDK セッションで `/og-manage` は解決するか | **する**。slash commands 95 本に在り、`Skill` ツールも出る。最初のメッセージに `/og-manage` を渡すと実際に読み込み、禁止 git 操作を verbatim で答えた | `scripts/probe-sdk-skill-resolution.mts` |
+| Claude Code の system prompt は付くか | **付かない**（「You are a Claude agent, built on Anthropic's Claude Agent SDK」）。`preset:'claude_code'` を渡しても同じ | `scripts/probe-sdk-system-prompt.mts` |
+| `append` は届くか | **届く**（トークン往復で確認）⇒ app-context カードはこれで明示注入 | 同上 |
+| argv / stdin 捕捉で分かるか | **分からない**。system prompt は argv に乗らず、SDK は CLI のハンドシェイク応答後にしか options を送らないので、スタブプロセスでは何も観測できない | 同上（失敗も記録） |
+
+seam と非自明点:
+
+- **`swarmManagerRuntime.ts` が「卓は在るか・話しかけられるか」の唯一の窓口**。PTY プール
+  と SDK プールの**両方**に聞く。⚠ 片方だけ見る実装に戻すと、SDK 卓が毎パス `absent` と
+  読まれ 5 分ごとに二卓目が立つ（0719 の11卓事故と同じ形を、今度は構造として作り込む）。
+- **ガードは張らない**（worker 限定スコープ）。司令官に veto を付けると PTY 司令官より
+  厳しくなり、統合そのものである `git push origin HEAD:main` が止まる。preflight も
+  バイナリ＋バージョンだけ（`sdkClaudeBinaryPreflight`）。
+- **声かけから ESC ダンスが消える**。PTY 側は「画面を読んで打ちかけでないか判定 → ESC で
+  下書きを消す → 本文 → Enter」で、しかも着弾は確認できない。SDK 側は push 1 回で、
+  受理は同期で分かる（mid-turn でも CLI がキューする実測済み）。
+- **クォータ停止はイベント源で拾う**（`sdkDeskLimit.ts`）。静穏窓・確認窓・3読み再武装は
+  持たない — あれは「絵を読む」代償。文言判定と通知本文は PTY 側と共有する。
+- **リモコンは消える**。これがこの移行で**唯一本当に失うもの**で、A がその代替。
+- 失敗時は**必ず PTY に降りる**（preflight 不通・spawn 失敗・即 failed）。「司令官が居ない」
+  は「司令官が PTY」より悪い。
+
+残件: 実機受け入れ（ダイヤル ON → 卓が立つ → 「状況」が返る → スマホから補給官経由で
+監視と注文）。
+
+---
+
 ## 14. 非目標と後続トラック
 
-1. **manager / supply の SDK 化** — stage 3。前提: 補給官=電話窓口の役割拡張
-   （状況報告の移設・INVESTIGATION §13-A）を先に設計。
+1. ~~**manager / supply の SDK 化** — stage 3~~ → **完了（§13-B・2026-07-31）**。
+   supply は SDK 化**しない**（PTY のままが要件 — 電話窓口）。
 2. **スクレイプ 2,461 行の削除** — SDK worker が実運用で S3/S5/S7 を置換したと
    確認できるまで凍結。owner desk 系（ownerDeskLimit / swarmRateLimitText の
-   desk 腕）は manager が PTY である限り現役。
+   desk 腕）は **補給官が PTY である限り恒久的に現役** — 司令官が SDK に移っても
+   消えない（消せると読んだら §13-B を読み直すこと）。
 3. **owner desk 向けの JSONL センサー移行（案2）** — 本書と独立に価値が残る
    （`isApiErrorMessage` 実測済み）。別カードで随時。
 4. **sandbox 実験 × SDK の併用** — Seatbelt wrap を SDK spawn に噛ませる設計は別途。

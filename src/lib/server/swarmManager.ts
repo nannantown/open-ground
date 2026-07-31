@@ -62,7 +62,12 @@ import { listLiveDesksIn, onTerminalExit, getTerminalScreen, isTerminalProcessAl
 import { matchesQuotaExhaustion, normalizeScreen } from './swarmRateLimitText'
 import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
-import { getExecutionMode, getAllowedModelTiers } from './store'
+import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
+import { listManagerDesks } from './swarmManagerRuntime'
+import { sdkManagerPreflight, sdkManagerLaunchPlan } from './swarmManagerSdk'
+import { spawnSdkSession, type SdkSessionInfo } from './sdkSession'
+import { watchSdkDeskForLimit } from './sdkDeskLimit'
+import { getExecutionMode, getAllowedModelTiers, getManagerRuntimeDial } from './store'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
@@ -79,13 +84,16 @@ import { type SpawnSwarmManagerResponse } from '../types'
 export const MANAGER_INJECTION = '/og-manage'
 
 /** The owner-facing name of this desk, carried onto its PTY pool entry
- *  (`TerminalInfo.deskLabel`). Two consumers, and the second is why it is a
- *  shared constant rather than a literal: the model-limit watch names the desk
- *  by it (ownerDeskLimit.ts), and {@link spawnSwarmManager}'s singleton guard
- *  IDENTIFIES a commander desk by it — the pool is the only authority that
- *  cannot desynchronise from itself (terminal.listLiveDesksIn). A desk the owner
- *  started by hand carries no label, so it is never mistaken for this one. */
-export const MANAGER_DESK_LABEL = '司令官'
+ *  (`TerminalInfo.deskLabel`). Consumers: the model-limit watch names the desk
+ *  by it (ownerDeskLimit.ts), and the singleton guard IDENTIFIES a commander
+ *  desk by it — the pool is the only authority that cannot desynchronise from
+ *  itself. A desk the owner started by hand carries no label, so it is never
+ *  mistaken for this one.
+ *
+ *  DEFINED in swarmManagerLabel.ts (a leaf module) and re-exported here: the
+ *  runtime seam that finds desks needs the label, and this module needs that
+ *  seam — see that file for the cycle it breaks. */
+export { MANAGER_DESK_LABEL }
 
 /** The positional prompt for a RESUMED commander (swarmSessions.ts): the same
  *  `/og-manage` skill, plus the ONE instruction a restored commander must obey
@@ -337,17 +345,18 @@ export const managerLaunchOpts = (
  *  and can therefore NEVER create a second desk. That is why the timeout path in
  *  {@link spawnSwarmManager} may call it without holding the spawn lock. */
 const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResponse | null> => {
-  const alive = isTerminalProcessAlive
-  const liveDesks = listLiveDesksIn(projectPath, MANAGER_DESK_LABEL)
-  // The pool's `finishedAt` is stamped by an ASYNCHRONOUS onExit, so right after a
-  // kill (the Restart button: DELETE the terminal, then POST a respawn) the pool
-  // can still list a desk that the OS has already reaped. Confirming with the
-  // process table (signal 0) before trusting an entry closes that window — see
-  // isTerminalProcessAlive's own header for the incident this guards against.
-  // Count only the entries that are ACTUALLY alive — a pool entry the OS has
-  // already reaped (still listed because `finishedAt` hasn't landed yet) must
-  // not inflate this into a false "close your extra desks" warning to the owner.
-  const aliveDesks = liveDesks.filter((d) => alive(d.id))
+  // BOTH POOLS (2026-07-31, stage 3). `listManagerDesks` asks the PTY pool AND
+  // the SDK pool, and re-confirms PTY entries against the process table — the
+  // pool's `finishedAt` is stamped by an ASYNCHRONOUS onExit, so right after a
+  // kill (the Restart button: DELETE the terminal, then POST a respawn) it can
+  // still list a desk the OS already reaped.
+  //
+  // Spanning both pools is not tidiness, it is the invariant: the dial can be
+  // flipped between two spawns, so a project whose commander is a live PTY and
+  // whose dial now says 'sdk' would — with a PTY-only check — get an SDK desk
+  // seated beside it. Two commanders integrating one trunk is exactly the
+  // 2026-07-15 concurrent-integration hazard, arrived at from a new direction.
+  const aliveDesks = listManagerDesks(projectPath)
   const existing = aliveDesks[0]
   if (!existing) return null
   if (aliveDesks.length > 1)
@@ -359,7 +368,9 @@ const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResp
     await recordSwarmSession(projectPath, 'manager', existing.agentSessionId).catch(() => {})
   }
   return {
-    terminalId: existing.id,
+    terminalId: existing.runtime === 'pty' ? existing.handleId : '',
+    runtime: existing.runtime,
+    ...(existing.runtime === 'sdk' ? { sdkSessionId: existing.handleId } : {}),
     agentSessionId: existing.agentSessionId ?? '',
     resumed: false,
     reused: true,
@@ -570,6 +581,24 @@ const launchNewDesk = async (
   // <project>"(言語は Settings.language、表示名は registry の displayName ||
   // フォルダ名)。resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名
   // 'manager' で spawn は通る。
+  // ── RUNTIME FORK (stage 3) ──────────────────────────────────────────────────
+  // Everything above this line is runtime-agnostic and must stay that way: the
+  // session resume decision, the skill self-repair, the tier probe and the hard
+  // model mask apply to a commander whatever carries it. Only the SPAWN differs.
+  //
+  // The dial is read here rather than passed in, so the engine's resuscitation
+  // reflex and the owner's button can never disagree about which runtime this
+  // project's commander uses. Anything but a literal 'sdk' — absent, corrupt,
+  // an unreadable settings file — is a PTY (store.getManagerRuntimeDial).
+  const dial = await getManagerRuntimeDial().catch(() => ({ mode: 'pty' as const }))
+  if (dial.mode === 'sdk') {
+    const sdk = await launchSdkDesk(opts, session, me)
+    if (sdk) return sdk
+    // Fell through ⇒ the SDK path could not be established (no usable claude,
+    // CLI too old). DEGRADE to the PTY commander rather than leaving the project
+    // without one: a desk on the known-good runtime beats no desk at all, and
+    // the reason has already been logged by launchSdkDesk.
+  }
   const remoteName = await resolveSwarmRemoteName('manager', opts.projectPath)
   const ref = launchClaude(
     managerLaunchOpts(
@@ -597,6 +626,90 @@ const launchNewDesk = async (
   })
   return {
     terminalId: ref.terminalId,
+    runtime: 'pty',
+    agentSessionId: session.agentSessionId,
+    resumed: session.resume,
+  }
+}
+
+/** Spawn the commander on the Agent SDK runtime, or return null when it cannot
+ *  be established (the caller then falls back to a PTY desk).
+ *
+ *  NEVER throws for a preflight reason — "this project has no commander" is a
+ *  worse outcome than "this project's commander is a PTY", and the engine's
+ *  reflex treats a throw as "retry next pass", which would leave review cards
+ *  waiting on a runtime that is simply unavailable on this machine.
+ *
+ *  What is deliberately NOT here, compared with the PTY branch:
+ *   - no Remote Control (the flag is inert outside a REPL — the supply desk is
+ *     the owner's phone window instead);
+ *   - no death-on-arrival screen watch. That watcher exists because a PTY tells
+ *     you nothing except by painting: it samples the SCREEN for the refusal
+ *     wording and races the exit. An SDK session says so — `quota_refusal` /
+ *     `api_error` arrive as events on its own stream, and the model-limit watch
+ *     reads them there (ownerDeskLimit). Re-implementing a screen race for a
+ *     runtime that has no screen would be inventing the problem back. */
+const launchSdkDesk = async (
+  opts: SpawnSwarmManagerOpts,
+  session: { agentSessionId: string; resume: boolean },
+  me: { model: string; effort?: ClaudeEffort },
+): Promise<SpawnSwarmManagerResponse | null> => {
+  const pre = sdkManagerPreflight()
+  if (!pre.ok || !pre.claudeBin) {
+    console.warn(
+      `[swarmManager] SDK commander unavailable (${pre.problems.join('; ')}) — ` +
+        'この卓は PTY で起動する(ダイヤルは sdk のまま)',
+    )
+    return null
+  }
+  const plan = sdkManagerLaunchPlan({
+    projectPath: opts.projectPath,
+    agentSessionId: session.agentSessionId,
+    resume: session.resume,
+    me,
+    claudeBin: pre.claudeBin,
+  })
+  for (const w of plan.warnings) console.warn(`[swarmManager] ${w}`)
+  let sdkSession: SdkSessionInfo
+  try {
+    sdkSession = spawnSdkSession({
+      cwd: opts.projectPath,
+      role: 'manager',
+      agentSessionId: session.agentSessionId,
+      options: plan.options,
+      initialPrompt: plan.initialPrompt,
+    })
+  } catch (e) {
+    console.warn(`[swarmManager] SDK commander spawn failed (${String(e)}) — PTY で起動する`)
+    return null
+  }
+  // A session that died inside spawnSdkSession (the SDK threw while building the
+  // query) reports 'failed' synchronously. Treat it exactly like a preflight
+  // miss: drop it and let the caller seat a PTY desk, rather than recording a
+  // session id for a conversation that does not exist.
+  if (sdkSession.status === 'failed') {
+    console.warn(
+      `[swarmManager] SDK commander failed at start (${sdkSession.exitReason ?? 'unknown'}) — PTY で起動する`,
+    )
+    return null
+  }
+  // The model-limit watch, wired at the SOURCE instead of on a sampling timer:
+  // the CLI's refusal arrives as an event on this session's own stream, so there
+  // is nothing to poll and no false-positive class to guard against.
+  watchSdkDeskForLimit({
+    sdkSessionId: sdkSession.id,
+    cwd: opts.projectPath,
+    deskLabel: MANAGER_DESK_LABEL,
+  })
+  await recordSwarmSession(opts.projectPath, 'manager', session.agentSessionId).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[swarmManager] could not persist the commander session id: ${String(e)}`)
+  })
+  return {
+    // EMPTY by the identity invariant — an SDK desk has no terminal.
+    terminalId: '',
+    runtime: 'sdk',
+    sdkSessionId: sdkSession.id,
     agentSessionId: session.agentSessionId,
     resumed: session.resume,
   }

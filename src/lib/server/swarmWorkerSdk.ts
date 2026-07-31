@@ -74,17 +74,18 @@ export interface SdkPreflightResult {
   cliVersion: string | null
 }
 
-/** Everything that must be true BEFORE an SDK worker is allowed to start.
- *  Fails closed: the caller runs a PTY worker instead rather than launching
- *  something whose veto or binary could not be established. */
-export const sdkWorkerPreflight = (opts?: {
-  writeRoots?: string[]
-  home?: string
-  /** Injected for tests. */
+/** The BINARY half of the preflight: the user's own claude must be resolvable,
+ *  and new enough that the stream-json contract is the one this integration was
+ *  measured against.
+ *
+ *  Split out because it is the ONLY half the commander shares. A worker also
+ *  has to prove its veto has teeth; the commander has no veto by design
+ *  (worker-only guard scoping — swarmManagerSdk.ts), so demanding one there
+ *  would refuse to launch over the absence of something the PTY commander does
+ *  not have either. */
+export const sdkClaudeBinaryPreflight = (opts?: {
   claudeBin?: string | null
   readVersion?: (bin: string) => string
-  evaluateFn?: GuardEvaluate
-  guardPath?: string
 }): SdkPreflightResult => {
   const problems: string[] = []
   const claudeBin = opts?.claudeBin !== undefined ? opts.claudeBin : resolveUserClaudeBin()
@@ -107,6 +108,27 @@ export const sdkWorkerPreflight = (opts?: {
     }
   }
 
+  return { ok: problems.length === 0, problems, claudeBin, cliVersion }
+}
+
+/** Everything that must be true BEFORE an SDK worker is allowed to start.
+ *  Fails closed: the caller runs a PTY worker instead rather than launching
+ *  something whose veto or binary could not be established. */
+export const sdkWorkerPreflight = (opts?: {
+  writeRoots?: string[]
+  home?: string
+  /** Injected for tests. */
+  claudeBin?: string | null
+  readVersion?: (bin: string) => string
+  evaluateFn?: GuardEvaluate
+  guardPath?: string
+}): SdkPreflightResult => {
+  const bin = sdkClaudeBinaryPreflight({
+    ...(opts?.claudeBin !== undefined ? { claudeBin: opts.claudeBin } : {}),
+    ...(opts?.readVersion ? { readVersion: opts.readVersion } : {}),
+  })
+  const problems = [...bin.problems]
+
   // The veto must be provably armed, not merely present — verifySdkGuard runs a
   // known-bad command through the real rule engine.
   const g = verifySdkGuard({
@@ -117,16 +139,17 @@ export const sdkWorkerPreflight = (opts?: {
   })
   problems.push(...g.problems)
 
-  return { ok: problems.length === 0, problems, claudeBin, cliVersion }
+  return { ok: problems.length === 0, problems, claudeBin: bin.claudeBin, cliVersion: bin.cliVersion }
 }
 
-/** Environment for the SDK-spawned claude.
+/** Environment for ANY SDK-spawned claude (worker or commander — the stripping
+ *  rule is about the parent process, not the role).
  *
  *  Strips CLAUDE_CODE_* / CLAUDECODE: a claude launched from inside another
  *  claude inherits child-session markers that change its behaviour (transcript
- *  handling among them), so a worker spawned by an OG server that itself runs
+ *  handling among them), so a session spawned by an OG server that itself runs
  *  under claude would not behave like one spawned by a plain server. */
-export const sdkWorkerEnv = (
+export const sdkSessionEnv = (
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> => {
   const out: Record<string, string> = {}
@@ -198,7 +221,7 @@ export const sdkWorkerLaunchPlan = (opts: SdkWorkerOptsInput): SdkWorkerLaunchPl
     cwd: opts.worktree,
     // The USER'S claude — never the SDK's bundled copy (§4 #11).
     pathToClaudeCodeExecutable: opts.claudeBin,
-    env: sdkWorkerEnv(opts.env),
+    env: sdkSessionEnv(opts.env),
     // Unattended: a worker must never sit on a tool-approval prompt with nobody
     // watching. Mirrors workerLaunchOpts' unconditional permissionMode:'bypass'.
     permissionMode: 'bypassPermissions',

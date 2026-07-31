@@ -171,6 +171,22 @@
   センサー対応表 §5 / ガード配線の非自明点 §4-G(**SDK は既定で settings をロードしない →
   素朴に spawn すると A3/L4 guard が黙って消える**・fail-closed 必須) / カード分割 §12。
   調査の正典は `SDK_CLIENT_INVESTIGATION.md`(実測台帳・「しない」だった旧結論の上書き経緯込み)
+- **司令官の SDK ランタイム(stage 3・実装済み・既定 OFF)**: 入口は
+  `swarmManagerRuntime.ts`(**卓の在処を答える唯一の seam** — PTY プールと SDK プールの両方に聞く)/
+  `swarmManagerSdk.ts`(launch plan + preflight)/ `swarmManagerLabel.ts`(循環を切る葉の定数)/
+  `sdkDeskLimit.ts`(クォータ停止をイベント源で拾う)/ route `POST /api/swarm/manager/say`。
+  ダイヤル = `Settings.swarmManagerRuntime.mode`(既定 `'pty'`・`store.getManagerRuntimeDial`)。
+  ⚠ **卓の存在判定を PTY プールだけに聞かないこと** — SDK 卓が毎パス `absent` と読まれ、
+  5分ごとに二卓目が立つ(0719 の11卓事故と同じ形)。必ず `listManagerDesks`。
+  ⚠ **SDK 卓に画面は無い**(`managerDeskScreen` は null)。null を「何も出ていない」と読むと
+  正しい結論に誤った理由で辿り着く。等価な証拠は自分のストリームの `quota_refusal` イベント。
+  ⚠ **リモコンは消える**(`--remote-control` は REPL 外で無効)。外からの窓口は **PTY のまま残す
+  補給官**(`skills/supply/SKILL.md` の「状況」「質問に答える」「司令官に伝えて」)。ここが
+  stage 3 の前提であり、補給官が状況を答えられないうちにダイヤルを回すと外から監視できなくなる。
+  実測(0731): SDK セッションでも `/og-manage` は解決する(slash commands 95本に在る・実際に読み込む)。
+  ただし **Claude Code の system prompt は付かない** ので app-context カードは
+  `systemPrompt.append` で明示注入する(`scripts/probe-sdk-skill-resolution.mts` /
+  `probe-sdk-system-prompt.mts`)。
 - 入口だけ: `swarmOrchestrator.ts`(エンジン tick)/ `swarmWorker.ts` / `swarmLaunch.ts`(spawn・
   モデル/effort/リモコン名解決)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
   `swarmQuota.ts` / route: `server/routes/swarm.ts` / UI: `modules/SwarmModule.tsx` + `useSwarmEngine.ts`
@@ -222,6 +238,9 @@
   判別は CLI 自身の remedy 行を読み返す。②**1パスで止まった卓は1本に合体** — account-wide は全卓を同時に
   止めるので卓ごとに鳴らすと同一本文がベルを埋め、本物の fatal を押し出す。③画面が読めなければ **null**
   (生バッファに落とすと枠を認識できず**静かに失明**する)
+  ⚠ **この卓はプールを走査する** ので **SDK 卓は見えない**。SDK 卓の等価物は `sdkDeskLimit.ts`
+  (spawn 時に張るリスナ・イベント源で拾う)。文言判定と通知本文は共有するが、静穏窓/確認窓/
+  3読み再武装は**持たない** — あれは「絵を読む」代償であって、CLI が言ってくるなら要らない。
 - worker/司令官へ焼き込む**規約テキスト**(コードでなく文言が機構): `swarmDecisionRouting.ts`
   (**誰が**決めるか — 観測地図で宛先を仕分け)/ `swarmSpecialistReview.ts`(**どう**決めるか — 判断前に
   一次資料を取り込む・取得失敗は `【資料取得できず】` で degrade)。どちらも WORKER_ORDER_RULES

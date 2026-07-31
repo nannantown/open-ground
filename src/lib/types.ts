@@ -139,6 +139,28 @@ export interface Settings {
     mode: 'pty' | 'sdk'
     sdkMaxWorkers?: number
   }
+  /** WHICH RUNTIME the COMMANDER desk (司令官) launches on — the stage-3 half of
+   *  the same migration, dialled separately because it spends something the
+   *  worker dial does not.
+   *
+   *  Absent / `'pty'` ⇒ the commander is an interactive `claude` PTY, exactly as
+   *  before, reachable from a phone through `--remote-control`. `'sdk'` ⇒ it
+   *  runs on the Agent SDK: structured transcript, liveness that is a fact
+   *  rather than an inference, and notices that no longer have to ERASE the
+   *  owner's half-typed input to be delivered — but NO Remote Control, because
+   *  the flag does nothing outside an interactive REPL.
+   *
+   *  That is why this is its own switch and why it ships OFF: turning it on is
+   *  only safe once the SUPPLY desk (which stays on a PTY) can answer 「状況」 as
+   *  well as take orders, since it then becomes the owner's only phone window.
+   *  See docs/SDK_CLIENT_INVESTIGATION.md §13 and skills/supply/SKILL.md.
+   *
+   *  Flipping it back does not disturb a desk already running; it decides what
+   *  the NEXT spawn builds, and the one-desk-per-project guard spans both pools
+   *  so a project can never end up with one of each. */
+  swarmManagerRuntime?: {
+    mode: 'pty' | 'sdk'
+  }
   /** The owner's chosen left-to-right order of the Swarm tab's sub-view strip
    *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー / 監督). PERSONAL UI
    *  state, kept central in `~/.openground/settings.json` (never the user's
@@ -1076,7 +1098,17 @@ export interface SpawnSwarmSupplyResponse {
  *  drain+integrate loop, this is the human-in-the-loop conversational counterpart.
  *  Stopping it is a plain PTY kill (no worktree). */
 export interface SpawnSwarmManagerResponse {
+  /** PTY commander ⇒ its terminal id. SDK commander ⇒ EMPTY — the identity
+   *  invariant is pty ⇔ terminalId, sdk ⇔ sdkSessionId, never both (the same
+   *  rule workerRuntime.ts keeps for workers). Branch on `runtime`, never on
+   *  whether one of the two ids happens to be truthy. */
   terminalId: string
+  /** Which runtime carries this desk. Absent ⇒ 'pty' (every response predating
+   *  the commander dial). */
+  runtime?: 'pty' | 'sdk'
+  /** Present only for an SDK commander: its {@link SdkSessionInfo} id, the
+   *  handle /api/sdk-session/* is addressed by. */
+  sdkSessionId?: string
   agentSessionId: string
   /** true ⇒ this is the project's PREVIOUS commander conversation, resumed
    *  (`claude --resume`) — see SpawnSwarmSupplyResponse.resumed. NOTE the asymmetry

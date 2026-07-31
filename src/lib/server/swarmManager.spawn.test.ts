@@ -77,6 +77,7 @@ vi.mock('./swarmLaunch', async (importOriginal) => ({
 
 import { spawnSwarmManager, MANAGER_DESK_LABEL, DESK_SPAWN_LOCK_WAIT_MS } from './swarmManager'
 import type { OwnerDeskTerminal } from './terminal'
+import { spawnSdkSession, __resetSdkSessionsForTests } from './sdkSession'
 
 const PROJ = '/repo/alpha'
 const OTHER = '/repo/beta'
@@ -222,6 +223,9 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
     expect(a.reused).toBeUndefined() // it spawned
     expect(b).toEqual({
       terminalId: a.terminalId,
+      // Adoption reports the runtime of the desk it FOUND — the loser must not
+      // be told 'pty' just because that is the default dial.
+      runtime: 'pty',
       agentSessionId: a.agentSessionId,
       resumed: false,
       reused: true,
@@ -304,6 +308,7 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
     expect(mocks.launchClaude).not.toHaveBeenCalled()
     expect(r).toEqual({
       terminalId: 'already-here',
+      runtime: 'pty',
       agentSessionId: 'sid-live',
       resumed: false,
       reused: true,
@@ -448,5 +453,86 @@ describe('spawnSwarmManager — wires session.resume through to the DOA watch (p
     fireDeath()
 
     expect(mocks.forgetSwarmSessionIf).toHaveBeenCalledWith(PROJ, 'manager', 'sid-refusal-only')
+  })
+})
+
+// ── the SECOND pool (stage 3) ────────────────────────────────────────────────
+// A commander can now live on the Agent SDK runtime, in a pool the PTY check
+// knows nothing about. If the singleton guard only asked the PTY pool, a project
+// whose commander is an SDK desk would read "no desk" — and the engine's reflex
+// would seat a replacement EVERY pass. That is the eleven-desk incident again,
+// this time built in rather than raced into.
+describe('one desk per project spans BOTH pools', () => {
+  beforeEach(() => {
+    __resetSdkSessionsForTests()
+  })
+  afterEach(() => {
+    __resetSdkSessionsForTests()
+  })
+
+  /** Put a live SDK commander in the real pool without running any claude. */
+  const seatSdkCommander = (cwd: string) =>
+    spawnSdkSession({
+      cwd,
+      role: 'manager',
+      agentSessionId: 'sid-sdk-desk',
+      options: {},
+      // A session that is simply ALIVE: it parks forever without producing a
+      // message. The trailing yield is unreachable and only there because a generator
+      // with no yield is not one.
+      queryFn: () => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise(() => {})
+          yield undefined
+        },
+      }),
+    })
+
+  it('an SDK commander is ADOPTED — nothing is launched, and the record is repointed', async () => {
+    mocks.listLiveDesksIn.mockReturnValue([]) // no PTY desk anywhere
+    const seated = seatSdkCommander(PROJ)
+
+    const r = await spawnSwarmManager({ projectPath: PROJ })
+
+    expect(mocks.launchClaude).not.toHaveBeenCalled()
+    expect(r).toEqual({
+      // The identity invariant, on the adoption path too: an SDK desk reports an
+      // EMPTY terminalId and its own session id, never one standing in for the other.
+      terminalId: '',
+      runtime: 'sdk',
+      sdkSessionId: seated.id,
+      agentSessionId: 'sid-sdk-desk',
+      resumed: false,
+      reused: true,
+    })
+    expect(mocks.recordSwarmSession).toHaveBeenCalledWith(PROJ, 'manager', 'sid-sdk-desk')
+  })
+
+  it('an SDK commander in ANOTHER project does not block this one', async () => {
+    mocks.listLiveDesksIn.mockReturnValue([])
+    seatSdkCommander(resolve('/tmp/some-other-project'))
+    await spawnSwarmManager({ projectPath: PROJ })
+    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+  })
+
+  it('an SDK WORKER in this project is not mistaken for a commander', async () => {
+    mocks.listLiveDesksIn.mockReturnValue([])
+    spawnSdkSession({
+      cwd: PROJ,
+      role: 'worker',
+      agentSessionId: 'sid-worker',
+      options: {},
+      // A session that is simply ALIVE: it parks forever without producing a
+      // message. The trailing yield is unreachable and only there because a generator
+      // with no yield is not one.
+      queryFn: () => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise(() => {})
+          yield undefined
+        },
+      }),
+    })
+    await spawnSwarmManager({ projectPath: PROJ })
+    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
   })
 })

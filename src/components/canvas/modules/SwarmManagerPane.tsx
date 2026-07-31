@@ -46,6 +46,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { Activity, AlertTriangle, BarChart3, ClipboardCheck, Gauge, MessageSquare, Power, Send } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
+import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { commanderPresence, type SwarmEngineState } from './useSwarmEngine'
@@ -54,13 +55,21 @@ import { commanderPresence, type SwarmEngineState } from './useSwarmEngine'
  *  like the supply session). null = not launched — the stage shows the launch
  *  CTA. */
 export interface ManagerSession {
+  /** PTY commander ⇒ its terminal id. SDK commander ⇒ '' (identity invariant:
+   *  pty ⇔ terminalId, sdk ⇔ sdkSessionId, never both). */
   terminalId: string
+  /** Absent ⇒ 'pty', the shape every session predating the commander dial has. */
+  runtime?: 'pty' | 'sdk'
+  sdkSessionId?: string
   /** Live status from SwarmModule's active-terminal poll (the SAME vocabulary
-   *  the supply / worker tiles use). */
+   *  the supply / worker tiles use). Only meaningful for a PTY desk — an SDK
+   *  desk reports its own status on its event stream. */
   status: WorkerStatus
 }
 
 interface Props {
+  /** The project this desk runs in — every /api/sdk-session/* call is gated on it. */
+  projectPath: string
   /** The commander conversation (/manage) PTY — owned by SwarmModule (like
    *  supply). null until launched. */
   session: ManagerSession | null
@@ -172,6 +181,7 @@ export const SwarmManagerPane = ({
   error,
   onToggleOverseer,
   sandboxWarning,
+  projectPath,
 }: Props) => {
   const { t } = useT()
 
@@ -185,10 +195,28 @@ export const SwarmManagerPane = ({
   // early (the hardening the server's pastePrompt uses) — then a SEPARATE CR
   // submits it, so its internal newlines stay literal instead of each submitting.
   const commanderId = session?.terminalId ?? null
+  const sdkCommanderId = session?.runtime === 'sdk' ? (session.sdkSessionId ?? null) : null
   const sendToCommander = useCallback(
     async (raw: string) => {
       const text = raw.replace(/\r/g, '')
-      if (!commanderId || !text.trim()) return
+      if (!text.trim()) return
+      // An SDK desk takes a TURN, not keystrokes: one POST carries the whole
+      // order, newlines and all, and the CLI queues it even mid-generation.
+      // None of the machinery below applies — no CR-as-Enter, no bracketed
+      // paste, no ESC stripping — because none of its problems exist when the
+      // text is not being typed into a terminal.
+      if (sdkCommanderId) {
+        await fetch(
+          `/api/sdk-session/${encodeURIComponent(sdkCommanderId)}/input?path=${encodeURIComponent(projectPath)}`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text }),
+          },
+        ).catch(() => {})
+        return
+      }
+      if (!commanderId) return
       const post = (data: string) =>
         fetch(`/api/terminal/${commanderId}/input`, {
           method: 'POST',
@@ -210,7 +238,7 @@ export const SwarmManagerPane = ({
         /* PTY gone / offline — the user can retry or type in the terminal itself */
       }
     },
-    [commanderId],
+    [commanderId, sdkCommanderId, projectPath],
   )
 
   // Engine status badge: running (moss) · stopped (grey) · offline (faint).
@@ -282,12 +310,27 @@ export const SwarmManagerPane = ({
                 dialogue input (text in, Enter sends). onExit bubbles the close
                 up so SwarmModule drops back to the launch CTA. */}
             <div className="min-h-0 flex-1">
-              <ClaudeTerminalPane
-                terminalId={session.terminalId}
-                chrome={false}
-                onExit={() => onSessionExit()}
-                onRestart={onRestartSession}
-              />
+              {session.runtime === 'sdk' && session.sdkSessionId ? (
+                // An SDK commander has no terminal to render — its desk shows the
+                // distilled event stream instead. This is the readable transcript
+                // the whole migration started from, now on the desk the owner
+                // actually reads. Same tile as an SDK worker, so a fleet and its
+                // commander read as one system.
+                <SdkWorkerPane
+                  sdkSessionId={session.sdkSessionId}
+                  projectPath={projectPath}
+                  branch={t('projectPanel.swarm.manager.badge')}
+                  taskTitle={t('projectPanel.swarm.manager.conversationTitle')}
+                  onExit={() => onSessionExit()}
+                />
+              ) : (
+                <ClaudeTerminalPane
+                  terminalId={session.terminalId}
+                  chrome={false}
+                  onExit={() => onSessionExit()}
+                  onRestart={onRestartSession}
+                />
+              )}
             </div>
             {/* Command bar: quick chips + a free-text field that POST the order to
                 the commander PTY (same /input route) so you can drive /manage

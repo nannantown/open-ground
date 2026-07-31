@@ -54,6 +54,43 @@ export const SWARM_LIB_MARKER = 'managed-by: openground'
  *  files out of a user's home is a bigger risk class than leaving one behind. */
 export const SWARM_LIB_BASENAME = 'openground-swarm-lib.sh'
 
+/** SHA-256 of the PRE-MARKER `~/.claude/skills/order/SKILL.md` — the tmux-era
+ *  copy that existing machines received by hand, before 19e19e0f (2026-07-22)
+ *  seeded the skill into this repo WITH the managed-by marker. Measured on the
+ *  owner's machine 2026-07-31; identified by the clause the repo version
+ *  deleted that day (auto-firing `/order` on phrases like 「ガチでやって」).
+ *
+ *  Listing it here is an explicit claim that those exact bytes are OPEN
+ *  GROUND's own prior output, so the installer may adopt them instead of
+ *  shielding them as user-authored forever (managedFileInstall.ts header).
+ *  Bytes NOT listed stay shielded — a single hand-edit takes the file back. */
+export const ORDER_SKILL_ADOPT_DIGESTS: readonly string[] = [
+  'b66c00d0ffec2832174debb8c6ca7a3397e653077a2eb4695fa104f8d007627f',
+]
+
+/** Same, for `~/.claude/skills/supply/SKILL.md`. The pre-marker copy is the one
+ *  that tells the desk it lives in a tmux cockpit window (`Ctrl-b 2`) — a
+ *  protocol that has not existed inside the app since the in-app swarm port,
+ *  and which the desk was still being handed on 2026-07-31. */
+export const SUPPLY_SKILL_ADOPT_DIGESTS: readonly string[] = [
+  '7b101a6f62ac9511451c1b77a6b5f84f6742eb6c6010c6731d14ba1770dc48b6',
+]
+
+/** Same, for `~/.claude/swarm-beat.sh` — the heartbeat CLI EVERY worker calls.
+ *  The pre-marker copy differs from the shipped one in exactly one functional
+ *  line: it sources `swarm-lib.sh` (the user's hand-written tmux-cockpit lib)
+ *  instead of {@link SWARM_LIB_BASENAME}. That works today only because the
+ *  legacy lib happens to define an identical `sw_hbdir` — verified 2026-07-31,
+ *  both resolve to the same `~/.openground/swarm/<key>` — so every worker's
+ *  heartbeat has been riding a file OPEN GROUND does not ship or control. If the
+ *  owner ever tidied that lib away, heartbeats would break with a shell
+ *  `command not found` and the commander would see a fleet of silent workers.
+ *  Adopting moves the dependency onto our own installed helper; the heartbeat
+ *  directory is byte-identical either way, so live workers do not move. */
+export const SWARM_BEAT_ADOPT_DIGESTS: readonly string[] = [
+  '6cafd125432c9f7d87953cc20f55a51fbe39c53610801ea7cad2c9efdf42cfb0',
+]
+
 interface ToolingFile {
   name: string
   /** Path segments relative to the app checkout root resolved by resolveHookSourceRoot(). */
@@ -62,15 +99,17 @@ interface ToolingFile {
   targetRel: string[]
   marker: string
   mode?: number
+  /** Pre-marker vintages of THIS file that the installer may claim as its own. */
+  adoptDigests?: readonly string[]
 }
 
 const TOOLING_FILES: ToolingFile[] = [
-  { name: 'order', sourceRel: ['skills', 'order', 'SKILL.md'], targetRel: ['.claude', 'skills', 'order', 'SKILL.md'], marker: ORDER_SKILL_MARKER },
-  { name: 'supply', sourceRel: ['skills', 'supply', 'SKILL.md'], targetRel: ['.claude', 'skills', 'supply', 'SKILL.md'], marker: SUPPLY_SKILL_MARKER },
+  { name: 'order', sourceRel: ['skills', 'order', 'SKILL.md'], targetRel: ['.claude', 'skills', 'order', 'SKILL.md'], marker: ORDER_SKILL_MARKER, adoptDigests: ORDER_SKILL_ADOPT_DIGESTS },
+  { name: 'supply', sourceRel: ['skills', 'supply', 'SKILL.md'], targetRel: ['.claude', 'skills', 'supply', 'SKILL.md'], marker: SUPPLY_SKILL_MARKER, adoptDigests: SUPPLY_SKILL_ADOPT_DIGESTS },
   // Keep the lib BEFORE swarm-beat.sh: on an app update the refreshed beat
   // sources the lib, so the lib must already be on disk when it lands.
   { name: SWARM_LIB_BASENAME, sourceRel: ['scripts', SWARM_LIB_BASENAME], targetRel: ['.claude', SWARM_LIB_BASENAME], marker: SWARM_LIB_MARKER, mode: 0o755 },
-  { name: 'swarm-beat.sh', sourceRel: ['scripts', 'swarm-beat.sh'], targetRel: ['.claude', 'swarm-beat.sh'], marker: SWARM_BEAT_MARKER, mode: 0o755 },
+  { name: 'swarm-beat.sh', sourceRel: ['scripts', 'swarm-beat.sh'], targetRel: ['.claude', 'swarm-beat.sh'], marker: SWARM_BEAT_MARKER, mode: 0o755, adoptDigests: SWARM_BEAT_ADOPT_DIGESTS },
 ]
 
 export interface SwarmToolingInstallResult {
@@ -123,7 +162,13 @@ export const installSwarmTooling = async (
     const source = join(sourceRoot, ...f.sourceRel)
     out.push({
       name: f.name,
-      result: await installManagedFile({ source, target, marker: f.marker, mode: f.mode }),
+      result: await installManagedFile({
+        source,
+        target,
+        marker: f.marker,
+        mode: f.mode,
+        ...(f.adoptDigests ? { adoptDigests: f.adoptDigests } : {}),
+      }),
     })
   }
   return out

@@ -249,6 +249,13 @@ void (async () => {
       if (r.outcome === 'installed' || r.outcome === 'refreshed') {
         console.log(`[openground:hono] swarm tooling ${name} ${r.outcome}: ${r.path}`)
       }
+      // adopted = the copy on disk was a PRE-MARKER vintage of our own shipped
+      // file (digest-matched, swarmToolingInstall.ts), so it has now been claimed
+      // and brought up to date. A one-time transition per file — worth its own
+      // line because until it happened those updates were silently not applying.
+      if (r.outcome === 'adopted') {
+        console.log(`[openground:hono] swarm tooling ${name} adopted (pre-marker copy of ours — now managed + updated): ${r.path}`)
+      }
       // kept-user means the shipped source has DRIFTED from the user's copy but we
       // never overwrite it (ownership contract) — log it so that drift is at least
       // visible, instead of silently never surfacing again.

@@ -276,6 +276,16 @@ export const getWorkerRuntimeDial = async (): Promise<{
   return { mode, ...(typeof raw?.sdkMaxWorkers === 'number' ? { sdkMaxWorkers: raw.sdkMaxWorkers } : {}) }
 }
 
+// ─── Swarm COMMANDER runtime dial (Settings.swarmManagerRuntime) ─────────────
+// The stage-3 kill switch, read through here for the same reason as the worker
+// dial: "absent ⇒ pty" must live in ONE place. The commander's default matters
+// more than the worker's, because switching it on costs the owner's phone
+// window (an SDK desk has no Remote Control) — so anything short of a literal
+// 'sdk' keeps the PTY commander.
+export const getManagerRuntimeDial = async (): Promise<{ mode: 'pty' | 'sdk' }> => ({
+  mode: (await getSettings()).swarmManagerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
+})
+
 // ─── Swarm autonomy "remembered ON" set (Settings.swarmAutonomyOn) ────────────
 // The ONLY autonomy state that survives a restart — a REMINDER, never an
 // auto-resume (the engine is in-memory and always relaunches OFF). Added when the

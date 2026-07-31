@@ -21,6 +21,7 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.1 / §6.
 
 import { randomUUID } from 'crypto'
+import { resolve as pathResolve } from 'path'
 import { distillSdkMessage, statusAfter, type SdkEvent, type SdkSessionStatus } from './sdkEvents'
 
 // ── injected shapes ─────────────────────────────────────────────────────────
@@ -39,9 +40,25 @@ export interface SdkQueryParams {
 
 export type SdkQueryFn = (params: SdkQueryParams) => SdkQueryHandle
 
+/** Which OPEN GROUND role a session carries. The pool is otherwise anonymous,
+ *  and "is a commander desk alive in this project?" must be answerable from the
+ *  POOL rather than from a store any spawn can overwrite — that is the exact
+ *  desync that produced eleven PTY commander desks in three hours (swarmManager
+ *  `adoptLiveDesk`). A pool cannot desynchronise from itself, so the SDK pool
+ *  has to be able to answer the same question the PTY pool answers via
+ *  `TerminalInfo.deskLabel`. */
+export type SdkSessionRole = 'worker' | 'manager' | 'supply'
+
 export interface SpawnSdkSessionOpts {
   /** Working directory the session runs in (a worker's worktree). */
   cwd: string
+  /** What this session IS, for pool queries (see {@link SdkSessionRole}). */
+  role?: SdkSessionRole
+  /** The CLAUDE session id this session drives (`sessionId`/`resume` in the SDK
+   *  options). Distinct from the pool id: the pool id addresses the session in
+   *  OG's own API surface, this one addresses the CONVERSATION on disk and is
+   *  what swarmSessions persists so a restart can resume it. */
+  agentSessionId?: string
   /** Options handed to `query()` verbatim. Built by the caller (swarmWorkerSdk
    *  for a worker) so this module owns no policy — not permissions, not the
    *  guard, not the model. */
@@ -58,6 +75,8 @@ export interface SpawnSdkSessionOpts {
 export interface SdkSessionInfo {
   id: string
   cwd: string
+  role?: SdkSessionRole
+  agentSessionId?: string
   status: SdkSessionStatus
   startedAt: number
   /** Wall-clock of the newest event — the liveness signal that replaces
@@ -79,6 +98,8 @@ type Listener = (frame: SdkStreamFrame) => void
 interface Entry {
   id: string
   cwd: string
+  role?: SdkSessionRole
+  agentSessionId?: string
   status: SdkSessionStatus
   startedAt: number
   lastEventAt: number
@@ -213,6 +234,8 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
   const e: Entry = {
     id,
     cwd: opts.cwd,
+    ...(opts.role ? { role: opts.role } : {}),
+    ...(opts.agentSessionId ? { agentSessionId: opts.agentSessionId } : {}),
     status: 'starting',
     startedAt: now,
     lastEventAt: now,
@@ -253,6 +276,8 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
 const snapshot = (e: Entry): SdkSessionInfo => ({
   id: e.id,
   cwd: e.cwd,
+  ...(e.role ? { role: e.role } : {}),
+  ...(e.agentSessionId ? { agentSessionId: e.agentSessionId } : {}),
   status: e.status,
   startedAt: e.startedAt,
   lastEventAt: e.lastEventAt,
@@ -276,6 +301,25 @@ export const listSdkSessions = (): SdkSessionInfo[] => {
 export const isSdkSessionAlive = (id: string): boolean => {
   const e = pool.sessions.get(id)
   return !!e && e.status !== 'exited' && e.status !== 'failed'
+}
+
+/** Every LIVE session of `role` whose cwd is `cwd` — the SDK counterpart of
+ *  terminal.ts's `listLiveDesksIn`, and the authority for "does this project
+ *  already have a commander desk?".
+ *
+ *  Paths are compared RESOLVED, exactly as the PTY side compares them, so a
+ *  symlinked or trailing-slash spelling of the same directory can never look
+ *  like a different project and earn itself a second desk. */
+export const listSdkSessionsIn = (cwd: string, role: SdkSessionRole): SdkSessionInfo[] => {
+  const want = pathResolve(cwd)
+  const out: SdkSessionInfo[] = []
+  pool.sessions.forEach((e) => {
+    if (e.role !== role) return
+    if (e.status === 'exited' || e.status === 'failed') return
+    if (pathResolve(e.cwd) !== want) return
+    out.push(snapshot(e))
+  })
+  return out
 }
 
 /** Queue one turn. Returns false when the session is gone or already finished.

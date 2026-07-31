@@ -60,6 +60,11 @@ import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
+import { listManagerDesks, sayToManagerDesk } from '@/lib/server/swarmManagerRuntime'
+
+/** Cap on one relayed message to the commander. Sized like the escalation answer
+ *  cap: this is a sentence the owner dictated from a phone, not a payload. */
+const MAX_MANAGER_SAY = 4000
 import {
   startOrchestrator,
   stopOrchestrator,
@@ -72,6 +77,7 @@ import {
   setOverseer,
   dismissOverseerReminder,
   writeManagerHeartbeat,
+  noticeDeliverable,
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
 import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
@@ -512,6 +518,50 @@ export const swarmRoutes = new Hono()
     } catch (e: any) {
       return c.json({ error: `failed to spawn manager: ${e?.message ?? e}` }, 500)
     }
+  })
+  // --- POST /api/swarm/manager/say — relay ONE message to the commander -------
+  // Body: { path, text }. The RUNTIME-AGNOSTIC way to speak to the commander
+  // desk, and the reason it exists is the phone.
+  //
+  // The owner reaches OPEN GROUND from outside through the SUPPLY desk, which
+  // stays on a PTY precisely because Remote Control only works there. Supply can
+  // read everything (「状況」) and file cards, but relaying an instruction —
+  // 「swarm/X をマージして」 — used to mean knowing the commander's terminal id and
+  // POSTing raw keystrokes to /api/terminal/:id/input, which is wrong twice: it
+  // does not exist for an SDK commander, and even on a PTY it is the same
+  // half-typed-input hazard the engine's notice path had to grow two refusals
+  // for. One endpoint, one seam (swarmManagerRuntime.sayToManagerDesk), and the
+  // caller never learns which runtime answered.
+  //
+  // Owner-gated + path-validated like every /api/swarm/* write. Never spawns:
+  // "there is no commander desk" is reported (404), not fixed — waking a desk is
+  // a decision with a model cost, and it belongs to the engine's reflex or the
+  // owner's button, not to a relayed sentence.
+  .post('/api/swarm/manager/say', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    const text = typeof body?.text === 'string' ? body.text.trim() : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    if (!text) return c.json({ error: 'text is required' }, 400)
+    if (text.length > MAX_MANAGER_SAY) return c.json({ error: 'text too large' }, 400)
+    const desk = listManagerDesks(path)[0] ?? null
+    if (!desk) return c.json({ error: 'no commander desk is running in this project' }, 404)
+    const res = sayToManagerDesk(desk, text, { deliverable: noticeDeliverable })
+    // held ≠ failed: a PTY desk mid-generation (or with a half-typed draft) is
+    // asked again later rather than clobbered, and the caller is TOLD which it
+    // was so it can say "届けました" or "今は取り込み中なので後で" honestly.
+    return c.json({
+      delivered: res.ok,
+      runtime: desk.runtime,
+      ...(res.heldBecause ? { heldBecause: res.heldBecause } : {}),
+    })
   })
   // --- POST /api/swarm/manager/beat — the commander's heartbeat (card B) ------
   // The `/og-manage` commander curls this at each integration phase boundary (it
