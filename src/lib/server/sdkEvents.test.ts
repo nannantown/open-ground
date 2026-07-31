@@ -244,6 +244,65 @@ describe('distillSdkMessage — the unknown', () => {
   })
 })
 
+describe('compact_boundary (the context-fills answer)', () => {
+  // "What happens to a long-running desk when its context fills?" was the last
+  // unmeasured risk in the SDK migration — and a commander desk is exactly the
+  // session long enough to find out. The CLI answers it in the stream, so the
+  // distiller must not swallow it with its 'system' siblings: an unknown you can
+  // watch is a different risk from an unknown you cannot.
+  const boundary = (md: Record<string, unknown>) => ({
+    type: 'system',
+    subtype: 'compact_boundary',
+    compact_metadata: md,
+    uuid: 'u',
+    session_id: 's',
+  })
+
+  it('an automatic compaction carries the before/after token counts', () => {
+    expect(
+      distillSdkMessage(boundary({ trigger: 'auto', pre_tokens: 128_000, post_tokens: 31_500 }), P),
+    ).toEqual([{ kind: 'compact', trigger: 'auto', preTokens: 128_000, postTokens: 31_500 }])
+  })
+
+  it('a manual /compact is distinguishable from an automatic one', () => {
+    expect(distillSdkMessage(boundary({ trigger: 'manual', pre_tokens: 90_000 }), P)).toEqual([
+      // post_tokens absent ⇒ null, NOT 0 — "unknown" and "compacted to nothing"
+      // must not read the same.
+      { kind: 'compact', trigger: 'manual', preTokens: 90_000, postTokens: null },
+    ])
+  })
+
+  it('an unknown trigger is carried verbatim, never coerced to auto', () => {
+    expect(distillSdkMessage(boundary({ trigger: 'future_thing', pre_tokens: 1 }), P)[0]).toMatchObject({
+      trigger: 'future_thing',
+    })
+  })
+
+  it('a malformed boundary still reports the compaction (the FACT outranks the numbers)', () => {
+    // Losing the counts is cosmetic; losing "history was summarised" leaves the
+    // reader wondering why the desk forgot.
+    expect(distillSdkMessage(boundary({}), P)).toEqual([
+      { kind: 'compact', trigger: 'auto', preTokens: 0, postTokens: null },
+    ])
+    expect(distillSdkMessage({ type: 'system', subtype: 'compact_boundary' }, P)).toHaveLength(1)
+    expect(
+      distillSdkMessage(boundary({ pre_tokens: 'lots', post_tokens: Number.NaN }), P),
+    ).toEqual([{ kind: 'compact', trigger: 'auto', preTokens: 0, postTokens: null }])
+  })
+
+  it("its 'system' siblings are still ignored", () => {
+    expect(distillSdkMessage({ type: 'system', subtype: 'init', session_id: 'x' }, P)).toEqual([])
+    expect(distillSdkMessage({ type: 'system', subtype: 'commands_changed' }, P)).toEqual([])
+    expect(distillSdkMessage({ type: 'system' }, P)).toEqual([])
+  })
+
+  it('compaction says nothing about the session status', () => {
+    // It is bookkeeping inside a turn, not a lifecycle transition — treating it
+    // as one would free a session that is still mid-work.
+    expect(statusAfter({ kind: 'compact', trigger: 'auto', preTokens: 1, postTokens: 1 })).toBeNull()
+  })
+})
+
 describe('statusAfter', () => {
   it('parks on a refusal and frees on a turn boundary', () => {
     expect(statusAfter({ kind: 'quota_refusal', raw: 'x' })).toBe('quota-parked')

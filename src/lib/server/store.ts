@@ -184,8 +184,38 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'executionMode',
   'swarmAllowedModels',
   'swarmPaneOrder',
+  'swarmWorkerRuntime',
+  'swarmManagerRuntime',
   'lockdownMode',
 ]
+
+/** Narrow an untrusted runtime dial to `{ mode }` (+ the worker's optional
+ *  `sdkMaxWorkers`). Anything else returns undefined so the key is DROPPED and
+ *  the previous value survives — the same "refuse a meaningless patch" stance as
+ *  the swarmAllowedModels all-off and swarmPaneOrder all-garbage guards.
+ *
+ *  Only a literal 'sdk' selects the experiment, which keeps this normalizer and
+ *  the two dial READERS (getWorkerRuntimeDial / getManagerRuntimeDial) agreeing
+ *  on the one rule that matters: absent-or-unrecognised ⇒ the shipped PTY path,
+ *  never the experimental one. These keys are deliberately inert with respect to
+ *  the validateProjectPath allowlist — they select a runtime, they cannot widen
+ *  any boundary — so admitting them to USER_SETTINGS_KEYS does not weaken the
+ *  narrowing this function's caller exists to perform. */
+const normalizeRuntimeDial = (
+  v: unknown,
+  withMaxWorkers: boolean,
+): { mode: 'pty' | 'sdk'; sdkMaxWorkers?: number } | undefined => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const raw = v as { mode?: unknown; sdkMaxWorkers?: unknown }
+  if (raw.mode !== 'pty' && raw.mode !== 'sdk') return undefined
+  const cap = raw.sdkMaxWorkers
+  return {
+    mode: raw.mode,
+    ...(withMaxWorkers && typeof cap === 'number' && Number.isFinite(cap) && cap > 0
+      ? { sdkMaxWorkers: Math.floor(cap) }
+      : {}),
+  }
+}
 
 /** Narrow an untrusted `swarmPaneOrder` body to the known pane ids, in the
  *  caller's order, DEDUPED. A forged POST /api/settings therefore can't persist
@@ -244,6 +274,19 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
     const clean = normalizeSwarmPaneOrder(safe.swarmPaneOrder)
     if (clean) safe.swarmPaneOrder = clean
     else delete safe.swarmPaneOrder
+  }
+  // The two Agent-SDK runtime dials, narrowed to `{ mode }` — see
+  // normalizeRuntimeDial. A garbage patch is refused rather than persisted, so a
+  // UI bug can never leave an unreadable shape where a runtime decision is made.
+  if (Object.prototype.hasOwnProperty.call(safe, 'swarmWorkerRuntime')) {
+    const clean = normalizeRuntimeDial(safe.swarmWorkerRuntime, true)
+    if (clean) safe.swarmWorkerRuntime = clean
+    else delete safe.swarmWorkerRuntime
+  }
+  if (Object.prototype.hasOwnProperty.call(safe, 'swarmManagerRuntime')) {
+    const clean = normalizeRuntimeDial(safe.swarmManagerRuntime, false)
+    if (clean) safe.swarmManagerRuntime = { mode: clean.mode }
+    else delete safe.swarmManagerRuntime
   }
   // Store the lockdown switch as a REAL boolean: only a literal `true` turns it
   // on (a forged truthy string must not), everything else persists `false`.

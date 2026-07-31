@@ -44,7 +44,7 @@
 // extra gating is needed here; the server /api/swarm/* routes are owner-only too.
 
 import { useCallback, useRef, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, ClipboardCheck, Gauge, MessageSquare, Power, Send } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, ClipboardCheck, Cpu, Gauge, MessageSquare, Power, Send } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
@@ -100,6 +100,14 @@ interface Props {
   /** The overseer was armed WITHOUT the sandbox experiment (L3) — show a reduced-
    *  containment note under the switch. */
   sandboxWarning: boolean
+  // ── Runtime dials (Agent SDK migration) ─────────────────────────────────────
+  /** Current Settings.swarmWorkerRuntime / swarmManagerRuntime, resolved by
+   *  SwarmModule from /api/settings. `null` while that read is in flight — the
+   *  switches render disabled rather than briefly claiming OFF, because "off" is
+   *  a real answer here and a wrong one is worse than a blank one. */
+  runtimeDials: { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk' } | null
+  /** Persist one dial (POST /api/settings, merged server-side by SwarmModule). */
+  onToggleRuntime: (which: 'worker' | 'manager', next: boolean) => void
 }
 
 // Commander-session status dot — the SAME beacon vocabulary as the supply tile
@@ -181,6 +189,8 @@ export const SwarmManagerPane = ({
   error,
   onToggleOverseer,
   sandboxWarning,
+  runtimeDials,
+  onToggleRuntime,
   projectPath,
 }: Props) => {
   const { t } = useT()
@@ -377,7 +387,13 @@ export const SwarmManagerPane = ({
       {/* ── DASHBOARD sidebar: engine controls ONLY ────────────────────────── */}
       {/* PAPER surface (bg-bg) — a dashboard, not a terminal, so the paper ink
           tokens keep 4.5:1+ contrast (the dark terminal bg lives on the stage). */}
-      <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-bg">
+      {/* `overflow-y-auto` because every section below is `shrink-0` in an
+          unbounded column: without a scroll container the sixth section (the
+          runtime dials, added 2026-07-31) would simply be CLIPPED on a short
+          window — invisible, not squashed, which is the failure you never notice.
+          Scrolling is inert while the content fits, so nothing changes on a tall
+          window. */}
+      <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto border-l border-line bg-bg">
         {/* Engine: status + the two switches (Card① / Card③). The worker monitor
             + engine log that used to sit below this were removed (一本化 — the
             worker tab owns live worker screens), so this is the sole section. */}
@@ -421,6 +437,54 @@ export const SwarmManagerPane = ({
           </div>
 
           {error && <p className="mt-2.5 text-[11px] leading-relaxed text-accent">{error}</p>}
+        </div>
+
+        {/* ── Runtime dials (Agent SDK migration) ────────────────────────────
+            These used to live ONLY in settings.json, which meant the owner —
+            the one person the experiment is gated to — could not turn it on
+            without hand-editing JSON. That is not a feature switch, it is a
+            note to the developer. So they surface here, next to the other
+            engine switches, with their real costs stated rather than implied.
+
+            Deliberately NOT disabled while the engine runs: unlike the overseer
+            (a stage of the running tick, which the server refuses to arm on a
+            stopped engine), a runtime dial is read at the moment a desk SPAWNS.
+            Flipping it mid-run is safe and simply lands on the next desk — the
+            hints say so, so the switch does not have to lie by being greyed. */}
+        <div className="shrink-0 border-t border-line px-4 py-3">
+          <div className="mb-3 flex items-center gap-2">
+            <Cpu size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+            <span className="label-cap text-ink-faint">{t('projectPanel.swarm.runtime.heading')}</span>
+          </div>
+          <div className="flex flex-col gap-2.5">
+            <ControlRow
+              label={t('projectPanel.swarm.runtime.worker')}
+              hint={t('projectPanel.swarm.runtime.workerHint')}
+              value={runtimeDials?.worker === 'sdk'}
+              // null ⇒ the settings read has not answered. Disabled beats
+              // rendering a confident OFF we have not verified.
+              disabled={runtimeDials === null}
+              ariaLabel={t('projectPanel.swarm.runtime.worker')}
+              onToggle={(v) => onToggleRuntime('worker', v)}
+              t={t}
+            />
+            <ControlRow
+              label={t('projectPanel.swarm.runtime.manager')}
+              hint={t('projectPanel.swarm.runtime.managerHint')}
+              value={runtimeDials?.manager === 'sdk'}
+              disabled={runtimeDials === null}
+              ariaLabel={t('projectPanel.swarm.runtime.manager')}
+              onToggle={(v) => onToggleRuntime('manager', v)}
+              t={t}
+            />
+            {/* The phone-window cost, shown ONLY once the switch is on — an
+                always-visible warning is wallpaper, and this one has to land. */}
+            {runtimeDials?.manager === 'sdk' ? (
+              <p className="text-[10px] leading-snug text-amber-500/90" role="note">
+                {t('projectPanel.swarm.runtime.managerWarning')}
+              </p>
+            ) : null}
+          </div>
         </div>
 
         {/* ── Commander presence (the inspection line) ──────────────────────────

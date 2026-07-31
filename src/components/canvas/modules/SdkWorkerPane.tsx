@@ -231,6 +231,10 @@ export const SdkWorkerPane = ({
   )
 }
 
+/** Token counts as a reader scans them, not as the API reports them: 128000 is
+ *  noise, "128k" is a size. Under 1000 stays exact — a small number IS the info. */
+const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
+
 const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
   switch (ev.kind) {
     case 'text':
@@ -277,6 +281,18 @@ const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
       return (
         <div className="font-mono text-[10px] text-ink-faint">
           {t('projectPanel.swarm.sdk.rateLimit')} {Math.round(ev.utilization * 100)}%
+        </div>
+      )
+    case 'compact':
+      // Deliberately visible rather than a faint aside: this is the transcript's
+      // ONLY sign that history was summarised, and a reader who does not see it
+      // will wonder why the desk "forgot". The token counts are the proof.
+      return (
+        <div className="my-1 rounded-[3px] border border-line bg-bg-card px-2 py-1 font-mono text-[10px] text-ink-muted">
+          ⟳ {t('projectPanel.swarm.sdk.compact')}
+          {ev.preTokens > 0
+            ? ` — ${fmtTokens(ev.preTokens)}${ev.postTokens !== null ? ` → ${fmtTokens(ev.postTokens)}` : ''}`
+            : ''}
         </div>
       )
     case 'status':

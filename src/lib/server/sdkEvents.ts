@@ -55,6 +55,26 @@ export type SdkEvent =
   /** The CLI's own "you've hit your limit" — matched against the SDK's exported
    *  prefix list, never a private copy of the wording. */
   | { kind: 'quota_refusal'; raw: string }
+  /** The conversation was compacted — its history summarised to make room.
+   *
+   *  WHY THIS IS DISTILLED AND NOT IGNORED LIKE ITS 'system' SIBLINGS. "What
+   *  happens to a long-running desk when its context fills?" was the ONE
+   *  unmeasured risk left in the SDK migration, and a commander desk is exactly
+   *  the session that runs long enough to find out. The CLI answers it —
+   *  `compact_boundary` is in the streamed message union — so the honest fix is
+   *  not to assert that auto-compact works but to SHOW each compaction when it
+   *  happens, with the token counts that prove it did. An unknown you can watch
+   *  is not the same risk as an unknown you cannot. */
+  | {
+      kind: 'compact'
+      /** 'auto' (context filled) or 'manual' (/compact). Left open: the CLI may
+       *  add triggers and an unknown one must not be coerced to 'auto'. */
+      trigger: 'auto' | 'manual' | (string & {})
+      preTokens: number
+      /** Absent on some boundaries — null, never 0, so "unknown" and "compacted
+       *  to nothing" stay distinguishable. */
+      postTokens: number | null
+    }
 
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim()
@@ -204,9 +224,26 @@ export const distillSdkMessage = (msg: unknown, prefixes: readonly string[]): Sd
       return out
     }
 
-    // 'system' (init and friends), 'stream_event', hook lifecycle and anything
-    // the CLI adds later: deliberately nothing. Status is owned by the session
-    // machine (sdkSession.ts), not inferred here.
+    case 'system': {
+      // The ONE 'system' subtype worth distilling. Its siblings (init,
+      // commands_changed, informational notices …) stay ignored — see below.
+      if (m.subtype !== 'compact_boundary') return []
+      const md = (m.compact_metadata ?? {}) as Record<string, unknown>
+      const pre = md.pre_tokens
+      const post = md.post_tokens
+      return [
+        {
+          kind: 'compact',
+          trigger: typeof md.trigger === 'string' ? md.trigger : 'auto',
+          preTokens: typeof pre === 'number' && Number.isFinite(pre) ? pre : 0,
+          postTokens: typeof post === 'number' && Number.isFinite(post) ? post : null,
+        },
+      ]
+    }
+
+    // 'stream_event', hook lifecycle and anything the CLI adds later:
+    // deliberately nothing. Status is owned by the session machine
+    // (sdkSession.ts), not inferred here.
     default:
       return []
   }

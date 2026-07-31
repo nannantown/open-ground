@@ -146,6 +146,16 @@ interface SwarmManager {
 
 const managerKey = (projectId: string) => `openground.swarm.manager.${projectId}`
 
+/** The two Agent-SDK runtime dials, as the manager dashboard's switches read them. */
+type RuntimeDials = { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk' }
+/** The shape of /api/settings this module cares about for those dials. Narrow on
+ *  purpose — the settings payload is large and everything else here is someone
+ *  else's business. */
+type RuntimeDialSettings = {
+  swarmWorkerRuntime?: { mode?: string }
+  swarmManagerRuntime?: { mode?: string }
+}
+
 /** Load + SANITISE the persisted commander session (localStorage is untrusted —
  *  a user/extension can forge any JSON, so coerce every field; a bad shape →
  *  null rather than crashing the render). Mirrors loadSupply. */
@@ -298,6 +308,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // settings load from overriding a tab the user clicked while it was in flight;
   // the reset effect re-lands on the first tab on every project switch.
   const [paneOrder, setPaneOrder] = useState<readonly string[] | undefined>(undefined)
+  // Settings.swarmWorkerRuntime / swarmManagerRuntime, for the manager dashboard's
+  // runtime switches. `null` until the settings GET answers — the switches render
+  // disabled rather than briefly asserting OFF, because OFF is a real answer here.
+  const [runtimeDials, setRuntimeDials] = useState<RuntimeDials | null>(null)
   const order = useMemo(
     () => effectiveTabOrder<MainView>(paneOrder, SWARM_PANE_IDS),
     [paneOrder],
@@ -411,6 +425,15 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           ? raw.filter((x): x is string => typeof x === 'string')
           : undefined
         setPaneOrder(saved)
+        // The runtime dials ride the SAME settings read — one GET, not three.
+        // "absent ⇒ pty" is resolved identically to the server's own dial
+        // readers (store.ts getWorkerRuntimeDial / getManagerRuntimeDial): only
+        // a literal 'sdk' counts, so a partial or hand-corrupted field shows the
+        // shipped behaviour rather than claiming the experiment is on.
+        setRuntimeDials({
+          worker: (s as RuntimeDialSettings).swarmWorkerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
+          manager: (s as RuntimeDialSettings).swarmManagerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
+        })
         if (!userPickedRef.current) {
           setMainView(effectiveTabOrder<MainView>(saved, SWARM_PANE_IDS)[0])
         }
@@ -995,6 +1018,37 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     },
     [order],
   )
+  // Flip one runtime dial and persist it. Optimistic so the switch answers the
+  // click immediately, but REVERTED on a failed write — unlike the pane order
+  // (cosmetic, self-heals on the next mount), a dial the user believes is ON
+  // while the server still reads OFF would send them hunting a phantom.
+  // The POST stays OUTSIDE the state updater on purpose: React runs updater
+  // functions twice under StrictMode, so a fetch in there would fire two writes
+  // per click. Read the current value from the closure and keep the updater pure.
+  const toggleRuntime = useCallback(
+    (which: 'worker' | 'manager', next: boolean) => {
+      if (!runtimeDials) return
+      const before = runtimeDials[which]
+      const mode = next ? ('sdk' as const) : ('pty' as const)
+      if (before === mode) return
+      setRuntimeDials({ ...runtimeDials, [which]: mode })
+      void fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          [which === 'worker' ? 'swarmWorkerRuntime' : 'swarmManagerRuntime']: { mode },
+        }),
+      })
+        .then((r) => {
+          if (!r.ok) throw new Error(String(r.status))
+        })
+        .catch(() => {
+          setRuntimeDials((cur) => (cur ? { ...cur, [which]: before } : cur))
+        })
+    },
+    [runtimeDials],
+  )
+
   const endPaneDrag = () => {
     setDragFrom(null)
     setDropAt(null)
@@ -1444,6 +1498,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               error={engineError}
               onToggleOverseer={toggleOverseer}
               sandboxWarning={engineSandboxWarning}
+              runtimeDials={runtimeDials}
+              onToggleRuntime={toggleRuntime}
             />
           </div>
         ) : allWorkers.length === 0 ? (

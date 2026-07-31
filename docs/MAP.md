@@ -330,6 +330,11 @@
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で
   意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`。
+- ランタイム切替(SDK 移行)の**スイッチは Swarm タブ → 司令官 → 右サイドバー
+  「動かし方(お試し)」**(`SwarmManagerPane.tsx` の `runtimeDials` / `SwarmModule.tsx` の
+  `toggleRuntime`)。**罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞るので、
+  新しい設定キーを**その配列に足さないと書き込みが黙って捨てられる**(スイッチは動いて見えるのに
+  何も変わらない — 0731 に実際に踏みかけた)。往復テスト=`server/routes/__tests__/settingsRuntimeDials.test.ts`
 - 罠(2026-07-31 実観測): **`node_modules/electron/dist/Electron.app` が macOS に
   マルウェア判定されてゴミ箱に消える**。`npx electron` は SIGKILL → 直後に `.app` が消滅、
   再展開しても同じ(zip 自体は正規 — `checksums.json` の SHA-256 と一致)。未 notarize の

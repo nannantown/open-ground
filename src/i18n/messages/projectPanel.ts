@@ -178,6 +178,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.empty': 'Waiting for the first turn…',
     'projectPanel.swarm.sdk.thinking': 'thought',
     'projectPanel.swarm.sdk.rateLimit': 'Usage',
+    'projectPanel.swarm.sdk.compact': 'History summarised to make room',
     'projectPanel.swarm.sdk.truncated':
       'Older lines were dropped — this transcript starts mid-conversation.',
     // Supply officer (タスク窓口) — the conversation desk that turns the user's
@@ -209,6 +210,17 @@ export const projectPanel = {
       'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. Turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
     'projectPanel.swarm.manager.overseerSandboxWarning':
       '⚠ Kernel-level containment is unavailable on this host (macOS sandbox-exec required) — the overseer’s brain runs with the permission-layer safeguards only. Its read-only design and budget still hold.',
+    // Runtime dials (Agent SDK migration). Both default OFF; a switch changes
+    // only the NEXT desk that starts, never a running one.
+    'projectPanel.swarm.runtime.heading': 'Runtime (experimental)',
+    'projectPanel.swarm.runtime.worker': 'Workers on the Agent SDK',
+    'projectPanel.swarm.runtime.workerHint':
+      'Run each worker through the Agent SDK instead of a terminal: a readable transcript instead of a repainting screen, liveness that is a fact rather than an inference, and engine notices that never erase your half-typed input. Off = the shipped terminal behaviour. Applies to the NEXT worker that starts — workers already running are untouched, so a mixed fleet is normal for a while.',
+    'projectPanel.swarm.runtime.manager': 'Commander on the Agent SDK',
+    'projectPanel.swarm.runtime.managerHint':
+      'The same, for the commander desk. Applies the next time the commander desk starts.',
+    'projectPanel.swarm.runtime.managerWarning':
+      '⚠ An SDK desk has no Remote Control — you can no longer reach the commander from your phone. The supply desk stays on a terminal and remains your window from outside: ask it for status, or have it relay an instruction to the commander.',
     'projectPanel.swarm.manager.on': 'On',
     'projectPanel.swarm.manager.off': 'Off',
     'projectPanel.swarm.manager.engineRunning': 'Engine running',
@@ -843,6 +855,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.empty': '最初のターンを待っています…',
     'projectPanel.swarm.sdk.thinking': '思考',
     'projectPanel.swarm.sdk.rateLimit': '使用量',
+    'projectPanel.swarm.sdk.compact': 'これまでの記憶を要約して空きを作りました',
     'projectPanel.swarm.sdk.truncated':
       '古い行は破棄されました — この記録は会話の途中から始まっています。',
     // Supply officer (タスク窓口) — 要望を Board:todo カードに積む対話デスク。
@@ -874,6 +887,19 @@ export const projectPanel = {
       'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
     'projectPanel.swarm.manager.overseerSandboxWarning':
       '⚠ この環境ではカーネルレベルの封じ込め（macOS の sandbox-exec）が利用できません — 監督の大脳は permission 層の防壁のみで動きます。読み取り専用設計と予算上限は有効です。',
+    // ランタイム切替(Agent SDK 移行)。どちらも既定オフ。切り替えても**次に立つ卓**から
+    // 適用され、動いている卓はそのまま。
+    'projectPanel.swarm.runtime.heading': '動かし方（お試し）',
+    // ⚠ これらは素のテキストとして描画される（Markdown ではない）。強調に ** を
+    // 書くと画面にそのまま星印が出る（2026-07-31 の隔離プレビューで実見）。
+    'projectPanel.swarm.runtime.worker': '作業者を SDK で動かす',
+    'projectPanel.swarm.runtime.workerHint':
+      '作業者をターミナルではなく Agent SDK 経由で動かします。画面の描き直しではなく読みやすい記録になり、生きているかどうかが推測でなく分かり、エンジンの声かけが打ちかけの入力を消しません。オフ＝今までどおり。適用されるのは次に立つ作業者からで、動いている作業者はそのままです（しばらく混在するのが正常）。',
+    'projectPanel.swarm.runtime.manager': '司令官を SDK で動かす',
+    'projectPanel.swarm.runtime.managerHint':
+      '司令官の卓も同じように。適用されるのは、次に司令官の卓が立つときからです。',
+    'projectPanel.swarm.runtime.managerWarning':
+      '⚠ SDK の卓には遠隔窓口がありません — スマホから司令官に話しかけられなくなります。外からの窓口は補給官が引き継ぎます（ターミナルのまま）: 状況を聞く・司令官への指示を中継する、はそのまま使えます。',
     'projectPanel.swarm.manager.on': 'オン',
     'projectPanel.swarm.manager.off': 'オフ',
     'projectPanel.swarm.manager.engineRunning': 'エンジン稼働中',

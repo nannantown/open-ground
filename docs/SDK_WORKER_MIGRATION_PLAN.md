@@ -389,8 +389,17 @@ swarmWorkerRuntime?: {
   なら SDK、そうでなければ PTY。**worker ごとに決めて roster に runtime を焼く**。
 - kill switch = `mode:'pty'` に書き戻すだけ。走行中の SDK worker は完走（または
   手動 terminate）。roster の後方互換により復旧 boot も安全。
-- UI: Swarm タブの実行モード設定列（owner-only 面）にトグル1行。stage 1 は
-  設定ファイル直編集でも可 — UI card は F に含めるが最小。
+- UI: **実装済み(0.11.45)** — Swarm タブ → 司令官 → 右サイドバー「動かし方(お試し)」に
+  worker / commander のトグル各1行（`SwarmManagerPane.tsx` の `runtimeDials`、書き込みは
+  `SwarmModule.tsx` の `toggleRuntime` → `POST /api/settings`）。commander 側は ON のときだけ
+  「スマホから届かなくなる」警告を出す（常時表示は壁紙になって読まれない）。
+  - **設定ファイル直編集は「オーナー限定の実験」の解ではなかった** — 唯一 ON にできる人が
+    JSON を手で書く必要がある状態は、機能スイッチではなく開発者向けメモである。
+  - **踏みかけた罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞る。
+    この2キーを配列に足すまで**書き込みは黙って捨てられていた**（スイッチは動いて見え、
+    UI は ON を表示し、卓は全部 PTY で立つ。例外もログも出ない）。往復テストで固定:
+    `server/routes/__tests__/settingsRuntimeDials.test.ts` は route に POST してから
+    **spawn パスが実際に読む** `getWorkerRuntimeDial()` / `getManagerRuntimeDial()` で確認する。
 
 ---
 
@@ -544,7 +553,27 @@ seam と非自明点:
   は「司令官が PTY」より悪い。
 
 残件: 実機受け入れ（ダイヤル ON → 卓が立つ → 「状況」が返る → スマホから補給官経由で
-監視と注文）。
+監視と注文）。**ダイヤルは 0.11.45 で UI に出た**ので、受け入れ手順から「settings.json を
+手で書く」が消えた（§8）。
+
+### 13-C. 文脈が満杯になったらどうなるか（0.11.45 で「見える」に変えた）
+
+長時間走る卓——とりわけ司令官——について**唯一残っていた未実測**が「context が満杯に
+なったら？」だった。答えは CLI 側にあり、**`compact_boundary` が streamed message union に
+入っている**（`SDKCompactBoundaryMessage` — `trigger:'auto'|'manual'` と前後トークン数つき）。
+
+そこで取った立場: **「auto-compact は効くはず」と主張するのではなく、起きたら見えるようにする。**
+`sdkEvents.ts` が `system/compact_boundary` を `{kind:'compact'}` に蒸留し、卓の記録に
+「これまでの記憶を要約して空きを作りました — 128k → 31k」と1行出る。
+*見張れる未知は、見張れない未知とは別のリスク*である。
+
+実装上の判断:
+- 壊れた boundary でも**必ず1件出す**（数値は装飾・「要約された」という事実が本体。
+  それを落とすと読み手は「なぜ卓が忘れたのか」を延々と探す）。
+- `post_tokens` 欠落は **null で、0 ではない**（「不明」と「全部要約した」を混ぜない）。
+- 未知の `trigger` は verbatim（`'auto'` に丸めない — claudeScreen 罠④と同じ轍）。
+- `statusAfter` は null（ターン内の記帳であってライフサイクル遷移ではない。
+  waiting に落とすと作業中の卓を空きと誤認する）。
 
 ---
 
