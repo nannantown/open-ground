@@ -34,6 +34,7 @@ import {
 } from './swarmManager'
 import { spawnSwarmSupply, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
 import { readSwarmSessions, recordSwarmSession } from './swarmSessions'
+import { setSettings } from './store'
 import { defaultManagerPresence } from './swarmOrchestrator'
 
 // A stand-in for `claude` that does the two things this test needs: dump the argv it was
@@ -224,6 +225,15 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     await writeFile(bin, STUB(capdir))
     await chmod(bin, 0o755)
     process.env.OPENGROUND_CLAUDE_BIN = bin
+
+    // ⚠ THIS FILE IS THE **PTY** COMMANDER'S INTEGRATION SUITE — it drives a real
+    // PTY through a stub `claude` and reads what landed on its command line, so
+    // it must ask for that runtime rather than inherit whichever one is current.
+    // Since 2026-08-02 the absent dial means SDK, and an SDK commander spawns no
+    // PTY at all: these four tests went red not because resume broke but because
+    // they were suddenly testing a different runtime than their own title says.
+    // The SDK commander's resume is covered in swarmManager.spawn.test.ts.
+    await setSettings({ swarmManagerRuntime: { mode: 'pty' } })
   })
 
   afterEach(async () => {

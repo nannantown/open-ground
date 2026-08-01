@@ -342,9 +342,32 @@ export const getWorkerRuntimeDial = async (): Promise<{
 // more than the worker's, because switching it on costs the owner's phone
 // window (an SDK desk has no Remote Control) — so anything short of a literal
 // 'sdk' keeps the PTY commander.
-export const getManagerRuntimeDial = async (): Promise<{ mode: 'pty' | 'sdk' }> => ({
-  mode: (await getSettings()).swarmManagerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
-})
+/** Which runtime this project's commander desk runs on. Absent ⇒ SDK.
+ *
+ *  ⚠ THIS DEFAULT MOVED A DAY AFTER THE WORKER'S (2026-08-02), and the delay was
+ *  a measured coverage gap rather than caution. On 08-01 the SDK commander was
+ *  already proven on a real machine — it seats, holds the singleton against a
+ *  second launch, takes `say`, stops and relaunches — but the property the
+ *  2026-07-19 eleven-desk incident was actually about was not: the check-then-act
+ *  CRITICAL SECTION. Every "TWO/THREE truly simultaneous calls open ONE desk"
+ *  test drove the PTY path, because the file that owns them fakes `launchClaude`.
+ *  Defaulting to a runtime whose twin-prevention race is untested is that
+ *  incident's trade, made on purpose.
+ *
+ *  `swarmManager.spawn.test.ts` now runs the race on BOTH runtimes, and the SDK
+ *  block was proven to bite: removing the spawn lock reds 22 tests, dropping the
+ *  SDK pool from the singleton guard reds 4, and reading liveness from `status`
+ *  instead of `reaped` (so a desk still unwinding reads as absent) reds 1.
+ *
+ *  Polarity, unchanged where it matters: explicit 'pty' ⇒ pty (the kill switch),
+ *  explicit 'sdk' ⇒ sdk, ABSENT ⇒ sdk, anything else ⇒ pty. A settings file we
+ *  cannot parse is not evidence that the SDK runtime is wanted. */
+export const getManagerRuntimeDial = async (): Promise<{ mode: 'pty' | 'sdk' }> => {
+  const m = (await getSettings()).swarmManagerRuntime?.mode
+  if (m === 'pty') return { mode: 'pty' }
+  if (m === 'sdk' || m === undefined) return { mode: 'sdk' }
+  return { mode: 'pty' } // unrecognised ⇒ the conservative runtime
+}
 
 // ─── Swarm autonomy "remembered ON" set (Settings.swarmAutonomyOn) ────────────
 // The ONLY autonomy state that survives a restart — a REMINDER, never an

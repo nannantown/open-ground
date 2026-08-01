@@ -1,6 +1,6 @@
 import { mkdtempSync, writeFileSync, rm, realpathSync } from 'fs'
 import { tmpdir, homedir } from 'os'
-import { join } from 'path'
+import { delimiter, join } from 'path'
 import {
   createTerminal,
   killTerminal,
@@ -608,7 +608,8 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
     ...(opts.guard
       ? {
           OPENGROUND_GUARD: '1',
-          OPENGROUND_GUARD_WRITE_ROOTS: opts.guard.writeRoots.join(':'),
+          // ⚠ `delimiter`, not ':' — see sdkGuardHook: a Windows path contains a colon.
+          OPENGROUND_GUARD_WRITE_ROOTS: opts.guard.writeRoots.join(delimiter),
         }
       : {}),
   }

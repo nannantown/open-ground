@@ -31,7 +31,7 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §4-G.
 
 import { existsSync } from 'fs'
-import { isAbsolute, join, resolve } from 'path'
+import { delimiter, isAbsolute, join, resolve } from 'path'
 import { createRequire } from 'module'
 import { resolveHookSourceRoot } from './hooksInstall'
 
@@ -154,7 +154,10 @@ export const makeSdkGuardHook = (
   // in-process consumer too.
   const env: Record<string, string | undefined> = {
     OPENGROUND_GUARD: '1',
-    OPENGROUND_GUARD_WRITE_ROOTS: opts.writeRoots.join(':'),
+    // ⚠ `delimiter`, not ':' — a Windows absolute path contains a colon, so a
+    // colon-joined list is unparseable there and the guard denies every write
+    // including the worker's own worktree (measured 2026-08-01).
+    OPENGROUND_GUARD_WRITE_ROOTS: opts.writeRoots.join(delimiter),
     HOME: opts.home,
   }
 
@@ -211,7 +214,9 @@ export const verifySdkGuard = (opts: {
     const evaluate = opts.evaluateFn ?? loadGuardEvaluate(opts.guardPath)
     const env = {
       OPENGROUND_GUARD: '1',
-      OPENGROUND_GUARD_WRITE_ROOTS: opts.writeRoots.join(':'),
+      // Same separator as the live hook builds — a preflight that parses the
+      // roots differently from the thing it is verifying proves nothing.
+      OPENGROUND_GUARD_WRITE_ROOTS: opts.writeRoots.join(delimiter),
       HOME: opts.home,
     }
     const cwd = opts.writeRoots[0] ?? opts.home

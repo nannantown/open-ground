@@ -491,14 +491,24 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           : undefined
         setPaneOrder(saved)
         // The runtime dials ride the SAME settings read — one GET, not three.
-        // "absent ⇒ pty" is resolved identically to the server's own dial
-        // readers (store.ts getWorkerRuntimeDial / getManagerRuntimeDial): only
-        // a literal 'sdk' counts, so a partial or hand-corrupted field shows the
-        // shipped behaviour rather than claiming the experiment is on.
+        // ⚠ RESOLVED EXACTLY AS THE SERVER DOES, ABSENT CASE INCLUDED. These two
+        // toggles are the KILL SWITCH: the whole safety story of the SDK runtime
+        // is "if anything goes wrong, turn it off — no release needed". A switch
+        // that draws OFF while the server is running SDK is not a switch the
+        // owner can trust, and they would be reading it at exactly the moment
+        // something has gone wrong.
+        //
+        // This said `=== 'sdk' ? 'sdk' : 'pty'` — correct until 2026-08-02, when
+        // the server's default flipped to SDK and this line kept answering PTY
+        // for the shipped (absent) state. Same shape as the ten display-vs-truth
+        // defects the SDK migration produced: a reader that did not move with
+        // the rule it mirrors.
+        const dialOf = (m: unknown): 'pty' | 'sdk' =>
+          m === 'pty' ? 'pty' : m === 'sdk' || m === undefined ? 'sdk' : 'pty'
         const cap = (s as RuntimeDialSettings).swarmWorkerRuntime?.sdkMaxWorkers
         setRuntimeDials({
-          worker: (s as RuntimeDialSettings).swarmWorkerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
-          manager: (s as RuntimeDialSettings).swarmManagerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
+          worker: dialOf((s as RuntimeDialSettings).swarmWorkerRuntime?.mode),
+          manager: dialOf((s as RuntimeDialSettings).swarmManagerRuntime?.mode),
           // Same resolution as the server's sdkSlotLimit: a non-number / negative
           // cap is not a cap. Floored, because it is a count of workers.
           workerCap:

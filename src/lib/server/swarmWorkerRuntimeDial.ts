@@ -120,7 +120,37 @@ export const chooseWorkerRuntime = (opts: {
    *  the decision stays testable without spawning anything. */
   poolSessions?: () => readonly { id: string; role?: string; status: string; reaped?: boolean }[]
 }): RuntimeChoice => {
-  const mode = opts.settings.swarmWorkerRuntime?.mode ?? 'pty'
+  // ⚠ THE DEFAULT IS 'sdk' SINCE 2026-08-01 — and the ABSENT case is the one that
+  // moved. The dial's two written values still mean exactly what they said:
+  // 'pty' is the kill switch and still wins.
+  //
+  // WHAT EARNED THE FLIP. Nine adversarial review rounds fixed ~60 defects here,
+  // but review is not what decided it — an acceptance pass against a real
+  // `claude` on a real machine, through the packaged bundle, was:
+  //   • a worker spawns, works, commits, and its worktree is torn down only
+  //     after the desk has REALLY gone (0 wedged git processes)
+  //   • the deny veto FIRES in a live session (`git checkout --` → BLOCKED). The
+  //     model complying is not the guard; this is the guard.
+  //   • the owner's inbox answer reaches a live SDK worker (`delivery:injected`)
+  //   • three at once keep three distinct identities, the 4th degrades to PTY
+  //     with the reason surfaced, and stopping one leaves the others untouched
+  //   • the commander seats on SDK, stays a singleton, takes `say`, and can be
+  //     stopped and relaunched
+  // The one defect that pass found — Windows write roots shredded by a ':' join —
+  // is fixed (swarmGuardWindowsRoots.test.ts).
+  //
+  // ⚠ THIS CHANGES NOTHING FOR ANYONE BUT THE OWNER. Every route that can create
+  // a worker is behind `hasSwarmOwnerAccess` (all 26 of them, checked), so the
+  // default only decides which runtime the OWNER's workers use.
+  // ⚠ `??` WAS NOT THE RIGHT RESOLUTION, because it folds `null` in with absent.
+  // A hand-edited `{"mode": null}` is not "nothing written yet" — it is a file we
+  // cannot read, and that is not evidence the SDK runtime is wanted. The
+  // commander's reader (store.getManagerRuntimeDial) already said so in words;
+  // this one said it in `??`, and the two disagreed on exactly that input
+  // (measured by swarmRuntimeDialParity.test.ts, minutes before shipping).
+  // Explicit ⇒ that runtime. ABSENT ⇒ sdk. Anything else ⇒ pty.
+  const raw = opts.settings.swarmWorkerRuntime?.mode
+  const mode = raw === 'pty' ? 'pty' : raw === 'sdk' || raw === undefined ? 'sdk' : 'pty'
   if (mode !== 'sdk') return { runtime: 'pty' }
 
   const limit = sdkSlotLimit(opts.settings)

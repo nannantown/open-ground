@@ -878,8 +878,21 @@ const bundleHas = (txt, letter) => /^-[A-Za-z]+$/.test(txt) && txt.includes(lett
 function makePathPolicy(env, payloadCwd) {
   const home = env.HOME || os.homedir()
   const rootsRaw = env.OPENGROUND_GUARD_WRITE_ROOTS || ''
+  // ⚠ THE LIST SEPARATOR IS PLATFORM'S, NOT ':'. A Windows absolute path CONTAINS
+  // a colon — `C:\\wt\\swarm-a` — so splitting on ':' shreds a single root into
+  // ['C', '\\wt\\swarm-a'] and every write, including the worker's own worktree,
+  // lands outside the (nonsense) roots and is DENIED. Measured 2026-08-01: on
+  // Windows-shaped input a guarded worker could not write one byte, in EITHER
+  // runtime — it fails closed, so it is not a hole, but it is a worker that
+  // cannot work. `path.delimiter` is ';' there and ':' everywhere else, which is
+  // exactly the join the producers use.
+  //
+  // The env override exists ONLY so this can be exercised for the other platform
+  // from a test (there is no Windows box here). A bogus value can only produce
+  // roots that match nothing ⇒ deny ⇒ fail closed, never a widened permission.
+  const delim = env.OPENGROUND_GUARD_ROOT_DELIM || path.delimiter
   const roots = rootsRaw
-    .split(':')
+    .split(delim)
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
     .map((s) => path.resolve(tildeExpand(s, home)))

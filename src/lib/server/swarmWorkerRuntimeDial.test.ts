@@ -23,11 +23,36 @@ const choose = (
 ) => chooseWorkerRuntime({ settings, workers, worktree: WT, home: '/Users/tester', preflight })
 
 describe('the dial default — the shipped state', () => {
-  it('is PTY when the setting is absent entirely', () => {
-    expect(choose({})).toEqual({ runtime: 'pty' })
+  it('is SDK when the setting is absent entirely (flipped 2026-08-01)', () => {
+    // ⚠ THE ABSENT CASE MOVED, AND ONLY THE ABSENT CASE. What earned it was not
+    // another review round — it was an acceptance pass against a real `claude`
+    // through the packaged bundle: a worker spawns/works/commits, its worktree
+    // comes down only after the desk has really gone, the deny veto FIRES in a
+    // live session, the owner's inbox answer arrives, and three at once keep
+    // three identities while the fourth degrades with its reason shown.
+    //
+    // This test is the one that has to be edited to change the shipped default,
+    // which is the point of it existing: the default cannot drift silently.
+    const c = choose({})
+    expect(c.runtime).toBe('sdk')
+    // …and it got there through the real decision, not by skipping it: the SDK
+    // arm runs the preflight, the PTY arm never does.
+    expect(c.preflight).toBeDefined()
+    expect(c.fellBackBecause).toBeUndefined()
   })
 
-  it('is PTY when the mode says pty', () => {
+  it('an absent dial still DEGRADES when the preflight refuses — the default is not a bypass', () => {
+    // Flipping a default must not also flip who is allowed to say no. An absent
+    // dial takes exactly the same road as an explicit 'sdk', including the exit.
+    const c = choose({}, [], () => ({ ok: false, problems: ['no claude'] }) as never)
+    expect(c.runtime).toBe('pty')
+    expect(c.fellBackBecause).toContain('preflight')
+  })
+
+  it('is PTY when the mode says pty — the kill switch still wins', () => {
+    // The switch is the whole safety story of the flip: whatever goes wrong with
+    // the SDK runtime, writing 'pty' puts every worker back on the proven path
+    // WITHOUT a release. It must keep working exactly as before.
     expect(choose({ swarmWorkerRuntime: { mode: 'pty' } })).toEqual({ runtime: 'pty' })
   })
 

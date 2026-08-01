@@ -245,6 +245,36 @@ const quotaPrefixes = (): readonly string[] => {
   }
   return cachedPrefixes
 }
+/** How a session talks to the CLI when the caller does not say. Production never
+ *  passes `queryFn`, so THIS is the real path — which is exactly why it needs a
+ *  seam.
+ *
+ *  ⚠ WHY A SEAM AND NOT `vi.mock`. The require below runs at CALL time inside a
+ *  CJS interop hop, and a module factory registered for the ESM specifier does
+ *  not intercept it — measured 2026-08-02, when a test that believed it had
+ *  faked the SDK was in fact spawning a real Agent SDK session on a machine with
+ *  no `claude`. The session died and landed in the pool as `failed`/`reaped`,
+ *  and two concurrency tests still passed, because at the moment they counted
+ *  the desk it had not finished dying yet. A green that depends on winning a
+ *  race with a crash is worse than a red.
+ *
+ *  Injecting HERE keeps everything above it real for a test — the pool, the
+ *  singleton guard, the per-project spawn lock — and replaces only the piece
+ *  that needs a subscription. */
+let defaultQueryFn: SdkQueryFn = (params) => {
+  const sdk = require('@anthropic-ai/claude-agent-sdk') as { query: SdkQueryFn }
+  return sdk.query(params)
+}
+
+/** Test seam: replace the real `query` for tests that must drive the POOL (and
+ *  everything built on it) without a subscription. `null` restores production. */
+export const __setDefaultQueryFnForTests = (fn: SdkQueryFn | null): void => {
+  defaultQueryFn = fn ?? ((params) => {
+    const sdk = require('@anthropic-ai/claude-agent-sdk') as { query: SdkQueryFn }
+    return sdk.query(params)
+  })
+}
+
 /** Test seam: pin the prefix list without loading the SDK. */
 export const __setQuotaPrefixesForTests = (p: readonly string[] | null): void => {
   cachedPrefixes = p
@@ -532,13 +562,7 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
 
   if (opts.initialPrompt) e.queue.push(opts.initialPrompt)
 
-  const queryFn: SdkQueryFn =
-    opts.queryFn ??
-    ((params) => {
-
-      const sdk = require('@anthropic-ai/claude-agent-sdk') as { query: SdkQueryFn }
-      return sdk.query(params)
-    })
+  const queryFn: SdkQueryFn = opts.queryFn ?? defaultQueryFn
 
   try {
     e.handle = queryFn({ prompt: makeInputIterable(e), options: opts.options })
