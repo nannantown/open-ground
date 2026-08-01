@@ -65,7 +65,12 @@ import { SwarmOverseerPane } from './SwarmOverseerPane'
 import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
 import { ExecutionModeMenu } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
-import { useSwarmEngine, planSwarmPower, KNOWN_ENV_ISSUE_IDS } from './useSwarmEngine'
+import {
+  useSwarmEngine,
+  planSwarmPower,
+  engineWorkerKey,
+  KNOWN_ENV_ISSUE_IDS,
+} from './useSwarmEngine'
 import type { SwarmEnvIssueId } from './useSwarmEngine'
 
 // Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
@@ -146,13 +151,23 @@ interface SwarmManager {
 
 const managerKey = (projectId: string) => `openground.swarm.manager.${projectId}`
 
-/** The two Agent-SDK runtime dials, as the manager dashboard's switches read them. */
-type RuntimeDials = { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk' }
+/** The two Agent-SDK runtime dials, as the manager dashboard's switches read them.
+ *  `workerCap` is how many workers may run on the SDK AT ONCE — carried because
+ *  the switch's own copy has to state it (with the shipped default of 1, "run
+ *  workers on the SDK" without the number reads as a promise the dial does not
+ *  keep) and because writing the dial back must not silently drop a cap the user
+ *  configured: settings merges at the top level, so a `{mode}` write REPLACES the
+ *  whole object. */
+type RuntimeDials = { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number }
+/** The shipped default when `sdkMaxWorkers` is unset — kept in lockstep with the
+ *  server's DEFAULT_SDK_MAX_WORKERS (swarmWorkerRuntimeDial.ts). Only used for
+ *  DISPLAY; the server never trusts this number. */
+const DEFAULT_SDK_MAX_WORKERS = 1
 /** The shape of /api/settings this module cares about for those dials. Narrow on
  *  purpose — the settings payload is large and everything else here is someone
  *  else's business. */
 type RuntimeDialSettings = {
-  swarmWorkerRuntime?: { mode?: string }
+  swarmWorkerRuntime?: { mode?: string; sdkMaxWorkers?: unknown }
   swarmManagerRuntime?: { mode?: string }
 }
 
@@ -201,6 +216,54 @@ const stopCommanderDesk = async (manager: SwarmManager, projectPath: string): Pr
   }
   if (!manager.terminalId) return
   await api.api.terminal[':id'].$delete({ param: { id: manager.terminalId } }).catch(() => {})
+}
+
+/** Tear down whichever runtime carries THIS WORKER's desk — the worker-side
+ *  twin of {@link stopCommanderDesk}, and the ONE place that decides it.
+ *
+ *  It is a shared helper and not an inline branch because both callers
+ *  (`terminate` and `restartWorker`) must make the same choice, and the second
+ *  one silently did not: it killed `worker.terminalId`, which for an SDK worker
+ *  is ABSENT by the identity invariant (pty ⇔ terminalId, sdk ⇔ sdkSessionId),
+ *  so the call was a no-op and the old `claude` kept running — in the very
+ *  worktree the restart re-enters. That is two agents on one worktree and one
+ *  branch, which is precisely the twin hazard the reuse-the-worktree design
+ *  exists to prevent.
+ *
+ *  Branches on `runtime`, NEVER on "whichever id happens to be non-empty": the
+ *  two pools take different ids, and DELETE /api/terminal/<an sdk id> would at
+ *  best 404 and at worst kill an unrelated pane.
+ *
+ *  Best-effort (both branches swallow): the desk may already be gone, and a
+ *  teardown that fails must not block the worktree removal / respawn that
+ *  follows. */
+const stopWorkerDesk = async (worker: SwarmWorkerRecord, projectPath: string): Promise<void> => {
+  if (worker.runtime === 'sdk' && worker.sdkSessionId) {
+    await fetch(
+      `/api/sdk-session/${encodeURIComponent(worker.sdkSessionId)}?path=${encodeURIComponent(projectPath)}`,
+      { method: 'DELETE' },
+    ).catch(() => {})
+    return
+  }
+  if (!worker.terminalId) return // a heartbeat-only DEAD worker: nothing to stop
+  await api.api.terminal[':id'].$delete({ param: { id: worker.terminalId } }).catch(() => {})
+}
+
+/** The runtime identity a just-restarted worker came up on, held until the next
+ *  GET /api/swarm/workers poll confirms it.
+ *
+ *  It carries the RUNTIME and not merely a terminalId because a restart decides
+ *  its runtime SERVER-side (the dial), so the fresh worker may live in the other
+ *  pool than the one that died. Overlaying only the terminalId left the tile
+ *  rendering the old, dead PTY — Restart button and all — for a whole poll
+ *  interval after an SDK worker had already come up in that worktree; a second
+ *  click there spawns a twin into a worktree that is being written to. */
+interface PendingRestart {
+  runtime: 'pty' | 'sdk'
+  /** Set for `runtime: 'pty'` only. */
+  terminalId?: string
+  /** Set for `runtime: 'sdk'` only. */
+  sdkSessionId?: string
 }
 
 const saveManager = (projectId: string, manager: SwarmManager | null) => {
@@ -284,7 +347,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // worktree → OPTIMISTIC new terminalId right after a successful restart, so the
   // tile re-mounts its terminal immediately instead of waiting up to 5s for the
   // next GET /api/swarm/workers poll to confirm it. Cleared once the poll agrees.
-  const [pendingRestarts, setPendingRestarts] = useState<ReadonlyMap<string, string>>(new Map())
+  const [pendingRestarts, setPendingRestarts] = useState<ReadonlyMap<string, PendingRestart>>(
+    new Map(),
+  )
   // worktrees whose CONFIRMED removal (terminate) we've already acted on — hides
   // the tile immediately instead of waiting for the next poll. Cleared once the
   // poll agrees the worktree is really gone.
@@ -430,9 +495,16 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         // readers (store.ts getWorkerRuntimeDial / getManagerRuntimeDial): only
         // a literal 'sdk' counts, so a partial or hand-corrupted field shows the
         // shipped behaviour rather than claiming the experiment is on.
+        const cap = (s as RuntimeDialSettings).swarmWorkerRuntime?.sdkMaxWorkers
         setRuntimeDials({
           worker: (s as RuntimeDialSettings).swarmWorkerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
           manager: (s as RuntimeDialSettings).swarmManagerRuntime?.mode === 'sdk' ? 'sdk' : 'pty',
+          // Same resolution as the server's sdkSlotLimit: a non-number / negative
+          // cap is not a cap. Floored, because it is a count of workers.
+          workerCap:
+            typeof cap === 'number' && Number.isFinite(cap) && cap >= 0
+              ? Math.floor(cap)
+              : DEFAULT_SDK_MAX_WORKERS,
         })
         if (!userPickedRef.current) {
           setMainView(effectiveTabOrder<MainView>(saved, SWARM_PANE_IDS)[0])
@@ -457,8 +529,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setPendingRestarts((prev) => {
       let changed = false
       const next = new Map(prev)
-      for (const [worktree, pendingId] of Array.from(prev)) {
-        if (byWorktree.get(worktree)?.terminalId === pendingId) {
+      for (const [worktree, pending] of Array.from(prev)) {
+        const seen = byWorktree.get(worktree)
+        // Compare through engineWorkerKey — the runtime-agnostic identity. An
+        // `?.terminalId === pendingId` comparison could never retire an SDK
+        // restart (both sides are absent there, so it matched a worker that had
+        // NOT come up yet, and never matched the one that had).
+        if (seen && engineWorkerKey(seen) === engineWorkerKey(pending)) {
           next.delete(worktree)
           changed = true
         }
@@ -603,13 +680,16 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       }
 
       try {
-        // Kill the PTY first (best-effort — it may already be gone, or this
-        // worker may already have none: a heartbeat-only dead worker).
-        if (worker.terminalId) {
-          await api.api.terminal[':id']
-            .$delete({ param: { id: worker.terminalId } })
-            .catch(() => {})
-        }
+        // Stop the desk first, IN WHICHEVER POOL IT LIVES (best-effort — it may
+        // already be gone, or this worker may never have had one: a
+        // heartbeat-only dead worker). Asking only the PTY pool is the silent
+        // half-fix this file has to keep resisting: an SDK worker's terminalId
+        // is ABSENT (pty ⇔ terminalId / sdk ⇔ sdkSessionId), so a PTY-only
+        // delete simply doesn't run for it — and the worktree removal that
+        // follows would then execute while `claude` is still writing in that
+        // tree, which is how a "terminate" leaves a live process behind. One
+        // shared helper so this decision cannot be made twice, differently.
+        await stopWorkerDesk(worker, project.path)
 
         let removed = false
         let reason: string | undefined
@@ -747,6 +827,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       }
       setManager(next)
       saveManager(project.id, next)
+      // The dial said 'sdk' and the server seated a PTY desk anyway. Degrading is
+      // the right behaviour (a desk beats no desk), but it must not be SILENT —
+      // otherwise the owner sees a terminal where they expected a structured desk
+      // and concludes the switch is broken.
+      if (spawn.fellBackBecause) {
+        setError(t('projectPanel.swarm.runtime.fellBack', { reason: spawn.fellBackBecause }))
+      }
     } catch (e) {
       setError(
         t('projectPanel.swarm.manager.launchFailed', {
@@ -876,6 +963,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       setManager(next)
       saveManager(project.id, next)
       forgetPty(old, next.terminalId)
+      // Same as launchManager: a degrade to PTY must not be silent. Restart is in
+      // fact the MORE likely place to meet one — it is what the owner reaches for
+      // right after flipping the switch.
+      if (spawn.fellBackBecause) {
+        setError(t('projectPanel.swarm.runtime.fellBack', { reason: spawn.fellBackBecause }))
+      }
     } catch (e) {
       setError(
         t('projectPanel.swarm.restartFailed', {
@@ -890,10 +983,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // A worker restart REUSES the existing worktree (passed back to /api/swarm/worker
   // as `worktree`), so the same swarm/* branch + its in-progress work is preserved
   // and NO orphan worktree / twin branch is created — claude just re-boots in place
-  // and re-runs its /order goal. We optimistically record the fresh terminalId
-  // (pendingRestarts) so the tile re-mounts before the next poll, and clear the
-  // dead id's bookkeeping. Manual (non-engine-owned) workers only — an engine
-  // worker's lifecycle is the orchestrator's (read-only here).
+  // and re-runs its /order goal. We optimistically record the fresh worker's
+  // RUNTIME IDENTITY (pendingRestarts — runtime + the id of whichever pool it
+  // came up in, never just a terminalId) so the tile re-mounts the right pane
+  // before the next poll, and clear the dead id's bookkeeping. Manual
+  // (non-engine-owned) workers only — an engine worker's lifecycle is the
+  // orchestrator's (read-only here).
   const restartWorker = useCallback(
     async (worker: SwarmWorkerRecord) => {
       if (busyWorktrees.has(worker.worktree)) return
@@ -901,10 +996,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       setBusyWorktrees((prev) => new Set(prev).add(worker.worktree))
       setError(null)
       try {
-        // Best-effort kill the old PTY first (see restartSupply). The worktree is
-        // reused (passed below), so only the dead/stale PTY is cleared — a transient
-        // probe false positive can't race a second claude in the same tree.
-        if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
+        // Best-effort stop the old desk first (see restartSupply), IN WHICHEVER
+        // POOL IT LIVES. The worktree is reused (passed below), so only the
+        // dead/stale desk is cleared — and a transient probe false positive
+        // can't race a second claude into the same tree. Going through
+        // stopWorkerDesk is the load-bearing part: the PTY-only kill this used
+        // to do was a NO-OP for an SDK worker, whose `claude` then kept running
+        // in the worktree the spawn below re-enters.
+        await stopWorkerDesk(worker, project.path)
         const res = await fetch('/api/swarm/worker', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -925,8 +1024,41 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
         }
         const spawn = (await res.json()) as SpawnSwarmWorkerResponse
-        setPendingRestarts((prev) => new Map(prev).set(worker.worktree, spawn.terminalId))
+        // Which runtime the fresh worker ACTUALLY came up on — the server's
+        // answer, not the dial's wish (a dial set to sdk degrades to pty for
+        // several reasons, each reported below). 'sdk' only with a handle to
+        // address it by; without one the SDK tile would point at nothing.
+        //
+        // AN OVERLAY WITH NO ADDRESS IS WORSE THAN NO OVERLAY. The previous
+        // shape was a two-arm ternary whose `else` swept up the impossible case
+        // too: a response saying `runtime:'sdk'` but carrying no sdkSessionId
+        // fell into the PTY arm and was recorded as `{runtime:'pty',
+        // terminalId:''}` — a pending restart pointing at NOBODY. Its
+        // engineWorkerKey is '', so the reconcile below can never retire it, and
+        // meanwhile it overwrote the live record's whole runtime identity: a
+        // working SDK worker was redrawn as a dead PTY tile, Restart button and
+        // all, and stayed that way. When the answer is unaddressable we record
+        // NOTHING and let the ≤5 s poll bring server truth — a tile that lags is
+        // recoverable, a tile that lies is not.
+        const fresh: PendingRestart | null =
+          spawn.runtime === 'sdk'
+            ? spawn.sdkSessionId
+              ? { runtime: 'sdk', sdkSessionId: spawn.sdkSessionId }
+              : null
+            : spawn.terminalId
+              ? { runtime: 'pty', terminalId: spawn.terminalId }
+              : null
+        if (fresh) setPendingRestarts((prev) => new Map(prev).set(worker.worktree, fresh))
         forgetPty(old, spawn.terminalId)
+        // Same rule as launchManager / restartManager: a degrade to PTY must not
+        // be SILENT. In a packaged app the server is a forked child, so the
+        // server-side console.warn reaches nobody — the owner would just see a
+        // terminal where they expected a structured SDK desk and conclude the
+        // switch is broken. The reason rides back on the response for exactly
+        // this, and until now this call site threw it away.
+        if (spawn.fellBackBecause) {
+          setError(t('projectPanel.swarm.runtime.fellBack', { reason: spawn.fellBackBecause }))
+        }
       } catch (e) {
         setError(
           t('projectPanel.swarm.restartFailed', {
@@ -982,8 +1114,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const allWorkers = realWorkers
     .filter((w) => !removedWorktrees.has(w.worktree))
     .map((w) => {
-      const pendingId = pendingRestarts.get(w.worktree)
-      return pendingId && pendingId !== w.terminalId ? { ...w, terminalId: pendingId } : w
+      const pending = pendingRestarts.get(w.worktree)
+      if (!pending || engineWorkerKey(pending) === engineWorkerKey(w)) return w
+      // Replace the WHOLE runtime identity, never just the terminalId: a restart
+      // picks its runtime server-side, so the fresh worker can live in the other
+      // pool. Overlaying half of it left an SDK restart rendering the old, DEAD
+      // PTY tile (with its Restart button live) until the next poll — one more
+      // click there and a twin claude is running in a worktree the fresh worker
+      // is already writing to. Both id fields are rewritten together so the
+      // record can never carry one from each pool.
+      return pending.runtime === 'sdk'
+        ? { ...w, runtime: 'sdk' as const, sdkSessionId: pending.sdkSessionId, terminalId: undefined }
+        : { ...w, runtime: 'pty' as const, terminalId: pending.terminalId, sdkSessionId: undefined }
     })
 
   // OFF / first-run: the swarm is FULLY idle — the engine isn't running, no
@@ -1035,15 +1177,31 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       void fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          [which === 'worker' ? 'swarmWorkerRuntime' : 'swarmManagerRuntime']: { mode },
-        }),
+        body: JSON.stringify(
+          which === 'worker'
+            ? // Carry sdkMaxWorkers BACK: settings merges at the top level, so a
+              // bare `{mode}` replaces the whole object and would silently wipe a
+              // cap the user configured. Omitted when it is just the default, so
+              // toggling the switch does not materialise a field nobody set.
+              {
+                swarmWorkerRuntime: {
+                  mode,
+                  ...(runtimeDials.workerCap !== DEFAULT_SDK_MAX_WORKERS
+                    ? { sdkMaxWorkers: runtimeDials.workerCap }
+                    : {}),
+                },
+              }
+            : { swarmManagerRuntime: { mode } },
+        ),
       })
         .then((r) => {
           if (!r.ok) throw new Error(String(r.status))
         })
         .catch(() => {
-          setRuntimeDials((cur) => (cur ? { ...cur, [which]: before } : cur))
+          // Revert ONLY if this click's value is still the one on screen — a
+          // second toggle while the first write was in flight owns the state now,
+          // and stomping it would hand the user a switch that flips by itself.
+          setRuntimeDials((cur) => (cur && cur[which] === mode ? { ...cur, [which]: before } : cur))
         })
     },
     [runtimeDials],
@@ -1476,21 +1634,40 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 manager
                   ? {
                       terminalId: manager.terminalId,
+                      // The PTY poll cannot see an SDK desk, so `status` is sent
+                      // ONLY for a PTY one. It used to be sent for both, with the
+                      // constant 'working' standing in for the SDK case — so the
+                      // commander's beacon said 作業中 forever: never waiting on
+                      // a question, never quota-parked, never exited. A status
+                      // that cannot be wrong is not a status. The SDK desk
+                      // reports its own on its event stream (SwarmManagerPane
+                      // reads it there); nothing here may guess it.
                       ...(manager.runtime === 'sdk' && manager.sdkSessionId
                         ? { runtime: 'sdk' as const, sdkSessionId: manager.sdkSessionId }
-                        : { runtime: 'pty' as const }),
-                      // The PTY poll cannot see an SDK desk, so asking it about
-                      // one would report 'exited' for a healthy commander. The
-                      // SDK tile reads its own status off its event stream.
-                      status:
-                        manager.runtime === 'sdk' ? 'working' : statusOfPty(manager.terminalId),
+                        : {
+                            runtime: 'pty' as const,
+                            status: statusOfPty(manager.terminalId),
+                          }),
                     }
                   : null
               }
               sessionBusy={managerBusy}
               onLaunchSession={() => void launchManager()}
               onStopSession={() => void stopManager()}
-              onSessionExit={() => manager && handleExit(manager.terminalId)}
+              onSessionExit={() => {
+                if (!manager) return
+                if (manager.runtime === 'sdk') {
+                  // An SDK desk has no terminalId, so the PTY bookkeeping below
+                  // would mark the EMPTY STRING exited — a no-op — while the
+                  // manager state (whose status is deliberately pinned 'working'
+                  // for SDK) kept rendering a live desk. The session is gone;
+                  // clear the desk so the pane honestly shows the launch CTA.
+                  setManager(null)
+                  saveManager(project.id, null)
+                  return
+                }
+                handleExit(manager.terminalId)
+              }}
               onRestartSession={() => void restartManager()}
               engine={engine}
               available={engineAvailable}
@@ -1556,6 +1733,21 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                       branch={w.branch}
                       taskTitle={w.taskTitle ?? w.note ?? ''}
                       source={isEngine ? 'engine' : 'manual'}
+                      // The SAME teardown affordances the PTY tile gets. Without
+                      // them a manually-started SDK worker could be launched
+                      // from this tab and then never cleaned up from it — its
+                      // worktree survived on disk with no UI path to remove it.
+                      retainedReason={!isEngine ? retainedByWorktree.get(w.worktree) : undefined}
+                      busy={!isEngine ? busyWorktrees.has(w.worktree) : false}
+                      onTerminate={!isEngine ? () => void terminate(w) : undefined}
+                      onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
+                      // …including RESTART, which this tile did not have at all.
+                      // A worker that came up on (or was restarted onto) the SDK
+                      // runtime renders here, and here the restart chain ended:
+                      // the only remaining move was to terminate the worktree
+                      // and lose the branch. Same callback the PTY tile gets, so
+                      // the reuse-the-worktree contract is identical.
+                      onRestart={!isEngine ? () => void restartWorker(w) : undefined}
                     />
                   ) : (
                   <SwarmWorkerPane

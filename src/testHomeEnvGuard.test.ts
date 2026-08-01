@@ -1342,6 +1342,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: 'drives installHooks against a tmpHome — the ~/.claude paths it builds are all under it',
   },
+  'src/lib/server/swarmSessionsRuntime.test.ts': {
+    tier: 'writes-elsewhere',
+    why: "seeds a transcript JSONL so resolveSwarmSession's real reader can be exercised; the `.claude/projects/<dir>` path it builds hangs off a `claudeHome` that is a mkdtemp, pinned to $HOME for the duration and RESTORED (never unset) in afterEach — os.homedir() honours $HOME on POSIX, which is the only reason claude's own home can be redirected at all",
+  },
   'src/lib/server/swarmSafety.test.ts': {
     tier: 'writes-elsewhere',
     why: 'feeds ~/.claude paths to the guard as POLICY STRINGS (allow/deny rows) and pins CLAUDE_CONFIG_PATH into an isolated home; no write goes near the real one',

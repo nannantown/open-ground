@@ -166,20 +166,42 @@ worktree の `node_modules` は**本体 checkout の `node_modules` への symli
 SDK が選ばれうる(枠は `sdkMaxWorkers`、既定 1)。設計は
 `docs/SDK_WORKER_MIGRATION_PLAN.md`。
 
-司令塔が知っておくべきことは 3 つだけ:
+司令塔が知っておくべきことは 4 つだけ:
 
 1. **識別**: `runtime` フィールド。**不在 ⇒ `'pty'`**(既存 roster.json はそのまま
    読める)。ハンドルは排他 — pty ⇔ `terminalId` / sdk ⇔ `sdkSessionId`。
    SDK worker の `terminalId` は**空文字**なので、`terminalId` で worker を探す
    コードは SDK worker を見つけられない。`workerKey(w)`(workerRuntime.ts)を使う。
+   ⚠ **「探す」だけでなく「キーにする」も同じ穴**。監督 S4 の重複排除キーが
+   `S4:${w.terminalId}` だったため、SDK worker は全員が空文字で**艦隊全体で1スロットを
+   奪い合い**、2体目以降のエスカレーションが黙って捨てられていた(0801 修正)。
+   `Map` のキー・`Set` の要素・受領キーの材料に worker を混ぜるときは必ず `workerKey(w)`。
 2. **見る場所**: SDK worker に端末画面は無い。Swarm タブのタイルは
    `SdkWorkerPane` に切り替わり、構造化トランスクリプトを表示する。
    HTTP で見るなら `GET /api/sdk-session/:id/stream?path=`(SSE)。
    `GET /api/terminal/active` には出ない。
-3. **降格は正常**: ダイヤルが `'sdk'` でも、枠が埋まっている / preflight が
-   通らない場合は **PTY にフォールバックして dispatch は続行する**(理由は
-   サーバログに出る)。「SDK のはずが PTY で上がった」は障害ではない。
+   ⚠ **「サーバは送っているのにクライアントが捨てる」形を1回踏んだ**(0801)。
+   `useSwarmEngine` の受信サニタイザがフィールドを手書きでコピーしており、
+   **`runtime` と `sdkSessionId` の2つだけ落としていた**。結果、SDK worker は全部
+   `runtime: undefined`(⇒ pty)+ terminalId 空で届き、**終了済みの端末セッションとして
+   描かれ、PTY 用の「再起動」ボタンが付いた** — 生きて働いている claude の上に。
+   `SdkWorkerPane` と停止ボタンは**本番では到達不能な死んだコード**だった。
+   司令塔向けの読み替え: **タイルの見た目を worker の生死の証拠にしない。**
+   `GET /api/swarm/workers` の生 JSON(`runtime` / `sdkSessionId`)を見ること。
+3. **生死は `isSdkSessionLive`(= `!reaped`)だけで見る。`status` では見ない。**
+   `terminateSdkSession` は status を**同期反転**させる — 「止めてくれと頼んだ」という
+   意味しかなく、その裏で claude はまだ unwind している。status で生死を書くと、
+   片付け中の卓が「もう居ない」と読まれ、**その worktree を削除してよい**という
+   結論になる(= 走っている claude の足元を消す)。0801 の6周でこの型の欠陥が
+   少なくとも9件出た。棚卸しと**数え方**は `docs/MAP.md` §5。
+4. **降格は正常**: ダイヤルが `'sdk'` でも、枠が埋まっている / preflight が
+   通らない場合は **PTY にフォールバックして dispatch は続行する**。
+   「SDK のはずが PTY で上がった」は障害ではない。
    逆に **veto を検証できない SDK worker は絶対に上げない**(fail-closed)。
+   理由の読み方: **HTTP レスポンスの `fellBackBecause`**(`SpawnSwarmWorkerResponse` /
+   `SpawnSwarmManagerResponse` — Swarm タブが表示する)。**サーバログを当てにしない** —
+   配布アプリの Hono は Electron が fork した子プロセスなので、`console.warn` は
+   オーナーの届かない所に出る。開発中に `npm run dev` を眺めているときだけ見える。
 
 **戻し方(kill switch)**: `settings.json` の `swarmWorkerRuntime.mode` を `'pty'` に
 戻すだけ。走行中の worker には触れず、次の dispatch から PTY に戻る。
@@ -190,6 +212,14 @@ SDK が選ばれうる(枠は `sdkMaxWorkers`、既定 1)。設計は
 グローバル settings.json に入っている guard hook は発火しない**。SDK worker の
 A3/L4 veto は `sdkGuardHook.ts` が in-process で武装し直している(同じ
 `openground-guard.js` の `evaluate` を呼ぶ — ルールの複製は無い)。
+⚠⚠ **「SDK worker が1体も上がらない」が配布版でだけ起きた実例**(2026-08-01 `dd311acc`)。
+`sdkGuardHook` が `createRequire(import.meta.url)` を使っており、esbuild の CJS 出力には
+`import.meta` が無い(`{}` に置換)ため `createRequire(undefined)` が TypeError。
+この hook は**設計上 fail-CLOSED** なので preflight が全部落ち、出荷版では SDK worker が
+1体も立たなかった。**dev(tsx/ESM)でも vitest(ESM)でも 100% 再現しない**形なので、
+「テストが緑」は配布版の証拠にならない。司令塔として覚えておくのはこれだけ:
+**SDK worker が全数 PTY に降格するなら、まず `fellBackBecause` の文面を読む**
+(preflight 落ちなのか枠なのかダイヤルなのかがそこに書いてある)。
 
 ### 2.4 claude 起動フラグ(worker の場合)
 

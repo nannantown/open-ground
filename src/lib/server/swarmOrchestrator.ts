@@ -92,6 +92,12 @@ import {
   subscribeTerminal,
   writeInput,
 } from './terminal'
+// The SDK pool's half of worker teardown. The engine reaches the RUNTIME through
+// workerRuntime's adapters everywhere else; these two are needed directly because
+// defaultRecoverWorker is handed ids, not a WorkerHandle, and must stop whichever
+// runtime the id belongs to before it touches the worktree.
+import { terminateSdkSession, isSdkSessionReaped, getSdkSession } from './sdkSession'
+import { stopAllDesksInDirAndWait } from './liveDesks'
 import { claudeRunPreflight } from './claudePreflight'
 // card 2 (docs/ENGINE_PERSISTENCE_PLAN.md) — engine intent write-through +
 // boot-time crash-loop breaker. See resumeEngines() below.
@@ -2463,15 +2469,15 @@ const clearKeptMove = (engine: ProjectEngine, taskId: string): void => {
  *  without `holdSince` still banks its confirmed tail rather than nothing.
  *  Idempotent: a worker not on hold banks nothing. A clock that runs backwards
  *  (a fixture, an NTP step) banks 0, never a negative credit. */
-const endRateLimitHold = (engine: ProjectEngine, terminalId: string, now: number): void => {
-  const rl = engine.rateLimited.get(terminalId)
-  engine.rateLimited.delete(terminalId)
+const endRateLimitHold = (engine: ProjectEngine, key: string, now: number): void => {
+  const rl = engine.rateLimited.get(key)
+  engine.rateLimited.delete(key)
   if (!rl) return
   const from = rl.holdSince ?? rl.since
   const held = Number.isFinite(from) ? Math.max(0, now - from) : 0
   if (held <= 0) return
   engine.rateLimitHeldMs ??= new Map() // lazy backfill (older-build engine / test literal)
-  engine.rateLimitHeldMs.set(terminalId, (engine.rateLimitHeldMs.get(terminalId) ?? 0) + held)
+  engine.rateLimitHeldMs.set(key, (engine.rateLimitHeldMs.get(key) ?? 0) + held)
 }
 
 /** How much rate-limit hold to CREDIT BACK to this worker's execution clock:
@@ -2480,9 +2486,9 @@ const endRateLimitHold = (engine: ProjectEngine, terminalId: string, now: number
  *  the ceiling while it sits there waiting). Capped at {@link HOLD_CREDIT_CAP_MS}
  *  so a limit↔work cycle can't defer the runaway check forever: the absolute
  *  wall-clock lifetime of any worker stays bounded by MAX_EXEC_MS + the cap. */
-const rateLimitHoldCredit = (engine: ProjectEngine, terminalId: string, now: number): number => {
-  const banked = engine.rateLimitHeldMs?.get(terminalId) ?? 0
-  const rl = engine.rateLimited.get(terminalId)
+const rateLimitHoldCredit = (engine: ProjectEngine, key: string, now: number): number => {
+  const banked = engine.rateLimitHeldMs?.get(key) ?? 0
+  const rl = engine.rateLimited.get(key)
   const from = rl ? (rl.holdSince ?? rl.since) : null
   const live = from !== null && Number.isFinite(from) ? Math.max(0, now - from) : 0
   const total = (Number.isFinite(banked) ? Math.max(0, banked) : 0) + live
@@ -2533,9 +2539,9 @@ const rateLimitHoldCredit = (engine: ProjectEngine, terminalId: string, now: num
  *  'review' and it goes idle pending the commander. Idempotent: a worker already
  *  waiting keeps its ORIGINAL stamp, so a repeated promote observation can't
  *  restart (and thereby shorten) the wait. */
-const beginIntegrationWait = (engine: ProjectEngine, terminalId: string, now: number): void => {
+const beginIntegrationWait = (engine: ProjectEngine, key: string, now: number): void => {
   engine.integrationWaitSince ??= new Map() // lazy backfill (older-build engine / test literal)
-  if (!engine.integrationWaitSince.has(terminalId)) engine.integrationWaitSince.set(terminalId, now)
+  if (!engine.integrationWaitSince.has(key)) engine.integrationWaitSince.set(key, now)
 }
 
 /** END a worker's integration wait, BANKING its span into the execution-time
@@ -2547,14 +2553,14 @@ const beginIntegrationWait = (engine: ProjectEngine, terminalId: string, now: nu
  *  execution-ceiling check (an unobserved transition must never leave a stale
  *  stamp growing). Idempotent: a worker not waiting banks nothing. A clock that
  *  runs backwards (a fixture, an NTP step) banks 0, never a negative credit. */
-const endIntegrationWait = (engine: ProjectEngine, terminalId: string, now: number): void => {
-  const since = engine.integrationWaitSince?.get(terminalId)
-  engine.integrationWaitSince?.delete(terminalId)
+const endIntegrationWait = (engine: ProjectEngine, key: string, now: number): void => {
+  const since = engine.integrationWaitSince?.get(key)
+  engine.integrationWaitSince?.delete(key)
   if (since === undefined) return
   const waited = Number.isFinite(since) ? Math.max(0, now - since) : 0
   if (waited <= 0) return
   engine.integrationWaitMs ??= new Map() // lazy backfill (older-build engine / test literal)
-  engine.integrationWaitMs.set(terminalId, (engine.integrationWaitMs.get(terminalId) ?? 0) + waited)
+  engine.integrationWaitMs.set(key, (engine.integrationWaitMs.get(key) ?? 0) + waited)
 }
 
 /** How much 統合待ち to CREDIT BACK to this worker's execution clock: everything
@@ -2568,8 +2574,8 @@ const endIntegrationWait = (engine: ProjectEngine, terminalId: string, now: numb
  *  (idempotently) on the line before, so any still-open stamp is already banked by
  *  the time we look. Summing it too would have been dead arithmetic implying a
  *  second, unexercised path. Callers must keep that order — end, then credit. */
-const integrationWaitCredit = (engine: ProjectEngine, terminalId: string): number => {
-  const banked = engine.integrationWaitMs?.get(terminalId) ?? 0
+const integrationWaitCredit = (engine: ProjectEngine, key: string): number => {
+  const banked = engine.integrationWaitMs?.get(key) ?? 0
   if (!Number.isFinite(banked)) return 0
   return Math.min(Math.max(0, banked), WAIT_CREDIT_CAP_MS)
 }
@@ -2585,11 +2591,11 @@ const integrationWaitCredit = (engine: ProjectEngine, terminalId: string): numbe
  *  un-ended wait would be silently omitted rather than credited. */
 const executionCredit = (
   engine: ProjectEngine,
-  terminalId: string,
+  key: string,
   now: number,
 ): { heldMs: number; waitedMs: number; creditMs: number } => {
-  const heldMs = rateLimitHoldCredit(engine, terminalId, now)
-  const waitedMs = integrationWaitCredit(engine, terminalId)
+  const heldMs = rateLimitHoldCredit(engine, key, now)
+  const waitedMs = integrationWaitCredit(engine, key)
   return { heldMs, waitedMs, creditMs: heldMs + waitedMs }
 }
 
@@ -2740,6 +2746,11 @@ export interface OrchestratorDeps {
      *  the recovery is being retried). The PTY's exit is then OUR kill, not the
      *  worker's death — implementations must not report it as exitInfo. */
     alreadyTornDown?: boolean
+    /** The SDK session id when this worker runs on the Agent SDK. REQUIRED for
+     *  such a worker: its `terminalId` is empty, so an implementation given only
+     *  that stops NOTHING and still tears the worktree down under a live claude
+     *  (see defaultRecoverWorker). Pass `w.sdkSessionId` at every call site. */
+    sdkSessionId?: string
   }) => Promise<{
     removed: boolean
     reason?: string
@@ -2818,7 +2829,16 @@ export interface OrchestratorDeps {
    *  never disturb the promote, spawn, or monitoring. OPTIONAL: absent ⇒ no
    *  consumption line (existing fake-deps tests unchanged). Default
    *  (defaultDeps): the real JSONL reader via the PTY's agentSessionId. */
-  readConsumption?: (opts: { worktree: string; terminalId: string }) => Promise<string | null>
+  readConsumption?: (opts: {
+    worktree: string
+    terminalId: string
+    /** The SDK session id when this worker runs on the Agent SDK. REQUIRED for
+     *  one: the default implementation finds the claude session id by looking
+     *  the PTY up in the terminal pool, and an SDK worker is not in it — so
+     *  without this, every SDK worker silently reported NO consumption and
+     *  vanished from the fuel accounting. */
+    sdkSessionId?: string
+  }) => Promise<string | null>
   /** Preflight `claude` before an AUTO-START engages the engine — `{ok:false}` when the
    *  CLI is missing / logged out. {@link maybeAutoStartDrain} consults it so it never flips
    *  `running` true into a spawn it knows will fail (which would make the chain — and the
@@ -2982,6 +3002,11 @@ export interface IntegrationDeps {
      *  the recovery is being retried). The PTY's exit is then OUR kill, not the
      *  worker's death — implementations must not report it as exitInfo. */
     alreadyTornDown?: boolean
+    /** The SDK session id when this worker runs on the Agent SDK. REQUIRED for
+     *  such a worker: its `terminalId` is empty, so an implementation given only
+     *  that stops NOTHING and still tears the worktree down under a live claude
+     *  (see defaultRecoverWorker). Pass `w.sdkSessionId` at every call site. */
+    sdkSessionId?: string
   }) => Promise<{
     removed: boolean
     reason?: string
@@ -2992,11 +3017,37 @@ export interface IntegrationDeps {
      *  owner stop), so it can't be misread as "why we killed it". */
     exitInfo?: { code: number | null; signal?: number }
   }>
-  /** Tell a LIVE worker (over its PTY) WHY its card was sent back and to fix it
-   *  IN PLACE — one line written to its terminal so a review→doing 差し戻し actually
-   *  restarts work instead of leaving an idle (post-done) worker untouched.
-   *  best-effort (a no-op when the session is gone). Default: defaultInstructRework. */
-  instructRework: (terminalId: string, message: string) => void
+  /** @deprecated DEAD SEAM — nothing calls it, and nothing should call THIS shape.
+   *
+   *  WHAT IT WAS. "Tell a LIVE worker over its PTY why its card was sent back and
+   *  to fix it in place" — one line written to its terminal, so a review→doing
+   *  差し戻し restarted work instead of leaving an idle (post-done) worker sitting
+   *  there. Its one caller was `reworkOrPark`, inside the engine's own
+   *  verify→lens→差し戻し machinery.
+   *
+   *  WHY IT IS DEAD, traced (2026-08-01) rather than assumed. `reworkOrPark` was
+   *  DELETED with the whole engine-side integration path in 675968e5
+   *  (manager-only rework, 2026-07-15): the engine no longer verifies, reviews,
+   *  merges or 差し戻す anything — it WAKES the commander. 差し戻し today is the
+   *  commander's `POST /api/project { rework: [...] }` (server/routes/project.ts),
+   *  which bumps reworkCount and moves the card review→doing; the REASON still
+   *  reaches the worker, through {@link ProjectEngine.reworkReasons} injected into
+   *  the next dispatch's /order context (see the priorFailure read in the dispatch
+   *  pass). So this is dead plumbing left behind by that removal — NOT a 差し戻し
+   *  instruction that silently goes nowhere.
+   *
+   *  WHY IT IS NOT MERELY DELETED. The field stays declared (optional) because
+   *  existing `const deps: OrchestratorDeps & … = { instructRework: … }` literals
+   *  in the test suite would fail the excess-property check without it. The
+   *  IMPLEMENTATION and the {@link defaultDeps} wiring ARE gone, which is the part
+   *  that mattered: its body was `writeInput(terminalId, …)`, keyed on a PTY
+   *  terminalId. An SDK worker's terminalId is the EMPTY STRING, so re-wiring that
+   *  body would have written a 差し戻し instruction into nothing for every SDK
+   *  worker — silently, with no error anywhere (docs/MAP.md §5). Any future
+   *  in-place 差し戻し conduit must take the WorkerHandle and go through
+   *  `runtimeOf(w).say(w, line)` like {@link defaultEscalate} does, never a
+   *  terminalId. Pinned by swarmEngineSdkBlindspots.test.ts. */
+  instructRework?: (terminalId: string, message: string) => void
   // ── MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15) — the engine WAKES the
   //    commander when a worker is ready instead of merging itself, and RE-wakes it if
   //    it dies/hangs (card B). These seams replace the verify→lens→FF-push→land
@@ -4304,6 +4355,34 @@ const defaultSpawnWorker = async (opts: {
   return spawnSwarmWorker(opts)
 }
 
+/** Announce a RUNTIME DEGRADE on an unattended dispatch.
+ *
+ *  `fellBackBecause` is set when the owner's dial asked for an SDK worker and the
+ *  worker came up as a PTY anyway (slots full, preflight refused, the session died
+ *  at start). On the manual route the reason rides the HTTP response and the Swarm
+ *  panel shows it — but the ENGINE spawns unattended: nobody is holding a response,
+ *  and the server is a forked child in a packaged app, so the `console.warn` inside
+ *  swarmWorker.ts reaches NOBODY. The whole slot-holding design was accepted on the
+ *  premise that a degrade announces itself; on the engine's path it did not, and an
+ *  owner who switched the dial on would have watched every worker come up as a PTY
+ *  with no explanation anywhere.
+ *
+ *  The engine LOG is the right sink (not the worker row, not the roster): the
+ *  fallback is an EVENT at launch, not a property of the running worker — the
+ *  worker's actual runtime is already on its roster row, and a per-worker copy of
+ *  the reason would have to be invented, persisted and expired. logLine is also
+ *  append-through to the on-disk journal, so the explanation outlives the ring
+ *  buffer and the restart. Deliberately NO `kind`: this is not a dispatch failure
+ *  (the worker IS running) and must not move the dispatchFailed counter. */
+const noteRuntimeFallback = (
+  engine: ProjectEngine,
+  spawn: SpawnSwarmWorkerResponse,
+  title: string,
+): void => {
+  if (!spawn.fellBackBecause) return
+  logLine(engine, 'warn', `runtime fallback (SDK→PTY): ${shorten(title)} — ${spawn.fellBackBecause}`)
+}
+
 // (isWorkerAlive / defaultLastOutputAt / defaultNudge lived here until 2026-07-30.
 //  Their bodies moved VERBATIM into workerRuntime.ptyWorkerRuntime so the engine
 //  asks the runtime instead of the PTY pool — see docs/SDK_WORKER_MIGRATION_PLAN.md.)
@@ -4467,6 +4546,40 @@ export const commitWipBeforeTeardown = async (
  *  If that salvage commit FAILS the worktree is KEPT, not destroyed: the work in
  *  it is unrecoverable, a leftover worktree is not. Branch is intentionally KEPT
  *  (see the dep doc). Never throws — a failure is reported for the log. */
+/** Wait (bounded) for a terminated SDK session to actually stop being alive —
+ *  the SDK counterpart of `waitForTerminalGone`, and needed for the same reason:
+ *  `terminateSdkSession` only ASKS (it interrupts the current turn and lets the
+ *  pump unwind), so salvaging the worktree immediately after would snapshot a
+ *  tree claude is still writing to, and run our git against the index its git is
+ *  still using. On timeout we proceed anyway — losing the WIP salvage entirely is
+ *  worse than snapshotting a possibly-torn tree (the same trade the PTY wait makes). */
+export const waitForSdkSessionGone = async (
+  sdkSessionId: string,
+  /** "Has the pump actually unwound?" — NOT `isSdkSessionAlive`.
+   *
+   *  ⚠ THE BUG THIS PARAMETER'S DEFAULT FIXES (2026-07-31). It used to default
+   *  to `isSdkSessionAlive`, which reads `status`. `terminateSdkSession` sets
+   *  `status:'exited'` SYNCHRONOUSLY — it only ASKS the session to stop, the
+   *  `interrupt()` behind it being fire-and-forget — so the very first poll saw
+   *  "not alive" and this returned in 0 ms. The gate existed and gated nothing:
+   *  the salvage below still started while claude was writing, which is the pair
+   *  of harms (torn snapshot, two gits on one index) the PTY path grew
+   *  `waitForTerminalGone` for. `reaped` is set only by the pump's `finally`,
+   *  i.e. once the SDK's iterator has genuinely returned. */
+  reaped: (id: string) => boolean = isSdkSessionReaped,
+  opts: { timeoutMs?: number; pollMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<boolean> => {
+  const timeoutMs = opts.timeoutMs ?? 5_000
+  const pollMs = opts.pollMs ?? 50
+  const nap = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (reaped(sdkSessionId)) return true
+    await nap(pollMs)
+  }
+  return reaped(sdkSessionId)
+}
+
 export const defaultRecoverWorker = async (
   opts: {
     projectPath: string
@@ -4478,11 +4591,29 @@ export const defaultRecoverWorker = async (
      *  back then, so whatever exit it now reports is OUR OWN kill — recording it
      *  would fabricate a cause of death. See the exitInfo gate below. */
     alreadyTornDown?: boolean
+    /** The SDK session id, when this worker runs on the Agent SDK runtime.
+     *
+     *  ⚠ WITHOUT THIS, THE WHOLE TEARDOWN IS A NO-OP THAT STILL DELETES.
+     *  An SDK worker's `terminalId` is EMPTY by the identity invariant
+     *  (pty ⇔ terminalId, sdk ⇔ sdkSessionId), so every PTY step below —
+     *  read, kill, wait-for-gone — silently did nothing for one, and the
+     *  function went straight on to `git add -A` and remove the worktree WHILE
+     *  CLAUDE WAS STILL WRITING INTO IT. That is precisely the pair of harms the
+     *  "kill FIRST, then salvage" comment below was added to prevent (a torn
+     *  snapshot; our git racing the worker's git on one index) — reintroduced by
+     *  a second runtime the code did not know to stop. */
+    sdkSessionId?: string
   },
   // Terminal-pool seam, injected the same way defaultNudgeManager takes its
   // write/sleep: it makes the exitInfo gate unit-testable without a real PTY
   // (pass `worktree: ''` and the function returns right after computing it).
-  termDeps?: { getTerminal?: typeof getTerminal; killTerminal?: typeof killTerminal },
+  termDeps?: {
+    getTerminal?: typeof getTerminal
+    killTerminal?: typeof killTerminal
+    /** SDK counterparts, injected for the same reason. */
+    terminateSdk?: typeof terminateSdkSession
+    isSdkReaped?: typeof isSdkSessionReaped
+  },
 ): Promise<{
   removed: boolean
   reason?: string
@@ -4491,6 +4622,9 @@ export const defaultRecoverWorker = async (
 }> => {
   const readTerminal = termDeps?.getTerminal ?? getTerminal
   const endTerminal = termDeps?.killTerminal ?? killTerminal
+  const endSdk = termDeps?.terminateSdk ?? terminateSdkSession
+  const sdkReaped = termDeps?.isSdkReaped ?? isSdkSessionReaped
+  const sdkId = opts.sdkSessionId ?? ''
   // Read BEFORE killTerminal — a PTY that is still alive has no exitCode yet, and
   // one we are about to kill ourselves must not have ITS exit mistaken for the
   // reason it died. Only meaningful for a reclaim of an ALREADY-dead worker
@@ -4507,8 +4641,14 @@ export const defaultRecoverWorker = async (
   // worker's own cause of
   // death. `alreadyTornDown` is the caller's answer to "did we already kill this
   // one?", and it vetoes the record outright.
-  const preKill = readTerminal(opts.terminalId)
-  const isCrashReclaim = (opts.reason ?? 'crash') === 'crash' && !opts.alreadyTornDown
+  // An SDK worker has no PTY and therefore no exit CODE — its cause of death
+  // arrives as events on its own stream (api_error / quota_refusal, sdkEvents),
+  // which is the whole point of the runtime. Reading the PTY pool with an empty
+  // id would return undefined and be journalled as `{code:null}` = "it died and
+  // we don't know why", inventing an unknown where a known answer exists.
+  const preKill = sdkId ? undefined : readTerminal(opts.terminalId)
+  const isCrashReclaim =
+    !sdkId && (opts.reason ?? 'crash') === 'crash' && !opts.alreadyTornDown
   const exitInfo = !isCrashReclaim
     ? undefined
     : preKill?.finishedAt
@@ -4526,7 +4666,11 @@ export const defaultRecoverWorker = async (
       // the 'unknown' case classifyWorkerExit exists for.
       : { code: null }
   try {
-    endTerminal(opts.terminalId)
+    // Stop the worker on WHICHEVER runtime carries it. Branch on the id we were
+    // given, matching the identity invariant — never on "is terminalId truthy",
+    // which is how a runtime gets forgotten.
+    if (sdkId) endSdk(sdkId)
+    else endTerminal(opts.terminalId)
   } catch {
     /* already dead / absent — the worktree teardown below is what matters */
   }
@@ -4543,7 +4687,8 @@ export const defaultRecoverWorker = async (
   // the evidence the kernel delivered its hangup to claude, which is what makes
   // the tree quiescent. Bounded; on timeout we proceed anyway, because losing the
   // WIP salvage entirely is worse than snapshotting a possibly-torn tree.
-  await waitForTerminalGone(opts.terminalId).catch(() => false)
+  if (sdkId) await waitForSdkSessionGone(sdkId, sdkReaped).catch(() => false)
+  else await waitForTerminalGone(opts.terminalId).catch(() => false)
   let wip: WipCommitResult = { committed: false }
   try {
     wip = await commitWipBeforeTeardown(opts.worktree, opts.reason ?? 'stopped')
@@ -4618,16 +4763,14 @@ export const defaultEscalate = async (
  *  behaviour (terminal.ts reconstructs the frame without touching the PTY). */
 const defaultRecentOutput = (w: WorkerHandle): string | null => runtimeOf(w).recentOutput(w)
 
-/** Send a LIVE worker a one-line 差し戻し instruction over its PTY (the rework
- *  conduit's "fix in place" message): collapse the reason to a SINGLE line (a raw
- *  newline would submit the half-typed prompt early) and write it with a trailing
- *  CR so the worker's `claude` takes it as its next turn. best-effort — writeInput
- *  is a no-op when the session is gone/finished, and workers run permissionMode
- *  'bypass' so a stray line can't approve anything. */
-const defaultInstructRework = (terminalId: string, message: string): void => {
-  const line = message.replace(/\s+/g, ' ').trim()
-  if (line) writeInput(terminalId, `${line}\r`)
-}
+// (defaultInstructRework lived here until 2026-08-01. It wrote a one-line 差し戻し
+//  instruction to a worker's PTY — `writeInput(terminalId, …)` — and had had NO
+//  caller since 675968e5 deleted reworkOrPark with the engine's whole integration
+//  path (manager-only rework, 2026-07-15). It is deleted rather than left lying
+//  around because its terminalId-keyed shape is a trap under two runtimes: an SDK
+//  worker's terminalId is '', so the next person to wire it up would have written
+//  every SDK worker's 差し戻し into nothing. See OrchestratorDeps.instructRework's
+//  @deprecated note for the full route trace and the correct shape.)
 
 // --- Default integration deps (Card③) -----------------------------------------
 
@@ -4777,7 +4920,42 @@ export const tscCheck: VerifyCheck = {
  *  `server/routes/swarm.ts`, so a future diff that quietly dropped the gate or
  *  the call (re-enabling unattended resume on every `tsx watch` save, or
  *  disabling the crash-loop-guarded resume in prod) would otherwise touch NO
- *  path this set already watches. */
+ *  path this set already watches.
+ *
+ *  ── THE SDK RUNTIME (2026-08-01) ────────────────────────────────────────────
+ *  WHAT THIS SET ACTUALLY DECIDES, traced before widening it (there are three
+ *  candidates and only two are real): (1) {@link swarmSafetyConditional} — the
+ *  A1 safety suite runs as a merge gate ONLY for a branch whose diff matches
+ *  here, and (2) the docs/commander freshness soft-warn in {@link makeVerify}.
+ *  It does NOT drive the engine self-update / canary rebuild: that fires from an
+ *  observed integration event (selfUpdateOnIntegrate.ts — a confirmed non-force
+ *  worktree removal whose tip is an ancestor of the trunk), not from a path
+ *  match. So a miss here is not "the canary never rebuilds"; it is "swarm code
+ *  changed and NOTHING re-proved the swarm's own safety invariants before it
+ *  auto-merged". Which is worse, and was the state for the ENTIRE second desk
+ *  pool: not one SDK-runtime file matched any pattern above.
+ *
+ *  THE MEMBERSHIP CRITERION (write this down, because a list of names rots): a
+ *  file is swarm code when it can change how a swarm DESK behaves — i.e. it is
+ *  one of the two desk pools, a seam that speaks to both, or something that
+ *  drives one. Mechanically that is two families, and the patterns below are the
+ *  cheap path-shaped approximation of them:
+ *    (a) NAMED by convention — `swarm*` / `Swarm*` / `sdk*` / `Sdk*` sitting
+ *        DIRECTLY under src/lib/server, server/routes(+__tests__) or
+ *        src/components/canvas/modules. PREFIX patterns, deliberately: a new
+ *        `sdkFoo.ts` is covered the day it lands, with no list to remember.
+ *    (b) IMPORTS a desk-runtime seam — `./sdkSession` (the SDK pool),
+ *        `./workerRuntime` (the pty⇔sdk dispatcher) or `./liveDesks` (the
+ *        ask-BOTH-pools seam). Everything in (b) is already in (a) except
+ *        `worktreeCleanup.ts` (it asks liveDesks whether a worktree is still
+ *        under a LIVE desk before deleting it — get that wrong and the engine
+ *        rm -rf's a running worker) and `server/routes/terminal.ts` (the PTY
+ *        desk surface, and the one route that answers the both-pools desk
+ *        query). Those two are named below; the rest of (b) needs no entry.
+ *  Family (b) cannot be evaluated from a path string, so it is CHECKED ON DISK
+ *  by swarmEngineSdkBlindspots.test.ts, which re-derives both families from the
+ *  working tree and fails when a file joins either without being matched here.
+ *  That test is the thing that makes this list survive the next SDK file. */
 const SWARM_CODE_PATHS: readonly RegExp[] = [
   /^src\/lib\/server\/swarm[^/]*\.ts$/,
   /^server\/routes\/swarm\.ts$/,
@@ -4788,6 +4966,17 @@ const SWARM_CODE_PATHS: readonly RegExp[] = [
   /^server\/__tests__\/gateEnvParity\.test\.ts$/,
   /^electron\/gateEnv\.js$/,
   /^server\/index\.ts$/,
+  // ── family (a): the SDK runtime, by naming convention ──
+  /^src\/lib\/server\/sdk[^/]*\.ts$/,
+  /^server\/routes\/sdk[^/]*\.ts$/,
+  /^server\/routes\/__tests__\/sdk[^/]*$/,
+  /^src\/components\/canvas\/modules\/Sdk[^/]*$/,
+  // ── the runtime seams + family (b)'s two non-conforming members ──
+  // workerRuntime = the pty⇔sdk dispatcher every engine verb goes through;
+  // liveDesks = the ONE seam that asks both pools; worktreeCleanup = the
+  // destructive consumer of that answer; routes/terminal = the PTY desk surface.
+  /^src\/lib\/server\/(workerRuntime|liveDesks|worktreeCleanup)[^/]*\.ts$/,
+  /^server\/routes\/terminal\.ts$/,
 ]
 
 /** Does this changed-file set (repo-relative paths) touch any swarm code? Pure — the
@@ -5004,7 +5193,7 @@ export const swarmSafetyConditional: ConditionalCheck = {
 // never blocked on a gate it can't run (mirrors tscCheck).
 
 /** eslint config filenames that signal "this project lints" — the `applicable` gate for
- *  {@link lintCheck}. Covers eslintrc (legacy — what OPEN GROUND uses: .eslintrc.json) and
+ *  {@link lintCheck}. Covers eslintrc (legacy — what OPEN GROUND uses: .eslintrc.cjs) and
  *  flat config. A reasonable signal, not exhaustive of every variant (e.g. an `eslintConfig`
  *  key in package.json is not detected): the goal is to ARM OPEN GROUND's own gate and SKIP
  *  a repo with no eslint, never to block one we can't lint. */
@@ -5727,8 +5916,33 @@ export const withRebasedWorktree = async <T>(
     // of ~/.claude.json bloat. Pruned BEFORE the remove, while the dir still exists,
     // so pathKeys resolves its realpath form as well (realpath-divergence robust).
     removeClaudeFolderTrust(dir)
-    await gitOut(projectPath, ['worktree', 'remove', '--force', dir])
-    await gitOut(projectPath, ['worktree', 'prune'])
+    // ⚠ STOP AND **WAIT** BEFORE DELETING. `fn` ran real `claude` reviewers in
+    // this dir, and each one's teardown is `killTerminal(ref.terminalId)` — a
+    // SIGHUP that returns immediately and promises nothing about the process
+    // having actually gone. Removing the tree in that gap is how OPEN GROUND
+    // manufactured its own un-killable orphans: claude shells out to `git`
+    // constantly, and a delete landing mid-run wedges the process in
+    // uninterruptible sleep where no signal and no timeout can reach it again
+    // (the 2026-07-28 machine freeze). `stopAllDesksInDirAndWait` is the seam
+    // built for exactly this — it asks BOTH pools (a reviewer becomes an SDK
+    // desk the day that dial goes on) and returns false when something is still
+    // there after the budget.
+    //
+    // WHEN IT REFUSES, THE TREE IS LEAKED ON PURPOSE. A leftover `.review-*`
+    // worktree is recoverable — `worktree prune` reaches it later and the next
+    // panel makes its own dir. A tree deleted out from under a live claude is
+    // not recoverable at all: it takes the machine with it. The asymmetry
+    // decides this, not tidiness.
+    if (await stopAllDesksInDirAndWait(dir)) {
+      await gitOut(projectPath, ['worktree', 'remove', '--force', dir])
+      await gitOut(projectPath, ['worktree', 'prune'])
+    } else {
+      console.warn(
+        `[swarm] review worktree ${dir} still has a live desk after the stop budget — ` +
+          `leaving it rather than deleting it under a running claude (worktree prune ` +
+          `reclaims it once the desk is gone)`,
+      )
+    }
   }
 }
 
@@ -6167,9 +6381,15 @@ const defaultCleanup = async (
 const defaultReadConsumption = async (opts: {
   worktree: string
   terminalId: string
+  sdkSessionId?: string
 }): Promise<string | null> => {
   try {
-    const sid = getTerminal(opts.terminalId)?.agentSessionId
+    // Ask the pool this worker actually lives in. Reading the terminal pool with
+    // an SDK worker's (empty) terminalId returns undefined, which read as "no
+    // JSONL" and dropped every SDK worker out of the consumption journal.
+    const sid = opts.sdkSessionId
+      ? getSdkSession(opts.sdkSessionId)?.agentSessionId
+      : getTerminal(opts.terminalId)?.agentSessionId
     if (!sid) return null
     return await readWorkerConsumptionLine(sessionJsonlPath(opts.worktree, sid))
   } catch {
@@ -6216,7 +6436,9 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   markConflict: defaultMarkConflict,
   cleanup: defaultCleanup,
   killPty: (w) => runtimeOf(w).kill(w),
-  instructRework: defaultInstructRework,
+  // instructRework is DELIBERATELY NOT WIRED (2026-08-01): the seam has had no
+  // caller since the manager-only rework, and its terminalId shape cannot address
+  // an SDK worker. See OrchestratorDeps.instructRework's @deprecated note.
   // Manager-only integration (2026-07-15): the engine wakes the commander instead of
   // merging. managerPresence decides WHICH response the desk needs (spawn / nudge /
   // nothing); wakeManager spawns, nudgeManager pokes a live one (2026-07-18).
@@ -6350,6 +6572,10 @@ const monitorWorkers = async (
         projectPath: engine.path,
         worktree: w.worktree,
         terminalId: w.terminalId,
+        // Carried so the teardown can actually STOP an SDK worker — its
+        // terminalId is empty, so without this the kill is a silent no-op and
+        // the worktree is removed under a running claude.
+        ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
         reason, // rides into the salvage commit's message (commitWipBeforeTeardown)
         // A kept RECOVERY move means an EARLIER pass already ran this very teardown
         // (recoverWorker runs before the Board write that got kept), so the PTY we
@@ -6686,7 +6912,11 @@ const monitorWorkers = async (
         // never keep a promote (or the pass) from completing.
         if (deps.readConsumption) {
           try {
-            const line = await deps.readConsumption({ worktree: w.worktree, terminalId: w.terminalId })
+            const line = await deps.readConsumption({
+              worktree: w.worktree,
+              terminalId: w.terminalId,
+              ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
+            })
             if (line) logLine(engine, 'info', `consumption: ${line} — ${shorten(w.taskTitle)}`)
           } catch {
             /* fail-safe: no consumption line, promote already landed */
@@ -7384,7 +7614,15 @@ const monitorWorkers = async (
                 receiptKey,
                 ...(card?.id ? { taskId: card.id } : {}),
                 branch: w.branch,
+                // The worker's FULL address, not just its terminalId. The record
+                // is what the owner's answer is later delivered against, and an
+                // SDK worker's terminalId is EMPTY — so a terminalId-only raise
+                // produced an inbox entry that could never reach the worker that
+                // asked (it fell through to the next-dispatch queue forever).
+                // Same shape as every other handle-passing site in this file.
+                ...(w.runtime ? { runtime: w.runtime } : {}),
                 terminalId: w.terminalId,
+                ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
               })
               logLine(
                 engine,
@@ -7947,6 +8185,7 @@ export const runDispatchPass = async (
         continue
       }
       if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
+      noteRuntimeFallback(engine, spawn, title)
 
       // Count it BEFORE the column move: the PTY is already live, so even if the
       // move fails the worker must stay counted (the dispatchedIds guard then
@@ -9543,6 +9782,14 @@ export const maybeAutoStartDrain = async (
  *  never owned) is a no-op returning the current state. The engine acts ONLY on
  *  its OWN workers; a manual worker is the manual control plane's to stop (POST
  *  /api/swarm/worktree/remove). Works whether the engine is running or stopped. */
+/** Stop ONE engine worker, addressed by its RUNTIME-AGNOSTIC key
+ *  ({@link workerKey}: the terminalId of a PTY worker, the sdkSessionId of an SDK
+ *  one). The parameter kept its old name for the wire, but matching on
+ *  `x.terminalId` was a live defect once a second runtime existed: EVERY SDK
+ *  worker records `terminalId: ''` by the identity invariant, so an id of `''`
+ *  matched the FIRST of them and the drop below then filtered out ALL of them —
+ *  the engine forgetting every SDK worker at once while their claude processes
+ *  kept running. Keying on workerKey makes the address unique per worker again. */
 export const stopOrchestratorWorker = async (
   projectPath: string,
   terminalId: string,
@@ -9559,8 +9806,19 @@ export const stopOrchestratorWorker = async (
   // undone); serializing makes the monitor see this drop + park, and this stop see the
   // monitor's, never a half-updated mix (see runExclusive).
   return runExclusive(engine, async () => {
-    const w = engine.workers.find((x) => x.terminalId === terminalId)
+    // keyOf, not `x.terminalId`: a runtime-agnostic address (see the doc above).
+    // An empty id can never match — it is the SDK worker's terminalId, and
+    // matching it would target an arbitrary worker.
+    const keyOf = (x: WorkerHandle): string => {
+      try {
+        return workerKey(x)
+      } catch {
+        return '' // malformed handle — unaddressable, never matched
+      }
+    }
+    const w = terminalId ? engine.workers.find((x) => keyOf(x) === terminalId) : undefined
     if (!w) return stateOf(engine, deps.isAlive) // unknown / already gone — idempotent
+    const stopKey = keyOf(w)
 
     // Tear the worktree + PTY down FIRST (the zombie-eradication — idempotent, and
     // the critical guarantee). Best-effort: a failure is logged, never blocks the stop.
@@ -9568,7 +9826,13 @@ export const stopOrchestratorWorker = async (
     try {
       // 'stopped' — an OWNER stop. Its uncommitted work is salvaged onto the branch
       // like any other teardown: the owner stopped the worker, not the work.
-      teardown = await deps.recoverWorker({ projectPath: key, worktree: w.worktree, terminalId, reason: 'stopped' })
+      teardown = await deps.recoverWorker({
+        projectPath: key,
+        worktree: w.worktree,
+        terminalId,
+        ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
+        reason: 'stopped',
+      })
     } catch {
       /* reported via teardown.removed=false below */
     }
@@ -9590,7 +9854,9 @@ export const stopOrchestratorWorker = async (
     engine.recoveries.delete(w.taskId)
     engine.reworks.delete(w.taskId) // owner halted this worker — drop its 差し戻し budget too
     engine.conflictReworks.delete(w.taskId) // ...and its conflict-委譲 budget (card 012a2848)
-    engine.workers = engine.workers.filter((x) => x.terminalId !== terminalId)
+    // Drop THIS worker only. Filtering on `x.terminalId !== terminalId` dropped
+    // every SDK worker at once (they all carry the empty terminalId).
+    engine.workers = engine.workers.filter((x) => keyOf(x) !== stopKey)
     // card 3 — teardown drops the worker's roster entry (completion condition ③).
     // AWAITED (a quick fail-open write, never throws) so the removal is observable
     // the instant the stop returns. Should it be lost, the worker is already gone
@@ -9679,6 +9945,7 @@ export const resolveOrchestratorReview = async (
           projectPath: key,
           worktree: w.worktree,
           terminalId: w.terminalId,
+          ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
           reason: 'stopped', // salvage any uncommitted work onto the branch first
         })
       } catch {
@@ -9938,6 +10205,7 @@ const adoptResumeCandidates = async (
       logLine(engine, 'warn', `resume spawn failed → reclaim: ${shorten(title || entry.branch)} — ${errMsg(e)}`, 'dispatch')
       continue
     }
+    noteRuntimeFallback(engine, spawn, title || entry.branch)
     engine.workers.push({
       terminalId: spawn.terminalId,
       branch: spawn.branch,

@@ -12,15 +12,18 @@
 //   - A DIRTY worktree (any `git status --porcelain` output — staged,
 //     unstaged, or untracked) is never removed, only reported. A status
 //     probe that FAILS also counts as dirty: when in doubt, keep it.
-//   - A worktree a LIVE claude PTY is working in is never removed even when
+//   - A worktree a LIVE claude session is working in is never removed even when
 //     clean (a freshly-launched or just-committed tree is clean while the
-//     session runs in it). The pool's live cwds are canonicalized to the same
-//     form as the worktree dir before matching, so a symlink-only difference
-//     can't read as "not live" (see cleanProjectWorktrees).
+//     session runs in it). Liveness is asked of BOTH desk pools — PTY and Agent
+//     SDK — through `listAllLiveDeskCwds` (liveDesks.ts); asking only one
+//     returns a confidently wrong "nothing is here", which is precisely the
+//     answer that authorises deletion. The live cwds are canonicalized to the
+//     same form as the worktree dir before matching, so a symlink-only
+//     difference can't read as "not live" (see cleanProjectWorktrees).
 //   - All git calls are execFile with argv arrays (never a shell string).
 
 import { execFile as execFileCb } from 'child_process'
-import { listActiveTerminalCwds } from './terminal'
+import { listAllLiveDeskCwds } from './liveDesks'
 import { isGitRepoRoot } from './gitRepoGuard'
 import { promisify } from 'util'
 import { sep } from 'path'
@@ -124,17 +127,23 @@ export const cleanProjectWorktrees = async (
   const canonCentral = await canonicalize(rawCentral)
   // A clean tree says nothing about a LIVE claude session working in it —
   // right after launch (or right after a mid-task commit) the tree is clean
-  // while the PTY's cwd is the worktree. Deleting a running session's cwd
-  // out from under it is never acceptable; the pool knows every live cwd.
+  // while the session's cwd IS the worktree. Deleting a running session's cwd
+  // out from under it is never acceptable.
   //
-  // The pool stores each PTY's RAW spawn cwd (createTerminal keeps opts.cwd
+  // ⚠ BOTH POOLS. This asked only the PTY pool until 2026-07-31, which meant
+  // that with the Agent SDK worker dial on, EVERY SDK worker's worktree read as
+  // abandoned — clean tree, no PTY — and was removed while claude was working in
+  // it. `listAllLiveDeskCwds` (liveDesks.ts) is the single seam that asks
+  // both, so a third runtime cannot reopen this by being forgotten here.
+  //
+  // Each pool stores its session's RAW spawn cwd (createTerminal keeps opts.cwd
   // verbatim), which can be in a different normalization form than wt.dir —
   // that one is canonicalized in listProjectWorktrees (macOS /var→/private/var,
   // symlinked home dirs). Canonicalize the live cwds to the SAME form before
   // matching; otherwise a symlink-only difference makes isLive return false and
   // the running worktree gets removed out from under the session.
   const liveCwds = await Promise.all(
-    listActiveTerminalCwds().map((cwd) => canonicalize(cwd)),
+    listAllLiveDeskCwds().map((cwd) => canonicalize(cwd)),
   )
   const isLive = (dir: string) =>
     liveCwds.some((cwd) => cwd === dir || cwd.startsWith(dir + sep))

@@ -9,8 +9,10 @@ import {
   isSdkSessionAlive,
   listSdkSessions,
   removeSdkSession,
+  SDK_SESSION_LINGER_MS,
   __resetSdkSessionsForTests,
   __setQuotaPrefixesForTests,
+  __ageClosedSessionForTests,
   type SdkQueryFn,
   type SdkStreamFrame,
 } from './sdkSession'
@@ -367,5 +369,48 @@ describe('pool bookkeeping', () => {
     })
     expect(info.id).toBe('fixed-id')
     expect(getSdkSession('fixed-id')).not.toBeNull()
+  })
+
+  // The leak this pins: removeSdkSession existed but had ZERO callers, so every
+  // finished session kept its full ring buffer in the pool for the life of the
+  // process — a week of engine dispatches would accumulate hundreds of dead
+  // transcripts. Retention now runs at the pool's growth/read edges.
+  it('sweeps a finished session once the linger window has passed', async () => {
+    // A completed turn leaves the session WAITING for the next input (that is
+    // the point of a multi-turn desk) — finishing it takes a terminate, which
+    // ends the input generator and lets the pump's finally stamp closedAt.
+    const dead = spawnSdkSession({ cwd: '/tmp/w', options: {}, initialPrompt: 'x', queryFn: scriptedQuery([[resultOk()]]) })
+    await settle()
+    terminateSdkSession(dead.id)
+    await settle()
+    expect(getSdkSession(dead.id)?.status).toBe('exited')
+
+    // Rewind the finish stamp past the window (the sweep reads closedAt).
+    __ageClosedSessionForTests(dead.id, SDK_SESSION_LINGER_MS + 1)
+    // Any growth/read edge triggers the sweep; a spawn is the canonical one.
+    spawnSdkSession({ cwd: '/tmp/w2', options: {}, initialPrompt: 'x', queryFn: scriptedQuery([[resultOk()]]) })
+    expect(getSdkSession(dead.id)).toBeNull()
+  })
+
+  it('a finished session INSIDE the window stays addressable (the tile reads its end)', async () => {
+    const done = spawnSdkSession({ cwd: '/tmp/w', options: {}, initialPrompt: 'x', queryFn: scriptedQuery([[resultOk()]]) })
+    await settle()
+    terminateSdkSession(done.id)
+    await settle()
+    spawnSdkSession({ cwd: '/tmp/w2', options: {}, initialPrompt: 'x', queryFn: scriptedQuery([[resultOk()]]) })
+    expect(getSdkSession(done.id)?.status).toBe('exited')
+  })
+
+  it('a LIVE session is never swept, no matter how old', async () => {
+    // No initialPrompt: the input generator waits, so the session stays open.
+    const live = spawnSdkSession({ cwd: '/tmp/w', options: {}, queryFn: scriptedQuery([[resultOk()]]) })
+    await settle()
+    expect(isSdkSessionAlive(live.id)).toBe(true)
+    // A live entry has no closedAt, so the age hook is a no-op on it — which is
+    // exactly the claim: the sweep keys on closedAt, never on age in general.
+    __ageClosedSessionForTests(live.id, SDK_SESSION_LINGER_MS * 10)
+    spawnSdkSession({ cwd: '/tmp/w2', options: {}, initialPrompt: 'x', queryFn: scriptedQuery([[resultOk()]]) })
+    expect(getSdkSession(live.id)).not.toBeNull()
+    terminateSdkSession(live.id)
   })
 })

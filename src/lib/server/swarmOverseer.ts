@@ -54,7 +54,7 @@ import type { SwarmInfoNotification, SwarmFatalNotification, EscalationStatus } 
 // this file must never import a VALUE back. The readHeartbeat/isAlive VALUES the pass
 // needs are handed in through OverseerDeps (the orchestrator already owns them).
 import type { HeartbeatSign } from './swarmOrchestrator'
-import type { WorkerHandle } from './workerRuntime'
+import { workerKey, workerRuntimeKind, type WorkerHandle } from './workerRuntime'
 import {
   answerAsOwner as realAnswerAsOwner,
   makeOverseerBrain,
@@ -68,6 +68,7 @@ import {
   defaultReceiptKey,
   injectAnswerIntoWorker,
   defaultCanInjectInto,
+  deliverAnswerToWorker,
   buildAnswerInjection,
   listEscalations as realListEscalations,
   listEscalationReceiptKeys,
@@ -178,7 +179,18 @@ export interface OverseerBrainResult {
   context: string
   taskId?: string
   branch?: string
+  /** The blocked worker's HANDLE, carried whole (pty ⇔ terminalId,
+   *  sdk ⇔ sdkSessionId — workerRuntime.ts's identity invariant).
+   *
+   *  It used to be `terminalId` alone, which is EMPTY for an SDK worker: the
+   *  drain below then had nothing to address, so a proxy answer for such a worker
+   *  could never be delivered — it was reported as "injection failed" and thrown
+   *  back at the owner every single time, for a worker that was sitting right
+   *  there waiting for it. Keep the whole handle; the conduit branches, not this
+   *  record. */
+  runtime?: 'pty' | 'sdk'
   terminalId?: string
+  sdkSessionId?: string
   /** null when the detached chain itself threw (answerAsOwner never throws, but the
    *  chain is guarded belt-and-suspenders) → treated as an insufficient-info escalate. */
   answer: OwnerAnswer | null
@@ -268,8 +280,14 @@ export interface OverseerEngine {
   /** Fatal rising-edge dedup set the engine maintains — durable while a state fatal
    *  (rework-exhausted:* / all-workers-down) is active (fireFatalNotifications). */
   notified: ReadonlySet<string>
-  /** Live + recently-dispatched workers (the overseer filters by isAlive). */
-  workers: readonly { terminalId: string; branch: string; taskId: string; taskTitle: string }[]
+  /** Live + recently-dispatched workers (the overseer filters by isAlive).
+   *
+   *  A {@link WorkerHandle}, not a bare terminalId: an SDK worker carries its id
+   *  in `sdkSessionId` and an EMPTY `terminalId`, so anything here that keys or
+   *  addresses on `terminalId` silently collapses every SDK worker into one (see
+   *  the S4 signal key below). `terminalId` stays optional for that reason —
+   *  {@link import('../types').OrchestratorWorker} satisfies this either way. */
+  workers: readonly (WorkerHandle & { branch: string; taskId: string; taskTitle: string })[]
   /** Review-column integration readiness (for S7). */
   reviews: readonly OrchestratorReview[]
   overseer: OverseerRuntime
@@ -308,6 +326,15 @@ export interface OverseerDeps {
   canInjectInto: (terminalId: string, projectPath: string) => Promise<boolean>
   /** W16 — inject a proxy answer into a live worker PTY (bracketed paste + CR). */
   injectAnswer: (terminalId: string, text: string) => Promise<boolean>
+  /** T1 — deliver a proxy answer to a live worker on EITHER runtime (guard +
+   *  delivery in one call; see swarmEscalations.deliverAnswerToWorker).
+   *
+   *  OPTIONAL, and the two PTY-shaped deps above are kept beside it ON PURPOSE:
+   *  they are the only knobs a PTY-worker test needs, and every existing dep
+   *  literal supplies exactly those. When this is absent the drain composes them
+   *  for a PTY target — byte-identical to before — and uses the real conduit for
+   *  an SDK target, which has no PTY equivalent to compose. */
+  deliverAnswer?: (target: WorkerHandle, projectPath: string, text: string) => Promise<boolean>
   /** T0'/S7/S9/S11 — info-grade bell + OS toast. */
   notifyInfo: (n: SwarmInfoNotification) => Promise<unknown>
   /** M8 — cached-only usage %, or null (miss/stale/idle). NEVER scrapes. */
@@ -366,6 +393,7 @@ export const defaultOverseerDeps = (io: {
   openEscalation: realOpenEscalation,
   canInjectInto: (terminalId, projectPath) => defaultCanInjectInto(terminalId, projectPath),
   injectAnswer: (terminalId, text) => injectAnswerIntoWorker(terminalId, text),
+  deliverAnswer: (target, projectPath, text) => deliverAnswerToWorker(target, projectPath, text),
   notifyInfo: (n) => createSwarmInfoNotification(n),
   peekUsagePct: () => {
     const u = peekCachedUsage()
@@ -466,7 +494,21 @@ const raiseToInbox = async (
     receiptKey: string
     taskId?: string
     branch?: string
-    terminalId?: string
+    /** The blocked worker's ADDRESS, carried WHOLE — never `terminalId` alone.
+     *
+     *  ⚠ This took `terminalId?: string` and passed only that to
+     *  {@link OpenEscalationInput}, which is the one-pool bug in its inbox form:
+     *  an SDK worker's terminalId is the EMPTY STRING (workerRuntime.ts's
+     *  identity invariant), so every S4 raise for one produced a record with NO
+     *  address. `addressOf` then stored nothing, `deliverAnswer` had nothing to
+     *  rebuild, and the owner's answer fell to the next-dispatch queue — reported
+     *  as delivered while the worker sat waiting. Nothing logged, nothing threw.
+     *
+     *  Every caller below already HOLDS the whole handle (the mailbox record's
+     *  `runtime`/`sdkSessionId`, or the roster worker itself) — the field it
+     *  could not express was the only thing missing. Spread a
+     *  {@link WorkerHandle}; do not pick one id out of it. */
+    target?: WorkerHandle
     proxyDraft?: OpenEscalationInput['proxyDraft']
   },
 ): Promise<boolean> => {
@@ -480,7 +522,13 @@ const raiseToInbox = async (
       receiptKey: input.receiptKey,
       ...(input.taskId ? { taskId: input.taskId } : {}),
       ...(input.branch ? { branch: input.branch } : {}),
-      ...(input.terminalId ? { terminalId: input.terminalId } : {}),
+      // The WHOLE address (runtime + the single handle it names). `runtime` is
+      // what tells openEscalation's `addressOf` which id is the real one; passing
+      // an id without it makes an SDK record un-deliverable, and passing the
+      // (empty) terminalId of an SDK worker names nobody at all.
+      ...(input.target?.runtime ? { runtime: input.target.runtime } : {}),
+      ...(input.target?.terminalId ? { terminalId: input.target.terminalId } : {}),
+      ...(input.target?.sdkSessionId ? { sdkSessionId: input.target.sdkSessionId } : {}),
       ...(input.proxyDraft ? { proxyDraft: input.proxyDraft } : {}),
     })
     ov.lastEscalateAt = now
@@ -670,6 +718,34 @@ export const runOverseerPass = async (
 
 // ── Mailbox drain (route each fire-and-forget brain result — T1 inject / T3 raise) ──
 
+/** The worker HANDLE a mailbox entry addresses, rebuilt for the conduit. */
+const targetOf = (r: OverseerBrainResult): WorkerHandle => ({
+  ...(r.runtime ? { runtime: r.runtime } : {}),
+  ...(r.terminalId ? { terminalId: r.terminalId } : {}),
+  ...(r.sdkSessionId ? { sdkSessionId: r.sdkSessionId } : {}),
+})
+
+/** Deliver a proxy answer to the worker, on whatever runtime carries it.
+ *
+ *  ONE branch, in ONE place, and only because the injected PTY deps have no SDK
+ *  counterpart to compose (see {@link OverseerDeps.deliverAnswer}). Never throws
+ *  — a delivery failure must fall through to the inbox, not abort the drain. */
+const deliverProxyAnswer = async (
+  deps: OverseerDeps,
+  projectPath: string,
+  target: WorkerHandle,
+  text: string,
+): Promise<boolean> => {
+  if (deps.deliverAnswer) return deps.deliverAnswer(target, projectPath, text).catch(() => false)
+  if (workerRuntimeKind(target) === 'sdk') {
+    return deliverAnswerToWorker(target, projectPath, text).catch(() => false)
+  }
+  const id = target.terminalId
+  if (!id) return false
+  if (!(await deps.canInjectInto(id, projectPath).catch(() => false))) return false
+  return deps.injectAnswer(id, text).catch(() => false)
+}
+
 const drainBrainResults = async (
   engine: OverseerEngine,
   ov: OverseerRuntime,
@@ -684,27 +760,30 @@ const drainBrainResults = async (
     // A confident, reversible, grounded answer → inject it into the LIVE worker (T1).
     // NOT written to you-corpus (only the OWNER's answer is — §8 invariant 6).
     if (ans && ans.kind === 'answer') {
-      const canInject = r.terminalId ? await deps.canInjectInto(r.terminalId, engine.path).catch(() => false) : false
-      if (canInject && r.terminalId) {
-        const ok = await deps
-          .injectAnswer(r.terminalId, buildAnswerInjection(r.question, ans.text))
-          .catch(() => false)
-        if (ok) {
-          log('info', `overseer: proxy answered a worker question (${ans.confidence}) — injected: ${shorten(r.question)}`)
-          continue
-        }
+      const ok = await deliverProxyAnswer(
+        deps,
+        engine.path,
+        targetOf(r),
+        buildAnswerInjection(r.question, ans.text),
+      )
+      if (ok) {
+        log('info', `overseer: proxy answered a worker question (${ans.confidence}) — injected: ${shorten(r.question)}`)
+        continue
       }
       // Worker gone / injection failed → fall through to the inbox so the answer isn't
       // lost (the owner can re-deliver it; it rides the next-dispatch conduit via C1).
       await raiseToInbox(deps, now, ov, {
         projectPath: engine.path,
         question: r.question,
-        context: `${r.context}\n\n(proxy が回答済みだが worker PTY への注入に失敗 — 本人が届け直してください。)`,
+        context: `${r.context}\n\n(proxy が回答済みだが worker への配達に失敗 — 本人が届け直してください。)`,
         whyEscalated: 'insufficient-info',
         receiptKey: defaultReceiptKey({ projectPath: engine.path, taskId: r.taskId, question: r.question }),
         taskId: r.taskId,
         branch: r.branch,
-        terminalId: r.terminalId,
+        // The SAME handle `deliverProxyAnswer` just tried, not the id it happens
+        // to carry: this record exists BECAUSE delivery failed, so it is the
+        // owner's only remaining route back to that exact worker.
+        target: targetOf(r),
         proxyDraft: { answer: ans.text, confidence: ans.confidence, isAbstention: false },
       })
       log('warn', `overseer: proxy answer could not be injected — raised to the inbox: ${shorten(r.question)}`)
@@ -750,7 +829,9 @@ const drainBrainResults = async (
       receiptKey: defaultReceiptKey({ projectPath: engine.path, taskId: r.taskId, question: r.question }),
       taskId: r.taskId,
       branch: r.branch,
-      terminalId: r.terminalId,
+      // Whole handle — the owner's answer to THIS record is delivered through
+      // the record's persisted address (swarmEscalations.deliverAnswer).
+      target: targetOf(r),
       // Same `abstained` gate, for the same reason the plainQuestion uses it: keyed
       // on `why` this read TRUE for a crashed / unparseable / timed-out brain, so the
       // UI labelled a FAILURE as a considered abstention ("コーパスが薄い") and swapped
@@ -784,7 +865,30 @@ const detectWorkerQuestions = async (
     const blockerText = (hb.blockers ?? hb.note ?? '').trim()
     if (!blockerText || !looksLikeQuestion(blockerText)) continue
 
-    const signalKey = `S4:${w.terminalId}`
+    // ⚠ `workerKey`, NEVER `w.terminalId`. Every SDK worker's terminalId is the
+    // EMPTY STRING (pty ⇔ terminalId, sdk ⇔ sdkSessionId), so `S4:${terminalId}`
+    // gave the WHOLE SDK FLEET one shared slot in `seen` — and a dedup map with
+    // one slot per fleet dedups nothing. Two blocked workers overwrite each
+    // other's fingerprint on every pass, so both questions re-fire on every pass:
+    // in the brain lane that re-charges the 大脳's 24/day cap and lets the two
+    // steal the single-flight from each other indefinitely (a THIRD blocked
+    // worker is never reached), and in the THROTTLED lane it re-raises both
+    // questions every tick. The receiptKey keeps the inbox itself from growing,
+    // which is exactly why nothing about this is visible from the owner's side.
+    // The engine's other per-worker maps (nudges, rateLimited, questionWaits…)
+    // moved to workerKey for this reason; this table did not follow.
+    //
+    // A malformed handle THROWS there by design (a shared "" key is worse than a
+    // loud failure), and this loop sits inside the pass's try — so an unaddressable
+    // worker would take the WHOLE pass down, skipping S5/S7/S11 and the prune. Skip
+    // that worker instead: it is the only one affected, and it is now named in the log.
+    let signalKey: string
+    try {
+      signalKey = `S4:${workerKey(w)}`
+    } catch (e) {
+      log('warn', `overseer: S4 skipped — unaddressable worker on ${w.branch}: ${errMsg(e)}`)
+      continue
+    }
     const fp = defaultReceiptKey({ projectPath: engine.path, taskId: w.taskId, question: blockerText })
     activeSeen.add(signalKey)
     if (ov.seen.get(signalKey) === fp) continue // already handled THIS exact question
@@ -803,7 +907,11 @@ const detectWorkerQuestions = async (
         receiptKey: fp,
         taskId: w.taskId,
         branch: w.branch,
-        terminalId: w.terminalId,
+        // The roster worker IS a WorkerHandle — hand it over whole. This lane is
+        // the S9-degraded one, i.e. the moment the owner is MOST needed, and it
+        // used to pass `w.terminalId` (empty for every SDK worker), so the bare
+        // question landed in the inbox with nowhere to send the reply.
+        target: w,
       })
       if (ok) {
         ov.seen.set(signalKey, fp)
@@ -828,7 +936,15 @@ const detectWorkerQuestions = async (
     fired.push('S4')
     const controller = new AbortController()
     ov.brainAbort = controller
-    const coords = { taskId: w.taskId, branch: w.branch, terminalId: w.terminalId }
+    // The WHOLE handle rides to the mailbox — the drain has to be able to address
+    // this worker on its own runtime hours later (see OverseerBrainResult).
+    const coords = {
+      taskId: w.taskId,
+      branch: w.branch,
+      ...(w.runtime ? { runtime: w.runtime } : {}),
+      ...(w.terminalId ? { terminalId: w.terminalId } : {}),
+      ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
+    }
     // Park the mailbox coordinates for the watchdog: only IT can deliver this
     // question if the flight never settles (see the force-release above).
     ov.brainInFlight = { signalKey, question: blockerText, context, ...coords }

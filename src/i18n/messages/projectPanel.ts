@@ -181,6 +181,11 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.compact': 'History summarised to make room',
     'projectPanel.swarm.sdk.truncated':
       'Older lines were dropped — this transcript starts mid-conversation.',
+    // Shown when a message (or a Stop) was REFUSED. It is not decoration: the
+    // composer clears on Enter, so without this the owner watched their words
+    // disappear into a session that never received them and had every reason
+    // to believe they had arrived. {error} is the server's own sentence.
+    'projectPanel.swarm.sdk.sendFailed': "Not delivered — {error}. Your text is back in the box.",
     // Supply officer (タスク窓口) — the conversation desk that turns the user's
     // requests into Board:todo cards. Writes the Board only; never edits code.
     'projectPanel.swarm.workersTab': 'Workers',
@@ -212,13 +217,22 @@ export const projectPanel = {
       '⚠ Kernel-level containment is unavailable on this host (macOS sandbox-exec required) — the overseer’s brain runs with the permission-layer safeguards only. Its read-only design and budget still hold.',
     // Runtime dials (Agent SDK migration). Both default OFF; a switch changes
     // only the NEXT desk that starts, never a running one.
-    'projectPanel.swarm.runtime.heading': 'Runtime (experimental)',
+    // "all projects" is not a footnote: this section sits directly beneath the
+    // Overseer switch, which is PER-PROJECT engine state. Two switches side by
+    // side with different scopes and no label is a trap.
+    'projectPanel.swarm.runtime.heading': 'Runtime (experimental · all projects)',
     'projectPanel.swarm.runtime.worker': 'Workers on the Agent SDK',
+    // {count} is the SDK slot limit (Settings.swarmWorkerRuntime.sdkMaxWorkers,
+    // default 1). Stating it is not a detail: with the cap at 1, "run each worker
+    // on the SDK" would be a plain untruth — one runs on it and the rest keep
+    // using a terminal, which looks like the switch half-worked.
     'projectPanel.swarm.runtime.workerHint':
-      'Run each worker through the Agent SDK instead of a terminal: a readable transcript instead of a repainting screen, liveness that is a fact rather than an inference, and engine notices that never erase your half-typed input. Off = the shipped terminal behaviour. Applies to the NEXT worker that starts — workers already running are untouched, so a mixed fleet is normal for a while.',
+      'Run workers through the Agent SDK instead of a terminal: a readable transcript instead of a repainting screen, liveness that is a fact rather than an inference, and engine notices that never erase your half-typed input. Off = the shipped terminal behaviour. Applies to the NEXT worker that starts (the ones already running are untouched, so a mixed fleet is normal for a while), and to at most {count} at a time — beyond that, workers keep using a terminal.',
     'projectPanel.swarm.runtime.manager': 'Commander on the Agent SDK',
     'projectPanel.swarm.runtime.managerHint':
       'The same, for the commander desk. Applies the next time the commander desk starts.',
+    'projectPanel.swarm.runtime.fellBack':
+      'The commander started on a terminal, not the Agent SDK — {reason}. The switch is still on; this desk simply could not use it.',
     'projectPanel.swarm.runtime.managerWarning':
       '⚠ An SDK desk has no Remote Control — you can no longer reach the commander from your phone. The supply desk stays on a terminal and remains your window from outside: ask it for status, or have it relay an instruction to the commander.',
     'projectPanel.swarm.manager.on': 'On',
@@ -858,6 +872,10 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.compact': 'これまでの記憶を要約して空きを作りました',
     'projectPanel.swarm.sdk.truncated':
       '古い行は破棄されました — この記録は会話の途中から始まっています。',
+    // 送信（や停止）が拒否されたときに出す。飾りではない: 入力欄は Enter で空になるので、
+    // これが無いと「届いていない言葉が消えた」だけになり、オーナーは届いたと信じてしまう。
+    // {error} はサーバ自身の文言。
+    'projectPanel.swarm.sdk.sendFailed': '届いていません — {error}。入力した文は欄に戻しました。',
     // Supply officer (タスク窓口) — 要望を Board:todo カードに積む対話デスク。
     // Board に書くだけで、コードは編集しない。
     'projectPanel.swarm.workersTab': 'ワーカー',
@@ -889,15 +907,22 @@ export const projectPanel = {
       '⚠ この環境ではカーネルレベルの封じ込め（macOS の sandbox-exec）が利用できません — 監督の大脳は permission 層の防壁のみで動きます。読み取り専用設計と予算上限は有効です。',
     // ランタイム切替(Agent SDK 移行)。どちらも既定オフ。切り替えても**次に立つ卓**から
     // 適用され、動いている卓はそのまま。
-    'projectPanel.swarm.runtime.heading': '動かし方（お試し）',
+    // 「全プロジェクト」は注釈ではない: このすぐ上の監督スイッチは**プロジェクトごと**の
+    // エンジン状態で、範囲の違う2つが並んでいて何も書かないのは罠。
+    'projectPanel.swarm.runtime.heading': '動かし方（お試し・全プロジェクト共通）',
     // ⚠ これらは素のテキストとして描画される（Markdown ではない）。強調に ** を
     // 書くと画面にそのまま星印が出る（2026-07-31 の隔離プレビューで実見）。
     'projectPanel.swarm.runtime.worker': '作業者を SDK で動かす',
+    // {count} は SDK で同時に動かせる人数（既定 1）。これを書かないと「作業者を SDK で
+    // 動かす」が嘘になる — 1人だけ SDK で残りはターミナルのままなので、スイッチが
+    // 半分だけ効いたように見える。
     'projectPanel.swarm.runtime.workerHint':
-      '作業者をターミナルではなく Agent SDK 経由で動かします。画面の描き直しではなく読みやすい記録になり、生きているかどうかが推測でなく分かり、エンジンの声かけが打ちかけの入力を消しません。オフ＝今までどおり。適用されるのは次に立つ作業者からで、動いている作業者はそのままです（しばらく混在するのが正常）。',
+      '作業者をターミナルではなく Agent SDK 経由で動かします。画面の描き直しではなく読みやすい記録になり、生きているかどうかが推測でなく分かり、エンジンの声かけが打ちかけの入力を消しません。オフ＝今までどおり。適用されるのは次に立つ作業者からで（動いている作業者はそのまま。しばらく混在するのが正常）、同時に SDK で動くのは最大 {count} 人です。それを超えた分はターミナルのままになります。',
     'projectPanel.swarm.runtime.manager': '司令官を SDK で動かす',
     'projectPanel.swarm.runtime.managerHint':
       '司令官の卓も同じように。適用されるのは、次に司令官の卓が立つときからです。',
+    'projectPanel.swarm.runtime.fellBack':
+      '司令官は SDK ではなくターミナルで立ち上がりました — {reason}。スイッチはオンのままです（この卓が SDK を使えなかっただけです）。',
     'projectPanel.swarm.runtime.managerWarning':
       '⚠ SDK の卓には遠隔窓口がありません — スマホから司令官に話しかけられなくなります。外からの窓口は補給官が引き継ぎます（ターミナルのまま）: 状況を聞く・司令官への指示を中継する、はそのまま使えます。',
     'projectPanel.swarm.manager.on': 'オン',

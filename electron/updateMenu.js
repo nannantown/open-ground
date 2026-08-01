@@ -39,6 +39,15 @@
  *  sees are the notes attached to the release they would install. */
 const RELEASE_NOTES_URL = 'https://github.com/nannantown/open-ground/releases'
 
+/** How long a MANUAL check may run before it is reported as failed.
+ *
+ *  electron-updater's checkForUpdates() has no timeout of its own, so a stalled
+ *  DNS lookup or a black-holed connection leaves its promise pending FOREVER.
+ *  That would not merely hang one click: the in-flight flag never clears, so
+ *  every later click answers "already checking" and the menu item is dead for
+ *  the rest of the session. A bounded wait turns that into one honest error. */
+const MANUAL_CHECK_TIMEOUT_MS = 60_000
+
 /** Menu item ids, so main.js (and a test) can refer to items without matching on
  *  a display label that is free to change. */
 const MENU_ID_CHECK_FOR_UPDATES = 'check-for-updates'
@@ -144,15 +153,28 @@ function buildAppMenuTemplate(opts) {
  *      a manual check must obey the same switch, and TELL the user, because a
  *      silently-skipped check is indistinguishable from "you're up to date".
  *   4. `busy` — a check is already in flight; a second one would race two dialogs.
- *   5. `check` — go ask GitHub.
+ *   5. `starting` — the app is up but initAutoUpdater has not run yet.
+ *
+ *      THIS IS NOT A THEORETICAL STATE. The menu is installed FIRST in start()
+ *      (so no frame shows Electron's default menu), while initAutoUpdater runs
+ *      LAST — after the forked server is spawned and health-polled, which is
+ *      allowed to take up to HEALTH_TIMEOUT_MS (120s). For that whole window a
+ *      packaged app has a live menu item and no updater behind it. Reporting
+ *      `unavailable` there — "this build has no updater attached" — would be a
+ *      flatly FALSE and alarming statement about a perfectly good build, so the
+ *      pending and the never-loaded cases are kept apart.
+ *   6. `unavailable` — packaged, initialisation ran, and electron-updater could
+ *      not be loaded. Now "no updater" is the truth.
+ *   7. `check` — go ask GitHub.
  *
  * @param {{
  *   packaged: boolean,
  *   lockdown: boolean,
  *   updateDownloaded?: boolean,
  *   inFlight?: boolean,
+ *   updater?: 'pending' | 'ready' | 'unavailable',
  * }} state
- * @returns {'dev' | 'restart' | 'lockdown' | 'busy' | 'check'}
+ * @returns {'dev' | 'restart' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'check'}
  */
 function manualCheckPrecondition(state) {
   const s = state || {}
@@ -163,6 +185,10 @@ function manualCheckPrecondition(state) {
   if (s.updateDownloaded) return 'restart'
   if (s.lockdown) return 'lockdown'
   if (s.inFlight) return 'busy'
+  // Absent `updater` is treated as 'ready' so an older caller keeps its old
+  // behaviour; only an explicit 'pending' / 'unavailable' diverts.
+  if (s.updater === 'pending') return 'starting'
+  if (s.updater === 'unavailable') return 'unavailable'
   return 'check'
 }
 
@@ -204,7 +230,7 @@ function manualCheckOutcome(args) {
  * true right now" and every detail answers "so what do I do".
  *
  * @param {'en' | 'ja'} lang
- * @param {'dev' | 'lockdown' | 'busy' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded'} kind
+ * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded'} kind
  * @param {{ version?: string | null, error?: string | null }} [opts]
  * @returns {{ message: string, detail: string, buttons?: string[], defaultId?: number, cancelId?: number }}
  */
@@ -247,6 +273,16 @@ function updateDialogText(lang, kind, opts) {
       return ja
         ? { message: '確認中です。', detail: 'すでにアップデートを確認しています。少し待ってください。' }
         : { message: 'Already checking.', detail: 'An update check is already running. Give it a moment.' }
+    case 'starting':
+      return ja
+        ? {
+            message: 'まだ起動中です。',
+            detail: 'アップデートの確認は起動が終わってから使えます。少ししてからもう一度お試しください。',
+          }
+        : {
+            message: 'Still starting up.',
+            detail: 'Update checks become available once startup finishes. Try again in a moment.',
+          }
     case 'unavailable':
       return ja
         ? {
@@ -307,8 +343,41 @@ function updateDialogText(lang, kind, opts) {
   }
 }
 
+/**
+ * Await `promise`, but reject with a timeout error after `ms`.
+ *
+ * Pure but for the clock, which is injected so the test does not sleep. The
+ * timer is cleared on settle so a resolved check does not hold the event loop.
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {{ setTimeout?: Function, clearTimeout?: Function }} [timers]
+ * @returns {Promise<T>}
+ */
+function withTimeout(promise, ms, timers) {
+  const set = (timers && timers.setTimeout) || setTimeout
+  const clear = (timers && timers.clearTimeout) || clearTimeout
+  let handle
+  // Promise.race does not CANCEL the loser. When the clock wins, the original
+  // check keeps running and may reject minutes later with nobody listening — an
+  // unhandled rejection in the Electron main process. This extra handler silences
+  // exactly that; it does not affect the race, which has its own subscription.
+  promise.catch(() => {})
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      handle = set(() => reject(new Error(`timed out after ${Math.round(ms / 1000)}s`)), ms)
+    }),
+  ]).finally(() => {
+    if (handle !== undefined) clear(handle)
+  })
+}
+
 module.exports = {
   RELEASE_NOTES_URL,
+  MANUAL_CHECK_TIMEOUT_MS,
+  withTimeout,
   MENU_ID_CHECK_FOR_UPDATES,
   MENU_ID_RELEASE_NOTES,
   languageFromSettingsRaw,

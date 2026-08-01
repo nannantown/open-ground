@@ -2,8 +2,21 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { listSwarmWorkers, readHeartbeats, parseHeartbeat } from './swarmWorkerRegistry'
+import {
+  listSwarmWorkers,
+  readHeartbeats,
+  parseHeartbeat,
+  defaultRegistryDeps,
+} from './swarmWorkerRegistry'
 import type { SwarmWorkerRegistryDeps } from './swarmWorkerRegistry'
+import {
+  spawnSdkSession,
+  terminateSdkSession,
+  getSdkSession,
+  isSdkSessionReaped,
+  __resetSdkSessionsForTests,
+  type SdkQueryFn,
+} from './sdkSession'
 import type { ActiveTerminalsResponse, OrchestratorWorker, SwarmOrchestratorState } from '../types'
 
 // ── Pure merge logic: fully faked deps, no real terminal pool / engine / FS ──
@@ -85,6 +98,123 @@ describe('listSwarmWorkers — server-truth union', () => {
       taskId: 'task-1',
       stage: 'running',
     })
+  })
+
+  // THE HOLE (2026-07-31, review round 5). This record is what the Swarm tab
+  // renders from, and it carried no runtime at all. `terminalId` is looked up in
+  // the PTY pool BY CWD — which an SDK worker is never in — so an SDK worker
+  // arrived with no id and no runtime, the tab fell through to the terminal
+  // renderer, and a healthy working worker was drawn as an EXITED one. The SDK
+  // tile shipped in W7 was unreachable for engine workers entirely.
+  it('carries runtime + sdkSessionId for an SDK worker (no PTY exists for it)', async () => {
+    const deps = makeDeps({
+      getOrchestratorState: async () => ({
+        ...emptyEngineState,
+        workers: [
+          engineWorker({
+            terminalId: '', // EMPTY by the identity invariant
+            runtime: 'sdk',
+            sdkSessionId: 'sdk-abc',
+            worktree: '/wt/sdk-x',
+            branch: 'swarm/sdk-x',
+          }) as OrchestratorWorker,
+        ],
+      }),
+      listActiveTerminals: () => activeTerminals([]), // the PTY pool is EMPTY
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      worktree: '/wt/sdk-x',
+      runtime: 'sdk',
+      sdkSessionId: 'sdk-abc',
+    })
+    // And NOT a stray terminalId, which would send the tile back to the terminal
+    // renderer (the identity invariant: sdk ⇔ sdkSessionId, never both).
+    expect(out[0].terminalId).toBeUndefined()
+  })
+
+  it('an engine SDK worker whose session IS in the pool still gets NO terminalId', async () => {
+    // The test above proves the SDK worker keeps `terminalId` undefined — but it
+    // leaves the SDK pool EMPTY, so the map that could leak into that field has
+    // nothing in it. Measured 2026-08-01: widening the lookup to
+    // `liveCwdToTerminalId.get(w.worktree) ?? liveCwdToSdkId.get(w.worktree)`
+    // kept every test in this file green, because no fixture ever had an engine
+    // SDK worker and a live SDK session at the SAME worktree — which is what
+    // EVERY healthy SDK worker actually looks like in production.
+    //
+    // Why that must fail: `terminalId` is not a label, it is an ADDRESS. The tile
+    // dispatches on it (a record carrying one renders as a terminal and its
+    // Terminate posts to /api/terminal/:id), and an SDK session id addresses
+    // nothing in the PTY pool — so the stop silently hits nothing while the
+    // worker keeps running. This is the identity invariant (pty ⇔ terminalId,
+    // sdk ⇔ sdkSessionId) at the exact seam the file's own comment says it is
+    // keeping two maps apart to protect.
+    const deps = makeDeps({
+      getOrchestratorState: async () => ({
+        ...emptyEngineState,
+        workers: [
+          engineWorker({
+            terminalId: '',
+            runtime: 'sdk',
+            sdkSessionId: 'sdk-live',
+            worktree: '/wt/sdk-live',
+            branch: 'swarm/sdk-live',
+          }) as OrchestratorWorker,
+        ],
+      }),
+      listActiveTerminals: () => activeTerminals([]),
+      // The healthy production shape: the engine knows this worker AND its
+      // session is live in the pool at the same worktree.
+      listActiveSdkWorkers: () => [{ id: 'sdk-live', cwd: '/wt/sdk-live' }],
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    expect(out).toHaveLength(1) // claimed by the engine — not also folded in as unclaimed
+    expect(out[0].terminalId).toBeUndefined()
+    expect(out[0]).toMatchObject({ runtime: 'sdk', sdkSessionId: 'sdk-live' })
+  })
+
+  it('an UNCLAIMED SDK worker (curl-direct dispatch) is found in the SDK pool', async () => {
+    // The other path to the same failure: a worker the engine never tracked. It
+    // was found only through its heartbeat, arrived with no id and no runtime,
+    // and the tab drew a live worker as an EXITED terminal.
+    const deps = makeDeps({
+      listActiveTerminals: () => activeTerminals([]), // PTY pool EMPTY
+      listActiveSdkWorkers: () => [{ id: 'sdk-manual', cwd: '/wt/manual' }],
+      branchOfWorktree: async () => 'swarm/manual',
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      worktree: '/wt/manual',
+      branch: 'swarm/manual',
+      runtime: 'sdk',
+      sdkSessionId: 'sdk-manual',
+    })
+    expect(out[0].terminalId).toBeUndefined() // identity invariant, both arms
+  })
+
+  it('an unclaimed SDK session OUTSIDE the central worktrees dir is not folded in', async () => {
+    // The same scoping the PTY arm has: the SDK pool is process-wide, so this
+    // project's own commander desk (primary checkout) must not read as a worker.
+    const deps = makeDeps({
+      listActiveTerminals: () => activeTerminals([]),
+      listActiveSdkWorkers: () => [{ id: 'sdk-cmd', cwd: '/elsewhere/primary' }],
+      branchOfWorktree: async () => 'swarm/whatever',
+    })
+    expect(await listSwarmWorkers('/proj', deps)).toEqual([])
+  })
+
+  it('a PTY worker gains no runtime field — absent still means pty', async () => {
+    const deps = makeDeps({
+      getOrchestratorState: async () => ({ ...emptyEngineState, workers: [engineWorker()] }),
+      listActiveTerminals: () =>
+        activeTerminals([{ id: 'engine-pty', cwd: '/wt/engine-x', status: 'working' }]),
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    expect(out[0].runtime).toBeUndefined()
+    expect(out[0].sdkSessionId).toBeUndefined()
+    expect(out[0].terminalId).toBe('engine-pty')
   })
 
   it('prefers the live disk heartbeat updatedAt over the engine roster\'s frozen heartbeatAt', async () => {
@@ -261,6 +391,85 @@ describe('listSwarmWorkers — server-truth union', () => {
     })
     const out = await listSwarmWorkers('/proj', deps)
     expect(out).toEqual([{ worktree: '/wt/curl-x', branch: 'swarm/curl-x', terminalId: 'curl-pty' }])
+  })
+})
+
+// ── The SHIPPED deps, not injected ones ─────────────────────────────────────
+// Every test above hands `listSwarmWorkers` a fake dep bag, which is right for
+// the merge logic — and left the dep bag GET /api/swarm/workers actually runs
+// with no guard whatsoever. Measured 2026-08-01: rewriting the SDK liveness
+// filter in `defaultRegistryDeps` to `x.status !== 'exited'`, and separately
+// deleting its `role === 'worker'` clause, each kept all 20 tests in this file
+// green. A test bag that never touches the real bag is a test of a function
+// nobody calls.
+describe('defaultRegistryDeps().listActiveSdkWorkers — the filter the route really runs', () => {
+  /** A session that only finishes when the test says so — the shape production
+   *  is in for the seconds after `terminate` while claude unwinds. */
+  const stuck = (control: { stop?: () => void }): SdkQueryFn =>
+    (() => ({
+      async *[Symbol.asyncIterator]() {
+        await new Promise<void>((r) => {
+          control.stop = r
+        })
+        yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+      },
+    })) as SdkQueryFn
+  const settle = () => new Promise((r) => setTimeout(r, 20))
+
+  beforeEach(() => {
+    __resetSdkSessionsForTests()
+  })
+  afterEach(() => {
+    __resetSdkSessionsForTests()
+  })
+
+  it('keeps a terminated-but-UNWINDING worker — status says gone, the claude is not', async () => {
+    // The consequence of getting this wrong is not a cosmetic one. The Swarm tab
+    // renders from this list; a worker missing from it is drawn as DEAD and the
+    // tile offers a Restart, which puts a SECOND claude into the worktree the
+    // first one is still writing to. `terminateSdkSession` flips status to
+    // 'exited' SYNCHRONOUSLY, so `status !== 'exited'` drops precisely this
+    // worker — the one case that matters — and looks correct in every other.
+    const control: { stop?: () => void } = {}
+    const s = spawnSdkSession({
+      cwd: '/wt/unwinding',
+      role: 'worker',
+      options: {},
+      initialPrompt: 'go',
+      queryFn: stuck(control),
+    })
+    await settle()
+    terminateSdkSession(s.id)
+    expect(getSdkSession(s.id)?.status).toBe('exited') // what a status filter believes
+    expect(isSdkSessionReaped(s.id)).toBe(false) // what is actually true
+
+    expect(defaultRegistryDeps().listActiveSdkWorkers?.()).toEqual([
+      { id: s.id, cwd: '/wt/unwinding' },
+    ])
+
+    control.stop?.()
+    await settle()
+    // …and it does drop out once the pump has really unwound, so the guard above
+    // is not just "this list never forgets anything".
+    expect(defaultRegistryDeps().listActiveSdkWorkers?.()).toEqual([])
+  })
+
+  it('never lists a non-worker desk — a commander is not a worker tile', async () => {
+    // The other clause of the same filter. Without it this project's own
+    // commander/supply desk arrives in the worker list as a phantom worker, and
+    // a Terminate click on that tile stops the commander.
+    const control: { stop?: () => void } = {}
+    const s = spawnSdkSession({
+      cwd: '/wt/commander',
+      role: 'manager',
+      options: {},
+      initialPrompt: 'go',
+      queryFn: stuck(control),
+    })
+    await settle()
+    expect(defaultRegistryDeps().listActiveSdkWorkers?.()).toEqual([])
+    control.stop?.()
+    terminateSdkSession(s.id)
   })
 })
 

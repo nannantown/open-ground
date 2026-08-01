@@ -26,6 +26,7 @@ import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { projectUUIDFromPath } from './projectDataPath'
 import { listActiveTerminals as defaultListActiveTerminals } from './terminal'
+import { listSdkSessions, isSdkSessionLive } from './sdkSession'
 import { getOrchestratorState as defaultGetOrchestratorState } from './swarmOrchestrator'
 import { swarmRepoKey } from './swarmJanitor'
 import type { ActiveTerminalsResponse, SwarmOrchestratorState, SwarmWorkerRecord } from '../types'
@@ -136,6 +137,14 @@ const resolveCentralWorktreesDir = async (projectPath: string): Promise<string |
  *  engine / filesystem. */
 export interface SwarmWorkerRegistryDeps {
   listActiveTerminals: () => ActiveTerminalsResponse
+  /** Live Agent SDK sessions, as {cwd, id} pairs — the SECOND pool a worker can
+   *  live in. Without it, a worker dispatched OUTSIDE the engine (curl-direct
+   *  `POST /api/swarm/worker`) on the SDK runtime is found only through its
+   *  heartbeat file, arrives with no id and no runtime, and the Swarm tab draws
+   *  a healthy worker as an EXITED terminal — the same failure the engine-tracked
+   *  arm had, on the other path. Optional so pre-existing fake-deps tests are
+   *  unaffected; absent ⇒ no SDK sessions. */
+  listActiveSdkWorkers?: () => { id: string; cwd: string }[]
   getOrchestratorState: (projectPath: string) => Promise<SwarmOrchestratorState>
   readHeartbeats: (projectPath: string) => Promise<Map<string, ParsedHeartbeat>>
   branchOfWorktree: (cwd: string) => Promise<string | null>
@@ -144,6 +153,14 @@ export interface SwarmWorkerRegistryDeps {
 
 export const defaultRegistryDeps = (): SwarmWorkerRegistryDeps => ({
   listActiveTerminals: defaultListActiveTerminals,
+  listActiveSdkWorkers: () =>
+    listSdkSessions()
+      // `isSdkSessionLive` (= not reaped), NEVER status: terminate flips status
+      // synchronously, so a status filter drops a worker whose claude is still
+      // unwinding — the tab redraws it as DEAD and offers a restart, which puts a
+      // SECOND claude into the worktree the first one is still writing to.
+      .filter((x) => x.role === 'worker' && isSdkSessionLive(x))
+      .map((x) => ({ id: x.id, cwd: x.cwd })),
   getOrchestratorState: defaultGetOrchestratorState,
   readHeartbeats,
   branchOfWorktree,
@@ -169,6 +186,12 @@ export const listSwarmWorkers = async (
 
   const liveCwdToTerminalId = new Map<string, string>()
   for (const c of active.claude) liveCwdToTerminalId.set(c.cwd, c.id)
+  // The SDK pool's half of "who is live in a worktree". Kept in a SEPARATE map
+  // from the PTY one because the id means a different thing and lands in a
+  // different field — merging them is how an SDK session id would end up in
+  // `terminalId` and break the identity invariant it exists to protect.
+  const liveCwdToSdkId = new Map<string, string>()
+  for (const s of deps.listActiveSdkWorkers?.() ?? []) liveCwdToSdkId.set(s.cwd, s.id)
 
   const byWorktree = new Map<string, SwarmWorkerRecord>()
 
@@ -188,6 +211,15 @@ export const listSwarmWorkers = async (
     byWorktree.set(w.worktree, {
       worktree: w.worktree,
       branch: w.branch,
+      // The RUNTIME travels with the record, taken from the engine's own handle
+      // rather than re-derived. Without it the tile has no way to know, and the
+      // consequences were total: `terminalId` below is looked up in the PTY pool
+      // BY CWD, which an SDK worker is never in, so every SDK worker arrived with
+      // NO id and NO runtime — the Swarm tab fell through to the terminal
+      // renderer and drew a healthy, working SDK worker as an EXITED one. The SDK
+      // tile (SdkWorkerPane) was unreachable for engine workers entirely.
+      ...(w.runtime === 'sdk' ? { runtime: 'sdk' as const } : {}),
+      ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
       ...(terminalId ? { terminalId } : {}),
       taskId: w.taskId,
       taskTitle: w.taskTitle,
@@ -209,12 +241,19 @@ export const listSwarmWorkers = async (
   //    UI restart). Enrich from its heartbeat file when one exists; otherwise
   //    fall back to reading the branch straight out of the worktree.
   //    SCOPED to this project's central worktrees dir + a `swarm/*` branch —
-  //    listActiveTerminals() is process-wide (every live claude PTY, including
+  //    BOTH pools are process-wide (every live claude PTY and every live SDK
+  //    session on the machine, including
   //    THIS project's own Supply/Commander conversation in its primary
   //    checkout, and every other project's terminals), so without both checks
   //    those would be folded in as phantom workers (and a Terminate click on
   //    one would kill a real, unrelated session).
-  for (const [cwd, terminalId] of Array.from(liveCwdToTerminalId)) {
+  //    Both pools are folded here: an unclaimed worker may be a live PTY *or* a
+  //    live SDK session, and looking at only one drew the other as a dead tile.
+  const unclaimed: { cwd: string; terminalId?: string; sdkSessionId?: string }[] = [
+    ...Array.from(liveCwdToTerminalId, ([cwd, terminalId]) => ({ cwd, terminalId })),
+    ...Array.from(liveCwdToSdkId, ([cwd, sdkSessionId]) => ({ cwd, sdkSessionId })),
+  ]
+  for (const { cwd, terminalId, sdkSessionId } of unclaimed) {
     if (byWorktree.has(cwd)) continue
     if (!centralDir) continue // can't scope to this project — skip, never guess
     let canonCwd: string
@@ -230,7 +269,8 @@ export const listSwarmWorkers = async (
     byWorktree.set(cwd, {
       worktree: cwd,
       branch,
-      terminalId,
+      // Exactly one of these, per the identity invariant.
+      ...(sdkSessionId ? { runtime: 'sdk' as const, sdkSessionId } : { terminalId }),
       ...(hb?.phase ? { phase: hb.phase } : {}),
       ...(hb?.task ? { note: hb.task } : {}),
       ...(hb?.updatedAt ? { heartbeatAt: hb.updatedAt } : {}),

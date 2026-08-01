@@ -25,6 +25,8 @@ import {
   getSdkSession,
   type SdkQueryFn,
 } from '@/lib/server/sdkSession'
+import { projectUUIDFromPath } from '@/lib/server/projectDataPath'
+import { centralWorktreesDir } from '@/lib/server/paths'
 
 const postJson = (body: unknown): RequestInit => ({
   method: 'POST',
@@ -63,8 +65,14 @@ describe('/api/sdk-session/* — gates and lifecycle', () => {
     await registerTestProject(projectPath)
     await registerTestProject(otherPath)
 
-    // A session whose cwd is INSIDE projectPath (a worker's worktree shape).
-    const wt = join(projectPath, 'wt1')
+    // A session whose cwd is the project's CENTRAL worktree — the arrangement
+    // production actually creates (~/.openground/projects/<uuid>/worktrees/…,
+    // in the isolated test home). The first version of this file put the
+    // worktree INSIDE the project instead, an arrangement that never exists,
+    // and thereby certified a gate that 403'd every real SDK worker. Measure
+    // the production arrangement, not a convenient one.
+    const uuid = await projectUUIDFromPath(projectPath)
+    const wt = join(centralWorktreesDir(uuid), 'wt1')
     await mkdir(wt, { recursive: true })
     sessionId = spawnSdkSession({
       cwd: wt,
@@ -101,6 +109,31 @@ describe('/api/sdk-session/* — gates and lifecycle', () => {
     it('404s an unknown session id under a valid project', async () => {
       const res = await app.request(`/api/sdk-session/does-not-exist?${q(projectPath)}`)
       expect(res.status).toBe(404)
+    })
+
+    it('allows a MANAGER-shaped session too (cwd = the project root itself)', async () => {
+      // The other production shape: a commander desk runs in the primary
+      // checkout, not a worktree. Same UUID both sides ⇒ entitled.
+      const managerSession = spawnSdkSession({
+        cwd: projectPath,
+        options: {},
+        initialPrompt: 'go',
+        queryFn: openQuery,
+      })
+      const res = await app.request(`/api/sdk-session/${managerSession.id}?${q(projectPath)}`)
+      expect(res.status).toBe(200)
+    })
+
+    it('403s a session whose cwd resolves to NO registered project', async () => {
+      // e.g. the project was removed from the canvas while its session ran.
+      const orphan = spawnSdkSession({
+        cwd: join(scratch, 'unregistered-dir'),
+        options: {},
+        initialPrompt: 'go',
+        queryFn: openQuery,
+      })
+      const res = await app.request(`/api/sdk-session/${orphan.id}?${q(projectPath)}`)
+      expect(res.status).toBe(403)
     })
 
     it('allows the owning project', async () => {

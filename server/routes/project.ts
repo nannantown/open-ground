@@ -29,6 +29,7 @@ import {
 } from '@/lib/server/registry'
 import { canonicalize } from '@/lib/server/canonicalize'
 import { projectCentralDir } from '@/lib/server/paths'
+import { stopAllDesksInDirAndWait } from '@/lib/server/liveDesks'
 import {
   getSettings,
   setSettings,
@@ -730,6 +731,37 @@ export const projectRoutes = new Hono()
   // real folder — while everything downstream (which canonicalizes) believed
   // the project was gone.
   const target = await canonicalize(path)
+
+  // ⚠ STOP THE DESKS FIRST, AND WAIT — INCLUDING THE ONES OUTSIDE THIS FOLDER.
+  // The note below used to reason "the folder is already gone, so any in-flight
+  // run is dead". That is FALSE for every swarm worker: a worker's cwd is its
+  // worktree under ~/.openground/projects/<uuid>/worktrees/, which is not under
+  // the project root at all — trashing the root leaves it running, and the
+  // `rm -rf` of the central dir a few lines down then deletes the tree out from
+  // under a live claude. That is the 2026-07-28 machine freeze exactly: claude
+  // shells out to `git` constantly, and a delete landing mid-run wedges the
+  // process in uninterruptible sleep where no signal and no timeout reaches it
+  // again. Nothing about the owner having pressed Delete makes that survivable.
+  //
+  // Both places are asked, through the seam that knows BOTH pools: the central
+  // worktrees dir (swarm workers) and the project root itself (a terminal the
+  // owner opened there). Stopping is automatic — the owner is not asked to go
+  // and do it — but if a desk will not go within the budget the delete is
+  // REFUSED with nothing destroyed, because a half-delete that freezes the
+  // machine is worse than a delete that did not happen.
+  const central = projectCentralDir(entry.id)
+  const stopped = (await stopAllDesksInDirAndWait(central)) && (await stopAllDesksInDirAndWait(target))
+  if (!stopped) {
+    return c.json(
+      {
+        error:
+          'a claude session is still running in this project and did not stop — nothing was ' +
+          'deleted. Wait for it to finish (or stop it from the Swarm tab) and try again.',
+      },
+      409,
+    )
+  }
+
   const { cmd, args } = buildTrashCommand(process.platform, target)
 
   try {
@@ -742,8 +774,9 @@ export const projectRoutes = new Hono()
   }
 
   // Trashed successfully — drop the registry entry, its canvas position, AND its
-  // central data dir. The folder is already gone, so any in-flight run is dead;
-  // without this the per-project store (~/.openground/projects/<id>/) would
+  // central data dir. Every desk in both places was stopped and WAITED FOR
+  // above (trashing the root proves nothing: a worker runs in the central
+  // worktrees dir, not in the repo); without this the per-project store (~/.openground/projects/<id>/) would
   // orphan forever under a dead uuid (Export isn't built, so it's unrecoverable).
   //
   // Keyed on removeProjectEntry's RESULT, never on the entry we looked up before

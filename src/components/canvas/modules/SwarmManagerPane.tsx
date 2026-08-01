@@ -48,8 +48,9 @@ import { Activity, AlertTriangle, BarChart3, ClipboardCheck, Cpu, Gauge, Message
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
+import type { SdkSessionStatus } from '@/lib/server/sdkEvents'
 import type { WorkerStatus } from './SwarmWorkerPane'
-import { commanderPresence, type SwarmEngineState } from './useSwarmEngine'
+import { commanderPresence, engineWorkerKey, type SwarmEngineState } from './useSwarmEngine'
 
 /** The commander CONVERSATION (/manage) session, owned by SwarmModule (exactly
  *  like the supply session). null = not launched — the stage shows the launch
@@ -62,9 +63,18 @@ export interface ManagerSession {
   runtime?: 'pty' | 'sdk'
   sdkSessionId?: string
   /** Live status from SwarmModule's active-terminal poll (the SAME vocabulary
-   *  the supply / worker tiles use). Only meaningful for a PTY desk — an SDK
-   *  desk reports its own status on its event stream. */
-  status: WorkerStatus
+   *  the supply / worker tiles use) — for a PTY desk ONLY, and therefore
+   *  ABSENT for an SDK one.
+   *
+   *  It is optional for a reason. The PTY poll (GET /api/terminal/active) cannot
+   *  see an SDK desk at all, so SwarmModule had nothing true to put here and put
+   *  the constant `'working'` instead: the commander's beacon read "作業中"
+   *  forever — never waiting, never quota-parked, never exited — which is the
+   *  one line of this pane the owner uses to decide whether to go and look. An
+   *  SDK desk reports its own status on its event stream, so the tile hands it
+   *  back through `onStatus` and THAT is what the header reads. Leaving this
+   *  undefined is how the pane knows not to consult a poll that is blind. */
+  status?: WorkerStatus
 }
 
 interface Props {
@@ -105,7 +115,7 @@ interface Props {
    *  SwarmModule from /api/settings. `null` while that read is in flight — the
    *  switches render disabled rather than briefly claiming OFF, because "off" is
    *  a real answer here and a wrong one is worse than a blank one. */
-  runtimeDials: { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk' } | null
+  runtimeDials: { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number } | null
   /** Persist one dial (POST /api/settings, merged server-side by SwarmModule). */
   onToggleRuntime: (which: 'worker' | 'manager', next: boolean) => void
 }
@@ -118,6 +128,37 @@ const SESSION_DOT: Record<WorkerStatus, string> = {
   waiting: 'bg-ochre',
   starting: 'bg-ink-faint',
   exited: 'bg-ink-faint',
+}
+
+// The word that goes with the colour — the SAME four the worker tiles use.
+const SESSION_STATUS_LABEL_KEY: Record<WorkerStatus, string> = {
+  working: 'projectPanel.swarm.statusWorking',
+  waiting: 'projectPanel.swarm.statusWaiting',
+  starting: 'projectPanel.swarm.statusStarting',
+  exited: 'projectPanel.swarm.statusExited',
+}
+
+/** An SDK session's own status, in the beacon vocabulary this header speaks.
+ *
+ *  'quota-parked' folds to `waiting` deliberately: to the owner it IS a desk
+ *  waiting on something it cannot supply itself, which is exactly what the ochre
+ *  beacon means everywhere else in the app. `null` (nothing heard from the
+ *  stream yet) is 'starting' — the honest "spawned, not yet observed".
+ *
+ *  Pure and exported so the mapping is provable without a live stream. */
+export const managerSdkStatus = (s: SdkSessionStatus | null): WorkerStatus => {
+  switch (s) {
+    case 'working':
+      return 'working'
+    case 'waiting':
+    case 'quota-parked':
+      return 'waiting'
+    case 'exited':
+    case 'failed':
+      return 'exited'
+    default:
+      return 'starting'
+  }
 }
 
 // Quick commands the bar offers as one-click chips. The SENT string is the
@@ -206,6 +247,17 @@ export const SwarmManagerPane = ({
   // submits it, so its internal newlines stay literal instead of each submitting.
   const commanderId = session?.terminalId ?? null
   const sdkCommanderId = session?.runtime === 'sdk' ? (session.sdkSessionId ?? null) : null
+
+  // The SDK commander's own status, straight off its event stream — the only
+  // place it exists (the PTY poll cannot see that pool). Keyed by session id so
+  // a relaunched desk starts from "not heard from yet" instead of inheriting the
+  // dead one's last word.
+  const [sdkStatus, setSdkStatus] = useState<{ id: string; status: SdkSessionStatus } | null>(null)
+  const heardFromThisDesk =
+    sdkStatus && sdkCommanderId && sdkStatus.id === sdkCommanderId ? sdkStatus.status : null
+  const deskStatus: WorkerStatus = sdkCommanderId
+    ? managerSdkStatus(heardFromThisDesk)
+    : (session?.status ?? 'starting')
   const sendToCommander = useCallback(
     async (raw: string) => {
       const text = raw.replace(/\r/g, '')
@@ -297,7 +349,15 @@ export const SwarmManagerPane = ({
           <>
             {/* Commander conversation header — identity + status + stop. */}
             <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1.5">
-              <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${SESSION_DOT[session.status]}`} aria-hidden />
+              {/* The beacon. Named, not colour-only: the dot is 6px and colour
+                  alone carries the whole state, so it gets a role+label a screen
+                  reader (and a test) can read. */}
+              <span
+                role="img"
+                aria-label={t(SESSION_STATUS_LABEL_KEY[deskStatus])}
+                title={t(SESSION_STATUS_LABEL_KEY[deskStatus])}
+                className={`h-[6px] w-[6px] shrink-0 rounded-full ${SESSION_DOT[deskStatus]}`}
+              />
               <span
                 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-[11px] text-ink-muted"
                 title={t('projectPanel.swarm.manager.conversationHint')}
@@ -332,6 +392,10 @@ export const SwarmManagerPane = ({
                   branch={t('projectPanel.swarm.manager.badge')}
                   taskTitle={t('projectPanel.swarm.manager.conversationTitle')}
                   onExit={() => onSessionExit()}
+                  // The desk's own status, reported outward — the header beacon
+                  // above has no other source (the PTY poll is blind to this
+                  // pool) and used to be handed a hard-coded 'working'.
+                  onStatus={(s) => setSdkStatus({ id: session.sdkSessionId!, status: s })}
                 />
               ) : (
                 <ClaudeTerminalPane
@@ -347,7 +411,13 @@ export const SwarmManagerPane = ({
                 WITHOUT clicking into the xterm — the reply renders in the terminal
                 above. Keyed on the PTY id so a relaunch clears the draft. */}
             <CommanderCommandBar
-              key={session.terminalId}
+              // Keyed on the desk's RUNTIME-AGNOSTIC identity (engineWorkerKey),
+              // never on the PTY id: an SDK commander's terminalId is the EMPTY
+              // STRING, so `key={session.terminalId}` was the same key for every
+              // SDK desk — the relaunch this key exists to notice never happened,
+              // and a half-typed order to the previous commander sat waiting in
+              // the box for the new one.
+              key={engineWorkerKey(session)}
               onSend={(text) => void sendToCommander(text)}
               disabled={sessionBusy}
               t={t}
@@ -459,7 +529,13 @@ export const SwarmManagerPane = ({
           <div className="flex flex-col gap-2.5">
             <ControlRow
               label={t('projectPanel.swarm.runtime.worker')}
-              hint={t('projectPanel.swarm.runtime.workerHint')}
+              // The cap is IN the copy: with the shipped default of 1, a hint that
+              // just said "run workers on the SDK" would promise something the dial
+              // does not do — one runs on it, the rest keep using a terminal, and
+              // the switch looks half-broken.
+              hint={t('projectPanel.swarm.runtime.workerHint', {
+                count: runtimeDials?.workerCap ?? 1,
+              })}
               value={runtimeDials?.worker === 'sdk'}
               // null ⇒ the settings read has not answered. Disabled beats
               // rendering a confident OFF we have not verified.

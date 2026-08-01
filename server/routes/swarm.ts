@@ -919,7 +919,10 @@ export const swarmRoutes = new Hono()
   })
   // --- POST /api/swarm/escalations/open — raise a question to the user -------
   // Body: { path, question, context, plainQuestion?, whyEscalated, receiptKey?,
-  //         taskId?, branch?, terminalId?, proxyDraft? }. Idempotent on receiptKey while
+  //         taskId?, branch?, runtime?, terminalId?, sdkSessionId?, proxyDraft? }.
+  // `runtime` + the ONE handle it names is the blocked worker's ADDRESS — an
+  // SDK worker CANNOT be named by terminalId (it is the empty string).
+  // Idempotent on receiptKey while
   // an 'open' record exists (returns {deduped:true} + the existing record).
   // Until C-core lands this is the manual/verification entry point; the
   // overseer will call openEscalation() in-process.
@@ -971,9 +974,43 @@ export const swarmRoutes = new Hono()
       }
       proxyDraft = { answer: d.answer, confidence: d.confidence, isAbstention: d.isAbstention }
     }
+    // The blocked worker's ADDRESS. `runtime` is what tells openEscalation which
+    // handle names the worker (pty ⇔ terminalId, sdk ⇔ sdkSessionId —
+    // workerRuntime.ts); without it an SDK raise stores NO address and the
+    // owner's answer can never reach that worker. This route accepted only
+    // `terminalId`, so every raise from outside the engine — the commander skill,
+    // a manual curl, any external tool — could name a PTY worker and nothing else.
+    // Unknown values are REFUSED rather than coerced: silently downgrading an
+    // 'sdk' typo to a PTY record is exactly the un-answerable row this fixes.
+    if (body?.runtime !== undefined && body.runtime !== 'pty' && body.runtime !== 'sdk') {
+      return c.json({ error: 'runtime must be pty | sdk' }, 400)
+    }
+    const runtime: 'pty' | 'sdk' | undefined = body?.runtime
+    // ⚠ A RUNTIME WITHOUT ITS HANDLE IS AN ADDRESS OF NOBODY. Validating the
+    // word alone let `{runtime:'sdk', terminalId:'pty-typo'}` through with a 200
+    // (measured), and `addressOf` then stored a record with no handle at all —
+    // an inbox row the owner can answer into the void, reported as delivered.
+    // The identity invariant is not "one of two words is present", it is
+    // pty ⇔ terminalId / sdk ⇔ sdkSessionId, so the pair must agree HERE, at the
+    // only door an external raiser comes through.
+    if (runtime) {
+      const handle = runtime === 'sdk' ? body?.sdkSessionId : body?.terminalId
+      if (typeof handle !== 'string' || handle.length === 0) {
+        return c.json(
+          {
+            error: `runtime '${runtime}' requires a non-empty ${
+              runtime === 'sdk' ? 'sdkSessionId' : 'terminalId'
+            } — an escalation with no handle can never be answered`,
+          },
+          400,
+        )
+      }
+    }
     // Id-like fields ride an UNCAPPED persisted file — bound them here too
-    // (the module clamps defensively as well).
-    for (const k of ['receiptKey', 'taskId', 'branch', 'terminalId'] as const) {
+    // (the module clamps defensively as well). ⚠ EVERY id-like key must be in
+    // this list: a new field added to the passthrough below but not here is a
+    // hole straight into the file, which is how `sdkSessionId` must NOT arrive.
+    for (const k of ['receiptKey', 'taskId', 'branch', 'terminalId', 'sdkSessionId'] as const) {
       if (typeof body?.[k] === 'string' && body[k].length > MAX_ESCALATION_SHORT_FIELD) {
         return c.json({ error: `${k} too large` }, 400)
       }
@@ -988,7 +1025,9 @@ export const swarmRoutes = new Hono()
         receiptKey: typeof body?.receiptKey === 'string' ? body.receiptKey : undefined,
         taskId: typeof body?.taskId === 'string' ? body.taskId : undefined,
         branch: typeof body?.branch === 'string' ? body.branch : undefined,
+        ...(runtime ? { runtime } : {}),
         terminalId: typeof body?.terminalId === 'string' ? body.terminalId : undefined,
+        sdkSessionId: typeof body?.sdkSessionId === 'string' ? body.sdkSessionId : undefined,
         proxyDraft,
       })
       return c.json<EscalationOpenResponse>(res)

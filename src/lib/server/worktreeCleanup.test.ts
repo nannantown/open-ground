@@ -13,13 +13,30 @@ import {
 import { centralWorktreesDir } from './paths'
 import { canonicalize } from './canonicalize'
 import { listActiveTerminalCwds } from './terminal'
+import {
+  spawnSdkSession,
+  terminateSdkSession,
+  __resetSdkSessionsForTests,
+  type SdkQueryFn,
+} from './sdkSession'
 import { registerTestProject } from '../../test/registerProject'
 
-// The live-PTY guard reads the terminal pool. Mock it so the engine tests drive
-// the live-cwd list directly (no real node-pty spawn) and default it to []
-// (empty pool) so every pre-existing test behaves exactly as before.
+// The live-desk guard reads BOTH pools (liveDeskCwds.ts). The PTY half is mocked
+// so the engine tests drive the live-cwd list directly (no real node-pty spawn),
+// defaulting to [] (empty pool) so every pre-existing test behaves exactly as
+// before. The SDK half is the REAL pool — its queryFn is injectable, so a live
+// session can be seated without a real claude, which is what lets the regression
+// below be driven end to end instead of through a second mock.
 vi.mock('./terminal', () => ({ listActiveTerminalCwds: vi.fn(() => [] as string[]) }))
 const liveCwdsMock = vi.mocked(listActiveTerminalCwds)
+
+/** A session that stays open forever — a worker mid-task. */
+const liveQuery: SdkQueryFn = () => ({
+  async *[Symbol.asyncIterator]() {
+    await new Promise(() => {})
+    yield undefined // unreachable; a generator needs a yield
+  },
+})
 
 // Engine tests against REAL git repos + REAL worktrees (gitBranches
 // flavor): the repo lives in a tmpdir and is REGISTERED via the test registry
@@ -263,6 +280,64 @@ describe('cleanProjectWorktrees — live PTY guard', () => {
     expect(result.removed).toEqual([])
     expect(result.skippedDirty).toEqual([clean])
     expect(await exists(clean)).toBe(true)
+  })
+
+  // THE regression this pair exists for (2026-07-31). The guard consulted the
+  // PTY pool ONLY. An SDK worker has no PTY entry, so with the Agent SDK worker
+  // dial on, every SDK worker's worktree read as abandoned — clean tree, no PTY
+  // — and got `git worktree remove`d while claude was still working in it. The
+  // module's own comment states the rule it was breaking: deleting a running
+  // session's cwd out from under it is never acceptable.
+  it('protects a clean worktree a live SDK session occupies (no PTY anywhere)', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    liveCwdsMock.mockReturnValue([]) // the PTY pool is EMPTY — as it is for an SDK worker
+    const s = spawnSdkSession({ cwd: clean, options: {}, queryFn: liveQuery })
+    try {
+      const result = await cleanProjectWorktrees(dir)
+      expect(result.removed).toEqual([])
+      expect(result.skippedDirty).toEqual([clean])
+      expect(await exists(clean)).toBe(true)
+    } finally {
+      terminateSdkSession(s.id)
+      __resetSdkSessionsForTests()
+    }
+  })
+
+  it('protects it when the live SDK session sits in a SUBDIRECTORY of the worktree', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    const subdir = join(clean, 'src', 'nested')
+    await mkdir(subdir, { recursive: true })
+    liveCwdsMock.mockReturnValue([])
+    const s = spawnSdkSession({ cwd: subdir, options: {}, queryFn: liveQuery })
+    try {
+      const result = await cleanProjectWorktrees(dir)
+      expect(result.removed).toEqual([])
+      expect(await exists(clean)).toBe(true)
+    } finally {
+      terminateSdkSession(s.id)
+      __resetSdkSessionsForTests()
+    }
+  })
+
+  it('an SDK session in an UNRELATED dir does not spuriously protect (guard still discriminates)', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-a', 'task/a')
+    liveCwdsMock.mockReturnValue([])
+    const s = spawnSdkSession({
+      cwd: join(scratch, 'somewhere-else'),
+      options: {},
+      queryFn: liveQuery,
+    })
+    try {
+      const result = await cleanProjectWorktrees(dir)
+      expect(result.removed).toEqual([clean])
+      expect(await exists(clean)).toBe(false)
+    } finally {
+      terminateSdkSession(s.id)
+      __resetSdkSessionsForTests()
+    }
   })
 
   it('still removes the same clean worktree when the pool is empty (negative control — removal path intact)', async () => {

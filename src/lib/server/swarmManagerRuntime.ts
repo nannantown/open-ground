@@ -41,7 +41,7 @@ import {
 } from './terminal'
 import {
   listSdkSessionsIn,
-  isSdkSessionAlive,
+  isSdkSessionLive,
   getSdkSession,
   pushSdkInput,
 } from './sdkSession'
@@ -110,14 +110,33 @@ export const listManagerDesks = (
   return [...pty, ...sdk].sort((a, b) => b.startedAt - a.startedAt)
 }
 
-/** Is this specific desk still able to work? */
+/** `isSdkSessionLive` over a pool lookup — an unknown id is NOT live. */
+const defaultSdkDeskAlive = (id: string): boolean => {
+  const s = getSdkSession(id)
+  return !!s && isSdkSessionLive(s)
+}
+
+/** Is this specific desk STILL THERE?
+ *
+ *  ⚠ BOTH ARMS ANSWER FROM REAL EVIDENCE, NOT FROM A TERMINAL MARKER. The PTY arm
+ *  asks the process table because the pool's `finishedAt` is stamped by an
+ *  asynchronous onExit. The SDK arm asks `isSdkSessionLive` (= `!reaped`, the
+ *  pump's iterator having actually returned) for the mirror-image reason:
+ *  `terminateSdkSession` flips `status` to 'exited' SYNCHRONOUSLY — it means "we
+ *  asked it to stop" — so the status-based `isSdkSessionAlive` this used to call
+ *  reported a commander desk DEAD the instant Restart pressed DELETE, while its
+ *  claude was still unwinding. The whole point of {@link listManagerDesks} is
+ *  that the singleton guard and the presence probe agree; that file already
+ *  selects on `reaped` (via `listSdkSessionsIn`), so a desk this predicate called
+ *  dead was one the desk LIST still showed — two answers to one question, which
+ *  is exactly how a project ends up with two commanders integrating one trunk. */
 export const isManagerDeskAlive = (
   h: ManagerDeskHandle,
   deps: { ptyAlive?: (id: string) => boolean; sdkAlive?: (id: string) => boolean } = {},
 ): boolean =>
   h.runtime === 'pty'
     ? (deps.ptyAlive ?? isTerminalProcessAlive)(h.handleId)
-    : (deps.sdkAlive ?? isSdkSessionAlive)(h.handleId)
+    : (deps.sdkAlive ?? defaultSdkDeskAlive)(h.handleId)
 
 /** The desk holding a given CLAUDE conversation id, or null.
  *

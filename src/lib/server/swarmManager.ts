@@ -58,14 +58,23 @@ import {
 } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession, forgetSwarmSessionIf } from './swarmSessions'
-import { listLiveDesksIn, onTerminalExit, getTerminalScreen, isTerminalProcessAlive } from './terminal'
+// ⚠ PTY-ONLY functions are deliberately NOT imported here. `listLiveDesksIn` /
+// `isTerminalProcessAlive` answer desk presence for one pool, and a commander
+// desk can live on either — asking them is how a TWIN commander gets seated.
+// Presence goes through swarmManagerRuntime (both pools); see docs/MAP.md §5.
+import { onTerminalExit, getTerminalScreen } from './terminal'
 import { matchesQuotaExhaustion, normalizeScreen } from './swarmRateLimitText'
 import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 import { listManagerDesks } from './swarmManagerRuntime'
 import { sdkManagerPreflight, sdkManagerLaunchPlan } from './swarmManagerSdk'
-import { spawnSdkSession, type SdkSessionInfo } from './sdkSession'
+import {
+  spawnSdkSession,
+  attachSdkListener,
+  type SdkSessionInfo,
+  type SdkStreamFrame,
+} from './sdkSession'
 import { watchSdkDeskForLimit } from './sdkDeskLimit'
 import { getExecutionMode, getAllowedModelTiers, getManagerRuntimeDial } from './store'
 import type { ClaudeEffort } from '../types'
@@ -238,6 +247,134 @@ export const watchDeskForDeathOnArrival = (
   // Disarm once the desk has outlived the window, so a long-lived commander's
   // eventual exit is never read as a launch failure.
   if (stop) setTimeout(stop, DESK_DOA_WINDOW_MS).unref?.()
+}
+
+/** The SDK arm of {@link watchDeskForDeathOnArrival} (2026-08-01).
+ *
+ *  WHY THIS EXISTS AT ALL. The SDK launch path armed only
+ *  {@link watchSdkDeskForLimit}, and justified the missing death-watch with "an
+ *  SDK session has no screen to race". That is true of ONE of the PTY watcher's
+ *  three jobs. Read the corpse-learning watcher again and it does:
+ *    1. SAMPLE THE SCREEN for the refusal wording — the only job a screenless
+ *       runtime genuinely does not need (an SDK desk is TOLD: sdkEvents distils
+ *       the CLI's refusal into a `quota_refusal` event on the session's stream);
+ *    2. COOL THE TIER — `markRateLimited`, 20 persisted minutes, so the NEXT
+ *       launch (the engine's resuscitation reflex fires every few minutes) does
+ *       not seat another commander on the same spent tier. This is the whole
+ *       point of the 2026-07-19 incident: four desks died in a row because
+ *       nothing wrote the wall down;
+ *    3. FORGET THE STALE SESSION POINTER for a FRESH desk — `forgetSwarmSessionIf`,
+ *       so the next launch does not `--resume` a transcript whose entire content
+ *       is one refusal line.
+ *  Jobs 2 and 3 are runtime-agnostic — they are about the TIER and about the
+ *  SESSION RECORD, neither of which knows what carried the conversation — and an
+ *  SDK commander had NEITHER. The dial flipping to 'sdk' silently disabled both.
+ *
+ *  WHAT REPLACES THE SCREEN RACE. The `quota_refusal` event itself, inside the
+ *  same {@link DESK_DOA_WINDOW_MS} birth window. No exit to wait for: on a PTY,
+ *  "it exited" is the only proof that the wording was a STOP and not the desk
+ *  merely printing about limits; on the SDK stream the event IS the CLI's own
+ *  refusal message (matched against the SDK's exported prefix list), so there is
+ *  no picture to misread. The window is still checked, for the identical reason
+ *  it is checked on the PTY side: a refusal on day three is evidence about the
+ *  work, not about the launch.
+ *
+ *  POLARITY IS NOT FORKED PER RUNTIME. `matchesQuotaExhaustion(normalizeScreen(…))`
+ *  — the SAME predicate on the SAME wording list the PTY watch uses. A refusal
+ *  that does not match cools NOTHING (the fail-safe direction: a missed mark
+ *  costs one retry that re-learns the truth; a wrong mark parks a healthy tier).
+ *
+ *  MANAGER-ONLY, exactly like its PTY twin: the forget branch hardcodes the
+ *  `'manager'` role. Arming this for the supply desk requires parameterising that
+ *  first, or a supply DOA would forget the COMMANDER's session record.
+ *
+ *  Returns a detach function, or null when the session could not be subscribed
+ *  to (already gone). Never throws — learning is best-effort. */
+export const watchSdkDeskForDeathOnArrival = (
+  sdkSessionId: string,
+  tier: string,
+  projectPath: string,
+  agentSessionId: string,
+  wasResumed: boolean,
+  deps: {
+    attach?: typeof attachSdkListener
+    now?: () => number
+    forget?: typeof forgetSwarmSessionIf
+    mark?: typeof markRateLimited
+  } = {},
+): (() => void) | null => {
+  if (!isModelTier(tier)) return null // never cool an arbitrary model string
+  const nowFn = deps.now ?? Date.now
+  const mark = deps.mark ?? markRateLimited
+  const forget = deps.forget ?? forgetSwarmSessionIf
+  const bornAt = nowFn()
+  let learned = false
+  /** The refusal wording, if this desk has quoted one. Remembered, NOT acted on
+   *  — see the two rules below. */
+  let refusal: string | null = null
+  const onFrame = (f: SdkStreamFrame): void => {
+    if (learned) return
+    // ⚠ RULE 1: A REFUSAL IS NOT A DEATH. This watch is "learn from the CORPSE",
+    // and the PTY twin gets that for free by hanging off `onTerminalExit` — it
+    // cannot run before the desk is gone. The SDK stream has no such gate, and
+    // the first cut fired on the refusal frame ALONE. But an SDK desk does not
+    // die when it is refused: it PARKS ("The desk keeps running" —
+    // sdkDeskLimit.ts) and `quota-parked` has explicit documented exits back to
+    // working (sdkEvents.ts). So a live, parked commander was being treated as a
+    // corpse: its tier was cooled for 20 persisted minutes across every spawn
+    // path, and — far worse — the branch below DELETED THE SESSION POINTER OF A
+    // CONVERSATION THAT WAS STILL RUNNING, which is the one thing that header
+    // says must never happen. Remember the wording; wait for the ending.
+    if (f.ev.kind === 'quota_refusal') {
+      // ⚠ RULE 2: DO NOT RE-ASK THE QUESTION THE SDK ALREADY ANSWERED. This used
+      // to run `matchesQuotaExhaustion(normalizeScreen(raw))` as a second gate.
+      // That predicate is a PRIVATE MIRROR of Anthropic's wording, written for
+      // the PTY path because pixels are all it has. Here the primary判定 is
+      // Anthropic's own exported `USAGE_LIMIT_ERROR_PREFIXES` (12 entries), so
+      // the second gate can only ever SUBTRACT — and measured 2026-08-01 it
+      // subtracts a whole family: of six realistic refusal sentences only two
+      // pass it, and every credit-exhaustion wording ("You're out of usage
+      // credits…", "Fable 5 requires usage credits…", "You're out of extra
+      // usage…") is silently dropped. The polarity rule the PTY twin enforces
+      // with that regex ("the desk SAID the tier is spent", not "the desk died")
+      // is already enforced upstream by the prefix list.
+      refusal = f.ev.raw
+      return
+    }
+    // The SDK counterpart of `onTerminalExit`: the pool announces the terminal
+    // status when the pump unwinds (announceStatus, sdkSession.ts).
+    if (f.ev.kind !== 'status') return
+    if (f.ev.status !== 'exited' && f.ev.status !== 'failed') return
+    if (refusal === null) return // it died of something else — says nothing about the tier
+    try {
+      if (nowFn() - bornAt > DESK_DOA_WINDOW_MS) return // it lived; this says nothing about the launch
+      learned = true
+      const until = mark(tier, { ptyText: refusal, now: nowFn() })
+      console.warn(
+        `[swarmManager] SDK 司令官卓が tier '${tier}' の枯渇で起動即死 — ` +
+          `${tier} を ${new Date(until).toISOString()} まで冷却(次の起動は1段下の tier)`,
+      )
+      // A resumed session's transcript is real history, not just a refusal —
+      // never drop the pointer to it (see watchDeskForDeathOnArrival's header).
+      if (!wasResumed) {
+        void forget(projectPath, 'manager', agentSessionId).catch(() => {})
+      }
+    } catch {
+      /* learning is best-effort; a fault here must never disturb the event pump */
+    }
+  }
+  // fromSeq 0 ⇒ replay whatever the buffer already holds, so a refusal that
+  // arrived between the spawn and this call is not missed. This is also WHY the
+  // caller may arm the watch after its `await`s: unlike the PTY exit callback,
+  // nothing here is lost by subscribing late inside the birth window.
+  const sub = (deps.attach ?? attachSdkListener)(sdkSessionId, 0, onFrame)
+  if (!sub) return null
+  sub.replay.forEach(onFrame)
+  // Disarm once the desk has outlived the window, so a long-lived commander's
+  // eventual limit is never read as a launch failure (its OWNER notice still
+  // fires — that is watchSdkDeskForLimit's job, and it never expires).
+  setTimeout(sub.detach, DESK_DOA_WINDOW_MS).unref?.()
+  return sub.detach
 }
 
 export interface SpawnSwarmManagerOpts {
@@ -591,13 +728,18 @@ const launchNewDesk = async (
   // project's commander uses. Anything but a literal 'sdk' — absent, corrupt,
   // an unreadable settings file — is a PTY (store.getManagerRuntimeDial).
   const dial = await getManagerRuntimeDial().catch(() => ({ mode: 'pty' as const }))
+  // Why this desk is a PTY even though the dial said 'sdk'. Carried into the
+  // response so the owner READS it — a console.warn inside a forked server in a
+  // packaged app reaches nobody, and an invisible degrade looks exactly like a
+  // switch that does not work.
+  let fellBackBecause
   if (dial.mode === 'sdk') {
     const sdk = await launchSdkDesk(opts, session, me)
-    if (sdk) return sdk
+    if (sdk.desk) return sdk.desk
     // Fell through ⇒ the SDK path could not be established (no usable claude,
     // CLI too old). DEGRADE to the PTY commander rather than leaving the project
-    // without one: a desk on the known-good runtime beats no desk at all, and
-    // the reason has already been logged by launchSdkDesk.
+    // without one: a desk on the known-good runtime beats no desk at all.
+    fellBackBecause = sdk.fellBackBecause
   }
   const remoteName = await resolveSwarmRemoteName('manager', opts.projectPath)
   const ref = launchClaude(
@@ -627,6 +769,7 @@ const launchNewDesk = async (
   return {
     terminalId: ref.terminalId,
     runtime: 'pty',
+    ...(fellBackBecause ? { fellBackBecause } : {}),
     agentSessionId: session.agentSessionId,
     resumed: session.resume,
   }
@@ -643,24 +786,30 @@ const launchNewDesk = async (
  *  What is deliberately NOT here, compared with the PTY branch:
  *   - no Remote Control (the flag is inert outside a REPL — the supply desk is
  *     the owner's phone window instead);
- *   - no death-on-arrival screen watch. That watcher exists because a PTY tells
- *     you nothing except by painting: it samples the SCREEN for the refusal
- *     wording and races the exit. An SDK session says so — `quota_refusal` /
- *     `api_error` arrive as events on its own stream, and the model-limit watch
- *     reads them there (ownerDeskLimit). Re-implementing a screen race for a
- *     runtime that has no screen would be inventing the problem back. */
+ *   - no SCREEN SAMPLING in the death-on-arrival watch. ⚠ This bullet used to say
+ *     "no death-on-arrival watch" outright, and that was wrong (fixed 2026-08-01):
+ *     the PTY watcher has THREE jobs and only the first — sampling the screen for
+ *     the refusal wording and racing the exit — is a picture-reading workaround an
+ *     SDK session does not need. Cooling the spent TIER and forgetting the stale
+ *     SESSION POINTER are about the tier and the session record, not about how the
+ *     conversation was carried, and an SDK commander was getting NEITHER. Both are
+ *     armed below via {@link watchSdkDeskForDeathOnArrival}, driven by the
+ *     session's own `quota_refusal` event instead of a screen race.
+ *
+ *  Returns `{ desk }` on success and `{ fellBackBecause }` otherwise. The reason
+ *  is RETURNED, not merely logged: a console.warn inside a forked server in a
+ *  packaged app reaches nobody, so an invisible degrade is indistinguishable
+ *  from a switch that does not work. The caller puts it in the response. */
 const launchSdkDesk = async (
   opts: SpawnSwarmManagerOpts,
   session: { agentSessionId: string; resume: boolean },
   me: { model: string; effort?: ClaudeEffort },
-): Promise<SpawnSwarmManagerResponse | null> => {
+): Promise<{ desk?: SpawnSwarmManagerResponse; fellBackBecause?: string }> => {
   const pre = sdkManagerPreflight()
   if (!pre.ok || !pre.claudeBin) {
-    console.warn(
-      `[swarmManager] SDK commander unavailable (${pre.problems.join('; ')}) — ` +
-        'この卓は PTY で起動する(ダイヤルは sdk のまま)',
-    )
-    return null
+    const why = `SDK preflight failed (${pre.problems.join('; ')})`
+    console.warn(`[swarmManager] SDK commander unavailable — ${why}; この卓は PTY で起動する`)
+    return { fellBackBecause: why }
   }
   const plan = sdkManagerLaunchPlan({
     projectPath: opts.projectPath,
@@ -680,18 +829,18 @@ const launchSdkDesk = async (
       initialPrompt: plan.initialPrompt,
     })
   } catch (e) {
-    console.warn(`[swarmManager] SDK commander spawn failed (${String(e)}) — PTY で起動する`)
-    return null
+    const why = `SDK spawn failed (${String((e as Error)?.message ?? e).slice(0, 200)})`
+    console.warn(`[swarmManager] ${why} — PTY で起動する`)
+    return { fellBackBecause: why }
   }
   // A session that died inside spawnSdkSession (the SDK threw while building the
   // query) reports 'failed' synchronously. Treat it exactly like a preflight
   // miss: drop it and let the caller seat a PTY desk, rather than recording a
   // session id for a conversation that does not exist.
   if (sdkSession.status === 'failed') {
-    console.warn(
-      `[swarmManager] SDK commander failed at start (${sdkSession.exitReason ?? 'unknown'}) — PTY で起動する`,
-    )
-    return null
+    const why = `the SDK session died at start (${sdkSession.exitReason ?? 'unknown'})`
+    console.warn(`[swarmManager] SDK commander — ${why}; PTY で起動する`)
+    return { fellBackBecause: why }
   }
   // The model-limit watch, wired at the SOURCE instead of on a sampling timer:
   // the CLI's refusal arrives as an event on this session's own stream, so there
@@ -705,12 +854,28 @@ const launchSdkDesk = async (
     // eslint-disable-next-line no-console
     console.warn(`[swarmManager] could not persist the commander session id: ${String(e)}`)
   })
+  // LEARN FROM THE CORPSE, SDK arm (2026-08-01) — cool a tier that refuses on
+  // arrival, and drop the one-line-refusal session pointer for a FRESH desk.
+  // Armed AFTER the record on purpose, and this ordering is only safe because the
+  // watch replays the session buffer from seq 0: nothing that arrived during the
+  // await is lost, and the forget can no longer race the write it is meant to
+  // undo (the PTY arm has to arm first, and lives with that race, because a PTY
+  // exit callback has no replay).
+  watchSdkDeskForDeathOnArrival(
+    sdkSession.id,
+    me.model,
+    opts.projectPath,
+    session.agentSessionId,
+    session.resume,
+  )
   return {
-    // EMPTY by the identity invariant — an SDK desk has no terminal.
-    terminalId: '',
-    runtime: 'sdk',
-    sdkSessionId: sdkSession.id,
-    agentSessionId: session.agentSessionId,
-    resumed: session.resume,
+    desk: {
+      // EMPTY by the identity invariant — an SDK desk has no terminal.
+      terminalId: '',
+      runtime: 'sdk',
+      sdkSessionId: sdkSession.id,
+      agentSessionId: session.agentSessionId,
+      resumed: session.resume,
+    },
   }
 }

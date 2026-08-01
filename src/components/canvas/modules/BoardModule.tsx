@@ -26,6 +26,8 @@ import { useT } from '@/i18n/I18nContext'
 import { sanitizeEngineState, type EngineWorker } from '@/components/canvas/modules/useSwarmEngine'
 import { SwarmWorkerPane, type WorkerStatus } from '@/components/canvas/modules/SwarmWorkerPane'
 import { deriveWorkerActivity, type BoardCardWorker } from '@/lib/boardWorker'
+import { SdkWorkerPane } from './SdkWorkerPane'
+import { engineWorkerKey } from './useSwarmEngine'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
 import { dependencyCandidates, dependencyCycleIds } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
@@ -241,7 +243,14 @@ export const BoardModule = ({
             const p = prev.get(id)
             return (
               !!p &&
+              // BOTH handles, because this is an IDENTITY test. `terminalId`
+              // alone answers "same worker?" with `'' === ''` for every SDK
+              // worker — so a card whose worker was replaced by a NEW SDK
+              // session (recovery, restart) kept the previous record, and the
+              // drawer went on addressing a session id that no longer exists.
+              // Found by workerAddressingInventory.test.ts scan D.
               p.terminalId === w.terminalId &&
+              p.sdkSessionId === w.sdkSessionId &&
               p.branch === w.branch &&
               p.stage === w.stage &&
               p.phase === w.phase &&
@@ -1462,15 +1471,20 @@ export const BoardModule = ({
   // falls to null and we revert to the normal drawer — a dead worker never
   // leaves a black screen.
   const drawerWorker = detailTask ? workersByTask.get(detailTask.id) : undefined
+  // ⚠ ADDRESS BY THE RUNTIME-AGNOSTIC KEY. An SDK worker's terminalId is EMPTY,
+  // so keying on it made `workerScreenId` null for one — and the drawer fell
+  // through to the DRAFT branch, putting a Run button on a card an SDK worker was
+  // actively working. Pressing it starts a SECOND claude on the same card.
+  const drawerWorkerKey = drawerWorker ? engineWorkerKey(drawerWorker) : ''
   const workerScreenId =
-    drawerWorker && !exitedWorkerScreens.has(drawerWorker.terminalId)
-      ? drawerWorker.terminalId
+    drawerWorker && drawerWorkerKey && !exitedWorkerScreens.has(drawerWorkerKey)
+      ? drawerWorkerKey
       : null
   // Map the worker's live beacon (+ coarse stage) to SwarmWorkerPane's status
   // vocabulary — same derivation as the card band (deriveWorkerActivity), minus
   // 'done'/'exited' (an exited PTY drops us out of this branch via onExit).
   const workerScreenStatus: WorkerStatus = (() => {
-    const live = drawerWorker ? claudeStatusByPty.get(drawerWorker.terminalId) : undefined
+    const live = drawerWorkerKey ? claudeStatusByPty.get(drawerWorkerKey) : undefined
     if (live === 'working') return 'working'
     if (live === 'waiting') return 'waiting'
     return drawerWorker?.stage === 'starting' ? 'starting' : 'waiting'
@@ -1515,7 +1529,10 @@ export const BoardModule = ({
     (taskId: string): BoardCardWorker | null => {
       const w = workersByTask.get(taskId)
       if (!w) return null
-      const live = claudeStatusByPty.get(w.terminalId)
+      // Keyed runtime-agnostically: the beacon (/api/terminal/active) now reports
+      // SDK sessions under their own session id, so an SDK worker resolves here
+      // instead of falling to `undefined` and painting as permanently "waiting".
+      const live = claudeStatusByPty.get(engineWorkerKey(w))
       const view: BoardCardWorker = {
         branch: w.branch,
         activity: deriveWorkerActivity(w.stage, live),
@@ -1633,14 +1650,28 @@ export const BoardModule = ({
                 )}
               </div>
               <div className="flex min-h-0 flex-1 flex-col">
-                <SwarmWorkerPane
-                  terminalId={workerScreenId}
-                  branch={drawerWorker.branch}
-                  taskTitle={detailTask.title}
-                  status={workerScreenStatus}
-                  source="engine"
-                  onExit={() => markWorkerScreenExited(workerScreenId)}
-                />
+                {drawerWorker.runtime === 'sdk' && drawerWorker.sdkSessionId ? (
+                  // An SDK worker has no terminal to render — its distilled
+                  // transcript is the screen. Same read-only stance as the PTY
+                  // arm (source='engine'): the orchestrator owns this worker.
+                  <SdkWorkerPane
+                    sdkSessionId={drawerWorker.sdkSessionId}
+                    projectPath={project.path}
+                    branch={drawerWorker.branch}
+                    taskTitle={detailTask.title}
+                    source="engine"
+                    onExit={() => markWorkerScreenExited(workerScreenId)}
+                  />
+                ) : (
+                  <SwarmWorkerPane
+                    terminalId={workerScreenId}
+                    branch={drawerWorker.branch}
+                    taskTitle={detailTask.title}
+                    status={workerScreenStatus}
+                    source="engine"
+                    onExit={() => markWorkerScreenExited(workerScreenId)}
+                  />
+                )}
               </div>
             </>
           ) : !hasTerminalSlot(detailTask.id) ? (

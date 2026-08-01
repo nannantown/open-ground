@@ -209,11 +209,28 @@ const normalizeRuntimeDial = (
   const raw = v as { mode?: unknown; sdkMaxWorkers?: unknown }
   if (raw.mode !== 'pty' && raw.mode !== 'sdk') return undefined
   const cap = raw.sdkMaxWorkers
+  // `sdkMaxWorkers: 0` IS A MEANINGFUL SETTING — "keep the dial on sdk but run
+  // NO SDK workers" — and the old `cap > 0` test threw it away as falsy. The key
+  // then vanished from the persisted dial, the reader fell back to
+  // DEFAULT_SDK_MAX_WORKERS (1), and the result was the worst kind of silence:
+  // the panel showed 0, the server kept seating one SDK worker, and nothing
+  // logged the disagreement. Zero is precisely the value an owner reaches for to
+  // stop the experiment without losing the setting, so it is the one that must
+  // survive the round trip.
+  //
+  // The accept predicate is deliberately IDENTICAL to the reader's
+  // (swarmWorkerRuntimeDial.sdkSlotLimit): finite, >= 0, floored. When writer and
+  // reader disagree, the same number means two different things depending on
+  // whether it arrived by POST /api/settings or by a hand-edited settings.json —
+  // and this dial is one people hand-edit. Everything else (negative, NaN,
+  // Infinity, a string, absent) OMITS the key, so the reader's documented default
+  // applies rather than an unbounded fleet. No upper clamp: a silly-large cap
+  // only ever means "do not cap", and every worker it admits still has to clear
+  // the SDK preflight.
+  const capOk = typeof cap === 'number' && Number.isFinite(cap) && cap >= 0
   return {
     mode: raw.mode,
-    ...(withMaxWorkers && typeof cap === 'number' && Number.isFinite(cap) && cap > 0
-      ? { sdkMaxWorkers: Math.floor(cap) }
-      : {}),
+    ...(withMaxWorkers && capOk ? { sdkMaxWorkers: Math.floor(cap) } : {}),
   }
 }
 

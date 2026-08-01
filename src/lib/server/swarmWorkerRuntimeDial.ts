@@ -21,6 +21,7 @@
 import type { Settings } from '../types'
 import { sdkWorkerPreflight, type SdkPreflightResult } from './swarmWorkerSdk'
 import { workerRuntimeKind, type WorkerHandle } from './workerRuntime'
+import { listSdkSessions } from './sdkSession'
 
 export const DEFAULT_SDK_MAX_WORKERS = 1
 
@@ -39,26 +40,96 @@ export const sdkSlotLimit = (settings: Pick<Settings, 'swarmWorkerRuntime'>): nu
   return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_SDK_MAX_WORKERS
 }
 
-/** Live SDK workers among the engine's roster. */
+/** Live SDK workers among the engine's roster.
+ *
+ *  ⚠ A ROSTER IS NOT THE FLEET. Kept for the engine's own accounting, but never
+ *  use it alone to enforce the cap: a worker dispatched outside the engine
+ *  (curl-direct `POST /api/swarm/worker` — the commander's documented and
+ *  PRIMARY path) is in no roster at all. Counting only rosters is why the cap
+ *  was silently unenforceable on that path. Use {@link liveSdkWorkerCount}. */
 export const countSdkWorkers = (workers: readonly WorkerHandle[]): number =>
   workers.reduce((n, w) => (workerRuntimeKind(w) === 'sdk' ? n + 1 : n), 0)
+
+/** How many SDK workers are ACTUALLY live, measured from the pool.
+ *
+ *  The pool is the only source that sees every worker however it was started,
+ *  which is what a cap has to count. The engine roster is merged in only to
+ *  cover the instant between "the engine recorded a worker" and "its session
+ *  appears in the pool"; ids dedupe the overlap.
+ *
+ *  Injectable so the decision stays a pure function under test. */
+export const liveSdkWorkerCount = (
+  rosterWorkers: readonly WorkerHandle[],
+  poolSessions: readonly { id: string; role?: string; status: string; reaped?: boolean }[],
+): number => {
+  const poolIds = new Set<string>()
+  for (const s of poolSessions) {
+    if (s.role !== 'worker') continue
+    // ⚠ `reaped` — AND NOTHING ELSE. The THIRD sibling of the same rule.
+    // terminateSdkSession flips status to 'exited' synchronously, so a status
+    // filter releases the slot of a worker whose claude is still unwinding in its
+    // worktree: the dial dispatches a replacement immediately and the cap is
+    // exceeded by exactly the workers that are hardest to see — two claudes, one
+    // worktree.
+    //
+    // The status test is DELETED, not merely preceded by the new one. Adding
+    // `if (reaped) continue` above it changed nothing at all, because the very
+    // sessions it was meant to catch are the ones status already excluded; the
+    // first attempt at this fix did exactly that and the guard below caught it.
+    // `reaped` is complete on its own: a spawn-failure entry is stamped reaped,
+    // and so is every session whose pump has unwound.
+    if (s.reaped) continue
+    poolIds.add(s.id)
+  }
+  let n = poolIds.size
+  for (const w of rosterWorkers) {
+    if (workerRuntimeKind(w) !== 'sdk') continue
+    // AN ID MEANS THE POOL IS THE AUTHORITY. If it is not in `poolIds` the
+    // session is not live, whether the pool still remembers it as finished or
+    // has already swept it — the pool only ever forgets sessions that CLOSED
+    // (sweepClosedSessions), and a pool reset means the process died and took
+    // every session with it. Either way: not running, not a slot.
+    //
+    // An earlier version instead exempted only ids the pool still REMEMBERED as
+    // finished, which quietly expired: 30 minutes after a worker ended, the
+    // retention sweep dropped it, the roster entry became "unknown", and the
+    // counter started charging a slot for work that finished half an hour ago —
+    // the fix regressing itself on a timer.
+    if (w.sdkSessionId) continue
+    // No id at all: recorded between spawn and pool insertion, or a legacy
+    // record. The engine believes it dispatched this worker, so ignoring it
+    // under-counts. (Dropping these is how this counter first regressed the
+    // shipped tests.)
+    n++
+  }
+  return n
+}
 
 /** Decide the runtime for ONE about-to-be-dispatched worker. */
 export const chooseWorkerRuntime = (opts: {
   settings: Pick<Settings, 'swarmWorkerRuntime'>
-  /** The engine's current roster (to count live SDK slots). */
+  /** The engine's current roster. Contributes to the slot count, but is NOT the
+   *  authority — a curl-direct worker is in no roster (see liveSdkWorkerCount). */
   workers: readonly WorkerHandle[]
   /** The worktree this worker will run in — the guard's write root. */
   worktree: string
   home?: string
   /** Injected for tests. */
   preflight?: (o: { writeRoots: string[]; home?: string }) => SdkPreflightResult
+  /** The SDK pool, for the slot count. Defaults to the real pool. Injected so
+   *  the decision stays testable without spawning anything. */
+  poolSessions?: () => readonly { id: string; role?: string; status: string; reaped?: boolean }[]
 }): RuntimeChoice => {
   const mode = opts.settings.swarmWorkerRuntime?.mode ?? 'pty'
   if (mode !== 'sdk') return { runtime: 'pty' }
 
   const limit = sdkSlotLimit(opts.settings)
-  const live = countSdkWorkers(opts.workers)
+  // Measured from the POOL, not from the caller's roster. Passing `workers: []`
+  // (which every curl-direct dispatch did, because there is no roster there)
+  // made `live` 0 forever, so `live >= limit` was permanently false and the cap
+  // never applied on the commander's main dispatch path — while the switch's own
+  // copy promised "at most N at a time".
+  const live = liveSdkWorkerCount(opts.workers, (opts.poolSessions ?? listSdkSessions)())
   if (live >= limit) {
     return {
       runtime: 'pty',

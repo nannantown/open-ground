@@ -139,8 +139,14 @@ PTY worker が今日受け取っているもの（`swarmWorker.ts workerLaunchOp
   runReviewer 注入と同型。
 - 公開 API（すべて id ベース）:
   `spawnSdkSession(opts)` / `attachListener(id, fromSeq)` / `pushInput(id, text)` /
-  `interruptSdkSession(id)`（graceful・turn 停止） / `terminateSdkSession(id)`
-  （hard・abort+子プロセス終了） / `getSdkSession(id)` / `listSdkSessions()`。
+  `interruptSdkSession(id)`（graceful・turn 停止。**セッションは生き延びる** — §6 の
+  0801 実測） / `terminateSdkSession(id)`（**「頼む」だけ**。`closed` を立てて
+  `interrupt()` を投げ、status を `exited` に**同期で**倒す。abort はしない） /
+  `getSdkSession(id)` / `listSdkSessions()`。
+- **生死の述語は `isSdkSessionLive(s)`（= `!reaped`）が唯一。** `status` は生死ではなく
+  「何を頼んだか／何を見たか」の記録で、terminate 直後は claude がまだ unwind 中でも
+  `exited` になっている。reap 待ちは `isSdkSessionReaped(id)`（pump の `finally` でだけ立つ）。
+  この2つを混同した seam が 0801 の一連のレビューで少なくとも9件出た（`docs/MAP.md` §5）。
 - **status 機械**（§6）はこのモジュールが唯一の書き手。
 
 ### 3.2 `src/lib/server/workerRuntime.ts` — アダプタ境界（新規）
@@ -311,14 +317,14 @@ GuardWiringError の哲学（unverified ⇒ spawn 拒否）に真っ向から反
 
 | # | 知りたい事実 | PTY の取り方（現状） | SDK の取り方（本設計） | 状態 |
 |---|---|---|---|---|
-| S1 | 生きているか | getTerminal + 心拍鮮度 + JSONL mtime の合議（推測） | プール entry の stream open / closed。閉じた=死（確定） | ✅ |
-| S2 | 作業中 or 入力待ち | `isGenerating(screen)`（footer 文字列 — 罠②の本文誤認あり） | ターン境界: input 送信済みで `turn_end` 未着=working / 着=waiting | ✅ |
+| S1 | 生きているか | getTerminal + 心拍鮮度 + JSONL mtime の合議（推測） | **`isSdkSessionLive(s)` = `!reaped`** ＝ pump のイテレータが実際に返ったか。⚠ **当初この欄は「closed = 死（確定）」と書いており、それが 0801 に少なくとも9件の無言欠陥を生んだ。** `closed` / `status:'exited'` は `terminateSdkSession` が**同期で立てる「頼んだ」印**で、その裏の claude はまだ unwind している。死んだと読んだ側は worktree を消しにいく | ✅（述語は1つに集約済み。棚卸しと数え方は `docs/MAP.md` §5） |
+| S2 | 作業中 or 入力待ち | `isGenerating(screen)`（footer 文字列 — 罠②の本文誤認あり） | ターン境界。⚠ **「メッセージが来た＝作業中」ではない** — CLI はターンの合間にも喋る（`background_tasks_changed` / `session_state_changed`）。それで working に上げると**終わるターンが無いので二度と waiting に戻らない**。昇格は**仕事の証拠**（`isWorkEvidence`）に限る。⚠ **terminate は遷移の終端**（`closed` 後は emit だけ）。ただし中断ターンの `aborted_streaming` は読む — 落とすと正常停止が全部 `failed` 表示になる | ✅（0801 の4〜6周目で3回作り直した箇所） |
 | S3 | クォータ拒否（tier 帰属つき） | swarmRateLimitText の位置解剖（758行） | `sdkEvents.quota_refusal`: `turn_end.reason==='api_error'` + SDK export の refusal prefix 前方一致。tier は worker.model から（今と同じ帰属規則） | ✅ 材料実測 / 組み立ては新規 |
 | S4 | rate limit の事前警告 | 無し（画面に出た時だけ） | `rate_limit_event`（utilization / resetsAt が**拒否の前に**流れる — 実測 0.55 を観測） | ✅ **新能力**: 冷却テーブルへ予防入力できる（stage 1 では記録のみ・挙動は変えない） |
 | S5 | 自由記述の質問で止まっている | detectFreeTextQuestion（画面・fail-closed） | `turn_end(success)` 後 waiting + 最終 `text` を質問分類（**既存 swarmQuestions の判定文法をテキスト入力で再利用** — 画面行の代わりに発話テキストを渡す薄い adapter） | ☑ 判定関数は流用・入口だけ差し替え |
 | S6 | 権限プロンプトで止まっている | detectMenu（backstop） | **backstop は不要かつ不可能** — bypass 下で `canUseTool` は呼ばれない（W0/S0-D 実測。SDK 自身が「bypass では PreToolUse hook を使え」と警告する）。ゲートは §4-G の hook 一本 | ✅ 解決（当初案は破棄） |
-| S7 | 注入が着弾したか | bracketedPaste + 画面再読（§3.7・7回差し戻し） | `pushInput` の受理 = 着弾（キュー投入が同期确認）。**mid-turn 投入の意味論（キューされるか）は S0-B** | ⚠ S0-B |
-| S8 | 停滞（長い1ターンの中で進んでいるか） | subagent JSONL の mtime | **併用**: lastEventAt（stream 由来・秒精度）+ 従来の subagent mtime（JSONL は SDK でも書かれる — resume 実測が間接証明。worktree cwd での書き出しは S0-C で直接確認） | ⚠ S0-C |
+| S7 | 注入が着弾したか | bracketedPaste + 画面再読（§3.7・7回差し戻し） | `pushInput` の受理 = 着弾（キュー投入が同期確認）。mid-turn 投入がキューされ次ターンで処理されることは **W0/S0-B で実測済み**（付録 B-3・本番構成の AsyncIterable prompt で測定） | ✅ 解決。⚠ **ただし「受理」は API の話で、UI はそれを取りこぼしうる** — タイルが POST の**前**に入力欄を空にしていたため、409 で拒否された投入が無言で消え、オーナーは届いたと信じていた（0801 修正）。同期で受理が分かる利点は、**失敗を表示して初めて**利点になる |
+| S8 | 停滞（長い1ターンの中で進んでいるか） | subagent JSONL の mtime | **併用**: lastEventAt（stream 由来・秒精度）+ 従来の subagent mtime（JSONL は SDK でも書かれる — resume 実測が間接証明。worktree cwd での書き出しは S0-C で直接確認） | ✅ 解決（付録 B-4。当初「JSONL が無い」と誤判定した原因は SDK ではなく OG 側 `claudeDirName` の実バグで、`dbba9e55` で根治済み） |
 | S9 | 消費量（トークン/コスト） | JSONL の usage 行 | `turn_end.usage` の累積（`modelUsage` 込みで result に実測済み）。JSONL fallback 維持 | ✅ |
 | S10 | コンテキスト残量 | JSONL 合算 + 画面 footnote | stage 1: JSONL 合算のまま（共通）。後続: `get_context_usage` 制御要求 | — 据え置き |
 | S11 | 心拍（phase/note/readyToMerge） | worker が Bash で swarm-beat.sh | **不変**（worker の /order プロトコルはランタイム非依存） | ✅ 設計上不変 |
@@ -344,11 +350,43 @@ working/waiting ──(stream close: reason)──▶ exited { reason }
 
 - `exited.reason` は `turn_end.reason`（`completed` / `aborted_streaming` / `api_error`）
   または `process-died`（result 無しで閉じた — 137 等）。
-- **`interrupt()` 後の throw（`[ede_diagnostic]`）は正常系**として吸収し、
-  `aborted_streaming` を exited/waiting の判定に使う（INVESTIGATION §3-A の罠:
-  **`subtype` では判定しない**。本物のエラーでも `success` が来る）。
-- `terminateSdkSession` = `abortController.abort()` + 子プロセス確認殺し
-  （abort は result を返さない — 実測 — ので、これは「理由を問わない停止」専用）。
+- **【2026-08-01 実測で訂正】`interrupt()` はセッションを終わらせない。**
+  当初この行は「`interrupt()` 後の throw（`[ede_diagnostic]`）は正常系として吸収する」と
+  書いていた。**因果が逆だった。** 認証もクォータも要らない protocol-speaking の偽 CLI で
+  実測（`scripts/probe-sdk-interrupt-survival.mts`）した結果:
+  - CLI が生きている限り `interrupt()` は**走っているターンだけ**を中断し、
+    `aborted_streaming` の result を届け、**async iterator は終わらない**。
+    その後に push したターンは完走する（= UI の「セッションは続きます」は真）。
+  - throw は **claude プロセスが死んだとき専用**。SDK は子プロセスの終了でしか自分の
+    iterator を終わらせず、その終了エラーの本文を**直前のエラー result の文言に貼り替える**
+    ので、例外が `[ede_diagnostic] …` と読めて interrupt が原因に見える。
+  - 0730 のスパイクが逆の結論を出したのは、**`prompt` に文字列を渡していた**から。
+    SDK は `typeof prompt === 'string'` で `isSingleUserTurn` を立て、最初の result で
+    CLI の stdin を閉じる ⇒ **その構成では CLI は必ず死ぬ**。本番は AsyncIterable
+    （`sdkSession.makeInputIterable`）で、これは**別の構成**である。
+  - ⚠ **測ったのは偽 CLI に対してであり、本物の `claude` に対してではない**（0801 の
+    点検で追記）。プロトコルが同じなので **SDK クライアント側の性質**（子が生きていれば
+    iterator は終わらない／throw は子の死に紐づく）は転用してよいが、
+    **「本物の `claude` が interrupt 後も生き続けるか」は未確認**。本物が終了を選ぶなら
+    本番はケース B に落ちる。隔離 HOME では認証できない（付録 B-6）ための意図的な未測定 —
+    付録 C の該当行を参照。
+  - ⚠ 教訓（このファイル全体に効く）: **本番と同じ構成で測る**。
+    auto-memory `reference_measure_the_production_arrangement` と同型の踏み方で、
+    ここでは「測り方の違い」が**因果の向きを反転させて確信させた**。
+  - なお `aborted_streaming` を判定に使う点と、**`subtype` では判定しない**という
+    INVESTIGATION §3-A の罠（本物のエラーでも `success` が来る）は変わらず有効。
+  - 副産物として本物の欠陥が1件出た: 中断の記録が**生涯フラグ**（`sawAbort`）で、朝
+    interrupt した卓が昼にクラッシュしても「綺麗に止めた」と記録されていた。
+    「直前のイベントが aborted な `turn_end` か」へ縮めてある。
+- **`terminateSdkSession` の実体は abort ではない**（設計当初は
+  `abortController.abort()` + 子プロセス確認殺しと書いていた）。現物は
+  ① `closed = true` ② 入力待ちの wake を叩き起こす ③ `handle.interrupt()` を投げっぱなし
+  ④ `exitReason ??= 'terminated'` ⑤ `setStatus(e,'exited')`。
+  ⚠ **⑤は同期**である。**「頼んだ」だけで claude はまだ unwind 中**なので、
+  status を生死判定に使うと片付け中の卓が「もう居ない」と読まれる。
+  生死は `isSdkSessionLive`（= `!reaped`）、reap 待ちは `isSdkSessionReaped`。
+  この2つを取り違えた seam が0801 の一連のレビューで少なくとも9件出ている（棚卸しと数え方は
+  `docs/MAP.md` §5 — **数ではなく数え方**を置いてある）。
 
 ---
 
@@ -395,6 +433,10 @@ swarmWorkerRuntime?: {
   「スマホから届かなくなる」警告を出す（常時表示は壁紙になって読まれない）。
   - **設定ファイル直編集は「オーナー限定の実験」の解ではなかった** — 唯一 ON にできる人が
     JSON を手で書く必要がある状態は、機能スイッチではなく開発者向けメモである。
+  - **`sdkMaxWorkers: 0` は意味のある値**（「ダイヤルは sdk だが SDK worker は1体も使わない」）。
+    0 を falsy として捨てると**既定 1 に戻る** — UI は 0 を表示したままサーバは1体立てる、という
+    「表示と実体が食い違う」形になる（0801 に実際に作った。`store.ts` で修正済み）。
+    設定値のバリデーションで `value || default` を書くと、境界値が黙って消える。
   - **踏みかけた罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞る。
     この2キーを配列に足すまで**書き込みは黙って捨てられていた**（スイッチは動いて見え、
     UI は ON を表示し、卓は全部 PTY で立つ。例外もログも出ない）。往復テストで固定:
@@ -411,7 +453,9 @@ swarmWorkerRuntime?: {
 | サーバ full restart | PTY 子は死ぬ → boot 復旧（roster + 心拍 + resumable probe → adopt/resume/blocked 判定） | SDK 子も死ぬ → **同じ復旧路**: roster の runtime==='sdk' entry → JSONL resumable probe（既存 swarmSessions の述語を流用）→ `resume` + WORKER_RESUME_INJECTION を最初の input として push。**recoveryColumn（commitsAhead>0 → blocked）は不変** — twin 増殖の根治規則を SDK でも通す |
 | OOM / 外部 kill（137） | `{exitCode:137, signal:0}` シェル中継の読み（実測済みの罠） | stream close（result 無し）→ `exited{process-died}`。**シェル中継の解釈問題が消滅** |
 | クォータ壁（mid-turn） | 画面文言 → hold+requeue+冷却 | `quota_refusal` event → 同じ hold+requeue+冷却（tier=worker.model） |
-| interrupt | SIGINT 相当の画面操作は無し（kill のみ） | graceful `interrupt()` が**新規に手に入る**（差し戻し時に「殺さず止めて指示」が可能 — stage 1 では従来同様 kill を既定、interrupt は手動ボタンのみ） |
+| interrupt | SIGINT 相当の画面操作は無し（kill のみ） | graceful `interrupt()` が**新規に手に入る**（差し戻し時に「殺さず止めて指示」が可能 — stage 1 では従来同様 kill を既定、interrupt は手動ボタンのみ）。**0801 実測でセッションが生き延びることを確認**（§6・`probe-sdk-interrupt-survival.mts`）: ターンだけ中断され iterator は続き、後続ターンは完走する |
+| **配布ビルドでだけ SDK worker が0体**（0801 実観測・`dd311acc`） | — | `import.meta` は esbuild の CJS 出力に存在せず `{}` に置換される ⇒ `createRequire(import.meta.url)` が `createRequire(undefined)` = **TypeError**。guard hook は fail-CLOSED なので preflight が全部落ちる。**dev(ESM)と vitest(ESM)では 100% 再現しない**。恒久策 = require のベースをロード対象の絶対パスにする＋ビルドの banner で `pathToFileURL(__filename).href` を define。番人 `sdkGuardBundleShape.test.ts` は**実際に esbuild へ食わせて**確かめる |
+| オーナーが「SDK にしたのに PTY で上がる」理由を知れない | — | 降格理由は `SpawnSwarmWorkerResponse.fellBackBecause` に載せて UI が出す。**配布アプリのサーバは fork された子プロセスなので `console.warn` はどこにも届かない** — ログだけに置く設計は「理由が表示されるから枠を1つ握る設計を受け入れた」という前提を静かに無効化する |
 | SDK パッケージの破壊的変更 | — | 影響面は sdkSession.ts に閉じる（bridge の @alpha は**使っていない** — query() 本体は semver 通常運用）。CI: SDK バージョンは lockfile 固定・更新は手動 PR |
 | ガード検証不能 | GuardWiringError fail-closed | 同型で fail-closed（§4-G-3） |
 
@@ -607,7 +651,41 @@ seam と非自明点:
 
 スクリプト: `scripts/probe-sdk-guard-hooks.mts` / `scripts/probe-sdk-session-semantics.mts`
 
+> ### ⚠ この付録を読む前に — **測った構成を確認すること**（2026-08-01 追記）
+>
+> この付録の主張は1件が**実測で覆っている**（§6 の interrupt）。原因は SDK の挙動ではなく
+> **スパイクが本番と違う構成を測っていた**こと。`query({ prompt })` に何を渡したかで
+> セッションの寿命が変わる:
+>
+> | prompt | SDK の解釈 | CLI の寿命 | 本番か |
+> |---|---|---|---|
+> | **文字列** | `isSingleUserTurn = true` | **最初の result で stdin を閉じる ⇒ 必ず死ぬ** | ✗ |
+> | **AsyncIterable** | 多ターン双方向 | 明示的に閉じるまで生きる | ✓（`sdkSession.makeInputIterable`） |
+>
+> したがって: **string prompt で測った結果から「セッションの寿命」「2ターン目以降」
+> 「終了の因果」を結論してはいけない。** 単一ターン内で完結する事実（hook が発火するか、
+> deny が効くか）はその構成でも読める。
+>
+> **どちらで測ったか**（実測: 各スクリプトの `query(...)` 引数を確認済み）:
+>
+> | 節 | prompt | 本番構成か | 結論の有効範囲 |
+> |---|---|---|---|
+> | B-1（ガード） | **文字列**（`opts.prompt ?? WRITE_PROMPT`） | ✗ | **ターン1限定**。下の 🔁 を参照 |
+> | B-2（canUseTool） | AsyncIterable | ✓ | そのまま有効 |
+> | B-3（生成中の注入） | AsyncIterable | ✓ | そのまま有効（多ターンでないと測れない主張なので構成も合っている） |
+> | B-4（session/path/effort） | AsyncIterable | ✓ | そのまま有効 |
+> | B-5（定数 import） | セッション不使用 | 該当なし | そのまま有効 |
+> | B-6（認証） | 環境の性質 | 該当なし | そのまま有効 |
+
 ### B-1. S0-A ガード（`probe-sdk-guard-hooks.mts`）
+
+> 🔁 **再実測が要る（未実施）**: このスパイクは **string prompt = 単一ターン**で測っている。
+> 本番の SDK worker は1セッションで何十ターンも回すので、**「ターン2以降も hook が
+> 武装されたままか」は一度も測っていない**。P / A1 / A2 / A3 はいずれもターン1の中で
+> 起きる事象なので、下の結論そのものは（ターン1については）有効。
+> 再実測は `prompt` を AsyncIterable にして、**2ターン目で Write を出させて deny を確認**
+> する形にすればよい。fail-closed 設計なので「ターン2で veto が外れる」なら
+> それは**出荷を止める級**の事実であり、未確認のまま「守られている」と書かないこと。
 
 | 測定 | 結果 |
 |---|---|
@@ -668,3 +746,41 @@ CLI は `~/.claude.json` の `oauthAccount` レコードも見ており、素の
 書いても解消しなかった）。
 ⇒ **実 claude を起動するテストは書かない**（設計 §13 の方針どおり `queryFn` 注入）。
 実起動が要る検証は本付録のプローブ側で行い、単体テストには持ち込まない。
+
+---
+
+## 付録C. 実測台帳の再点検（2026-08-01）
+
+**なぜこの付録があるか。** 本書には「実測済み」と書かれた主張が多数あり、そのうち
+**1件が実測で覆った**（§6 の interrupt）。覆ったのは SDK の挙動ではなく**測り方**で、
+しかもその誤りは「本番と違う構成を測った」という**再現可能な型**だった。
+同じ型が他に混ざっていないかを一件ずつ突き合わせた結果を置く。
+
+**判定の凡例** — ✅ 現物と一致 / 🔁 **再実測が要る**（未実施・印だけ付けてある） /
+📝 現物が変わったので本文を修正済み。
+
+⚠ **この台帳自身が、自分の判定基準を1件だけ緩めていた**（0801 の点検で摘出）。
+基準は「**本番と同じ構成で測る**」であり、他の行はその基準で 🔁 を付けている
+（`prompt` が string ＝ ターン1限定、など）。ところが §6 の interrupt 行だけは、
+再実測が**偽 CLI**（`scripts/probe-sdk-interrupt-survival.mts` の 60 行スタンドイン）
+に対するものであるのに、無条件の 📝 として置かれていた。**構成の一致は
+`prompt` の形だけではない — 相手側のプロセスも構成のうち**。下の行に但し書きを
+足して閉じる。緩めた側に倒すと、次の人はその行を「実測済み」として引用する。
+
+| 主張 | どこ | 判定 | 根拠 / 何が要るか |
+|---|---|---|---|
+| `interrupt()` 後の throw は正常系（＝ interrupt がセッションを終わらせる） | 旧 §6 | 📝 **覆った**（旧説の根拠は崩れた） | string prompt で測っていた＝CLI の stdin が最初の result で閉じ、**その構成では CLI は必ず死ぬ**。旧説が成り立たないことはこれで確定。0801 の再実測（`scripts/probe-sdk-interrupt-survival.mts`）。§6 に訂正の全文 |
+| ↳ その置き換え説「`interrupt()` はターンだけ止め、iterator は続く」 | §6 | 🔁 **偽 CLI に対しては実測、本物の `claude` に対しては未確認** | 測ったのは 60 行の stream-json スタンドイン。**確定するのは SDK クライアント側の性質**（子が生きていれば iterator は終わらない／throw は子の死に紐づく）で、プロトコルが同じ以上ここは転用してよい。**確定しないのは「本物の `claude` が interrupt 後も生き続けるか」** — もし本物が終了を選ぶなら本番はケース B（throw）に落ち、UI の「セッションは続きます」はまた偽になる。隔離 HOME では認証できず（付録 B-6）、実機で測ればオーナーのクォータを使うため**意図的に未測定**。無条件の「実測済み」として引用しないこと |
+| `terminateSdkSession` = `abortController.abort()` + 子プロセス確認殺し | 旧 §3.1 / 旧 §6 | 📝 **現物と違った** | 現物は `closed` + `interrupt()` + **status を同期で `exited`**。abort はしない。これを「死んだ」と読んだ seam が0801 の欠陥群の根 |
+| 「プール entry が closed = 死（確定）」 | 旧 §5 S1 | 📝 **現物と違った** | 死は `reaped`（pump の `finally`）。`closed` は「頼んだ」印 |
+| bypass 下で `canUseTool` は呼ばれない | 付録 B-2 | ✅ | 本番構成（AsyncIterable）で測定。SDK 自身の警告文も一次情報として一致 |
+| mid-turn の `pushInput` はキューされ次ターンで処理される | 付録 B-3 | ✅ | 本番構成で測定。多ターンでないと測れない主張なので構成も必然的に合っている |
+| `sessionId` 採用 / `effort:'max'` 受理 / `permissionMode:'bypassPermissions'` / JSONL は書かれる | 付録 B-4 | ✅ | 本番構成で測定。JSONL の「無い」誤判定は OG 側 `claudeDirName` のバグで、`dbba9e55` で根治済み |
+| `USAGE_LIMIT_ERROR_PREFIXES` 等が runtime import できる | 付録 B-5 | ✅ | セッションを張らない測定なので構成の影響を受けない。⚠ ただし**件数（12/2）は SDK バージョンに紐づく**ので、lockfile を上げたら数ではなく**import が通ること**を見ること |
+| 隔離 HOME では認証できない | 付録 B-6 | ✅ | 環境の性質。テスト方針（`queryFn` 注入）の根拠として今も有効 |
+| **A3 ガードは fail-open（hook が throw すると veto が消える）** | 付録 B-1 | 🔁 **ターン1しか測っていない** | string prompt = 単一ターン。**「2ターン目以降も hook が武装されたままか」は未測定**。本番の worker は1セッションで何十ターンも回す。再実測 = prompt を AsyncIterable にして2ターン目に Write を出させ deny を確認 |
+| **P（SDK は filesystem settings をロードしない）/ A1（bypass 下でも deny は効く）/ A2（subagent も同じ hook を通る）** | 付録 B-1 | 🔁 **同上（ターン1限定）** | 結論そのものはターン1については有効。fail-closed 設計の土台なので、**「ターン2で veto が外れる」なら出荷を止める級**。未確認のまま「守られている」と書かないこと |
+| `interrupt()` → 例外あり（判別表） | `docs/SDK_CLIENT_INVESTIGATION.md` §3-A | 🔁 **本書の範囲外だが同じ誤り** | 同じ string-prompt スパイクの表。「例外あり」は**CLI が死ぬ構成でのみ真**。判別子が `terminal_reason` である点と `subtype` の罠は有効なまま。**あちらのファイルは未修正** |
+
+**この表の使い方**: 🔁 の行を「実測済み」として引用しないこと。引用したいときは
+先に測り直して、この表の判定を更新してから引用する。

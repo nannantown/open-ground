@@ -1045,6 +1045,16 @@ export interface SpawnSwarmWorkerResponse {
    *  rate-limit sighting can mark the RIGHT tier cooling (swarmQuota). Optional:
    *  older callers/fakes without it simply leave the sighting unattributed. */
   model?: string
+  /** Set ONLY when the dial asked for `sdk` and this worker came up as a PTY
+   *  anyway — slots full, preflight refused, or the SDK session died at start.
+   *  The human-readable reason, mirroring
+   *  {@link SpawnSwarmManagerResponse.fellBackBecause}.
+   *
+   *  It is on the RESPONSE and not merely in a server log because in a packaged
+   *  app the server is a forked child: a console.warn there reaches nobody. The
+   *  whole slot-holding design was accepted on the premise that a degrade
+   *  ANNOUNCES itself; on the worker path that premise was not yet true. */
+  fellBackBecause?: string
 }
 
 /** POST /api/swarm/worktree/remove — whether the worktree was torn down, with
@@ -1109,6 +1119,17 @@ export interface SpawnSwarmManagerResponse {
   /** Present only for an SDK commander: its {@link SdkSessionInfo} id, the
    *  handle /api/sdk-session/* is addressed by. */
   sdkSessionId?: string
+  /** Set ONLY when the dial asked for `sdk` and this desk came back as a PTY
+   *  anyway (no usable claude, CLI too old, spawn failed) — the human-readable
+   *  reason.
+   *
+   *  It exists because the alternative is a silent degrade, which is the worst
+   *  shape this feature can take: the owner flips the switch, expects a
+   *  structured desk, gets a terminal, and the explanation is a console.warn
+   *  inside a forked server in a packaged app — i.e. nowhere. Degrading to a PTY
+   *  is still the RIGHT behaviour (a desk on the known-good runtime beats no
+   *  desk); it just must not be invisible. */
+  fellBackBecause?: string
   agentSessionId: string
   /** true ⇒ this is the project's PREVIOUS commander conversation, resumed
    *  (`claude --resume`) — see SpawnSwarmSupplyResponse.resumed. NOTE the asymmetry
@@ -2573,10 +2594,29 @@ export interface Escalation {
   /** The project it belongs to (canonical path). */
   projectPath: string
   /** Coordinates of the BLOCKED worker awaiting this answer, when worker-rooted:
-   *  the Board card, its swarm branch, and its live PTY (the injection target). */
+   *  the Board card, its swarm branch, and its live DESK (the delivery target —
+   *  `runtime` + the one handle that runtime is addressed by, below). */
   taskId?: string
   branch?: string
   terminalId?: string
+  /** WHICH RUNTIME carries the blocked worker — the other half of its address,
+   *  without which the handle fields cannot name it. ABSENT ⇒ `'pty'`, so every
+   *  record persisted before this field existed keeps meaning exactly what it
+   *  meant (the same absent-means-pty rule workerRuntime.ts applies to the
+   *  roster; nothing re-reads or migrates escalations.json).
+   *
+   *  ⚠ WHY THIS IS PERSISTED AND NOT DERIVED AT DELIVERY TIME. An SDK worker's
+   *  `terminalId` is EMPTY by the identity invariant (pty ⇔ terminalId,
+   *  sdk ⇔ sdkSessionId), so a record carrying only `terminalId` cannot address
+   *  one AT ALL: the answer the owner typed had no target, silently fell through
+   *  to the next-dispatch queue on every attempt, and the blocked worker waited
+   *  for a reply that could not reach it. Rebuilding the handle branches on THIS
+   *  field — never on which of the two ids happens to be truthy, which is how a
+   *  stale id from an earlier incarnation wins over the live one. */
+  runtime?: 'pty' | 'sdk'
+  /** The blocked worker's Agent SDK session id. Present only with
+   *  `runtime: 'sdk'` — where `terminalId` is empty, and vice versa. */
+  sdkSessionId?: string
   /** The question shown to the user — one screen, decidable at a glance. */
   question: string
   /** Why this is being asked + what is at stake (the decision's context). */
@@ -2591,9 +2631,14 @@ export interface Escalation {
    *  raises, whose question text is itself written plainly per the /order
    *  worker rules) fall back to `question` in the UI. */
   plainQuestion?: string
-  /** Path to the PTY-tail capture taken when the escalation was raised (what the
-   *  worker's screen showed) — a small text file under
-   *  ~/.openground/escalation-shots/, unlinked when the record is pruned. */
+  /** Path to the EVIDENCE TAIL captured when the escalation was raised — what the
+   *  worker was doing right before it stopped. A small text file under
+   *  ~/.openground/escalation-shots/, unlinked when the record is pruned.
+   *  Runtime-shaped, because the two runtimes have different evidence: a PTY
+   *  worker contributes its rendered screen, an SDK worker its recent distilled
+   *  event transcript (tool calls / API errors / text). Historically PTY-only,
+   *  which left every SDK escalation with no evidence at all — the field name is
+   *  kept for the records already on disk. */
   screenshotRef?: string
   /** The proxy's provisional answer + confidence (C2), when it ran. */
   proxyDraft?: EscalationProxyDraft
@@ -2632,7 +2677,9 @@ export interface EscalationOpenResponse {
 }
 
 /** How the owner's answer reached the blocked worker:
- *   • 'injected' — pasted into the LIVE worker PTY (bracketed paste + Enter).
+ *   • 'injected' — delivered into the LIVE worker on its own runtime: a
+ *                  bracketed paste + Enter for a PTY, one queued turn for an
+ *                  SDK session (swarmEscalations' `deliverAnswerToWorker`).
  *   • 'queued'   — the worker is gone; the answer is queued for the card's NEXT
  *                  dispatch (rides the same learning-loop slot as rework
  *                  reasons, so the fresh worker's /order carries it).

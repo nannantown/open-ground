@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   RELEASE_NOTES_URL,
+  MANUAL_CHECK_TIMEOUT_MS,
+  withTimeout,
   MENU_ID_CHECK_FOR_UPDATES,
   MENU_ID_RELEASE_NOTES,
   languageFromSettingsRaw,
@@ -113,7 +115,13 @@ describe('buildAppMenuTemplate', () => {
 })
 
 describe('manualCheckPrecondition', () => {
-  const base = { packaged: true, lockdown: false, updateDownloaded: false, inFlight: false }
+  const base = {
+    packaged: true,
+    lockdown: false,
+    updateDownloaded: false,
+    inFlight: false,
+    updater: 'ready' as const,
+  }
 
   it('a normal packaged app with nothing pending actually checks', () => {
     expect(manualCheckPrecondition(base)).toBe('check')
@@ -143,6 +151,85 @@ describe('manualCheckPrecondition', () => {
 
   it('a second click while a check is running does not race a second dialog', () => {
     expect(manualCheckPrecondition({ ...base, inFlight: true })).toBe('busy')
+  })
+
+  // The window where the menu exists but the updater does not, YET. main.js
+  // installs the menu at the top of start() and calls initAutoUpdater at the
+  // bottom — after a health poll allowed to take up to 120s. Answering
+  // 'unavailable' there tells the user their perfectly good build has no
+  // updater in it, which is false and alarming.
+  it('during startup it says "still starting", NOT "this build has no updater"', () => {
+    expect(manualCheckPrecondition({ ...base, updater: 'pending' })).toBe('starting')
+  })
+
+  it('after init failed, "no updater" is finally the truth and may be said', () => {
+    expect(manualCheckPrecondition({ ...base, updater: 'unavailable' })).toBe('unavailable')
+  })
+
+  it('a downloaded update still offers the restart even mid-startup', () => {
+    // It is on disk; nothing about applying it needs the updater to have finished
+    // wiring, and "restart to apply" is the most useful answer available.
+    expect(
+      manualCheckPrecondition({ ...base, updater: 'pending', updateDownloaded: true }),
+    ).toBe('restart')
+  })
+
+  it('an absent `updater` field behaves as ready (back-compat with older callers)', () => {
+    const { updater: _drop, ...noUpdater } = base
+    expect(manualCheckPrecondition(noUpdater)).toBe('check')
+  })
+})
+
+describe('withTimeout (a manual check must always settle)', () => {
+  // Without this, a stalled DNS lookup does not just hang one click:
+  // manualCheckInFlight never clears, so every later click answers "already
+  // checking" and the menu item is dead for the rest of the session.
+  const fakeTimers = () => {
+    const fired: (() => void)[] = []
+    const cleared: unknown[] = []
+    return {
+      fire: () => fired.forEach((f) => f()),
+      cleared,
+      timers: {
+        setTimeout: (fn: () => void) => {
+          fired.push(fn)
+          return 'h' as unknown
+        },
+        clearTimeout: (h: unknown) => {
+          cleared.push(h)
+        },
+      },
+    }
+  }
+
+  it('resolves with the value when the promise wins', async () => {
+    const f = fakeTimers()
+    await expect(withTimeout(Promise.resolve('ok'), 1000, f.timers)).resolves.toBe('ok')
+  })
+
+  it('rejects when the clock wins — a never-settling check becomes an error', async () => {
+    const f = fakeTimers()
+    const p = withTimeout(new Promise<never>(() => {}), 60_000, f.timers)
+    f.fire()
+    await expect(p).rejects.toThrow(/timed out after 60s/)
+  })
+
+  it('clears the timer on success so a finished check does not hold the loop', async () => {
+    const f = fakeTimers()
+    await withTimeout(Promise.resolve(1), 1000, f.timers)
+    expect(f.cleared).toEqual(['h'])
+  })
+
+  it('a rejecting promise still propagates its own error, not the timeout', async () => {
+    const f = fakeTimers()
+    await expect(withTimeout(Promise.reject(new Error('ENOTFOUND')), 1000, f.timers)).rejects.toThrow(
+      'ENOTFOUND',
+    )
+  })
+
+  it('the shipped ceiling is a real, finite number of seconds', () => {
+    expect(MANUAL_CHECK_TIMEOUT_MS).toBeGreaterThan(0)
+    expect(Number.isFinite(MANUAL_CHECK_TIMEOUT_MS)).toBe(true)
   })
 })
 
@@ -215,6 +302,7 @@ describe('updateDialogText', () => {
     'dev',
     'lockdown',
     'busy',
+    'starting',
     'unavailable',
     'up-to-date',
     'downloading',

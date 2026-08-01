@@ -164,7 +164,156 @@
   `swarmWorkerSdk.ts`(launch plan + preflight)/ `swarmWorkerRuntimeDial.ts`(ダイヤル)/
   route `server/routes/sdkSession.ts`(SSE・**二重ゲート**)/ UI `modules/SdkWorkerPane.tsx`。
   ⚠ **SDK は filesystem settings を読まない → 素朴に spawn すると guard が黙って消える**。
-  ⚠ **`terminalId` は SDK worker では空**。worker を鍵で引くときは `workerKey(w)`。
+  ⚠ **開発で100%動き、配布ビルドで100%動かない形を1回踏んだ**(0801 `dd311acc`)。
+  `sdkGuardHook.loadGuardEvaluate` が `createRequire(import.meta.url)` を使っていた。
+  esbuild の CJS 出力に `import.meta` は無く `{}` に置換されるので、Electron が fork する
+  `server/dist/index.cjs` では `createRequire(undefined)` が **TypeError**。この hook は
+  fail-CLOSED なので preflight が落ち、**出荷版では SDK worker が1体も立たない**。
+  vitest は ESM なのでテストからは原理的に見えない。**esbuild は `empty-import-meta` で
+  警告していたが、ビルド設定が `logOverride` で黙らせていた** — 当時の唯一の読み手は
+  死んだ枝だったので正しかったが、その沈黙が後から生えた**生きた読み手**を覆った。
+  今は require のベースを**ロード対象の絶対パス**にし(そもそも解決基準としてこちらが正しい)、
+  ビルド側は banner で `pathToFileURL(__filename).href` を define して**本物の file URL を
+  与える**。番人 = `sdkGuardBundleShape.test.ts`(設定に文字列があることではなく、その
+  banner/define を**実際に esbuild へ食わせて** file URL が出ることを見る)。
+  ⚠⚠ **worker は `workerKey(w)` で指し、`runtimeOf(w)` 経由で操作する。`w.terminalId` で
+  直接触る箇所はすべて穴** — SDK worker の terminalId は**空**なので、失敗せず
+  「何もしない」か「別人に当たる」。0731 のレビュー5周で**6件**摘出(全部無言。
+  ⚠ この「6件」も**その時点の数**であって不変条件ではない — 下の「数を信用するな」と同じ扱いで、
+  引用する前に数え直すこと。実際 0801 に同じ型が**送る側**でさらに複数出ている):
+  掃除役が稼働中の worktree を削除 / 解体が止めずに削除 / 停止が全 SDK worker を巻き添え /
+  一覧が runtime を落として健康な worker を「終了」表示 / 消費集計と Ground ビーコンが欠落。
+  規則は `workerRuntime.ts` の `workerKey` 冒頭、性質は
+  `swarmSdkWorkerContract.test.ts`、両プールを1回で聞く seam は `liveDesks.ts`。
+  ⚠⚠⚠ **SDK デスクの生死は `isSdkSessionLive(s)`(= `!reaped`)だけで判定する。`status` で
+  判定した箇所は全部欠陥** — `terminateSdkSession` は status を**同期反転**させる(頼むだけ)ので、
+  片付け中の卓が「もう居ない」と読まれる。述語は `sdkSession.ts` から1つ export 済み。
+  ⚠⚠⚠ **この問いを聞く seam の「数」を信用しないこと。この行が2度嘘をついた場所である。**
+  0801 の5周目コミット(`80d567f6`)は「seam は6つ」と書き、その6つ(司令官の唯一性判定 /
+  掃除役 / 停止 / Ground ビーコン / Swarm タブ一覧 / 枠カウント)を直して**集約済み**と宣言した。
+  同じコミットのツリーに `status` 判定の seam が**2つそのまま残っていた**
+  (`swarmManagerRuntime.isManagerDeskAlive` / `workerRuntime.sdkWorkerRuntime.isAlive`。
+  どちらも7周目 `fecb4628` で修正)。**なぜ数え間違えたか — grep で見落としたのではない。**
+  実測: その commit で `git grep isSdkSessionAlive` を打つと、残る2つは**同じ画面に出ていた**。
+  外したのは数え方の単位だった:
+  ①**「seam」ではなく「その周に見つけた欠陥」を数えていた** — 既に正しく `reaped` を見ている
+  seam(reap 待ちの3本 = `isSdkSessionReaped` / `stopAllDesksInDirAndWait` /
+  `waitForSdkSessionGone`)は数から落ち、まだ書かれていない seam(SDK worker への回答配達
+  `defaultCanPushIntoSdkWorker` — 7周目に新設)は数えようがない。**call site の個数は
+  コードが伸びれば増える**ので、数を書いた瞬間にその行は古くなる。
+  ②**列挙の単位が「オーナーに見える症状」だった** — twin が湧く / worktree が消える /
+  カードが消灯する / 生きた worker が死亡表示 / 枠を超える / 誤って止まる、と並べた。
+  残った2つは**エンジンが内部で聞くだけ**で固有の症状名が付かず、症状の表に行が立たなかった。
+  症状で数えると、症状を持たない seam が静かに落ちる。
+  **数える代わりに、数え方を置く**(次に棚卸しする人はこの3手を全部やること):
+  `git grep -n "reaped" src/lib/server server | grep -v test`(フィールド直読み —
+  `sdkSession.ts` 内部の4箇所は記号を経由しないのでこれでしか出ない)/
+  `git grep -n "isSdkSessionLive\|isSdkSessionAlive\|isSdkSessionReaped"`(記号)/
+  **DI 既定値を目で追う**(`deps.sdkAlive ?? …` / `opts.sdkReaped ?? …` /
+  `reaped: (id) => boolean = isSdkSessionReaped` — 呼び出し側のローカル名は別物なので、
+  「聞いている場所」を記号 grep では拾えない)。
+  0801 時点の棚卸し(**日付つきの事実であって不変条件ではない**)= 本番15箇所:
+  プール内部**5**(`listActiveSdkCwds` / `terminateSdkSessionsInDir` / `listSdkSessionsIn` /
+  `isSdkSessionReaped` / **`sweepClosedSessions`**)+ `isSdkSessionLive` 消費7(Ground ビーコン /
+  Swarm タブ一覧 / 司令官卓の生存プローブ / worker の isAlive / 回答配達 / **SSE 終端** /
+  **会話の resume 可否** = `swarmSessions.isAgentSessionLiveAnywhere`)+ `reaped` 直読み3
+  (枠カウント / 削除ゲート / 解体待ち)。
+  **数え方**(引用する前にこの線引きを合わせること): 数えるのは**読み**だけ。
+  `e.reaped = true` の**書き**2箇所(pump の `finally` / spawn 失敗)と、
+  `SdkSessionInfo` への射影(`...(e.reaped ? …)`)は含めない。
+  ⚠ **初版はこの棚卸しで `sweepClosedSessions` を落としていた**(0801、点検で摘出)。
+  落ちた理由が上の①②そのもの: **エクスポートされていないので記号 grep に出ず**、
+  かつ**固有の症状名が無い** — この関数が `reaped` でない entry を永久に消さないのは
+  仕様(D 状態で固まった claude の worktree を守るため、リーパ timeout を置かない)で、
+  「壊れた」と呼べる行が症状の表に立たない。**仕様どおりの読みも読みである。**
+  そして**この1箇所が下流の性質を1つ決めている**: プールが非 reaped entry を永久に
+  抱えるので、`isAgentSessionLiveAnywhere` はその会話 id に対して**サーバプロセスの
+  生涯ずっと "live" と答え続ける**(再起動でプールは消える)。詳細は
+  `swarmSessions.isAgentSessionLiveAnywhere` の注記。
+  ⚠ **この棚卸しを書いている最中に1件生えた**(`isAgentSessionLiveAnywhere` — 「この
+  claude 会話はまだどちらかのプールで開いているか」。false で「空いている」と答えると、
+  まだ喋っている卓のトランスクリプトを新しい `--resume` に渡してしまう)。上の3手を
+  実際に打って出てきたもので、私の頭の中の一覧には無かった。**数を引用する前に打つ**という
+  規則がここで1回身を守った、という記録として残す。
+  SSE 終端(`server/routes/sdkSession.ts`)は 0801 まで status 判定で、**片付け中の
+  最後のフレーム — 卓がどう終わったかを言う唯一のフレーム — が客に届かなかった**
+  (再接続すると即 `end` でタイルが白紙)。`isSdkSessionLive` に寄せて解消。
+  ⚠ ここには「隣の Swarm 一覧は `!reaped` で『稼働中』と描くので**同じ画面で2つの答えが
+  並んでいた**」と書いてあったが、**それは観測ではなくコードからの再構成**だった
+  (0801 の点検で撤回)。2つの読み手が別々の述語を使っていたことは現物で確認できる
+  事実、その画面を誰かが実際に見た記録は無い。**成立しうる状態と、観測した状態を
+  同じ文体で書かない** — 再現手順を持たない「実例」は、次の人に測り直す気を失わせる。
+  ⚠ その修正には**プール側の相方**が要った: `terminateSdkSession` が先に `exited` を
+  書いているので、pump の `finally` の書き込みは `setStatus` の重複排除に飲まれて
+  **フレームを1つも出していなかった** — 「頼んだ」と「本当に止まった」で1フレームしか
+  存在しなかった。`announceStatus`(重複でも emit する)を新設し、**`reaped = true` を
+  emit の前に立てる**(受け取った listener がプールに聞き返したとき既に true でないと、
+  「まだ生きている」と告げられて二度と知らせが来ない)。順序は番人が直接固定する
+  (`server/routes/__tests__/sdkSessionStreamEnd.test.ts`)。
+  **status のまま残っている1つ**: `isSdkSessionAlive`(= 終端 status が書かれたか。
+  **生死ではない**。本番の呼び手ゼロ・テストだけが呼ぶ地雷)。
+  ⚠ **status を動かす昇格は「仕事の証拠」(`isWorkEvidence`)で** — CLI はターンの合間にも喋る
+  (`background_tasks_changed` / `session_state_changed`)。「メッセージが来た＝作業中」で書くと、
+  終わるターンが無いので**二度と waiting に戻らない**。
+  ⚠ **terminate は status 遷移の終端**。`closed` 後は emit だけして status に触らない。ただし
+  中断ターンの `aborted_streaming` は**読む** — 落とすと正常停止が全部 `failed` 表示になる
+  (`closed` 自体も「頼んだ停止」の一次証拠として扱う)。
+  ⚠ **`interrupt()` はセッションを殺さない**(0801 実測 `scripts/probe-sdk-interrupt-survival.mts`)。
+  CLI が生きていれば interrupt は**ターンだけ**中断し、`aborted_streaming` の result を届けて
+  **イテレータは続く** — 後から push したターンは完走する。イテレータの throw は
+  **claude プロセスが死んだとき専用**で、SDK が例外本文を最後のエラー result の文言に貼り替える
+  ので `[ede_diagnostic] …` と読め、interrupt が原因に見える。0730 のスパイクが逆の結論を
+  出したのは **string prompt** を使っていたから(SDK は `typeof prompt === 'string'` で
+  `isSingleUserTurn` を立て、最初の result で CLI の stdin を閉じる = CLI は必ず死ぬ)。
+  本番は AsyncIterable(`makeInputIterable`)で**別の構成**。
+  ⚠ **ただし測った相手は偽 CLI**(プロトコルだけ喋る 60 行のスタンドイン)。**確定するのは
+  SDK クライアント側の性質**(子が生きていれば iterator は終わらない / throw は子の死に紐づく)
+  で、**「本物の `claude` が interrupt 後も生き続けるか」は未確認**(隔離 HOME では認証
+  できないため意図的に未測定 — SDK_WORKER_MIGRATION_PLAN 付録 B-6 / C)。本物が終了を
+  選ぶなら本番は throw 側に落ちる。**「実測済み」を無条件に引用しないこと。**
+  → 「本番と違う構成を測ると逆の因果を確信する」の実例。auto-memory
+  `reference_measure_the_production_arrangement` と同じ罠。**そして構成の一致は
+  `prompt` の形だけではない — 相手側のプロセスも構成のうち**(この但し書き自体が、
+  同じ罠の2周目として 0801 の点検で足された)。
+  ⚠ **エンジンから worker への通信路が丸ごと PTY 前提だった**(0801・7周目 `fecb4628`)。
+  生存判定と同じ型の**送る側**の版で4本 — 2本は `status` 前提(司令官卓の生存判定 /
+  worker の `isAlive`)、2本は `terminalId` 前提: 監督 S4 の重複キー
+  (`S4:${w.terminalId}` — SDK worker は全員空文字なので**艦隊全体で1スロットを奪い合い**、
+  2体目以降のエスカレーションが黙って捨てられる。今は `workerKey(w)`)/ 監督 T1 の回答注入
+  (`canInjectInto(terminalId) && injectAnswerIntoWorker(terminalId)` — SDK worker には
+  **一度も発火しようがなかった**。劣化した経路ではなく、動きようのない経路)。
+  回答配達は runtime 非依存の seam
+  `swarmEscalations.deliverAnswerToWorker`(ガードと配達を1呼び出しに畳んだもの。PTY =
+  bracketed paste + CR + 着地確認 / SDK = ターンを1つ queue)へ寄せた。
+  ⚠ **エスカレーションのレコードは「住所」を丸ごと持つ**(`Escalation.runtime` +
+  `terminalId` / `sdkSessionId`。不在 ⇒ `'pty'` で既存 JSON はそのまま読める)。
+  0801 まで `terminalId` しか永続しておらず、SDK worker では空文字なので
+  **オーナーが inbox から答えても誰にも届かず**、毎回「次 dispatch に相乗り」へ落ちていた。
+  ⚠ 住所の更新は**丸ごと差し替え**(runtime + 両ハンドル)。フィールド単位で上書きすると、
+  再起動で別ランタイムに生まれ直した worker のレコードに**前世の terminalId と今世の
+  sdkSessionId が同居**し、どちらが本物か分からなくなる。
+  ⚠ 証拠の尾(`screenshotRef`)も**ランタイムごとに材料が違う** — PTY は画面、SDK は蒸留済み
+  イベントの直近。PTY 前提のままだと SDK のエスカレーションは**証拠ゼロ**で上がる。
+  ⚠ **同じ型の最後の1歩は「クライアントの受信サニタイザ」だった**(0801)。
+  `useSwarmEngine` の手書きコピーが `runtime` と `sdkSessionId` **だけ**落としており、
+  サーバが正しく送っていても SDK worker は全部 `runtime: undefined`(⇒ pty)で届き、
+  **終了済み端末として描かれ PTY 用の再起動ボタンが付いていた** — 生きた claude の上に。
+  `SdkWorkerPane` は本番では**到達不能な死んだコード**だった。恒久策はサニタイザを
+  `Required<SwarmWorkerRecord>` 上の **mapped type** にして、フィールド追加漏れを
+  **コンパイルエラー**にすること(手書きの逐次コピーは黙って落とす)。番人は
+  `useSwarmEngine.workerWireContract.test.ts` — **本物のサーバ組み立て**と
+  **本物のサニタイザ**を通して往復させ、落ちたら赤。
+  ⚠ **SDK worker の PTY 降格理由は HTTP レスポンスに乗る**(`SpawnSwarmWorkerResponse.fellBackBecause`
+  → `SwarmModule.tsx` が表示)。配布アプリのサーバは fork された子プロセスなので
+  **`console.warn` はオーナーに届かない** — 「スイッチを入れたのに PTY で上がる」の理由を
+  ログだけに置くと、枠が満杯なのか preflight 落ちなのかダイヤルが効いていないのか誰にも分からない。
+  ⚠ **`sdkMaxWorkers: 0` は「SDK worker を使わない」という意味のある値**。0 を falsy として
+  捨てると既定 1 に戻り、UI は 0 を表示したままサーバは1体立てる(`store.ts`)。
+  ⚠ **セッション所有の判定はレジストリ UUID で**(`projectUUIDFromPath` を両辺に) — パス前方一致で
+  書くと**全 SDK worker が 403**(worker の cwd は repo 外の central worktree。0731 に出荷2版が
+  この形で、worktree を repo 内に作ったテストが偽緑で通していた)。
+  終了セッションは 30 分 linger 後に sweep(`SDK_SESSION_LINGER_MS` — 放置すると ring buffer ごと
+  永久残留・`removeSdkSession` は呼び手ゼロだった)。
   kill switch = `Settings.swarmWorkerRuntime.mode` を `'pty'` に戻すだけ。
   設計と実測台帳: `docs/SDK_WORKER_MIGRATION_PLAN.md`
   (0730 オーナー決定 — worker から段階導入・既定 pty のダイヤル併存・PTY コードは消さない)。
@@ -326,6 +475,13 @@
   ⌘C/⌘V が消える — テストが見張る(`server/__tests__/updateMenu.test.ts`)
 - ビルド: `scripts/build-server.js`(esbuild → `server/dist/index.cjs`)/ vite → `dist-web/`。
   署名: `scripts/sign-and-notarize.sh` / `verify-dmg.sh`
+  ⚠ **CJS バンドルには `import.meta` が存在しない**(esbuild が `{}` に置換)。dev(tsx/ESM)と
+  vitest(ESM)では動き、**配布版だけ壊れる**ので、テストからは原理的に見えない。0801 にこれで
+  「出荷版では SDK worker が1体も立たない」を作った(`dd311acc`・詳細は §5)。
+  今は banner で `pathToFileURL(__filename).href` を define して**本物の file URL を与える**。
+  ⚠⚠ **`logOverride` で esbuild の警告を黙らせるときは、その警告が将来の読み手も覆うと考える**。
+  `empty-import-meta` の沈黙は、追加した当時は正しかった(唯一の読み手が死んだ枝だった)が、
+  後から生えた生きた読み手をそのまま覆った。番人 = `src/lib/server/sdkGuardBundleShape.test.ts`
 - 配布: `docs/DISTRIBUTION.md` — 2リポ構成(origin=PMmap 開発・open-ground 公開、tag vX.Y.Z で CI)
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で

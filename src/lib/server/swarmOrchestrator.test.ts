@@ -40,6 +40,7 @@ import {
   classifyWorker,
   classifyWorkerExit,
   defaultRecoverWorker,
+  waitForSdkSessionGone,
   type TeardownReason,
   classifyStall,
   defaultEscalate,
@@ -113,6 +114,13 @@ import {
   type ReviewerVerdict,
 } from './swarmOrchestrator'
 import { canonicalize } from './canonicalize'
+import {
+  spawnSdkSession,
+  terminateSdkSession,
+  isSdkSessionAlive,
+  isSdkSessionReaped,
+  __resetSdkSessionsForTests,
+} from './sdkSession'
 import { markCoolingUntil, isTierCooling, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
 import { __resetAllowedModelsForTest } from './swarmAllowedModels'
 import { resolveSwarmModelEffort } from './swarmLaunch'
@@ -929,6 +937,142 @@ describe('defaultRecoverWorker — never attributes OUR OWN kill to the worker',
       { getTerminal: (() => null) as never, killTerminal: (() => true) as never },
     )
     expect(r.exitInfo).toEqual({ code: null })
+  })
+})
+
+describe('defaultRecoverWorker — an SDK worker must actually be STOPPED', () => {
+  // THE HOLE (2026-07-31, review round 5). This function was written when there
+  // was one runtime, so it kills `opts.terminalId`. An SDK worker's terminalId is
+  // EMPTY by the identity invariant, so every PTY step — read, kill, wait — was a
+  // silent no-op, and the function walked straight on to `git add -A` and remove
+  // the worktree WHILE CLAUDE WAS STILL WRITING INTO IT. That is exactly the pair
+  // of harms its own "kill FIRST, then salvage" comment was added to prevent,
+  // reintroduced by a runtime the code did not know how to stop.
+  const seams = (over: Record<string, unknown> = {}) => {
+    const calls: string[] = []
+    return {
+      calls,
+      deps: {
+        getTerminal: ((id: string) => {
+          calls.push(`getTerminal:${id}`)
+          return null
+        }) as never,
+        killTerminal: ((id: string) => {
+          calls.push(`killTerminal:${id}`)
+          return true
+        }) as never,
+        terminateSdk: ((id: string) => {
+          calls.push(`terminateSdk:${id}`)
+          return true
+        }) as never,
+        isSdkAlive: (() => false) as never,
+        ...over,
+      },
+    }
+  }
+
+  it('terminates the SDK SESSION — and never touches the terminal pool', async () => {
+    const { calls, deps } = seams()
+    await defaultRecoverWorker(
+      { projectPath: '/p', worktree: '', terminalId: '', sdkSessionId: 'sdk-7', reason: 'stopped' },
+      deps,
+    )
+    expect(calls).toContain('terminateSdk:sdk-7')
+    // Not `killTerminal:''` — which is what shipped, and which stopped nothing.
+    expect(calls.some((c) => c.startsWith('killTerminal'))).toBe(false)
+  })
+
+  it('a PTY worker is unaffected — it still goes through killTerminal', async () => {
+    const { calls, deps } = seams()
+    await defaultRecoverWorker(
+      { projectPath: '/p', worktree: '', terminalId: 't1', reason: 'stopped' },
+      deps,
+    )
+    expect(calls).toContain('killTerminal:t1')
+    expect(calls.some((c) => c.startsWith('terminateSdk'))).toBe(false)
+  })
+
+  it('does not invent a cause of death for an SDK worker', async () => {
+    // A PTY reclaim reads an exit code off the pool; an SDK session has none —
+    // its death arrives as events on its own stream. Reading the pool with an
+    // empty id would journal `{code:null}` = "it died and we don't know why",
+    // manufacturing an unknown where a known answer exists.
+    const { deps } = seams()
+    const r = await defaultRecoverWorker(
+      { projectPath: '/p', worktree: '', terminalId: '', sdkSessionId: 'sdk-7', reason: 'crash' },
+      deps,
+    )
+    expect(r.exitInfo).toBeUndefined()
+  })
+})
+
+describe('waitForSdkSessionGone — salvage must not race a live worker', () => {
+  // Driven through the REAL pool, not an injected `alive` fake.
+  //
+  // The first version of this suite injected `alive = () => ++calls < 3` — an
+  // arrangement production never creates — and thereby certified a gate that in
+  // production returned in 0 ms: `terminateSdkSession` sets status 'exited'
+  // SYNCHRONOUSLY (it only asks; interrupt() is fire-and-forget), so a wait built
+  // on `isSdkSessionAlive` was satisfied on its first poll and the salvage started
+  // while claude was still writing. Exactly the "measure the production
+  // arrangement" trap this session spent six rounds finding in other people's code.
+  const liveQuery = (control: { stop?: () => void }) => () => ({
+    async *[Symbol.asyncIterator]() {
+      await new Promise<void>((resolve) => {
+        control.stop = resolve
+      })
+      yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+    },
+  })
+
+  afterEach(() => __resetSdkSessionsForTests())
+
+  it('does NOT return while the pump is still unwinding, even though terminate already marked it exited', async () => {
+    const control: { stop?: () => void } = {}
+    const s = spawnSdkSession({ cwd: '/wt/x', options: {}, initialPrompt: 'go', queryFn: liveQuery(control) as never })
+    await new Promise((r) => setTimeout(r, 10))
+
+    terminateSdkSession(s.id)
+    // The trap, pinned: the OLD signal already says "gone"…
+    expect(isSdkSessionAlive(s.id)).toBe(false)
+    // …while the real one correctly says the iterator has not returned.
+    expect(isSdkSessionReaped(s.id)).toBe(false)
+
+    let settled = false
+    const waiting = waitForSdkSessionGone(s.id, undefined, { timeoutMs: 2_000, pollMs: 5 }).then((v) => {
+      settled = true
+      return v
+    })
+    await new Promise((r) => setTimeout(r, 60))
+    expect(settled).toBe(false) // still waiting — this is the whole point
+
+    control.stop?.() // the iterator finally returns
+    await expect(waiting).resolves.toBe(true)
+    expect(isSdkSessionReaped(s.id)).toBe(true)
+  })
+
+  it('returns immediately for a session that already finished', async () => {
+    const control: { stop?: () => void } = {}
+    const s = spawnSdkSession({ cwd: '/wt/y', options: {}, initialPrompt: 'go', queryFn: liveQuery(control) as never })
+    await new Promise((r) => setTimeout(r, 10))
+    control.stop?.()
+    await new Promise((r) => setTimeout(r, 20))
+    await expect(waitForSdkSessionGone(s.id, undefined, { timeoutMs: 1_000, pollMs: 5 })).resolves.toBe(true)
+  })
+
+  it('an unknown id is "gone" — nothing left to wait for', async () => {
+    await expect(waitForSdkSessionGone('nope', undefined, { timeoutMs: 100, pollMs: 5 })).resolves.toBe(true)
+  })
+
+  it('gives up after the budget rather than blocking the teardown forever', async () => {
+    const control: { stop?: () => void } = {}
+    const s = spawnSdkSession({ cwd: '/wt/z', options: {}, initialPrompt: 'go', queryFn: liveQuery(control) as never })
+    await new Promise((r) => setTimeout(r, 10))
+    terminateSdkSession(s.id)
+    // Losing the WIP salvage entirely would be worse than a possibly-torn
+    // snapshot — the same trade the PTY wait makes.
+    await expect(waitForSdkSessionGone(s.id, undefined, { timeoutMs: 80, pollMs: 10 })).resolves.toBe(false)
+    control.stop?.()
   })
 })
 

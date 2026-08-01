@@ -31,7 +31,7 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §4-G.
 
 import { existsSync } from 'fs'
-import { join } from 'path'
+import { isAbsolute, join, resolve } from 'path'
 import { createRequire } from 'module'
 import { resolveHookSourceRoot } from './hooksInstall'
 
@@ -97,7 +97,17 @@ export const loadGuardEvaluate = (guardPath?: string): GuardEvaluate => {
     throw new Error(resolveGuardModulePath().problem ?? 'guard source not resolvable')
   }
   if (cached && cached.path === resolved) return cached.evaluate
-  const require_ = createRequire(import.meta.url)
+  // ⚠ THE REQUIRE BASE IS THE GUARD FILE, NEVER `import.meta.url`. This module
+  // is bundled into `server/dist/index.cjs` by esbuild, which has no import.meta
+  // in CJS output and emits `{}` for it — so `import.meta.url` is `undefined`
+  // there and `createRequire(undefined)` THROWS. The hook fails closed, which
+  // means the SDK worker preflight fails, which means **the SDK runtime never
+  // starts in the packaged app at all** while every dev run (real ESM) works.
+  // esbuild's own `empty-import-meta` warning would have said so; the build
+  // silenced it for an unrelated, genuinely-dead branch in hooksInstall.ts.
+  // `resolved` is the absolute path of the guard we are about to load — the
+  // correct resolution base anyway, and one that exists in both worlds.
+  const require_ = createRequire(isAbsolute(resolved) ? resolved : resolve(resolved))
   // Load fresh: a stale module object from a previous checkout would be a veto
   // built from rules that are no longer the ones on disk.
   delete require_.cache?.[require_.resolve(resolved)]

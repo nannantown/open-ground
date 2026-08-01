@@ -91,7 +91,7 @@ tier の意味(`swarmOverseer.ts:146`): **T3** = 受信箱(escalations.json)へ�
 | **S1** rework-exhausted | `engine.anomalies` に `kind:'rework-exhausted'`(= 差し戻し `MAX_REWORKS`=2 超過で blocked 退避、`swarmOrchestrator.ts:238,5781-5798`)。毎 tick 読む | T3 | inbox へ「設計見直し/放置/分割して再依頼?」。receiptKey=`S1:<path>:<taskId>:<attempts>` | `swarmOverseer.ts:804-826` |
 | **S2** all-workers-down | `engine.notified.has('all-workers-down')`(= running・live worker 0・doing に swarm branch カード残、`swarmOrchestrator.ts:5929-5943`)。毎 tick | T3 | inbox へ「どう復旧しますか?」。receiptKey=`S2:<path>:all-workers-down` | `swarmOverseer.ts:829-849` |
 | **S3** exec-timeout | 通知ストア再読(60s サブサイクル)で `event:'exec-timeout'`、**24h 窓内**(`fatalWindowMs`、`:133`)かつ**受領台帳に無い occurrence のみ**(§3.6)。元は worker が `MAX_EXEC_MS`(既定 90 分、`swarmOrchestrator.ts:364`)を**実作業時間**で超過 → `pendingFatal.push`(`:5550-5569`)。**4 種類が同じ event で来る**(02 章 §5.6 の表): ①未 ready = 暴走(→blocked)/ ②`rework` = ready 済みで**実際に再作業**した(→review・**tip は未検証**)/ ③`capped-wait` = **統合待ちが控除上限を超えた**だけ(→review・**tip は ready 到達時のまま**)/ ④`work` = 待ちは全額控除・再作業もなしで、**純粋に実作業**が上限に達した(→review・**tip は未検証**。kept promote もここ)。②③④の判別は `fatal.execTimeoutShape`('rework'/'capped-wait'/'work')で、いずれもオーナーの判断は不要 — 司令官が差分を読んで判断する | T3 | inbox の**文面も 4 種類に分岐する**(`execTimeoutKind` + `execTimeoutShape`、`swarmOverseer.ts:1021,1032`): ①「分割して再依頼 or 見送り?」/ ②③④「このまま任せる or 見送る」(「あなたが決めることは基本ありません」と明記)。**③と④を取り違えないこと** — ④に「順番待ちが長引いた」と書くと、待ち 0 分でずっと働いていた worker について嘘を語ることになる(boolean 判別子だった頃の実バグ)。**③に「その後の手直しが持ち時間を使い切って」と書いてはいけない** — 手直しは 1 分も起きていないので、それは 0718 と同型の作り話になる(63 時間の週末レビューで実測)。**ready 側に「分割して再依頼」を出してはいけない** — worker 撤去後の回答は `deliverAnswer` → `recordEscalationAnswerForNextDispatch` で**次の dispatch に指示として乗る**ので、「小さく分けてやり直せ」は納品済みの作業をやり直させる実効命令になる(0718 実害(c)の再生産)。receiptKey=`S3:<path>:<ref>:<createdAt>`(§3.6)。~~§4.1 の増殖バグの主役~~ → **根治済み(§4.1 は歴史)** | `swarmOverseer.ts:854-959` |
-| **S4** worker 自由文質問 | live worker の心拍が `blocked` かつ blockers 文が疑問形(`looksLikeQuestion`、`swarmOverseer.ts:392-399`)。心拍の blocked 判定は `phase==='blocked' || blockers` (`swarmOrchestrator.ts:2622-2624`) | **T1**(THROTTLED 中は T3 直行) | budget が通れば大脳を fire-and-forget で起こす(`:744-787`)。**1 pass に 1 brain**(`:788-789`)。THROTTLED 中は素の質問を inbox 直行(`:718-734`) | `swarmOverseer.ts:690-791` |
+| **S4** worker 自由文質問 | live worker の心拍が `blocked` かつ blockers 文が疑問形(`looksLikeQuestion`、`swarmOverseer.ts:392-399`)。心拍の blocked 判定は `phase==='blocked' || blockers` (`swarmOrchestrator.ts:2622-2624`) | **T1**(THROTTLED 中は T3 直行) | budget が通れば大脳を fire-and-forget で起こす(`:744-787`)。**1 pass に 1 brain**(`:788-789`)。THROTTLED 中は素の質問を inbox 直行(`:718-734`)。⚠ 重複排除キーは **`S4:${workerKey(w)}`** — かつて `S4:${w.terminalId}` で、SDK worker は全員が空文字だったため**艦隊全体が1スロットを共有**し、2体目以降の質問が黙って捨てられていた(0801 修正)。ハンドルの取れない worker は S4 をスキップして warn ログを残す(共有キーに落とすくらいなら鳴らさない) | `swarmOverseer.ts:690-791` |
 | **S5** blocked-dwell | tasks スナップショットで `blocked` 列カードが**連続 30 分**滞留(`blockedStuckMs`、`:128`)。watch で dwell 計測(`:1061-1068`) | T3(weak) | inbox へ「依存は解けましたか?(todo へ戻す/このまま保留)」。**overseer は自分では列を動かさない**(`:1073-1075`)。**[保留] 運用と衝突** — §4.2 | `swarmOverseer.ts:1041-1093` |
 | **S6** | **欠番**。todo 枯渇→次タスク起草は C-core スコープから除外(goal 生成は最高リスクの runaway) | — | — | `swarmOverseer.ts:139-144` |
 | **S7** review-idle | `engine.reviews` の `status==='ff'`(統合可)が**連続 30 分**残存(`reviewIdleMs`、`:129`) | T0' | info 通知 `review-idle`「統合可能な review カードが N 件…」。inbox には行かない(`:1043`) | `swarmOverseer.ts:1011-1052` |
@@ -402,11 +402,57 @@ prune seen/watch                                      :617
    `resolveSwarmModelEffort(mode,'overseer')` + 許可 tier マスク(`swarmOverseer.ts:339-352`、
    spawn 時再解決 `swarmOverseerBrain.ts:420-421`)。
 5. **mailbox drain**(次 pass 冒頭、`swarmOverseer.ts:628-686`):
-   - `answer` → `canInjectInto` ガード(live claude TUI・menu 非表示・同一 project UUID —
-     `swarmEscalations.ts:529-560`)を通れば `injectAnswerIntoWorker` で worker PTY に注入。
-     注入失敗/worker 消滅なら **inbox へ格下げ**(proxyDraft 付き、`:654-665`)。
+   - `answer` → **`deliverAnswerToWorker(target, projectPath, text)`**(`swarmEscalations.ts`)。
+     ガードと配達を1呼び出しに畳んだ **runtime 非依存の seam** で、mailbox が運ぶのは
+     `terminalId` 単体ではなく **worker のハンドル丸ごと**(`runtime` / `terminalId` /
+     `sdkSessionId`)。配達失敗/worker 消滅なら **inbox へ格下げ**(proxyDraft 付き)。
+     - **PTY** = `canInjectInto` ガード(live claude TUI・menu 非表示・同一 project UUID)
+       → bracketed paste + settle + CR + 着地確認(未送信のまま残っていたら CR 再送)。
+     - **SDK** = `defaultCanPushIntoSdkWorker` ガード → `pushSdkInput` で**ターンを1つ queue**。
+       ガードが PTY 版より**短いのは意図的**: 「claude の TUI か」は SDK セッションでは
+       構造的に自明(シェルが無い)、「メニューが出ていないか」はメニュー自体が無い。
+       残るのは唯一セキュリティに効く条件 — **レジストリ UUID が一致するか**。
+       生死は **`isSdkSessionLive`**(`status` ではない。terminate は status を同期反転
+       させるので、まだ答えを受け取れるセッションに配達を拒否してしまう)。
+     - ⚠ **かつてこの経路は SDK worker に対して1度も発火できなかった**(0801 修正)。
+       `canInjectInto(terminalId) && injectAnswerIntoWorker(terminalId)` と書かれており、
+       SDK worker の `terminalId` は空文字なので**両方とも無言の no-op**。監督の回答は
+       毎パス「注入失敗」と記録されてオーナーに投げ返されていた。劣化した経路ではなく、
+       **一度も動きようがなかった経路**。
    - `escalate` / null(brain 死亡)→ inbox へ(proxyDraft は abstention フラグ付き、`:671-684`)。
-6. **watchdog**(`:523-539`): settle しない brain は 5min+60s で強制解放し、
+6. **オーナーが inbox から答えた分の配達**(T1 とは別経路)。`Escalation` レコードは
+   worker の**住所を丸ごと**持つ — `runtime`(不在 ⇒ `'pty'`)+ そのランタイムが使う
+   ハンドル1本(`terminalId` **または** `sdkSessionId`)。配達は 5. と同じ
+   `deliverAnswerToWorker` を通る。
+   - ⚠ **「同じ seam を通るから PTY にも SDK にも届く」は半分しか真ではない。**
+     seam が runtime 非依存でも、**レコードが住所を持っていなければ届かない。**
+     `deliverAnswer` は `record.runtime` / `terminalId` / `sdkSessionId` から
+     ハンドルを組み直して渡すだけなので、住所が空のレコードでは
+     `deliverAnswerToWorker` が即 `false` を返し、`taskId` があれば
+     「次 dispatch に相乗り(`'queued'`)」、無ければ `'skipped'` に落ちる。
+     **例外もログも出ず、オーナーの画面では「答えた」ままになる。**
+   - ⚠ **0801 まで、S4 の起票側がその住所を落としていた。** レコード型が `runtime` +
+     `sdkSessionId` を持つようになった後も、**起票する側**
+     (`swarmOverseer.raiseToInbox` / `swarmQuestions.handleWorkerQuestion`)は
+     `terminalId` 単体を受けて渡していた。SDK worker の `terminalId` は**空文字**
+     (workerRuntime.ts の同一性不変条件)なので、S4 経路で立つレコードは
+     **住所ゼロ**で生まれ、オーナーの回答は SDK worker に**一度も届きようがなかった**。
+     0801 に**ハンドルを丸ごと渡す形**へ変更(`raiseToInbox` の `target: WorkerHandle`、
+     `WorkerQuestionInput` の `runtime` + `sdkSessionId`)。
+   - **掟**: 起票も配達も **id 1本を抜き出さず `WorkerHandle` を丸ごと運ぶ**。
+     「配達関数を直したから経路全体が直った」と読まないこと — 住所を**書く**側が
+     落としていれば、runtime 非依存の配達関数は空を配るだけになる。
+   - ⚠ **住所の更新は丸ごと差し替える**(runtime + 両ハンドルを一度に)。フィールド単位で
+     上書きすると、再起動で**別のランタイムに生まれ直した** worker のレコードに
+     「前世の `terminalId`」と「今世の `sdkSessionId`」が同居し、どちらが本物か
+     判別できなくなる(ハンドルの真偽値で分岐すると死んだ方を選びうる)。
+     配達側は**必ず `runtime` で分岐する**。
+7. ⚠ **証拠の尾(`screenshotRef`)もランタイムで材料が違う**。PTY は端末画面のキャプチャ、
+   SDK は**蒸留済みイベントの直近**(tool 呼び出し / API エラー / text)。PTY 前提のままだと
+   SDK worker のエスカレーションは**証拠が1バイトも付かない**まま上がる — 司令塔が
+   「止まる直前に何をしていたか」を読む唯一の材料なので、空欄は「何も無かった」ではなく
+   「取り方が間違っている」と読むこと。
+8. **watchdog**(`:523-539`): settle しない brain は 5min+60s で強制解放し、
    `{...brainInFlight, answer:null}` を mailbox に合成 — 質問が silent drop にならない。
 
 ### 3.3 escalations store の状態機械(`~/.openground/escalations.json`)

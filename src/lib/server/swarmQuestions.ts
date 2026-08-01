@@ -48,9 +48,11 @@ import {
   MAX_ESCALATION_QUESTION,
   buildAnswerInjection,
   defaultCanInjectInto,
+  deliverAnswerToWorker,
   injectAnswerIntoWorker,
   openEscalation,
 } from './swarmEscalations'
+import { workerRuntimeKind, type WorkerHandle, type WorkerRuntimeKind } from './workerRuntime'
 import type { Escalation, EscalationWhy } from '../types'
 
 // ─── Screen anatomy ──────────────────────────────────────────────────────────
@@ -152,9 +154,21 @@ export interface WorkerQuestionInput {
   context: string
   taskId?: string
   branch?: string
-  /** The live PTY to answer into. Absent (S4 heartbeat path, dead worker) ⇒
-   *  a confident answer still lands in the inbox as a proxyDraft. */
+  /** The blocked worker's ADDRESS — `runtime` plus the ONE handle it names
+   *  (pty ⇔ `terminalId`, sdk ⇔ `sdkSessionId`; workerRuntime.ts). Absent
+   *  entirely (S4 heartbeat path, dead worker) ⇒ a confident answer still lands
+   *  in the inbox as a proxyDraft.
+   *
+   *  ⚠ THIS USED TO BE `terminalId` ALONE, and the pipe below branched on
+   *  `if (input.terminalId)`. An SDK worker's terminalId is the EMPTY STRING by
+   *  the identity invariant, so for every such worker the branch was false: the
+   *  answer was never delivered, the escalation that replaced it carried no
+   *  address either, and the whole thing reported success ('escalated'). Not a
+   *  degraded path — one that could not fire once. Carry the WHOLE handle and
+   *  let {@link deliverAnswerToWorker} branch. */
+  runtime?: WorkerRuntimeKind
   terminalId?: string
+  sdkSessionId?: string
 }
 
 export type WorkerQuestionOutcome =
@@ -168,10 +182,22 @@ export type WorkerQuestionOutcome =
 export interface HandleWorkerQuestionDeps {
   /** The C2 proxy (default: answerAsOwner over runOverseerBrain). */
   answer?: (q: OwnerQuestion) => Promise<OwnerAnswer>
-  /** The injection-target guard (default: {@link defaultCanInjectInto}). */
+  /** PTY ARM ONLY — the injection-target guard (default: {@link defaultCanInjectInto}). */
   canInjectInto?: (terminalId: string, projectPath: string) => Promise<boolean>
-  /** The W16 delivery helper (default: {@link injectAnswerIntoWorker}). */
+  /** PTY ARM ONLY — the W16 delivery helper (default: {@link injectAnswerIntoWorker}). */
   inject?: (terminalId: string, text: string) => Promise<boolean>
+  /** SDK ARM — the targeting guard (default: `defaultCanPushIntoSdkWorker`).
+   *  Declared here, and not only on `DeliverAnswerDeps`, for the same reason
+   *  {@link import('./swarmEscalations').AnswerEscalationDeps} declares it: a
+   *  test that can inject only the PTY seams can only ever exercise the PTY
+   *  half — which is precisely how this pipe stayed PTY-only unnoticed. */
+  canPushInto?: (sdkSessionId: string, projectPath: string) => Promise<boolean>
+  /** SDK ARM — the delivery (default: `pushSdkInput`). */
+  push?: (sdkSessionId: string, text: string) => boolean
+  /** The WHOLE conduit, overriding both arms (default: the composition below).
+   *  Mirrors `OverseerDeps.deliverAnswer` — one seam a caller can hand a fake
+   *  runtime-agnostic delivery to. */
+  deliver?: (target: WorkerHandle, projectPath: string, text: string) => Promise<boolean>
   /** The T3 inbox (default: {@link openEscalation}). */
   escalate?: (
     input: OpenEscalationInput,
@@ -182,11 +208,11 @@ export interface HandleWorkerQuestionDeps {
 /**
  * One worker question, end to end: C2 answers as the owner (C4 gates the
  * question AND the answer text inside answerAsOwner), a confident answer is
- * injected into the live worker PTY via W16 (bracketed paste + Enter with
- * landing confirmation/retry), and EVERY other path — proxy escalation,
- * missing/refused/failed injection target — falls CLOSED into the T3 inbox
- * (with the proxy's draft attached when one exists, so the owner reviews
- * instead of retyping). Never throws.
+ * delivered to the live worker ON ITS OWN RUNTIME (W16 bracketed paste + Enter
+ * with landing confirmation/retry for a PTY; one queued turn for an SDK
+ * session), and EVERY other path — proxy escalation, missing/refused/failed
+ * target — falls CLOSED into the T3 inbox (with the proxy's draft attached when
+ * one exists, so the owner reviews instead of retyping). Never throws.
  */
 export const handleWorkerQuestion = async (
   input: WorkerQuestionInput,
@@ -200,13 +226,46 @@ export const handleWorkerQuestion = async (
   const inject = deps?.inject ?? injectAnswerIntoWorker
   const escalate = deps?.escalate ?? openEscalation
 
+  /** Deliver to the worker on ITS OWN runtime.
+   *
+   *  ONE branch, in ONE place — and it exists (rather than being a bare call to
+   *  {@link deliverAnswerToWorker}) for the same reason swarmOverseer's
+   *  `deliverProxyAnswer` does: the PTY seams this pipe exposes (`canInjectInto`
+   *  + `inject`, which replaces the WHOLE of `injectAnswerIntoWorker`) have no
+   *  counterpart inside `DeliverAnswerDeps` to compose. The SDK arm has no such
+   *  legacy shape, so it goes straight through the production conduit with its
+   *  own seams injected. */
+  const deliverTo = async (h: WorkerHandle, text: string): Promise<boolean> => {
+    if (deps?.deliver) return deps.deliver(h, input.projectPath, text)
+    if (workerRuntimeKind(h) === 'sdk') {
+      return deliverAnswerToWorker(h, input.projectPath, text, {
+        ...(deps?.canPushInto ? { canPushInto: deps.canPushInto } : {}),
+        ...(deps?.push ? { push: deps.push } : {}),
+      })
+    }
+    const id = h.terminalId
+    if (!id) return false
+    return (await canInjectInto(id, input.projectPath)) && (await inject(id, text))
+  }
+
   const question = input.question.replace(/\s+/g, ' ').trim().slice(0, MAX_ESCALATION_QUESTION)
   const context = input.context.slice(0, MAX_ESCALATION_CONTEXT)
+  // The blocked worker's address, normalized once. Empty ids are dropped here so
+  // an SDK worker's `terminalId: ''` can never be mistaken for a PTY handle by
+  // anything downstream (openEscalation's `addressOf` would store nothing for it
+  // anyway — but the branch below would already have taken the wrong arm).
+  const target: WorkerHandle = {
+    ...(input.runtime ? { runtime: input.runtime } : {}),
+    ...(input.terminalId ? { terminalId: input.terminalId } : {}),
+    ...(input.sdkSessionId ? { sdkSessionId: input.sdkSessionId } : {}),
+  }
   const coords = {
     projectPath: input.projectPath,
     ...(input.taskId ? { taskId: input.taskId } : {}),
     ...(input.branch ? { branch: input.branch } : {}),
-    ...(input.terminalId ? { terminalId: input.terminalId } : {}),
+    // The escalation record must be able to name the SAME worker this pipe just
+    // failed to reach: the inbox row is the owner's only remaining route to it.
+    ...target,
   }
 
   const raise = async (
@@ -248,13 +307,13 @@ export const handleWorkerQuestion = async (
     return raise(verdict.why, verdict.reason)
   }
 
-  // Confident, C4-clean answer — deliver it into the live PTY when we may.
-  if (input.terminalId) {
+  // Confident, C4-clean answer — deliver it into the LIVE worker, on whatever
+  // runtime carries it. The address decides which conduit; this call site does
+  // not get to pick one id and hope.
+  if (target.terminalId || target.sdkSessionId) {
     let delivered = false
     try {
-      delivered =
-        (await canInjectInto(input.terminalId, input.projectPath)) &&
-        (await inject(input.terminalId, buildAnswerInjection(question, verdict.text)))
+      delivered = await deliverTo(target, buildAnswerInjection(question, verdict.text))
     } catch {
       delivered = false
     }
@@ -263,8 +322,8 @@ export const handleWorkerQuestion = async (
     }
   }
   // No target / target refused / delivery failed ⇒ the answer must not be lost
-  // AND must not be silently dropped into a wrong PTY: inbox, draft attached.
-  return raise('policy', 'proxy answered but the worker PTY was not injectable', {
+  // AND must not be silently dropped into a wrong desk: inbox, draft attached.
+  return raise('policy', 'proxy answered but the worker was not reachable', {
     answer: verdict.text,
     confidence: verdict.confidence,
   })

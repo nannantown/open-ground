@@ -50,6 +50,8 @@ const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath }
 const { decideCrashResponse } = require('./crashRespawn')
 const {
   RELEASE_NOTES_URL,
+  MANUAL_CHECK_TIMEOUT_MS,
+  withTimeout,
   languageFromSettingsRaw,
   buildAppMenuTemplate,
   manualCheckPrecondition,
@@ -1790,7 +1792,20 @@ async function start() {
 
   if (mainWindow) {
     // dev → Vite dev server (HMR); prod → the bundled Hono server (one origin).
-    await mainWindow.loadURL(MODE === 'dev' ? DEV_URL : BASE_URL)
+    //
+    // GUARDED. This await sits OUTSIDE the server-boot try/catch above, so a
+    // rejection (ERR_ABORTED when the user closes the window mid-load, a
+    // transient refusal, a renderer crash) used to propagate out of start() —
+    // taking initAutoUpdater() and the self-update arming with it. The app then
+    // ran with auto-update silently dead for the whole session, and, since the
+    // menu item was added, "Check for Updates…" answered "still starting" forever
+    // because the dial never left 'pending'. Loading the window is not a
+    // precondition for wiring the updater.
+    try {
+      await mainWindow.loadURL(MODE === 'dev' ? DEV_URL : BASE_URL)
+    } catch (err) {
+      console.error('[startup] loadURL failed:', err && err.message ? err.message : err)
+    }
   }
 
   // Auto-update wiring (Fix #14). Only ever runs in a packaged build — in dev
@@ -1862,6 +1877,12 @@ const AUTO_UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4h
 // it. Null in dev / unpackaged (initAutoUpdater never loads the module there) and
 // null if the require fails — both of which the precondition below answers for.
 let autoUpdaterHandle = null
+// Has initAutoUpdater run yet, and did it succeed? 'pending' is a REAL state the
+// user can reach: the menu is installed at the top of start() while
+// initAutoUpdater runs at the bottom, after a health poll that may take up to
+// HEALTH_TIMEOUT_MS. Reporting "no updater in this build" during that window
+// would be a false statement about a perfectly good build.
+let autoUpdaterInit = 'pending'
 // The update already downloaded and waiting for a restart, if the user chose
 // "Later" — `{ version }`, or null when there is none. A manual check must offer
 // THAT restart rather than re-asking GitHub about an update already on disk. It is
@@ -1917,7 +1938,11 @@ function promptRestartForUpdate(version) {
           isQuitting = v
         },
         shutdownServerChild,
-        quitAndInstall: () => autoUpdaterHandle && autoUpdaterHandle.quitAndInstall(),
+        // Fall back to a plain quit if the handle is somehow gone: by this point
+        // the server child has already been torn down, so doing NOTHING would
+        // leave the user staring at a live window backed by a dead server.
+        quitAndInstall: () =>
+          autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit(),
       }).catch(() => {})
     })
     .catch(() => {})
@@ -1941,6 +1966,9 @@ async function checkForUpdatesInteractive() {
     lockdown: isLockdownEnabled(),
     updateDownloaded: Boolean(downloadedUpdate),
     inFlight: manualCheckInFlight,
+    // 'ready' only once initAutoUpdater has actually wired a handle — a null
+    // handle after a successful init would still be a lie, so belt and braces.
+    updater: autoUpdaterInit === 'ready' && autoUpdaterHandle ? 'ready' : autoUpdaterInit,
   })
   if (decision === 'restart') {
     await promptRestartForUpdate(downloadedUpdate.version)
@@ -1950,17 +1978,20 @@ async function checkForUpdatesInteractive() {
     await showUpdateDialog(decision, {})
     return
   }
-  if (!autoUpdaterHandle) {
-    await showUpdateDialog('unavailable', {})
-    return
-  }
 
   manualCheckInFlight = true
   try {
     // checkForUpdates(), NOT checkForUpdatesAndNotify(): the notify variant fires an
     // OS notification of its own, which on top of our dialog would tell the user the
     // same thing twice.
-    const result = await autoUpdaterHandle.checkForUpdates()
+    //
+    // BOUNDED: checkForUpdates() has no timeout of its own, and a promise that
+    // never settles would leave manualCheckInFlight true forever — every later
+    // click answering "already checking" for the rest of the session.
+    const result = await withTimeout(
+      autoUpdaterHandle.checkForUpdates(),
+      MANUAL_CHECK_TIMEOUT_MS,
+    )
     const outcome = manualCheckOutcome({ result, currentVersion: app.getVersion() })
     // autoDownload means a small update can finish DURING the check — in which case
     // 'update-downloaded' already put the restart prompt on screen. Don't stack a
@@ -1993,7 +2024,12 @@ function installApplicationMenu() {
         appName: 'OPEN GROUND',
         isMac: process.platform === 'darwin',
         onCheckForUpdates: () => {
-          void checkForUpdatesInteractive()
+          // .catch because the early-return branches await showMessageBox OUTSIDE
+          // the try — a dialog that rejects (window destroyed mid-prompt) would
+          // otherwise surface as an unhandled rejection in the main process.
+          void checkForUpdatesInteractive().catch((err) => {
+            console.error('[updater] manual check failed:', err && err.message)
+          })
         },
         onOpenReleaseNotes: () => {
           void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
@@ -2004,16 +2040,21 @@ function installApplicationMenu() {
 }
 
 function initAutoUpdater() {
-  if (!app.isPackaged) return // dev / unpackaged: never touch electron-updater.
+  // dev / unpackaged: never touch electron-updater. The dial stays 'pending',
+  // which is never read there — manualCheckPrecondition answers 'dev' first.
+  if (!app.isPackaged) return
 
   let autoUpdater
   try {
     ;({ autoUpdater } = require('electron-updater'))
   } catch (err) {
     console.error('[updater] electron-updater unavailable:', err && err.message)
+    // NOW "this build has no updater" is the truth, and the menu may say it.
+    autoUpdaterInit = 'unavailable'
     return
   }
   autoUpdaterHandle = autoUpdater
+  autoUpdaterInit = 'ready'
 
   // We drive the "apply" step ourselves (a dialog button), so disable the
   // built-in auto-install-on-quit — otherwise a downloaded update would also

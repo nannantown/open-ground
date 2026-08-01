@@ -56,8 +56,34 @@ export interface EngineLogLine {
 /** The coarse lifecycle stage the manager monitor shows for a worker. */
 export type ManagerWorkerStage = 'starting' | 'running' | 'done'
 
+/** This worker's RUNTIME-AGNOSTIC identity — the client mirror of the server's
+ *  `workerKey`. The sdkSessionId of an SDK worker, the terminalId of a PTY one.
+ *  Use it for React keys, for map lookups, and as the id "stop" sends: an SDK
+ *  worker's terminalId is EMPTY, so keying on it makes every SDK worker the same
+ *  worker. Returns '' only for a malformed record (unaddressable by design). */
+export const engineWorkerKey = (w: {
+  runtime?: 'pty' | 'sdk'
+  terminalId?: string
+  sdkSessionId?: string
+}): string => ((w.runtime ?? 'pty') === 'sdk' ? (w.sdkSessionId ?? '') : (w.terminalId ?? ''))
+
 export interface EngineWorker {
+  /** EMPTY for an SDK worker — the identity invariant is pty ⇔ terminalId,
+   *  sdk ⇔ sdkSessionId (workerRuntime.ts). Never use it as this worker's
+   *  identity; use {@link engineWorkerKey}. */
   terminalId: string
+  /** Absent ⇒ 'pty' (every engine predating the Agent SDK runtime). */
+  runtime?: 'pty' | 'sdk'
+  /** Present only for an SDK worker: the handle its tile and its stop are
+   *  addressed by.
+   *
+   *  ⚠ These two fields were DROPPED here until 2026-07-31, and dropping them
+   *  broke three things at once: every SDK worker collapsed to the same empty
+   *  key (React keys collided), its tile fell through to the terminal renderer
+   *  and showed a healthy worker as an EXITED one, and "stop" sent `''` — which
+   *  the engine matched against the first SDK worker and then used to drop ALL
+   *  of them from its roster while their claude processes kept running. */
+  sdkSessionId?: string
   branch: string
   taskId: string
   taskTitle: string
@@ -389,9 +415,38 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
   const workers = Array.isArray(o.workers)
     ? o.workers
         .filter((w): w is Record<string, unknown> => !!w && typeof w === 'object')
-        .filter((w) => typeof w.terminalId === 'string')
+        // ADDRESSABLE IN EITHER POOL — never "has a terminalId".
+        //
+        // This filter used to read `typeof w.terminalId === 'string'`, which is
+        // the PTY-only question in its purest form. It survives today only by
+        // luck: the engine still writes terminalId:'' for an SDK worker, so the
+        // empty string satisfies the typeof. The day that field stops being
+        // emitted (it carries no information for an SDK worker and the record
+        // documents it as EMPTY), EVERY SDK worker silently vanishes from the
+        // commander's monitor — no error, no warning, just an emptying roster
+        // beside desks that are visibly working. Ask the question the identity
+        // invariant actually poses: can this row be addressed in the pool it
+        // claims (pty ⇔ terminalId, sdk ⇔ sdkSessionId)?
+        // ⚠ NON-EMPTY, because `typeof '' === 'string'`. An SDK worker's
+        // terminalId is ALWAYS the empty string by the identity invariant, so
+        // the typeof form admits every row — including `{terminalId:'',
+        // sdkSessionId:''}`, which is addressable in neither pool and is exactly
+        // what `workerKey` throws on. The question is "can this row be addressed
+        // in the pool it claims", and only a non-empty handle answers it.
+        .filter((w) => Boolean(w.terminalId) || Boolean(w.sdkSessionId))
         .map((w): EngineWorker => ({
-          terminalId: String(w.terminalId),
+          terminalId: typeof w.terminalId === 'string' ? w.terminalId : '',
+          // Carried, not dropped — see EngineWorker.sdkSessionId for the three
+          // failures dropping them caused. Only a literal 'sdk' selects the SDK
+          // renderer/address, matching the server's own "absent ⇒ pty" rule —
+          // and only WITH a handle to address it by, so the sibling pair can
+          // never be half-true (see sanitizeSwarmWorkers for the same rule).
+          ...(w.runtime === 'sdk' && typeof w.sdkSessionId === 'string' && w.sdkSessionId
+            ? { runtime: 'sdk' as const }
+            : {}),
+          ...(typeof w.sdkSessionId === 'string' && w.sdkSessionId
+            ? { sdkSessionId: w.sdkSessionId }
+            : {}),
           branch: typeof w.branch === 'string' ? w.branch : '',
           taskId: typeof w.taskId === 'string' ? w.taskId : '',
           taskTitle: typeof w.taskTitle === 'string' ? w.taskTitle : '',
@@ -613,11 +668,82 @@ export const sanitizeEnvIssues = (raw: unknown): SwarmEnvIssue[] => {
 
 const KNOWN_ORCH_STAGES: ReadonlySet<string> = new Set(['starting', 'running', 'done'])
 
+/** Non-empty string, else absent. The house rule for every optional text field
+ *  on the wire: an empty string carries no information and writing it would make
+ *  a JSON round-trip differ from what the server actually sent. */
+const wireString = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+/** STRICTLY `true`, else absent — a forged `'yes'` / `1` must never read as a
+ *  worker declaring itself ready or blocked. */
+const wireTrue = (v: unknown): true | undefined => (v === true ? true : undefined)
+
+/** One coercer per field of {@link SwarmWorkerRecord}, `undefined` ⇒ omit the key.
+ *
+ *  ⚠ WRITTEN AS A MAPPED TYPE OVER THE RECORD ON PURPOSE — do NOT "simplify" it
+ *  back into a hand-written object literal that copies fields one at a time.
+ *  A mapped type over `Required<SwarmWorkerRecord>` makes the two halves of this
+ *  contract impossible to drift: a field added to the record and not to this
+ *  table is a COMPILE error ("Property 'x' is missing in type"), and a key here
+ *  that the record does not have is one too. The old copy-each-field shape could
+ *  say nothing when they drifted — and they did drift, silently, in the one place
+ *  it mattered most:
+ *
+ *  the server carries `runtime` + `sdkSessionId` all the way through
+ *  swarmWorkerRegistry.ts SPECIFICALLY so the tab can tell an SDK worker from a
+ *  PTY one, and this function dropped both. Every SDK worker therefore reached
+ *  the render as `runtime: undefined` (⇒ 'pty') with no terminalId, fell through
+ *  to the PTY renderer, and was drawn as an ENDED session — with a Restart button
+ *  wired to the PTY path, over a `claude` that was alive and working. The SDK tile
+ *  (SdkWorkerPane) and its stop button were unreachable dead code in production.
+ *
+ *  The end-to-end guard is useSwarmEngine.workerWireContract.test.ts: it runs the
+ *  REAL server builder and this REAL sanitizer over one record and asserts nothing
+ *  is lost — so "the server sends it, the client drops it" fails a test, not a
+ *  release. */
+type SwarmWorkerFieldCoercers = {
+  [K in keyof Required<SwarmWorkerRecord>]: (v: unknown) => SwarmWorkerRecord[K] | undefined
+}
+
+const SWARM_WORKER_FIELDS: SwarmWorkerFieldCoercers = {
+  worktree: wireString,
+  branch: wireString,
+  terminalId: wireString,
+  // Only the two runtimes the client can actually render. Anything else (a
+  // forged value, a runtime a newer server knows and this client does not)
+  // folds to absent ⇒ 'pty', which is the server's own "absent ⇒ pty" rule and
+  // the only renderer this build is sure it has.
+  runtime: (v) => (v === 'sdk' || v === 'pty' ? v : undefined),
+  sdkSessionId: wireString,
+  taskId: wireString,
+  taskTitle: wireString,
+  startedAt: wireString,
+  stage: (v) =>
+    typeof v === 'string' && KNOWN_ORCH_STAGES.has(v)
+      ? (v as SwarmWorkerRecord['stage'])
+      : undefined,
+  phase: wireString,
+  note: wireString,
+  heartbeatAt: wireString,
+  ready: wireTrue,
+  blocked: wireTrue,
+  blockers: wireString,
+}
+
+/** Every field this sanitizer carries — i.e. every field of `SwarmWorkerRecord`,
+ *  because the table above is exhaustive BY TYPE.
+ *
+ *  Exported so the wire-contract test can assert its FIXTURE still exercises all
+ *  of them. That closes the last hole: a new field is a compile error until it is
+ *  added to the table, adding it to the table grows this list, and growing this
+ *  list turns the contract test red until a real server-built record actually
+ *  carries the field through. Without that ratchet the contract test would keep
+ *  passing on a fixture that no longer covers what the server sends. */
+export const SWARM_WORKER_KEYS = Object.keys(SWARM_WORKER_FIELDS) as (keyof SwarmWorkerRecord)[]
+
 // GET /api/swarm/workers is the SERVER-TRUTH worker list (project_swarm_worker_registry):
-// live PTYs + the engine's own roster + heartbeat files, already unified server-side —
-// see src/lib/server/swarmWorkerRegistry.ts. Untrusted like every other route response,
-// so coerce every field and drop a row with no identifiable worktree/branch rather than
-// letting a bad shape crash the render.
+// live PTYs + live SDK sessions + the engine's own roster + heartbeat files, already
+// unified server-side — see src/lib/server/swarmWorkerRegistry.ts. Untrusted like every
+// other route response, so coerce every field and drop a row with no identifiable
+// worktree/branch rather than letting a bad shape crash the render.
 export const sanitizeSwarmWorkers = (raw: unknown): SwarmWorkerRecord[] => {
   if (!raw || typeof raw !== 'object') return []
   const arr = (raw as Record<string, unknown>).workers
@@ -626,25 +752,39 @@ export const sanitizeSwarmWorkers = (raw: unknown): SwarmWorkerRecord[] => {
   for (const item of arr) {
     if (!item || typeof item !== 'object') continue
     const o = item as Record<string, unknown>
-    if (typeof o.worktree !== 'string' || !o.worktree) continue
-    if (typeof o.branch !== 'string' || !o.branch) continue
-    out.push({
-      worktree: o.worktree,
-      branch: o.branch,
-      ...(typeof o.terminalId === 'string' && o.terminalId ? { terminalId: o.terminalId } : {}),
-      ...(typeof o.taskId === 'string' && o.taskId ? { taskId: o.taskId } : {}),
-      ...(typeof o.taskTitle === 'string' && o.taskTitle ? { taskTitle: o.taskTitle } : {}),
-      ...(typeof o.startedAt === 'string' && o.startedAt ? { startedAt: o.startedAt } : {}),
-      ...(typeof o.stage === 'string' && KNOWN_ORCH_STAGES.has(o.stage)
-        ? { stage: o.stage as SwarmWorkerRecord['stage'] }
-        : {}),
-      ...(typeof o.phase === 'string' && o.phase ? { phase: o.phase } : {}),
-      ...(typeof o.note === 'string' && o.note ? { note: o.note } : {}),
-      ...(typeof o.heartbeatAt === 'string' && o.heartbeatAt ? { heartbeatAt: o.heartbeatAt } : {}),
-      ...(o.ready === true ? { ready: true } : {}),
-      ...(o.blocked === true ? { blocked: true } : {}),
-      ...(typeof o.blockers === 'string' && o.blockers ? { blockers: o.blockers } : {}),
-    })
+    const row: Record<string, unknown> = {}
+    for (const key of SWARM_WORKER_KEYS) {
+      const value = SWARM_WORKER_FIELDS[key](o[key])
+      // Omit rather than write `undefined`: the record is compared against the
+      // server's own object in the wire-contract test, and an explicit
+      // `undefined` key is a different object than an absent one.
+      if (value !== undefined) row[key] = value
+    }
+    // SIBLING INVARIANT: runtime 'sdk' ⇔ a usable sdkSessionId.
+    //
+    // The coercer table above is exhaustive by TYPE but blind ACROSS fields —
+    // each coercer sees one value and nothing else — so `{runtime:'sdk'}` with no
+    // session handle sailed straight through, and the record's central invariant
+    // (pty ⇔ terminalId, sdk ⇔ sdkSessionId) was true of the server and merely
+    // hoped for here. A record that claims the SDK pool but names no session in
+    // it is addressable by NOBODY: the SDK tile can't mount (SwarmModule checks
+    // both), and `stopWorkerDesk` takes the sdk arm, finds no id, falls through,
+    // finds no terminalId either — so a "restart" would spawn a second claude
+    // into a worktree the first may still be writing in. That is the twin
+    // hazard, reached from a malformed payload.
+    //
+    // Fold the CLAIM, keep the row: without the claim it is exactly the shape of
+    // a dead worker (no runtime, no id, worktree intact), which is a real state
+    // this UI already handles honestly — visible, terminable, restartable.
+    // Dropping the row instead would hide a worktree that exists on disk.
+    if (row.runtime === 'sdk' && typeof row.sdkSessionId !== 'string') delete row.runtime
+    // Identity. A row without both of these cannot be keyed, addressed, or acted
+    // on, so it is dropped instead of rendered as a nameless tile. Re-stating the
+    // two narrowed values in the pushed object is what lets the assertion hold:
+    // a bare `Record<string, unknown>` has no overlap with the record type.
+    const { worktree, branch } = row
+    if (typeof worktree !== 'string' || typeof branch !== 'string') continue
+    out.push({ ...row, worktree, branch } as SwarmWorkerRecord)
   }
   return out
 }

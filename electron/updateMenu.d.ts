@@ -7,6 +7,18 @@
  *  and the same feed electron-updater installs from. */
 export declare const RELEASE_NOTES_URL: string
 
+/** Ceiling on a MANUAL check. electron-updater's checkForUpdates() has no
+ *  timeout, and a promise that never settles would wedge the in-flight flag —
+ *  every later click answering "already checking" for the rest of the session. */
+export declare const MANUAL_CHECK_TIMEOUT_MS: number
+
+/** Await `promise`, rejecting after `ms`. Timers injectable so tests do not sleep. */
+export declare function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  timers?: { setTimeout?: (fn: () => void, ms: number) => unknown; clearTimeout?: (h: unknown) => void },
+): Promise<T>
+
 /** Stable id of the "Check for Updates…" item, so callers/tests never match on a
  *  display label. */
 export declare const MENU_ID_CHECK_FOR_UPDATES: string
@@ -55,14 +67,19 @@ export interface ManualCheckState {
   updateDownloaded?: boolean
   /** Is a manual check already running? */
   inFlight?: boolean
+  /** Has initAutoUpdater run, and did it find electron-updater? 'pending' is a
+   *  REAL state: the menu is installed before the updater is wired. Absent is
+   *  treated as 'ready' for back-compat. */
+  updater?: 'pending' | 'ready' | 'unavailable'
 }
 
 /** What a manual "Check for Updates…" click should do before any network is
- *  touched. Precedence: dev → restart → lockdown → busy → check (see the .js
- *  header for why `restart` outranks `lockdown`). */
+ *  touched. Precedence: dev → restart → lockdown → busy → starting → unavailable
+ *  → check (see the .js header for why `restart` outranks `lockdown`, and why
+ *  `starting` and `unavailable` are not the same answer). */
 export declare function manualCheckPrecondition(
   state: ManualCheckState,
-): 'dev' | 'restart' | 'lockdown' | 'busy' | 'check'
+): 'dev' | 'restart' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'check'
 
 /** How to read electron-updater's `checkForUpdates()` result. An unknown shape
  *  degrades toward "there is an update", never toward a false all-clear; `null`
@@ -76,6 +93,7 @@ export type UpdateDialogKind =
   | 'dev'
   | 'lockdown'
   | 'busy'
+  | 'starting'
   | 'unavailable'
   | 'up-to-date'
   | 'downloading'

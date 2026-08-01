@@ -3,11 +3,19 @@
 // overseer (or, until C-core lands, a manual API caller) hits a question that is
 // IRREVERSIBLE or beyond the proxy's knowledge, it lands here instead of being
 // auto-answered — {question, context/stakes, the proxy's provisional answer,
-// why it was raised, the blocked worker's coordinates, a PTY-tail capture} —
-// and the REAL user answers it. The answer is (1) injected into the blocked
-// worker's live PTY so it resumes, or queued for the card's next dispatch when
-// the worker is gone, and (2) written back to you-corpus memory (owner Q→A
-// only) — the proxy-you training pipeline.
+// why it was raised, the blocked worker's ADDRESS, an evidence tail} — and the
+// REAL user answers it. The answer is (1) delivered into the blocked worker on
+// ITS OWN RUNTIME so it resumes (bracketed paste + Enter for a PTY, one queued
+// turn for an SDK session — deliverAnswerToWorker), or queued for the card's
+// next dispatch when the worker is gone, and (2) written back to you-corpus
+// memory (owner Q→A only) — the proxy-you training pipeline.
+//
+// ⚠ THE ADDRESS IS TWO FIELDS, NOT ONE. `runtime` + the single handle it names
+// (pty ⇔ terminalId, sdk ⇔ sdkSessionId — workerRuntime.ts). A record built from
+// `terminalId` alone cannot name an SDK worker, whose terminalId is the EMPTY
+// STRING: every answer to one silently fell through to the next-dispatch queue
+// while the worker sat waiting. Anything here that reaches a worker must go
+// through the record's address, never through one id it happens to like.
 //
 // INVARIANTS this module owns (§8; the tests pin them):
 //  1. FAIL-CLOSED: there is NO code path that moves a record out of 'open'
@@ -32,6 +40,13 @@ import { WORKING_FOOTER_RE } from '@/lib/claudeScreen'
 import { ensureOpenGroundHome, escalationsFile, escalationShotsDir } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import { getTerminal, getTerminalScreen, writeInput } from './terminal'
+import { getSdkSession, isSdkSessionLive, pushSdkInput } from './sdkSession'
+import {
+  runtimeOf,
+  workerRuntimeKind,
+  type WorkerHandle,
+  type WorkerRuntimeKind,
+} from './workerRuntime'
 import { bracketedPaste } from './pastePrompt'
 import { appendJudgment } from './youCorpus'
 import { createSwarmInfoNotification } from './swarmNotifications'
@@ -61,7 +76,9 @@ export const MAX_ESCALATION_SHORT_FIELD = 512
  *  answer can't blow the goal size / Windows argv ceiling. The FULL answer
  *  stays on the escalation record. */
 export const MAX_ESCALATION_ORDER_LINE = 2000
-/** PTY-tail capture clamp — the LAST N chars of the worker's screen. */
+/** Evidence-tail clamp — the LAST N chars of the worker's screen (PTY) or of its
+ *  recent distilled events (SDK). The TAIL, because what matters is what the
+ *  worker said last before it stopped. */
 export const MAX_ESCALATION_SHOT_CHARS = 8 * 1024
 /** Days a RESOLVED (answered/injected/dismissed) record is kept before the boot
  *  retention sweep prunes it. 'open' records are NEVER pruned (fail-closed). */
@@ -348,16 +365,83 @@ export interface OpenEscalationInput {
   receiptKey?: string
   taskId?: string
   branch?: string
+  /** The blocked worker's ADDRESS. `runtime` picks which handle names it —
+   *  absent ⇒ 'pty' ⇒ `terminalId`; 'sdk' ⇒ `sdkSessionId` (and `terminalId` is
+   *  empty for such a worker, by the identity invariant in workerRuntime.ts).
+   *  A raiser that knows a worker MUST pass all three the same way every other
+   *  worker-touching call site in the engine does: omitting `runtime` on an SDK
+   *  worker makes the record un-deliverable, and nothing anywhere says so. */
+  runtime?: WorkerRuntimeKind
   terminalId?: string
+  sdkSessionId?: string
   proxyDraft?: EscalationProxyDraft
 }
 
 export interface OpenEscalationDeps {
   /** DI for tests: the PTY-tail capture (default getTerminalScreen). */
   captureScreen?: (terminalId: string) => string | null
+  /** DI for tests: the SDK evidence tail — the session's recent distilled events
+   *  (default: the SDK runtime's own `recentOutput`, i.e. exactly the text the
+   *  engine's classifier reads). A SEPARATE seam from `captureScreen` on purpose:
+   *  the two are keyed by DIFFERENT ids, and one dep taking "an id" is precisely
+   *  the shape that lets a caller hand the PTY arm an SDK session id. */
+  captureSdk?: (sdkSessionId: string) => string | null
   /** DI for tests: the bell/OS-toast firer (default createSwarmInfoNotification). */
   notify?: (n: Parameters<typeof createSwarmInfoNotification>[0]) => Promise<unknown>
   now?: () => Date
+}
+
+/** The persisted ADDRESS of a blocked worker, normalized to the identity
+ *  invariant: exactly one handle, plus the runtime that says which one it is.
+ *
+ *  Built ONCE, at the write boundary, so a record on disk can never carry an
+ *  `sdkSessionId` from this incarnation next to a `terminalId` from the last one
+ *  — a mixed record delivers to whichever the reader happens to look at first,
+ *  which is the same "answered the wrong desk" failure as answering none.
+ *  `runtime: 'pty'` is left OFF the record: absent already means pty everywhere,
+ *  and writing it would make old and new records differ for no reason. */
+const addressOf = (h: WorkerHandle): Pick<Escalation, 'runtime' | 'terminalId' | 'sdkSessionId'> =>
+  workerRuntimeKind(h) === 'sdk'
+    ? h.sdkSessionId
+      ? { runtime: 'sdk', sdkSessionId: h.sdkSessionId.slice(0, MAX_ESCALATION_SHORT_FIELD) }
+      : {} // 'sdk' with no session id names nothing — store no address at all
+    : h.terminalId
+      ? { terminalId: h.terminalId.slice(0, MAX_ESCALATION_SHORT_FIELD) }
+      : {}
+
+/** Does this address name a worker at all? (An escalation may legitimately have
+ *  none — the overseer's project-level raises are not worker-rooted.) */
+const hasAddress = (a: Pick<Escalation, 'terminalId' | 'sdkSessionId'>): boolean =>
+  !!(a.terminalId || a.sdkSessionId)
+
+/** The evidence tail for one worker, from ITS OWN runtime.
+ *
+ *  This used to be `if (input.terminalId) getTerminalScreen(...)`, which is the
+ *  one-pool question in its purest form: an SDK worker has no terminalId, so its
+ *  escalation reached the owner with NO record of what the worker was doing when
+ *  it stopped — the single most useful thing on the card. The SDK runtime's
+ *  `recentOutput` returns the real distilled event tail (tool calls, API errors,
+ *  the text of the turn), which is the same string the engine's own classifier
+ *  reads, so the owner sees the evidence the machine saw.
+ *
+ *  Best-effort by contract: null / a throw means "no evidence", NEVER "nothing
+ *  was wrong" — a capture failure must not block the escalation itself. */
+const captureEvidence = (h: WorkerHandle, deps?: OpenEscalationDeps): string | null => {
+  try {
+    if (workerRuntimeKind(h) === 'sdk') {
+      const id = h.sdkSessionId
+      if (!id) return null
+      const cap =
+        deps?.captureSdk ??
+        ((sid: string) => runtimeOf(h).recentOutput({ runtime: 'sdk', sdkSessionId: sid }))
+      return cap(id)
+    }
+    const id = h.terminalId
+    if (!id) return null
+    return (deps?.captureScreen ?? getTerminalScreen)(id)
+  } catch {
+    return null
+  }
 }
 
 /** The default receiptKey: stable across restarts for "the same card asking the
@@ -411,11 +495,27 @@ export const openEscalation = async (
     )
     if (existing) {
       // Refresh the WORKER COORDINATES on the dedup hit: a re-raise after a
-      // worker respawn carries the LIVE worker's terminal/branch — the answer
-      // must target that one, not the dead PTY recorded at first raise.
+      // worker respawn carries the LIVE worker's desk/branch — the answer must
+      // target that one, not the dead desk recorded at first raise.
       let touched = false
-      if (input.terminalId && input.terminalId !== existing.terminalId) {
-        existing.terminalId = input.terminalId
+      // The address is replaced WHOLESALE (runtime + both handles), never
+      // field-by-field. A respawn can land on the OTHER runtime — the sdk dial
+      // falling back to a PTY, or an sdk worker replacing a pty one — and merging
+      // a fresh sdkSessionId into a record that still holds the old terminalId
+      // leaves a record whose runtime and ids disagree. Field-by-field is also
+      // how the pre-SDK version silently ignored an SDK re-raise entirely: it
+      // only ever looked at `input.terminalId`, which is empty for those workers.
+      const addr = addressOf(input)
+      if (
+        hasAddress(addr) &&
+        (addr.runtime !== existing.runtime ||
+          addr.terminalId !== existing.terminalId ||
+          addr.sdkSessionId !== existing.sdkSessionId)
+      ) {
+        delete existing.runtime
+        delete existing.terminalId
+        delete existing.sdkSessionId
+        Object.assign(existing, addr)
         touched = true
       }
       if (input.branch && input.branch !== existing.branch) {
@@ -429,14 +529,15 @@ export const openEscalation = async (
     const id = randomUUID()
     const createdAt = (deps?.now?.() ?? new Date()).toISOString()
 
-    // PTY-tail capture (§8 screenshotRef): what the blocked worker's screen
-    // showed when the question was raised. Best-effort — a capture failure
-    // never blocks the escalation itself.
+    // Evidence tail (§8 screenshotRef): what the blocked worker was doing when
+    // the question was raised — its PTY screen, or an SDK session's recent event
+    // transcript, asked of the worker's OWN runtime (see captureEvidence).
+    // Best-effort — a capture failure never blocks the escalation itself.
+    const address = addressOf(input)
     let screenshotRef: string | undefined
-    if (input.terminalId) {
+    if (hasAddress(address)) {
       try {
-        const capture = deps?.captureScreen ?? getTerminalScreen
-        const tail = capture(input.terminalId)?.trimEnd().slice(-MAX_ESCALATION_SHOT_CHARS)
+        const tail = captureEvidence(input, deps)?.trimEnd().slice(-MAX_ESCALATION_SHOT_CHARS)
         if (tail) {
           // Private like the inbox itself (0600/0700): the capture shows what a
           // worker was doing in the user's project — the most sensitive part of
@@ -464,9 +565,9 @@ export const openEscalation = async (
       projectPath,
       ...(input.taskId ? { taskId: input.taskId.slice(0, MAX_ESCALATION_SHORT_FIELD) } : {}),
       ...(input.branch ? { branch: input.branch.slice(0, MAX_ESCALATION_SHORT_FIELD) } : {}),
-      ...(input.terminalId
-        ? { terminalId: input.terminalId.slice(0, MAX_ESCALATION_SHORT_FIELD) }
-        : {}),
+      // ONE normalized address (runtime + the single handle it names), already
+      // clamped — see addressOf. Never both ids.
+      ...address,
       question,
       context,
       ...(plainQuestion ? { plainQuestion } : {}),
@@ -679,9 +780,123 @@ export const injectAnswerIntoWorker = async (
   }
 }
 
+/**
+ * Guard: may we push a turn into this SDK session? The SDK counterpart of
+ * {@link defaultCanInjectInto}, and deliberately SHORTER — two of that guard's
+ * three conditions do not exist on this runtime, and saying so is the point:
+ *  • "it hosts a `claude` TUI" — an SDK session IS a `claude` conversation by
+ *    construction (there is no shell to hand a command line to);
+ *  • "no interactive menu is open" — there is no menu, and no bare CR that could
+ *    confirm one; a pushed turn is a message, never a keystroke.
+ * What DOES carry over is the third and only security-relevant one: the session
+ * must belong to the SAME registered project as the escalation, compared by
+ * registry UUID so a worker running in the project's central worktree matches.
+ *
+ * ⚠ LIVENESS IS `isSdkSessionLive`, NEVER `status`. `terminateSdkSession` flips
+ * status to 'exited' synchronously while the claude behind it is still unwinding;
+ * a status-based guard would refuse to deliver an answer to a session that is
+ * still perfectly able to take one (and, on the other seams, authorise deleting
+ * its worktree). Delivery itself is still gated by `pushSdkInput`, which refuses
+ * a session that has actually been closed — so this is the containment check,
+ * not a second liveness opinion.
+ */
+export const defaultCanPushIntoSdkWorker = async (
+  sdkSessionId: string,
+  projectPath: string,
+  deps?: {
+    get?: typeof getSdkSession
+    uuidOf?: typeof projectUUIDFromPath
+  },
+): Promise<boolean> => {
+  const get = deps?.get ?? getSdkSession
+  const uuidOf = deps?.uuidOf ?? projectUUIDFromPath
+  const s = get(sdkSessionId)
+  if (!s || !isSdkSessionLive(s)) return false
+  try {
+    const [a, b] = await Promise.all([uuidOf(s.cwd), uuidOf(projectPath)])
+    return a === b
+  } catch {
+    return false // either side unresolvable → refuse (fail-closed)
+  }
+}
+
+export interface DeliverAnswerDeps {
+  write?: typeof writeInput
+  sleep?: (ms: number) => Promise<void>
+  readScreen?: (id: string) => string | null
+  /** DI for tests: the PTY targeting guard (default {@link defaultCanInjectInto}). */
+  canInjectInto?: (terminalId: string, projectPath: string) => Promise<boolean>
+  /** DI for tests: the SDK targeting guard (default {@link defaultCanPushIntoSdkWorker}). */
+  canPushInto?: (sdkSessionId: string, projectPath: string) => Promise<boolean>
+  /** DI for tests: the SDK delivery (default `pushSdkInput`). */
+  push?: (sdkSessionId: string, text: string) => boolean
+}
+
+/**
+ * THE answer conduit to a live worker, whatever runtime carries it — guard and
+ * delivery in one call, so no caller has to know that the two runtimes need
+ * different bytes.
+ *
+ * WHY THIS EXISTS. Every path that answers a blocked worker — the owner's inbox
+ * answer ({@link deliverAnswer}) and the overseer's proxy answer (swarmOverseer's
+ * brain-result drain) — was written as `canInjectInto(terminalId) &&
+ * injectAnswerIntoWorker(terminalId)`. An SDK worker's terminalId is EMPTY by the
+ * identity invariant (workerRuntime.ts), so for those workers both calls were a
+ * silent no-op: the proxy's answer was reported as "injection failed" and thrown
+ * back at the owner on EVERY pass, and an answer the owner actually typed reached
+ * the worker never. Not a degraded path — a path that could not fire once.
+ *
+ * The two deliveries are genuinely different mechanisms, and that is the whole
+ * reason this is a seam rather than a shared string:
+ *  • PTY — bracketed paste, a settle delay, a submitting CR, then a bounded
+ *    landing check that re-sends the CR while the text still sits unsent
+ *    ({@link injectAnswerIntoWorker}). None of it can confirm more than "the
+ *    writes landed on a live pty".
+ *  • SDK — one queued turn. Accepted synchronously, mid-turn is fine (the CLI
+ *    queues it), and there is no input box to clear, no draft to erase, and no
+ *    Enter to be swallowed.
+ *
+ * Returns whether the worker actually received it; false lets the caller fall
+ * back (the inbox, or the card's next-dispatch queue).
+ */
+export const deliverAnswerToWorker = async (
+  target: WorkerHandle,
+  projectPath: string,
+  text: string,
+  deps?: DeliverAnswerDeps,
+): Promise<boolean> => {
+  if (workerRuntimeKind(target) === 'sdk') {
+    const id = target.sdkSessionId
+    // No handle ⇒ nothing to deliver to. Deliberately NOT `workerKey(target)`:
+    // that throws, and a missing handle here must degrade to the caller's
+    // fallback (inbox / next dispatch), not blow up an answer already recorded.
+    if (!id) return false
+    if (!(await (deps?.canPushInto ?? defaultCanPushIntoSdkWorker)(id, projectPath))) return false
+    return (deps?.push ?? pushSdkInput)(id, text)
+  }
+  const id = target.terminalId
+  if (!id) return false
+  if (!(await (deps?.canInjectInto ?? defaultCanInjectInto)(id, projectPath))) return false
+  return injectAnswerIntoWorker(id, text, deps)
+}
+
 export interface AnswerEscalationDeps {
   write?: typeof writeInput
   sleep?: (ms: number) => Promise<void>
+  /** DI for tests: the PTY landing check ({@link injectAnswerIntoWorker} re-reads
+   *  the worker's frame to decide whether the submitting CR landed; default
+   *  `getTerminalScreen`).
+   *
+   *  ⚠ Declared because this type is passed WHOLE to {@link deliverAnswerToWorker}
+   *  as its {@link DeliverAnswerDeps} — so a `readScreen` handed to
+   *  `answerEscalation` already reached the landing check STRUCTURALLY, through a
+   *  field this interface did not admit existed. Callers were relying on an
+   *  undeclared dep: TypeScript's excess-property check only fires on object
+   *  LITERALS, so every test that built its seam bag in a helper (the normal
+   *  shape) passed silently, while inlining the same bag would have failed to
+   *  compile. Declaring it makes the contract the callers already use the one the
+   *  type states. */
+  readScreen?: (id: string) => string | null
   /** DI for tests: the you-corpus write-back (default appendJudgment). */
   appendMemory?: (input: { text: string; tags?: string[]; context?: string }) => Promise<unknown>
   /** DI for tests: the worker-gone fallback (default: the engine's rework-reason
@@ -690,8 +905,15 @@ export interface AnswerEscalationDeps {
   queueForNextDispatch?: (projectPath: string, taskId: string, line: string) => Promise<void>
   /** DI for tests: the registry allowlist check (default validateProjectPath). */
   isPathAllowed?: (p: string) => Promise<boolean>
-  /** DI for tests: the injection-target guard (default {@link defaultCanInjectInto}). */
+  /** DI for tests: the PTY injection-target guard (default {@link defaultCanInjectInto}). */
   canInjectInto?: (terminalId: string, projectPath: string) => Promise<boolean>
+  /** DI for tests: the SDK targeting guard (default {@link defaultCanPushIntoSdkWorker}).
+   *  Present here, and not only on {@link DeliverAnswerDeps}, because the owner's
+   *  answer route reaches the SDK arm THROUGH this type — a test that can only
+   *  inject the PTY seams can only ever exercise the PTY half. */
+  canPushInto?: (sdkSessionId: string, projectPath: string) => Promise<boolean>
+  /** DI for tests: the SDK delivery (default `pushSdkInput`). */
+  push?: (sdkSessionId: string, text: string) => boolean
   now?: () => Date
 }
 
@@ -717,18 +939,29 @@ const deliverAnswer = async (
   const isPathAllowed = deps?.isPathAllowed ?? isValidProjectPath
   if (!(await isPathAllowed(record.projectPath))) return 'skipped'
 
-  // Target guard BEFORE any byte reaches the PTY: only a live `claude` TUI,
-  // with no menu open, belonging to this record's project (see
-  // defaultCanInjectInto for why each condition is load-bearing).
-  const canInject = deps?.canInjectInto ?? defaultCanInjectInto
+  // Delivery goes through the RUNTIME-AGNOSTIC conduit, which carries the target
+  // guard with it (see {@link deliverAnswerToWorker}): a PTY worker gets the
+  // bracketed paste + Enter + landing check, an SDK worker gets a queued turn,
+  // and this call site does not have to know which.
+  //
+  // The handle is rebuilt from the record's PERSISTED ADDRESS — `runtime` decides
+  // which id names the worker, exactly as {@link addressOf} wrote it. Reading the
+  // record's `runtime` (rather than "whichever id is truthy") is what keeps a
+  // record that somehow carries both from delivering to the stale one. Records
+  // written before `runtime` existed have none, which resolves to 'pty' — the
+  // only thing they could ever have been.
+  const target: WorkerHandle = {
+    ...(record.runtime ? { runtime: record.runtime } : {}),
+    ...(record.terminalId ? { terminalId: record.terminalId } : {}),
+    ...(record.sdkSessionId ? { sdkSessionId: record.sdkSessionId } : {}),
+  }
   if (
-    record.terminalId &&
-    (await canInject(record.terminalId, record.projectPath)) &&
-    (await injectAnswerIntoWorker(
-      record.terminalId,
+    await deliverAnswerToWorker(
+      target,
+      record.projectPath,
       buildAnswerInjection(record.question, answer, record.plainQuestion),
       deps,
-    ))
+    )
   ) {
     // The 'injected' PROMOTION is persisted by the caller (markInjected) — this
     // leg runs outside the chain and must not write the array it never read.

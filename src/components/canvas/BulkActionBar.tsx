@@ -34,6 +34,14 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
     setBusy(true)
     setError(null)
     const failed: string[] = []
+    // ⚠ CARRY THE SERVER'S REASON, not just the name. Delete now REFUSES (409)
+    // while a claude session is still running in the project — it stops the
+    // desks and waits, and declines rather than deleting a worktree out from
+    // under a live process (which is how the 2026-07-28 machine freeze was
+    // manufactured). That refusal is the one failure here the owner can act on,
+    // and reporting it as a bare "Failed for: foo" throws away the only sentence
+    // that says what to do about it.
+    const reasons = new Map<string, string>()
     for (const p of projects) {
       try {
         const res = await fetch(endpoint, {
@@ -41,7 +49,14 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ path: p.path }),
         })
-        if (!res.ok) failed.push(p.name)
+        if (!res.ok) {
+          failed.push(p.name)
+          const why = await res
+            .json()
+            .then((b: { error?: unknown }) => (typeof b?.error === 'string' ? b.error : ''))
+            .catch(() => '')
+          if (why) reasons.set(p.name, why)
+        }
         // Letting go of a project — bulk Remove AND Delete both do — tears
         // down the hosted custom-tab frames it owns (same invariant as the
         // panel delete / single remove paths), so audio started there can't
@@ -57,7 +72,14 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
     onReload()
     if (failed.length) {
       // Keep the modal open with the failed list; the user can retry or cancel.
-      setError(`Failed for: ${failed.join(', ')}`)
+      // One line per project when the server explained itself, so a refusal that
+      // names a running session reads as an instruction rather than a mystery.
+      const explained = failed.map((n) => (reasons.has(n) ? `${n} — ${reasons.get(n)}` : n))
+      setError(
+        explained.length === 1 && reasons.size === 1
+          ? explained[0]
+          : `Failed for: ${explained.join(' / ')}`,
+      )
       return
     }
     onClear()

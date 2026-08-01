@@ -31,7 +31,7 @@ import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
-import { killTerminalsByCwdAndWait } from './terminal'
+import { stopAllDesksInDirAndWait } from './liveDesks'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
@@ -430,7 +430,13 @@ export const removeSwarmWorktree = async (
   // signal and no timeout can reach it again (07 章 §7) — our own teardown
   // manufacturing the un-killable orphans we spent 2026-07-28 rooting out.
   // A worker teardown is not urgent; five seconds of certainty is cheap.
-  const ptyGone = await killTerminalsByCwdAndWait(worktree)
+  // ⚠ BOTH POOLS. This asked only the PTY pool until 2026-07-31, and
+  // killTerminalsByCwdAndWait answers `true` ("nothing to wait for") when it
+  // finds no sessions — which is EXACTLY what an SDK worker's worktree looks
+  // like to it. So the refusal below never fired for one, and the removal below
+  // ran under a live claude: the very accident the comment above describes,
+  // reintroduced by a second runtime the check did not know about.
+  const ptyGone = await stopAllDesksInDirAndWait(worktree)
   if (!ptyGone) {
     // Still occupied. Refusing is the safe answer: the caller retries (the
     // engine's next pass, the commander's next sweep) and the worktree stays
@@ -788,10 +794,24 @@ export const spawnSwarmWorker = async (
     workers: opts.liveWorkers ?? [],
     worktree,
   })
-  if (choice.fellBackBecause) {
-    // Say it out loud. A silent fallback is how a migration ends up "not
-    // working" with nobody able to explain why.
-    console.warn(`[swarm] ${choice.fellBackBecause}`)
+  // WHY THIS RIDES BACK ON THE RESPONSE AND NOT ONLY INTO console.warn:
+  // in a packaged app the server is a forked child process, so a console.warn
+  // lands NOWHERE the owner can reach. They flip the switch, watch PTY workers
+  // come up, and have no way to learn whether the cap was full, the preflight
+  // failed, or the dial never took. The commander path already answers that
+  // question (`SpawnSwarmManagerResponse.fellBackBecause`, surfaced by the Swarm
+  // pane); the worker path did not, which quietly invalidated the reason the
+  // slot-holding design was accepted in the first place — "the cost of holding a
+  // slot is acceptable BECAUSE the reason is displayed". It is displayable now.
+  //
+  // `let`, because a fallback can also be decided BELOW (an SDK session that
+  // dies inside spawnSdkSession), and that reason must reach the caller too.
+  let fellBackBecause = choice.fellBackBecause
+  if (fellBackBecause) {
+    // Still said out loud: the log is what a developer tailing the server reads,
+    // the response is what the owner sees. A silent fallback is how a migration
+    // ends up "not working" with nobody able to explain why.
+    console.warn(`[swarm] ${fellBackBecause}`)
   }
 
   if (choice.runtime === 'sdk') {
@@ -827,17 +847,42 @@ export const spawnSwarmWorker = async (
       }
       throw e
     }
-    // terminalId is EMPTY for an SDK worker: the identity invariant is
-    // pty ⇔ terminalId / sdk ⇔ sdkSessionId (workerRuntime.ts), never both.
-    return {
-      terminalId: '',
-      runtime: 'sdk',
-      sdkSessionId: session.id,
-      agentSessionId,
-      worktree,
-      branch,
-      model: me.model,
+    // A session that died INSIDE spawnSdkSession reports 'failed' SYNCHRONOUSLY
+    // rather than throwing: the default queryFn does its `require` + `query()`
+    // inside the pool, which catches a synchronous throw and records the entry as
+    // failed. Returning it as a live worker is how a dead session becomes a roster
+    // entry the engine monitors forever. The commander's SDK path already checked
+    // this (swarmManager.launchSdkDesk); the worker path did not.
+    //
+    // DEGRADE, don't throw. `SdkWorkerUnavailableError` has no catcher anywhere,
+    // so throwing here would fail the whole dispatch — the card goes back to todo
+    // and the engine tries again into the same failure. Falling through to the
+    // PTY launch below keeps the house rule the commander path states outright:
+    // a worker on the known-good runtime beats no worker at all. The worktree and
+    // branch are REUSED (they were made for this card, and the PTY worker wants
+    // exactly them), so nothing is rolled back here.
+    if (session.status === 'failed') {
+      // This degrade is the one the owner is MOST likely to hit right after
+      // flipping the switch (a missing @anthropic-ai/claude-agent-sdk, a query()
+      // that throws on boot), and it is decided here rather than in
+      // chooseWorkerRuntime — so it has to be attached to the response by hand or
+      // it stays as invisible as the dial-level ones used to be.
+      fellBackBecause = `SDK worker died at start (${session.exitReason ?? 'unknown'}) — this worker runs as a PTY`
+      console.warn(`[swarm] ${fellBackBecause}`)
+    } else {
+      // terminalId is EMPTY for an SDK worker: the identity invariant is
+      // pty ⇔ terminalId / sdk ⇔ sdkSessionId (workerRuntime.ts), never both.
+      return {
+        terminalId: '',
+        runtime: 'sdk',
+        sdkSessionId: session.id,
+        agentSessionId,
+        worktree,
+        branch,
+        model: me.model,
+      }
     }
+    // …falls through to the PTY launch below.
   }
 
   let ref: ReturnType<typeof launchClaude>
@@ -871,7 +916,16 @@ export const spawnSwarmWorker = async (
   }
   // `model` rides back so the orchestrator can attribute a later rate-limit
   // sighting on this worker to the RIGHT quota tier (swarmQuota cooling table).
-  return { terminalId: ref.terminalId, agentSessionId, worktree, branch, model: me.model }
+  // `fellBackBecause` is present ONLY when the dial asked for sdk and this worker
+  // came up as a PTY anyway — see the runtime-choice block above.
+  return {
+    terminalId: ref.terminalId,
+    agentSessionId,
+    worktree,
+    branch,
+    model: me.model,
+    ...(fellBackBecause ? { fellBackBecause } : {}),
+  }
 }
 
 /** Wall-clock stamp `MMDD-HHMMSS` for branch uniqueness. Isolated in one helper

@@ -40,6 +40,7 @@ import { atomicWriteJson } from './atomicWrite'
 import { claudeDirName } from './claudeProjectDir'
 import { projectDataFile } from './projectDataPath'
 import { isTranscriptLoadable } from './swarmTranscriptProof'
+import { isSdkSessionLive, listSdkSessions } from './sdkSession'
 import { isClaudeSessionLive } from './terminal'
 
 /** The per-project central file holding the desks' session ids. */
@@ -69,8 +70,9 @@ export type SwarmSessionsFile = Partial<Record<SwarmSessionRole, SwarmRoleSessio
  *   - `none`    — nothing persisted yet (first launch on this project/role).
  *   - `moved`   — the project's cwd changed, so claude's transcript for this id
  *                 lives under a different project dir and `--resume` can't see it.
- *   - `live`    — a PTY is STILL driving this session; two claude processes
- *                 appending to one transcript would interleave-corrupt it.
+ *   - `live`    — a desk is STILL driving this session, on EITHER runtime (PTY or
+ *                 Agent SDK); two claude processes appending to one transcript
+ *                 would interleave-corrupt it.
  *   - `missing` — claude has no loadable transcript for the id (never written,
  *                 pruned, emptied, or truncated to garbage).
  *   - `store`   — the persistence layer itself failed (unregistered path, unreadable
@@ -242,20 +244,104 @@ export const forgetSwarmSessionIf = async (
  *  it needs only the plain exists/non-empty/parseable proof. */
 export const isSessionResumable = isTranscriptLoadable
 
+// ── "is anyone already holding this conversation?", asked of BOTH pools ──────
+
+/** Is a LIVE desk — on EITHER runtime — already driving this CLAUDE conversation id?
+ *
+ *  WHY THIS IS NOT `isClaudeSessionLive`. That predicate answers for the PTY pool
+ *  alone, and it was this module's default until 2026-08-01. The question it is
+ *  asked here is "would handing this id to a second claude interleave-corrupt the
+ *  transcript?", and with the SDK runtime dialled on the answer lives in two
+ *  pools: an SDK desk IS a claude, appending to the SAME
+ *  ~/.claude/projects/<cwd>/<sessionId>.jsonl. A PTY-only reader says "free" about
+ *  a conversation an SDK desk is writing into right now, {@link resolveSwarmSession}
+ *  returns `resume:true`, and two claudes write one file. Silent — nothing throws,
+ *  nothing logs, and the damage shows up later as a transcript neither desk can load.
+ *
+ *  ⚠ THE UPSTREAM GUARD IS NOT A SUBSTITUTE, AND MUST NOT BE MISTAKEN FOR ONE.
+ *  swarmManager.adoptLiveDesk does ask both pools before it lets a commander spawn
+ *  reach here — but it asks a DIFFERENT question: "(this project, the 司令官 label)",
+ *  and it asks it ONLY on the commander spawn path. This one is "(this conversation
+ *  id, either pool)", so it also covers a desk holding the id that adopt's label
+ *  filter does not select. And `spawnSwarmSupply` has NO singleton guard at all —
+ *  for the 補給官 this function is the ONLY thing standing between a second launch
+ *  and a shared transcript.
+ *
+ *  ⚠ WHAT NEITHER ARM SEES — do not cite it as this predicate's reason for being.
+ *  An earlier revision of this comment claimed the PTY arm catches the owner
+ *  running `claude --resume <id>` by hand in a Terminal pane. It does not. The PTY
+ *  arm matches on `TerminalInfo.agentSessionId` (terminal.ts, `claudeSessionActivity`),
+ *  a field written ONLY by `launchClaude`; a hand-typed claude inside a `zsh -l`
+ *  pane leaves it undefined, so that session is invisible here — and equally
+ *  invisible to the SDK arm, which can only see sessions this server spawned.
+ *  BOTH pools answer for desks OPEN GROUND itself started, and nothing else. The
+ *  hand-run case is a KNOWN uncovered hole, not a covered one.
+ *
+ *  Liveness is `!reaped` ({@link isSdkSessionLive}), NEVER `status`:
+ *  `terminateSdkSession` flips status to 'exited' SYNCHRONOUSLY — it means "we
+ *  asked it to stop" — so a status reader would call a still-unwinding desk gone
+ *  and hand its open transcript to a fresh `--resume`. That is the same trap
+ *  documented on `listSdkSessionsIn` / `terminateSdkSessionsInDir`.
+ *
+ *  ERRING TOWARDS "LIVE" IS STILL THE SAFE DIRECTION — but it is NOT cheap, and an
+ *  earlier revision of this comment underpriced it as "one desk its memory for ONE
+ *  LAUNCH". There is no such bound in the code. A false "live" makes
+ *  {@link resolveSwarmSession} mint a fresh id, and BOTH callers immediately write
+ *  that fresh id over the record (swarmManager.ts / swarmSupply.ts each call
+ *  `recordSwarmSession` right after launching). The store keeps ONE slot per
+ *  (project, role), so the accumulated conversation is not skipped for a launch —
+ *  it is FORGOTTEN: its JSONL survives under ~/.claude, but nothing addresses it
+ *  any more and no code path here ever goes back for it. The direction is still
+ *  right (a false "free" corrupts the transcript, which is worse than losing the
+ *  pointer to it) — the price is just one whole conversation, not one launch.
+ *
+ *  ⚠ AND THE SDK ARM HAS A PERMANENT-"LIVE" MODE, BY DESIGN UPSTREAM. It scans the
+ *  pool, and `sweepClosedSessions` (sdkSession.ts) deliberately evicts ONLY reaped
+ *  entries — no reaper timeout, on purpose, so a claude wedged in D-state git keeps
+ *  its worktree protected instead of having it deleted out from under it. An entry
+ *  whose pump never unwinds therefore answers "live" for its conversation id for
+ *  the whole life of the server process (a restart clears the in-memory pool).
+ *  Composed with the paragraph above, the cost is bounded but real: the FIRST desk
+ *  launch after the wedge loses that conversation for good, and every launch after
+ *  it resumes normally (the freshly recorded id is held by nobody). That is the
+ *  accepted trade — do not "fix" it by reading `status` here, which is exactly the
+ *  false-"free" this predicate exists to prevent.
+ *
+ *  HOME: conceptually this belongs beside the other both-pools questions in
+ *  liveDesks.ts. It is here because liveDesks answers by cwd and by beacon, not
+ *  by claude conversation id, and this is its only consumer today — hoist it there
+ *  the moment a second caller appears rather than growing a third copy. */
+export const isAgentSessionLiveAnywhere = (agentSessionId: string): boolean => {
+  // An empty id addresses nobody. BELT AND BRACES, not the load-bearing check —
+  // be honest about that, because a test asserting "the empty case works" cannot
+  // fail on this line's removal. Both arms already refuse it independently:
+  // `claudeSessionActivity` returns early on a falsy id (terminal.ts), and the SDK
+  // pool never STORES an empty `agentSessionId` (`spawnSdkSession` spreads it only
+  // when truthy), so `s.agentSessionId === ''` is unreachable below. This states
+  // the rule once, at the top, so it survives a change to either arm.
+  if (!agentSessionId) return false
+  if (isClaudeSessionLive(agentSessionId)) return true
+  return listSdkSessions().some(
+    (s) => s.agentSessionId === agentSessionId && isSdkSessionLive(s),
+  )
+}
+
 // ── the seam the desks call ─────────────────────────────────────────────────
 
 /** Decide how `role`'s desk should start in `projectPath`: RESUME the persisted
  *  conversation, or open a fresh one. Never throws — every failure degrades to a
  *  fresh session id (see the fail-open contract in the module header).
  *
- *  `isLive` is injected (default: the real PTY pool) so the "session still open"
- *  branch is unit-testable without spawning a terminal. */
+ *  `isLive` is injected (default: {@link isAgentSessionLiveAnywhere}, i.e. BOTH
+ *  desk pools) so the "session still open" branch is unit-testable without
+ *  spawning a terminal. Do not narrow that default back to one pool — see the
+ *  predicate's own note for what a PTY-only reader gets wrong. */
 export const resolveSwarmSession = async (
   projectPath: string,
   role: SwarmSessionRole,
   deps: { isLive?: (agentSessionId: string) => boolean } = {},
 ): Promise<ResolvedSwarmSession> => {
-  const isLive = deps.isLive ?? isClaudeSessionLive
+  const isLive = deps.isLive ?? isAgentSessionLiveAnywhere
   const fresh = (reason: FreshSessionReason): ResolvedSwarmSession => ({
     agentSessionId: randomUUID(),
     resume: false,
@@ -274,9 +360,10 @@ export const resolveSwarmSession = async (
   // claude addresses a session by (cwd, id). The project moved ⇒ its transcript is
   // filed under the OLD dir name and `--resume` would not find it from here.
   if (claudeDirName(rec.cwd) !== claudeDirName(projectPath)) return fresh('moved')
-  // Still open in a live PTY (double-click, a second window, a stale localStorage
-  // pointing at a running desk): two claude processes appending to one transcript
-  // interleave-corrupt it. Give the second desk its own session instead.
+  // Still open in a live desk on EITHER pool (double-click, a second window, a
+  // stale localStorage pointing at a running desk, an SDK commander the dial
+  // seated): two claude processes appending to one transcript interleave-corrupt
+  // it. Give the second desk its own session instead.
   if (isLive(rec.sessionId)) return fresh('live')
   if (!(await isSessionResumable(projectPath, rec.sessionId))) return fresh('missing')
   return { agentSessionId: rec.sessionId, resume: true }

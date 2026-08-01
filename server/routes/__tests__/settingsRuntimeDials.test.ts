@@ -89,7 +89,11 @@ describe('POST /api/settings — Agent SDK runtime dials round-trip', () => {
   })
 
   it('a negative / non-numeric sdkMaxWorkers is dropped, not stored', async () => {
-    for (const cap of [0, -3, Number.NaN, Number.POSITIVE_INFINITY, '4', null]) {
+    // NOTE: `0` used to head this list, and that was the bug — "run no SDK
+    // workers" is a real setting, not junk, so dropping it made the panel show 0
+    // while the server kept seating one. Its round trip is pinned in
+    // src/lib/server/sdkDialAndFallback.test.ts.
+    for (const cap of [-3, Number.NaN, Number.POSITIVE_INFINITY, '4', null]) {
       await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'sdk', sdkMaxWorkers: cap } }))
       expect(await getWorkerRuntimeDial(), String(cap)).toEqual({ mode: 'sdk' })
     }

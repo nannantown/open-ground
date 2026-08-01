@@ -28,12 +28,12 @@ import { attachContextLeftPct } from '@/lib/server/sessionContext'
 import { sendClaudeSlash } from '@/lib/server/claudeSlash'
 import { Hono } from 'hono'
 import { readProjectData, validateProjectPath } from '@/lib/server/projectData'
+import { listAllActiveDesks } from '@/lib/server/liveDesks'
 import {
   ackFlowStream,
   createTerminal,
   getTerminal,
   killTerminal,
-  listActiveTerminals,
   resizeTerminal,
   writeInput,
   setTerminalTaskId,
@@ -347,8 +347,12 @@ export const terminalRoutes = new Hono()
   // attachContextLeftPct then stamps each claude pane with its context-window
   // "% still free" (JSONL usage main source + on-screen auto-compact footnote
   // override) — the per-session context gauge signal (docs/CONTEXT_MANAGEMENT_PLAN.md).
+  // ⚠ BOTH POOLS (listAllActiveDesks, liveDesks.ts). Read from the PTY pool
+  // alone, a project whose work runs entirely on Agent SDK workers shows a QUIET
+  // card while claude is working in it — the beacon is the only "something is
+  // happening here" signal the Ground has, so a false-quiet is a lie, not a gap.
   .get('/api/terminal/active', async (c) =>
-    c.json(await attachContextLeftPct(await attachProjectIds(listActiveTerminals()))),
+    c.json(await attachContextLeftPct(await attachProjectIds(listAllActiveDesks()))),
   )
   // --- GET /api/terminal/:id — fetch terminal info ---
   .get('/api/terminal/:id', (c) => {

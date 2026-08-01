@@ -104,7 +104,23 @@ const scanRepo = (): ScanResult => {
   const tokenVerdict = new Map<string, boolean>() // token → banned? (sha256 は unique token ごとに1回)
   for (const rel of files) {
     if (BINARY_EXT.test(rel)) continue
-    const buf = readFileSync(join(ROOT, rel))
+    // ⚠ ENOENT IS A NORMAL TRANSIENT, AND MUST NOT RED THIS GUARD. `git ls-files`
+    // reads the INDEX, so a file deleted in the worktree but not yet staged is
+    // still listed — which is every rename, for as long as it takes to stage it.
+    // Measured 2026-08-01: renaming `.eslintrc.json` → `.eslintrc.cjs` failed
+    // this whole guard with an unhandled ENOENT, i.e. the pre-release PII gate
+    // went red for a reason that had nothing to do with PII. A guard that is red
+    // for reasons unrelated to its subject is a guard somebody switches off, and
+    // this one is the last thing standing between a real home path and a public
+    // repository. A file with no content cannot leak anything, so skipping it is
+    // correct as well as safe — the STAGED deletion will simply not be scanned.
+    let buf: Buffer
+    try {
+      buf = readFileSync(join(ROOT, rel))
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ENOENT') continue
+      throw err
+    }
     if (buf.length > MAX_BYTES || buf.includes(0)) continue
     out.scanned++
     const exemptTokens = TOKEN_EXEMPT_FILES.has(rel)

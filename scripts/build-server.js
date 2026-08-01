@@ -65,11 +65,20 @@ esbuild
     // Helpful when debugging the forked server in prod.
     sourcemap: true,
     logLevel: 'info',
-    // hooksInstall.ts falls back to import.meta.url for its ESM runtime
-    // (vitest); in this CJS bundle that branch is dead code behind a
-    // `typeof __dirname` guard, so esbuild's "import.meta will be empty"
-    // warning is expected + harmless here.
-    logOverride: { 'empty-import-meta': 'silent' },
+    // ⚠ GIVE `import.meta.url` A REAL VALUE — DO NOT SILENCE THE WARNING.
+    // esbuild has no import.meta in CJS output and emits `{}`, so every
+    // `import.meta.url` in bundled server code reads `undefined` at runtime.
+    // This was previously papered over with
+    // `logOverride: { 'empty-import-meta': 'silent' }` on the grounds that the
+    // only reader (hooksInstall.ts) sat behind a dead `typeof __dirname`
+    // branch — and then sdkGuardHook.ts grew a LIVE `createRequire(import.meta.url)`
+    // that throws on every call, so the packaged app could not start an SDK
+    // worker at all while every dev run worked. Shimming it is the fix that
+    // covers the next such reader too; silencing only hides them.
+    banner: {
+      js: "const __ogImportMetaUrl = require('url').pathToFileURL(__filename).href;",
+    },
+    define: { 'import.meta.url': '__ogImportMetaUrl' },
   })
   .then(() => {
     console.log('[build-server] wrote server/dist/index.cjs')

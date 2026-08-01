@@ -405,6 +405,71 @@ curl -s "http://127.0.0.1:47776/api/swarm/notifications" | jq '[.notifications[]
   2. **og-manage 起動時チェック** — `skills/og-manage/SKILL.md` の「前提・環境確認」に、00-INDEX §6-1 の乖離チェック(対象コミットと origin/main tip の diff --stat)をセッション開始手順として追記済み。
 - **起票テンプレへの組み込みも実装済み**(案 B'、2026-07-11): 補給官(`~/.claude/skills/supply/SKILL.md` 手順3、正典は repo `skills/supply/SKILL.md`)・/order(`~/.claude/skills/order/SKILL.md` 入力1、正典は repo `skills/order/SKILL.md`)・og-manage(`~/.claude/skills/og-manage/SKILL.md`「注文」手順3、正典は repo `skills/og-manage/SKILL.md`)の3テンプレすべてに「SWARM_CODE_PATHS 相当に触れるカードは、完了条件に docs/commander/ 該当章の更新(更新不要ならその明示判断)を含める」ルールが入った。役割分担: テンプレは**起票時の予防**、コード側の検知2点は**事後の警報**(journal warn は 200 行 ring で再起動により揮発する — 00-INDEX §7 — ため警報だけでは「気づかれず放置」を防げない。両輪で塞ぐ)。**2026-07-22 追記**: 当時 og-manage だけが「アプリ起動時に repo 正典から自動配備」だったが、3スキルとも repo 正典(+ `scripts/swarm-beat.sh` / `scripts/openground-swarm-lib.sh`)から `server/index.ts` boot 時に同じ idempotent installer(`swarmToolingInstall.ts` / `ogManageSkill.ts` が共有する `managedFileInstall.ts`)で自動配備されるようになった(marker 無しの手編集ファイルは kept-user として不可侵)。非対称は解消 — 3スキルとも「repo 内から直接編集できる」。**2026-07-23 追記**: シェル補助の配備名を `swarm-lib.sh` → **`openground-swarm-lib.sh`** に改名した(`SWARM_LIB_BASENAME`)。ユーザの `~/.claude/swarm-lib.sh` は旧 tmux コックピット時代の**手書き 12 関数**で、~/.claude 配下の別スクリプト群がそれを source している — OG 版(2 関数)を同名で配備すると、kept-user の盾が外れた瞬間(利用者が「kept-user (marker missing)」のログを見て自分の copy を消す等)に 10 関数が消えて `sw_session: command not found` 系で**静かに壊れる**。配備先を分けたので旧ファイルはもう install 対象ですらない。**配備名を旧名に戻さないこと**(回帰テスト = `swarmToolingInstall.test.ts` の describe「legacy ~/.claude/swarm-lib.sh collision」)。`scripts/swarm-beat.sh` の source 行(`$(dirname "$0")/openground-swarm-lib.sh`)と `package.json` の `build.files` allowlist も同じ名前で追随する 3 点セット。
 
+- **【2026-08-01 に見つかった穴】`SWARM_CODE_PATHS` が SDK ランタイムの中核ファイルを1つも拾わない。**
+  集合の第1要素は `^src/lib/server/swarm[^/]*\.ts$` = **ファイル名が `swarm` で始まるもの**なので、
+  `swarmEscalations.ts` / `swarmOverseer.ts` / `swarmManagerRuntime.ts` /
+  `swarmWorkerRuntimeDial.ts` / `swarmWorkerRegistry.ts` は入る。しかし
+  **`sdkSession.ts` / `sdkEvents.ts` / `sdkGuardHook.ts` / `sdkDeskLimit.ts` /
+  `workerRuntime.ts` / `liveDesks.ts` は1つも入らない**(UI 側も
+  `^src/components/canvas/modules/Swarm[^/]*$` なので `SdkWorkerPane.tsx` は外)。
+  同じ述語 `touchesSwarmPaths` が **swarm-safety スイートの起動条件**(`appliesTo`)にも
+  使われているので、影響は文書追随の soft-warn だけでは終わらない — **worker の生死判定と
+  guard 配線を書き換えるブランチが、安全網の適用対象外として通り抜けうる。**
+
+  **【この節の初版にあった過大主張を撤回する(0801 の点検)】** ここには
+  「0801 の6周のレビューで摘出した欠陥は**ほぼ全部この集合の外側**にあった」と
+  書いてあった。**コミット単位で実測すると偽。** 0731–0801 のレビュー系
+  fix/test コミット **19 本**を当時の集合に当てると、**17 本は内側のファイルを
+  1つ以上含んでいた** — 多くは同一コミット内の兄弟(`swarmSdkWorkerContract.test.ts` /
+  `swarmOrchestrator.ts` / `SwarmModule.tsx` / `swarmEscalations.ts`)。
+  つまりそれらのブランチでは `touchesSwarmPaths` は **true** で、
+  swarm-safety も soft-warn も**発火していた**。「ほぼ全部すり抜けた」は起きていない。
+
+  **完全に外側だったのは 2 本。ただしその 2 本が最悪の 2 件だった**(だから穴は本物):
+  - `94e60bd5`「稼働中 worker の worktree を消す最悪の穴」=
+    `liveDesks.ts` / `worktreeCleanup.ts` / `sdkSession.ts` / `server/routes/terminal.ts`
+  - `dd311acc`「配布ビルドでは SDK worker が1体も起動しない(critical)」=
+    `sdkGuardHook.ts` / `scripts/build-server.js`
+
+  教訓は**数の話ではなく書き方の話**: 機構の欠陥を「実際にこう抜けた」と断ずると、
+  次の人は数え直さない。**穴の存在**(集合の定義から導ける)と
+  **抜けた実例**(コミットを数えて初めて言える)を分けて書くこと。数え直す手:
+
+  ```bash
+  # 各コミットが当時の集合の内側/外側どちらだったか(0 = 完全に外側 = 素通りしうる)
+  git log --format=%h --since=2026-07-31 | while read c; do
+    n=$(git show --name-only --format= "$c" | grep -v '^$' | grep -cE \
+      '^src/lib/server/swarm[^/]*\.ts$|^server/routes/(swarm|project)\.ts$|^src/components/canvas/modules/Swarm[^/]*$|^server/index\.ts$')
+    echo "$n $c $(git log -1 --format=%s "$c")"
+  done
+  ```
+
+  ⚠ **これは「文書が現物と食い違っている」ではなく「機構に穴がある」** ので、
+  文書側だけでは閉じない。**0801 に `SWARM_CODE_PATHS` へ追加済み**(現物 =
+  `swarmOrchestrator.ts` の同定数): `^src/lib/server/sdk[^/]*\.ts$` /
+  **`^server/routes/sdk[^/]*\.ts$`**(SSE 終端 — 初版の処方箋はこれを落としていた。
+  `^server/routes/swarm\.ts$` にも sdk 正規表現にも当たらないので、名指ししない限り漏れる)/
+  `^server/routes/__tests__/sdk[^/]*$` / `^src/components/canvas/modules/Sdk[^/]*$` /
+  `^src/lib/server/(workerRuntime|liveDesks|worktreeCleanup)[^/]*\.ts$` /
+  `^server/routes/terminal\.ts$`。
+  **残っている外側(0801 時点・未修正、編入するかは未判断)**:
+  - `src/components/canvas/modules/useSwarmEngine.ts` — Swarm タブの配線を持つが
+    `Swarm[^/]*` にも `Sdk[^/]*` にも当たらない(0801 の欠陥1件がここにあった)。
+  - `scripts/build-server.js` — `dd311acc` の**真因**がここだった(esbuild が guard hook を
+    どう畳むか)。今は同コミットが `sdkGuardHook.ts` も触るので**結果的に**ゲートは
+    発火するが、ビルドスクリプトだけを触るブランチは今も素通りする。
+
+  ⚠ **番人は「ある」が、0801 の追加分をまだ見ていない**(0801 時点の観測)。
+  `swarmOrchestrator.integration.test.ts` の `describe('touchesSwarmPaths — the
+  swarm-code path matcher')` は正しい形 —— 集合の中身ではなく**実ファイル名が
+  true になること**を見る —— だが、並んでいる実名は編入前のもの(`swarmOrchestrator.ts` /
+  `server/routes/swarm.ts` / `project.ts` / `SwarmModule.tsx` / `server/index.ts`)だけで、
+  上の SDK 系エントリ(`sdkSession.ts` / `server/routes/sdkSession.ts` / `workerRuntime.ts` /
+  `liveDesks.ts` / `worktreeCleanup.ts` / `SdkWorkerPane.tsx` / `server/routes/terminal.ts`)は
+  **1つも入っていない**。正規表現を消しても番人は緑のまま = 編入が守られていない。
+  確認: `git grep -n "sdkSession.ts'\]" src/lib/server/swarmOrchestrator.integration.test.ts`
+  が空なら未追随。
+
 ### 対応カード
 
 案 B の検知2点+案 B'(テンプレ組込み)まで完了: supply / order は 2026-07-11 にグローバルスキルへ直接追記済み、og-manage はカード「[docs/commander] カード起票テンプレへの文書追随ルール組み込み」で repo 正典(`skills/og-manage/SKILL.md`)に組込み。**テンプレ経由の運用実績 1 件目 = カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」(2026-07-11、本改訂)** — テンプレの docs 追随ルールどおり完了条件に文書更新が入り、同一ブランチでコード+docs/commander/ が一緒に動いた(soft-warn を踏まない形の実測を兼ねる)。§7 の §6 行は ✓。

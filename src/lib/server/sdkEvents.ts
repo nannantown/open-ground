@@ -252,6 +252,33 @@ export const distillSdkMessage = (msg: unknown, prefixes: readonly string[]): Sd
 /** The status a {@link SdkEvent} implies, or null when it implies nothing.
  *  Kept next to the distiller so "what does this event mean for the machine"
  *  has one answer. `quota_refusal` parks; a turn boundary frees the session. */
+/** Does this event PROVE the desk is doing work AT THIS MOMENT?
+ *
+ *  ⚠ ARRIVAL IS NOT WORK. The SDK stream is not turn-scoped: the CLI keeps
+ *  talking between turns — `background_tasks_changed` when a background job it
+ *  started ends, `session_state_changed`(state:'idle') AFTER the result flushes,
+ *  task notifications, auth-status and rate-limit updates. Every one of those
+ *  distils to ZERO events here (they fall through 'system'/default), so a
+ *  promotion written as "a message arrived ⇒ working" fires on messages that
+ *  prove the opposite. And nothing takes it back: the only routes to 'waiting'
+ *  are a turn_end and the park's second boundary, neither of which can happen
+ *  when no turn is running — so the desk reads 作業中 until somebody injects a
+ *  new turn AND it completes. That is the dead-worker-shows-running failure
+ *  inverted: a desk sitting on the owner, never saying so.
+ *
+ *  ⚠ NOT THE PARK'S EXIT RULE, even though it looks like one. Leaving
+ *  'quota-parked' takes a TOOL CALL or a second turn boundary — deliberately
+ *  NOT `text`, because the CLI's refusal is emitted as ordinary text too and a
+ *  text-based exit un-parks the session on the refusal's own sentence. Here
+ *  `text` is correct (an assistant sentence is a turn in flight); there it is
+ *  wrong. Do not unify these two predicates. */
+export const isWorkEvidence = (ev: SdkEvent): boolean =>
+  ev.kind === 'text' ||
+  ev.kind === 'thinking' ||
+  ev.kind === 'tool_use' ||
+  ev.kind === 'tool_result' ||
+  ev.kind === 'compact'
+
 export const statusAfter = (ev: SdkEvent): SdkSessionStatus | null => {
   if (ev.kind === 'quota_refusal') return 'quota-parked'
   if (ev.kind === 'turn_end') return 'waiting'

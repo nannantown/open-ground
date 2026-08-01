@@ -114,8 +114,11 @@ const backupPath = () => join(guardedHomedir(), '.claude', 'settings.json.opengr
 // This module's dir under both module systems it runs in: CJS (tsx dev on
 // this type-less package, and the esbuild CJS bundle) has __dirname; ESM
 // (vitest's transform) has import.meta.url. In the CJS bundle the
-// import.meta branch is dead code behind the __dirname guard (esbuild lowers
-// it to undefined — warning silenced in scripts/build-server.js).
+// import.meta branch is dead code behind the __dirname guard. (The build no
+// longer LOWERS import.meta.url to undefined — it shims it to a real file URL,
+// because a live reader elsewhere once took that undefined and threw, silently
+// disabling the SDK runtime in the packaged app. Nothing here changes: the
+// __dirname guard wins in CJS either way.)
 const realModuleDir = (): string => {
   if (typeof __dirname !== 'undefined') return __dirname
   return dirname(fileURLToPath(import.meta.url))
