@@ -4,10 +4,29 @@
 // The rule is deliberately conservative and lives in ONE function so there is
 // exactly one place to read when asking "why did this worker come up as a PTY?":
 //
-//   • the dial is absent or 'pty'            → PTY   (the shipped default)
+//   • the dial says 'pty'                    → PTY   (the kill switch)
+//   • the dial holds an unrecognised value   → PTY   (a VALUE we cannot read is
+//                                                     not consent to the SDK)
 //   • the SDK slot budget is already full    → PTY
 //   • the SDK preflight does not pass        → PTY   (+ the reason, surfaced)
-//   • otherwise                              → SDK
+//   • the dial is absent, or says 'sdk'      → SDK
+//
+// ⚠ ABSENT ⇒ SDK SINCE 2026-08-01 — and NOTE THAT THIS FUNCTION'S RULE IS NOT
+// WHAT SHIPS ON ITS OWN. The only production caller (swarmWorker.ts) never hands
+// over the raw setting: it passes `await store.getWorkerRuntimeDial()`, so an
+// absent dial arrives here already resolved and this branch sees it only through
+// that reader. For one day the reader resolved absent to an EXPLICIT
+// `{mode:'pty'}` while this rule said sdk, so the flip could not reach dispatch
+// at all: measured 2026-08-02 (isolated HOME, nothing written) the composed path
+// answered pty while this function and the Swarm panel both answered sdk, and
+// 0.11.47 shipped that way. The reader now shares this polarity (absent ⇒ sdk),
+// and the file-level rule stays separate on both: an UNREADABLE settings.json
+// resolves to pty before either default is consulted.
+//
+// ⚠ DO NOT TEST THIS FUNCTION ALONE AND CALL IT A GUARANTEE ABOUT DISPATCH —
+// that shortcut is exactly what kept the defect above green for a release.
+// swarmRuntimeDialParity.test.ts composes reader→decision the way swarmWorker.ts
+// does, and compares it against what the Swarm panel is served.
 //
 // Every fallback is a DEGRADATION TO THE KNOWN-GOOD PATH, never a refusal to
 // dispatch: a worker that would have run fine as a PTY must not be blocked
@@ -53,9 +72,10 @@ export const countSdkWorkers = (workers: readonly WorkerHandle[]): number =>
 /** How many SDK workers are ACTUALLY live, measured from the pool.
  *
  *  The pool is the only source that sees every worker however it was started,
- *  which is what a cap has to count. The engine roster is merged in only to
- *  cover the instant between "the engine recorded a worker" and "its session
- *  appears in the pool"; ids dedupe the overlap.
+ *  which is what a cap has to count. The engine roster is merged in for two
+ *  cases: the instant between "the engine recorded a worker" and "its session
+ *  appears in the pool", and a `runtime:'sdk'` record carrying no session id at
+ *  all; ids dedupe the overlap.
  *
  *  Injectable so the decision stays a pure function under test. */
 export const liveSdkWorkerCount = (
@@ -97,7 +117,9 @@ export const liveSdkWorkerCount = (
     // the fix regressing itself on a timer.
     if (w.sdkSessionId) continue
     // No id at all: recorded between spawn and pool insertion, or a legacy
-    // record. The engine believes it dispatched this worker, so ignoring it
+    // record that still carries `runtime:'sdk'` (one without the field was
+    // already skipped above as 'pty'). The engine believes it dispatched this
+    // worker, so ignoring it
     // under-counts. (Dropping these is how this counter first regressed the
     // shipped tests.)
     n++

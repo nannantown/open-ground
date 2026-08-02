@@ -215,8 +215,11 @@ export const projectPanel = {
       'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. Turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
     'projectPanel.swarm.manager.overseerSandboxWarning':
       '⚠ Kernel-level containment is unavailable on this host (macOS sandbox-exec required) — the overseer’s brain runs with the permission-layer safeguards only. Its read-only design and budget still hold.',
-    // Runtime dials (Agent SDK migration). Both default OFF; a switch changes
-    // only the NEXT desk that starts, never a running one.
+    // Runtime dials (Agent SDK migration). No longer "both default OFF": with
+    // nothing written, the panel draws BOTH switches ON (`dialOf` resolves an
+    // absent dial to 'sdk'), so the copy below describes what OFF MEANS, not
+    // what ships. A switch changes only the NEXT desk that starts, never a
+    // running one.
     // "all projects" is not a footnote: this section sits directly beneath the
     // Overseer switch, which is PER-PROJECT engine state. Two switches side by
     // side with different scopes and no label is a trap.
@@ -905,8 +908,10 @@ export const projectPanel = {
       'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
     'projectPanel.swarm.manager.overseerSandboxWarning':
       '⚠ この環境ではカーネルレベルの封じ込め（macOS の sandbox-exec）が利用できません — 監督の大脳は permission 層の防壁のみで動きます。読み取り専用設計と予算上限は有効です。',
-    // ランタイム切替(Agent SDK 移行)。どちらも既定オフ。切り替えても**次に立つ卓**から
-    // 適用され、動いている卓はそのまま。
+    // ランタイム切替(Agent SDK 移行)。「どちらも既定オフ」ではなくなった — 未設定なら
+    // 画面上は両方オンで描かれる(`dialOf` が不在を 'sdk' と解決する)。以下の文言は
+    // 「オフとは何か」の説明であって出荷時の状態の説明ではない。切り替えても**次に立つ卓**
+    // から適用され、動いている卓はそのまま。
     // 「全プロジェクト」は注釈ではない: このすぐ上の監督スイッチは**プロジェクトごと**の
     // エンジン状態で、範囲の違う2つが並んでいて何も書かないのは罠。
     'projectPanel.swarm.runtime.heading': '動かし方（お試し・全プロジェクト共通）',

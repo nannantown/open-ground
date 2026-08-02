@@ -25,7 +25,10 @@ import {
   getNotificationState,
   markNotificationsRead,
   isLockdownEnabled,
+  getWorkerRuntimeDial,
+  getManagerRuntimeDial,
 } from '@/lib/server/store'
+import { sdkSlotLimit } from '@/lib/server/swarmWorkerRuntimeDial'
 import { resolveExperiments } from '@/lib/server/experiments'
 import { scanProjects } from '@/lib/server/scan'
 import {
@@ -348,13 +351,41 @@ export const miscRoutes = new Hono()
   })
   // --- GET / POST /api/settings ---------------------------------------------
   .get('/api/settings', async (c) => {
-    // The persisted settings plus the non-persisted display-name suggestion
-    // (see suggestedDisplayName above) — the POST below never receives it
-    // back because the client saves only real Settings fields.
-    const settings = await getSettings()
+    // The persisted settings plus two NON-persisted, server-computed fields —
+    // the display-name suggestion (see suggestedDisplayName above) and the
+    // resolved runtime dials. The POST below never receives either back: the
+    // client saves only real Settings fields, and neither key is on
+    // USER_SETTINGS_KEYS, so a forged body carrying them is dropped.
+    //
+    // ⚠ WHY THE RESOLVED DIALS RIDE ALONG. The Swarm tab's two toggles ARE the
+    // kill switch for the SDK runtime, and they used to re-implement the
+    // server's rule against the raw keys in this same body. That copy drifted
+    // twice on 2026-08-02: an absent worker dial drew ON while dispatch ran PTY,
+    // and (once an unreadable settings.json started falling to the kill switch)
+    // a broken file drew ON while the server ran PTY — the second one firing at
+    // exactly the moment the owner reads the switch. The raw keys CANNOT answer
+    // it: a tolerant read reports a missing key for both "never written" and
+    // "the file is unreadable", which resolve to opposite runtimes. So the
+    // answer is computed HERE, through the same readers the dispatch path
+    // (swarmWorker.ts) and desk launch (swarmManager.ts) consult — two extra
+    // small local reads per GET, in exchange for a toggle that cannot lie.
+    const [settings, suggested, workerDial, managerDial] = await Promise.all([
+      getSettings(),
+      suggestedDisplayName(),
+      getWorkerRuntimeDial(),
+      getManagerRuntimeDial(),
+    ])
     const body: SettingsResponse = {
       ...settings,
-      suggestedDisplayName: await suggestedDisplayName(),
+      suggestedDisplayName: suggested,
+      runtimeDialsEffective: {
+        worker: workerDial.mode,
+        manager: managerDial.mode,
+        // The cap the SERVER would enforce, resolved from the SAME dial — not
+        // from the raw `sdkMaxWorkers`, which the reader may have dropped along
+        // with an unreadable file's mode.
+        workerCap: sdkSlotLimit({ swarmWorkerRuntime: workerDial }),
+      },
     }
     return c.json(body)
   })

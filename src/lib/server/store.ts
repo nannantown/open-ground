@@ -1,4 +1,4 @@
-import { readFile } from 'fs/promises'
+import { lstat, readFile } from 'fs/promises'
 import { ensureOpenGroundHome, settingsFile, canvasFile, notificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import { snapshotBeforeWrite } from './homeBackup'
@@ -32,30 +32,93 @@ const DEFAULT_CANVAS: CanvasState = {
   elements: [],
 }
 
-const readJson = async <T>(path: string, fallback: T): Promise<T> => {
+/** WHY the last read returned what it returned.
+ *
+ *  `absent` — nothing has been written yet (ENOENT). A fresh install.
+ *  `unreadable` — something IS there and we could not use it: no permission, a
+ *    directory in its place, an I/O error, truncated/hand-mangled JSON, or JSON
+ *    that parses to something other than an object.
+ *  `ok` — parsed into a real object.
+ *
+ *  The distinction exists because "absent" and "unreadable" both produce the
+ *  SAME fallback value, and a reader deciding a SAFETY question has to tell them
+ *  apart: nothing-written-yet is consent to a default, a broken file is not. */
+type ConfigReadHealth = 'ok' | 'absent' | 'unreadable'
+
+const readJsonWithHealth = async <T>(
+  path: string,
+  fallback: T,
+): Promise<{ value: T; health: ConfigReadHealth }> => {
   // Ensure the legacy ~/.pmmap home is migrated before we resolve the path —
   // otherwise the very first read would silently return defaults from a
   // not-yet-renamed directory.
   await ensureOpenGroundHome()
+  let raw: string
   try {
-    const raw = await readFile(path, 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    // Only spread a PLAIN object. A hand-corrupted config that parses to a
-    // non-object (a bare string/number/array/null) would otherwise pollute the
-    // result with char/numeric keys — e.g. `{...fallback, ...'oops'}` becomes
-    // `{0:'o',1:'o',2:'p',3:'s', ...fallback}` (proven), and an array spread
-    // injects numeric keys. Every config file (settings/canvas/notifications)
-    // is an object, so this never rejects VALID data — it only refuses garbage,
-    // returning the typed fallback instead of a polluted shape downstream code
-    // (scan.ts reading settings.projects, etc.) would choke on.
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return fallback
+    raw = await readFile(path, 'utf8')
+  } catch (err: unknown) {
+    // ENOENT is the ONLY read failure that CAN mean "nothing written yet".
+    // EACCES, EISDIR, EIO and friends all mean the opposite — a file exists and
+    // we cannot see its contents — which is the case a safety dial must not read
+    // as a fresh install.
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      return { value: fallback, health: 'unreadable' }
     }
-    return { ...fallback, ...(parsed as Record<string, unknown>) }
-  } catch {
-    return fallback
+    // ...but a DANGLING SYMLINK reports ENOENT too, and it is emphatically not a
+    // fresh install: someone pointed this path at a file on purpose (dotfiles
+    // setups symlink settings.json into a synced folder) and the target is
+    // missing right now — an unmounted volume, a repo not yet cloned. Reading
+    // that as "absent" would flip the kill switch to SDK for exactly as long as
+    // the target is away, and WRITING to it would replace the owner's symlink
+    // with a plain file (atomicWriteJson renames over it), silently detaching
+    // them from their own dotfiles. `lstat` sees the LINK rather than following
+    // it, so it succeeds precisely when the path is occupied by something.
+    try {
+      await lstat(path)
+      return { value: fallback, health: 'unreadable' }
+    } catch (linkErr: unknown) {
+      // SAME POLARITY AS THE READ ABOVE, and for the same reason: `absent` is
+      // the fail-OPEN answer (it lets the dial say sdk and lets a write
+      // proceed), so it must be reached only by the ONE error that actually
+      // means "nothing occupies this path". An EACCES on the parent directory,
+      // or an EIO, means we could not answer the question at all — and an
+      // unanswered question is not permission. Catching everything here would
+      // have left the fail-open door propped by any lstat failure whatsoever,
+      // which is the exact asymmetry this card exists to remove.
+      return {
+        value: fallback,
+        health: (linkErr as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable',
+      }
+    }
   }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { value: fallback, health: 'unreadable' }
+  }
+  // Only spread a PLAIN object. A hand-corrupted config that parses to a
+  // non-object (a bare string/number/array/null) would otherwise pollute the
+  // result with char/numeric keys — e.g. `{...fallback, ...'oops'}` becomes
+  // `{0:'o',1:'o',2:'p',3:'s', ...fallback}` (proven), and an array spread
+  // injects numeric keys. Every config file (settings/canvas/notifications)
+  // is an object, so this never rejects VALID data — it only refuses garbage,
+  // returning the typed fallback instead of a polluted shape downstream code
+  // (scan.ts reading settings.projects, etc.) would choke on. Garbage of this
+  // shape is `unreadable`, not `absent`: the file was written, just not with
+  // anything we can use.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { value: fallback, health: 'unreadable' }
+  }
+  return { value: { ...fallback, ...(parsed as Record<string, unknown>) }, health: 'ok' }
 }
+
+/** The tolerant read every non-safety caller wants: failures of any kind become
+ *  the fallback. Deliberately kept — canvas positions and notification marks
+ *  SHOULD degrade quietly rather than wedge the cockpit. Only callers deciding
+ *  whether to enable something reach for `readJsonWithHealth` instead. */
+const readJson = async <T>(path: string, fallback: T): Promise<T> =>
+  (await readJsonWithHealth(path, fallback)).value
 
 const writeJson = async (path: string, data: unknown) => {
   await ensureOpenGroundHome()
@@ -72,8 +135,20 @@ const writeJson = async (path: string, data: unknown) => {
   await atomicWriteJson(path, data)
 }
 
-export const getSettings = async (): Promise<Settings> => {
-  const s = await readJson<Settings>(settingsFile(), DEFAULT_SETTINGS)
+/** `getSettings` plus WHY the values are what they are — see ConfigReadHealth.
+ *
+ *  Private on purpose, and the two kinds of asker are both inside this file:
+ *  a SAFETY READ ("may I turn this on?" — the runtime dials) and every
+ *  READ-MODIFY-WRITE ("is what I am about to merge into actually the truth?" —
+ *  readSettingsForWrite). Exporting it would invite callers to branch on
+ *  `unreadable` in the many places where degrading quietly is the right
+ *  behaviour: a missing canvas position or notification mark SHOULD fall back
+ *  silently rather than wedge the cockpit. */
+const getSettingsWithHealth = async (): Promise<{
+  settings: Settings
+  health: ConfigReadHealth
+}> => {
+  const { value: s, health } = await readJsonWithHealth<Settings>(settingsFile(), DEFAULT_SETTINGS)
   // Coerce array-typed fields back to arrays. readJson already rejects a
   // non-OBJECT top level, but a hand-corrupted settings.json with a per-field
   // type error (e.g. {"projects":"oops"}) would still slip through and CRASH an
@@ -94,16 +169,69 @@ export const getSettings = async (): Promise<Settings> => {
   // request.
   setLockdownCache(s.lockdownMode)
   return {
-    ...s,
-    projects: Array.isArray(s.projects)
-      ? s.projects.filter((e): e is (typeof s.projects)[number] => e != null && typeof e === 'object' && !Array.isArray(e))
-      : [],
-    openApps: Array.isArray(s.openApps) ? s.openApps : [],
-    excludePatterns: Array.isArray(s.excludePatterns)
-      ? s.excludePatterns
-      : DEFAULT_SETTINGS.excludePatterns,
+    settings: {
+      ...s,
+      projects: Array.isArray(s.projects)
+        ? s.projects.filter((e): e is (typeof s.projects)[number] => e != null && typeof e === 'object' && !Array.isArray(e))
+        : [],
+      openApps: Array.isArray(s.openApps) ? s.openApps : [],
+      excludePatterns: Array.isArray(s.excludePatterns)
+        ? s.excludePatterns
+        : DEFAULT_SETTINGS.excludePatterns,
+    },
+    health,
   }
 }
+
+export const getSettings = async (): Promise<Settings> => (await getSettingsWithHealth()).settings
+
+/** Refusing to save beats saving the wrong thing.
+ *
+ *  Worded for the OWNER, who is not a programmer: this can reach the cockpit
+ *  (POST /api/settings surfaces the failure) and "ENOENT on readJson" would tell
+ *  them nothing about what to do. Bilingual on purpose — the language preference
+ *  lives in `Settings.language`, i.e. inside the very file we just failed to
+ *  read, so there is nothing to branch on. */
+export class SettingsUnreadableError extends Error {
+  constructor(path: string) {
+    super(
+      `設定ファイル(${path})が読み取れません。` +
+        `上書きして登録済みプロジェクトの一覧を失わないよう、書き込みを止めています。` +
+        `ファイルを直すか削除してから、もう一度お試しください。` +
+        ` / Cannot read settings.json (${path}).` +
+        ` Writing has been stopped so that overwriting it cannot destroy the list` +
+        ` of registered projects. Repair or remove the file, then try again.`,
+    )
+    this.name = 'SettingsUnreadableError'
+  }
+}
+
+/** The read half of EVERY settings read-modify-write in this file.
+ *
+ *  Each writer below reads the current settings, merges its patch and writes the
+ *  whole object back — which is safe only while "read the current settings"
+ *  tells the truth. It did not: the tolerant reader turned an unreadable or
+ *  corrupt file into DEFAULT_SETTINGS, so the merge persisted the DEFAULTS as
+ *  the new truth. Measured 2026-08-02 (isolated HOME): a settings.json holding
+ *  two registered projects, chmod 000, then `setSettings({swarmManagerRuntime})`
+ *  ⇒ `projects: []`, `defaultWorkspace: null`, no exception, no log.
+ *
+ *  `projects` is not merely a list — it is the validateProjectPath ALLOWLIST and
+ *  the key to every project's central data dir, so erasing it also unhooks all
+ *  per-project data. This is the 2026-07-18 incident's shape (45 projects → 3)
+ *  down a different road, and the generational backup added after that incident
+ *  cannot cover it: snapshotBeforeWrite copies the CURRENT content aside, and
+ *  the current content is exactly what we could not read.
+ *
+ *  ABSENT is deliberately NOT this case: a fresh install has no settings.json
+ *  and must be able to write its first one. Only `unreadable` refuses.
+ *  Pinned by settingsWriteGuard.test.ts. */
+const readSettingsForWrite = async (): Promise<Settings> => {
+  const { settings, health } = await getSettingsWithHealth()
+  if (health === 'unreadable') throw new SettingsUnreadableError(settingsFile())
+  return settings
+}
+
 // Merge so a partial save from one UI (e.g. the Settings panel) does not
 // clobber fields owned by another (e.g. the project panel's openApps).
 //
@@ -119,7 +247,7 @@ export const getSettings = async (): Promise<Settings> => {
 let settingsChain: Promise<unknown> = Promise.resolve()
 export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
   const run = settingsChain.then(async () => {
-    const current = await getSettings()
+    const current = await readSettingsForWrite()
     const merged = { ...current, ...patch }
     await writeJson(settingsFile(), merged)
     // Re-mirror the model mask from the value we just PERSISTED (getSettings above
@@ -194,10 +322,21 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
  *  the previous value survives — the same "refuse a meaningless patch" stance as
  *  the swarmAllowedModels all-off and swarmPaneOrder all-garbage guards.
  *
- *  Only a literal 'sdk' selects the experiment, which keeps this normalizer and
- *  the two dial READERS (getWorkerRuntimeDial / getManagerRuntimeDial) agreeing
- *  on the one rule that matters: absent-or-unrecognised ⇒ the shipped PTY path,
- *  never the experimental one. These keys are deliberately inert with respect to
+ *  Only a literal 'pty' or 'sdk' is persisted; anything else (absent, null, a
+ *  forged string) drops the key rather than storing a value a reader would have
+ *  to guess at. What the two dial READERS then make of a MISSING key is ONE
+ *  shared rule again as of 2026-08-02: absent ⇒ 'sdk' on both
+ *  (getManagerRuntimeDial flipped that day, getWorkerRuntimeDial the same day —
+ *  it had been left behind by the 08-01 worker flip and shipped a fleet that
+ *  disagreed with its own switch). An unrecognised MODE VALUE ⇒ pty is shared
+ *  too — but a CONTAINER we cannot read `mode` out of is NOT that case (a
+ *  non-object, or an object with no `mode` key: `?.mode` is then undefined, so
+ *  both readers resolve it to 'sdk'). This normalizer
+ *  does NOT implement that half either. It REFUSES a garbage patch (returns
+ *  undefined; the caller drops it from the PATCH) so the PREVIOUS dial survives rather than falling
+ *  to any default — pinned by settingsRuntimeDials.test.ts. On a machine that
+ *  had no dial written yet, that refusal therefore leaves the key ABSENT, which
+ *  the commander's reader resolves to 'sdk'. These keys are deliberately inert with respect to
  *  the validateProjectPath allowlist — they select a runtime, they cannot widen
  *  any boundary — so admitting them to USER_SETTINGS_KEYS does not weaken the
  *  narrowing this function's caller exists to perform. */
@@ -324,24 +463,57 @@ export const getAllowedModelTiers = async (): Promise<SwarmAllowedModels> =>
 
 // ─── Swarm worker runtime dial (Settings.swarmWorkerRuntime) ─────────────────
 // The kill switch for the Agent SDK worker migration. Read through here rather
-// than straight from getSettings so the "absent ⇒ pty" default lives in ONE
-// place: a missing, partial or hand-corrupted field must degrade to the shipped
-// PTY behaviour, never to an experimental runtime.
+// than straight from getSettings so the resolution lives in ONE place: an
+// unreadable file or a hand-corrupted value degrades to PTY, never to an
+// experimental runtime.
+//
+// ⚠ THIS READER IS WHERE THE 2026-08-01 DEFAULT FLIP ACTUALLY LANDS, and for a
+// day it was the one place the flip did NOT reach. `chooseWorkerRuntime` resolved
+// an ABSENT dial to 'sdk' and the Swarm panel drew the switch ON — but the only
+// production caller (swarmWorker.ts) feeds that decision THIS function's output,
+// and this function turned absent into an explicit {mode:'pty'}. So the flip
+// could never arrive: measured 2026-08-02 (isolated HOME, nothing written), the
+// composed path dispatched PTY workers under a switch drawn ON, and it shipped
+// that way in 0.11.47. The rule inside chooseWorkerRuntime was unreachable for
+// the one machine state that matters, a fresh install.
+//
+// Fixed by giving this reader the SAME polarity as the commander's below —
+// explicit ⇒ that runtime, ABSENT ⇒ sdk, anything else ⇒ pty — so the two dials
+// answer a missing key the same way and neither can drift from the rule alone.
+// Pinned end-to-end by swarmRuntimeDialParity.test.ts, which now composes
+// exactly as dispatch does instead of calling chooseWorkerRuntime directly (the
+// shortcut that let this defect ship green).
 export const getWorkerRuntimeDial = async (): Promise<{
   mode: 'pty' | 'sdk'
   sdkMaxWorkers?: number
 }> => {
-  const raw = (await getSettings()).swarmWorkerRuntime
-  const mode = raw?.mode === 'sdk' ? 'sdk' : 'pty'
+  const { settings, health } = await getSettingsWithHealth()
+  // FILE-level fail-closed, and since the flip above it is doing REAL work: it
+  // used to agree with the absent-default by coincidence (absent resolved pty
+  // here too), and that coincidence has now expired. A settings.json we cannot
+  // read is not consent to run the experimental runtime — whatever it said
+  // before it broke. ABSENT is NOT this case: nothing written yet is a fresh
+  // install, and its rule is sdk. `sdkMaxWorkers` is dropped with the mode: a
+  // PTY fleet has no SDK slot budget. Pinned by runtimeDialFileHealth.test.ts.
+  if (health === 'unreadable') return { mode: 'pty' }
+  const raw = settings.swarmWorkerRuntime
+  const m = raw?.mode
+  // Explicit ⇒ that runtime. ABSENT ⇒ sdk. Anything else ⇒ pty — including a
+  // CONTAINER we cannot read `mode` out of (a non-object, or an object with no
+  // `mode` key), which `?.mode` reports as undefined and therefore rides the
+  // absent rule. Identical to getManagerRuntimeDial by design.
+  const mode = m === 'pty' ? 'pty' : m === 'sdk' || m === undefined ? 'sdk' : 'pty'
   return { mode, ...(typeof raw?.sdkMaxWorkers === 'number' ? { sdkMaxWorkers: raw.sdkMaxWorkers } : {}) }
 }
 
 // ─── Swarm COMMANDER runtime dial (Settings.swarmManagerRuntime) ─────────────
 // The stage-3 kill switch, read through here for the same reason as the worker
-// dial: "absent ⇒ pty" must live in ONE place. The commander's default matters
-// more than the worker's, because switching it on costs the owner's phone
-// window (an SDK desk has no Remote Control) — so anything short of a literal
-// 'sdk' keeps the PTY commander.
+// dial: the resolution must live in ONE place. WHAT that resolution is changed
+// on 2026-08-02 — absent ⇒ sdk, explicit 'pty' and anything unrecognised ⇒ pty
+// (the polarity note on the function has the evidence). The commander's default
+// matters more than the worker's, because it costs the owner's phone window (an
+// SDK desk has no Remote Control) — which is why it moved a day later, and only
+// once the twin-prevention race was covered on BOTH runtimes.
 /** Which runtime this project's commander desk runs on. Absent ⇒ SDK.
  *
  *  ⚠ THIS DEFAULT MOVED A DAY AFTER THE WORKER'S (2026-08-02), and the delay was
@@ -360,10 +532,42 @@ export const getWorkerRuntimeDial = async (): Promise<{
  *  instead of `reaped` (so a desk still unwinding reads as absent) reds 1.
  *
  *  Polarity, unchanged where it matters: explicit 'pty' ⇒ pty (the kill switch),
- *  explicit 'sdk' ⇒ sdk, ABSENT ⇒ sdk, anything else ⇒ pty. A settings file we
- *  cannot parse is not evidence that the SDK runtime is wanted. */
+ *  explicit 'sdk' ⇒ sdk, ABSENT ⇒ sdk, an unrecognised MODE VALUE ⇒ pty.
+ *
+ *  ⚠ THE FILE LEVEL IS A SEPARATE RULE FROM THE VALUE LEVEL, AND THIS NOTE IS
+ *  THE ONE PLACE THAT STATES IT. Callers point here instead of restating it;
+ *  three separate restatements drifted from the code before that rule
+ *  (2026-08-02). An UNREADABLE or UNPARSEABLE settings.json ⇒ pty — the kill
+ *  switch — while an ABSENT one keeps its ⇒ sdk. The two are told apart by
+ *  ConfigReadHealth, because before it they were not: readJson swallowed the
+ *  read failure and the parse failure alike and returned the fallback, so a
+ *  chmod-000 file and a fresh install both arrived here as `mode: undefined`.
+ *  Measured 2026-08-02 (isolated HOME), the behaviour that fixed:
+ *  an explicit {"mode":"pty"} + chmod 000 ⇒ SDK, and broken JSON ⇒ SDK. An owner
+ *  who had deliberately turned the SDK commander off got it back the moment the
+ *  file stopped being readable. "A settings file we cannot parse is not evidence
+ *  that the SDK runtime is wanted" was written here long before it was true; it
+ *  is true now, and runtimeDialFileHealth.test.ts is what keeps it that way.
+ *
+ *  A caller that wraps this in `.catch(() => pty)` (swarmManager's
+ *  `launchNewDesk`) reaches that fallback only from a REJECT — a narrower door
+ *  than it looks, and NOT the one the corrupt-file case comes through (that one
+ *  resolves, to pty, above). `getSettings` can reject when
+ *  `ensureOpenGroundHome()` does — it is awaited OUTSIDE the read's try — but
+ *  `homeReady` caches the RESOLVED promise and evicts on reject (paths.ts:201-264,
+ *  `homeReady = null` — self-heal), so only an ensure that has not yet cached a
+ *  RESOLVED promise can reject that way. Not merely the first CALL: while the
+ *  cause persists every call re-enters and re-rejects (measured 2026-08-02 — an
+ *  unreadable HOME parent rejected calls #1, #2 and #3 alike, and #4 resolved
+ *  once the mode bits were restored). A desk launched on a long-running server
+ *  is normally past that window. */
 export const getManagerRuntimeDial = async (): Promise<{ mode: 'pty' | 'sdk' }> => {
-  const m = (await getSettings()).swarmManagerRuntime?.mode
+  const { settings, health } = await getSettingsWithHealth()
+  // FILE level first: a settings.json we cannot read is not consent to run the
+  // experimental runtime — whatever it may have said before it broke. ABSENT is
+  // NOT this case (nothing written yet is a fresh install, and its rule is sdk).
+  if (health === 'unreadable') return { mode: 'pty' }
+  const m = settings.swarmManagerRuntime?.mode
   if (m === 'pty') return { mode: 'pty' }
   if (m === 'sdk' || m === undefined) return { mode: 'sdk' }
   return { mode: 'pty' } // unrecognised ⇒ the conservative runtime
@@ -383,7 +587,7 @@ export const getManagerRuntimeDial = async (): Promise<{ mode: 'pty' | 'sdk' }> 
 export const rememberSwarmAutonomy = async (key: string): Promise<void> => {
   if (!key) return
   const run = settingsChain.then(async () => {
-    const current = await getSettings()
+    const current = await readSettingsForWrite()
     const existing = Array.isArray(current.swarmAutonomyOn) ? current.swarmAutonomyOn : []
     if (existing.includes(key)) return
     await writeJson(settingsFile(), { ...current, swarmAutonomyOn: [...existing, key] })
@@ -395,7 +599,7 @@ export const rememberSwarmAutonomy = async (key: string): Promise<void> => {
 export const forgetSwarmAutonomy = async (key: string): Promise<void> => {
   if (!key) return
   const run = settingsChain.then(async () => {
-    const current = await getSettings()
+    const current = await readSettingsForWrite()
     const existing = Array.isArray(current.swarmAutonomyOn) ? current.swarmAutonomyOn : []
     if (!existing.includes(key)) return
     await writeJson(settingsFile(), {
@@ -430,7 +634,7 @@ export const isSwarmAutonomyRemembered = async (key: string): Promise<boolean> =
 export const rememberSwarmManualStop = async (key: string): Promise<void> => {
   if (!key) return
   const run = settingsChain.then(async () => {
-    const current = await getSettings()
+    const current = await readSettingsForWrite()
     const existing = Array.isArray(current.swarmManualStop) ? current.swarmManualStop : []
     if (existing.includes(key)) return
     await writeJson(settingsFile(), { ...current, swarmManualStop: [...existing, key] })
@@ -442,7 +646,7 @@ export const rememberSwarmManualStop = async (key: string): Promise<void> => {
 export const forgetSwarmManualStop = async (key: string): Promise<void> => {
   if (!key) return
   const run = settingsChain.then(async () => {
-    const current = await getSettings()
+    const current = await readSettingsForWrite()
     const existing = Array.isArray(current.swarmManualStop) ? current.swarmManualStop : []
     if (!existing.includes(key)) return
     await writeJson(settingsFile(), {

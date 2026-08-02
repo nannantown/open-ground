@@ -17,8 +17,19 @@
 > | W7 SdkWorkerPane + i18n | ✅ | `221fbfd5` |
 > | W8 docs 追随 | ✅ | 本コミット |
 >
-> **既定は OFF**（`Settings.swarmWorkerRuntime.mode` 不在 ⇒ `'pty'`）。
-> 有効化しない限り、挙動は移行前と1ビットも変わらない。
+> **既定は 2026-08-01 に SDK へ反転した**（キー不在 ⇒ `'sdk'` /
+> 明示 `'pty'` ⇒ pty＝キルスイッチ健在 / 壊れた値 ⇒ pty / **読めないファイル ⇒ pty**）。
+> ⚠ **反転が dispatch に届いたのは 2026-08-02**：規則は `chooseWorkerRuntime` に入ったが、
+> 本番の唯一の呼び出し（`swarmWorker.ts`）は `store.getWorkerRuntimeDial()` を通して渡し、
+> **その reader が不在を明示 `{mode:'pty'}` へ潰していた**ので、未設定の機体は PTY worker を
+> 立て続けた（隔離 HOME で実測 0802・**0.11.47 に出荷済み**）。盤面は不在を `'sdk'` と描くので
+> **表示と実効が逆**だった。修正は reader を司令官側と同じ極性（不在 ⇒ sdk）に揃えること、
+> および**盤面が導出をやめてサーバの実効値を描く**こと（`GET /api/settings` の
+> `runtimeDialsEffective` — §8 の UI 項）。
+> **教訓**: 番人が `chooseWorkerRuntime` を**直接**叩き、パネルから写した `dialOf` と
+> 比べていたため、「防いだ」と宣言している欠陥が現実に存在したまま緑だった。
+> 番人（`swarmRuntimeDialParity.test.ts`）は**合成経路**（reader → 決定）と**パネルに配られる値**を
+> 比べる形に付け替えた。
 >
 > **残っているのは §12 の実機受け入れ4項目のみ**（ダイヤル ON で toy カード完走 /
 > PTY worker と混在 / 再起動で twin が生えない / kill switch）。これは実運用の
@@ -41,7 +52,8 @@
 ## 0. ゴール状態と期待挙動
 
 **ゴール状態**: swarm worker の実行ランタイムが `'pty' | 'sdk'` の2種になり、
-設定ダイヤルで worker 単位に選べる。既定は `'pty'`（挙動不変）。`'sdk'` を
+設定ダイヤルで worker 単位に選べる。既定は 0801 に反転しキー不在 ⇒ `'sdk'`
+（reader まで届いたのは 0802 — 冒頭の注記）。`'sdk'` を
 `sdkMaxWorkers: 1` で有効化すると、次に dispatch される worker 1体だけが
 Agent SDK 経由で起動し、残りは従来どおり PTY。両者は同じ roster / Board /
 統合パイプラインの下で共存する。
@@ -76,7 +88,7 @@ Agent SDK 経由で起動し、残りは従来どおり PTY。両者は同じ ro
 | 論点 | 決定 | 根拠 |
 |---|---|---|
 | 移行するか | **する**（worker から・段階導入） | オーナー 0730。「PTY で粘っても収束が見えない」 |
-| 置換か併存か | **併存**（runtime ダイヤル・既定 pty） | 戻すときに困るのは途中状態。git revert でなく設定切替で戻れる形に |
+| 置換か併存か | **併存**（runtime ダイヤル・0730 時点の既定 pty → 0801 に「不在⇒sdk」へ反転） | 戻すときに困るのは途中状態。git revert でなく設定切替で戻れる形に |
 | 最初の範囲 | **worker 1体**（`sdkMaxWorkers: 1`） | 同日・同エンジン下で PTY worker と直接比較でき、失敗の損害が最小 |
 | manager | **後**（stage 3・別設計） | リモコン必須 → 補給官へ窓口移設の設計が先（INVESTIGATION §13） |
 | スクレイプ 2,461 行 | **消さない** | SDK worker が実運用で置換を証明してから（PTY 経路が残る限り必要） |
@@ -418,18 +430,41 @@ sdkSessionId?: string
 ```ts
 // Settings（~/.openground/settings.json）
 swarmWorkerRuntime?: {
-  mode: 'pty' | 'sdk'      // 既定 'pty'（キー不在も 'pty'）
+  mode: 'pty' | 'sdk'      // キー不在 ⇒ 'sdk'（2026-08-01 反転）
+                           // 明示 'pty' / 壊れた値 ⇒ 'pty'
   sdkMaxWorkers?: number   // mode==='sdk' 時の SDK 起動上限。既定 1
 }
 ```
 
+- ⚠ **規則は `chooseWorkerRuntime` だけでは効かない**: `swarmWorker.ts` は
+  `store.getWorkerRuntimeDial()` を挟んで渡すので、**dispatch を決めるのはその reader**。
+  0801〜0802 の間 reader は不在を明示 `{mode:'pty'}` に潰しており、反転が dispatch まで
+  届いていなかった（実測 0802・0.11.47 出荷）。**両者は同じ極性に揃えてある** — 明示 ⇒ その
+  ランタイム / 不在 ⇒ sdk / それ以外 ⇒ pty。片方だけ動かさないこと。
+- ⚠ **FILE レベルは別規則**: `settings.json` が読めない / parse 不能 / 非オブジェクトなら
+  **どちらのダイヤルも `'pty'`**（`sdkMaxWorkers` も落ちる）。反転前は「不在の既定がたまたま
+  pty」だったので偶然一致していたが、その偶然は 0802 に消えた。番人は
+  `src/lib/server/runtimeDialFileHealth.test.ts`。
 - dispatch 時の決定: `mode==='sdk' && (現在生きている SDK worker 数 < sdkMaxWorkers)`
   なら SDK、そうでなければ PTY。**worker ごとに決めて roster に runtime を焼く**。
 - kill switch = `mode:'pty'` に書き戻すだけ。走行中の SDK worker は完走（または
   手動 terminate）。roster の後方互換により復旧 boot も安全。
 - UI: **実装済み(0.11.45)** — Swarm タブ → 司令官 → 右サイドバー「動かし方(お試し)」に
   worker / commander のトグル各1行（`SwarmManagerPane.tsx` の `runtimeDials`、書き込みは
-  `SwarmModule.tsx` の `toggleRuntime` → `POST /api/settings`）。commander 側は ON のときだけ
+  `SwarmModule.tsx` の `toggleRuntime` → `POST /api/settings`）。
+  - ⚠ **盤面は導出せずサーバの実効値を描く(2026-08-02)** — `GET /api/settings` が
+    `runtimeDialsEffective: { worker, manager, workerCap }` を返し、`SwarmModule` はそれを
+    そのまま表示する。値は**dispatch / 卓起動が実際に使う読み手**
+    （`store.getWorkerRuntimeDial()` / `getManagerRuntimeDial()`）から取る。
+    以前はパネル側が生キーからサーバ規則を再実装（`dialOf`）しており、**0802 だけで表示ズレを
+    2件**産んだ: ①不在の worker ダイヤルを ON と描くのに dispatch は PTY
+    ②壊れた `settings.json` で ON と描くのにサーバはキルスイッチ側。②は生キーからは原理的に
+    直せない（寛容リーダーは「未記入」と「読めない」を同じ**キー不在**として返すが、
+    両者の解決先は逆）。`dialOf` は削除済み — 復活させないこと。
+    ⚠ **読み取り専用**: `runtimeDialsEffective` は `USER_SETTINGS_KEYS` に**足さない**
+    （`suggestedDisplayName` と同じくサーバ計算のレスポンス専用フィールド）。
+    サーバが答えない/壊れた形なら盤面は `null` = **トグルを disabled** にする（推測しない）。
+  commander 側は ON のときだけ
   「スマホから届かなくなる」警告を出す（常時表示は壁紙になって読まれない）。
   - **設定ファイル直編集は「オーナー限定の実験」の解ではなかった** — 唯一 ON にできる人が
     JSON を手で書く必要がある状態は、機能スイッチではなく開発者向けメモである。
@@ -540,10 +575,11 @@ swarmWorkerRuntime?: {
 
 ---
 
-## 13-B. stage 3 — 司令官の SDK 化（2026-07-31 完了・既定 OFF）
+## 13-B. stage 3 — 司令官の SDK 化（2026-07-31 完了・既定は 2026-08-02 に SDK へ反転）
 
 前提だった「補給官＝電話窓口の役割拡張」を先に済ませ（下記 A）、その上で司令官を
-移した（B）。ダイヤルは **`Settings.swarmManagerRuntime.mode`（既定 `'pty'`）** で
+移した（B）。ダイヤルは **`Settings.swarmManagerRuntime.mode`（不在 ⇒ `'sdk'`・
+明示 `'pty'` と壊れた値 ⇒ `'pty'`）** で
 worker のダイヤルとは**別**：回すと失うものが違うから分けてある。
 
 ### A. 補給官が電話窓口になる（PTY のまま）

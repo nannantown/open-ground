@@ -15,6 +15,15 @@ import { getWorkerRuntimeDial, getManagerRuntimeDial, setSettings } from '@/lib/
 //
 // HOME is redirected to a throwaway tmp dir by ./src/test/setup-home.ts, so every
 // write here lands in an isolated home — never the real ~/.openground.
+//
+// SCOPE: everything here is the VALUE level — given a settings.json we can read,
+// which runtime does the stored value select. The level underneath (given a
+// settings.json that is MISSING / unreadable / unparseable, which runtime wins)
+// is src/lib/server/runtimeDialFileHealth.test.ts, and it is a separate file
+// because the two levels had opposite answers until 2026-08-02: a chmod-000
+// settings.json read as "nothing written yet" and flipped the commander's kill
+// switch back to SDK. Nothing in THIS file could have caught that — every case
+// here writes a readable file first.
 
 const post = (body: unknown): RequestInit => ({
   method: 'POST',
@@ -34,6 +43,10 @@ describe('POST /api/settings — Agent SDK runtime dials round-trip', () => {
   })
 
   it('commander dial: same round trip, independently of the worker dial', async () => {
+    // Seed the worker dial EXPLICITLY rather than inheriting whatever the case
+    // above left behind: since absent ⇒ sdk on both dials, "still pty" is only
+    // evidence of independence if pty was written on purpose.
+    await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'pty' } }))
     await app.request('/api/settings', post({ swarmManagerRuntime: { mode: 'sdk' } }))
     expect((await getManagerRuntimeDial()).mode).toBe('sdk')
     // The worker dial is untouched by a commander write (they are separate
@@ -77,14 +90,20 @@ describe('POST /api/settings — Agent SDK runtime dials round-trip', () => {
     }
   })
 
-  it('an absent / hand-corrupted field reads as PTY — never as the experiment', async () => {
-    // The fail direction that matters: anything we cannot read must land on the
-    // shipped behaviour. Written straight to the store to simulate a hand-edited file.
+  it('a hand-corrupted field reads as PTY; an ABSENT one is the fresh-install default', async () => {
+    // The fail direction that matters: a value we cannot READ must land on the
+    // shipped behaviour. ABSENT is a different question and has the opposite
+    // answer — nothing written yet is a fresh install, whose default flipped to
+    // sdk (worker 2026-08-01, commander 08-02). Written straight to the store to
+    // simulate a hand-edited file.
     await setSettings({
       swarmWorkerRuntime: undefined,
       swarmManagerRuntime: { mode: 'nonsense' } as never,
     })
-    expect((await getWorkerRuntimeDial()).mode).toBe('pty')
+    // ⚠ THIS SAID 'pty' UNTIL 2026-08-02 and was one of the two places the stale
+    // default was pinned — the worker reader had not moved with the flip, so a
+    // fresh install dispatched PTY workers under a switch drawn ON (0.11.47).
+    expect((await getWorkerRuntimeDial()).mode).toBe('sdk')
     expect((await getManagerRuntimeDial()).mode).toBe('pty')
   })
 

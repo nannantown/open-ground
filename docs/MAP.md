@@ -157,7 +157,8 @@
 ## 5. Swarm — 並列 worker エンジン(詳細は docs/commander/)
 - **診断・改修の前に `docs/commander/00-INDEX.md`**(症状→章の直行表)。理想形 = `TARGET-STATE.md`。
   安全不変条件 = `docs/SWARM_SAFETY_INVARIANTS.md` + `src/lib/server/swarmSafety.test.ts`(触る前に緑確認)
-- **worker の SDK ランタイム(実装済み・既定 OFF)**: 入口は
+- **worker の SDK ランタイム(実装済み・ダイヤル既定は 0801 に SDK へ反転・reader まで届いたのは
+  0802/詳細は本節 §5 後段「ダイヤル既定は 2026-08-01 に反転」の段)**: 入口は
   `workerRuntime.ts`(WorkerRuntime seam・`workerKey`・pty/sdk 実装)/
   `sdkSession.ts`(プール・queryFn DI)/ `sdkEvents.ts`(メッセージ蒸留の一枚岩)/
   `sdkGuardHook.ts`(**A3/L4 veto の in-process 再武装・全失敗経路が deny**)/
@@ -315,16 +316,30 @@
   終了セッションは 30 分 linger 後に sweep(`SDK_SESSION_LINGER_MS` — 放置すると ring buffer ごと
   永久残留・`removeSdkSession` は呼び手ゼロだった)。
   kill switch = `Settings.swarmWorkerRuntime.mode` を `'pty'` に戻すだけ。
+  ダイヤル既定は 2026-08-01 に反転(不在⇒`sdk` / 明示 `'pty'`⇒pty / 壊れた値⇒pty /
+  **読めないファイル⇒pty**)。⚠ **反転が dispatch に届いたのは 0802** — 規則は
+  `chooseWorkerRuntime` に入ったが、唯一の本番呼び出し(`swarmWorker.ts`)は
+  `store.getWorkerRuntimeDial()` 経由で渡し、**その reader が不在を明示 `{mode:'pty'}` に潰して
+  いた**ので未設定の機体は PTY worker を立て続けた(隔離 HOME で実測 0802・0.11.47 出荷)。
+  盤面は不在を `'sdk'` と描いていたので**表示と実効が逆**。⚠ **決めるのは reader** — 規則を
+  `chooseWorkerRuntime` だけ直しても効かない。両者は同極性に揃えてある。
+  ⚠ **盤面はサーバの実効値を描く(0802)** — `GET /api/settings` の
+  `runtimeDialsEffective:{worker,manager,workerCap}`(readers から算出・読み取り専用・
+  `USER_SETTINGS_KEYS` に足さない)。パネル側の導出(`dialOf`)は**削除済み**・復活させないこと。
   設計と実測台帳: `docs/SDK_WORKER_MIGRATION_PLAN.md`
-  (0730 オーナー決定 — worker から段階導入・既定 pty のダイヤル併存・PTY コードは消さない)。
+  (0730 オーナー決定 — worker から段階導入・ダイヤル併存・PTY コードは消さない)。
   センサー対応表 §5 / ガード配線の非自明点 §4-G(**SDK は既定で settings をロードしない →
   素朴に spawn すると A3/L4 guard が黙って消える**・fail-closed 必須) / カード分割 §12。
   調査の正典は `SDK_CLIENT_INVESTIGATION.md`(実測台帳・「しない」だった旧結論の上書き経緯込み)
-- **司令官の SDK ランタイム(stage 3・実装済み・既定 OFF)**: 入口は
+- **司令官の SDK ランタイム(stage 3・実装済み・既定は 0802 に SDK へ反転=未設定なら SDK 卓)**: 入口は
   `swarmManagerRuntime.ts`(**卓の在処を答える唯一の seam** — PTY プールと SDK プールの両方に聞く)/
   `swarmManagerSdk.ts`(launch plan + preflight)/ `swarmManagerLabel.ts`(循環を切る葉の定数)/
   `sdkDeskLimit.ts`(クォータ停止をイベント源で拾う)/ route `POST /api/swarm/manager/say`。
-  ダイヤル = `Settings.swarmManagerRuntime.mode`(既定 `'pty'`・`store.getManagerRuntimeDial`)。
+  ダイヤル = `Settings.swarmManagerRuntime.mode`(不在⇒`'sdk'` / 明示 `'pty'`・壊れた **mode の値**⇒`'pty'`
+  ・`store.getManagerRuntimeDial`)。**0802 以降 worker 側の reader と同極性**(先に反転が届いたのは
+  司令官側で、worker 側が1日遅れた)。
+  ⚠ **`mode` を読み取れない容器**(非オブジェクト、または `mode` の無いオブジェクト)だと
+  `?.mode` が undefined になり `'sdk'` 側へ倒れる(実測 0802・**両ダイヤル共通**)。
   ⚠ **卓の存在判定を PTY プールだけに聞かないこと** — SDK 卓が毎パス `absent` と読まれ、
   5分ごとに二卓目が立つ(0719 の11卓事故と同じ形)。必ず `listManagerDesks`。
   ⚠ **SDK 卓に画面は無い**(`managerDeskScreen` は null)。null を「何も出ていない」と読むと
@@ -490,7 +505,10 @@
   「動かし方(お試し)」**(`SwarmManagerPane.tsx` の `runtimeDials` / `SwarmModule.tsx` の
   `toggleRuntime`)。**罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞るので、
   新しい設定キーを**その配列に足さないと書き込みが黙って捨てられる**(スイッチは動いて見えるのに
-  何も変わらない — 0731 に実際に踏みかけた)。往復テスト=`server/routes/__tests__/settingsRuntimeDials.test.ts`
+  何も変わらない — 0731 に実際に踏みかけた)。往復テスト=`server/routes/__tests__/settingsRuntimeDials.test.ts`。
+  **表示側は逆**: トグルが描く値は `GET /api/settings` の `runtimeDialsEffective`(サーバ計算・
+  読み取り専用)で、**書き込みキーではないので allowlist には足さない**。盤面で規則を再実装しない
+  (`dialOf` は 0802 に削除)。表示⇄実挙動の番人=`src/lib/server/swarmRuntimeDialParity.test.ts`
 - 罠(2026-07-31 実観測): **`node_modules/electron/dist/Electron.app` が macOS に
   マルウェア判定されてゴミ箱に消える**。`npx electron` は SIGKILL → 直後に `.app` が消滅、
   再展開しても同じ(zip 自体は正規 — `checksums.json` の SHA-256 と一致)。未 notarize の

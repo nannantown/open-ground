@@ -514,10 +514,17 @@ export interface SpawnSwarmWorkerOpts {
   /** Board goal — typically a card's title (+ notes). Injected as the /order. */
   title: string
   notes?: string
-  /** The engine's CURRENT roster, used only to count live SDK worker slots
-   *  (docs/SDK_WORKER_MIGRATION_PLAN.md §8). Absent ⇒ counted as zero, which is
-   *  correct for the curl-direct spawn path (no engine roster exists there) and
-   *  harmless while the runtime dial ships OFF. */
+  /** The engine's CURRENT roster (docs/SDK_WORKER_MIGRATION_PLAN.md §8). It only
+   *  ever ADDS to the slot count: the cap is measured from the SDK POOL, which
+   *  sees every worker however it was started, and the roster is merged in for
+   *  two cases: the instant between "the engine recorded a worker" and "its
+   *  session appears in the pool", and a `runtime:'sdk'` record carrying no
+   *  `sdkSessionId` at all — a record WITHOUT the field counts as 'pty' and is
+   *  skipped (both in liveSdkWorkerCount). Absent ⇒ the roster contributes
+   *  nothing, which is correct for the curl-direct spawn path (no engine roster
+   *  exists there) and does not weaken the cap, because the pool is the authority.
+   *  The OLD justification — "harmless while the runtime dial ships OFF" — is no
+   *  longer a safe premise now that the dial's absent case has moved. */
   liveWorkers?: readonly WorkerHandle[]
   /** Optional branch-name decoration (uniqueness comes from the timestamp). */
   hint?: string
@@ -783,7 +790,15 @@ export const spawnSwarmWorker = async (
   const freshlyCreated = !opts.worktree
 
   // ── RUNTIME CHOICE (docs/SDK_WORKER_MIGRATION_PLAN.md §8) ──────────────────
-  // Which way this worker's `claude` is driven. The dial ships OFF, and every
+  // Which way this worker's `claude` is driven. ⚠ NOTE WHAT IS PASSED: the dial
+  // arrives through store.getWorkerRuntimeDial(), so THAT reader — not
+  // chooseWorkerRuntime's own absent-rule — is what decides a machine with
+  // nothing written. For one day the two disagreed (the reader turned absent
+  // into an explicit {mode:'pty'} while chooseWorkerRuntime and the panel both
+  // said sdk), and 0.11.47 shipped dispatching PTY workers under a switch drawn
+  // ON. They now share one polarity — absent ⇒ sdk, unreadable file ⇒ pty — and
+  // swarmRuntimeDialParity.test.ts composes exactly this call rather than
+  // calling chooseWorkerRuntime directly, which is how the gap stayed green. Every
   // reason to not use the SDK degrades to the PTY path rather than refusing the
   // dispatch — a worker that would have run fine must never be blocked because
   // an experimental runtime could not be established. The one thing that must

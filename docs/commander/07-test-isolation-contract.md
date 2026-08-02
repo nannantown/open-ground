@@ -122,10 +122,15 @@ fence とは設計が違い、統合時に突き合わせている(この worktr
 
 **これは設計上の必須条件で、動かしてはいけない。**
 
-`store.ts` の `readJson` は寛容リーダー(`catch { return fallback }` :54)。
+`store.ts` の `readJson` は**今も寛容リーダー**(実体は `readJsonWithHealth` で、
+読み取り失敗も parse 失敗も各 `catch` が fallback に潰す。`readJson` はその
+`value` だけを返す薄いラッパ — 2026-08-02 に形が変わったので、旧記述の
+`catch { return fallback }` :54 という引用はもう現物に無い)。
 もし fence を `readFile` の中で投げれば、その例外は握り潰され、`getSettings()` は
 **何事もなかったかのように `DEFAULT_SETTINGS` を返す** — fail-closed のつもりが
-fail-open になる(過去に同型の前例あり)。
+fail-open になる(過去に同型の前例あり)。**この節の主張は形が変わっても真のまま** —
+`readJsonWithHealth` が新しく返す `health` は「不在か・壊れているか」を区別するだけで、
+fence の例外を**外へ通すわけではない**(`unreadable` に潰れて呼び手に届く)。
 
 現在は `settingsFile()` が `readJson(...)` の**引数として先に評価される**ため、
 throw は try ブロックの外で起き、寛容リーダーを素通りして呼び出し元まで届く。

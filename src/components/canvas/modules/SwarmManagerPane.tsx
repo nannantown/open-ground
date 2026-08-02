@@ -111,10 +111,13 @@ interface Props {
    *  containment note under the switch. */
   sandboxWarning: boolean
   // ── Runtime dials (Agent SDK migration) ─────────────────────────────────────
-  /** Current Settings.swarmWorkerRuntime / swarmManagerRuntime, resolved by
-   *  SwarmModule from /api/settings. `null` while that read is in flight — the
-   *  switches render disabled rather than briefly claiming OFF, because "off" is
-   *  a real answer here and a wrong one is worse than a blank one. */
+  /** THE SERVER'S OWN EFFECTIVE dials — `runtimeDialsEffective` off /api/settings,
+   *  passed through by SwarmModule without re-deriving anything. (It used to
+   *  resolve the raw settings keys client-side; that copy drifted from the server
+   *  twice on 2026-08-02 and the switches drew the opposite of what was running.)
+   *  `null` while the read is in flight OR if the server did not answer — the
+   *  switches render disabled rather than claiming OFF, because "off" is a real
+   *  answer here and a wrong one is worse than a blank one. */
   runtimeDials: { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number } | null
   /** Persist one dial (POST /api/settings, merged server-side by SwarmModule). */
   onToggleRuntime: (which: 'worker' | 'manager', next: boolean) => void

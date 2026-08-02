@@ -49,6 +49,7 @@ import type {
   ProjectData,
   ProjectMeta,
   RemoveSwarmWorktreeResponse,
+  SettingsResponse,
   SpawnSwarmManagerResponse,
   SpawnSwarmSupplyResponse,
   SpawnSwarmWorkerResponse,
@@ -159,17 +160,12 @@ const managerKey = (projectId: string) => `openground.swarm.manager.${projectId}
  *  configured: settings merges at the top level, so a `{mode}` write REPLACES the
  *  whole object. */
 type RuntimeDials = { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number }
-/** The shipped default when `sdkMaxWorkers` is unset — kept in lockstep with the
- *  server's DEFAULT_SDK_MAX_WORKERS (swarmWorkerRuntimeDial.ts). Only used for
- *  DISPLAY; the server never trusts this number. */
+/** Last-resort display fallback for the cap, used only if the server answered
+ *  with a non-number — kept in lockstep with the server's
+ *  DEFAULT_SDK_MAX_WORKERS (swarmWorkerRuntimeDial.ts). The real value arrives
+ *  resolved in `runtimeDialsEffective.workerCap`; this module derives nothing
+ *  about the dials itself (see the note at the settings read). */
 const DEFAULT_SDK_MAX_WORKERS = 1
-/** The shape of /api/settings this module cares about for those dials. Narrow on
- *  purpose — the settings payload is large and everything else here is someone
- *  else's business. */
-type RuntimeDialSettings = {
-  swarmWorkerRuntime?: { mode?: string; sdkMaxWorkers?: unknown }
-  swarmManagerRuntime?: { mode?: string }
-}
 
 /** Load + SANITISE the persisted commander session (localStorage is untrusted —
  *  a user/extension can forge any JSON, so coerce every field; a bad shape →
@@ -373,9 +369,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // settings load from overriding a tab the user clicked while it was in flight;
   // the reset effect re-lands on the first tab on every project switch.
   const [paneOrder, setPaneOrder] = useState<readonly string[] | undefined>(undefined)
-  // Settings.swarmWorkerRuntime / swarmManagerRuntime, for the manager dashboard's
-  // runtime switches. `null` until the settings GET answers — the switches render
-  // disabled rather than briefly asserting OFF, because OFF is a real answer here.
+  // The SERVER's effective runtime dials (`runtimeDialsEffective`), for the
+  // manager dashboard's switches — never derived here. `null` until the settings
+  // GET answers, or if it answers without them — the switches render disabled
+  // rather than briefly asserting OFF, because OFF is a real answer here.
   const [runtimeDials, setRuntimeDials] = useState<RuntimeDials | null>(null)
   const order = useMemo(
     () => effectiveTabOrder<MainView>(paneOrder, SWARM_PANE_IDS),
@@ -491,31 +488,44 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           : undefined
         setPaneOrder(saved)
         // The runtime dials ride the SAME settings read — one GET, not three.
-        // ⚠ RESOLVED EXACTLY AS THE SERVER DOES, ABSENT CASE INCLUDED. These two
-        // toggles are the KILL SWITCH: the whole safety story of the SDK runtime
-        // is "if anything goes wrong, turn it off — no release needed". A switch
-        // that draws OFF while the server is running SDK is not a switch the
-        // owner can trust, and they would be reading it at exactly the moment
-        // something has gone wrong.
+        // ⚠ DRAWN, NOT DERIVED. These two toggles are the KILL SWITCH: the whole
+        // safety story of the SDK runtime is "if anything goes wrong, turn it off
+        // — no release needed". A switch that draws OFF while the server is
+        // running SDK is not a switch the owner can trust, and they would be
+        // reading it at exactly the moment something has gone wrong.
         //
-        // This said `=== 'sdk' ? 'sdk' : 'pty'` — correct until 2026-08-02, when
-        // the server's default flipped to SDK and this line kept answering PTY
-        // for the shipped (absent) state. Same shape as the ten display-vs-truth
-        // defects the SDK migration produced: a reader that did not move with
-        // the rule it mirrors.
-        const dialOf = (m: unknown): 'pty' | 'sdk' =>
-          m === 'pty' ? 'pty' : m === 'sdk' || m === undefined ? 'sdk' : 'pty'
-        const cap = (s as RuntimeDialSettings).swarmWorkerRuntime?.sdkMaxWorkers
-        setRuntimeDials({
-          worker: dialOf((s as RuntimeDialSettings).swarmWorkerRuntime?.mode),
-          manager: dialOf((s as RuntimeDialSettings).swarmManagerRuntime?.mode),
-          // Same resolution as the server's sdkSlotLimit: a non-number / negative
-          // cap is not a cap. Floored, because it is a count of workers.
-          workerCap:
-            typeof cap === 'number' && Number.isFinite(cap) && cap >= 0
-              ? Math.floor(cap)
-              : DEFAULT_SDK_MAX_WORKERS,
-        })
+        // This block used to resolve the raw `swarmWorkerRuntime` /
+        // `swarmManagerRuntime` keys here, re-implementing the server's rule
+        // client-side. It drifted twice on 2026-08-02 alone: the worker switch
+        // drew ON while dispatch ran PTY (the reader between them never got the
+        // flip), and a broken settings.json drew ON while the server fell to the
+        // kill switch. The second one is unfixable from the raw keys — a tolerant
+        // GET reports a missing key for BOTH "never written" and "unreadable",
+        // and those resolve to opposite runtimes. So the server now resolves them
+        // through the very readers dispatch consults and serves the answer as
+        // `runtimeDialsEffective`; this reads it and nothing more.
+        //
+        // Absent (an older server, or a shape we do not recognise) ⇒ null, which
+        // renders the switches DISABLED rather than guessing. "I do not know what
+        // the server is doing" is a state the owner can act on; a confident wrong
+        // answer is not.
+        const eff = (s as Partial<SettingsResponse>).runtimeDialsEffective
+        const dial = (v: unknown): 'pty' | 'sdk' | null =>
+          v === 'pty' || v === 'sdk' ? v : null
+        const worker = dial(eff?.worker)
+        const manager = dial(eff?.manager)
+        setRuntimeDials(
+          worker && manager
+            ? {
+                worker,
+                manager,
+                workerCap:
+                  typeof eff?.workerCap === 'number' && Number.isFinite(eff.workerCap)
+                    ? eff.workerCap
+                    : DEFAULT_SDK_MAX_WORKERS,
+              }
+            : null,
+        )
         if (!userPickedRef.current) {
           setMainView(effectiveTabOrder<MainView>(saved, SWARM_PANE_IDS)[0])
         }

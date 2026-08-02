@@ -124,9 +124,16 @@ export interface Settings {
   /** WHICH RUNTIME a newly dispatched swarm worker runs on.
    *
    *  This is the kill switch for the Agent SDK worker migration
-   *  (docs/SDK_WORKER_MIGRATION_PLAN.md). Absent / `mode:'pty'` ⇒ every worker
-   *  is a PTY worker, exactly as before — that is the shipped default and the
-   *  state to return to if anything about the SDK path misbehaves. Flipping it
+   *  (docs/SDK_WORKER_MIGRATION_PLAN.md). `mode:'pty'` ⇒ every worker is a PTY
+   *  worker, exactly as before — the state to return to if anything about the
+   *  SDK path misbehaves, and still honoured verbatim. ABSENT is where the
+   *  default moved on 2026-08-01: an untouched settings.json dispatches SDK
+   *  workers. (For one day it did not — the flip lived in `chooseWorkerRuntime`
+   *  while the dispatch path reached that decision through
+   *  `store.getWorkerRuntimeDial`, which turned absent back into 'pty'; 0.11.47
+   *  shipped drawing the switch ON over a PTY fleet. Both now resolve absent to
+   *  'sdk'.) An UNREADABLE settings.json is a separate rule and still falls to
+   *  'pty' — a file we cannot read is not consent. Flipping it
    *  back does NOT disturb workers already running; it only decides what the
    *  NEXT dispatch builds, and the roster records each worker's own runtime so
    *  a mixed fleet stays coherent across a restart.
@@ -143,16 +150,19 @@ export interface Settings {
    *  the same migration, dialled separately because it spends something the
    *  worker dial does not.
    *
-   *  Absent / `'pty'` ⇒ the commander is an interactive `claude` PTY, exactly as
-   *  before, reachable from a phone through `--remote-control`. `'sdk'` ⇒ it
+   *  `'pty'` (and any unrecognised value) ⇒ the commander is an interactive
+   *  `claude` PTY, exactly as before, reachable from a phone through
+   *  `--remote-control`. ABSENT ⇒ `'sdk'` since 2026-08-02. `'sdk'` ⇒ it
    *  runs on the Agent SDK: structured transcript, liveness that is a fact
    *  rather than an inference, and notices that no longer have to ERASE the
    *  owner's half-typed input to be delivered — but NO Remote Control, because
    *  the flag does nothing outside an interactive REPL.
    *
-   *  That is why this is its own switch and why it ships OFF: turning it on is
-   *  only safe once the SUPPLY desk (which stays on a PTY) can answer 「状況」 as
-   *  well as take orders, since it then becomes the owner's only phone window.
+   *  That is why this is its own switch, and why its default moved LAST (a day
+   *  after the worker's): defaulting to SDK is only safe once the SUPPLY desk
+   *  (which stays on a PTY) can answer 「状況」 as well as take orders, since the
+   *  commander then stops being the owner's phone window. That window was moved
+   *  first, which is what the ordering of stage 3 was for.
    *  See docs/SDK_CLIENT_INVESTIGATION.md §13 and skills/supply/SKILL.md.
    *
    *  Flipping it back does not disturb a desk already running; it decides what
@@ -231,11 +241,38 @@ export interface ExperimentsResponse {
   flags: ExperimentFlags
 }
 
+/** The runtime each swarm dial RESOLVES TO on this machine right now, computed
+ *  by the server and served read-only on {@link SettingsResponse}.
+ *
+ *  ⚠ THE PANEL MUST DRAW THESE, NOT DERIVE ITS OWN. The Swarm tab used to read
+ *  the raw `swarmWorkerRuntime` / `swarmManagerRuntime` keys off the same
+ *  response and re-implement the server's rule client-side. That copy produced
+ *  TWO display-vs-truth defects on 2026-08-02 alone — an absent worker dial drawn
+ *  ON while dispatch ran PTY, and a broken settings.json drawn ON while the
+ *  commander fell to the kill switch — because a raw key cannot distinguish
+ *  "never written" from "the file is unreadable", and a copied rule does not move
+ *  when the rule does. These fields come from the very readers dispatch and desk
+ *  launch consult (`store.getWorkerRuntimeDial` / `getManagerRuntimeDial`), so
+ *  the toggle and the server cannot disagree by construction.
+ *
+ *  NOT a settings key: it is computed per request and must never appear in
+ *  `USER_SETTINGS_KEYS`. `workerCap` is the effective SDK slot limit
+ *  (`sdkSlotLimit` of the resolved dial), shown beside the worker switch. */
+export type RuntimeDialsEffective = {
+  worker: 'pty' | 'sdk'
+  manager: 'pty' | 'sdk'
+  workerCap: number
+}
+
 /** GET /api/settings response: the persisted {@link Settings} plus a
  *  NON-persisted display-name suggestion (`git config --global user.name`,
- *  null when git is missing or user.name is unset). The client shows it only
- *  as the input placeholder — it is never written into settings.json. */
-export type SettingsResponse = Settings & { suggestedDisplayName: string | null }
+ *  null when git is missing or user.name is unset) and the server's own
+ *  {@link RuntimeDialsEffective}. The client shows the suggestion only as the
+ *  input placeholder — neither field is ever written into settings.json. */
+export type SettingsResponse = Settings & {
+  suggestedDisplayName: string | null
+  runtimeDialsEffective: RuntimeDialsEffective
+}
 
 /** One published release of the distribution repo (GET /api/release-notes).
  *  `body` is the release's markdown notes, written with `### English` /
@@ -1033,8 +1070,9 @@ export interface SpawnSwarmWorkerResponse {
   agentSessionId: string
   worktree: string
   branch: string
-  /** HOW this worker was actually launched. ABSENT ⇒ `'pty'` (the default and,
-   *  unless the owner flips the dial, the only value ever produced). */
+  /** HOW this worker was actually launched. ABSENT ⇒ `'pty'` — the RECORD-level
+   *  rule (every response predating the SDK runtime keeps its meaning), which is
+   *  untouched by where the dial's default sits. */
   runtime?: 'pty' | 'sdk'
   /** The Agent SDK session id, present ONLY for `runtime: 'sdk'`. The caller
    *  records it on the roster; `terminalId` is empty for such a worker. */

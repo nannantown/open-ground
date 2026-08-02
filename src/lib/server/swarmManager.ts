@@ -725,8 +725,12 @@ const launchNewDesk = async (
   //
   // The dial is read here rather than passed in, so the engine's resuscitation
   // reflex and the owner's button can never disagree about which runtime this
-  // project's commander uses. Anything but a literal 'sdk' — absent, corrupt,
-  // an unreadable settings file — is a PTY (store.getManagerRuntimeDial).
+  // project's commander uses. Since 2026-08-02 an ABSENT dial is an SDK desk;
+  // an explicit 'pty' and any unrecognised MODE VALUE are a PTY.
+  //
+  // The dial's FILE-level behaviour — an unreadable / unparseable settings.json,
+  // and when the `.catch` below actually fires — is documented in ONE place:
+  // store.getManagerRuntimeDial. Do not restate it here.
   const dial = await getManagerRuntimeDial().catch(() => ({ mode: 'pty' as const }))
   // Why this desk is a PTY even though the dial said 'sdk'. Carried into the
   // response so the owner READS it — a console.warn inside a forked server in a

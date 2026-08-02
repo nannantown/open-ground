@@ -162,9 +162,30 @@ worktree の `node_modules` は**本体 checkout の `node_modules` への symli
 
 `spawnSwarmWorker` は起動の直前に `chooseWorkerRuntime`(swarmWorkerRuntimeDial.ts)を
 呼び、その worker を **PTY** で動かすか **Agent SDK** で動かすかを決める。
-**既定は PTY** で、設定 `Settings.swarmWorkerRuntime.mode` が `'sdk'` のときだけ
-SDK が選ばれうる(枠は `sdkMaxWorkers`、既定 1)。設計は
-`docs/SDK_WORKER_MIGRATION_PLAN.md`。
+ダイヤルの既定は 2026-08-01 に SDK へ反転し、**2026-08-02 に dispatch まで届いた**。
+つまり**未設定の機体では worker は SDK で上がる**(枠は `sdkMaxWorkers`、既定 1 — 2体目以降は
+PTY へ降格し、理由が `fellBackBecause` に載る)。設計は `docs/SDK_WORKER_MIGRATION_PLAN.md`。
+
+⚠ **1日ズレていた期間がある(0.11.47 に出荷済み)**。規則は `chooseWorkerRuntime` に入った
+のに、本番の呼び出しは `store.getWorkerRuntimeDial()` を挟み、**その reader が不在を明示
+`'pty'` へ潰していた**。結果、盤面はスイッチ ON を描きながら PTY worker が立っていた
+(隔離 HOME で実測 0802)。**決めるのは reader** — 規則を `chooseWorkerRuntime` だけ直しても
+効かない。両者は同極性に揃えてある(明示 ⇒ そのランタイム / 不在 ⇒ sdk / それ以外 ⇒ pty)。
+古い司令塔メモに「未設定なら PTY」とあれば、それはこの期間の記述。
+
+⚠ **ファイルが読めないときは PTY**(2026-08-02)。`settings.json` が読めない / parse できない /
+全体が非オブジェクト / 切れた symlink のとき、`store.getWorkerRuntimeDial()` はそれを
+**不在扱いにせず** `'pty'` を返す(`sdkMaxWorkers` も落とす)。**この規則は今や実挙動を変える**
+—— 不在の既定が `'sdk'` になったので、規則が無ければ「壊れた settings.json が実験ランタイムを
+有効にする」穴がそのまま開く(反転前は不在の既定がたまたま `'pty'` で一致していただけ)。
+番人は `src/lib/server/runtimeDialFileHealth.test.ts`。司令官ダイヤル側の同じ話は 03 章 §2.3 冒頭。
+
+⚠ **盤面(Swarm パネル)の値は導出ではなくサーバの実効値**(2026-08-02)。`GET /api/settings` が
+`runtimeDialsEffective:{worker,manager,workerCap}` を返し、パネルはそれを描くだけ。
+以前はパネルが生の設定キーからサーバ規則を再実装しており、**同じ日に表示ズレを2件**産んだ
+(不在 worker ダイヤル / 壊れたファイル)。**司令塔が「盤面はこう出ている」と報告するときは、
+その値がサーバの実効値であることを前提にしてよい** —— ただし前提が成り立つのは
+`swarmRuntimeDialParity.test.ts`(合成経路 ⇄ 配られる値を比較)が緑である限り。
 
 司令塔が知っておくべきことは 4 つだけ:
 
