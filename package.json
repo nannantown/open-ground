@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.48",
+  "version": "0.11.49",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -13,7 +13,8 @@
     "build:web": "vite build",
     "build:server": "node scripts/build-server.js",
     "start": "PORT=47776 node server/dist/index.cjs",
-    "lint": "eslint . --ext .ts,.tsx",
+    "lint": "eslint . --ext .ts,.tsx,.mts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
     "check:screens": "npx tsx scripts/check-screen-modules.ts",
     "you-corpus": "tsx scripts/you-corpus.ts",
     "swarm:audit": "tsx scripts/swarm-token-audit.ts",

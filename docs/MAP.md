@@ -177,6 +177,13 @@
   ビルド側は banner で `pathToFileURL(__filename).href` を define して**本物の file URL を
   与える**。番人 = `sdkGuardBundleShape.test.ts`(設定に文字列があることではなく、その
   banner/define を**実際に esbuild へ食わせて** file URL が出ることを見る)。
+  ⚠ **同じ「dev で100%動き、配布で100%動かない」を 0802 にもう一度踏んだ**(`e26d5efb`)。
+  今度は `sdkSession.ts` の `require('@anthropic-ai/claude-agent-sdk')`。この SDK は
+  **ESM 専用**かつ `external` なので、Electron が fork する CJS バンドルからは読めない
+  (Electron 31.7.7 = Node 20.18、`require(esm)` は 20.19/22.12 以降) ⇒ 配布ビルドでは
+  **全 spawn が `ERR_REQUIRE_ESM`**、SDK は製品として一度も起動していない
+  (0.11.47/0.11.48 出荷済み)。今は動的 `import()`。番人 = `sdkEsmLoadFromCjsBundle.test.ts`。
+  **2 件に共通するのは「ビルド成果物を走らせていない」ことだけ**。
   ⚠⚠ **worker は `workerKey(w)` で指し、`runtimeOf(w)` 経由で操作する。`w.terminalId` で
   直接触る箇所はすべて穴** — SDK worker の terminalId は**空**なので、失敗せず
   「何もしない」か「別人に当たる」。0731 のレビュー5周で**6件**摘出(全部無言。
@@ -494,6 +501,13 @@
   vitest(ESM)では動き、**配布版だけ壊れる**ので、テストからは原理的に見えない。0801 にこれで
   「出荷版では SDK worker が1体も立たない」を作った(`dd311acc`・詳細は §5)。
   今は banner で `pathToFileURL(__filename).href` を define して**本物の file URL を与える**。
+  ⚠ **CJS バンドルは ESM 専用パッケージを `require()` できない**(Electron 31 = Node 20.18、
+  `require(esm)` は Node 20.19/22.12 以降)。0802 にこれで「配布版では SDK ランタイムが
+  一度も起動しない」を作った(`e26d5efb`・0.11.47/0.11.48 出荷済み)。`import()` なら読める —
+  **esbuild は external かつ target=node20 では `import()` を `require()` に書き換えない**
+  ので小細工は不要(target を下げる/external から外すと書き換えが復活する)。`buildOptions`
+  はこのスクリプトから **export** してあり、番人 `sdkEsmLoadFromCjsBundle.test.ts` が
+  **本番と同一の options で**バンドルして .cjs を実行する。
   ⚠⚠ **`logOverride` で esbuild の警告を黙らせるときは、その警告が将来の読み手も覆うと考える**。
   `empty-import-meta` の沈黙は、追加した当時は正しかった(唯一の読み手が死んだ枝だった)が、
   後から生えた生きた読み手をそのまま覆った。番人 = `src/lib/server/sdkGuardBundleShape.test.ts`

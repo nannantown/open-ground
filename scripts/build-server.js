@@ -22,68 +22,94 @@ const path = require('path')
 
 const repoRoot = path.resolve(__dirname, '..')
 
-esbuild
-  .build({
-    entryPoints: [path.join(repoRoot, 'server', 'index.ts')],
-    outfile: path.join(repoRoot, 'server', 'dist', 'index.cjs'),
-    bundle: true,
-    platform: 'node',
-    format: 'cjs',
-    target: 'node20',
-    // node-pty loads a native .node binding by runtime path — never bundle it.
-    // Keep it (and its optional deps) external so `require('node-pty')` in
-    // src/lib/server/terminal.ts hits the real installed module on disk.
-    // fsevents is an optional native dep (chokidar → screenWatcher on macOS);
-    // like node-pty it ships a .node binding that can't be bundled.
-    // bufferutil / utf-8-validate are `ws`'s OPTIONAL native accelerators,
-    // required inside try/catch — mark them external so bundling `ws` (the
-    // collabMirror WebSocket polyfill for Electron's Node 20, which lacks a
-    // global WebSocket) doesn't fail on the unresolvable optional requires;
-    // at runtime the try/catch falls back to the pure-JS paths.
-    // @anthropic-ai/claude-agent-sdk is external for the SAME reason node-pty is:
-    // it locates and spawns a native `claude` binary, and it does so with
-    // `require.resolve` from its OWN package directory. Bundled, that resolution
-    // has no package directory to resolve from — the SDK's own README documents
-    // this failure for compiled bundles. OPEN GROUND always passes
-    // `pathToClaudeCodeExecutable` (subscription-only: it must be the USER'S
-    // claude, never the SDK's bundled copy), so that path is not load-bearing
-    // here — but bundling a 4MB SDK for an OFF-by-default feature, and defeating
-    // the deliberate lazy `require()` in sdkSession.ts while doing it, is not
-    // something to leave to chance. Verified 2026-07-31: bundled it was inlined.
-    external: [
-      'node-pty',
-      'fsevents',
-      'bufferutil',
-      'utf-8-validate',
-      '@anthropic-ai/claude-agent-sdk',
-    ],
-    // `@/*` → `src/*` (mirrors tsconfig paths) so server/routes/*.ts imports of
-    // '@/lib/server/*' resolve during bundling.
-    alias: {
-      '@': path.join(repoRoot, 'src'),
-    },
-    // Helpful when debugging the forked server in prod.
-    sourcemap: true,
-    logLevel: 'info',
-    // ⚠ GIVE `import.meta.url` A REAL VALUE — DO NOT SILENCE THE WARNING.
-    // esbuild has no import.meta in CJS output and emits `{}`, so every
-    // `import.meta.url` in bundled server code reads `undefined` at runtime.
-    // This was previously papered over with
-    // `logOverride: { 'empty-import-meta': 'silent' }` on the grounds that the
-    // only reader (hooksInstall.ts) sat behind a dead `typeof __dirname`
-    // branch — and then sdkGuardHook.ts grew a LIVE `createRequire(import.meta.url)`
-    // that throws on every call, so the packaged app could not start an SDK
-    // worker at all while every dev run worked. Shimming it is the fix that
-    // covers the next such reader too; silencing only hides them.
-    banner: {
-      js: "const __ogImportMetaUrl = require('url').pathToFileURL(__filename).href;",
-    },
-    define: { 'import.meta.url': '__ogImportMetaUrl' },
-  })
-  .then(() => {
-    console.log('[build-server] wrote server/dist/index.cjs')
-  })
-  .catch((err) => {
-    console.error('[build-server] failed', err)
-    process.exit(1)
-  })
+// EXPORTED (see the bottom of this file) so a test can bundle with the OPTIONS
+// THE SHIP USES rather than a copy of them. sdkEsmLoadFromCjsBundle.test.ts
+// depends on three of them together — `format: 'cjs'`, `target: 'node20'`, and
+// the SDK being `external` — because that combination is what decides whether
+// esbuild leaves the SDK's dynamic `import()` alone or rewrites it back into the
+// `require()` that cannot load an ES module on Electron's Node 20. A copied
+// config would keep passing while this one drifted.
+const buildOptions = {
+  entryPoints: [path.join(repoRoot, 'server', 'index.ts')],
+  outfile: path.join(repoRoot, 'server', 'dist', 'index.cjs'),
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  // ⚠ NOT BELOW node13.2. Under a target without the dynamic-import feature
+  // esbuild rewrites `import()` into `require()`, which resurrects the
+  // ERR_REQUIRE_ESM that stopped the SDK runtime from EVER starting in the
+  // packaged app (0.11.47 / 0.11.48) — see src/lib/server/sdkSession.ts.
+  target: 'node20',
+  // node-pty loads a native .node binding by runtime path — never bundle it.
+  // Keep it (and its optional deps) external so `require('node-pty')` in
+  // src/lib/server/terminal.ts hits the real installed module on disk.
+  // fsevents is an optional native dep (chokidar → screenWatcher on macOS);
+  // like node-pty it ships a .node binding that can't be bundled.
+  // bufferutil / utf-8-validate are `ws`'s OPTIONAL native accelerators,
+  // required inside try/catch — mark them external so bundling `ws` (the
+  // collabMirror WebSocket polyfill for Electron's Node 20, which lacks a
+  // global WebSocket) doesn't fail on the unresolvable optional requires;
+  // at runtime the try/catch falls back to the pure-JS paths.
+  // ⚠ @anthropic-ai/claude-agent-sdk MUST STAY EXTERNAL, and it is ESM-only —
+  // sdkSession.ts reaches it with `import()`, which esbuild preserves verbatim
+  // for an external module but INLINES (as a require-shaped hop) for a bundled
+  // one. It is external for the SAME reason node-pty is:
+  // it locates and spawns a native `claude` binary, and it does so with
+  // `require.resolve` from its OWN package directory. Bundled, that resolution
+  // has no package directory to resolve from — the SDK's own README documents
+  // this failure for compiled bundles. OPEN GROUND always passes
+  // `pathToClaudeCodeExecutable` (subscription-only: it must be the USER'S
+  // claude, never the SDK's bundled copy), so that path is not load-bearing
+  // here — but bundling a 4MB SDK, and collapsing sdkSession.ts's deliberate
+  // lazy `import()` into an inlined module while doing it, is not something to
+  // leave to chance. Verified 2026-07-31: bundled it was inlined.
+  // (Two details this comment used to get wrong: the load is an `import()`, not
+  // a `require()` — that was the 0802 defect — and the SDK runtime is no longer
+  // an off-by-default feature, since the worker dial defaults to sdk.)
+  external: [
+    'node-pty',
+    'fsevents',
+    'bufferutil',
+    'utf-8-validate',
+    '@anthropic-ai/claude-agent-sdk',
+  ],
+  // `@/*` → `src/*` (mirrors tsconfig paths) so server/routes/*.ts imports of
+  // '@/lib/server/*' resolve during bundling.
+  alias: {
+    '@': path.join(repoRoot, 'src'),
+  },
+  // Helpful when debugging the forked server in prod.
+  sourcemap: true,
+  logLevel: 'info',
+  // ⚠ GIVE `import.meta.url` A REAL VALUE — DO NOT SILENCE THE WARNING.
+  // esbuild has no import.meta in CJS output and emits `{}`, so every
+  // `import.meta.url` in bundled server code reads `undefined` at runtime.
+  // This was previously papered over with
+  // `logOverride: { 'empty-import-meta': 'silent' }` on the grounds that the
+  // only reader (hooksInstall.ts) sat behind a dead `typeof __dirname`
+  // branch — and then sdkGuardHook.ts grew a LIVE `createRequire(import.meta.url)`
+  // that throws on every call, so the packaged app could not start an SDK
+  // worker at all while every dev run worked. Shimming it is the fix that
+  // covers the next such reader too; silencing only hides them.
+  banner: {
+    js: "const __ogImportMetaUrl = require('url').pathToFileURL(__filename).href;",
+  },
+  define: { 'import.meta.url': '__ogImportMetaUrl' },
+}
+
+// The options are the export; running the file still builds. `require.main`
+// keeps `npm run build` (which invokes this with node) behaving exactly as
+// before while a test can `require()` it for the options alone.
+module.exports = { buildOptions, repoRoot }
+
+if (require.main === module) {
+  esbuild
+    .build(buildOptions)
+    .then(() => {
+      console.log('[build-server] wrote server/dist/index.cjs')
+    })
+    .catch((err) => {
+      console.error('[build-server] failed', err)
+      process.exit(1)
+    })
+}

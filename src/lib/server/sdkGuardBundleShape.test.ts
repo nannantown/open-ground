@@ -25,6 +25,8 @@ import { createRequire } from 'module'
 
 const repoRoot = join(__dirname, '..', '..', '..')
 const buildScript = join(repoRoot, 'scripts', 'build-server.js')
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { buildOptions } = require(buildScript) as { buildOptions: esbuild.BuildOptions }
 
 describe('the guard hook survives the CJS bundle', () => {
   it('createRequire(undefined) throws — the mechanism this file guards against', () => {
@@ -46,8 +48,12 @@ describe('the guard hook survives the CJS bundle', () => {
     expect(cfg.replace(/\/\/.*$/gm, '')).not.toMatch(/'empty-import-meta':\s*'silent'/)
 
     // Take the shim the build actually uses, verbatim, and prove it works.
-    const banner = cfg.match(/js:\s*"([^"]*__filename[^"]*)"/)?.[1]
-    const define = cfg.match(/define:\s*\{\s*'import\.meta\.url':\s*'([^']+)'/)?.[1]
+    // THE OPTIONS OBJECT ITSELF, not a regex over its source: build-server.js
+    // exports `buildOptions` (sdkEsmLoadFromCjsBundle.test.ts reads it the same
+    // way), so the config and the thing under test cannot drift apart, and a
+    // reformat of the file cannot silently turn this assertion into `undefined`.
+    const banner = buildOptions.banner?.js
+    const define = buildOptions.define?.['import.meta.url']
     expect(banner, 'build-server.js must carry an import.meta.url banner').toBeTruthy()
     expect(define, 'build-server.js must define import.meta.url').toBeTruthy()
 
@@ -65,7 +71,7 @@ describe('the guard hook survives the CJS bundle', () => {
         bundle: true,
         platform: 'node',
         format: 'cjs',
-        banner: { js: banner!.replace(/\\'/g, "'") },
+        banner: { js: banner! },
         define: { 'import.meta.url': define! },
         outfile: join(dir, 'out.cjs'),
         logLevel: 'silent',

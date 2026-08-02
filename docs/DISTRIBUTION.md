@@ -347,6 +347,44 @@ shell:
 scripts/verify-dmg.sh "OPEN GROUND-0.11.11-arm64.dmg" 0.11.11 swarmOrchestrator
 ```
 
+⚠ **A feature marker proves code SHIPPED, not that it RUNS.** Twice now a defect
+existed *only* in the distributed build and *only* at runtime: the guard hook's
+`createRequire(import.meta.url)` (0801 `dd311acc`) and the `require()` of the
+ESM-only Agent SDK (0802 `e26d5efb` — shipped broken in 0.11.47/0.11.48, where
+the SDK runtime never started once). A presence-grep passes in both cases. For
+this class the useful check is the *absence* of a pattern:
+
+```bash
+# BOTH lines, and check both numbers — absence alone is not evidence.
+#   require(…) must be 0: a CJS bundle cannot require() an ESM-only package on
+#                         Node 20, which is what Electron 31 ships. Non-zero ⇒
+#                         every SDK desk degrades to a PTY.
+#   import(…)  must be ≥1: if the SDK is ever dropped from `external` in
+#                         build-server.js it gets BUNDLED, and then NEITHER form
+#                         appears — so a require-only check passes on a build
+#                         whose lazy load has silently vanished.
+# ⚠ `grep -c` exits 1 when the count is 0, so under `set -e` these must be run
+#   as `|| true` (or with `set +e`) or the script stops on the healthy case.
+grep -c 'require("@anthropic-ai/claude-agent-sdk")' server/dist/index.cjs || true   # want 0
+grep -c 'import("@anthropic-ai/claude-agent-sdk")'  server/dist/index.cjs || true   # want >=1
+```
+
+⚠ **That grep is a source check, and the unit suite's runtime check is not run on
+Electron's Node.** `sdkEsmLoadFromCjsBundle.test.ts` executes the bundle on the
+dev machine's Node with `require(esm)` disabled — close, but *not* the Node 20.18
+that Electron 31.7.7 embeds and forks. Both defects of this class were "green on
+the dev Node, dead on the forked Electron Node", so on a machine that has the
+packaged app, run the real thing once per release:
+
+```bash
+ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
+  -e "import('@anthropic-ai/claude-agent-sdk').then(m=>console.log('OK',m.USAGE_LIMIT_ERROR_PREFIXES.length),e=>console.log('NG',e.code))"
+```
+
+(Unverified as of 2026-08-02: the worktree that fixed this had no Electron binary
+in `node_modules/electron/dist` — only LICENSE and version — so it could not be
+measured there.)
+
 It mounts the dmg, prints the bundle's `CFBundleShortVersionString` + Mach-O
 arch, optionally greps a feature marker in the server bundle, and detaches —
 exiting non-zero on a version mismatch or a missing feature marker, and **warning

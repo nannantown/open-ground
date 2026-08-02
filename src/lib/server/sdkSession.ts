@@ -55,7 +55,7 @@ export type SdkQueryFn = (params: SdkQueryParams) => SdkQueryHandle
  *  `TerminalInfo.deskLabel`. */
 export type SdkSessionRole = 'worker' | 'manager' | 'supply'
 
-export interface SpawnSdkSessionOpts {
+interface SpawnSdkSessionCore {
   /** Working directory the session runs in (a worker's worktree). */
   cwd: string
   /** What this session IS, for pool queries (see {@link SdkSessionRole}). */
@@ -72,11 +72,53 @@ export interface SpawnSdkSessionOpts {
   /** First turn, sent as soon as the session starts. Omit for a session the
    *  caller will drive with {@link pushSdkInput}. */
   initialPrompt?: string
-  /** Injected for tests; defaults to the real SDK `query`. */
-  queryFn?: SdkQueryFn
   /** Injected id (tests / deterministic resume). Defaults to a fresh uuid. */
   id?: string
 }
+
+/** ⚠ EITHER INJECT `queryFn`, OR HAND OVER PROOF THAT THE MODULE IS LOADED.
+ *
+ *  This spawn is SYNCHRONOUS and the SDK is an ESM package a CJS bundle can only
+ *  reach with `await import()`, so a caller that has not preloaded gets a session
+ *  that fails at birth. That is safe — it degrades to a PTY — but it is SILENT,
+ *  and silence is how it got missed: `scripts/probe-sdk-manager-launch.mts` (the
+ *  canonical "boot a real commander" verifier, docs/SDK_CLIENT_INVESTIGATION.md
+ *  §662) called this without preloading, so the verifier would have started
+ *  failing at the exact moment production started working. `scripts/` sits
+ *  outside every inventory guard, so nothing would have said a word.
+ *
+ *  A presence-check guard cannot close that: it can see that TODAY's callers call
+ *  preloadSdk, not that TOMORROW's does, nor that it does so BEFORE this. Making
+ *  the proof an ARGUMENT moves the whole class from "silent at runtime" to "does
+ *  not compile" — the direction CLAUDE.md asks for when a guard has to choose
+ *  between under- and over-approximating.
+ *
+ *  ⚠ "DOES NOT COMPILE" IS ONLY TRUE WHERE A COMPILER LOOKS, AND IT DID NOT LOOK
+ *  HERE. tsconfig.json includes `scripts/**\/*.ts` — not `.mts` — so all 14
+ *  scripts/*.mts, INCLUDING the probe above, were outside `tsc --noEmit`
+ *  entirely, and `npm run lint` (`--ext .ts,.tsx`) skipped them too. Measured on
+ *  review: deleting the proof from that probe left the root typecheck at exit 0
+ *  with zero errors, i.e. this rule was real for src/ and server/ and absent from
+ *  the one directory the defect came from. `tsconfig.scripts.json` now covers
+ *  them and scriptsTypecheck.test.ts runs it from the suite, so the claim holds
+ *  for every caller in the repo — verified by deleting the argument and watching
+ *  it go red.
+ *
+ *  Tests are exempt by construction rather than by exception: injecting `queryFn`
+ *  means the module is never read, so there is nothing to prove. */
+export type SpawnSdkSessionOpts = SpawnSdkSessionCore &
+  (
+    | {
+        /** Injected for tests — the real SDK `query` is then never reached. */
+        queryFn: SdkQueryFn
+        sdk?: SdkPreloadResult
+      }
+    | {
+        /** What {@link preloadSdk} returned. */
+        sdk: SdkPreloadResult
+        queryFn?: undefined
+      }
+  )
 
 export interface SdkSessionInfo {
   id: string
@@ -228,51 +270,200 @@ interface PoolShape {
 const g = globalThis as unknown as { __openground_sdk_sessions?: PoolShape }
 const pool: PoolShape = (g.__openground_sdk_sessions ??= { sessions: new Map() })
 
-// The SDK's own refusal vocabulary, loaded lazily so importing this module
-// never requires the SDK to be resolvable (tests inject queryFn and may run in
-// an environment without it). Falls back to an EMPTY list — which makes
+// ── loading the ESM-only SDK out of a CJS bundle ─────────────────────────────
+//
+// ⚠ `require()` CANNOT LOAD THIS PACKAGE IN THE SHIPPED APP, AND NOTHING IN THIS
+// SUITE COULD SEE IT. @anthropic-ai/claude-agent-sdk is ESM-only
+// (`"type":"module"`, main `sdk.mjs`) and is deliberately `external` in
+// scripts/build-server.js, so inside `server/dist/index.cjs` — the CommonJS
+// bundle Electron forks in the packaged app — a `require()` of it lands on a
+// real ES module. Electron 31.7.7 carries Node 20.18.0, and `require(esm)`
+// exists only from Node 20.19 / 22.12 onward. So every SDK spawn in a shipped
+// build threw ERR_REQUIRE_ESM and degraded to a PTY: the 0.11.47 / 0.11.48
+// "default is SDK" flip never started ONE SDK desk as a product, while dev
+// (tsx, real ESM) and vitest (ESM) both worked perfectly. Same shape as the
+// import.meta bundle defect — see sdkGuardBundleShape.test.ts, and now
+// sdkEsmLoadFromCjsBundle.test.ts which measures THIS one on the real options.
+//
+// Dynamic `import()` is the fix and it needs no esbuild trick. esbuild rewrites
+// `import()` into `require()` in CJS output only when the target lacks the
+// dynamic-import feature, or when the imported module is BUNDLED rather than
+// external; here the target is node20 and the SDK is external, so the `import()`
+// survives verbatim into the .cjs. That is measured against the production
+// build options rather than assumed — lower the target or drop the SDK from
+// `external` and the bundle test goes red, instead of the packaged app going
+// quiet again.
+
+interface SdkModule {
+  query: SdkQueryFn
+  USAGE_LIMIT_ERROR_PREFIXES?: string[]
+}
+
+let sdkModule: SdkModule | null = null
+let sdkLoadError: string | null = null
+let sdkLoad: Promise<void> | null = null
+
+/** How the module is fetched. A named indirection ONLY so a test can force the
+ *  fetch to fail; the default is the literal `import()` the CJS bundle depends
+ *  on, and `sdkEsmLoadFromCjsBundle.test.ts` executes THAT — it runs the built
+ *  `.cjs` in a child process where no seam is applied — so this indirection
+ *  cannot hide a regression in the thing that actually ships. */
+type SdkImporter = () => Promise<unknown>
+const realSdkImport: SdkImporter = () => import('@anthropic-ai/claude-agent-sdk')
+let importSdk: SdkImporter = realSdkImport
+
+/** Import the SDK once. NEVER REJECTS — the failure is recorded and re-thrown
+ *  synchronously by {@link sdkNow}, which is what keeps the degrade contract
+ *  described on {@link preloadSdk} intact.
+ *
+ *  ⚠ EVICT ON FAILURE. `??=` alone memoises the FAILURE for the life of the
+ *  process — and because this promise RESOLVES rather than rejects, it memoises
+ *  it as a success, so nothing ever retries. One transient miss (EMFILE, an NFS
+ *  blip, a dispatch racing an install) would then mean "every worker on this
+ *  machine runs as a PTY until the app restarts", and in a packaged app the
+ *  server lives as long as the app does. It would also be SILENT: the degrade
+ *  only ever announces itself in `fellBackBecause`. paths.ts:203-209 and
+ *  registry.ts:39-42 each learned this same rule the hard way. Retrying costs
+ *  one import per spawn attempt, which is rate-limited by dispatch itself.
+ *
+ *  Still lazy: importing this module must not require the SDK to be resolvable,
+ *  because the unit suite constructs the pool with an injected `queryFn` on
+ *  machines that may not have it installed at all. */
+const loadSdkModule = (): Promise<void> =>
+  (sdkLoad ??= importSdk()
+    .then((m) => {
+      sdkModule = m as SdkModule
+      sdkLoadError = null
+    })
+    .catch((e: unknown) => {
+      sdkLoadError = String((e as Error)?.message ?? e).slice(0, 200)
+      // The eviction itself. `sdkLoad` is the one with teeth — drop it alone and
+      // sdkLoaderEvict.test.ts goes red.
+      sdkLoad = null
+      // Defence in depth, and DELIBERATELY redundant today: `quotaPrefixes`
+      // already refuses to memoise on a failed load, so there is normally
+      // nothing here to clear, and removing this line changes no test. It stays
+      // because the two rules have to agree for the recovery to work, and the
+      // cheapest way to keep them agreeing is for each to hold on its own.
+      cachedPrefixes = null
+    }))
+
+/** Test seam: force the module fetch to fail (or hand back a stub) so the
+ *  eviction rule above can be MEASURED rather than asserted in a comment.
+ *  `null` restores the real `import()` and clears every memo. */
+export const __setSdkImporterForTests = (fn: SdkImporter | null): void => {
+  importSdk = fn ?? realSdkImport
+  sdkLoad = null
+  sdkModule = null
+  sdkLoadError = null
+  cachedPrefixes = null
+}
+
+export interface SdkPreloadResult {
+  /** The marker {@link SpawnSdkSessionOpts} demands, so that "I awaited the
+   *  loader" is something the compiler checks rather than something a reviewer
+   *  has to notice.
+   *
+   *  ⚠ IT STOPS FORGETTING, NOT FORGING. TypeScript is structural, so hand-
+   *  writing `{ __sdkPreloaded: true, loaded: true, quotaPrefixCount: 0 }` type-
+   *  checks fine — measured, rather than assumed, on review. Making it truly
+   *  unmintable needs a `unique symbol`, which was NOT done because there is
+   *  nothing to protect: `spawnSdkSession` never reads `opts.sdk` at runtime, so
+   *  a forged one changes nothing — `sdkNow()` still throws, the session is still
+   *  recorded `failed`, and the callers still degrade to a PTY. The value here is
+   *  entirely in catching the accident (a new call site that forgot), and nobody
+   *  writes that property by accident. */
+  readonly __sdkPreloaded: true
+  /** The ESM module resolved and its exports are in hand. */
+  loaded: boolean
+  /** Why not, when `loaded` is false — the sentence a degrade should quote. */
+  error?: string
+  /** How many usage-limit prefixes the SDK actually exposes. CONTENT, not just
+   *  "some module object came back": this is the number that lets a bundle test
+   *  claim the real `sdk.mjs` executed, rather than that a call did not throw. */
+  quotaPrefixCount: number
+}
+
+/** Resolve the SDK module BEFORE spawning, so {@link spawnSdkSession} can stay
+ *  synchronous.
+ *
+ *  ⚠ WHY THE CALLERS AWAIT THIS INSTEAD OF THE POOL AWAITING IT ITSELF. Both
+ *  spawn callers — swarmWorker's SDK arm and swarmManager.launchSdkDesk — decide
+ *  "fall back to a PTY" from the status `spawnSdkSession` returns SYNCHRONOUSLY,
+ *  and both say so in a comment at the call site. A module-load failure has to
+ *  be visible in that return value or a broken SDK seats a DEAD SDK desk instead
+ *  of a working PTY one, which is the exact failure the fallback exists to
+ *  prevent. Making the pool async would move the decision after the fact;
+ *  handing back a handle that loads lazily on first iteration would do the same
+ *  thing more quietly. So the async step happens HERE, before the spawn, and
+ *  everything downstream of it stays synchronous.
+ *
+ *  Idempotent, and it never rejects: an awaiting caller needs no try/catch, and
+ *  a failure surfaces at the spawn in the shape those callers already handle. */
+export const preloadSdk = async (): Promise<SdkPreloadResult> => {
+  await loadSdkModule()
+  // Returned — NOT thrown — even on failure: the caller's job is to hand this to
+  // the spawn, and the spawn is what turns a missing module into the PTY degrade
+  // both call sites already implement. Rejecting would need a try/catch at every
+  // site and would route around that one path.
+  if (!sdkModule) {
+    return { __sdkPreloaded: true, loaded: false, error: sdkLoadError ?? 'unknown', quotaPrefixCount: 0 }
+  }
+  return { __sdkPreloaded: true, loaded: true, quotaPrefixCount: (await quotaPrefixes()).length }
+}
+
+/** The loaded module, or a SYNCHRONOUS throw that the spawn path records as a
+ *  failed session (and the callers turn into a PTY fallback). */
+const sdkNow = (): SdkModule => {
+  if (sdkModule) return sdkModule
+  if (sdkLoadError) throw new Error(`could not load @anthropic-ai/claude-agent-sdk: ${sdkLoadError}`)
+  throw new Error('@anthropic-ai/claude-agent-sdk is not loaded — await preloadSdk() before spawning')
+}
+
+// The SDK's own refusal vocabulary. Falls back to an EMPTY list — which makes
 // quota detection silent rather than wrong; a private copy of Anthropic's
 // wording is the thing sdkEvents exists to avoid.
 let cachedPrefixes: readonly string[] | null = null
-const quotaPrefixes = (): readonly string[] => {
+const quotaPrefixes = async (): Promise<readonly string[]> => {
   if (cachedPrefixes) return cachedPrefixes
-  try {
-
-    const sdk = require('@anthropic-ai/claude-agent-sdk') as { USAGE_LIMIT_ERROR_PREFIXES?: string[] }
-    cachedPrefixes = sdk.USAGE_LIMIT_ERROR_PREFIXES ?? []
-  } catch {
-    cachedPrefixes = []
-  }
+  await loadSdkModule()
+  // ⚠ DO NOT MEMOISE THE EMPTY LIST WHEN THE LOAD FAILED. `[]` is truthy, so the
+  // guard above would return it forever — and since the loader now evicts itself
+  // and retries, a later SUCCESSFUL load would come back with quota detection
+  // still, and silently, switched off. Returning without caching keeps the
+  // failure re-askable; only a real module populates the memo.
+  if (!sdkModule) return []
+  cachedPrefixes = sdkModule.USAGE_LIMIT_ERROR_PREFIXES ?? []
   return cachedPrefixes
 }
 /** How a session talks to the CLI when the caller does not say. Production never
  *  passes `queryFn`, so THIS is the real path — which is exactly why it needs a
  *  seam.
  *
- *  ⚠ WHY A SEAM AND NOT `vi.mock`. The require below runs at CALL time inside a
- *  CJS interop hop, and a module factory registered for the ESM specifier does
- *  not intercept it — measured 2026-08-02, when a test that believed it had
- *  faked the SDK was in fact spawning a real Agent SDK session on a machine with
- *  no `claude`. The session died and landed in the pool as `failed`/`reaped`,
- *  and two concurrency tests still passed, because at the moment they counted
- *  the desk it had not finished dying yet. A green that depends on winning a
- *  race with a crash is worse than a red.
+ *  ⚠ WHY A SEAM AND NOT `vi.mock`. Injecting HERE keeps everything above it real
+ *  for a test — the pool, the singleton guard, the per-project spawn lock — and
+ *  replaces only the piece that needs a subscription. A module factory for the
+ *  SDK specifier would swap the module out for the whole file, taking the loader
+ *  and its memo with it, so the test would stop exercising the production path
+ *  it means to be testing.
  *
- *  Injecting HERE keeps everything above it real for a test — the pool, the
- *  singleton guard, the per-project spawn lock — and replaces only the piece
- *  that needs a subscription. */
-let defaultQueryFn: SdkQueryFn = (params) => {
-  const sdk = require('@anthropic-ai/claude-agent-sdk') as { query: SdkQueryFn }
-  return sdk.query(params)
-}
+ *  (HISTORY — THE REASON CHANGED UNDER THIS FILE, so the old one is kept but
+ *  labelled. While the load was a `require()` inside a CJS interop hop, a factory
+ *  registered for the ESM specifier did NOT intercept it at all: measured
+ *  2026-08-02, when a test that believed it had faked the SDK was in fact
+ *  spawning a real Agent SDK session on a machine with no `claude`. The session
+ *  died and landed in the pool as `failed`/`reaped`, and two concurrency tests
+ *  still passed, because at the moment they counted the desk it had not finished
+ *  dying yet. Since the load became a dynamic `import()`, a factory DOES
+ *  intercept — re-measured on review 2026-08-02 — so interception is no longer
+ *  the argument; the paragraph above is. A green that depends on winning a race
+ *  with a crash is still worse than a red.) */
+let defaultQueryFn: SdkQueryFn = (params) => sdkNow().query(params)
 
 /** Test seam: replace the real `query` for tests that must drive the POOL (and
  *  everything built on it) without a subscription. `null` restores production. */
 export const __setDefaultQueryFnForTests = (fn: SdkQueryFn | null): void => {
-  defaultQueryFn = fn ?? ((params) => {
-    const sdk = require('@anthropic-ai/claude-agent-sdk') as { query: SdkQueryFn }
-    return sdk.query(params)
-  })
+  defaultQueryFn = fn ?? ((params) => sdkNow().query(params))
 }
 
 /** Test seam: pin the prefix list without loading the SDK. */
@@ -355,7 +546,10 @@ const makeInputIterable = (e: Entry): AsyncIterable<unknown> => ({
 
 /** Drain the SDK's output into the ring buffer until it ends. */
 const pump = async (e: Entry): Promise<void> => {
-  const prefixes = quotaPrefixes()
+  // Awaited, not synchronous: the vocabulary comes out of the ESM SDK, which a
+  // CJS bundle can only reach through `import()`. Free in practice — the spawn
+  // that started this pump already awaited the same one-shot load.
+  const prefixes = await quotaPrefixes()
   // Was the LAST event we saw an aborted turn boundary? Deliberately a
   // most-recent-event flag and NOT a "has this session ever been aborted" one.
   //

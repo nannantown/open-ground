@@ -455,9 +455,11 @@ curl -s "http://127.0.0.1:47776/api/swarm/notifications" | jq '[.notifications[]
   **残っている外側(0801 時点・未修正、編入するかは未判断)**:
   - `src/components/canvas/modules/useSwarmEngine.ts` — Swarm タブの配線を持つが
     `Swarm[^/]*` にも `Sdk[^/]*` にも当たらない(0801 の欠陥1件がここにあった)。
-  - `scripts/build-server.js` — `dd311acc` の**真因**がここだった(esbuild が guard hook を
-    どう畳むか)。今は同コミットが `sdkGuardHook.ts` も触るので**結果的に**ゲートは
-    発火するが、ビルドスクリプトだけを触るブランチは今も素通りする。
+  - `scripts/build-server.js` — **配布ビルドでだけ死ぬ欠陥 2 件が、どちらもここ絡み**
+    だった(`dd311acc` = esbuild が guard hook をどう畳むか / `e26d5efb` 0802 = CJS 出力が
+    ESM 専用パッケージを読めない)。どちらも同じコミットが `sdk*.ts` も触ったので
+    **結果的に**ゲートは発火したが、ビルドスクリプトだけを触るブランチは今も素通りする。
+    **2 件目が出た以上「たまたま巻き込まれる」に賭け続ける根拠は無い**(編入は未判断)。
 
   ⚠ **番人は「ある」が、0801 の追加分をまだ見ていない**(0801 時点の観測)。
   `swarmOrchestrator.integration.test.ts` の `describe('touchesSwarmPaths — the

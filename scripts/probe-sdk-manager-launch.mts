@@ -18,7 +18,13 @@
 // touched and no desk is adopted by a later spawn.
 
 import { sdkManagerLaunchPlan, sdkManagerPreflight } from '../src/lib/server/swarmManagerSdk'
-import { spawnSdkSession, getSdkSession, attachSdkListener, terminateSdkSession } from '../src/lib/server/sdkSession'
+import {
+  spawnSdkSession,
+  preloadSdk,
+  getSdkSession,
+  attachSdkListener,
+  terminateSdkSession,
+} from '../src/lib/server/sdkSession'
 import { randomUUID } from 'crypto'
 
 const main = async () => {
@@ -42,6 +48,13 @@ const main = async () => {
   console.log(`app-context card: ${sp?.append ? `${sp.append.length} chars` : 'MISSING (bug)'}`)
   console.log(`first message   : ${JSON.stringify(plan.initialPrompt)}`)
 
+  // The SDK is ESM-only; `spawnSdkSession` reads it SYNCHRONOUSLY and therefore
+  // requires it to be imported first, exactly as the two production spawn sites
+  // do. Without this the probe reports `status:'failed'` with "is not loaded",
+  // i.e. the verifier would break at the moment production started working.
+  const pre2 = await preloadSdk()
+  if (!pre2.loaded) console.log(`warning: SDK module did not load — ${pre2.error ?? 'unknown'}`)
+
   const s = spawnSdkSession({
     cwd: projectPath,
     role: 'manager',
@@ -49,6 +62,7 @@ const main = async () => {
     // Bound the run: boot, take one turn, stop.
     options: { ...plan.options, maxTurns: 1 },
     initialPrompt: plan.initialPrompt,
+    sdk: pre2,
   })
   console.log(`\nspawned sdk session ${s.id} (status ${s.status})\n── events ──`)
 

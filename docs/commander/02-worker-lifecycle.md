@@ -241,6 +241,28 @@ A3/L4 veto は `sdkGuardHook.ts` が in-process で武装し直している(同�
 「テストが緑」は配布版の証拠にならない。司令塔として覚えておくのはこれだけ:
 **SDK worker が全数 PTY に降格するなら、まず `fellBackBecause` の文面を読む**
 (preflight 落ちなのか枠なのかダイヤルなのかがそこに書いてある)。
+⚠⚠ **同じ「配布版でだけ0体」を 2026-08-02 にもう一度踏んだ**(`e26d5efb`)。今度は
+`sdkSession.ts` の `require('@anthropic-ai/claude-agent-sdk')`。この SDK は **ESM 専用**
+(`"type":"module"` / `main: sdk.mjs`)で、ビルドでは `external` にしてあるので、Electron が
+fork する CJS バンドルの中では**実 ES モジュールを require する**ことになる。Electron
+31.7.7 が積む Node は **20.18.0** で、`require(esm)` は Node 20.19/22.12 以降にしか無い
+⇒ **全 spawn が `ERR_REQUIRE_ESM` で即死**し、設計どおり静かに PTY へ降格していた。
+**0.11.47 / 0.11.48 はこの状態で出荷**され、「既定を SDK へ」は製品として一度も効いて
+いない。恒久策 = 動的 `import()`(esbuild は external かつ target=node20 では `import()` を
+書き換えない — 実測)。番人 = `sdkEsmLoadFromCjsBundle.test.ts`。
+**司令塔として覚えておくのは 1 つ**: この 2 件はどちらも「dev で緑・配布で全滅」で、
+違いは**ビルド成果物を実際に走らせたかどうか**だけ。なお今回それが見えたのは
+0.11.48 で `fellBackBecause` を記録するようにしたからで、それが無ければ
+「なんとなく PTY で動いている」ままだった。
+⚠ **番人がまだ届いていない範囲がある(0802 時点・未検証)**。`sdkEsmLoadFromCjsBundle.test.ts`
+は出荷 options でバンドルした .cjs を**開発機の Node 22 + `--no-experimental-require-module`**
+で走らせている。これは「`require(esm)` が無い Node で ESM が読める」ことは示すが、
+**Electron 31.7.7 が同梱して fork する Node 20.18 そのもので走らせてはいない**。
+worker 機に Electron 本体バイナリが無く(`node_modules/electron/dist` は LICENSE と
+version のみ)測れなかったため。**この 1 回の実機確認は配布物を持つ側の宿題**
+(`ELECTRON_RUN_AS_NODE=1 <Electron> -e "import('@anthropic-ai/claude-agent-sdk')…"`)。
+2 件とも「dev の Node では緑・fork された Electron の Node で死ぬ」形だったので、
+ここを「たぶん大丈夫」で埋めない。
 
 ### 2.4 claude 起動フラグ(worker の場合)
 

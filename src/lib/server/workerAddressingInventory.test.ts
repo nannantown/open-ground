@@ -763,14 +763,14 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'runtime-dispatched',
     why: 'Seats the commander on the SDK runtime when the dial says so and falls back to a PTY desk otherwise; watchSdkDeskForLimit is the SDK twin of the PTY quota watch.',
     ptyFns: ['getTerminalScreen', 'onTerminalExit'],
-    sdkCalls: ['attachSdkListener', 'spawnSdkSession'],
+    sdkCalls: ['attachSdkListener', 'preloadSdk', 'spawnSdkSession'],
     sdkHandleFloor: 5,
   },
   'src/lib/server/swarmWorker.ts': {
     tier: 'runtime-dispatched',
     why: 'Builds the worker record, which carries `runtime` plus exactly one handle — the identity invariant this whole inventory is about.',
     ptyFns: [],
-    sdkCalls: ['spawnSdkSession', 'stopAllDesksInDirAndWait'],
+    sdkCalls: ['preloadSdk', 'spawnSdkSession', 'stopAllDesksInDirAndWait'],
     sdkHandleFloor: 1,
   },
   'src/lib/server/swarmOverseerBrain.ts': {

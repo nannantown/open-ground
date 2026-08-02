@@ -26,6 +26,12 @@
 > **表示と実効が逆**だった。修正は reader を司令官側と同じ極性（不在 ⇒ sdk）に揃えること、
 > および**盤面が導出をやめてサーバの実効値を描く**こと（`GET /api/settings` の
 > `runtimeDialsEffective` — §8 の UI 項）。
+> ⚠⚠ **その上で、SDK ランタイムは 0.11.47 / 0.11.48 の配布ビルドで一度も起動していない**：
+> `sdkSession.ts` が **ESM 専用**の SDK を **CJS バンドルから `require()`** しており、
+> Electron の Node 20.18 に `require(esm)` が無いため、**全 spawn が `ERR_REQUIRE_ESM` で
+> 即死して PTY へ降格**していた（0802 `e26d5efb`・詳細は §9）。つまり上の「既定は SDK へ
+> 反転した」は、**配布形態では 0.11.49 まで無効**だった。降格の設計自体は正しく効いており、
+> これが見えたのは 0.11.48 で `fellBackBecause` を記録するようにしたおかげである。
 > **教訓**: 番人が `chooseWorkerRuntime` を**直接**叩き、パネルから写した `dialOf` と
 > 比べていたため、「防いだ」と宣言している欠陥が現実に存在したまま緑だった。
 > 番人（`swarmRuntimeDialParity.test.ts`）は**合成経路**（reader → 決定）と**パネルに配られる値**を
@@ -490,6 +496,7 @@ swarmWorkerRuntime?: {
 | クォータ壁（mid-turn） | 画面文言 → hold+requeue+冷却 | `quota_refusal` event → 同じ hold+requeue+冷却（tier=worker.model） |
 | interrupt | SIGINT 相当の画面操作は無し（kill のみ） | graceful `interrupt()` が**新規に手に入る**（差し戻し時に「殺さず止めて指示」が可能 — stage 1 では従来同様 kill を既定、interrupt は手動ボタンのみ）。**0801 実測でセッションが生き延びることを確認**（§6・`probe-sdk-interrupt-survival.mts`）: ターンだけ中断され iterator は続き、後続ターンは完走する |
 | **配布ビルドでだけ SDK worker が0体**（0801 実観測・`dd311acc`） | — | `import.meta` は esbuild の CJS 出力に存在せず `{}` に置換される ⇒ `createRequire(import.meta.url)` が `createRequire(undefined)` = **TypeError**。guard hook は fail-CLOSED なので preflight が全部落ちる。**dev(ESM)と vitest(ESM)では 100% 再現しない**。恒久策 = require のベースをロード対象の絶対パスにする＋ビルドの banner で `pathToFileURL(__filename).href` を define。番人 `sdkGuardBundleShape.test.ts` は**実際に esbuild へ食わせて**確かめる |
+| **配布ビルドでだけ SDK worker が0体(2件目)**（0802 実観測・`e26d5efb`・**0.11.47/0.11.48 に出荷済み**） | — | `@anthropic-ai/claude-agent-sdk` は **ESM 専用**（`"type":"module"` / `main: sdk.mjs`）で、ビルドでは `external`。よって `server/dist/index.cjs`（Electron が fork する **CJS** バンドル）の中の `require()` は実 ES モジュールに当たる。Electron 31.7.7 = **Node 20.18.0** で、`require(esm)` は Node 20.19/22.12 以降にしか無い ⇒ 全 spawn が `ERR_REQUIRE_ESM` ⇒ `fellBackBecause: "SDK worker died at start (spawn failed: require() of ES Module …)"` で全数 PTY。**dev(tsx/ESM)と vitest(ESM)では原理的に再現しない**。恒久策 = 動的 `import()`（esbuild は **external かつ target が dynamic-import を持つ**なら `import()` を書き換えない — 実測）。ローダが async になる分は `preloadSdk()` として **spawn の手前**に置き、`spawnSdkSession` の**同期 `status==='failed'` 契約**（降格判定の土台・`swarmWorker` と `swarmManager` の両方がこれを見る）は壊さない。⚠ その `await` は**枠を数える `chooseWorkerRuntime` より手前**に置く — カウントと着席の間に await が入ると `sdkMaxWorkers` が check-then-act になり、同時 dispatch で枠を超える（番人 `swarmSdkSlotRace.test.ts`）。⚠ preload 忘れは**型で止める**: `spawnSdkSession` は `preloadSdk()` の戻り値（`queryFn` を注入するテストは免除）を引数で要求するので、preload しない呼び出し元は**コンパイルできない** — 存在検査では「明日の呼び出し元」も「順序」も見られず、実際に `scripts/` の検証器がその穴に落ちていた。⚠⚠ **ただし「コンパイルできない」はコンパイラが読む範囲でしか真ではない**: `tsconfig.json` の include は `scripts/**/*.ts` で **`.mts` を含まず**、`npm run lint` も `--ext .ts,.tsx` だったので、**14本の `scripts/*.mts`（＝欠陥が実際にあったファイル）は型検査の外**だった（0802 レビューで実測 — 証拠の引数を消しても root の `tsc --noEmit` は exit 0）。`tsconfig.scripts.json`（`target: es2022` — 素直に root の include へ足すと **合計 55 エラー**: 51×TS1378 と 1×TS1432（どちらも top-level await 系）＋ 1×TS2802 が `target` 引き上げで消え、残る 2×TS5097 は `allowImportingTsExtensions` が覆う。0802 実測）で覆い、`npm run typecheck` と番人 `scriptsTypecheck.test.ts` の両方から走らせている。**別 tsconfig を置くだけでは不十分**で、完了ゲートで実際に打たれるのは `npx tsc --noEmit`（root のみ）だから、誰も呼ばない設定は番人ではない。⚠ ロード失敗は memo しない（`??=` は never-reject なローダの失敗を「成功」としてキャッシュし、一過性の失敗でプロセス寿命ぶん全 worker が静かに PTY になる — `paths.ts:203-209` と同じ規則。番人 `sdkLoaderEvict.test.ts`）。番人 `sdkEsmLoadFromCjsBundle.test.ts` は**本番の `buildOptions` でバンドルし、出た .cjs を実行して** SDK の実体（`USAGE_LIMIT_ERROR_PREFIXES` の要素数）を見る。⚠ **未検証の範囲を明記する**: その実行は**開発機の Node 22 + `--no-experimental-require-module`**（= `require(esm)` を落としただけ）であり、**Electron 31.7.7 が同梱・fork する Node 20.18 そのものでは走らせていない**（当該 worktree に Electron 本体バイナリが無く測定不能・0802）。この 2 件はどちらも「dev の Node で緑・fork された Electron の Node で死ぬ」形だったので、`ELECTRON_RUN_AS_NODE=1` での実機 1 回は配布側の宿題として残っている |
 | オーナーが「SDK にしたのに PTY で上がる」理由を知れない | — | 降格理由は `SpawnSwarmWorkerResponse.fellBackBecause` に載せて UI が出す。**配布アプリのサーバは fork された子プロセスなので `console.warn` はどこにも届かない** — ログだけに置く設計は「理由が表示されるから枠を1つ握る設計を受け入れた」という前提を静かに無効化する |
 | SDK パッケージの破壊的変更 | — | 影響面は sdkSession.ts に閉じる（bridge の @alpha は**使っていない** — query() 本体は semver 通常運用）。CI: SDK バージョンは lockfile 固定・更新は手動 PR |
 | ガード検証不能 | GuardWiringError fail-closed | 同型で fail-closed（§4-G-3） |
@@ -560,6 +567,39 @@ swarmWorkerRuntime?: {
 2. 同時に PTY worker 1体を並走させ、roster/UI/統合が混在で正しい
 3. サーバ再起動 → SDK worker が resume 復旧 or blocked 退避（twin が生えない）
 4. kill switch（mode:'pty' へ）→ 次 dispatch が PTY に戻る
+
+**実機実測ログ（オーナー機・事実のみ／原因修正はこのカードの範囲外）**:
+
+`2026-08-02 / 0.11.48 / 既定(未設定)で dispatch した worker の runtime = pty / 理由 = 下記 fellBackBecause 全文`
+
+engine `log[]` の warn 行（全文・途中の改行も原文どおり）:
+
+```
+runtime fallback (SDK→PTY): [検証] 既定(未設定)で dispatch した worker が SDK で立つか — worker 自身が観測し… — SDK worker died at start (spawn failed: require() of ES Module /Applications/OPEN GROUND.app/Contents/Resources/app/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs not supported.
+Instead change the require of /Applications/OPEN GROUND.a) — this worker runs as a PTY
+```
+
+- 末尾が `/Applications/OPEN GROUND.a)` で切れているのは**ログ側の欠落ではなく**元の
+  `exitReason` が既に切り詰められているため（`swarmWorker.ts:885` は exitReason を
+  そのまま `fellBackBecause` に埋め、`swarmOrchestrator.ts:4383` はそれを無加工で出す）。
+- 走っていたのはパッケージ版 `/Applications/OPEN GROUND.app` の
+  `server/dist/index.cjs`（esbuild の **CJS** バンドル）。それが
+  `@anthropic-ai/claude-agent-sdk/sdk.mjs`（**ESM**）を `require()` して Node に拒否された。
+- **副次観測1**: `workers[]` の自分の行に `runtime` フィールドが**無かった**
+  （`swarmWorkerRoster.ts` にも `runtime` の語が 1 つも出てこない）。ただしこれは欠落ではなく
+  **設計どおり** — `runtime` は **SDK のときだけ**載る
+  （`swarmWorkerRegistry.ts:221` = `...(w.runtime === 'sdk' ? { runtime: 'sdk' } : {})`、
+  同 `:273` = `...(sdkSessionId ? { runtime: 'sdk', sdkSessionId } : { terminalId })`、
+  直上 `:272` のコメント「Exactly one of these, per the identity invariant.」）。
+  正典は `workerRuntime.ts:18-21` の identity invariant:
+  `runtime 'pty' ⇔ terminalId present, sdkSessionId absent` /
+  `runtime 'sdk' ⇔ sdkSessionId present, terminalId absent`。
+  したがって PTY は `terminalId` の有無で判別する。今回の観測（`terminalId` 有り ＋
+  `sdkSessionId` 無し ⇒ PTY）はこの不変条件どおりの**正しい観測手段**であり、上の受け入れ
+  項目 2（roster/UI が混在で正しい）も**この方法で観測できる**
+  （今回は全数 PTY だったため、混在の確認自体は未実施）。
+- **副次観測2**: 同時刻の `GET /api/swarm/preflight` は `{"ok":true,"issues":[]}` を返した
+  — 実際には起動が失敗する状態を preflight は素通しした（この失敗モードを見ていない）。
 
 ---
 

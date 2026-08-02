@@ -47,7 +47,7 @@ import { snapshotWorktreeBranch, fireSelfUpdateIfIntegrated } from './selfUpdate
 import { getExecutionMode, getAllowedModelTiers, getWorkerRuntimeDial } from './store'
 import { chooseWorkerRuntime } from './swarmWorkerRuntimeDial'
 import { sdkWorkerLaunchPlan, SdkWorkerUnavailableError } from './swarmWorkerSdk'
-import { spawnSdkSession } from './sdkSession'
+import { spawnSdkSession, preloadSdk } from './sdkSession'
 import type { WorkerHandle } from './workerRuntime'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
@@ -804,6 +804,30 @@ export const spawnSwarmWorker = async (
   // an experimental runtime could not be established. The one thing that must
   // not happen is the reverse (an SDK worker with an unverified veto), which is
   // why the guard proof is part of chooseWorkerRuntime, not a later check.
+  // ⚠ THE PRELOAD GOES *BEFORE* chooseWorkerRuntime, NOT NEXT TO THE SPAWN.
+  // chooseWorkerRuntime COUNTS the live SDK sessions against `sdkMaxWorkers`
+  // (swarmWorkerRuntimeDial.ts), and the seat it grants is taken by the
+  // spawnSdkSession below — so everything between the count and the seat has to
+  // be synchronous, or the cap degenerates into check-then-act. It briefly did:
+  // preloading next to the spawn put an `await` inside that region (the first
+  // import measures ~178ms, and even a warm one yields a microtask), so two
+  // concurrent dispatches could both read live=0 and both sit down with a limit
+  // of 1. There is no spawn lock on the worker path to catch it.
+  //
+  // THE COST, STATED IN THE UNIT THAT ACTUALLY MATTERS: a PTY-dialled machine
+  // also imports the SDK, and the price is MEMORY, not time — measured ~63ms and
+  // **~44MB RSS**, with no resident handles or process listeners, so nothing is
+  // kept alive and no dispatch is delayed. Paid once if it succeeds; on failure
+  // the loader evicts itself, so it is retried once per dispatch until it works.
+  // (If someone later reads "PTY everywhere, why is the SDK resident?" — this is
+  // why.)
+  //
+  // It is deliberate: the only way to skip it is to ask "will the dial say sdk?"
+  // HERE, which means a SECOND reader of the absent⇒sdk polarity — and two
+  // readers of exactly that rule is what shipped 0.11.47 dispatching PTY workers
+  // under a switch drawn ON (the note above). 44MB beats re-splitting that rule.
+  // Never rejects, so there is nothing to catch.
+  const sdkReady = await preloadSdk()
   const choice = chooseWorkerRuntime({
     settings: { swarmWorkerRuntime: await getWorkerRuntimeDial() },
     workers: opts.liveWorkers ?? [],
@@ -846,6 +870,12 @@ export const spawnSwarmWorker = async (
       claudeBin,
     })
     for (const w of built.warnings) console.warn(`[swarm] ${w}`)
+    // ⚠ NOTHING MAY `await` BETWEEN chooseWorkerRuntime AND THIS SPAWN — the slot
+    // count above and the seat below are one check-then-act pair. The SDK module
+    // was already imported before that count (see the note there); a load failure
+    // comes back from the spawn as a failed session and takes the
+    // `status === 'failed'` degrade below, which keeps the dispatch alive as a
+    // PTY worker. Guarded by swarmSdkSlotRace.test.ts.
     let session: ReturnType<typeof spawnSdkSession>
     try {
       session = spawnSdkSession({
@@ -854,6 +884,9 @@ export const spawnSwarmWorker = async (
         agentSessionId,
         options: built.options,
         initialPrompt: built.initialPrompt,
+        // Carried down from before the slot count — the type demands it, which
+        // is what stops the next spawn site from forgetting to preload.
+        sdk: sdkReady,
       })
     } catch (e) {
       if (freshlyCreated) {

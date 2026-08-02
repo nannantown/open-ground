@@ -71,6 +71,7 @@ import { listManagerDesks } from './swarmManagerRuntime'
 import { sdkManagerPreflight, sdkManagerLaunchPlan } from './swarmManagerSdk'
 import {
   spawnSdkSession,
+  preloadSdk,
   attachSdkListener,
   type SdkSessionInfo,
   type SdkStreamFrame,
@@ -823,6 +824,12 @@ const launchSdkDesk = async (
     claudeBin: pre.claudeBin,
   })
   for (const w of plan.warnings) console.warn(`[swarmManager] ${w}`)
+  // The SDK is ESM-only and this runs from a CJS bundle in the packaged app, so
+  // the module has to be imported BEFORE the synchronous spawn below — see
+  // sdkSession.preloadSdk. A load failure is reported by the spawn as a failed
+  // session, which the `status === 'failed'` check further down already turns
+  // into a PTY desk, so nothing is caught here.
+  const sdkReady = await preloadSdk()
   let sdkSession: SdkSessionInfo
   try {
     sdkSession = spawnSdkSession({
@@ -831,6 +838,7 @@ const launchSdkDesk = async (
       agentSessionId: session.agentSessionId,
       options: plan.options,
       initialPrompt: plan.initialPrompt,
+      sdk: sdkReady,
     })
   } catch (e) {
     const why = `SDK spawn failed (${String((e as Error)?.message ?? e).slice(0, 200)})`

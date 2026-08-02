@@ -1,0 +1,52 @@
+{
+  // The `.mts` probes and verifiers, which the ROOT tsconfig does not see.
+  //
+  // WHY THIS FILE EXISTS. tsconfig.json's `include` lists `scripts/**/*.ts` —
+  // NOT `.mts` — so all 14 `scripts/*.mts` were outside `tsc --noEmit`, and
+  // `npm run lint` (`--ext .ts,.tsx`) did not read them either. That is exactly
+  // where the last defect lived: probe-sdk-manager-launch.mts called
+  // `spawnSdkSession` without preloading the ESM SDK, so it would have broken at
+  // the moment production started working, silently. The fix for that was to make
+  // the proof a required ARGUMENT — but a type gate only bites files a compiler
+  // actually reads, and this one did not read the single file that had the bug.
+  //
+  // ⚠ `target` IS THE WHOLE POINT OF THE OVERRIDE. The root sets no `target`
+  // (⇒ ES5) and these files use top-level `await`. Adding `scripts/**/*.mts` to
+  // the root include instead produces 55 errors — measured 2026-08-02, and the
+  // breakdown matters more than the total:
+  //     51 × TS1378  top-level await          ┐
+  //      1 × TS1432  top-level for-await      ├ all cleared by `target: es2022`
+  //      1 × TS2802  MapIterator iteration    ┘
+  //      2 × TS5097  literal `.ts` import extension
+  //                  → cleared by `allowImportingTsExtensions` below
+  // (55 is the TOTAL. An earlier version of this comment read "55 × TS1378 and
+  // nothing else", which is wrong twice over — TS1378 is 51, and three other
+  // codes are involved. A measured number written down wrong is worse than no
+  // number: whoever re-runs this sees 51, concludes something changed, and stops
+  // trusting the rest of the note.)
+  // Everything else is inherited on purpose: same strictness, same
+  // `moduleResolution: bundler` (extensionless relative imports, the way tsx runs
+  // them), same paths.
+  //
+  // Run by `npm run typecheck`, and by scriptsTypecheck.test.ts so it cannot be
+  // forgotten in a gate that only says `npx tsc --noEmit`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "es2022",
+    // These files are run by tsx, never emitted, and two of them import a
+    // sibling by its literal `.ts` path (which tsx resolves fine). Legal only
+    // with noEmit — inherited from the root — which is precisely this case.
+    "allowImportingTsExtensions": true,
+    // ⚠ THIS LINE IS A GUARD, NOT HOUSEKEEPING — DO NOT TIDY IT AWAY. With
+    // `incremental: true` (inherited from the root) tsc writes
+    // `tsconfig.scripts.tsbuildinfo` (~121KB) into the REPO ROOT, and the repo-
+    // root fence (src/test/repoRootFence.ts) diffs a readdirSync baseline — it
+    // does NOT read .gitignore — so the suite turns red. The nasty part is that
+    // it hides locally after the first run (the file joins the next baseline),
+    // so the symptom presents as "red on CI only", which is precisely when an
+    // unexplained line gets deleted as noise. Measured 2026-08-02: flipping this
+    // to true reproduces it ("appeared: tsconfig.scripts.tsbuildinfo").
+    "incremental": false
+  },
+  "include": ["scripts/**/*.mts"]
+}
