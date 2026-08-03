@@ -902,7 +902,12 @@ export interface AnswerEscalationDeps {
   /** DI for tests: the worker-gone fallback (default: the engine's rework-reason
    *  slot via a lazy import — lazy so swarmOrchestrator can import THIS module
    *  later (C-core, T3) without a static cycle). */
-  queueForNextDispatch?: (projectPath: string, taskId: string, line: string) => Promise<void>
+  queueForNextDispatch?: (
+    projectPath: string,
+    taskId: string,
+    line: string,
+    opts?: { workerAddressed?: boolean },
+  ) => Promise<void>
   /** DI for tests: the registry allowlist check (default validateProjectPath). */
   isPathAllowed?: (p: string) => Promise<boolean>
   /** DI for tests: the PTY injection-target guard (default {@link defaultCanInjectInto}). */
@@ -991,6 +996,14 @@ const deliverAnswer = async (
       const flat = s.replace(/\s+/g, ' ').trim()
       return flat.length > n ? `${flat.slice(0, n)}…` : flat
     }
+    // Did a WORKER ever ask this? The record's persisted address is the answer:
+    // an S4 worker question carries one, an overseer/board raise (S1/S5 — "this
+    // card has been stuck, what should I do?") carries none. Passed through
+    // because the receiver's unpark is only meaningful in the first case: for a
+    // card nobody was working on, 'blocked' is the OWNER's placement and an
+    // answer like 「このまま保留」 must not move it (cycle-3 finding — the
+    // owner's "leave it" was itself moving the card).
+    const workerAddressed = !!(record.terminalId || record.sdkSessionId)
     await queue(
       record.projectPath,
       record.taskId,
@@ -1001,6 +1014,7 @@ const deliverAnswer = async (
           // menu), and `brief()` folds the menu onto this single line, so an `A:`
           // answer label would sit inline next to the question's own `A: …`.
           `Q: ${brief(record.question, 600)} → オーナーの回答: ${brief(answer, 900)} — この回答を前提に再開すること`,
+      { workerAddressed },
     )
     return 'queued'
   }

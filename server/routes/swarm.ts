@@ -595,7 +595,12 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     if (!text) return c.json({ error: 'text is required' }, 400)
     if (text.length > MAX_MANAGER_SAY) return c.json({ error: 'text too large' }, 400)
-    const desk = listManagerDesks(path)[0] ?? null
+    // A desk asked to stop is CLOSED — it refuses every push — so speaking to it
+    // is not "held, try later", it is nobody home. Filtering here makes the
+    // phone窓口 answer 404 (「司令官の卓が立っていません」) instead of telling the
+    // owner their message is queued behind a busy desk that will never read it
+    // (cycle-3 finding; same list, same question as adoption).
+    const desk = listManagerDesks(path).find((d) => !d.stopping) ?? null
     if (!desk) return c.json({ error: 'no commander desk is running in this project' }, 404)
     const res = sayToManagerDesk(desk, text, { deliverable: noticeDeliverable })
     // held ≠ failed: a PTY desk mid-generation (or with a half-typed draft) is

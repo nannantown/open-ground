@@ -336,8 +336,47 @@ export const parseResetLabel = (
 
   // (3) absolute date — drop a trailing "(Asia/Tokyo)" and collapse " at ".
   const trimmed = s.replace(/\s*\([^)]+\)\s*$/, '').replace(/\s+at\s+/, ' ')
-  const ms = Date.parse(trimmed)
-  return Number.isFinite(ms) ? ms : null
+  // ⚠ 12-HOUR TIME MUST BE CONVERTED FIRST (overnight review 2026-08-04).
+  // `Date.parse` does not understand "3pm": the CLI's own weekly-reset label
+  // ("May 25 at 3pm (Asia/Tokyo)") therefore became NaN here and the whole
+  // parse returned null — so a limit DAYS away fell through to the flat
+  // 20-minute grace and the engine re-launched into a dry tier every 20
+  // minutes until the real reset. (The unit test that "covered" this branch fed
+  // an ISO string production never emits — a fixture greener than the code.)
+  const normalized = trimmed.replace(
+    /\b(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b/i,
+    (_all, h: string, m: string | undefined, mer: string) => {
+      let hour = Number(h)
+      if (mer.toLowerCase() === 'pm' && hour !== 12) hour += 12
+      if (mer.toLowerCase() === 'am' && hour === 12) hour = 0
+      return `${String(hour).padStart(2, '0')}:${m ?? '00'}`
+    },
+  )
+  // ⚠ AND THE YEAR MUST BE SUPPLIED. The CLI's label carries none ("May 25 at
+  // 3pm"), and V8 resolves a year-less date to 2001 (measured) — a timestamp 25
+  // years in the past, which any sane caller then discards. So try the CURRENT
+  // year first and roll to the next one when that is already behind us (the
+  // Dec→Jan boundary). A reset is always days away at most, so the nearer
+  // future reading is the right one.
+  const hasYear = /\b\d{4}\b/.test(normalized)
+  const parseWith = (year: number): number =>
+    Date.parse(hasYear ? normalized : normalized.replace(/^(\w+\s+\d{1,2})/, `$1, ${year}`))
+  const thisYear = new Date(now).getFullYear()
+  let ms = parseWith(thisYear)
+  if (Number.isFinite(ms) && ms <= now && !hasYear) ms = parseWith(thisYear + 1)
+  if (!Number.isFinite(ms)) return null
+  // TWO fences, and the FAR one matters more than it looks. A usage reset is a
+  // few days away at most (5-hour window, weekly window), so anything further
+  // out is not a reset — it is a misread label, and believing it would park the
+  // tier for months. That is the 2026-07-29 incident (20 minutes read as ~23
+  // hours) with a much bigger blast radius, so the year-roll above is allowed
+  // ONLY for a genuine Dec→Jan boundary, never as a way to make a stale date
+  // "valid". A PAST time is refused for the same reason the bare-clock branch
+  // refuses one: stale screen text is not evidence. Both fences fall through to
+  // the next source (A5, then the flat grace) rather than inventing a cool.
+  const MAX_RESET_HORIZON_MS = 30 * 24 * 60 * 60_000
+  if (ms <= now) return null
+  return ms - now <= MAX_RESET_HORIZON_MS ? ms : null
 }
 
 /** Pull a reset time out of a `claude` PTY screen ("limit resets…" / "usage

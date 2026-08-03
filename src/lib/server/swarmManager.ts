@@ -494,7 +494,17 @@ const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResp
   // whose dial now says 'sdk' would — with a PTY-only check — get an SDK desk
   // seated beside it. Two commanders integrating one trunk is exactly the
   // 2026-07-15 concurrent-integration hazard, arrived at from a new direction.
-  const aliveDesks = listManagerDesks(projectPath)
+  // ⚠ A DESK ASKED TO STOP IS NOT A DESK TO REUSE (overnight review 2026-08-04,
+  // cycle 3 — a regression in cycle 1's own fix). `stopping` marks a session
+  // whose `closed` flag is already set: `pushSdkInput` refuses it, the engine
+  // cannot nudge it, and it will never integrate anything again. Adopting one
+  // returns `reused:true` for a desk that is deaf — so 停止 stuck (the earlier
+  // fix) but the very next 「司令官」 press silently seated nothing, and on a
+  // wedged session (which never reaps) the commander could not be relaunched at
+  // all. The twin hazard this guard exists for is TWO LIVE commanders; a closed
+  // one cannot be the second. Both doors — this one and getOrchestratorState's
+  // published handle — now ask the same question of the same list.
+  const aliveDesks = listManagerDesks(projectPath).filter((d) => !d.stopping)
   const existing = aliveDesks[0]
   if (!existing) return null
   if (aliveDesks.length > 1)

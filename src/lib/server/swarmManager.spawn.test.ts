@@ -691,16 +691,37 @@ describe('the critical section holds on the SDK runtime too', () => {
     expect(b).toBeTruthy() // the lock was released
   })
 
-  it('an SDK desk that is still UNWINDING is not a free slot — a twin must not be seated', async () => {
-    // `terminateSdkSession` flips status synchronously while claude is still
-    // going. A guard that read `status` would call this project deskless and
-    // seat a second commander into a conversation that is still running — the
-    // eleven-desk shape, arrived at through the OTHER door.
+  it('a desk ASKED TO STOP is not reused — the respawn seats a working one (2026-08-04)', async () => {
+    // ⚠ THIS TEST CHANGED SIDES, deliberately. It used to assert that a
+    // terminated-but-unwinding desk is REUSED (`reused:true`), to keep a twin
+    // from being seated into a conversation that is still running. But
+    // `terminateSdkSession` sets `closed` at the same moment it flips the
+    // status: the adopted desk refuses every `pushSdkInput`, the engine cannot
+    // nudge it and it will never integrate again. So the old expectation was
+    // pinning a DEAD END — the owner pressed Restart, got `reused:true`, and
+    // nothing happened; on a wedged session (which never reaps, on purpose —
+    // sweepClosedSessions refuses to force it) the commander could not be
+    // brought back at all without restarting the app.
+    //
+    // The twin hazard is TWO LIVE commanders integrating one trunk. A closed
+    // desk cannot be the second one, so the sharper rule is "a desk asked to
+    // stop is not a slot" — and the sibling test below still pins the other
+    // half (a genuinely live desk IS the slot, no twin). The PTY path has
+    // always worked this way: Restart DELETEs and respawns immediately.
     const first = await spawnSwarmManager({ projectPath: PROJ })
     expect(first.runtime).toBe('sdk')
     terminateSdkSession(first.sdkSessionId as string)
     expect(getSdkSession(first.sdkSessionId as string)?.reaped).toBeUndefined() // asked, not gone
 
+    const second = await spawnSwarmManager({ projectPath: PROJ })
+    expect(second.sdkSessionId).not.toBe(first.sdkSessionId)
+    expect(second.reused).toBeFalsy()
+  })
+
+  it('a LIVE desk is still the slot — the twin guard itself is unchanged', async () => {
+    const first = await spawnSwarmManager({ projectPath: PROJ })
+    expect(first.runtime).toBe('sdk')
+    // No terminate: the desk is working. A second press must adopt it.
     const second = await spawnSwarmManager({ projectPath: PROJ })
     expect(deskCount()).toBe(1)
     expect(second.sdkSessionId).toBe(first.sdkSessionId)

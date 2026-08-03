@@ -732,6 +732,14 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'claudeSessionActivity',
       'getTerminal',
       'getTerminalScreen',
+      // 0804: the published supplyDesk handle re-confirms the pool entry against
+      // the PROCESS TABLE before offering it for adoption — `finishedAt` lands on
+      // an async onExit, so for a moment after a kill the pool still lists the
+      // desk and the pane re-adopts the one the owner just stopped. PTY-correct
+      // by construction: the supply desk is a PTY desk (swarmSupply spawns it
+      // through launchClaude), and listManagerDesks does the same re-confirmation
+      // for the commander's PTY arm.
+      'isTerminalProcessAlive',
       'killTerminal',
       'listLiveDesksIn',
       'subscribeTerminal',

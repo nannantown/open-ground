@@ -199,14 +199,24 @@ describe('parseResetLabel — relative / bare-clock / absolute, clock injected',
     expect(pm).not.toBe(am)
   })
 
-  it('absolute ISO ⇒ Date.parse', () => {
-    expect(parseResetLabel('2030-01-01T15:00:00Z', NOW)).toBe(Date.parse('2030-01-01T15:00:00Z'))
+  it('absolute ISO ⇒ Date.parse (…but a date years out is refused as a misread)', () => {
+    // 2026-08-04: a reset is DAYS away at most, so the parse now bounds the
+    // horizon — believing a years-out label would park the tier for months
+    // (the 2026-07-29 "20 minutes read as 23 hours" incident, amplified).
+    expect(parseResetLabel('2030-01-01T15:00:00Z', NOW)).toBeNull()
+    const soon = new Date(NOW + 3 * 24 * 60 * 60_000).toISOString()
+    expect(parseResetLabel(soon, NOW)).toBe(Date.parse(soon))
   })
 
-  it('A5 weekly form "May 25 at 3pm (Asia/Tokyo)" ⇒ null (Node cannot parse it; caller falls back to grace)', () => {
-    // Documents the best-effort limit: Date.parse('May 25 3pm') is NaN. The
-    // resolveCoolingUntil chain then uses PTY/grace instead — never throws.
-    expect(parseResetLabel('May 25 at 3pm (Asia/Tokyo)', NOW)).toBeNull()
+  it('A5 weekly form "May 25 at 3pm (Asia/Tokyo)" now PARSES (was null — the 20-minute misread)', () => {
+    // This used to assert null and was green while production lost days-long
+    // weekly limits to the 20-minute grace: Date.parse('May 25 3pm') is NaN and
+    // a year-less date resolves to 2001 in V8. Both are handled now, so the
+    // label resolves to a real future moment near `now`.
+    const may20 = Date.parse('2026-05-20T02:00:00Z')
+    const ms = parseResetLabel('May 25 at 3pm (Asia/Tokyo)', may20)
+    expect(ms).not.toBeNull()
+    expect(ms! - may20).toBeGreaterThan(3 * 24 * 60 * 60_000)
   })
 
   it('unparseable garbage ⇒ null', () => {

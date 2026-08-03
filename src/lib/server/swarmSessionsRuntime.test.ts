@@ -247,12 +247,25 @@ describe('swarmSessions resume seam × PTY/SDK runtimes', () => {
     expect(r.agentSessionId).not.toBe(CONV)
   })
 
-  it('a desk ASKED TO STOP still counts as holding it — status flips synchronously, the claude has not gone', async () => {
-    // `terminateSdkSession` sets status 'exited' the moment it is called; `reaped`
-    // lands only when the pump's iterator actually returns. A liveness check
-    // written on `status` (or on `isSdkSessionAlive`) reads "gone" here and hands
-    // the still-open transcript to a fresh `--resume`. That is the same trap
-    // `listSdkSessionsIn` and `terminateSdkSessionsInDir` each document.
+  it('a desk ASKED TO STOP releases the conversation — the next launch RESUMES it (2026-08-04)', async () => {
+    // ⚠ THIS TEST CHANGED SIDES, deliberately. It used to assert that a
+    // terminated-but-unreaped desk still HOLDS its conversation, so the next
+    // launch opened a fresh one. The intent was right — never hand a transcript
+    // another desk is actively using to a second `--resume` — but the condition
+    // was too wide: this seam's only consumer asks "is some desk still USING
+    // it?", and a CLOSED session uses nothing. It accepts no input, produces no
+    // further turns, and is merely unwinding.
+    //
+    // The cost of the wide reading was measured in cycle 4: every commander
+    // Restart (DELETE then POST, milliseconds apart — `reaped` cannot land in
+    // between) minted a brand-new conversation AND overwrote the one-slot
+    // record with it. The accumulated integration conversation kept its JSONL
+    // under ~/.claude and was never addressed again — silently, on the button
+    // whose whole purpose is "same desk, fresh process".
+    //
+    // The guard's real subject is a desk that is still ALIVE AND OPEN; the
+    // sibling test above (a seated, working desk) pins exactly that and is
+    // unchanged.
     await recordSwarmSession(proj, 'manager', CONV)
     await writeTranscript(proj, CONV)
     const id = seatSdkDesk(proj, CONV, 'manager')
@@ -263,11 +276,12 @@ describe('swarmSessions resume seam × PTY/SDK runtimes', () => {
     // test that quietly stops covering anything.
     const s = getSdkSession(id)!
     expect(s.status).toBe('exited')
-    expect(isSdkSessionLive(s)).toBe(true)
+    expect(isSdkSessionLive(s)).toBe(true) // still unwinding — NOT reaped
+    expect(s.closed).toBe(true) // …but no longer using the conversation
 
     const r = await resolveSwarmSession(proj, 'manager')
-    expect(r.resume).toBe(false)
-    expect(r.reason).toBe('live')
+    expect(r.resume).toBe(true)
+    expect(r.agentSessionId).toBe(CONV)
   })
 
   // ── the other direction: the gate must still OPEN ─────────────────────────

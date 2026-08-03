@@ -88,6 +88,7 @@ import {
   killTerminal,
   waitForTerminalGone,
   listLiveDesksIn,
+  isTerminalProcessAlive,
   type OwnerDeskTerminal,
   subscribeTerminal,
   writeInput,
@@ -1016,6 +1017,41 @@ export const computeLeadTimeStats = (
   return { medianMs: medianOf(samples), count: samples.length }
 }
 
+/** The PROMOTE line's title — the engine's own "this worker's card reached
+ *  review" record. Same shortened-title pairing INTEGRATE_TITLE_RE uses. */
+const PROMOTE_TITLE_RE = /^promoted to review: (.+?) → /
+
+/** Cards the ENGINE carried to review that the Board now shows DONE.
+ *
+ *  ⚠ WHY THIS EXISTS (overnight review 2026-08-04). `counters.integrated` only
+ *  counts the engine's OWN auto-land journal line — but since 2026-07-15 the
+ *  engine deliberately does NOT integrate: it wakes the COMMANDER, who merges by
+ *  hand. In that (default) mode no integrate line is ever written, so
+ *  workerSuccessRate was structurally 0% and lead time a dash — a dashboard
+ *  reporting "12 dispatched, nothing landed" while every card had in fact
+ *  landed. Counting a promoted card that the Board shows done measures the
+ *  OUTCOME (did the worker's work land?) instead of WHO pressed merge, so it is
+ *  right in both modes. Pure; the journal's retention window bounds it, exactly
+ *  like the lead-time pairing next to it. */
+export const countLandedFromBoard = (
+  tasks: readonly ProjectTask[],
+  log: readonly OrchestratorLogLine[],
+): number => {
+  const promoted = new Set<string>()
+  for (const line of log) {
+    if (line.kind !== 'promote') continue
+    const m = PROMOTE_TITLE_RE.exec(line.message)
+    if (m) promoted.add(m[1])
+  }
+  if (promoted.size === 0) return 0
+  let landed = 0
+  for (const t of tasks) {
+    if (!isDoneCard(t)) continue
+    if (promoted.has(shorten(t.title ?? ''))) landed++
+  }
+  return landed
+}
+
 /** The full KPI roll-up — PURE over the engine's lifetime counters + the Board
  *  cards + the journal. A rate is null when its denominator is 0 ("no data yet",
  *  the UI shows a dash) so an empty engine never reads as 0% success. Definitions
@@ -1030,14 +1066,20 @@ export const computeSwarmKpis = (input: {
 }): SwarmKpis => {
   const c = input.counters
   const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null)
+  // "Landed" = the engine's own auto-lands PLUS the cards it carried to review
+  // that the Board now shows done (the commander-merges mode, which is the
+  // DEFAULT — see countLandedFromBoard). Max, not sum: the two sources overlap
+  // whenever the engine landed a card itself, and double-counting would push
+  // workerSuccessRate past 100%.
+  const landed = Math.max(c.integrated, countLandedFromBoard(input.tasks, input.log))
   return {
     leadTime: computeLeadTimeStats(input.tasks, input.log),
-    conflictRate: ratio(c.conflicted, c.integrated + c.conflicted),
-    reworkRate: ratio(c.reworked, c.reworked + c.integrated),
-    workerSuccessRate: ratio(c.integrated, c.dispatched),
+    conflictRate: ratio(c.conflicted, landed + c.conflicted),
+    reworkRate: ratio(c.reworked, c.reworked + landed),
+    workerSuccessRate: ratio(landed, c.dispatched),
     counts: {
       dispatched: c.dispatched,
-      integrated: c.integrated,
+      integrated: landed,
       conflicted: c.conflicted,
       reworked: c.reworked,
       crashed: c.crashed,
@@ -2309,10 +2351,56 @@ export const mergeReworkReason = (existing: string | undefined, reasonLine: stri
  *     line — the full answer lives on the escalation record) and marker-
  *     prefixed so {@link mergeReworkReason} can preserve it across later
  *     mechanical rework overwrites. */
+/** What the owner's answer says about MOVING the card, read from the answer
+ *  itself rather than from who happened to ask.
+ *
+ *  ⚠ WHY THE ANSWER, NOT THE ASKER (cycle-4, correcting cycle-3's correction).
+ *  Gating the unpark on "a worker asked this" fixed the case where 「B: このまま
+ *  保留」 itself moved the card — and broke its twin: the overseer's S5/S1
+ *  raises offer 「A: 順番待ちの列に戻して、作業を再開させる」, and the unpark is
+ *  the ONLY engine route out of 'blocked', so choosing A became a silent no-op
+ *  while the UI promised delivery. Both options belong to the same menu; the
+ *  discriminator has to be which one the owner picked.
+ *
+ *  The menus are OURS (swarmOverseer's plainQuestion templates), so the leading
+ *  option letter is the strongest signal and is checked first — keyword scans
+ *  come second precisely because a label like 「A: このまま任せる」 carries a
+ *  hold-shaped phrase inside a resume-shaped choice. Anything unreadable is
+ *  'unstated', which keeps the conservative caller-supplied default. PURE. */
+export type UnparkIntent = 'resume' | 'hold' | 'unstated'
+
+const HOLD_PHRASES = ['このまま保留', '保留のまま', '見送', '止めておく', '諦め', '動かさない', 'そのままで']
+const RESUME_PHRASES = ['戻して', 'todo へ戻', 'todoへ戻', '再開', 'もう一度', 'やり直', '続きを']
+
+export const readUnparkIntent = (answer: string): UnparkIntent => {
+  const s = (answer ?? '').replace(/\s+/g, ' ').trim()
+  if (!s) return 'unstated'
+  // The option LETTER first — unambiguous, and it survives an owner who pasted
+  // the whole label back. Accepts the full-width forms the IME produces.
+  // Full-width punctuation is what the IME actually emits after a letter —
+  // ：．、）】 as well as the ASCII forms.
+  const letter = /(?:^|[「『(【\s])([abABＡＢａｂ])\s*[:：.．、,，)）】]/.exec(s)
+  if (letter) {
+    const ch = letter[1].toLowerCase().replace('ａ', 'a').replace('ｂ', 'b').replace('Ａ', 'a').replace('Ｂ', 'b')
+    return ch === 'a' ? 'resume' : 'hold'
+  }
+  if (/^[abAB]$/.test(s)) return s.toLowerCase() === 'a' ? 'resume' : 'hold'
+  if (HOLD_PHRASES.some((p) => s.includes(p))) return 'hold'
+  if (RESUME_PHRASES.some((p) => s.includes(p))) return 'resume'
+  return 'unstated'
+}
+
 export const recordEscalationAnswerForNextDispatch = async (
   projectPath: string,
   taskId: string,
   line: string,
+  /** `workerAddressed` — did a WORKER ask the question this answers? The
+   *  escalation record's persisted address is the evidence (swarmEscalations
+   *  passes it). Only then is the unpark below meaningful: an overseer/board
+   *  raise ("this card has been stuck — what should I do?") carries no worker,
+   *  so 'blocked' is the OWNER's placement and their 「このまま保留」 must not
+   *  be the thing that moves it. Absent ⇒ false (never unpark on a guess). */
+  opts?: { workerAddressed?: boolean },
   deps?: {
     fetchTasks?: (p: string) => Promise<ProjectTask[]>
     unpark?: (p: string, id: string) => Promise<boolean>
@@ -2366,6 +2454,17 @@ export const recordEscalationAnswerForNextDispatch = async (
     if (engine.log.length > MAX_LOG_LINES) engine.log.splice(0, engine.log.length - MAX_LOG_LINES)
     await appendEngineJournalLine(engine.path, entry).catch(() => {})
   }
+  // WHAT THE OWNER CHOSE decides, with "who asked" only as the tie-breaker:
+  //   • 'hold'     — 「B: このまま保留」: never move it, whoever asked.
+  //   • 'resume'   — 「A: 戻して再開」: move it, even though no worker asked
+  //                  (the overseer's S5/S1 raises are exactly this shape, and
+  //                  the unpark is the ONLY engine route out of 'blocked').
+  //   • 'unstated' — free text with no menu choice: fall back to the worker
+  //                  rule (a worker's question ⇒ resume it; nobody asked ⇒
+  //                  leave the card where it is).
+  const intent = readUnparkIntent(line)
+  if (intent === 'hold') return
+  if (intent === 'unstated' && !opts?.workerAddressed) return
   try {
     const tasks = await (deps?.fetchTasks ?? defaultFetchTasks)(engine.path)
     const card = tasks.find((t) => t.id === taskId)
@@ -10249,7 +10348,14 @@ export const getOrchestratorState = async (
         agentSessionId: managerDeskFull.agentSessionId,
       }
     : null
-  const supplyLive = listLiveDesksIn(key, SUPPLY_DESK_LABEL)[0] ?? null
+  // ⚠ RE-CONFIRM AGAINST THE PROCESS TABLE, exactly as listManagerDesks does
+  // for the commander (cycle-3 finding: the supply desk had neither that check
+  // nor a `stopping` notion). The pool's `finishedAt` is stamped by an
+  // ASYNCHRONOUS onExit, so for a moment after a kill the desk is still listed
+  // — and the pane, being told a live handle, re-adopts the desk the owner just
+  // stopped. Same shape as the commander's stop-does-not-stick, one pool over.
+  const supplyLive =
+    listLiveDesksIn(key, SUPPLY_DESK_LABEL).find((d) => isTerminalProcessAlive(d.id)) ?? null
   const supplyDesk = supplyLive
     ? {
         runtime: 'pty' as const,

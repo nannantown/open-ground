@@ -321,8 +321,18 @@ export const isAgentSessionLiveAnywhere = (agentSessionId: string): boolean => {
   // the rule once, at the top, so it survives a change to either arm.
   if (!agentSessionId) return false
   if (isClaudeSessionLive(agentSessionId)) return true
+  // ⚠ `closed` MATTERS HERE, and it is a different question from liveness
+  // (2026-08-04). This predicate answers "is some desk still USING this
+  // conversation?" — its only consumer refuses to `--resume` a conversation
+  // another desk holds. A session that was asked to stop is closed: it accepts
+  // no input, produces no more turns, and is merely unwinding. Counting it as a
+  // holder made every commander RESTART mint a brand-new conversation and
+  // overwrite the record with it — the days-long integration conversation kept
+  // its JSONL under ~/.claude but nothing addressed it again, silently. (The
+  // teardown-safety question stays `reaped`-based, where being conservative
+  // protects a working directory rather than throwing away memory.)
   return listSdkSessions().some(
-    (s) => s.agentSessionId === agentSessionId && isSdkSessionLive(s),
+    (s) => s.agentSessionId === agentSessionId && isSdkSessionLive(s) && !s.closed,
   )
 }
 
