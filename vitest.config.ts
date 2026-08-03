@@ -79,6 +79,31 @@ export default defineConfig({
     // all ~285 files get it instead of 5%.
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // ── Fork teardown (the 0.11.49 public-CI failure) ─────────────────────
+    // vitest 4's forks pool tears a worker down after its file; a worker that
+    // does not exit inside `teardownTimeout` is force-killed, and the kill
+    // RACES the IPC flush of results already produced — the file is then
+    // counted failed with "Worker exited unexpectedly" even though every test
+    // in it passed. Measured 2026-08-02/03 on the public 4-vCPU runner, twice
+    // on one commit, same victim file (terminal.test.ts — untouched by the
+    // release that surfaced it), lost-test counts DIFFERENT between the two
+    // runs (58 vs ~10 short) — the signature of a kill landing at random
+    // points of the flush, not of a test failing. Not reproducible on this
+    // repo's private 2-vCPU CI, on macOS, or in a Linux/Node-20 Docker rig
+    // (4 attempts). Upstream this is a known vitest-4 pool class:
+    // vitest-dev/vitest#8766 / #9762 / discussion #6285 — no fixed version.
+    //
+    // 60s: same reasoning as testTimeout above — teardown is wall-clock work
+    // (exit handlers under CPU contention) and 10s is the stopwatch, not the
+    // work. This does NOT mask a truly wedged worker: that still fails, and
+    // the hanging-process reporter below prints WHAT kept it alive, which is
+    // the diagnosis 0.11.49's two red runs never gave us.
+    teardownTimeout: 60_000,
+    // 'hanging-process' is SILENT unless a worker cannot exit — then it dumps
+    // the open handles (timers, fds, children) that hold it. Costs nothing on
+    // green runs; turns the next occurrence of the teardown kill into a named
+    // culprit instead of a third unexplained red.
+    reporters: ['default', 'hanging-process'],
     // The guard that keeps a 60s ceiling from hiding a genuine hang: the
     // default reporter prints any test slower than this in yellow. Vitest's
     // default (300ms) would flag nearly every I/O test here = no signal at

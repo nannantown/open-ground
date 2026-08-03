@@ -193,6 +193,7 @@ import {
 import { detectFreeTextQuestion } from './swarmQuestions'
 import {
   defaultReceiptKey,
+  deliverAnswerToWorker,
   openEscalation,
   type OpenEscalationInput,
 } from './swarmEscalations'
@@ -2778,6 +2779,21 @@ export interface OrchestratorDeps {
    *  still-silent worker is reclaimed. Returns false when the PTY is gone or
    *  either write failed. (Stall recovery escalation, 2026-07.) */
   escalate: (w: WorkerHandle, taskTitle: string) => Promise<boolean>
+  /** Tell a LIVE worker its card was sent back review→doing from OUTSIDE the
+   *  engine (Board API / UI drag). Optional: absent ⇒ swarmEscalations'
+   *  deliverAnswerToWorker, the one conduit that speaks BOTH runtimes.
+   *
+   *  WHY THIS EXISTS (2026-08-03, measured on the owner's machine). The
+   *  observation below re-arms MONITORING (stage/reworkAt) but told the worker
+   *  nothing — for a commander-initiated rework that is fine (the commander
+   *  speaks to the worker itself), but an OWNER-dragged card left the worker
+   *  working obliviously toward its already-invalidated ready. The owner then
+   *  reached for the tools that LOOK right and neither works: paste-task
+   *  targets a terminalId (an SDK worker has none), and a worktree restart is
+   *  refused by the occupancy guard precisely because the worker is still
+   *  alive. The one seam that reaches both runtimes must therefore be wired
+   *  HERE, where the rework is observed. */
+  deliverReworkNotice?: (target: WorkerHandle, projectPath: string, text: string) => Promise<boolean>
   /** The worker's CURRENT recent output as plain text, or null when unknown.
    *  Read-only. The orchestrator classifies it (classifyOutput) to tell WHY a
    *  non-promoting worker isn't progressing — a usage/rate-limit WAIT or a
@@ -6789,6 +6805,32 @@ const monitorWorkers = async (
         engine,
         'info',
         `Board 側の差し戻し(review→doing)を観測 — worker を再作業中へ: ${w.branch} (${shorten(w.taskTitle)})`,
+      )
+      // …AND TELL THE WORKER. Re-arming above is bookkeeping the worker never
+      // sees: a commander-initiated rework speaks to the worker itself, but this
+      // branch fires precisely when the move came from OUTSIDE the engine — the
+      // owner's UI drag — and then NOBODY had told the worker (2026-08-03,
+      // measured: an SDK worker sat working toward its invalidated ready while
+      // the owner's paste-task had no terminalId to land on and a restart was
+      // refused by the occupancy guard BECAUSE the worker was alive). One turn
+      // through the both-runtimes conduit closes it. Awaited (a rework is rare
+      // and once-per-observation — this branch flips stage, so it cannot refire
+      // next pass); a false/throw is a WARN, not a retry loop: the worker's
+      // ceiling and nudge machinery still stand behind it, and the commander
+      // can always speak by hand.
+      const delivered = await (deps.deliverReworkNotice ?? deliverAnswerToWorker)(
+        w,
+        engine.path,
+        `【差し戻し】このカードは Board で review→doing に戻されました。以前の ready は無効です。` +
+          `カードの notes と差し戻し理由を Board API で読み直し、指摘に対応してコミットし、` +
+          `完了したら改めて心拍 ready(bash ~/.claude/swarm-beat.sh done true)を打って停止してください。`,
+      ).catch(() => false)
+      logLine(
+        engine,
+        delivered ? 'info' : 'warn',
+        delivered
+          ? `差し戻しを worker の卓に伝えました: ${w.branch}`
+          : `差し戻しを worker の卓に伝えられませんでした(卓が応答しない/書き込み不可) — worker は次の心拍・催促で拾われます: ${w.branch}`,
       )
     }
 

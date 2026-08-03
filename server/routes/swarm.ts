@@ -56,7 +56,11 @@ import {
 } from '@/lib/server/projectData'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { swarmEnvPreflight } from '@/lib/server/swarmEnvPreflight'
-import { spawnSwarmWorker, removeSwarmWorktree } from '@/lib/server/swarmWorker'
+import {
+  spawnSwarmWorker,
+  removeSwarmWorktree,
+  WorktreeOccupiedError,
+} from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
@@ -389,6 +393,14 @@ export const swarmRoutes = new Hono()
       // The claim outlived the spawn it was for — hand the card back to `todo`
       // so it is re-dispatchable instead of stranded in `doing` worker-less.
       if (claimed) await releaseCardClaim(path, taskId).catch(() => {})
+      // "A desk is already working here" is a CONFLICT, not a breakage: the
+      // caller asked for a restart that would have made two claudes share one
+      // worktree, and the right answer is the same 409 the card-claim gates use.
+      // A 500 would read as "the server fell over" and invite a retry loop
+      // against a healthy, occupied worktree.
+      if (e instanceof WorktreeOccupiedError) {
+        return c.json({ error: e.message, worktree: e.worktree, occupied: true }, 409)
+      }
       return c.json({ error: `failed to spawn worker: ${e?.message ?? e}` }, 500)
     }
     // The branch only exists once the worktree does, so it lands in a second

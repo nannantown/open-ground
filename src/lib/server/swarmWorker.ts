@@ -31,7 +31,7 @@ import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
-import { stopAllDesksInDirAndWait } from './liveDesks'
+import { stopAllDesksInDirAndWait, liveDeskOccupies } from './liveDesks'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
@@ -672,6 +672,23 @@ export class GuardWiringError extends Error {
   }
 }
 
+/** Thrown when a RESTART would put a second desk into a worktree that a live one
+ *  — on EITHER runtime — is still working in. Refusing is the whole point: two
+ *  claudes sharing a worktree share its files and its `swarm/*` branch, and the
+ *  loser's edits are simply overwritten. A caller that means to replace the
+ *  incumbent stops it first (stopAllDesksInDirAndWait) and then retries. */
+export class WorktreeOccupiedError extends Error {
+  readonly worktree: string
+  constructor(worktree: string) {
+    super(
+      'a desk is already live in this worktree — worker spawn refused so two ' +
+        `claudes cannot share one working tree: ${worktree}`,
+    )
+    this.name = 'WorktreeOccupiedError'
+    this.worktree = worktree
+  }
+}
+
 // One bell/toast per THROTTLE window, not per refused spawn — the engine's
 // dispatch tick retries a refused spawn every few seconds, and the refusal
 // itself (the throw) already repeats; only the human-facing notification needs
@@ -753,6 +770,33 @@ export const spawnSwarmWorker = async (
   const { worktree, branch } = opts.worktree
     ? await resolveExistingSwarmWorktree(opts.projectPath, opts.worktree)
     : await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
+  // ── ONE DESK PER WORKTREE (2026-08-03) ──────────────────────────────────────
+  // The fresh path is protected by construction — createSwarmWorktree throws if
+  // the directory already exists. The RESTART path deliberately reuses one, and
+  // had NO occupancy check, so "relaunch the worker for this card" would seat a
+  // second claude beside a first that was still working.
+  //
+  // MEASURED, not imagined. A card was sent back review→doing while its SDK
+  // worker was still alive; a restart came in; the SDK slot was full (1/1 — held
+  // by the very worker nobody had looked for), so the newcomer degraded to PTY
+  // and started editing the same files on the same `swarm/*` branch. The engine
+  // log carried no `dispatch:` line because the engine had not dispatched it.
+  //
+  // ⚠ ASK BOTH POOLS. A PTY-shaped check ("is a terminal live in this cwd?") is
+  // exactly what was already available and exactly what would have missed this:
+  // an SDK worker holds no terminalId, so to that question it does not exist.
+  // liveDeskOccupies is the seam that cannot forget a pool.
+  //
+  // Refusing (rather than adopting, or killing the incumbent) is deliberate: the
+  // incumbent holds uncommitted work, and this call cannot know whether the
+  // caller wants it dead. A restart that really must replace a live desk stops it
+  // first — stopAllDesksInDirAndWait — and then calls here.
+  //
+  // A canonicalize failure throws out of here rather than resolving to "free":
+  // "cannot prove the directory is empty" must not authorise a spawn into it.
+  if (opts.worktree && (await liveDeskOccupies(worktree))) {
+    throw new WorktreeOccupiedError(worktree)
+  }
   // RESUME (card 4): reuse the PERSISTED session id so `--resume <id>` reattaches
   // the same conversation; else mint a fresh one (unchanged). resumeSessionId only
   // arrives on the restart path (always paired with opts.worktree above), and only

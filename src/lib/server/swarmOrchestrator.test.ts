@@ -7984,6 +7984,15 @@ describe('monitorWorkers — re-promote suppression after a 差し戻し (rework
       heartbeats,
     })
     const observedLogs = () => engine.log.filter((l) => l.message.includes('Board 側の差し戻し')).length
+    // 差し戻しの通知は WORKER 自身にも届く(2026-08-03)。観測ブロックは監視を再武装する
+    // だけで卓には何も言わなかった — オーナーが UI でカードを戻したとき、worker は無効に
+    // なった ready に向かって働き続けていた。通知は観測1回につき1通で、後続 tick で
+    // 連打されないこと(stage が flip するので再発火しない)まで固定する。
+    const notices: { target: unknown; path: string; text: string }[] = []
+    deps.deliverReworkNotice = async (target, path, text) => {
+      notices.push({ target, path, text })
+      return true
+    }
 
     // ① エンジンがカードを review へ昇格(通常の完了経路)
     await runDispatchPass(engine, deps, NOW)
@@ -8008,12 +8017,20 @@ describe('monitorWorkers — re-promote suppression after a 差し戻し (rework
     expect(engine.workers[0]?.stage).toBe('running')
     expect(engine.workers[0]?.reworkAt).toBe(new Date(T1).toISOString())
     expect(observedLogs()).toBe(1)
+    // 観測と同じ tick で、worker 自身に差し戻しが1通届いている
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.path).toBe(engine.path)
+    expect((notices[0]?.target as { terminalId?: string })?.terminalId).toBe('pty-a-1')
+    expect(notices[0]?.text).toContain('差し戻し')
+    expect(notices[0]?.text).toContain('以前の ready は無効')
+    expect(engine.log.some((l) => l.message.includes('差し戻しを worker の卓に伝えました'))).toBe(true)
 
     // 古い心拍のまま更に tick が回っても沈黙のまま(再昇格も、観測ログ・reworkAt の連打もない)
     await runDispatchPass(engine, deps, T1 + 30_000)
     expect(deps.reviews).toHaveLength(1)
     expect(engine.workers[0]?.reworkAt).toBe(new Date(T1).toISOString()) // 基準時刻は据え置き
     expect(observedLogs()).toBe(1)
+    expect(notices).toHaveLength(1) // 通知も連打されない
 
     // ④ worker が差し戻し後の新しい完了報告(reworkAt より新しい心拍)を打つ → 次 tick で再昇格
     heartbeats.set('a', { ready: true, blocked: false, at: new Date(T1 + 40_000).toISOString() })
@@ -8022,6 +8039,27 @@ describe('monitorWorkers — re-promote suppression after a 差し戻し (rework
     expect(deps.board.get('a')?.boardColumn).toBe('review')
     expect(engine.workers[0]?.stage).toBe('done')
     expect(engine.workers[0]?.reworkAt).toBeUndefined() // 抑制は昇格で解除
+  })
+
+  it('差し戻し通知が届かなくても観測は成立する — warn を残して monitoring は再武装済みのまま', async () => {
+    // 卓が busy / 打ちかけ / 既に死んでいる — deliverAnswerToWorker が false を
+    // 返す形。通知の失敗が再武装(stage/reworkAt)を巻き戻したり、パスを落としたり
+    // してはいけない。worker はその後も ceiling / nudge の機械で拾われる。
+    const NOW = Date.parse('2026-07-13T12:00:00Z')
+    const engine = newEngine({
+      workers: [worker({ branch: 'swarm/a', taskId: 'a', terminalId: 'pty-a-1', stage: 'done' })],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 1]]),
+      heartbeats: new Map([['a', { ready: true, blocked: false, at: new Date(NOW - 60_000).toISOString() }]]),
+    })
+    deps.deliverReworkNotice = async () => false
+    await runDispatchPass(engine, deps, NOW)
+    expect(engine.workers[0]?.stage).toBe('running') // 再武装は成立
+    expect(engine.workers[0]?.reworkAt).toBe(new Date(NOW).toISOString())
+    const warn = engine.log.find((l) => l.message.includes('伝えられませんでした'))
+    expect(warn?.level).toBe('warn')
   })
 })
 

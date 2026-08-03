@@ -23,7 +23,7 @@
 //   - All git calls are execFile with argv arrays (never a shell string).
 
 import { execFile as execFileCb } from 'child_process'
-import { listAllLiveDeskCwds } from './liveDesks'
+import { canonicalLiveDeskCwds, isDirOccupied } from './liveDesks'
 import { isGitRepoRoot } from './gitRepoGuard'
 import { promisify } from 'util'
 import { sep } from 'path'
@@ -142,11 +142,12 @@ export const cleanProjectWorktrees = async (
   // symlinked home dirs). Canonicalize the live cwds to the SAME form before
   // matching; otherwise a symlink-only difference makes isLive return false and
   // the running worktree gets removed out from under the session.
-  const liveCwds = await Promise.all(
-    listAllLiveDeskCwds().map((cwd) => canonicalize(cwd)),
-  )
-  const isLive = (dir: string) =>
-    liveCwds.some((cwd) => cwd === dir || cwd.startsWith(dir + sep))
+  // Both steps now live in liveDesks.ts so the spawn side and the delete side
+  // cannot drift apart: 2026-08-03 the spawn side had no occupancy check at all
+  // and put a second claude into a live worktree, which is this same question
+  // asked in the other direction. One rule, one place.
+  const liveCwds = await canonicalLiveDeskCwds()
+  const isLive = (dir: string) => isDirOccupied(liveCwds, dir)
   for (const wt of await listProjectWorktrees(projectPath)) {
     if (wt.dirty || isLive(wt.dir)) {
       skippedDirty.push(wt.dir)

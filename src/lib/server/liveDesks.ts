@@ -34,6 +34,8 @@ import {
   terminateSdkSessionsInDir,
   isSdkSessionReaped,
 } from './sdkSession'
+import { canonicalize } from './canonicalize'
+import { sep } from 'path'
 import type { ActiveTerminalsResponse, ClaudeBeaconStatus } from '../types'
 
 /** Every directory a LIVE desk is working in, from BOTH pools. Deduped, unordered.
@@ -49,6 +51,48 @@ import type { ActiveTerminalsResponse, ClaudeBeaconStatus } from '../types'
  *  one, which is the failure this list exists to prevent). */
 export const listAllLiveDeskCwds = (): string[] =>
   Array.from(new Set([...listActiveTerminalCwds(), ...listActiveSdkCwds()]))
+
+/** {@link listAllLiveDeskCwds}, canonicalized — the form every path comparison
+ *  must use. Symlinks are the reason: `~/.openground` is routinely a symlinked
+ *  home, and a symlink-only difference makes an occupied directory read as free.
+ *
+ *  Injectable so the matching rule can be tested without a pool or a filesystem. */
+export const canonicalLiveDeskCwds = async (
+  opts: { listCwds?: () => string[]; canon?: (p: string) => Promise<string> } = {},
+): Promise<string[]> => {
+  const list = opts.listCwds ?? listAllLiveDeskCwds
+  const canon = opts.canon ?? canonicalize
+  return Promise.all(list().map((cwd) => canon(cwd)))
+}
+
+/** Does any of `liveCwds` sit AT `canonDir` or underneath it? Pure, and the ONE
+ *  place this comparison is written — a desk that `cd`s deeper into its own
+ *  worktree is still occupying it, and a prefix test without the separator would
+ *  also match a sibling whose name merely starts the same way. */
+export const isDirOccupied = (liveCwds: readonly string[], canonDir: string): boolean =>
+  liveCwds.some((cwd) => cwd === canonDir || cwd.startsWith(canonDir + sep))
+
+/** Is a desk — on EITHER runtime — already working in `dir`?
+ *
+ *  ⚠ THIS IS THE QUESTION A SPAWN MUST ASK BEFORE REUSING A DIRECTORY, and the
+ *  reason it lives here rather than at the call site is that 2026-08-03 proved
+ *  the call site forgets: spawnSwarmWorker's RESTART path relaunched into an
+ *  existing worktree with no occupancy check at all. A card sent back to `doing`
+ *  got a second worker while its FIRST one — an SDK session, so invisible to any
+ *  PTY-shaped check — was still editing files there. Two claudes, one worktree,
+ *  one shared `swarm/*` branch, and no `dispatch:` line in the engine log because
+ *  the engine had not dispatched it.
+ *
+ *  Answers TRUE on a canonicalization failure? No — canonicalize is what throws
+ *  there, and the caller treats a throw as "cannot prove it is free", which is
+ *  the safe direction for a spawn. */
+export const liveDeskOccupies = async (
+  dir: string,
+  opts: { listCwds?: () => string[]; canon?: (p: string) => Promise<string> } = {},
+): Promise<boolean> => {
+  const canon = opts.canon ?? canonicalize
+  return isDirOccupied(await canonicalLiveDeskCwds(opts), await canon(dir))
+}
 
 /** An SDK session's lifecycle status, as the Ground's two-state beacon.
  *

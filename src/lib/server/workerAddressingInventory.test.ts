@@ -658,9 +658,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/liveDesks.ts': {
     tier: 'both-pools',
-    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, listAllActiveDesks, stopAllDesksInDirAndWait.',
+    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait.',
     ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals'],
-    sdkCalls: ['isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
   },
   'server/routes/project.ts': {
     tier: 'both-pools',
@@ -670,9 +670,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/worktreeCleanup.ts': {
     tier: 'both-pools',
-    why: 'The most destructive consumer in the repository: it asks listAllLiveDeskCwds whether a worktree is still under a LIVE desk and then runs `git worktree remove`. Reverting it to one pool deleted a running SDK worker\'s tree in 0731 — and it was absent from this inventory until the trigger learned that calling the liveDesks seam counts.',
+    why: 'The most destructive consumer in the repository: it asks the liveDesks seam whether a worktree is still under a LIVE desk and then runs `git worktree remove`. Reverting it to one pool deleted a running SDK worker\'s tree in 0731 — and it was absent from this inventory until the trigger learned that calling the liveDesks seam counts. 0803: the canonicalize+prefix matching it used to spell out inline moved INTO the seam (canonicalLiveDeskCwds + isDirOccupied) so the delete side and the spawn side ask one rule.',
     ptyFns: [],
-    sdkCalls: ['listAllLiveDeskCwds'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'isDirOccupied'],
   },
   'src/lib/server/sdkDeskLimit.ts': {
     tier: 'sdk-live-predicate',
@@ -730,6 +730,10 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'writeInput',
     ],
     sdkCalls: [
+      // 0803: the external-rework observation now TELLS the worker through the
+      // both-runtimes conduit (swarmEscalations.deliverAnswerToWorker) instead
+      // of only re-arming its own monitoring.
+      'deliverAnswerToWorker',
       'getSdkSession',
       'isSdkSessionReaped',
       'stopAllDesksInDirAndWait',
@@ -768,9 +772,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/swarmWorker.ts': {
     tier: 'runtime-dispatched',
-    why: 'Builds the worker record, which carries `runtime` plus exactly one handle — the identity invariant this whole inventory is about.',
+    why: 'Builds the worker record, which carries `runtime` plus exactly one handle — the identity invariant this whole inventory is about. It also asks liveDeskOccupies before REUSING a worktree on the restart path: without that (0803) a card sent back to `doing` got a second claude beside its live SDK worker, and a PTY-shaped occupancy test would have missed it for exactly the reason this inventory exists.',
     ptyFns: [],
-    sdkCalls: ['preloadSdk', 'spawnSdkSession', 'stopAllDesksInDirAndWait'],
+    sdkCalls: ['liveDeskOccupies', 'preloadSdk', 'spawnSdkSession', 'stopAllDesksInDirAndWait'],
     sdkHandleFloor: 1,
   },
   'src/lib/server/swarmOverseerBrain.ts': {

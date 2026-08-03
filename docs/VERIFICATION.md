@@ -122,6 +122,107 @@ Node であって、`nvm` の Node ではない。**この差だけで結果が�
 **配布アプリでは1体も SDK が起動しない**状態で出荷された。降格は設計どおり働いたので
 被害はなく、そして**だからこそ誰も気づかなかった**。
 
+#### 実測値（2026-08-02、出荷済み .app 同梱の Electron + 同梱 SDK 0.3.220）
+
+| 実行環境 | `require(ESM)` | `import(ESM)` |
+|---|---|---|
+| システム Node **22.22.0** | **OK** | OK |
+| Electron **31.7.7**（= Node **20.18.0**、本番） | **FAIL**（`ERR_REQUIRE_ESM`） | **OK** |
+
+**真因はビルド設定ではなく、走らせている Node の版そのもの。**
+`require(esm)` が**既定で有効になったのは Node 20.19 / 22.12 以降**（それ以前は
+`--experimental-require-module` が要る）。**Electron 31.7.7 が同梱するのは Node 20.18.0
+で、20.19 / 22.12 のどちらにも満たない** — だから機能自体が効かず `ERR_REQUIRE_ESM` に
+なる。**「Node 20 だからダメ」ではない**（同じ 20 系でも 20.19 以降なら通る）。同一の CJS
+バンドル・同一の呼び出し形でも、**実行する Node の版だけで結果が反転する**（`import()`
+は両方とも通るので、`require()` 側だけが罠になる）。
+
+**再現コマンド**（インストール不要・GUI 非起動で再現できる — 出荷済み .app の Electron
+バイナリをそのまま Node として使う。上の表はこの手順で取った）:
+
+```bash
+# worker 卓向けの注記: openground-guard.js は worker 限定で発動し、拒否するのは
+# 「write roots（= 使い捨て worktree）の外」への書き込み。つまり worktree 内が許可側・
+# /tmp が拒否側 — なので worker 卓ではこの一式を worktree 内の作業ディレクトリに置く
+# （マネージャ/補習官/素の claude では guard 自体が no-op なので任意の場所でよいが、
+#  repo を汚さない・後始末が楽という理由で worktree 内に置くのを既定にする）
+mkdir -p .scratch/og-esm-probe && cd .scratch/og-esm-probe
+
+# ⚠ probe.cjs 単体では解決できない。出荷 .app 同梱の node_modules を借りる（symlink）。
+# ⚠ 2回目以降も同じコマンドを打つ運用が前提なので、必ず `-sfn`（force + no-dereference）
+#   にする。素の `ln -s` は、node_modules が既にそのシンボリックリンクである状態で
+#   もう一度打つと **リンクを辿って `.app` の node_modules の中に新しい symlink を
+#   作ってしまう**（終了コード0・無警告。実測: /tmp で再現）。`.app` は `test -w` で
+#   書込み可・署名済み（`codesign -dv` で hardened runtime を確認できる）なので、
+#   これは出荷物への実害ある書き込みになる。
+#   `-sfn` は既存リンクを辿らず「置き換える」ので、同じコマンドを何度打っても
+#   `.app` 側は無傷（実測: 2回連続実行で `.app/.../node_modules` の中身が不変）。
+ln -sfn "/Applications/OPEN GROUND.app/Contents/Resources/app/node_modules" node_modules
+
+# probe.cjs — specifier は **bare** で書くこと（理由は下の ⚠）
+cat <<'EOF' > probe.cjs
+try {
+  require('@anthropic-ai/claude-agent-sdk');
+  console.log('require(ESM): OK');
+} catch (e) {
+  console.log('require(ESM): FAIL —', e.code || e.message);
+}
+import('@anthropic-ai/claude-agent-sdk')
+  .then(() => console.log('import(ESM): OK'))
+  .catch((e) => console.log('import(ESM): FAIL —', e.code || e.message));
+EOF
+
+# 本番側 — 出荷 .app 同梱の Electron を「Node として」動かす
+ELECTRON_RUN_AS_NODE=1 "/Applications/OPEN GROUND.app/Contents/MacOS/OPEN GROUND" probe.cjs
+#   → require(ESM): FAIL — ERR_REQUIRE_ESM
+#     import(ESM): OK
+
+# 対照 — システム Node（20.19 / 22.12 以降）で同じ probe.cjs
+node probe.cjs
+#   → require(ESM): OK
+#     import(ESM): OK
+
+# 表の版番号もこの場で取れる
+ELECTRON_RUN_AS_NODE=1 "/Applications/OPEN GROUND.app/Contents/MacOS/OPEN GROUND" \
+  -e "console.log(process.versions.node, process.versions.electron)"   # → 20.18.0 31.7.7
+
+# 後始末 — symlink 本体と probe.cjs を消す。**symlink 側は `-r` を付けない・末尾
+# スラッシュを付けない**こと。`rm -rf node_modules/`（末尾スラッシュ付き）は symlink
+# を辿ってターゲット（`.app` の node_modules）の中身ごと消し、アプリが起動しなくなる
+# （実測: /tmp で再現、ターゲットディレクトリそのものが消滅した）。`rm -f node_modules`
+# （-r 無し・スラッシュ無し）なら symlink というファイル自体だけが消えてターゲットは
+# 無傷（実測で確認）。差はスラッシュ1文字。⚠ probe.cjs も一緒に消さないと
+# ディレクトリが空にならず、直後の `rmdir` が(黙って)失敗して `.scratch/` が
+# working tree に残る（`|| true` は「rmdir が失敗しても後始末全体は止めない」ためだが、
+# 消し残しがあれば rmdir 自体は失敗するので `git status --porcelain` で気づける）。
+rm -f node_modules probe.cjs
+cd - >/dev/null && rmdir .scratch/og-esm-probe .scratch 2>/dev/null || true
+```
+
+⚠ **specifier を `@anthropic-ai/claude-agent-sdk/sdk.mjs` と書くと、この手順は何も検証
+しない。** このパッケージの `package.json` には `exports` マップがあり、公開されているのは
+`.` / `./extract` / `./browser` / `./bridge` / `./sdk-tools` — **`./sdk.mjs` は非公開**。
+`exports` を持つパッケージへの未公開サブパス require は **Node の版に関係なく**弾かれるので、
+**両方とも `ERR_PACKAGE_PATH_NOT_EXPORTED` で FAIL** し、版差が消えて上の表と矛盾した
+結論に着く（2026-08-03 実測。bare 版・サブパス版を両ランタイムで実行して確認）。
+「検証手順が実は検証していない」の実例がこの章自身の中で起きた、ということ。
+
+判定はコンソール出力の `OK` / `FAIL` を見るだけ（GUI は起動しない・読むだけの操作）。
+
+⚠ **「第1段では原理的に再現できない」は正確ではない。** `node server/dist/index.cjs`
+自体は特定の Node 版を強制しない — もしこの機体のシステム Node が Node 20.18 のような
+`require(esm)` 未対応版なら、**第1段でも同じ `ERR_REQUIRE_ESM` が出る**（実際、リポジトリの
+番人 `sdkEsmLoadFromCjsBundle.test.ts` は「開発機の Node + `--no-experimental-require-module`」
+でこの分岐を第1段側で再現している。ただしこれは「Electron 31.7.7 が同梱する Node 20.18.0
+そのもの」ではない — `docs/DISTRIBUTION.md` と `docs/commander/02-worker-lifecycle.md` が
+"close, but not the Node 20.18" と整理している通り）。
+※ これに対し「**dev(tsx/ESM) と vitest では原理的に再現しない**」は正しい主張のまま
+（そちらは ESM 実行文脈なので `require()` の分岐自体が存在しない）。
+正しい要点は版の有無ではなく**信頼性**: 第1段はシステム Node の版を誰も固定していない
+ので、**たまたま緑（成功側）に倒れて見逃す**ことがある版依存の検査であり、実際
+0.11.47/0.11.48 はこの検査で緑のまま出荷された。だから第2段（packaged `.app` での検証）
+が省略不可になる。
+
 ### 第2段 — 配布形態でしか出ないものの検証（別枠・省略不可）
 
 次のどれかに触ったら、**packaged `.app` を起動して**確かめる。第1段では原理的に出ない:
