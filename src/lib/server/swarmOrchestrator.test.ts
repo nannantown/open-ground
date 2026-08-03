@@ -2144,11 +2144,25 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       const engine = newEngine({ running: false })
       engine.path = await canonicalize('/proj-restart-drops-dwell')
       engine.reviewSeenAt = new Map([['swarm/a', 1_000]]) // stamped before the stop
+      // A FRESH throttle stamp — the stop→start-within-15s case the reset exists
+      // for. Without the reset, the immediately-kicked pass would bail at the
+      // throttle and the readiness snapshot would stay stale.
+      engine.lastIntegrateAt = Date.now()
       __seedEngineForTests(engine)
-      await startOrchestrator(engine.path, fullDeps({ cards: [] }))
+      const deps = fullDeps({ cards: [] })
+      const prepareTarget = vi.fn(async () => 'main')
+      deps.prepareTarget = prepareTarget
+      await startOrchestrator(engine.path, deps)
       expect(engine.running).toBe(true)
       expect(engine.reviewSeenAt.size).toBe(0) // ← the wait restarts from the restart
-      expect(engine.lastIntegrateAt).toBe(0) // (the sibling reset this one rides beside)
+      // The sibling reset this rides beside, checked by its EFFECT rather than by
+      // the field: the first pass after a start must actually RUN. Asserting
+      // `lastIntegrateAt === 0` was reading a field the kicked pass legitimately
+      // re-stamps microseconds later — it passed only while the pass happened to
+      // still be in flight, so any extra await upstream (2026-08-03: one added
+      // inside writeEngineIntent) flipped it. This asserts the throttle was
+      // cleared by watching the integrate pass do its first piece of work.
+      await vi.waitFor(() => expect(prepareTarget).toHaveBeenCalled(), { timeout: 10_000 })
       // 60s, not vitest's 5s default: startOrchestrator writes settings and kicks a real
       // pass, so this test is IO-bound like its siblings here — measured 9s alone and
       // >19s while another worker's suite held the machine at load ~9. A 5s budget makes
@@ -4057,6 +4071,33 @@ describe('runDispatchPass — monitor: at-spawn rejection confirmed early (leg �
   afterEach(() => {
     __resetQuotaForTest()
     a5Mock.current = null
+  })
+
+  // The SDK half of the same sensor (overnight review 2026-08-04). The engine's
+  // quota eye is a WORDING matcher; the SDK pool instead matches the refusal
+  // against the SDK's own exported USAGE_LIMIT_ERROR_PREFIXES and parks the
+  // session. Where they disagreed the engine lost: "You're out of usage
+  // credits. Add funds to continue." matches NONE of our patterns, so no
+  // sighting was stamped, the tier never cooled, and dispatch kept launching
+  // into it. The runtime's own verdict now promotes to 'rate-limited', so the
+  // sighting takes the very same path a PTY's screen text takes.
+  it('a runtime-reported quota block stamps the sighting even when the TEXT matches no pattern (SDK)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      outputs: new Map([['pty-a-1', T0 + 4_000]]),
+      // Deliberately NOT a recognised notice — this is the real CLI sentence
+      // the wording matcher misses.
+      screens: new Map([['pty-a-1', "You're out of usage credits. Add funds to continue."]]),
+    })
+    const tStamp = T0 + 4_000 + RATE_LIMIT_SCRAPE_QUIET_MS + 3_000
+    // Text alone: no sighting (this is the blind spot, asserted).
+    await runDispatchPass(engine, deps, tStamp)
+    expect(engine.limitScreen?.has('pty-a-1')).toBe(false)
+    // With the runtime's verdict wired in, the same frame stamps the sighting.
+    const engine2 = newEngine({ workers: [w1()] })
+    await runDispatchPass(engine2, { ...deps, quotaBlocked: () => true }, tStamp)
+    expect(engine2.limitScreen?.get('pty-a-1')).toBe(tStamp)
   })
 
   it('confirms an instantly-rejected worker UNDER TWO MINUTES and cools its tier (完了条件1)', async () => {

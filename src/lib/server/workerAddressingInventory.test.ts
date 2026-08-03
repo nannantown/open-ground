@@ -1143,6 +1143,15 @@ const STATUS_SITES: Record<string, Decl & { count: number }> = {
     count: 2,
     why: "The body of the deprecated isSdkSessionAlive, kept only so two suites can pin the trap it represents ('the old signal already says gone, the real one does not'). The ban below holds it to this one definition site.",
   },
+  'src/lib/server/swarmManagerRuntime.ts': {
+    // 'runtime-dispatched', not 'display-only': the guard is right that a
+    // SERVER-side status read authorises something. Here what it authorises is
+    // narrow and deliberate — whether a PANE may adopt this desk — and the file
+    // is SDK-aware (it branches on runtime throughout).
+    tier: 'runtime-dispatched',
+    count: 2,
+    why: "NOT a liveness question — the opposite one. listManagerDesks deliberately selects on `reaped` so a desk that was ASKED to stop is still listed (the singleton guard must keep seeing it, or a twin spawns on top of an unwinding commander). These two literals only set `stopping`, which answers 'may a PANE adopt this desk?': a terminate flips status synchronously, and adopting a desk mid-teardown is how 停止 stopped sticking on a wedged session (2026-08-03 overnight review). Liveness for a seated desk is still isManagerDeskAlive → isSdkSessionLive → reaped, one function below.",
+  },
   'src/lib/server/swarmManager.ts': {
     tier: 'runtime-dispatched',
     count: 3,

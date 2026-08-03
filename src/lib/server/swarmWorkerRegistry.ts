@@ -18,7 +18,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { readdir, readFile } from 'fs/promises'
+import { readdir, readFile, stat } from 'fs/promises'
 import { join } from 'path'
 import { openGroundHome, centralWorktreesDir } from './paths'
 import { isGitRepoRoot } from './gitRepoGuard'
@@ -149,6 +149,10 @@ export interface SwarmWorkerRegistryDeps {
   readHeartbeats: (projectPath: string) => Promise<Map<string, ParsedHeartbeat>>
   branchOfWorktree: (cwd: string) => Promise<string | null>
   resolveCentralWorktreesDir: (projectPath: string) => Promise<string | null>
+  /** Does this worktree still EXIST on disk? Used only for the heartbeat-only
+   *  arm below — see the GHOST note there. Optional so pre-existing fake-deps
+   *  tests are unaffected; absent ⇒ assume it exists (the old behaviour). */
+  worktreeExists?: (worktree: string) => Promise<boolean>
 }
 
 export const defaultRegistryDeps = (): SwarmWorkerRegistryDeps => ({
@@ -165,6 +169,16 @@ export const defaultRegistryDeps = (): SwarmWorkerRegistryDeps => ({
   readHeartbeats,
   branchOfWorktree,
   resolveCentralWorktreesDir,
+  // A worktree the terminate already removed leaves its heartbeat file behind
+  // (the worker wrote it, removeSwarmWorktree never touches it) — see the GHOST
+  // note on the heartbeat-only arm.
+  worktreeExists: async (worktree) => {
+    try {
+      return (await stat(worktree)).isDirectory()
+    } catch {
+      return false
+    }
+  },
 })
 
 /** List every REAL swarm worker for `projectPath`: cross-references live PTYs
@@ -285,9 +299,22 @@ export const listSwarmWorkers = async (
   // 3) Heartbeat files with no live PTY and no engine record — a DEAD worker
   //    (PTY exited, work + branch still on disk). Kept so the restart
   //    affordance can still target it (条件3).
+  //
+  //    ⚠ GHOSTS (overnight review 2026-08-04). A terminate removes the worktree
+  //    but NOT the heartbeat file (the worker wrote it; removeSwarmWorktree
+  //    never touches ~/.openground/swarm/…), so this arm kept resurrecting a
+  //    worker whose working directory no longer exists — listed with a Restart
+  //    button that cannot work, until the file aged out. "The work is still on
+  //    disk" is the whole premise of this arm, so when the directory is gone the
+  //    premise is false: drop the row AND sweep the stale file so it stops
+  //    coming back — the FILE sweep stays with its owner (the heartbeat
+  //    sweeper); this arm only stops DRAWING a worker that cannot exist.
+  //    Best-effort: a check that throws degrades to the old behaviour (show it)
+  //    rather than hiding a real worker.
   for (const [worktree, hb] of Array.from(heartbeats)) {
     if (byWorktree.has(worktree)) continue
     if (!hb.branch) continue // can't identify the branch → nothing to restart
+    if (deps.worktreeExists && !(await deps.worktreeExists(worktree).catch(() => true))) continue
     byWorktree.set(worktree, {
       worktree,
       branch: hb.branch,

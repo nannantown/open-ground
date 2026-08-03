@@ -129,6 +129,23 @@ export interface WorkerRuntime {
   /** Send the worker a one-line instruction (the 差し戻し / escalation conduit).
    *  Returns whether it was accepted. */
   say(w: WorkerHandle, text: string): Promise<boolean>
+  /** Has this runtime ITSELF concluded the worker is blocked on a usage limit?
+   *  False when it has no such verdict (then the engine's text classifier is the
+   *  only evidence, exactly as before).
+   *
+   *  ⚠ WHY A SECOND CHANNEL EXISTS (overnight review 2026-08-04). The engine's
+   *  quota SENSOR is a wording matcher over {@link recentOutput}
+   *  (swarmRateLimitText). The SDK runtime does NOT need to guess wording — the
+   *  pool already matched the refusal against the SDK's OWN exported
+   *  `USAGE_LIMIT_ERROR_PREFIXES` and parked the session. Where the two
+   *  disagreed the tier never cooled: "You're out of usage credits. Add funds to
+   *  continue." is a real CLI refusal that matches NONE of the engine's
+   *  patterns, so dispatch kept launching workers into a dry tier — a fresh
+   *  worktree burnt per attempt against a limit that will not lift.
+   *  Widening the pattern list would have been another private mirror of
+   *  Anthropic's wording, the maintenance trap swarmRateLimitText exists to end.
+   *  Asking the pool is the same move liveDesks made for liveness. */
+  quotaBlocked(w: WorkerHandle): boolean
 }
 
 export const ptyWorkerRuntime: WorkerRuntime = {
@@ -146,6 +163,9 @@ export const ptyWorkerRuntime: WorkerRuntime = {
   lastOutputAt: (w) => getTerminal(workerKey(w))?.lastOutputAt ?? null,
   nudge: (w) => writeInput(workerKey(w), '\r'),
   say: async (w, text) => writeInput(workerKey(w), text),
+  // A PTY has no structured verdict — its screen text IS the only evidence, and
+  // the engine's matcher already reads it.
+  quotaBlocked: () => false,
 }
 
 /** How far back {@link sdkWorkerRuntime.recentOutput} reads, and how much of it
@@ -311,6 +331,15 @@ export const sdkWorkerRuntime: WorkerRuntime = {
   // A bare CR means nothing to a stream. The equivalent poke is an actual turn.
   nudge: (w) => pushSdkInput(workerKey(w), 'Continue.'),
   say: async (w, text) => pushSdkInput(workerKey(w), text),
+  // The pool's OWN verdict, matched against the SDK's exported prefix list —
+  // authoritative where the engine's wording matcher can only guess. Two
+  // independent signs, either of which means "parked on a limit": the session
+  // status, and a still-current refusal sentence. See WorkerRuntime.quotaBlocked.
+  quotaBlocked: (w) => {
+    const id = workerKey(w)
+    if (getSdkSession(id)?.status === 'quota-parked') return true
+    return lastQuotaRefusalText(id) !== null
+  },
 }
 
 /** Resolve the runtime for one worker. The engine calls this instead of reaching

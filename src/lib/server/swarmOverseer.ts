@@ -194,7 +194,24 @@ export interface OverseerBrainResult {
   /** null when the detached chain itself threw (answerAsOwner never throws, but the
    *  chain is guarded belt-and-suspenders) → treated as an insufficient-info escalate. */
   answer: OwnerAnswer | null
+  /** How many drains have already FAILED to route this result (raiseToInbox
+   *  returned false). Absent ⇒ 0. See {@link MAX_BRAIN_ROUTE_ATTEMPTS}. */
+  routeAttempts?: number
 }
+
+/** How many passes may try to route ONE brain result before it is dropped.
+ *
+ *  ⚠ WHY A RETRY EXISTS AT ALL (overnight review 2026-08-03). raiseToInbox
+ *  returns false on an fs/notify hiccup and its own comment states the contract:
+ *  "leave `seen` UNSET so the next pass retries; the receiptKey keeps a later
+ *  retry idempotent". But the drain had already SPLICED every result out of the
+ *  mailbox, and it ignored the return — so there was no next pass to retry with.
+ *  A single failed write silently destroyed the worker's question AND the
+ *  proxy's answer, and the worker went on waiting for an inbox entry that would
+ *  never appear. Re-queueing restores the contract the callee was written to.
+ *  Bounded so a permanently failing disk cannot grow the mailbox forever; the
+ *  give-up is LOUD (the whole point is that this stopped being silent). */
+export const MAX_BRAIN_ROUTE_ATTEMPTS = 5
 
 /** Per-engine overseer state (§5). In-memory ONLY — held on the ProjectEngine, which
  *  lives on globalThis; a server restart resets it, which also re-arms `enabled` OFF
@@ -755,6 +772,22 @@ const drainBrainResults = async (
 ): Promise<void> => {
   if (ov.brainResults.length === 0) return
   const results = ov.brainResults.splice(0, ov.brainResults.length)
+  // Re-queue a result whose inbox write FAILED so the next pass retries it —
+  // raiseToInbox's false is "transient, try again", and this drain used to throw
+  // that away along with the question (see MAX_BRAIN_ROUTE_ATTEMPTS). Bounded,
+  // and the give-up says so out loud.
+  const requeue = (r: OverseerBrainResult, what: string): void => {
+    const attempts = (r.routeAttempts ?? 0) + 1
+    if (attempts >= MAX_BRAIN_ROUTE_ATTEMPTS) {
+      log(
+        'warn',
+        `overseer: GIVING UP on ${what} after ${attempts} failed inbox writes — the question is lost: ${shorten(r.question)}`,
+      )
+      return
+    }
+    ov.brainResults.push({ ...r, routeAttempts: attempts })
+    log('warn', `overseer: inbox write failed for ${what} (attempt ${attempts}) — re-queued for the next pass`)
+  }
   for (const r of results) {
     const ans = r.answer
     // A confident, reversible, grounded answer → inject it into the LIVE worker (T1).
@@ -772,7 +805,7 @@ const drainBrainResults = async (
       }
       // Worker gone / injection failed → fall through to the inbox so the answer isn't
       // lost (the owner can re-deliver it; it rides the next-dispatch conduit via C1).
-      await raiseToInbox(deps, now, ov, {
+      const raised = await raiseToInbox(deps, now, ov, {
         projectPath: engine.path,
         question: r.question,
         context: `${r.context}\n\n(proxy が回答済みだが worker への配達に失敗 — 本人が届け直してください。)`,
@@ -786,6 +819,10 @@ const drainBrainResults = async (
         target: targetOf(r),
         proxyDraft: { answer: ans.text, confidence: ans.confidence, isAbstention: false },
       })
+      if (!raised) {
+        requeue(r, 'an undeliverable proxy answer')
+        continue
+      }
       log('warn', `overseer: proxy answer could not be injected — raised to the inbox: ${shorten(r.question)}`)
       continue
     }
@@ -820,7 +857,7 @@ const drainBrainResults = async (
     const plainQuestion = abstained
       ? buildUnclassifiedRoutingPlainQuestion(r.question)
       : undefined
-    await raiseToInbox(deps, now, ov, {
+    const escalated = await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
       question: r.question,
       context: `${r.context}\n\n(監督の proxy 判断: ${reason})`,
@@ -841,6 +878,10 @@ const drainBrainResults = async (
       // `abstained` flag this branch added is what makes the fix a one-liner.)
       proxyDraft: { answer: reason, confidence: 'low', isAbstention: abstained },
     })
+    if (!escalated) {
+      requeue(r, 'an escalated worker question')
+      continue
+    }
     log('info', `overseer: proxy escalated a worker question (${why}) → inbox: ${shorten(r.question)}`)
   }
 }

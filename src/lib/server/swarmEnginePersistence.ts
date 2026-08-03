@@ -85,24 +85,66 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
   }
 }
 
+/** What a writer states. The three REQUIRED flags are always the caller's
+ *  current truth; every OPTIONAL field is preserve-by-default — omit it and the
+ *  on-disk value survives, pass `false`/`null` to CLEAR it deliberately.
+ *
+ *  ⚠ THE SHAPE EXISTS BECAUSE THE ALTERNATIVE FAILED SILENTLY (2026-08-03).
+ *  writeEngineIntent used to take the whole record and atomically REPLACE the
+ *  file, so any writer that named only the three flags erased the optional ones
+ *  it had never heard of. Two live features were losing state that way, with no
+ *  error and no log: the supply desk's boot auto-resume (`supplyDesired`, added
+ *  that same day — wiped by the very next autonomy toggle) and self-supply's
+ *  daily cap (`selfSupplyDayKey`/`Count`, whose whole point since 2026-07-29 is
+ *  that a restart must NOT hand the loop a fresh budget). Fixing the three call
+ *  sites would have left the trap armed for the fourth. Preserve-by-default
+ *  moves the invariant into the seam every write already passes through —
+ *  a new optional field is safe by construction, and
+ *  swarmEnginePersistenceMerge.test.ts reads the field list OUT of this
+ *  interface so a future one is covered without anyone remembering to add it. */
+export interface EngineIntentWrite {
+  desiredRunning: boolean
+  selfSupply: boolean
+  overseer: boolean
+  supplyDesired?: boolean | null
+  selfSupplyDayKey?: string | null
+  selfSupplyDayCount?: number | null
+}
+
 /** Write-through the engine's current intent. FAIL-OPEN: returns `false` (never
  *  throws) on a write fault — the in-memory engine is this process's truth; disk
  *  is a best-effort mirror for the NEXT boot, so a bad disk must never affect the
  *  running engine. Callers should log a journal warning on a `false` return
- *  (plan §3) but must not treat it as a reason to change in-memory behaviour. */
+ *  (plan §3) but must not treat it as a reason to change in-memory behaviour.
+ *
+ *  Optional fields are MERGED from disk (see {@link EngineIntentWrite}); the
+ *  three required flags are replaced with what the caller states. */
 export const writeEngineIntent = async (
   projectPath: string,
-  intent: Omit<EngineIntent, 'updatedAt'>,
+  intent: EngineIntentWrite,
   now: number = Date.now(),
 ): Promise<boolean> => {
   try {
+    // Read-before-write so an omitted optional field keeps its disk value. The
+    // read is FAIL-QUIET-TO-OFF, so an unreadable file degrades to "no optional
+    // state" — the same answer the caller would have written anyway.
+    const current = await readEngineIntent(projectPath)
+    const supplyDesired = intent.supplyDesired === undefined ? current.supplyDesired : intent.supplyDesired
+    const dayKey = intent.selfSupplyDayKey === undefined ? current.selfSupplyDayKey : intent.selfSupplyDayKey
+    const dayCount =
+      intent.selfSupplyDayCount === undefined ? current.selfSupplyDayCount : intent.selfSupplyDayCount
     // The central data dir (~/.openground/projects/<uuid>/) may not exist yet
     // for a project whose engine has never run before — atomicWriteJson's
     // sibling-temp-file rename needs the directory to already be there (same
     // ensure-then-write shape as projectData.ts's writers).
     await mkdir(await projectDataDir(projectPath), { recursive: true })
     await atomicWriteJson(await engineIntentFile(projectPath), {
-      ...intent,
+      desiredRunning: intent.desiredRunning,
+      selfSupply: intent.selfSupply,
+      overseer: intent.overseer,
+      ...(supplyDesired === true ? { supplyDesired: true } : {}),
+      ...(typeof dayKey === 'string' && dayKey ? { selfSupplyDayKey: dayKey } : {}),
+      ...(typeof dayCount === 'number' && dayCount >= 0 ? { selfSupplyDayCount: dayCount } : {}),
       updatedAt: now,
     } satisfies EngineIntent)
     return true
@@ -127,17 +169,20 @@ export const writeEngineIntent = async (
  *  CURRENT disk value and patching only the field this call owns closes that gap. */
 export const patchEngineIntent = async (
   projectPath: string,
-  patch: Partial<Omit<EngineIntent, 'updatedAt'>>,
+  patch: Partial<EngineIntentWrite>,
   now: number = Date.now(),
 ): Promise<boolean> => {
   const current = await readEngineIntent(projectPath)
+  // Only the three REQUIRED flags need filling in from disk here — every
+  // optional field is preserve-by-default inside writeEngineIntent, so passing
+  // the patch through untouched keeps both "omit ⇒ keep" and "false ⇒ clear".
   return writeEngineIntent(
     projectPath,
     {
+      ...patch,
       desiredRunning: patch.desiredRunning ?? current.desiredRunning,
       selfSupply: patch.selfSupply ?? current.selfSupply,
       overseer: patch.overseer ?? current.overseer,
-      ...((patch.supplyDesired ?? current.supplyDesired) === true ? { supplyDesired: true } : {}),
     },
     now,
   )

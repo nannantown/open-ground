@@ -116,6 +116,7 @@ describe('isManagerDeskAlive', () => {
     agentSessionId: null,
     lastOutputAt: null,
     startedAt: 0,
+    stopping: false,
   })
 
   it('asks the pool that owns the handle, and only that one', () => {
@@ -173,6 +174,7 @@ describe('sayToManagerDesk', () => {
     agentSessionId: null,
     lastOutputAt: null,
     startedAt: 0,
+    stopping: false,
   }
   const sdk: ManagerDeskHandle = { ...pty, runtime: 'sdk', handleId: 'sdk-1' }
 
@@ -224,6 +226,7 @@ describe('screen + summary', () => {
     agentSessionId: null,
     lastOutputAt: null,
     startedAt: 0,
+    stopping: false,
   }
   const sdk: ManagerDeskHandle = { ...pty, runtime: 'sdk', handleId: 'sdk-1' }
 

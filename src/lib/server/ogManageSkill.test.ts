@@ -194,4 +194,31 @@ describe('shipped skill source (skills/og-manage/SKILL.md)', () => {
       expect(text).toContain(api)
     }
   })
+
+  // 差し戻し IS THE PROTOCOL'S HOT PATH, AND THE DEFAULT RUNTIME IS SDK.
+  // The step keyed on `terminalId`, which an SDK worker does NOT have (the
+  // identity invariant: pty ⇔ terminalId, sdk ⇔ sdkSessionId). So the commander
+  // read a LIVE default-runtime worker as "dead", fell to the restart step, and
+  // the restart 409'd on the occupancy guard — the 差し戻し never arrived and
+  // nothing said why (found 2026-08-04, overnight review). Sliced like 手順4
+  // above: the claim is that the runtime branch is IN the step the commander is
+  // reading, not merely somewhere in the file.
+  const REWORK_START = '2. **live worker がいる**'
+  const REWORK_END = '### 「自動運転」/ エンジンに任せる'
+  it('差し戻し step branches on RUNTIME and names the SDK conduit (not terminalId alone)', async () => {
+    const text = await readFile(shippedPath, 'utf8')
+    const start = text.indexOf(REWORK_START)
+    const end = text.indexOf(REWORK_END, start + 1)
+    if (start < 0 || end <= start) {
+      throw new Error(`差し戻し step anchors not found (start=${start}, end=${end})`)
+    }
+    const step = text.slice(start, end)
+    expect(step).toContain('/api/sdk-session/')
+    expect(step).toContain('sdkSessionId')
+    expect(step).toContain("runtime:'sdk'")
+    // …and the trap is named where the mistake is made.
+    expect(step).toContain('terminalId')
+    // The literal carries backticks around the identifier — match the clause.
+    expect(step).toMatch(/terminalId`? ?の有無で判断しない/)
+  })
 })

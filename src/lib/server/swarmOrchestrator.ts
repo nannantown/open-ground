@@ -2313,6 +2313,11 @@ export const recordEscalationAnswerForNextDispatch = async (
   projectPath: string,
   taskId: string,
   line: string,
+  deps?: {
+    fetchTasks?: (p: string) => Promise<ProjectTask[]>
+    unpark?: (p: string, id: string) => Promise<boolean>
+    countCommitsAhead?: (p: string, branch: string) => Promise<number>
+  },
 ): Promise<void> => {
   // Control bytes → space FIRST (so the segment can never contain
   // REWORK_REASON_SEP), then whitespace-fold + clamp.
@@ -2322,6 +2327,7 @@ export const recordEscalationAnswerForNextDispatch = async (
   const marked = text.includes(ESCALATION_ANSWER_MARKER)
     ? text
     : `${ESCALATION_ANSWER_MARKER} ${text}`
+  let recorded = false
   await runExclusive(engine, async () => {
     const existing = engine.reworkReasons.get(taskId)
     // A re-delivery retry re-records the SAME answer — don't stack duplicates.
@@ -2330,7 +2336,81 @@ export const recordEscalationAnswerForNextDispatch = async (
       taskId,
       existing ? `${existing}${REWORK_REASON_SEP}${marked}` : marked,
     )
+    recorded = true
   })
+  if (!recorded) return
+  // ── UNPARK (2026-08-03 overnight review, must-fix) ────────────────────────
+  // This lane exists because the worker was GONE, and the commonest way it is
+  // gone is that the engine PARKED it for the very question the owner just
+  // answered (recoveryColumn: reason 'question' ⇒ 'blocked', QUESTION_GRACE_MS).
+  // But 'blocked' is the HUMAN lane — the dispatch pass never picks from it. So
+  // the answer sat in reworkReasons for "the next dispatch" that could not
+  // happen, and from the owner's seat the card simply never moved again after
+  // they answered. Recording the answer and leaving the card parked is a dead
+  // end; the record and the unpark are ONE act, so they live together.
+  //
+  // Narrow on purpose: only a card still sitting in 'blocked' moves, and only
+  // to 'todo' (the dispatch queue). A card in todo/doing/review is already
+  // live or queued — touching it could yank work out from under a running
+  // worker; a 'done' / vanished card is not ours to resurrect.
+  // ⚠ logAwaited, NOT logLine: logLine's journal append is FIRE-AND-FORGET
+  // (`void appendEngineJournalLine`), which is fine on the engine's own tick but
+  // NOT here — this tail runs after an awaited board fetch, so the dangling
+  // write outlived its caller and landed in a directory a test had already
+  // started removing (ENOTEMPTY, doctrine §8: my own async tail racing
+  // teardown, the second time). Awaiting the append keeps the line AND ends the
+  // work inside the call the owner's answer is waiting on.
+  const logAwaited = async (level: 'info' | 'warn', message: string): Promise<void> => {
+    const entry = { at: new Date().toISOString(), level, message } as const
+    engine.log.push(entry)
+    if (engine.log.length > MAX_LOG_LINES) engine.log.splice(0, engine.log.length - MAX_LOG_LINES)
+    await appendEngineJournalLine(engine.path, entry).catch(() => {})
+  }
+  try {
+    const tasks = await (deps?.fetchTasks ?? defaultFetchTasks)(engine.path)
+    const card = tasks.find((t) => t.id === taskId)
+    if (!card || columnOf(card) !== 'blocked') return
+    // ⚠ COMMITTED WORK STAYS PARKED — the twin-dispatch root fix (2026-07-23),
+    // which this unpark bypassed when it first shipped (caught the same night by
+    // the review fleet). A worker reclaimed for a question has already had its
+    // uncommitted work WIP-committed onto its swarm/* branch by the teardown. A
+    // dispatch from 'todo' spawns a FRESH worker with NO worktree, so
+    // createSwarmWorktree mints a NEW swarm/* branch and moveToDoing stamps it
+    // onto the card — orphaning the saved commits and redoing the work from
+    // zero. recoveryColumn refuses exactly this (`commitsAhead > 0 ⇒ blocked`);
+    // 'question' returns 'blocked' before reaching that line, so the guard has
+    // to be re-stated HERE, at the other door into the dispatch queue.
+    // The answer is still recorded either way — it rides the next dispatch of
+    // this card whenever the commander sends it back.
+    const branch = typeof card.branch === 'string' ? card.branch : ''
+    const ahead = branch
+      ? await (deps?.countCommitsAhead ?? defaultCountCommitsAhead)(engine.path, branch)
+      : 0
+    if (ahead > 0) {
+      await logAwaited(
+        'info',
+        `escalation answer recorded for card ${taskId}, but it stays in blocked — ${branch} already carries ${ahead} commit(s). Re-dispatching would mint a new branch and orphan them; the commander integrates or 差し戻し's this branch instead.`,
+      )
+      return
+    }
+    const ok = await (deps?.unpark ?? ((p: string, id: string) => setCardColumn(p, id, 'todo', '')))(
+      engine.path,
+      taskId,
+    )
+    await logAwaited(
+      ok ? 'info' : 'warn',
+      ok
+        ? `escalation answer recorded — card ${taskId} unparked (blocked → todo) so the next dispatch carries it`
+        : `escalation answer recorded but the unpark write FAILED for card ${taskId} — it stays in blocked; move it to todo to resume`,
+    )
+  } catch (e) {
+    // FAIL-OPEN: the answer IS recorded (that write already succeeded). A board
+    // read/write fault must not lose it — say so and let the owner move the card.
+    await logAwaited(
+      'warn',
+      `escalation answer recorded but the unpark check failed for card ${taskId} (${e instanceof Error ? e.message : String(e)}) — move it from blocked to todo to resume`,
+    )
+  }
 }
 
 /** Per-engine CRITICAL SECTION — serialize the autonomous tick's board-mutating
@@ -2693,9 +2773,21 @@ const stateOf = (
     selfSupply: engine.selfSupply.enabled,
     overseer: engine.overseer.enabled,
     workers: live,
-    reviews: [...engine.reviews],
+    // ⚠ FROZEN WHILE STOPPED IS A LIE (overnight review 2026-08-04). Both lists
+    // are computed ONLY inside a running pass (runIntegratePass sets `reviews`,
+    // runEnginePass sets `anomalies`), and both start with `if (!engine.running)
+    // return` — while the engine is off, nothing recomputes them and nothing
+    // clears them. `workers` right above already filters to what is genuinely
+    // alive; these two kept publishing the last snapshot forever, so the panel
+    // showed 「検品待ち: 3件」 for cards the commander had since integrated and a
+    // worker-stale warning for a worker that no longer existed — beside a
+    // correctly-empty worker list, on the same screen. A stopped engine has no
+    // live observation to report: say nothing rather than something stale.
+    // (The lists themselves are KEPT in memory — a restart re-populates them on
+    // the first pass, and stopOrchestrator deliberately preserves the journal.)
+    reviews: engine.running ? [...engine.reviews] : [],
     log: [...engine.log],
-    anomalies: [...engine.anomalies],
+    anomalies: engine.running ? [...engine.anomalies] : [],
     maxWorkers: ORCHESTRATOR_MAX_WORKERS,
     kpis: computeSwarmKpis({ counters, tasks, log: engine.log }),
     consumption: computeSwarmConsumption({ liveWorkers: live, counters, limit: DISPATCH_BUDGET }),
@@ -2839,6 +2931,10 @@ export interface OrchestratorDeps {
    *  Default: `runtimeOf(w).recentOutput(w)`, which for a PTY worker is the same
    *  `getTerminalScreen(w.terminalId)` call it always was. */
   recentOutput: (w: WorkerHandle) => string | null
+  /** The runtime's own "parked on a usage limit" verdict — see
+   *  WorkerRuntime.quotaBlocked. Injected in tests; production resolves it per
+   *  worker through runtimeOf(w). */
+  quotaBlocked?: (w: WorkerHandle) => boolean
   /** Newest mtime across a worker's OWN transcript + its sub-agent transcripts
    *  (its worktree cwd + agentSessionId), or null. The stall path's THIRD liveness
    *  channel, resolved ONLY for a worker the cheap channels (heartbeat + PTY output)
@@ -3185,7 +3281,7 @@ const defaultFetchTasks = async (projectPath: string): Promise<ProjectTask[]> =>
 const setCardColumn = async (
   projectPath: string,
   taskId: string,
-  column: 'doing' | 'review',
+  column: 'todo' | 'doing' | 'review',
   branch: string,
 ): Promise<boolean> => {
   const res = await fetch(`${loopbackOrigin()}/api/project/tasks`, {
@@ -7405,7 +7501,20 @@ const monitorWorkers = async (
         /* unknown → classifyOutput('normal') → ordinary stall handling below */
       }
     }
-    const output = classifyOutput(screen, workerRuntimeKind(w))
+    // The runtime's OWN quota verdict outranks the wording matcher: an SDK
+    // session parked on the SDK's exported refusal vocabulary is quota-blocked
+    // even when its sentence matches none of our patterns ("You're out of usage
+    // credits…" matched nothing, so the tier never cooled and dispatch kept
+    // launching into it — overnight review 2026-08-04). Text remains the only
+    // evidence for a PTY, whose arm reports false.
+    let output = classifyOutput(screen, workerRuntimeKind(w))
+    if (output !== 'rate-limited') {
+      try {
+        if (deps.quotaBlocked?.(w) ?? runtimeOf(w).quotaBlocked(w)) output = 'rate-limited'
+      } catch {
+        /* pool read failed → keep the text verdict */
+      }
+    }
     if (sampleScreen) {
       if (output === 'rate-limited') {
         if (!engine.limitScreen.has(workerKey(w))) engine.limitScreen.set(workerKey(w), now)
@@ -10126,7 +10235,13 @@ export const getOrchestratorState = async (
   // an engine-woken desk: the heartbeat above carries phase/note but NO id, so
   // after an app restart the pane pinned to its dead pre-restart id forever
   // while the sidebar said the commander was working (0803 owner report).
-  const managerDeskFull = listManagerDesks(key)[0] ?? null
+  // ⚠ `.stopping` desks are EXCLUDED here and only here: they still exist for
+  // the singleton guard (a twin must not spawn on top of an unwinding desk) but
+  // they must never be ADOPTED — publishing one made the pane re-attach to the
+  // desk the owner had just stopped, so 停止 never stuck on a wedged session
+  // (overnight review 2026-08-03). Occupancy and adoption are different
+  // questions about the same desk; this is the line where they part.
+  const managerDeskFull = listManagerDesks(key).find((d) => !d.stopping) ?? null
   const managerDesk = managerDeskFull
     ? {
         runtime: managerDeskFull.runtime,

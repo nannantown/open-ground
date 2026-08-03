@@ -61,6 +61,20 @@ export interface ManagerDeskHandle {
   /** Newest evidence of output, epoch ms. Null when it has produced none yet. */
   lastOutputAt: number | null
   startedAt: number
+  /** The desk has been ASKED TO STOP and is still unwinding — it exists (so it
+   *  must keep blocking a twin spawn) but it must NEVER be adopted by a pane.
+   *
+   *  ⚠ THE TWO QUESTIONS ARE NOT THE SAME (found 2026-08-03, overnight review).
+   *  `terminateSdkSession` flips `status` to 'exited' synchronously while the
+   *  pump keeps unwinding, and this list deliberately selects on `reaped` so the
+   *  singleton guard still sees the dying desk. But the UI's reconcile adopts
+   *  ANY live desk it is shown — so pressing 停止 cleared the pane's record and
+   *  the very next poll re-adopted the desk being stopped. On a wedged session
+   *  (the case where stopping matters most) that never reaps, 停止 could never
+   *  stick. The flag lets the OCCUPANCY answer keep the desk while the ADOPTION
+   *  answer drops it. PTY desks are already re-confirmed against the process
+   *  table, so their arm reports false. */
+  stopping: boolean
 }
 
 export interface ManagerDeskDeps {
@@ -91,6 +105,10 @@ export const listManagerDesks = (
       agentSessionId: d.agentSessionId ?? null,
       lastOutputAt: d.lastOutputAt ?? null,
       startedAt: d.startedAtMs,
+      // A PTY entry that survived the process-table re-confirmation above is
+      // genuinely alive — a killed one is already filtered out, so there is no
+      // "asked to stop but still here" window on this arm.
+      stopping: false,
     }))
   const sdk = (deps.sdkDesks ?? listSdkSessionsIn)(projectPath, 'manager').map<ManagerDeskHandle>(
     (s) => ({
@@ -105,6 +123,9 @@ export const listManagerDesks = (
       // output once at least one event has been emitted.
       lastOutputAt: s.seq > 0 ? s.lastEventAt : null,
       startedAt: s.startedAt,
+      // Asked to stop (status flipped synchronously by terminateSdkSession)
+      // but not yet reaped — see ManagerDeskHandle.stopping.
+      stopping: s.status === 'exited' || s.status === 'failed',
     }),
   )
   return [...pty, ...sdk].sort((a, b) => b.startedAt - a.startedAt)
@@ -158,6 +179,9 @@ export const managerDeskForSession = (
       agentSessionId,
       lastOutputAt: act.lastOutputAt,
       startedAt: 0,
+      // `act.live` IS the process-table answer, so a desk reported here is not
+      // mid-teardown (same reasoning as the PTY arm of listManagerDesks).
+      stopping: false,
     }
   }
   return (

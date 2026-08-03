@@ -283,12 +283,19 @@ API で起動する使い捨て `claude` セッションで、各自が隔離 wo
      (ドラッグ操作は setColumn API を叩かない別経路)— カウンタをリセットしたい復活は API 経由が確実。
      (`swarm-board.sh rework <id>` があればそちらでも同じ意味の分岐が `→ doing` / `→ blocked` の
      stdout で得られる — 独自カウンタファイルで別管理なので上の API の counter とは混ざらない。)
-2. **live worker がいる**(worker 一覧に `terminalId` あり)→ 指示を注入:
-   `POST /api/terminal/<terminalId>/paste` body `{path, text:"<file:line+何が壊れてるか+期待動作>"}`
-   → 1秒待って → `POST /api/terminal/<terminalId>/input` body `{"data":"\r"}`。
+2. **live worker がいる** → その worker の**ランタイムで宛先が違う**。まず一覧の
+   `runtime` を見る(`terminalId` の有無で判断しないこと — SDK worker は terminalId を
+   **持たない**ので「死んでいる」と誤判定し、手順3の再起動が占有ガードで 409 になり
+   差し戻しが永久に届かない。2026-08-04 実確認。既定は SDK なので**これが普通の経路**):
+   - `runtime:'sdk'`(`sdkSessionId` あり)→ **1回の POST で完了**:
+     `POST /api/sdk-session/<sdkSessionId>/input?path=<projectPath>` body `{"text":"<file:line+何が壊れてるか+期待動作>"}`
+     (paste も Enter も不要 — ストリームは1ターンとして受け取る)
+   - `runtime:'pty'`(`terminalId` あり)→ 従来どおり2段階:
+     `POST /api/terminal/<terminalId>/paste` body `{path, text:"…"}`
+     → 1秒待って → `POST /api/terminal/<terminalId>/input` body `{"data":"\r"}`
    指示は**平文で**書く(スラッシュコマンドを注入しない — TUI ではコマンドとして送信されない)。
    「直して」でなく観測可能な修正条件で。
-3. **worker が死んでいる**(`terminalId` なし)→ 再起動で返す:
+3. **worker が死んでいる**(`runtime` に対応する handle が一覧に無い / 一覧自体に居ない)→ 再起動で返す:
    `POST /api/swarm/worker` body `{path, taskId, worktree:"<既存worktree絶対パス>"}`(同じ branch・
    作業を保持したまま再開)。worktree ごと作り直したい場合だけ worktree 無しで振り直す
    (その時は title/notes に「前回の差し戻し理由」を明記して同じ失敗を繰り返させない)。
