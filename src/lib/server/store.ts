@@ -304,6 +304,7 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 // Settings field, add its key here too or POST /api/settings will silently drop it.
 const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'language',
+  'theme',
   'displayName',
   'defaultWorkspace',
   'openApps',
@@ -448,6 +449,11 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   // on (a forged truthy string must not), everything else persists `false`.
   if (Object.prototype.hasOwnProperty.call(safe, 'lockdownMode')) {
     safe.lockdownMode = safe.lockdownMode === true
+  }
+  // Theme: only the two literals are stored; anything else drops the key so the
+  // previous value survives (same refuse-a-meaningless-patch stance as above).
+  if (Object.prototype.hasOwnProperty.call(safe, 'theme')) {
+    if (safe.theme !== 'light' && safe.theme !== 'dark') delete safe.theme
   }
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]

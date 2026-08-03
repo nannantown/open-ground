@@ -1400,7 +1400,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           <div
             role="tablist"
             aria-label={t('projectPanel.swarm.title')}
-            className="flex min-w-0 flex-1 items-center gap-4 self-stretch overflow-x-auto"
+            className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch overflow-x-auto"
           >
             {orderedTabs.map(({ view, icon: Icon, label, badge, badgeTone }, i) => {
               const active = mainView === view
@@ -1454,10 +1454,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 onKeyDown={(e) => onPaneKeyDown(e, i)}
                 title={t('projectPanel.dragToReorder')}
                 className={[
-                  '-mb-px relative flex shrink-0 items-center gap-1.5 self-stretch border-b-2 px-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+                  // 計器盤 language: same inverse-pill idiom as the panel's
+                  // main tab strip (ProjectPanel) — no underline, bg+text
+                  // change together.
+                  'relative my-1.5 flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
                   active
-                    ? 'border-accent text-accent'
-                    : 'border-transparent text-ink-muted hover:text-accent',
+                    ? 'bg-ink text-ink-inverse'
+                    : 'text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset',
                   dimmed ? 'opacity-40' : '',
                   dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
                 ].join(' ')}
@@ -1472,7 +1475,11 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                     className={
                       badgeTone === 'accent'
                         ? 'rounded-full bg-accent-soft px-1.5 text-[9px] font-medium leading-[14px] text-accent'
-                        : 'rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint'
+                        : active
+                          // On the active inverse pill the faint/line pair
+                          // would sink into the ink surface — flip to inverse.
+                          ? 'rounded-full border border-ink-inverse/40 px-1.5 text-[9px] font-medium leading-[14px] text-ink-inverse'
+                          : 'rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint'
                     }
                   >
                     {badge}

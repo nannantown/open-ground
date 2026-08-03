@@ -190,15 +190,19 @@ const BoardCardInner = ({
         onDropCard()
       }}
       className={[
-        'group relative rounded-[3px] border p-2.5 shadow-card transition-colors',
+        // 計器盤 language: the resting card is a borderless raised surface
+        // (bg-card + shadow on the inset well); hover deepens the shadow.
+        // The border stays in the layout as TRANSPARENT so the accent border
+        // of the editing/selected states appears without a layout shift.
+        'group relative rounded-[4px] border p-2.5 shadow-card transition-[box-shadow,border-color,background-color]',
         isEditing
           ? 'cursor-default border-accent'
-          : 'cursor-grab hover:border-line-strong active:cursor-grabbing',
+          : 'cursor-grab hover:shadow-card-hover active:cursor-grabbing',
         // The card whose detail drawer is open reads as selected: accent border
         // + a light accent wash.
         isSelected && !isEditing
           ? 'border-accent bg-accent/15'
-          : 'border-line bg-bg-card',
+          : 'border-transparent bg-bg-card',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg-inset',
         isDragHidden ? 'hidden' : '',
       ].join(' ')}

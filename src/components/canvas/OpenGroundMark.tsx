@@ -13,8 +13,6 @@ import { OG_RING_ORDER, OG_SHARD_CENTROIDS, OG_SHARDS, OG_VIEWBOX } from './open
 // 15–18px. When `spinning`, the whole thing rotates (.og-spin) about the ring
 // centre (the viewBox is centred on it) as the assistant's "thinking" indicator.
 
-const BRAND = '#231916'
-
 // Below this rendered pixel size, draw the carved ring instead of the shards.
 const SWAP_PX = 48
 
@@ -40,7 +38,10 @@ const NOTCH_SHARDS: number[] = (() => {
 export const OpenGroundMark = ({
   size = 16,
   spinning = false,
-  color = BRAND,
+  // currentColor since the 計器盤 theme work (2026-08-03): the mark follows the
+  // surrounding text colour, so callers pick the ink token (text-ink flips to
+  // cream in dark mode). Pass an explicit colour for fixed-brand contexts.
+  color = 'currentColor',
   className = '',
 }: {
   size?: number

@@ -188,6 +188,12 @@ export interface Settings {
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
    *  language toggle so the server can pick the matching prompt language. */
   language?: 'en' | 'ja'
+  /** Colour theme (第三弾「計器盤」2026-08-03). Unset means 'light' (the
+   *  original paper palette); 'dark' is the night instrument palette. Applied
+   *  client-side as html[data-theme] (src/lib/theme.ts) and mirrored to
+   *  localStorage('og-theme') for a flash-free first paint. User-settable;
+   *  setUserSettings narrows to the two literals and DROPS anything else. */
+  theme?: 'light' | 'dark'
   /** Owner-only experiment toggles (hidden, default off). The RAW stored
    *  switches — the resolved gate ANDs each with the owner role server-side
    *  (see {@link ExperimentsResponse} / resolveExperiments), so a non-owner who

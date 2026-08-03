@@ -842,12 +842,33 @@ export const BoardTab = ({
                 commitDrop()
               }}
               className={[
-                'flex min-h-0 w-[260px] shrink-0 flex-col rounded-[4px] border transition-colors',
-                isDropTarget ? 'border-accent bg-accent/5' : 'border-line bg-bg-inset/40',
+                // 計器盤 language: columns are borderless WELLS — the surface
+                // lightness difference (bg-inset vs the page) is the boundary.
+                // The drop target keeps its accent signal as a ring (no border,
+                // no layout shift).
+                'flex min-h-0 w-[260px] shrink-0 flex-col rounded-[6px] transition-colors',
+                isDropTarget ? 'bg-accent/5 ring-1 ring-accent' : 'bg-bg-inset',
               ].join(' ')}
             >
-              <header className="flex shrink-0 items-baseline justify-between gap-2 border-b border-line px-3 py-2">
-                <span className="label-cap text-ink">
+              <header className="flex shrink-0 items-baseline justify-between gap-2 px-3 pb-1 pt-2.5">
+                <span className="label-cap flex items-center gap-1.5 text-ink">
+                  {/* Instrument lamp: lit only while the column carries work
+                      that means something is HAPPENING or WAITING ON YOU —
+                      doing=moss, review=azure, blocked=ochre. Neutral when
+                      empty or for the passive lanes (todo/done). */}
+                  <span
+                    aria-hidden
+                    className={[
+                      'inline-block h-1.5 w-1.5 rounded-full',
+                      cards.length > 0 && col.key === 'doing'
+                        ? 'bg-moss'
+                        : cards.length > 0 && col.key === 'review'
+                          ? 'bg-azure'
+                          : cards.length > 0 && col.key === 'blocked'
+                            ? 'bg-ochre'
+                            : 'bg-line-strong',
+                    ].join(' ')}
+                  />
                   {col.label}{' '}
                   <span className="text-ink-faint tabular-nums">{cards.length}</span>
                 </span>
@@ -952,7 +973,7 @@ const AddCardButton = ({
         type="button"
         disabled={disabled}
         onClick={onAdd}
-        className="w-full rounded-[3px] border border-transparent bg-transparent px-2 py-1.5 text-left text-[12px] text-ink-faint transition-colors hover:border-line hover:bg-bg-card hover:text-ink active:bg-bg-inset focus-visible:border-accent focus-visible:bg-bg-card focus-visible:text-ink focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+        className="w-full rounded-[3px] border border-transparent bg-transparent px-2 py-1.5 text-left text-[12px] text-ink-faint transition-colors hover:bg-bg-card hover:text-ink active:bg-bg-card active:text-ink focus-visible:border-accent focus-visible:bg-bg-card focus-visible:text-ink focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
       >
         {t('board.composer.placeholder')}
       </button>

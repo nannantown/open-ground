@@ -4,12 +4,104 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------------------------------------------------------------------------
+   Theme palettes (2026-08-03, 第三弾「計器盤」). Every Tailwind colour token in
+   tailwind.config.ts reads `rgb(var(--og-*) / <alpha-value>)`, so the WHOLE app
+   switches palette on html[data-theme] — no per-component theme code. Values
+   are space-separated RGB channels (never hex) so Tailwind opacity modifiers
+   (bg-accent/10, ring-accent/40 …) keep working.
+
+   Light = the original paper/ink/vermillion survey-map palette.
+   Dark  = the "night instrument panel" (夜の計器盤): warm ink surfaces, cream
+   text, status colours brightened so every READ pair clears WCAG AA 4.5:1 on
+   its surface — ratios are pinned by src/themePalette.test.ts; change a value
+   here and the test recomputes. */
 :root {
-  --paper-tint: #F2EDDE;
+  /* surfaces */
+  --og-bg: 242 237 222;          /* #F2EDDE paper */
+  --og-bg-elevated: 237 230 210; /* #EDE6D2 */
+  --og-bg-card: 248 244 232;     /* #F8F4E8 */
+  --og-bg-inset: 230 222 198;    /* #E6DEC6 */
+  --og-bg-deep: 42 31 26;        /* #2A1F1A */
+  /* ink */
+  --og-ink: 42 31 26;            /* #2A1F1A */
+  --og-ink-muted: 107 88 71;     /* #6B5847 */
+  /* subtle/faint darkened again 2026-08-03: the 0801 AA fix only checked the
+     paper bg — on the darker elevated/inset surfaces they fell to ~4.2:1
+     (caught by themePalette.test.ts). Now ≥4.5 on ALL four surfaces. */
+  --og-ink-subtle: 110 92 74;    /* #6E5C4A — inset 4.75:1 */
+  --og-ink-faint: 112 94 76;     /* #705E4C — inset 4.60:1 */
+  --og-ink-inverse: 248 244 232; /* #F8F4E8 */
+  /* lines */
+  --og-line: 214 201 172;        /* #D6C9AC */
+  --og-line-soft: 226 216 190;   /* #E2D8BE */
+  --og-line-strong: 184 169 136; /* #B8A988 */
+  /* accent (vermillion) */
+  --og-accent: 178 58 44;        /* #B23A2C */
+  --og-accent-hover: 154 47 34;  /* #9A2F22 */
+  --og-accent-soft: 232 213 206; /* #E8D5CE */
+  --og-accent-deeper: 122 37 25; /* #7A2519 */
+  /* semantic accents */
+  --og-moss: 92 107 61;          /* #5C6B3D */
+  --og-moss-soft: 220 224 204;   /* #DCE0CC */
+  --og-azure: 58 107 140;        /* #3A6B8C */
+  --og-azure-soft: 210 222 230;  /* #D2DEE6 */
+  --og-ochre: 154 110 32;        /* #9A6E20 */
+  /* deep darkened 2026-08-03 (#855E17→#7D5814): on its own soft chip surface
+     it was 4.38:1 — below AA (same themePalette.test.ts catch). */
+  --og-ochre-deep: 125 88 20;    /* #7D5814 — soft 4.83:1, card 5.83:1 */
+  --og-ochre-deeper: 110 78 19;  /* #6E4E13 */
+  --og-ochre-soft: 233 223 196;  /* #E9DFC4 */
+  --og-invite: 94 74 135;        /* #5E4A87 */
+  --og-invite-soft: 228 220 239; /* #E4DCEF */
+  /* shadow ink for box-shadows (tailwind.config.ts boxShadow) */
+  --og-shadow: 42 31 26;
+  /* paper grain: multiply sinks the grain into the light paper */
+  --og-grain-blend: multiply;
+  --og-grain-opacity: 0.6;
+  /* legacy alias — a few rules below still read it */
+  --paper-tint: rgb(var(--og-bg));
   /* Ground card "Waiting" beacon label — claude is sitting on the human.
      Amber, darkened from the ochre token (#9A6E20, only ~4:1) so the 10px
-     label clears WCAG AA (4.5:1) on the card bg #F8F4E8 (≈5.3:1 here). */
-  --beacon-waiting: #855E17;
+     label clears WCAG AA (4.5:1) on the card bg #F8F4E8. Tracks ochre-deep. */
+  --beacon-waiting: #7D5814;
+}
+
+/* 夜の計器盤 — the dark instrument palette. Same token names, night values. */
+html[data-theme='dark'] {
+  --og-bg: 42 31 26;             /* #2A1F1A ink becomes the ground */
+  --og-bg-elevated: 51 40 31;    /* #33281F bars & pills */
+  --og-bg-card: 54 42 34;        /* #362A22 raised cards */
+  --og-bg-inset: 32 24 18;       /* #201812 wells (columns, troughs) */
+  --og-bg-deep: 20 16 12;        /* #14100C deepest (terminal frames) */
+  --og-ink: 248 244 232;         /* #F8F4E8 cream */
+  --og-ink-muted: 198 183 162;   /* #C6B7A2 ≥7:1 on card */
+  --og-ink-subtle: 183 166 144;  /* #B7A690 ≥5.8:1 on card */
+  --og-ink-faint: 176 159 137;   /* #B09F89 ≥5.4:1 on card */
+  --og-ink-inverse: 42 31 26;    /* dark text on cream/accent fills */
+  --og-line: 74 58 46;           /* #4A3A2E (decorative only) */
+  --og-line-soft: 62 48 37;      /* #3E3025 */
+  --og-line-strong: 95 76 60;    /* #5F4C3C */
+  --og-accent: 230 120 99;       /* #E67863 4.79:1 on card */
+  --og-accent-hover: 236 139 119;/* #EC8B77 hover brightens at night */
+  --og-accent-soft: 64 37 31;    /* #40251F dim red surface */
+  --og-accent-deeper: 240 161 144; /* #F0A190 "stronger" = lighter at night */
+  --og-moss: 157 179 107;        /* #9DB36B running lamp */
+  --og-moss-soft: 51 57 38;      /* #333926 */
+  --og-azure: 133 173 201;       /* #85ADC9 */
+  --og-azure-soft: 40 54 65;     /* #283641 */
+  --og-ochre: 221 174 88;        /* #DDAE58 waiting lamp */
+  --og-ochre-deep: 226 185 104;  /* #E2B968 */
+  --og-ochre-deeper: 232 196 128;/* #E8C480 */
+  --og-ochre-soft: 62 49 32;     /* #3E3120 */
+  --og-invite: 172 152 216;      /* #AC98D8 */
+  --og-invite-soft: 58 49 73;    /* #3A3149 */
+  --og-shadow: 0 0 0;
+  /* multiply would vanish on dark — plain low-opacity grain instead
+     (measured on the mock: stdev 1.7 → 2.8 keeps the texture visible) */
+  --og-grain-blend: normal;
+  --og-grain-opacity: 0.12;
+  --beacon-waiting: #DDAE58;
 }
 
 /* Assistant brand mark: a calm continuous rotation while the assistant is
@@ -26,7 +118,7 @@ html,
 body {
   height: 100%;
   background: var(--paper-tint);
-  color: #2A1F1A;
+  color: rgb(var(--og-ink));
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
@@ -43,9 +135,9 @@ body::before {
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  opacity: 0.6;
+  opacity: var(--og-grain-opacity);
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.16  0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0.045 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
-  mix-blend-mode: multiply;
+  mix-blend-mode: var(--og-grain-blend);
 }
 
 /* When the Comment tool is active, the canvas wrapper sets its own
@@ -82,18 +174,18 @@ body::before {
 .canvas-grid {
   background-color: var(--paper-tint);
   background-image:
-    linear-gradient(to right, rgba(42, 31, 26, 0.05) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(42, 31, 26, 0.05) 1px, transparent 1px),
-    linear-gradient(to right, rgba(42, 31, 26, 0.10) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(42, 31, 26, 0.10) 1px, transparent 1px);
+    linear-gradient(to right, rgb(var(--og-ink) / 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(var(--og-ink) / 0.05) 1px, transparent 1px),
+    linear-gradient(to right, rgb(var(--og-ink) / 0.10) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(var(--og-ink) / 0.10) 1px, transparent 1px);
   background-size: 24px 24px, 24px 24px, 192px 192px, 192px 192px;
   background-position: 0 0;
 }
 
 /* Double-line rule, cartographic style */
 .rule-double {
-  border-bottom: 1px solid rgba(42, 31, 26, 0.16);
-  box-shadow: 0 3px 0 -2px rgba(42, 31, 26, 0.16);
+  border-bottom: 1px solid rgb(var(--og-ink) / 0.16);
+  box-shadow: 0 3px 0 -2px rgb(var(--og-ink) / 0.16);
 }
 
 /* Small caps with cartographic tracking */
@@ -124,15 +216,15 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 a:focus-visible {
-  outline: 1.5px solid #B23A2C;
+  outline: 1.5px solid rgb(var(--og-accent));
   outline-offset: 2px;
   border-radius: 2px;
 }
 
 /* Selection */
 ::selection {
-  background: rgba(178, 58, 44, 0.25);
-  color: #2A1F1A;
+  background: rgb(var(--og-accent) / 0.25);
+  color: rgb(var(--og-ink));
 }
 
 /* Ground card — live-terminal beacon: the dot breathes while the project has
@@ -213,4 +305,3 @@ a:focus-visible {
     transform: scaleY(0.65);
   }
 }
-

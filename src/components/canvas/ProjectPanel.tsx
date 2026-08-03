@@ -3378,7 +3378,11 @@ const ViewTabs = ({
   const menuAction = tabMenu ? rowMenu?.actionFor(tabMenu.id) ?? null : null
 
   return (
-    <div className="flex shrink-0 items-end gap-4 border-b border-line px-8">
+    // 計器盤 language (2026-08-03): the tab strip carries NO rule — separation
+    // is spacing, and the active tab is an INVERSE PILL (ink surface, inverse
+    // text — cream-on-ink in light, ink-on-cream in dark) instead of the old
+    // red underline. Background+text change together (ui-interactive-states).
+    <div className="flex shrink-0 items-center gap-1 px-6 py-2">
       {tabs.map((m, i) => {
         const active = m.id === view
         const dimmed = dragFrom === i
@@ -3432,15 +3436,11 @@ const ViewTabs = ({
             }}
             onKeyDown={e => onTabKeyDown(e, i)}
             title={t('projectPanel.dragToReorder')}
-            // -mb-px lets the active border-b sit directly on top of the
-            // row's border-b, so the underline reads as "this tab owns the
-            // panel below," not "this tab has its own underline above the
-            // row line."
             className={[
-              '-mb-px relative flex items-center gap-1.5 border-b-2 px-1 py-2 label-cap transition-colors',
+              'relative flex items-center gap-1.5 rounded-full px-3 py-1.5 label-cap transition-colors',
               active
-                ? 'border-accent text-accent'
-                : 'border-transparent text-ink-muted hover:text-accent',
+                ? 'bg-ink text-ink-inverse'
+                : 'text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset',
               dimmed ? 'opacity-40' : '',
               dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
             ].join(' ')}
@@ -3453,7 +3453,9 @@ const ViewTabs = ({
             {tabPlayback && (
               <span
                 title={tabPlayback.title ?? 'Playing'}
-                className="text-accent"
+                // On the active inverse pill the accent would sink into the ink
+                // surface — flip to the inverse text colour there.
+                className={active ? 'text-ink-inverse' : 'text-accent'}
               >
                 <PlaybackEq size={9} />
               </span>
@@ -3461,7 +3463,12 @@ const ViewTabs = ({
             {(badges?.[m.id] ?? 0) > 0 && (
               <span
                 title={t('projectPanel.reviewWaitingTitle')}
-                className="rounded-full border border-ochre/60 px-1.5 text-[9px] font-medium leading-[14px] text-[var(--beacon-waiting)]"
+                className={[
+                  'rounded-full border px-1.5 text-[9px] font-medium leading-[14px]',
+                  active
+                    ? 'border-ink-inverse/40 text-ink-inverse'
+                    : 'border-ochre/60 text-[var(--beacon-waiting)]',
+                ].join(' ')}
               >
                 {badges![m.id]}
               </span>

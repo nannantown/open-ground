@@ -33,6 +33,19 @@
         --font-jetbrains-mono: 'JetBrains Mono';
       }
     </style>
+    <!-- Theme pre-paint: stamp data-theme from the local mirror BEFORE first
+         paint so a dark-mode user never sees a paper flash. localStorage is
+         only the fast mirror — the source of truth is settings.json (`theme`),
+         which src/lib/theme.ts re-applies (and re-mirrors) once /api/projects
+         answers. Runs inline (no CSP on the SPA shell) and fails closed to
+         light on any storage error. -->
+    <script>
+      try {
+        if (localStorage.getItem('og-theme') === 'dark') {
+          document.documentElement.dataset.theme = 'dark'
+        }
+      } catch {}
+    </script>
   </head>
   <body class="font-body antialiased">
     <div id="root"></div>

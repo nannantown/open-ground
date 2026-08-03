@@ -17,6 +17,8 @@ export const toolbar = {
     'toolbar.settingsWithUnread': 'Settings ({count} new feedback)',
     'toolbar.manual': 'Manual',
     'toolbar.skills': 'Skills',
+    'toolbar.themeDark': 'Switch to dark mode',
+    'toolbar.themeLight': 'Switch to light mode',
     'toolbar.sharedWithMe': 'Shared with me',
     // Visible label on the toolbar Join entry; `sharedWithMe` stays the tooltip.
     'toolbar.joinShared': 'Join shared',
@@ -40,6 +42,8 @@ export const toolbar = {
     'toolbar.settingsWithUnread': '設定（新着フィードバック {count} 件）',
     'toolbar.manual': 'マニュアル',
     'toolbar.skills': 'スキル',
+    'toolbar.themeDark': 'ダークモードに切り替え',
+    'toolbar.themeLight': 'ライトモードに切り替え',
     'toolbar.sharedWithMe': '共有プロジェクト',
     'toolbar.joinShared': '共有に参加',
     'toolbar.language': '言語',

@@ -11,66 +11,58 @@ const config: Config = {
   content: ['./src/**/*.{ts,tsx}', '!./src/lib/server/**'],
   theme: {
     extend: {
+      // 2026-08-03 (第三弾「計器盤」): every token reads a CSS variable so the
+      // whole app switches palette on html[data-theme] — the actual channel
+      // values (light paper / dark instrument, with their WCAG rationale) live
+      // in src/app/globals.css, pinned by src/themePalette.test.ts. The
+      // `rgb(var() / <alpha-value>)` form keeps Tailwind opacity modifiers
+      // (bg-accent/10, ring-accent/40 …) working.
       colors: {
         bg: {
-          DEFAULT: '#F2EDDE',
-          elevated: '#EDE6D2',
-          card: '#F8F4E8',
-          inset: '#E6DEC6',
-          deep: '#2A1F1A',
+          DEFAULT: 'rgb(var(--og-bg) / <alpha-value>)',
+          elevated: 'rgb(var(--og-bg-elevated) / <alpha-value>)',
+          card: 'rgb(var(--og-bg-card) / <alpha-value>)',
+          inset: 'rgb(var(--og-bg-inset) / <alpha-value>)',
+          deep: 'rgb(var(--og-bg-deep) / <alpha-value>)',
         },
         ink: {
-          DEFAULT: '#2A1F1A',
-          muted: '#6B5847',
-          // subtle/faint darkened so every text usage clears WCAG AA (4.5:1) on
-          // the paper bg — they were 2.84:1 / 1.71:1 (decorative-only). The
-          // ink > muted > subtle > faint ordering is preserved; the gap is just
-          // compressed because there's little room between AA (4.5:1) and muted
-          // (5.77:1). Contrast on paper #F2EDDE: subtle 4.92:1, faint 4.56:1.
-          subtle: '#756351',
-          faint: '#7A6856',
-          inverse: '#F8F4E8',
+          DEFAULT: 'rgb(var(--og-ink) / <alpha-value>)',
+          muted: 'rgb(var(--og-ink-muted) / <alpha-value>)',
+          subtle: 'rgb(var(--og-ink-subtle) / <alpha-value>)',
+          faint: 'rgb(var(--og-ink-faint) / <alpha-value>)',
+          inverse: 'rgb(var(--og-ink-inverse) / <alpha-value>)',
         },
         line: {
-          DEFAULT: '#D6C9AC',
-          soft: '#E2D8BE',
-          strong: '#B8A988',
+          DEFAULT: 'rgb(var(--og-line) / <alpha-value>)',
+          soft: 'rgb(var(--og-line-soft) / <alpha-value>)',
+          strong: 'rgb(var(--og-line-strong) / <alpha-value>)',
         },
         accent: {
-          DEFAULT: '#B23A2C',
-          hover: '#9A2F22',
-          soft: '#E8D5CE',
-          deeper: '#7A2519',
+          DEFAULT: 'rgb(var(--og-accent) / <alpha-value>)',
+          hover: 'rgb(var(--og-accent-hover) / <alpha-value>)',
+          soft: 'rgb(var(--og-accent-soft) / <alpha-value>)',
+          deeper: 'rgb(var(--og-accent-deeper) / <alpha-value>)',
         },
         moss: {
-          DEFAULT: '#5C6B3D',
-          soft: '#DCE0CC',
+          DEFAULT: 'rgb(var(--og-moss) / <alpha-value>)',
+          soft: 'rgb(var(--og-moss-soft) / <alpha-value>)',
         },
         azure: {
-          DEFAULT: '#3A6B8C',
-          soft: '#D2DEE6',
+          DEFAULT: 'rgb(var(--og-azure) / <alpha-value>)',
+          soft: 'rgb(var(--og-azure-soft) / <alpha-value>)',
         },
         ochre: {
-          DEFAULT: '#9A6E20',
-          soft: '#E9DFC4',
-          // Darker amber for small labels + filled chips. The DEFAULT #9A6E20
-          // only clears ~4.1:1 on the paper card bg (globals.css says as much) —
-          // below WCAG AA (4.5:1). `deep` (= the --beacon-waiting value) reaches
-          // 5.29:1 as text/fill; `deeper` 6.91:1 for the hover of a filled pill
-          // (mirrors accent's DEFAULT→hover darkening). Used by the Board card
-          // priority 'high' chip + selected pill (src/lib/boardPriority.ts).
-          deep: '#855E17',
-          deeper: '#6E4E13',
+          DEFAULT: 'rgb(var(--og-ochre) / <alpha-value>)',
+          soft: 'rgb(var(--og-ochre-soft) / <alpha-value>)',
+          deep: 'rgb(var(--og-ochre-deep) / <alpha-value>)',
+          deeper: 'rgb(var(--og-ochre-deeper) / <alpha-value>)',
         },
         // Shared/invited semantic accent — a folder-less collab project shared
         // WITH the user wears this (and only this) so it reads at a glance as
-        // shared, distinct from the user's own (local) cards. A dusty indigo-
-        // violet, maximally separable from accent(red)/azure(blue)/moss(green)/
-        // ochre(amber). DEFAULT clears WCAG AA on the paper card bg #F8F4E8
-        // (6.81:1) and on its own soft tint (5.63:1); soft is the badge/icon fill.
+        // shared, distinct from the user's own (local) cards.
         invite: {
-          DEFAULT: '#5E4A87',
-          soft: '#E4DCEF',
+          DEFAULT: 'rgb(var(--og-invite) / <alpha-value>)',
+          soft: 'rgb(var(--og-invite-soft) / <alpha-value>)',
         },
       },
       fontFamily: {
@@ -84,10 +76,10 @@ const config: Config = {
         'cartographic': '0.18em',
       },
       boxShadow: {
-        card: '0 1px 0 rgba(42,31,26,0.04), 0 1px 2px rgba(42,31,26,0.06)',
-        'card-hover': '0 1px 0 rgba(42,31,26,0.06), 0 6px 14px rgba(42,31,26,0.08)',
-        'card-active': '0 1px 0 rgba(178,58,44,0.20), 0 8px 24px rgba(178,58,44,0.18)',
-        'ink-inset': 'inset 0 0 0 1px rgba(42,31,26,0.06)',
+        card: '0 1px 0 rgb(var(--og-shadow) / 0.04), 0 1px 2px rgb(var(--og-shadow) / 0.06)',
+        'card-hover': '0 1px 0 rgb(var(--og-shadow) / 0.06), 0 6px 14px rgb(var(--og-shadow) / 0.08)',
+        'card-active': '0 1px 0 rgb(var(--og-accent) / 0.20), 0 8px 24px rgb(var(--og-accent) / 0.18)',
+        'ink-inset': 'inset 0 0 0 1px rgb(var(--og-shadow) / 0.06)',
       },
       // Overlay layer scale — the single source of truth for the stacking order
       // of full-screen panels and modal surfaces. Consumed by <Overlay> via

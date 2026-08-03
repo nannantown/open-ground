@@ -15,6 +15,7 @@ import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
 import { CollabSharedDialog } from '@/components/canvas/CollabSharedDialog'
 import { useCollab } from '@/lib/collab/RealtimeContext'
+import { applyTheme, themeFromSettings } from '@/lib/theme'
 import { useExperiments } from '@/lib/modules/useExperiments'
 import { useJoinDeepLink } from '@/lib/useJoinDeepLink'
 import { Onboarding } from '@/components/Onboarding'
@@ -312,6 +313,10 @@ export default function App() {
       const canvas = { ...data.canvas, positions }
       setProjects(data.projects)
       setSettings(data.settings)
+      // Colour theme: settings.json is the source of truth — re-stamp
+      // html[data-theme] (and the pre-paint localStorage mirror) on every load
+      // so a hand-edited or another-window change lands here too.
+      applyTheme(themeFromSettings(data.settings))
       // If an edit landed while we were fetching (or the flush above failed),
       // the server snapshot is stale: keep the local canvas — its save is still
       // pending — and only lay out any cards it doesn't know yet.

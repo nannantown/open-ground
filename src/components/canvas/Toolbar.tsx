@@ -10,10 +10,14 @@ import {
   HelpCircle,
   Blocks,
   DoorOpen,
+  Moon,
+  Sun,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import { applyTheme, currentTheme, persistTheme, type ThemeName } from '@/lib/theme'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
+import { OpenGroundWordmark } from '@/components/canvas/OpenGroundWordmark'
 import { IconButton } from '@/components/canvas/IconButton'
 import { NotificationBell } from '@/components/canvas/NotificationBell'
 import type { AppNotification } from '@/lib/types'
@@ -94,14 +98,9 @@ export const Toolbar = ({
             to the wordmark inside a nested leading-none group (its line-box would
             otherwise inflate the wrapper and push the wordmark off the mark's
             centre). The outer gap-3.5 still spaces the · / project count. */}
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2 text-ink">
           <OpenGroundMark size={18} className="shrink-0 select-none" />
-          <img
-            src="/brand/openground-wordmark.svg"
-            alt="OPEN GROUND"
-            className="h-[15px] w-auto shrink-0 select-none"
-            draggable={false}
-          />
+          <OpenGroundWordmark className="shrink-0 select-none [&>svg]:h-[15px] [&>svg]:w-auto [&>svg]:block" />
           {/* Beta tag — OPEN GROUND is still beta; breaking changes may land. */}
           <span
             // inline-flex + a 1px-top-heavy pad optically centres the all-caps
@@ -173,6 +172,8 @@ export const Toolbar = ({
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />
           </IconButton>
+          <ThemeToggle />
+
           {/* In-app notifications (Ground お知らせ). Shown only when notifications
               are wired (the app-login build); the bell stays present-but-quiet
               with no badge when there's nothing unread / signed out. */}
@@ -201,6 +202,38 @@ export const Toolbar = ({
         </div>
       </div>
     </div>
+  )
+}
+
+// Light ⇄ dark toggle (第三弾「計器盤」). The applied theme lives on
+// html[data-theme] (stamped by applyTheme AND re-stamped by App's settings
+// load), so the icon tracks the ATTRIBUTE via a MutationObserver rather than
+// trusting local state — a concurrent settings refresh can flip the theme
+// under us and the moon/sun must follow.
+const ThemeToggle = () => {
+  const { t } = useT()
+  const [theme, setTheme] = useState<ThemeName>(() => currentTheme())
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(currentTheme()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => observer.disconnect()
+  }, [])
+  const toggle = () => {
+    const next: ThemeName = currentTheme() === 'dark' ? 'light' : 'dark'
+    applyTheme(next) // instant switch; the observer updates the icon
+    void persistTheme(next) // settings.json is the durable truth
+  }
+  return (
+    <IconButton
+      onClick={toggle}
+      title={theme === 'dark' ? t('toolbar.themeLight') : t('toolbar.themeDark')}
+    >
+      {theme === 'dark' ? (
+        <Sun size={13} strokeWidth={1.75} />
+      ) : (
+        <Moon size={13} strokeWidth={1.75} />
+      )}
+    </IconButton>
   )
 }
 

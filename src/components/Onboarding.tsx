@@ -9,9 +9,10 @@
 // user's responsibility; the app passively REFLECTS whether Claude is connected
 // (a quiet toolbar indicator + a Settings status), never blocks first-run on it.
 import { useT } from '@/i18n/I18nContext'
+import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
+import { OpenGroundWordmark } from '@/components/canvas/OpenGroundWordmark'
 
 const MARK = '/brand/openground-mark.svg'
-const WORDMARK = '/brand/openground-wordmark.svg'
 
 const rise = (ms: number): React.CSSProperties => ({
   animation: 'og-rise 0.6s cubic-bezier(0.22,1,0.36,1) both',
@@ -99,9 +100,9 @@ export function Onboarding({
       <div className="relative flex w-full shrink-0 flex-col justify-center overflow-y-auto border-line bg-bg-card px-10 py-10 shadow-card-hover md:w-[460px] md:border-l">
         <div className="mx-auto w-full max-w-[340px]">
           {/* header: mark + wordmark + beta tag */}
-          <div className="flex items-center gap-2.5" style={rise(0)}>
-            <img src={MARK} alt="" aria-hidden="true" className="h-[28px] w-[28px] select-none" draggable={false} />
-            <img src={WORDMARK} alt="OPEN GROUND" className="h-[20px] w-auto select-none" draggable={false} />
+          <div className="flex items-center gap-2.5 text-ink" style={rise(0)}>
+            <OpenGroundMark size={28} className="shrink-0 select-none" />
+            <OpenGroundWordmark className="select-none [&>svg]:h-[20px] [&>svg]:w-auto [&>svg]:block" />
             <span className="inline-flex shrink-0 select-none items-center rounded-[3px] border border-accent/40 bg-accent/10 px-1.5 pt-[3px] pb-[2px] text-[9px] font-semibold uppercase leading-none tracking-wide text-accent">
               Beta
             </span>
