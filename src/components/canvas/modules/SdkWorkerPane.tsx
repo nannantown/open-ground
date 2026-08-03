@@ -649,19 +649,26 @@ export const SdkWorkerPane = ({
         <div
           ref={feedRef}
           onScroll={onFeedScroll}
-          className="h-full overflow-y-auto px-2.5 py-2 text-[11px] leading-relaxed"
+          className="h-full overflow-y-auto px-6 py-5"
         >
-          {frames.length === 0 ? (
-            <div className="text-ink-faint">{t('projectPanel.swarm.sdk.empty')}</div>
-          ) : (
-            renderItems.map((it) =>
-              it.kind === 'tool' ? (
-                <ToolCard key={it.seq} item={it} />
-              ) : (
-                <EventRow key={it.seq} ev={it.ev} t={t} />
-              ),
-            )
-          )}
+          {/* Document measure (owner feedback 2026-08-03「paddingもないし文字も
+              小さいし強弱がない」): the transcript is a REPORT, so it gets
+              article typography — a capped line length instead of wall-to-wall
+              text, real margins, and a type scale (ProseBlocks). Tool rows stay
+              small and muted on purpose: they are the machinery, not the story. */}
+          <div className="mx-auto w-full max-w-[720px] text-[12px] leading-relaxed">
+            {frames.length === 0 ? (
+              <div className="text-ink-faint">{t('projectPanel.swarm.sdk.empty')}</div>
+            ) : (
+              renderItems.map((it) =>
+                it.kind === 'tool' ? (
+                  <ToolCard key={it.seq} item={it} />
+                ) : (
+                  <EventRow key={it.seq} ev={it.ev} t={t} />
+                ),
+              )
+            )}
+          </div>
         </div>
         {drifted ? (
           <button
@@ -758,7 +765,7 @@ const InlineMd = ({ text }: { text: string }) => {
         typeof p === 'string' ? (
           <span key={i}>{p}</span>
         ) : 'code' in p ? (
-          <code key={i} className="rounded-[3px] bg-bg-inset px-1 font-mono text-[11px] text-ink">
+          <code key={i} className="rounded-[3px] bg-bg-inset px-1.5 py-px font-mono text-[0.88em] text-ink">
             {p.code}
           </code>
         ) : (
@@ -772,13 +779,32 @@ const InlineMd = ({ text }: { text: string }) => {
 }
 
 /** Worker prose as markdown blocks — the research's core readability move. */
+// Article typography for the worker's prose (2026-08-03 owner feedback): base
+// 13.5px/1.75 with a real heading scale and paragraph rhythm — this is the
+// PRIMARY reading surface of the desk. Sub-agent prose stays a size down and
+// muted (a side conversation, not the report).
 const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) => (
-  <div className={subagent ? 'pl-3 text-[11px] text-ink-muted' : 'text-[12px] text-ink'}>
+  <div
+    className={
+      subagent
+        ? 'pl-3 text-[12px] leading-[1.7] text-ink-muted'
+        : 'text-[13.5px] leading-[1.75] text-ink'
+    }
+  >
     {parseMarkdownBlocks(text).map((b, i) => {
       switch (b.kind) {
         case 'heading':
           return (
-            <div key={i} className={`mt-1.5 font-semibold ${b.level === 1 ? 'text-[13px]' : 'text-[12px]'}`}>
+            <div
+              key={i}
+              className={`font-semibold ${
+                b.level === 1
+                  ? 'mb-1.5 mt-5 text-[16px]'
+                  : b.level === 2
+                    ? 'mb-1 mt-4 text-[14.5px]'
+                    : 'mb-1 mt-3 text-[13.5px]'
+              }`}
+            >
               <InlineMd text={b.text} />
             </div>
           )
@@ -786,16 +812,19 @@ const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) =
           return (
             <pre
               key={i}
-              className="my-1 overflow-x-auto rounded-[4px] border border-line-soft bg-bg-inset px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-ink"
+              className="my-2.5 overflow-x-auto rounded-[4px] bg-bg-inset px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink"
             >
               {b.text}
             </pre>
           )
         case 'list':
           return (
-            <ul key={i} className={`my-0.5 ${b.ordered ? 'list-decimal' : 'list-disc'} pl-4`}>
+            <ul
+              key={i}
+              className={`my-2 ${b.ordered ? 'list-decimal' : 'list-disc'} space-y-1 pl-5 marker:text-ink-faint`}
+            >
               {b.items.map((it, j) => (
-                <li key={j} className="my-0.5">
+                <li key={j}>
                   <InlineMd text={it} />
                 </li>
               ))}
@@ -803,7 +832,7 @@ const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) =
           )
         default:
           return (
-            <p key={i} className="my-0.5 whitespace-pre-wrap">
+            <p key={i} className="my-2 whitespace-pre-wrap">
               <InlineMd text={b.text} />
             </p>
           )
@@ -881,7 +910,8 @@ const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
         </div>
       )
     case 'turn_end':
-      return <div className="my-1 border-t border-line-soft" aria-hidden />
+      // A turn boundary is a PAUSE, not a wall — breathing room over a rule.
+      return <div className="my-4 border-t border-line-soft" aria-hidden />
     case 'quota_refusal':
       return (
         <div className="my-1 rounded-[3px] border border-ochre/40 bg-ochre/10 px-2 py-1 text-[10px] text-ochre">
