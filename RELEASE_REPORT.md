@@ -218,3 +218,56 @@ the operator Secrets/dashboard items above (which only gate the *visibility* of 
   also need the cert locally).
 - ❌ No feature/product code changed — release ops only (version string + docs).
 - ✅ All work is on `swarm/w2-0618-185214-91539`, reversible, awaiting commander integration.
+
+---
+
+## 0.11.50: 実機観測ログ 2026-08-03 — packaged `.app` の API を実測
+
+> このセクションは本文書 H1(0.9.1 release prep)とはスコープが別(0.11.50 の実機観測)。
+> 追記位置はカード指示に従い末尾。
+
+`GET /api/health` に応答したのは **署名済みの packaged `.app`**
+(`projectDir: /Applications/OPEN GROUND.app/Contents/Resources/app`, `version: "0.11.50"`)。
+`:5174`(dev サーバ)は無応答(`curl -m 2 http://127.0.0.1:5174/` → 接続不可)で、dev インスタンスは
+存在しない。**以下はすべてこの packaged `.app` 0.11.50 が応答した API から取得した値**
+(2026-08-03 11:16〜11:20 JST・自分で取得。vitest のみワークツリー上で実行)。
+
+- **占有409(経路の確認 + 単体テスト緑・実機の409応答そのものは未取得)**:
+  `WorktreeOccupiedError` の catch(`server/routes/swarm.ts`)が worktree 占有中の再要求に
+  `c.json({ error: e.message, worktree: e.worktree, occupied: true }, 409)` を返すコードパスを
+  目視確認。対応テスト `src/lib/server/swarmWorktreeOccupancy.test.ts` を単体実行(コード変更なし):
+  ```
+  npx vitest run src/lib/server/swarmWorktreeOccupancy.test.ts
+  ✓ src/lib/server/swarmWorktreeOccupancy.test.ts (10 tests) 7ms
+  Test Files  1 passed (1)
+  Tests  10 passed (10)
+  ```
+  実機に対して実際に409応答を受け取った記録ではない(そこは未実測)。
+- **差し戻し通知(実機の journal を観測)**: 本カード自身
+  (`swarm/docs-0-11-50-release-rep-0803-111619-f27f452f638e`)の review→doing 差し戻しが、
+  この packaged `.app` の engine journal へ実際に記録されたことを
+  `GET /api/swarm/orchestrator?path=<このプロジェクトの絶対パス>` の `log[]` で確認:
+  ```
+  2026-08-03T02:17:47.069Z  Board 側の差し戻し(review→doing)を観測 — worker を再作業中へ:
+                             swarm/docs-0-11-50-release-rep-0803-111619-f27f452f638e
+  2026-08-03T02:17:47.071Z  差し戻しを worker の卓に伝えました:
+                             swarm/docs-0-11-50-release-rep-0803-111619-f27f452f638e
+  ```
+  同型のイベントがこのカードの2回目の差し戻しでも `02:19:02.144Z` / `02:19:02.146Z` に再発生。
+  なお「伝えました」は engine の自己申告行であり単独では送達の証拠にならない
+  (auto-memory の実測知見)。より強い裏取り: 実際に worker が再作業してコミット
+  `1f29c04c` を作り、心拍ファイルが `updatedAt: 2026-08-03T02:20:20Z` へ動いた
+  (`~/.openground/swarm/OPEN_GROUND-11c067a6/swarm-docs-0-11-50-release-rep-...json`)。
+  journal の自己申告 + worker 側の実際の応答(コミット・心拍)が揃っており、「届いた」を
+  観測できている。
+- **SDK点火(この packaged `.app` 0.11.50 で1体点火 — 範囲限定の実測)**: 本カード自身の
+  worker を `GET /api/swarm/workers` で確認したところ `runtime: "sdk"`,
+  `sdkSessionId: "0cd5552b-e53b-4908-9695-292cc8f23690"` が入り `terminalId: null`
+  (= PTY 経由ではなく SDK worker として起動)。この `.app` の `startedAt` は
+  `2026-08-03T02:09:24Z`、本カードの dispatch は `2026-08-03T02:16:20Z`(journal 実測、上記)
+  — dispatch は起動後なので、**この packaged `.app`(0.11.50)自身が SDK worker を1体
+  点火した**ことが時系列で確定する。0.11.47/0.11.48 で「配布ビルドでは SDK worker が
+  1体も起動しない」既知事象(auto-memory `reference_electron_node_cannot_require_esm_sdk.md`)
+  の**逆**が本カードの worker 自身で観測できている。ただし配布アプリの受入手順一般
+  (`docs/VERIFICATION.md` §4.1 の言う packaged `.app` を新規に起動して一巡させる検証)を
+  網羅したものではない — 「1体の点火を実測」に範囲を限定する。
