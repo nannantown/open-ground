@@ -120,15 +120,18 @@ describe('runFileTask — spawn-time run-gate re-check (TOCTOU)', () => {
     expect(killTerminal).toHaveBeenCalledTimes(1)
   })
 
-  it('a timeout with no completion marker throws the generic "output file" error', async () => {
-    // Every timeout surfaces the same generic failure: there is no MCP-specific
-    // path any more. runFileTask spawns claude with --strict-mcp-config (it loads
-    // ZERO MCP servers), so the welcome-screen "MCP servers need authentication"
-    // stall is structurally impossible — nothing to special-case.
+  it('a timeout with no completion marker names ITSELF (timed out), not the generic error', async () => {
+    // 2026-08-03: a session still alive at the deadline throws "timed out" so
+    // the client can say 時間切れ — the generic wording hid the ceiling from
+    // the owner (their real generate died as an anonymous 「失敗」). The
+    // generic "output file" error is reserved for a session that EXITED
+    // without completing. (No MCP-specific path exists either way:
+    // --strict-mcp-config loads zero MCP servers, so the welcome-screen
+    // "MCP servers need authentication" stall is structurally impossible.)
     nextChunk = 'Cogitating…\nstill working, no marker yet\n'
     await expect(
       runFileTask({ cwd: dir, prompt: 'p', file, timeoutMs: 50 }),
-    ).rejects.toThrow(/output file/i)
+    ).rejects.toThrow(/timed out/i)
   })
 })
 

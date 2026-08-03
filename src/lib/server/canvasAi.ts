@@ -102,7 +102,13 @@ export const containsDoneMarker = (raw: string): boolean => {
 
 const MAX_BUFFER = 64_000
 const POLL_MS = 500
-const DEFAULT_TIMEOUT_MS = 180_000
+// 480s since 2026-08-03 (was 180s): a full mock/screen generation legitimately
+// runs for minutes, and the owner's real-world generate died as a generic
+// 「失敗」 that was almost certainly this ceiling (the machinery reproduced
+// fine in 41s on a trivial brief). The job is background + cancellable, so a
+// longer ceiling costs nothing; the timeout now also names itself in the
+// error so the client can say 時間切れ instead of guessing.
+const DEFAULT_TIMEOUT_MS = 480_000
 
 // Model is pinned to sonnet: both tasks emit structured output (JSON schemas,
 // JSX source). haiku visibly breaks JSX / drops schema fields; sonnet is the
@@ -130,6 +136,10 @@ export interface FileTaskOpts {
   /** Abort (e.g. the HTTP request died). A queued task that's already aborted
    *  never spawns its claude session; an in-flight one is killed. */
   signal?: AbortSignal
+  /** CLI model alias for this run (owner-picked, 2026-08-03). Unset ⇒ the
+   *  CANVAS_AI_MODEL default (sonnet). Routes narrow to SWARM_MODEL_TIERS ∩
+   *  the allowed-models mask before it reaches here. */
+  model?: string
 }
 
 /** Run one file-handoff claude task: spawn a claude PTY session in the handoff
@@ -167,7 +177,7 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
     agentSessionId: newId(),
     initialPrompt: opts.prompt,
     permissionMode: 'bypass',
-    model: CANVAS_AI_MODEL,
+    model: opts.model ?? CANVAS_AI_MODEL,
     name: 'canvas-ai',
     appContext: false,
     // Non-sandboxed, bypass: ignore user-scope ~/.claude.json mcpServers so a
@@ -218,7 +228,15 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
       const content = await readFile(opts.file, 'utf8').catch(() => '')
       if (content && content !== (opts.initialContent ?? '')) return content
     }
-    throw new Error('canvas AI session ended without completing its output file')
+    // Name the two failure shapes apart: the client turns "timed out" into an
+    // honest 時間切れ message (the generic wording hid the 180s ceiling from
+    // the owner on 2026-08-03). `exited` false at deadline ⇒ the session was
+    // still alive and simply ran out of time.
+    throw new Error(
+      exited || sub?.info.finishedAt
+        ? 'canvas AI session ended without completing its output file'
+        : 'canvas AI session timed out',
+    )
   } finally {
     opts.signal?.removeEventListener('abort', onAbort)
     sub?.unsubscribe()
@@ -558,7 +576,7 @@ export const buildGenerateElementsPrompt = (file: string, userPrompt: string): s
  *  positioned relative to (0,0) — the client offsets to the viewport. */
 export const generateCanvasElements = async (
   prompt: string,
-  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  opts: { timeoutMs?: number; signal?: AbortSignal; model?: string } = {},
 ): Promise<CanvasElement[]> => {
   const seed = '[]\n'
   const { file, dir } = await makeTmpFile('elements.json', seed)
@@ -574,6 +592,7 @@ export const generateCanvasElements = async (
       // Safe: parseGeneratedElements structurally validates (JSON + zod).
       salvage: true,
       signal: opts.signal,
+      model: opts.model,
     })
     return parseGeneratedElements(content)
   } finally {
@@ -629,7 +648,7 @@ export const buildTweakScreenPrompt = (file: string, req: TweakScreenRequest): s
  *  silent no-op would gaslight the user. */
 export const tweakScreenSource = async (
   req: TweakScreenRequest,
-  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  opts: { timeoutMs?: number; signal?: AbortSignal; model?: string } = {},
 ): Promise<{ source: string; unchanged?: boolean }> => {
   const name = req.framework === 'react' ? 'screen.tsx' : 'screen.html'
   const { file, dir } = await makeTmpFile(name, req.source)
@@ -644,6 +663,7 @@ export const tweakScreenSource = async (
       // NO salvage: source has no structural validation downstream, so a
       // half-finished rewrite must never come back as an HTTP 200.
       signal: opts.signal,
+      model: opts.model,
     })
     if (!content.trim()) throw new Error('the tweak emptied the source')
     if (content === req.source) {
@@ -822,7 +842,13 @@ export interface GenerateJobDeps {
  *  the elements are appended to `canvasId` at a non-overlapping position,
  *  server-side. */
 export const startGenerateJob = (
-  args: { projectPath: string; canvasId: string; prompt: string; timeoutMs?: number },
+  args: {
+    projectPath: string
+    canvasId: string
+    prompt: string
+    timeoutMs?: number
+    model?: string
+  },
   deps: GenerateJobDeps = {},
 ): string => {
   const generate = deps.generate ?? generateCanvasElements
@@ -830,7 +856,11 @@ export const startGenerateJob = (
   return startJob(
     { kind: 'generate', projectPath: args.projectPath, canvasId: args.canvasId },
     async (signal) => {
-      const elements = await generate(args.prompt, { signal, timeoutMs: args.timeoutMs })
+      const elements = await generate(args.prompt, {
+        signal,
+        timeoutMs: args.timeoutMs,
+        model: args.model,
+      })
       // A cancel that lands after claude finished but before we persist must
       // still win — otherwise a "cancelled" run would silently write to the
       // canvas. Re-check here so the abort short-circuits the persist.
@@ -875,6 +905,7 @@ export const startTweakJob = (
     elementId: string
     req: TweakScreenRequest
     timeoutMs?: number
+    model?: string
   },
   deps: TweakJobDeps = {},
 ): string => {
@@ -888,7 +919,11 @@ export const startTweakJob = (
       elementId: args.elementId,
     },
     async (signal) => {
-      const { source, unchanged } = await tweak(args.req, { signal, timeoutMs: args.timeoutMs })
+      const { source, unchanged } = await tweak(args.req, {
+        signal,
+        timeoutMs: args.timeoutMs,
+        model: args.model,
+      })
       // Honour a cancel that landed after claude finished but before persist (see
       // startGenerateJob) — a cancelled tweak must not overwrite the element.
       if (signal.aborted) throw new Error('canvas AI task aborted')

@@ -352,6 +352,9 @@ export interface GenerateCanvasAiRequest {
   path: string
   canvasId: string
   prompt: string
+  /** CLI model alias (a SWARM_MODEL_TIERS member). Absent/unknown/mask-denied
+   *  ⇒ the server's canvas default (sonnet) — narrowed server-side. */
+  model?: string
 }
 /** POST /api/canvas/ai/tweak — start a screen/mock tweak job: claude rewrites
  *  the picked element's source per an instruction aimed at a node inside its

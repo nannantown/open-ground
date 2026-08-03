@@ -576,6 +576,24 @@ export const CanvasWorkspace = ({
   const surfaceRef = useRef<HTMLDivElement>(null)
   const [genOpen, setGenOpen] = useState(false)
   const [genPrompt, setGenPrompt] = useState('')
+  // Owner-picked generation model (2026-08-03), remembered per machine. The
+  // server narrows to known+allowed tiers and defaults to sonnet, so a stale
+  // stored value degrades harmlessly.
+  const [genModel, setGenModelState] = useState<string>(() => {
+    try {
+      return localStorage.getItem('og-canvas-ai-model') ?? 'sonnet'
+    } catch {
+      return 'sonnet'
+    }
+  })
+  const setGenModel = (m: string) => {
+    setGenModelState(m)
+    try {
+      localStorage.setItem('og-canvas-ai-model', m)
+    } catch {
+      // per-machine nicety only
+    }
+  }
   const [genPending, setGenPending] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
   // Signed-out (503 { claudeLoggedOut }): the run gate refuses to spawn a
@@ -751,7 +769,14 @@ export const CanvasWorkspace = ({
           setGenOpen(false)
           setGenPrompt('')
         } else {
-          setGenError(t('canvas.generate.error'))
+          // The server names the failure (job.error) — say 時間切れ when that
+          // is what happened instead of the generic line that hid the 180s
+          // ceiling from the owner on 2026-08-03.
+          setGenError(
+            /timed out/.test(job.error ?? '')
+              ? t('canvas.generate.timeout')
+              : t('canvas.generate.error'),
+          )
         }
         finish()
       } catch {
@@ -878,6 +903,7 @@ export const CanvasWorkspace = ({
         path: projectPath,
         canvasId: canvasRef.current.id,
         prompt,
+        model: genModel,
       }
       // We do NOT hold this request for the whole run — it returns a jobId fast.
       // The run lives server-side and survives this component unmounting.
@@ -1227,6 +1253,20 @@ export const CanvasWorkspace = ({
                 </>
               ) : (
                 <>
+                  {/* Model pick (2026-08-03 owner request). Compact select in
+                      the bar; server-side narrowing means an unknown choice
+                      quietly falls back to the default. */}
+                  <select
+                    value={genModel}
+                    onChange={(e) => setGenModel(e.target.value)}
+                    aria-label={t('canvas.generate.model')}
+                    title={t('canvas.generate.model')}
+                    className="h-7 shrink-0 cursor-pointer rounded-full border border-line bg-transparent px-2 text-[11px] text-ink-muted transition-colors hover:border-ink-faint hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  >
+                    <option value="sonnet">{t('canvas.generate.modelSonnet')}</option>
+                    <option value="opus">{t('canvas.generate.modelOpus')}</option>
+                    <option value="haiku">{t('canvas.generate.modelHaiku')}</option>
+                  </select>
                   <button
                     type="button"
                     onClick={() => void submitGenerate()}

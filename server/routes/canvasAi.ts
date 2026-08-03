@@ -38,6 +38,22 @@ import {
   startTweakJob,
 } from '@/lib/server/canvasAi'
 import type { TweakScreenRequest } from '@/lib/types'
+import { SWARM_MODEL_TIERS, type SwarmModelTier } from '@/lib/types'
+import { getAllowedModelTiers } from '@/lib/server/store'
+
+/** Narrow an untrusted `model` to a KNOWN tier the allowed-models mask permits
+ *  (the same mask every claude spawn path consults). Anything else — absent,
+ *  unknown alias, a mask-disabled tier — returns undefined so the run falls
+ *  back to the canvas default (sonnet) instead of erroring: a stale client
+ *  must not lose a generation over a model name. */
+export const narrowCanvasAiModel = async (raw: unknown): Promise<SwarmModelTier | undefined> => {
+  if (typeof raw !== 'string') return undefined
+  const tier = SWARM_MODEL_TIERS.find((t) => t === raw)
+  if (!tier) return undefined
+  const allowed = await getAllowedModelTiers().catch(() => null)
+  if (allowed && allowed[tier] === false) return undefined
+  return tier
+}
 
 // Size caps — these bodies feed a prompt file verbatim, so reject absurd
 // payloads up front instead of burning a claude session on them.
@@ -62,7 +78,7 @@ export const canvasAiRoutes = new Hono()
   .post('/api/canvas/ai/generate', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    let body: { canvasId?: unknown; prompt?: unknown }
+    let body: { canvasId?: unknown; prompt?: unknown; model?: unknown }
     try {
       body = await c.req.json()
     } catch {
@@ -73,11 +89,12 @@ export const canvasAiRoutes = new Hono()
     if (!canvasId) return c.json({ error: 'canvasId is required' }, 400)
     if (!prompt) return c.json({ error: 'prompt is required' }, 400)
     if (prompt.length > MAX_PROMPT_LEN) return c.json({ error: 'prompt too long' }, 400)
+    const model = await narrowCanvasAiModel(body.model)
     // Pre-flight BEFORE creating a job, so a missing / signed-out CLI surfaces
     // the same 503 CTA the client already handles (no orphan job is created).
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
-    const jobId = startGenerateJob({ projectPath: path, canvasId, prompt })
+    const jobId = startGenerateJob({ projectPath: path, canvasId, prompt, model })
     return c.json({ jobId })
   })
   // ── POST /api/canvas/ai/tweak ─────────────────────────────────────────────
@@ -93,6 +110,7 @@ export const canvasAiRoutes = new Hono()
       source: string
       framework: string
       instruction: string
+      model: unknown
       element: { tag?: unknown; classes?: unknown; text?: unknown; html?: unknown }
     }>
     try {
@@ -132,9 +150,10 @@ export const canvasAiRoutes = new Hono()
         html: str(body.element.html, MAX_ELEMENT_HTML),
       },
     }
+    const model = await narrowCanvasAiModel(body.model)
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
-    const jobId = startTweakJob({ projectPath: path, canvasId, elementId, req })
+    const jobId = startTweakJob({ projectPath: path, canvasId, elementId, req, model })
     return c.json({ jobId })
   })
   // ── GET /api/canvas/ai/active ─────────────────────────────────────────────

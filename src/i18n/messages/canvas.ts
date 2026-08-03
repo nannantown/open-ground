@@ -20,6 +20,12 @@ export const canvas = {
     'canvas.generate.hint': 'This can take 30–60 seconds…',
     'canvas.generate.cancel': 'Cancel generation',
     'canvas.generate.error': 'Generation failed. Try again.',
+    'canvas.generate.timeout':
+      'It ran out of time. Try again — or pick a shorter brief or a faster model.',
+    'canvas.generate.model': 'Model',
+    'canvas.generate.modelSonnet': 'Sonnet · standard',
+    'canvas.generate.modelOpus': 'Opus · best quality',
+    'canvas.generate.modelHaiku': 'Haiku · fastest',
     // The server was restarted (full process swap) while the run was in flight,
     // so its in-memory job — and result — was lost. Distinct from a plain
     // failure so the user knows it was interrupted, not rejected; the prompt is
@@ -210,6 +216,12 @@ export const canvas = {
     'canvas.generate.close': '閉じる',
     'canvas.generate.hint': '数十秒かかります…',
     'canvas.generate.error': '生成に失敗しました。もう一度お試しください。',
+    'canvas.generate.timeout':
+      '時間切れになりました。もう一度試すか、指示を短くするか、速いモデルをお試しください。',
+    'canvas.generate.model': 'モデル',
+    'canvas.generate.modelSonnet': 'Sonnet・標準',
+    'canvas.generate.modelOpus': 'Opus・高品質',
+    'canvas.generate.modelHaiku': 'Haiku・高速',
     'canvas.generate.interrupted':
       'サーバの再起動で生成が中断されました。もう一度お試しください。',
     'canvas.generate.claudeMissing':
