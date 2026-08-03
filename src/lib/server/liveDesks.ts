@@ -26,7 +26,12 @@
 // it at a call site: a second pool is exactly the kind of thing a call site
 // forgets, and this file is where the next reader will look.
 
-import { listActiveTerminalCwds, listActiveTerminals, killTerminalsByCwdAndWait } from './terminal'
+import {
+  listActiveTerminalCwds,
+  listActiveTerminals,
+  listPtySafetyViews,
+  killTerminalsByCwdAndWait,
+} from './terminal'
 import {
   isSdkSessionLive,
   listActiveSdkCwds,
@@ -34,9 +39,15 @@ import {
   terminateSdkSessionsInDir,
   isSdkSessionReaped,
 } from './sdkSession'
+import type { SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
+import { projectsDataRootDir } from './paths'
 import { sep } from 'path'
-import type { ActiveTerminalsResponse, ClaudeBeaconStatus } from '../types'
+import type {
+  ActiveTerminalsResponse,
+  ClaudeBeaconStatus,
+  UpdateRestartSafetyResponse,
+} from '../types'
 
 /** Every directory a LIVE desk is working in, from BOTH pools. Deduped, unordered.
  *
@@ -182,6 +193,53 @@ export const stopAllDesksInDirAndWait = async (
     if (now() >= deadline) return false // still occupied — refuse the delete
     await nap(pollMs)
   }
+}
+
+// ─── Auto-update restart safety ─────────────────────────────────────────────
+// "May the Electron shell restart the app RIGHT NOW to apply a downloaded
+// update?" — a who-is-alive question, so it lives HERE (both pools, one seam).
+//
+// The policy (2026-08-03, hands-free updates):
+//   BLOCKS:  claude mid-generation in either pool (the in-flight turn is
+//            unrecoverable), and any visible user PTY pane (a user terminal —
+//            claude or plain shell — is user state with no resume machinery).
+//   ALLOWS:  resting desks (補給官/司令官 — conversation resume by design),
+//            swarm workers at rest in the central worktrees area (roster
+//            recovery + conversation resume, and their edits live on disk),
+//            hidden utility sessions not generating, and quota-parked SDK
+//            sessions (parked BECAUSE nothing can proceed).
+
+/** Pure core, unit-tested directly (updateRestartSafety.test.ts). `engine` on a
+ *  PTY view means its cwd sits under the central data root — engine-owned. */
+export const computeRestartSafety = (
+  ptys: readonly { desk: boolean; hidden: boolean; engine: boolean; claudeWorking: boolean }[],
+  sdkStatuses: readonly SdkSessionStatus[],
+): UpdateRestartSafetyResponse => {
+  const generating =
+    ptys.filter((p) => p.claudeWorking).length +
+    sdkStatuses.filter((s) => s === 'working' || s === 'starting').length
+  const userPtys = ptys.filter((p) => !p.desk && !p.hidden && !p.engine).length
+  return { safe: generating === 0 && userPtys === 0, generating, userPtys }
+}
+
+/** The live answer, from BOTH pools. Engine-owned cwds are recognised by
+ *  prefix against the canonicalized central data root (~/.openground/projects/
+ *  — user projects never live there; the sep-terminated compare mirrors
+ *  isDirOccupied so `…/projects-evil` can't match). */
+export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse> => {
+  const centralRoot = await canonicalize(projectsDataRootDir())
+  const ptys = await Promise.all(
+    listPtySafetyViews().map(async (v) => ({
+      desk: v.desk,
+      hidden: v.hidden,
+      claudeWorking: v.claudeWorking,
+      engine: (await canonicalize(v.cwd)).startsWith(centralRoot + sep),
+    })),
+  )
+  const sdkStatuses = listSdkSessions()
+    .filter((s) => isSdkSessionLive(s))
+    .map((s) => s.status)
+  return computeRestartSafety(ptys, sdkStatuses)
 }
 
 export const listAllActiveDesks = (): ActiveTerminalsResponse => {

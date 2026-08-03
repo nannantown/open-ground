@@ -5026,6 +5026,11 @@ const SWARM_CODE_PATHS: readonly RegExp[] = [
   // destructive consumer of that answer; routes/terminal = the PTY desk surface.
   /^src\/lib\/server\/(workerRuntime|liveDesks|worktreeCleanup)[^/]*\.ts$/,
   /^server\/routes\/terminal\.ts$/,
+  // misc.ts joined family (b) 2026-08-03: GET /api/update/restart-safety calls
+  // the liveDesks seam (the Electron shell's "may I restart the app on top of
+  // whatever is running?" verdict), so changes here must pay for the
+  // swarm-safety suite like every other seam importer.
+  /^server\/routes\/misc\.ts$/,
 ]
 
 /** Does this changed-file set (repo-relative paths) touch any swarm code? Pure — the

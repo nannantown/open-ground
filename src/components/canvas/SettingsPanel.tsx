@@ -140,6 +140,8 @@ export const SettingsPanel = ({
   // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
+  // Hands-free updates (settings.autoUpdate) — same pattern again.
+  const [autoUpdateOn, setAutoUpdateState] = useState(settings.autoUpdate === true)
   // Non-persisted placeholder for the Display name input: the user's global
   // git identity, served by GET /api/settings as `suggestedDisplayName`.
   const [suggestedName, setSuggestedName] = useState<string | null>(null)
@@ -255,6 +257,18 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       lockdownMode: next,
+    })
+  }
+
+  const setAutoUpdate = (next: boolean) => {
+    if (next === autoUpdateOn) return
+    setAutoUpdateState(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      autoUpdate: next,
     })
   }
 
@@ -407,6 +421,22 @@ export const SettingsPanel = ({
               onBlur={flush}
               placeholder={suggestedName ?? ''}
               className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+            />
+          </Section>
+
+          {/* Hands-free updates — default OFF (the shipped behaviour: download +
+              explicit restart dialog). ON removes the dialog: the update applies
+              itself only when the user is away AND nothing unrecoverable runs
+              (electron/autoUpdatePolicy.js + GET /api/update/restart-safety),
+              plus on any normal quit. Same instant-persist toggle idiom as
+              lockdown/experiments. */}
+          <Section heading={t('settings.autoUpdate.heading')} hint={t('settings.autoUpdate.hint')}>
+            <ExperimentToggle
+              label={t('settings.autoUpdate.label')}
+              value={autoUpdateOn}
+              onChange={setAutoUpdate}
+              offLabel={t('settings.experiments.off')}
+              onLabel={t('settings.experiments.on')}
             />
           </Section>
 

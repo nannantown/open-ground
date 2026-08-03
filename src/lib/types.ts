@@ -194,6 +194,17 @@ export interface Settings {
    *  localStorage('og-theme') for a flash-free first paint. User-settable;
    *  setUserSettings narrows to the two literals and DROPS anything else. */
   theme?: 'light' | 'dark'
+  /** Hands-free updates (2026-08-03, owner request "毎回するのが面倒"). Default
+   *  OFF = the conservative shipped behaviour (auto-download + an explicit
+   *  restart dialog). `true` removes the dialog: the update downloads silently
+   *  and is APPLIED automatically, but only at a provably safe moment — the
+   *  window has been unfocused ≥30min AND the server's restart-safety probe
+   *  (GET /api/update/restart-safety) reports no claude generating and no open
+   *  user terminal panes. Any app quit also applies it (autoInstallOnAppQuit).
+   *  Read by the Electron MAIN process straight from settings.json per tick
+   *  (electron/autoUpdatePolicy.js — the lockdown.js pattern), so toggling
+   *  takes effect without a restart. Stored as a REAL boolean (narrowed). */
+  autoUpdate?: boolean
   /** Owner-only experiment toggles (hidden, default off). The RAW stored
    *  switches — the resolved gate ANDs each with the owner role server-side
    *  (see {@link ExperimentsResponse} / resolveExperiments), so a non-owner who
@@ -2117,6 +2128,23 @@ export interface ClaudeActivity {
 export interface ActiveTerminalsResponse {
   cwds: string[]
   claude: ClaudeActivity[]
+}
+
+/** Response of GET /api/update/restart-safety — the server's answer to "may the
+ *  Electron shell restart the app RIGHT NOW to apply a downloaded update
+ *  without destroying anything that can't come back?". Computed across BOTH
+ *  desk pools (liveDesks.updateRestartSafety). `safe` is the verdict; the
+ *  counts are the explanation (surfaced in main-process logs).
+ *  - `generating`: claude sessions mid-generation (either pool) — cutting one
+ *    loses the in-flight turn, so any > 0 blocks.
+ *  - `userPtys`: visible non-desk, non-engine PTY panes (user terminals,
+ *    including plain shells) — user state with no resume machinery, blocks.
+ *  Resting desks (補給官/司令官) and swarm workers do NOT block: they resume by
+ *  design (conversation --resume + roster recovery). */
+export interface UpdateRestartSafetyResponse {
+  safe: boolean
+  generating: number
+  userPtys: number
 }
 
 // ---- Auth (optional Google/GitHub login via Supabase Auth) ----------------

@@ -403,6 +403,9 @@ const POOL_API: Record<string, 'pool' | 'pure'> = {
   listActiveTerminalCwds: 'pool',
   listActiveTerminals: 'pool',
   listOwnerDeskTerminals: 'pool',
+  // Enumerates every live session for the auto-update restart-safety verdict
+  // (liveDesks.updateRestartSafety) — a pool read like the two list* above.
+  listPtySafetyViews: 'pool',
   listLiveDesksIn: 'pool',
   listPanesForTask: 'pool',
   isClaudeSessionLive: 'pool',
@@ -658,9 +661,15 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/liveDesks.ts': {
     tier: 'both-pools',
-    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait.',
-    ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals'],
-    sdkCalls: ['canonicalLiveDeskCwds', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
+    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety).',
+    ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listPtySafetyViews'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
+  },
+  'server/routes/misc.ts': {
+    tier: 'both-pools',
+    why: 'GET /api/update/restart-safety — the Electron shell asks "may I restart the app RIGHT NOW to apply a downloaded update?" and the answer must come from the liveDesks seam (both pools in one call): a one-pool answer here authorises an unattended restart on top of a live SDK worker — the same authorises-destruction shape as worktreeCleanup 0731.',
+    ptyFns: [],
+    sdkCalls: ['updateRestartSafety'],
   },
   'server/routes/project.ts': {
     tier: 'both-pools',

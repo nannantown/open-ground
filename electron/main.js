@@ -46,6 +46,12 @@ const {
   runRegressionSteps,
 } = require('./selfUpdate')
 const { hasLiveForkedChildren, applyDownloadedUpdate } = require('./autoUpdate')
+const {
+  AUTO_APPLY_POLL_MS,
+  SAFETY_FETCH_TIMEOUT_MS,
+  autoUpdateFromSettingsRaw,
+  decideAutoApply,
+} = require('./autoUpdatePolicy')
 const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath } = require('./lockdown')
 const { decideCrashResponse } = require('./crashRespawn')
 const {
@@ -611,6 +617,13 @@ function createWindow() {
     if ((input.control || input.meta) && ['=', '+', '-', '0'].includes(input.key)) {
       event.preventDefault()
     }
+  })
+
+  // Hands-free updates: the auto-apply policy needs "how long has the user
+  // been away" — track the last blur. Focus resets nothing (the policy reads
+  // isFocused() live); blur just stamps when away-time started.
+  mainWindow.on('blur', () => {
+    lastBlurAt = Date.now()
   })
 
   mainWindow.on('closed', () => {
@@ -1864,6 +1877,12 @@ async function start() {
 // explicit user action (a dialog button on 'update-downloaded'). The
 // minimal contract is "download + tell the user"; the restart is opt-in.
 //
+// EXCEPTION (2026-08-03, settings.autoUpdate — default OFF): with the
+// hands-free toggle on, the dialog is skipped and the update applies ITSELF,
+// but only when the user is away (unfocused ≥30min) AND the forked server's
+// restart-safety probe proves nothing unrecoverable is running — plus on any
+// normal quit (autoInstallOnAppQuit). Policy: electron/autoUpdatePolicy.js.
+//
 // The user-INITIATED counterpart is the menu's "Check for Updates…"
 // (checkForUpdatesInteractive below, decisions in electron/updateMenu.js). Every
 // path above is the app deciding to act ON the user, and all of them are silent
@@ -1890,6 +1909,83 @@ let autoUpdaterInit = 'pending'
 let downloadedUpdate = null
 // Guard against two manual checks racing two dialogs.
 let manualCheckInFlight = false
+
+// ── Hands-free updates (settings.autoUpdate, electron/autoUpdatePolicy.js) ──
+// When the window last lost focus (epoch ms), or null while focused. Fed by the
+// blur/focus listeners installed in start(); the policy needs "how long has the
+// user been away", and a window that has NEVER focused (launched to the
+// background) counts as away since launch.
+let lastBlurAt = Date.now()
+// The polling timer that re-evaluates the auto-apply decision while an update
+// sits downloaded. One at a time; cleared when it fires the apply.
+let autoApplyTimer = null
+
+/** settings.autoUpdate, re-read from disk per call (the lockdown.js pattern —
+ *  toggling in Settings takes effect at the next tick, no restart). */
+function autoUpdateEnabled() {
+  try {
+    return autoUpdateFromSettingsRaw(require('fs').readFileSync(settingsFilePath(), 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+/** Ask the forked server whether a restart destroys anything right now.
+ *  null (unreachable / non-OK / timeout) is FAIL-CLOSED to "unsafe" by the
+ *  policy — a dead server probably means mid-boot or mid-teardown, both of
+ *  which are wrong moments to restart on top of. */
+async function fetchRestartSafety() {
+  try {
+    const res = await fetch(`http://127.0.0.1:${FIXED_PORT}/api/update/restart-safety`, {
+      signal: AbortSignal.timeout(SAFETY_FETCH_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+/** One policy evaluation. Applies the update (same ordered teardown as the
+ *  dialog path) when every condition holds; otherwise just logs why not. */
+async function maybeAutoApplyUpdate() {
+  const focused = mainWindow ? mainWindow.isFocused() : false
+  const unfocusedMs = focused ? 0 : Date.now() - lastBlurAt
+  const decision = decideAutoApply({
+    enabled: autoUpdateEnabled(),
+    lockdown: isLockdownEnabled(),
+    hasDownloaded: !!downloadedUpdate,
+    unfocusedMs,
+    safety: downloadedUpdate ? await fetchRestartSafety() : null,
+  })
+  if (!decision.apply) {
+    console.log(`[updater] auto-apply deferred: ${decision.reason}`)
+    return
+  }
+  console.log('[updater] auto-applying update', downloadedUpdate && downloadedUpdate.version)
+  if (autoApplyTimer) {
+    clearInterval(autoApplyTimer)
+    autoApplyTimer = null
+  }
+  await applyDownloadedUpdate({
+    setQuitting: (v) => {
+      isQuitting = v
+    },
+    shutdownServerChild,
+    quitAndInstall: () =>
+      autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit(),
+  }).catch(() => {})
+}
+
+/** Arm the recurring evaluation after a download lands (idempotent). */
+function armAutoApplyLoop() {
+  if (autoApplyTimer) return
+  autoApplyTimer = setInterval(() => {
+    void maybeAutoApplyUpdate()
+  }, AUTO_APPLY_POLL_MS)
+  // First look right away — the user may already be away.
+  void maybeAutoApplyUpdate()
+}
 
 /** The app's own UI language, re-read per dialog so a change in Settings takes
  *  effect without an app restart (the same per-use freshness lockdown.js uses).
@@ -2084,8 +2180,15 @@ function initAutoUpdater() {
     // Remember it: if the user picks "Later", the menu's manual check must offer
     // THIS restart instead of asking GitHub again about an update already on disk.
     downloadedUpdate = { version }
-    // Notify only — do NOT auto-restart (could kill an in-flight claude session).
-    // Offer the restart as an explicit choice; default to "Later".
+    // Hands-free mode (settings.autoUpdate): no dialog — arm the policy loop
+    // that applies the update at a provably safe, user-away moment, and let any
+    // normal quit apply it too. Default (off): the conservative shipped flow —
+    // notify + explicit restart choice, never auto-restart.
+    if (autoUpdateEnabled()) {
+      autoUpdater.autoInstallOnAppQuit = true
+      armAutoApplyLoop()
+      return
+    }
     void promptRestartForUpdate(version)
   })
 
@@ -2102,6 +2205,11 @@ function initAutoUpdater() {
       console.log(`[updater] ${label} check skipped — work mode (lockdown) is on`)
       return
     }
+    // Keep the quit-time backstop in step with the LIVE setting: hands-free on
+    // ⇒ a downloaded update also applies on any normal quit; toggled off ⇒ back
+    // to explicit-restart-only. Refreshed per tick so the Settings toggle needs
+    // no app restart (same liveness contract as the lockdown read above).
+    autoUpdater.autoInstallOnAppQuit = autoUpdateEnabled()
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
       console.error(`[updater] ${label} check failed:`, err && err.message)
     })

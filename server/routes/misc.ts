@@ -37,6 +37,7 @@ import {
   readLastIntegrityReport,
 } from '@/lib/server/homeIntegrity'
 import { writeProjectData } from '@/lib/server/projectData'
+import { updateRestartSafety } from '@/lib/server/liveDesks'
 import {
   ensureProjectsMigrated,
   addCreatedProjectEntry,
@@ -434,6 +435,14 @@ export const miscRoutes = new Hono()
   // all-false flags, so every experimental surface stays invisible — see
   // src/lib/server/experiments.ts.
   .get('/api/experiments', async (c) => c.json(await resolveExperiments()))
+  // --- GET /api/update/restart-safety ---------------------------------------
+  // The Electron MAIN process asks this before auto-applying a downloaded
+  // update (settings.autoUpdate) — "may the app restart right now without
+  // destroying anything that can't come back?". Computed across BOTH desk
+  // pools in ONE seam (liveDesks.updateRestartSafety); the caller fails CLOSED
+  // (treats fetch error as unsafe). Pure read, no path input → no
+  // validateProjectPath needed.
+  .get('/api/update/restart-safety', async (c) => c.json(await updateRestartSafety()))
   // --- GET /api/usage -------------------------------------------------------
   .get('/api/usage', async (c) => {
     try {

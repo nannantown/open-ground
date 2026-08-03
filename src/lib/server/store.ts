@@ -305,6 +305,7 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
 const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'language',
   'theme',
+  'autoUpdate',
   'displayName',
   'defaultWorkspace',
   'openApps',
@@ -454,6 +455,13 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   // previous value survives (same refuse-a-meaningless-patch stance as above).
   if (Object.prototype.hasOwnProperty.call(safe, 'theme')) {
     if (safe.theme !== 'light' && safe.theme !== 'dark') delete safe.theme
+  }
+  // Auto-update: a REAL boolean like lockdownMode — only a literal `true` turns
+  // hands-free apply on (the Electron main process reads this raw from
+  // settings.json, so a forged truthy string must not read as enabled there
+  // either — electron/autoUpdatePolicy.js applies the same `=== true`).
+  if (Object.prototype.hasOwnProperty.call(safe, 'autoUpdate')) {
+    safe.autoUpdate = safe.autoUpdate === true
   }
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]

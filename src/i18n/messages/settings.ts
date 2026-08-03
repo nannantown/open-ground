@@ -29,6 +29,11 @@ export const settings = {
       'Reveals the Persona tab for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own.',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
+    // Hands-free updates (settings.autoUpdate)
+    'settings.autoUpdate.heading': 'Automatic updates',
+    'settings.autoUpdate.label': 'Apply updates automatically',
+    'settings.autoUpdate.hint':
+      'New versions install themselves — no more restart dialogs. The app only restarts while you are away and nothing is running: it waits while Claude is working or a terminal pane is open. Quitting the app also applies a waiting update.',
     // Work mode (lockdown) — the non-Anthropic egress kill switch
     'settings.lockdown.heading': 'Work mode',
     'settings.lockdown.label': 'Block non-Anthropic connections',
@@ -89,6 +94,10 @@ export const settings = {
       'この端末でペルソナタブを可視化します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
+    'settings.autoUpdate.heading': '自動アップデート',
+    'settings.autoUpdate.label': '新しい版を自動で適用する',
+    'settings.autoUpdate.hint':
+      '新しい版が来たら、再起動の確認を出さずに自動で入れ替えます。入れ替えるのは「あなたが席を外していて、何も動いていないとき」だけ — Claude が作業中のときや、ターミナルを開いているあいだは待ちます。アプリを閉じたときにも適用されます。',
     'settings.lockdown.heading': '業務モード',
     'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
     'settings.lockdown.hint':

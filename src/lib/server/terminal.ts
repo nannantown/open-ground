@@ -720,6 +720,34 @@ export const listActiveTerminals = (): ActiveTerminalsResponse => {
   return { cwds: Array.from(cwds), claude }
 }
 
+/** Minimal per-session rows for the auto-update restart-safety computation —
+ *  see liveDesks.updateRestartSafety, which combines this with the SDK pool.
+ *  PURE READ, one row per LIVE session (finished ones excluded, hidden ones
+ *  included — the computation decides what each kind means, not the pool). */
+export interface PtySafetyView {
+  cwd: string
+  /** Utility session with no pane (titling runs etc.). */
+  hidden: boolean
+  /** Launched as a named desk (補給官/司令官) — resumes by design. */
+  desk: boolean
+  /** A claude session actively producing output right now. */
+  claudeWorking: boolean
+}
+export const listPtySafetyViews = (): PtySafetyView[] => {
+  const now = Date.now()
+  const out: PtySafetyView[] = []
+  sessions.forEach((s) => {
+    if (s.info.finishedAt) return
+    out.push({
+      cwd: s.info.cwd,
+      hidden: !!s.info.hidden,
+      desk: !!s.info.deskLabel,
+      claudeWorking: s.info.tag === 'claude' && claudeStatus(s.info, now) === 'working',
+    })
+  })
+  return out
+}
+
 export const writeInput = (id: string, data: string): boolean => {
   const s = sessions.get(id)
   if (!s || s.info.finishedAt) return false
