@@ -466,3 +466,70 @@ describe('SdkWorkerPane — a manual worker can be torn down (③)', () => {
     expect(queryByTitle('projectPanel.swarm.sdk.interrupt')).toBeNull()
   })
 })
+
+describe('SdkWorkerPane — the open-question banner (2026-08-03)', () => {
+  // The 0.11.52 acceptance put the owner in front of this pane while their
+  // worker waited on a question — and the pane said only 「待機中」, with the
+  // question living silently in another tab. The banner closes that gap; these
+  // tests pin the two ways it could quietly lie:
+  //   • showing NOTHING (the pre-fix state), and
+  //   • showing SOMEONE ELSE'S question (the address filter dropped — the same
+  //     empty-terminalId aliasing family as the S4 shared-slot bug).
+  const inbox = (items: unknown[]) => {
+    respond = async (url) =>
+      url.includes('/api/swarm/escalations')
+        ? new Response(JSON.stringify({ escalations: items }), { status: 200 })
+        : new Response(JSON.stringify({ ok: true, queued: true }), { status: 200 })
+  }
+
+  it("shows THIS session's open question — not another worker's, not an answered one", async () => {
+    inbox([
+      {
+        id: 'e-mine',
+        status: 'open',
+        sdkSessionId: 'sdk-1',
+        question: 'AとBのどちらにしますか?',
+        createdAt: '2026-08-03T00:00:10Z',
+      },
+      {
+        id: 'e-other',
+        status: 'open',
+        sdkSessionId: 'sdk-SOMEONE-ELSE',
+        question: '他人の質問',
+        createdAt: '2026-08-03T00:00:20Z',
+      },
+      {
+        id: 'e-done',
+        status: 'answered',
+        sdkSessionId: 'sdk-1',
+        question: '回答済みの質問',
+        createdAt: '2026-08-03T00:00:30Z',
+      },
+    ])
+    const { findByText, queryByText } = mount()
+    await findByText('AとBのどちらにしますか?')
+    expect(queryByText('projectPanel.swarm.sdk.questionBanner')).toBeTruthy()
+    expect(queryByText('projectPanel.swarm.sdk.questionBannerHint')).toBeTruthy()
+    expect(queryByText('他人の質問')).toBeNull()
+    expect(queryByText('回答済みの質問')).toBeNull()
+  })
+
+  it('shows NO banner when the inbox holds nothing addressed to this session', async () => {
+    inbox([
+      {
+        id: 'e-other',
+        status: 'open',
+        sdkSessionId: 'sdk-SOMEONE-ELSE',
+        question: '他人の質問',
+        createdAt: '2026-08-03T00:00:20Z',
+      },
+    ])
+    const { queryByText } = mount()
+    // Let the mount-time poll settle before asserting the negative.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(queryByText('projectPanel.swarm.sdk.questionBanner')).toBeNull()
+    expect(queryByText('他人の質問')).toBeNull()
+  })
+})

@@ -194,6 +194,44 @@ export const SdkWorkerPane = ({
     !finished && !closed && status !== 'exited' && status !== 'failed'
   const [truncated, setTruncated] = useState(false)
   const [draft, setDraft] = useState('')
+  // ── The open-question banner (2026-08-03, owner-requested) ─────────────────
+  // The 0.11.52 acceptance put the owner in front of this exact pane while
+  // their worker sat waiting on a question — and the pane said only 「待機中」.
+  // The question lived in a DIFFERENT tab (監督) with nothing here pointing at
+  // it. So the pane itself asks the inbox "is one of these mine?" and puts the
+  // question — and where to answer it — right where the owner is looking.
+  // Self-contained polling (10s) rather than prop-threading: this pane has two
+  // unrelated hosts (the Board drawer and the Manager stage) and both would
+  // have to grow the same plumbing.
+  const [openQuestion, setOpenQuestion] = useState<string | null>(null)
+  useEffect(() => {
+    if (finished) {
+      setOpenQuestion(null)
+      return
+    }
+    let stopped = false
+    const read = async () => {
+      try {
+        const r = await fetch(`/api/swarm/escalations?path=${encodeURIComponent(projectPath)}`)
+        if (!r.ok || stopped) return
+        const d = (await r.json()) as {
+          escalations?: { status?: string; sdkSessionId?: string; question?: string; createdAt?: string }[]
+        }
+        const mine = (d.escalations ?? [])
+          .filter((e) => e.status === 'open' && e.sdkSessionId === sdkSessionId && e.question)
+          .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+        if (!stopped) setOpenQuestion(mine[0]?.question ?? null)
+      } catch {
+        /* keep the last known state — a fetch hiccup must not flap the banner */
+      }
+    }
+    void read()
+    const timer = setInterval(() => void read(), 10_000)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [projectPath, sdkSessionId, finished])
   const [posting, setPosting] = useState(false)
   // The last refused action, in the server's own words. Null = nothing to say.
   const [actionError, setActionError] = useState<string | null>(null)
@@ -421,7 +459,7 @@ export const SdkWorkerPane = ({
     if (!r.ok) setActionError(r.error)
   }
 
-  const statusLabel: string = {
+  const baseStatusLabel: string = {
     starting: t('projectPanel.swarm.statusStarting'),
     working: t('projectPanel.swarm.statusWorking'),
     waiting: t('projectPanel.swarm.statusWaiting'),
@@ -429,9 +467,18 @@ export const SdkWorkerPane = ({
     exited: t('projectPanel.swarm.statusExited'),
     failed: t('projectPanel.swarm.sdk.statusFailed'),
   }[status]
+  // 「待機中」 is technically true and practically useless while a question sits
+  // in the inbox — the owner's next action is ANSWERING, so the label says so.
+  const statusLabel =
+    openQuestion && status === 'waiting' ? t('projectPanel.swarm.sdk.statusQuestion') : baseStatusLabel
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#1a1a1a]">
+    // PAPER, not a counterfeit terminal. The rows below already speak the paper
+    // ink tokens (text-ink / text-ink-muted) — on the old hardcoded #1a1a1a they
+    // were near-invisible (the owner's 2026-08-03 screenshot: their worker's
+    // question, rendered dark-on-dark). An SDK worker's feed is a transcript,
+    // not a screen; it gets the same reading surface as every other dashboard.
+    <div className="flex h-full min-h-0 flex-col bg-bg">
       {/* Header — same shape and vocabulary as SwarmWorkerPane. */}
       <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-2.5 py-1.5">
         <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
@@ -496,6 +543,31 @@ export const SdkWorkerPane = ({
           </>
         )}
       </div>
+
+      {openQuestion ? (
+        // The worker is waiting on the OWNER — say so where they are looking,
+        // show the question itself, and name the place the answer box lives.
+        // role="status": it matters to a screen reader exactly as much.
+        <div
+          role="status"
+          className="shrink-0 border-b border-ochre/40 bg-ochre/10 px-2.5 py-2"
+        >
+          <div className="flex items-start gap-1.5">
+            <AlertTriangle size={13} strokeWidth={2.25} className="mt-0.5 shrink-0 text-ochre" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-medium text-ochre">
+                {t('projectPanel.swarm.sdk.questionBanner')}
+              </div>
+              <div className="mt-0.5 line-clamp-3 text-[12px] leading-snug text-ink" title={openQuestion}>
+                {openQuestion}
+              </div>
+              <div className="mt-1 text-[10px] text-ink-muted">
+                {t('projectPanel.swarm.sdk.questionBannerHint')}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {truncated ? (
         // Never let an incomplete transcript look continuous.
@@ -611,8 +683,12 @@ const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : Strin
 const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
   switch (ev.kind) {
     case 'text':
+      // The worker's own words are the PRIMARY content of this transcript —
+      // one size up from the chrome, full ink. Sub-agent text stays quieter.
       return (
-        <div className={`whitespace-pre-wrap ${ev.fromSubagent ? 'pl-3 text-ink-muted' : 'text-ink'}`}>
+        <div
+          className={`whitespace-pre-wrap ${ev.fromSubagent ? 'pl-3 text-[11px] text-ink-muted' : 'text-[12px] text-ink'}`}
+        >
           {ev.text}
         </div>
       )

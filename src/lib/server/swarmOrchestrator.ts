@@ -353,6 +353,24 @@ export const MAX_REVIEW_DEFERS = 2
  *  minutes is almost always waiting on input or wedged. */
 export const STALL_SILENCE_MS = 10 * 60_000
 
+/** How long an SDK worker sits quiet before its FREE-TEXT QUESTION is raised —
+ *  deliberately far under {@link STALL_SILENCE_MS}.
+ *
+ *  The 10-minute gate exists for a PTY reason: a PTY worker that merely PRINTS
+ *  question-shaped text mid-work is still streaming, and only long silence
+ *  proves it actually stopped at the input box. An SDK worker needs no such
+ *  inference — its session status ('waiting') is the pool's own authoritative
+ *  "the turn ENDED", and detectSdkFreeTextQuestion already requires exactly
+ *  that head. The remaining minute is a debounce for back-to-back turns, not a
+ *  proof of idleness.
+ *
+ *  Measured cost of NOT having this (0.11.52 acceptance, 2026-08-03): the owner
+ *  sat in front of an already-asked question for 10 straight minutes — twice —
+ *  while the engine, by design, refused to look. For a runtime whose whole
+ *  pitch is "a lookup where the PTY does an inference", that wait was pure
+ *  inheritance, not caution. */
+export const SDK_QUESTION_SILENCE_MS = 60_000
+
 /** After nudging a silent worker (sending Enter), wait this long before nudging
  *  again or escalating to a reclaim — give the keystroke time to wake it and
  *  produce a fresh heartbeat. */
@@ -7590,7 +7608,22 @@ const monitorWorkers = async (
     // question in front of the owner), not about whether it is alive. A task running in
     // the background answers the liveness question and nothing else — muting the owner's
     // inbox behind it would be a new bug wearing this fix's clothes.
-    if (cheapStall.silentMs >= STALL_SILENCE_MS) {
+    //
+    // THE SDK-QUESTION EXCEPTION (2026-08-03). The 10-minute threshold is the
+    // PTY's proof of idleness; an SDK worker whose output CLASSIFIED as
+    // 'question' has already proven it the strong way (the detector requires
+    // the pool's own turn-ended head), so it enters after only the short
+    // debounce. Question-shaped, sdk-shaped, and nothing else — a PTY worker,
+    // and every other SDK state, waits the full ten minutes exactly as before.
+    // Inside the block this admission can only reach the question arm: the
+    // permission arm tests `output === 'permission-wait'`, which the admission
+    // clause has already excluded.
+    if (
+      cheapStall.silentMs >= STALL_SILENCE_MS ||
+      (output === 'question' &&
+        workerRuntimeKind(w) === 'sdk' &&
+        cheapStall.silentMs >= SDK_QUESTION_SILENCE_MS)
+    ) {
       // PERMISSION-WAIT — silent at a trust/permission prompt that slipped past
       // bypass (--dangerously-skip-permissions should suppress every prompt; this
       // is the backstop). AUTO-ACCEPT once (Enter takes the trust dialog's default
@@ -7668,7 +7701,11 @@ const monitorWorkers = async (
               await deps.raiseQuestion({
                 projectPath: engine.path,
                 question: q.question,
-                context: `worker ${w.branch} (${w.taskTitle}) の claude が入力待ちで停止中に画面から検出した質問。`,
+                // Runtime-neutral wording: an SDK worker HAS no 画面 — its
+                // question comes off the session's own transcript. Saying
+                // "screen" to the owner for that runtime was a small lie the
+                // 0.11.52 acceptance put on an actual owner-facing card.
+                context: `worker ${w.branch} (${w.taskTitle}) の claude が入力待ちで停止中に検出した質問。`,
                 whyEscalated: 'policy',
                 receiptKey,
                 ...(card?.id ? { taskId: card.id } : {}),

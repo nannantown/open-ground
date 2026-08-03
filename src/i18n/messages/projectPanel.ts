@@ -171,6 +171,13 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.badgeHint':
       'This worker runs on the Agent SDK runtime, not a terminal. Its transcript is shown instead of a screen.',
     'projectPanel.swarm.sdk.statusQuotaParked': 'Quota wait',
+    // Question banner (2026-08-03): the worker asked the OWNER something and is
+    // waiting. Shown in the pane the owner is actually looking at, with the
+    // question text and where the answer box lives.
+    'projectPanel.swarm.sdk.statusQuestion': 'Waiting for your answer',
+    'projectPanel.swarm.sdk.questionBanner': 'This worker asked you a question',
+    'projectPanel.swarm.sdk.questionBannerHint':
+      'Answer it from the Overseer tab (SWARM → Overseer) — the worker resumes on your reply.',
     'projectPanel.swarm.sdk.statusFailed': 'Failed',
     'projectPanel.swarm.sdk.interrupt': 'Stop the current turn (the session stays open)',
     'projectPanel.swarm.sdk.send': 'Send',
@@ -865,6 +872,10 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.badgeHint':
       'この worker は端末ではなく Agent SDK ランタイムで動いています。画面の代わりに会話の記録を表示します。',
     'projectPanel.swarm.sdk.statusQuotaParked': '上限待ち',
+    'projectPanel.swarm.sdk.statusQuestion': '回答待ち',
+    'projectPanel.swarm.sdk.questionBanner': 'この作業者から質問が届いています',
+    'projectPanel.swarm.sdk.questionBannerHint':
+      '回答は SWARM タブ →「監督」からできます — 答えると作業者はそのまま再開します。',
     'projectPanel.swarm.sdk.statusFailed': '失敗',
     'projectPanel.swarm.sdk.interrupt': '今のターンを止める(セッションは続きます)',
     'projectPanel.swarm.sdk.send': '送信',

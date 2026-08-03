@@ -16,6 +16,7 @@ import { app } from '../../../server/app'
 import { writeSession, clearSession } from './authStore'
 import { __resetMigrationCacheForTests, addImportedProjectEntry } from './registry'
 import {
+  SDK_QUESTION_SILENCE_MS,
   STALL_SILENCE_MS,
   emptyMetricsCounters,
   runDispatchPass,
@@ -425,6 +426,54 @@ describe('② the RAISER hands the inbox a complete address', () => {
     taskTitle: 'task a',
     startedAt: new Date(T0).toISOString(),
     stage: 'running',
+  })
+
+  it("an SDK worker's question is raised after ONE minute, not ten (2026-08-03)", async () => {
+    // The 10-minute silence gate is the PTY's proof of idleness; the SDK
+    // detector already carries the stronger proof (the pool's turn-ended head),
+    // so the gate admits it after only the debounce. Measured cost of the old
+    // inheritance: the 0.11.52 acceptance sat the OWNER in front of an
+    // already-asked question for ten straight minutes, twice.
+    const engine = newEngine({ workers: [sdkWorker()] })
+    const { deps, raised } = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['sdk-a-1', SDK_QUESTION_OUTPUT]]),
+    })
+    // Under the debounce: NOT raised (back-to-back turns must not spam the inbox).
+    await runDispatchPass(engine, deps, T0 + SDK_QUESTION_SILENCE_MS - 1_000)
+    expect(raised).toHaveLength(0)
+    // Past the debounce, far under ten minutes: raised.
+    await runDispatchPass(engine, deps, T0 + SDK_QUESTION_SILENCE_MS + 1_000)
+    expect(raised).toHaveLength(1)
+    expect(raised[0].runtime).toBe('sdk')
+  })
+
+  it('a PTY worker still waits the full ten minutes — the fast lane is sdk-question-shaped only', async () => {
+    // The false-kill fix must survive: a PTY worker PRINTING question-shaped
+    // text mid-work is only proven idle by long silence. Widening the fast lane
+    // to PTY would re-create the 2026-07 false-positive class the 10-minute
+    // gate was built against.
+    const engine = newEngine({
+      workers: [
+        {
+          terminalId: 'pty-a-1',
+          branch: 'swarm/a',
+          worktree: '/wt/a',
+          taskId: 'a',
+          taskTitle: 'task a',
+          startedAt: new Date(T0).toISOString(),
+          stage: 'running',
+        },
+      ],
+    })
+    const { deps, raised } = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', QUESTION_SCREEN]]),
+    })
+    await runDispatchPass(engine, deps, T0 + SDK_QUESTION_SILENCE_MS + 1_000)
+    expect(raised).toHaveLength(0) // one minute is NOT enough for a PTY
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(raised).toHaveLength(1) // ten minutes is, exactly as before
   })
 
   it('carries runtime + sdkSessionId, not just the (empty) terminalId', async () => {
