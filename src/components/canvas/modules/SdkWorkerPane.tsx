@@ -124,6 +124,12 @@ interface Props {
   onTerminate?: () => void
   /** Remove the worktree with --force (the dirty/abandon case). Manual only. */
   onForceRemove?: () => void
+  /** Rendered inside a parent that provides its OWN header and composer (the
+   *  manager pane, 2026-08-03). Hides this tile's duplicates — the owner's
+   *  screenshot showed the desk wearing TWO stacked headers and TWO input
+   *  boxes, which read as scattered chrome, not one desk. The transcript,
+   *  question banner, ended-strip and restart affordance all stay. */
+  embedded?: boolean
   /** Relaunch this worker once its session is finished — REUSES the same
    *  worktree, so the swarm/* branch and its in-progress work survive (the same
    *  contract SwarmWorkerPane's Restart has). Manual workers only.
@@ -162,6 +168,7 @@ export const SdkWorkerPane = ({
   onTerminate,
   onForceRemove,
   onRestart,
+  embedded = false,
 }: Props) => {
   const { t } = useT()
   const [frames, setFrames] = useState<Frame[]>([])
@@ -503,7 +510,9 @@ export const SdkWorkerPane = ({
     // question, rendered dark-on-dark). An SDK worker's feed is a transcript,
     // not a screen; it gets the same reading surface as every other dashboard.
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      {/* Header — same shape and vocabulary as SwarmWorkerPane. */}
+      {/* Header — same shape and vocabulary as SwarmWorkerPane. Hidden when
+          embedded: the parent (manager pane) wears the one desk header. */}
+      {embedded ? null : (
       <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-2.5 py-1.5">
         <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
         <span
@@ -567,6 +576,7 @@ export const SdkWorkerPane = ({
           </>
         )}
       </div>
+      )}
 
       {openQuestion ? (
         // The worker is waiting on the OWNER — say so where they are looking,
@@ -688,7 +698,7 @@ export const SdkWorkerPane = ({
           Gated on `accepting` — the pool's own answer to "will this be taken?"
           — never on liveness: a desk that was asked to stop is still ALIVE for
           a while, and it refuses every word of it. */}
-      {accepting ? (
+      {accepting && !embedded ? (
         <div className="flex shrink-0 items-center gap-1.5 border-t border-line-soft bg-bg-card px-2 py-1.5">
           <input
             value={draft}

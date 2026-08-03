@@ -326,6 +326,7 @@ export const projectPanel = {
     'projectPanel.swarm.manager.engineHeading': 'Engine',
     // KPI roll-up (the analytics layer) — the manager dashboard's "is the swarm
     // getting better?" panel: lead time + rework / conflict / worker-success rates.
+    'projectPanel.swarm.manager.dialsHeading': 'Settings',
     'projectPanel.swarm.manager.kpiHeading': 'Metrics',
     'projectPanel.swarm.manager.kpiLeadTime': 'Lead time',
     'projectPanel.swarm.manager.kpiLeadTimeHint': 'Median todo→done · {count} completed',
@@ -1023,6 +1024,7 @@ export const projectPanel = {
     'projectPanel.swarm.manager.engineHeading': 'エンジン',
     // KPI 集計（分析レイヤ）— マネージャーダッシュボードの「swarm は良くなっているか」
     // パネル: リードタイム＋差し戻し / コンフリクト / worker 成功率。
+    'projectPanel.swarm.manager.dialsHeading': '設定',
     'projectPanel.swarm.manager.kpiHeading': 'メトリクス',
     'projectPanel.swarm.manager.kpiLeadTime': 'リードタイム',
     'projectPanel.swarm.manager.kpiLeadTimeHint': 'todo→done 中央値 ・ 完了 {count} 件',

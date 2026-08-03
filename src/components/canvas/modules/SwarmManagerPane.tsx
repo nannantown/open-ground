@@ -44,7 +44,7 @@
 // extra gating is needed here; the server /api/swarm/* routes are owner-only too.
 
 import { useCallback, useRef, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, ClipboardCheck, Cpu, Gauge, MessageSquare, Power, Send } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, ChevronRight, ClipboardCheck, Cpu, Gauge, MessageSquare, Power, Send } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
@@ -198,16 +198,25 @@ const KpiRow = ({
   label,
   value,
   sub,
+  hint,
   valueTone = 'default',
 }: {
   label: string
   value: string
   sub?: string
+  /** One-line explanation as a TOOLTIP on the label (計器盤 text-diet) —
+   *  where `sub` would print it under the row permanently. */
+  hint?: string
   valueTone?: 'default' | 'warn'
 }) => (
   <div className="flex items-baseline justify-between gap-3 py-1">
     <div className="min-w-0">
-      <div className="truncate text-[12px] text-ink-subtle">{label}</div>
+      <div
+        className={`truncate text-[12px] text-ink-subtle${hint ? ' cursor-help' : ''}`}
+        title={hint}
+      >
+        {label}
+      </div>
       {sub && <div className="truncate text-[10px] leading-tight text-ink-faint">{sub}</div>}
     </div>
     <div
@@ -256,6 +265,9 @@ export const SwarmManagerPane = ({
   // a relaunched desk starts from "not heard from yet" instead of inheriting the
   // dead one's last word.
   const [sdkStatus, setSdkStatus] = useState<{ id: string; status: SdkSessionStatus } | null>(null)
+  // The ⚙ settings disclosure (overseer + runtime dials). Closed by default,
+  // per session — settings are set once; the gauges are what change.
+  const [dialsOpen, setDialsOpen] = useState(false)
   const heardFromThisDesk =
     sdkStatus && sdkCommanderId && sdkStatus.id === sdkCommanderId ? sdkStatus.status : null
   const deskStatus: WorkerStatus = sdkCommanderId
@@ -366,9 +378,20 @@ export const SwarmManagerPane = ({
                 title={t('projectPanel.swarm.manager.conversationHint')}
               >
                 <MessageSquare size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-                {/* Text-diet: the tab strip one row above already says マネージャー;
-                    the identity text was a duplicate. Tooltip keeps the words. */}
+                {/* The desk's ONE header (2026-08-03): the embedded SDK tile no
+                    longer draws its own, so the status word lives here — beside
+                    the lamp, instrument style. The tab strip still owns the
+                    identity word (マネージャー). */}
+                <span className="truncate">{t(SESSION_STATUS_LABEL_KEY[deskStatus])}</span>
               </span>
+              {session.runtime === 'sdk' ? (
+                <span
+                  className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
+                  title={t('projectPanel.swarm.sdk.badgeHint')}
+                >
+                  SDK
+                </span>
+              ) : null}
               <button
                 type="button"
                 onClick={onStopSession}
@@ -395,6 +418,11 @@ export const SwarmManagerPane = ({
                   projectPath={projectPath}
                   branch={t('projectPanel.swarm.manager.badge')}
                   taskTitle={t('projectPanel.swarm.manager.conversationTitle')}
+                  // ONE header, ONE composer: this pane already wears the desk
+                  // header above and the command bar below — the tile's own
+                  // copies stacked a second header and a second input box on
+                  // the same desk (the owner's 2026-08-03 "散乱" screenshot).
+                  embedded
                   onExit={() => onSessionExit()}
                   // The desk's own status, reported outward — the header beacon
                   // above has no other source (the PTY poll is blind to this
@@ -467,7 +495,34 @@ export const SwarmManagerPane = ({
           window — invisible, not squashed, which is the failure you never notice.
           Scrolling is inert while the content fits, so nothing changes on a tall
           window. */}
-      <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto border-l border-line bg-bg">
+      {/* 計器盤 2026-08-03 (the owner's「散乱」screenshot): the column is a WELL
+          (bg-inset, no border — surface difference is the boundary), and the
+          rarely-touched switches (overseer + runtime dials, with their amber
+          warnings) fold into ONE quiet ⚙ row, closed by default. What stays in
+          sight is only what changes by itself: the desk state and the gauges. */}
+      <aside className="flex w-[280px] shrink-0 flex-col overflow-y-auto bg-bg-inset">
+        {/* ⚙ 設定 — collapsed disclosure. Settings are set once; a dashboard
+            that always shows them is wallpaper (the warnings included — they
+            show when the owner is actually AT the dials). */}
+        <div className="shrink-0 px-4 pt-3">
+          <button
+            type="button"
+            onClick={() => setDialsOpen((v) => !v)}
+            aria-expanded={dialsOpen}
+            className="flex w-full items-center gap-1.5 rounded-[3px] py-1 label-cap text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          >
+            <ChevronRight
+              size={12}
+              strokeWidth={2}
+              className={`transition-transform duration-150 ${dialsOpen ? 'rotate-90' : ''}`}
+              aria-hidden
+            />
+            <Cpu size={12} strokeWidth={2} className="shrink-0" aria-hidden />
+            {t('projectPanel.swarm.manager.dialsHeading')}
+          </button>
+        </div>
+        {dialsOpen && (
+          <>
         {/* Engine: status + the two switches (Card① / Card③). The worker monitor
             + engine log that used to sit below this were removed (一本化 — the
             worker tab owns live worker screens), so this is the sole section. */}
@@ -568,6 +623,8 @@ export const SwarmManagerPane = ({
             ) : null}
           </div>
         </div>
+          </>
+        )}
 
         {/* ── Commander presence (the inspection line) ──────────────────────────
             Explains the post-worker quiet minutes: fresh heartbeat → "the
@@ -579,7 +636,7 @@ export const SwarmManagerPane = ({
             readable. Static readout — no controls, so the 5-state interactive
             contract doesn't apply. Owner-plain wording (owner-surface rule,
             2026-07-17); paper ink tokens keep 4.5:1+ contrast. */}
-        <div className="shrink-0 border-t border-line-soft px-4 py-3">
+        <div className="shrink-0 px-4 py-3">
           <div className="mb-2 flex items-center gap-2">
             <ClipboardCheck size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
             <span className="label-cap text-ink-faint">
@@ -588,24 +645,28 @@ export const SwarmManagerPane = ({
           </div>
           <div className="flex items-center gap-1.5">
             {/* Same beacon vocabulary as the session dots: azure = working now,
-                ink-faint = inert (resting). */}
+                ink-faint = inert (resting). The one-line explanation moved into
+                the tooltip (計器盤 text-diet — the lamp + word ARE the reading;
+                the why is a hover away). */}
             <span
               className={`h-[6px] w-[6px] shrink-0 rounded-full ${
                 presence === 'active' ? 'bg-azure' : 'bg-ink-faint'
               }`}
               aria-hidden
             />
-            <span className="text-[12px] font-medium text-ink">
+            <span
+              className="cursor-help text-[12px] font-medium text-ink"
+              title={
+                presence === 'active'
+                  ? t('projectPanel.swarm.manager.presenceActiveHint')
+                  : t('projectPanel.swarm.manager.presenceStandbyHint')
+              }
+            >
               {presence === 'active'
                 ? t('projectPanel.swarm.manager.presenceActive')
                 : t('projectPanel.swarm.manager.presenceStandby')}
             </span>
           </div>
-          <p className="mt-1 text-[11px] leading-snug text-ink-subtle">
-            {presence === 'active'
-              ? t('projectPanel.swarm.manager.presenceActiveHint')
-              : t('projectPanel.swarm.manager.presenceStandbyHint')}
-          </p>
           {/* The commander's own one-line note — its self-reported "doing now"
               (free-form, often Japanese). Shown only while fresh: a stale note
               describes a PAST episode and would read as a live claim. */}
@@ -641,16 +702,15 @@ export const SwarmManagerPane = ({
             better?" data foundation. Static readout (no controls), so the
             5-state interactive contract doesn't apply; paper ink tokens keep
             contrast in dark + light. */}
-        <div className="shrink-0 border-t border-line-soft px-4 py-3">
+        {/* Rendered only once there is DATA — an empty gauge block explaining
+            its own emptiness was exactly the「散乱」the owner photographed. */}
+        {kpiEmpty ? null : (
+        <div className="shrink-0 px-4 py-3">
           <div className="mb-2 flex items-center gap-2">
             <BarChart3 size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
             <span className="label-cap text-ink-faint">{t('projectPanel.swarm.manager.kpiHeading')}</span>
           </div>
-          {kpiEmpty ? (
-            <p className="text-[11px] leading-relaxed text-ink-subtle">
-              {t('projectPanel.swarm.manager.kpiEmpty')}
-            </p>
-          ) : (
+          {(
             <div className="flex flex-col">
               <KpiRow
                 label={t('projectPanel.swarm.manager.kpiLeadTime')}
@@ -681,6 +741,7 @@ export const SwarmManagerPane = ({
             </div>
           )}
         </div>
+        )}
 
         {/* ── Consumption (the budget layer) ────────────────────────────────────
             A SEPARATE panel from the KPI metrics above: the UNATTENDED loop's
@@ -690,7 +751,7 @@ export const SwarmManagerPane = ({
             doesn't apply (nothing to hover/press/focus). The over-budget warning
             uses ochre-deep (#855E17, ≥4.5:1 on the paper bg) per the caution
             palette — never raw ochre. */}
-        <div className="shrink-0 border-t border-line-soft px-4 py-3">
+        <div className="shrink-0 px-4 py-3">
           <div className="mb-2 flex items-center gap-2">
             <Activity size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
             <span className="label-cap text-ink-faint">
@@ -709,7 +770,7 @@ export const SwarmManagerPane = ({
             <KpiRow
               label={t('projectPanel.swarm.manager.consumptionDispatched')}
               value={`${consumption.dispatched} / ${consumption.limit}`}
-              sub={t('projectPanel.swarm.manager.consumptionDispatchedHint')}
+              hint={t('projectPanel.swarm.manager.consumptionDispatchedHint')}
               valueTone={consumption.overLimit ? 'warn' : 'default'}
             />
           </div>

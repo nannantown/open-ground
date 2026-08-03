@@ -254,15 +254,21 @@ fork する CJS バンドルの中では**実 ES モジュールを require す�
 違いは**ビルド成果物を実際に走らせたかどうか**だけ。なお今回それが見えたのは
 0.11.48 で `fellBackBecause` を記録するようにしたからで、それが無ければ
 「なんとなく PTY で動いている」ままだった。
-⚠ **番人がまだ届いていない範囲がある(0802 時点・未検証)**。`sdkEsmLoadFromCjsBundle.test.ts`
+⚠ **番人がまだ届いていない範囲がある**。`sdkEsmLoadFromCjsBundle.test.ts`
 は出荷 options でバンドルした .cjs を**開発機の Node 22 + `--no-experimental-require-module`**
 で走らせている。これは「`require(esm)` が無い Node で ESM が読める」ことは示すが、
 **Electron 31.7.7 が同梱して fork する Node 20.18 そのもので走らせてはいない**。
 worker 機に Electron 本体バイナリが無く(`node_modules/electron/dist` は LICENSE と
-version のみ)測れなかったため。**この 1 回の実機確認は配布物を持つ側の宿題**
-(`ELECTRON_RUN_AS_NODE=1 <Electron> -e "import('@anthropic-ai/claude-agent-sdk')…"`)。
-2 件とも「dev の Node では緑・fork された Electron の Node で死ぬ」形だったので、
-ここを「たぶん大丈夫」で埋めない。
+version のみ)測れなかったため。
+✅ **その「実機 1 回」の宿題は 2026-08-03 に閉じた** — packaged `.app`(0.11.49)で
+`swarmWorkerRuntime` 未設定のまま dispatch した worker が **1 体 SDK で点火し commit まで
+到達**(`runtime:'sdk'` / `terminalId` 空 / `runtime fallback (SDK→PTY)` 行はその boot で 0 件)。
+単体 probe でも Electron の Node = **20.18.0** で `require(esm)` が `ERR_REQUIRE_ESM`・
+システム Node 22.22.0 では成功、まで実測
+(`docs/SDK_WORKER_MIGRATION_PLAN.md` §12「実機実測ログ 2」)。
+⚠ 閉じたのは**この 1 回ぶんだけ**で、**番人自身が Electron の Node で走るようになったわけでは
+ない**。2 件とも「dev の Node では緑・fork された Electron の Node で死ぬ」形だったので、
+同型が次に出たらまた実機 1 回が要る。ここを「たぶん大丈夫」で埋めない。
 
 ### 2.4 claude 起動フラグ(worker の場合)
 

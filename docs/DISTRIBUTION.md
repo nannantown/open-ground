@@ -373,20 +373,143 @@ grep -c 'import("@anthropic-ai/claude-agent-sdk")'  server/dist/index.cjs || tru
 Electron's Node.** `sdkEsmLoadFromCjsBundle.test.ts` executes the bundle on the
 dev machine's Node with `require(esm)` disabled — close, but *not* the Node 20.18
 that Electron 31.7.7 embeds and forks. Both defects of this class were "green on
-the dev Node, dead on the forked Electron Node", so on a machine that has the
-packaged app, run the real thing once per release:
+the dev Node, dead on the forked Electron Node", so once per release, on a machine
+where the app is **installed**, run the real thing. The runtime that matters lives
+inside the installed `.app` — **not** in `node_modules/electron`:
 
 ```bash
-ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
-  -e "import('@anthropic-ai/claude-agent-sdk').then(m=>console.log('OK',m.USAGE_LIMIT_ERROR_PREFIXES.length),e=>console.log('NG',e.code))"
+# Run from the repo root: the bare specifier resolves through ./node_modules,
+# while the runtime executing it is the shipped app's Electron-as-Node.
+ELECTRON_RUN_AS_NODE=1 "/Applications/OPEN GROUND.app/Contents/MacOS/OPEN GROUND" -e "
+  console.log('node', process.versions.node, '| electron', process.versions.electron);
+  try { require('@anthropic-ai/claude-agent-sdk'); console.log('require(ESM): OK') }
+  catch (e) { console.log('require(ESM): FAIL', e.code) }
+  import('@anthropic-ai/claude-agent-sdk').then(
+    m => console.log('import(ESM): OK', m.USAGE_LIMIT_ERROR_PREFIXES.length),
+    e => console.log('import(ESM): FAIL', e.code))"
+# measured 2026-08-03, against the installed app at 0.11.54. Re-run this every release
+# and record the version YOU measured (do not carry 0.11.54 forward) — read it with:
+#   plutil -extract CFBundleShortVersionString raw \
+#     "/Applications/OPEN GROUND.app/Contents/Info.plist"
+#   → node 20.18.0 | electron 31.7.7
+#     require(ESM): FAIL ERR_REQUIRE_ESM   ← diagnostic only (see below), NOT the gate
+#     import(ESM): OK 12                   ← this line is the pass/fail
+# ⚠ This is a DIFFERENT run from the 0.11.49 end-to-end record in
+#   SDK_WORKER_MIGRATION_PLAN.md §12. There, `import()` was confirmed by an SDK worker
+#   reaching `done` — not by this probe. Here both forms were probed directly.
 ```
 
-(Unverified as of 2026-08-02: the worktree that fixed this had no Electron binary
-in `node_modules/electron/dist` — only LICENSE and version — so it could not be
-measured there.)
+⚠ **Install the build you are about to ship BEFORE running this.** The command resolves
+the bare specifier through the **checkout's** `node_modules` but executes it on the
+**installed** app's Electron-as-Node — so run it too early and you measure the *previous*
+release's runtime and call it green. Concretely, check that the installed bundle's
+version equals the version you are about to ship:
 
-It mounts the dmg, prints the bundle's `CFBundleShortVersionString` + Mach-O
-arch, optionally greps a feature marker in the server bundle, and detaches —
+```bash
+plutil -extract CFBundleShortVersionString raw "/Applications/OPEN GROUND.app/Contents/Info.plist"
+grep -m1 '"version"' package.json
+# the two must agree — measured 2026-08-03: 0.11.55  /  "version": "0.11.55",  ✓
+```
+
+If they diverge you measured the old runtime and the result means nothing — exactly the
+"didn't measure the production arrangement" failure this section exists to prevent.
+⚠ **Do not use the printed `electron` version as that check.** The `electron`
+devDependency (`^31.7.0` ⇒ `31.7.7`) does not move between OPEN GROUND releases, so it
+reads ✓ against a months-old `.app` — it has no teeth for the accident you are trying to
+catch. The app version does move every release, which is why it is the one to compare.
+⚠ Pointing the command at the `.app` mounted from the dmg you just built (instead of an
+installed one) **has not been tried** — plausible, but **unverified as of 2026-08-03**.
+Run it through once before relying on it.
+
+**The pass/fail line is `import(ESM): OK` — nothing else.** A run that prints
+`import(ESM): FAIL` — **or that prints neither line at all** (see the hollow-namespace
+note below) — means the SDK cannot load in the shipped app at all: every SDK desk
+will silently degrade to a PTY. That is a release blocker.
+
+**The `require` line is diagnostic, not a gate.** On the currently shipped Electron
+31.7.7 (Node **20.18.0**) `require(ESM): FAIL ERR_REQUIRE_ESM` is the *expected* value:
+`require(esm)` is only **enabled by default** from Node **20.19 / 22.12 / 23.0** onward
+(it was *added* earlier — 20.17 / 22.0 — but behind `--experimental-require-module`,
+which we do not pass). So the failure is a fact about that runtime, not a verdict on
+the fix. (It is also the mechanism of the
+0.11.47/0.11.48 defect: the CJS bundle used to `require()` the SDK, so on this Node every
+spawn died — hence the switch to dynamic `import()`.) **Move to an Electron whose embedded
+Node is ≥ 20.19 or ≥ 22.12 and this line flips to `require(ESM): OK`. That is neither a
+regression nor permission to go back to `require()`** — judge by the `import` line only.
+The "20.18.0, not Node 20" correction is in `docs/VERIFICATION.md` §4.1 and
+`docs/SDK_WORKER_MIGRATION_PLAN.md` §9/§12.
+
+⚠ Do not assume the next Electron major clears that bar, and **do not read the bar off
+the major at all** — a line can cross it mid-way. Checked mechanically against every
+stable entry in `https://releases.electronjs.org/releases.json` (fetched 2026-08-03):
+
+| Electron | initial release | final release | first release over 20.19 / 22.12 |
+| --- | --- | --- | --- |
+| 31 (ours) | 31.0.0 → node 20.14.0 | 31.7.7 → 20.18.0 | never |
+| 32 | 32.0.0 → 20.16.0 | 32.3.3 → 20.18.1 | never |
+| 33 | 33.0.0 → 20.18.0 | 33.4.11 → 20.18.3 | never |
+| 34 | 34.0.0 → 20.18.1 | 34.5.8 → 20.19.1 | **34.5.0 → 20.19.0** |
+| 35 | 35.0.0 → 22.14.0 | 35.7.5 → 22.16.0 | 35.0.0 — from day one |
+
+So **32 and 33 never cross, not even at their final patch** (20.18.1 / 20.18.3) —
+`require` keeps failing for the whole life of both lines. **34 crosses mid-line**: its
+initial 34.0.0 still carries 20.18.1, but **34.5.0 reaches 20.19.0**. The first major
+that is over the line **from its initial release** is **35.0.0 (Node 22.14.0)**.
+
+That mid-line crossing is the point: a stable line keeps taking Node minor/patch bumps
+after release (our own 31.7.7 carries 20.18.0 although 31.0.0 shipped 20.14.0), so the
+Electron major alone cannot tell you which side of the line you are on. Read
+`process.versions.node` off the probe output above.
+
+The `12` is `USAGE_LIMIT_ERROR_PREFIXES.length` in the bundled SDK **0.3.220** — the
+number itself is not the pass condition, it is only evidence that the module's exports
+were really readable. Expect it to change when the SDK is upgraded.
+
+⚠ **A resolved-but-hollow namespace does not print `undefined` — it prints nothing at
+all.** If the import resolves but that export is missing, `m.USAGE_LIMIT_ERROR_PREFIXES`
+is `undefined` and `.length` throws `TypeError: Cannot read properties of undefined
+(reading 'length')` *inside* the `onFulfilled` callback — and a throw there is **not**
+caught by the second argument of the **same** `.then` (an exception raised in
+`onFulfilled` never reaches the `onRejected` of that same call). So **neither the `OK`
+line nor the `FAIL` line is printed**: you get an unhandled-rejection stack and exit 1.
+**The missing line is itself the failure.** Read the probe as: pass ⇔ a line beginning
+`import(ESM): OK` appears — a `FAIL` line, a bare stack, or no output at all are all
+failures.
+
+⚠ **Do not decide this with a loose `grep 'import(ESM)'`.** The unhandled-rejection
+stack **echoes the offending source line**, and that line contains the literal text
+`import(ESM): OK` — so a substring grep matches on the *failing* run too and hands you a
+false green. Anchor it (`grep '^import(ESM): OK'`) or just read the output.
+(Measured 2026-08-03 with a hollow stand-in namespace: zero lines starting with
+`import(ESM):`, one TypeError stack, exit 1 — while a substring grep for `import(ESM)`
+still counted 1 hit, from the echoed source line.)
+
+If you must probe from a scratch directory (no `node_modules` in cwd), borrow the
+`.app`'s own — use the exact `ln -sfn` / `rm -f` forms in `docs/VERIFICATION.md` §4.1
+and do not improvise, because that recipe has **two destructive footguns, one at setup
+and one at teardown**: a bare `ln -s` re-run follows the existing link and writes a new
+symlink *inside* the shipped `.app`'s `node_modules` (exit 0, no warning), and
+`rm -rf node_modules/` — with the trailing slash — follows the link and deletes the
+`.app`'s `node_modules` outright, after which the app will not start. (A third caution
+there, forgetting to delete `probe.cjs`, only leaves `.scratch/` behind; it is untidy,
+not destructive.)
+
+(Measured once on 2026-08-03 against the packaged `.app` at 0.11.49 — a **different,
+earlier run** than the probe above, and an end-to-end one rather than a two-form probe:
+one worker dispatched with the runtime dial untouched came up `runtime:'sdk'` and reached commit —
+docs/SDK_WORKER_MIGRATION_PLAN.md §12「実機実測ログ 2」. That was a single
+owner-machine pass, not a suite run, and it does not retire the per-release probe.
+⚠ What a checkout could not supply here was the **Electron binary, not the SDK**: on
+this machine `node_modules/electron/dist` held only `LICENSE`,
+`LICENSES.chromium.html` and `version` — why the binary is absent was not determined
+(`electron` is an ordinary devDependency, so a fresh install may well have it).
+Module resolution from the checkout is fine, which is exactly why the command above
+pairs the checkout's `node_modules` with the installed `.app`. Use the BARE specifier
+as written; requiring the unexported subpath `…/claude-agent-sdk/sdk.mjs` fails
+`ERR_PACKAGE_PATH_NOT_EXPORTED` on every runtime and mimics this defect.)
+
+`verify-dmg.sh` mounts the dmg, prints the bundle's `CFBundleShortVersionString`
++ Mach-O arch, optionally greps a feature marker in the server bundle, and detaches —
 exiting non-zero on a version mismatch or a missing feature marker, and **warning
 (not failing)** on a missing arm64 slice (the Intel `--x64` dmg legitimately has
 none, so that stays a heads-up, not an error). **Always verify through this

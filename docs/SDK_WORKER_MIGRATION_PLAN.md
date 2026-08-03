@@ -496,7 +496,7 @@ swarmWorkerRuntime?: {
 | クォータ壁（mid-turn） | 画面文言 → hold+requeue+冷却 | `quota_refusal` event → 同じ hold+requeue+冷却（tier=worker.model） |
 | interrupt | SIGINT 相当の画面操作は無し（kill のみ） | graceful `interrupt()` が**新規に手に入る**（差し戻し時に「殺さず止めて指示」が可能 — stage 1 では従来同様 kill を既定、interrupt は手動ボタンのみ）。**0801 実測でセッションが生き延びることを確認**（§6・`probe-sdk-interrupt-survival.mts`）: ターンだけ中断され iterator は続き、後続ターンは完走する |
 | **配布ビルドでだけ SDK worker が0体**（0801 実観測・`dd311acc`） | — | `import.meta` は esbuild の CJS 出力に存在せず `{}` に置換される ⇒ `createRequire(import.meta.url)` が `createRequire(undefined)` = **TypeError**。guard hook は fail-CLOSED なので preflight が全部落ちる。**dev(ESM)と vitest(ESM)では 100% 再現しない**。恒久策 = require のベースをロード対象の絶対パスにする＋ビルドの banner で `pathToFileURL(__filename).href` を define。番人 `sdkGuardBundleShape.test.ts` は**実際に esbuild へ食わせて**確かめる |
-| **配布ビルドでだけ SDK worker が0体(2件目)**（0802 実観測・`e26d5efb`・**0.11.47/0.11.48 に出荷済み**） | — | `@anthropic-ai/claude-agent-sdk` は **ESM 専用**（`"type":"module"` / `main: sdk.mjs`）で、ビルドでは `external`。よって `server/dist/index.cjs`（Electron が fork する **CJS** バンドル）の中の `require()` は実 ES モジュールに当たる。Electron 31.7.7 = **Node 20.18.0** で、`require(esm)` は Node 20.19/22.12 以降にしか無い ⇒ 全 spawn が `ERR_REQUIRE_ESM` ⇒ `fellBackBecause: "SDK worker died at start (spawn failed: require() of ES Module …)"` で全数 PTY。**dev(tsx/ESM)と vitest(ESM)では原理的に再現しない**。恒久策 = 動的 `import()`（esbuild は **external かつ target が dynamic-import を持つ**なら `import()` を書き換えない — 実測）。ローダが async になる分は `preloadSdk()` として **spawn の手前**に置き、`spawnSdkSession` の**同期 `status==='failed'` 契約**（降格判定の土台・`swarmWorker` と `swarmManager` の両方がこれを見る）は壊さない。⚠ その `await` は**枠を数える `chooseWorkerRuntime` より手前**に置く — カウントと着席の間に await が入ると `sdkMaxWorkers` が check-then-act になり、同時 dispatch で枠を超える（番人 `swarmSdkSlotRace.test.ts`）。⚠ preload 忘れは**型で止める**: `spawnSdkSession` は `preloadSdk()` の戻り値（`queryFn` を注入するテストは免除）を引数で要求するので、preload しない呼び出し元は**コンパイルできない** — 存在検査では「明日の呼び出し元」も「順序」も見られず、実際に `scripts/` の検証器がその穴に落ちていた。⚠⚠ **ただし「コンパイルできない」はコンパイラが読む範囲でしか真ではない**: `tsconfig.json` の include は `scripts/**/*.ts` で **`.mts` を含まず**、`npm run lint` も `--ext .ts,.tsx` だったので、**14本の `scripts/*.mts`（＝欠陥が実際にあったファイル）は型検査の外**だった（0802 レビューで実測 — 証拠の引数を消しても root の `tsc --noEmit` は exit 0）。`tsconfig.scripts.json`（`target: es2022` — 素直に root の include へ足すと **合計 55 エラー**: 51×TS1378 と 1×TS1432（どちらも top-level await 系）＋ 1×TS2802 が `target` 引き上げで消え、残る 2×TS5097 は `allowImportingTsExtensions` が覆う。0802 実測）で覆い、`npm run typecheck` と番人 `scriptsTypecheck.test.ts` の両方から走らせている。**別 tsconfig を置くだけでは不十分**で、完了ゲートで実際に打たれるのは `npx tsc --noEmit`（root のみ）だから、誰も呼ばない設定は番人ではない。⚠ ロード失敗は memo しない（`??=` は never-reject なローダの失敗を「成功」としてキャッシュし、一過性の失敗でプロセス寿命ぶん全 worker が静かに PTY になる — `paths.ts:203-209` と同じ規則。番人 `sdkLoaderEvict.test.ts`）。番人 `sdkEsmLoadFromCjsBundle.test.ts` は**本番の `buildOptions` でバンドルし、出た .cjs を実行して** SDK の実体（`USAGE_LIMIT_ERROR_PREFIXES` の要素数）を見る。⚠ **未検証の範囲を明記する**: その実行は**開発機の Node 22 + `--no-experimental-require-module`**（= `require(esm)` を落としただけ）であり、**Electron 31.7.7 が同梱・fork する Node 20.18 そのものでは走らせていない**（当該 worktree に Electron 本体バイナリが無く測定不能・0802）。この 2 件はどちらも「dev の Node で緑・fork された Electron の Node で死ぬ」形だったので、`ELECTRON_RUN_AS_NODE=1` での実機 1 回は配布側の宿題として残っている |
+| **配布ビルドでだけ SDK worker が0体(2件目)**（0802 実観測・`e26d5efb`・**0.11.47/0.11.48 に出荷済み**） | — | `@anthropic-ai/claude-agent-sdk` は **ESM 専用**（`"type":"module"` / `main: sdk.mjs`）で、ビルドでは `external`。よって `server/dist/index.cjs`（Electron が fork する **CJS** バンドル）の中の `require()` は実 ES モジュールに当たる。Electron 31.7.7 = **Node 20.18.0** で、`require(esm)` は Node 20.19/22.12 以降にしか無い ⇒ 全 spawn が `ERR_REQUIRE_ESM` ⇒ `fellBackBecause: "SDK worker died at start (spawn failed: require() of ES Module …)"` で全数 PTY。**dev(tsx/ESM)と vitest(ESM)では原理的に再現しない**。恒久策 = 動的 `import()`（esbuild は **external かつ target が dynamic-import を持つ**なら `import()` を書き換えない — 実測）。ローダが async になる分は `preloadSdk()` として **spawn の手前**に置き、`spawnSdkSession` の**同期 `status==='failed'` 契約**（降格判定の土台・`swarmWorker` と `swarmManager` の両方がこれを見る）は壊さない。⚠ その `await` は**枠を数える `chooseWorkerRuntime` より手前**に置く — カウントと着席の間に await が入ると `sdkMaxWorkers` が check-then-act になり、同時 dispatch で枠を超える（番人 `swarmSdkSlotRace.test.ts`）。⚠ preload 忘れは**型で止める**: `spawnSdkSession` は `preloadSdk()` の戻り値（`queryFn` を注入するテストは免除）を引数で要求するので、preload しない呼び出し元は**コンパイルできない** — 存在検査では「明日の呼び出し元」も「順序」も見られず、実際に `scripts/` の検証器がその穴に落ちていた。⚠⚠ **ただし「コンパイルできない」はコンパイラが読む範囲でしか真ではない**: `tsconfig.json` の include は `scripts/**/*.ts` で **`.mts` を含まず**、`npm run lint` も `--ext .ts,.tsx` だったので、**14本の `scripts/*.mts`（＝欠陥が実際にあったファイル）は型検査の外**だった（0802 レビューで実測 — 証拠の引数を消しても root の `tsc --noEmit` は exit 0）。`tsconfig.scripts.json`（`target: es2022` — 素直に root の include へ足すと **合計 55 エラー**: 51×TS1378 と 1×TS1432（どちらも top-level await 系）＋ 1×TS2802 が `target` 引き上げで消え、残る 2×TS5097 は `allowImportingTsExtensions` が覆う。0802 実測）で覆い、`npm run typecheck` と番人 `scriptsTypecheck.test.ts` の両方から走らせている。**別 tsconfig を置くだけでは不十分**で、完了ゲートで実際に打たれるのは `npx tsc --noEmit`（root のみ）だから、誰も呼ばない設定は番人ではない。⚠ ロード失敗は memo しない（`??=` は never-reject なローダの失敗を「成功」としてキャッシュし、一過性の失敗でプロセス寿命ぶん全 worker が静かに PTY になる — `paths.ts:203-209` と同じ規則。番人 `sdkLoaderEvict.test.ts`）。番人 `sdkEsmLoadFromCjsBundle.test.ts` は**本番の `buildOptions` でバンドルし、出た .cjs を実行して** SDK の実体（`USAGE_LIMIT_ERROR_PREFIXES` の要素数）を見る。⚠ **番人が覆う範囲は今も狭い**: その実行は**開発機の Node 22 + `--no-experimental-require-module`**（= `require(esm)` を落としただけ）であり、**Electron 31.7.7 が同梱・fork する Node 20.18 そのものでは走らせていない**（テスト側の worktree に Electron 本体バイナリが無く測定不能・0802）。この 2 件はどちらも「dev の Node で緑・fork された Electron の Node で死ぬ」形だったので `ELECTRON_RUN_AS_NODE=1` での実機1回を宿題にしていたが、**2026-08-03 に配布物で実測して閉じた**（§12「実機実測ログ 2」— 0.11.49 のパッケージ済み `.app` で既定のまま dispatch した worker が `runtime:'sdk'` / `terminalId:''` / commit 到達・fallback 行 0 件。単体 probe では Electron の Node = **20.18.0** で `require(esm)` が `ERR_REQUIRE_ESM`・システム Node 22.22.0 では成功、まで実測）。⚠ ただし**番人自身が Electron の Node で走るようになったわけではない** — 同型が次に出たら、また実機 1 回が要る |
 | オーナーが「SDK にしたのに PTY で上がる」理由を知れない | — | 降格理由は `SpawnSwarmWorkerResponse.fellBackBecause` に載せて UI が出す。**配布アプリのサーバは fork された子プロセスなので `console.warn` はどこにも届かない** — ログだけに置く設計は「理由が表示されるから枠を1つ握る設計を受け入れた」という前提を静かに無効化する |
 | SDK パッケージの破壊的変更 | — | 影響面は sdkSession.ts に閉じる（bridge の @alpha は**使っていない** — query() 本体は semver 通常運用）。CI: SDK バージョンは lockfile 固定・更新は手動 PR |
 | ガード検証不能 | GuardWiringError fail-closed | 同型で fail-closed（§4-G-3） |
@@ -597,9 +597,74 @@ Instead change the require of /Applications/OPEN GROUND.a) — this worker runs 
   したがって PTY は `terminalId` の有無で判別する。今回の観測（`terminalId` 有り ＋
   `sdkSessionId` 無し ⇒ PTY）はこの不変条件どおりの**正しい観測手段**であり、上の受け入れ
   項目 2（roster/UI が混在で正しい）も**この方法で観測できる**
-  （今回は全数 PTY だったため、混在の確認自体は未実施）。
+  （今回は全数 PTY だったため、混在の確認自体は未実施。⚠「全数 PTY」は §9 の機構からの
+  帰結であって、このログが数えた事実ではない — 下の「実機実測ログ 2」の **n=1** の但し書きを見よ）。
 - **副次観測2**: 同時刻の `GET /api/swarm/preflight` は `{"ok":true,"issues":[]}` を返した
   — 実際には起動が失敗する状態を preflight は素通しした（この失敗モードを見ていない）。
+
+**実機実測ログ 2（2026-08-03・同じ観測点で「SDK で立った」側）** — 上の 0802 のログは**消さない**。
+あれは「PTY だった」ことの証拠で、この 2 本が前後の対比になって初めて `e26d5efb`（`require()` →
+動的 `import()` 化の**本体**）を含む一連の修正が実機で効いた証拠になる。
+⚠ **ブランチ tip の `0b40007b` は修正コミットではない** — 中身は docs ＋ `tsconfig.scripts.json` ＋
+`scriptsTypecheck.test.ts` だけ（`git show --stat` で確認）。実体は `e26d5efb`
+（`sdkSession.ts` / `scripts/build-server.js`）と `60ef465c`（`preloadSdk` の配線・枠の
+check-then-act・ロード失敗 memo の修正）で、§9 の帰属もそちら。
+観測者は**司令官**（このカードの worker の worktree には Electron 本体バイナリが無く、
+worker 側では再測定していない）。
+
+- **日付**: 2026-08-03（= 観測者が実際に測った日）
+- **版**: 0.11.49（パッケージ済み `/Applications/OPEN GROUND.app`）
+- **条件**: 既定のまま — `swarmWorkerRuntime` は**未設定**（設定を触らずに）dispatch
+- **結果**: worker の runtime = **sdk** / **commit まで到達**
+
+`GET /api/swarm/orchestrator` の該当 worker の実レコード:
+
+```
+runtime: "sdk" / terminalId: "" / sdkSessionId: "e1ee11a4-fc0e-4d91-8b05-02ec77a110a9" / phase: done
+```
+
+- engine journal に `runtime fallback (SDK→PTY)` の行は **この boot で 0 件**。
+  ⚠ 0802 側について言えるのは「**同じ観測点で fallback 行が出ていた**」まで — あのログは
+  worker 1 体の記録（**n=1**）で、「全数 PTY だった」は §9 の機構（Electron の Node 20.18 では
+  `require(esm)` が必ず落ちる ⇒ 全 spawn が同じ失敗）からの帰結であって、0802 のログが
+  数えた事実ではない。
+- 識別は上の副次観測1の identity invariant どおり — `sdkSessionId` 有り ＋ `terminalId` 空 ⇒ SDK。
+  ⚠ 不変条件が言うのは「**在る/無い**」で、**無い側の綴りは生成箇所で揺れる**: SDK worker の
+  レコードは `terminalId: ''`（`src/lib/server/swarmWorker.ts:968`。司令官卓も同型で
+  `src/lib/server/swarmManager.ts:886`）、ターミナル生存を返す形は `terminalId: null`
+  （`src/lib/server/terminal.ts:515` — `claudeSessionActivity` が返す `ClaudeSessionActivity`
+  の初期値）。`=== null` や `=== ''` の片方だけで判定しない。
+  （この 3 箇所は `sed -n '<行>p' <file>` で現物を見て書いた・0803。行番号は編集で動くので、
+  ずれていたら `terminalId:` の綴りで探し直すこと。)
+- ⇒ **配布ビルドで SDK worker が初めて起動し、コミットまで到達した**。§9 の「配布ビルドでだけ
+  SDK worker が0体(2件目)」行が残していた宿題（`ELECTRON_RUN_AS_NODE=1` での実機1回）はこれで閉じる。
+  ⚠ 閉じたのは**その宿題（配布形態で一度通す）だけ**で、覆いが広がったわけではない —
+  番人は今も Electron の Node では走っておらず、観測は 0.11.49 の 1 機 × worker 1 体（**n=1**）。
+  同型が次に出たら、また実機 1 回が要る（§9 末尾・`docs/commander/02-worker-lifecycle.md`・
+  番人コメントに置いた但し書きと同じ）。
+- **併せて取った直接測定（Electron の Node 単体）**:
+  `ELECTRON_RUN_AS_NODE=1 "/Applications/OPEN GROUND.app/Contents/MacOS/OPEN GROUND" -e …`
+  → `node 20.18.0 | electron 31.7.7`。`require('@anthropic-ai/claude-agent-sdk')` は
+  **Electron の Node(20.18.0) で FAIL `ERR_REQUIRE_ESM` / システム Node 22.22.0 で OK**。
+  ⇒ `require(esm)` が使えないのは「Node 20 だから」ではなく **20.18.0 だから**（`require(esm)` は
+  20.19 / 22.12 以降）。§9 のこの行の前提は**推論から実測に変わった**。
+  なお `import()` 側については、**今回の記録では**この単体 probe ではなく
+  **配布アプリの SDK worker が done まで到達したこと（この「実機実測ログ 2」の本体）で
+  end-to-end に確認した**。⚠ これは probe による確認を**否定するものではない** —
+  Electron 31.7.7 で `import(ESM)` = OK を直接 probe した表は `docs/VERIFICATION.md` §4.1 にあり、
+  `docs/DISTRIBUTION.md` の推奨 probe も同じ形。両者は競合せず補い合う。
+- ⚠ **日付の食い違い（追随カード候補・本カードでは直さない）**: 同じ probe の値を
+  `docs/VERIFICATION.md` §4.1 は「実測値(2026-08-02)」として載せている。司令官が実際に
+  Electron probe を走らせたのは **2026-08-03** なので、ここはその日付で書いた。
+  **これは別の測定ではなく、どちらの暦で書くかの差**（司令官の記録では probe 初回は
+  `2026-08-02T15:25Z` ＝ JST では 08-03 00:25 — UTC/JST の日跨ぎ）。⚠ 次の担当は
+  **§4.1 を「間違い」として書き換えないこと**。直すなら「どちらの時刻帯で書くか」を
+  先に決める話で、値そのものは同一。
+  `docs/VERIFICATION.md` は別カードで統合済みの本文のため**触っていない**。
+- ⚠ **probe は bare specifier で書く**: 未公開サブパス
+  `…/@anthropic-ai/claude-agent-sdk/sdk.mjs` を `require` すると **Electron の Node もシステム Node も**
+  `ERR_PACKAGE_PATH_NOT_EXPORTED` で落ちる（exports マップに無い）。0802 のエラー本文がこのパスを
+  名指しするので、**そのままコピーして probe すると別の理由の失敗を同じ失敗と読み違える**。
 
 ---
 

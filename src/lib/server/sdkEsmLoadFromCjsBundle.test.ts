@@ -26,7 +26,9 @@
 //
 // ⚠ WHAT THIS FILE DOES NOT PROVE: it runs the bundle on THIS machine's Node
 // (22.22) with require(esm) switched off — not on the Node 20.18 that Electron
-// embeds and forks. See the note on `nodeArgs`.
+// embeds and forks. That gap is no longer unmeasured, only unmeasured *here*:
+// on 2026-08-03 the shipped app was probed directly and a packaged-app SDK
+// worker ran end to end. See the note on `nodeArgs` for what was seen.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as esbuild from 'esbuild'
@@ -61,12 +63,34 @@ const { buildOptions } = require(join(REPO_ROOT, 'scripts', 'build-server.js')) 
  *  the Node 20.18 that Electron 31.7.7 embeds, and the child process below is
  *  `process.execPath`, not Electron. BOTH defects of this class so far were
  *  "green on the dev Node, dead on the forked Electron Node" (docs/MAP.md says
- *  exactly that), so the honest claim for this file is narrow: **the emitted CJS
- *  loads the ESM package on a Node that has no require(esm)**. Whether it loads
- *  under Electron's own Node is UNVERIFIED HERE — this machine ships no Electron
- *  binary (`node_modules/electron/dist` holds only LICENSE + version), so it
- *  could not be measured, 2026-08-02. That one belongs on a machine with the
- *  packaged app; see docs/DISTRIBUTION.md. */
+ *  exactly that), so the honest claim for this file is narrow, and unchanged:
+ *  **the emitted CJS loads the ESM package on a Node that has no require(esm)**.
+ *
+ *  WHAT ELECTRON'S OWN NODE DOES was measured on 2026-08-03 — off to the side,
+ *  on the owner's machine against the packaged app, because a test run still
+ *  cannot reach it from here (`node_modules/electron/dist` holds only LICENSE +
+ *  version, same as 2026-08-02):
+ *    - `ELECTRON_RUN_AS_NODE=1 "…/OPEN GROUND.app/Contents/MacOS/OPEN GROUND"`
+ *      reports `node 20.18.0 | electron 31.7.7`, and there
+ *      `require('@anthropic-ai/claude-agent-sdk')` FAILS ERR_REQUIRE_ESM while
+ *      the system Node 22.22.0 succeeds. So the missing `require(esm)` is about
+ *      20.18.0 specifically, not "Node 20" — it landed in 20.19 / 22.12.
+ *    - the `import()` half was confirmed IN THAT RECORD end to end rather than by
+ *      probe: on 0.11.49 a packaged-app worker dispatched with the runtime dial
+ *      untouched came up `runtime:'sdk'` (sdkSessionId set, terminalId empty) and
+ *      reached commit, with zero `runtime fallback (SDK→PTY)` lines for that boot.
+ *      That narrow wording is deliberate — a DIRECT `import(ESM)` probe against
+ *      Electron 31.7.7 does exist (docs/VERIFICATION.md §4.1, and the probe
+ *      docs/DISTRIBUTION.md recommends). This record is not that probe and does
+ *      not supersede it; the two corroborate each other.
+ *      Both records: docs/SDK_WORKER_MIGRATION_PLAN.md §12「実機実測ログ 2」.
+ *  ⚠ Probe with the BARE specifier. Requiring the unexported subpath
+ *  `…/@anthropic-ai/claude-agent-sdk/sdk.mjs` — the path the 0802 crash message
+ *  names — fails ERR_PACKAGE_PATH_NOT_EXPORTED on BOTH runtimes, which looks
+ *  like this defect and is a different one.
+ *
+ *  None of that makes THIS file run under Electron's Node. The next defect of
+ *  this class still costs one real packaged-app pass; see docs/DISTRIBUTION.md. */
 const nodeArgs = ((): string[] => {
   const probe = spawnSync(process.execPath, ['--no-experimental-require-module', '-e', '0'])
   // A Node old enough to reject the flag is a Node with no `require(esm)` to
