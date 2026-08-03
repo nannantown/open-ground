@@ -29,6 +29,12 @@ export interface EngineIntent {
   desiredRunning: boolean
   selfSupply: boolean
   overseer: boolean
+  /** The owner had the SUPPLY desk up when the app last ran (set on spawn,
+   *  cleared on the explicit stop route). Read at boot by resumeEngines to
+   *  bring the desk back after an update restart — the owner's 2026-08-03
+   *  request: 「補給官も毎回再起動からはじまるのでめんどくさい」. Strict-true
+   *  read like every other flag here; absent on old files ⇒ no auto-relaunch. */
+  supplyDesired?: boolean
   /** The UTC day (`YYYY-MM-DD`) `selfSupplyDayCount` is counting, and the count
    *  itself — self-supply's DAILY CAP, the guard that bounds how many cards the
    *  engine may propose to itself in a day.
@@ -67,6 +73,7 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
       desiredRunning: parsed.desiredRunning === true,
       selfSupply: parsed.selfSupply === true,
       overseer: parsed.overseer === true,
+      ...(parsed.supplyDesired === true ? { supplyDesired: true } : {}),
       ...(typeof parsed.selfSupplyDayKey === 'string' ? { selfSupplyDayKey: parsed.selfSupplyDayKey } : {}),
       ...(typeof parsed.selfSupplyDayCount === 'number' && parsed.selfSupplyDayCount >= 0
         ? { selfSupplyDayCount: parsed.selfSupplyDayCount }
@@ -130,6 +137,7 @@ export const patchEngineIntent = async (
       desiredRunning: patch.desiredRunning ?? current.desiredRunning,
       selfSupply: patch.selfSupply ?? current.selfSupply,
       overseer: patch.overseer ?? current.overseer,
+      ...((patch.supplyDesired ?? current.supplyDesired) === true ? { supplyDesired: true } : {}),
     },
     now,
   )

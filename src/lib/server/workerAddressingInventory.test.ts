@@ -784,8 +784,8 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/swarmSupply.ts': {
     tier: 'pty-only-by-design',
-    why: 'The supply desk is deliberately kept on the PTY runtime (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK, where the remote control disappears).',
-    ptyFns: [],
+    why: 'The supply desk is deliberately kept on the PTY runtime (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK, where the remote control disappears). 0803: it also OWNS stopping its desks (stopSwarmSupplyDesks — kill by desk label), so the route layer never reaches the PTY pool directly.',
+    ptyFns: ['killTerminal', 'listLiveDesksIn'],
   },
 
   // ── one-off utility PTYs: each spawns its own claude, reads it, kills it ──
@@ -1584,8 +1584,8 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   },
   'src/components/canvas/modules/SwarmModule.tsx::map-keyed': {
     tier: 'pty-only-by-design',
-    count: 4,
-    why: "statusOfPty's own three maps (exitedIds / statusByPty / seenRef). The name says the scope: an SDK desk's status comes from the SDK pane's own stream, and feeding '' in here would read the PTY map's absent entry as 'starting' forever.",
+    count: 6,
+    why: "statusOfPty's own three maps (exitedIds / statusByPty / seenRef). The name says the scope: an SDK desk's status comes from the SDK pane's own stream, and feeding '' in here would read the PTY map's absent entry as 'starting' forever. 0803 (+2): the desk-reconcile effect asks exitedIds whether the STORED desk is confirmed dead before clearing it — the manager probe uses `terminalId || sdkSessionId` (both-runtime, the empty-string invariant makes the fallback correct) and the supply probe uses terminalId alone (that desk is PTY-only by design).",
   },
   'server/routes/swarm.ts::interpolated': {
     tier: 'runtime-dispatched',

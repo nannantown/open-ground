@@ -62,7 +62,8 @@ import {
   WorktreeOccupiedError,
 } from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
-import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
+import { spawnSwarmSupply, stopSwarmSupplyDesks } from '@/lib/server/swarmSupply'
+import { patchEngineIntent } from '@/lib/server/swarmEnginePersistence'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
 import { listManagerDesks, sayToManagerDesk } from '@/lib/server/swarmManagerRuntime'
 
@@ -463,6 +464,14 @@ export const swarmRoutes = new Hono()
       // a resume, so a junk body can never silently discard the desk's memory.
       const fresh = body?.fresh === true
       const res = await spawnSwarmSupply({ projectPath: path, cols, rows, fresh })
+      // The owner wants this desk UP — remember it across restarts (engine.json),
+      // so an app update brings the supply officer back instead of a dead pane
+      // (0803 owner request). AWAITED but swallow-on-fail: a failed mirror write
+      // must not fail a spawn that already succeeded — while a FIRE-AND-FORGET
+      // write here raced test teardowns with ENOTEMPTY (§8 of the doctrine, the
+      // exact class measured 0801) and left the response claiming an intent the
+      // disk might not hold yet. One small JSON write is worth the wait.
+      await patchEngineIntent(path, { supplyDesired: true }).catch(() => {})
       return c.json(res)
     } catch (e: any) {
       return c.json({ error: `failed to spawn supply: ${e?.message ?? e}` }, 500)
@@ -482,6 +491,29 @@ export const swarmRoutes = new Hono()
   // `resumed` says which happened) — and a resumed commander re-reads the Board
   // before it speaks, because the engine's in-memory roster did NOT survive the
   // restart even though the conversation did. `fresh:true` opts out (swarmSessions.ts).
+  // --- POST /api/swarm/supply/stop — the owner turns the supply desk OFF -----
+  // Body: { path }. Kills every live supply-desk PTY in the project and clears
+  // the persisted supplyDesired flag — the counterpart of the spawn route's
+  // set. The UI used to DELETE the raw terminal id, which stopped the desk but
+  // could never speak to intent; with boot auto-resume in play (0803), a stop
+  // that forgets to clear the flag would resurrect a desk the owner just
+  // closed, every restart, forever. Owner-gated + validated like every
+  // /api/swarm/* write.
+  .post('/api/swarm/supply/stop', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const stopped = stopSwarmSupplyDesks(path)
+    await patchEngineIntent(path, { supplyDesired: false }).catch(() => {})
+    return c.json({ ok: true, stopped })
+  })
   .post('/api/swarm/manager', async (c) => {
     // OWNER-ONLY gate (see /api/swarm/worker): the commander session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any

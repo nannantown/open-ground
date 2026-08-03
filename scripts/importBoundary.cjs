@@ -39,6 +39,9 @@ const PTY_BY_DESIGN = [
   'src/lib/server/swarmEnvPreflight.ts', //   probes a throwaway PTY before launch
   'src/lib/server/swarmJanitor.ts', //        sweeps the PTY pool's own leftovers
   'src/lib/server/swarmOverseerBrain.ts', //  reads a PTY screen for the brain pass
+  'src/lib/server/swarmSupply.ts', //        the supply desk is PTY-ONLY BY DESIGN
+  //                                          (Remote Control lives on the PTY runtime;
+  //                                          stopSwarmSupplyDesks kills by desk label)
   'server/routes/customModules.ts', //        custom tabs are PTY panes by design
   'server/routes/sse.ts', //                  the PTY output stream
   'server/index.ts', //                       starts/stops the PTY sweep loop

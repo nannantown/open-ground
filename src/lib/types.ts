@@ -1603,6 +1603,14 @@ export interface SwarmOrchestratorState {
    *  engine never dispatches (manual POST /api/swarm/worker is untouched) AND
    *  never integrates — the global stop. */
   running: boolean
+  /** The commander desk ACTUALLY live right now, from the both-pools desk read
+   *  (listManagerDesks[0]) — the handle the pane needs to ADOPT an engine-woken
+   *  desk instead of pinning to a dead pre-restart id forever (the 0803
+   *  「再起動のたびに死画面」 report). Additive + optional: an old server omits
+   *  it (client keeps its old behaviour); null = no live commander desk. */
+  managerDesk?: { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null
+  /** Same, for the supply desk (PTY-only by design — Remote Control lives there). */
+  supplyDesk?: { runtime: 'pty'; handleId: string; agentSessionId: string | null } | null
   /** True while the owner has EXPLICITLY paused the engine (Autonomy OFF) and
    *  not turned it back ON — the machine-readable "stopped by hand" signal a
    *  commander / another session reads to tell a DELIBERATE stop from a

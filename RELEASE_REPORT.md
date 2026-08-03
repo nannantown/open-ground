@@ -271,3 +271,43 @@ the operator Secrets/dashboard items above (which only gate the *visibility* of 
   の**逆**が本カードの worker 自身で観測できている。ただし配布アプリの受入手順一般
   (`docs/VERIFICATION.md` §4.1 の言う packaged `.app` を新規に起動して一巡させる検証)を
   網羅したものではない — 「1体の点火を実測」に範囲を限定する。
+
+## 0.11.52: 散文質問(SDK worker → オーナー → 回答配達)の実機確認
+
+> このセクションは本文書 H1(0.9.1 release prep)とはスコープが別(0.11.52 の実機観測)。
+
+本カード自身の worker(この packaged `.app` 0.11.52、`sdkSessionId` 経由の SDK worker)が
+末尾を「?」で終える散文の質問を出し、実際に本人(オーナー)から回答を受け取れることを、
+別枠の作り物ではなく**この受入カードの実行そのもの**で確認した — 受け取った回答文が
+`buildAnswerInjection`(`src/lib/server/swarmEscalations.ts:639-656`)の **`plainQuestion`
+未指定の分岐**(4行構成: 先頭行「【本人からの回答】エスカレーションした質問に、本人
+（オーナー）が回答しました。」→ `Q:` 行 → `オーナーの回答:` 行 → 末尾行「この回答を前提に、
+ブロックされていた作業を再開してください。」)が生成する固定文言と一字一句一致することを
+目視確認した。これは本カードの質問が worker 自身の起票(plainQuestion なし)だったために
+通ったのがこの分岐だった、というだけで、`plainQuestion` 有りの分岐(5行構成: `Q:` 行の代わりに
+「オーナーに表示された質問…」「あなたが出した元の質問:」の2行)は今回未実測。
+
+実測できた具体値(再現用): escalation id `482d8f21-9301-4964-8ab0-0773c99c4352` /
+runtime `sdk` / `sdkSessionId 7cb0f12f-8879-416e-a933-cc1a66a2d2a5` /
+`createdAt 04:02:06.533Z` / `answeredAt 04:16:09.063Z`(answer "B") /
+`injectedAt 04:16:09.161Z`。
+
+`swarmSdkQuestions.test.ts` の16本は本番の `sdkRecentOutputHead`/`renderSdkTail` builder で
+組み立てた fixture による単体検証(手書きの模造 head ではない — それを殺す番人がある)。
+本カードは fixture を介さず「実際に動いている SDK worker が実際に質問し実際に回答が届く」まで
+を通しで実測した初回。ただし実測できたのは**質問1本・worker 1体・`plainQuestion` 無しの分岐・
+生きた worker への live injection レーン(`status: 'injected'`)だけ**であり、次は未実測のまま
+残る: worker 死亡時の queued レーン(`swarmEscalations.ts` の `queueForNextDispatch`)、
+`plainQuestion` 有りのレーン、検知の fail-closed 側(working / quota-parked / マーカー行で
+'question' と誤判定しないこと)。
+
+0802 のクラウド中心決定(auto-memory `project_cloud_centric_for_now`)は再検討条件を3つ挙げ、
+そのうち2つが成立したとしている(自動運転の完走、および本カードで実測した散文質問)。
+未成立の1つは「オーナーが最初の数回に張り付ける時間があると言ったとき」で、これはオーナー側の
+判断待ちのため今回も変わらず未成立。この段落の根拠は auto-memory(リポジトリ外)のみであり
+読者が直接検証できない点に注意 — リポジトリ内で確認できる一次情報は上記の escalation id と
+コード引用のみ。
+
+(カード指示は `docs/RELEASE_REPORT.md` を指していたが、実体は本リポジトリ直下の
+`RELEASE_REPORT.md` のみでこのパスは存在しない。直下に追記した — 次にこのカードを書く人は
+同じ食い違いを踏まないこと。)

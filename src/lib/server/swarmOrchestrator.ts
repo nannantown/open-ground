@@ -234,6 +234,7 @@ import {
   managerDeskForSession,
   sayToManagerDesk,
 } from './swarmManagerRuntime'
+import { SUPPLY_DESK_LABEL, spawnSwarmSupply } from './swarmSupply'
 import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
@@ -10115,6 +10116,27 @@ export const getOrchestratorState = async (
   // restart is the one kill switch layer with no substitute (OVERSEER_DESIGN.md K2 /
   // L9-③). readEngineIntent never throws (fail-quiet-to-OFF ⇒ no banner on a bad disk).
   const overseerIntent = (await readEngineIntent(projectPath)).overseer
+  // The desks ACTUALLY live right now — both-pools reads, still pure/idempotent
+  // (this GET's K8 no-mutate contract). This is the handle the UI needs to ADOPT
+  // an engine-woken desk: the heartbeat above carries phase/note but NO id, so
+  // after an app restart the pane pinned to its dead pre-restart id forever
+  // while the sidebar said the commander was working (0803 owner report).
+  const managerDeskFull = listManagerDesks(key)[0] ?? null
+  const managerDesk = managerDeskFull
+    ? {
+        runtime: managerDeskFull.runtime,
+        handleId: managerDeskFull.handleId,
+        agentSessionId: managerDeskFull.agentSessionId,
+      }
+    : null
+  const supplyLive = listLiveDesksIn(key, SUPPLY_DESK_LABEL)[0] ?? null
+  const supplyDesk = supplyLive
+    ? {
+        runtime: 'pty' as const,
+        handleId: supplyLive.id,
+        agentSessionId: supplyLive.agentSessionId ?? null,
+      }
+    : null
   const engine = store.engines.get(key)
   if (!engine) {
     return {
@@ -10124,6 +10146,8 @@ export const getOrchestratorState = async (
       manualStopPersisted: stopped,
       overseerRemembered: overseerIntent,
       manager,
+      managerDesk,
+      supplyDesk,
     }
   }
   // Read the Board cards for the lead-time KPI (read-only — never mutates). A
@@ -10135,7 +10159,7 @@ export const getOrchestratorState = async (
   } catch {
     tasks = []
   }
-  return { ...stateOf(engine, deps.isAlive, tasks, remembered, stopped, overseerIntent), manager }
+  return { ...stateOf(engine, deps.isAlive, tasks, remembered, stopped, overseerIntent), manager, managerDesk, supplyDesk }
 }
 
 /** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the
@@ -10402,6 +10426,10 @@ export const resumeEngines = async (
      *  SHARED {@link proveTranscriptLoadable} with the SIGKILL-orphan mtime window
      *  ON. `true` ⇒ `--resume`; `false` ⇒ fall back to crash reclaim. */
     proveResumable?: (worktree: string, sessionId: string) => Promise<boolean>
+    /** DI for tests: the supply-desk boot resume (default spawnSwarmSupply).
+     *  Injectable so the resume test proves the supplyDesired flag actually
+     *  spawns — and that its ABSENCE spawns nothing — without a real claude. */
+    spawnSupply?: (o: { projectPath: string }) => Promise<unknown>
   },
 ): Promise<{ resumed: string[]; suppressed: boolean }> => {
   const now = opts?.now ?? Date.now()
@@ -10476,6 +10504,22 @@ export const resumeEngines = async (
     try {
       const key = await canonicalize(projectPath)
       const intent = await readEngineIntent(projectPath)
+      // SUPPLY DESK RESUME (2026-08-03, owner request: 「補給官も毎回再起動から
+      // はじまるのでめんどくさい」). Independent of the ENGINE's desiredRunning —
+      // the supply desk is the owner's phone window and can be up with autonomy
+      // off. spawnSwarmSupply resumes the persisted conversation by default, so
+      // the desk comes back with its memory; the flag is set by the spawn route
+      // and cleared ONLY by the explicit stop route, so a desk the owner closed
+      // stays closed. Fail-quiet: a supply that cannot come back (claude not
+      // ready, spawn fault) must never block the engine resume below.
+      if (intent.supplyDesired) {
+        try {
+          const pre = await claudeRunPreflight()
+          if (pre.ok) await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath })
+        } catch {
+          /* resume is best-effort; the owner can relaunch from the tab */
+        }
+      }
       if (!intent.desiredRunning) continue
       if (await isSwarmManualStopPersisted(key)) continue // supremacy — never override an explicit pause
       const pre = await claudeRunPreflight()

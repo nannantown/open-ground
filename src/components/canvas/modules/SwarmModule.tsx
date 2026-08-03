@@ -42,6 +42,7 @@ import { Network, Inbox, Boxes, Gauge, ShieldCheck, X, Power, Eye, type LucideIc
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
+import { reconcileDesk } from '@/lib/deskReconcile'
 import type {
   ActiveTerminalsResponse,
   BoardColumn,
@@ -634,6 +635,70 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setExitedIds((prev) => (prev.has(terminalId) ? prev : new Set(prev).add(terminalId)))
   }, [])
 
+  // ── Desk reconcile (2026-08-03 — the post-restart dead-screen fix) ──────────
+  // Every engine poll now carries the LIVE desk handles (managerDesk/supplyDesk,
+  // both-pools reads). Follow them: ADOPT an engine-woken desk the stored record
+  // does not name (zero-click reconnect after an app restart), CLEAR a
+  // confirmed-dead record with no successor (honest launch CTA instead of the
+  // eternal 「セッションが終了しました」). The decision itself is pure and
+  // guarded (deskReconcile.ts — busy wins, old servers change nothing); this
+  // effect only applies the verdict to state + localStorage.
+  useEffect(() => {
+    // The stored records use OPTIONAL runtime ('pty' when absent — every old
+    // record's shape); the reconcile input is the normalized strict form.
+    const mv = reconcileDesk(
+      manager
+        ? {
+            terminalId: manager.terminalId,
+            runtime: manager.runtime ?? 'pty',
+            ...(manager.sdkSessionId ? { sdkSessionId: manager.sdkSessionId } : {}),
+            agentSessionId: manager.agentSessionId,
+            startedAt: manager.startedAt,
+          }
+        : null,
+      engine.managerDesk,
+      {
+        busy: managerBusy,
+        storedDead: !!manager && exitedIds.has(manager.terminalId || manager.sdkSessionId || ''),
+      },
+    )
+    if (mv.kind === 'adopt') {
+      setManager(mv.record)
+      saveManager(project.id, mv.record)
+    } else if (mv.kind === 'clear') {
+      setManager(null)
+      saveManager(project.id, null)
+    }
+    const sv = reconcileDesk(
+      supply
+        ? {
+            terminalId: supply.terminalId,
+            runtime: 'pty', // the supply desk is PTY-only by design
+            agentSessionId: supply.agentSessionId,
+            startedAt: supply.startedAt,
+          }
+        : null,
+      engine.supplyDesk,
+      {
+        busy: supplyBusy,
+        storedDead: !!supply && exitedIds.has(supply.terminalId),
+      },
+    )
+    if (sv.kind === 'adopt' && sv.record.runtime === 'pty') {
+      const rec: SwarmSupply = {
+        terminalId: sv.record.terminalId,
+        agentSessionId: sv.record.agentSessionId,
+        startedAt: sv.record.startedAt,
+      }
+      setSupply(rec)
+      saveSupply(project.id, rec)
+    } else if (sv.kind === 'clear') {
+      setSupply(null)
+      saveSupply(project.id, null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setters/savers are stable; keyed on the data
+  }, [engine.managerDesk, engine.supplyDesk, manager, supply, managerBusy, supplyBusy, exitedIds, project.id])
+
   // Terminate a worker: kill the PTY, then tear the worktree down. A soft
   // attempt keeps a dirty/locked tree (removed:false) so uncommitted work isn't
   // lost — we surface a force option. Force that still refuses drops the worker
@@ -802,6 +867,16 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setSupplyBusy(true)
     setError(null)
     try {
+      // The intent-clearing stop (2026-08-03): kills the desk server-side AND
+      // clears the persisted supplyDesired flag — without it, boot auto-resume
+      // would resurrect a desk the owner just closed, every restart, forever.
+      await fetch('/api/swarm/supply/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+      }).catch(() => {})
+      // Belt-and-braces: the raw terminal delete for the stored id (the route
+      // kills by desk label; a desk the pool lost the label for still dies here).
       await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
     } finally {
       setSupply(null)

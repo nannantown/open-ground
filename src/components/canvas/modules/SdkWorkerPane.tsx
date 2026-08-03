@@ -16,6 +16,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, Gauge, RotateCcw } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import type { SdkEvent, SdkSessionStatus } from '@/lib/server/sdkEvents'
+import {
+  groupSdkFrames,
+  parseMarkdownBlocks,
+  toolCardSummary,
+  type SdkRenderItem,
+} from '@/lib/sdkTranscript'
 
 export interface Frame {
   seq: number
@@ -400,13 +406,29 @@ export const SdkWorkerPane = ({
     onStatusRef.current?.(status)
   }, [status])
 
-  // Keep the newest line in view unless the reader has scrolled up.
-  useEffect(() => {
+  // Follow the newest line — 3-state model (research: TanStack/Roo-Code, and
+  // claude-code#76350 the other way round). `drifted` is set by the READER's
+  // own scroll, never derived from post-growth distance: the old check measured
+  // "near bottom" AFTER the DOM grew, so one big chunk (a long text event)
+  // pushed the distance past the threshold and silently stopped following —
+  // exactly the forced-scroll/stuck-scroll class the research warns about.
+  const [drifted, setDrifted] = useState(false)
+  const onFeedScroll = () => {
     const el = feedRef.current
     if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-    if (nearBottom) el.scrollTop = el.scrollHeight
-  }, [frames])
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    setDrifted(!nearBottom)
+  }
+  useEffect(() => {
+    const el = feedRef.current
+    if (!el || drifted) return
+    el.scrollTop = el.scrollHeight
+  }, [frames, drifted])
+  const jumpToLatest = () => {
+    const el = feedRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    setDrifted(false)
+  }
 
   // LOOK AT THE ANSWER. This used to await fetch and inspect nothing — no
   // `r.ok`, no status, no catch — so a refusal was indistinguishable from
@@ -458,6 +480,8 @@ export const SdkWorkerPane = ({
     const r = await post('/interrupt')
     if (!r.ok) setActionError(r.error)
   }
+
+  const renderItems: SdkRenderItem[] = useMemo(() => groupSdkFrames(frames), [frames])
 
   const baseStatusLabel: string = {
     starting: t('projectPanel.swarm.statusStarting'),
@@ -608,13 +632,36 @@ export const SdkWorkerPane = ({
         </div>
       ) : null}
 
-      {/* Feed */}
-      <div ref={feedRef} className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2 text-[11px] leading-relaxed">
-        {frames.length === 0 ? (
-          <div className="text-ink-faint">{t('projectPanel.swarm.sdk.empty')}</div>
-        ) : (
-          frames.map((f) => <EventRow key={f.seq} ev={f.ev} t={t} />)
-        )}
+      {/* Feed — grouped transcript (tool call + result = one collapsed card;
+          prose = markdown blocks), with the jump-to-latest pill when the reader
+          has scrolled up. */}
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={feedRef}
+          onScroll={onFeedScroll}
+          className="h-full overflow-y-auto px-2.5 py-2 text-[11px] leading-relaxed"
+        >
+          {frames.length === 0 ? (
+            <div className="text-ink-faint">{t('projectPanel.swarm.sdk.empty')}</div>
+          ) : (
+            renderItems.map((it) =>
+              it.kind === 'tool' ? (
+                <ToolCard key={it.seq} item={it} />
+              ) : (
+                <EventRow key={it.seq} ev={it.ev} t={t} />
+              ),
+            )
+          )}
+        </div>
+        {drifted ? (
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2.5 py-1 text-[10px] text-ink-muted shadow-sm transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          >
+            ↓ {t('projectPanel.swarm.sdk.jumpLatest')}
+          </button>
+        ) : null}
       </div>
 
       {/* Session-ended strip — the SDK twin of SwarmWorkerPane's dead-PTY
@@ -680,18 +727,130 @@ export const SdkWorkerPane = ({
  *  noise, "128k" is a size. Under 1000 stays exact — a small number IS the info. */
 const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
 
+/** Inline styling for one line of worker prose: `code` spans and **bold**.
+ *  A tiny hand parser on purpose — every node is a React element (nothing ever
+ *  reaches innerHTML), and the subset is exactly what workers emit. */
+const InlineMd = ({ text }: { text: string }) => {
+  const parts: (string | { code: string } | { bold: string })[] = []
+  let rest = text
+  const re = /`([^`]+)`|\*\*([^*]+)\*\*/
+  for (;;) {
+    const m = re.exec(rest)
+    if (!m) break
+    if (m.index > 0) parts.push(rest.slice(0, m.index))
+    parts.push(m[1] !== undefined ? { code: m[1] } : { bold: m[2] })
+    rest = rest.slice(m.index + m[0].length)
+  }
+  if (rest) parts.push(rest)
+  return (
+    <>
+      {parts.map((p, i) =>
+        typeof p === 'string' ? (
+          <span key={i}>{p}</span>
+        ) : 'code' in p ? (
+          <code key={i} className="rounded-[3px] bg-bg-inset px-1 font-mono text-[11px] text-ink">
+            {p.code}
+          </code>
+        ) : (
+          <strong key={i} className="font-semibold">
+            {p.bold}
+          </strong>
+        ),
+      )}
+    </>
+  )
+}
+
+/** Worker prose as markdown blocks — the research's core readability move. */
+const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) => (
+  <div className={subagent ? 'pl-3 text-[11px] text-ink-muted' : 'text-[12px] text-ink'}>
+    {parseMarkdownBlocks(text).map((b, i) => {
+      switch (b.kind) {
+        case 'heading':
+          return (
+            <div key={i} className={`mt-1.5 font-semibold ${b.level === 1 ? 'text-[13px]' : 'text-[12px]'}`}>
+              <InlineMd text={b.text} />
+            </div>
+          )
+        case 'code':
+          return (
+            <pre
+              key={i}
+              className="my-1 overflow-x-auto rounded-[4px] border border-line-soft bg-bg-inset px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-ink"
+            >
+              {b.text}
+            </pre>
+          )
+        case 'list':
+          return (
+            <ul key={i} className={`my-0.5 ${b.ordered ? 'list-decimal' : 'list-disc'} pl-4`}>
+              {b.items.map((it, j) => (
+                <li key={j} className="my-0.5">
+                  <InlineMd text={it} />
+                </li>
+              ))}
+            </ul>
+          )
+        default:
+          return (
+            <p key={i} className="my-0.5 whitespace-pre-wrap">
+              <InlineMd text={b.text} />
+            </p>
+          )
+      }
+    })}
+  </div>
+)
+
+/** One tool call as ONE collapsed card — summary row (name + clamped args),
+ *  the result attached as the elbow preview, click to expand. An ERROR result
+ *  ships expanded and red (the research's one no-collapse rule). */
+const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) => {
+  const isError = item.result !== null && !item.result.ok
+  const [expanded, setExpanded] = useState(isError)
+  const sub = item.use.fromSubagent
+  return (
+    <div className={`my-0.5 ${sub ? 'pl-3' : ''}`}>
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex w-full items-baseline gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-[10px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+      >
+        <span className="shrink-0 text-ink-faint" aria-hidden>
+          {expanded ? '▾' : '▸'}
+        </span>
+        <span className="min-w-0 flex-1 truncate">🔧 {toolCardSummary(item.use)}</span>
+        {item.result && !expanded ? (
+          <span className={`min-w-0 max-w-[45%] truncate ${isError ? 'text-error' : 'text-ink-faint'}`}>
+            ⎿ {item.result.head}
+          </span>
+        ) : null}
+      </button>
+      {expanded ? (
+        <div className="ml-4 border-l border-line-soft pl-2">
+          {item.use.detail ? (
+            <div className="whitespace-pre-wrap break-all font-mono text-[10px] text-ink-muted">{item.use.detail}</div>
+          ) : null}
+          {item.result ? (
+            <div className={`whitespace-pre-wrap break-all font-mono text-[10px] ${isError ? 'text-error' : 'text-ink-faint'}`}>
+              ⎿ {item.result.head}
+            </div>
+          ) : (
+            <div className="font-mono text-[10px] text-ink-faint">…</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
   switch (ev.kind) {
     case 'text':
       // The worker's own words are the PRIMARY content of this transcript —
-      // one size up from the chrome, full ink. Sub-agent text stays quieter.
-      return (
-        <div
-          className={`whitespace-pre-wrap ${ev.fromSubagent ? 'pl-3 text-[11px] text-ink-muted' : 'text-[12px] text-ink'}`}
-        >
-          {ev.text}
-        </div>
-      )
+      // markdown blocks, full ink. Sub-agent text stays quieter.
+      return <ProseBlocks text={ev.text} subagent={ev.fromSubagent} />
     case 'tool_use':
       return (
         <div className={`font-mono text-[10px] text-ink-muted ${ev.fromSubagent ? 'pl-3' : ''}`}>

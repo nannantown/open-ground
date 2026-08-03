@@ -270,6 +270,13 @@ export interface SwarmEngineState {
    *  response that omits it — the GET poll refills it within seconds). The UI
    *  degrades to the standby wording on null — never an error (fail-safe). */
   manager: EngineManagerHeartbeat | null
+  /** The LIVE commander desk handle from the server's both-pools read, or null
+   *  (none live) / undefined (old server — field absent). What the tab's
+   *  reconcile (deskReconcile.ts) adopts so an engine-woken desk attaches
+   *  within one poll instead of the pane pinning to a dead pre-restart id. */
+  managerDesk?: { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null
+  /** Same for the supply desk (PTY-only by design). */
+  supplyDesk?: { runtime: 'pty'; handleId: string; agentSessionId: string | null } | null
 }
 
 export const EMPTY_KPIS: EngineKpis = {
@@ -527,6 +534,32 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     }
   })()
 
+  // The live desk handles (whole-or-null-or-undefined). `undefined` is
+  // MEANINGFUL here — an old server omits the field, and the reconcile treats
+  // that as "keep the old behaviour", never as "no desk".
+  const parseDesk = (
+    v: unknown,
+  ): { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null | undefined => {
+    if (v === undefined) return undefined
+    if (v === null || typeof v !== 'object') return null
+    const r = v as Record<string, unknown>
+    if (r.runtime !== 'pty' && r.runtime !== 'sdk') return null
+    if (typeof r.handleId !== 'string' || !r.handleId) return null
+    return {
+      runtime: r.runtime,
+      handleId: r.handleId,
+      agentSessionId: typeof r.agentSessionId === 'string' ? r.agentSessionId : null,
+    }
+  }
+  const managerDesk = parseDesk(o.managerDesk)
+  const supplyDeskRaw = parseDesk(o.supplyDesk)
+  const supplyDesk =
+    supplyDeskRaw && supplyDeskRaw.runtime === 'pty'
+      ? { runtime: 'pty' as const, handleId: supplyDeskRaw.handleId, agentSessionId: supplyDeskRaw.agentSessionId }
+      : supplyDeskRaw === undefined
+        ? undefined
+        : null
+
   return {
     running: o.running === true,
     // Strict boolean like `running`: a forged / absent value folds to FALSE — the
@@ -546,6 +579,8 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     autonomyResumed: o.autonomyResumed === true,
     overseerRemembered: o.overseerRemembered === true,
     manager,
+    ...(managerDesk !== undefined ? { managerDesk } : {}),
+    ...(supplyDesk !== undefined ? { supplyDesk } : {}),
   }
 }
 

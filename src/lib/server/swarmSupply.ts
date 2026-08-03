@@ -48,6 +48,7 @@
 
 import { randomUUID } from 'crypto'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
+import { killTerminal, listLiveDesksIn } from './terminal'
 import {
   swarmLaunchDefaults,
   resolveSwarmModelEffortProbed,
@@ -139,7 +140,7 @@ export const supplyLaunchOpts = (
   // worker: a model-limit stop here stops the owner's own conversation. Watched by
   // ownerDeskLimit.ts, which names it by the role the owner knows it as.
   ownerDesk: true,
-  deskLabel: '補給官',
+  deskLabel: SUPPLY_DESK_LABEL,
   ...swarmLaunchDefaults(opts.remoteName ?? 'supply', me),
   env: { SWARM_MANAGER: '1' },
   cols: opts.cols,
@@ -160,6 +161,23 @@ export const supplyLaunchOpts = (
  *  disposable worker, so an app restart must not wipe its memory. Fail-open: any
  *  doubt about the persisted session (gone, corrupt, still open, project moved)
  *  and it opens a fresh one instead. The desk always launches. */
+/** The supply desk's PTY label — the pool-side identity every desk-discovery
+ *  read keys on (the supply twin of MANAGER_DESK_LABEL). Exported (2026-08-03)
+ *  because getOrchestratorState now surfaces the live desk to the UI, and a
+ *  second literal there would drift from this one. */
+export const SUPPLY_DESK_LABEL = '補給官'
+
+/** Stop every live supply desk in the project. Lives HERE — the module that
+ *  owns the desk and its PTY-by-design status — so the route layer never has
+ *  to reach into the PTY pool directly (the import boundary exists precisely
+ *  to stop that reach; this module is on its exemption list WITH the reason).
+ *  Returns the ids it asked to die (kill is fire-and-forget by pool contract). */
+export const stopSwarmSupplyDesks = (projectPath: string): string[] => {
+  const desks = listLiveDesksIn(projectPath, SUPPLY_DESK_LABEL)
+  for (const d of desks) killTerminal(d.id)
+  return desks.map((d) => d.id)
+}
+
 export const spawnSwarmSupply = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
