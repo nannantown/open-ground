@@ -306,6 +306,8 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'language',
   'theme',
   'autoUpdate',
+  'soundOnDone',
+  'soundOnDoneVolume',
   'displayName',
   'defaultWorkspace',
   'openApps',
@@ -462,6 +464,19 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   // either — electron/autoUpdatePolicy.js applies the same `=== true`).
   if (Object.prototype.hasOwnProperty.call(safe, 'autoUpdate')) {
     safe.autoUpdate = safe.autoUpdate === true
+  }
+  // Completion chime: boolean like the above; the hook applies the same
+  // `=== true` when it re-reads the raw file.
+  if (Object.prototype.hasOwnProperty.call(safe, 'soundOnDone')) {
+    safe.soundOnDone = safe.soundOnDone === true
+  }
+  // Chime volume: a clamped 0–100 integer, or the key is DROPPED (the hook
+  // treats a missing/garbage value as full volume, so a broken write must not
+  // persist a shape the reader has to guess at).
+  if (Object.prototype.hasOwnProperty.call(safe, 'soundOnDoneVolume')) {
+    const v = Number(safe.soundOnDoneVolume)
+    if (Number.isFinite(v)) safe.soundOnDoneVolume = Math.round(Math.min(100, Math.max(0, v)))
+    else delete safe.soundOnDoneVolume
   }
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]

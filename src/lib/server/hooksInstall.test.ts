@@ -297,4 +297,44 @@ describe('hook source resolution — cwd-independent, worktree-refusing', () => 
     expect(ours).toHaveLength(1)
     expect(ours[0]).toContain(join(ogHome(), 'hooks', 'openground-hook.js'))
   })
+
+  it('R9 — legacy-chime migration: the bare absolute-path afplay Stop entry is removed ONCE, seeding soundOnDone; other user hooks and relative-path afplay stay', async () => {
+    const { getSettings, setSettings } = await import('./store')
+    await mkdir(join(tmpHome, '.claude'), { recursive: true })
+    await writeFile(
+      claudeSettings(),
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            // The migration target: the documented hand-added chime, absolute path.
+            { matcher: '', hooks: [{ type: 'command', command: 'afplay /System/Library/Sounds/Glass.aiff' }] },
+            // NOT targets: a relative-path afplay (R7 pins its preservation) and
+            // an unrelated user hook — "never touch user hooks" still holds.
+            { matcher: '', hooks: [{ type: 'command', command: 'afplay Glass.aiff' }] },
+            { matcher: '', hooks: [{ type: 'command', command: 'say done' }] },
+          ],
+        },
+      }),
+      'utf8',
+    )
+
+    const res = await installHooks()
+    expect(res.errors).toEqual([])
+    const settings = JSON.parse(await readFile(claudeSettings(), 'utf8'))
+    const cmds = settings.hooks.Stop.map((e: any) => e.hooks[0].command)
+    expect(cmds).not.toContain('afplay /System/Library/Sounds/Glass.aiff')
+    expect(cmds).toContain('afplay Glass.aiff')
+    expect(cmds).toContain('say done')
+    // Behaviour preserved: the chime now rings via the setting instead.
+    const seeded = await getSettings()
+    expect(seeded.soundOnDone).toBe(true)
+    expect(seeded.soundOnDoneVolume).toBe(100)
+
+    // One-shot: an explicit OFF later survives the next install (the seed
+    // fires only while the key is absent AND the legacy entry exists).
+    await setSettings({ soundOnDone: false })
+    const res2 = await installHooks()
+    expect(res2.errors).toEqual([])
+    expect((await getSettings()).soundOnDone).toBe(false)
+  })
 })

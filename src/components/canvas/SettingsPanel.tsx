@@ -142,6 +142,12 @@ export const SettingsPanel = ({
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
   // Hands-free updates (settings.autoUpdate) — same pattern again.
   const [autoUpdateOn, setAutoUpdateState] = useState(settings.autoUpdate === true)
+  // Completion chime — toggle + volume. Volume commits on release (onChange
+  // updates the label live; persisting every drag tick would spam the API).
+  const [soundOn, setSoundOnState] = useState(settings.soundOnDone === true)
+  const [soundVolume, setSoundVolume] = useState(
+    typeof settings.soundOnDoneVolume === 'number' ? settings.soundOnDoneVolume : 100,
+  )
   // Non-persisted placeholder for the Display name input: the user's global
   // git identity, served by GET /api/settings as `suggestedDisplayName`.
   const [suggestedName, setSuggestedName] = useState<string | null>(null)
@@ -270,6 +276,36 @@ export const SettingsPanel = ({
       displayName: latest.current.displayName.trim(),
       autoUpdate: next,
     })
+  }
+
+  const setSoundOn = (next: boolean) => {
+    if (next === soundOn) return
+    setSoundOnState(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      soundOnDone: next,
+    })
+  }
+
+  const commitSoundVolume = (v: number) => {
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      soundOnDoneVolume: v,
+    })
+  }
+
+  const testSound = () => {
+    void fetch('/api/sound/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume: soundVolume }),
+    }).catch(() => {})
   }
 
   // Fetch the display-name suggestion when the drawer opens (cheap: the server
@@ -438,6 +474,54 @@ export const SettingsPanel = ({
               offLabel={t('settings.experiments.off')}
               onLabel={t('settings.experiments.on')}
             />
+          </Section>
+
+          {/* Completion chime — ON/OFF + volume + test-play. The sound itself is
+              played by the managed Stop hook (attended desks only); the server
+              plays the test so the slider is auditable before saving a claude
+              turn's worth of waiting. */}
+          <Section heading={t('settings.sound.heading')} hint={t('settings.sound.hint')}>
+            <div className="flex flex-col gap-3">
+              <ExperimentToggle
+                label={t('settings.sound.label')}
+                value={soundOn}
+                onChange={setSoundOn}
+                offLabel={t('settings.experiments.off')}
+                onLabel={t('settings.experiments.on')}
+              />
+              {soundOn && (
+                <div className="flex items-center gap-3">
+                  <label className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="shrink-0 text-[11px] text-ink-muted">
+                      {t('settings.sound.volume')}
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={soundVolume}
+                      onChange={(e) => setSoundVolume(Number(e.target.value))}
+                      onMouseUp={() => commitSoundVolume(soundVolume)}
+                      onTouchEnd={() => commitSoundVolume(soundVolume)}
+                      onKeyUp={() => commitSoundVolume(soundVolume)}
+                      className="min-w-0 flex-1 accent-[rgb(var(--og-accent))] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      aria-label={t('settings.sound.volume')}
+                    />
+                    <span className="w-8 shrink-0 text-right text-[11px] tabular-nums text-ink">
+                      {soundVolume}
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={testSound}
+                    className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                  >
+                    {t('settings.sound.test')}
+                  </button>
+                </div>
+              )}
+            </div>
           </Section>
 
           {/* Owner-only inboxes — only when the server can read submissions. */}

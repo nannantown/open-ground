@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { atomicWriteJson } from './atomicWrite'
 import { openGroundHome } from './paths'
+import { getSettings, setSettings } from './store'
 import { assertTestHomeIsolated } from './testHomeGuard'
 
 // Idempotently install OPEN GROUND's Claude Code hook entries into the user's
@@ -368,6 +369,43 @@ export const installHooks = async (): Promise<InstallResult> => {
         dirty = true
       } else {
         result.unchanged.push(phase)
+      }
+    }
+  }
+
+  // ── One-shot legacy-chime migration (2026-08-03) ──────────────────────────
+  // Before OG owned the completion chime, the documented pattern was a bare
+  // `afplay /System/Library/Sounds/….aiff` Stop entry (the header above names
+  // it as the canonical user-authored example). The managed hook now plays the
+  // chime ITSELF, governed by settings.soundOnDone — with the bare entry still
+  // wired the Settings toggle would LIE (OFF, and the sound keeps ringing), so
+  // this is the one narrow exception to "never touch user-authored hooks".
+  // Removing it seeds soundOnDone=true + full volume, preserving the user's
+  // audible behaviour exactly; the seed fires only while the key is ABSENT, so
+  // an explicit OFF later is never resurrected — and the entry being gone
+  // makes the whole migration naturally one-shot.
+  {
+    const LEGACY_CHIME_RE = /^afplay\s+\/System\/Library\/Sounds\/[^\s/]+\.aiff$/
+    const stopArr: any[] = Array.isArray(settings.hooks.Stop) ? settings.hooks.Stop : []
+    const legacyIdxs = stopArr.reduce<number[]>((acc, e, i) => {
+      const cmds = Array.isArray(e?.hooks) ? e.hooks : []
+      const only = cmds.length === 1 ? cmds[0] : null
+      return only && typeof only.command === 'string' && LEGACY_CHIME_RE.test(only.command.trim())
+        ? [...acc, i]
+        : acc
+    }, [])
+    if (legacyIdxs.length > 0) {
+      for (const i of legacyIdxs.reverse()) stopArr.splice(i, 1)
+      settings.hooks.Stop = stopArr
+      dirty = true
+      try {
+        const cur = await getSettings()
+        if (cur.soundOnDone === undefined) {
+          await setSettings({ soundOnDone: true, soundOnDoneVolume: 100 })
+        }
+      } catch {
+        // Seeding is best-effort: on failure the chime toggle simply starts
+        // OFF — never worth failing the whole hook install over.
       }
     }
   }

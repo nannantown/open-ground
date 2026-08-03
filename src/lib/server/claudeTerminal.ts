@@ -605,6 +605,13 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // shadow the veto's gate.
   const launchEnv: Record<string, string> = {
     ...(opts.env ?? {}),
+    // Attended vs unattended, told to the HOOK layer: the completion chime
+    // (scripts/openground-hook.js stop) must ring for desks the owner sits at
+    // and stay silent for machinery. `ownerDesk` is already the pool's own
+    // attended-desk definition (ownerDeskLimit reads the same flag), so the
+    // env just carries it across the process boundary. Placed before the
+    // guard spread — a caller-supplied env key can't shadow the veto's gate.
+    ...(opts.ownerDesk ? {} : { OPENGROUND_UNATTENDED: '1' }),
     ...(opts.guard
       ? {
           OPENGROUND_GUARD: '1',

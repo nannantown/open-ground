@@ -572,7 +572,10 @@ describe('repo guard — exactly one OPEN GROUND home resolver', () => {
       'src/lib/server/gateEnvTamper.test.ts': 2,
       'electron/lockdown.js': 1,
       'scripts/swarm-lock.js': 1,
-      'scripts/openground-hook.js': 2,
+      // 3rd site 2026-08-03: the completion chime reads settings.json per stop
+      // (soundOnDone/soundOnDoneVolume) — same structural reason as the other
+      // two (a bare-node Claude hook cannot import paths.ts).
+      'scripts/openground-hook.js': 3,
     }
     // NOT read at all, and pinned at no number — the two files where a hit is
     // meaningless rather than allowed:

@@ -29,6 +29,13 @@ export const settings = {
       'Reveals the Persona tab for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own.',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
+    // Completion chime (settings.soundOnDone / soundOnDoneVolume)
+    'settings.sound.heading': 'Completion sound',
+    'settings.sound.label': 'Play a sound when Claude finishes',
+    'settings.sound.hint':
+      'Rings once when a Claude session you are watching finishes its turn — terminal panes and board runs. Swarm workers stay silent.',
+    'settings.sound.volume': 'Volume',
+    'settings.sound.test': 'Test',
     // Hands-free updates (settings.autoUpdate)
     'settings.autoUpdate.heading': 'Automatic updates',
     'settings.autoUpdate.label': 'Apply updates automatically',
@@ -94,6 +101,12 @@ export const settings = {
       'この端末でペルソナタブを可視化します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
+    'settings.sound.heading': '完了音',
+    'settings.sound.label': 'Claude の命令が終わったら音を鳴らす',
+    'settings.sound.hint':
+      'あなたが見ている Claude（ターミナルのペインやボード実行）が返事を書き終えたときに1回鳴ります。swarm の worker は鳴りません。',
+    'settings.sound.volume': '音量',
+    'settings.sound.test': '試聴',
     'settings.autoUpdate.heading': '自動アップデート',
     'settings.autoUpdate.label': '新しい版を自動で適用する',
     'settings.autoUpdate.hint':

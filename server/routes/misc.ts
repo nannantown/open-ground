@@ -14,7 +14,7 @@
 import { Hono } from 'hono'
 import { mkdir, rmdir, stat, readFile } from 'fs/promises'
 import { basename, join, resolve } from 'path'
-import { execFile as execFileCb } from 'child_process'
+import { execFile as execFileCb, spawn } from 'child_process'
 import { promisify } from 'util'
 import {
   getSettings,
@@ -443,6 +443,37 @@ export const miscRoutes = new Hono()
   // (treats fetch error as unsafe). Pure read, no path input → no
   // validateProjectPath needed.
   .get('/api/update/restart-safety', async (c) => c.json(await updateRestartSafety()))
+  // --- POST /api/sound/test -------------------------------------------------
+  // The Settings「試聴」button: play the completion chime ONCE at the given
+  // volume so the slider is auditable before a claude turn ever ends. Local
+  // audio only (afplay / SystemSounds on this machine — no egress, so no
+  // lockdown gate). Volume is narrowed exactly like setUserSettings does;
+  // playback is fire-and-forget and fail-silent (`played:false` on an
+  // unsupported platform, so the UI can say so instead of pretending).
+  .post('/api/sound/test', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { volume?: unknown }
+    const v = Number(body.volume)
+    const volume = (Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 100) / 100
+    let played = false
+    try {
+      if (process.platform === 'darwin') {
+        spawn('afplay', ['-v', String(volume), '/System/Library/Sounds/Glass.aiff'], {
+          detached: true,
+          stdio: 'ignore',
+        }).unref()
+        played = true
+      } else if (process.platform === 'win32') {
+        spawn('powershell', ['-NoProfile', '-c', '[System.Media.SystemSounds]::Asterisk.Play()'], {
+          detached: true,
+          stdio: 'ignore',
+        }).unref()
+        played = true
+      }
+    } catch {
+      played = false
+    }
+    return c.json({ ok: true, played })
+  })
   // --- GET /api/usage -------------------------------------------------------
   .get('/api/usage', async (c) => {
     try {

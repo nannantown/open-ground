@@ -126,6 +126,41 @@ const main = () => {
       stoppedAt: new Date().toISOString(),
     })
     nudgeServer(sessionId, 'stop')
+    // Completion chime (settings.soundOnDone, 2026-08-03 — replaces the
+    // owner's hand-added `afplay Glass.aiff` Stop hook, which hooksInstall
+    // migrates away). Settings are re-read per stop so the toggle/volume in
+    // the app apply to the NEXT chime with no hook reinstall. UNATTENDED
+    // desks (swarm workers, hidden utility runs — claudeTerminal sets the
+    // env) stay silent: a fleet finishing turns is machinery, not a doorbell.
+    // Fail-silent like everything else here: no sound is never worth a
+    // broken hook contract.
+    try {
+      if (process.env.OPENGROUND_UNATTENDED !== '1') {
+        const s = JSON.parse(
+          fs.readFileSync(path.join(os.homedir(), '.openground', 'settings.json'), 'utf8'),
+        )
+        if (s && s.soundOnDone === true) {
+          const rawVol = Number(s.soundOnDoneVolume)
+          const vol = Number.isFinite(rawVol) ? Math.min(100, Math.max(0, rawVol)) / 100 : 1
+          if (vol > 0) {
+            const { spawn } = require('child_process')
+            if (process.platform === 'darwin') {
+              spawn('afplay', ['-v', String(vol), '/System/Library/Sounds/Glass.aiff'], {
+                detached: true,
+                stdio: 'ignore',
+              }).unref()
+            } else if (process.platform === 'win32') {
+              // SystemSounds has no volume API — the toggle still governs.
+              spawn(
+                'powershell',
+                ['-NoProfile', '-c', '[System.Media.SystemSounds]::Asterisk.Play()'],
+                { detached: true, stdio: 'ignore' },
+              ).unref()
+            }
+          }
+        }
+      }
+    } catch {}
   } else if (PHASE === 'post-tool-use') {
     writeMarker(sessionId, {
       phase: 'tool-used',

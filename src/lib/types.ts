@@ -194,6 +194,17 @@ export interface Settings {
    *  localStorage('og-theme') for a flash-free first paint. User-settable;
    *  setUserSettings narrows to the two literals and DROPS anything else. */
   theme?: 'light' | 'dark'
+  /** Completion chime (2026-08-03): ring when a claude turn finishes on an
+   *  ATTENDED desk (Terminal panes, board runs — never swarm machinery, which
+   *  launches with OPENGROUND_UNATTENDED=1). Played by the managed Stop hook
+   *  (scripts/openground-hook.js), which re-reads settings.json per turn — so
+   *  the toggle applies to the next chime with no reinstall. Default OFF;
+   *  hooksInstall's one-shot migration seeds it ON for users whose settings
+   *  carried the old hand-added `afplay Glass.aiff` Stop hook. */
+  soundOnDone?: boolean
+  /** Chime volume, 0–100 (afplay -v). Unset ⇒ 100 (the legacy hook's loudness).
+   *  Narrowed to a clamped integer by setUserSettings. */
+  soundOnDoneVolume?: number
   /** Hands-free updates (2026-08-03, owner request "毎回するのが面倒"). Default
    *  OFF = the conservative shipped behaviour (auto-download + an explicit
    *  restart dialog). `true` removes the dialog: the update downloads silently
