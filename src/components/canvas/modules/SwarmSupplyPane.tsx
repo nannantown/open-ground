@@ -66,7 +66,7 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
           title={t('projectPanel.swarm.supply.hint')}
         >
           <Inbox size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-          <span className="truncate">{t('projectPanel.swarm.supply.identity')}</span>
+          {/* Text-diet: the active tab is already labelled タスク窓口. */}
         </span>
         <button
           type="button"

@@ -430,6 +430,24 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // the whole of what [×] means.
   const [restoredNoticeDismissed, setRestoredNoticeDismissed] = useState(false)
 
+  // ── Onboarding: FIRST RUN ONLY (2026-08-03 text-diet) ──────────────────────
+  // The full explainer used to return on EVERY fully-idle visit — a returning
+  // owner re-read ~330 chars of roles-and-flow each time the engine was off.
+  // localStorage (client-side seen flag) rather than settings: it is a display
+  // preference of THIS browser profile, and the settings allowlist trap
+  // (unknown keys silently dropped) is not worth a server round trip for it.
+  // The full explainer stays REACHABLE (the compact idle state's 「仕組み」
+  // button below) — a disclosure without an entrance is a deleted feature.
+  const [onboardingSeen, setOnboardingSeen] = useState(
+    () => localStorage.getItem('og-swarm-onboarding-seen-v1') === '1',
+  )
+  const [showOnboarding, setShowOnboarding] = useState(false)
+  const markOnboardingSeen = useCallback(() => {
+    localStorage.setItem('og-swarm-onboarding-seen-v1', '1')
+    setOnboardingSeen(true)
+    setShowOnboarding(false)
+  }, [])
+
   // The env-preflight banner is dismissible (条件: nit5, 2026-07-22 review) —
   // keyed by the SET of issue ids currently shown, not a plain boolean, so
   // dismissing "git missing" doesn't also hide a DIFFERENT issue that appears
@@ -1667,13 +1685,44 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           work-flow, and what Start does, shown BEFORE pressing it. Its Start fires
           the SAME powerSwarm composition as the bar above. Otherwise → the normal
           supply ⇆ commander ⇆ workers tab surface. */}
-      {swarmIdle ? (
+      {swarmIdle && (!onboardingSeen || showOnboarding) ? (
         <SwarmOnboarding
-          onStart={() => powerSwarm(true)}
+          onStart={() => {
+            markOnboardingSeen()
+            powerSwarm(true)
+          }}
           busy={engineBusy}
           available={engineAvailable}
           error={engineError}
         />
+      ) : swarmIdle ? (
+        // The compact idle state — what a RETURNING owner sees instead of the
+        // full explainer: one line, Start, and the entrance back to the manual.
+        <div className="flex min-h-0 flex-1 items-center justify-center">
+          <div className="max-w-[360px] text-center">
+            <p className="mb-4 text-[12px] text-ink-subtle">
+              {t('projectPanel.swarm.onboarding.intro')}
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => powerSwarm(true)}
+                disabled={engineBusy || !engineAvailable}
+                className="inline-flex items-center gap-1.5 rounded-[3px] bg-accent px-4 py-1.5 text-[12px] font-medium text-bg-card transition-colors hover:opacity-90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+              >
+                {t('projectPanel.swarm.power.start')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowOnboarding(true)}
+                className="text-[11px] text-ink-faint underline-offset-2 transition-colors hover:text-ink-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+              >
+                {t('projectPanel.swarm.onboarding.reopen')}
+              </button>
+            </div>
+            {engineError ? <p className="mt-3 text-[11px] text-accent">{engineError}</p> : null}
+          </div>
+        </div>
       ) : mainView === 'overseer' ? null : (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {mainView === 'supply' ? (

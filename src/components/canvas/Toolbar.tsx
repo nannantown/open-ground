@@ -112,7 +112,6 @@ export const Toolbar = ({
           >
             Beta
           </span>
-          <span className="hidden xl:inline truncate label-cap leading-none text-ink-subtle">the shore for your work</span>
         </div>
         {projectCount > 0 && (
           <>
@@ -150,7 +149,6 @@ export const Toolbar = ({
           )}
           {onOpenShared && (
             <>
-              <span className="h-4 w-px bg-line-soft" />
               {/* The member's entry to the INITIAL join (paste an invite code /
                   link). A bare "Users" icon read as "members" and was easy to
                   miss — a permanent "Join shared" label + the DoorOpen (enter a
@@ -167,13 +165,11 @@ export const Toolbar = ({
               </IconButton>
             </>
           )}
-          <span className="h-4 w-px bg-line-soft" />
           {/* Skills (the user's own ~/.claude/skills). "Sparkles" implied AI/magic;
               a "Skills" label + the modular Blocks glyph say what it opens. */}
           <IconButton onClick={onOpenSkills} title={t('toolbar.skills')} label={t('toolbar.skills')}>
             <Blocks size={13} strokeWidth={1.75} />
           </IconButton>
-          <span className="h-4 w-px bg-line-soft" />
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />
           </IconButton>
@@ -182,7 +178,6 @@ export const Toolbar = ({
               with no badge when there's nothing unread / signed out. */}
           {notifications && (
             <>
-              <span className="h-4 w-px bg-line-soft" />
               <NotificationBell
                 notifications={notifications}
                 unreadCount={unreadNotifications}

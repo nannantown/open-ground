@@ -8,7 +8,6 @@ import {
   FolderOpen,
   GitBranch,
   Loader2,
-  MessageSquare,
   Minus,
   MoreHorizontal,
   Plus,
@@ -76,7 +75,6 @@ import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
 import { BranchChangesModal } from '@/components/canvas/BranchChangesModal'
 import { SkillsModal } from '@/components/canvas/SkillsModal'
 import { UsageHud } from '@/components/canvas/UsageHud'
-import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import {
   BoardModule,
   type TaskLaunchResult,
@@ -285,8 +283,6 @@ const OwnedProjectBody = ({
   const { t, lang } = useT()
   // Per-tab contextual feedback: opening the modal here tags the submission
   // with the active tab (source + display label) so the report says which
-  // surface it's about. Only mounted/offered when `feedbackEnabled` is true.
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [data, setData] = useState<ProjectData | null>(null)
   // Which project path the currently-held `data` was loaded for. `data` itself
   // carries no path, and a project switch keeps the old data on screen until the
@@ -2275,20 +2271,9 @@ const OwnedProjectBody = ({
               kept visible while working inside a project so the user always
               knows how close they are to the rate-limit cap. */}
           <UsageHud />
-          {/* Beta: feedback is surfaced prominently (labelled button), not
-              hidden in a menu, so it's easy to send from inside a project. */}
-          {feedbackEnabled && (
-            <button
-              type="button"
-              onClick={() => setFeedbackOpen(true)}
-              title={t('toolbar.feedback')}
-              className="flex items-center gap-1.5 rounded-[3px] border border-line px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            >
-              <MessageSquare size={13} strokeWidth={1.75} />
-              {/* Narrow window: icon only (the title attr still carries the label). */}
-              <span className="hidden md:inline">{t('toolbar.feedback')}</span>
-            </button>
-          )}
+          {/* Text-diet 2026-08-03: feedback had THREE permanent entries (Ground
+              toolbar pill, this header button, the Settings section). The
+              toolbar + Settings pair covers reach; this duplicate is cut. */}
           <div className="flex items-center gap-0.5">
             <MoreMenu
               onProjectSettings={() => setProjectSettingsOpen(true)}
@@ -2810,13 +2795,6 @@ const OwnedProjectBody = ({
         />
       )}
 
-      {feedbackEnabled && (
-        <FeedbackModal
-          open={feedbackOpen}
-          onClose={() => setFeedbackOpen(false)}
-        />
-      )}
-
       <BranchChangesModal
         open={branchModalOpen}
         path={project.path}
@@ -3120,14 +3098,8 @@ const ProjectSettingsDialog = ({
               </p>
 
               <div className="mt-3 space-y-3.5">
-                {/* The launch profile (model / effort / permission mode) moved
-                    to the Board's run-defaults strip (2026-06-12) — visible
-                    and editable right where tasks run, overridable per card.
-                    One quiet pointer so dialog visitors aren't stranded. */}
-                <p className="text-[11px] leading-relaxed text-ink-faint">
-                  {t('projectPanel.settingsLaunchMovedHint')}
-                </p>
-
+                {/* Text-diet 2026-08-03: the 「起動設定は Board へ移った」
+                    signage (2026-06-12 transition note) served its year. Cut. */}
                 {/* Marketplace — the tab row no longer carries a bare "Market"
                     text entry; this is the settings-side way in (the "+" picker
                     carries the other). owner|tester only. */}

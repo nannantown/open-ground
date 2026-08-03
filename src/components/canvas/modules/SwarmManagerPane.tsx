@@ -366,7 +366,8 @@ export const SwarmManagerPane = ({
                 title={t('projectPanel.swarm.manager.conversationHint')}
               >
                 <MessageSquare size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-                <span className="truncate">{t('projectPanel.swarm.manager.conversationIdentity')}</span>
+                {/* Text-diet: the tab strip one row above already says マネージャー;
+                    the identity text was a duplicate. Tooltip keeps the words. */}
               </span>
               <button
                 type="button"
@@ -471,13 +472,12 @@ export const SwarmManagerPane = ({
             + engine log that used to sit below this were removed (一本化 — the
             worker tab owns live worker screens), so this is the sole section. */}
         <div className="shrink-0 px-4 py-3">
+          {/* Text-diet 2026-08-03: the engine's on/off used to be stated THREE
+              times on this tab (header pill, the Stop|Start fill, and a dot+label
+              here). The sidebar copy was the least load-bearing — cut. */}
           <div className="mb-3 flex items-center gap-2">
             <Gauge size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
             <span className="label-cap text-ink-faint">{t('projectPanel.swarm.manager.engineHeading')}</span>
-            <span className="ml-auto flex items-center gap-1.5">
-              <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${statusDot}`} aria-hidden />
-              <span className="text-[11px] text-ink-muted">{statusLabel}</span>
-            </span>
           </div>
 
           {/* Autonomy (Card① start/stop) moved to the module-level master power
@@ -537,6 +537,9 @@ export const SwarmManagerPane = ({
               // does not do — one runs on it, the rest keep using a terminal, and
               // the switch looks half-broken.
               hint={t('projectPanel.swarm.runtime.workerHint', {
+                count: runtimeDials?.workerCap ?? 1,
+              })}
+              summary={t('projectPanel.swarm.runtime.workerSummary', {
                 count: runtimeDials?.workerCap ?? 1,
               })}
               value={runtimeDials?.worker === 'sdk'}
@@ -737,6 +740,7 @@ export const SwarmManagerPane = ({
 const ControlRow = ({
   label,
   hint,
+  summary,
   value,
   disabled,
   ariaLabel,
@@ -744,7 +748,17 @@ const ControlRow = ({
   t,
 }: {
   label: string
+  /** The FULL explanation — an ⓘ tooltip now, not a resident paragraph.
+   *  2026-08-03 text-diet: this component rendered `hint` as an always-visible
+   *  div, which meant every switch shipped with a permanent essay under it (the
+   *  532-char overseer hint being the record holder — half the sidebar was
+   *  switch documentation). The full text stays reachable (hover/focus the ⓘ —
+   *  the disclosure has a visible entrance, per the over-hiding anti-pattern);
+   *  what the eye gets by default is the label plus at most ONE line. */
   hint: string
+  /** Optional single visible line (e.g. the SDK dial's 「次に立つ卓から適用」).
+   *  Keep it to a clause — anything longer belongs in `hint`. */
+  summary?: string
   value: boolean
   disabled: boolean
   ariaLabel: string
@@ -753,8 +767,18 @@ const ControlRow = ({
 }) => (
   <div className="flex items-start justify-between gap-3">
     <div className="min-w-0">
-      <div className="text-[12px] font-medium text-ink">{label}</div>
-      <div className="text-[11px] leading-snug text-ink-subtle">{hint}</div>
+      <div className="flex items-center gap-1 text-[12px] font-medium text-ink">
+        {label}
+        <span
+          title={hint}
+          tabIndex={0}
+          aria-label={hint}
+          className="cursor-help select-none text-[10px] text-ink-faint transition-colors hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        >
+          ⓘ
+        </span>
+      </div>
+      {summary ? <div className="text-[11px] leading-snug text-ink-subtle">{summary}</div> : null}
     </div>
     <div
       role="group"

@@ -851,7 +851,16 @@ export const BoardTab = ({
                   {col.label}{' '}
                   <span className="text-ink-faint tabular-nums">{cards.length}</span>
                 </span>
-                {col.hint && <span className="text-[10px] text-ink-faint">{col.hint}</span>}
+                {/* Text-diet: the todo mechanics note moved into a tooltip on the
+                    column label; the blocked column's hint stays VISIBLE — it is a
+                    decision cue (「あなたの判断待ち」), not mechanics. */}
+                {col.hint && col.key === 'blocked' ? (
+                  <span className="text-[10px] text-ink-faint">{col.hint}</span>
+                ) : col.hint ? (
+                  <span title={col.hint} className="cursor-help text-[10px] text-ink-faint" aria-label={col.hint}>
+                    ⓘ
+                  </span>
+                ) : null}
                 {/* Bulk-clear (F073) — small text button, shown only while the
                     Done column holds any card (counted over ALL tasks, not the
                     filtered view: clearing always empties the whole column). */}

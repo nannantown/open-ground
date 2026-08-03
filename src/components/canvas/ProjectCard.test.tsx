@@ -38,13 +38,13 @@ describe('ProjectCard', () => {
     expect(screen.getByText('My Project')).toBeTruthy()
     expect(screen.getByText('/Users/me/code/my-project')).toBeTruthy()
     // The shared-only chrome must be absent on an owned card.
-    expect(screen.queryByText('projectPanel.groundSharedBadge')).toBeNull()
+    expect(screen.queryByLabelText('projectPanel.groundSharedBadge')).toBeNull()
   })
 
   it('owned card still shows the open-task stamp (shared variant does not steal it)', () => {
     render(<ProjectCard project={{ ...owned, openTaskCount: 3 }} />)
     expect(screen.getByText('3 open')).toBeTruthy()
-    expect(screen.queryByText('projectPanel.groundSharedBadge')).toBeNull()
+    expect(screen.queryByLabelText('projectPanel.groundSharedBadge')).toBeNull()
   })
 
   it('shared card (shared prop) wears the invite Shared badge + keeps its caption', () => {
@@ -53,8 +53,9 @@ describe('ProjectCard', () => {
     // distinguishable at a glance from the user's own cards.
     render(<ProjectCard project={sharedMeta} shared />)
     expect(screen.getByText('Shared Alpha')).toBeTruthy()
-    // The Shared badge (invite chrome) is present...
-    expect(screen.getByText('projectPanel.groundSharedBadge')).toBeTruthy()
+    // The Shared badge (invite chrome) is present — since the 0803 text-diet it
+    // is a GLYPH whose word lives on the aria-label/tooltip, not visible text.
+    expect(screen.getByLabelText('projectPanel.groundSharedBadge')).toBeTruthy()
     // ...and the shared caption still shows through the description slot.
     expect(screen.getByText('Shared with you')).toBeTruthy()
     // hasGit:false + openTaskCount:0 → no git/task stamp leaks in.
@@ -67,6 +68,6 @@ describe('ProjectCard', () => {
     // mere shape of their meta.
     render(<ProjectCard project={sharedMeta} />)
     expect(screen.getByText('Shared Alpha')).toBeTruthy()
-    expect(screen.queryByText('projectPanel.groundSharedBadge')).toBeNull()
+    expect(screen.queryByLabelText('projectPanel.groundSharedBadge')).toBeNull()
   })
 })

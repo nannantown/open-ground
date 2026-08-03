@@ -23,7 +23,7 @@ export const board = {
       'Delete {count} cards in Done. On a shared board the deletion applies to everyone.',
     // Card
     'board.card.untitled': 'Untitled',
-    'board.empty.guide': 'Write a task in “+ Add a card” → check its run settings (PR / model / effort) → Run → the terminal opens and the task starts by itself → on finish the work merges (or opens a PR).',
+    'board.empty.guide': 'Write a card → Run → the terminal does the task → done merges.',
     'board.card.sessionWorking': 'Claude is working on this card',
     'board.card.sessionWaiting': 'Claude is waiting for your input on this card',
     'board.detail.markDone': '✓ Done',
@@ -164,7 +164,7 @@ export const board = {
       "Couldn't prepare the review session — restart the session and retry.",
     // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
-      'Launch claude in this project (plain — no prompt is sent). Use "Insert task into input" to paste the title + content into the input box, then press Enter to run. Respond and approve permission prompts in this terminal.',
+      'Launch claude here, then use “Insert task into input” and press Enter.',
   } as Record<string, string>,
   ja: {
     // Columns
@@ -188,7 +188,7 @@ export const board = {
       'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。',
     // Card
     'board.card.untitled': '無題',
-    'board.empty.guide': '「＋ カードを追加」にやることを書く → 設定（PR/モデル/effort）を確認 → 実行 → ターミナルでタスクが自動で走る → 完了でマージ（または PR）。',
+    'board.empty.guide': 'カードを書く → 実行 → ターミナルが走る → 完了でマージ。',
     'board.card.sessionWorking': 'このカードで claude が作業中です',
     'board.card.sessionWaiting': 'このカードで claude があなたの入力を待っています',
     'board.detail.markDone': '✓ 完了にする',
@@ -329,6 +329,6 @@ export const board = {
       'レビューセッションを準備できませんでした — セッションを再起動してもう一度お試しください。',
     // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
-      'このプロジェクトで claude を起動します（プレーン起動 — プロンプトは送信されません）。「タスク内容を入力欄へ」でタイトルと内容を入力欄に貼り付け、Enter で実行します。応答や権限確認はこのターミナルで操作します。',
+      'ここで claude を起動し、「タスク内容を入力欄へ」→ Enter で実行します。',
   } as Record<string, string>,
 }

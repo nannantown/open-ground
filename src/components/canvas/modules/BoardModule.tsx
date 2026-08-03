@@ -2016,13 +2016,15 @@ export const BoardModule = ({
                           : t('board.detail.restartSessionHint')
                       }
                     >
+                      {/* Text-diet: the teaching sentence lives in title= now;
+                          only a FAILURE (decision-relevant) stays visible. */}
                       {launchFailed.has(detailTask.id)
                         ? t(
                             launchFailed.get(detailTask.id) === 'claudeMissing'
                               ? 'board.run.failedClaudeMissing'
                               : 'board.run.failed',
                           )
-                        : t('board.detail.restartSessionHint')}
+                        : null}
                     </span>
                   </div>
                 )}
@@ -2045,7 +2047,7 @@ export const BoardModule = ({
                     className={`min-w-0 truncate text-[11px] ${insertError ? 'text-accent' : 'text-ink-faint'}`}
                     title={insertError ?? t('board.detail.insertTaskHint')}
                   >
-                    {insertError ?? t('board.detail.insertTaskHint')}
+                    {insertError ?? null}
                   </span>
                 </div>
               </div>

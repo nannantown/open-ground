@@ -175,12 +175,15 @@ export const ProjectCard = memo(({
             {project.name}
           </div>
           {shared && (
-            // The Shared badge, restored from the pre-member-merge card but now
-            // carried in the invite token (text + soft fill = the "badge 地色"):
-            // colour reinforces the band/ring, the glyph + label name it.
-            <span className="mt-0.5 flex shrink-0 items-center gap-1 rounded-[3px] bg-invite-soft px-1.5 py-0.5 label-cap text-invite">
-              <Users size={10} strokeWidth={2.25} />
-              {t('projectPanel.groundSharedBadge')}
+            // Text-diet 2026-08-03: a shared card carried FOUR marks at once
+            // (band, ring, this badge, the icon chip). The text label was the
+            // least dense of the four — the glyph keeps the meaning, the
+            // tooltip keeps the word.
+            <span
+              title={t('projectPanel.groundSharedBadge')}
+              className="mt-0.5 flex shrink-0 items-center rounded-[3px] bg-invite-soft p-1 text-invite"
+            >
+              <Users size={10} strokeWidth={2.25} aria-label={t('projectPanel.groundSharedBadge')} />
             </span>
           )}
           {project.openTaskCount > 0 && (
