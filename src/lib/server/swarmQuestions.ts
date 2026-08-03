@@ -52,7 +52,12 @@ import {
   injectAnswerIntoWorker,
   openEscalation,
 } from './swarmEscalations'
-import { workerRuntimeKind, type WorkerHandle, type WorkerRuntimeKind } from './workerRuntime'
+import {
+  sdkRecentOutputHead,
+  workerRuntimeKind,
+  type WorkerHandle,
+  type WorkerRuntimeKind,
+} from './workerRuntime'
 import type { Escalation, EscalationWhy } from '../types'
 
 // ─── Screen anatomy ──────────────────────────────────────────────────────────
@@ -142,6 +147,87 @@ export const detectFreeTextQuestion = (
   if (!question) return null
   return { question }
 }
+
+// ─── The SDK arm (2026-08-03 — the seam workerRuntime reserved) ──────────────
+//
+// An SDK worker has no screen, so every condition above that reads TUI
+// furniture is unsatisfiable for it — classifyOutput answered 'normal' forever
+// and a prose question died unheard (heartbeat `blocked` was the only route to
+// the owner). The SDK equivalents are STRONGER, not approximations:
+//
+//   PTY condition                        SDK equivalent
+//   idle footer / no working footer  →   the pool's own status: 'waiting' means
+//                                        the turn ENDED after real work evidence
+//                                        (sdkSession's promotion rule) — an
+//                                        authoritative lookup where the footer
+//                                        is an inference from pixels
+//   no permission menu               →   menus cannot exist (bypass, no TUI)
+//   empty input box                  →   no input box exists; pushSdkInput
+//                                        queues a turn regardless, so there is
+//                                        no half-typed draft to double-answer
+//   last row ends in ?/？            →   same, on the DISTILLED tail — whose
+//                                        lines are the worker's actual words,
+//                                        with tool/API/compact lines rendered
+//                                        under unambiguous markers (workerRuntime)
+//
+// FALSE-POSITIVE COST IS LOWER HERE (no keystrokes are typed into anyone's
+// terminal; a raise is an inbox entry and the question-grace park is 'blocked',
+// the human lane) — but the same fail-closed posture is kept: only the exact
+// 'waiting' head, only an unmarked utterance line, only a bounded block.
+
+/** A tail line that is the RENDERER's marker, not the worker's words —
+ *  `[tool] …` / `[tool ok|error] …` / `API Error…` / `[compacted …]`
+ *  (workerRuntime.renderSdkEvent is the single writer of these shapes). */
+const SDK_MARKER_LINE_RE = /^(?:\[tool(?:\]| ok\]| error\])|API Error|\[compacted )/
+
+/**
+ * Detect "an SDK worker ended its turn on a free-text question". Input is the
+ * EXACT string sdkWorkerRuntime.recentOutput returns: the status head line
+ * (sdkRecentOutputHead — imported, not re-derived) above the distilled tail.
+ * ALL of (fail-closed):
+ *  1. the head is precisely the idle one — `[sdk session waiting]`. 'working'
+ *     is mid-turn, 'quota-parked' is the rate-limit arm's turf, spawn/exit
+ *     states have no one listening for an answer;
+ *  2. the tail's last non-empty line is the worker's own words (not a
+ *     tool/API/compact marker) and ends in '?' / '？';
+ *  3. the reassembled block stays within QUESTION_BLOCK_MAX_ROWS.
+ */
+export const detectSdkFreeTextQuestion = (
+  out: string | null,
+): DetectedFreeTextQuestion | null => {
+  if (!out) return null
+  const nl = out.indexOf('\n')
+  const head = nl === -1 ? out : out.slice(0, nl)
+  if (head !== sdkRecentOutputHead('waiting')) return null
+
+  const rows = nl === -1 ? [] : out.slice(nl + 1).split('\n')
+  let i = rows.length - 1
+  while (i >= 0 && !rows[i].trim()) i--
+  if (i < 0) return null
+  const last = rows[i].trim()
+  if (SDK_MARKER_LINE_RE.test(last)) return null
+  if (!/[?？]$/.test(last)) return null
+
+  const block: string[] = [last]
+  for (let j = i - 1; j >= 0 && block.length < QUESTION_BLOCK_MAX_ROWS; j--) {
+    const t = rows[j].trim()
+    if (!t || SDK_MARKER_LINE_RE.test(t)) break
+    block.unshift(t)
+  }
+  const question = block.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_ESCALATION_QUESTION)
+  if (!question) return null
+  return { question }
+}
+
+/** THE question detector — one call, whatever runtime carries the worker.
+ *  This is the seam the two call sites (classifyOutput's 'question' arm and the
+ *  monitor's raise) go through, so neither can ever ask a PTY-shaped question
+ *  of an SDK worker's output again. */
+export const detectWorkerFreeTextQuestion = (
+  kind: WorkerRuntimeKind,
+  out: string | null,
+): DetectedFreeTextQuestion | null =>
+  kind === 'sdk' ? detectSdkFreeTextQuestion(out) : detectFreeTextQuestion(out)
 
 // ─── The T1 pipe (C-core's library — NOT self-scheduling; see file header) ────
 

@@ -210,7 +210,17 @@ const renderSdkEvent = (ev: SdkEvent): string | null => {
  *  rebuild the bug the decay rule was written to kill. So a `quota_refusal` — and
  *  the `text` twin the distiller emits for the SAME block — is dropped here; the
  *  caller has already asked the owning channel first. */
-const renderSdkTail = (events: readonly SdkEvent[]): string => {
+/** The status head line {@link sdkWorkerRuntime.recentOutput} puts above the
+ *  tail — EXPORTED because swarmQuestions' SDK question detector keys its idle
+ *  gate on this exact string. One builder on both sides, or the reader stops
+ *  moving with the writer (the 0.11.47 dial-default class, in miniature). */
+export const sdkRecentOutputHead = (status: string, exitReason?: string | null): string =>
+  `[sdk session ${status}${exitReason ? ` — ${exitReason}` : ''}]`
+
+/** Exported for swarmQuestions' SDK-detector TESTS: fixtures must be shapes
+ *  production can actually emit (VERIFICATION.md §3), and composing them through
+ *  the real renderer is what guarantees that. Not part of the runtime surface. */
+export const renderSdkTail = (events: readonly SdkEvent[]): string => {
   const refusals = new Set<string>()
   for (const ev of events) if (ev.kind === 'quota_refusal') refusals.add(oneLine(ev.raw))
   const lines: string[] = []
@@ -283,11 +293,13 @@ export const sdkWorkerRuntime: WorkerRuntime = {
     // furniture — the idle footer, the `❯` input box — and manufacturing those
     // rows here would make an SDK worker's behaviour depend on claudeScreen's
     // regexes, which is precisely the coupling this runtime exists to delete.
-    // Question detection for an SDK worker belongs on a runtime-aware seam at the
-    // classifier's call site (swarmOrchestrator's classifyOutput), not on a
-    // counterfeit screen — that is still OPEN, and until it lands an SDK worker's
-    // question reaches the owner only through the overseer's S4 heartbeat path.
-    const head = `[sdk session ${s.status}${s.exitReason ? ` — ${s.exitReason}` : ''}]`
+    // Question detection for an SDK worker lives on exactly the runtime-aware
+    // seam this comment used to reserve: swarmQuestions.detectSdkFreeTextQuestion
+    // reads THIS string — the head line (built by sdkRecentOutputHead, shared so
+    // the two cannot drift) as the idle gate, the rendered tail as the utterance
+    // — and swarmOrchestrator's classifyOutput dispatches on the worker's
+    // runtime kind (closed 2026-08-03; was OPEN since the runtime landed).
+    const head = sdkRecentOutputHead(s.status, s.exitReason)
     const tail = renderSdkTail(bufferedSdkEvents(id))
     return tail ? `${head}\n${tail}` : head
   },

@@ -29,7 +29,12 @@ import type {
   ProjectTask,
   SpawnSwarmWorkerResponse,
 } from '../types'
-import { workerKey, type WorkerHandle } from './workerRuntime'
+import {
+  renderSdkTail,
+  sdkRecentOutputHead,
+  workerKey,
+  type WorkerHandle,
+} from './workerRuntime'
 
 // CAN THE OWNER'S ANSWER REACH AN SDK WORKER AT ALL?
 //
@@ -305,6 +310,21 @@ const QUESTION_SCREEN = [
   '  ? for shortcuts · ← for agents',
 ].join('\n')
 
+/** The SDK worker's question, in the shape the SDK runtime ACTUALLY emits —
+ *  status head + distilled tail, composed with the production writers. Until
+ *  2026-08-03 the SDK tests below served the TUI frame above instead; the
+ *  runtime-blind classifier accepted it, which meant they were green through an
+ *  input production can never produce (VERIFICATION.md §3). The kind-aware
+ *  classifier rejects that frame — correctly — and these fixtures moved to the
+ *  real shape the same day the "once the classifier learns its output shape"
+ *  note below stopped being future tense. */
+const SDK_QUESTION_OUTPUT = [
+  sdkRecentOutputHead('waiting'),
+  renderSdkTail([
+    { kind: 'text', text: '質問がひとつあります。\nどのデータベースを使いますか？' },
+  ]),
+].join('\n')
+
 const card = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
   id,
   title: `task ${id}`,
@@ -416,7 +436,7 @@ describe('② the RAISER hands the inbox a complete address', () => {
     // failure mode is silent: an inbox row nobody can answer.
     const { deps, raised } = makeDeps({
       cards: [card('a', { boardColumn: 'doing' })],
-      screens: new Map([['sdk-a-1', QUESTION_SCREEN]]),
+      screens: new Map([['sdk-a-1', SDK_QUESTION_OUTPUT]]),
     })
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
 
@@ -435,7 +455,7 @@ describe('② the RAISER hands the inbox a complete address', () => {
     const engine = newEngine({ workers: [sdkWorker()] })
     const { deps, raiseImpl } = makeDeps({
       cards: [card('a', { boardColumn: 'doing' })],
-      screens: new Map([['sdk-a-1', QUESTION_SCREEN]]),
+      screens: new Map([['sdk-a-1', SDK_QUESTION_OUTPUT]]),
     })
     raiseImpl.fn = (i) => openEscalation(i, { notify: async () => {}, captureSdk: () => null })
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)

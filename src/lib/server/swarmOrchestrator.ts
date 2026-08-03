@@ -142,7 +142,13 @@ import {
   isSwarmManualStopPersisted,
 } from './store'
 import { launchClaude } from './claudeTerminal'
-import { runtimeOf, workerKey, workerRuntimeKind, type WorkerHandle } from './workerRuntime'
+import {
+  runtimeOf,
+  workerKey,
+  workerRuntimeKind,
+  type WorkerHandle,
+  type WorkerRuntimeKind,
+} from './workerRuntime'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTierProbed } from './swarmLaunch'
 // The limit-wording detector, extracted to swarmRateLimitText.ts (2026-07-13) so
@@ -190,7 +196,7 @@ import {
   type SelfSupplyDeps,
   type SelfSupplyRuntime,
 } from './swarmSelfSupply'
-import { detectFreeTextQuestion } from './swarmQuestions'
+import { detectWorkerFreeTextQuestion } from './swarmQuestions'
 import {
   defaultReceiptKey,
   deliverAnswerToWorker,
@@ -1603,13 +1609,21 @@ const a5CoolingHint = (): string | null => {
  *  A null/empty screen ⇒ 'normal' (no signal — never invent a wait). */
 export const classifyOutput = (
   screen: string | null,
+  // The worker's runtime, because the QUESTION arm has two shapes: the PTY one
+  // reads TUI furniture, the SDK one reads the pool's status head + distilled
+  // tail (detectWorkerFreeTextQuestion — the seam). Defaults to 'pty' so every
+  // existing caller/test keeps its exact old meaning; the monitor passes the
+  // real kind. Until 2026-08-03 this function was runtime-blind, which made an
+  // SDK worker's prose question permanently invisible ('normal' forever — only
+  // the heartbeat `blocked` route reached the owner).
+  kind: WorkerRuntimeKind = 'pty',
 ): 'rate-limited' | 'permission-wait' | 'question' | 'normal' => {
   if (!screen) return 'normal'
   const text = normalizeScreen(screen)
   if (!text) return 'normal'
   if (PERMISSION_PROMPT_PATTERNS.some((re) => re.test(text))) return 'permission-wait'
   if (matchesRateLimit(text)) return 'rate-limited'
-  if (detectFreeTextQuestion(screen)) return 'question'
+  if (detectWorkerFreeTextQuestion(kind, screen)) return 'question'
   return 'normal'
 }
 
@@ -7367,7 +7381,7 @@ const monitorWorkers = async (
         /* unknown → classifyOutput('normal') → ordinary stall handling below */
       }
     }
-    const output = classifyOutput(screen)
+    const output = classifyOutput(screen, workerRuntimeKind(w))
     if (sampleScreen) {
       if (output === 'rate-limited') {
         if (!engine.limitScreen.has(workerKey(w))) engine.limitScreen.set(workerKey(w), now)
@@ -7638,7 +7652,10 @@ const monitorWorkers = async (
         // older build / a test fixture must still get once-per-question raising.
         engine.questionRaised ??= new Map()
         engine.questionWaits ??= new Map()
-        const q = heartbeat?.blocked && engine.overseer?.enabled ? null : detectFreeTextQuestion(screen)
+        const q =
+          heartbeat?.blocked && engine.overseer?.enabled
+            ? null
+            : detectWorkerFreeTextQuestion(workerRuntimeKind(w), screen)
         if (q && deps.raiseQuestion) {
           const receiptKey = defaultReceiptKey({
             projectPath: engine.path,
