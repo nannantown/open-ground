@@ -5,6 +5,7 @@ import {
   AUTO_APPLY_UNFOCUSED_MIN_MS,
   autoUpdateFromSettingsRaw,
   decideAutoApply,
+  decideDownloadedAction,
 } from '../../electron/autoUpdatePolicy'
 
 // The hands-free apply decision (electron/autoUpdatePolicy.js). Every input is
@@ -57,5 +58,66 @@ describe('decideAutoApply', () => {
     expect(
       decideAutoApply({ ...base, safety: { safe: false, generating: 1, userPtys: 0 } }).apply,
     ).toBe(false)
+  })
+})
+
+// ─── THE INVERSION (2026-08-04) ─────────────────────────────────────────────
+//
+// Turning hands-free updates ON used to SUPPRESS the restart prompt: main.js
+// armed the auto-apply loop and returned early. That left the ON path with two
+// ways to land an update (the unattended moment, and a normal quit) against the
+// OFF path's three — because OFF also just asks, which always works.
+//
+// And the unattended moment never came. Measured on the owner's own running app
+// on 2026-08-04: `GET /api/update/restart-safety` → {safe:false, generating:0,
+// userPtys:2}, and both PTYs were empty login shells with no child process, open
+// for 1h23m. The gate wanted userPtys === 0 from someone who always has a
+// terminal open, so the answer was structurally always "defer".
+//
+// **ON delivered updates less reliably than OFF.** These pin the fix: arming the
+// loop and telling the user are independent decisions, and hands-free means "no
+// modal interrupting you", never "no way to know".
+
+describe('decideDownloadedAction — hands-free never means silent', () => {
+  it('ON still notifies (this is the whole bug)', () => {
+    const r = decideDownloadedAction({ enabled: true, lockdown: false, waitedDays: 0 })
+    expect(r.armLoop, 'the unattended loop is still armed').toBe(true)
+    expect(r.notify, 'and the user is told anyway').toBe(true)
+  })
+
+  it('the notice escalates the longer an update sits unapplied', () => {
+    const at = (waitedDays: number) =>
+      decideDownloadedAction({ enabled: true, lockdown: false, waitedDays }).escalation
+    expect(at(0)).toBe('quiet')
+    expect(at(2)).toBe('quiet')
+    expect(at(3)).toBe('banner')
+    expect(at(6)).toBe('banner')
+    expect(at(7)).toBe('dialog')
+    expect(at(30)).toBe('dialog')
+  })
+
+  it('OFF keeps the shipped flow — ask once, immediately, no loop', () => {
+    const r = decideDownloadedAction({ enabled: false, lockdown: false, waitedDays: 0 })
+    expect(r).toEqual({ armLoop: false, notify: true, escalation: 'dialog' })
+  })
+
+  it('work mode suppresses everything, both directions', () => {
+    for (const enabled of [true, false]) {
+      expect(decideDownloadedAction({ enabled, lockdown: true, waitedDays: 99 })).toEqual({
+        armLoop: false,
+        notify: false,
+        escalation: 'none',
+      })
+    }
+  })
+
+  it('a nonsense waitedDays does not silence the notice', () => {
+    // NaN / negative must never fall through to "say nothing" — the failure
+    // direction that produced the original bug.
+    for (const waitedDays of [NaN, -5, Infinity]) {
+      const r = decideDownloadedAction({ enabled: true, lockdown: false, waitedDays })
+      expect(r.notify, `waitedDays=${waitedDays}`).toBe(true)
+      expect(['quiet', 'banner', 'dialog']).toContain(r.escalation)
+    }
   })
 })

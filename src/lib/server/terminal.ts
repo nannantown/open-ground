@@ -732,6 +732,14 @@ export interface PtySafetyView {
   desk: boolean
   /** A claude session actively producing output right now. */
   claudeWorking: boolean
+  /** node-pty's foreground process name (tcgetpgrp). `zsh` / `bash` / `sh` means
+   *  the login shell ITSELF is in front — nothing is running inside the pane.
+   *  Anything else (claude, npm, a build) is real work, however quiet. */
+  foreground: string
+  /** Epoch ms of the last byte this session painted, or 0 if it never has. */
+  lastOutputAt: number
+  /** OS pid of the pty leader, for the child-process probe. 0 if unknown. */
+  pid: number
 }
 export const listPtySafetyViews = (): PtySafetyView[] => {
   const now = Date.now()
@@ -743,6 +751,24 @@ export const listPtySafetyViews = (): PtySafetyView[] => {
       hidden: !!s.info.hidden,
       desk: !!s.info.deskLabel,
       claudeWorking: s.info.tag === 'claude' && claudeStatus(s.info, now) === 'working',
+      // `.process` can throw on a pty that died between the liveness check and
+      // here; an unreadable foreground reads as "something is running" so the
+      // safety answer stays conservative.
+      foreground: (() => {
+        try {
+          return s.pty.process || ''
+        } catch {
+          return ''
+        }
+      })(),
+      lastOutputAt: s.info.lastOutputAt ?? 0,
+      pid: (() => {
+        try {
+          return s.pty.pid || 0
+        } catch {
+          return 0
+        }
+      })(),
     })
   })
   return out

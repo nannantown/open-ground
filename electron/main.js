@@ -51,6 +51,7 @@ const {
   SAFETY_FETCH_TIMEOUT_MS,
   autoUpdateFromSettingsRaw,
   decideAutoApply,
+  decideDownloadedAction,
 } = require('./autoUpdatePolicy')
 const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath } = require('./lockdown')
 const { decideCrashResponse } = require('./crashRespawn')
@@ -1907,6 +1908,8 @@ let autoUpdaterInit = 'pending'
 // THAT restart rather than re-asking GitHub about an update already on disk. It is
 // an object rather than a bare string so "we have one" survives a missing version.
 let downloadedUpdate = null
+/** When the pending update finished downloading — drives the notice escalation. */
+let downloadedUpdateAt = 0
 // Guard against two manual checks racing two dialogs.
 let manualCheckInFlight = false
 
@@ -2180,16 +2183,41 @@ function initAutoUpdater() {
     // Remember it: if the user picks "Later", the menu's manual check must offer
     // THIS restart instead of asking GitHub again about an update already on disk.
     downloadedUpdate = { version }
-    // Hands-free mode (settings.autoUpdate): no dialog — arm the policy loop
-    // that applies the update at a provably safe, user-away moment, and let any
-    // normal quit apply it too. Default (off): the conservative shipped flow —
-    // notify + explicit restart choice, never auto-restart.
-    if (autoUpdateEnabled()) {
+    // When it landed — the escalation below and the poll loop both age from this.
+    // WHAT HANDS-FREE MEANS, and what it used to mean by accident.
+    //
+    // This branch used to `return` after arming the loop, so turning the setting
+    // ON removed the only prompt that always worked. ON therefore had two ways to
+    // land an update — the unattended moment and a normal quit — where OFF had
+    // three, and the unattended moment never arrived for anyone who keeps a
+    // terminal open (measured on the owner's own app: userPtys stuck at 2, both
+    // empty shells). **ON delivered updates less reliably than OFF.**
+    //
+    // Arming the loop and telling the user are now independent
+    // (autoUpdatePolicy.decideDownloadedAction, unit-tested without Electron).
+    // Hands-free still means "nothing interrupts you"; it never means "you are
+    // not told". The notice escalates the longer the update waits, and every
+    // form of it restarts in one click.
+    downloadedUpdateAt = Date.now()
+    const action = decideDownloadedAction({
+      enabled: autoUpdateEnabled(),
+      lockdown: isLockdownEnabled(),
+      waitedDays: 0,
+    })
+    if (action.armLoop) {
       autoUpdater.autoInstallOnAppQuit = true
       armAutoApplyLoop()
+    }
+    if (!action.notify) return
+    if (action.escalation === 'dialog') {
+      void promptRestartForUpdate(version)
       return
     }
-    void promptRestartForUpdate(version)
+    createInAppNotification({
+      event: 'update-ready',
+      detail: `新しい版 ${version} の準備ができました。手が空いた頃合いに自動で入れ替えますが、今すぐでも構いません。`,
+      logHint: '設定 → 自動アップデート で、いま適用できない理由が見られます。',
+    })
   })
 
   // Kick off an initial check, then poll every 4h. checkForUpdatesAndNotify

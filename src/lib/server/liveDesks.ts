@@ -43,6 +43,7 @@ import type { SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
 import { projectsDataRootDir } from './paths'
 import { sep } from 'path'
+import { execFile } from 'node:child_process'
 import type {
   ActiveTerminalsResponse,
   ClaudeBeaconStatus,
@@ -209,16 +210,125 @@ export const stopAllDesksInDirAndWait = async (
 //            hidden utility sessions not generating, and quota-parked SDK
 //            sessions (parked BECAUSE nothing can proceed).
 
+
+/**
+ * Does this shell have anything running under it?
+ *
+ * ⚠ THE HOLE THIS CLOSES, measured 2026-08-04 with a throwaway node-pty:
+ *   idle shell                  .process = "zsh"
+ *   foreground `sleep 60`       .process = "sleep"
+ *   **`sleep 300 &`, prompt back  .process = "zsh"**
+ *   `less`                      .process = "less"
+ * The third line is the whole problem. A background job — a build, a test run,
+ * anything the user launched with `&` — leaves the SHELL in front, so the
+ * foreground check alone reads it as an empty pane. Ten minutes of silence later
+ * the gate would have called it abandoned and restarted on top of live work.
+ *
+ * Fails CLOSED in every direction it cannot answer: an unknown pid, a platform
+ * without pgrep, a spawn error or a timeout all report "has children", because
+ * the cost of a false "empty" is destroying someone's work and the cost of a
+ * false "busy" is waiting for the next five-minute tick.
+ */
+const hasChildProcesses = async (pid: number): Promise<boolean> => {
+  if (!pid || process.platform === 'win32') return true
+  return await new Promise<boolean>((resolve) => {
+    let settled = false
+    const done = (v: boolean) => {
+      if (!settled) {
+        settled = true
+        resolve(v)
+      }
+    }
+    try {
+      const child = execFile('pgrep', ['-P', String(pid)], { timeout: 2000 }, (err, stdout) => {
+        // pgrep exits 1 with no output when there are no matches — that, and
+        // only that, is a genuine "no children".
+        if (err && (err as NodeJS.ErrnoException).code !== undefined && !stdout) {
+          const code = (err as unknown as { code?: number }).code
+          done(code !== 1)
+          return
+        }
+        if (err && !stdout) return done(true)
+        done(stdout.trim().length > 0)
+      })
+      child.on('error', () => done(true))
+    } catch {
+      done(true)
+    }
+  })
+}
+
+/** A pane whose foreground process is the login shell itself has nothing running
+ *  in it. Deliberately an exact list rather than a pattern: an unknown value
+ *  (including the empty string an unreadable pty yields) counts as WORK. */
+const LOGIN_SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', '-zsh', '-bash'])
+
+/** How long a shell must also have been silent before it counts as abandoned. */
+export const IDLE_PANE_MS = 10 * 60 * 1000
+
 /** Pure core, unit-tested directly (updateRestartSafety.test.ts). `engine` on a
- *  PTY view means its cwd sits under the central data root — engine-owned. */
+ *  PTY view means its cwd sits under the central data root — engine-owned.
+ *
+ *  ⚠ WHAT `userPtys` COUNTS, and why it changed on 2026-08-04.
+ *  It used to count every visible user pane, full stop. That reads "a pane is
+ *  open" as "work is happening", and those are not the same thing — measured on
+ *  the owner's own machine, the two panes blocking every unattended update were
+ *  `/bin/zsh -l` with ZERO child processes, sitting untouched for 1h23m. The
+ *  gate wanted zero panes from someone who always has a terminal open, so it
+ *  answered "unsafe" forever and the feature never once fired.
+ *
+ *  A safety gate that never opens is not caution, it is a disabled feature with
+ *  a reassuring name. So the question is now "would a restart destroy anything?"
+ *  — and it takes TWO signals to answer no: the login shell is in front (nothing
+ *  is running) AND the pane has been silent for {@link IDLE_PANE_MS}. Either one
+ *  alone is a known trap: a foreground `claude` can go minutes without painting,
+ *  and a shell can be idle for a second between commands.
+ *
+ *  Everything else is unchanged and still blocks: claude working in either pool,
+ *  any pane running anything at all, and any pane whose state cannot be read. */
 export const computeRestartSafety = (
-  ptys: readonly { desk: boolean; hidden: boolean; engine: boolean; claudeWorking: boolean }[],
+  // ⚠ REQUIRED, not optional — `| undefined` rather than `?`. Review caught the
+  // first version shipping with these optional: `updateRestartSafety()` below
+  // re-packs each row into a fresh literal, and it simply did not copy the two
+  // new fields. `foreground` arrived as undefined, `LOGIN_SHELLS.has('')` was
+  // false, and the entire relaxation never fired in production — while all
+  // twelve unit tests, which call this function directly with complete rows,
+  // stayed green. tsc said nothing, because optional means optional.
+  // Requiring the KEY (its value may still be undefined, which reads as "cannot
+  // tell" and fails closed) turns that silent omission into a build error. This
+  // is the repo's own rule: prefer over-approximation you cannot miss to an
+  // existence check that goes quiet.
+  ptys: readonly {
+    desk: boolean
+    hidden: boolean
+    engine: boolean
+    claudeWorking: boolean
+    foreground: string | undefined
+    lastOutputAt: number | undefined
+    hasChildren: boolean | undefined
+  }[],
   sdkStatuses: readonly SdkSessionStatus[],
+  now: number = Date.now(),
 ): UpdateRestartSafetyResponse => {
   const generating =
     ptys.filter((p) => p.claudeWorking).length +
     sdkStatuses.filter((s) => s === 'working' || s === 'starting').length
-  const userPtys = ptys.filter((p) => !p.desk && !p.hidden && !p.engine).length
+  // THREE signals, and every one of them defaults to "busy" when absent.
+  //   1. the login shell is in front  → nothing is running IN the pane
+  //   2. it has no child processes    → and nothing is running BEHIND it
+  //   3. it has been silent 10 min    → and nobody is sitting at it
+  // Two would not do. (1) alone misses `npm test &` — measured: a backgrounded
+  // job leaves `.process` reporting "zsh". (3) alone misses a foreground claude
+  // thinking quietly. Together they describe an empty pane and nothing else.
+  const abandoned = (p: {
+    foreground?: string
+    lastOutputAt?: number
+    hasChildren?: boolean
+  }): boolean =>
+    LOGIN_SHELLS.has(p.foreground ?? '') &&
+    p.hasChildren === false &&
+    now - (p.lastOutputAt ?? 0) >= IDLE_PANE_MS
+  const userPtys = ptys.filter((p) => !p.desk && !p.hidden && !p.engine && !abandoned(p)).length
   return { safe: generating === 0 && userPtys === 0, generating, userPtys }
 }
 
@@ -233,6 +343,15 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
       desk: v.desk,
       hidden: v.hidden,
       claudeWorking: v.claudeWorking,
+      foreground: v.foreground,
+      lastOutputAt: v.lastOutputAt,
+      // Only asked for panes that could possibly be abandoned — a pgrep per
+      // live pane on every probe would be wasteful, and the answer only matters
+      // when the other two signals already say "empty".
+      hasChildren:
+        LOGIN_SHELLS.has(v.foreground) && Date.now() - v.lastOutputAt >= IDLE_PANE_MS
+          ? await hasChildProcesses(v.pid)
+          : true,
       engine: (await canonicalize(v.cwd)).startsWith(centralRoot + sep),
     })),
   )

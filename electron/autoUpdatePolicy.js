@@ -73,10 +73,48 @@ function decideAutoApply(input) {
   return { apply: true, reason: 'idle + server safe' }
 }
 
+/**
+ * Pure decision: an update just finished downloading — what happens now?
+ *
+ * THE INVERSION THIS EXISTS TO FIX. Turning hands-free updates ON used to
+ * SUPPRESS the "restart now?" prompt entirely: main.js armed the auto-apply loop
+ * and returned. So the ON path had exactly two ways to land an update — the
+ * unattended moment, and a normal quit — while the OFF path had a third that
+ * always worked: asking. And the unattended moment never came for a user who
+ * keeps terminals open (measured on the owner's own app: userPtys never reached
+ * 0). **ON delivered updates less reliably than OFF.** A setting that makes the
+ * thing it promises less likely is worse than a missing feature, because the
+ * user stops looking.
+ *
+ * So: arming the loop and telling the user are independent. Hands-free still
+ * means "no modal interrupting you", never "no way to know". The notice
+ * escalates the longer an update sits unapplied, and any of its forms restarts
+ * in one click.
+ *
+ * @param {{
+ *   enabled: boolean,     // settings.autoUpdate
+ *   lockdown: boolean,    // work mode suppresses ALL updater activity
+ *   waitedDays: number,   // days this update has been sitting downloaded
+ * }} input
+ * @returns {{ armLoop: boolean, notify: boolean, escalation: 'none'|'quiet'|'banner'|'dialog' }}
+ */
+function decideDownloadedAction(input) {
+  // Work mode blocks updater activity outright — no loop, no notice.
+  if (input.lockdown) return { armLoop: false, notify: false, escalation: 'none' }
+  if (!input.enabled) {
+    // The shipped conservative flow: ask, once, right away.
+    return { armLoop: false, notify: true, escalation: 'dialog' }
+  }
+  const d = Number.isFinite(input.waitedDays) ? Math.max(0, input.waitedDays) : 0
+  const escalation = d >= 7 ? 'dialog' : d >= 3 ? 'banner' : 'quiet'
+  return { armLoop: true, notify: true, escalation }
+}
+
 module.exports = {
   AUTO_APPLY_UNFOCUSED_MIN_MS,
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
   autoUpdateFromSettingsRaw,
+  decideDownloadedAction,
   decideAutoApply,
 }

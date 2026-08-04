@@ -102,13 +102,29 @@ export const containsDoneMarker = (raw: string): boolean => {
 
 const MAX_BUFFER = 64_000
 const POLL_MS = 500
-// 480s since 2026-08-03 (was 180s): a full mock/screen generation legitimately
-// runs for minutes, and the owner's real-world generate died as a generic
-// 「失敗」 that was almost certainly this ceiling (the machinery reproduced
-// fine in 41s on a trivial brief). The job is background + cancellable, so a
-// longer ceiling costs nothing; the timeout now also names itself in the
-// error so the client can say 時間切れ instead of guessing.
-const DEFAULT_TIMEOUT_MS = 480_000
+// TWO DEADLINES, because a wall-clock ceiling was answering the wrong question.
+//
+// The owner asked it plainly on 2026-08-04: 「時間制限は意味ある？」 Measured, it
+// mostly wasn't. The successful generate that morning took 412s against a 480s
+// wall — 86% of the budget, i.e. no margin at all — and the one that failed had
+// spent its whole seven minutes running ls/find/grep and had written nothing.
+// Neither run was helped by the number. One was nearly killed for being slow;
+// the other was killed long after it was obviously lost.
+//
+// A total-time ceiling punishes long legitimate work and is patient with a hang.
+// What actually needs bounding is SILENCE: a session producing output is making
+// progress, and one that has gone quiet for minutes is stuck. So:
+//
+//   NO_PROGRESS_MS — the real limit. Nothing painted in this long ⇒ stop, and
+//   say so honestly ("no progress"), not "you were too slow".
+//   HARD_CEILING_MS — a runaway backstop only, set far above any real job so it
+//   never decides a normal outcome. swarm already splits it this way (silence 10
+//   min, runaway 90 min); the surface a human is WATCHING had the weaker guard.
+const NO_PROGRESS_MS = 120_000
+const HARD_CEILING_MS = 1_800_000
+/** Back-compat name for callers that pass an explicit budget; it now sets the
+ *  runaway backstop, never the everyday limit. */
+const DEFAULT_TIMEOUT_MS = HARD_CEILING_MS
 
 // Model is pinned to sonnet: both tasks emit structured output (JSON schemas,
 // JSX source). haiku visibly breaks JSX / drops schema fields; sonnet is the
@@ -124,6 +140,8 @@ export interface FileTaskOpts {
    *  it and deletes it — the runner only reads). */
   file: string
   timeoutMs?: number
+  /** Silence budget. The everyday limit — see NO_PROGRESS_MS. */
+  noProgressMs?: number
   /** What the caller seeded the file with. On timeout / early session death
    *  the file content counts as a result only if it differs from this. */
   initialContent?: string
@@ -151,6 +169,7 @@ export interface FileTaskOpts {
  *  premise — run AI in project A, work in project B). */
 export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const noProgressMs = opts.noProgressMs ?? NO_PROGRESS_MS
   // A queued task whose requester already hung up must not burn a claude
   // session out of the user's subscription window.
   if (opts.signal?.aborted) throw new Error('canvas AI task aborted')
@@ -187,6 +206,17 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
   })
 
   let buffer = ''
+  /** MONOTONIC count of every byte the session has painted.
+   *
+   *  ⚠ NOT `buffer.length`. `buffer` is TAIL-CAPPED at MAX_BUFFER, so once a
+   *  session has produced 64KB — which claude's TUI does in well under a
+   *  minute, that cap exists precisely because it repaints constantly — its
+   *  length pins at 64000 and never changes again. A progress check reading it
+   *  would see "no output" for the entire rest of the run and kill every
+   *  generation 120s after saturation, including the 412s one this change set
+   *  out to protect. Caught in review before shipping; the first version of the
+   *  progress check made exactly that mistake. */
+  let paintedBytes = 0
   let exited = false
   let aborted = false
   const onAbort = () => {
@@ -202,7 +232,9 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
     ref.terminalId,
     (chunk) => {
       // Tail-cap: the marker always arrives near the end, and an unbounded
-      // buffer would grow with every TUI repaint.
+      // buffer would grow with every TUI repaint. The counter is kept OUTSIDE
+      // the cap — that is the whole point of it.
+      paintedBytes += chunk.length
       buffer = (buffer + chunk).slice(-MAX_BUFFER)
     },
     () => {
@@ -210,6 +242,10 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
     },
   )
   const deadline = Date.now() + timeoutMs
+  // Progress = bytes painted, counted monotonically (see paintedBytes).
+  let lastProgressAt = Date.now()
+  let seenBytes = paintedBytes
+  let stalled = false
   try {
     while (Date.now() < deadline) {
       await sleep(POLL_MS)
@@ -218,6 +254,13 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
         return await readFile(opts.file, 'utf8')
       }
       if (exited || sub?.info.finishedAt) break
+      if (paintedBytes !== seenBytes) {
+        seenBytes = paintedBytes
+        lastProgressAt = Date.now()
+      } else if (Date.now() - lastProgressAt >= noProgressMs) {
+        stalled = true
+        break
+      }
     }
     if (aborted) throw new Error('canvas AI task aborted')
     // Timed out or the session died early. The file may STILL have been
@@ -232,10 +275,14 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
     // honest 時間切れ message (the generic wording hid the 180s ceiling from
     // the owner on 2026-08-03). `exited` false at deadline ⇒ the session was
     // still alive and simply ran out of time.
+    // Three outcomes, named apart so the client can say something true rather
+    // than blaming the user's prompt for a hang.
     throw new Error(
       exited || sub?.info.finishedAt
         ? 'canvas AI session ended without completing its output file'
-        : 'canvas AI session timed out',
+        : stalled
+          ? 'canvas AI session made no progress'
+          : 'canvas AI session timed out',
     )
   } finally {
     opts.signal?.removeEventListener('abort', onAbort)
@@ -568,6 +615,15 @@ export const buildGenerateElementsPrompt = (file: string, userPrompt: string): s
     'Process:',
     '1. Plan the layout, then write the complete JSON array into the file above.',
     '2. Do not create, edit, or delete ANY other file, and do not touch the project.',
+    // ⚠ THE ACTUAL FAILURE, measured 2026-08-04. A generate that "timed out" had
+    // made 44 tool calls, every one of them a Bash ls/find/grep across the
+    // filesystem, and had written NOTHING. A bare `find ~` hit claude's own 120s
+    // ceiling and burned a quarter of the budget on its own. The brief is
+    // self-contained — the model has no reason to go looking, and until now
+    // nothing told it not to: the rule above forbids WRITING anywhere else and
+    // says nothing about reading. Raising the wall would only have bought a
+    // longer wander.
+    '3. Do NOT explore the machine. You already have everything you need in this prompt: do not run ls, find, grep, cat, or any other command, and do not read files. If the brief mentions something you cannot see, design a sensible version of it rather than searching for it.',
     buildDonePromptLine(),
   ].join('\n')
 

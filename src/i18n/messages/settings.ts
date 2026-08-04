@@ -39,8 +39,14 @@ export const settings = {
     // Hands-free updates (settings.autoUpdate)
     'settings.autoUpdate.heading': 'Automatic updates',
     'settings.autoUpdate.label': 'Apply updates automatically',
+    // ⚠ This copy was WRONG on both halves until 2026-08-04 and has to stay
+    // honest, because the setting's whole value is that you can trust it while
+    // not looking. It said "no more restart dialogs" — but ON also removed the
+    // only notice that always worked, so ON delivered updates LESS reliably
+    // than OFF. And it promised to wait "while a terminal pane is open", which
+    // is why it waited forever: an empty shell counted as work.
     'settings.autoUpdate.hint':
-      'New versions install themselves — no more restart dialogs. The app only restarts while you are away and nothing is running: it waits while Claude is working or a terminal pane is open. Quitting the app also applies a waiting update.',
+      'New versions install themselves while you are away — nothing interrupts you, and you are still told an update is waiting so you can take it now. It waits for real work: Claude generating, and any terminal pane with something running in it. A pane sitting empty at the prompt does not hold it up. Quitting the app also applies a waiting update.',
     // Work mode (lockdown) — the non-Anthropic egress kill switch
     'settings.lockdown.heading': 'Work mode',
     'settings.lockdown.label': 'Block non-Anthropic connections',
@@ -110,7 +116,7 @@ export const settings = {
     'settings.autoUpdate.heading': '自動アップデート',
     'settings.autoUpdate.label': '新しい版を自動で適用する',
     'settings.autoUpdate.hint':
-      '新しい版が来たら、再起動の確認を出さずに自動で入れ替えます。入れ替えるのは「あなたが席を外していて、何も動いていないとき」だけ — Claude が作業中のときや、ターミナルを開いているあいだは待ちます。アプリを閉じたときにも適用されます。',
+      '席を外しているあいだに、新しい版へ自動で入れ替えます。作業は邪魔しませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。待つのは本当に作業がある場合だけ — Claude が生成中のときと、中で何かが走っているターミナルです。プロンプトのまま放置しているターミナルは、待つ理由になりません。アプリを閉じたときにも適用されます。',
     'settings.lockdown.heading': '業務モード',
     'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
     'settings.lockdown.hint':

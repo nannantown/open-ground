@@ -20,8 +20,12 @@ export const canvas = {
     'canvas.generate.hint': 'This can take 30–60 seconds…',
     'canvas.generate.cancel': 'Cancel generation',
     'canvas.generate.error': 'Generation failed. Try again.',
-    'canvas.generate.timeout':
-      'It ran out of time. Try again — or pick a shorter brief or a faster model.',
+    // "shorten your brief" put the blame on the user. Measured 2026-08-04: the
+    // timeout was not a long brief, it was the model wandering the filesystem
+    // and drawing nothing. Exploration is forbidden now; when it does stop, say
+    // what happened instead of assigning fault.
+    'canvas.generate.timeout': 'It stopped part-way through. Try again.',
+    'canvas.generate.stalled': 'It stopped part-way through. Try again.',
     'canvas.generate.model': 'Model',
     'canvas.generate.modelSonnet': 'Sonnet · standard',
     'canvas.generate.modelOpus': 'Opus · best quality',
@@ -216,8 +220,11 @@ export const canvas = {
     'canvas.generate.close': '閉じる',
     'canvas.generate.hint': '数十秒かかります…',
     'canvas.generate.error': '生成に失敗しました。もう一度お試しください。',
-    'canvas.generate.timeout':
-      '時間切れになりました。もう一度試すか、指示を短くするか、速いモデルをお試しください。',
+    // 「短くしてください」は利用者のせいにしていた。実測(2026-08-04)では、時間切れの
+    // 正体は長すぎる指示ではなく、AI がパソコン中を探し回って絵を1つも描かなかったこと。
+    // 探索は禁止したうえで、止まったこと自体は「手が止まった」と正直に言う。
+    'canvas.generate.timeout': '途中で手が止まってしまいました。もう一度お試しください。',
+    'canvas.generate.stalled': '途中で手が止まってしまいました。もう一度お試しください。',
     'canvas.generate.model': 'モデル',
     'canvas.generate.modelSonnet': 'Sonnet・標準',
     'canvas.generate.modelOpus': 'Opus・高品質',

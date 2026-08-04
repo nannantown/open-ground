@@ -769,11 +769,14 @@ export const CanvasWorkspace = ({
           setGenOpen(false)
           setGenPrompt('')
         } else {
-          // The server names the failure (job.error) — say 時間切れ when that
-          // is what happened instead of the generic line that hid the 180s
-          // ceiling from the owner on 2026-08-03.
+          // The server names the failure (job.error). Three shapes now: it ran
+          // out of total time (the runaway backstop), it went silent, or it
+          // failed some other way. The first two mean the same thing to a
+          // person — it stopped part-way — and neither is the user's fault, so
+          // neither tells them to rewrite their brief.
+          const err = job.error ?? ''
           setGenError(
-            /timed out/.test(job.error ?? '')
+            /timed out|no progress/.test(err)
               ? t('canvas.generate.timeout')
               : t('canvas.generate.error'),
           )
