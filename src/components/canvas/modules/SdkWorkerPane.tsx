@@ -7,7 +7,7 @@
 //
 // That is the readable view the whole migration started from: the same work,
 // legible without reading a terminal repaint. The header keeps SwarmWorkerPane's
-// exact vocabulary (the azure/ochre beacon dots the Ground and Board cards use)
+// exact vocabulary (the moss/ochre beacon dots the Ground and Board cards use)
 // so a mixed fleet reads as one fleet.
 //
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.6.
@@ -144,11 +144,11 @@ interface Props {
 }
 
 // The SAME beacon vocabulary as SwarmWorkerPane / the Ground + Board cards:
-// azure = busy, ochre = waiting for input. Inert states use ink-faint so the
+// moss = busy, ochre = waiting for input. Inert states use ink-faint so the
 // grey dot still clears the 3:1 graphic-contrast floor on the paper header.
 const DOT: Record<SdkSessionStatus, string> = {
   starting: 'bg-ink-faint',
-  working: 'bg-azure',
+  working: 'bg-moss',
   waiting: 'bg-ochre',
   'quota-parked': 'bg-ochre',
   exited: 'bg-ink-faint',

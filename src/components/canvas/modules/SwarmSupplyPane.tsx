@@ -31,11 +31,11 @@ interface Props {
 }
 
 // Status dot colour — the SAME beacon vocabulary as the worker tiles
-// (SwarmWorkerPane) and the Ground/Board cards: azure = busy, ochre = waiting.
+// (SwarmWorkerPane) and the Ground/Board cards: moss = busy, ochre = waiting.
 // starting/exited use ink-faint so the inert grey dot clears the 3:1 graphic
 // floor on the paper header (line-strong ≈ 2.1:1 was near-invisible).
 const DOT: Record<WorkerStatus, string> = {
-  working: 'bg-azure',
+  working: 'bg-moss',
   waiting: 'bg-ochre',
   starting: 'bg-ink-faint',
   exited: 'bg-ink-faint',

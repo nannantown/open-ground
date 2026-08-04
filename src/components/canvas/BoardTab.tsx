@@ -875,7 +875,7 @@ export const BoardTab = ({
                 <span className="flex shrink-0 items-center gap-[7px] whitespace-nowrap text-meta font-semibold text-ink-muted">
                   {/* Instrument lamp: lit only while the column carries work
                       that means something is HAPPENING or WAITING ON YOU —
-                      doing=moss, review=azure, blocked=ochre. Neutral when
+                      doing=moss, review=ochre, blocked=ochre. Neutral when
                       empty or for the passive lanes (todo/done). */}
                   {/* The mock draws a lamp ONLY on the lanes that can mean
                       「動いている」/「あなた待ち」 — todo and done carry none at all.

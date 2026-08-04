@@ -13,7 +13,7 @@ import { useT } from '@/i18n/I18nContext'
 /** Display state of a worker, derived by SwarmModule from the active-terminal
  *  poll + the pane's own exit signal:
  *  - working/waiting come straight from GET /api/terminal/active (the same
- *    azure/ochre beacon vocabulary the Board + Ground cards use),
+ *    moss/ochre beacon vocabulary the Board + Ground cards use),
  *  - starting = spawned but not yet seen by the poll (optimistic),
  *  - exited   = the PTY closed (ClaudeTerminalPane.onExit / a dead probe). */
 export type WorkerStatus = 'working' | 'waiting' | 'starting' | 'exited'
@@ -60,11 +60,11 @@ interface Props {
 }
 
 // Status dot colour — the SAME beacon vocabulary as the Ground/Board cards
-// (ProjectCard.tsx, BoardTab.tsx): azure = busy, ochre = waiting for input.
+// (ProjectCard.tsx, BoardTab.tsx): moss = busy, ochre = waiting for input.
 // starting/exited use ink-faint (not line-strong) so the inert grey dot clears
 // the 3:1 graphic-contrast floor on the paper header (CLAUDE.md contrast rule).
 const DOT: Record<WorkerStatus, string> = {
-  working: 'bg-azure',
+  working: 'bg-moss',
   waiting: 'bg-ochre',
   starting: 'bg-ink-faint',
   exited: 'bg-ink-faint',

@@ -33,7 +33,10 @@ function inline(text: string): React.ReactNode {
 }
 
 const NOTE_TONES = {
-  info: { bar: 'border-azure/45', bg: 'bg-azure-soft/45', tag: 'text-azure', label: { en: 'Note', ja: 'メモ' } },
+  // `info` is deliberately colourless: a note is the neutral one, and giving
+  // it a hue of its own made the vocabulary four colours wide. `tip` and
+  // `warn` earn theirs.
+  info: { bar: 'border-line-strong', bg: 'bg-bg-inset/60', tag: 'text-ink-subtle', label: { en: 'Note', ja: 'メモ' } },
   tip: { bar: 'border-moss/45', bg: 'bg-moss-soft/50', tag: 'text-moss', label: { en: 'Tip', ja: 'ヒント' } },
   warn: { bar: 'border-ochre/50', bg: 'bg-ochre-soft/50', tag: 'text-ochre', label: { en: 'Heads-up', ja: '注意' } },
 } as const
@@ -282,7 +285,7 @@ function LayersDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
         <div className="flex gap-2">
           {[0, 1, 2].map((i) => (
             <div key={i} className="relative h-11 w-16 rounded-[2px] border border-line bg-bg-inset">
-              {i === 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-azure" />}
+              {i === 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-moss" />}
               <div className="mt-2 space-y-1 px-1.5">
                 <div className="h-1 w-9 rounded-full bg-line-strong/60" />
                 <div className="h-1 w-11 rounded-full bg-line/70" />

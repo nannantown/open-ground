@@ -237,7 +237,7 @@ export const ModuleReviewInbox = ({
                           />
                         </div>
                         {/* Raw source — text-escaped by React, never HTML. */}
-                        <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-words rounded-[2px] border border-line bg-bg-deep p-2 text-micro leading-[1.5] text-ink-muted">
+                        <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-words rounded-[2px] border border-line bg-bg-deep p-2 text-micro leading-[1.5] text-ink-onDeep">
                           {openSource!.source}
                         </pre>
                       </>

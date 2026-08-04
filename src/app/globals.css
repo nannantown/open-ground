@@ -45,13 +45,41 @@
   --og-plane: 232 225 208;       /* #E8E1D0 */
   /* ink */
   --og-ink: 42 31 26;            /* #2A1F1A */
-  --og-ink-muted: 107 88 71;     /* #6B5847 */
-  /* subtle/faint darkened again 2026-08-03: the 0801 AA fix only checked the
-     paper bg — on the darker elevated/inset surfaces they fell to ~4.2:1
-     (caught by themePalette.test.ts). Now ≥4.5 on ALL four surfaces. */
-  --og-ink-subtle: 110 92 74;    /* #6E5C4A — inset 4.75:1 */
-  --og-ink-faint: 112 94 76;     /* #705E4C — inset 4.60:1 */
+  /* THE INK LADDER, opened 2026-08-04 — the paper half of the same work the
+     night palette got earlier that day. The three steps below `ink` sat within
+     2.4 L* of each other (gaps of 1.5 and 0.8), so they were one colour wearing
+     three names.
+     The dark note claimed this could not be fixed on paper, because lifting
+     `faint` would drop it under AA on `bg-inset`. That was true and it was the
+     wrong direction: `faint` is pinned from below, so the ladder opens DOWNWARD.
+     Darkening `muted` and `subtle` improves every pair ON A LIGHT SURFACE, which
+     is all six of the paper palette's own surfaces; the worst of them is still
+     faint-on-inset at 4.60, exactly where it was.
+     ⚠ NOT "every pair anywhere" — that is what this comment said for an hour and
+     it was false. `bg-deep` is dark IN THE LIGHT PALETTE too, so on that one
+     surface darker ink is worse, and `text-ink-muted` on it went 2.38 → 1.54.
+     The sites are fixed (they use `ink-on-deep` now) and the pair is measured,
+     but the sentence is the thing to learn from: "darker is more contrast" is a
+     claim about light grounds, and the palette owns a dark one.
+       muted   9.47:1 on card (was 6.14)   L* gap to ink   14.1
+       subtle  7.13:1        (was 5.80)    gap to muted     7.8
+       faint   5.63:1        (unchanged)   gap to subtle    6.4 */
+  --og-ink-muted: 76 61 48;      /* #4C3D30 */
+  --og-ink-subtle: 95 79 63;     /* #5F4F3F */
+  --og-ink-faint: 112 94 76;     /* #705E4C — inset 4.60:1, the binding pair */
   --og-ink-inverse: 248 244 232; /* #F8F4E8 */
+  /* THE ONE SURFACE THAT DOES NOT INVERT. `bg-deep` is the terminal-frame slab:
+     dark on paper (#2A1F1A — byte-identical to the light `ink`) and darker still
+     at night (#14100C). Every other surface flips with the theme, so `ink` and
+     `ink-inverse` flip with it and land correctly. This one does not, and both of
+     those tokens are therefore WRONG on it in one theme or the other:
+       light: `ink` on bg-deep       = 1.00:1   (it IS the same colour)
+       dark:  `ink-inverse` on it    = 1.18:1
+     So it gets its own ink, identical in both palettes because the surface is.
+     Found 2026-08-04 by review: `text-ink-muted` had been sitting here at 2.38:1
+     and the light ladder's darkening took it to 1.54 — a pair no check was
+     looking at. `themePalette.test.ts` now measures it in BOTH themes. */
+  --og-ink-on-deep: 248 244 232; /* #F8F4E8 — 14.58:1 on light bg-deep */
   /* lines */
   --og-line: 214 201 172;        /* #D6C9AC */
   --og-line-soft: 226 216 190;   /* #E2D8BE */
@@ -69,8 +97,6 @@
      never used as text, so it does not need the text-grade contrast the
      accent token carries. */
   --og-verm: 178 58 44;          /* #B23A2C */
-  --og-azure: 58 107 140;        /* #3A6B8C */
-  --og-azure-soft: 210 222 230;  /* #D2DEE6 */
   --og-ochre: 154 110 32;        /* #9A6E20 */
   /* deep darkened 2026-08-03 (#855E17→#7D5814): on its own soft chip surface
      it was 4.38:1 — below AA (same themePalette.test.ts catch). */
@@ -131,6 +157,9 @@ html[data-theme='dark'] {
   --og-ink-subtle: 212 201 184;  /* #D4C9B8 8.50:1 on card */
   --og-ink-faint: 201 189 170;   /* #C9BDAA 7.51:1 on card */
   --og-ink-inverse: 42 31 26;    /* dark text on cream/accent fills */
+  --og-ink-on-deep: 248 244 232; /* #F8F4E8 — 17.22:1 on dark bg-deep. Same value
+                                    as the light palette on purpose: the surface it
+                                    names is the same colour in both. */
   --og-line: 74 58 46;           /* #4A3A2E (decorative only) */
   --og-line-soft: 62 48 37;      /* #3E3025 */
   --og-line-strong: 95 76 60;    /* #5F4C3C */
@@ -153,8 +182,6 @@ html[data-theme='dark'] {
   --og-moss: 157 179 107;        /* #9DB36B running lamp */
   --og-moss-text: 168 189 122;   /* #A8BD7A running LABEL 6.8:1 on card */
   --og-moss-soft: 51 57 38;      /* #333926 */
-  --og-azure: 133 173 201;       /* #85ADC9 */
-  --og-azure-soft: 40 54 65;     /* #283641 */
   --og-ochre: 221 174 88;        /* #DDAE58 waiting lamp */
   --og-ochre-deep: 226 185 104;  /* #E2B968 */
   --og-ochre-deeper: 232 196 128;/* #E8C480 */

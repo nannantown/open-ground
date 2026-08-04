@@ -35,18 +35,42 @@ const css = src('app/globals.css')
 const mirror = src('lib/screenSrcdoc.ts')
 const twConfig = readFileSync(resolve(__dirname, '../tailwind.config.ts'), 'utf8')
 
-/** Pull `name: ['11px', { lineHeight: '14px', letterSpacing: '0.16em' }],` rows. */
+/**
+ * Pull `name: ['11px', { lineHeight: '14px', letterSpacing: '0.16em' }],` rows.
+ *
+ * ⚠ `letterSpacing` is OPTIONAL, and that is load-bearing. It was mandatory in
+ * the first version, so the hour the `plate` step dropped its tracking (a fix in
+ * its own right — a size token must not carry a Latin-only style), `plate` fell
+ * out of this regex on BOTH sides at once. The two objects still compared equal,
+ * the `>= 6` floor was still satisfied by the seven survivors, and the suite went
+ * green: the ONE step that commit edited became the one step this guard could not
+ * see. A drift on it would have shipped silently.
+ *
+ * Two changes, because either alone is a coin-flip: the shape is now tolerant,
+ * AND `declaredSteps()` reads the step NAMES structurally so the caller can
+ * assert that everything declared was actually captured. A parser that quietly
+ * skips what it cannot match is the same failure as a test that greps for its
+ * own remedy — it reports on what it happened to see.
+ */
 const parseFontSizes = (text: string): Record<string, string> => {
   const start = text.indexOf('fontSize: {')
   if (start === -1) return {}
   const block = text.slice(start, text.indexOf('\n      },', start))
   const out: Record<string, string> = {}
   for (const m of Array.from(block.matchAll(
-    /(\w+):\s*\['(\d+px)',\s*\{\s*lineHeight:\s*'(\d+px)',\s*letterSpacing:\s*'(-?[\d.]+em|0)'\s*\}\]/g,
+    /(\w+):\s*\['(\d+px)',\s*\{\s*lineHeight:\s*'(\d+px)'(?:,\s*letterSpacing:\s*'(-?[\d.]+em|0)')?\s*\}\]/g,
   ))) {
-    out[m[1]] = `${m[2]}/${m[3]}/${m[4]}`
+    out[m[1]] = `${m[2]}/${m[3]}/${m[4] ?? 'none'}`
   }
   return out
+}
+
+/** Every step NAME the file declares, read without caring about its shape. */
+const declaredSteps = (text: string): string[] => {
+  const start = text.indexOf('fontSize: {')
+  if (start === -1) return []
+  const block = text.slice(start, text.indexOf('\n      },', start))
+  return Array.from(block.matchAll(/^\s*(\w+):\s*\[/gm)).map((m) => m[1])
 }
 
 /** Pull the declared size + tracking of a plate class from either file. */
@@ -65,8 +89,20 @@ describe('screenSrcdoc mirrors the real design tokens', () => {
     const real = parseFontSizes(twConfig)
     const copy = parseFontSizes(mirror)
     expect(Object.keys(real).length, 'tailwind.config.ts declares a fontSize scale').toBeGreaterThanOrEqual(6)
-    // Same steps, same values. A step added to one side only is the exact shape
-    // of the bug this file exists to catch, so compare the whole object.
+    // FIRST: everything declared must have been captured. Without this, a step
+    // whose shape drifts out of the parser's reach simply stops being compared,
+    // and the comparison below passes on a subset while looking total.
+    for (const file of [
+      ['tailwind.config.ts', twConfig, real],
+      ['screenSrcdoc.ts', mirror, copy],
+    ] as const) {
+      const [name, text, parsed] = file
+      expect(Object.keys(parsed).sort(), `${name}: every declared step was parsed`).toEqual(
+        declaredSteps(text).sort(),
+      )
+    }
+    // THEN: same steps, same values. A step added to one side only is the exact
+    // shape of the bug this file exists to catch, so compare the whole object.
     expect(copy).toEqual(real)
   })
 

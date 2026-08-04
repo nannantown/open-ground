@@ -14,7 +14,7 @@ import { resolve } from 'node:path'
 // Pair lists are PER THEME because the two palettes carry text differently:
 // light uses the `deeper`/`deep` variants on soft chip surfaces (the DEFAULTs
 // are decorative there — a pre-existing property of the paper palette), while
-// the dark instrument panel sets status colours (moss/ochre/azure lamps)
+// the dark instrument panel sets status colours (moss / ochre lamps)
 // directly on the dark surfaces, so those direct pairs are load-bearing.
 
 const css = readFileSync(resolve(__dirname, 'app/globals.css'), 'utf8')
@@ -65,6 +65,9 @@ const COMMON_PAIRS: [string, string][] = [
   ['accent', 'bg-card'], // …and on cards (181 text-accent usages)
   ['accent', 'plane'], // …and on the hover lift (SettingsPanel/SdkWorkerPane)
   ['accent', 'bg-card-hover'], // …and on a hovered card
+  // `bg-deep` is the one surface that stays dark in BOTH palettes, so it needs a
+  // text token that stays light in both — neither `ink` nor `ink-inverse` does.
+  ['ink-on-deep', 'bg-deep'],
   ['ink-inverse', 'accent'], // filled accent buttons
   ['accent-deeper', 'accent-soft'], // IconButton active / selected chips
   ['ochre-deep', 'ochre-soft'], // Board priority "high" chip (boardPriority.ts)
@@ -73,6 +76,9 @@ const COMMON_PAIRS: [string, string][] = [
 
 // The night panel additionally carries status colours straight on its surfaces
 // (the instrument lamps) and labels on the deepest terminal-frame surface.
+// Azure was removed from the palette on 2026-08-04 — the vocabulary is three
+// colours (稼働=苔 / 待ち=黄土 / 高=朱) and a fourth had been signalling the
+// SAME state that moss already signalled on the Board.
 const DARK_ONLY_PAIRS: [string, string][] = [
   ['accent', 'bg-inset'],
   ['accent', 'accent-soft'],
@@ -81,9 +87,6 @@ const DARK_ONLY_PAIRS: [string, string][] = [
   ['moss', 'moss-soft'],
   ['ochre', 'bg'],
   ['ochre', 'bg-card'],
-  ['azure', 'bg'],
-  ['azure', 'bg-card'],
-  ['azure', 'azure-soft'],
   ['ink', 'bg-deep'],
   ['ink-muted', 'bg-deep'],
 ]
@@ -96,12 +99,22 @@ const DARK_ONLY_PAIRS: [string, string][] = [
 // than lightness, so at 10–11px they rendered as one flat grey and the ranking
 // the token names promise did not exist on screen. Every pair was green.
 //
-// DARK ONLY, deliberately: the paper palette's ladder is squeezed to 2.4 L*
-// total because its inks are pinned by `bg-inset` (#E6DEC6), where `ink-faint`
-// already sits at 4.60:1 — opening the light ladder means lightening `faint`
-// below AA. Fixing that needs a lighter inset, which is a palette change, not a
-// token tweak. Recorded here as a known limit rather than a silently missing
-// check.
+// BOTH THEMES since 2026-08-04. It was dark-only for a few hours, with a note
+// saying paper could not be fixed: `ink-faint` is pinned at 4.60:1 on
+// `bg-inset`, so lifting it drops it under AA. Both halves of that were true and
+// the conclusion did not follow — it only considered opening the ladder UPWARD.
+// `faint` is pinned from BELOW, so the ladder opens downward instead: darken
+// `muted` and `subtle`. On a LIGHT ground darker means more contrast, so that
+// direction cost nothing across all six paper surfaces, and the binding pair is
+// still faint-on-inset at exactly 4.60.
+// Two lessons, and the second one was expensive:
+//   1. A constraint that blocks one direction is not a constraint on the problem.
+//   2. "Darker is more contrast" is a claim about LIGHT grounds — and the paper
+//      palette owns a dark one (`bg-deep`, the terminal-frame slab, which does
+//      not invert with the theme). This comment briefly said "no combination
+//      anywhere regresses"; on that surface the combination did regress, 2.38 to
+//      1.54, and nothing here was measuring it. `ink-on-deep` and the pairs below
+//      exist because of that.
 const LADDER = ['ink', 'ink-muted', 'ink-subtle', 'ink-faint'] as const
 const MIN_LADDER_STEP = 4 // L* — below this the ranks stop being distinguishable
 
@@ -114,19 +127,28 @@ describe('theme palettes (globals.css) keep every read pair ≥ 4.5:1', () => {
   const light = parsePalette(':root {')
   const dark = parsePalette("html[data-theme='dark'] {")
 
-  it('dark: the ink ladder stays four distinguishable ranks', () => {
+  it.each([
+    ['dark', () => dark, 'desc'],
+    ['light', () => light, 'asc'],
+  ] as const)('%s: the ink ladder stays four distinguishable ranks', (_name, get, order) => {
+    const p = get()
     const steps = LADDER.slice(0, -1).map((t, i) => ({
       pair: `${t} → ${LADDER[i + 1]}`,
-      delta: Math.abs(lstar(dark[t]) - lstar(dark[LADDER[i + 1]])),
+      delta: Math.abs(lstar(p[t]) - lstar(p[LADDER[i + 1]])),
     }))
     for (const s of steps) {
       expect(s.delta, `${s.pair} is ${s.delta.toFixed(1)} L* apart`).toBeGreaterThanOrEqual(
         MIN_LADDER_STEP,
       )
     }
-    // …and the ranks must stay in order, brightest first.
-    const ls = LADDER.map((t) => lstar(dark[t]))
-    expect(ls, 'dark ink ranks descend').toEqual([...ls].sort((a, b) => b - a))
+    // …and the ranks must stay in order: away from the ground, never back toward
+    // it. On paper that means progressively LIGHTER, at night progressively
+    // darker — a rank that doubles back is a rank nobody can read as a rank.
+    const ls = LADDER.map((t) => lstar(p[t]))
+    const sorted = [...ls].sort((a, b) => (order === 'desc' ? b - a : a - b))
+    expect(ls, `${_name} ink ranks run ${order === 'desc' ? 'brightest' : 'darkest'} first`).toEqual(
+      sorted,
+    )
   })
 
   it('parses both palettes with the same token set', () => {

@@ -11,7 +11,7 @@ import type { ClaudeBeaconStatus } from '@/lib/types'
 export type WorkerStage = 'starting' | 'running' | 'done' | undefined
 
 /** What a doing card's worker band/stamp shows at a glance:
- *  - working  = the worker's PTY is actively producing output (azure, scanning),
+ *  - working  = the worker's PTY is actively producing output (moss, scanning),
  *  - waiting  = alive but idle / on a prompt, OR no live signal (steady amber),
  *  - starting = dispatched, still booting (steady grey),
  *  - done     = the worker finished (steady moss; transient — the engine moves

@@ -248,7 +248,7 @@ const AlertRow = ({
             title={t('projectPanel.swarm.overseer.markHandledHint')}
             className={`shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-subtle transition-all duration-150
               hover:border-line-strong hover:bg-plane hover:text-ink
-              active:bg-bg-deep
+              active:bg-bg-deep active:text-ink-onDeep
               focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
               ${age ? '' : 'ml-auto'}`}
           >

@@ -130,10 +130,10 @@ interface Props {
 }
 
 // Commander-session status dot — the SAME beacon vocabulary as the supply tile
-// (SwarmSupplyPane): azure = working, ochre = waiting, ink-faint = starting/exited
+// (SwarmSupplyPane): moss = working, ochre = waiting, ink-faint = starting/exited
 // (the inert grey, ≥3:1 on paper unlike the near-invisible line-strong).
 const SESSION_DOT: Record<WorkerStatus, string> = {
-  working: 'bg-azure',
+  working: 'bg-moss',
   waiting: 'bg-ochre',
   starting: 'bg-ink-faint',
   exited: 'bg-ink-faint',
@@ -679,13 +679,13 @@ export const SwarmManagerPane = ({
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            {/* Same beacon vocabulary as the session dots: azure = working now,
+            {/* Same beacon vocabulary as the session dots: moss = working now,
                 ink-faint = inert (resting). The one-line explanation moved into
                 the tooltip (計器盤 text-diet — the lamp + word ARE the reading;
                 the why is a hover away). */}
             <span
               className={`h-[6px] w-[6px] shrink-0 rounded-full ${
-                presence === 'working' ? 'bg-azure' : 'bg-ink-faint'
+                presence === 'working' ? 'bg-moss' : 'bg-ink-faint'
               }`}
               aria-hidden
             />

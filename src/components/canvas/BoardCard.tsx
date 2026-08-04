@@ -9,13 +9,14 @@ import type { MessageKey } from '@/i18n/messages'
 
 // ── Swarm worker status vocabulary (doing-column cards) ──────────────────────
 // The SAME beacon palette the Ground/Board cards + the SwarmWorkerPane already
-// use: azure = working, ochre = waiting, ink-faint = booting/idle, moss = done.
+// use: moss = working, ochre = waiting, ink-faint = booting/idle.
 // Display-only (the strip carries no interactions) — these are status colours,
-// so contrast on the paper card (azure/ochre/moss/ink-faint all clear AA) is the
+// so contrast on the paper card (moss/ochre/ink-faint all clear AA) is the
 // only CLAUDE.md rule that bites here.
 // ⚠ THE COLOUR VOCABULARY IS THREE (案C: 「色は状態だけ — 稼働=苔・待ち=黄土・高=朱」).
-// Azure is not in it. Running used to be azure here, which read as a FOURTH
-// state colour on the one screen the design language was drawn for.
+// Azure was not in it. This card dropped it first; on 2026-08-04 the rest of
+// the app followed and the token was deleted outright, so the fourth colour
+// cannot come back by someone reaching for it.
 const WORKER_BAND: Record<WorkerActivity, string> = {
   working: 'bg-moss',
   waiting: 'bg-ochre',
@@ -213,10 +214,10 @@ const BoardCardInner = ({
       ].join(' ')}
     >
       {/* Top edge — the surveyor's marking. A swarm worker on a doing card takes
-          precedence (azure scanning while its PTY produces output, steady
+          precedence (moss scanning while its PTY produces output, steady
           otherwise — synced to the worker; it disappears the moment the engine
           drops the worker). Otherwise the same claude-status band the Ground
-          cards carry: azure scanning while claude works, steady amber while it
+          cards carry: moss scanning while claude works, steady amber while it
           waits on the human. */}
       {hasWorker ? (
         <div

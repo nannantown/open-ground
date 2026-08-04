@@ -11,7 +11,7 @@
 // gets the project's full design system so a Claude-authored, token-using,
 // lucide-icon component renders faithfully with no rebuild:
 //   • Tailwind Play CDN + the same `theme.extend` as tailwind.config.ts, so
-//     project tokens (bg-bg-card / text-ink / accent / moss / azure / shadow-card …)
+//     project tokens (bg-bg-card / text-ink / accent / moss / ochre / shadow-card …)
 //     resolve to the right values.
 //   • The project's display / body / mono fonts (Google Fonts) wired to the
 //     `--font-*` CSS vars the token config references, plus the `.label-cap` /
@@ -78,7 +78,6 @@ const TAILWIND_CONFIG = {
         line: { DEFAULT: '#D6C9AC', soft: '#E2D8BE', strong: '#B8A988' },
         accent: { DEFAULT: '#B23A2C', hover: '#9A2F22', soft: '#E8D5CE', deeper: '#7A2519' },
         moss: { DEFAULT: '#5C6B3D', soft: '#DCE0CC' },
-        azure: { DEFAULT: '#3A6B8C', soft: '#D2DEE6' },
         ochre: { DEFAULT: '#9A6E20', soft: '#E9DFC4' },
       },
       fontFamily: {

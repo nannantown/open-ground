@@ -99,12 +99,26 @@ describe('Latin small-caps plates do not fold 和文', () => {
 
 // ─── DEAD TRACKING UTILITIES ────────────────────────────────────────────────
 
+/**
+ * Every shipped .tsx under src/ — NOT just src/components.
+ *
+ * This walked only `components/` until 2026-08-04, which made all four sweeps
+ * below quietly partial: `App.tsx`, `screen/`, and anything else outside that
+ * one directory could carry the very shapes they exist to ban, and the suite
+ * would stay green. (It happened to be clean when the gap was found, so nothing
+ * was hiding — but "no offenders" and "did not look" are the same colour on a
+ * test report, which is the whole problem with a narrow sweep.)
+ *
+ * Test files are excluded: they are not shipped UI, and they quote these very
+ * patterns in their own prose. A sweep that flags its own explanation is a sweep
+ * people learn to silence.
+ */
 const walk = (dir: string, out: string[] = []): string[] => {
   for (const name of readdirSync(dir)) {
     if (name === 'node_modules' || name.startsWith('.')) continue
     const p = join(dir, name)
     if (statSync(p).isDirectory()) walk(p, out)
-    else if (p.endsWith('.tsx')) out.push(p)
+    else if (p.endsWith('.tsx') && !p.includes('.test.')) out.push(p)
   }
   return out
 }
@@ -116,7 +130,7 @@ describe('no call site declares a tracking that the cascade throws away', () => 
     // so on a plate element the utility always loses. Writing one is therefore
     // never a change; it is a note to the reader that is false. Ban the shape.
     const offenders: string[] = []
-    for (const file of walk(resolve(__dirname, 'components'))) {
+    for (const file of walk(resolve(__dirname))) {
       const src = readFileSync(file, 'utf8')
       src.split('\n').forEach((line, i) => {
         if (!/\btracking-\[/.test(line)) return
@@ -175,7 +189,7 @@ describe('a pill with a min-width floor never folds its own label', () => {
     // it, and re-measured red. (Verified: reverting the nowrap on those 5 sites
     // fails this test.)
     const offenders: string[] = []
-    for (const file of walk(resolve(__dirname, 'components'))) {
+    for (const file of walk(resolve(__dirname))) {
       readFileSync(file, 'utf8')
         .split('\n')
         .forEach((line, i) => {
@@ -211,7 +225,7 @@ describe('a plate whose text is hardcoded Latin keeps its plate in every UI', ()
     // `capTrackingClass()` where the value can be either script.
     const LITERAL_CHILD = />\s*[A-Za-z][A-Za-z0-9 ·./+-]{0,24}\s*</
     const offenders: string[] = []
-    for (const file of walk(resolve(__dirname, 'components'))) {
+    for (const file of walk(resolve(__dirname))) {
       const lines = readFileSync(file, 'utf8').split('\n')
       lines.forEach((line, i) => {
         if (!PLATES.some((p) => new RegExp(`\\b${p}\\b`).test(line))) return
@@ -243,7 +257,7 @@ describe('no component names a font size outside the scale', () => {
     // If a genuinely new step is needed, add it to tailwind.config.ts —
     // that is a decision worth making once and naming, which is the point.
     const offenders: string[] = []
-    for (const file of walk(resolve(__dirname, 'components'))) {
+    for (const file of walk(resolve(__dirname))) {
       readFileSync(file, 'utf8')
         .split('\n')
         .forEach((line, i) => {
@@ -278,5 +292,43 @@ describe('no component names a font size outside the scale', () => {
     // being prose; `plate` and `micro` sit below it on purpose and carry only
     // Latin captions and numerals.
     expect(steps.find((s) => s.name === 'meta')?.px, 'meta is the prose floor').toBe(13)
+  })
+})
+
+// ─── THE SURFACE THAT DOES NOT INVERT ───────────────────────────────────────
+
+describe('bg-deep carries only the ink that was made for it', () => {
+  it('never puts a theme-flipping ink token on bg-bg-deep', () => {
+    // `bg-deep` is the terminal-frame slab. Every other surface in the palette
+    // swaps with the theme, and `ink` / `ink-inverse` swap along with them — so
+    // on a normal surface either one lands correctly in both themes. This one is
+    // dark in BOTH (light #2A1F1A, which is byte-identical to the light `ink`;
+    // dark #14100C), so the flipping tokens are each wrong in one theme:
+    //   light: `ink` on bg-deep        1.00:1   — literally the same colour
+    //   dark:  `ink-inverse` on bg-deep 1.18:1
+    // Nobody notices, because you develop in one theme and the other is where it
+    // breaks. Measured 2026-08-04: `text-ink-muted` had been sitting on it at
+    // 2.38:1 and the light ladder's darkening took it to 1.54.
+    //
+    // `ink-on-deep` is identical in both palettes because the surface is. Ban the
+    // alternatives on this surface rather than trusting anyone to remember which
+    // theme they were looking at.
+    const BANNED = /\btext-ink(-muted|-subtle|-faint|-inverse)?\b/
+    const offenders: string[] = []
+    for (const file of walk(resolve(__dirname))) {
+      const lines = readFileSync(file, 'utf8').split('\n')
+      lines.forEach((line, i) => {
+        if (!/\bbg-bg-deep\b/.test(line)) return
+        // the ink may sit on this line or in the same className block
+        const block = lines.slice(Math.max(0, i - 4), i + 5).join('\n')
+        if (!BANNED.test(block)) return
+        if (/text-ink-onDeep/.test(block)) return
+        offenders.push(`${file.slice(file.indexOf('/src/') + 1)}:${i + 1}  ${line.trim().slice(0, 80)}`)
+      })
+    }
+    expect(
+      offenders,
+      `theme-flipping ink on the non-inverting surface:\n${offenders.join('\n')}`,
+    ).toEqual([])
   })
 })

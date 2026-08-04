@@ -13,7 +13,7 @@ interface Props {
   onPointerDown?: (e: React.PointerEvent) => void
   selected?: boolean
   active?: boolean
-  /** Live claude session in this project: 'working' → azure "Running" edge
+  /** Live claude session in this project: 'working' → moss "Running" edge
    *  bar + stamp, 'waiting' → amber "Waiting" (claude is sitting on you).
    *  Undefined = no claude session (plain shells show nothing). */
   claudeStatus?: ClaudeBeaconStatus
@@ -37,7 +37,7 @@ const coordFromId = (id: string) => {
 
 // One project on the Ground: name + description. While a claude session is
 // live here the card carries the runner-era surveyor's marking — a coloured
-// band along the top edge plus a stamp on the right margin: azure "Running"
+// band along the top edge plus a stamp on the right margin: moss "Running"
 // (scanning) while claude works, amber "Waiting" when it sits on the human.
 //
 // A folder-less collab project shared WITH the user (shared=true) renders
@@ -92,7 +92,7 @@ export const ProjectCard = memo(({
         <div
           className={[
             'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-            claudeStatus === 'working' ? 'bg-azure' : 'bg-ochre',
+            claudeStatus === 'working' ? 'bg-moss' : 'bg-ochre',
           ].join(' ')}
         >
           {claudeStatus === 'working' && (
@@ -115,9 +115,9 @@ export const ProjectCard = memo(({
 
       {/* claude-status stamp, mirroring the coord label on the right margin */}
       {claudeStatus === 'working' && (
-        // claude is busy — azure, with the dot pulsing while live.
-        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-azure">
-          <span className="run-pulse h-[5px] w-[5px] rounded-full bg-azure" />
+        // claude is busy — moss, with the dot pulsing while live.
+        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-moss-text">
+          <span className="run-pulse h-[5px] w-[5px] rounded-full bg-moss" />
           <span>Running</span>
         </div>
       )}

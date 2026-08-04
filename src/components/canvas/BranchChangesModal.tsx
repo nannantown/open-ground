@@ -26,7 +26,7 @@ type DiffState =
 const diffKey = (scope: FileDiffScope, file: string) => `${scope}\0${file}`
 
 // One unified-diff body. +/− lines get the moss/accent soft-tint pair from
-// the app palette; hunk headers go azure; everything scrolls horizontally
+// the app palette; hunk headers stay neutral; everything scrolls horizontally
 // instead of wrapping (diff alignment is the point).
 const DiffBody = ({ d }: { d: Extract<DiffState, { state: 'done' }> }) => {
   const { t } = useT()
@@ -43,7 +43,7 @@ const DiffBody = ({ d }: { d: Extract<DiffState, { state: 'done' }> }) => {
               : line.startsWith('-') && !line.startsWith('---')
                 ? 'bg-accent-soft text-accent-deeper'
                 : line.startsWith('@@')
-                  ? 'text-azure'
+                  ? 'text-ink-subtle'
                   : 'text-ink-muted'
           return (
             <div key={i} className={`whitespace-pre px-3 ${cls}`}>

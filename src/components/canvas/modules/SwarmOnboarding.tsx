@@ -67,20 +67,20 @@ const FLOW: { key: string; role: FlowRole }[] = [
 ]
 
 // Role → flow-node tint. Reuses the app's existing role-ish semantic colors
-// (azure / moss / ochre, the same trio used as soft tints across the app — see
-// ManualPanel / BranchChangesModal). The NODE only tints its background + dot;
+// (朱 / 苔 / 黄土 — the three colours the design language sanctions, one per
+// role rather than a fourth hue invented for the diagram). The NODE only tints its background + dot;
 // the action text itself stays text-ink so it always clears AA regardless of the
 // tint. 'you' / 'state' are the inert neutral surfaces.
 const NODE_TINT: Record<FlowRole, string> = {
   you: 'bg-bg-inset',
-  supply: 'bg-azure-soft',
+  supply: 'bg-accent-soft',
   manager: 'bg-moss-soft',
   worker: 'bg-ochre-soft',
   state: 'bg-bg-inset',
 }
 const NODE_DOT: Record<FlowRole, string> = {
   you: 'bg-ink-faint',
-  supply: 'bg-azure',
+  supply: 'bg-accent',
   manager: 'bg-moss',
   worker: 'bg-ochre',
   state: 'bg-ink-faint',
@@ -110,7 +110,7 @@ const ROLES: {
 // Role-icon chip tint for the summary table — soft tint bg + the role color for
 // the icon (graphic, ≥3:1), matching the flow nodes so color maps role→step.
 const ROLE_ICON: Record<'supply' | 'manager' | 'worker', string> = {
-  supply: 'bg-azure-soft text-azure',
+  supply: 'bg-accent-soft text-accent-deeper',
   manager: 'bg-moss-soft text-moss',
   worker: 'bg-ochre-soft text-ochre',
 }

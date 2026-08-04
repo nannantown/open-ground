@@ -81,6 +81,7 @@ const config: Config = {
           subtle: 'rgb(var(--og-ink-subtle) / <alpha-value>)',
           faint: 'rgb(var(--og-ink-faint) / <alpha-value>)',
           inverse: 'rgb(var(--og-ink-inverse) / <alpha-value>)',
+          onDeep: 'rgb(var(--og-ink-on-deep) / <alpha-value>)',
         },
         /** The LIFT a hover puts on top of a surface — the opposite of bg-inset,
          *  which is a well pressed INTO one. They look alike on paper and
@@ -106,10 +107,6 @@ const config: Config = {
           /** Text-grade running colour (the lamp's fill is too dark to read). */
           text: 'rgb(var(--og-moss-text) / <alpha-value>)',
           soft: 'rgb(var(--og-moss-soft) / <alpha-value>)',
-        },
-        azure: {
-          DEFAULT: 'rgb(var(--og-azure) / <alpha-value>)',
-          soft: 'rgb(var(--og-azure-soft) / <alpha-value>)',
         },
         ochre: {
           DEFAULT: 'rgb(var(--og-ochre) / <alpha-value>)',

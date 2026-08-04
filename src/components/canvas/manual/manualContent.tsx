@@ -176,8 +176,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'Each card shows the project name, description, open-task count and a map coordinate. When a claude session is live in that project, a beacon appears: azure "Running" (a pulsing dot — claude is working) or amber "Waiting" (claude is waiting on you).',
-          ja: '各カードにはプロジェクト名・説明・未着手タスク数・地図座標が出ます。そのプロジェクトで claude セッションが動いていると、ビーコンが灯ります —— 青の「Running」（点滅するドット = claude が作業中）か、琥珀の「Waiting」（claude があなたの番を待っている）。',
+          en: 'Each card shows the project name, description, open-task count and a map coordinate. When a claude session is live in that project, a beacon appears: moss "Running" (a pulsing dot — claude is working) or amber "Waiting" (claude is waiting on you).',
+          ja: '各カードにはプロジェクト名・説明・未着手タスク数・地図座標が出ます。そのプロジェクトで claude セッションが動いていると、ビーコンが灯ります —— 苔色の「Running」（点滅するドット = claude が作業中）か、琥珀の「Waiting」（claude があなたの番を待っている）。',
         },
       },
       {
