@@ -154,22 +154,22 @@ export const ModuleReviewInbox = ({
       </div>
 
       {loading && !items && (
-        <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
+        <span className="inline-flex items-center gap-1 text-meta text-ink-subtle">
           <Loader2 size={12} className="animate-spin" />
           {t('customTabs.reviewLoading')}
         </span>
       )}
       {error && (
-        <div className="inline-flex items-start gap-1 text-[11px] text-accent">
+        <div className="inline-flex items-start gap-1 text-meta text-accent">
           <AlertCircle size={12} className="mt-[2px] shrink-0" />
           <span>{error}</span>
         </div>
       )}
       {items && items.length === 0 && !error && (
-        <p className="text-[11px] leading-relaxed text-ink-subtle">{t('customTabs.reviewEmpty')}</p>
+        <p className="text-meta leading-relaxed text-ink-subtle">{t('customTabs.reviewEmpty')}</p>
       )}
       {actionError && (
-        <div className="mb-2 inline-flex items-start gap-1 text-[11px] text-accent">
+        <div className="mb-2 inline-flex items-start gap-1 text-meta text-accent">
           <AlertCircle size={12} className="mt-[2px] shrink-0" />
           <span>{actionError}</span>
         </div>
@@ -188,13 +188,13 @@ export const ModuleReviewInbox = ({
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-[12px] font-medium text-ink">{s.name}</p>
+                    <p className="truncate text-ui font-medium text-ink">{s.name}</p>
                     {s.description && (
-                      <p className="whitespace-pre-wrap break-words text-[11px] text-ink-muted">
+                      <p className="whitespace-pre-wrap break-words text-meta text-ink-muted">
                         {s.description}
                       </p>
                     )}
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-ink-subtle">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-micro text-ink-subtle">
                       <span className="font-mono uppercase">{s.framework}</span>
                       {s.submitter_email && (
                         <>
@@ -237,12 +237,12 @@ export const ModuleReviewInbox = ({
                           />
                         </div>
                         {/* Raw source — text-escaped by React, never HTML. */}
-                        <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-words rounded-[2px] border border-line bg-bg-deep p-2 text-[10.5px] leading-[1.5] text-ink-muted">
+                        <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-words rounded-[2px] border border-line bg-bg-deep p-2 text-micro leading-[1.5] text-ink-muted">
                           {openSource!.source}
                         </pre>
                       </>
                     ) : (
-                      <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
+                      <span className="inline-flex items-center gap-1 text-meta text-ink-subtle">
                         <Loader2 size={12} className="animate-spin" />
                         {t('customTabs.reviewLoading')}
                       </span>
@@ -254,7 +254,7 @@ export const ModuleReviewInbox = ({
                   <button
                     onClick={() => void act(s, 'approve')}
                     disabled={rowBusy}
-                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink transition-colors hover:bg-plane active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-meta text-ink transition-colors hover:bg-plane active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   >
                     {rowBusy && busy?.action === 'approve' ? (
                       <Loader2 size={11} className="animate-spin" />
@@ -268,7 +268,7 @@ export const ModuleReviewInbox = ({
                   <button
                     onClick={() => void act(s, 'reject')}
                     disabled={rowBusy}
-                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   >
                     {rowBusy && busy?.action === 'reject' ? (
                       <Loader2 size={11} className="animate-spin" />
@@ -284,7 +284,7 @@ export const ModuleReviewInbox = ({
             )
           })}
           {truncated && (
-            <li className="px-1 text-[10px] text-ink-subtle">{t('customTabs.reviewTruncated')}</li>
+            <li className="px-1 text-micro text-ink-subtle">{t('customTabs.reviewTruncated')}</li>
           )}
         </ul>
       )}

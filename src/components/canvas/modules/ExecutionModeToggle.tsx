@@ -179,7 +179,7 @@ export const ExecutionModeMenu = () => {
         onClick={() => setOpen((v) => !v)}
         title={t('projectPanel.swarm.mode.label')}
         className={[
-          'flex h-6 items-center gap-1 rounded-[4px] border px-2 text-[11px] transition-colors duration-150',
+          'flex h-6 items-center gap-1 rounded-[4px] border px-2 text-meta transition-colors duration-150',
           'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
           'disabled:cursor-not-allowed disabled:opacity-40',
           open
@@ -235,10 +235,10 @@ export const ExecutionModeMenu = () => {
                   aria-hidden
                 />
                 <span className="min-w-0">
-                  <span className={`block text-[12px] font-medium ${active ? 'text-accent' : 'text-ink'}`}>
+                  <span className={`block text-ui font-medium ${active ? 'text-accent' : 'text-ink'}`}>
                     {t(LABEL_KEY[m])}
                   </span>
-                  <span className="block text-[10.5px] leading-snug text-ink-subtle">
+                  <span className="block text-micro leading-snug text-ink-subtle">
                     {t(HINT_KEY[m], hintVars)}
                   </span>
                 </span>
@@ -250,10 +250,10 @@ export const ExecutionModeMenu = () => {
               because it is a different KIND of setting: not "how much to spend"
               but "which models exist for this swarm at all". */}
           <div className="border-t border-line px-3 pb-1 pt-2">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-ink-faint">
+            <div className="text-micro font-medium uppercase tracking-wide text-ink-faint">
               {t('projectPanel.swarm.models.label')}
             </div>
-            <div className="mt-0.5 text-[10.5px] leading-snug text-ink-subtle">
+            <div className="mt-0.5 text-micro leading-snug text-ink-subtle">
               {t('projectPanel.swarm.models.hint')}
             </div>
           </div>
@@ -288,7 +288,7 @@ export const ExecutionModeMenu = () => {
                   >
                     {on && <Check size={10} strokeWidth={3} />}
                   </span>
-                  <span className={`text-[12px] ${on ? 'text-ink' : 'text-ink-faint line-through'}`}>
+                  <span className={`text-ui ${on ? 'text-ink' : 'text-ink-faint line-through'}`}>
                     {MODEL_LABEL[tier]}
                   </span>
                 </button>

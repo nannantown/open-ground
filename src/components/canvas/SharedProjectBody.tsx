@@ -198,7 +198,7 @@ function SharedCanvasView({
             inspectorHost={null}
           />
         </div>
-        <div className="pointer-events-none absolute inset-x-0 top-0 border-b border-line bg-bg-card/90 px-4 py-1.5 text-center text-[11px] text-ink-muted backdrop-blur-sm">
+        <div className="pointer-events-none absolute inset-x-0 top-0 border-b border-line bg-bg-card/90 px-4 py-1.5 text-center text-meta text-ink-muted backdrop-blur-sm">
           {t('projectPanel.collabSharedCachedBanner')}
         </div>
       </div>
@@ -206,7 +206,7 @@ function SharedCanvasView({
   }
   return (
     <div className="flex h-full items-center justify-center px-8 text-center">
-      <p className="text-[12px] leading-relaxed text-ink-muted">
+      <p className="text-ui leading-relaxed text-ink-muted">
         {collab
           ? t('projectPanel.collabSharedConnecting')
           : t('projectPanel.collabSharedUnavailable')}
@@ -413,10 +413,10 @@ export const SharedProjectBody = ({
     () => (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
         <Users size={20} className="text-ink-faint" />
-        <p className="font-display text-[15px] text-ink">
+        <p className="font-display text-read text-ink">
           {t('projectPanel.collabSharedClaudeTitle')}
         </p>
-        <p className="max-w-[340px] text-[12px] leading-relaxed text-ink-muted">
+        <p className="max-w-[340px] text-ui leading-relaxed text-ink-muted">
           {t('projectPanel.collabSharedClaudeBody')}
         </p>
       </div>
@@ -462,11 +462,11 @@ export const SharedProjectBody = ({
         backLabel={t('projectPanel.backToGround')}
         leading={
           <div className="flex min-w-0 items-center gap-2">
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-micro uppercase tracking-wide text-ink-muted">
               <Users size={10} />
               {t('projectPanel.collabSharedBadge')}
             </span>
-            <span className="truncate font-display text-[15px] text-ink" title={label}>
+            <span className="truncate font-display text-read text-ink" title={label}>
               {label}
             </span>
           </div>
@@ -483,7 +483,7 @@ export const SharedProjectBody = ({
                   key={tk}
                   type="button"
                   onClick={() => setTab(tk)}
-                  className={`rounded-[2px] px-2 py-0.5 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                  className={`rounded-[2px] px-2 py-0.5 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
                     tab === tk
                       ? 'bg-ink text-bg-card'
                       : 'text-ink-muted hover:text-ink'
@@ -501,7 +501,7 @@ export const SharedProjectBody = ({
                 onClick={handleLinkFolder}
                 disabled={linking}
                 title={t('projectPanel.collabLinkFolderHint')}
-                className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-2 py-0.5 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-2 py-0.5 text-meta text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <FolderPlus size={12} />
                 {t('projectPanel.collabLinkFolder')}
@@ -510,7 +510,7 @@ export const SharedProjectBody = ({
             {/* Presence — who else is in this shared project right now (u15). */}
             <CollabPresence channel={collab} />
             <span
-              className={`shrink-0 text-[10px] uppercase tracking-wide ${
+              className={`shrink-0 text-micro uppercase tracking-wide ${
                 live ? 'text-ink-muted' : 'text-ink-faint'
               }`}
             >
@@ -536,12 +536,12 @@ export const SharedProjectBody = ({
                 <button
                   type="button"
                   onClick={() => setActiveCanvasId(null)}
-                  className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                 >
                   <ArrowLeft size={12} />
                   {t('projectPanel.collabCanvasBack')}
                 </button>
-                <span className="truncate text-[12px] text-ink" title={activeCanvasName}>
+                <span className="truncate text-ui text-ink" title={activeCanvasName}>
                   {activeCanvasName}
                 </span>
               </div>
@@ -556,7 +556,7 @@ export const SharedProjectBody = ({
           ) : (
             <div className="h-full overflow-y-auto px-4 py-4">
               {canvasList.length === 0 ? (
-                <p className="text-[12px] leading-relaxed text-ink-faint">
+                <p className="text-ui leading-relaxed text-ink-faint">
                   {t('projectPanel.collabCanvasEmpty')}
                 </p>
               ) : (
@@ -566,7 +566,7 @@ export const SharedProjectBody = ({
                       <button
                         type="button"
                         onClick={() => setActiveCanvasId(cv.id)}
-                        className="flex w-full items-center gap-2 rounded-[3px] border border-line bg-bg px-3 py-2 text-left text-[12px] text-ink transition-colors hover:border-accent hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        className="flex w-full items-center gap-2 rounded-[3px] border border-line bg-bg px-3 py-2 text-left text-ui text-ink transition-colors hover:border-accent hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       >
                         <Palette size={13} className="shrink-0 text-ink-faint" />
                         <span className="truncate">
@@ -611,13 +611,13 @@ export const SharedProjectBody = ({
                 onLaunchTask={launchTask}
               />
             </div>
-            <div className="pointer-events-none absolute inset-x-0 top-0 border-b border-line bg-bg-card/90 px-4 py-1.5 text-center text-[11px] text-ink-muted backdrop-blur-sm">
+            <div className="pointer-events-none absolute inset-x-0 top-0 border-b border-line bg-bg-card/90 px-4 py-1.5 text-center text-meta text-ink-muted backdrop-blur-sm">
               {t('projectPanel.collabSharedCachedBanner')}
             </div>
           </div>
         ) : (
           <div className="flex h-full items-center justify-center px-8 text-center">
-            <p className="text-[12px] leading-relaxed text-ink-muted">
+            <p className="text-ui leading-relaxed text-ink-muted">
               {collab
                 ? t('projectPanel.collabSharedConnecting')
                 : t('projectPanel.collabSharedUnavailable')}

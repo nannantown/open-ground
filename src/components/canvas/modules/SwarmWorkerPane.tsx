@@ -106,7 +106,7 @@ export const SwarmWorkerPane = ({
           {statusLabel}
         </span>
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted"
+          className="min-w-0 flex-1 truncate font-mono text-micro text-ink-muted"
           title={taskTitle ? `${branch} — ${taskTitle}` : branch}
         >
           {branch}
@@ -115,7 +115,7 @@ export const SwarmWorkerPane = ({
           // Read-only badge: the engine owns this worker's lifecycle. A static
           // chip (not a button) so it can't be mistaken for a terminate control.
           <span
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
             title={t('projectPanel.swarm.engineOwnedHint')}
           >
             <Gauge size={10} strokeWidth={2.25} aria-hidden />
@@ -127,7 +127,7 @@ export const SwarmWorkerPane = ({
             onClick={onTerminate}
             disabled={busy}
             title={t('projectPanel.swarm.terminate')}
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <Power size={10} strokeWidth={2.25} />
             {busy ? t('projectPanel.swarm.terminating') : t('projectPanel.swarm.terminate')}
@@ -142,7 +142,7 @@ export const SwarmWorkerPane = ({
         <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft bg-bg-inset px-2.5 py-1">
           <AlertTriangle size={11} className="shrink-0 text-ochre" aria-hidden />
           <span
-            className="min-w-0 flex-1 truncate text-[10px] text-ink-muted"
+            className="min-w-0 flex-1 truncate text-micro text-ink-muted"
             title={retainedReason}
           >
             {t('projectPanel.swarm.retained')}
@@ -151,7 +151,7 @@ export const SwarmWorkerPane = ({
             type="button"
             onClick={onForceRemove}
             disabled={busy}
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <Trash2 size={10} strokeWidth={2.25} />
             {t('projectPanel.swarm.forceRemove')}
@@ -175,13 +175,13 @@ export const SwarmWorkerPane = ({
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 bg-[#1a1a1a] px-4 text-center">
-            <span className="text-[11px] text-ink-faint">{t('projectPanel.swarm.sessionEnded')}</span>
+            <span className="text-meta text-ink-faint">{t('projectPanel.swarm.sessionEnded')}</span>
             {onRestart && (
               <button
                 type="button"
                 onClick={() => void onRestart()}
                 disabled={busy}
-                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
               >
                 {busy ? t('projectPanel.swarm.restarting') : t('projectPanel.swarm.restart')}
               </button>

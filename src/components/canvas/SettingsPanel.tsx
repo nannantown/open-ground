@@ -81,8 +81,8 @@ const ExperimentToggle = ({
 }) => (
   <div className="flex items-start justify-between gap-3">
     <div className="min-w-0">
-      <div className="text-[13px] text-ink">{label}</div>
-      {hint && <div className="mt-0.5 text-[11px] leading-snug text-ink-subtle">{hint}</div>}
+      <div className="text-ui text-ink">{label}</div>
+      {hint && <div className="mt-0.5 text-meta leading-snug text-ink-subtle">{hint}</div>}
     </div>
     <div
       role="group"
@@ -108,7 +108,7 @@ const ExperimentToggle = ({
             onClick={() => onChange(v)}
             aria-pressed={active}
             className={[
-              'h-7 min-w-[44px] whitespace-nowrap px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+              'h-7 min-w-[44px] whitespace-nowrap px-3 rounded-[2px] text-ui font-medium cursor-pointer transition-all duration-150',
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               active
                 ? 'bg-accent text-bg-card border-accent'
@@ -385,7 +385,7 @@ export const SettingsPanel = ({
           align="baseline"
           eyebrow={t('settings.eyebrow')}
           title={<span style={{ fontVariationSettings: "'opsz' 24, 'SOFT' 40" }}>Settings</span>}
-          titleClassName="font-display text-[22px] leading-none tracking-tightest text-ink"
+          titleClassName="font-display text-head tracking-tightest text-ink"
           onClose={onClose}
           closeLabel={t('common.close')}
         />
@@ -395,7 +395,7 @@ export const SettingsPanel = ({
               that non-Anthropic egress is blocked, shown only while it is on
               (the toggle itself lives under Advanced). */}
           {lockdown && (
-            <div className="mb-6 flex items-start gap-2 rounded-[3px] border border-line bg-bg-inset/40 px-3 py-2.5 text-[11px] leading-relaxed text-ink-muted">
+            <div className="mb-6 flex items-start gap-2 rounded-[3px] border border-line bg-bg-inset/40 px-3 py-2.5 text-meta leading-relaxed text-ink-muted">
               <span className="mt-[3px] size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
               <span>{t('settings.lockdown.badge')}</span>
             </div>
@@ -405,12 +405,12 @@ export const SettingsPanel = ({
           {onOpenFeedback && (
             <section className="mb-6 rounded-[3px] border border-line bg-bg-inset/40 px-4 py-3.5">
               <p className="label-cap text-ink-muted mb-1">{t('settings.feedback.heading')}</p>
-              <p className="text-[11px] text-ink-subtle leading-relaxed mb-3">
+              <p className="text-meta text-ink-subtle leading-relaxed mb-3">
                 {t('settings.feedback.body')}
               </p>
               <button
                 onClick={onOpenFeedback}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] border border-line-strong bg-bg px-4 py-2.5 text-[13px] text-ink transition-all duration-150 hover:border-accent hover:bg-plane hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] border border-line-strong bg-bg px-4 py-2.5 text-ui text-ink transition-all duration-150 hover:border-accent hover:bg-plane hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 <MessageSquare size={14} strokeWidth={1.75} />
                 {t('settings.feedback.button')}
@@ -437,7 +437,7 @@ export const SettingsPanel = ({
                     onClick={() => setLang(value)}
                     aria-pressed={active}
                     className={[
-                      'h-7 min-w-[44px] whitespace-nowrap px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                      'h-7 min-w-[44px] whitespace-nowrap px-3 rounded-[2px] text-ui font-medium cursor-pointer transition-all duration-150',
                       'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                       active
                         ? 'bg-accent text-bg-card border-accent'
@@ -463,7 +463,7 @@ export const SettingsPanel = ({
               }}
               onBlur={flush}
               placeholder={suggestedName ?? ''}
-              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
             />
           </Section>
 
@@ -499,7 +499,7 @@ export const SettingsPanel = ({
               {soundOn && (
                 <div className="flex items-center gap-3">
                   <label className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="shrink-0 text-[11px] text-ink-muted">
+                    <span className="shrink-0 text-meta text-ink-muted">
                       {t('settings.sound.volume')}
                     </span>
                     <input
@@ -515,14 +515,14 @@ export const SettingsPanel = ({
                       className="min-w-0 flex-1 accent-[rgb(var(--og-accent))] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       aria-label={t('settings.sound.volume')}
                     />
-                    <span className="w-8 shrink-0 text-right text-[11px] tabular-nums text-ink">
+                    <span className="w-8 shrink-0 text-right text-meta tabular-nums text-ink">
                       {soundVolume}
                     </span>
                   </label>
                   <button
                     type="button"
                     onClick={testSound}
-                    className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                    className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                   >
                     {t('settings.sound.test')}
                   </button>
@@ -571,7 +571,7 @@ export const SettingsPanel = ({
                       }}
                       onBlur={flush}
                       placeholder="/Users/you/projects"
-                      className="flex-1 min-w-0 rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+                      className="flex-1 min-w-0 rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
                     />
                     <button
                       onClick={browse}
@@ -597,7 +597,7 @@ export const SettingsPanel = ({
                     {t('settings.connection.recheck')}
                   </button>
                 }>
-                  <div className="text-[11px] leading-relaxed">
+                  <div className="text-meta leading-relaxed">
                     {claudeConn === null && (
                       <span className="inline-flex items-center gap-1 text-ink-subtle">
                         <Loader2 size={12} className="animate-spin" />
@@ -631,7 +631,7 @@ export const SettingsPanel = ({
                       </div>
                     )}
                   </div>
-                  <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{t('settings.connection.hint')}</p>
+                  <p className="mt-2 text-meta text-ink-subtle leading-relaxed">{t('settings.connection.hint')}</p>
                 </Section>
 
                 {/* Work mode (lockdown) — every user (not owner-gated): the
@@ -719,7 +719,7 @@ const Section = ({
       {action}
     </div>
     {children}
-    {hint && <p className="mt-2 text-[11px] text-ink-subtle leading-relaxed">{hint}</p>}
+    {hint && <p className="mt-2 text-meta text-ink-subtle leading-relaxed">{hint}</p>}
   </div>
 )
 
@@ -767,16 +767,16 @@ const ReleaseNotesSection = () => {
       {expanded && (
         <div className="mt-3">
           {loading && !data && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
+            <span className="inline-flex items-center gap-1 text-meta text-ink-subtle">
               <Loader2 size={12} className="animate-spin" />
               {t('settings.releaseNotes.loading')}
             </span>
           )}
           {!loading && data?.lockdown && (
-            <p className="text-[11px] text-ink-subtle">{t('settings.releaseNotes.lockdown')}</p>
+            <p className="text-meta text-ink-subtle">{t('settings.releaseNotes.lockdown')}</p>
           )}
           {!loading && data && !data.lockdown && data.releases.length === 0 && (
-            <div className="inline-flex items-start gap-1 text-[11px] text-accent">
+            <div className="inline-flex items-start gap-1 text-meta text-accent">
               <AlertCircle size={12} className="mt-[2px] shrink-0" />
               <span>{t('settings.releaseNotes.error')}</span>
             </div>
@@ -786,22 +786,22 @@ const ReleaseNotesSection = () => {
               {data.releases.map((r) => (
                 <li key={r.version} className="rounded-[2px] border border-line bg-bg p-3">
                   <div className="mb-1.5 flex items-baseline gap-2">
-                    <span className="font-mono text-[12px] font-semibold text-ink">v{r.version}</span>
+                    <span className="font-mono text-ui font-semibold text-ink">v{r.version}</span>
                     {r.version === data.current && (
-                      <span className="rounded-[2px] border border-accent px-1.5 py-px text-[9px] font-medium uppercase tracking-wide text-accent">
+                      <span className="rounded-[2px] border border-accent px-1.5 py-px text-plate font-medium uppercase tracking-wide text-accent">
                         {t('settings.releaseNotes.current')}
                       </span>
                     )}
-                    <span className="ml-auto text-[10px] text-ink-subtle">
+                    <span className="ml-auto text-micro text-ink-subtle">
                       {r.publishedAt.slice(0, 10)}
                     </span>
                   </div>
                   {r.body ? (
-                    <div className="text-[12px] leading-relaxed">
+                    <div className="text-ui leading-relaxed">
                       <Markdown source={pickReleaseNotesLang(r.body, lang)} />
                     </div>
                   ) : (
-                    <p className="text-[11px] text-ink-subtle">—</p>
+                    <p className="text-meta text-ink-subtle">—</p>
                   )}
                 </li>
               ))}
@@ -837,7 +837,7 @@ const AppVersionSection = () => {
   return (
     <div className="mt-6 border-t border-line pt-4">
       <p className="label-cap text-ink-muted mb-1.5">{t('settings.version.heading')}</p>
-      <p className="font-mono text-[12px] text-ink-subtle">
+      <p className="font-mono text-ui text-ink-subtle">
         OPEN GROUND{version ? ` v${version}` : ''}
       </p>
     </div>
@@ -907,25 +907,25 @@ const FeedbackInbox = ({ onSeen }: { onSeen?: (latestCreatedAt: string | null) =
       </div>
 
       {loading && !items && (
-        <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
+        <span className="inline-flex items-center gap-1 text-meta text-ink-subtle">
           <Loader2 size={12} className="animate-spin" />
           {t('settings.inbox.loading')}
         </span>
       )}
       {error && (
-        <div className="inline-flex items-start gap-1 text-[11px] text-accent">
+        <div className="inline-flex items-start gap-1 text-meta text-accent">
           <AlertCircle size={12} className="mt-[2px] shrink-0" />
           <span>{error}</span>
         </div>
       )}
       {items && items.length === 0 && !error && (
-        <p className="text-[11px] text-ink-subtle leading-relaxed">{t('settings.inbox.empty')}</p>
+        <p className="text-meta text-ink-subtle leading-relaxed">{t('settings.inbox.empty')}</p>
       )}
       {items && items.length > 0 && (
         <ul className="space-y-2 max-h-[280px] overflow-y-auto -mx-1 px-1">
           {items.map((f) => (
             <li key={f.id} className="rounded-[2px] border border-line bg-bg p-3 leading-relaxed">
-              <p className="text-[12px] text-ink whitespace-pre-wrap break-words">{f.message}</p>
+              <p className="text-ui text-ink whitespace-pre-wrap break-words">{f.message}</p>
               {f.images && f.images.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {f.images.map((img, i) => (
@@ -947,7 +947,7 @@ const FeedbackInbox = ({ onSeen }: { onSeen?: (latestCreatedAt: string | null) =
                   ))}
                 </div>
               )}
-              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-ink-subtle">
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-micro text-ink-subtle">
                 <span>{formatFeedbackDate(f.created_at)}</span>
                 {f.email && (
                   <>
@@ -973,7 +973,7 @@ const FeedbackInbox = ({ onSeen }: { onSeen?: (latestCreatedAt: string | null) =
         </ul>
       )}
       {truncated && (
-        <p className="mt-2 text-[10px] text-ink-faint leading-relaxed">{t('settings.inbox.truncated')}</p>
+        <p className="mt-2 text-micro text-ink-faint leading-relaxed">{t('settings.inbox.truncated')}</p>
       )}
     </div>
   )

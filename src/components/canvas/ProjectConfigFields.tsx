@@ -11,7 +11,7 @@ import { useT } from '@/i18n/I18nContext'
 import type { ProjectBranchesResponse } from '@/lib/types'
 
 export const FIELD_INPUT_CSS =
-  'w-full rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint transition-colors focus:border-accent focus:outline-none'
+  'w-full rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-ui text-ink placeholder:text-ink-faint transition-colors focus:border-accent focus:outline-none'
 
 /** The repo's branch list — fetched once per dialog open so Target branch is
  *  a pick-from-list instead of a typo-prone text field. branches null while
@@ -95,7 +95,7 @@ export const CompletionFlowField = ({
               onClick={() => onChange(v)}
               aria-pressed={active}
               className={[
-                'h-7 whitespace-nowrap px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                'h-7 whitespace-nowrap px-3 rounded-[2px] text-ui font-medium cursor-pointer transition-all duration-150',
                 'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                 active
                   ? 'bg-accent text-bg-card border-accent'
@@ -111,7 +111,7 @@ export const CompletionFlowField = ({
           )
         })}
       </div>
-      <p className="mt-1.5 text-[11px] leading-relaxed text-ink-faint">
+      <p className="mt-1.5 text-meta leading-relaxed text-ink-faint">
         {t(
           flow === 'pr'
             ? 'projectPanel.settingsFlowPrHint'
@@ -119,7 +119,7 @@ export const CompletionFlowField = ({
         )}
       </p>
       {flow === 'pr' && ghStatus && (!ghStatus.installed || !ghStatus.authenticated) && (
-        <p className="mt-1 text-[11px] leading-relaxed text-accent">
+        <p className="mt-1 text-meta leading-relaxed text-accent">
           {ghStatus.installed
             ? t('projectPanel.settingsGhUnauthenticated')
             : t('projectPanel.settingsGhMissing')}
@@ -214,7 +214,7 @@ export const MembersField = ({
           {members.map(name => (
             <span
               key={name}
-              className="flex max-w-full items-center gap-1 rounded-sm border border-line px-2 py-1 text-[11px] text-ink"
+              className="flex max-w-full items-center gap-1 rounded-sm border border-line px-2 py-1 text-meta text-ink"
             >
               <span className="min-w-0 truncate">{name}</span>
               <button
@@ -248,12 +248,12 @@ export const MembersField = ({
           type="button"
           onClick={add}
           disabled={!draft.trim()}
-          className="shrink-0 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="shrink-0 rounded-sm border border-line px-2.5 py-1.5 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           {t('projectPanel.settingsMemberAdd')}
         </button>
       </div>
-      <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">{hint}</p>
+      <p className="mt-1 text-meta leading-relaxed text-ink-faint">{hint}</p>
     </div>
   )
 }

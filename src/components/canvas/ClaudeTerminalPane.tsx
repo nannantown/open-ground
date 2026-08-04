@@ -476,26 +476,26 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
     <div className="flex h-full w-full min-h-0 flex-col bg-[#1a1a1a]">
       {chrome ? (
       <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1.5">
-        <span className="font-mono text-[10px] text-ink-muted">
+        <span className="font-mono text-micro text-ink-muted">
           claude {info ? `· ${info.cols}×${info.rows}` : ''}
           {label ? ` · ${label}` : ''}
         </span>
         <div className="ml-auto flex items-center gap-2">
           {exited ? (
-            <span className="font-mono text-[10px] text-accent">
+            <span className="font-mono text-micro text-accent">
               exited{exited.exitCode != null ? ` (${exited.exitCode})` : ''}
             </span>
           ) : (
             <button
               type="button"
               onClick={() => sendInput('\x03')}
-              className="font-mono text-[10px] text-ink-muted hover:text-ink"
+              className="font-mono text-micro text-ink-muted hover:text-ink"
               title="Send Ctrl-C to interrupt claude (twice within 3s = force-kill)"
             >
               Ctrl-C
             </button>
           )}
-          {error && <span className="font-mono text-[10px] text-accent">{error}</span>}
+          {error && <span className="font-mono text-micro text-accent">{error}</span>}
         </div>
       </div>
       ) : (
@@ -507,11 +507,11 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
         (exited || error) && !onRestart && (
           <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1">
             {exited && (
-              <span className="font-mono text-[10px] text-accent">
+              <span className="font-mono text-micro text-accent">
                 exited{exited.exitCode != null ? ` (${exited.exitCode})` : ''}
               </span>
             )}
-            {error && <span className="font-mono text-[10px] text-accent">{error}</span>}
+            {error && <span className="font-mono text-micro text-accent">{error}</span>}
           </div>
         )
       )}
@@ -535,7 +535,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
             the PTY has exited or a probe error is shown (those own the affordance). */}
         {!exited && !error && (connState === 'reconnecting' || connState === 'lost') && (
           <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2">
-            <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-[11px] text-white/80 shadow-lg backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-meta text-white/80 shadow-lg backdrop-blur-[1px]">
               {connState === 'reconnecting' ? (
                 <>
                   <RotateCcw size={11} strokeWidth={2.25} className="animate-spin" aria-hidden />
@@ -566,11 +566,11 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
                 <Power size={17} strokeWidth={1.75} />
               </span>
               <div>
-                <p className="text-[13px] font-medium text-white/90">
+                <p className="text-ui font-medium text-white/90">
                   {t('projectPanel.swarm.sessionEnded')}
                 </p>
                 {exited?.exitCode != null && (
-                  <p className="mt-1 font-mono text-[10px] text-white/40">
+                  <p className="mt-1 font-mono text-micro text-white/40">
                     {t('projectPanel.swarm.sessionExitCode', { code: String(exited.exitCode) })}
                   </p>
                 )}
@@ -579,7 +579,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
                 type="button"
                 onClick={() => void handleRestart()}
                 disabled={restarting}
-                className="inline-flex items-center gap-1.5 rounded-[4px] bg-white px-3.5 py-1.5 text-[12px] font-medium text-black transition-colors hover:bg-white/90 active:bg-white/80 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                className="inline-flex items-center gap-1.5 rounded-[4px] bg-white px-3.5 py-1.5 text-ui font-medium text-black transition-colors hover:bg-white/90 active:bg-white/80 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
               >
                 <RotateCcw
                   size={13}

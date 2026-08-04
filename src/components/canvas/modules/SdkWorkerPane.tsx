@@ -521,13 +521,13 @@ export const SdkWorkerPane = ({
           {statusLabel}
         </span>
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted"
+          className="min-w-0 flex-1 truncate font-mono text-micro text-ink-muted"
           title={taskTitle ? `${branch} — ${taskTitle}` : branch}
         >
           {branch}
         </span>
         <span
-          className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
+          className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
           title={t('projectPanel.swarm.sdk.badgeHint')}
         >
           SDK
@@ -537,7 +537,7 @@ export const SdkWorkerPane = ({
           // worker's lifecycle. Without it, an engine tile just looks like a
           // tile whose buttons went missing.
           <span
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
             title={t('projectPanel.swarm.engineOwnedHint')}
           >
             <Gauge size={10} strokeWidth={2.25} aria-hidden />
@@ -553,7 +553,7 @@ export const SdkWorkerPane = ({
                 onClick={() => void interrupt()}
                 disabled={controlsBusy}
                 title={t('projectPanel.swarm.sdk.interrupt')}
-                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
               >
                 <Square size={11} strokeWidth={2.25} />
               </button>
@@ -567,7 +567,7 @@ export const SdkWorkerPane = ({
                 onClick={onTerminate}
                 disabled={controlsBusy}
                 title={t('projectPanel.swarm.terminate')}
-                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
               >
                 <Power size={10} strokeWidth={2.25} />
                 {busy ? t('projectPanel.swarm.terminating') : t('projectPanel.swarm.terminate')}
@@ -589,13 +589,13 @@ export const SdkWorkerPane = ({
           <div className="flex items-start gap-1.5">
             <AlertTriangle size={13} strokeWidth={2.25} className="mt-0.5 shrink-0 text-ochre" aria-hidden />
             <div className="min-w-0 flex-1">
-              <div className="text-[11px] font-medium text-ochre">
+              <div className="text-meta font-medium text-ochre">
                 {t('projectPanel.swarm.sdk.questionBanner')}
               </div>
-              <div className="mt-0.5 line-clamp-3 text-[12px] leading-snug text-ink" title={openQuestion}>
+              <div className="mt-0.5 line-clamp-3 text-ui leading-snug text-ink" title={openQuestion}>
                 {openQuestion}
               </div>
-              <div className="mt-1 text-[10px] text-ink-muted">
+              <div className="mt-1 text-micro text-ink-muted">
                 {t('projectPanel.swarm.sdk.questionBannerHint')}
               </div>
             </div>
@@ -605,7 +605,7 @@ export const SdkWorkerPane = ({
 
       {truncated ? (
         // Never let an incomplete transcript look continuous.
-        <div className="shrink-0 border-b border-line-soft bg-bg-card px-2.5 py-1 text-[10px] text-ochre">
+        <div className="shrink-0 border-b border-line-soft bg-bg-card px-2.5 py-1 text-micro text-ochre">
           {t('projectPanel.swarm.sdk.truncated')}
         </div>
       ) : null}
@@ -615,7 +615,7 @@ export const SdkWorkerPane = ({
         // reader too — a message that never left is not a visual detail.
         <div
           role="alert"
-          className="shrink-0 border-b border-line-soft bg-error/10 px-2.5 py-1 text-[10px] text-error"
+          className="shrink-0 border-b border-line-soft bg-error/10 px-2.5 py-1 text-micro text-error"
         >
           {t('projectPanel.swarm.sdk.sendFailed', { error: actionError })}
         </div>
@@ -627,14 +627,14 @@ export const SdkWorkerPane = ({
       {retainedReason && onForceRemove ? (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft bg-bg-inset px-2.5 py-1">
           <AlertTriangle size={11} className="shrink-0 text-ochre" aria-hidden />
-          <span className="min-w-0 flex-1 truncate text-[10px] text-ink-muted" title={retainedReason}>
+          <span className="min-w-0 flex-1 truncate text-micro text-ink-muted" title={retainedReason}>
             {t('projectPanel.swarm.retained')}
           </span>
           <button
             type="button"
             onClick={onForceRemove}
             disabled={controlsBusy}
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <Trash2 size={10} strokeWidth={2.25} />
             {t('projectPanel.swarm.forceRemove')}
@@ -656,7 +656,7 @@ export const SdkWorkerPane = ({
               article typography — a capped line length instead of wall-to-wall
               text, real margins, and a type scale (ProseBlocks). Tool rows stay
               small and muted on purpose: they are the machinery, not the story. */}
-          <div className="mx-auto w-full max-w-[720px] text-[12px] leading-relaxed">
+          <div className="mx-auto w-full max-w-[720px] text-ui leading-relaxed">
             {frames.length === 0 ? (
               <div className="text-ink-faint">{t('projectPanel.swarm.sdk.empty')}</div>
             ) : (
@@ -674,7 +674,7 @@ export const SdkWorkerPane = ({
           <button
             type="button"
             onClick={jumpToLatest}
-            className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2.5 py-1 text-[10px] text-ink-muted shadow-sm transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2.5 py-1 text-micro text-ink-muted shadow-sm transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             ↓ {t('projectPanel.swarm.sdk.jumpLatest')}
           </button>
@@ -687,12 +687,12 @@ export const SdkWorkerPane = ({
           worker (this pane had no restart affordance at all). */}
       {finished && onRestart ? (
         <div className="flex shrink-0 items-center justify-center gap-2 border-t border-line-soft bg-bg-card px-2 py-1.5">
-          <span className="text-[11px] text-ink-faint">{t('projectPanel.swarm.sessionEnded')}</span>
+          <span className="text-meta text-ink-faint">{t('projectPanel.swarm.sessionEnded')}</span>
           <button
             type="button"
             onClick={onRestart}
             disabled={controlsBusy}
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line bg-transparent px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-plane hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line bg-transparent px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-plane hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <RotateCcw size={11} strokeWidth={2.25} aria-hidden />
             {busy ? t('projectPanel.swarm.restarting') : t('projectPanel.swarm.restart')}
@@ -723,14 +723,14 @@ export const SdkWorkerPane = ({
               }
             }}
             placeholder={t('projectPanel.swarm.sdk.placeholder')}
-            className="min-w-0 flex-1 rounded-[3px] border border-line bg-bg-inset px-1.5 py-0.5 text-[11px] text-ink placeholder:text-ink-faint transition-colors hover:border-line-strong focus:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40"
+            className="min-w-0 flex-1 rounded-[3px] border border-line bg-bg-inset px-1.5 py-0.5 text-meta text-ink placeholder:text-ink-faint transition-colors hover:border-line-strong focus:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40"
           />
           <button
             type="button"
             onClick={() => void send()}
             disabled={controlsBusy || !draft.trim()}
             title={t('projectPanel.swarm.sdk.send')}
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <CornerDownLeft size={11} strokeWidth={2.25} />
           </button>
@@ -787,8 +787,8 @@ const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) =
   <div
     className={
       subagent
-        ? 'pl-3 text-[12px] leading-[1.7] text-ink-muted'
-        : 'text-[13.5px] leading-[1.75] text-ink'
+        ? 'pl-3 text-ui leading-[1.7] text-ink-muted'
+        : 'text-ui leading-[1.75] text-ink'
     }
   >
     {parseMarkdownBlocks(text).map((b, i) => {
@@ -799,10 +799,10 @@ const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) =
               key={i}
               className={`font-semibold ${
                 b.level === 1
-                  ? 'mb-1.5 mt-5 text-[16px]'
+                  ? 'mb-1.5 mt-5 text-read'
                   : b.level === 2
-                    ? 'mb-1 mt-4 text-[14.5px]'
-                    : 'mb-1 mt-3 text-[13.5px]'
+                    ? 'mb-1 mt-4 text-read'
+                    : 'mb-1 mt-3 text-ui'
               }`}
             >
               <InlineMd text={b.text} />
@@ -812,7 +812,7 @@ const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) =
           return (
             <pre
               key={i}
-              className="my-2.5 overflow-x-auto rounded-[4px] bg-bg-inset px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink"
+              className="my-2.5 overflow-x-auto rounded-[4px] bg-bg-inset px-3 py-2 font-mono text-meta leading-relaxed text-ink"
             >
               {b.text}
             </pre>
@@ -854,7 +854,7 @@ const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) 
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-full items-baseline gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-[10px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="flex w-full items-baseline gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-micro text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
         <span className="shrink-0 text-ink-faint" aria-hidden>
           {expanded ? '▾' : '▸'}
@@ -869,14 +869,14 @@ const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) 
       {expanded ? (
         <div className="ml-4 border-l border-line-soft pl-2">
           {item.use.detail ? (
-            <div className="whitespace-pre-wrap break-all font-mono text-[10px] text-ink-muted">{item.use.detail}</div>
+            <div className="whitespace-pre-wrap break-all font-mono text-micro text-ink-muted">{item.use.detail}</div>
           ) : null}
           {item.result ? (
-            <div className={`whitespace-pre-wrap break-all font-mono text-[10px] ${isError ? 'text-error' : 'text-ink-faint'}`}>
+            <div className={`whitespace-pre-wrap break-all font-mono text-micro ${isError ? 'text-error' : 'text-ink-faint'}`}>
               ⎿ {item.result.head}
             </div>
           ) : (
-            <div className="font-mono text-[10px] text-ink-faint">…</div>
+            <div className="font-mono text-micro text-ink-faint">…</div>
           )}
         </div>
       ) : null}
@@ -892,20 +892,20 @@ const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
       return <ProseBlocks text={ev.text} subagent={ev.fromSubagent} />
     case 'tool_use':
       return (
-        <div className={`font-mono text-[10px] text-ink-muted ${ev.fromSubagent ? 'pl-3' : ''}`}>
+        <div className={`font-mono text-micro text-ink-muted ${ev.fromSubagent ? 'pl-3' : ''}`}>
           🔧 {ev.name}
           {ev.detail ? ` ${ev.detail}` : ''}
         </div>
       )
     case 'tool_result':
       return (
-        <div className={`font-mono text-[10px] ${ev.ok ? 'text-ink-faint' : 'text-error'} ${ev.fromSubagent ? 'pl-3' : ''}`}>
+        <div className={`font-mono text-micro ${ev.ok ? 'text-ink-faint' : 'text-error'} ${ev.fromSubagent ? 'pl-3' : ''}`}>
           ↳ {ev.head}
         </div>
       )
     case 'thinking':
       return (
-        <div className="font-mono text-[10px] text-ink-faint">
+        <div className="font-mono text-micro text-ink-faint">
           {t('projectPanel.swarm.sdk.thinking')} ({ev.chars})
         </div>
       )
@@ -914,20 +914,20 @@ const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
       return <div className="my-4 border-t border-line-soft" aria-hidden />
     case 'quota_refusal':
       return (
-        <div className="my-1 rounded-[3px] border border-ochre/40 bg-ochre/10 px-2 py-1 text-[10px] text-ochre">
+        <div className="my-1 rounded-[3px] border border-ochre/40 bg-ochre/10 px-2 py-1 text-micro text-ochre">
           {ev.raw}
         </div>
       )
     case 'api_error':
       return (
-        <div className="my-1 rounded-[3px] border border-error/40 bg-error/10 px-2 py-1 text-[10px] text-error">
+        <div className="my-1 rounded-[3px] border border-error/40 bg-error/10 px-2 py-1 text-micro text-error">
           {ev.status ? `${ev.status} — ` : ''}
           {ev.head}
         </div>
       )
     case 'rate_limit':
       return (
-        <div className="font-mono text-[10px] text-ink-faint">
+        <div className="font-mono text-micro text-ink-faint">
           {t('projectPanel.swarm.sdk.rateLimit')} {Math.round(ev.utilization * 100)}%
         </div>
       )
@@ -936,7 +936,7 @@ const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
       // ONLY sign that history was summarised, and a reader who does not see it
       // will wonder why the desk "forgot". The token counts are the proof.
       return (
-        <div className="my-1 rounded-[3px] border border-line bg-bg-card px-2 py-1 font-mono text-[10px] text-ink-muted">
+        <div className="my-1 rounded-[3px] border border-line bg-bg-card px-2 py-1 font-mono text-micro text-ink-muted">
           ⟳ {t('projectPanel.swarm.sdk.compact')}
           {ev.preTokens > 0
             ? ` — ${fmtTokens(ev.preTokens)}${ev.postTokens !== null ? ` → ${fmtTokens(ev.postTokens)}` : ''}`

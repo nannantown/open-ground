@@ -257,10 +257,10 @@ export const ElementView = memo(({
             onBlur={onEditDone}
             onKeyDown={(e) => editorKeyDown(e, onEditDone)}
             onPointerDown={(e) => e.stopPropagation()}
-            className="block h-full w-full resize-none bg-transparent text-[13px] leading-relaxed text-ink focus:outline-none"
+            className="block h-full w-full resize-none bg-transparent text-ui leading-relaxed text-ink focus:outline-none"
           />
         ) : (
-          <div className="h-full w-full select-none overflow-hidden whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
+          <div className="h-full w-full select-none overflow-hidden whitespace-pre-wrap text-ui leading-relaxed text-ink">
             {element.text || <span className="text-ink/55">Double-click to edit</span>}
           </div>
         )}
@@ -495,7 +495,7 @@ const MockView = ({
       >
         <Code2 size={10} strokeWidth={2.25} />
         <span className="truncate">{element.name || (framework === 'html' ? 'HTML mock' : 'React mock')}</span>
-        <span className="ml-auto font-mono normal-case tracking-normal text-[9px] text-ink-faint">
+        <span className="ml-auto font-mono normal-case tracking-normal text-plate text-ink-faint">
           {framework}
         </span>
       </div>
@@ -510,7 +510,7 @@ const MockView = ({
             onPointerDown={(e) => e.stopPropagation()}
             spellCheck={false}
             wrap="off"
-            className="block h-full w-full resize-none bg-bg px-3 py-2 font-mono text-[11.5px] leading-[1.55] text-ink focus:outline-none"
+            className="block h-full w-full resize-none bg-bg px-3 py-2 font-mono text-meta leading-[1.55] text-ink focus:outline-none"
           />
         ) : (
           <>
@@ -541,7 +541,7 @@ const MockView = ({
                 {/* Interactivity is real but invisible (select first, then the
                     iframe is live) — say so on hover, or nobody discovers it. */}
                 {!commentTool && (
-                  <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-[10px] font-medium text-ink-muted opacity-0 shadow-card transition-opacity duration-150 group-hover:opacity-100">
+                  <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-micro font-medium text-ink-muted opacity-0 shadow-card transition-opacity duration-150 group-hover:opacity-100">
                     {t('canvasEl.iframe.clickToInteract')}
                   </span>
                 )}

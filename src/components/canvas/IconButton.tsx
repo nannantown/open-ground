@@ -41,7 +41,13 @@ export const IconButton = ({
     disabled={disabled}
     className={[
       'relative flex h-7 items-center justify-center rounded-sm transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
-      label ? 'gap-1.5 px-2.5' : 'w-7',
+      // The permanent label collapses below xl. Measured 2026-08-04: with the
+      // type scale in place the Ground's right-hand cluster is 905px wide —
+      // wider than a 900px window — so the gear sat 64px off-screen and the
+      // app's own wordmark was squeezed to nothing. The icon and the tooltip
+      // carry the meaning at narrow widths; `aria-label` is unchanged, and
+      // WCAG 2.5.3 only binds when a visible label exists.
+      label ? 'w-7 xl:w-auto xl:gap-1.5 xl:px-2.5' : 'w-7',
       'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
       active
         ? 'bg-accent-soft text-accent-deeper'
@@ -49,7 +55,7 @@ export const IconButton = ({
     ].join(' ')}
   >
     {children}
-    {label && <span className="whitespace-nowrap text-[12px] leading-none">{label}</span>}
+    {label && <span className="hidden whitespace-nowrap text-ui leading-none xl:inline">{label}</span>}
     {dot && (
       <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-accent ring-2 ring-bg-card" />
     )}

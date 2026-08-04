@@ -129,14 +129,14 @@ export const DesignFrameView = memo(({
               }}
               onPointerDown={(e) => e.stopPropagation()}
               placeholder="Frame name"
-              className="w-44 bg-bg-elevated px-1 py-0.5 text-[11px] font-medium leading-none text-ink outline outline-1 outline-accent"
+              className="w-44 bg-bg-elevated px-1 py-0.5 text-meta font-medium leading-none text-ink outline outline-1 outline-accent"
             />
           ) : (
             <span
               onPointerDown={onLabelPointerDown}
               className={[
                 'block max-w-[280px] cursor-grab select-none truncate whitespace-nowrap px-1 py-0.5',
-                'text-[11px] font-medium leading-none active:cursor-grabbing',
+                'text-meta font-medium leading-none active:cursor-grabbing',
                 selected ? 'text-accent' : 'text-ink-muted hover:text-ink',
               ].join(' ')}
             >

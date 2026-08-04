@@ -153,7 +153,7 @@ export const CollabSharedDialog = ({
               {t('projectPanel.collabSharedDialogTitle')}
             </>
           }
-          titleClassName="flex items-center gap-2 font-display text-[16px] text-ink"
+          titleClassName="flex items-center gap-2 font-display text-read text-ink"
           onClose={onClose}
           closeLabel={t('common.cancel')}
         />
@@ -181,10 +181,10 @@ export const CollabSharedDialog = ({
             <div className="flex items-start gap-2.5 rounded-[3px] border border-line bg-bg px-3 py-2.5">
               <Clock size={14} className="mt-0.5 shrink-0 text-accent" />
               <div className="min-w-0">
-                <p className="text-[12px] font-medium text-ink">
+                <p className="text-ui font-medium text-ink">
                   {t('projectPanel.collabSharedDialogAwaiting')}
                 </p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-muted">
+                <p className="mt-0.5 text-meta leading-relaxed text-ink-muted">
                   {t('projectPanel.collabSharedDialogAwaitingBody')}
                 </p>
               </div>
@@ -197,7 +197,7 @@ export const CollabSharedDialog = ({
           {initialCode && !awaiting && (
             <div className="flex items-start gap-2.5 rounded-[3px] border border-accent/40 bg-accent-soft px-3 py-2.5">
               <LogIn size={14} className="mt-0.5 shrink-0 text-accent" />
-              <p className="text-[12px] leading-relaxed text-ink">
+              <p className="text-ui leading-relaxed text-ink">
                 {lang === 'ja'
                   ? '招待リンクを開きました。コードを確認して「参加」を押すと参加します。'
                   : 'You opened an invite link. Review the code below and click Join to join.'}
@@ -236,7 +236,7 @@ export const CollabSharedDialog = ({
                   : t('projectPanel.collabSharedDialogJoin')}
               </Btn>
             </div>
-            {error && <p className="mt-1.5 text-[11px] leading-relaxed text-accent">{error}</p>}
+            {error && <p className="mt-1.5 text-meta leading-relaxed text-accent">{error}</p>}
           </div>
 
           {/* The list of projects shared with me */}
@@ -245,9 +245,9 @@ export const CollabSharedDialog = ({
               {t('projectPanel.collabSharedDialogListLabel')}
             </label>
             {shared === null ? (
-              <p className="text-[12px] text-ink-faint">{t('projectPanel.loading')}</p>
+              <p className="text-ui text-ink-faint">{t('projectPanel.loading')}</p>
             ) : shared.length === 0 ? (
-              <p className="text-[11px] leading-relaxed text-ink-faint">
+              <p className="text-meta leading-relaxed text-ink-faint">
                 {t('projectPanel.collabSharedDialogEmpty')}
               </p>
             ) : (
@@ -263,7 +263,7 @@ export const CollabSharedDialog = ({
                       // (presence + content sync) — a data exchange, so it waits
                       // for the same consent tick the join button does.
                       disabled={!consented}
-                      className="flex w-full items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-2 text-left text-[12px] text-ink transition-colors hover:border-accent hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:bg-bg"
+                      className="flex w-full items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-2 text-left text-ui text-ink transition-colors hover:border-accent hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:bg-bg"
                     >
                       <Users size={13} className="shrink-0 text-ink-faint" />
                       <span className="truncate">

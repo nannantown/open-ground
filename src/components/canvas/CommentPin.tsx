@@ -106,7 +106,7 @@ export const CommentPin = ({
             {anchorLabel ? (
               <span
                 title={`Attached to ${anchorLabel}`}
-                className="ml-1 truncate rounded-[3px] bg-bg-inset px-1.5 py-[1px] font-mono text-[9.5px] normal-case tracking-normal text-ink-faint"
+                className="ml-1 truncate rounded-[3px] bg-bg-inset px-1.5 py-[1px] font-mono text-plate normal-case tracking-normal text-ink-faint"
               >
                 ↳ {anchorLabel}
               </span>
@@ -117,7 +117,7 @@ export const CommentPin = ({
                 onClick={onToggleResolved}
                 title={resolved ? 'Reopen this comment' : 'Mark as resolved'}
                 className={[
-                  'ml-auto flex h-5 items-center gap-1 rounded-[3px] px-1.5 text-[10.5px] normal-case tracking-normal transition-colors',
+                  'ml-auto flex h-5 items-center gap-1 rounded-[3px] px-1.5 text-micro leading-none normal-case tracking-normal transition-colors',
                   resolved
                     ? 'bg-bg-inset text-ink-muted hover:bg-plane/80 hover:text-ink'
                     : 'text-ink-faint hover:bg-plane hover:text-ink',
@@ -151,10 +151,10 @@ export const CommentPin = ({
               }}
               placeholder={t('canvasEl.comment.placeholder')}
               rows={3}
-              className="block w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-[12.5px] leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+              className="block w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-ui leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
             />
           ) : (
-            <div className="whitespace-pre-wrap rounded-[3px] bg-bg/70 px-2 py-1.5 text-[12.5px] leading-snug text-ink">
+            <div className="whitespace-pre-wrap rounded-[3px] bg-bg/70 px-2 py-1.5 text-ui leading-snug text-ink">
               {element.text || <span className="text-ink-faint">No content yet</span>}
             </div>
           )}

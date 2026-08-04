@@ -27,6 +27,9 @@ import { capTrackingClass } from './lib/labelScript'
 const cssPath = resolve(__dirname, 'app/globals.css')
 const css = readFileSync(cssPath, 'utf8')
 
+/** The named steps of the type scale (tailwind.config.ts → theme.extend.fontSize). */
+const SIZE_TOKEN = /\btext-(plate|micro|meta|ui|read|title|head|hero)\b/
+
 /** The Latin small-caps plate classes — anything with `letter-spacing` meant for Latin. */
 const PLATES = ['label-cap', 'coord-label'] as const
 
@@ -163,13 +166,21 @@ describe('a pill with a min-width floor never folds its own label', () => {
     // a font size is a pill, and a pill must pin its line. This is a lint the
     // cheap way — the alternative (measure every label in every locale against
     // every floor) is the thing that never gets done.
+    //
+    // ⚠ RE-AIMED 2026-08-04. This originally looked for `text-[Npx]`. The type
+    // scale replaced all 678 of those with named steps, at which point the
+    // pattern matched NOTHING and the test went permanently, silently green —
+    // while the shape it guards was still present at 5 sites. A detector that
+    // names the thing it hunts must be re-aimed in the same change that renames
+    // it, and re-measured red. (Verified: reverting the nowrap on those 5 sites
+    // fails this test.)
     const offenders: string[] = []
     for (const file of walk(resolve(__dirname, 'components'))) {
       readFileSync(file, 'utf8')
         .split('\n')
         .forEach((line, i) => {
           if (!/min-w-\[\d+px\]/.test(line)) return
-          if (!/text-\[[\d.]+px\]/.test(line)) return
+          if (!SIZE_TOKEN.test(line)) return
           if (/whitespace-nowrap/.test(line)) return
           offenders.push(`${file.slice(file.indexOf('/src/') + 1)}:${i + 1}  ${line.trim().slice(0, 90)}`)
         })
@@ -215,5 +226,57 @@ describe('a plate whose text is hardcoded Latin keeps its plate in every UI', ()
       offenders,
       `these Latin plates get flattened in the Japanese UI:\n${offenders.join('\n')}`,
     ).toEqual([])
+  })
+})
+
+// ─── THE SCALE IS THE ONLY WAY TO NAME A SIZE ───────────────────────────────
+
+describe('no component names a font size outside the scale', () => {
+  it('never writes a raw `text-[Npx]`', () => {
+    // How the 25 sizes happened: every one of them was one reasonable-looking
+    // line. `text-[11.5px]` next to `text-[12px]` next to `text-[12.5px]` — each
+    // defensible alone, collectively the reason the UI read as "not quite lined
+    // up" (owner, 2026-08-04). The scale only stays a scale if nothing can be
+    // added beside it, so the arbitrary form is banned outright rather than
+    // discouraged in a doc nobody reads at the moment they need it.
+    //
+    // If a genuinely new step is needed, add it to tailwind.config.ts —
+    // that is a decision worth making once and naming, which is the point.
+    const offenders: string[] = []
+    for (const file of walk(resolve(__dirname, 'components'))) {
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, i) => {
+          const m = line.match(/text-\[[\d.]+px\]/)
+          if (!m) return
+          offenders.push(`${file.slice(file.indexOf('/src/') + 1)}:${i + 1}  ${m[0]}`)
+        })
+    }
+    expect(
+      offenders,
+      `sizes written outside the scale:\n${offenders.join('\n')}`,
+    ).toEqual([])
+  })
+
+  it('the scale itself stays a ladder — every step strictly larger', () => {
+    // A scale with a step out of order, or two steps at the same size, is an
+    // accumulation wearing a scale's names. Read the real config.
+    const cfg = readFileSync(resolve(__dirname, '../tailwind.config.ts'), 'utf8')
+    const block = cfg.slice(cfg.indexOf('fontSize: {'))
+    const steps = Array.from(block.matchAll(/(\w+):\s*\['(\d+)px'/g)).map((m) => ({
+      name: m[1],
+      px: Number(m[2]),
+    }))
+    expect(steps.length, 'the scale has steps').toBeGreaterThanOrEqual(6)
+    for (let i = 1; i < steps.length; i++) {
+      expect(
+        steps[i].px,
+        `${steps[i].name} (${steps[i].px}px) must exceed ${steps[i - 1].name} (${steps[i - 1].px}px)`,
+      ).toBeGreaterThan(steps[i - 1].px)
+    }
+    // …and the floor holds. 13px is where 和文 stops being decoration and starts
+    // being prose; `plate` and `micro` sit below it on purpose and carry only
+    // Latin captions and numerals.
+    expect(steps.find((s) => s.name === 'meta')?.px, 'meta is the prose floor').toBe(13)
   })
 })

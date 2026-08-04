@@ -1252,7 +1252,7 @@ export default function App() {
           user knows it's still going from anywhere (Ground included). */}
       {aiActiveCount > 0 && (
         <div className="pointer-events-none absolute left-1/2 top-3 z-40 -translate-x-1/2">
-          <div className="flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-3 py-1.5 text-[11px] font-medium text-ink-muted shadow-card backdrop-blur">
+          <div className="flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-3 py-1.5 text-meta font-medium text-ink-muted shadow-card backdrop-blur">
             <Loader2 size={12} strokeWidth={2} className="animate-spin text-accent" />
             <Sparkles size={11} strokeWidth={2} className="text-accent" />
             <span>{t('canvas.generate.generating')}</span>

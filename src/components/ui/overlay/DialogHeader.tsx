@@ -103,7 +103,7 @@ export function DialogHeader({
               // titleClassName REPLACES the default (not appends) so a surface
               // with bespoke title type — e.g. a mono path/name — never fights two
               // conflicting `text-*` utilities.
-              titleClassName ?? 'font-display text-[20px] leading-snug tracking-tightest text-ink'
+              titleClassName ?? 'font-display text-title leading-snug tracking-tightest text-ink'
             }
           >
             {title}

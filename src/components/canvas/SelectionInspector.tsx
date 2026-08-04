@@ -213,7 +213,7 @@ export const SelectionInspector = ({
 // an 11px ink-muted heading.
 const Section = ({ title, children }: { title?: string; children: React.ReactNode }) => (
   <div className="flex flex-col gap-2.5 border-t border-line-soft px-3 py-3 first:border-t-0">
-    {title && <div className="text-[11px] font-medium text-ink-muted">{title}</div>}
+    {title && <div className="text-meta font-medium text-ink-muted">{title}</div>}
     {children}
   </div>
 )
@@ -516,7 +516,7 @@ const AutoLayoutProperties = ({
           (() => onPatch({ layout: { mode: 'column', ...AUTO_LAYOUT_DEFAULTS } }))
         }
         className={[
-          'flex h-7 w-full items-center justify-center rounded-[4px] border border-line bg-bg text-[12px] text-ink-subtle',
+          'flex h-7 w-full items-center justify-center rounded-[4px] border border-line bg-bg text-ui text-ink-subtle',
           'transition-colors hover:border-line-strong hover:bg-bg-elevated hover:text-ink active:bg-plane',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
         ].join(' ')}
@@ -1032,7 +1032,7 @@ const EffectsSection = ({
                       onClick={() => setShadow(i, { type: ty })}
                       aria-pressed={active}
                       className={[
-                        'flex-1 text-[10px] font-medium transition-colors',
+                        'flex-1 text-micro font-medium transition-colors',
                         k > 0 ? 'border-l border-line' : '',
                         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
                         active ? 'bg-accent/10 text-accent' : 'text-ink-faint hover:bg-bg-elevated hover:text-ink',
@@ -1077,7 +1077,7 @@ const EffectsSection = ({
         <button
           type="button"
           onClick={addShadow}
-          className="self-start rounded-[4px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="self-start rounded-[4px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           + {t('canvas.insp.addEffect')}
         </button>
@@ -1537,7 +1537,7 @@ const MultiSelection = ({
 // set its own (w-full and a fixed w-16 are conflicting utilities — Tailwind
 // resolves by stylesheet order, not class order, so combining them is a trap).
 const INPUT_BASE_CLS = [
-  'h-7 rounded-[4px] border border-line bg-bg px-2 text-[12px] text-ink',
+  'h-7 rounded-[4px] border border-line bg-bg px-2 text-ui text-ink',
   'transition-colors hover:border-line-strong',
   'focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
 ].join(' ')
@@ -1587,7 +1587,7 @@ const Segmented = ({
           aria-pressed={active}
           onClick={() => onChange(o.value)}
           className={[
-            'flex h-7 min-w-0 flex-1 items-center justify-center rounded-[4px] border px-1 text-[11px]',
+            'flex h-7 min-w-0 flex-1 items-center justify-center rounded-[4px] border px-1 text-meta',
             'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
             active
               ? 'border-accent bg-accent text-bg-card hover:bg-accent/90'
@@ -1616,7 +1616,7 @@ const ToggleButton = ({
     type="button"
     onClick={onClick}
     className={[
-      'flex h-7 w-full items-center justify-center gap-1.5 rounded-[4px] border text-[12px] transition-colors',
+      'flex h-7 w-full items-center justify-center gap-1.5 rounded-[4px] border text-ui transition-colors',
       'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
       active
         ? 'border-accent/40 bg-accent/10 text-accent hover:bg-accent/15'
@@ -1832,7 +1832,7 @@ const ColorField = ({
         onBlur={commit} // hex edited → remember on blur
         spellCheck={false}
         className={[
-          'h-7 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 font-mono text-[11px] text-ink',
+          'h-7 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 font-mono text-meta text-ink',
           'transition-colors hover:border-line-strong',
           'focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
         ].join(' ')}
@@ -2003,7 +2003,7 @@ const FillControl = ({
               onClick={() => switchMode(m)}
               aria-pressed={active}
               className={[
-                'flex-1 text-[10px] font-medium uppercase tracking-wide transition-colors',
+                'flex-1 text-micro font-medium uppercase tracking-wide transition-colors',
                 i > 0 ? 'border-l border-line' : '',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
                 active ? 'bg-accent/10 text-accent' : 'text-ink-faint hover:bg-bg-elevated hover:text-ink',
@@ -2079,7 +2079,7 @@ const ImageFillField = ({
           value={mode}
           aria-label={t('canvas.insp.imageFit')}
           onChange={(e) => onSetMode(e.target.value as ImageFillMode)}
-          className="h-7 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 text-[11px] text-ink transition-colors hover:border-line-strong focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+          className="h-7 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 text-meta text-ink transition-colors hover:border-line-strong focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
         >
           {IMAGE_FILL_MODES.map((m) => (
             <option key={m} value={m}>
@@ -2091,7 +2091,7 @@ const ImageFillField = ({
           type="button"
           onClick={onReplace}
           disabled={uploading}
-          className="shrink-0 rounded-[4px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="shrink-0 rounded-[4px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           {uploading ? t('canvas.insp.imageUploading') : t('canvas.insp.imageReplace')}
         </button>
@@ -2155,7 +2155,7 @@ const GradientStopRow = ({
           else if (e.key === 'Escape') setDraft(null)
         }}
         spellCheck={false}
-        className="h-6 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 font-mono text-[11px] text-ink transition-colors hover:border-line-strong focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+        className="h-6 min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-2 font-mono text-meta text-ink transition-colors hover:border-line-strong focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
       />
       <div className="w-11 shrink-0">
         <NumberInput
@@ -2255,7 +2255,7 @@ const GradientField = ({
       <button
         type="button"
         onClick={addStop}
-        className="self-start rounded-[4px] border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="self-start rounded-[4px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         + {t('canvas.insp.addStop')}
       </button>

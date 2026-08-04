@@ -169,7 +169,7 @@ export const ProjectCard = memo(({
             )}
           </div>
           <div
-            className="min-w-0 flex-1 truncate font-display text-[16px] leading-tight text-ink"
+            className="min-w-0 flex-1 truncate font-display text-read leading-tight text-ink"
             style={{ fontVariationSettings: "'opsz' 18, 'SOFT' 30" }}
           >
             {project.name}
@@ -187,7 +187,7 @@ export const ProjectCard = memo(({
             </span>
           )}
           {project.openTaskCount > 0 && (
-            <span className="mt-0.5 flex shrink-0 items-center gap-1 text-[10px] font-medium tracking-[0.04em] text-accent">
+            <span className="mt-0.5 flex shrink-0 items-center gap-1 text-micro font-medium tracking-[0.04em] text-accent">
               <span className="h-1 w-1 rounded-full bg-accent" />
               {project.openTaskCount} open
             </span>
@@ -202,8 +202,17 @@ export const ProjectCard = memo(({
             className={[
               'line-clamp-4',
               project.description
-                ? 'text-[11.5px] leading-snug text-ink-muted'
-                : 'font-mono text-[10px] text-ink-subtle',
+                ? 'text-meta leading-snug text-ink-muted'
+                : // A filesystem path has no spaces, so it offers the line
+                  // breaker nothing to work with: at 10px it happened to fit
+                  // the card, and at 12px it simply ran out the side (measured
+                  // 2026-08-04 — 30 of 44 cards overflowed by 3–156px).
+                  // `break-all` is the honest fix: paths are reference data, so
+                  // breaking mid-segment costs nothing, and `line-clamp-4` still
+                  // bounds the height. Shrinking the type back would have been
+                  // the other option, and it is the one that made this unreadable
+                  // in the first place.
+                  'font-mono text-micro text-ink-subtle [overflow-wrap:anywhere]',
             ].join(' ')}
           >
             {project.description || (project.missing ? 'Folder no longer exists — remove it from the Ground.' : project.path)}

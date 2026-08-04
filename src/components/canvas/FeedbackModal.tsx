@@ -258,7 +258,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
               {t('modals.feedback.title')}
             </span>
           }
-          titleClassName="font-display text-[22px] text-ink leading-none tracking-tightest"
+          titleClassName="font-display text-head text-ink tracking-tightest"
           onClose={onClose}
           closeLabel={t('common.close')}
         />
@@ -266,7 +266,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
         {sent ? (
           <div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
             <CheckCircle2 size={28} strokeWidth={1.5} className="text-accent" />
-            <p className="text-[13px] text-ink leading-relaxed">
+            <p className="text-ui text-ink leading-relaxed">
               {t('modals.feedback.thanks')}
             </p>
           </div>
@@ -275,7 +275,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
             <div className="px-6 py-5 space-y-4">
               {context && (
                 <div className="inline-flex max-w-full items-center rounded-[2px] border border-line bg-bg-inset px-2 py-1">
-                  <span className="truncate text-[12px] text-ink-muted">
+                  <span className="truncate text-ui text-ink-muted">
                     {t('modals.feedback.about', { label: context.label })}
                   </span>
                 </div>
@@ -291,11 +291,11 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
                   onPaste={onPaste}
                   placeholder={t('modals.feedback.messagePlaceholder')}
                   maxLength={MAX_LEN + 100}
-                  className="w-full min-h-[120px] rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent resize-y leading-relaxed"
+                  className="w-full min-h-[120px] rounded-[2px] border border-line bg-bg px-3 py-2 text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent resize-y leading-relaxed"
                 />
                 <p
                   className={[
-                    'mt-1 text-[10px] text-right tabular-nums',
+                    'mt-1 text-micro text-right tabular-nums',
                     over ? 'text-accent' : 'text-ink-faint',
                   ].join(' ')}
                 >
@@ -363,7 +363,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    className="flex w-full items-center justify-center gap-2 rounded-[2px] border border-dashed border-line bg-bg px-3 py-3 text-[12px] text-ink-faint transition-colors hover:border-ink-faint hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    className="flex w-full items-center justify-center gap-2 rounded-[2px] border border-dashed border-line bg-bg px-3 py-3 text-ui text-ink-faint transition-colors hover:border-ink-faint hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                   >
                     <ImagePlus size={14} />
                     {t('modals.feedback.attachHint')}
@@ -371,7 +371,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
                 )}
 
                 {attachError && (
-                  <p className="mt-1 text-[10px] text-accent leading-relaxed">{attachError}</p>
+                  <p className="mt-1 text-micro text-accent leading-relaxed">{attachError}</p>
                 )}
 
                 <input
@@ -396,12 +396,12 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+                  className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
                 />
               </div>
 
               {error && (
-                <p className="text-[12px] text-accent leading-relaxed">{error}</p>
+                <p className="text-ui text-accent leading-relaxed">{error}</p>
               )}
             </div>
 
@@ -430,7 +430,7 @@ export const FeedbackModal = ({ open, onClose, context }: Props) => {
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[3px] border-2 border-dashed border-accent bg-bg-card/85 backdrop-blur-sm">
             <div className="flex flex-col items-center gap-2 text-accent">
               <ImagePlus size={24} strokeWidth={1.5} />
-              <p className="text-[13px] font-medium">{t('modals.feedback.attachDrop')}</p>
+              <p className="text-ui font-medium">{t('modals.feedback.attachDrop')}</p>
             </div>
           </div>
         )}

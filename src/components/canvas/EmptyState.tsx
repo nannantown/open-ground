@@ -56,12 +56,12 @@ export const EmptyState = ({
 
         <p className="label-cap text-accent mb-3">{t('misc.empty.eyebrow')}</p>
         <h1
-          className="mb-4 font-display text-[34px] leading-[1.05] tracking-tightest text-ink"
+          className="mb-4 font-display text-hero leading-[1.05] tracking-tightest text-ink"
           style={{ fontVariationSettings: "'opsz' 36, 'SOFT' 40" }}
         >
           {t('misc.empty.title')}
         </h1>
-        <p className="mx-auto mb-7 max-w-[360px] text-[13px] leading-relaxed text-ink-muted">
+        <p className="mx-auto mb-7 max-w-[360px] text-ui leading-relaxed text-ink-muted">
           {t('misc.empty.body')}
         </p>
 
@@ -80,7 +80,7 @@ export const EmptyState = ({
           <button
             type="button"
             onClick={onOpenManual}
-            className="mx-auto mt-6 block text-[12px] text-ink-faint underline-offset-4 transition-colors hover:text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="mx-auto mt-6 block text-ui text-ink-faint underline-offset-4 transition-colors hover:text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {t('misc.empty.manual')}
           </button>

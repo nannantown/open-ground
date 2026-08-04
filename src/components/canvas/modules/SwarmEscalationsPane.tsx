@@ -183,7 +183,7 @@ export const SwarmEscalationsPane = ({
         <Inbox size={13} strokeWidth={2} className="shrink-0 text-accent" aria-hidden />
         <span className="label-cap text-ink">{t('projectPanel.swarm.esc.title')}</span>
         {open.length > 0 && (
-          <span className="rounded-full bg-accent-soft px-1.5 text-[11px] leading-[18px] text-accent">
+          <span className="rounded-full bg-accent-soft px-1.5 text-meta leading-[18px] text-accent">
             {open.length}
           </span>
         )}
@@ -192,7 +192,7 @@ export const SwarmEscalationsPane = ({
       {(notice || error) && (
         <p
           role="status"
-          className={`border-b border-line-soft px-3 py-2 text-[11px] leading-relaxed ${error ? 'text-accent' : 'text-ink-muted'}`}
+          className={`border-b border-line-soft px-3 py-2 text-meta leading-relaxed ${error ? 'text-accent' : 'text-ink-muted'}`}
         >
           {error ?? notice}
         </p>
@@ -218,9 +218,9 @@ export const SwarmEscalationsPane = ({
                   {t(WHY_KEY[e.whyEscalated])}
                 </span>
                 {e.branch && (
-                  <span className="truncate font-mono text-[11px] text-ink-faint">{e.branch}</span>
+                  <span className="truncate font-mono text-meta text-ink-faint">{e.branch}</span>
                 )}
-                <span className="ml-auto text-[11px] text-ink-faint">
+                <span className="ml-auto text-meta text-ink-faint">
                   {new Date(e.createdAt).toLocaleString()}
                 </span>
               </div>
@@ -232,18 +232,18 @@ export const SwarmEscalationsPane = ({
                   keep the legacy layout: question primary, context secondary. */}
               {e.plainQuestion?.trim() ? (
                 <>
-                  <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">
+                  <p className="whitespace-pre-wrap break-words text-ui leading-relaxed text-ink">
                     {e.plainQuestion}
                   </p>
                   <details className="min-w-0">
-                    <summary className="cursor-pointer text-[11px] text-ink-faint hover:text-ink">
+                    <summary className="cursor-pointer text-meta text-ink-faint hover:text-ink">
                       {t('projectPanel.swarm.esc.techDetails')}
                     </summary>
                     <div className="mt-1 flex flex-col gap-1">
-                      <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                      <p className="whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
                         {e.question}
                       </p>
-                      <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                      <p className="whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
                         {e.context}
                       </p>
                     </div>
@@ -251,10 +251,10 @@ export const SwarmEscalationsPane = ({
                 </>
               ) : (
                 <>
-                  <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">
+                  <p className="whitespace-pre-wrap break-words text-ui leading-relaxed text-ink">
                     {e.question}
                   </p>
-                  <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                  <p className="whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
                     {e.context}
                   </p>
                 </>
@@ -283,11 +283,11 @@ export const SwarmEscalationsPane = ({
                     )}
                   </div>
                   {e.proxyDraft.isAbstention ? (
-                    <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                    <p className="mt-1 text-meta leading-relaxed text-ink-faint">
                       {t('projectPanel.swarm.esc.abstention')}
                     </p>
                   ) : (
-                    <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
+                    <p className="mt-1 whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
                       {e.proxyDraft.answer}
                     </p>
                   )}
@@ -296,10 +296,10 @@ export const SwarmEscalationsPane = ({
 
               {e.screenshot && (
                 <details className="min-w-0">
-                  <summary className="cursor-pointer text-[11px] text-ink-faint hover:text-ink">
+                  <summary className="cursor-pointer text-meta text-ink-faint hover:text-ink">
                     {t('projectPanel.swarm.esc.screenshot')}
                   </summary>
-                  <pre className="mt-1 max-h-48 overflow-auto rounded-[2px] border border-line bg-bg-inset p-2 font-mono text-[10px] leading-snug text-ink-muted">
+                  <pre className="mt-1 max-h-48 overflow-auto rounded-[2px] border border-line bg-bg-inset p-2 font-mono text-micro leading-snug text-ink-muted">
                     {e.screenshot}
                   </pre>
                 </details>
@@ -311,7 +311,7 @@ export const SwarmEscalationsPane = ({
                 placeholder={t('projectPanel.swarm.esc.answerPlaceholder')}
                 rows={2}
                 disabled={busy}
-                className="w-full resize-y rounded-[2px] border border-line bg-bg px-2 py-1.5 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent focus:outline-none disabled:opacity-40"
+                className="w-full resize-y rounded-[2px] border border-line bg-bg px-2 py-1.5 text-ui leading-relaxed text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent focus:outline-none disabled:opacity-40"
               />
               <div className="flex items-center gap-2">
                 <Btn

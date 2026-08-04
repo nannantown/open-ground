@@ -25,7 +25,7 @@ type TFn = (key: MessageKey, vars?: Record<string, string | number>) => string
 // The run-defaults strip's quiet inline selects — one shared class so the
 // four pickers can't drift apart visually.
 const DEFAULTS_SELECT_CLS =
-  'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+  'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-meta text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
 
 // ─── Board tab ───────────────────────────────────────────────────────────────
 // A kanban of task cards (one source of truth in the central tasks.json).
@@ -601,7 +601,7 @@ export const BoardTab = ({
               disabled={!hasDisplayName}
               title={hasDisplayName ? undefined : t('board.toolbar.mineOnlyNeedsName')}
               className={[
-                'rounded-sm border px-2.5 py-1 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+                'rounded-sm border px-2.5 py-1 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                 !hasDisplayName
                   ? 'cursor-not-allowed border-line text-ink-faint opacity-50'
                   : mineOnly
@@ -626,7 +626,7 @@ export const BoardTab = ({
               onClick={onOpenProjectSettings}
               disabled={projectMissing}
               title={t('board.toolbar.projectSettings')}
-              className="flex items-center gap-1.5 rounded-sm px-1 py-1 text-[11px] text-ink-muted transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
+              className="flex items-center gap-1.5 rounded-sm px-1 py-1 text-meta text-ink-muted transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
             >
               <Settings2 size={13} className="shrink-0" />
               {t('board.toolbar.projectSettings')}
@@ -661,7 +661,7 @@ export const BoardTab = ({
         {defaultsOpen && (
           <>
             {hasGit && (
-              <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+              <label className="flex items-center gap-1 text-micro text-ink-faint">
                 {t('board.run.flowLabel')}
                 <select
                   value={data.config?.completionFlow ?? 'merge'}
@@ -682,7 +682,7 @@ export const BoardTab = ({
                 </select>
               </label>
             )}
-            <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+            <label className="flex items-center gap-1 text-micro text-ink-faint">
               {t('board.run.modelLabel')}
               <select
                 value={data.launch?.model ?? ''}
@@ -706,7 +706,7 @@ export const BoardTab = ({
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+            <label className="flex items-center gap-1 text-micro text-ink-faint">
               {t('board.run.effortLabel')}
               <select
                 value={data.launch?.effort ?? ''}
@@ -732,7 +732,7 @@ export const BoardTab = ({
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-1 text-[10px] text-ink-faint">
+            <label className="flex items-center gap-1 text-micro text-ink-faint">
               {t('board.defaults.permLabel')}
               <select
                 value={data.launch?.permissionMode ?? 'default'}
@@ -766,7 +766,7 @@ export const BoardTab = ({
       {/* First-run guide — one quiet line of "what happens here" while the
           board is empty (F089). Vanishes with the first card. */}
       {data.tasks.length === 0 && (
-        <p className="shrink-0 px-8 pb-3 text-[11.5px] leading-relaxed text-ink-faint">
+        <p className="shrink-0 px-8 pb-3 text-meta leading-relaxed text-ink-faint">
           {t('board.empty.guide')}
         </p>
       )}
@@ -776,10 +776,13 @@ export const BoardTab = ({
           BUT equal-split with no FLOOR is how the columns got crushed: with the
           card drawer open on a 1280px window each column lands at ~125px, and
           every Japanese label inside (「クリア」「＋ カードを追加」) had to fold or
-          clip. `min-w-[150px]` is the width at which those labels fit; below it
-          the row scrolls instead of squeezing. On any window wide enough — which
-          is the normal case, and the only case the mock drew — nothing scrolls
-          and the split stays equal, so this costs the mock nothing. */}
+          clip. The floor is the width at which those labels fit; below it the
+          row scrolls instead of squeezing. On any window wide enough — which is
+          the normal case, and the only case the mock drew — nothing scrolls and
+          the split stays equal, so this costs the mock nothing.
+          166, not 150 (2026-08-04): the floor was cut for 11px labels, and the
+          type scale moved them to 13px. A floor is only a floor for the type it
+          was measured against — when the type moves, it moves. */}
       <div className="no-scrollbar flex min-h-0 flex-1 gap-3.5 overflow-x-auto px-5 pb-5">
         {COLUMNS.map(col => {
           const cards = byColumn[col.key]
@@ -856,7 +859,7 @@ export const BoardTab = ({
                 // lightness difference (bg-inset vs the page) is the boundary.
                 // The drop target keeps its accent signal as a ring (no border,
                 // no layout shift).
-                'flex min-h-0 min-w-[150px] flex-1 flex-col rounded-xl px-2.5 pb-2.5 pt-3 transition-colors',
+                'flex min-h-0 min-w-[166px] flex-1 flex-col rounded-xl px-2.5 pb-2.5 pt-3 transition-colors',
                 isDropTarget ? 'bg-accent/5 ring-1 ring-accent' : 'bg-bg-inset',
               ].join(' ')}
             >
@@ -869,7 +872,7 @@ export const BoardTab = ({
                     The mock's 0.14em was measured on LATIN small caps; carrying it
                     over to 和文 buys nothing and costs the line. `shrink-0` keeps
                     the name whole and lets the hint beside it give way instead. */}
-                <span className="flex shrink-0 items-center gap-[7px] whitespace-nowrap text-[11px] font-semibold text-ink-muted">
+                <span className="flex shrink-0 items-center gap-[7px] whitespace-nowrap text-meta font-semibold text-ink-muted">
                   {/* Instrument lamp: lit only while the column carries work
                       that means something is HAPPENING or WAITING ON YOU —
                       doing=moss, review=azure, blocked=ochre. Neutral when
@@ -892,7 +895,7 @@ export const BoardTab = ({
                     />
                   )}
                   {col.label}{' '}
-                  <span className="font-mono text-[11px] font-normal text-ink-muted">
+                  <span className="font-mono text-meta font-normal text-ink-muted">
                     {cards.length}
                   </span>
                 </span>
@@ -901,7 +904,7 @@ export const BoardTab = ({
                     decision cue (「あなたの判断待ち」), not mechanics. It is rendered
                     BELOW this row, not beside the name — see the note there. */}
                 {col.hint && col.key !== 'blocked' ? (
-                  <span title={col.hint} className="cursor-help text-[10px] text-ink-faint" aria-label={col.hint}>
+                  <span title={col.hint} className="cursor-help text-micro text-ink-faint" aria-label={col.hint}>
                     ⓘ
                   </span>
                 ) : null}
@@ -914,7 +917,7 @@ export const BoardTab = ({
                     onClick={clearDone}
                     disabled={projectMissing}
                     title={t('board.toolbar.clearDoneTitle')}
-                    className="shrink-0 whitespace-nowrap rounded-full px-2.5 py-[3px] text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                    className="shrink-0 whitespace-nowrap rounded-full px-2.5 py-[3px] text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
                   >
                     {t('board.toolbar.clearDone')}
                   </button>
@@ -927,7 +930,7 @@ export const BoardTab = ({
                   so unlike the names above it is allowed to wrap; what was never
                   acceptable was folding short labels, not wrapping prose. */}
               {col.hint && col.key === 'blocked' ? (
-                <p className="shrink-0 px-1.5 pb-1.5 text-[10px] leading-snug text-ink-subtle">
+                <p className="shrink-0 px-1.5 pb-1.5 text-micro leading-snug text-ink-subtle">
                   {col.hint}
                 </p>
               ) : null}
@@ -1011,7 +1014,7 @@ const AddCardButton = ({
         type="button"
         disabled={disabled}
         onClick={onAdd}
-        className="w-full whitespace-nowrap rounded-[10px] bg-ink/[0.04] p-[11px] text-center text-[12px] text-ink-muted transition-colors hover:bg-ink/[0.09] hover:text-ink active:bg-ink/[0.13] active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-ink/[0.04] disabled:hover:text-ink-muted"
+        className="w-full whitespace-nowrap rounded-[10px] bg-ink/[0.04] p-[11px] text-center text-ui text-ink-muted transition-colors hover:bg-ink/[0.09] hover:text-ink active:bg-ink/[0.13] active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-ink/[0.04] disabled:hover:text-ink-muted"
       >
         {t('board.composer.placeholder')}
       </button>

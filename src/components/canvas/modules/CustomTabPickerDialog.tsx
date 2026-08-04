@@ -106,7 +106,7 @@ export const CustomTabPickerDialog = ({
     <button
       type="button"
       onClick={onCreateNew}
-      className="group/create inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-[12px] font-medium text-accent transition-colors hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      className="group/create inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-ui font-medium text-accent transition-colors hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     >
       <Plus size={14} strokeWidth={1.75} className="shrink-0" />
       <span className="underline-offset-2 group-hover/create:underline">
@@ -122,7 +122,7 @@ export const CustomTabPickerDialog = ({
     <button
       type="button"
       onClick={onBrowseMarket}
-      className="group/market inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-[12px] font-medium text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      className="group/market inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-ui font-medium text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     >
       <Store size={14} strokeWidth={1.75} className="shrink-0" />
       <span className="underline-offset-2 group-hover/market:underline">
@@ -163,10 +163,10 @@ export const CustomTabPickerDialog = ({
             className="pointer-events-none absolute right-4 top-[14px] h-[14px] w-[14px] border-r border-t border-line-strong opacity-70"
           />
           <p className="label-cap mb-3 text-accent">{t('customTabs.pickerLabel')}</p>
-          <h2 className="font-display text-[23px] font-medium leading-[1.12] tracking-tightest text-ink">
+          <h2 className="font-display text-head font-medium leading-[1.12] tracking-tightest text-ink">
             {t('customTabs.pickerTitle')}
           </h2>
-          <p className="mt-[9px] max-w-[42ch] text-[12px] leading-[1.55] text-ink-muted">
+          <p className="mt-[9px] max-w-[42ch] text-ui leading-[1.55] text-ink-muted">
             {t('customTabs.pickerExplain')}
           </p>
         </header>
@@ -232,13 +232,13 @@ export const CustomTabPickerDialog = ({
                         'focus-visible:outline focus-visible:outline-[1.5px] focus-visible:-outline-offset-2 focus-visible:outline-accent',
                       ].join(' ')}
                     >
-                      <span className="font-mono text-[10px] uppercase tracking-[0.06em] tabular-nums text-ink-faint group-hover:text-ink-subtle">
+                      <span className="font-mono text-micro uppercase tracking-[0.06em] tabular-nums text-ink-faint group-hover:text-ink-subtle">
                         {serial}
                       </span>
                       <div className="min-w-0">
                         <div
                           className={[
-                            'truncate text-[13px] font-medium leading-[1.3]',
+                            'truncate text-ui font-medium leading-[1.3]',
                             n.enabled ? 'text-ink' : 'text-ink-muted',
                           ].join(' ')}
                         >
@@ -247,12 +247,12 @@ export const CustomTabPickerDialog = ({
                       </div>
                       <div className="flex items-center justify-end gap-2.5">
                         {n.enabled ? (
-                          <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[9px] font-medium uppercase text-moss">
+                          <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-plate font-medium uppercase text-moss">
                             <Eye size={13} strokeWidth={2} />
                             {t('customTabs.shown')}
                           </span>
                         ) : (
-                          <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[9px] font-medium uppercase text-ink-faint">
+                          <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-plate font-medium uppercase text-ink-faint">
                             <EyeOff size={13} strokeWidth={2} />
                             {t('customTabs.hidden')}
                           </span>
@@ -270,10 +270,10 @@ export const CustomTabPickerDialog = ({
         {modules.length === 0 ? (
           // Empty state — a single ledger line with the T·— serial.
           <div className="flex items-baseline gap-3 px-[30px] py-7">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-line-strong">
+            <span className="font-mono text-micro uppercase tracking-[0.06em] text-line-strong">
               T·—
             </span>
-            <span className="font-display text-[12.5px] italic text-ink-muted">
+            <span className="font-display text-ui italic text-ink-muted">
               {t('customTabs.pickerEmpty')}
             </span>
           </div>
@@ -340,7 +340,7 @@ export const CustomTabPickerDialog = ({
                       ].join(' ')}
                     >
                       {/* serial — mono, tabular, firms up on hover */}
-                      <span className="font-mono text-[10px] uppercase tracking-[0.06em] tabular-nums text-ink-faint group-hover:text-ink-subtle">
+                      <span className="font-mono text-micro uppercase tracking-[0.06em] tabular-nums text-ink-faint group-hover:text-ink-subtle">
                         {serial}
                       </span>
 
@@ -348,7 +348,7 @@ export const CustomTabPickerDialog = ({
                       <div className="min-w-0">
                         <div
                           className={[
-                            'truncate text-[13px] font-medium leading-[1.3]',
+                            'truncate text-ui font-medium leading-[1.3]',
                             attached ? 'text-ink-muted' : 'text-ink',
                           ].join(' ')}
                         >
@@ -356,7 +356,7 @@ export const CustomTabPickerDialog = ({
                         </div>
                         {m.description && (
                           <div
-                            className="mt-0.5 truncate text-[11px] leading-[1.4] text-ink-muted"
+                            className="mt-0.5 truncate text-meta leading-[1.4] text-ink-muted"
                             title={m.description}
                           >
                             {m.description}
@@ -368,7 +368,7 @@ export const CustomTabPickerDialog = ({
                       <div className="flex items-center justify-end gap-3">
                         {confirming ? (
                           <span className="inline-flex items-center gap-2 text-accent-deeper">
-                            <span className="whitespace-nowrap text-[11px] font-semibold">
+                            <span className="whitespace-nowrap text-meta font-semibold">
                               {t(
                                 kind === 'delete'
                                   ? 'customTabs.deleteConfirmYes'
@@ -406,19 +406,19 @@ export const CustomTabPickerDialog = ({
                         ) : (
                           <>
                             {typeof m.version === 'number' && (
-                              <span className="font-mono text-[11px] tabular-nums text-ink-faint">
+                              <span className="font-mono text-meta tabular-nums text-ink-faint">
                                 {t('customTabs.publishedBadge', {
                                   version: String(m.version),
                                 })}
                               </span>
                             )}
                             {m.origin === 'installed' && (
-                              <span className="whitespace-nowrap rounded-[3px] border border-line-strong px-[5px] py-0.5 text-[8.5px] font-medium uppercase leading-none text-ink-faint">
+                              <span className="whitespace-nowrap rounded-[3px] border border-line-strong px-[5px] py-0.5 text-plate font-medium uppercase leading-none text-ink-faint">
                                 {t('customTabs.installed')}
                               </span>
                             )}
                             {attached && (
-                              <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[9px] font-medium uppercase text-moss">
+                              <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-plate font-medium uppercase text-moss">
                                 <Check size={13} strokeWidth={2} />
                                 {t('customTabs.pickerAttached')}
                               </span>
@@ -474,7 +474,7 @@ export const CustomTabPickerDialog = ({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-ui font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {t('common.close')}
           </button>

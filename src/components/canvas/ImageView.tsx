@@ -61,7 +61,7 @@ export const ImageView = memo(({
       onPointerDown={onPointerDown}
       style={{ width: w, height: h, opacity }}
       className={[
-        'flex items-center justify-center overflow-hidden rounded-[4px] border border-dashed border-line bg-bg-inset text-[11px] text-ink-faint cursor-grab active:cursor-grabbing',
+        'flex items-center justify-center overflow-hidden rounded-[4px] border border-dashed border-line bg-bg-inset text-meta text-ink-faint cursor-grab active:cursor-grabbing',
         ring,
       ].join(' ')}
     >

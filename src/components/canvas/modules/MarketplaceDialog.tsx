@@ -99,10 +99,10 @@ export const MarketplaceDialog = ({
   // ledger line with a T·— style serial, so the body never looks broken.
   const message = (text: string) => (
     <div className="flex items-baseline gap-3 px-[30px] py-7">
-      <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-line-strong">
+      <span className="font-mono text-micro uppercase tracking-[0.06em] text-line-strong">
         M·—
       </span>
-      <span className="text-[12px] leading-relaxed text-ink-muted">{text}</span>
+      <span className="text-ui leading-relaxed text-ink-muted">{text}</span>
     </div>
   )
 
@@ -136,10 +136,10 @@ export const MarketplaceDialog = ({
             className="pointer-events-none absolute right-4 top-[14px] h-[14px] w-[14px] border-r border-t border-line-strong opacity-70"
           />
           <p className="label-cap mb-3 text-accent">{t('customTabs.marketLabel')}</p>
-          <h3 className="font-display text-[23px] font-medium leading-[1.12] tracking-tightest text-ink">
+          <h3 className="font-display text-head font-medium leading-[1.12] tracking-tightest text-ink">
             {t('customTabs.marketTitle')}
           </h3>
-          <p className="mt-[9px] max-w-[46ch] text-[12px] leading-[1.55] text-ink-muted">
+          <p className="mt-[9px] max-w-[46ch] text-ui leading-[1.55] text-ink-muted">
             {t('customTabs.marketExplain')}
           </p>
         </header>
@@ -168,15 +168,15 @@ export const MarketplaceDialog = ({
                             key={item.remoteId}
                             className="relative grid grid-cols-[44px_1fr_auto] items-center gap-x-4 border-t border-line-soft px-[30px] py-[14px] first:border-t-0 before:absolute before:inset-y-0 before:left-[74px] before:w-px before:bg-line-soft/70"
                           >
-                            <span className="font-mono text-[10px] uppercase tracking-[0.06em] tabular-nums text-ink-faint">
+                            <span className="font-mono text-micro uppercase tracking-[0.06em] tabular-nums text-ink-faint">
                               {serial}
                             </span>
                             <div className="min-w-0">
                               <div className="flex items-baseline gap-2">
-                                <span className="truncate text-[13px] font-medium leading-[1.3] text-ink">
+                                <span className="truncate text-ui font-medium leading-[1.3] text-ink">
                                   {item.name}
                                 </span>
-                                <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint">
+                                <span className="shrink-0 font-mono text-meta tabular-nums text-ink-faint">
                                   {t('customTabs.marketVersion', {
                                     version: String(item.version),
                                   })}
@@ -184,7 +184,7 @@ export const MarketplaceDialog = ({
                               </div>
                               {item.description && (
                                 <div
-                                  className="mt-0.5 truncate text-[11px] leading-[1.4] text-ink-muted"
+                                  className="mt-0.5 truncate text-meta leading-[1.4] text-ink-muted"
                                   title={item.description}
                                 >
                                   {item.description}
@@ -195,7 +195,7 @@ export const MarketplaceDialog = ({
                               type="button"
                               onClick={() => void install(item.remoteId)}
                               disabled={installing || installed}
-                              className="rounded-[5px] border border-line-strong px-3 py-1 text-[11px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated disabled:cursor-not-allowed disabled:border-line disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                              className="rounded-[5px] border border-line-strong px-3 py-1 text-meta font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated disabled:cursor-not-allowed disabled:border-line disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                             >
                               {installing
                                 ? t('customTabs.installing')
@@ -211,7 +211,7 @@ export const MarketplaceDialog = ({
         </div>
 
         {installError && (
-          <p className="px-[30px] pt-3 text-[11px] leading-relaxed text-accent">
+          <p className="px-[30px] pt-3 text-meta leading-relaxed text-accent">
             {installError}
           </p>
         )}
@@ -222,7 +222,7 @@ export const MarketplaceDialog = ({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-ui font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {t('common.close')}
           </button>

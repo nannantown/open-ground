@@ -80,13 +80,13 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
     switch (b.kind) {
       case 'subhead':
         return (
-          <h3 key={i} className="pt-3 text-[12px] font-semibold uppercase text-ink-faint">
+          <h3 key={i} className="pt-3 text-ui font-semibold uppercase text-ink-faint">
             {L(b.text)}
           </h3>
         )
       case 'p':
         return (
-          <p key={i} className="text-[14px] leading-relaxed text-ink-muted">
+          <p key={i} className="text-read leading-relaxed text-ink-muted">
             {inline(L(b.text))}
           </p>
         )
@@ -94,8 +94,8 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
         return (
           <ol key={i} className="space-y-2.5">
             {b.items.map((it, n) => (
-              <li key={n} className="flex gap-3 text-[14px] leading-relaxed text-ink-muted">
-                <span className="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line bg-bg-inset text-[11px] font-medium tabular-nums text-ink-faint">
+              <li key={n} className="flex gap-3 text-read leading-relaxed text-ink-muted">
+                <span className="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line bg-bg-inset text-meta leading-none font-medium tabular-nums text-ink-faint">
                   {n + 1}
                 </span>
                 <span>{inline(L(it))}</span>
@@ -107,7 +107,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
         return (
           <ul key={i} className="space-y-2">
             {b.items.map((it, n) => (
-              <li key={n} className="flex gap-2.5 text-[14px] leading-relaxed text-ink-muted">
+              <li key={n} className="flex gap-2.5 text-read leading-relaxed text-ink-muted">
                 <span className="mt-[9px] h-1 w-1 shrink-0 rounded-full bg-line-strong" />
                 <span>{inline(L(it))}</span>
               </li>
@@ -119,7 +119,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
         return (
           <div key={i} className={`rounded-[3px] border-l-2 ${t.bar} ${t.bg} px-3.5 py-2.5`}>
             <span className={`label-cap ${t.tag}`}>{t.label[lang]}</span>
-            <p className="mt-1 text-[13px] leading-relaxed text-ink-muted">{inline(L(b.text))}</p>
+            <p className="mt-1 text-ui leading-relaxed text-ink-muted">{inline(L(b.text))}</p>
           </div>
         )
       }
@@ -131,14 +131,14 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
               <div key={n} className={`flex gap-3 px-3 py-2 ${n ? 'border-t border-line-soft' : ''}`}>
                 <div className="w-[42%] shrink-0">
                   {mono ? (
-                    <code className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-snug text-ink">
+                    <code className="whitespace-pre-wrap break-words font-mono text-meta leading-snug text-ink">
                       {r.k}
                     </code>
                   ) : (
-                    <span className="text-[13px] font-medium text-ink">{r.k}</span>
+                    <span className="text-ui font-medium text-ink">{r.k}</span>
                   )}
                 </div>
-                <div className="flex-1 text-[13px] leading-snug text-ink-muted">{inline(L(r.v))}</div>
+                <div className="flex-1 text-ui leading-snug text-ink-muted">{inline(L(r.v))}</div>
               </div>
             ))}
           </div>
@@ -168,10 +168,10 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
         </span>
         <span className="label-cap text-ink-faint">{L(s.kicker)}</span>
       </div>
-      <h2 className="font-display text-[26px] leading-[1.15] tracking-tight text-ink" style={DISPLAY}>
+      <h2 className="font-display text-head leading-[1.15] tracking-tight text-ink" style={DISPLAY}>
         {L(s.title)}
       </h2>
-      <p className="mt-2 text-[15px] leading-relaxed text-ink-subtle">{L(s.intro)}</p>
+      <p className="mt-2 text-read leading-relaxed text-ink-subtle">{L(s.intro)}</p>
       <div className="mt-6 space-y-4">{s.blocks.map(renderBlock)}</div>
     </section>
   )
@@ -202,7 +202,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
             <OpenGroundMark size={20} className="shrink-0 select-none" />
             <div className="flex min-w-0 flex-col leading-none">
               <span className="label-cap label-cap-latin text-ink-faint">OPEN GROUND</span>
-              <span className="mt-0.5 font-display text-[15px] tracking-tight text-ink" style={DISPLAY}>
+              <span className="mt-0.5 font-display text-read tracking-tight text-ink" style={DISPLAY}>
                 {lang === 'ja' ? 'マニュアル' : 'Manual'}
               </span>
             </div>
@@ -218,7 +218,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
                 onClick={() => setLang(l)}
                 aria-pressed={lang === l}
                 className={[
-                  'rounded-[2px] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors',
+                  'rounded-[2px] px-2 py-1 text-micro font-semibold uppercase tracking-[0.08em] transition-colors',
                   lang === l ? 'bg-accent text-bg-card' : 'text-ink-muted hover:bg-plane hover:text-ink',
                 ].join(' ')}
               >
@@ -241,7 +241,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
                 type="button"
                 onClick={() => go(s.id)}
                 className={[
-                  'flex items-center gap-2.5 rounded-[3px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
+                  'flex items-center gap-2.5 rounded-[3px] px-2.5 py-1.5 text-left text-ui transition-colors',
                   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                   on ? 'bg-accent-soft text-accent' : 'text-ink-muted hover:bg-plane hover:text-ink',
                 ].join(' ')}
@@ -257,7 +257,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
         <div ref={scrollRef} onScroll={onScroll} className="relative min-w-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[760px] px-6 py-10 md:px-12">
             {MANUAL_SECTIONS.map(renderSection)}
-            <footer className="mt-2 flex items-center gap-1.5 border-t border-line-soft pt-6 text-[11px] text-ink-faint">
+            <footer className="mt-2 flex items-center gap-1.5 border-t border-line-soft pt-6 text-meta text-ink-faint">
               <CornerDownRight size={12} strokeWidth={1.75} className="shrink-0" />
               <span>
                 {lang === 'ja'
@@ -293,13 +293,13 @@ function LayersDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
       </div>
       <div className="flex items-center gap-1.5 pl-1 text-ink-faint">
         <CornerDownRight size={13} strokeWidth={1.75} />
-        <span className="text-[11px]">{lang === 'ja' ? 'カードを開く' : 'open a card'}</span>
+        <span className="text-meta">{lang === 'ja' ? 'カードを開く' : 'open a card'}</span>
       </div>
       <div>
         <div className="label-cap mb-2 text-ink-faint">{lang === 'ja' ? 'レイヤー2 · プロジェクト' : 'Layer 2 · the project'}</div>
         <div className="flex flex-wrap gap-2">
           {['Board', 'Canvas', 'Terminal'].map((t) => (
-            <div key={t} className="rounded-[2px] border border-line bg-bg-card px-3 py-1.5 text-[12px] text-ink shadow-card">
+            <div key={t} className="rounded-[2px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink shadow-card">
               {t}
             </div>
           ))}
@@ -332,7 +332,7 @@ function BoardDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
               <div key={n} className="h-3.5 rounded-[2px] border border-line bg-bg-card" />
             ))}
           </div>
-          {c.opt && <div className="mt-1.5 text-[9px] leading-tight text-ink-faint">{lang === 'ja' ? '任意' : 'optional'}</div>}
+          {c.opt && <div className="mt-1.5 text-plate leading-tight text-ink-faint">{lang === 'ja' ? '任意' : 'optional'}</div>}
         </div>
       ))}
     </div>

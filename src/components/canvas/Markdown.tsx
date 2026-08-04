@@ -36,7 +36,7 @@ export const Markdown = ({ source }: { source: string }) => {
   const flushPara = () => {
     if (para.length === 0) return
     blocks.push(
-      <p key={key++} className="text-[13px] leading-relaxed text-ink-muted">
+      <p key={key++} className="text-ui leading-relaxed text-ink-muted">
         {renderInline(para.join(' '))}
       </p>,
     )
@@ -47,7 +47,7 @@ export const Markdown = ({ source }: { source: string }) => {
     blocks.push(
       <ul key={key++} className="space-y-1 pl-1">
         {list.map((item, i) => (
-          <li key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink-muted">
+          <li key={i} className="flex items-start gap-2 text-ui leading-relaxed text-ink-muted">
             <span className="mt-[8px] h-[4px] w-[4px] shrink-0 rounded-full bg-accent/60" />
             <span>{renderInline(item)}</span>
           </li>
@@ -67,10 +67,10 @@ export const Markdown = ({ source }: { source: string }) => {
       const level = h[1].length
       const cls =
         level === 1
-          ? 'mt-1 text-[18px] font-display text-ink'
+          ? 'mt-1 text-title font-display text-ink'
           : level === 2
-            ? 'mt-4 text-[15px] font-semibold text-ink'
-            : 'mt-3 text-[13px] font-semibold text-ink'
+            ? 'mt-4 text-read font-semibold text-ink'
+            : 'mt-3 text-ui font-semibold text-ink'
       blocks.push(
         <div key={key++} className={cls}>
           {renderInline(h[2])}

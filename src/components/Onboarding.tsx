@@ -103,12 +103,12 @@ export function Onboarding({
           <div className="flex items-center gap-2.5 text-ink" style={rise(0)}>
             <OpenGroundMark size={28} className="shrink-0 select-none" />
             <OpenGroundWordmark className="select-none [&>svg]:h-[20px] [&>svg]:w-auto [&>svg]:block" />
-            <span className="inline-flex shrink-0 select-none items-center rounded-[3px] border border-accent/40 bg-accent/10 px-1.5 pt-[3px] pb-[2px] text-[9px] font-semibold uppercase leading-none tracking-wide text-accent">
+            <span className="inline-flex shrink-0 select-none items-center rounded-[3px] border border-accent/40 bg-accent/10 px-1.5 pt-[3px] pb-[2px] text-plate font-semibold uppercase leading-none tracking-wide text-accent">
               Beta
             </span>
           </div>
 
-          <h1 style={rise(90)} className="mt-10 font-display text-[26px] leading-[1.2] tracking-tight text-ink">
+          <h1 style={rise(90)} className="mt-10 font-display text-head leading-[1.2] tracking-tight text-ink">
             {t('onboarding.tagline')}
           </h1>
           <div className="mt-9" style={rise(170)}>
@@ -116,7 +116,7 @@ export function Onboarding({
             <ol className="space-y-3">
               {['line1', 'line2', 'line3'].map((k, i) => (
                 <li key={k} className="flex gap-3 text-sm leading-relaxed text-ink-subtle">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line bg-bg-inset text-[11px] font-medium text-ink-faint">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line bg-bg-inset text-meta leading-none font-medium text-ink-faint">
                     {i + 1}
                   </span>
                   <span>{t(`onboarding.how.${k}`)}</span>
@@ -126,7 +126,7 @@ export function Onboarding({
           </div>
           {/* Beta notice — set expectations (breaking changes) and invite
               feedback. OPEN GROUND ships a Feedback button in the toolbar. */}
-          <p style={rise(210)} className="mt-7 rounded-[3px] border border-line bg-bg-inset px-3 py-2.5 text-[12px] leading-relaxed text-ink-subtle">
+          <p style={rise(210)} className="mt-7 rounded-[3px] border border-line bg-bg-inset px-3 py-2.5 text-ui leading-relaxed text-ink-subtle">
             <span className="font-semibold text-accent">{t('onboarding.beta.tag')}</span>{' '}
             {t('onboarding.beta.note')}
           </p>

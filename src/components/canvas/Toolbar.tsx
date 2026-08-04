@@ -98,7 +98,7 @@ export const Toolbar = ({
             to the wordmark inside a nested leading-none group (its line-box would
             otherwise inflate the wrapper and push the wordmark off the mark's
             centre). The outer gap-3.5 still spaces the · / project count. */}
-        <div className="flex min-w-0 items-center gap-2 text-ink">
+        <div className="flex shrink-0 items-center gap-2 text-ink">
           <OpenGroundMark size={18} className="shrink-0 select-none" />
           <OpenGroundWordmark className="shrink-0 select-none [&>svg]:h-[15px] [&>svg]:w-auto [&>svg]:block" />
           {/* Beta tag — OPEN GROUND is still beta; breaking changes may land. */}
@@ -106,7 +106,7 @@ export const Toolbar = ({
             // inline-flex + a 1px-top-heavy pad optically centres the all-caps
             // glyphs (a tight uppercase line-box leaves empty descender space at
             // the bottom, which otherwise makes the text sit high).
-            className="inline-flex shrink-0 select-none items-center rounded-[3px] border border-accent/40 bg-accent/10 px-1.5 pt-[3px] pb-[2px] text-[9px] font-semibold uppercase leading-none tracking-wide text-accent"
+            className="inline-flex shrink-0 select-none items-center rounded-[3px] border border-accent/40 bg-accent/10 px-1.5 pt-[3px] pb-[2px] text-plate font-semibold uppercase leading-none tracking-wide text-accent"
             title={t('toolbar.betaTooltip')}
           >
             Beta
@@ -114,8 +114,12 @@ export const Toolbar = ({
         </div>
         {projectCount > 0 && (
           <>
-            <span className="text-line-strong text-[14px] leading-none">·</span>
-            <span className="text-[11px] text-ink-subtle tracking-[0.04em] tabular-nums">
+            <span className="shrink-0 text-line-strong text-read leading-none">·</span>
+            {/* THE part that may give way. `min-w-0 truncate` makes the count the
+                thing the flexbox squeezes when the right-hand cluster grows —
+                previously the whole lockup was the squeezable one, so the app's
+                own name disappeared before its project count did. */}
+            <span className="min-w-0 truncate text-meta text-ink-subtle tracking-[0.04em] tabular-nums">
               {projectCount} {projectCount === 1 ? 'project' : 'projects'}
             </span>
           </>
@@ -123,7 +127,9 @@ export const Toolbar = ({
       </div>
 
       <div className="pointer-events-auto flex shrink-0 items-center gap-3">
-        {usage && <div className="hidden md:flex items-center">{usage}</div>}
+        {/* The gauge is the widest single item in the bar (~200px). It is ambient
+            information, not a control, so it is the first thing to go. */}
+        {usage && <div className="hidden xl:flex items-center">{usage}</div>}
         {/* Standalone, always-visible feedback button. The app is in beta and we
             want feedback actively, so it's surfaced as its own labelled pill
             rather than buried in the account menu. */}
@@ -132,10 +138,10 @@ export const Toolbar = ({
             type="button"
             onClick={onFeedback}
             title={t('toolbar.feedback')}
-            className="flex items-center gap-1.5 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] px-3 py-2 shadow-card text-[12px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="flex items-center gap-1.5 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] px-2.5 xl:px-3 py-2 shadow-card text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <MessageSquare size={13} strokeWidth={1.75} />
-            <span>{t('toolbar.feedback')}</span>
+            <span className="hidden xl:inline">{t('toolbar.feedback')}</span>
           </button>
         )}
         <div className="flex items-center gap-0 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] p-0.5 shadow-card">
@@ -347,7 +353,7 @@ const AccountControl = ({
             className="h-5 w-5 rounded-full object-cover ring-1 ring-line"
           />
         ) : (
-          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent-soft text-accent text-[10px] font-medium leading-none">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent-soft text-accent text-micro font-medium leading-none">
             {initials}
           </span>
         )}
@@ -356,12 +362,12 @@ const AccountControl = ({
         <Menu>
           <div className="mb-1 border-b border-line-soft px-3 pb-2 pt-1">
             {user.name && (
-              <div className="truncate text-[12px] font-medium leading-tight text-ink">
+              <div className="truncate text-ui font-medium leading-tight text-ink">
                 {user.name}
               </div>
             )}
             {user.email && (
-              <div className="truncate text-[11px] leading-tight text-ink-subtle">
+              <div className="truncate text-meta leading-tight text-ink-subtle">
                 {user.email}
               </div>
             )}
@@ -398,7 +404,7 @@ const MenuItem = ({
   <button
     type="button"
     onClick={onClick}
-    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
   >
     <span className="text-ink-faint">{icon}</span>
     {label}

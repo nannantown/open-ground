@@ -768,7 +768,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
 
   if (!loaded) {
     return (
-      <div className="flex h-full w-full items-center justify-center text-[12px] text-ink-subtle">
+      <div className="flex h-full w-full items-center justify-center text-ui text-ink-subtle">
         Loading…
       </div>
     )
@@ -810,7 +810,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
             onInspectorOpenChange={setInspectorOpen}
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center text-[12px] text-ink-subtle">
+          <div className="flex h-full w-full items-center justify-center text-ui text-ink-subtle">
             Loading…
           </div>
         )}
@@ -833,7 +833,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
       {notice && (
         <div
           role="alert"
-          className="absolute bottom-4 right-4 z-20 flex max-w-md items-center gap-3 rounded-[4px] border border-line bg-bg-card/95 px-4 py-2.5 text-[12px] shadow-card backdrop-blur"
+          className="absolute bottom-4 right-4 z-20 flex max-w-md items-center gap-3 rounded-[4px] border border-line bg-bg-card/95 px-4 py-2.5 text-ui shadow-card backdrop-blur"
         >
           <span className="text-ink">
             {notice === 'delete-failed'

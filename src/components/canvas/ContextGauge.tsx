@@ -64,7 +64,7 @@ const TEXT_TONE: Record<UsageLevel, string> = {
 // all defined, per the interactive-states rule. Ghost on dark — transparent
 // until touched, and unmistakably inert when disabled.
 const ACTION_BTN = [
-  'w-full rounded-[3px] border px-2 py-1.5 text-left text-[11px] font-medium transition-all duration-150',
+  'w-full rounded-[3px] border px-2 py-1.5 text-left text-meta font-medium transition-all duration-150',
   'border-white/15 bg-transparent text-white/70',
   'hover:border-white/25 hover:bg-white/[0.08] hover:text-white',
   'active:border-white/30 active:bg-white/[0.12] active:text-white',
@@ -75,7 +75,7 @@ const ACTION_BTN = [
 // The focus box shares the buttons' ghost-on-dark skin, with its own resting /
 // hover / focus / disabled steps (a text field has no meaningful "pressed").
 const FOCUS_INPUT = [
-  'w-full rounded-[3px] border px-2 py-1 text-[11px] transition-all duration-150',
+  'w-full rounded-[3px] border px-2 py-1 text-meta transition-all duration-150',
   'border-white/10 bg-white/[0.04] text-white placeholder:text-white/35',
   'hover:border-white/20 hover:bg-white/[0.07]',
   'focus:border-white/30 focus:bg-white/[0.09] focus:outline-none',
@@ -186,7 +186,7 @@ export const ContextGauge = ({ leftPct, source, hasSession, onAction }: Props) =
         {/* Quiet by default: the number only joins the tab once the session is
             actually filling up (amber / red), so a healthy pane stays clean. */}
         {known && level !== 'ok' && (
-          <span className={`font-mono text-[9px] tabular-nums ${TEXT_TONE[level]}`}>{left}%</span>
+          <span className={`font-mono text-plate tabular-nums ${TEXT_TONE[level]}`}>{left}%</span>
         )}
       </button>
 
@@ -198,12 +198,12 @@ export const ContextGauge = ({ leftPct, source, hasSession, onAction }: Props) =
         >
           <div className="mb-2 flex items-center gap-1.5">
             <Gauge size={12} strokeWidth={2} className={TEXT_TONE[level]} aria-hidden />
-            <span className="text-[11px] font-semibold text-white">
+            <span className="text-meta font-semibold text-white">
               {t('projectPanel.contextGauge.label')}
             </span>
           </div>
 
-          <div className={`text-[12px] font-semibold tabular-nums ${TEXT_TONE[level]}`}>
+          <div className={`text-ui font-semibold tabular-nums ${TEXT_TONE[level]}`}>
             {reading}
           </div>
           <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
@@ -212,7 +212,7 @@ export const ContextGauge = ({ leftPct, source, hasSession, onAction }: Props) =
               style={{ width: `${fill}%` }}
             />
           </div>
-          <p className="mt-2 text-[10px] leading-relaxed text-white/50">
+          <p className="mt-2 text-micro leading-relaxed text-white/50">
             {known
               ? t(
                   source === 'footnote'
@@ -233,7 +233,7 @@ export const ContextGauge = ({ leftPct, source, hasSession, onAction }: Props) =
                   className={ACTION_BTN}
                 >
                   <span className="block">{t(`projectPanel.contextGauge.${id}`)}</span>
-                  <span className="mt-0.5 block text-[10px] font-normal text-white/45">
+                  <span className="mt-0.5 block text-micro font-normal text-white/45">
                     {busyAction === id
                       ? t('projectPanel.contextGauge.sending')
                       : t(`projectPanel.contextGauge.${id}Hint`)}
@@ -268,7 +268,7 @@ export const ContextGauge = ({ leftPct, source, hasSession, onAction }: Props) =
           {outcome && (
             <p
               role="status"
-              className={`mt-2 text-[10px] leading-relaxed ${
+              className={`mt-2 text-micro leading-relaxed ${
                 outcome === 'ok' ? 'text-moss' : 'text-ochre'
               }`}
             >

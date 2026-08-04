@@ -112,10 +112,10 @@ export const CustomTabCreateDialog = ({
             className="pointer-events-none absolute right-4 top-[14px] h-[14px] w-[14px] border-r border-t border-line-strong opacity-70"
           />
           <p className="label-cap mb-3 text-accent">{t('customTabs.createLabel')}</p>
-          <h3 className="font-display text-[23px] font-medium leading-[1.12] tracking-tightest text-ink">
+          <h3 className="font-display text-head font-medium leading-[1.12] tracking-tightest text-ink">
             {t('customTabs.createTitle')}
           </h3>
-          <p className="mt-[9px] max-w-[44ch] text-[12px] leading-[1.55] text-ink-muted">
+          <p className="mt-[9px] max-w-[44ch] text-ui leading-[1.55] text-ink-muted">
             {t('customTabs.createExplain')}
           </p>
         </header>
@@ -132,7 +132,7 @@ export const CustomTabCreateDialog = ({
             maxLength={LABEL_MAX}
             placeholder={t('customTabs.createNamePlaceholder')}
             disabled={busy}
-            className="w-full rounded-[3px] border border-line bg-bg px-3 py-2 text-[12px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            className="w-full rounded-[3px] border border-line bg-bg px-3 py-2 text-ui text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           />
           <label className="label-cap mb-1.5 mt-4 block text-ink-muted">
             {t('customTabs.createDescription')}
@@ -143,10 +143,10 @@ export const CustomTabCreateDialog = ({
             maxLength={DESCRIPTION_MAX}
             placeholder={t('customTabs.createDescriptionPlaceholder')}
             disabled={busy}
-            className="w-full resize-y rounded-[3px] border border-line bg-bg px-3 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            className="w-full resize-y rounded-[3px] border border-line bg-bg px-3 py-2 text-ui leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           />
           {error && (
-            <p className="mt-3 text-[11px] leading-relaxed text-accent">{error}</p>
+            <p className="mt-3 text-meta leading-relaxed text-accent">{error}</p>
           )}
         </div>
 

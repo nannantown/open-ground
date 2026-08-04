@@ -429,7 +429,7 @@ export const CollabInviteDialog = ({
 
   // Shared classes for the small text "link" buttons in the lists.
   const textBtn =
-    'shrink-0 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+    'shrink-0 rounded-sm px-1.5 py-1 text-meta text-ink-muted transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
   const iconBtn =
     'shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:text-accent active:text-accent disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
@@ -460,10 +460,10 @@ export const CollabInviteDialog = ({
         <div className="w-full px-6 py-10">
           <div className="mx-auto w-full max-w-[480px]">
             <p className="label-cap text-accent mb-2">{t('projectPanel.collabLabel')}</p>
-            <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
+            <h3 className="font-display text-title leading-snug text-ink tracking-tightest">
               {t('projectPanel.collabTitle', { name: projectName })}
             </h3>
-            <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
+            <p className="mt-2.5 text-ui leading-relaxed text-ink-muted">
               {t('projectPanel.collabExplain')}
             </p>
 
@@ -498,13 +498,13 @@ export const CollabInviteDialog = ({
                 placeholder={t('projectPanel.collabSharedName')}
                 className={FIELD_INPUT_CSS}
               />
-              <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+              <p className="mt-1 text-meta leading-relaxed text-ink-faint">
                 {t('projectPanel.collabSharedNameHint')}
               </p>
             </div>
 
             {error && (
-              <p className="mt-3 text-[11px] leading-relaxed text-accent">{error}</p>
+              <p className="mt-3 text-meta leading-relaxed text-accent">{error}</p>
             )}
 
             {/* ─────────────────────────────────────────────────────────────
@@ -518,11 +518,11 @@ export const CollabInviteDialog = ({
                   <label className="label-cap text-ink-muted">
                     {t('projectPanel.collabInviteEmailLabel')}
                   </label>
-                  <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent">
+                  <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-plate font-semibold uppercase tracking-wide text-accent">
                     {t('projectPanel.collabInviteRecommended')}
                   </span>
                 </div>
-                <p className="mb-2.5 text-[11px] leading-relaxed text-ink-faint">
+                <p className="mb-2.5 text-meta leading-relaxed text-ink-faint">
                   {t('projectPanel.collabInviteEmailExplain')}
                 </p>
                 {/* Email + invite — a PENDING invite the named person accepts in-app. */}
@@ -561,9 +561,9 @@ export const CollabInviteDialog = ({
                     {t('projectPanel.collabMembersLabel')}
                   </label>
                   {members === null ? (
-                    <p className="text-[11px] text-ink-faint">{t('projectPanel.loading')}</p>
+                    <p className="text-meta text-ink-faint">{t('projectPanel.loading')}</p>
                   ) : members.length === 0 ? (
-                    <p className="text-[11px] leading-relaxed text-ink-faint">
+                    <p className="text-meta leading-relaxed text-ink-faint">
                       {t('projectPanel.collabNoMembers')}
                     </p>
                   ) : (
@@ -575,13 +575,13 @@ export const CollabInviteDialog = ({
                         return (
                           <li
                             key={(m.email ?? m.userId ?? '') + m.role}
-                            className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
+                            className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-ui"
                           >
                             <span className="min-w-0 flex-1 truncate text-ink">
                               {m.email ?? t('projectPanel.collabMemberNoEmail')}
                             </span>
                             <span
-                              className={`shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+                              className={`shrink-0 rounded-sm border px-1.5 py-0.5 text-micro uppercase tracking-wide ${
                                 isPending
                                   ? 'border-accent/40 bg-accent-soft text-accent'
                                   : 'border-line text-ink-muted'
@@ -633,7 +633,7 @@ export const CollabInviteDialog = ({
                 <label className="mb-1 block label-cap text-ink-muted">
                   {t('projectPanel.collabQuickShareLabel')}
                 </label>
-                <p className="mb-2.5 text-[11px] leading-relaxed text-ink-faint">
+                <p className="mb-2.5 text-meta leading-relaxed text-ink-faint">
                   {t('projectPanel.collabQuickShareExplain')}
                 </p>
 
@@ -655,7 +655,7 @@ export const CollabInviteDialog = ({
                             aria-checked={selected}
                             onClick={() => setMode(m)}
                             disabled={name === null}
-                            className={`flex-1 rounded-[3px] border px-2.5 py-1.5 text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 ${
+                            className={`flex-1 rounded-[3px] border px-2.5 py-1.5 text-meta font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 ${
                               selected
                                 ? 'border-accent bg-accent text-bg-card'
                                 : 'border-line bg-transparent text-ink-muted hover:border-accent hover:text-accent'
@@ -670,7 +670,7 @@ export const CollabInviteDialog = ({
                         )
                       })}
                     </div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                    <p className="mt-1 text-meta leading-relaxed text-ink-faint">
                       {t(
                         mode === 'open'
                           ? 'projectPanel.collabModeOpenHint'
@@ -678,7 +678,7 @@ export const CollabInviteDialog = ({
                       )}
                     </p>
 
-                    <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-ink-muted">
+                    <label className="mt-3 flex cursor-pointer items-center gap-2 text-ui text-ink-muted">
                       <input
                         type="checkbox"
                         checked={singleUse}
@@ -689,7 +689,7 @@ export const CollabInviteDialog = ({
                     </label>
 
                     <div className="mt-2 flex items-center gap-2">
-                      <label htmlFor="collab-member-cap" className="text-[12px] text-ink-muted">
+                      <label htmlFor="collab-member-cap" className="text-ui text-ink-muted">
                         {t('projectPanel.collabMemberCapField')}
                       </label>
                       <input
@@ -714,13 +714,13 @@ export const CollabInviteDialog = ({
                       {t('projectPanel.collabCodeLabel')}
                     </label>
                     <div className="flex items-stretch gap-1.5">
-                      <p className="min-w-0 flex-1 select-all break-all rounded-[3px] border border-line bg-bg px-2.5 py-2 font-mono text-[12px] leading-relaxed text-ink">
+                      <p className="min-w-0 flex-1 select-all break-all rounded-[3px] border border-line bg-bg px-2.5 py-2 font-mono text-ui leading-relaxed text-ink">
                         {code}
                       </p>
                       <button
                         type="button"
                         onClick={() => void copy()}
-                        className={`inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[3px] border border-accent px-3 text-[11px] font-medium text-bg-card transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                        className={`inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[3px] border border-accent px-3 text-meta font-medium text-bg-card transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
                           copied ? 'bg-accent' : 'bg-accent hover:bg-accent-hover active:bg-accent-deeper'
                         }`}
                       >
@@ -733,10 +733,10 @@ export const CollabInviteDialog = ({
                     <div className="mt-2.5 flex items-start gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-2">
                       <Clock size={13} className="mt-0.5 shrink-0 text-ink-faint" aria-hidden />
                       <div className="min-w-0 space-y-1">
-                        <p className="text-[11px] leading-relaxed text-ink-muted">
+                        <p className="text-meta leading-relaxed text-ink-muted">
                           {t('projectPanel.collabExpires')}
                         </p>
-                        <p className="text-[11px] leading-relaxed text-ink-faint">
+                        <p className="text-meta leading-relaxed text-ink-faint">
                           {t('projectPanel.collabAfterNote')}
                         </p>
                       </div>
@@ -782,7 +782,7 @@ export const CollabInviteDialog = ({
                       {requests.map((rq) => (
                         <li
                           key={rq.id}
-                          className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
+                          className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-ui"
                         >
                           <span className="min-w-0 flex-1 truncate text-ink">{rq.email}</span>
                           <Btn
@@ -829,7 +829,7 @@ export const CollabInviteDialog = ({
                       </button>
                     </div>
                     {loadedCap != null && (
-                      <p className="mb-1.5 text-[11px] text-ink-faint">
+                      <p className="mb-1.5 text-meta text-ink-faint">
                         {t('projectPanel.collabMemberCapCurrent', { cap: String(loadedCap) })}
                       </p>
                     )}
@@ -837,9 +837,9 @@ export const CollabInviteDialog = ({
                       {links.map((lk) => (
                         <li
                           key={lk.id}
-                          className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[12px]"
+                          className="flex items-center gap-2 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-ui"
                         >
-                          <span className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-muted">
+                          <span className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro uppercase tracking-wide text-ink-muted">
                             {t(
                               lk.mode === 'approval'
                                 ? 'projectPanel.collabLinkModeApproval'
@@ -877,7 +877,7 @@ export const CollabInviteDialog = ({
                     the owner has agreed (unlike the disabled mint button above). */}
                 {consented && (
                   <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
-                    <span className="min-w-0 text-[11px] leading-relaxed text-ink-faint">
+                    <span className="min-w-0 text-meta leading-relaxed text-ink-faint">
                       {revoked
                         ? t('projectPanel.collabRevoked')
                         : t('projectPanel.collabRevokeHint')}

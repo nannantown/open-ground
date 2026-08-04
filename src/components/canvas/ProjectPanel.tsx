@@ -2003,7 +2003,7 @@ const OwnedProjectBody = ({
                     {t('projectPanel.openInEditor')}
                   </div>
                   {installedEditors.length === 0 && (
-                    <div className="px-3 py-1.5 text-[12px] text-ink-faint">
+                    <div className="px-3 py-1.5 text-ui text-ink-faint">
                       {t('projectPanel.editorNoneFound')}
                     </div>
                   )}
@@ -2014,7 +2014,7 @@ const OwnedProjectBody = ({
                         <button
                           role="menuitem"
                           onClick={() => void openInEditorWith(ed)}
-                          className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                          className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
                         >
                           {ed.name}
                         </button>
@@ -2049,7 +2049,7 @@ const OwnedProjectBody = ({
                     <button
                       role="menuitem"
                       onClick={() => void pickEditor()}
-                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                      className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
                     >
                       {t('projectPanel.editorPickOther')}
                     </button>
@@ -2058,7 +2058,7 @@ const OwnedProjectBody = ({
                     <button
                       role="menuitem"
                       onClick={() => void saveDefaultEditor(null)}
-                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
+                      className="block w-full px-3 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
                     >
                       {t('projectPanel.editorClearDefault')}
                     </button>
@@ -2082,7 +2082,7 @@ const OwnedProjectBody = ({
                   aria-label={t('projectPanel.branchMenuTitle')}
                   aria-haspopup="menu"
                   aria-expanded={branchMenuOpen}
-                  className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
+                  className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
                     branchMenuOpen
                       ? 'border-line bg-bg-inset text-ink'
                       : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink'
@@ -2119,11 +2119,11 @@ const OwnedProjectBody = ({
                       {t('projectPanel.branchMenuTitle')}
                     </div>
                     {activeBranches === null ? (
-                      <div className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-faint">
+                      <div className="flex items-center gap-2 px-3 py-2 text-ui text-ink-faint">
                         <Loader2 size={12} className="animate-spin" />
                       </div>
                     ) : activeBranches.branches.length === 0 ? (
-                      <div className="px-3 py-1.5 text-[12px] text-ink-faint">
+                      <div className="px-3 py-1.5 text-ui text-ink-faint">
                         {t('projectPanel.branchMenuEmpty')}
                       </div>
                     ) : (
@@ -2143,7 +2143,7 @@ const OwnedProjectBody = ({
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
                               <span
-                                className={`truncate font-mono text-[12px] ${
+                                className={`truncate font-mono text-ui ${
                                   b.current ? 'text-ink' : 'text-ink-muted'
                                 }`}
                                 title={b.name}
@@ -2151,14 +2151,14 @@ const OwnedProjectBody = ({
                                 {b.name}
                               </span>
                               {b.current && (
-                                <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-[9px] uppercase tracking-wide text-ink-faint">
+                                <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-plate uppercase tracking-wide text-ink-faint">
                                   {t('projectPanel.branchMenuCurrent')}
                                 </span>
                               )}
                             </div>
                             {b.worktreePath && (
                               <div
-                                className="truncate text-[11px] text-ink-faint"
+                                className="truncate text-meta text-ink-faint"
                                 title={b.worktreePath}
                               >
                                 {b.worktreePath}
@@ -2175,7 +2175,7 @@ const OwnedProjectBody = ({
                         setBranchMenuOpen(false)
                         setBranchModalOpen(true)
                       }}
-                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                      className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
                     >
                       {t('projectPanel.branchChangesTitle')}
                     </button>
@@ -2213,7 +2213,7 @@ const OwnedProjectBody = ({
                     <RotateCw size={11} />
                   )}
                 </button>
-                <p className="min-w-0 flex-1 truncate text-[12px] leading-snug text-ink-muted">
+                <p className="min-w-0 flex-1 truncate text-ui leading-snug text-ink-muted">
                   {descriptionForLang(data, lang)}
                 </p>
               </div>
@@ -2233,7 +2233,7 @@ const OwnedProjectBody = ({
                       ? t('projectPanel.cancelDescription')
                       : t('projectPanel.generateDescription')
                   }
-                  className="rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                  className="rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
                 >
                   {describing
                     ? t('projectPanel.generating')
@@ -2256,7 +2256,7 @@ const OwnedProjectBody = ({
             disabled={project.missing}
             title={t('projectPanel.skillsButtonHint')}
             aria-label={t('projectPanel.skillsButton')}
-            className="flex shrink-0 items-center gap-1 rounded-sm px-1 py-1 text-[11px] text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
+            className="flex shrink-0 items-center gap-1 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
           >
             <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
             {t('projectPanel.skillsButton')}
@@ -2268,7 +2268,7 @@ const OwnedProjectBody = ({
               type="button"
               onClick={() => setCollabInviteOpen(true)}
               title={t('projectPanel.collabEntryTitle')}
-              className="shrink-0 rounded-sm px-1 py-1 text-[11px] text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="shrink-0 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               {t('projectPanel.collabEntry')}
             </button>
@@ -2298,7 +2298,7 @@ const OwnedProjectBody = ({
         <div className="flex items-start gap-2 border-b border-accent/30 bg-accent/5 px-8 py-2.5">
           <AlertCircle size={14} className="mt-[1px] shrink-0 text-accent" />
           <div className="flex flex-1 flex-col items-start gap-1.5">
-            <p className="text-[11.5px] leading-relaxed text-ink-muted">
+            <p className="text-meta leading-relaxed text-ink-muted">
               {t('projectPanel.missingBanner')}
             </p>
             {onRelocate && (
@@ -2538,7 +2538,7 @@ const OwnedProjectBody = ({
               onClick={addTerminal}
               disabled={terminalSlots.length >= MAX_TERMINALS}
               title={t('projectPanel.newTerminal')}
-              className="flex shrink-0 select-none items-center gap-1 border-b-2 border-b-[#272727] bg-[#1c1c1c] px-2.5 py-1.5 text-[11px] text-[#7c7c7c] transition-colors hover:bg-[#242424] hover:text-[#d4d4d4] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#1c1c1c] disabled:hover:text-[#7c7c7c]"
+              className="flex shrink-0 select-none items-center gap-1 border-b-2 border-b-[#272727] bg-[#1c1c1c] px-2.5 py-1.5 text-meta text-[#7c7c7c] transition-colors hover:bg-[#242424] hover:text-[#d4d4d4] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#1c1c1c] disabled:hover:text-[#7c7c7c]"
             >
               <Plus size={11} strokeWidth={2.25} />
               <span>{t('projectPanel.new')}</span>
@@ -2594,14 +2594,14 @@ const OwnedProjectBody = ({
         ) : (
           // List still loading (or the module vanished — the fallback effect
           // is about to move the view).
-          <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">
+          <div className="flex-1 px-8 py-6 text-ui text-ink-subtle">
             {t('projectPanel.loading')}
           </div>
         )
       ) : loadError && !data ? (
         // Initial load failed (e.g. the API server isn't running) — an explicit,
         // retryable message beats an endless "Loading…". Retry re-runs the load.
-        <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">
+        <div className="flex-1 px-8 py-6 text-ui text-ink-subtle">
           {t('projectPanel.loadFailed')}{' '}
           <button
             type="button"
@@ -2612,7 +2612,7 @@ const OwnedProjectBody = ({
           </button>
         </div>
       ) : loading || !data ? (
-        <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">{t('projectPanel.loading')}</div>
+        <div className="flex-1 px-8 py-6 text-ui text-ink-subtle">{t('projectPanel.loading')}</div>
       ) : view === 'board' ? (
         <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2836,10 +2836,10 @@ const OwnedProjectBody = ({
               align="center"
               leading={
                 <div className="min-w-0">
-                  <p className="truncate text-[13px] font-medium text-ink">
+                  <p className="truncate text-ui font-medium text-ink">
                     {t('projectPanel.claudeLogin.title')}
                   </p>
-                  <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                  <p className="mt-0.5 text-meta leading-relaxed text-ink-faint">
                     {t('projectPanel.claudeLogin.hint')}
                   </p>
                 </div>
@@ -2858,19 +2858,19 @@ const OwnedProjectBody = ({
                 <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
                   {claudeLoginError ? (
                     <>
-                      <p className="max-w-[90%] text-[12px] leading-relaxed text-accent">
+                      <p className="max-w-[90%] text-ui leading-relaxed text-accent">
                         {claudeLoginError}
                       </p>
                       <button
                         type="button"
                         onClick={() => void openClaudeLogin()}
-                        className="rounded-sm border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        className="rounded-sm border border-line px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       >
                         {t('projectPanel.claudeLogin.retry')}
                       </button>
                     </>
                   ) : (
-                    <p className="text-[12px] text-ink-faint">
+                    <p className="text-ui text-ink-faint">
                       {t('projectPanel.claudeLogin.starting')}
                     </p>
                   )}
@@ -3053,7 +3053,7 @@ const ProjectSettingsDialog = ({
           <p className="label-cap text-accent mb-2">
             {t('projectPanel.settingsDialogLabel')}
           </p>
-          <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
+          <h3 className="font-display text-title leading-snug text-ink tracking-tightest">
             {projectName}
           </h3>
 
@@ -3064,7 +3064,7 @@ const ProjectSettingsDialog = ({
               {/* ── タスクのワークフロー ── */}
               <div className="border-t border-line pt-4">
                 <p className="label-cap text-ink">{t('projectPanel.settingsWorkflowHeading')}</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                <p className="mt-0.5 text-meta leading-relaxed text-ink-faint">
                   {t('projectPanel.settingsWorkflowHint')}
                 </p>
                 <div className="mt-3 space-y-3.5">
@@ -3099,7 +3099,7 @@ const ProjectSettingsDialog = ({
             {/* ── Personal ── */}
             <div className="mt-5 border-t border-line pt-4 md:mt-0">
               <p className="label-cap text-ink">{t('projectPanel.settingsPersonalHeading')}</p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+              <p className="mt-0.5 text-meta leading-relaxed text-ink-faint">
                 {t('projectPanel.settingsPersonalHint')}
               </p>
 
@@ -3114,13 +3114,13 @@ const ProjectSettingsDialog = ({
                     <label className="mb-1 block label-cap text-ink-muted">
                       {t('customTabs.market')}
                     </label>
-                    <p className="text-[12px] leading-relaxed text-ink-faint">
+                    <p className="text-ui leading-relaxed text-ink-faint">
                       {t('customTabs.marketHint')}
                     </p>
                     <button
                       type="button"
                       onClick={onBrowseMarket}
-                      className="mt-1.5 inline-flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="mt-1.5 inline-flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       <Store size={13} strokeWidth={2} className="shrink-0" />
                       {t('customTabs.marketBrowse')}
@@ -3135,7 +3135,7 @@ const ProjectSettingsDialog = ({
                   <label className="mb-1 block label-cap text-ink-muted">
                     {t('projectPanel.settingsWorktrees')}
                   </label>
-                  <p className="text-[12px] text-ink">
+                  <p className="text-ui text-ink">
                     {worktreesFailed
                       ? t('projectPanel.settingsWorktreesUnavailable')
                       : worktrees === null
@@ -3152,7 +3152,7 @@ const ProjectSettingsDialog = ({
                       type="button"
                       onClick={cleanWorktrees}
                       disabled={wtCleaning}
-                      className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       {wtCleaning
                         ? t('projectPanel.settingsWorktreesCleaning')
@@ -3160,7 +3160,7 @@ const ProjectSettingsDialog = ({
                     </button>
                   )}
                   {wtResult && !wtCleaning && (
-                    <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                    <p className="mt-1 text-meta leading-relaxed text-ink-faint">
                       {t('projectPanel.settingsWorktreesResult', {
                         removed: String(wtResult.removed.length),
                         skipped: String(wtResult.skippedDirty.length),
@@ -3168,11 +3168,11 @@ const ProjectSettingsDialog = ({
                     </p>
                   )}
                   {wtError && (
-                    <p className="mt-1 text-[11px] leading-relaxed text-accent">
+                    <p className="mt-1 text-meta leading-relaxed text-accent">
                       {t('projectPanel.settingsWorktreesFailed', { error: wtError })}
                     </p>
                   )}
-                  <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+                  <p className="mt-1 text-meta leading-relaxed text-ink-faint">
                     {t('projectPanel.settingsWorktreesHint')}
                   </p>
                 </div>
@@ -3215,10 +3215,10 @@ const DeleteConfirm = ({
   >
     <div className="mx-auto w-full max-w-[420px]">
       <p className="label-cap text-accent mb-2">{t('projectPanel.deleteProjectLabel')}</p>
-      <h3 className="font-display text-[20px] leading-snug text-ink tracking-tightest">
+      <h3 className="font-display text-title leading-snug text-ink tracking-tightest">
         {t('projectPanel.moveToTrashQuestion', { name: projectName })}
       </h3>
-      <p className="mt-2.5 text-[12px] leading-relaxed text-ink-muted">
+      <p className="mt-2.5 text-ui leading-relaxed text-ink-muted">
         {t('projectPanel.deleteExplain')}
       </p>
       <label className="label-cap text-ink-muted mb-1.5 mt-5 block">
@@ -3233,10 +3233,10 @@ const DeleteConfirm = ({
         value={confirmText}
         onChange={e => setConfirmText(e.target.value)}
         placeholder={projectName}
-        className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+        className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
       />
       {error && (
-        <p className="mt-3 text-[11px] leading-relaxed text-accent">
+        <p className="mt-3 text-meta leading-relaxed text-accent">
           {t('projectPanel.deleteFailed', { error })}
         </p>
       )}
@@ -3384,10 +3384,20 @@ const ViewTabs = ({
   const menuAction = tabMenu ? rowMenu?.actionFor(tabMenu.id) ?? null : null
 
   return (
-    // 計器盤 language (2026-08-03): the tab strip carries NO rule — separation
-    // is spacing, and the active tab is an INVERSE PILL (ink surface, inverse
-    // text — cream-on-ink in light, ink-on-cream in dark) instead of the old
-    // red underline. Background+text change together (ui-interactive-states).
+    // 計器盤 language. The tab strip carries no rule of its own — separation is
+    // spacing — and the active tab is marked by an UNDERSCORE plus a colour
+    // change (owner, 2026-08-04: 「下線と文字の色が変わるのでactiveを表現する
+    // だけのシンプル仕様でもいいかも」).
+    //
+    // This replaces the inverse pill of 2026-08-03, which itself replaced a red
+    // underline — so, back to a mark, deliberately and with the reason recorded.
+    // The pill existed to satisfy "background and text change together", the
+    // rule that stops a state being signalled by text colour alone (invisible on
+    // a dark ground). An underline satisfies it differently and just as well: the
+    // indicator is a SHAPE that appears, not a hue that shifts, so it survives
+    // low contrast and colour-blindness in a way a recolour does not. It also
+    // suits the instrument panel better than a filled lozenge — a gauge marks its
+    // reading with a line, not by inverting the dial.
     <div className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto px-7 pb-0 pt-[18px]">
       {tabs.map((m, i) => {
         const active = m.id === view
@@ -3443,13 +3453,26 @@ const ViewTabs = ({
             onKeyDown={e => onTabKeyDown(e, i)}
             title={t('projectPanel.dragToReorder')}
             className={[
-              'relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 label-cap transition-colors',
+              // No negative margin: the strip is `overflow-x-auto` (it scrolls
+              // when custom tabs pile up), and overflow clips on BOTH axes — a
+              // `-mb-px` put the underscore 1px outside the scroll box and it
+              // vanished. Measured: tab bottom 199 against parent 198.
+              'relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[3px] px-2.5 pb-2 pt-1.5 label-cap transition-colors',
+              // The width is unconditional so the row never reflows; the COLOUR
+              // is set in exactly one place. Naming `border-transparent` here
+              // and `border-ink` in the active branch put two border-color
+              // utilities of equal specificity on the same element, and the
+              // winner is then decided by the order Tailwind happens to emit
+              // them — measured: the active tab's underscore stayed transparent.
+              // (Same shape as the `tracking-[…]` utilities that never applied,
+              // fixed earlier today. Do not re-introduce a competing base.)
+              'border-b-2',
               // A tab label is either t() ('BOARD') or a name the user typed
               // ('メモ帳'). Ask the string, not the UI language.
               capTrackingClass(tabLabel(m, t)),
               active
-                ? 'bg-ink text-ink-inverse'
-                : 'text-ink-muted hover:bg-plane hover:text-ink active:bg-plane',
+                ? 'border-ink text-ink'
+                : 'border-transparent text-ink-muted hover:border-line-strong hover:text-ink active:text-ink',
               dimmed ? 'opacity-40' : '',
               dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
             ].join(' ')}
@@ -3473,7 +3496,7 @@ const ViewTabs = ({
               <span
                 title={t('projectPanel.reviewWaitingTitle')}
                 className={[
-                  'rounded-full border px-1.5 text-[9px] font-medium leading-[14px]',
+                  'rounded-full border px-1.5 text-plate font-medium leading-[14px]',
                   active
                     ? 'border-ink-inverse/40 text-ink-inverse'
                     : 'border-ochre/60 text-[var(--beacon-waiting)]',
@@ -3538,7 +3561,7 @@ const ViewTabs = ({
                 void menuAction.run()
                 setTabMenu(null)
               }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-plane active:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition-colors hover:bg-plane active:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
             >
               {menuAction.kind === 'detach' ? (
                 <Minus size={13} strokeWidth={2} className="shrink-0" />
@@ -3635,7 +3658,7 @@ const MoreMenu = ({
               setOpen(false)
               onProjectSettings()
             }}
-            className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            className="flex w-full items-center px-3 py-1.5 text-left text-ui text-ink transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
           >
             {t('projectPanel.projectSettingsMenu')}
           </button>
@@ -3645,7 +3668,7 @@ const MoreMenu = ({
               setOpen(false)
               onRemove()
             }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-plane"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition-colors hover:bg-plane"
           >
             <Archive size={12} strokeWidth={1.75} />
             {t('projectPanel.removeFromCanvas')}
@@ -3656,7 +3679,7 @@ const MoreMenu = ({
               setOpen(false)
               onDelete()
             }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-accent transition-colors hover:bg-accent-soft"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-accent transition-colors hover:bg-accent-soft"
           >
             <Trash2 size={12} strokeWidth={1.75} />
             {t('projectPanel.deleteProjectMenu')}
@@ -3683,14 +3706,14 @@ const TITLE_CSS = {
     // 案C `h1`: 30px / 600 / letter-spacing 0.005em / line-height 1.1. The old
     // `tracking-tightest` (-0.04em) pulled the letters ~1.2px tighter at this
     // size, which is the single most visible difference in the wordmark.
-    text: 'mt-1.5 min-w-0 break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[0.005em] text-ink',
+    text: 'mt-1.5 min-w-0 break-words font-display text-hero font-semibold leading-[1.1] tracking-[0.005em] text-ink',
     style: { fontVariationSettings: "'opsz' 30, 'SOFT' 40, 'wght' 600" } as React.CSSProperties,
-    input: 'mt-1.5 font-display text-[30px] font-semibold leading-[1.1] tracking-[0.005em]',
+    input: 'mt-1.5 font-display text-hero font-semibold leading-[1.1] tracking-[0.005em]',
   },
   sidebar: {
-    text: 'font-display text-[24px] text-ink leading-[1.05] tracking-tightest truncate',
+    text: 'font-display text-head text-ink leading-[1.05] tracking-tightest truncate',
     style: { fontVariationSettings: "'opsz' 28, 'SOFT' 40" } as React.CSSProperties,
-    input: 'font-display text-[24px] leading-[1.05] tracking-tightest',
+    input: 'font-display text-head leading-[1.05] tracking-tightest',
   },
 }
 
@@ -3783,7 +3806,7 @@ const EditableTitle = ({
           style={css.style}
         />
         {error && (
-          <p className="mt-1 text-[11px] text-accent leading-tight">{error}</p>
+          <p className="mt-1 text-meta text-accent leading-tight">{error}</p>
         )}
       </div>
     )

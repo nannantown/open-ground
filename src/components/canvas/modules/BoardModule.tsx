@@ -919,7 +919,7 @@ export const BoardModule = ({
     // small-caps label on the left, the select fills the remaining width. This
     // reads cleanly and "uses the width" instead of the old cramped inline wrap.
     const selectCls =
-      'min-w-0 flex-1 rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+      'min-w-0 flex-1 rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 text-ui text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
     const rowCls = 'flex items-center gap-3'
     const capCls = 'w-20 shrink-0 label-cap text-ink-faint'
     const defaultModel = data.launch?.model?.trim() || t('board.run.modelCliDefault')
@@ -1064,7 +1064,7 @@ export const BoardModule = ({
           // no longer eats the whole drawer, vertically resizable from the
           // native bottom-right grip when a task needs more room.
           className={[
-            'w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[12px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none',
+            'w-full rounded-[3px] border border-line bg-bg px-2.5 py-2 text-ui leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none',
             grow ? 'min-h-[200px] resize-y' : 'resize-y',
           ].join(' ')}
         />
@@ -1106,7 +1106,7 @@ export const BoardModule = ({
               )}
             </div>
             {attachError && (
-              <p className="mt-1 text-[10px] text-accent" title={attachError}>
+              <p className="mt-1 text-micro text-accent" title={attachError}>
                 {attachError}
               </p>
             )}
@@ -1124,7 +1124,7 @@ export const BoardModule = ({
             href={task.prUrl}
             target="_blank"
             rel="noreferrer"
-            className="inline-block max-w-full truncate rounded-sm border border-line px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="inline-block max-w-full truncate rounded-sm border border-line px-2.5 py-1 text-ui text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {task.prUrl.replace(/^https?:\/\//, '')} ↗
           </a>
@@ -1172,8 +1172,8 @@ export const BoardModule = ({
                 aria-pressed={active}
                 className={
                   active
-                    ? 'shrink-0 rounded-sm border border-accent bg-accent px-2.5 py-1 text-[11px] text-bg-card transition-colors hover:bg-accent/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-                    : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                    ? 'shrink-0 rounded-sm border border-accent bg-accent px-2.5 py-1 text-meta text-bg-card transition-colors hover:bg-accent/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                    : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
                 }
               >
                 {name}
@@ -1198,7 +1198,7 @@ export const BoardModule = ({
                     setAddingAssignee(false)
                   }
                 }}
-                className="w-28 rounded-[3px] border border-accent bg-bg px-2 py-1 text-[12px] text-ink placeholder:text-ink-faint focus:outline-none"
+                className="w-28 rounded-[3px] border border-accent bg-bg px-2 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
               />
               <button
                 type="button"
@@ -1210,7 +1210,7 @@ export const BoardModule = ({
                   if (v) persistLocal(withRegisteredAssignee(data, task.id, v))
                   setAddingAssignee(false)
                 }}
-                className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="shrink-0 rounded-sm border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 {t('board.detail.assigneeAddConfirm')}
               </button>
@@ -1219,7 +1219,7 @@ export const BoardModule = ({
             <button
               type="button"
               onClick={() => setAddingAssignee(true)}
-              className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-meta text-ink-faint transition-colors hover:border-line hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               {t('board.detail.assigneeAdd')}
             </button>
@@ -1243,7 +1243,7 @@ export const BoardModule = ({
             return (
               <span
                 key={depId}
-                className="flex max-w-[180px] shrink-0 items-center gap-1 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted"
+                className="flex max-w-[180px] shrink-0 items-center gap-1 rounded-sm border border-line px-2 py-1 text-meta text-ink-muted"
               >
                 <span className="min-w-0 truncate" title={depTitle}>
                   {depTitle}
@@ -1282,7 +1282,7 @@ export const BoardModule = ({
                       setAddingDep(false)
                     }
                   }}
-                  className="max-w-[200px] rounded-[3px] border border-accent bg-bg px-2 py-1 text-[12px] text-ink focus:outline-none"
+                  className="max-w-[200px] rounded-[3px] border border-accent bg-bg px-2 py-1 text-ui text-ink focus:outline-none"
                 >
                   <option value="" disabled>
                     {t('board.detail.dependsPick')}
@@ -1300,7 +1300,7 @@ export const BoardModule = ({
                 onClick={() => setAddingDep(true)}
                 disabled={candidates.length === 0}
                 title={candidates.length === 0 ? t('board.detail.dependsNone') : undefined}
-                className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-meta text-ink-faint transition-colors hover:border-line hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 {t('board.detail.dependsAdd')}
               </button>
@@ -1312,7 +1312,7 @@ export const BoardModule = ({
             it forever. Surfaced the moment the loop is created so the owner can
             break it — purely informational, the field itself is untouched. */}
         {dependencyCycleIds(data.tasks).has(task.id) && (
-          <p className="mt-1.5 flex items-start gap-1 text-[11px] text-accent">
+          <p className="mt-1.5 flex items-start gap-1 text-meta text-accent">
             <span aria-hidden>⚠︎</span>
             <span>{t('board.detail.dependsCycleWarn')}</span>
           </p>
@@ -1329,7 +1329,7 @@ export const BoardModule = ({
             type="date"
             value={task.dueDate ?? ''}
             onChange={e => patchTask(task, { dueDate: e.target.value || undefined })}
-            className="rounded-[3px] border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors hover:border-ink-faint focus:border-accent focus:outline-none"
+            className="rounded-[3px] border border-line bg-bg px-2 py-1 text-ui text-ink transition-colors hover:border-ink-faint focus:border-accent focus:outline-none"
           />
           {task.dueDate && (
             <button
@@ -1337,7 +1337,7 @@ export const BoardModule = ({
               aria-label={t('board.detail.dueClear')}
               title={t('board.detail.dueClear')}
               onClick={() => patchTask(task, { dueDate: undefined })}
-              className="shrink-0 rounded-sm px-1.5 py-1 text-[11px] text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="shrink-0 rounded-sm px-1.5 py-1 text-meta text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               ✕
             </button>
@@ -1367,7 +1367,7 @@ export const BoardModule = ({
                   patchTask(task, { priority: p === 'normal' ? undefined : p })
                 }
                 className={[
-                  'shrink-0 rounded-sm border px-2.5 py-1 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+                  'shrink-0 rounded-sm border px-2.5 py-1 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                   active
                     ? PRIORITY_META[p].pillSelectedClass
                     : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink',
@@ -1635,14 +1635,14 @@ export const BoardModule = ({
             <>
               <div className="shrink-0 border-b border-line-soft px-5 py-2">
                 <div
-                  className="truncate text-[13px] text-ink"
+                  className="truncate text-ui text-ink"
                   title={detailTask.title.trim() || undefined}
                 >
                   {detailTask.title.trim() || t('board.card.untitled')}
                 </div>
                 {drawerWorker.note && (
                   <div
-                    className="mt-0.5 truncate text-[11px] text-ink-faint"
+                    className="mt-0.5 truncate text-meta text-ink-faint"
                     title={drawerWorker.note}
                   >
                     {drawerWorker.note}
@@ -1696,7 +1696,7 @@ export const BoardModule = ({
                   (worktree + unsent diff prompt — a different action). */}
               <div className="shrink-0 space-y-2.5 border-t border-line-soft px-5 py-3">
                 {project.missing ? (
-                  <p className="text-[11px] leading-relaxed text-ink-faint">
+                  <p className="text-meta leading-relaxed text-ink-faint">
                     {t('board.run.missingFolder')}
                   </p>
                 ) : (
@@ -1723,7 +1723,7 @@ export const BoardModule = ({
                     {runSettingsOpen && (
                       <div className="pb-1 pt-0.5">{runSettingsRow(detailTask)}</div>
                     )}
-                    <p className="text-[11px] leading-relaxed text-ink-faint">
+                    <p className="text-meta leading-relaxed text-ink-faint">
                       {!(detailTask.notes ?? '').trim()
                         ? t('board.run.needsContent')
                         : t('board.run.hint')}
@@ -1741,21 +1741,21 @@ export const BoardModule = ({
                         // (ProjectPanel owns it). After sign-in, pressing 実行
                         // again launches normally.
                         <div className="flex flex-wrap items-center gap-2">
-                          <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-accent">
+                          <p className="min-w-0 flex-1 text-meta leading-relaxed text-accent">
                             {t('board.run.failedClaudeLoggedOut')}
                           </p>
                           {onClaudeLogin && (
                             <button
                               type="button"
                               onClick={onClaudeLogin}
-                              className="shrink-0 rounded-sm border border-accent px-2.5 py-1 text-[11px] text-accent transition-colors hover:bg-accent hover:text-bg-card active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                              className="shrink-0 rounded-sm border border-accent px-2.5 py-1 text-meta text-accent transition-colors hover:bg-accent hover:text-bg-card active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                             >
                               {t('board.run.signIn')}
                             </button>
                           )}
                         </div>
                       ) : (
-                        <p className="text-[11px] leading-relaxed text-accent">
+                        <p className="text-meta leading-relaxed text-accent">
                           {t(
                             launchFailed.get(detailTask.id) === 'claudeMissing'
                               ? 'board.run.failedClaudeMissing'
@@ -1769,7 +1769,7 @@ export const BoardModule = ({
                     <div className="flex items-center justify-end gap-2">
                       {reviewNotice && (
                         <span
-                          className="mr-auto min-w-0 truncate text-[10px] text-accent"
+                          className="mr-auto min-w-0 truncate text-micro text-accent"
                           title={reviewNotice}
                         >
                           {reviewNotice}
@@ -1783,7 +1783,7 @@ export const BoardModule = ({
                             disabled={reviewBusy || launching}
                             onClick={() => void reviewWithClaude(detailTask)}
                             title={t('board.detail.reviewWithClaudeTitle')}
-                            className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                            className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                           >
                             {reviewBusy
                               ? t('board.detail.reviewWithClaudeBusy')
@@ -1805,7 +1805,7 @@ export const BoardModule = ({
                             ? t('board.run.buttonTitle')
                             : t('board.run.needsContent')
                         }
-                        className="shrink-0 rounded-sm border border-accent bg-accent px-4 py-1.5 text-[12px] font-medium text-bg-card transition-colors hover:bg-accent/85 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        className="shrink-0 rounded-sm border border-accent bg-accent px-4 py-1.5 text-ui font-medium text-bg-card transition-colors hover:bg-accent/85 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       >
                         {launching ? t('board.run.buttonBusy') : t('board.run.button')}
                       </button>
@@ -1835,7 +1835,7 @@ export const BoardModule = ({
                       size={13}
                       className={`shrink-0 text-ink-faint transition-transform ${fieldsOpen ? 'rotate-90' : ''}`}
                     />
-                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                    <span className="min-w-0 flex-1 truncate text-ui text-ink">
                       {detailTask.title.trim() || t('board.card.untitled')}
                     </span>
                     {detailTask.titleAuto && (
@@ -1853,7 +1853,7 @@ export const BoardModule = ({
                       onClick={() => void regenerateTitle(detailTask)}
                       disabled={regenBusy}
                       title={t('board.detail.regenTitle')}
-                      className="mr-3 shrink-0 rounded-sm px-1.5 py-0.5 text-[12px] text-ink-faint transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="mr-3 shrink-0 rounded-sm px-1.5 py-0.5 text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       {regenBusy ? '✦ …' : '✦'}
                     </button>
@@ -1863,7 +1863,7 @@ export const BoardModule = ({
                   /* flex-wrap: a long branch name / flow note / profile chip
                      must wrap to the next line, never push the row past the
                      drawer edge (long-text robustness, F098). */
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 pb-2 text-[11px] text-ink-faint">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 pb-2 text-meta text-ink-faint">
                     {detailTask.branch && (
                       <span
                         className="flex min-w-0 items-center gap-1"
@@ -1883,14 +1883,14 @@ export const BoardModule = ({
                         disabled={checkoutBusy || project.missing}
                         onClick={() => void openBranchLocally(detailTask)}
                         title={t('board.detail.tryBranchTitle')}
-                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                       >
                         {checkoutBusy ? t('board.detail.tryBranchBusy') : t('board.detail.tryBranch')}
                       </button>
                     )}
                     {checkoutNotice && (
                       <span
-                        className="min-w-0 truncate text-[10px] text-accent"
+                        className="min-w-0 truncate text-micro text-accent"
                         title={checkoutNotice}
                       >
                         {checkoutNotice}
@@ -1907,7 +1907,7 @@ export const BoardModule = ({
                           disabled={reviewBusy || project.missing}
                           onClick={() => void reviewWithClaude(detailTask)}
                           title={t('board.detail.reviewWithClaudeTitle')}
-                          className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                          className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                         >
                           {reviewBusy
                             ? t('board.detail.reviewWithClaudeBusy')
@@ -1916,7 +1916,7 @@ export const BoardModule = ({
                       )}
                     {reviewNotice && (
                       <span
-                        className="min-w-0 truncate text-[10px] text-accent"
+                        className="min-w-0 truncate text-micro text-accent"
                         title={reviewNotice}
                       >
                         {reviewNotice}
@@ -1950,7 +1950,7 @@ export const BoardModule = ({
                           onOpenDetail(null)
                         }}
                         title={t('board.detail.markDoneTitle')}
-                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
                       >
                         {t('board.detail.markDone')}
                       </button>
@@ -1971,7 +1971,7 @@ export const BoardModule = ({
                         available:false (no gh, bad URL) renders nothing. */}
                     {detailTask.prUrl && prInfo?.available && (
                       <span
-                        className={`shrink-0 text-[10px] ${
+                        className={`shrink-0 text-micro ${
                           prInfo.state === 'MERGED'
                             ? 'text-moss'
                             : prInfo.state === 'CLOSED'
@@ -1998,14 +1998,14 @@ export const BoardModule = ({
                       onClick={() => restartSession(detailTask)}
                       // No restart into a missing cwd — the spawn would fail.
                       disabled={launching || project.missing}
-                      className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       {launching
                         ? t('projectPanel.launchingClaude')
                         : t('board.detail.restartSession')}
                     </button>
                     <span
-                      className={`min-w-0 truncate text-[11px] ${launchFailed.has(detailTask.id) ? 'text-accent' : 'text-ink-faint'}`}
+                      className={`min-w-0 truncate text-meta ${launchFailed.has(detailTask.id) ? 'text-accent' : 'text-ink-faint'}`}
                       title={
                         launchFailed.has(detailTask.id)
                           ? t(
@@ -2037,14 +2037,14 @@ export const BoardModule = ({
                     type="button"
                     onClick={() => void insertTask(detailTask)}
                     disabled={inserting || !liveTerminalId(detailTask.id)}
-                    className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   >
                     {inserting
                       ? t('board.detail.insertTaskBusy')
                       : t('board.detail.insertTask')}
                   </button>
                   <span
-                    className={`min-w-0 truncate text-[11px] ${insertError ? 'text-accent' : 'text-ink-faint'}`}
+                    className={`min-w-0 truncate text-meta ${insertError ? 'text-accent' : 'text-ink-faint'}`}
                     title={insertError ?? t('board.detail.insertTaskHint')}
                   >
                     {insertError ?? null}

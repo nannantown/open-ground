@@ -28,7 +28,7 @@ export function BackLink({
         // 案C `.back`: 11px / .08em / weight 400 / ink-muted. It was `label-cap`
         // in ACCENT — a red, uppercased, 10px/.18em stamp — which made the way
         // back the loudest thing in the header.
-        'flex items-center gap-1 text-[11px] tracking-[0.08em] text-ink-muted transition-colors',
+        'flex items-center gap-1 text-meta tracking-[0.08em] text-ink-muted transition-colors',
         'hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted',
         'rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
         className,

@@ -82,7 +82,7 @@ export const CollabConsentNotice = ({
         <ShieldCheck size={15} className="mt-0.5 shrink-0 text-accent" />
         <div className="min-w-0 space-y-3">
           <div>
-            <p className="text-[13px] font-medium text-ink">
+            <p className="text-ui font-medium text-ink">
               {ja
                 ? owner
                   ? 'このプロジェクトを共有する前に'
@@ -91,7 +91,7 @@ export const CollabConsentNotice = ({
                   ? 'Before you share this project'
                   : 'Before you join'}
             </p>
-            <p className="mt-1 text-[12px] leading-relaxed text-ink-muted">
+            <p className="mt-1 text-ui leading-relaxed text-ink-muted">
               {ja
                 ? owner
                   ? 'メンバーを招待するとリアルタイム同期が有効になり、一部のデータがあなたのマシンを離れてクラウドに保存されます:'
@@ -105,7 +105,7 @@ export const CollabConsentNotice = ({
           {/* Email → the membership / login service (identity + the roster). */}
           <div className="flex items-start gap-2">
             <Database size={13} className="mt-0.5 shrink-0 text-ink-faint" />
-            <p className="text-[12px] leading-relaxed text-ink-muted">
+            <p className="text-ui leading-relaxed text-ink-muted">
               <span className="font-medium text-ink">
                 {ja ? 'メンバー管理（ログイン基盤）：' : 'Membership (login service): '}
               </span>
@@ -123,7 +123,7 @@ export const CollabConsentNotice = ({
               storage. The headline disclosure of this whole notice. */}
           <div className="flex items-start gap-2">
             <Cloud size={13} className="mt-0.5 shrink-0 text-ink-faint" />
-            <p className="text-[12px] leading-relaxed text-ink-muted">
+            <p className="text-ui leading-relaxed text-ink-muted">
               <span className="font-medium text-ink">
                 {ja
                   ? 'リアルタイム同期・保存（同期サーバ）：'
@@ -142,7 +142,7 @@ export const CollabConsentNotice = ({
           {/* Stays put — the reassurance half: code/terminal/Claude never leave. */}
           <div className="flex items-start gap-2">
             <Laptop size={13} className="mt-0.5 shrink-0 text-ink-faint" />
-            <p className="text-[12px] leading-relaxed text-ink-faint">
+            <p className="text-ui leading-relaxed text-ink-faint">
               {ja
                 ? 'リポジトリのファイル、ターミナル、Claude との会話、ローカルのファイルパスはマシンの外に出ません。'
                 : 'Your repository files, your terminal, your Claude conversations, and your local file path never leave your machine.'}
@@ -158,7 +158,7 @@ export const CollabConsentNotice = ({
               onChange={(e) => onCheckedChange(e.target.checked)}
               className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
             />
-            <span className="text-[12px] leading-relaxed text-ink-muted">
+            <span className="text-ui leading-relaxed text-ink-muted">
               {ja ? (
                 <>
                   <a

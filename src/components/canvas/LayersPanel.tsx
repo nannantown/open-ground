@@ -432,7 +432,7 @@ export const LayersPanel = memo(({
               }}
               placeholder={t('canvas.searchLayers')}
               aria-label={t('canvas.searchLayers')}
-              className="min-w-0 flex-1 bg-transparent text-[12px] text-ink outline-none placeholder:text-ink-faint"
+              className="min-w-0 flex-1 bg-transparent text-ui text-ink outline-none placeholder:text-ink-faint"
             />
             {query && (
               <button
@@ -449,11 +449,11 @@ export const LayersPanel = memo(({
       )}
 
       {elements.length === 0 ? (
-        <div className="px-3 py-6 text-center text-[12px] text-ink-faint">
+        <div className="px-3 py-6 text-center text-ui text-ink-faint">
           {t('canvas.noElementsYet')}
         </div>
       ) : rows.length === 0 ? (
-        <div className="px-3 py-6 text-center text-[12px] text-ink-faint">
+        <div className="px-3 py-6 text-center text-ui text-ink-faint">
           {t('canvas.noSearchResults')}
         </div>
       ) : (
@@ -575,13 +575,13 @@ export const LayersPanel = memo(({
                         }
                         e.stopPropagation()
                       }}
-                      className="min-w-0 flex-1 rounded-[3px] border border-accent/50 bg-bg-card px-1 py-0.5 text-[12.5px] text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      className="min-w-0 flex-1 rounded-[3px] border border-accent/50 bg-bg-card px-1 py-0.5 text-ui text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     />
                   ) : (
                     <span
                       title={canvasElementLabel(el)}
                       className={[
-                        'flex min-w-0 flex-1 items-center gap-2 text-left text-[12.5px]',
+                        'flex min-w-0 flex-1 items-center gap-2 text-left text-ui',
                         isHidden ? 'opacity-50' : '',
                       ].join(' ')}
                     >

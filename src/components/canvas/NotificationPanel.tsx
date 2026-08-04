@@ -26,12 +26,12 @@ export const NotificationPanel = ({
       className="absolute right-0 top-full z-20 mt-1.5 w-[340px] max-w-[92vw] overflow-hidden rounded-[3px] border border-line bg-bg-card shadow-card-hover"
     >
       <div className="border-b border-line-soft px-3.5 py-2.5">
-        <span className="font-display text-[13px] leading-none text-ink">
+        <span className="font-display text-ui leading-none text-ink">
           {t('notifications.title')}
         </span>
       </div>
       {notifications.length === 0 ? (
-        <p className="px-3.5 py-6 text-center text-[12px] leading-relaxed text-ink-faint">
+        <p className="px-3.5 py-6 text-center text-ui leading-relaxed text-ink-faint">
           {t('notifications.empty')}
         </p>
       ) : (
@@ -72,14 +72,14 @@ const NotificationRow = ({
           <AlertTriangle size={13} strokeWidth={1.75} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="break-words text-[12px] leading-relaxed text-ink">{f.detail}</p>
+          <p className="break-words text-ui leading-relaxed text-ink">{f.detail}</p>
           {ctx && (
-            <p className="mt-0.5 break-words font-mono text-[11px] leading-relaxed text-ink-faint">
+            <p className="mt-0.5 break-words font-mono text-meta leading-relaxed text-ink-faint">
               {ctx}
             </p>
           )}
           {f.logHint && (
-            <p className="mt-1 break-words text-[11px] leading-relaxed text-ink-faint">{f.logHint}</p>
+            <p className="mt-1 break-words text-meta leading-relaxed text-ink-faint">{f.logHint}</p>
           )}
         </div>
       </div>
@@ -100,9 +100,9 @@ const NotificationRow = ({
           <Inbox size={13} strokeWidth={1.75} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="break-words text-[12px] leading-relaxed text-ink">{i.detail}</p>
+          <p className="break-words text-ui leading-relaxed text-ink">{i.detail}</p>
           {ctx && (
-            <p className="mt-0.5 break-words font-mono text-[11px] leading-relaxed text-ink-faint">
+            <p className="mt-0.5 break-words font-mono text-meta leading-relaxed text-ink-faint">
               {ctx}
             </p>
           )}
@@ -125,7 +125,7 @@ const NotificationRow = ({
           <UserPlus size={13} strokeWidth={1.75} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="break-words text-[12px] leading-relaxed text-ink">{text}</p>
+          <p className="break-words text-ui leading-relaxed text-ink">{text}</p>
           <Btn
             variant="primary"
             size="xs"

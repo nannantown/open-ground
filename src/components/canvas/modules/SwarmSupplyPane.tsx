@@ -62,7 +62,7 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
           {statusLabel}
         </span>
         <span
-          className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-[11px] text-ink-muted"
+          className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-meta text-ink-muted"
           title={t('projectPanel.swarm.supply.hint')}
         >
           <Inbox size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
@@ -73,7 +73,7 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
           onClick={onStop}
           disabled={busy}
           title={t('projectPanel.swarm.supply.stop')}
-          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           <Power size={10} strokeWidth={2.25} />
           {busy ? t('projectPanel.swarm.supply.stopping') : t('projectPanel.swarm.supply.stop')}

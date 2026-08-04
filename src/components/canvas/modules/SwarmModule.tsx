@@ -1511,12 +1511,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                   <span
                     className={
                       badgeTone === 'accent'
-                        ? 'rounded-full bg-accent-soft px-1.5 text-[9px] font-medium leading-[14px] text-accent'
+                        ? 'rounded-full bg-accent-soft px-1.5 text-plate font-medium leading-[14px] text-accent'
                         : active
                           // On the active inverse pill the faint/line pair
                           // would sink into the ink surface — flip to inverse.
-                          ? 'rounded-full border border-ink-inverse/40 px-1.5 text-[9px] font-medium leading-[14px] text-ink-inverse'
-                          : 'rounded-full border border-line px-1.5 text-[9px] font-medium leading-[14px] text-ink-faint'
+                          ? 'rounded-full border border-ink-inverse/40 px-1.5 text-plate font-medium leading-[14px] text-ink-inverse'
+                          : 'rounded-full border border-line px-1.5 text-plate font-medium leading-[14px] text-ink-faint'
                     }
                   >
                     {badge}
@@ -1545,12 +1545,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       {showEnvBanner && (
         <div className="flex shrink-0 items-start gap-3 border-b border-line-soft bg-bg px-3 py-2">
           <div className="min-w-0 flex-1">
-            <p className="text-[11px] font-medium leading-relaxed text-accent">
+            <p className="text-meta font-medium leading-relaxed text-accent">
               {t('projectPanel.swarm.envPreflight.title')}
             </p>
             <ul className="mt-1 list-disc pl-4">
               {envIssues.map((issue) => (
-                <li key={issue.id} className="text-[11px] leading-relaxed text-ink-subtle">
+                <li key={issue.id} className="text-meta leading-relaxed text-ink-subtle">
                   {t(`projectPanel.swarm.envPreflight.${issue.id}`)}
                 </li>
               ))}
@@ -1558,7 +1558,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             {(() => {
               const footnoteKey = envBannerFootnoteKey(envIssues)
               return footnoteKey ? (
-                <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">{t(footnoteKey)}</p>
+                <p className="mt-1 text-meta leading-relaxed text-ink-faint">{t(footnoteKey)}</p>
               ) : null
             })()}
           </div>
@@ -1578,7 +1578,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}
       {error && (
-        <p className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-[11px] leading-relaxed text-accent">
+        <p className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-meta leading-relaxed text-accent">
           {error}
         </p>
       )}
@@ -1593,7 +1593,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           POST the reminder below uses would STOP a healthy running engine here. */}
       {engine.autonomyResumed && engine.running && !restoredNoticeDismissed && (
         <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
-          <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted">
+          <span className="min-w-0 flex-1 text-meta leading-relaxed text-ink-muted">
             {t('projectPanel.swarm.autonomyRestored')}
           </span>
           <button
@@ -1615,14 +1615,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           marker (toggleAutonomy false → forgetSwarmAutonomy). */}
       {engine.autonomyRemembered && !engine.running && (
         <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
-          <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted">
+          <span className="min-w-0 flex-1 text-meta leading-relaxed text-ink-muted">
             {t('projectPanel.swarm.autonomyReminder')}
           </span>
           <button
             type="button"
             onClick={() => toggleAutonomy(true)}
             disabled={engineBusy || !engineAvailable}
-            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-meta font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <Power size={12} strokeWidth={2.25} aria-hidden />
             {t('projectPanel.swarm.autonomyReminder.resume')}
@@ -1655,17 +1655,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       {engine.overseerRemembered && !engine.overseer && (
         <div className="flex shrink-0 items-start gap-3 border-b border-line-soft bg-bg px-3 py-2">
           <div className="min-w-0 flex-1">
-            <p className="text-[11px] leading-relaxed text-ink-muted">
+            <p className="text-meta leading-relaxed text-ink-muted">
               {t('projectPanel.swarm.overseerReminder')}
             </p>
-            <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+            <p className="mt-1 text-meta leading-relaxed text-ink-faint">
               {t('projectPanel.swarm.overseerReminder.effects')}
             </p>
             {/* Arming REQUIRES a running engine (the D1 gate the server enforces —
                 this card adds a display, never a new way in). Say why the button is
                 dimmed rather than letting the click silently do nothing. */}
             {!engine.running && (
-              <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+              <p className="mt-1 text-meta leading-relaxed text-ink-faint">
                 {t('projectPanel.swarm.overseerReminder.needsAutonomy')}
               </p>
             )}
@@ -1675,7 +1675,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             onClick={() => toggleOverseer(true)}
             disabled={engineBusy || !engineAvailable || !engine.running}
             title={!engine.running ? t('projectPanel.swarm.overseerReminder.needsAutonomy') : undefined}
-            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-meta font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <Eye size={12} strokeWidth={2.25} aria-hidden />
             {t('projectPanel.swarm.overseerReminder.restore')}
@@ -1746,7 +1746,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         // full explainer: one line, Start, and the entrance back to the manual.
         <div className="flex min-h-0 flex-1 items-center justify-center">
           <div className="max-w-[360px] text-center">
-            <p className="mb-4 text-[12px] text-ink-subtle">
+            <p className="mb-4 text-ui text-ink-subtle">
               {t('projectPanel.swarm.onboarding.intro')}
             </p>
             <div className="flex items-center justify-center gap-3">
@@ -1754,19 +1754,19 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 type="button"
                 onClick={() => powerSwarm(true)}
                 disabled={engineBusy || !engineAvailable}
-                className="inline-flex items-center gap-1.5 rounded-[3px] bg-accent px-4 py-1.5 text-[12px] font-medium text-bg-card transition-colors hover:opacity-90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                className="inline-flex items-center gap-1.5 rounded-[3px] bg-accent px-4 py-1.5 text-ui font-medium text-bg-card transition-colors hover:opacity-90 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
               >
                 {t('projectPanel.swarm.power.start')}
               </button>
               <button
                 type="button"
                 onClick={() => setShowOnboarding(true)}
-                className="text-[11px] text-ink-faint underline-offset-2 transition-colors hover:text-ink-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                className="text-meta text-ink-faint underline-offset-2 transition-colors hover:text-ink-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
               >
                 {t('projectPanel.swarm.onboarding.reopen')}
               </button>
             </div>
-            {engineError ? <p className="mt-3 text-[11px] text-accent">{engineError}</p> : null}
+            {engineError ? <p className="mt-3 text-meta text-accent">{engineError}</p> : null}
           </div>
         </div>
       ) : mainView === 'overseer' ? null : (
@@ -1792,17 +1792,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                   <Inbox size={20} strokeWidth={1.75} />
                 </div>
                 <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.supply.badge')}</p>
-                <h2 className="mb-2 text-[15px] font-medium text-ink">
+                <h2 className="mb-2 text-read font-medium text-ink">
                   {t('projectPanel.swarm.supply.title')}
                 </h2>
-                <p className="mb-4 text-[12px] leading-relaxed text-ink-subtle">
+                <p className="mb-4 text-ui leading-relaxed text-ink-subtle">
                   {t('projectPanel.swarm.supply.empty')}
                 </p>
                 <button
                   type="button"
                   onClick={() => void launchSupply()}
                   disabled={supplyBusy}
-                  className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                  className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
                 >
                   <Inbox size={13} strokeWidth={2} />
                   {supplyBusy
@@ -1876,10 +1876,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 <Network size={20} strokeWidth={1.75} />
               </div>
               <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.badge')}</p>
-              <h2 className="mb-2 text-[15px] font-medium text-ink">
+              <h2 className="mb-2 text-read font-medium text-ink">
                 {t('projectPanel.swarm.title')}
               </h2>
-              <p className="text-[12px] leading-relaxed text-ink-subtle">
+              <p className="text-ui leading-relaxed text-ink-subtle">
                 {t('projectPanel.swarm.workersEmpty')}
               </p>
             </div>

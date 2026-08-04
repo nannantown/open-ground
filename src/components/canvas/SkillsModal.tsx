@@ -82,20 +82,20 @@ export const SkillsModal = ({ open, path, projectName, onClose }: Props) => {
               {projectName}
             </span>
           }
-          titleClassName="truncate font-mono text-[12px] text-ink-muted"
+          titleClassName="truncate font-mono text-ui text-ink-muted"
           onClose={onClose}
           closeLabel={t('common.close')}
         />
 
         <DialogBody className="px-6 py-4">
           {load.state === 'loading' && (
-            <p className="flex items-center gap-2 text-[12px] text-ink-faint">
+            <p className="flex items-center gap-2 text-ui text-ink-faint">
               <Loader2 size={12} className="animate-spin" /> {t('projectPanel.loading')}
             </p>
           )}
 
           {load.state === 'error' && (
-            <p className="text-[12px] leading-relaxed text-accent">
+            <p className="text-ui leading-relaxed text-accent">
               {t('projectPanel.skillsLoadFailed', { error: load.error })}
             </p>
           )}
@@ -103,10 +103,10 @@ export const SkillsModal = ({ open, path, projectName, onClose }: Props) => {
           {load.state === 'done' &&
             (load.skills.length === 0 ? (
               <div className="space-y-2">
-                <p className="text-[12px] leading-relaxed text-ink-muted">
+                <p className="text-ui leading-relaxed text-ink-muted">
                   {t('projectPanel.skillsEmptyProject')}
                 </p>
-                <code className="inline-block rounded-[2px] bg-bg-inset px-1.5 py-0.5 font-mono text-[11px] text-ink-faint">
+                <code className="inline-block rounded-[2px] bg-bg-inset px-1.5 py-0.5 font-mono text-meta text-ink-faint">
                   .claude/skills/&lt;name&gt;/SKILL.md
                 </code>
               </div>
@@ -114,14 +114,14 @@ export const SkillsModal = ({ open, path, projectName, onClose }: Props) => {
               <ul className="space-y-2">
                 {load.skills.map((s) => (
                   <li key={s.id} className="rounded-[3px] border border-line bg-bg px-3 py-2.5">
-                    <p className="font-display text-[14px] leading-tight text-ink">{s.name}</p>
+                    <p className="font-display text-read leading-tight text-ink">{s.name}</p>
                     {s.description && (
-                      <p className="mt-1 text-[12px] leading-relaxed text-ink-muted">
+                      <p className="mt-1 text-ui leading-relaxed text-ink-muted">
                         {s.description}
                       </p>
                     )}
                     <p
-                      className="mt-1.5 truncate font-mono text-[10px] text-ink-faint"
+                      className="mt-1.5 truncate font-mono text-micro text-ink-faint"
                       title={s.file}
                     >
                       {s.file}

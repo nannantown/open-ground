@@ -446,7 +446,7 @@ export function useInspectTweak({
     <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
       {/* The mode flip (selected = live) needs a visible signal — the moss
           dot mirrors the Ground card's Working beacon register. */}
-      <span className="pointer-events-none flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-[10px] font-medium text-moss shadow-card">
+      <span className="pointer-events-none flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-micro font-medium text-moss shadow-card">
         <span className="h-[5px] w-[5px] rounded-full bg-moss" />
         {t('canvasEl.iframe.interactive')}
       </span>
@@ -458,7 +458,7 @@ export function useInspectTweak({
           aria-pressed={inspecting}
           title={t('canvasEl.tweak.title')}
           className={[
-            'flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-card transition-colors',
+            'flex items-center gap-1 rounded-full border px-2.5 py-1 text-micro font-medium shadow-card transition-colors',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
             inspecting
               ? 'border-accent bg-accent text-bg-card hover:bg-accent-hover'
@@ -495,10 +495,10 @@ export function useInspectTweak({
                 align="center"
                 leading={
                   <div className="min-w-0">
-                    <p className="truncate text-[13px] font-medium text-ink">
+                    <p className="truncate text-ui font-medium text-ink">
                       {t('projectPanel.claudeLogin.title')}
                     </p>
-                    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                    <p className="mt-0.5 text-meta leading-relaxed text-ink-faint">
                       {t('projectPanel.claudeLogin.hint')}
                     </p>
                   </div>
@@ -513,19 +513,19 @@ export function useInspectTweak({
                   <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
                     {loginError ? (
                       <>
-                        <p className="max-w-[90%] text-[12px] leading-relaxed text-accent">
+                        <p className="max-w-[90%] text-ui leading-relaxed text-accent">
                           {loginError}
                         </p>
                         <button
                           type="button"
                           onClick={() => void openClaudeLogin()}
-                          className="rounded-sm border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                          className="rounded-sm border border-line px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                         >
                           {t('projectPanel.claudeLogin.retry')}
                         </button>
                       </>
                     ) : (
-                      <p className="text-[12px] text-ink-faint">
+                      <p className="text-ui text-ink-faint">
                         {t('projectPanel.claudeLogin.starting')}
                       </p>
                     )}
@@ -546,7 +546,7 @@ export function useInspectTweak({
           className="absolute inset-x-0 bottom-0 z-10 border-t border-line bg-bg-card p-2"
         >
           <div className="flex items-center gap-2">
-            <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted">
+            <span className="min-w-0 flex-1 truncate font-mono text-micro text-ink-muted">
               {picked
                 ? `<${picked.tag}>` +
                   (picked.classes.trim()
@@ -581,13 +581,13 @@ export function useInspectTweak({
                 disabled={pending}
                 autoFocus
                 placeholder={t('canvasEl.tweak.placeholder')}
-                className="h-7 min-w-0 flex-1 rounded-[3px] border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-7 min-w-0 flex-1 rounded-[3px] border border-line bg-bg px-2 text-ui text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               />
               <button
                 type="button"
                 onClick={() => void submit()}
                 disabled={pending || !instruction.trim()}
-                className="flex h-7 shrink-0 items-center gap-1 rounded-[3px] bg-accent px-2.5 text-[11px] font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
+                className="flex h-7 shrink-0 items-center gap-1 rounded-[3px] bg-accent px-2.5 text-meta font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
               >
                 {pending ? (
                   <Loader2 size={12} strokeWidth={2} className="animate-spin" />
@@ -603,13 +603,13 @@ export function useInspectTweak({
             // the login terminal (loginModal below). claudeMissing keeps its
             // own install copy via the notice branch.
             <div className="mt-1 flex items-center justify-between gap-2">
-              <p className="min-w-0 flex-1 text-[10.5px] leading-snug text-ink-muted">
+              <p className="min-w-0 flex-1 text-micro leading-snug text-ink-muted">
                 {t('canvasEl.tweak.claudeLoggedOut')}
               </p>
               <button
                 type="button"
                 onClick={() => void openClaudeLogin()}
-                className="shrink-0 rounded-[3px] border border-line px-2 py-0.5 text-[10.5px] font-medium text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="shrink-0 rounded-[3px] border border-line px-2 py-0.5 text-micro font-medium text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 {t('canvas.generate.signIn')}
               </button>
@@ -618,7 +618,7 @@ export function useInspectTweak({
             notice && (
               <p
                 className={[
-                  'mt-1 truncate text-[10.5px]',
+                  'mt-1 truncate text-micro',
                   notice.kind === 'ok' ? 'text-moss' : 'text-accent',
                 ].join(' ')}
               >
@@ -664,7 +664,7 @@ const ChromeStrip = ({
         <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
         <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" />
         <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
-        <span className="ml-2 truncate font-mono text-[10px] tracking-tight text-ink-muted">
+        <span className="ml-2 truncate font-mono text-micro tracking-tight text-ink-muted">
           {label}
         </span>
       </div>
@@ -749,7 +749,7 @@ export const ScreenView = ({
             spellCheck={false}
             wrap="off"
             placeholder={'export default function Screen() {\n  return <div className="p-10">…</div>\n}'}
-            className="block h-full w-full resize-none bg-bg px-3 py-2 font-mono text-[11.5px] leading-[1.55] text-ink focus:outline-none"
+            className="block h-full w-full resize-none bg-bg px-3 py-2 font-mono text-meta leading-[1.55] text-ink focus:outline-none"
           />
         ) : source.trim() ? (
           <>
@@ -781,7 +781,7 @@ export const ScreenView = ({
                 {/* Interactivity is real but invisible (select first, then the
                     iframe is live) — say so on hover, or nobody discovers it. */}
                 {!commentTool && (
-                  <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-[10px] font-medium text-ink-muted opacity-0 shadow-card transition-opacity duration-150 group-hover:opacity-100">
+                  <span className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-micro font-medium text-ink-muted opacity-0 shadow-card transition-opacity duration-150 group-hover:opacity-100">
                     {t('canvasEl.iframe.clickToInteract')}
                   </span>
                 )}
@@ -802,12 +802,12 @@ export const ScreenView = ({
             className="flex h-full w-full flex-col items-center justify-center gap-2 bg-bg-card p-6 text-center"
           >
             <MonitorSmartphone size={22} strokeWidth={1.5} className="text-ink-faint" />
-            <span className="text-[13px] font-medium text-ink">
+            <span className="text-ui font-medium text-ink">
               {element.moduleId
                 ? t('canvasEl.screen.legacyTitle')
                 : t('canvasEl.screen.emptyTitle')}
             </span>
-            <span className="max-w-[36ch] text-[11.5px] leading-snug text-ink-muted">
+            <span className="max-w-[36ch] text-meta leading-snug text-ink-muted">
               {t('canvasEl.screen.emptyHint')}
             </span>
           </button>

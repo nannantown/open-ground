@@ -135,7 +135,7 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
             </>
           }
           title={t('projectPanel.skillsPanelSubtitle')}
-          titleClassName="font-mono text-[12px] text-ink-muted"
+          titleClassName="font-mono text-ui text-ink-muted"
           onClose={() => {
             if (!creating) onClose()
           }}
@@ -156,10 +156,10 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
               disabled={creating}
               rows={3}
               placeholder={t('projectPanel.skillsCreatePlaceholder')}
-              className="w-full resize-y rounded-[3px] border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:opacity-50"
+              className="w-full resize-y rounded-[3px] border border-line bg-bg px-2.5 py-2 text-ui leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:opacity-50"
             />
             <div className="mt-2 flex items-center justify-between gap-3">
-              <span className="text-[11px] leading-relaxed text-ink-faint">
+              <span className="text-meta leading-relaxed text-ink-faint">
                 {creating ? t('projectPanel.skillsCreating') : t('projectPanel.skillsCreateHint')}
               </span>
               <Btn
@@ -180,7 +180,7 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
               </Btn>
             </div>
             {createError && (
-              <p className="mt-2 text-[12px] leading-relaxed text-accent">{createError}</p>
+              <p className="mt-2 text-ui leading-relaxed text-accent">{createError}</p>
             )}
           </section>
 
@@ -194,34 +194,34 @@ export const GlobalSkillsPanel = ({ open, onClose }: Props) => {
             </h3>
 
             {load.state === 'loading' && (
-              <p className="flex items-center gap-2 text-[12px] text-ink-faint">
+              <p className="flex items-center gap-2 text-ui text-ink-faint">
                 <Loader2 size={12} className="animate-spin" /> {t('projectPanel.loading')}
               </p>
             )}
 
             {load.state === 'error' && (
-              <p className="text-[12px] leading-relaxed text-accent">
+              <p className="text-ui leading-relaxed text-accent">
                 {t('projectPanel.skillsLoadFailed', { error: load.error })}
               </p>
             )}
 
             {load.state === 'done' &&
               (load.skills.length === 0 ? (
-                <p className="text-[12px] leading-relaxed text-ink-muted">
+                <p className="text-ui leading-relaxed text-ink-muted">
                   {t('projectPanel.skillsEmptyGlobal')}
                 </p>
               ) : (
                 <ul className="space-y-2">
                   {load.skills.map((s) => (
                     <li key={s.id} className="rounded-[3px] border border-line bg-bg px-3 py-2.5">
-                      <p className="font-display text-[14px] leading-tight text-ink">{s.name}</p>
+                      <p className="font-display text-read leading-tight text-ink">{s.name}</p>
                       {s.description && (
-                        <p className="mt-1 text-[12px] leading-relaxed text-ink-muted">
+                        <p className="mt-1 text-ui leading-relaxed text-ink-muted">
                           {s.description}
                         </p>
                       )}
                       <p
-                        className="mt-1.5 truncate font-mono text-[10px] text-ink-faint"
+                        className="mt-1.5 truncate font-mono text-micro text-ink-faint"
                         title={s.file}
                       >
                         {s.file}

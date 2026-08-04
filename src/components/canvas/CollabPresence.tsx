@@ -82,7 +82,7 @@ export const CollabPresence = ({
       {shown.map((p) => (
         <span
           key={p.clientId}
-          className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-bg-card text-[9px] font-semibold text-white shadow-card"
+          className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-bg-card text-plate font-semibold leading-none text-white shadow-card"
           style={{ backgroundColor: p.color }}
           title={p.email || p.name}
         >
@@ -90,7 +90,7 @@ export const CollabPresence = ({
         </span>
       ))}
       {extra > 0 && (
-        <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-bg-card bg-bg-inset px-1 text-[9px] font-semibold text-ink-muted">
+        <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-bg-card bg-bg-inset px-1 text-plate leading-none font-semibold text-ink-muted">
           +{extra}
         </span>
       )}

@@ -131,12 +131,12 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
                 <p className="label-cap text-accent mb-1.5">
                   {confirming === 'delete' ? 'Delete projects' : 'Remove from Ground'}
                 </p>
-                <h2 className="font-display text-[21px] leading-snug text-ink tracking-tightest">
+                <h2 className="font-display text-title leading-snug text-ink tracking-tightest">
                   {confirming === 'delete'
                     ? `Move ${projects.length} projects to the Trash?`
                     : `Remove ${projects.length} projects from the Ground?`}
                 </h2>
-                <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
+                <p className="mt-2 text-ui leading-relaxed text-ink-muted">
                   {confirming === 'delete'
                     ? 'Each folder is moved to the macOS Trash — removed from OPEN GROUND, but restorable from Finder.'
                     : 'Each card is taken off the canvas. The folders stay on disk — re-import them anytime.'}
@@ -147,14 +147,14 @@ export const BulkActionBar = ({ projects, onClear, onReload }: Props) => {
               {projects.map((p) => (
                 <li
                   key={p.id}
-                  className="truncate py-1.5 font-mono text-[12px] text-ink"
+                  className="truncate py-1.5 font-mono text-ui text-ink"
                 >
                   {p.name}
                 </li>
               ))}
             </ul>
             {error && (
-              <p className="border-t border-line px-6 pt-3 text-[11px] leading-relaxed text-accent">
+              <p className="border-t border-line px-6 pt-3 text-meta leading-relaxed text-accent">
                 {error}
               </p>
             )}

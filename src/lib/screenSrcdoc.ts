@@ -87,6 +87,18 @@ const TAILWIND_CONFIG = {
         sans: ['var(--font-instrument-sans)', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'Noto Sans JP', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         mono: ['var(--font-jetbrains-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
+      // Mirrored from tailwind.config.ts — see the note at the top of this
+      // block. src/screenSrcdocMirror.test.ts fails if the two drift.
+      fontSize: {
+        plate: ['11px', { lineHeight: '14px' }],
+        micro: ['12px', { lineHeight: '16px', letterSpacing: '0.005em' }],
+        meta: ['13px', { lineHeight: '18px', letterSpacing: '0' }],
+        ui: ['14px', { lineHeight: '20px', letterSpacing: '-0.006em' }],
+        read: ['16px', { lineHeight: '24px', letterSpacing: '-0.011em' }],
+        title: ['20px', { lineHeight: '26px', letterSpacing: '-0.02em' }],
+        head: ['26px', { lineHeight: '32px', letterSpacing: '-0.025em' }],
+        hero: ['34px', { lineHeight: '40px', letterSpacing: '-0.03em' }],
+      },
       letterSpacing: { tightest: '-0.04em', cartographic: '0.18em' },
       boxShadow: {
         card: '0 1px 0 rgba(42,31,26,0.04), 0 1px 2px rgba(42,31,26,0.06)',
@@ -117,12 +129,22 @@ const TOKEN_CSS = `
 }
 .label-cap {
   font-family: var(--font-instrument-sans), system-ui, sans-serif;
-  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 500;
+  font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; font-weight: 500;
 }
 .coord-label {
   font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
-  font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
 }
+/* 和文 folds under Latin small-caps tracking — see globals.css for the full
+   reasoning. This half was written on 2026-08-04 (0.11.66) and never copied
+   here, so a generated UI kept stacking Japanese captions one character per
+   line long after the app stopped. src/screenSrcdocMirror.test.ts now fails if
+   these drift apart again. */
+:lang(ja) .label-cap { letter-spacing: 0.02em; }
+:lang(ja) .coord-label { letter-spacing: 0.02em; }
+html .label-cap.label-cap-latin { letter-spacing: 0.16em; }
+html .coord-label.label-cap-latin { letter-spacing: 0.08em; }
+html .label-cap.label-cap-flat, html .coord-label.label-cap-flat { letter-spacing: 0.02em; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 `
@@ -361,7 +383,7 @@ export function preprocessScreenSource(src: string): string {
 // CSS / fonts / Tailwind available so a hand-written HTML sketch also gets the
 // design system.
 const HTML_TEMPLATE = (code: string, theme: ScreenTheme): string => `<!doctype html>
-<html>
+<html lang="${currentLang()}">
   <head>
     <meta charset="utf-8" />
     <script src="https://cdn.tailwindcss.com"></script>
@@ -381,7 +403,7 @@ const REACT_TEMPLATE = (
   theme: ScreenTheme,
   propsJson: string,
 ): string => `<!doctype html>
-<html>
+<html lang="${currentLang()}">
   <head>
     <meta charset="utf-8" />
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -436,17 +458,17 @@ export const DEFAULT_SCREEN_SOURCE = `export default function Screen() {
   return (
     <div className="min-h-full bg-bg p-10 font-body text-ink">
       <p className="label-cap text-ink-muted">Screen</p>
-      <h1 className="mt-2 font-display text-[34px] leading-tight text-ink">
+      <h1 className="mt-2 font-display text-hero leading-tight text-ink">
         ${st('screen.starter.heading')}
       </h1>
-      <p className="mt-3 max-w-[46ch] text-[14px] leading-relaxed text-ink-muted">
+      <p className="mt-3 max-w-[46ch] text-ui leading-relaxed text-ink-muted">
         ${st('screen.starter.body')}
       </p>
       <div className="mt-8 flex gap-3">
-        <button className="rounded-[3px] bg-accent px-4 py-2 text-[13px] font-medium text-bg-card">
+        <button className="rounded-[3px] bg-accent px-4 py-2 text-meta font-medium text-bg-card">
           Primary
         </button>
-        <button className="rounded-[3px] border border-line bg-bg-card px-4 py-2 text-[13px] text-ink">
+        <button className="rounded-[3px] border border-line bg-bg-card px-4 py-2 text-meta text-ink">
           Secondary
         </button>
       </div>
@@ -457,8 +479,8 @@ export const DEFAULT_SCREEN_SOURCE = `export default function Screen() {
 
 export const DEFAULT_SCREEN_HTML = `<div class="min-h-full bg-bg p-10 font-body text-ink">
   <p class="label-cap text-ink-muted">Screen</p>
-  <h1 class="mt-2 font-display text-[34px] leading-tight text-ink">${st('screen.starter.heading')}</h1>
-  <p class="mt-3 max-w-[46ch] text-[14px] leading-relaxed text-ink-muted">
+  <h1 class="mt-2 font-display text-hero leading-tight text-ink">${st('screen.starter.heading')}</h1>
+  <p class="mt-3 max-w-[46ch] text-ui leading-relaxed text-ink-muted">
     ${st('screen.starter.htmlBody')}
   </p>
 </div>

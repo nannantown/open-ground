@@ -222,7 +222,7 @@ export const PersonaGraphView = ({ judgments }: { judgments: ManualJudgment[] })
                 x={0}
                 y={NODE_RADIUS + 12}
                 textAnchor="middle"
-                className="select-none fill-ink text-[9px]"
+                className="select-none fill-ink text-plate"
               >
                 {label}
               </text>
@@ -239,8 +239,8 @@ export const PersonaGraphView = ({ judgments }: { judgments: ManualJudgment[] })
   if (judgments.length === 0) {
     return (
       <div className="flex flex-col gap-1.5 rounded-[3px] border border-dashed border-line px-4 py-5">
-        <p className="text-[12.5px] text-ink">{t('persona.graph.empty.title')}</p>
-        <p className="text-[12px] leading-relaxed text-ink-muted">
+        <p className="text-ui text-ink">{t('persona.graph.empty.title')}</p>
+        <p className="text-ui leading-relaxed text-ink-muted">
           {t('persona.graph.empty.body')}
         </p>
       </div>
@@ -265,7 +265,7 @@ export const PersonaGraphView = ({ judgments }: { judgments: ManualJudgment[] })
           </g>
         </svg>
 
-        <div className="absolute right-2 top-2 flex flex-col gap-1 rounded-[3px] border border-line bg-bg-card/90 px-2 py-1.5 text-[10px] text-ink-faint shadow-card">
+        <div className="absolute right-2 top-2 flex flex-col gap-1 rounded-[3px] border border-line bg-bg-card/90 px-2 py-1.5 text-micro text-ink-faint shadow-card">
           <span className="flex items-center gap-1.5">
             <span
               className="inline-block h-[2px] w-3"
@@ -293,12 +293,12 @@ export const PersonaGraphView = ({ judgments }: { judgments: ManualJudgment[] })
         </div>
       </div>
 
-      <p className="text-[11px] text-ink-faint">{t('persona.graph.hint')}</p>
+      <p className="text-meta text-ink-faint">{t('persona.graph.hint')}</p>
 
       {selected && (
         <article className="flex flex-col gap-2 rounded-[3px] border border-line bg-bg-card px-4 py-3 shadow-card">
           <div className="flex items-start justify-between gap-3">
-            <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink">
+            <p className="whitespace-pre-wrap text-ui leading-relaxed text-ink">
               {selected.text}
             </p>
             <Btn variant="subtle" size="xs" onClick={() => setSelectedId(null)}>
@@ -310,12 +310,12 @@ export const PersonaGraphView = ({ judgments }: { judgments: ManualJudgment[] })
               <span className="label-cap text-ink-faint">
                 {t(selected.correctsId ? 'persona.notes.corrects' : 'persona.notes.basis')}
               </span>
-              <p className="whitespace-pre-wrap text-[11.5px] leading-relaxed text-ink-subtle">
+              <p className="whitespace-pre-wrap text-meta leading-relaxed text-ink-subtle">
                 {selected.context}
               </p>
             </div>
           )}
-          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
+          <div className="flex flex-wrap items-center gap-1.5 text-meta text-ink-faint">
             <time dateTime={selected.addedAt}>
               {new Date(selected.addedAt).toLocaleString(lang === 'ja' ? 'ja-JP' : 'en-US', {
                 year: 'numeric',

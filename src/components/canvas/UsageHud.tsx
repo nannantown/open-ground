@@ -164,7 +164,7 @@ export const UsageHud = () => {
         // 案C `.gauge`: a WELL of its own (the darkest face), 8px radius,
         // 8/14px padding, mono. It used to be a transparent 3px-radius strip, so
         // the instrument read as loose text rather than a gauge.
-        className="mx-2 flex items-center gap-2.5 whitespace-nowrap rounded-lg bg-bg-inset px-3.5 py-2 font-mono text-[11px] tabular-nums text-ink-muted select-none transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        className="mx-2 flex items-center gap-2.5 whitespace-nowrap rounded-lg bg-bg-inset px-3.5 py-2 font-mono text-meta tabular-nums text-ink-muted select-none transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
         {model && <span className="hidden md:inline text-ink">{model}</span>}
         <div className="relative h-1.5 w-24 rounded-full bg-line-soft overflow-hidden">
@@ -204,20 +204,20 @@ export const UsageHud = () => {
         <div className="absolute right-0 top-full z-30 mt-1.5 w-[264px] rounded-[3px] border border-line bg-bg-card p-3.5 text-ink shadow-card-hover">
           <div className="mb-2.5 flex items-baseline justify-between">
             <p className="label-cap text-ink-muted">{t('misc.usage.heading')}</p>
-            {model && <span className="text-[11px] text-ink-subtle">{model}</span>}
+            {model && <span className="text-meta text-ink-subtle">{model}</span>}
           </div>
 
           {pct != null ? (
             <>
               <div className="flex items-baseline justify-between">
-                <span className="text-[12px] text-ink-muted">{t('misc.usage.session')}</span>
-                <span className={`text-[16px] font-medium tabular-nums ${textTone}`}>{pct}%</span>
+                <span className="text-ui text-ink-muted">{t('misc.usage.session')}</span>
+                <span className={`text-read font-medium tabular-nums ${textTone}`}>{pct}%</span>
               </div>
               <div className="mt-1.5 h-1.5 w-full rounded-full bg-line-soft overflow-hidden">
                 <div className={`h-full ${fillTone}`} style={{ width: `${Math.max(2, ratio * 100)}%` }} />
               </div>
               {(resetClockShort || resetRelOk) && (
-                <p className="mt-2 text-[11px] text-ink-subtle">
+                <p className="mt-2 text-meta text-ink-subtle">
                   {resetClockShort && t('misc.usage.resetsAt', { time: resetClockShort })}
                   {resetRelOk && (
                     <span className="text-ink-faint"> · {t('misc.usage.resetsIn', { rel: resetRelOk })}</span>
@@ -227,8 +227,8 @@ export const UsageHud = () => {
               {cliWeek && (
                 <div className="mt-3 border-t border-line-soft pt-2.5">
                   <div className="flex items-baseline justify-between">
-                    <span className="text-[12px] text-ink-muted">{t('misc.usage.week')}</span>
-                    <span className={`text-[14px] font-medium tabular-nums ${TEXT[weekLevel]}`}>
+                    <span className="text-ui text-ink-muted">{t('misc.usage.week')}</span>
+                    <span className={`text-read font-medium tabular-nums ${TEXT[weekLevel]}`}>
                       {cliWeek.pct}%
                     </span>
                   </div>
@@ -239,7 +239,7 @@ export const UsageHud = () => {
                     />
                   </div>
                   {weekResetShort && (
-                    <p className="mt-2 text-[11px] text-ink-subtle">
+                    <p className="mt-2 text-meta text-ink-subtle">
                       {t('misc.usage.resetsAt', { time: weekResetShort })}
                     </p>
                   )}
@@ -248,15 +248,15 @@ export const UsageHud = () => {
             </>
           ) : (
             <div className="space-y-1.5">
-              <p className="text-[12px] leading-relaxed text-ink-subtle">{reason}</p>
+              <p className="text-ui leading-relaxed text-ink-subtle">{reason}</p>
               {localEstimate && (
-                <p className="text-[11px] leading-relaxed text-ink-faint">{localEstimate}</p>
+                <p className="text-meta leading-relaxed text-ink-faint">{localEstimate}</p>
               )}
             </div>
           )}
 
           <div className="mt-3 flex items-center justify-between gap-2 border-t border-line-soft pt-2.5">
-            <span className="min-w-0 truncate text-[10px] text-ink-faint">
+            <span className="min-w-0 truncate text-micro text-ink-faint">
               {ago ? t('misc.usage.updated', { ago }) : ''}
             </span>
             <button
@@ -270,7 +270,7 @@ export const UsageHud = () => {
             </button>
           </div>
           {pct != null && (
-            <p className="mt-2 text-[10px] leading-relaxed text-ink-faint">{t('misc.usage.live')}</p>
+            <p className="mt-2 text-micro leading-relaxed text-ink-faint">{t('misc.usage.live')}</p>
           )}
         </div>
       )}

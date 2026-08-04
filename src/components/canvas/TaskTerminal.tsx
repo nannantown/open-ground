@@ -35,7 +35,7 @@ export const BoardTaskTerminal = ({
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
       <TerminalSquare size={20} className="text-ink-faint" />
-      <p className="max-w-[85%] text-[12px] leading-relaxed text-ink-faint">
+      <p className="max-w-[85%] text-ui leading-relaxed text-ink-faint">
         {t('board.taskTerminal.hint')}
       </p>
       <button
@@ -49,7 +49,7 @@ export const BoardTaskTerminal = ({
           }
         }}
         disabled={launching}
-        className="flex items-center gap-1.5 rounded-[4px] border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+        className="flex items-center gap-1.5 rounded-[4px] border border-line px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
       >
         <Play size={11} strokeWidth={2.5} />
         {launching ? t('projectPanel.launchingClaude') : t('projectPanel.launchClaude')}

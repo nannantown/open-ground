@@ -299,17 +299,17 @@ const BoardCardInner = ({
                 }
               }}
               onBlur={e => onCommitTitle(task.id, task.title, e.target.value)}
-              className="w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-[12.5px] leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+              className="w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-ui leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
             />
           ) : (
-            <p className="text-[13px] leading-[1.55] text-ink line-clamp-3 [overflow-wrap:anywhere]">
+            <p className="text-ui leading-[1.55] text-ink line-clamp-3 [overflow-wrap:anywhere]">
               {/* Drawer-claude stamp — suppressed when a swarm worker owns the
                   card (its strip below is the authoritative status), so the two
                   never show conflicting states on one card. */}
               {!hasWorker && claudeStatus === 'working' && (
                 <span
                   title={t('board.card.sessionWorking')}
-                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-[11px] text-moss-text"
+                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-meta text-moss-text"
                 >
                   <span className="run-pulse h-1.5 w-1.5 rounded-full bg-moss shadow-lamp-moss" />
                   {t('board.card.sessionWorkingLabel')}
@@ -320,7 +320,7 @@ const BoardCardInner = ({
                 // (same register as the Ground card's Waiting stamp).
                 <span
                   title={t('board.card.sessionWaiting')}
-                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-[11px] text-[var(--beacon-waiting)]"
+                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-meta text-[var(--beacon-waiting)]"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-ochre shadow-lamp-ochre" />
                   {t('board.card.sessionWaitingLabel')}
@@ -330,7 +330,7 @@ const BoardCardInner = ({
             </p>
           )}
           {!isEditing && task.notes?.trim() && (
-            <p className="mt-[7px] text-[12px] leading-[1.6] line-clamp-2 text-ink-muted [overflow-wrap:anywhere]">
+            <p className="mt-[7px] text-ui leading-[1.6] line-clamp-2 text-ink-muted [overflow-wrap:anywhere]">
               {task.notes.trim()}
             </p>
           )}
@@ -358,14 +358,14 @@ const BoardCardInner = ({
                   // because it carries Japanese — and for the same reason it
                   // carries no tracking. .1em widened 稼働中 to 36.3px and left
                   // 0 chars for the branch name beside it (2026-08-04).
-                  'shrink-0 whitespace-nowrap text-[11px]',
+                  'shrink-0 whitespace-nowrap text-meta',
                   WORKER_LABEL_CLS[workerActivity],
                 ].join(' ')}
               >
                 {t(WORKER_LABEL_KEY[workerActivity])}
               </span>
               <span
-                className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-muted"
+                className="min-w-0 flex-1 truncate font-mono text-meta text-ink-muted"
                 title={
                   workerNote
                     ? `${workerBranch} — ${workerNote}`
@@ -395,7 +395,7 @@ const BoardCardInner = ({
                 // Full name in the tooltip — the visible label truncates on long
                 // reviewer names (260px card).
                 title={`${t('board.card.reviewedBy', { name: task.reviewedBy.trim() })} — ${t('board.card.reviewedClear')}`}
-                className="mt-1 flex max-w-full items-center gap-1 rounded-sm px-0 py-0.5 text-[10px] text-moss transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-moss"
+                className="mt-1 flex max-w-full items-center gap-1 rounded-sm px-0 py-0.5 text-micro text-moss transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-moss"
               >
                 <span aria-hidden className="shrink-0">✓</span>
                 <span className="min-w-0 truncate">
@@ -412,7 +412,7 @@ const BoardCardInner = ({
                   onSetReviewedBy(task.id, displayName.trim())
                 }}
                 title={t('board.card.markReviewedTitle')}
-                className="mt-1 whitespace-nowrap rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                className="mt-1 whitespace-nowrap rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
               >
                 {t('board.card.markReviewed')}
               </button>
@@ -424,7 +424,7 @@ const BoardCardInner = ({
               (moveCard). */}
           {!isEditing && isReview && task.integrationConflict && (
             <div
-              className="mt-1 flex min-w-0 items-center gap-1 rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
+              className="mt-1 flex min-w-0 items-center gap-1 rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-micro text-accent"
               title={t('board.card.integrationConflictTitle')}
             >
               <span aria-hidden className="shrink-0">⚠</span>
@@ -442,7 +442,7 @@ const BoardCardInner = ({
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 gap-y-1">
               <span
                 title={t('board.card.mergedTitle')}
-                className="shrink-0 rounded-sm border border-moss/40 bg-moss/10 px-1.5 py-0.5 text-[10px] leading-none text-moss"
+                className="shrink-0 rounded-sm border border-moss/40 bg-moss/10 px-1.5 py-0.5 text-micro leading-none text-moss"
               >
                 {t('board.card.merged')}
               </span>
@@ -460,7 +460,7 @@ const BoardCardInner = ({
                   if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
                 }}
                 title={t('board.card.mergedToDoneTitle')}
-                className="min-w-0 truncate rounded-sm px-1 py-0.5 text-[10px] text-ink-muted transition-colors hover:bg-plane hover:text-moss active:bg-plane active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                className="min-w-0 truncate rounded-sm px-1 py-0.5 text-micro text-ink-muted transition-colors hover:bg-plane hover:text-moss active:bg-plane active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
               >
                 {t('board.card.mergedToDone')}
               </button>
@@ -495,7 +495,7 @@ const BoardCardInner = ({
                         title={t('board.card.priorityTitle', {
                           label: t(PRIORITY_META[task.priority].labelKey),
                         })}
-                        className={`shrink-0 rounded-full px-[9px] py-0.5 text-[11px] font-semibold ${PRIORITY_META[task.priority].chipClass}`}
+                        className={`shrink-0 rounded-full px-[9px] py-0.5 text-meta font-semibold ${PRIORITY_META[task.priority].chipClass}`}
                       >
                         {t(PRIORITY_META[task.priority].labelKey)}
                       </span>
@@ -508,7 +508,7 @@ const BoardCardInner = ({
                         draggable={false}
                         onClick={e => e.stopPropagation()}
                         title={task.prUrl}
-                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                       >
                         PR ↗
                       </a>
@@ -516,7 +516,7 @@ const BoardCardInner = ({
                     {depCount > 0 && (
                       <span
                         title={t('board.card.depsTitle', { titles: depTitlesText })}
-                        className="shrink-0 text-[10px] text-ink-muted"
+                        className="shrink-0 text-micro text-ink-muted"
                       >
                         {/* U+FE0E pins text presentation — without it some
                             platforms render the chain as a color emoji. */}
@@ -526,7 +526,7 @@ const BoardCardInner = ({
                     {inCycle && (
                       <span
                         title={t('board.card.cycleTitle')}
-                        className="shrink-0 rounded-sm border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent"
+                        className="shrink-0 rounded-sm border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-micro font-medium text-accent"
                       >
                         {/* U+FE0E forces text (not emoji) rendering of the
                             warning sign — matches the chain. */}
@@ -540,7 +540,7 @@ const BoardCardInner = ({
                           // max-w + truncate: a malformed/long due string can't
                           // blow the card footer row; title carries the full
                           // value.
-                          'max-w-[96px] truncate text-[10px]',
+                          'max-w-[96px] truncate text-micro',
                           // Today (inclusive) or earlier = needs attention —
                           // unless the card is done.
                           !doneCard && isOverdue(task.dueDate)
@@ -553,7 +553,7 @@ const BoardCardInner = ({
                     )}
                   </span>
                   {task.assignee?.trim() && (
-                    <p className="min-w-0 truncate text-right text-[10px] text-ink-faint">
+                    <p className="min-w-0 truncate text-right text-micro text-ink-faint">
                       {task.assignee.trim()}
                     </p>
                   )}

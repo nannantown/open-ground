@@ -653,12 +653,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       {(exited || error) && (
         <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-4 py-1.5">
           {exited && (
-            <span className="font-mono text-[10px] text-accent">
+            <span className="font-mono text-micro text-accent">
               exited ({exited.exitCode ?? '?'})
             </span>
           )}
           {error && (
-            <span className="font-mono text-[10px] text-accent">{error}</span>
+            <span className="font-mono text-micro text-accent">{error}</span>
           )}
         </div>
       )}
@@ -684,7 +684,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
             the session has exited or an error strip is shown. */}
         {!exited && !error && (connState === 'reconnecting' || connState === 'lost') && (
           <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2">
-            <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-[11px] text-white/80 shadow-lg backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-meta text-white/80 shadow-lg backdrop-blur-[1px]">
               {connState === 'reconnecting' ? (
                 <>
                   <RotateCcw size={11} strokeWidth={2.25} className="animate-spin" aria-hidden />

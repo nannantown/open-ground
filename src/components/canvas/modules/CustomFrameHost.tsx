@@ -424,7 +424,7 @@ export const CustomFrameHost = () => {
                 <span
                   key={f.moduleId}
                   title={p?.title ?? f.label}
-                  className="flex items-center gap-1.5 text-[11px] font-medium text-ink-muted"
+                  className="flex items-center gap-1.5 text-meta font-medium text-ink-muted"
                 >
                   {p && (
                     <span className="text-accent">

@@ -57,7 +57,7 @@ export const SwarmPowerStatus = ({ running, manualStop, available, workerCount }
   return (
     <span
       className={[
-        'flex min-w-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] transition-colors duration-150',
+        'flex min-w-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-meta transition-colors duration-150',
         live ? 'bg-moss-soft text-ink' : 'text-ink-muted',
       ].join(' ')}
       title={t('projectPanel.swarm.power.hint')}
@@ -122,7 +122,7 @@ export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchP
             aria-pressed={active}
             disabled={disabled}
             className={[
-              'h-6 min-w-[52px] whitespace-nowrap rounded-[3px] px-2.5 text-[11px] font-medium transition-all duration-150',
+              'h-6 min-w-[52px] whitespace-nowrap rounded-[3px] px-2.5 text-meta font-medium transition-all duration-150',
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               'disabled:cursor-not-allowed disabled:opacity-40',
               active

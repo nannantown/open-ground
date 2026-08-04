@@ -338,7 +338,7 @@ export const PersonaModule = () => {
 
   if (loading) {
     return (
-      <div className="flex-1 px-8 py-6 text-[12px] text-ink-subtle">
+      <div className="flex-1 px-8 py-6 text-ui text-ink-subtle">
         {t('persona.loading')}
       </div>
     )
@@ -352,20 +352,20 @@ export const PersonaModule = () => {
         <header className="flex flex-col gap-2">
           <div className="flex items-center gap-2 text-ink">
             <Fingerprint size={14} strokeWidth={2} />
-            <h2 className="font-display text-[17px] tracking-tightest">
+            <h2 className="font-display text-title tracking-tightest">
               {t('persona.intro.title')}
             </h2>
           </div>
-          <p className="text-[12.5px] leading-relaxed text-ink-muted">
+          <p className="text-ui leading-relaxed text-ink-muted">
             {t('persona.intro.body')}
           </p>
-          <p className="text-[12.5px] leading-relaxed text-ink-subtle">
+          <p className="text-ui leading-relaxed text-ink-subtle">
             {t('persona.intro.correctionNote')}
           </p>
         </header>
 
         {loadError && (
-          <div className="flex items-center gap-3 rounded-[3px] border border-line bg-bg-card px-4 py-3 text-[12px] text-ink-muted">
+          <div className="flex items-center gap-3 rounded-[3px] border border-line bg-bg-card px-4 py-3 text-ui text-ink-muted">
             <span>{t('persona.loadFailed')}</span>
             <Btn variant="ghost" size="xs" onClick={() => void load()}>
               {t('persona.retry')}
@@ -383,10 +383,10 @@ export const PersonaModule = () => {
             <h3 className="label-cap text-ink-faint">{t('persona.interview.heading')}</h3>
             {question ? (
               <>
-                <p className="text-[13px] leading-relaxed text-ink">
+                <p className="text-ui leading-relaxed text-ink">
                   {lang === 'ja' ? question.textJa : question.textEn}
                 </p>
-                <p className="text-[11.5px] leading-relaxed text-ink-subtle">
+                <p className="text-meta leading-relaxed text-ink-subtle">
                   {t('persona.interview.intro')}
                 </p>
                 {question.status === 'open' ? (
@@ -409,7 +409,7 @@ export const PersonaModule = () => {
                       }}
                       rows={3}
                       placeholder={t('persona.interview.placeholder')}
-                      className="w-full resize-y rounded-[2px] border border-line bg-bg px-3 py-2 text-[12.5px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+                      className="w-full resize-y rounded-[2px] border border-line bg-bg px-3 py-2 text-ui leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
                     />
                     <div className="flex items-center justify-end gap-2">
                       <Btn
@@ -432,7 +432,7 @@ export const PersonaModule = () => {
                       </Btn>
                     </div>
                     {resolveError && (
-                      <p className="text-[11.5px] text-accent">
+                      <p className="text-meta text-accent">
                         {t(
                           resolveError === 'skip'
                             ? 'persona.interview.skipFailed'
@@ -442,7 +442,7 @@ export const PersonaModule = () => {
                     )}
                   </>
                 ) : (
-                  <p className="border-t border-line-soft pt-2 text-[11.5px] leading-relaxed text-ink-muted">
+                  <p className="border-t border-line-soft pt-2 text-meta leading-relaxed text-ink-muted">
                     {t(
                       question.status !== 'answered'
                         ? 'persona.interview.skipped'
@@ -459,8 +459,8 @@ export const PersonaModule = () => {
               // A barren day is stated plainly, and says WHY — otherwise the
               // absence reads as the feature being broken.
               <div className="flex flex-col gap-1.5">
-                <p className="text-[12.5px] text-ink">{t('persona.interview.none.title')}</p>
-                <p className="text-[12px] leading-relaxed text-ink-muted">
+                <p className="text-ui text-ink">{t('persona.interview.none.title')}</p>
+                <p className="text-ui leading-relaxed text-ink-muted">
                   {t('persona.interview.none.body')}
                 </p>
               </div>
@@ -472,7 +472,7 @@ export const PersonaModule = () => {
         {status && (
           <section className="flex flex-col gap-2.5 rounded-[3px] border border-line bg-bg-card px-4 py-3.5 shadow-card">
             <h3 className="label-cap text-ink-faint">{t('persona.meta.heading')}</h3>
-            <div className="flex flex-col gap-1.5 text-[12px]">
+            <div className="flex flex-col gap-1.5 text-ui">
               <MetaRow
                 label={t('persona.meta.updated')}
                 value={updatedAt ?? t('persona.meta.never')}
@@ -492,7 +492,7 @@ export const PersonaModule = () => {
               />
             </div>
             {staleWarning && (
-              <p className="border-t border-line-soft pt-2 text-[11.5px] leading-relaxed text-ochre-deep">
+              <p className="border-t border-line-soft pt-2 text-meta leading-relaxed text-ochre-deep">
                 {t('persona.meta.stale')}
               </p>
             )}
@@ -506,7 +506,7 @@ export const PersonaModule = () => {
             {t(correcting ? 'persona.correct.heading' : 'persona.add.heading')}
           </h3>
           {correcting && (
-            <blockquote className="border-l-2 border-accent-soft pl-3 text-[12px] leading-relaxed text-ink-subtle">
+            <blockquote className="border-l-2 border-accent-soft pl-3 text-ui leading-relaxed text-ink-subtle">
               {correcting.text}
             </blockquote>
           )}
@@ -527,16 +527,16 @@ export const PersonaModule = () => {
             placeholder={t(
               correcting ? 'persona.correct.placeholder' : 'persona.add.placeholder',
             )}
-            className="w-full resize-y rounded-[2px] border border-line bg-bg px-3 py-2 text-[12.5px] leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+            className="w-full resize-y rounded-[2px] border border-line bg-bg px-3 py-2 text-ui leading-relaxed text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
           />
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex flex-1 items-center gap-2 text-[11px] text-ink-muted">
+            <label className="flex flex-1 items-center gap-2 text-meta text-ink-muted">
               <span className="whitespace-nowrap">{t('persona.add.tagsLabel')}</span>
               <input
                 value={tagsDraft}
                 onChange={(e) => setTagsDraft(e.target.value)}
                 placeholder={t('persona.add.tagsPlaceholder')}
-                className="min-w-0 flex-1 rounded-[2px] border border-line bg-bg px-2 py-1 text-[12px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+                className="min-w-0 flex-1 rounded-[2px] border border-line bg-bg px-2 py-1 text-ui text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
               />
             </label>
             {correcting && (
@@ -556,7 +556,7 @@ export const PersonaModule = () => {
             </Btn>
           </div>
           {submitError && (
-            <p className="text-[11.5px] text-accent">{t('persona.add.failed')}</p>
+            <p className="text-meta text-accent">{t('persona.add.failed')}</p>
           )}
         </section>
 
@@ -571,7 +571,7 @@ export const PersonaModule = () => {
               <h3 className="label-cap text-ink-faint">{t('persona.notes.heading')}</h3>
               <div className="flex items-center gap-2">
                 {judgments.length > 0 && (
-                  <span className="text-[11px] text-ink-faint">
+                  <span className="text-meta text-ink-faint">
                     {countLabel('persona.notes.count', judgments.length)}
                   </span>
                 )}
@@ -602,8 +602,8 @@ export const PersonaModule = () => {
               <PersonaGraphView judgments={judgments} />
             ) : judgments.length === 0 ? (
               <div className="flex flex-col gap-1.5 rounded-[3px] border border-dashed border-line px-4 py-5">
-                <p className="text-[12.5px] text-ink">{t('persona.notes.empty.title')}</p>
-                <p className="text-[12px] leading-relaxed text-ink-muted">
+                <p className="text-ui text-ink">{t('persona.notes.empty.title')}</p>
+                <p className="text-ui leading-relaxed text-ink-muted">
                   {t('persona.notes.empty.body')}
                 </p>
               </div>
@@ -613,7 +613,7 @@ export const PersonaModule = () => {
                   key={j.id}
                   className="flex flex-col gap-2 rounded-[3px] border border-line bg-bg-card px-4 py-3 shadow-card"
                 >
-                  <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink">
+                  <p className="whitespace-pre-wrap text-ui leading-relaxed text-ink">
                     {j.text}
                   </p>
                   {j.context && (
@@ -628,13 +628,13 @@ export const PersonaModule = () => {
                          *  back to the generic label. */}
                         {t(j.correctsId ? 'persona.notes.corrects' : 'persona.notes.basis')}
                       </span>
-                      <p className="whitespace-pre-wrap text-[11.5px] leading-relaxed text-ink-subtle">
+                      <p className="whitespace-pre-wrap text-meta leading-relaxed text-ink-subtle">
                         {j.context}
                       </p>
                     </div>
                   )}
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
+                    <div className="flex flex-wrap items-center gap-1.5 text-meta text-ink-faint">
                       <time dateTime={j.addedAt}>{formatWhen(j.addedAt, lang) ?? j.addedAt}</time>
                       {j.tags?.map((tag) => (
                         <span

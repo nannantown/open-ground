@@ -127,8 +127,8 @@ export const SwarmOnboarding = ({ onStart, busy, available, error }: Props) => {
         {/* Identity — REUSE the swarm badge + title; one new framing line. */}
         <header className="text-center">
           <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.badge')}</p>
-          <h2 className="mb-2 text-[17px] font-medium text-ink">{t('projectPanel.swarm.title')}</h2>
-          <p className="mx-auto max-w-md text-[12px] leading-relaxed text-ink-subtle">
+          <h2 className="mb-2 text-title font-medium text-ink">{t('projectPanel.swarm.title')}</h2>
+          <p className="mx-auto max-w-md text-ui leading-relaxed text-ink-subtle">
             {t('projectPanel.swarm.onboarding.intro')}
           </p>
         </header>
@@ -147,12 +147,12 @@ export const SwarmOnboarding = ({ onStart, busy, available, error }: Props) => {
                     className={`flex min-w-0 flex-col justify-center gap-0.5 rounded-[5px] border border-line-soft px-2.5 py-1.5 ${NODE_TINT[step.role]}`}
                   >
                     {roleName && (
-                      <span className="flex items-center gap-1 text-[9.5px] font-medium text-ink-muted">
+                      <span className="flex items-center gap-1 text-plate font-medium text-ink-muted">
                         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${NODE_DOT[step.role]}`} aria-hidden />
                         {t(roleName)}
                       </span>
                     )}
-                    <span className="text-[11px] font-medium leading-tight text-ink">
+                    <span className="text-meta font-medium leading-tight text-ink">
                       {t(`projectPanel.swarm.onboarding.${step.key}`)}
                     </span>
                   </span>
@@ -184,8 +184,8 @@ export const SwarmOnboarding = ({ onStart, busy, available, error }: Props) => {
                   <Icon size={14} strokeWidth={2} aria-hidden />
                 </span>
                 <div className="min-w-0">
-                  <div className="text-[12px] font-medium text-ink">{t(nameKey)}</div>
-                  <div className="text-[11px] leading-snug text-ink-subtle">{t(descKey)}</div>
+                  <div className="text-ui font-medium text-ink">{t(nameKey)}</div>
+                  <div className="text-meta leading-snug text-ink-subtle">{t(descKey)}</div>
                 </div>
               </li>
             ))}
@@ -195,7 +195,7 @@ export const SwarmOnboarding = ({ onStart, busy, available, error }: Props) => {
         {/* ── Start: what pressing it does (条件2) + the primary CTA, which fires
             the same master-power composition as the bar above. ── */}
         <section className="flex flex-col items-center gap-3 text-center">
-          <p className="mx-auto max-w-md text-[11px] leading-relaxed text-ink-subtle">
+          <p className="mx-auto max-w-md text-meta leading-relaxed text-ink-subtle">
             {t('projectPanel.swarm.onboarding.startNote')}
           </p>
           <button
@@ -204,13 +204,13 @@ export const SwarmOnboarding = ({ onStart, busy, available, error }: Props) => {
               if (!disabled) onStart()
             }}
             disabled={disabled}
-            className="inline-flex items-center gap-1.5 rounded-[4px] border border-accent bg-accent px-4 py-2 text-[12px] font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="inline-flex items-center gap-1.5 rounded-[4px] border border-accent bg-accent px-4 py-2 text-ui font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <Power size={14} strokeWidth={2.25} aria-hidden />
             {t('projectPanel.swarm.power.start')}
           </button>
-          {!available && <p className="text-[11px] text-ink-faint">{t('projectPanel.swarm.power.offline')}</p>}
-          {error && <p className="mx-auto max-w-md text-[11px] leading-relaxed text-accent">{error}</p>}
+          {!available && <p className="text-meta text-ink-faint">{t('projectPanel.swarm.power.offline')}</p>}
+          {error && <p className="mx-auto max-w-md text-meta leading-relaxed text-accent">{error}</p>}
         </section>
       </div>
     </div>

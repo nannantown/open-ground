@@ -109,7 +109,7 @@ export const NewProjectModal = ({ open, defaultWorkspace, onClose, onCreated }: 
               {t('modals.newProject.title')}
             </span>
           }
-          titleClassName="font-display text-[22px] text-ink leading-none tracking-tightest"
+          titleClassName="font-display text-head text-ink tracking-tightest"
           onClose={onClose}
           closeLabel={t('common.close')}
         />
@@ -125,22 +125,22 @@ export const NewProjectModal = ({ open, defaultWorkspace, onClose, onCreated }: 
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="my-new-project"
-              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
             />
             <div className="mt-1.5 flex items-center justify-between gap-2">
               {workspace ? (
-                <p className="min-w-0 flex-1 text-[11px] font-mono text-ink-subtle truncate">
+                <p className="min-w-0 flex-1 text-meta font-mono text-ink-subtle truncate">
                   {workspace.replace(/\/$/, '')}/<span className="text-ink-muted">{name || '…'}</span>
                 </p>
               ) : (
-                <p className="min-w-0 flex-1 text-[11px] text-ink-faint truncate">
+                <p className="min-w-0 flex-1 text-meta text-ink-faint truncate">
                   {t('modals.newProject.chooseLocation')}
                 </p>
               )}
               <button
                 type="button"
                 onClick={pickWorkspace}
-                className="shrink-0 inline-flex items-center gap-1 rounded-[2px] border border-line px-2 py-1 text-[10.5px] text-ink-muted hover:text-ink hover:border-line-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent transition-colors"
+                className="shrink-0 inline-flex items-center gap-1 rounded-[2px] border border-line px-2 py-1 text-micro text-ink-muted hover:text-ink hover:border-line-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent transition-colors"
               >
                 <Folder size={11} />
                 {workspace ? t('modals.newProject.change') : t('modals.newProject.chooseLocationBtn')}
@@ -156,12 +156,12 @@ export const NewProjectModal = ({ open, defaultWorkspace, onClose, onCreated }: 
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder={t('modals.newProject.descriptionPlaceholder')}
-              className="w-full min-h-[72px] rounded-[2px] border border-line bg-bg px-3 py-2 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent resize-y leading-relaxed"
+              className="w-full min-h-[72px] rounded-[2px] border border-line bg-bg px-3 py-2 text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent resize-y leading-relaxed"
             />
           </div>
 
           {error && (
-            <p className="text-[12px] text-accent leading-relaxed">{error}</p>
+            <p className="text-ui text-accent leading-relaxed">{error}</p>
           )}
         </div>
 

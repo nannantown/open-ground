@@ -1173,7 +1173,7 @@ export const CanvasWorkspace = ({
             type="button"
             onClick={() => zoomApi.current?.fitAll()}
             title={t('canvas.zoom.fit')}
-            className="h-6 min-w-[44px] whitespace-nowrap rounded-[4px] px-1 text-center text-[11px] tabular-nums text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-6 min-w-[44px] whitespace-nowrap rounded-[4px] px-1 text-center text-meta tabular-nums text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             {Math.round(canvas.viewport.zoom * 100)}%
           </button>
@@ -1223,14 +1223,14 @@ export const CanvasWorkspace = ({
                 }}
                 disabled={genPending}
                 placeholder={t('canvas.generate.placeholder')}
-                className="min-w-0 flex-1 bg-transparent text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                className="min-w-0 flex-1 bg-transparent text-ui text-ink placeholder:text-ink-faint focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               />
               {genPending ? (
                 <>
                   {/* Live "working" status: spinner + label + elapsed seconds,
                       so a 30s–3min claude session never reads as "frozen". */}
                   <span
-                    className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-ink-muted"
+                    className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-meta text-ink-muted"
                     aria-live="polite"
                   >
                     <Loader2 size={12} strokeWidth={2} className="animate-spin" />
@@ -1246,7 +1246,7 @@ export const CanvasWorkspace = ({
                   <button
                     type="button"
                     onClick={cancelGenerate}
-                    className="h-7 shrink-0 rounded-full border border-line px-3 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="h-7 shrink-0 rounded-full border border-line px-3 text-meta font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
                     {t('canvas.generate.cancel')}
                   </button>
@@ -1261,7 +1261,7 @@ export const CanvasWorkspace = ({
                     onChange={(e) => setGenModel(e.target.value)}
                     aria-label={t('canvas.generate.model')}
                     title={t('canvas.generate.model')}
-                    className="h-7 shrink-0 cursor-pointer rounded-full border border-line bg-transparent px-2 text-[11px] text-ink-muted transition-colors hover:border-ink-faint hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="h-7 shrink-0 cursor-pointer rounded-full border border-line bg-transparent px-2 text-meta text-ink-muted transition-colors hover:border-ink-faint hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
                     <option value="sonnet">{t('canvas.generate.modelSonnet')}</option>
                     <option value="opus">{t('canvas.generate.modelOpus')}</option>
@@ -1271,7 +1271,7 @@ export const CanvasWorkspace = ({
                     type="button"
                     onClick={() => void submitGenerate()}
                     disabled={!genPrompt.trim()}
-                    className="h-7 shrink-0 rounded-full bg-accent px-3 text-[11.5px] font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
+                    className="h-7 shrink-0 rounded-full bg-accent px-3 text-meta font-medium text-bg-card transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-accent"
                   >
                     {t('canvas.generate.go')}
                   </button>
@@ -1288,20 +1288,20 @@ export const CanvasWorkspace = ({
             </div>
             {genLoggedOut ? (
               <div className="mt-1.5 flex flex-col items-center gap-1.5 px-4 text-center">
-                <p className="text-[11px] leading-relaxed text-ink-muted">
+                <p className="text-meta leading-relaxed text-ink-muted">
                   {t('canvas.generate.claudeLoggedOut')}
                 </p>
                 <button
                   type="button"
                   onClick={() => void openClaudeLogin()}
-                  className="rounded-full border border-line px-3 py-1 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="rounded-full border border-line px-3 py-1 text-meta font-medium text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   {t('canvas.generate.signIn')}
                 </button>
               </div>
             ) : (
               genError && (
-                <p className="mt-1.5 truncate px-4 text-center text-[11px] text-accent">
+                <p className="mt-1.5 truncate px-4 text-center text-meta text-accent">
                   {genError}
                 </p>
               )
@@ -1380,8 +1380,8 @@ export const CanvasWorkspace = ({
               </div>
             ) : (
               <div className="flex flex-col gap-1 px-3 py-2.5">
-                <div className="truncate text-[12px] text-ink-muted">{canvas.name}</div>
-                <div className="text-[11px] text-ink-faint">
+                <div className="truncate text-ui text-ink-muted">{canvas.name}</div>
+                <div className="text-meta text-ink-faint">
                   {t('canvas.side.elementCount', { count: canvas.elements.length })}
                 </div>
               </div>
@@ -1433,10 +1433,10 @@ export const CanvasWorkspace = ({
                   align="center"
                   leading={
                     <div className="min-w-0">
-                      <p className="truncate text-[13px] font-medium text-ink">
+                      <p className="truncate text-ui font-medium text-ink">
                         {t('projectPanel.claudeLogin.title')}
                       </p>
-                      <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+                      <p className="mt-0.5 text-meta leading-relaxed text-ink-faint">
                         {t('projectPanel.claudeLogin.hint')}
                       </p>
                     </div>
@@ -1455,19 +1455,19 @@ export const CanvasWorkspace = ({
                     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
                       {loginError ? (
                         <>
-                          <p className="max-w-[90%] text-[12px] leading-relaxed text-accent">
+                          <p className="max-w-[90%] text-ui leading-relaxed text-accent">
                             {loginError}
                           </p>
                           <button
                             type="button"
                             onClick={() => void openClaudeLogin()}
-                            className="rounded-sm border border-line px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                            className="rounded-sm border border-line px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                           >
                             {t('projectPanel.claudeLogin.retry')}
                           </button>
                         </>
                       ) : (
-                        <p className="text-[12px] text-ink-faint">
+                        <p className="text-ui text-ink-faint">
                           {t('projectPanel.claudeLogin.starting')}
                         </p>
                       )}

@@ -116,11 +116,11 @@ export const FrameView = memo(({
             }}
             onPointerDown={(e) => e.stopPropagation()}
             placeholder="Frame name"
-            className="w-full bg-transparent font-display text-[15px] leading-none text-ink focus:outline-none"
+            className="w-full bg-transparent font-display text-read leading-none text-ink focus:outline-none"
           />
         ) : (
           <>
-            <span className="flex-1 select-none truncate font-display text-[15px] leading-none text-ink">
+            <span className="flex-1 select-none truncate font-display text-read leading-none text-ink">
               {frame.text || <span className="text-ink-faint">Frame</span>}
             </span>
             {onTidy && (
@@ -136,7 +136,7 @@ export const FrameView = memo(({
                 }}
                 className={[
                   'shrink-0 inline-flex h-6 items-center gap-1 rounded-[3px] px-2',
-                  'cursor-pointer text-[11px] font-medium tracking-[0.02em]',
+                  'cursor-pointer text-meta font-medium tracking-[0.02em]',
                   'text-ink-muted transition-colors',
                   'hover:bg-plane hover:text-ink',
                   'active:bg-line-soft',

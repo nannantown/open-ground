@@ -218,15 +218,15 @@ const KpiRow = ({
   <div className="flex items-baseline justify-between gap-3 py-1">
     <div className="min-w-0">
       <div
-        className={`truncate text-[12px] text-ink-subtle${hint ? ' cursor-help' : ''}`}
+        className={`truncate text-ui text-ink-subtle${hint ? ' cursor-help' : ''}`}
         title={hint}
       >
         {label}
       </div>
-      {sub && <div className="truncate text-[10px] leading-tight text-ink-faint">{sub}</div>}
+      {sub && <div className="truncate text-micro leading-tight text-ink-faint">{sub}</div>}
     </div>
     <div
-      className={`shrink-0 text-[13px] font-medium tabular-nums ${
+      className={`shrink-0 text-ui font-medium tabular-nums ${
         valueTone === 'warn' ? 'text-ochre-deep' : 'text-ink'
       }`}
     >
@@ -403,7 +403,7 @@ export const SwarmManagerPane = ({
                 className={`h-[6px] w-[6px] shrink-0 rounded-full ${SESSION_DOT[deskStatus]}`}
               />
               <span
-                className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-[11px] text-ink-muted"
+                className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-meta text-ink-muted"
                 title={t('projectPanel.swarm.manager.conversationHint')}
               >
                 <MessageSquare size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
@@ -415,7 +415,7 @@ export const SwarmManagerPane = ({
               </span>
               {session.runtime === 'sdk' ? (
                 <span
-                  className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-faint"
+                  className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
                   title={t('projectPanel.swarm.sdk.badgeHint')}
                 >
                   SDK
@@ -426,7 +426,7 @@ export const SwarmManagerPane = ({
                 onClick={onStopSession}
                 disabled={sessionBusy}
                 title={t('projectPanel.swarm.manager.stop')}
-                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
               >
                 <Power size={10} strokeWidth={2.25} />
                 {sessionBusy ? t('projectPanel.swarm.manager.stopping') : t('projectPanel.swarm.manager.stop')}
@@ -493,17 +493,17 @@ export const SwarmManagerPane = ({
                 <MessageSquare size={20} strokeWidth={1.75} />
               </div>
               <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.manager.badge')}</p>
-              <h2 className="mb-2 text-[15px] font-medium text-ink">
+              <h2 className="mb-2 text-read font-medium text-ink">
                 {t('projectPanel.swarm.manager.conversationTitle')}
               </h2>
-              <p className="mb-4 text-[12px] leading-relaxed text-ink-subtle">
+              <p className="mb-4 text-ui leading-relaxed text-ink-subtle">
                 {t('projectPanel.swarm.manager.conversationEmpty')}
               </p>
               <button
                 type="button"
                 onClick={onLaunchSession}
                 disabled={sessionBusy}
-                className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
               >
                 <MessageSquare size={13} strokeWidth={2} />
                 {sessionBusy
@@ -591,13 +591,13 @@ export const SwarmManagerPane = ({
               t={t}
             />
             {engine.overseer && sandboxWarning ? (
-              <p className="text-[10px] leading-snug text-amber-500/90" role="note">
+              <p className="text-micro leading-snug text-amber-500/90" role="note">
                 {t('projectPanel.swarm.manager.overseerSandboxWarning')}
               </p>
             ) : null}
           </div>
 
-          {error && <p className="mt-2.5 text-[11px] leading-relaxed text-accent">{error}</p>}
+          {error && <p className="mt-2.5 text-meta leading-relaxed text-accent">{error}</p>}
         </div>
 
         {/* ── Runtime dials (Agent SDK migration) ────────────────────────────
@@ -652,7 +652,7 @@ export const SwarmManagerPane = ({
             {/* The phone-window cost, shown ONLY once the switch is on — an
                 always-visible warning is wallpaper, and this one has to land. */}
             {runtimeDials?.manager === 'sdk' ? (
-              <p className="text-[10px] leading-snug text-amber-500/90" role="note">
+              <p className="text-micro leading-snug text-amber-500/90" role="note">
                 {t('projectPanel.swarm.runtime.managerWarning')}
               </p>
             ) : null}
@@ -690,7 +690,7 @@ export const SwarmManagerPane = ({
               aria-hidden
             />
             <span
-              className="cursor-help whitespace-nowrap text-[12px] font-medium text-ink"
+              className="cursor-help whitespace-nowrap text-ui font-medium text-ink"
               title={t(PRESENCE_VIEW[presence].hint)}
             >
               {t(PRESENCE_VIEW[presence].label)}
@@ -700,14 +700,14 @@ export const SwarmManagerPane = ({
               (free-form, often Japanese). Shown only while fresh: a stale note
               describes a PAST episode and would read as a live claim. */}
           {presence === 'working' && manager?.note && (
-            <p className="mt-1.5 truncate text-[11px] text-ink-muted" title={manager.note}>
+            <p className="mt-1.5 truncate text-meta text-ink-muted" title={manager.note}>
               {manager.note}
             </p>
           )}
           {/* Last-report age (server clock) — shown whenever a heartbeat exists,
               so a resting desk still says how long ago it last spoke. */}
           {manager && (
-            <p className="mt-0.5 text-[10px] text-ink-faint">
+            <p className="mt-0.5 text-micro text-ink-faint">
               {t('projectPanel.swarm.manager.presenceLastBeat', {
                 ago: formatDuration(manager.ageMs),
               })}
@@ -715,10 +715,10 @@ export const SwarmManagerPane = ({
           )}
           {reviewCount > 0 && (
             <div className="mt-2 border-t border-line-soft pt-2">
-              <div className="text-[12px] font-medium tabular-nums text-ink">
+              <div className="text-ui font-medium tabular-nums text-ink">
                 {t('projectPanel.swarm.manager.presenceQueue', { count: reviewCount })}
               </div>
-              <p className="mt-0.5 text-[10px] leading-snug text-ink-faint">
+              <p className="mt-0.5 text-micro leading-snug text-ink-faint">
                 {t('projectPanel.swarm.manager.presenceQueueHint')}
               </p>
             </div>
@@ -806,7 +806,7 @@ export const SwarmManagerPane = ({
           {consumption.overLimit && (
             <p
               role="alert"
-              className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-ochre-deep"
+              className="mt-2 flex items-start gap-1.5 text-meta leading-relaxed text-ochre-deep"
             >
               <AlertTriangle size={13} strokeWidth={2} className="mt-px shrink-0" aria-hidden />
               <span>
@@ -857,18 +857,18 @@ const ControlRow = ({
 }) => (
   <div className="flex items-start justify-between gap-3">
     <div className="min-w-0">
-      <div className="flex items-center gap-1 text-[12px] font-medium text-ink">
+      <div className="flex items-center gap-1 text-ui font-medium text-ink">
         {label}
         <span
           title={hint}
           tabIndex={0}
           aria-label={hint}
-          className="cursor-help select-none text-[10px] text-ink-faint transition-colors hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          className="cursor-help select-none text-micro text-ink-faint transition-colors hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           ⓘ
         </span>
       </div>
-      {summary ? <div className="text-[11px] leading-snug text-ink-subtle">{summary}</div> : null}
+      {summary ? <div className="text-meta leading-snug text-ink-subtle">{summary}</div> : null}
     </div>
     <div
       role="group"
@@ -891,7 +891,7 @@ const ControlRow = ({
             aria-pressed={active}
             disabled={disabled}
             className={[
-              'h-6 min-w-[48px] whitespace-nowrap rounded-[2px] px-2.5 text-[11px] font-medium transition-all duration-150',
+              'h-6 min-w-[48px] whitespace-nowrap rounded-[2px] px-2.5 text-meta font-medium transition-all duration-150',
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               'disabled:cursor-not-allowed disabled:opacity-40',
               active
@@ -949,7 +949,7 @@ const CommanderCommandBar = ({
             type="button"
             disabled={disabled}
             onClick={() => onSend(q.command)}
-            className="rounded-full border border-line bg-transparent px-2.5 py-0.5 text-[11px] text-ink-muted transition-colors enabled:hover:border-accent enabled:hover:text-ink active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+            className="rounded-full border border-line bg-transparent px-2.5 py-0.5 text-meta text-ink-muted transition-colors enabled:hover:border-accent enabled:hover:text-ink active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
           >
             {t(`projectPanel.swarm.manager.${q.key}`)}
           </button>
@@ -982,13 +982,13 @@ const CommanderCommandBar = ({
               submit()
             }
           }}
-          className="max-h-[120px] min-h-[34px] min-w-0 flex-1 resize-none rounded-[4px] border border-line bg-bg px-2.5 py-1.5 text-[12px] leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+          className="max-h-[120px] min-h-[34px] min-w-0 flex-1 resize-none rounded-[4px] border border-line bg-bg px-2.5 py-1.5 text-ui leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
         />
         <button
           type="button"
           onClick={submit}
           disabled={disabled || !value.trim()}
-          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors enabled:hover:border-accent enabled:hover:text-ink active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line bg-bg px-2.5 py-1.5 text-meta text-ink-muted transition-colors enabled:hover:border-accent enabled:hover:text-ink active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         >
           <Send size={11} strokeWidth={2.25} />
           {t('projectPanel.swarm.manager.send')}

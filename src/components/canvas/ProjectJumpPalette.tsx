@@ -113,14 +113,14 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Jump to project…"
-            className="flex-1 min-w-0 bg-transparent text-[14px] text-ink placeholder:text-ink-faint focus:outline-none"
+            className="flex-1 min-w-0 bg-transparent text-read text-ink placeholder:text-ink-faint focus:outline-none"
           />
           <span className="label-cap label-cap-latin text-ink-faint shrink-0">esc</span>
         </div>
 
         <div ref={listRef} className="overflow-y-auto py-1.5">
           {matches.length === 0 ? (
-            <p className="px-4 py-6 text-center text-[12px] text-ink-subtle">
+            <p className="px-4 py-6 text-center text-ui text-ink-subtle">
               No projects match
             </p>
           ) : (
@@ -141,7 +141,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
                 ) : (
                   <FolderOpen size={12} className="shrink-0 text-ink-faint" />
                 )}
-                <span className="truncate text-[13px] text-ink">{p.name}</span>
+                <span className="truncate text-ui text-ink">{p.name}</span>
                 {p.openTaskCount > 0 && (
                   <span className="ml-auto shrink-0 label-cap label-cap-latin text-accent">
                     {p.openTaskCount} open

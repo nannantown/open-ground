@@ -151,7 +151,7 @@ export const SwarmOverseerPane = ({
             <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2">
               <AlertTriangle size={13} strokeWidth={2.25} className="shrink-0 text-accent" aria-hidden />
               <span className="label-cap text-ink">{t('projectPanel.swarm.overseer.alertsHeading')}</span>
-              <span className="rounded-full bg-accent-soft px-1.5 text-[11px] leading-[18px] text-accent tabular-nums">
+              <span className="rounded-full bg-accent-soft px-1.5 text-meta leading-[18px] text-accent tabular-nums">
                 {alerts.length}
               </span>
             </div>
@@ -169,10 +169,10 @@ export const SwarmOverseerPane = ({
             <div className="inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
               <AlertTriangle size={20} strokeWidth={1.75} />
             </div>
-            <p className="text-[13px] font-medium text-ink">
+            <p className="text-ui font-medium text-ink">
               {t('projectPanel.swarm.overseer.inboxUnknownTitle')}
             </p>
-            <p className="max-w-sm text-[12px] leading-relaxed text-ink-subtle">
+            <p className="max-w-sm text-ui leading-relaxed text-ink-subtle">
               {t('projectPanel.swarm.overseer.inboxUnknownBody')}
             </p>
           </div>
@@ -185,8 +185,8 @@ export const SwarmOverseerPane = ({
             <div className="inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
               <ShieldCheck size={20} strokeWidth={1.75} />
             </div>
-            <p className="text-[13px] font-medium text-ink">{t('projectPanel.swarm.overseer.emptyTitle')}</p>
-            <p className="max-w-sm text-[12px] leading-relaxed text-ink-subtle">
+            <p className="text-ui font-medium text-ink">{t('projectPanel.swarm.overseer.emptyTitle')}</p>
+            <p className="max-w-sm text-ui leading-relaxed text-ink-subtle">
               {t('projectPanel.swarm.overseer.emptyBody')}
             </p>
           </div>
@@ -220,7 +220,7 @@ const AlertRow = ({
     return (
       <li className="flex flex-col gap-0.5 px-3 py-2">
         <div className="flex items-center gap-1.5">
-          <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-medium text-bg-card">
+          <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-plate font-medium text-bg-card">
             {/* An event this build has no label for still renders — with its raw
                 name. A row the owner does not recognise is a question they can
                 ask; a dropped row is a failure they never learn about (the
@@ -229,12 +229,12 @@ const AlertRow = ({
             {FATAL_EVENT_LABEL[f.event] ? t(FATAL_EVENT_LABEL[f.event]) : f.event}
           </span>
           {where && (
-            <span className="min-w-0 truncate text-[11px] text-ink" title={where}>
+            <span className="min-w-0 truncate text-meta text-ink" title={where}>
               {where}
             </span>
           )}
           {age && (
-            <span className="ml-auto shrink-0 text-[10px] tabular-nums text-ink-faint">
+            <span className="ml-auto shrink-0 text-micro tabular-nums text-ink-faint">
               {t('projectPanel.swarm.overseer.ago', { age })}
             </span>
           )}
@@ -246,7 +246,7 @@ const AlertRow = ({
             type="button"
             onClick={() => onMarkHandled(f.id)}
             title={t('projectPanel.swarm.overseer.markHandledHint')}
-            className={`shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-[10px] text-ink-subtle transition-all duration-150
+            className={`shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-subtle transition-all duration-150
               hover:border-line-strong hover:bg-plane hover:text-ink
               active:bg-bg-deep
               focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
@@ -255,13 +255,13 @@ const AlertRow = ({
             {t('projectPanel.swarm.overseer.markHandled')}
           </button>
         </div>
-        {f.detail && <span className="text-[10px] leading-snug text-ink-subtle">{f.detail}</span>}
+        {f.detail && <span className="text-micro leading-snug text-ink-subtle">{f.detail}</span>}
       </li>
     )
   }
   if (alert.source === 'anomaly' && alert.anomaly) {
     return (
-      <li className="px-3 py-2 text-[11px] leading-snug text-ink">{anomalyText(alert.anomaly, t)}</li>
+      <li className="px-3 py-2 text-meta leading-snug text-ink">{anomalyText(alert.anomaly, t)}</li>
     )
   }
   return null

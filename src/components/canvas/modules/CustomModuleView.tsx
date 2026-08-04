@@ -308,7 +308,7 @@ export const CustomModuleView = ({
   }
 
   const headerBtn =
-    'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+    'shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -316,12 +316,12 @@ export const CustomModuleView = ({
         {canAuthor && (
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-8 py-2">
             <span
-              className="min-w-0 flex-1 truncate text-[12px] text-ink-muted"
+              className="min-w-0 flex-1 truncate text-ui text-ink-muted"
               title={module.description || module.label}
             >
               {module.label}
               {typeof module.version === 'number' && (
-                <span className="ml-1.5 font-mono text-[10px] text-ink-faint">
+                <span className="ml-1.5 font-mono text-micro text-ink-faint">
                   {t('customTabs.publishedBadge', { version: String(module.version) })}
                 </span>
               )}
@@ -331,7 +331,7 @@ export const CustomModuleView = ({
                 role="status"
                 title={notice.text}
                 className={[
-                  'max-w-[320px] truncate text-[11px]',
+                  'max-w-[320px] truncate text-meta',
                   notice.kind === 'error' ? 'text-accent' : 'text-ink-faint',
                 ].join(' ')}
               >
@@ -368,7 +368,7 @@ export const CustomModuleView = ({
               while the tab is visible; the div only supplies the geometry. */}
           <div ref={anchorRef} className="relative h-full w-full">
             {!frameLive && (
-              <div className="flex h-full items-center justify-center px-8 text-center text-[12px] text-ink-faint">
+              <div className="flex h-full items-center justify-center px-8 text-center text-ui text-ink-faint">
                 {loadFailed
                   ? t('customTabs.sourceLoadFailed')
                   : t('customTabs.sourceLoading')}

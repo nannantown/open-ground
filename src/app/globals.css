@@ -283,8 +283,13 @@ body::before {
    utilities happened; src/labelPlates.test.ts computes both and refuses one. */
 .label-cap {
   font-family: var(--font-instrument-sans), system-ui, sans-serif;
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  /* 11px, not 10 (2026-08-04, with the type scale). The plate is the smallest
+     thing on screen by design, but 10px was below the floor even for Latin
+     small caps once the rest of the UI moved up — it read as a different
+     product. 0.16em rather than 0.18: a larger glyph needs proportionally less
+     air to read as engraved. */
+  font-size: 11px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   font-weight: 500;
 }
@@ -295,7 +300,10 @@ body::before {
 
 .coord-label {
   font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
-  font-size: 9px;
+  /* 11px, not 9. JetBrains Mono has the largest x-height in the stack (0.550
+     against the UI face's 0.510), so a coord at 11px reads about the same
+     weight as body text at 12 — which is what the map index wants. */
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -324,7 +332,7 @@ body::before {
    2026-08-04: sharing 0.18em put the Ground card's map coord at 1.62px against
    its designed 0.72px. The test below pins each `-latin` value to its own base. */
 html .label-cap.label-cap-latin {
-  letter-spacing: 0.18em;
+  letter-spacing: 0.16em;
 }
 html .coord-label.label-cap-latin {
   letter-spacing: 0.08em;

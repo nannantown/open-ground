@@ -160,7 +160,7 @@ export const PagesSection = ({
                   // While renaming the row swaps its <button> for a <div> — an
                   // <input> may not live inside a button (invalid HTML; screen
                   // readers mangle "textbox inside button").
-                  <div className="flex h-7 min-w-0 flex-1 items-center py-1 pl-3 text-[12px]">
+                  <div className="flex h-7 min-w-0 flex-1 items-center py-1 pl-3 text-ui">
                     <input
                       autoFocus
                       value={draft}
@@ -182,7 +182,7 @@ export const PagesSection = ({
                         }
                       }}
                       className={[
-                        'min-w-0 flex-1 bg-transparent text-[12px] focus:outline-none',
+                        'min-w-0 flex-1 bg-transparent text-ui focus:outline-none',
                         isActive ? 'text-bg-card' : 'text-ink',
                       ].join(' ')}
                     />
@@ -198,7 +198,7 @@ export const PagesSection = ({
                     aria-current={isActive ? 'page' : undefined}
                     title={isActive ? c.name : t('canvas.switchToCanvas', { name: c.name })}
                     className={[
-                      'flex h-7 min-w-0 flex-1 items-center py-1 pl-3 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                      'flex h-7 min-w-0 flex-1 items-center py-1 pl-3 text-ui focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
                       isActive ? 'focus-visible:ring-bg-card/70' : 'focus-visible:ring-accent/60',
                     ].join(' ')}
                   >
@@ -223,7 +223,7 @@ export const PagesSection = ({
                         }
                       }}
                       className={[
-                        'shrink-0 whitespace-nowrap rounded-[4px] px-1.5 py-0.5 text-[10.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2',
+                        'shrink-0 whitespace-nowrap rounded-[4px] px-1.5 py-0.5 text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2',
                         isActive
                           ? 'bg-bg-card text-accent hover:bg-bg focus-visible:ring-bg-card/70'
                           : 'bg-accent text-bg-card hover:bg-accent-hover focus-visible:ring-accent/40',

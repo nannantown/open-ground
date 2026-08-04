@@ -31,11 +31,11 @@ const diffKey = (scope: FileDiffScope, file: string) => `${scope}\0${file}`
 const DiffBody = ({ d }: { d: Extract<DiffState, { state: 'done' }> }) => {
   const { t } = useT()
   if (!d.diff.trim()) {
-    return <p className="px-3 py-2 text-[11px] text-ink-faint">{t('projectPanel.branchDiffEmpty')}</p>
+    return <p className="px-3 py-2 text-meta text-ink-faint">{t('projectPanel.branchDiffEmpty')}</p>
   }
   return (
     <div className="overflow-x-auto bg-bg">
-      <pre className="min-w-max py-1 font-mono text-[11px] leading-[1.55]">
+      <pre className="min-w-max py-1 font-mono text-meta leading-[1.55]">
         {d.diff.split('\n').map((line, i) => {
           const cls =
             line.startsWith('+') && !line.startsWith('+++')
@@ -53,7 +53,7 @@ const DiffBody = ({ d }: { d: Extract<DiffState, { state: 'done' }> }) => {
         })}
       </pre>
       {d.truncated && (
-        <p className="border-t border-line px-3 py-1.5 text-[11px] text-ink-faint">
+        <p className="border-t border-line px-3 py-1.5 text-meta text-ink-faint">
           {t('projectPanel.branchDiffTruncated')}
         </p>
       )}
@@ -166,7 +166,7 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
           ].join(' ')}
         >
           {leading}
-          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]" title={file}>
+          <span className="min-w-0 flex-1 truncate font-mono text-meta" title={file}>
             {file}
           </span>
           {diff?.state === 'loading' && (
@@ -176,7 +176,7 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
         {isOpen && diff && diff.state !== 'loading' && (
           <div className="border-t border-line-soft">
             {diff.state === 'error' ? (
-              <p className="px-3 py-2 text-[11px] text-accent">
+              <p className="px-3 py-2 text-meta text-accent">
                 {t('projectPanel.branchDiffFailed', { error: diff.error })}
               </p>
             ) : (
@@ -207,15 +207,15 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
               <p className="label-cap mb-1.5 text-accent">{t('projectPanel.branchChangesTitle')}</p>
               {git && (
                 <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                  <span className="flex min-w-0 items-center gap-1.5 font-mono text-[14px] text-ink">
+                  <span className="flex min-w-0 items-center gap-1.5 font-mono text-read text-ink">
                     <GitBranch size={13} strokeWidth={1.75} className="shrink-0 text-ink-muted" />
                     <span className="truncate">{git.branch ?? 'HEAD'}</span>
                   </span>
                   {git.target && !git.sameBranch && (
                     <>
-                      <span className="text-[12px] text-ink-faint">→</span>
-                      <span className="truncate font-mono text-[13px] text-ink-muted">{git.target}</span>
-                      <span className="text-[11px] tabular-nums text-ink-faint">
+                      <span className="text-ui text-ink-faint">→</span>
+                      <span className="truncate font-mono text-ui text-ink-muted">{git.target}</span>
+                      <span className="text-meta tabular-nums text-ink-faint">
                         {t('projectPanel.branchAheadBehind', {
                           ahead: String(git.ahead),
                           behind: String(git.behind),
@@ -231,12 +231,12 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
           {!info && !error && (
-            <p className="flex items-center gap-2 text-[12px] text-ink-faint">
+            <p className="flex items-center gap-2 text-ui text-ink-faint">
               <Loader2 size={12} className="animate-spin" /> {t('projectPanel.loading')}
             </p>
           )}
           {error && (
-            <p className="text-[12px] leading-relaxed text-accent">
+            <p className="text-ui leading-relaxed text-accent">
               {t('projectPanel.branchLoadFailed', { error })}
             </p>
           )}
@@ -249,14 +249,14 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
                   {t('projectPanel.branchWorkingHeading')}
                 </h3>
                 {git.working.length === 0 ? (
-                  <p className="text-[12px] text-ink-faint">{t('projectPanel.branchNoChanges')}</p>
+                  <p className="text-ui text-ink-faint">{t('projectPanel.branchNoChanges')}</p>
                 ) : (
                   <ul className="rounded-[2px] border border-line">
                     {git.working.map((w) =>
                       fileRow(
                         'working',
                         w.path,
-                        <span className="w-6 shrink-0 text-center font-mono text-[10.5px] text-ochre">
+                        <span className="w-6 shrink-0 text-center font-mono text-micro text-ochre">
                           {w.status}
                         </span>,
                       ),
@@ -273,22 +273,22 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
                     : t('projectPanel.branchChangesTitle')}
                 </h3>
                 {!git.target ? (
-                  <p className="text-[12px] leading-relaxed text-ink-faint">
+                  <p className="text-ui leading-relaxed text-ink-faint">
                     {t('projectPanel.branchNoTarget')}
                   </p>
                 ) : git.sameBranch ? (
-                  <p className="text-[12px] leading-relaxed text-ink-faint">
+                  <p className="text-ui leading-relaxed text-ink-faint">
                     {t('projectPanel.branchSameAsTarget')}
                   </p>
                 ) : git.committed.length === 0 ? (
-                  <p className="text-[12px] text-ink-faint">{t('projectPanel.branchNoChanges')}</p>
+                  <p className="text-ui text-ink-faint">{t('projectPanel.branchNoChanges')}</p>
                 ) : (
                   <ul className="rounded-[2px] border border-line">
                     {git.committed.map((f) =>
                       fileRow(
                         'branch',
                         f.path,
-                        <span className="shrink-0 font-mono text-[10.5px] tabular-nums">
+                        <span className="shrink-0 font-mono text-micro tabular-nums">
                           <span className="text-moss">+{f.additions}</span>{' '}
                           <span className="text-accent">−{f.deletions}</span>
                         </span>,

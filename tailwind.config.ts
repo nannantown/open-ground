@@ -11,6 +11,54 @@ const config: Config = {
   content: ['./src/**/*.{ts,tsx}', '!./src/lib/server/**'],
   theme: {
     extend: {
+      // ─── THE TYPE SCALE (2026-08-04) ─────────────────────────────────────
+      // Before this there was NO fontSize theme at all: 684 sites each named
+      // their own px, producing 25 distinct sizes — including 9.5, 10.5, 11.5,
+      // 12.5, 13.5 and 14.5. That is not a scale, it is an accumulation, and it
+      // is why the UI read as "not quite lined up" as much as it read as small.
+      // Owner report: 「小さい文字は結構小さくて読みづらい」＋「ちょっとオシャレに」
+      // — one cause, so one fix.
+      //
+      // Eight steps. Tight at the bottom (1px apart, where a dense cockpit does
+      // its work) and opening upward, each carrying its own line-height and
+      // tracking so a call site never has to name them again. Line-heights sit
+      // on a 2px grid.
+      //
+      // Japanese sets the floor. 和文 has far more strokes per em than Latin and
+      // falls back to Hiragino Sans here (Instrument Sans carries no kana), so
+      // the smallest step that still reads as prose is 13px — hence `meta`, not
+      // `micro`, is where the old 11px bulk (217 sites) lands. `plate` and
+      // `micro` are reserved for the two things that are not prose: engraved
+      // Latin captions and numerals.
+      fontSize: {
+        // 刻印 — Latin small-caps plates and map coordinates. Never prose.
+        // ⚠ NO letterSpacing ON THIS STEP. It carried 0.16em until the review
+        // caught it (2026-08-04): a SIZE token is script-agnostic, but 0.16em is
+        // a Latin small-caps STYLE, and baking one into the other re-created the
+        // exact defect 0.11.66 shipped to fix — 和文 widened by a sixth, with no
+        // way out. The `.label-cap` / `.coord-label` classes have a `:lang(ja)`
+        // escape; a generated utility like `text-plate` cannot have one, because
+        // there is no selector to hang it on.
+        // Measured on the running app: `text-plate` + 「表示中」 rendered at
+        // 1.76px tracking against .label-cap's 0.22px, and
+        // 「再起動が続いたため自動再開を見合わせました」 came out 16% wider — in a
+        // shrink-0 badge with no nowrap, beside a truncating sibling.
+        // The 22 sites that landed here came from 9px / 9.5px, which had no
+        // tracking at all, so dropping it restores exactly what they had.
+        // Want the engraved plate? Use `.label-cap` — that is what it is for.
+        plate: ['11px', { lineHeight: '14px' }],
+        // 数値・時刻・カウント・バッジ。ほぼ等幅で、字数が読めるもの。
+        micro: ['12px', { lineHeight: '16px', letterSpacing: '0.005em' }],
+        // 補足・ヒント・二次情報。和文が散文として読める最小。
+        meta: ['13px', { lineHeight: '18px', letterSpacing: '0' }],
+        // 既定。行・ボタン・入力・チップ — 迷ったらこれ。
+        ui: ['14px', { lineHeight: '20px', letterSpacing: '-0.006em' }],
+        // 散文・カード名・記録。まとまった文章を読ませる帯。
+        read: ['16px', { lineHeight: '24px', letterSpacing: '-0.011em' }],
+        title: ['20px', { lineHeight: '26px', letterSpacing: '-0.02em' }],
+        head: ['26px', { lineHeight: '32px', letterSpacing: '-0.025em' }],
+        hero: ['34px', { lineHeight: '40px', letterSpacing: '-0.03em' }],
+      },
       // 2026-08-03 (第三弾「計器盤」): every token reads a CSS variable so the
       // whole app switches palette on html[data-theme] — the actual channel
       // values (light paper / dark instrument, with their WCAG rationale) live

@@ -3977,7 +3977,7 @@ export const InfiniteCanvas = ({
               }
             />
             <div
-              className="absolute rounded-[3px] bg-accent px-1 py-0.5 text-[10px] font-semibold leading-none text-bg-card"
+              className="absolute rounded-[3px] bg-accent px-1 py-0.5 text-micro font-semibold leading-none text-bg-card"
               style={{
                 left: m.w / 2,
                 top: m.h / 2,
@@ -4155,7 +4155,7 @@ export const InfiniteCanvas = ({
             const off = 14 / viewport.zoom
             return (
               <div
-                className="pointer-events-none absolute whitespace-nowrap rounded-[4px] border border-line bg-bg-card px-1.5 py-0.5 font-mono text-[10px] leading-none text-ink"
+                className="pointer-events-none absolute whitespace-nowrap rounded-[4px] border border-line bg-bg-card px-1.5 py-0.5 font-mono text-micro leading-none text-ink"
                 style={{
                   left: mid.x - Math.sin(r) * off,
                   top: mid.y + Math.cos(r) * off,
@@ -4172,7 +4172,7 @@ export const InfiniteCanvas = ({
             while a rotate drags. */}
         {chromeDrag?.kind === 'rotate' && rotateTarget && (
           <div
-            className="pointer-events-none absolute whitespace-nowrap rounded-[4px] border border-line bg-bg-card px-1.5 py-0.5 font-mono text-[10px] leading-none text-ink"
+            className="pointer-events-none absolute whitespace-nowrap rounded-[4px] border border-line bg-bg-card px-1.5 py-0.5 font-mono text-micro leading-none text-ink"
             style={{
               left: chromeDrag.x + 16 / viewport.zoom,
               top: chromeDrag.y + 16 / viewport.zoom,
@@ -4298,7 +4298,7 @@ const ContextItem = ({
     type="button"
     onClick={onClick}
     className={[
-      'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] transition-colors',
+      'flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition-colors',
       danger
         ? 'text-accent hover:bg-accent hover:text-bg-card'
         : 'text-ink hover:bg-plane',
@@ -4306,6 +4306,6 @@ const ContextItem = ({
   >
     <span className="shrink-0 text-ink-faint">{icon}</span>
     <span className="flex-1">{label}</span>
-    {hint && <span className="font-mono text-[10px] text-ink-faint">{hint}</span>}
+    {hint && <span className="font-mono text-micro text-ink-faint">{hint}</span>}
   </button>
 )

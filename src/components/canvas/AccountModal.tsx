@@ -45,7 +45,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
               {user ? t('modals.account.titleSignedIn') : t('modals.account.titleSignedOut')}
             </span>
           }
-          titleClassName="font-display text-[22px] leading-none tracking-tightest text-ink"
+          titleClassName="font-display text-head tracking-tightest text-ink"
           onClose={onClose}
           closeLabel={t('common.close')}
         />
@@ -64,18 +64,18 @@ export const AccountModal = ({ open, onClose }: Props) => {
                     className="h-11 w-11 rounded-full border border-line object-cover"
                   />
                 ) : (
-                  <div className="flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg-inset text-[15px] font-display text-ink">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full border border-line bg-bg-inset text-read font-display text-ink">
                     {(user.name || user.email || '?').slice(0, 1).toUpperCase()}
                   </div>
                 )}
                 <div className="min-w-0">
                   {user.name && (
-                    <p className="text-[14px] text-ink leading-tight truncate">
+                    <p className="text-read text-ink leading-tight truncate">
                       {user.name}
                     </p>
                   )}
                   {user.email && (
-                    <p className="text-[12px] text-ink-muted leading-tight truncate">
+                    <p className="text-ui text-ink-muted leading-tight truncate">
                       {user.email}
                     </p>
                   )}
@@ -100,7 +100,7 @@ export const AccountModal = ({ open, onClose }: Props) => {
           // --- Signed out -------------------------------------------------
           <>
             <div className="px-6 py-5 space-y-3">
-              <p className="text-[13px] text-ink-muted leading-relaxed">
+              <p className="text-ui text-ink-muted leading-relaxed">
                 {t('modals.account.intro')}
               </p>
               <div className="space-y-2 pt-1">
@@ -126,15 +126,15 @@ export const AccountModal = ({ open, onClose }: Props) => {
                 </Btn>
               </div>
               {authError ? (
-                <p className="text-[12px] text-accent leading-relaxed pt-1">
+                <p className="text-ui text-accent leading-relaxed pt-1">
                   {authError}
                 </p>
               ) : signingIn ? (
-                <p className="text-[11px] text-ink-faint leading-relaxed pt-1">
+                <p className="text-meta text-ink-faint leading-relaxed pt-1">
                   {t('modals.account.completeInBrowser')}
                 </p>
               ) : (
-                <p className="text-[11px] text-ink-faint leading-relaxed pt-1">
+                <p className="text-meta text-ink-faint leading-relaxed pt-1">
                   {t('modals.account.browserWillOpen')}
                 </p>
               )}
