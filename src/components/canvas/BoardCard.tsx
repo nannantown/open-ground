@@ -309,7 +309,7 @@ const BoardCardInner = ({
               {!hasWorker && claudeStatus === 'working' && (
                 <span
                   title={t('board.card.sessionWorking')}
-                  className="mr-1.5 inline-flex items-center gap-1 align-middle text-[11px] tracking-[0.1em] text-moss-text"
+                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-[11px] text-moss-text"
                 >
                   <span className="run-pulse h-1.5 w-1.5 rounded-full bg-moss shadow-lamp-moss" />
                   {t('board.card.sessionWorkingLabel')}
@@ -320,7 +320,7 @@ const BoardCardInner = ({
                 // (same register as the Ground card's Waiting stamp).
                 <span
                   title={t('board.card.sessionWaiting')}
-                  className="mr-1.5 inline-flex items-center gap-1 align-middle text-[11px] tracking-[0.1em] text-[var(--beacon-waiting)]"
+                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-[11px] text-[var(--beacon-waiting)]"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-ochre shadow-lamp-ochre" />
                   {t('board.card.sessionWaitingLabel')}
@@ -354,9 +354,11 @@ const BoardCardInner = ({
               />
               <span
                 className={[
-                  // NOT label-cap: the mock's state line is 11px / .1em and is
-                  // never uppercased (it carries Japanese).
-                  'shrink-0 text-[11px] tracking-[0.1em]',
+                  // NOT label-cap: the mock's state line is never uppercased
+                  // because it carries Japanese — and for the same reason it
+                  // carries no tracking. .1em widened 稼働中 to 36.3px and left
+                  // 0 chars for the branch name beside it (2026-08-04).
+                  'shrink-0 whitespace-nowrap text-[11px]',
                   WORKER_LABEL_CLS[workerActivity],
                 ].join(' ')}
               >
@@ -410,7 +412,7 @@ const BoardCardInner = ({
                   onSetReviewedBy(task.id, displayName.trim())
                 }}
                 title={t('board.card.markReviewedTitle')}
-                className="mt-1 rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                className="mt-1 whitespace-nowrap rounded-sm border border-line px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
               >
                 {t('board.card.markReviewed')}
               </button>
@@ -437,7 +439,7 @@ const BoardCardInner = ({
               clicks, the card moves, the reviewedBy stamp survives (moveCard
               keeps it for the done column). */}
           {!isEditing && isReview && task.branch && isMerged && (
-            <div className="mt-1 flex min-w-0 items-center gap-1.5">
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 gap-y-1">
               <span
                 title={t('board.card.mergedTitle')}
                 className="shrink-0 rounded-sm border border-moss/40 bg-moss/10 px-1.5 py-0.5 text-[10px] leading-none text-moss"
@@ -486,7 +488,7 @@ const BoardCardInner = ({
                 return null
               const doneCard = task.done || isDone
               return (
-                <div className="mt-1 flex items-center justify-between gap-2">
+                <div className="mt-1 flex flex-wrap items-center justify-between gap-2 gap-y-1">
                   <span className="flex min-w-0 items-center gap-1.5">
                     {task.priority && task.priority !== 'normal' && (
                       <span

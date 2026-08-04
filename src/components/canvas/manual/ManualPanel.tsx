@@ -80,7 +80,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
     switch (b.kind) {
       case 'subhead':
         return (
-          <h3 key={i} className="pt-3 text-[12px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+          <h3 key={i} className="pt-3 text-[12px] font-semibold uppercase text-ink-faint">
             {L(b.text)}
           </h3>
         )
@@ -201,7 +201,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
           <div className="flex min-w-0 items-center gap-2.5">
             <OpenGroundMark size={20} className="shrink-0 select-none" />
             <div className="flex min-w-0 flex-col leading-none">
-              <span className="label-cap text-ink-faint">OPEN GROUND</span>
+              <span className="label-cap label-cap-latin text-ink-faint">OPEN GROUND</span>
               <span className="mt-0.5 font-display text-[15px] tracking-tight text-ink" style={DISPLAY}>
                 {lang === 'ja' ? 'マニュアル' : 'Manual'}
               </span>
@@ -322,7 +322,7 @@ function BoardDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
       {cols.map((c, i) => (
         <div
           key={i}
-          className={`min-w-[78px] flex-1 rounded-[3px] border bg-bg px-2 py-2 ${
+          className={`min-w-[96px] flex-1 rounded-[3px] border bg-bg px-2 py-2 ${
             c.opt ? 'border-dashed border-line-strong' : 'border-line'
           }`}
         >

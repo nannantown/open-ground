@@ -37,7 +37,7 @@ const FauxCard = ({
     style={style}
     className={`absolute w-[212px] rounded-[3px] border border-line bg-bg-card shadow-card ${className ?? ''}`}
   >
-    <div className="coord-label absolute -top-[7px] left-3 bg-bg-card px-1.5 text-ink-subtle">{coord}</div>
+    <div className="coord-label label-cap-latin absolute -top-[7px] left-3 bg-bg-card px-1.5 text-ink-subtle">{coord}</div>
     <div className="px-4 py-3.5">
       <div className="flex items-center gap-2.5">
         <div className="h-6 w-6 rounded-[2px] border border-line bg-bg-inset" />

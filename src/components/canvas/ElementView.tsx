@@ -261,7 +261,7 @@ export const ElementView = memo(({
           />
         ) : (
           <div className="h-full w-full select-none overflow-hidden whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
-            {element.text || <span className="text-ink/35">Double-click to edit</span>}
+            {element.text || <span className="text-ink/55">Double-click to edit</span>}
           </div>
         )}
         </div>

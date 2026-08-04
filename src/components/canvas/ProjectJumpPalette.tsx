@@ -115,7 +115,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
             placeholder="Jump to project…"
             className="flex-1 min-w-0 bg-transparent text-[14px] text-ink placeholder:text-ink-faint focus:outline-none"
           />
-          <span className="label-cap text-ink-faint shrink-0">esc</span>
+          <span className="label-cap label-cap-latin text-ink-faint shrink-0">esc</span>
         </div>
 
         <div ref={listRef} className="overflow-y-auto py-1.5">
@@ -143,7 +143,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
                 )}
                 <span className="truncate text-[13px] text-ink">{p.name}</span>
                 {p.openTaskCount > 0 && (
-                  <span className="ml-auto shrink-0 label-cap text-accent">
+                  <span className="ml-auto shrink-0 label-cap label-cap-latin text-accent">
                     {p.openTaskCount} open
                   </span>
                 )}

@@ -85,6 +85,7 @@ import {
   type TextSizing,
   type TextVAlign,
 } from '@/lib/canvasTextSizing'
+import { capTrackingClass } from '@/lib/labelScript'
 import {
   resolveOpacity,
   opacityFromPercent,
@@ -1697,7 +1698,7 @@ const NumberInput = ({
 
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
   <label className="flex flex-col gap-1">
-    <span className="label-cap text-ink-faint">{label}</span>
+    <span className={`label-cap ${capTrackingClass(label)} text-ink-faint`}>{label}</span>
     {children}
   </label>
 )

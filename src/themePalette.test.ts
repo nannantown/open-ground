@@ -42,7 +42,20 @@ const contrast = (a: [number, number, number], b: [number, number, number]): num
   return (hi + 0.05) / (lo + 0.05)
 }
 
-const SURFACES = ['bg', 'bg-elevated', 'bg-card', 'bg-inset'] as const
+// HOVER SURFACES were missing here until 2026-08-04, and that omission was the
+// bug: `--og-plane` and `--og-bg-card-hover` arrived with the hover rework, so
+// nothing ever measured text on them — while `hover:bg-plane` alone reached 98
+// sites. On paper ALL FOUR inks plus accent were below AA on `plane` (3.75 to
+// 4.26) and the suite was green. A surface that carries text belongs in this
+// list the day it is born.
+const SURFACES = [
+  'bg',
+  'bg-elevated',
+  'bg-card',
+  'bg-inset',
+  'plane',
+  'bg-card-hover',
+] as const
 const TEXTS = ['ink', 'ink-muted', 'ink-subtle', 'ink-faint'] as const
 
 // Read pairs common to BOTH themes.
@@ -50,6 +63,8 @@ const COMMON_PAIRS: [string, string][] = [
   ...SURFACES.flatMap((s) => TEXTS.map((t): [string, string] => [t, s])),
   ['accent', 'bg'], // vermillion labels/links on the ground
   ['accent', 'bg-card'], // …and on cards (181 text-accent usages)
+  ['accent', 'plane'], // …and on the hover lift (SettingsPanel/SdkWorkerPane)
+  ['accent', 'bg-card-hover'], // …and on a hovered card
   ['ink-inverse', 'accent'], // filled accent buttons
   ['accent-deeper', 'accent-soft'], // IconButton active / selected chips
   ['ochre-deep', 'ochre-soft'], // Board priority "high" chip (boardPriority.ts)
@@ -73,9 +88,46 @@ const DARK_ONLY_PAIRS: [string, string][] = [
   ['ink-muted', 'bg-deep'],
 ]
 
+// ─── THE LADDER ────────────────────────────────────────────────────────────
+// AA per pair is necessary and not sufficient: three ranks can each clear 4.5:1
+// and still be indistinguishable from each other. That is exactly what happened
+// to the night palette — ink-muted / -subtle / -faint sat within 5.4 L* (gaps of
+// 2.8 and 2.6, against 24.4 from `ink` down to `muted`), separated by HUE rather
+// than lightness, so at 10–11px they rendered as one flat grey and the ranking
+// the token names promise did not exist on screen. Every pair was green.
+//
+// DARK ONLY, deliberately: the paper palette's ladder is squeezed to 2.4 L*
+// total because its inks are pinned by `bg-inset` (#E6DEC6), where `ink-faint`
+// already sits at 4.60:1 — opening the light ladder means lightening `faint`
+// below AA. Fixing that needs a lighter inset, which is a palette change, not a
+// token tweak. Recorded here as a known limit rather than a silently missing
+// check.
+const LADDER = ['ink', 'ink-muted', 'ink-subtle', 'ink-faint'] as const
+const MIN_LADDER_STEP = 4 // L* — below this the ranks stop being distinguishable
+
+const lstar = (rgb: [number, number, number]): number => {
+  const y = luminance(rgb)
+  return y > 216 / 24389 ? 116 * Math.cbrt(y) - 16 : y * (24389 / 27)
+}
+
 describe('theme palettes (globals.css) keep every read pair ≥ 4.5:1', () => {
   const light = parsePalette(':root {')
   const dark = parsePalette("html[data-theme='dark'] {")
+
+  it('dark: the ink ladder stays four distinguishable ranks', () => {
+    const steps = LADDER.slice(0, -1).map((t, i) => ({
+      pair: `${t} → ${LADDER[i + 1]}`,
+      delta: Math.abs(lstar(dark[t]) - lstar(dark[LADDER[i + 1]])),
+    }))
+    for (const s of steps) {
+      expect(s.delta, `${s.pair} is ${s.delta.toFixed(1)} L* apart`).toBeGreaterThanOrEqual(
+        MIN_LADDER_STEP,
+      )
+    }
+    // …and the ranks must stay in order, brightest first.
+    const ls = LADDER.map((t) => lstar(dark[t]))
+    expect(ls, 'dark ink ranks descend').toEqual([...ls].sort((a, b) => b - a))
+  })
 
   it('parses both palettes with the same token set', () => {
     // A token added to one palette but forgotten in the other would fall back

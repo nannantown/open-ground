@@ -109,14 +109,14 @@ export const ProjectCard = memo(({
       )}
 
       {/* coordinate label, like a map index */}
-      <div className="coord-label absolute -top-[7px] left-3 bg-bg-card px-1.5 text-ink-subtle">
+      <div className="coord-label label-cap-latin absolute -top-[7px] left-3 bg-bg-card px-1.5 text-ink-subtle">
         {coordFromId(project.id)}
       </div>
 
       {/* claude-status stamp, mirroring the coord label on the right margin */}
       {claudeStatus === 'working' && (
         // claude is busy — azure, with the dot pulsing while live.
-        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap text-azure">
+        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-azure">
           <span className="run-pulse h-[5px] w-[5px] rounded-full bg-azure" />
           <span>Running</span>
         </div>
@@ -127,7 +127,7 @@ export const ProjectCard = memo(({
         // darkened amber var (≥4.5:1 on the card — raw ochre is only ~4:1 at
         // this size). Steady, no pulse: pulsing means "activity", and a
         // full-opacity stamp stays visible at a glance.
-        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap text-[var(--beacon-waiting)]">
+        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-[var(--beacon-waiting)]">
           <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
           <span>Waiting</span>
         </div>
@@ -140,7 +140,7 @@ export const ProjectCard = memo(({
       {playback && (
         <div
           title={playback.title ?? undefined}
-          className="absolute -bottom-[7px] right-3 flex items-center gap-1.5 bg-bg-card px-1.5 label-cap text-accent"
+          className="absolute -bottom-[7px] right-3 flex items-center gap-1.5 bg-bg-card px-1.5 label-cap label-cap-latin text-accent"
         >
           <PlaybackEq size={8} />
           <span>Playing</span>
@@ -193,7 +193,7 @@ export const ProjectCard = memo(({
             </span>
           )}
           {project.missing && (
-            <span className="mt-0.5 shrink-0 label-cap text-accent">missing</span>
+            <span className="mt-0.5 shrink-0 label-cap label-cap-latin text-accent">missing</span>
           )}
         </div>
 

@@ -529,7 +529,11 @@ export const SwarmManagerPane = ({
           rarely-touched switches (overseer + runtime dials, with their amber
           warnings) fold into ONE quiet ⚙ row, closed by default. What stays in
           sight is only what changes by itself: the desk state and the gauges. */}
-      <aside className="flex w-[280px] shrink-0 flex-col overflow-y-auto bg-bg-inset">
+      {/* 320, not 280 (2026-08-04). The presence line 「マネージャーはいます（手が
+          空いています）」 is 20 full-width chars = 240px, against 236px of inner
+          width — 4px short, so it folded on EVERY window size, and a scrollbar
+          made it worse. The labels are what they are; the column was wrong. */}
+      <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto bg-bg-inset">
         {/* ⚙ 設定 — collapsed disclosure. Settings are set once; a dashboard
             that always shows them is wallpaper (the warnings included — they
             show when the owner is actually AT the dials). */}
@@ -611,7 +615,9 @@ export const SwarmManagerPane = ({
         <div className="shrink-0 border-t border-line px-4 py-3">
           <div className="mb-3 flex items-center gap-2">
             <Cpu size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-            <span className="label-cap text-ink-faint">{t('projectPanel.swarm.runtime.heading')}</span>
+            <span className="label-cap shrink-0 whitespace-nowrap text-ink-faint">
+              {t('projectPanel.swarm.runtime.heading')}
+            </span>
           </div>
           <div className="flex flex-col gap-2.5">
             <ControlRow
@@ -684,7 +690,7 @@ export const SwarmManagerPane = ({
               aria-hidden
             />
             <span
-              className="cursor-help text-[12px] font-medium text-ink"
+              className="cursor-help whitespace-nowrap text-[12px] font-medium text-ink"
               title={t(PRESENCE_VIEW[presence].hint)}
             >
               {t(PRESENCE_VIEW[presence].label)}
@@ -885,7 +891,7 @@ const ControlRow = ({
             aria-pressed={active}
             disabled={disabled}
             className={[
-              'h-6 min-w-[40px] rounded-[2px] px-2.5 text-[11px] font-medium transition-all duration-150',
+              'h-6 min-w-[48px] whitespace-nowrap rounded-[2px] px-2.5 text-[11px] font-medium transition-all duration-150',
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               'disabled:cursor-not-allowed disabled:opacity-40',
               active

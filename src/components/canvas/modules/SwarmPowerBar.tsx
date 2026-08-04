@@ -122,7 +122,7 @@ export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchP
             aria-pressed={active}
             disabled={disabled}
             className={[
-              'h-6 min-w-[52px] rounded-[3px] px-2.5 text-[11px] font-medium transition-all duration-150',
+              'h-6 min-w-[52px] whitespace-nowrap rounded-[3px] px-2.5 text-[11px] font-medium transition-all duration-150',
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               'disabled:cursor-not-allowed disabled:opacity-40',
               active

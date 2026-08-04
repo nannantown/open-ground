@@ -183,10 +183,10 @@ export const CustomTabPickerDialog = ({
               aria-hidden
               className="flex items-baseline justify-between px-[30px] pb-[7px] pt-3 text-ink-faint"
             >
-              <span className="coord-label tracking-[0.16em]">
+              <span className="coord-label">
                 {t('customTabs.builtinSection')}
               </span>
-              <span className="coord-label tracking-[0.12em] opacity-85">
+              <span className="coord-label opacity-85">
                 {t('customTabs.pickerLegendState')}
               </span>
             </div>
@@ -247,12 +247,12 @@ export const CustomTabPickerDialog = ({
                       </div>
                       <div className="flex items-center justify-end gap-2.5">
                         {n.enabled ? (
-                          <span className="inline-flex items-center gap-1.5 text-[9px] font-medium uppercase tracking-[0.16em] text-moss">
+                          <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[9px] font-medium uppercase text-moss">
                             <Eye size={13} strokeWidth={2} />
                             {t('customTabs.shown')}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1.5 text-[9px] font-medium uppercase tracking-[0.16em] text-ink-faint">
+                          <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[9px] font-medium uppercase text-ink-faint">
                             <EyeOff size={13} strokeWidth={2} />
                             {t('customTabs.hidden')}
                           </span>
@@ -284,10 +284,10 @@ export const CustomTabPickerDialog = ({
               aria-hidden
               className="flex items-baseline justify-between px-[30px] pb-[7px] pt-3 text-ink-faint"
             >
-              <span className="coord-label tracking-[0.16em]">
+              <span className="coord-label">
                 {t('customTabs.pickerLegendIndex')}
               </span>
-              <span className="coord-label tracking-[0.12em] opacity-85">
+              <span className="coord-label opacity-85">
                 {t('customTabs.pickerLegendState')}
               </span>
             </div>
@@ -413,12 +413,12 @@ export const CustomTabPickerDialog = ({
                               </span>
                             )}
                             {m.origin === 'installed' && (
-                              <span className="whitespace-nowrap rounded-[3px] border border-line-strong px-[5px] py-0.5 text-[8.5px] font-medium uppercase leading-none tracking-[0.16em] text-ink-faint">
+                              <span className="whitespace-nowrap rounded-[3px] border border-line-strong px-[5px] py-0.5 text-[8.5px] font-medium uppercase leading-none text-ink-faint">
                                 {t('customTabs.installed')}
                               </span>
                             )}
                             {attached && (
-                              <span className="inline-flex items-center gap-1.5 text-[9px] font-medium uppercase tracking-[0.16em] text-moss">
+                              <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[9px] font-medium uppercase text-moss">
                                 <Check size={13} strokeWidth={2} />
                                 {t('customTabs.pickerAttached')}
                               </span>

@@ -100,7 +100,7 @@ export const CommentPin = ({
           className="absolute left-[34px] top-0 z-20 flex flex-col gap-2 rounded-[6px] border border-line bg-bg-card p-2.5 shadow-card"
           style={{ width: POPUP_W }}
         >
-          <div className="flex items-center gap-1.5 label-cap text-ink-muted">
+          <div className="flex items-center gap-1.5 label-cap label-cap-latin text-ink-muted">
             <MessageSquareText size={11} strokeWidth={2} />
             <span>Comment</span>
             {anchorLabel ? (

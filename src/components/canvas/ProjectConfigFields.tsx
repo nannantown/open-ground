@@ -84,7 +84,7 @@ export const CompletionFlowField = ({
       <div
         role="group"
         aria-label={t('projectPanel.settingsCompletionFlow')}
-        className="inline-flex items-center gap-0 rounded-[3px] border border-line p-0.5"
+        className="inline-flex shrink-0 items-center gap-0 rounded-[3px] border border-line p-0.5"
       >
         {(['merge', 'pr'] as const).map(v => {
           const active = flow === v
@@ -95,7 +95,7 @@ export const CompletionFlowField = ({
               onClick={() => onChange(v)}
               aria-pressed={active}
               className={[
-                'h-7 px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                'h-7 whitespace-nowrap px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
                 'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                 active
                   ? 'bg-accent text-bg-card border-accent'

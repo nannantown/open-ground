@@ -1729,7 +1729,7 @@ export const BoardModule = ({
                         : t('board.run.hint')}
                       {isolationText ? ` · ${isolationText}` : ''}
                       {flowTextFor(detailTask) ? ` · ${flowTextFor(detailTask)}` : ''}
-                      <span className="text-ink-faint/80" title={t('board.detail.profileTitle')}>
+                      <span className="text-ink-faint" title={t('board.detail.profileTitle')}>
                         {' · '}
                         {profileTextFor(detailTask)}
                       </span>
@@ -1931,7 +1931,7 @@ export const BoardModule = ({
                       </span>
                     )}
                     <span
-                      className="ml-auto min-w-0 max-w-full truncate text-ink-faint/80"
+                      className="ml-auto min-w-0 max-w-full truncate text-ink-faint"
                       title={`${t('board.detail.profileTitle')} — ${profileTextFor(detailTask)}`}
                     >
                       {profileTextFor(detailTask)}

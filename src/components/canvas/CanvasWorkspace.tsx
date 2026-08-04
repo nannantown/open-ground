@@ -1173,7 +1173,7 @@ export const CanvasWorkspace = ({
             type="button"
             onClick={() => zoomApi.current?.fitAll()}
             title={t('canvas.zoom.fit')}
-            className="h-6 min-w-[44px] rounded-[4px] px-1 text-center text-[11px] tabular-nums text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-6 min-w-[44px] whitespace-nowrap rounded-[4px] px-1 text-center text-[11px] tabular-nums text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             {Math.round(canvas.viewport.zoom * 100)}%
           </button>

@@ -48,7 +48,7 @@ export const ElementBar = ({
   return (
     <div className="pointer-events-none fixed bottom-0 left-1/2 z-30 -translate-x-1/2 p-5">
       <div className="pointer-events-auto flex items-center gap-1 rounded-[3px] border border-line bg-bg-card/95 px-2 py-1.5 shadow-card-hover backdrop-blur">
-        <span className="px-2 label-cap text-ink-muted">{TYPE_LABEL[element.type]}</span>
+        <span className="px-2 label-cap label-cap-latin text-ink-muted">{TYPE_LABEL[element.type]}</span>
 
         {element.type === 'sticky' && (
           <>

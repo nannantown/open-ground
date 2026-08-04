@@ -110,6 +110,7 @@ import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTermina
 import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
 import { CustomTabPickerDialog } from '@/components/canvas/modules/CustomTabPickerDialog'
 import { MarketplaceDialog } from '@/components/canvas/modules/MarketplaceDialog'
+import { capTrackingClass } from '@/lib/labelScript'
 
 // The per-project tabs are declared once in the module registry
 // (moduleRegistry.tsx) — plus the user's custom tabs (`custom:<uuid>`,
@@ -3387,7 +3388,7 @@ const ViewTabs = ({
     // is spacing, and the active tab is an INVERSE PILL (ink surface, inverse
     // text — cream-on-ink in light, ink-on-cream in dark) instead of the old
     // red underline. Background+text change together (ui-interactive-states).
-    <div className="flex shrink-0 items-center gap-1 px-7 pb-0 pt-[18px]">
+    <div className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto px-7 pb-0 pt-[18px]">
       {tabs.map((m, i) => {
         const active = m.id === view
         const dimmed = dragFrom === i
@@ -3442,7 +3443,10 @@ const ViewTabs = ({
             onKeyDown={e => onTabKeyDown(e, i)}
             title={t('projectPanel.dragToReorder')}
             className={[
-              'relative flex items-center gap-1.5 rounded-full px-3 py-1.5 label-cap transition-colors',
+              'relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 label-cap transition-colors',
+              // A tab label is either t() ('BOARD') or a name the user typed
+              // ('メモ帳'). Ask the string, not the UI language.
+              capTrackingClass(tabLabel(m, t)),
               active
                 ? 'bg-ink text-ink-inverse'
                 : 'text-ink-muted hover:bg-plane hover:text-ink active:bg-plane',

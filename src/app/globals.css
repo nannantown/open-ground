@@ -31,8 +31,18 @@
   /* PLANE = the lift a hover puts ON TOP of a surface. Distinct from bg-inset
      (a WELL — a trough pressed INTO the surface). They coincide on paper (both
      darker) and are opposites at night, which is why hover used to sink into a
-     hole in dark mode. */
-  --og-plane: 214 205 182;       /* #D6CDB6 */
+     hole in dark mode.
+     LIGHTENED 2026-08-04 from #D6CDB6. The ink ladder was tuned against bg /
+     elevated / card / inset — `plane` arrived later with the hover rework and
+     was never in that set, so nothing measured it. On paper it was the darkest
+     thing under text, and ALL FOUR inks failed AA on it: accent 3.75, muted
+     4.26, subtle 4.03, faint 3.91 — across 98 `hover:bg-plane` sites, i.e. the
+     hover state of most of the light-theme UI. It was also out of character:
+     36 channel-steps below the paper, where the mock's own `.card:hover` moves
+     only 9. #E8E1D0 fixes both — a hover delta the size of the mock's, and
+     ≥4.56 for every ink. `themePalette.test.ts` now checks the hover surfaces
+     so this cannot be re-introduced. */
+  --og-plane: 232 225 208;       /* #E8E1D0 */
   /* ink */
   --og-ink: 42 31 26;            /* #2A1F1A */
   --og-ink-muted: 107 88 71;     /* #6B5847 */
@@ -93,20 +103,53 @@ html[data-theme='dark'] {
   --og-bg-glow: 50 37 30;        /* #32251E — the ground's radial lift */
   --og-plane: 65 54 49;          /* #413631 = cream 11% over the ground */
   --og-ink: 248 244 232;         /* #F8F4E8 cream */
-  /* #B6AFA5 = the mock's cream at 66% over the card face. The old value was a
-     brighter, warmer guess; matching it restores the mock's three-step ink
-     ladder (bright / held back / whisper). */
-  --og-ink-muted: 182 175 165;   /* #B6AFA5 6.4:1 on card */
-  --og-ink-subtle: 183 166 144;  /* #B7A690 ≥5.8:1 on card */
-  --og-ink-faint: 176 159 137;   /* #B09F89 ≥5.4:1 on card */
+  /* THE INK LADDER — measured, and deliberately ABOVE the mock (owner request
+     2026-08-04: 「ダークモードでもう少し文字と背景のコントラストを出したい」).
+     Two things were wrong, and only the second one is obvious from a screenshot.
+       1. Everything below `ink` was dim: 6.40 / 5.87 / 5.40 on the card.
+       2. THE LADDER HAD COLLAPSED. Those three steps sat within 5.4 L* of each
+          other (gaps of 2.8 and 2.6, against 24.4 from ink down to muted), and
+          what separated them was HUE, not lightness — muted is neutral grey,
+          subtle and faint are warm. At 10–11px on a warm ground the eye reads
+          no hue difference at all, so three ranks rendered as one flat grey.
+     Both are fixed by measurement, not taste. Every step is brighter, and the
+     lower three are now 9.8 / 5.0 / 4.3 L* apart — the first time they read as
+     three ranks:
+       muted   9.77:1 on card (was 6.40) — secondary text, hints, descriptions
+       subtle  8.50:1         (was 5.87) — quieter still
+       faint   7.51:1         (was 5.40) — counts, stamps, decoration
+     `faint` gets the biggest lift on purpose: an audit of src/ found it on 318
+     elements (against muted's 330), 49 of them prose set in `leading-relaxed`.
+     It was never the whisper the name promises — it is a second body colour,
+     and it was the dimmest thing on the screen.
+     This puts `muted` 14.5 L* above the mock's cream-at-66% (#B6AFA5). That is
+     the deliberate part: the mock pins muted ALONE — subtle and faint were
+     hand-placed warm values that were never on its ladder — so opening the
+     bottom three costs nothing in fidelity. Ratios are recomputed against every
+     surface by src/themePalette.test.ts on each change. */
+  --og-ink-muted: 221 216 204;   /* #DDD8CC 9.77:1 on card */
+  --og-ink-subtle: 212 201 184;  /* #D4C9B8 8.50:1 on card */
+  --og-ink-faint: 201 189 170;   /* #C9BDAA 7.51:1 on card */
   --og-ink-inverse: 42 31 26;    /* dark text on cream/accent fills */
   --og-line: 74 58 46;           /* #4A3A2E (decorative only) */
   --og-line-soft: 62 48 37;      /* #3E3025 */
   --og-line-strong: 95 76 60;    /* #5F4C3C */
-  --og-accent: 230 120 99;       /* #E67863 4.79:1 on card */
-  --og-accent-hover: 236 139 119;/* #EC8B77 hover brightens at night */
+  /* ACCENT — lifted 2026-08-04 with the ink ladder, for the same reason and by
+     the same measurement. The mock's #E67863 clears AA on a plain card (4.79)
+     but the accent is almost never on a plain card: it sits on the surfaces the
+     UI puts UNDER it, and there it failed —
+       `text-accent` on `--og-plane` (the hover lift)   4.02  ✗  2 sites
+       `text-accent` on `bg-accent/10` (the active chip) 4.12  ✗ 12 sites
+       `text-accent` on `bg-accent/15`                   3.80  ✗
+     Those are the accent's two most common grounds, so the failing case was the
+     normal case. #F29580 is the same hue one step lighter and clears all of
+     them (5.22 / 5.15 / 4.67), which is also what this palette already says out
+     loud two lines down: at night, stronger means lighter. hover and deeper are
+     re-stacked above it so the ramp still climbs. */
+  --og-accent: 242 149 128;      /* #F29580 6.21:1 on card, 5.22 on plane */
+  --og-accent-hover: 247 173 155;/* #F7AD9B hover brightens at night */
   --og-accent-soft: 64 37 31;    /* #40251F dim red surface */
-  --og-accent-deeper: 240 161 144; /* #F0A190 "stronger" = lighter at night */
+  --og-accent-deeper: 250 190 175; /* #FABEAF "stronger" = lighter at night */
   --og-moss: 157 179 107;        /* #9DB36B running lamp */
   --og-moss-text: 168 189 122;   /* #A8BD7A running LABEL 6.8:1 on card */
   --og-moss-soft: 51 57 38;      /* #333926 */
@@ -224,6 +267,20 @@ body::before {
 }
 
 /* Small caps with cartographic tracking */
+/* Small-caps label. The 0.18em tracking and the uppercase are LATIN typography:
+   they give a short English word the "engraved plate" reading the instrument
+   panel wants.
+   ⚠ Neither survives translation. `text-transform` does nothing to 和文, while
+   the tracking DOES apply — so a Japanese label rendered here comes out as
+   「業 務 モ ー ド」, one third wider than it should be, and in a narrow container
+   it wraps or folds. (Owner report 2026-08-04.)
+   `:lang(ja)` drops the tracking for Japanese only, so English keeps its plate
+   and Japanese keeps its rhythm. Set on <html> by the i18n provider, so it
+   covers every descendant without touching a single call site.
+   Written `:lang(ja) .label-cap` and NOT `html:lang(ja) .label-cap` — the extra
+   element bumps it to (0,2,1), tying with the per-string rules further down and
+   handing the decision to source order. Ties are how the dead tracking
+   utilities happened; src/labelPlates.test.ts computes both and refuses one. */
 .label-cap {
   font-family: var(--font-instrument-sans), system-ui, sans-serif;
   font-size: 10px;
@@ -232,11 +289,49 @@ body::before {
   font-weight: 500;
 }
 
+:lang(ja) .label-cap {
+  letter-spacing: 0.02em;
+}
+
 .coord-label {
   font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
   font-size: 9px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* Same treatment, same reason — `.coord-label` is the other Latin small-caps
+   plate and it carries Japanese too (「標準タブ」「ライブラリ」「状態」). Kept
+   adjacent to the rule above on purpose: two plates, two overrides, one place,
+   so "we fixed one and forgot the other" is visible rather than latent. */
+:lang(ja) .coord-label {
+  letter-spacing: 0.02em;
+}
+
+/* ── The two rules above key on UI LANGUAGE. That is right for captions that
+   come from t() — when the UI is Japanese, those captions ARE Japanese. It is
+   wrong for any slot whose text is USER-SUPPLIED, because there the script does
+   not follow the UI at all:
+     · English UI + a Japanese custom tab name → keeps 0.18em, folds
+     · Japanese UI + a Latin tab name (BOARD / CANVAS) → loses its plate
+   Those slots decide per-string instead, via `capTrackingClass()` in
+   src/lib/labelScript.ts. `html` is in the selector to buy specificity (0,2,1)
+   over `:lang(ja) .label-cap` (0,2,0) — without it the two tie and the winner
+   is decided by source order, which is not a decision. */
+/* One rule per plate, NOT one shared value: the two plates are engraved at
+   different depths (.label-cap 0.18em at 10px, .coord-label 0.08em at 9px), so a
+   single `-latin` value restores one of them to the wrong tracking. Measured
+   2026-08-04: sharing 0.18em put the Ground card's map coord at 1.62px against
+   its designed 0.72px. The test below pins each `-latin` value to its own base. */
+html .label-cap.label-cap-latin {
+  letter-spacing: 0.18em;
+}
+html .coord-label.label-cap-latin {
+  letter-spacing: 0.08em;
+}
+html .label-cap.label-cap-flat,
+html .coord-label.label-cap-flat {
+  letter-spacing: 0.02em;
 }
 
 .no-scrollbar::-webkit-scrollbar {

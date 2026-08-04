@@ -772,8 +772,15 @@ export const BoardTab = ({
       )}
       {/* 案C: 5 equal columns filling the width (`.board { gap:14px; padding:0 20px 20px }`).
           Fixed 260px columns + overflow-x meant the 5th column fell off a 1280px
-          window — the mock has no horizontal scroll. */}
-      <div className="flex min-h-0 flex-1 gap-3.5 px-5 pb-5">
+          window — the mock has no horizontal scroll.
+          BUT equal-split with no FLOOR is how the columns got crushed: with the
+          card drawer open on a 1280px window each column lands at ~125px, and
+          every Japanese label inside (「クリア」「＋ カードを追加」) had to fold or
+          clip. `min-w-[150px]` is the width at which those labels fit; below it
+          the row scrolls instead of squeezing. On any window wide enough — which
+          is the normal case, and the only case the mock drew — nothing scrolls
+          and the split stays equal, so this costs the mock nothing. */}
+      <div className="no-scrollbar flex min-h-0 flex-1 gap-3.5 overflow-x-auto px-5 pb-5">
         {COLUMNS.map(col => {
           const cards = byColumn[col.key]
           // The column's end-of-list drop index = count of non-source cards.
@@ -849,14 +856,20 @@ export const BoardTab = ({
                 // lightness difference (bg-inset vs the page) is the boundary.
                 // The drop target keeps its accent signal as a ring (no border,
                 // no layout shift).
-                'flex min-h-0 min-w-0 flex-1 flex-col rounded-xl px-2.5 pb-2.5 pt-3 transition-colors',
+                'flex min-h-0 min-w-[150px] flex-1 flex-col rounded-xl px-2.5 pb-2.5 pt-3 transition-colors',
                 isDropTarget ? 'bg-accent/5 ring-1 ring-accent' : 'bg-bg-inset',
               ].join(' ')}
             >
               <header className="flex shrink-0 items-center justify-between gap-2 px-1.5 pb-1.5">
-                {/* NOT label-cap: the mock's column name is 11px / .14em / 600 and
-                    is never uppercased (it carries Japanese). */}
-                <span className="flex items-center gap-[7px] text-[11px] font-semibold tracking-[0.14em] text-ink-muted">
+                {/* ⚠ NO TRACKING, AND NEVER WRAP (2026-08-04, owner report: 「判断待ち」
+                    was breaking into 判断 / 待ち). Japanese breaks between ANY two
+                    characters — there are no word boundaries to protect a short
+                    label — and letter-spacing widens every gap, so a 4-character
+                    name plus its count outgrew a column that also carries a hint.
+                    The mock's 0.14em was measured on LATIN small caps; carrying it
+                    over to 和文 buys nothing and costs the line. `shrink-0` keeps
+                    the name whole and lets the hint beside it give way instead. */}
+                <span className="flex shrink-0 items-center gap-[7px] whitespace-nowrap text-[11px] font-semibold text-ink-muted">
                   {/* Instrument lamp: lit only while the column carries work
                       that means something is HAPPENING or WAITING ON YOU —
                       doing=moss, review=azure, blocked=ochre. Neutral when
@@ -879,16 +892,15 @@ export const BoardTab = ({
                     />
                   )}
                   {col.label}{' '}
-                  <span className="font-mono text-[11px] font-normal tracking-normal text-ink-muted">
+                  <span className="font-mono text-[11px] font-normal text-ink-muted">
                     {cards.length}
                   </span>
                 </span>
                 {/* Text-diet: the todo mechanics note moved into a tooltip on the
                     column label; the blocked column's hint stays VISIBLE — it is a
-                    decision cue (「あなたの判断待ち」), not mechanics. */}
-                {col.hint && col.key === 'blocked' ? (
-                  <span className="text-[10px] text-ink-faint">{col.hint}</span>
-                ) : col.hint ? (
+                    decision cue (「あなたの判断待ち」), not mechanics. It is rendered
+                    BELOW this row, not beside the name — see the note there. */}
+                {col.hint && col.key !== 'blocked' ? (
                   <span title={col.hint} className="cursor-help text-[10px] text-ink-faint" aria-label={col.hint}>
                     ⓘ
                   </span>
@@ -902,12 +914,23 @@ export const BoardTab = ({
                     onClick={clearDone}
                     disabled={projectMissing}
                     title={t('board.toolbar.clearDoneTitle')}
-                    className="rounded-full px-2.5 py-[3px] text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                    className="shrink-0 whitespace-nowrap rounded-full px-2.5 py-[3px] text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
                   >
                     {t('board.toolbar.clearDone')}
                   </button>
                 )}
               </header>
+              {/* The 判断待ち cue on its OWN line. It shared the header row until
+                  2026-08-04 and lost: the name is `shrink-0`, so all the squeeze
+                  landed here and 22 characters were truncated to five — a cue
+                  nobody could read is not a cue. It is a SENTENCE, not a label,
+                  so unlike the names above it is allowed to wrap; what was never
+                  acceptable was folding short labels, not wrapping prose. */}
+              {col.hint && col.key === 'blocked' ? (
+                <p className="shrink-0 px-1.5 pb-1.5 text-[10px] leading-snug text-ink-subtle">
+                  {col.hint}
+                </p>
+              ) : null}
 
               {/* Empty columns show no placeholder text: dragging a card over a
                   column already highlights it as a drop target, and the
@@ -988,7 +1011,7 @@ const AddCardButton = ({
         type="button"
         disabled={disabled}
         onClick={onAdd}
-        className="w-full rounded-[10px] bg-ink/[0.04] p-[11px] text-center text-[12px] text-ink-muted transition-colors hover:bg-ink/[0.09] hover:text-ink active:bg-ink/[0.13] active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-ink/[0.04] disabled:hover:text-ink-muted"
+        className="w-full whitespace-nowrap rounded-[10px] bg-ink/[0.04] p-[11px] text-center text-[12px] text-ink-muted transition-colors hover:bg-ink/[0.09] hover:text-ink active:bg-ink/[0.13] active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-ink/[0.04] disabled:hover:text-ink-muted"
       >
         {t('board.composer.placeholder')}
       </button>

@@ -87,7 +87,14 @@ const ExperimentToggle = ({
     <div
       role="group"
       aria-label={label}
-      className="inline-flex items-center gap-0 border border-line rounded-[3px] p-0.5"
+      // ⚠ shrink-0 (2026-08-04, owner report: the switch read 「オ フ」/「オ ン」 in two
+      // stacked lines). This group sits in a flex row whose other child is the
+      // label + hint, and flex children shrink by DEFAULT — so a long label
+      // squeezed the switch below its own text width. Japanese then breaks
+      // between any two characters (there is no word boundary to protect a
+      // 2-character word), so it folded vertically instead of overflowing.
+      // English never shows this, which is why it survived review.
+      className="inline-flex shrink-0 items-center gap-0 border border-line rounded-[3px] p-0.5"
     >
       {([
         [false, offLabel],
@@ -101,7 +108,7 @@ const ExperimentToggle = ({
             onClick={() => onChange(v)}
             aria-pressed={active}
             className={[
-              'h-7 min-w-[44px] px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+              'h-7 min-w-[44px] whitespace-nowrap px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               active
                 ? 'bg-accent text-bg-card border-accent'
@@ -416,7 +423,7 @@ export const SettingsPanel = ({
             <div
               role="group"
               aria-label={t('settings.language.heading')}
-              className="inline-flex items-center gap-0 border border-line rounded-[3px] p-0.5"
+              className="inline-flex shrink-0 items-center gap-0 border border-line rounded-[3px] p-0.5"
             >
               {([
                 ['en', t('toolbar.langEn')],
@@ -430,7 +437,7 @@ export const SettingsPanel = ({
                     onClick={() => setLang(value)}
                     aria-pressed={active}
                     className={[
-                      'h-7 min-w-[44px] px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
+                      'h-7 min-w-[44px] whitespace-nowrap px-3 rounded-[2px] text-[12px] font-medium cursor-pointer transition-all duration-150',
                       'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                       active
                         ? 'bg-accent text-bg-card border-accent'
