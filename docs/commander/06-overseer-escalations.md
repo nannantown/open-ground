@@ -533,9 +533,48 @@ prune seen/watch                                      :617
   - STATE(毎 pass 再導出、`engine.notified` で rising-edge dedup)— `rework-exhausted`
     (`:5990-6001`)と `all-workers-down`(`:6004-6017`)。条件が消えると notified から外れ、
     **本物の再発は再通知される**(`:6019-6027`)。
-- fatal イベントの全種は `SwarmFatalEvent`(`types.ts:1959-1964`)、info は `SwarmInfoEvent`
-  (`types.ts:1999-2003`)。GET は `/api/swarm/notifications`(swarm owner gate、
-  `server/routes/swarm.ts:535-538`)。
+- fatal イベントの全種は `SwarmFatalEvent`(`types.ts` — 現在 11 種)、info は `SwarmInfoEvent`。
+  GET は `/api/swarm/notifications`(swarm owner gate、`server/routes/swarm.ts`)。
+- **表示側(Swarm タブ「要対応」)の契約 — 2026-08-04 に 2 つ直した**:
+  - ① **クライアント側の許可リストを廃止した**。`useSwarmEngine.sanitizeFatalNotifications`
+    は 7 種の手書き集合で濾していて、サーバの 11 種のうち `guard-unwired` /
+    `manager-unrevivable` / `engine-resume-suppressed` / `data-integrity` の **4 種を
+    無言で捨てていた**(型の上では繋がっていないので tsc も黙る)。`guard-unwired` は
+    「拒否ベトを確認できず worker を 1 体も起動できない」の通知なので、**全 worker が
+    起動しない状態で画面は「すべて静かです」と出ていた**。現在は event 名が空でなければ
+    必ず描画し、ラベル未登録なら生の event 名を出す(登録漏れ=沈黙 ではなく、
+    見慣れない行=質問できる、へ倒した)。ラベルの網羅は
+    `swarmOverseerFatalLabels.test.ts` が `types.ts` の union を**パースして**突き合わせ、
+    落ちれば**赤で**知らせる。
+  - ② **「要対応」が二度と静かにならない問題**。通知ストアは期限なし(cap 50 から
+    押し出されるまで残る)なので、一度でも fatal が出ると「対応の必要はありません」の
+    静穏表示に**永久に戻れなかった**(点きっぱなしの警告板は読まれなくなる)。各 fatal 行に
+    **対応済み**ボタンを付けた。印は通知そのものの `handledAt`
+    (`POST /api/swarm/notifications/handled` → `markSwarmNotificationHandled`、
+    冪等・最初の時刻を保持)に書く。⚠ **ベルの既読(`/api/notifications/read`)を
+    流用してはいけない** — 既読はベルを開いた瞬間に全件へ一括で書かれるので、
+    流用すると「ベルを一度見た」だけで swarm の作業リストが空になる。押した行は
+    フィードから消えるが、ストアにもベルにも残る(削除ではない)。⚠ **エンジンの anomaly は消えない** — 通知は
+    「一度起きた出来事」、anomaly は「今の状態」なので、履歴を既読にしても現在の
+    ドリフトは隠さない。
+  - 関連の落とし穴: ベルの既読集合の読み込み(`GET /api/notifications`)は collab ゲートの
+    **中**にあったため、collab OFF(既定)のビルドでは一度も読まれず、**既読にした fatal が
+    毎回の起動でまた未読として数えられていた**。現在は `bellDataGates`(`src/App.tsx`)
+    1 か所で 3 系統のゲートを決め、`App.notificationGates.test.tsx` が
+    「行を出せるビルドは必ず既読集合も読む」を不変条件として固定する。
+
+### 3.4-b 2026-08-04 の6〜7周目で塞いだ「無言」5件(この章の読者が最初に見る所)
+
+| # | 症状(オーナーから見えるもの) | 真因 | 直し方 |
+| --- | --- | --- | --- |
+| 1 | 全ワーカーが起動しないのに「すべて静かです」 | クライアントの許可リスト7種 vs サーバ11種。`guard-unwired` ほか4種を sanitize が無言で捨てていた | 許可リスト廃止(空でない event は必ず描画・未登録は生名)。網羅は `swarmOverseerFatalLabels.test.ts` が `types.ts` の union をパースして赤にする |
+| 2 | 「要対応」が一度点くと二度と消えない | 通知は期限なし。押し出されるまで残る | 各行に**対応済み**(`POST /api/swarm/notifications/handled` → 通知自身の `handledAt`)。⚠ベルの既読は流用しない(§3.4) |
+| 3 | 対応済みにすると**継続中**の障害まで隠れる | `all-workers-down` / `manager-unrevivable` は**状態**なのに**一度きりの通知**でしか出ていなかった(`engine.notified` / `rs.fatalFired` が条件解消まで再発火を抑える) | 同じ条件を**anomaly**にも出す(毎パス再導出なので dismiss で隠れない)。`detectAnomalies` の末尾2本 + `OrchestratorAnomalyKind` に2種追加 |
+| 4 | 起動しても自動運転が戻らない・理由がどこにも無い | boot の再開で `claudeRunPreflight` が失敗した枝だけ通知も journal も無かった(engine 生成前なのでログの置き場も無い) | 同じ `engine-resume-suppressed` を出す。テスト名も「fail-quiet, not fatal」から反転 |
+| 5 | その通知を出す画面が、まさにその状況で隠れている | `swarmIdle`(エンジンOFF・卓なし・worker 0・質問0)が**タブ面全体**を初回オンボーディングに差し替える。上記の fatal はどれも「何も起きていない」状態で鳴る | 未対応のアラートがあれば `swarmIdle` にしない(`SwarmModule.alertVisibility.test.tsx` が DOM で固定) |
+
+⚠ **anomaly 側の許可リストも同時に撤去した**(`no-heartbeat` が数か月・`recover-review` が4日後、と2度落としている)。
+ラベル網羅は fatal と同じ番人が `OrchestratorAnomalyKind` を突き合わせる。
 
 ### 3.5 engine 側 C3(TUI スクレイプ質問)と S4 の分担
 

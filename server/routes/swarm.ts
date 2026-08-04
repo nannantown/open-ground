@@ -60,6 +60,7 @@ import {
   spawnSwarmWorker,
   removeSwarmWorktree,
   WorktreeOccupiedError,
+  ensureSwarmWorktreeForBranch,
 } from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply, stopSwarmSupplyDesks } from '@/lib/server/swarmSupply'
@@ -87,7 +88,7 @@ import {
 } from '@/lib/server/swarmOrchestrator'
 import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
 import { brainSandboxAvailable } from '@/lib/server/swarmOverseerBrain'
-import { listSwarmNotifications } from '@/lib/server/swarmNotifications'
+import { listSwarmNotifications, markSwarmNotificationHandled } from '@/lib/server/swarmNotifications'
 import {
   listEscalations,
   openEscalation,
@@ -378,6 +379,21 @@ export const swarmRoutes = new Hono()
       }
     }
 
+    // SAME RULE AS THE ENGINE (2026-08-04): a card that already has a `swarm/*`
+    // branch is CONTINUED, not restarted. Without this the manual/commander door
+    // mints a fresh branch and `recordCardBranch` below stamps it over the old
+    // one — the same orphaning the engine's dispatch was fixed for, one door
+    // over. An explicit `worktree` in the body still wins (that caller is naming
+    // the place on purpose).
+    let reuse: string | undefined = worktree
+    if (!reuse && taskId) {
+      const card = (await readProjectData(path).catch(() => ({ tasks: [] }))).tasks.find(
+        (t) => t.id === taskId,
+      )
+      const branch = typeof card?.branch === 'string' ? card.branch.trim() : ''
+      if (branch) reuse = (await ensureSwarmWorktreeForBranch(path, branch))?.worktree
+    }
+
     let res: SpawnSwarmWorkerResponse
     try {
       // WORKER: no env — its veto arms via the guard opt (OPENGROUND_GUARD=1).
@@ -386,7 +402,7 @@ export const swarmRoutes = new Hono()
         title,
         notes,
         hint,
-        worktree,
+        worktree: reuse,
         cols,
         rows,
       })
@@ -747,6 +763,26 @@ export const swarmRoutes = new Hono()
   .get('/api/swarm/notifications', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     return c.json<AppNotificationsResponse>({ notifications: await listSwarmNotifications() })
+  })
+  // --- POST /api/swarm/notifications/handled — the owner dealt with one row ---
+  // Body: { id }. Stamps `handledAt` so the Swarm tab's needs-attention feed stops
+  // showing it. DISTINCT from the bell's read-state (/api/notifications/read):
+  // "seen" is written wholesale when the bell opens, and wiring the feed to it
+  // would empty the swarm's work list the first time the owner glanced at the
+  // bell. Nothing is deleted — the row stays in the store and in the bell.
+  // Idempotent, so a double-click / retry is harmless. Owner-only.
+  .post('/api/swarm/notifications/handled', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const id = typeof body?.id === 'string' ? body.id : ''
+    if (!id) return c.json({ error: 'id is required' }, 400)
+    await markSwarmNotificationHandled(id)
+    return c.json({ ok: true })
   })
   // --- POST /api/swarm/orchestrator/start — turn autonomous drain ON ---------
   // Body: { path }. Starts the per-project drain+dispatch loop (idempotent). The

@@ -1165,7 +1165,7 @@ export const CanvasWorkspace = ({
             type="button"
             onClick={() => zoomApi.current?.zoomOut()}
             title={t('canvas.zoom.out')}
-            className="flex h-6 w-6 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-6 w-6 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <Minus size={12} strokeWidth={2} />
           </button>
@@ -1173,7 +1173,7 @@ export const CanvasWorkspace = ({
             type="button"
             onClick={() => zoomApi.current?.fitAll()}
             title={t('canvas.zoom.fit')}
-            className="h-6 min-w-[44px] rounded-[4px] px-1 text-center text-[11px] tabular-nums text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-6 min-w-[44px] rounded-[4px] px-1 text-center text-[11px] tabular-nums text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             {Math.round(canvas.viewport.zoom * 100)}%
           </button>
@@ -1181,7 +1181,7 @@ export const CanvasWorkspace = ({
             type="button"
             onClick={() => zoomApi.current?.zoomIn()}
             title={t('canvas.zoom.in')}
-            className="flex h-6 w-6 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-6 w-6 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <Plus size={12} strokeWidth={2} />
           </button>
@@ -1246,7 +1246,7 @@ export const CanvasWorkspace = ({
                   <button
                     type="button"
                     onClick={cancelGenerate}
-                    className="h-7 shrink-0 rounded-full border border-line px-3 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="h-7 shrink-0 rounded-full border border-line px-3 text-[11.5px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
                     {t('canvas.generate.cancel')}
                   </button>
@@ -1279,7 +1279,7 @@ export const CanvasWorkspace = ({
                     type="button"
                     onClick={closeGenerate}
                     title={t('canvas.generate.close')}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
                     <X size={13} strokeWidth={2} />
                   </button>
@@ -1395,7 +1395,7 @@ export const CanvasWorkspace = ({
             onClick={undo}
             disabled={!canUndo}
             title={t('canvas.undo')}
-            className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+            className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
           >
             <Undo2 size={14} strokeWidth={2} />
           </button>
@@ -1404,7 +1404,7 @@ export const CanvasWorkspace = ({
             onClick={redo}
             disabled={!canRedo}
             title={t('canvas.redo')}
-            className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+            className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
           >
             <Redo2 size={14} strokeWidth={2} />
           </button>

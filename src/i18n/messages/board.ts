@@ -25,6 +25,10 @@ export const board = {
     'board.card.untitled': 'Untitled',
     'board.empty.guide': 'Write a card → Run → the terminal does the task → done merges.',
     'board.card.sessionWorking': 'Claude is working on this card',
+    // The visible stamp on the card. Short by design — the mock's state line is
+    // a word, not a sentence, and it sits inline before the title.
+    'board.card.sessionWorkingLabel': 'working',
+    'board.card.sessionWaitingLabel': 'your turn',
     'board.card.sessionWaiting': 'Claude is waiting for your input on this card',
     'board.detail.markDone': '✓ Done',
     'board.detail.markDoneTitle': 'Move this card to Done now (use when the run finished but the card didn\'t move)',
@@ -190,6 +194,8 @@ export const board = {
     'board.card.untitled': '無題',
     'board.empty.guide': 'カードを書く → 実行 → ターミナルが走る → 完了でマージ。',
     'board.card.sessionWorking': 'このカードで claude が作業中です',
+    'board.card.sessionWorkingLabel': '稼働',
+    'board.card.sessionWaitingLabel': '待ち',
     'board.card.sessionWaiting': 'このカードで claude があなたの入力を待っています',
     'board.detail.markDone': '✓ 完了にする',
     'board.detail.markDoneTitle': 'このカードを今すぐ Done へ（ランは終わったのにカードが動かなかった時に）',

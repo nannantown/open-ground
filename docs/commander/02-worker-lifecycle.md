@@ -488,6 +488,34 @@ PTY 死亡・stall(心拍・PTY 出力・**sub-agent/transcript の mtime**・**
 
 **どの行き先でも、teardown の前に未コミット作業は WIP コミットで branch に保全される**(§6 冒頭)。回収後に `git log <branch>` を見れば `WIP: swarm reclaim auto-save (<理由>)` が立っている(dirty が無ければ何も起きない)。
 
+**【2026-08-04 追加】判定の向きを2か所直した — どちらも「作業が消える側」に倒れていた。**
+
+1. **`commitsAhead` の 0 は「作業ゼロ」と「git が答えられなかった」を区別していなかった。**
+   `defaultCountCommitsAhead` は ①本当に0コミット ②trunk の ref が1つも解決しない
+   ③git が失敗/タイムアウト の3つを全部 `0` で返していた。promote 側(`hasWork`)には
+   無害(昇格を見送るだけ)だが、**`recoveryColumn` では極性が逆** — 0 は「新しいブランチで
+   やり直してよい」の意味になる。**trunk が `origin/main` でも `main` でもないリポ**
+   (`git init` した `master`、origin/HEAD の無い手動 remote)では**全 worker・全パスで 0**
+   が返っていたので、commit 済みの worker が crash すると todo に戻され、次の dispatch が
+   新ブランチを `card.branch` に上書きし、コミットは `git branch --list` でしか辿れなく
+   なる。負荷時の一過性の git 失敗でも同じことが1パス起きる。
+   → 戻り値を `number | null` にし、**null(=読めなかった)は「作業がある」側**に倒す
+   (`recoveryColumn` は blocked、roster は ahead 扱い、promote 側だけ 0 扱い)。
+   番人: `swarmOrchestrator.test.ts`「parks when the commit count could NOT be read」。
+
+2. **撤収を拒まれても worker を名簿から捨てていた。**
+   `removeSwarmWorktree` は作業場にまだ生きた卓があると `{removed:false}` を返し、
+   コメントは「呼び手が再試行する」と約束している。**どの呼び手も再試行していなかった** —
+   カードを移し、worker を `engine.workers` からも `roster.json` からも外していたので、
+   **持ち主のいない作業場で claude が生き続ける**。SDK 側はさらに悪く、reap されない
+   セッションはスロットを**プロセスの寿命いっぱい**占有する(以後の worker は黙って PTY に
+   降格)。自動掃除も届かない(孤児 sweep は git が worktree として列挙する限り飛ばす、
+   janitor は worktree 本体を触らない)。
+   → `stillOccupied:true` を返し、エンジンは**最大3パス再試行**(その間カードは動かさない)。
+   諦めるときは error で1行出し、**カードは todo でなく blocked へ退避**(古い作業場の
+   claude が生きているかもしれないので、同じカードに2人目を出さない)。
+   番人: 同ファイル「a REFUSED teardown keeps the worker and retries」+「stops holding the slot, loudly」。
+
 ### 5.4a stall 判定の第3チャネル — sub-agent/transcript mtime(2026-07-23・**7517 の worker 版**)
 
 worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起動時刻)**だけ**で測っていた。だが worker が**自前の敵対レビュー Task(sub-agent)**を回すと、親 PTY 出力も心拍(phase 境界でしか出ない)も凍り、両チャネルとも古くなる — 走っている本人は生きているのに。これは**司令官卓で 7517e4b1 が塞いだのと同じ死角**であり(03章 delivery 節: `defaultManagerDeliveryAt` が心拍/セッション JSONL/**sub-agent JSONL** の3つで測る)、worker には未適用のまま残っていた。

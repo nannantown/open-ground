@@ -100,16 +100,19 @@ export interface PriorityMeta {
 export const PRIORITY_META: Record<TaskPriority, PriorityMeta> = {
   urgent: {
     labelKey: 'board.detail.priority.urgent',
-    chipClass: 'border-accent/30 bg-accent/10 text-accent',
+    // Above 高 in the ladder, so it keeps the solid fill AND adds a ring —
+    // 高 is now solid vermillion, and a tint would read as LOWER than it.
+    chipClass: 'bg-verm text-bg-inset ring-1 ring-inset ring-ink/40',
     pillSelectedClass: 'border-accent bg-accent text-bg-card hover:bg-accent-hover',
   },
   high: {
     labelKey: 'board.detail.priority.high',
-    // text-ochre-deep / bg-ochre-deep (not raw ochre): the DEFAULT ochre only
-    // clears ~4:1 on the paper bg, below WCAG AA. deep ⇒ chip text 4.72:1,
-    // selected fill 5.29:1; deeper ⇒ hover 6.91:1 (all ≥ 4.5:1). See
-    // tailwind.config.ts ochre.deep/deeper + globals.css --beacon-waiting.
-    chipClass: 'border-ochre/40 bg-ochre/10 text-ochre-deep',
+    // 案C: 高 = 朱のベタ塗り (`.chip-high` — vermillion fill, dark text, no
+    // border, pill). It was an ochre TINT, which collided with the language's
+    // own meaning for ochre (待ち) and read as a fourth state on the board.
+    // `verm` is a fill-only token: the text sitting ON it is bg-inset, so this
+    // pair is checked as a fill, not as vermillion text.
+    chipClass: 'bg-verm text-bg-inset',
     pillSelectedClass: 'border-ochre-deep bg-ochre-deep text-bg-card hover:bg-ochre-deeper',
   },
   normal: {

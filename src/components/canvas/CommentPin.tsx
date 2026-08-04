@@ -119,8 +119,8 @@ export const CommentPin = ({
                 className={[
                   'ml-auto flex h-5 items-center gap-1 rounded-[3px] px-1.5 text-[10.5px] normal-case tracking-normal transition-colors',
                   resolved
-                    ? 'bg-bg-inset text-ink-muted hover:bg-bg-inset/80 hover:text-ink'
-                    : 'text-ink-faint hover:bg-bg-inset hover:text-ink',
+                    ? 'bg-bg-inset text-ink-muted hover:bg-plane/80 hover:text-ink'
+                    : 'text-ink-faint hover:bg-plane hover:text-ink',
                 ].join(' ')}
               >
                 {resolved ? (

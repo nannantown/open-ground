@@ -692,7 +692,7 @@ export const SdkWorkerPane = ({
             type="button"
             onClick={onRestart}
             disabled={controlsBusy}
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line bg-transparent px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-bg-inset hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line bg-transparent px-2 py-1 text-[11px] text-ink-muted transition-colors hover:border-accent hover:bg-plane hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <RotateCcw size={11} strokeWidth={2.25} aria-hidden />
             {busy ? t('projectPanel.swarm.restarting') : t('projectPanel.swarm.restart')}
@@ -854,7 +854,7 @@ const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) 
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-full items-baseline gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-[10px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="flex w-full items-baseline gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-[10px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
         <span className="shrink-0 text-ink-faint" aria-hidden>
           {expanded ? '▾' : '▸'}

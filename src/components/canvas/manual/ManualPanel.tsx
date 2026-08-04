@@ -219,7 +219,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
                 aria-pressed={lang === l}
                 className={[
                   'rounded-[2px] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors',
-                  lang === l ? 'bg-accent text-bg-card' : 'text-ink-muted hover:bg-bg-inset hover:text-ink',
+                  lang === l ? 'bg-accent text-bg-card' : 'text-ink-muted hover:bg-plane hover:text-ink',
                 ].join(' ')}
               >
                 {l}
@@ -243,7 +243,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
                 className={[
                   'flex items-center gap-2.5 rounded-[3px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
                   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-                  on ? 'bg-accent-soft text-accent' : 'text-ink-muted hover:bg-bg-inset hover:text-ink',
+                  on ? 'bg-accent-soft text-accent' : 'text-ink-muted hover:bg-plane hover:text-ink',
                 ].join(' ')}
               >
                 <span className={`shrink-0 ${on ? 'text-accent' : 'text-ink-faint'}`}>{s.icon}</span>

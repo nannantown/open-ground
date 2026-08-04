@@ -105,7 +105,7 @@ const ExperimentToggle = ({
               'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
               active
                 ? 'bg-accent text-bg-card border-accent'
-                : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
+                : 'bg-transparent text-ink-muted border-line hover:bg-plane hover:text-ink hover:border-line-strong',
             ].join(' ')}
           >
             {l}
@@ -403,7 +403,7 @@ export const SettingsPanel = ({
               </p>
               <button
                 onClick={onOpenFeedback}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] border border-line-strong bg-bg px-4 py-2.5 text-[13px] text-ink transition-all duration-150 hover:border-accent hover:bg-bg-inset hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] border border-line-strong bg-bg px-4 py-2.5 text-[13px] text-ink transition-all duration-150 hover:border-accent hover:bg-plane hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 <MessageSquare size={14} strokeWidth={1.75} />
                 {t('settings.feedback.button')}
@@ -434,7 +434,7 @@ export const SettingsPanel = ({
                       'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                       active
                         ? 'bg-accent text-bg-card border-accent'
-                        : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
+                        : 'bg-transparent text-ink-muted border-line hover:bg-plane hover:text-ink hover:border-line-strong',
                     ].join(' ')}
                   >
                     {label}
@@ -569,7 +569,7 @@ export const SettingsPanel = ({
                     <button
                       onClick={browse}
                       disabled={picking}
-                      className="shrink-0 inline-flex items-center gap-1.5 rounded-[2px] border border-line-strong bg-bg-elevated px-3 py-2 label-cap text-ink-muted hover:text-ink hover:bg-bg-inset hover:border-ink-subtle disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      className="shrink-0 inline-flex items-center gap-1.5 rounded-[2px] border border-line-strong bg-bg-elevated px-3 py-2 label-cap text-ink-muted hover:text-ink hover:bg-plane hover:border-ink-subtle disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                       {picking ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}
                       {t('settings.workspace.browse')}

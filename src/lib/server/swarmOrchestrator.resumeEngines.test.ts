@@ -184,12 +184,37 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     await forgetSwarmManualStop(keyA)
   })
 
-  it('a preflight failure skips resume without throwing (fail-quiet, not fatal)', async () => {
+  it('a preflight failure skips resume without throwing — and TELLS THE OWNER', async () => {
+    // ⚠ THIS TEST CHANGED SIDES (2026-08-04). It was named
+    // "(fail-quiet, not fatal)" and pinned the SILENCE as intended: no
+    // notification, no journal line (this branch runs before getOrCreateEngine,
+    // so there is no engine log yet), and no retry — the background auto-drain
+    // sweep is opt-in behind an env var and drain-tick is a pure read.
+    //
+    // The owner closes the app with autonomy ON. At the next launch `claude` is
+    // momentarily not ready — a Finder-launched .app still resolving its
+    // login-shell PATH, a re-auth, a CLI upgrade. Autonomy stays OFF for the
+    // whole session, the todo cards sit, and nothing anywhere says why. The only
+    // surface was the Swarm tab's "autonomy was on — resume?" banner, which
+    // looks IDENTICAL to the one shown when the owner turned it off by hand.
+    //
+    // The two sibling suppression branches (disk fault, crash-loop breaker) both
+    // raise 'engine-resume-suppressed'; this one — the likeliest of the three —
+    // was the only mute one.
     preflightMock.ok = false
     await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
     expect(result.resumed).toHaveLength(0)
+    // `suppressed` stays false: that flag means "the whole boot was suppressed",
+    // and here every OTHER project may still resume normally.
     expect(result.suppressed).toBe(false)
+
+    const notifications = await readNotificationsFresh()
+    const fatal = notifications.find(
+      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed',
+    )
+    expect(fatal, 'a project that failed to resume must not do so in silence').toBeTruthy()
+    expect(fatal?.swarmFatal?.projectPath).toBe(projA)
   })
 
   it('resumes multiple projects independently and fires ONE summarizing info notification', async () => {

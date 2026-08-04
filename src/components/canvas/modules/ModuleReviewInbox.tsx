@@ -254,7 +254,7 @@ export const ModuleReviewInbox = ({
                   <button
                     onClick={() => void act(s, 'approve')}
                     disabled={rowBusy}
-                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink transition-colors hover:bg-bg-inset active:bg-bg-inset disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink transition-colors hover:bg-plane active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   >
                     {rowBusy && busy?.action === 'approve' ? (
                       <Loader2 size={11} className="animate-spin" />
@@ -268,7 +268,7 @@ export const ModuleReviewInbox = ({
                   <button
                     onClick={() => void act(s, 'reject')}
                     disabled={rowBusy}
-                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    className="inline-flex items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   >
                     {rowBusy && busy?.action === 'reject' ? (
                       <Loader2 size={11} className="animate-spin" />

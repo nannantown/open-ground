@@ -506,6 +506,57 @@ describe('GET /api/swarm/notifications — fatal swarm notifications (owner-only
   })
 })
 
+// The dismissal half of that valve: POST /api/swarm/notifications/handled. The
+// feed hides handled rows, which is the ONLY way it can go quiet — before this,
+// one fatal event pinned the alert panel open for the life of the install.
+// Verified through the PRODUCTION READER (the GET above), not the writer's own
+// return value.
+describe('POST /api/swarm/notifications/handled — retire one alert (owner-only)', () => {
+  const seed = async () =>
+    (
+      await createSwarmFatalNotification(
+        { event: 'guard-unwired', detail: 'deny veto unverified', projectPath: '/p' },
+        { os: false, now: 1000 },
+      )
+    ).id
+
+  const post = (body: unknown) =>
+    app.request('/api/swarm/notifications/handled', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  it('403 for a signed-out caller — and the row is NOT retired', async () => {
+    const id = await seed()
+    await clearSession()
+    expect((await post({ id })).status).toBe(403)
+    await signInAs(OWNER)
+    const body = (await (await app.request('/api/swarm/notifications')).json()) as AppNotificationsResponse
+    expect(body.notifications[0].handledAt).toBeUndefined()
+  })
+
+  it('403 for a non-owner', async () => {
+    const id = await seed()
+    await signInAs(TESTER)
+    expect((await post({ id })).status).toBe(403)
+  })
+
+  it('400 on a missing / non-string id', async () => {
+    expect((await post({})).status).toBe(400)
+    expect((await post({ id: 42 })).status).toBe(400)
+    expect((await post({ id: '' })).status).toBe(400)
+  })
+
+  it('stamps handledAt, visible through the route the feed actually reads', async () => {
+    const id = await seed()
+    expect((await post({ id })).status).toBe(200)
+    const body = (await (await app.request('/api/swarm/notifications')).json()) as AppNotificationsResponse
+    expect(body.notifications).toHaveLength(1) // nothing deleted — the bell keeps it
+    expect(typeof body.notifications[0].handledAt).toBe('number')
+  })
+})
+
 // ── Model-quota control plane ────────────────────────────────────────────────
 // The owner's manual steering wheel over swarmQuota's cooling table. It exists
 // because the automatic sensor can be wrong or late (2026-07-09: the CLI's

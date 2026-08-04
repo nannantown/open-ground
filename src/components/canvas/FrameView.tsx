@@ -138,7 +138,7 @@ export const FrameView = memo(({
                   'shrink-0 inline-flex h-6 items-center gap-1 rounded-[3px] px-2',
                   'cursor-pointer text-[11px] font-medium tracking-[0.02em]',
                   'text-ink-muted transition-colors',
-                  'hover:bg-bg-inset hover:text-ink',
+                  'hover:bg-plane hover:text-ink',
                   'active:bg-line-soft',
                   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
                 ].join(' ')}

@@ -4301,7 +4301,7 @@ const ContextItem = ({
       'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] transition-colors',
       danger
         ? 'text-accent hover:bg-accent hover:text-bg-card'
-        : 'text-ink hover:bg-bg-inset',
+        : 'text-ink hover:bg-plane',
     ].join(' ')}
   >
     <span className="shrink-0 text-ink-faint">{icon}</span>

@@ -1240,6 +1240,14 @@ const detectEdgeFatals = async (
             'A: 入れ替えに失敗した原因の調査を、新しい作業としてAIに頼む\n' +
             'B: このまま様子を見る（次に入れ替えが成功するまで、今の版のまま動き続けます）',
       whyEscalated: 'policy',
+      // Only the integration-wait shape offers 「できあがった分も取り込みません」.
+      // The runaway branch of S3 says 「今回の変更は取り込まれません」 about a card
+      // that recoveryColumn already parked in 'blocked' — it is not in review, so
+      // there is nothing to withhold, and declaring the acting effect there would
+      // freeze it for no reason.
+      ...(c.id === 'S3' && c.f.execTimeoutKind === 'integration-wait'
+        ? { declineEffect: 'drop-integration' as const }
+        : {}),
       receiptKey: c.receiptKey,
       taskId: c.f.taskId,
       branch: c.f.branch,

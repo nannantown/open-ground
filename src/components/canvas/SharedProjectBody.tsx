@@ -536,7 +536,7 @@ export const SharedProjectBody = ({
                 <button
                   type="button"
                   onClick={() => setActiveCanvasId(null)}
-                  className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                 >
                   <ArrowLeft size={12} />
                   {t('projectPanel.collabCanvasBack')}
@@ -566,7 +566,7 @@ export const SharedProjectBody = ({
                       <button
                         type="button"
                         onClick={() => setActiveCanvasId(cv.id)}
-                        className="flex w-full items-center gap-2 rounded-[3px] border border-line bg-bg px-3 py-2 text-left text-[12px] text-ink transition-colors hover:border-accent hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        className="flex w-full items-center gap-2 rounded-[3px] border border-line bg-bg px-3 py-2 text-left text-[12px] text-ink transition-colors hover:border-accent hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       >
                         <Palette size={13} className="shrink-0 text-ink-faint" />
                         <span className="truncate">

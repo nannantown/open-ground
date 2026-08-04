@@ -351,9 +351,15 @@ export const projectPanel = {
     'projectPanel.swarm.manager.presenceActive': 'The manager is working',
     'projectPanel.swarm.manager.presenceActiveHint':
       'It is checking finished work and putting it into the main code. This usually takes a few minutes per job.',
-    'projectPanel.swarm.manager.presenceStandby': 'The manager is resting',
+    'projectPanel.swarm.manager.presenceStandby': 'The manager is here, not busy',
     'projectPanel.swarm.manager.presenceStandbyHint':
-      'It wakes up on its own the next time a worker finishes something — no action needed.',
+      'It is open and waiting. When a worker finishes something it picks it up — while the swarm is running, that happens on its own.',
+    'projectPanel.swarm.manager.presenceMissing': 'No manager is open',
+    'projectPanel.swarm.manager.presenceMissingHint':
+      'Finished work will not be put into the main code until one is opened. Press the 司令官 button on this tab to open one.',
+    'projectPanel.swarm.manager.presenceUnknown': 'Checking…',
+    'projectPanel.swarm.manager.presenceUnknownHint':
+      'Could not read the manager status just now. This is not the same as "no manager" — it retries by itself.',
     'projectPanel.swarm.manager.presenceQueue': 'Waiting for inspection: {count}',
     'projectPanel.swarm.manager.presenceQueueHint':
       'Finished work goes live only after the manager checks it.',
@@ -383,6 +389,12 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.emptyBody':
       "Questions and fatal events from the swarm land here.",
     'projectPanel.swarm.overseer.ago': '{age} ago',
+    'projectPanel.swarm.overseer.inboxUnknownTitle': 'Cannot read the inbox right now',
+    'projectPanel.swarm.overseer.inboxUnknownBody':
+      'This is not the same as "nothing to do" — the list could not be loaded, so there may be questions waiting. It retries on its own; if it keeps saying this, reopen the app.',
+    'projectPanel.swarm.overseer.markHandled': 'Handled',
+    'projectPanel.swarm.overseer.markHandledHint':
+      'Hide this alert from the list. It stays in the bell history; nothing is deleted.',
     'projectPanel.swarm.overseer.anomalyReworkExhausted': 'Card retried too many times — parked in Needs decision',
     'projectPanel.swarm.overseer.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
     'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'Review panel indecisive — merge withheld, needs a human',
@@ -398,6 +410,14 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.fatalCanaryFailed': 'Self-update canary failed',
     'projectPanel.swarm.overseer.fatalReviewPanelFailed': 'Review panel failed · merge withheld',
     'projectPanel.swarm.overseer.fatalHighRiskHold': 'High-risk paths · awaiting manual merge',
+    'projectPanel.swarm.overseer.anomalyAllWorkersDown':
+      'Every worker has stopped · cards are still waiting',
+    'projectPanel.swarm.overseer.anomalyManagerUnrevivable':
+      'The commander desk will not come back · merging is stopped',
+    'projectPanel.swarm.overseer.fatalGuardUnwired': 'Safety guard unverified · workers cannot start',
+    'projectPanel.swarm.overseer.fatalManagerUnrevivable': 'Commander desk will not come back',
+    'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': 'Auto-resume held back after repeated restarts',
+    'projectPanel.swarm.overseer.fatalDataIntegrity': 'App data damaged · backups available',
     // Escalations inbox (C1) — questions the swarm raised to YOU, waiting for
     // your answer. Fail-closed: nothing proceeds until you decide.
     'projectPanel.swarm.esc.title': 'Escalations — waiting for your answer',
@@ -413,9 +433,23 @@ export const projectPanel = {
     'projectPanel.swarm.esc.screenshot': "Worker's screen at the time",
     'projectPanel.swarm.esc.answerPlaceholder': 'Your answer…',
     'projectPanel.swarm.esc.answerSend': 'Answer & resume',
-    'projectPanel.swarm.esc.dismiss': 'Dismiss',
+    // ⚠ NOT "見送る"/"Decline" — that is what option B of some questions SAYS,
+    // and this button does something else entirely: it closes the question
+    // without answering, permanently (the same question is never re-raised).
+    // An owner who read B as 「この作業は見送る」 and pressed the button beside it
+    // got "stop asking" recorded instead of their decision.
+    'projectPanel.swarm.esc.dismiss': 'Close without answering',
+    'projectPanel.swarm.esc.dismissHint':
+      'Closes this question for good without recording a decision. It will not be asked again. To decline the work itself, answer the question with B.',
     'projectPanel.swarm.esc.deliveryInjected': 'Answer injected into the live worker — it resumes now.',
-    'projectPanel.swarm.esc.deliveryQueued': "Worker is gone — recorded; while the swarm is running, the card's next dispatch carries this answer.",
+    // ⚠ Do NOT promise a re-dispatch here (2026-08-04). The card is very often
+    // PARKED after this — a branch that already holds commits, or an unreadable
+    // commit count, or a question nobody's worker asked, all keep it in 保留 —
+    // and a parked card is never dispatched. The old wording ("the card's next
+    // dispatch carries this answer") read as "work resumes now", so an owner who
+    // chose "try again" watched nothing happen and had no way to learn why.
+    'projectPanel.swarm.esc.deliveryQueued':
+      'Recorded. The worker that asked has already been stood down, so nothing restarts right away: if the card can go back to the queue it will carry your answer, and if its work is already saved on a branch the commander picks it up from there.',
     'projectPanel.swarm.esc.deliverySkipped': 'Recorded. Nothing live to deliver to.',
     'projectPanel.swarm.esc.memoryWritten': 'Learned — written back to your corpus.',
     'projectPanel.swarm.esc.actionFailed': 'Escalation action failed: {error}',
@@ -1048,9 +1082,15 @@ export const projectPanel = {
     'projectPanel.swarm.manager.presenceActive': 'マネージャーが動いています',
     'projectPanel.swarm.manager.presenceActiveHint':
       '仕上がった作業を検品して、本番のコードに反映しています。1件あたり数分かかるのが普通です。',
-    'projectPanel.swarm.manager.presenceStandby': 'マネージャーは休んでいます',
+    'projectPanel.swarm.manager.presenceStandby': 'マネージャーはいます（手が空いています）',
     'projectPanel.swarm.manager.presenceStandbyHint':
-      '次に worker の作業が仕上がると自動で起きます — 何もしなくて大丈夫です。',
+      '席にいて待っている状態です。作業が仕上がると引き取ります — 自動運転が動いている間は、そこまで自動で進みます。',
+    'projectPanel.swarm.manager.presenceMissing': 'マネージャーがいません',
+    'projectPanel.swarm.manager.presenceMissingHint':
+      '仕上がった作業を本番のコードに入れる人がいない状態です。このタブの「司令官」ボタンで呼べます。',
+    'projectPanel.swarm.manager.presenceUnknown': '確認中',
+    'projectPanel.swarm.manager.presenceUnknownHint':
+      'いまマネージャーの状態を読めませんでした。「いない」とは違います — 自動でやり直します。',
     'projectPanel.swarm.manager.presenceQueue': '検品待ち: {count} 件',
     'projectPanel.swarm.manager.presenceQueueHint':
       '仕上がった作業は、マネージャーの検品を通ってから本番に反映されます。',
@@ -1079,6 +1119,12 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.emptyBody':
       'swarm からの質問と致命イベントがここに届きます。',
     'projectPanel.swarm.overseer.ago': '{age} 前',
+    'projectPanel.swarm.overseer.inboxUnknownTitle': 'いま受信箱を読めていません',
+    'projectPanel.swarm.overseer.inboxUnknownBody':
+      '「対応が要るものはありません」とは違います — 一覧を読み込めなかっただけで、質問が待っているかもしれません。自動でやり直します。これが続くときはアプリを開き直してください。',
+    'projectPanel.swarm.overseer.markHandled': '対応済み',
+    'projectPanel.swarm.overseer.markHandledHint':
+      'この通知を一覧から隠します。お知らせの履歴には残り、消えるわけではありません。',
     'projectPanel.swarm.overseer.anomalyReworkExhausted': 'リトライ上限超過 — 判断待ちに退避',
     'projectPanel.swarm.overseer.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
     'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'レビューパネル決着せず — 統合保留・人間の確認待ち',
@@ -1094,6 +1140,12 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.fatalCanaryFailed': '自己更新カナリア失敗',
     'projectPanel.swarm.overseer.fatalReviewPanelFailed': 'レビューパネル不成立 · 統合保留',
     'projectPanel.swarm.overseer.fatalHighRiskHold': '高リスクパス · 手動マージ待ち',
+    'projectPanel.swarm.overseer.anomalyAllWorkersDown': 'ワーカーが全部止まっています · 待っているカードがあります',
+    'projectPanel.swarm.overseer.anomalyManagerUnrevivable': '司令官の卓が戻りません · 統合が止まっています',
+    'projectPanel.swarm.overseer.fatalGuardUnwired': '安全装置を確認できず · ワーカーを起動できません',
+    'projectPanel.swarm.overseer.fatalManagerUnrevivable': '司令官の卓が復帰しません',
+    'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': '再起動が続いたため自動再開を見合わせました',
+    'projectPanel.swarm.overseer.fatalDataIntegrity': 'アプリのデータが壊れました · バックアップあり',
     // エスカレーション受信箱（C1）— swarm があなたに上げた質問の回答待ち。
     // fail-closed: あなたが決めるまで何も先に進まない。
     'projectPanel.swarm.esc.title': 'エスカレーション — あなたの回答待ち',
@@ -1110,9 +1162,12 @@ export const projectPanel = {
     'projectPanel.swarm.esc.screenshot': 'その時の worker 画面',
     'projectPanel.swarm.esc.answerPlaceholder': '回答を入力…',
     'projectPanel.swarm.esc.answerSend': '回答して再開',
-    'projectPanel.swarm.esc.dismiss': '見送る',
+    'projectPanel.swarm.esc.dismiss': '答えずに閉じる',
+    'projectPanel.swarm.esc.dismissHint':
+      'この質問を、答えないまま閉じます。同じ質問は二度と出ません。作業そのものを見送るときは、質問に B と答えてください。',
     'projectPanel.swarm.esc.deliveryInjected': '回答を実行中の worker に注入しました — 作業が再開します。',
-    'projectPanel.swarm.esc.deliveryQueued': 'worker 不在 — 回答は記録済み。swarm 稼働中なら同じカードの次回 dispatch に同梱されます。',
+    'projectPanel.swarm.esc.deliveryQueued':
+      '回答を記録しました。質問した担当はすでに降りているので、すぐに作業が再開するとは限りません — このカードが順番待ちに戻せる状態なら次に呼ばれたときに回答が渡り、作業がすでにブランチに保存されている場合は司令官がそこから引き継ぎます。',
     'projectPanel.swarm.esc.deliverySkipped': '記録しました（配達先の worker/カードなし）。',
     'projectPanel.swarm.esc.memoryWritten': '記憶に追記しました（you-corpus）。',
     'projectPanel.swarm.esc.actionFailed': 'エスカレーション操作に失敗: {error}',

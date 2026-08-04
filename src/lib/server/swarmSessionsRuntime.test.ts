@@ -66,6 +66,7 @@ import {
   recordSwarmSession,
   resolveSwarmSession,
   isAgentSessionLiveAnywhere,
+  defaultAwaitRelease,
 } from './swarmSessions'
 
 // ── the PTY pool, seated hermetically ────────────────────────────────────────
@@ -279,7 +280,54 @@ describe('swarmSessions resume seam × PTY/SDK runtimes', () => {
     expect(isSdkSessionLive(s)).toBe(true) // still unwinding — NOT reaped
     expect(s.closed).toBe(true) // …but no longer using the conversation
 
-    const r = await resolveSwarmSession(proj, 'manager')
+    // ⚠ WITH A BOUNDED WAIT (2026-08-04, cycle 6). Handing the conversation over
+    // the INSTANT `closed` is set is not safe either: terminateSdkSession only
+    // sets the flag and fires a best-effort interrupt, so a session mid-tool-call
+    // keeps appending to the transcript. The resolve now waits for the holder to
+    // finish (reap) before deciding, and gives up after
+    // CONVERSATION_RELEASE_GRACE_MS so a WEDGED desk — which never reaps — cannot
+    // strand the conversation forever. This case is the wedged one: nothing
+    // releases the iterator, so the grace expires and the hand-over happens.
+    // A short grace is injected so the suite does not sit here for 3 seconds; the
+    // production function is still the one running.
+    const r = await resolveSwarmSession(proj, 'manager', {
+      awaitRelease: (id) => defaultAwaitRelease(id, 40),
+    })
+    expect(r.resume).toBe(true)
+    expect(r.agentSessionId).toBe(CONV)
+  })
+
+  it('WAITS for a stopping desk to actually finish before handing over the conversation', async () => {
+    // The composition two separate cycle fixes opened (found by adversarial
+    // review 2026-08-04): `adoptLiveDesk` skips a `stopping` desk (so Restart
+    // spawns a new one) AND the liveness predicate ignores a `closed` session
+    // (so the conversation reads as free). Together, on a Restart pressed while
+    // the old claude is mid-tool-call, TWO processes would hold one transcript.
+    await recordSwarmSession(proj, 'manager', CONV)
+    await writeTranscript(proj, CONV)
+    const id = seatSdkDesk(proj, CONV, 'manager')
+    terminateSdkSession(id)
+    expect(getSdkSession(id)!.reaped).toBeFalsy() // still unwinding
+
+    let settled = false
+    const pending = resolveSwarmSession(proj, 'manager', {
+      awaitRelease: (sid) => defaultAwaitRelease(sid, 5_000),
+    }).then((r) => {
+      settled = true
+      return r
+    })
+    // Long enough for several release polls (50ms each) to have run.
+    await new Promise((r) => setTimeout(r, 160))
+    expect(settled, 'the conversation must not be handed over while its holder still runs').toBe(
+      false,
+    )
+
+    // Now let the old session finish, exactly as a normal stop does.
+    for (const release of releaseIterators) release()
+    releaseIterators = []
+    const r = await pending
+    expect(getSdkSession(id)!.reaped).toBe(true)
+    // …and the SAME conversation is handed on — waiting must not cost the memory.
     expect(r.resume).toBe(true)
     expect(r.agentSessionId).toBe(CONV)
   })

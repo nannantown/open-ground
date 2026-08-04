@@ -22,6 +22,7 @@ import {
   ENTER_RETRY_MAX,
 } from './swarmEscalations'
 import { escalationsFile, escalationShotsDir, youCorpusAdditionsFile } from './paths'
+import { readUnparkIntent } from './swarmOrchestrator'
 import { BRACKETED_PASTE_START, BRACKETED_PASTE_END } from './pastePrompt'
 import type { OpenEscalationInput } from './swarmEscalations'
 
@@ -239,7 +240,18 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
   const answerDeps = () => {
     const writes: Array<{ id: string; data: string }> = []
     const memory: Array<{ text: string; tags?: string[] }> = []
-    const queued: Array<{ projectPath: string; taskId: string; line: string }> = []
+    // The 4th argument is captured DELIBERATELY. `opts.answer` is what the
+    // orchestrator reads the owner's choice out of, it is OPTIONAL, and its
+    // absence degrades in SILENCE (readUnparkIntent('') ⇒ 'unstated' ⇒ the
+    // unpark is skipped for a non-worker-addressed raise). That handoff broke in
+    // three separate cycles on 2026-08-03/04 while every fake here took three
+    // parameters and looked at `line` only.
+    const queued: Array<{
+      projectPath: string
+      taskId: string
+      line: string
+      opts?: { workerAddressed?: boolean; answer?: string }
+    }> = []
     return {
       writes,
       memory,
@@ -253,8 +265,13 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
         appendMemory: async (input: { text: string; tags?: string[] }) => {
           memory.push(input)
         },
-        queueForNextDispatch: async (projectPath: string, taskId: string, line: string) => {
-          queued.push({ projectPath, taskId, line })
+        queueForNextDispatch: async (
+          projectPath: string,
+          taskId: string,
+          line: string,
+          opts?: { workerAddressed?: boolean; answer?: string },
+        ) => {
+          queued.push({ projectPath, taskId, line, opts })
         },
         isPathAllowed: async () => true,
         // The REAL guard needs a live claude PTY in a registered project —
@@ -376,6 +393,75 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     expect(h.queued[0].line).toContain('オーナーの回答: B')
     // `A:` may appear ONLY as the question's own option — never as the answer.
     expect(h.queued[0].line).not.toContain('→ A: ')
+  })
+
+  // THE 4-ARGUMENT HANDOFF. `line` is question+answer CONCATENATED and the
+  // question carries the menu, so the owner's choice CANNOT be read from it —
+  // that exact misreading shipped on 2026-08-04 (every answer, including
+  // 「B: このまま保留」, resolved as resume and the card moved anyway). The choice
+  // rides in `opts.answer`, which is OPTIONAL: drop it and readUnparkIntent('')
+  // returns 'unstated', the unpark is skipped, and NOTHING throws or logs. This
+  // seam broke in three consecutive review cycles while every fake in this file
+  // took three parameters. These two tests read the 4th.
+  it('hands the BARE answer to the next dispatch — not the question+answer line', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(
+      openInput({
+        // The question's own menu opens with A — the trap the line-scan fell into.
+        question: 'この worker をどうしますか？\nA: 順番待ちに戻して再開\nB: このまま保留',
+      }),
+      { notify },
+    )
+    const h = answerDeps()
+    await answerEscalation(escalation.id, 'B: このまま保留', h.deps)
+
+    const call = h.queued[0]
+    expect(call.opts?.answer).toBe('B: このまま保留') // the bare answer, verbatim
+    // …and it still READS as hold through the production parser. Asserting the
+    // string alone would pass even if the two sides disagreed about the shape.
+    expect(readUnparkIntent(call.opts!.answer!)).toBe('hold')
+    // The line is the concatenation the worker reads; it carries the QUESTION's
+    // menu as well as the answer.
+    expect(call.line).toContain('A: 順番待ちに戻して再開')
+  })
+
+  it('the LINE and the ANSWER are not interchangeable — the menu poisons the line', async () => {
+    // The owner picks A (resume). The question's own menu spells out option B
+    // (「このまま保留」), so the concatenated line carries a hold phrase the owner
+    // never chose. Feeding the line to the parser therefore reads the OPPOSITE
+    // of what they said — which is the whole reason the answer travels
+    // separately. (Under the old last-word rule this misread as resume; under
+    // the current hold-wins-a-tie rule it misreads as hold. Either way it is
+    // not the owner's choice, so pin the DIVERGENCE, not a particular wrong
+    // value.)
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(
+      openInput({
+        question: 'この worker をどうしますか？\nA: 順番待ちに戻して再開\nB: このまま保留',
+      }),
+      { notify },
+    )
+    const h = answerDeps()
+    await answerEscalation(escalation.id, 'A: 順番待ちに戻して再開', h.deps)
+
+    const call = h.queued[0]
+    expect(readUnparkIntent(call.opts!.answer!)).toBe('resume') // what the owner said
+    expect(readUnparkIntent(call.line)).not.toBe('resume') // what the line would say
+  })
+
+  it('carries workerAddressed=false for a raise the worker did not author', async () => {
+    // The other half of the pair: with workerAddressed false, an 'unstated'
+    // intent makes the orchestrator skip the unpark entirely — so a dropped
+    // `answer` on THIS lane is a silent no-op for the owner.
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(routingInput(), { notify })
+    const h = answerDeps()
+    await answerEscalation(escalation.id, 'A でお願いします', h.deps)
+
+    const call = h.queued[0]
+    expect(call.opts?.workerAddressed).toBe(false)
+    expect(call.opts?.answer).toBe('A でお願いします')
+    expect(readUnparkIntent(call.opts!.answer!)).toBe('resume')
   })
 
   it('dead PTY (write returns false) → falls back to the next-dispatch queue', async () => {

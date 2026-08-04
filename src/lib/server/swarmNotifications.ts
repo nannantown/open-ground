@@ -108,6 +108,42 @@ export const appendSwarmNotification = async (app: AppNotification): Promise<voi
   return run
 }
 
+/**
+ * Mark ONE notification HANDLED (the Swarm tab's needs-attention feed hides it).
+ * Idempotent: an unknown id, or a row already handled, writes nothing and
+ * resolves — the caller never has to check first.
+ *
+ * WHY A FIELD OF ITS OWN, not the bell's read-state. Both would "hide the row",
+ * but they answer different questions: read-state means "I have SEEN this",
+ * written wholesale the moment the bell is opened; handled means "I have DEALT
+ * with this". Wiring the feed to read-state would empty the swarm's work list
+ * the first time the owner glanced at the bell — losing to-dos silently, the
+ * exact failure direction this feed exists to prevent. Nothing is deleted here
+ * either: the row stays in the store and in the bell.
+ *
+ * `handledAt` is a timestamp rather than a boolean so a later "what did I
+ * dismiss, and when?" view needs no migration.
+ */
+export const markSwarmNotificationHandled = async (
+  id: string,
+  nowMs: number = Date.now(),
+): Promise<void> => {
+  if (!id) return
+  const run = chain.then(async () => {
+    const state = await readState()
+    let changed = false
+    const items = state.items.map((it) => {
+      if (it.id !== id || it.handledAt) return it
+      changed = true
+      return { ...it, handledAt: nowMs }
+    })
+    if (!changed) return
+    await atomicWriteJson(swarmNotificationsFile(), { items } satisfies SwarmNotificationsState)
+  })
+  chain = run.catch(() => {})
+  return run
+}
+
 /** A short, operator-facing English label per event (the OS toast title; matches
  *  the style of electron's existing notifyRollback). The Japanese specifics ride
  *  in `detail`, which the engine log already phrases. */

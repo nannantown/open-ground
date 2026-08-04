@@ -1132,6 +1132,13 @@ export interface SpawnSwarmWorkerResponse {
 export interface RemoveSwarmWorktreeResponse {
   removed: boolean
   reason?: string
+  /** The removal was REFUSED because a desk is still live in that directory —
+   *  "ask again", not "it failed". Distinct from every other `removed:false` so a
+   *  caller can honour the retry contract the refusal promises without matching on
+   *  `reason` text. The engine keeps such a worker in its roster and retries on a
+   *  later pass; dropping it strands a live claude in a worktree nobody owns (and,
+   *  on the SDK pool, holds its slot for the life of the process). */
+  stillOccupied?: boolean
   /** Present on a CONFIRMED non-force removal (the commander's post-merge sweep
    *  lane — og-manage §マージ step 7): the commander-integration detection that
    *  reconnects the engine self-update trigger (selfUpdateOnIntegrate.ts). */
@@ -1503,6 +1510,22 @@ export type OrchestratorAnomalyKind =
   | 'rework-exhausted'
   | 'review-panel-failed'
   | 'high-risk-hold'
+  // The two LEVEL-TRIGGERED failures, mirrored here from the notification lane
+  // (2026-08-04). Both fire as ONE-SHOT notifications that will not be minted
+  // again until the condition clears, so once the owner could dismiss a row from
+  // the needs-attention feed, a STANDING failure could be hidden forever with one
+  // click. As anomalies they are re-derived from live state every pass: a
+  // dismissal cannot silence them, and they vanish on their own when the
+  // condition ends.
+  //   - 'all-workers-down' — the engine is running, NO worker is alive, and swarm
+  //                          cards are still sitting in 'doing' (work hanging).
+  //                          `attempts` carries how many cards are hanging.
+  //   - 'manager-unrevivable' — the commander desk failed to come back the
+  //                          maximum number of times in a row, so integration is
+  //                          stopped until a human looks. `attempts` carries the
+  //                          consecutive failure count.
+  | 'all-workers-down'
+  | 'manager-unrevivable'
 
 export interface OrchestratorAnomaly {
   /** Which inconsistency — see {@link OrchestratorAnomalyKind}. */
@@ -1629,6 +1652,15 @@ export interface SwarmManagerHeartbeat {
  *  the workers it counts against the cap, the review cards awaiting the
  *  commander, the recent journal, and the concurrency ceiling.
  *  Owner-only (same gate as the rest of /api/swarm/*). */
+/** What the Swarm pane says about the commander desk. Display-only — see
+ *  {@link SwarmOrchestratorState.managerPresence}.
+ *   • 'missing' — no live commander desk in either pool.
+ *   • 'quiet'   — a desk is up; it is not reporting integration work right now.
+ *   • 'working' — a desk is up AND its heartbeat is fresh.
+ *  (A fourth display state, "unknown", exists only on the client: it means the
+ *  server did not say, which must never be shown as 'missing'.) */
+export type SwarmManagerPresence = 'missing' | 'quiet' | 'working'
+
 export interface SwarmOrchestratorState {
   /** True while the autonomous drain+dispatch loop is scheduled. OFF ⇒ the
    *  engine never dispatches (manual POST /api/swarm/worker is untouched) AND
@@ -1640,6 +1672,25 @@ export interface SwarmOrchestratorState {
    *  「再起動のたびに死画面」 report). Additive + optional: an old server omits
    *  it (client keeps its old behaviour); null = no live commander desk. */
   managerDesk?: { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null
+  /** DISPLAY-ONLY commander status — what the pane tells the owner.
+   *
+   *  ⚠ NOT {@link ManagerPresence} (absent/idle/active), which is the engine's
+   *  REFLEX judgement: it stats transcripts, discounts its own keystroke echo,
+   *  and falls to 'absent' on any exception. That direction is right for
+   *  "should I wake the desk?" and wrong for "what do I tell the owner?", where
+   *  one transient read failure would announce that the commander is gone.
+   *
+   *  Derived server-side from facts the state read ANYWAY (a live desk in either
+   *  pool + the heartbeat's freshness), so this costs no extra I/O.
+   *
+   *  WHY IT EXISTS: the pane used to derive "動いています" from the heartbeat's
+   *  10-minute freshness ALONE. A commander that beat once and then died kept
+   *  saying it was working — for ten minutes, unattended, on the one screen that
+   *  is supposed to tell the owner whether to look.
+   *
+   *  Additive + optional: an old server omits it, and the client must read the
+   *  absence as UNKNOWN — never as 'missing'. */
+  managerPresence?: SwarmManagerPresence
   /** Same, for the supply desk (PTY-only by design — Remote Control lives there). */
   supplyDesk?: { runtime: 'pty'; handleId: string; agentSessionId: string | null } | null
   /** True while the owner has EXPLICITLY paused the engine (Autonomy OFF) and
@@ -1900,6 +1951,24 @@ export interface ProjectTask {
    *  of the review column (a rework / completion invalidates the stamp). Shared
    *  data. */
   integrationConflict?: boolean
+  /** The owner answered 「B: この作業は見送る（できあがった分も取り込みません）」 to
+   *  an escalation about this card. It is a STANDING instruction, not a log line:
+   *  while it is set, the engine must never publish this card as ready to
+   *  integrate — no `engine.reviews` row, no 「統合してください」 notice to the
+   *  commander desk, no wake.
+   *
+   *  ⚠ WHY A CARD FLAG AND NOT JUST AN ANSWER. Answering used to record the text
+   *  and stop there: the card stayed in `review`, so the engine kept telling the
+   *  commander to integrate it and the commander did. Integration onto the trunk
+   *  is irreversible, so "I chose B" has to survive as STATE that the publish
+   *  path reads, not as prose in a journal nobody consults.
+   *
+   *  CLEARED whenever the card leaves 'blocked' by a human's hand (a column move
+   *  or a 差し戻し) — moving it back into play IS the owner changing their mind,
+   *  and the work on its branch is still there to pick up.
+   *  Shared data. (3点セット: types.ts / schemas.ts ProjectTaskSchema / the
+   *  server's setter in server/routes/project.ts.) */
+  abandoned?: boolean
   /** Set by the commander engine's SELF-SUPPLY stage (card b3fbbfba) when the
    *  engine proposed this card on its own (a discovered improvement point — a
    *  type/lint error, a failed test, a state anomaly, a TODO). Its presence both
@@ -2625,6 +2694,13 @@ export interface AppNotification {
   kind: NotificationKind
   /** Epoch ms for newest-first ordering (absent → sorts last). */
   createdAt?: number
+  /** Epoch ms when the owner marked this row HANDLED from the Swarm tab's
+   *  needs-attention feed (POST /api/swarm/notifications/handled). Deliberately
+   *  NOT the bell's read-state: "I glanced at the bell" must not empty a work
+   *  list. The feed hides handled rows — the only way it can return to its quiet
+   *  state, since notifications never expire (they leave only by falling out of
+   *  the per-kind cap). The bell still shows them; nothing is deleted. */
+  handledAt?: number
   /** Present when kind === 'collab-invite'. */
   collabInvite?: CollabInviteForMe
   /** Present when kind === 'swarm-fatal'. */
@@ -2738,6 +2814,16 @@ export interface Escalation {
   proxyDraft?: EscalationProxyDraft
   /** Which valve raised this — see {@link EscalationWhy}. */
   whyEscalated: EscalationWhy
+  /** WHAT THE DECLINE OPTION MEANS, declared by whoever raised the question.
+   *   • absent / 'park' — 「このまま保留にしておく」: leave the card where it is.
+   *   • 'drop-integration' — 「この作業は見送る（できあがった分も取り込みません）」:
+   *     the work must not be integrated. Answering B EXECUTES that.
+   *
+   *  ⚠ The effect is DECLARED, never inferred from the answer text. 「保留」 and
+   *  「見送る」 both read as "hold" to a phrase parser, and they are not the same
+   *  act: one leaves a card alone, the other cancels an irreversible merge. The
+   *  raiser knows which question it asked; the reader must not guess. */
+  declineEffect?: 'park' | 'drop-integration'
   status: EscalationStatus
   /** The owner's actual answer (set on 'answered'; the ONLY text that is ever
    *  written back to you-corpus memory). */

@@ -280,6 +280,8 @@ const makeDeps = (init: {
   spawnModel?: string // model alias the fake spawn reports launching with (quota attribution)
   exitInfos?: Map<string, { code: number | null; signal?: number }> // taskId → the dead PTY's
   //   own exit code/signal, as recoverWorker would report it for a 'crash' reclaim
+  occupied?: Set<string> // taskIds whose worktree still holds a LIVE desk, so the
+  //   teardown REFUSES ({removed:false, stillOccupied:true}) — the "ask again" answer
 }): OrchestratorDeps & {
   spawned: { taskId: string; priorFailure?: string }[]
   moves: { taskId: string; branch: string }[]
@@ -301,6 +303,7 @@ const makeDeps = (init: {
   const reviewFails = new Set(init.reviewFails ?? [])
   const reviewAlwaysFails = new Set(init.reviewAlwaysFails ?? [])
   const recoverFails = new Set(init.recoverFails ?? [])
+  const occupied = new Set(init.occupied ?? [])
   const recoverTodoFails = new Set(init.recoverTodoFails ?? [])
   const commits = init.commits ?? new Map<string, number>()
   const heartbeats = init.heartbeats ?? new Map<string, HeartbeatSign>()
@@ -404,6 +407,11 @@ const makeDeps = (init: {
       // "the exit reached the journal" true no matter what the gate does.
       const gated = (reason ?? 'crash') !== 'crash' || alreadyTornDown === true
       const exitInfo = !gated && taskId ? exitInfos.get(taskId) : undefined
+      // `occupied` = the worktree still has a live desk, so removeSwarmWorktree
+      // REFUSES. Production returns { removed:false, stillOccupied:true } there.
+      if (taskId && occupied.has(taskId)) {
+        return { removed: false, stillOccupied: true, reason: 'a session is still running in this worktree' }
+      }
       return { removed: true, ...(exitInfo ? { exitInfo } : {}) }
     },
     // PTY output epoch, keyed by terminalId (absent → null = no output signal, so
@@ -1086,6 +1094,22 @@ describe('recoveryColumn — where a LOST worker’s card goes', () => {
 
   it('requeues a bare crash to todo while the retry budget remains', () => {
     expect(recoveryColumn(p(), 0, 1)).toBe('todo')
+  })
+
+  it('parks when the commit count could NOT be read — 0 and "unknown" are different', () => {
+    // MEASURED 2026-08-04 (adversarial review, lens: losing the user's work).
+    // countCommitsAhead used to answer 0 for three different facts: the branch is
+    // empty, no trunk ref resolved, git failed. This line reads 0 as "safe to
+    // requeue onto a fresh branch". In a repo whose trunk is neither origin/main
+    // nor main — a `git init` repo on master, a hand-added remote with no
+    // origin/HEAD — that was EVERY worker on EVERY pass: a worker committed, the
+    // process died, the card went back to todo, the next dispatch minted a new
+    // swarm/* branch over card.branch, and the commits became reachable only via
+    // `git branch --list`. Nothing told the owner; the work was redone from zero.
+    expect(recoveryColumn(p({ commitsUnknown: true }), 0, 1)).toBe('blocked')
+    // …and it is the UNKNOWN that parks it, not the crash: a proven-empty branch
+    // still takes the retry budget (nothing to orphan).
+    expect(recoveryColumn(p({ commitsAhead: 0 }), 0, 1)).toBe('todo')
   })
 
   it('parks in blocked once the retry budget is spent', () => {
@@ -2566,6 +2590,108 @@ describe('runDispatchPass — drain + dispatch', () => {
       expect(crash?.message).toContain(expectedCategory)
     },
   )
+
+  it('a REFUSED teardown keeps the worker and retries — it does not orphan a live claude', async () => {
+    // MEASURED 2026-08-04 (adversarial review, lens: losing the user's work).
+    // removeSwarmWorktree refuses while a desk is still live in the directory, and
+    // its comment promises "the caller retries and the worktree stays intact
+    // meanwhile". NO caller implemented that: recoverLost re-homed the card and
+    // dropped the worker from engine.workers (and from roster.json), so a
+    // still-running claude was left in a worktree nobody owned. On the SDK pool it
+    // also pinned its slot for the life of the process — a non-reaped session is
+    // never swept — so every later worker silently fell back to a PTY. Nothing
+    // retried: the orphan sweep skips a dir git still lists as a worktree, and the
+    // janitor never touches worktree bodies.
+    const dead = new Set<string>()
+    const deps = makeDeps({
+      cards: [card('a', { boardOrder: 0 })],
+      dead,
+      occupied: new Set(['a']), // the desk in this worktree will not stop
+    })
+    const engine = newEngine()
+
+    await runDispatchPass(engine, deps) // dispatch
+    dead.add('a')
+    await runDispatchPass(engine, deps) // reclaim attempt 1 — refused
+
+    // THE OBSERVABLE OUTCOME: the worker is still ours, so something will come
+    // back for it. (Before the fix: engine.workers was empty here.)
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.workers[0].branch).toBe('swarm/a')
+    // …and the card was NOT re-homed while we wait.
+    expect(deps.recovered).toHaveLength(0)
+    expect(engine.log.some((l) => l.message.includes('撤収を保留'))).toBe(true)
+  })
+
+  it('a retried teardown does NOT re-run the detectors (no second bell for one stop)', async () => {
+    // MEASURED 2026-08-04 (cross-fix interaction). Each detection arm clears its
+    // OWN trigger state before calling recoverLost, so a retry that fell back
+    // through the detectors re-fired their one-shot effects. The loudest is
+    // exec-timeout: it pushes onto `engine.pendingFatal`, the EDGE lane whose
+    // contract is "fire each exactly once, then drain" — so ONE stop produced a
+    // bell + OS toast per retry pass, and the later ones quoted 0-minute spans
+    // because the numbers had already been consumed. The rate-limit arm also
+    // re-wrote the quota cooling table and restarted its grace clock.
+    //
+    // The fixture drives the RETRY STATE directly rather than trying to arrive
+    // at it through a detector: which arm reclaims a worker at a given clock is
+    // incidental to this claim (an earlier version of this test was silently
+    // measuring the stall arm instead), while "a worker already being torn down
+    // skips the detectors" is the claim itself.
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing', branch: 'swarm/a' })],
+      occupied: new Set(['a']), // the desk will not stop → the teardown is refused
+    })
+    const engine = newEngine({
+      running: true,
+      workers: [
+        worker({
+          terminalId: 'pty-a-1',
+          branch: 'swarm/a',
+          taskId: 'a',
+          taskTitle: 'task a',
+          // Started long before the ceiling: every detector would have something
+          // to say about this worker if it were re-examined.
+          startedAt: new Date(Date.parse('2026-08-04T00:00:00Z')).toISOString(),
+        }),
+      ],
+    })
+    // …and it is ALREADY mid-teardown, from an earlier pass.
+    engine.teardownRetries = new Map([['a', { tries: 1, reason: 'runaway' as const }]])
+
+    await runDispatchPass(engine, deps, Date.parse('2026-08-04T00:00:00Z') + MAX_EXEC_MS + 60_000)
+
+    // The detectors did not run again, so no second one-shot effect was fired.
+    expect(engine.pendingFatal.map((f) => f.event)).toEqual([])
+    // …and the worker is still ours, so the teardown will be attempted again.
+    expect(engine.workers).toHaveLength(1)
+  })
+
+  it('…but a worktree that never frees up stops holding the slot, loudly', async () => {
+    // The other direction. Retrying forever is its own failure: the slot would be
+    // held for the life of the process. Past the bound the engine proceeds exactly
+    // as before AND says so at error level, so the orphan is at least on the record.
+    const dead = new Set<string>()
+    const deps = makeDeps({
+      cards: [card('a', { boardOrder: 0 })],
+      dead,
+      occupied: new Set(['a']),
+    })
+    const engine = newEngine()
+
+    await runDispatchPass(engine, deps)
+    dead.add('a')
+    for (let i = 0; i < 5; i++) await runDispatchPass(engine, deps)
+
+    const shout = engine.log.find((l) => l.level === 'error' && l.message.includes('止まりませんでした'))
+    expect(shout, 'giving up on a teardown must not be silent').toBeTruthy()
+    // The card is PARKED, not requeued: the old claude may still be working in
+    // the old worktree, so dispatching a fresh worker for the same card would put
+    // TWO of them on one card — the twin class this engine exists to prevent.
+    expect(deps.recovered.map((r) => r.column)).toEqual(['blocked'])
+    // …and no new worker was spawned for it afterwards.
+    expect(deps.spawned.filter((sp) => sp.taskId === 'a')).toHaveLength(1)
+  })
 
   it('tells recoverWorker when a RETRY is re-tearing-down a worker we already killed', async () => {
     // The call-site half of the 2026-07-27 review finding. Pass 1 reclaims and its
@@ -6282,6 +6408,49 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     expect(deps.woke).toEqual(['swarm/a'])
   })
 
+  it('THE FIX: an ABANDONED review card is never published, woken for, or announced', async () => {
+    // MEASURED 2026-08-04. Answering 「B: この作業は見送る（できあがった分も取り込み
+    // ません）」 recorded the owner's words and changed nothing else: the card stayed
+    // in `review`, so this pass kept publishing it as ready-to-integrate, kept
+    // typing 「統合してください」 into the commander's desk, and kept a desk alive
+    // because work was waiting — and the commander merged the branch the owner had
+    // just declined, onto the trunk, irreversibly. The UI said "delivered" throughout.
+    //
+    // The decision now lives on the card (`abandoned`), and THIS is the line where
+    // it takes effect. Mutation that turns this red: drop `c.abandoned !== true`
+    // from the `swarmCards` filter in runIntegratePass.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [
+        reviewCard('a', 'swarm/a', { abandoned: true }),
+        reviewCard('b', 'swarm/b'),
+      ],
+      readiness: { 'swarm/a': 'ff', 'swarm/b': 'ff' },
+      managerPresence: 'absent',
+    })
+    await runIntegratePass(engine, deps)
+
+    // Not in the readiness snapshot the pane and the commander read…
+    expect(engine.reviews.map((r) => r.taskId)).toEqual(['b'])
+    // …and not in the wake that tells the desk what is waiting.
+    expect(deps.woke).toEqual(['swarm/b'])
+  })
+
+  it('an abandoned card ALONE leaves the commander undisturbed (no desk woken at all)', async () => {
+    // The other direction, and the one that matters for an unattended run: if the
+    // only thing waiting is work the owner declined, nothing should be woken —
+    // otherwise the reflex keeps a desk alive to integrate something it must not.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a', { abandoned: true })],
+      readiness: { 'swarm/a': 'ff' },
+      managerPresence: 'absent',
+    })
+    await runIntegratePass(engine, deps)
+    expect(engine.reviews).toEqual([])
+    expect(deps.wakeCalls).toEqual([])
+  })
+
   it('wakes the commander for review cards when the desk is INACTIVE — dead PTY OR hung (完了条件2)', async () => {
     const engine = newEngine()
     // 'absent' = no live PTY holds the manager session: the desk is GONE, which since
@@ -8610,6 +8779,87 @@ describe('detectAnomalies — state inconsistency detection', () => {
     expect(await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/m'])), NOW)).toEqual([])
   })
 
+  // ── the two LEVEL-TRIGGERED failures, mirrored as anomalies (2026-08-04) ──
+  // Both fire as ONE-SHOT notifications that are not minted again until the
+  // condition clears. That was survivable while the needs-attention feed showed
+  // every notification forever — and became a hole the same night the owner
+  // gained a 対応済み button: one click on a STANDING failure and the pane
+  // returned to "nothing needs you" while integration was still dead. An anomaly
+  // is re-derived from live state every pass, so a dismissal cannot hide it.
+  it('flags all-workers-down while cards hang and every dispatched worker is dead', async () => {
+    const engine = newEngine({
+      running: true,
+      workers: [worker({ terminalId: 'pty-z-1', branch: 'swarm/z', taskId: 'z', taskTitle: 'task z', startedAt: at(NOW) })],
+    })
+    const tasks = [card('z', { boardColumn: 'doing', branch: 'swarm/z' })]
+    // Worktree PRESENT (so orphan-doing stays silent — that arm only fires when
+    // the tree is gone) and the worker dead: exactly the blind spot.
+    const out = await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/z']), new Set()), NOW)
+    expect(out).toEqual([{ kind: 'all-workers-down', ref: 'engine', attempts: 1 }])
+  })
+
+  it('says it ONCE — no all-workers-down row when orphan-doing already names every hanging card', async () => {
+    // Roster: one dead worker whose card has already moved on to review, so the
+    // roster is non-empty and nothing in it is alive. Board: one doing card with
+    // no counted worker and no worktree — the orphan-doing case. The hanging set
+    // is exactly that card, and it is already named, so the summary row would be
+    // the feed repeating itself.
+    const engine = newEngine({
+      running: true,
+      workers: [worker({ terminalId: 'pty-r-1', branch: 'swarm/r', taskId: 'r', taskTitle: 'task r', startedAt: at(NOW) })],
+    })
+    const tasks = [
+      card('r', { boardColumn: 'review', branch: 'swarm/r' }),
+      card('o', { boardColumn: 'doing', branch: 'swarm/o' }),
+    ]
+    const out = await detectAnomalies(engine, tasks, depsWith(new Set(), new Set()), NOW)
+    expect(out.map((a) => a.kind)).toEqual(['orphan-doing'])
+  })
+
+  it('does NOT cry all-workers-down while a teardown is being retried', async () => {
+    // MEASURED 2026-08-04 (cross-fix interaction found by the adversarial pass).
+    // The teardown retry keeps a DEAD worker on the roster and leaves its card in
+    // 'doing' on purpose — which, for a single-worker engine, is bit-for-bit the
+    // condition this alarm fires on. So the fix for "the engine orphans a live
+    // claude" started ringing the fix for "every worker died", complete with bell,
+    // OS toast and (with the overseer armed) an owner-facing question, about a
+    // transient the engine clears by itself a few passes later.
+    const engine = newEngine({
+      running: true,
+      workers: [worker({ terminalId: 'pty-t-1', branch: 'swarm/t', taskId: 't', taskTitle: 'task t', startedAt: at(NOW) })],
+    })
+    engine.teardownRetries = new Map([['t', { tries: 1, reason: 'stall' as const }]]) // refused teardown, retrying
+    const tasks = [card('t', { boardColumn: 'doing', branch: 'swarm/t' })]
+    const out = await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/t']), new Set()), NOW)
+    expect(out).toEqual([])
+    // …and the moment the teardown finishes, the real condition is reported again.
+    engine.teardownRetries?.clear()
+    const after = await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/t']), new Set()), NOW)
+    expect(after.map((a) => a.kind)).toEqual(['all-workers-down'])
+  })
+
+  it('does NOT cry all-workers-down while the engine is stopped, or with an empty roster', async () => {
+    const tasks = [card('s', { boardColumn: 'doing', branch: 'swarm/s' })]
+    // Stopped: nothing is supposed to be running, so nothing is wrong.
+    const stopped = newEngine({ running: false, workers: [] })
+    expect(await detectAnomalies(stopped, tasks, depsWith(new Set(['swarm/s'])), NOW)).toEqual([])
+    // Running but the engine never dispatched anyone: a MANUAL worker owns that
+    // card and the engine does not count those — the same "never a false orphan"
+    // rule the arm above follows.
+    const noRoster = newEngine({ running: true, workers: [] })
+    expect(await detectAnomalies(noRoster, tasks, depsWith(new Set(['swarm/s'])), NOW)).toEqual([])
+  })
+
+  it('flags manager-unrevivable for as long as the commander cannot be raised', async () => {
+    const engine = newEngine({ running: true, workers: [] })
+    engine.managerResume = { attempts: 3, lastWakeAt: NOW, fatalFired: true }
+    const out = await detectAnomalies(engine, [], depsWith(new Set()), NOW)
+    expect(out).toEqual([{ kind: 'manager-unrevivable', ref: 'manager', attempts: 3 }])
+    // …and it goes quiet by itself once a desk comes back (fatalFired cleared).
+    engine.managerResume.fatalFired = false
+    expect(await detectAnomalies(engine, [], depsWith(new Set()), NOW)).toEqual([])
+  })
+
   it('does NOT flag a doing card a counted worker drains', async () => {
     const engine = newEngine({
       workers: [worker({ terminalId: 'pty-d-1', branch: 'swarm/d', taskId: 'd', taskTitle: 'task d', startedAt: at(NOW) })],
@@ -9090,6 +9340,33 @@ describe('resolveOrchestratorReview', () => {
     expect(engine.reviews).toHaveLength(0)
     expect(engine.workers).toHaveLength(0)
     expect(state.reviews).toHaveLength(0)
+  })
+
+  it('a 差し戻し whose old worker will NOT stop is parked, not requeued (no twin)', async () => {
+    // MEASURED 2026-08-04 (adversarial pass over the same night's teardown fix).
+    // The card leaves review BEFORE the teardown runs — that move is the
+    // must-succeed step — so when the old desk refuses to stop we already have a
+    // 'todo' card in the dispatch queue. The next pass then spawns a SECOND claude
+    // on a FRESH branch for the same card while the first is still writing in the
+    // old worktree: the recorded field failure ("差し戻しが生きている worker を
+    // 見落として同じ作業場に2本目を立てる"), and exactly what the engine's own
+    // recovery path refuses to do. The requeue has to be corrected to a park.
+    const key = await canonicalize('/proj-resolve-occupied')
+    const engine = newEngine({
+      path: key,
+      workers: [worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a' })],
+    })
+    __seedEngineForTests(engine)
+    const deps = resolveDeps([card('a', { boardColumn: 'review', branch: 'swarm/a' })], {
+      occupied: new Set(['a']), // the desk in that worktree will not stop
+    })
+
+    await resolveOrchestratorReview('/proj-resolve-occupied', 'a', 'todo', deps)
+
+    // The OBSERVABLE outcome: where the card ended up.
+    expect(deps.board.get('a')?.boardColumn).toBe('blocked')
+    expect(deps.recovered.map((r) => r.column)).toEqual(['todo', 'blocked'])
+    expect(engine.log.some((l) => l.message.includes('2人目'))).toBe(true)
   })
 
   it('requeues a conflicted card to todo and drops the stale worker (re-dispatchable)', async () => {
@@ -9612,6 +9889,29 @@ describe('KPI: computeSwarmKpis (counters + cards + journal → rates)', () => {
     expect(k.conflictRate).toBeNull()
     expect(k.reworkRate).toBeNull()
     expect(k.leadTime).toEqual({ medianMs: null, count: 0 })
+  })
+
+  it('an UNOBSERVED conflict/rework reads as a dash, not a confident 0%', () => {
+    // MEASURED 2026-08-04. Neither counter has a writer in production: no logLine
+    // passes kind 'conflict', and nothing has written REWORK_LOG_MARKER since the
+    // engine stopped doing 差し戻し itself (the commander does it through the
+    // Board API, invisible to the engine). So the numerator is structurally 0 —
+    // and the moment ONE card lands, the denominator turns positive and both
+    // rates froze at "0%", telling the owner "no rework and no conflicts, ever"
+    // about the two things that happen most. A zero nobody can observe is not a
+    // zero; it is unknown, and unknown is the dash.
+    const k = computeSwarmKpis({ counters: counters({ dispatched: 5, integrated: 5 }), tasks: [], log: [] })
+    expect(k.workerSuccessRate).toBeCloseTo(1) // this one IS observed — still shown
+    expect(k.conflictRate).toBeNull()
+    expect(k.reworkRate).toBeNull()
+    // …and a REAL event still produces a real number (the dash is not a mute).
+    const withEvents = computeSwarmKpis({
+      counters: counters({ dispatched: 5, integrated: 4, conflicted: 1, reworked: 1 }),
+      tasks: [],
+      log: [],
+    })
+    expect(withEvents.conflictRate).toBeCloseTo(0.2)
+    expect(withEvents.reworkRate).toBeCloseTo(0.2)
   })
 
   it('folds the lead-time stats from the cards + journal', () => {

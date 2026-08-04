@@ -99,7 +99,7 @@ export const CompletionFlowField = ({
                 'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                 active
                   ? 'bg-accent text-bg-card border-accent'
-                  : 'bg-transparent text-ink-muted border-line hover:bg-bg-inset hover:text-ink hover:border-line-strong',
+                  : 'bg-transparent text-ink-muted border-line hover:bg-plane hover:text-ink hover:border-line-strong',
               ].join(' ')}
             >
               {t(
@@ -248,7 +248,7 @@ export const MembersField = ({
           type="button"
           onClick={add}
           disabled={!draft.trim()}
-          className="shrink-0 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="shrink-0 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           {t('projectPanel.settingsMemberAdd')}
         </button>

@@ -135,6 +135,7 @@ export const ProjectTaskSchema = z.object({
   // it by hand. Cleared on any move out of review. (3点セット: types.ts /
   // tasks route setColumn clearing / here.)
   integrationConflict: z.boolean().optional().catch(undefined),
+  abandoned: z.boolean().optional().catch(undefined),
   // Self-supply provenance + dedup key (card b3fbbfba): set when the commander
   // engine proposed this card on its own. Presence marks it engine-proposed and
   // GATED — selectDispatch skips it until selfSupplyApproved is true. MUST be in

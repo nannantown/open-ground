@@ -64,6 +64,7 @@ import { SdkWorkerPane } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { SwarmOverseerPane } from './SwarmOverseerPane'
+import { deriveOverseerAlerts } from './swarmOverseerFeed'
 import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
 import { ExecutionModeMenu } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
@@ -410,6 +411,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const {
     engine,
     fatalNotifications,
+    handledFatalIds,
+    markFatalHandled,
     realWorkers,
     available: engineAvailable,
     busy: engineBusy,
@@ -1250,8 +1253,42 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // comes up, the normal tabs return. escCount is part of the guard because a
   // LEFTOVER question from the last run must not hide behind the onboarding —
   // the tab surface (with the overseer badge) must win.
+  // An UNDISMISSED alert also wins over the onboarding (2026-08-04). Several
+  // fatal events fire precisely when nothing is up — 'engine-resume-suppressed'
+  // means the engine did NOT come back at boot, so `running` is false, there are
+  // no desks and no workers — and the onboarding replaced the whole tab surface,
+  // including the needs-attention feed that carries the explanation. The alert
+  // existed only in the Ground bell, on the one screen the owner opens to ask
+  // "why is nothing running?".
+  //
+  // …but only a THIS-PROJECT alert may do so (2026-08-04, second pass). Several
+  // fatal events carry no projectPath at all — the Electron self-update's
+  // rollback / canary-failed, the boot-time data-integrity check, and the two
+  // app-wide resume suppressions — and `useSwarmEngine` shows a project-less
+  // notification on EVERY project by design (they concern the whole app). Left in
+  // this term, one undismissed rollback replaced the first-run onboarding with an
+  // empty tab surface on every project the owner had never touched swarm in, and
+  // it never self-clears. The feed still shows those rows; they just do not
+  // hijack a screen that is trying to explain what swarm IS.
+  //
+  // ⚠ SHIPPED WITHOUT A GUARD, deliberately. I could not build a jsdom case that
+  // goes red with this filter removed — the mounted-but-hidden overseer pane puts
+  // the alert row in the document either way, and the onboarding kept rendering
+  // in the un-filtered build too, so every assertion I tried passed both ways. A
+  // test that cannot fail is worse than none (CLAUDE.md §1), so there is none;
+  // this comment is the record. The reachability argument is concrete: those
+  // events carry no projectPath, useSwarmEngine shows a project-less
+  // notification on every project, and none of them self-clears.
+  const pendingAlerts = deriveOverseerAlerts(engine, fatalNotifications, handledFatalIds).filter(
+    (a) => a.source !== 'fatal' || a.fatal?.projectPath === project.path,
+  ).length
   const swarmIdle =
-    !engine.running && !supply && !manager && allWorkers.length === 0 && escCount === 0
+    !engine.running &&
+    !supply &&
+    !manager &&
+    allWorkers.length === 0 &&
+    escCount === 0 &&
+    pendingAlerts === 0
 
   // Persist a drag/keyboard reorder to Settings.swarmPaneOrder (条件2). moveTab
   // (shared with the per-project tab row) computes the new order; the POST is
@@ -1460,7 +1497,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                   'relative my-1.5 flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
                   active
                     ? 'bg-ink text-ink-inverse'
-                    : 'text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset',
+                    : 'text-ink-muted hover:bg-plane hover:text-ink active:bg-plane',
                   dimmed ? 'opacity-40' : '',
                   dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
                 ].join(' ')}
@@ -1674,6 +1711,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           projectPath={project.path}
           engine={engine}
           fatalNotifications={fatalNotifications}
+          handledFatalIds={handledFatalIds}
+          onMarkFatalHandled={markFatalHandled}
           openCount={escCount}
           onOpenCountChange={setEscCount}
         />

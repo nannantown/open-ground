@@ -88,7 +88,11 @@ describe('BoardCard extraction smoke', () => {
       />,
     )
     const article = getByText('Alpha').closest('article')!
-    expect(article.className).toContain('border-accent')
+    // ⚠ CHANGED WITH THE DESIGN (2026-08-04). 案C is 「罫線なし・面の明度差のみ」,
+    // so the selected card is marked by an INSET RING, not a border — a border
+    // occupies layout, which is why the card had to reserve a transparent 1px
+    // and could never carry the mock's 12/13px padding. The accent wash stays.
+    expect(article.className).toContain('ring-accent')
     expect(article.className).toContain('bg-accent/15')
   })
 

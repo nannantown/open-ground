@@ -195,7 +195,7 @@ export const MarketplaceDialog = ({
                               type="button"
                               onClick={() => void install(item.remoteId)}
                               disabled={installing || installed}
-                              className="rounded-[5px] border border-line-strong px-3 py-1 text-[11px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink active:bg-bg-elevated disabled:cursor-not-allowed disabled:border-line disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                              className="rounded-[5px] border border-line-strong px-3 py-1 text-[11px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated disabled:cursor-not-allowed disabled:border-line disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                             >
                               {installing
                                 ? t('customTabs.installing')
@@ -222,7 +222,7 @@ export const MarketplaceDialog = ({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {t('common.close')}
           </button>

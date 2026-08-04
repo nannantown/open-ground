@@ -361,9 +361,22 @@ export const createSwarmWorktree = async (
     throw new Error(`createSwarmWorktree: git worktree add failed for ${branch}`)
   }
 
-  // Symlink node_modules from the main checkout (only if the project has one
-  // and the worktree didn't inherit one). Best-effort — npm/dev simply won't
-  // work in the worktree if it fails, which doesn't block claude itself.
+  await linkWorktreeNodeModules(projectPath, dir)
+
+  return { worktree: dir, branch, uuid }
+}
+
+/** Symlink the main checkout's node_modules into a worker worktree (no-op when
+ *  the repo has none, or the worktree already has one). Best-effort — npm simply
+ *  won't work there if it fails, which doesn't block claude itself.
+ *
+ *  ⚠ SHARED BY BOTH DOORS on purpose. `commitWipBeforeTeardown` UNLINKS this
+ *  symlink before its `git add -A`, so any worktree that has been through a
+ *  reclaim comes back without one. If only `createSwarmWorktree` linked it, a
+ *  worker re-entering an existing branch would start fine, work fine, and fail
+ *  ONLY at its completion gate (`npm test` / `tsc`) — the least diagnosable
+ *  shape there is. */
+export const linkWorktreeNodeModules = async (projectPath: string, dir: string): Promise<void> => {
   try {
     const repoNm = join(projectPath, 'node_modules')
     const wtNm = join(dir, 'node_modules')
@@ -373,8 +386,73 @@ export const createSwarmWorktree = async (
   } catch {
     // ignore — node_modules is a convenience, not a correctness requirement
   }
+}
 
-  return { worktree: dir, branch, uuid }
+/** A place where a card's work already lives — see {@link ensureSwarmWorktreeForBranch}. */
+export interface ReusableWork {
+  worktree: string
+  branch: string
+}
+
+/**
+ * Get a usable worktree for an EXISTING `swarm/*` branch, so a card that already
+ * has work can be continued instead of started over.
+ *
+ * WHY THIS EXISTS. A worker reclaimed at a quota wall goes back to 'todo' with
+ * its `card.branch` intact (the recover write only sets the column). The next
+ * dispatch used to mint a FRESH branch and stamp it over `card.branch`, leaving
+ * the commits reachable only through `git branch --list` — work paid for, then
+ * orphaned, silently. Re-entering the same branch makes that stamp a write of
+ * the value it already had.
+ *
+ * Returns null when there is nothing to reuse (no such branch, or git refuses) —
+ * the caller then dispatches normally. Never throws.
+ *
+ * ⚠ NO `--force`, NO `--detach`. git's refusal to check one branch out twice
+ * (exit 128) is the structural guard that keeps "one branch, one worktree" true;
+ * forcing past it is how two workers end up writing in one place.
+ * ⚠ NO `pull` / `rebase`. Nobody is watching this tree; catching up with the
+ * trunk belongs to the commander's integration, not to a silent re-entry.
+ */
+export const ensureSwarmWorktreeForBranch = async (
+  projectPath: string,
+  branch: string,
+): Promise<ReusableWork | null> => {
+  const name = branch.trim()
+  // The engine's ownership line: never take hold of a branch outside swarm/*.
+  if (!name.startsWith('swarm/') || name.includes('..') || /[\s~^:?*[\\]/.test(name)) return null
+  try {
+    if ((await git(projectPath, ['rev-parse', '--verify', '--quiet', name])) === null) return null
+
+    // Already checked out somewhere? Use THAT — re-adding would be refused, and
+    // the existing dir is by definition the place this work lives.
+    const listed = await git(projectPath, ['worktree', 'list', '--porcelain'])
+    if (listed) {
+      let dir: string | null = null
+      for (const line of listed.split('\n')) {
+        if (line.startsWith('worktree ')) dir = line.slice('worktree '.length).trim()
+        else if (line.startsWith('branch ') && line.slice('branch '.length).trim() === `refs/heads/${name}`) {
+          if (dir && (await stat(dir).then((st) => st.isDirectory()).catch(() => false))) {
+            await linkWorktreeNodeModules(projectPath, dir)
+            return { worktree: dir, branch: name }
+          }
+        }
+      }
+    }
+
+    const uuid = await projectUUIDFromPath(projectPath)
+    const dir = join(centralWorktreesDir(uuid), swarmWorktreeDirName(name))
+    // A directory left behind by a removed worktree makes `git worktree add`
+    // fail with a stale-administrative-file error; prune clears the record
+    // first (measured: without it, exit 128).
+    await git(projectPath, ['worktree', 'prune'])
+    if ((await git(projectPath, ['worktree', 'add', dir, name])) === null) return null
+    if (!(await stat(dir).then((st) => st.isDirectory()).catch(() => false))) return null
+    await linkWorktreeNodeModules(projectPath, dir)
+    return { worktree: dir, branch: name }
+  } catch {
+    return null
+  }
 }
 
 /** Remove a worker worktree (kill / completion). Hard safety: the dir MUST sit
@@ -441,7 +519,16 @@ export const removeSwarmWorktree = async (
     // Still occupied. Refusing is the safe answer: the caller retries (the
     // engine's next pass, the commander's next sweep) and the worktree stays
     // intact meanwhile. Deleting anyway is what created the wedge.
-    return { removed: false, reason: 'a session is still running in this worktree' }
+    return {
+      removed: false,
+      reason: 'a session is still running in this worktree',
+      // The caller must be able to tell "still busy, ask again" from "removal
+      // failed for some other reason" WITHOUT string-matching this sentence.
+      // The engine now retries on this one instead of dropping the worker (see
+      // recoverLost's retry budget) — a dropped worker is an orphaned claude in
+      // a worktree nobody owns, holding an SDK slot for the life of the process.
+      stillOccupied: true,
+    }
   }
   // Drop the node_modules convenience symlink before removing: under a
   // `node_modules/` (trailing-slash) .gitignore — the dominant convention — the

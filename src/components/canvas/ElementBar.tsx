@@ -91,7 +91,7 @@ export const ElementBar = ({
         <button
           onClick={onClear}
           title="Clear selection"
-          className="flex h-7 w-7 items-center justify-center rounded-sm text-ink-muted hover:bg-bg-inset hover:text-ink transition-colors"
+          className="flex h-7 w-7 items-center justify-center rounded-sm text-ink-muted hover:bg-plane hover:text-ink transition-colors"
         >
           <X size={14} />
         </button>
@@ -112,7 +112,7 @@ const IconBtn = ({
   <button
     onClick={onClick}
     title={title}
-    className="flex h-7 w-7 items-center justify-center rounded-sm text-ink-muted hover:bg-bg-inset hover:text-ink transition-colors"
+    className="flex h-7 w-7 items-center justify-center rounded-sm text-ink-muted hover:bg-plane hover:text-ink transition-colors"
   >
     {children}
   </button>
@@ -135,7 +135,7 @@ const BarButton = ({
       'flex items-center gap-1.5 rounded-[2px] px-2.5 py-1.5 label-cap transition-colors',
       danger
         ? 'text-ink-muted hover:bg-accent-soft hover:text-accent'
-        : 'text-ink-muted hover:bg-bg-inset hover:text-ink',
+        : 'text-ink-muted hover:bg-plane hover:text-ink',
     ].join(' ')}
   >
     {icon}

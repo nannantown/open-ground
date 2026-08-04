@@ -216,7 +216,11 @@ export const classifyRosterEntry = (reality: RosterReality): RosterEntryClass =>
  *  test can inject fakes). */
 export interface RosterReconcileDeps {
   fetchTasks: (projectPath: string) => Promise<ProjectTask[]>
-  countCommitsAhead: (projectPath: string, branch: string) => Promise<number>
+  /** `null` ⇒ git could not answer (see swarmOrchestrator's
+   *  defaultCountCommitsAhead). Read as "assume the branch HAS work": the roster's
+   *  classification decides whether an entry can be dropped, and dropping one that
+   *  holds commits is the loss. */
+  countCommitsAhead: (projectPath: string, branch: string) => Promise<number | null>
   heartbeatReady: (projectPath: string, branch: string) => Promise<boolean>
   worktreeExists: (worktree: string) => Promise<boolean>
 }
@@ -315,7 +319,14 @@ export const reconcileRoster = async (
         // the worker's own `readyToMerge` is sticky and survives a 差し戻し.
         cardInReview = !!card && columnOf(card) === 'review'
         if (cardActive) {
-          branchAhead = (await deps.countCommitsAhead(projectPath, entry.branch).catch(() => 0)) > 0
+          // `null` (git could not answer) and a THROW both mean "unknown", and
+          // unknown counts as AHEAD here — the safe direction for a decision that
+          // can retire a roster entry whose branch may hold the only copy of the
+          // work. A genuine 0 still reads as not-ahead.
+          const counted = await deps
+            .countCommitsAhead(projectPath, entry.branch)
+            .catch(() => null)
+          branchAhead = counted === null || counted > 0
           heartbeatReady = await deps.heartbeatReady(projectPath, entry.branch).catch(() => false)
         }
       }

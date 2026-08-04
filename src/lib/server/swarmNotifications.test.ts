@@ -11,6 +11,7 @@ import {
   capNotificationsByKind,
   formatFatalNotification,
   buildFatalAppNotification,
+  markSwarmNotificationHandled,
   SWARM_NOTIFICATIONS_CAP,
 } from './swarmNotifications'
 import { swarmNotificationsFile } from './paths'
@@ -139,6 +140,61 @@ describe('swarmNotifications — store round-trip (HOME-isolated)', () => {
 
   it('an empty/absent store reads as no notifications', async () => {
     expect(await listSwarmNotifications()).toEqual([])
+  })
+})
+
+// GUARD (2026-08-04): the Swarm tab's needs-attention feed could never go quiet.
+// Notifications are persisted with no expiry (they leave only by falling out of
+// the per-kind cap), so the first fatal event of an install pinned the alert
+// panel open forever and the "nothing needs you" state became unreachable — a
+// permanently-lit warning board is one nobody reads.
+//
+// The dismissal is stamped HERE, on the notification, and NOT on the bell's
+// read-state: read-state means "seen" and is written wholesale the moment the
+// bell is opened, so reusing it would empty the swarm's work list the first time
+// the owner glanced at the bell.
+describe('markSwarmNotificationHandled — the owner can retire one row', () => {
+  it('stamps handledAt on exactly that row, and READS BACK through the production reader', async () => {
+    const a = await createSwarmFatalNotification(fatal({ taskId: 'card-a' }), { os: false, now: 1000 })
+    const b = await createSwarmFatalNotification(fatal({ taskId: 'card-b' }), { os: false, now: 2000 })
+
+    await markSwarmNotificationHandled(a.id, 5555)
+
+    const items = await listSwarmNotifications()
+    const readA = items.find((n) => n.id === a.id)
+    const readB = items.find((n) => n.id === b.id)
+    expect(readA?.handledAt).toBe(5555)
+    expect(readB?.handledAt).toBeUndefined() // its neighbour is untouched
+    // NOTHING IS DELETED — the row is still in the store (the bell still shows it).
+    expect(items).toHaveLength(2)
+  })
+
+  it('is idempotent and keeps the FIRST timestamp (a double-click must not re-date it)', async () => {
+    const a = await createSwarmFatalNotification(fatal(), { os: false, now: 1000 })
+    await markSwarmNotificationHandled(a.id, 5555)
+    await markSwarmNotificationHandled(a.id, 9999)
+    const items = await listSwarmNotifications()
+    expect(items.find((n) => n.id === a.id)?.handledAt).toBe(5555)
+  })
+
+  it('an unknown or empty id writes nothing and does not throw', async () => {
+    const a = await createSwarmFatalNotification(fatal(), { os: false, now: 1000 })
+    await markSwarmNotificationHandled('no-such-id', 5555)
+    await markSwarmNotificationHandled('', 5555)
+    const items = await listSwarmNotifications()
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe(a.id)
+    expect(items[0].handledAt).toBeUndefined()
+  })
+
+  it('survives an append afterwards — the stamp is not clobbered by the next fatal', async () => {
+    // appendSwarmNotification re-reads inside the single-flight chain; a stamp
+    // written before it must still be there after (the classic lost-update).
+    const a = await createSwarmFatalNotification(fatal(), { os: false, now: 1000 })
+    await markSwarmNotificationHandled(a.id, 5555)
+    await createSwarmFatalNotification(fatal({ taskId: 'later' }), { os: false, now: 3000 })
+    const items = await listSwarmNotifications()
+    expect(items.find((n) => n.id === a.id)?.handledAt).toBe(5555)
   })
 })
 

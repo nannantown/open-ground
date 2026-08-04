@@ -45,7 +45,7 @@ export const IconButton = ({
       'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
       active
         ? 'bg-accent-soft text-accent-deeper'
-        : 'text-ink-muted hover:text-ink hover:bg-bg-inset active:bg-bg-inset active:text-accent-deeper',
+        : 'text-ink-muted hover:text-ink hover:bg-plane active:bg-plane active:text-accent-deeper',
     ].join(' ')}
   >
     {children}

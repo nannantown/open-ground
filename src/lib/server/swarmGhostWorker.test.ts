@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { listSwarmWorkers } from './swarmWorkerRegistry'
+import { listSwarmWorkers, defaultRegistryDeps } from './swarmWorkerRegistry'
 
 // ─── a worker whose worktree is gone is not a worker ─────────────────────────
 //
@@ -51,7 +51,38 @@ describe('listSwarmWorkers — heartbeat-only arm', () => {
   })
 
   it('deps without the check behave exactly as before (back-compat for older callers)', async () => {
+    // ⚠ This describes an INJECTION that production never performs — the route
+    // calls listSwarmWorkers(path) with no deps at all. Read together with the
+    // wiring test below, not on its own: alone it reads as "the ghost is fine".
     const out = await listSwarmWorkers('/repo', baseDeps())
     expect(out).toHaveLength(1)
+  })
+
+  it('THE REAL DEFAULTS carry the check — the shipped route passes no deps', async () => {
+    // The three tests above prove the BRANCH works when `worktreeExists` is
+    // injected. Nothing proved the ONE caller that matters gets it: the route is
+    // `listSwarmWorkers(path)`, so the only thing keeping ghosts out of the
+    // shipped Swarm tab is defaultRegistryDeps() containing the stat. Delete
+    // those lines and every other test in this file still passes (measured by an
+    // adversarial pass, 2026-08-04) — including the back-compat one above, which
+    // would then be describing production.
+    //
+    // So: take the REAL defaults, override only the two seams that need a
+    // fixture (which heartbeats exist, where the worktrees live), and point them
+    // at a directory that genuinely does not exist on this machine.
+    const out = await listSwarmWorkers('/repo', {
+      ...defaultRegistryDeps(),
+      listActiveTerminals: () => ({ cwds: [], claude: [] }),
+      getOrchestratorState: async () => ({ running: false, workers: [] }) as never,
+      readHeartbeats: async () =>
+        new Map([
+          [
+            '/definitely/not/here/wt-ghost',
+            { branch: 'swarm/ghost', updatedAt: new Date().toISOString() },
+          ],
+        ]) as never,
+      resolveCentralWorktreesDir: async () => '/definitely/not/here',
+    } as never)
+    expect(out).toHaveLength(0)
   })
 })

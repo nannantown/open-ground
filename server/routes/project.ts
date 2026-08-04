@@ -214,7 +214,12 @@ interface TasksBody {
   markDone?: string[]
   /** Move cards between board columns (e.g. a task claude finished a PR for
    *  moves to 'review'). Marking 'done' via here also sets done:true. */
-  setColumn?: { id: string; column: BoardColumn }[]
+  /** `abandoned` rides ALONG WITH the column so the pair is ONE write: the
+   *  owner's 「見送る」 is "park it AND stop publishing it", and splitting that
+   *  across two batches would make the outcome depend on the order the handlers
+   *  happen to run in — a dependency that breaks silently when someone
+   *  reorders them later. */
+  setColumn?: { id: string; column: BoardColumn; abandoned?: boolean }[]
   /** Record the pull request opened for a task — claude calls this when its
    *  `gh pr create` succeeds. http(s) URLs only; anything else is ignored. */
   setPrUrl?: { id: string; url: string }[]
@@ -1007,6 +1012,18 @@ export const projectRoutes = new Hono()
                 // Leaving review invalidates the commander engine's conflict stamp
                 // (Card③) — a rework or completion supersedes it, mirroring reviewedBy.
                 integrationConflict: mv.column === 'review' ? t.integrationConflict : undefined,
+                // …and MOVING THE CARD BY HAND IS CHANGING YOUR MIND. The
+                // 「見送る」 flag is a standing "do not integrate this"; the one
+                // way back is to put the card into play again, so any human
+                // column move except back into 'blocked' clears it. Leaving it
+                // set would strand the card silently — the engine would keep
+                // refusing to publish work the owner had just re-queued.
+                abandoned:
+                  mv.abandoned === true
+                    ? true
+                    : mv.column === 'blocked'
+                      ? t.abandoned
+                      : undefined,
                 // A fresh-start/success landing clears the 差し戻し loop-guard counter
                 // (same semantics as swarm-board.sh's _move_card) — a later reuse of
                 // this card id isn't pre-tripped by a past round of rework.
@@ -1064,6 +1081,13 @@ export const projectRoutes = new Hono()
                 done: false,
                 reworkCount: count,
                 integrationConflict: undefined,
+                // THE THIRD CLEAR SITE. A 差し戻し puts the card back into play,
+                // which is the owner changing their mind about 「見送る」 just as
+                // much as a drag is. Missing it here would leave the flag on a
+                // card the commander had just sent back to a worker: the work
+                // would be redone and then never published — the failure is
+                // SILENT, which is the direction this repo keeps paying for.
+                abandoned: undefined,
               }
             : t,
         )

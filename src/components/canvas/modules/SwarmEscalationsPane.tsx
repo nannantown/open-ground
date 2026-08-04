@@ -34,12 +34,16 @@ const WHY_KEY: Record<EscalationWhy, string> = {
 export const SwarmEscalationsPane = ({
   projectPath,
   onOpenCountChange,
+  onLoadedChange,
 }: {
   projectPath: string
   /** Reports the OPEN-question count on every poll/action — SwarmModule shows it
    *  as the Overseer tab badge (the pane itself may be hidden). Optional so the
    *  pane stays usable standalone. */
   onOpenCountChange?: (count: number) => void
+  /** True once the inbox has been read successfully at least once for this
+   *  project. False means "unknown", NOT "empty". */
+  onLoadedChange?: (loaded: boolean) => void
 }) => {
   const { t } = useT()
   const [items, setItems] = useState<EscalationView[]>([])
@@ -49,6 +53,12 @@ export const SwarmEscalationsPane = ({
   const [busyId, setBusyId] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Has the inbox EVER been read successfully for this project? A failed read
+  // leaves `items` empty, which is indistinguishable from "no questions" — and
+  // the Overseer pane turns that into a reassuring "nothing needs you". A 403 is
+  // reachable in practice (the owner-role lookup can degrade), so the pane must
+  // be able to say "could not read" instead of "all clear".
+  const [loaded, setLoaded] = useState(false)
   const alive = useRef(true)
 
   const refresh = useCallback(async () => {
@@ -58,7 +68,10 @@ export const SwarmEscalationsPane = ({
       )
       if (!res.ok) return // signed-out / non-owner → panel simply stays empty
       const data = (await res.json()) as EscalationsResponse
-      if (alive.current) setItems(data.escalations ?? [])
+      if (alive.current) {
+        setItems(data.escalations ?? [])
+        setLoaded(true)
+      }
     } catch {
       /* transient network failure — the next poll recovers */
     }
@@ -73,6 +86,7 @@ export const SwarmEscalationsPane = ({
     setNotice(null)
     setError(null)
     setBusyId(null)
+    setLoaded(false)
     void refresh()
     const timer = window.setInterval(() => {
       if (!document.hidden) {
@@ -145,6 +159,12 @@ export const SwarmEscalationsPane = ({
   useEffect(() => {
     onOpenCountChange?.(open.length)
   }, [open.length, onOpenCountChange])
+
+  // Report the read-state separately from the count, so the parent can tell
+  // "zero questions" from "we never managed to ask".
+  useEffect(() => {
+    onLoadedChange?.(loaded)
+  }, [loaded, onLoadedChange])
 
   // Invisible while empty — but keep showing the last action's outcome line
   // (the "answered → injected" feedback) until the next action or poll cycle.
@@ -302,11 +322,18 @@ export const SwarmEscalationsPane = ({
                 >
                   {t('projectPanel.swarm.esc.answerSend')}
                 </Btn>
+                {/* NOT `danger`. This button closes the question WITHOUT
+                    answering — it is a retreat, not a decision, and dressing it
+                    in the alarm colour put it in direct competition with the
+                    question's own option B (「この作業は見送る」). An owner reading
+                    「見送る」 in the text and seeing a red 「見送る」 button below it
+                    pressed the button; the system recorded "never ask again" and
+                    their actual decision was never made. */}
                 <Btn
                   variant="subtle"
                   size="xs"
-                  danger
                   disabled={busy}
+                  title={t('projectPanel.swarm.esc.dismissHint')}
                   className="enabled:active:scale-[0.99]"
                   onClick={() => void act(e.id, 'dismiss')}
                 >

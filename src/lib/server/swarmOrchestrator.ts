@@ -177,6 +177,8 @@ import {
   spawnSwarmWorker,
   removeSwarmWorktree,
   swarmWorktreeDirName,
+  ensureSwarmWorktreeForBranch,
+  type ReusableWork,
 } from './swarmWorker'
 import { centralWorktreesDir } from './paths'
 import { projectUUIDFromPath } from './projectDataPath'
@@ -223,6 +225,7 @@ import type {
   SwarmConsumption,
   SwarmKpis,
   SwarmManagerHeartbeat,
+  SwarmManagerPresence,
   SwarmOrchestratorState,
   SwarmFatalNotification,
 } from '../types'
@@ -296,6 +299,13 @@ export const STARTUP_GRACE_MS = 25_000
  *  that DECLARED itself done with nothing to merge, is parked immediately (no
  *  retry) — see {@link recoveryColumn}. */
 export const RECOVER_MAX_REQUEUE = 1
+
+/** How many consecutive passes the engine re-attempts a teardown that was refused
+ *  because a desk is still live in the worktree, before it frees the slot anyway
+ *  and says so at 'error' level. Three passes of the 3s tick chain is ~10s on top
+ *  of the two 5s waits the teardown itself already performed — long enough for an
+ *  ordinary unwind, short enough that a wedged worker does not hold a slot. */
+const MAX_TEARDOWN_RETRIES = 3
 
 /** How many times a Board COLUMN MOVE may be KEPT (its write rejected/failed) in a
  *  row before the engine ESCALATES instead of just logging + retrying forever. A
@@ -1074,8 +1084,24 @@ export const computeSwarmKpis = (input: {
   const landed = Math.max(c.integrated, countLandedFromBoard(input.tasks, input.log))
   return {
     leadTime: computeLeadTimeStats(input.tasks, input.log),
-    conflictRate: ratio(c.conflicted, landed + c.conflicted),
-    reworkRate: ratio(c.reworked, c.reworked + landed),
+    // ⚠ NEITHER OF THESE HAS A WRITER IN PRODUCTION (measured 2026-08-04).
+    // `conflicted` is only bumped by a journal line with kind 'conflict', and no
+    // logLine call passes that kind; `reworked` is only bumped by a line carrying
+    // REWORK_LOG_MARKER, and nothing writes it since the engine stopped doing
+    // 差し戻し itself (2026-07-15 — the commander does it through the Board API,
+    // which the engine never sees). So the numerator is structurally 0, and the
+    // moment ONE card lands the denominator turns positive and both rates freeze
+    // at a confident "0%" — a dashboard telling the owner "no rework, no
+    // conflicts, ever" about the two things that actually happen most.
+    //
+    // A zero we cannot observe is not a zero, it is UNKNOWN, and unknown is the
+    // dash. Reporting `null` until a real event arrives keeps the panel honest
+    // and needs no follow-up here when a writer appears: the number starts
+    // showing itself. (This is the same defect that was fixed for
+    // workerSuccessRate on 2026-08-04 — one of the three rows was repaired and
+    // its two neighbours were left with the identical hole.)
+    conflictRate: c.conflicted > 0 ? ratio(c.conflicted, landed + c.conflicted) : null,
+    reworkRate: c.reworked > 0 ? ratio(c.reworked, c.reworked + landed) : null,
     workerSuccessRate: ratio(landed, c.dispatched),
     counts: {
       dispatched: c.dispatched,
@@ -1179,6 +1205,13 @@ export interface WorkerProbe {
    *  countCommitsAhead). 0 ⇒ no integrable work yet (a freshly-branched or
    *  empty-handed worker). */
   commitsAhead: number
+  /** True when the count above could NOT be read (no trunk ref resolved, git
+   *  failed, the probe threw) — as opposed to a genuine zero. The two consumers
+   *  disagree about which way to fall: the promote gate wants "no proof ⇒ no
+   *  promotion" (harmless), while {@link recoveryColumn} wants "no proof ⇒ assume
+   *  there IS work" (because guessing zero there orphans a committed branch).
+   *  Absent ⇒ false, so an older/handwritten probe literal keeps today's meaning. */
+  commitsUnknown?: boolean
   /** The worker's heartbeat sign, or null if it never wrote one. */
   heartbeat: HeartbeatSign | null
 }
@@ -1380,6 +1413,18 @@ export type TeardownReason = WorkerRecoveryReason | 'stopped' | 'rework'
  *      this rule only ever governs a plain crash or stall.)
  *    • retry budget spent (`requeues >= maxRequeues`) ⇒ 'blocked' — a card that
  *      reliably kills its worker escalates instead of spinning forever.
+ *
+ *  ⚠ KNOWN GAP, LEFT AS A DELIBERATE TRADE (2026-08-04). The `rate-limit` arm
+ *  returns 'todo' FIRST, before the committed-work rule — so a worker that had
+ *  already committed and then hit a quota wall is requeued, and the next dispatch
+ *  mints a fresh branch over `card.branch`, orphaning those commits exactly the
+ *  way the rule below exists to prevent. Extending the rule here would park every
+ *  quota-walled worker that had committed anything (i.e. most of them) and hand
+ *  the unattended loop to a human on every wall — a real cost, and a change to
+ *  what "autonomous" means rather than a bug fix. The honest repair is for the
+ *  re-dispatch to REUSE the existing branch instead of minting one, which is a
+ *  dispatch-path change. Flagged here so the next reader inherits the choice
+ *  rather than the surprise.
  *    • otherwise (a BARE crash/kill: dead, no completion/blocker sign, no committed
  *      work, budget left) ⇒ 'todo' — a transient failure gets one more attempt.
  *  Pure (no IO, no clock). */
@@ -1413,7 +1458,12 @@ export const recoveryColumn = (
   // it so the commander adopts the committed branch instead. Mirrors `ready ⇒ blocked`
   // above: never auto-redo work the engine can see already exists. A BARE crash
   // (commitsAhead === 0) still auto-retries via the budget below — nothing to orphan.
-  if (probe.commitsAhead > 0) return 'blocked'
+  // …and an UNREADABLE count parks it too (2026-08-04). `commitsAhead` used to be
+  // 0 both when the branch was empty and when git could not answer, and this line
+  // reads 0 as "safe to requeue". In a repo whose trunk is neither origin/main nor
+  // main that was EVERY worker on EVERY pass: a crashed worker's committed branch
+  // was orphaned by the next dispatch and the work redone from zero.
+  if (probe.commitsAhead > 0 || probe.commitsUnknown === true) return 'blocked'
   if (requeues >= maxRequeues) return 'blocked'
   return 'todo'
 }
@@ -1936,6 +1986,14 @@ export interface ProjectEngine {
     lastNudgeAt?: number
     /** One-shot "it ignored every nudge" log per episode (cleared with the rest). */
     unresponsiveLogged?: boolean
+    /** Consecutive pokes that wrote NOTHING (2026-08-04) — the desk is live but
+     *  the session store no longer names it, so neither writer can address it.
+     *  Counted apart from `nudges` because an un-sent poke is not a turn the desk
+     *  ignored; charging it to the budget retired the reflex without the
+     *  commander ever having been spoken to. */
+    unaddressable?: number
+    /** One-shot "we cannot reach the desk" log per episode. */
+    unaddressableLogged?: boolean
     /** Wall-clock (ms) of the last NOTICE we typed into the desk (2026-07-27). Not a
      *  budget — the notice has none — but a SELF-WRITE instant, and it has to join
      *  `lastNudgeAt` / `lastWakeAt` in the echo cutoff the presence probe is handed.
@@ -1982,6 +2040,20 @@ export interface ProjectEngine {
    *  when the card is parked in 'blocked' (so a human requeue starts fresh) or
    *  succeeds/leaves the retry cycle. In-memory only. */
   recoveries: Map<string, number>
+  /** How many consecutive passes a worker's teardown has been REFUSED because a
+   *  desk is still live in its worktree (`stillOccupied`), keyed by taskId. The
+   *  refusal's own contract is "the caller retries and the worktree stays intact
+   *  meanwhile" — but no caller implemented it: the engine re-homed the card and
+   *  dropped the worker from the roster, leaving a live claude in a worktree
+   *  nobody owns (and, on the SDK pool, holding its slot for the life of the
+   *  process, since a non-reaped session is never swept). Bounded by
+   *  {@link MAX_TEARDOWN_RETRIES} so a genuinely wedged worker still frees its
+   *  slot, loudly. Carries the ORIGINAL recovery reason so the retry finishes the
+   *  job it started instead of re-detecting the fault (which re-fired one-shot
+   *  side effects — see the retry short-circuit in monitorWorkers). Optional
+   *  (absent ⇒ empty, lazy-init) so a hand-written test engine literal keeps
+   *  compiling. In-memory only. */
+  teardownRetries?: Map<string, { tries: number; reason: WorkerRecoveryReason }>
   /** How many times each card (taskId) has been sent review→doing on a 差し戻し
    *  (rework) — the {@link MAX_REWORKS} loop guard. Bumped on every rework; KEPT
    *  while the card is mid-cycle (doing/review) or PARKED past the budget (in
@@ -2206,6 +2278,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       highRiskHolds: new Map(),
       lastIntegrateAt: 0,
       recoveries: new Map(),
+      teardownRetries: new Map(),
       reworks: new Map(),
       reworkReasons: new Map(),
       conflictReworks: new Map(),
@@ -2369,24 +2442,114 @@ export const mergeReworkReason = (existing: string | undefined, reasonLine: stri
  *  'unstated', which keeps the conservative caller-supplied default. PURE. */
 export type UnparkIntent = 'resume' | 'hold' | 'unstated'
 
-const HOLD_PHRASES = ['このまま保留', '保留のまま', '見送', '止めておく', '諦め', '動かさない', 'そのままで']
-const RESUME_PHRASES = ['戻して', 'todo へ戻', 'todoへ戻', '再開', 'もう一度', 'やり直', '続きを']
+// Each phrase must be a DECISION on its own. 'そのままで' is deliberately ABSENT:
+// it read 「そのままで大丈夫です、進めてください」 (a RESUME) as hold and stranded
+// the card the unpark exists to free (measured 2026-08-04).
+//
+// The short natural holds below (保留 / 中止 / キャンセル / 待って / 止めて / やらなくて)
+// were added the same night, after a measurement showed 「保留で」「このままで」
+// 「いったん止めて」「やらなくていい」「中止して」「キャンセルで」「待って」 ALL
+// resolving to 'unstated' — which, on a worker-asked question, UNPARKS. An
+// unrecognised hold silently became a resume; an unrecognised resume is
+// harmless. The asymmetry ran the wrong way.
+// ⚠ EVERY ENTRY MUST BE A DECISION, NOT A NOUN (re-learned the hard way, twice in
+// one night). The first version of this list was too narrow and short holds fell
+// through to 'unstated'; the fix for that added the BARE words 保留 / 中止 /
+// キャンセル / 待って / stop / cancel — and those are ordinary vocabulary in a
+// card about a cancel button, a stop condition or a hold queue. Measured
+// consequences of the bare forms, every one of which means RESUME and read as
+// hold: 「保留の理由は解決したので戻してください」「待っている間に確認しました。進めて
+// ください」「キャンセル機能の実装はそのままで、進めてください」「中止条件のテストだけ
+// 直して、再開してください」"Go ahead, the cancel button is fine"
+// "Continue — do not stop until tests pass" "Resume. The stopwatch widget is
+// unrelated." (`stop`/`cancel` as substrings also hit stopped / stopwatch /
+// non-stop / cancellation).
+//
+// So each phrase carries its own verb or particle. The cost is that a bare 「待って」
+// or 「保留」 with no ending reads as 'unstated' — which, on an overseer-raised
+// question, leaves the card where the owner already put it. That is the harmless
+// side; matching a feature name is not.
+const HOLD_PHRASES = [
+  // 保留 needs its own ending: 「保留していた件、進めてOKです」 is a RESUME, so a
+  // bare 保留し would strand it.
+  'このまま保留', '保留で', '保留に', '保留のまま', '保留。', '保留です',
+  '保留してください', '保留しておいて', '保留とし', '見送', '諦め',
+  '止めておく', '止めてください', '止めてほしい', 'いったん止め',
+  '中止して', '中止で', '中止に', 'キャンセルして', 'キャンセルで',
+  // 待ってください/待ちます etc. — never the bare 待って, which is inside
+  // 待っている / 待ってて, nor the bare 待ち, which is inside 順番待ち (the S5
+  // menu's RESUME label).
+  '待ってください', '待ってほしい', '待ちます', '待ちたい', '待とう',
+  'やらなくて', 'やらないで', '動かさないで', '触らないで', 'そのまま置いて',
+  'leave it', 'on hold', 'keep it parked', 'hold off', 'do not proceed',
+]
+const RESUME_PHRASES = [
+  '戻して', '戻す', 'todo へ戻', 'todoへ戻', '再開', 'もう一度', 'やり直',
+  '続きを', '続行', '進めて', 'resume', 'continue', 'go ahead',
+]
 
+// A refusal to resume IS a hold — not the absence of a decision. Scrubbing these
+// to nothing (the first version of this rule) left 「再開しないでください」 as
+// 'unstated', which on the worker-asked lane unparks: the owner's explicit "do
+// not" produced exactly the act they refused (measured 2026-08-04, adversarial
+// review of my own fix). The English arm only ever worked because "leave it on
+// hold, do not resume" carries a second hold phrase; a bare 「再開しないで」 had
+// nothing left.
+const NEGATED_RESUME =
+  /(?:\b(?:do not|don'?t|never|no need to)\s+(?:resume|continue|go ahead)|(?:再開|続行|進め)(?:は)?(?:せず|しないで|ないで|なくて))/i
+// The mirror: a negated HOLD is not a hold. 「見送らずに再開してください」 must not
+// be read as hold just because 見送 appears in it.
+const NEGATED_HOLD =
+  /(?:(?:見送|保留|止め|諦め|中止|キャンセル)(?:に|は|を)?(?:し|せ|ら|り|め)?(?:ず|ないで|なくて)|\b(?:don'?t|do not|never)\s+(?:hold|stop|cancel|pause))/i
+// An option letter is only a CHOICE when it stands alone, opens a labelled option,
+// or is followed by a particle that makes it the OBJECT of the sentence —
+// 「A」「A: …」「A。」「Aで」「Aに」「Aを」「Aが」「Aの方針で」「Aだね」「Aと思います」「A案で」
+// 「A please」. A letter that merely begins a word is prose: 「Aさんに聞いてから
+// 決めます」 and "a human should look at this — leave it parked" both resolved to
+// RESUME under the old letter-then-any-non-alphanumeric rule (measured 2026-08-04).
+//
+// ⚠ THE PARTICLE LIST IS LOAD-BEARING, AND IT WAS TOO SHORT (measured hours later,
+// same night). With only で/に/案 the most ordinary phrasings — 「Aをお願いします」
+// 「Aがいいです」「Aの方針で」「Aを選びます」「A please」 — fell through to 'unstated',
+// and on an OVERSEER-raised question (workerAddressed=false) 'unstated' means
+// "leave the card parked": the owner picked A, the UI said the answer was
+// delivered, and the card never moved — verbatim the cycle-4 failure this reader
+// was rewritten to fix. The same gap flipped B answers the other way on the
+// worker lane. Widen before narrowing: a missed particle is a silent no-op.
+const LEADING_OPTION =
+  /^([abABＡＢａｂ])(?:\s*[:：.。、,)）\]】]|\s*(?:で|に|を|が|の|だ|と|案)|\s+please\b|\s*$)/i
+
+/** Read the owner's DECISION out of their answer.
+ *
+ *  ⚠ FEED IT THE ANSWER, NEVER THE QUESTION+ANSWER LINE. The queued line is a
+ *  concatenation whose FIRST half is the question — and the question carries
+ *  the menu, so any scan over the line finds 「A: …」 before the owner's word.
+ *  Measured 2026-08-04: every answer, including 「B: このまま保留」 and a plain
+ *  English "Leave it on hold", resolved as resume and the card moved.
+ *
+ *  DIRECTION OF DOUBT: when both a hold and a resume signal survive, HOLD wins.
+ *  The old rule was "the last decision word wins", which read
+ *  「いまは保留にしておいて、来週になったら再開しよう」 as resume and moved the card
+ *  NOW. Position is not scope. Preferring hold can only leave a card where the
+ *  owner already put it; preferring resume overrides what they said. PURE. */
 export const readUnparkIntent = (answer: string): UnparkIntent => {
   const s = (answer ?? '').replace(/\s+/g, ' ').trim()
   if (!s) return 'unstated'
-  // The option LETTER first — unambiguous, and it survives an owner who pasted
-  // the whole label back. Accepts the full-width forms the IME produces.
-  // Full-width punctuation is what the IME actually emits after a letter —
-  // ：．、）】 as well as the ASCII forms.
-  const letter = /(?:^|[「『(【\s])([abABＡＢａｂ])\s*[:：.．、,，)）】]/.exec(s)
-  if (letter) {
-    const ch = letter[1].toLowerCase().replace('ａ', 'a').replace('ｂ', 'b').replace('Ａ', 'a').replace('Ｂ', 'b')
-    return ch === 'a' ? 'resume' : 'hold'
-  }
-  if (/^[abAB]$/.test(s)) return s.toLowerCase() === 'a' ? 'resume' : 'hold'
-  if (HOLD_PHRASES.some((p) => s.includes(p))) return 'hold'
-  if (RESUME_PHRASES.some((p) => s.includes(p))) return 'resume'
+  const norm = (c: string) => c.toLowerCase().replace('ａ', 'a').replace('ｂ', 'b')
+  // 1. The option letter — the menus are OURS, so a real choice is the strongest
+  //    signal and is checked first (a label like 「A: このまま任せる」 carries a
+  //    hold-shaped phrase inside a resume-shaped choice).
+  const lead = LEADING_OPTION.exec(s)
+  if (lead) return norm(lead[1]) === 'a' ? 'resume' : 'hold'
+  // 2. An explicit refusal to resume is a HOLD, stated.
+  if (NEGATED_RESUME.test(s)) return 'hold'
+  // 3. Strip negated HOLD words so only genuine ones are counted below.
+  const scrubbed = s.replace(new RegExp(NEGATED_HOLD.source, 'gi'), ' ')
+  const has = (phrases: readonly string[]): boolean =>
+    phrases.some((p) => scrubbed.toLowerCase().includes(p.toLowerCase()))
+  // 4. Hold wins a tie — see DIRECTION OF DOUBT above.
+  if (has(HOLD_PHRASES)) return 'hold'
+  if (has(RESUME_PHRASES)) return 'resume'
   return 'unstated'
 }
 
@@ -2400,11 +2563,11 @@ export const recordEscalationAnswerForNextDispatch = async (
    *  raise ("this card has been stuck — what should I do?") carries no worker,
    *  so 'blocked' is the OWNER's placement and their 「このまま保留」 must not
    *  be the thing that moves it. Absent ⇒ false (never unpark on a guess). */
-  opts?: { workerAddressed?: boolean },
+  opts?: { workerAddressed?: boolean; answer?: string },
   deps?: {
     fetchTasks?: (p: string) => Promise<ProjectTask[]>
     unpark?: (p: string, id: string) => Promise<boolean>
-    countCommitsAhead?: (p: string, branch: string) => Promise<number>
+    countCommitsAhead?: (p: string, branch: string) => Promise<number | null>
   },
 ): Promise<void> => {
   // Control bytes → space FIRST (so the segment can never contain
@@ -2462,7 +2625,9 @@ export const recordEscalationAnswerForNextDispatch = async (
   //   • 'unstated' — free text with no menu choice: fall back to the worker
   //                  rule (a worker's question ⇒ resume it; nobody asked ⇒
   //                  leave the card where it is).
-  const intent = readUnparkIntent(line)
+  // The ANSWER, never `line` — see readUnparkIntent's warning. An older caller
+  // that passes no answer degrades to 'unstated', i.e. the who-asked fallback.
+  const intent = readUnparkIntent(opts?.answer ?? '')
   if (intent === 'hold') return
   if (intent === 'unstated' && !opts?.workerAddressed) return
   try {
@@ -2485,10 +2650,16 @@ export const recordEscalationAnswerForNextDispatch = async (
     const ahead = branch
       ? await (deps?.countCommitsAhead ?? defaultCountCommitsAhead)(engine.path, branch)
       : 0
-    if (ahead > 0) {
+    // `null` = git could not answer. STAY PARKED: unparking mints a fresh branch
+    // over card.branch on the next dispatch, so guessing "no commits" here is the
+    // one guess that destroys work. Parked is always recoverable — the commander
+    // adopts the branch — while an orphaned branch is found only by hand.
+    if (ahead === null || ahead > 0) {
       await logAwaited(
         'info',
-        `escalation answer recorded for card ${taskId}, but it stays in blocked — ${branch} already carries ${ahead} commit(s). Re-dispatching would mint a new branch and orphan them; the commander integrates or 差し戻し's this branch instead.`,
+        ahead === null
+          ? `escalation answer recorded for card ${taskId}, but it stays in blocked — could not read how many commits ${branch} carries (git did not answer). Re-dispatching could orphan committed work, so the commander decides this one.`
+          : `escalation answer recorded for card ${taskId}, but it stays in blocked — ${branch} already carries ${ahead} commit(s). Re-dispatching would mint a new branch and orphan them; the commander integrates or 差し戻し's this branch instead.`,
       )
       return
     }
@@ -2932,11 +3103,18 @@ export interface OrchestratorDeps {
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
   isAlive: (w: WorkerHandle) => boolean
+  /** Where this card's work already lives, if anywhere — see
+   *  {@link ensureSwarmWorktreeForBranch}. `null` ⇒ dispatch fresh. Optional so
+   *  existing dep literals keep compiling; the default resolver is used when
+   *  absent. */
+  resolveReusableWork?: (projectPath: string, card: ProjectTask) => Promise<ReusableWork | null>
   /** Commits the worker's `swarm/*` branch carries ahead of trunk — the
    *  "branch is ready" signal. 0 on any failure (conservative: no proof of
    *  work ⇒ no promotion). Probed from the shared repo by branch ref, so it
    *  works whether or not the worktree still exists. (Card②) */
-  countCommitsAhead: (projectPath: string, branch: string) => Promise<number>
+  /** `null` ⇒ git could not answer. NEVER read that as 0 — see
+   *  {@link defaultCountCommitsAhead}. */
+  countCommitsAhead: (projectPath: string, branch: string) => Promise<number | null>
   /** The worker's heartbeat sign for its branch, or null when it never wrote
    *  one / it's unreadable. Carries the display-only phase/note/at too. (Card②) */
   readHeartbeat: (
@@ -2948,6 +3126,10 @@ export interface OrchestratorDeps {
    *  (a reported blocker, an exhausted retry budget, or an owner stop). False on a
    *  kept write so the caller can retry. (Card① crash recovery / owner stop) */
   recoverCard: (projectPath: string, taskId: string, column: 'todo' | 'blocked') => Promise<boolean>
+  /** Park a card AND stamp the owner's 「見送る」 in one board write (see
+   *  {@link abandonCardIntegration}). Optional so existing dep literals keep
+   *  compiling; the default writer is used when absent. */
+  markAbandoned?: (projectPath: string, taskId: string) => Promise<boolean>
   /** Tear down a LOST/STOPPED worker: remove its isolated worktree and kill its
    *  `claude` PTY (the zombie-eradication that the old monitor skipped — a
    *  crashed worker left its worktree on disk forever). Force-removes (a crashed
@@ -2979,6 +3161,11 @@ export interface OrchestratorDeps {
   }) => Promise<{
     removed: boolean
     reason?: string
+    /** The removal was refused because a desk is still live in that worktree —
+     *  "ask again", not "it failed". recoverLost retries a bounded number of
+     *  passes instead of dropping the worker (which would orphan a live claude
+     *  and, on the SDK pool, pin its slot for the life of the process). */
+    stillOccupied?: boolean
     wip?: WipCommitResult
     /** The dead PTY's own exit code/signal, captured BEFORE this call's kill —
      *  i.e. only populated when the process had ALREADY died on its own (a real
@@ -3254,6 +3441,9 @@ export interface IntegrationDeps {
   }) => Promise<{
     removed: boolean
     reason?: string
+    /** Refused because a desk is still live in that worktree — "ask again", not
+     *  "it failed" (recoverLost retries a bounded number of passes). */
+    stillOccupied?: boolean
     wip?: WipCommitResult
     /** The dead PTY's own exit code/signal, captured BEFORE this call's kill —
      *  i.e. only populated when the process had ALREADY died on its own (a real
@@ -4461,18 +4651,39 @@ const commitBasePreference = async (projectPath: string): Promise<string[]> => {
  *  worktree is removed. The trunk is RESOLVED per-project ({@link commitBasePreference}),
  *  not a hardcoded origin/main, so a committed worker in a non-main-default repo
  *  (master, …) is seen as ahead and promoted — matching how the integrate stage
- *  already resolves the trunk. 0 when no trunk ref resolves or the branch is gone
- *  (conservative — no provable work ⇒ no promotion). */
-const defaultCountCommitsAhead = async (projectPath: string, branch: string): Promise<number> => {
-  if (!branch) return 0
-  for (const base of await commitBasePreference(projectPath)) {
+ *  already resolves the trunk.
+ *
+ *  ⚠ `null` MEANS "COULD NOT ANSWER", AND IT IS NOT ZERO (2026-08-04).
+ *  This used to fold three different facts into the number 0: the branch really
+ *  has no commits, no trunk ref resolved, and git failed or timed out. That is
+ *  harmless for the promote gate — 0 only withholds a promotion — but a second
+ *  consumer arrived later with the OPPOSITE polarity: `recoveryColumn` reads
+ *  `commitsAhead > 0` as "there is work here, park the card", so for IT a 0 means
+ *  "safe to requeue onto a fresh branch". A repo whose trunk is neither
+ *  `origin/main` nor `main` (a `git init` repo on `master`, a hand-added remote
+ *  with no origin/HEAD) answered 0 for EVERY worker on EVERY pass — so a worker
+ *  that committed and then crashed had its card requeued, the next dispatch minted
+ *  a fresh swarm/* branch over `card.branch`, and the commits became reachable only
+ *  by `git branch --list`. Nothing told the owner; the work was simply redone.
+ *  A transient git failure under load produces the same result on one pass.
+ *
+ *  So the two answers are now distinguishable, and every caller states which way
+ *  it wants "unknown" to fall. */
+const defaultCountCommitsAhead = async (
+  projectPath: string,
+  branch: string,
+): Promise<number | null> => {
+  if (!branch) return 0 // no branch at all: genuinely nothing, not a failed read
+  const bases = await commitBasePreference(projectPath)
+  if (bases.length === 0) return null // no trunk name resolved — cannot measure
+  for (const base of bases) {
     if ((await gitOut(projectPath, ['rev-parse', '--verify', '--quiet', base])) === null) continue
     const out = await gitOut(projectPath, ['rev-list', '--count', `${base}..${branch}`])
-    if (out === null) return 0 // branch ref missing / git error ⇒ no proof of work
+    if (out === null) return null // branch ref missing / git error ⇒ NOT a zero
     const n = Number.parseInt(out, 10)
     return Number.isFinite(n) && n > 0 ? n : 0
   }
-  return 0
+  return null // every candidate trunk ref failed to verify
 }
 
 /** Repo-key cache (projectPath → swarm heartbeat dir key). The key is stable for
@@ -4643,6 +4854,31 @@ const defaultRecoverCard = async (
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path: projectPath, setColumn: [{ id: taskId, column }] }),
+    signal: AbortSignal.timeout(15_000),
+  })
+  return res.ok
+}
+
+/** Resolve where a todo card's work already lives (quota re-entry). Failure is
+ *  `null`, never a throw: a card we cannot re-enter simply dispatches fresh. */
+const defaultResolveReusableWork = async (
+  projectPath: string,
+  card: ProjectTask,
+): Promise<ReusableWork | null> => {
+  const branch = typeof card.branch === 'string' ? card.branch.trim() : ''
+  if (!branch || !isSwarmBranch(branch)) return null
+  return ensureSwarmWorktreeForBranch(projectPath, branch)
+}
+
+/** Park a card in 'blocked' AND stamp it 「見送る」 in ONE board write. */
+const defaultMarkAbandoned = async (projectPath: string, taskId: string): Promise<boolean> => {
+  const res = await fetch(`${loopbackOrigin()}/api/project/tasks`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      path: projectPath,
+      setColumn: [{ id: taskId, column: 'blocked', abandoned: true }],
+    }),
     signal: AbortSignal.timeout(15_000),
   })
   return res.ok
@@ -6813,6 +7049,8 @@ const monitorWorkers = async (
     let teardown: {
       removed: boolean
       reason?: string
+      /** Refused while a desk is still live there — retried, not given up on. */
+      stillOccupied?: boolean
       wip?: WipCommitResult
       exitInfo?: { code: number | null; signal?: number }
     } = { removed: false }
@@ -6841,6 +7079,52 @@ const monitorWorkers = async (
     } catch {
       /* reported via teardown.removed=false below */
     }
+    // Set when we give up on a refused teardown: the card must be PARKED, not
+    // requeued, because a live claude may still hold the old worktree.
+    let forceBlocked = false
+    // ── THE REFUSAL IS A "TRY AGAIN", NOT A "GIVE UP" (2026-08-04) ─────────
+    // removeSwarmWorktree refuses while a desk is still live in the directory,
+    // and its comment promises the caller retries. No caller did: the card was
+    // re-homed and the worker dropped from engine.workers AND roster.json, so a
+    // still-running claude was left in a worktree nobody owned. On the SDK pool
+    // that also pins its slot forever — sweepClosedSessions never reaps a session
+    // whose iterator has not returned — so every later worker silently falls back
+    // to a PTY. Nothing retried: the orphan sweep skips a directory git still
+    // lists as a worktree, and the janitor never touches worktree bodies.
+    //
+    // So: keep the worker and ask again next pass, up to a bound. The card is NOT
+    // re-homed while we wait (it is still 'doing' and its worker still exists);
+    // past the bound we fall through to the old behaviour and say so at 'error'
+    // level, because a slot held forever is its own failure.
+    if (teardown.stillOccupied === true) {
+      const retries = (engine.teardownRetries ??= new Map())
+      const tries = (retries.get(w.taskId)?.tries ?? 0) + 1
+      retries.set(w.taskId, { tries, reason })
+      if (tries <= MAX_TEARDOWN_RETRIES) {
+        logLine(
+          engine,
+          'warn',
+          `worker ${verb} — 撤収を保留(${tries}/${MAX_TEARDOWN_RETRIES}): ${w.branch} の作業場でまだ claude が動いています。次のパスでやり直します`,
+          'cleanup',
+        )
+        return true // keep it in the roster; the next pass tears down again
+      }
+      logLine(
+        engine,
+        'error',
+        `worker ${verb} — ${w.branch} の作業場で claude が ${tries} 回連続して止まりませんでした。` +
+          `作業場を残したままワーカーを名簿から外し、カードは「保留」へ退避します。` +
+          `Terminal タブでその作業場のセッションを閉じてください`,
+        'cleanup',
+      )
+      // PARK IT, never requeue. The old claude may still be working in the old
+      // worktree; a requeue would dispatch a SECOND worker on a fresh branch for
+      // the same card — two claudes on one card, which is the twin class this
+      // engine spends most of its guards preventing. Blocked is where a human
+      // looks, and that is exactly what this state needs.
+      forceBlocked = true
+    }
+    engine.teardownRetries?.delete(w.taskId)
     const keptNote = teardown.removed ? '' : ` · worktree kept (${teardown.reason ?? '?'})`
     // Surfaces the PTY's OWN exit code/signal for a 'crash' recovery — this is the
     // only place a dead worker's death cause is ever recorded (in-memory TerminalInfo
@@ -6892,7 +7176,9 @@ const monitorWorkers = async (
     const probeForColumn = salvaged
       ? { ...probe, commitsAhead: (probe.commitsAhead ?? 0) + salvaged }
       : probe
-    let col = recoveryColumn(probeForColumn, requeues, RECOVER_MAX_REQUEUE, reason)
+    let col = forceBlocked
+      ? ('blocked' as const)
+      : recoveryColumn(probeForColumn, requeues, RECOVER_MAX_REQUEUE, reason)
     let moved = false
     try {
       // 'review' rides moveToReview, not recoverCard: it is a forward promotion of
@@ -6997,7 +7283,10 @@ const monitorWorkers = async (
   const hasDeliverable = async (w: OrchestratorWorker): Promise<boolean> => {
     if (w.readyAt) return true // already recorded — never re-probe, never revoke
     try {
-      if ((await deps.countCommitsAhead(engine.path, w.branch)) > 0) return true
+      // `null` (git could not answer) is NOT evidence — same as 0 here. This
+      // read only DEFERS a `readyAt` stamp to the next pass, so "no proof yet"
+      // is the harmless direction (unlike recoveryColumn, where it is not).
+      if (((await deps.countCommitsAhead(engine.path, w.branch)) ?? 0) > 0) return true
     } catch {
       /* conservative: no evidence */
     }
@@ -7015,6 +7304,33 @@ const monitorWorkers = async (
     }
     const alive = deps.isAlive(w)
     const card = byId.get(w.taskId)
+
+    // ── A TEARDOWN ALREADY IN PROGRESS FINISHES ITSELF (2026-08-04) ─────────
+    // This worker was reclaimed on an earlier pass and its worktree removal was
+    // REFUSED (a desk is still live there), so it was kept on the roster to be
+    // retried. Retry the SAME recovery and skip every detection arm below.
+    //
+    // Falling through instead re-ran the detectors against a worker we had
+    // already decided about, and they re-fired their ONE-SHOT side effects,
+    // because each arm clears its own trigger state before calling recoverLost:
+    //   • exec-timeout pushes `engine.pendingFatal` BEFORE the recovery, and that
+    //     is the edge lane — "fire each exactly once, then drain" — so one stop
+    //     produced up to MAX_TEARDOWN_RETRIES+1 identical bells and OS toasts,
+    //     and the later ones quoted 「rate-limit待ち 0分 / 統合待ち 0分」 because
+    //     the spans had been deleted: contradictory numbers about one event.
+    //   • the rate-limit arm calls endRateLimitHold first, so the next pass
+    //     re-entered "first sighting" and called markRateLimited again — a real
+    //     write into the quota cooling table — and restarted the grace clock.
+    //   • the question arm deletes questionWaits/questionRaised, so the retry
+    //     waited another QUESTION_GRACE_MS.
+    // The last two also meant "retry next pass" silently became "retry next grace
+    // window" while the worker held a dispatch slot.
+    const pendingTeardown = engine.teardownRetries?.get(w.taskId)
+    if (pendingTeardown) {
+      if (await recoverLost(w, card, { alive, commitsAhead: 0, heartbeat: null }, pendingTeardown.reason))
+        next.push(w)
+      continue
+    }
 
     // 外部差し戻しの観測(Board API / UI ドラッグ): roster は 'done'(このカードは一度
     // review へ昇格済み)なのにカードが 'doing' に戻っている。エンジン自身の integrate
@@ -7131,12 +7447,20 @@ const monitorWorkers = async (
     }
 
     // The monitored state: card in 'doing'. Probe the completion signals.
+    // `commitsAhead` keeps its numeric contract for the promote gate; whether the
+    // count is UNKNOWN travels beside it, because the two consumers want opposite
+    // fallbacks (see defaultCountCommitsAhead and recoveryColumn).
     let commitsAhead = 0
+    let commitsUnknown = false
     let heartbeat: HeartbeatSign | null = null
     try {
-      commitsAhead = await deps.countCommitsAhead(engine.path, w.branch)
+      const counted = await deps.countCommitsAhead(engine.path, w.branch)
+      if (counted === null) commitsUnknown = true
+      else commitsAhead = counted
     } catch {
-      /* treat as 0 — conservative */
+      // A THROW is also "could not answer" — the default never throws, but an
+      // injected dep might, and reading that as "no work" is the destructive way.
+      commitsUnknown = true
     }
     try {
       heartbeat = await deps.readHeartbeat(engine.path, w.branch)
@@ -7145,7 +7469,7 @@ const monitorWorkers = async (
     }
 
     let { promote, stage } = classifyWorker(
-      { alive, commitsAhead, heartbeat },
+      { alive, commitsAhead, commitsUnknown, heartbeat },
       sinceStart(w.startedAt) >= STARTUP_GRACE_MS,
     )
 
@@ -7266,7 +7590,7 @@ const monitorWorkers = async (
         await recoverLost(
           w,
           card,
-          { alive, commitsAhead, heartbeat },
+          { alive, commitsAhead, commitsUnknown, heartbeat },
           pendingReason,
           pendingReason === 'integration-wait' ? pending?.shape : undefined,
         )
@@ -7548,7 +7872,7 @@ const monitorWorkers = async (
         await recoverLost(
           w,
           card,
-          { alive, commitsAhead, heartbeat },
+          { alive, commitsAhead, commitsUnknown, heartbeat },
           reason,
           reason === 'integration-wait' ? shape : undefined,
         )
@@ -7740,7 +8064,15 @@ const monitorWorkers = async (
       Number.isFinite(startedMs) &&
       limitSince - startedMs <= RATE_LIMIT_EARLY_ONSET_MS &&
       now - limitSince >= RATE_LIMIT_EARLY_CONFIRM_MS &&
+      // (c) DEMONSTRABLY zero commits — an unreadable count is not a zero
+      // (2026-08-04). `commitsAhead` is 0 both for an empty branch and for a
+      // branch git could not measure, and this condition's whole claim is "the
+      // worker never started working". Reading a failed measurement as proof of
+      // that is the same conflation the recovery path was fixed for; here it only
+      // accelerates a hold, so the direction is harmless — but the claim should
+      // still rest on evidence.
       commitsAhead === 0 &&
+      !commitsUnknown &&
       (!Number.isFinite(hbMs) || hbMs <= limitSince)
 
     // RATE-LIMIT WAIT — waiting on a usage/quota/overload limit, NOT wedged.
@@ -7802,7 +8134,7 @@ const monitorWorkers = async (
         // decorative-toast case stays covered: one repaint delays the requeue by
         // at most one scrape-quiet window, it can't cancel it.
         endRateLimitHold(engine, workerKey(w), now)
-        if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'rate-limit')) next.push(w)
+        if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'rate-limit')) next.push(w)
         continue
       }
       next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
@@ -7864,7 +8196,7 @@ const monitorWorkers = async (
           )
         } else if (now - pw.since >= PERMISSION_WAIT_GRACE_MS) {
           engine.permissionWaits.delete(workerKey(w))
-          if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'permission')) next.push(w)
+          if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'permission')) next.push(w)
           continue
         }
         next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
@@ -7958,7 +8290,7 @@ const monitorWorkers = async (
         } else if (now - qw.since >= QUESTION_GRACE_MS) {
           engine.questionWaits.delete(workerKey(w))
           engine.questionRaised?.delete(workerKey(w))
-          if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'question')) next.push(w)
+          if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'question')) next.push(w)
           continue
         }
         next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
@@ -7986,7 +8318,7 @@ const monitorWorkers = async (
       // A silent worker is reclaimed like a crash: recoveryColumn (via recoverLost)
       // sends a bare hang to 'todo' (one retry) or 'blocked' (budget spent), never
       // to review — a stall NEVER fakes progress.
-      if (await recoverLost(w, card, { alive, commitsAhead, heartbeat }, 'stall')) next.push(w)
+      if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'stall')) next.push(w)
       continue
     }
     if (stall.action === 'escalate') {
@@ -8487,9 +8819,43 @@ export const runDispatchPass = async (
         continue
       }
 
+      // ── GO BACK TO WHERE THIS CARD'S WORK ALREADY IS (2026-08-04) ────────
+      // A worker reclaimed at a quota wall returns to 'todo' with `card.branch`
+      // still set (the recover write only sets the column). Minting a fresh
+      // worktree here made the todo→doing move stamp a NEW branch over it, and
+      // the commits already paid for became reachable only through
+      // `git branch --list` — orphaned, silently, every time the wall was hit.
+      // Re-entering the same branch makes that stamp a write of the value it
+      // already had.
+      //
+      // `null` covers both "no branch on the card" (the ordinary first dispatch)
+      // and "could not be resolved" (branch gone, git refused) — either way we
+      // fall through to a normal fresh dispatch, which is the pre-existing
+      // behaviour and never worse than it.
+      const reuse = await (deps.resolveReusableWork ?? defaultResolveReusableWork)(
+        engine.path,
+        card,
+      ).catch(() => null)
+      if (reuse) {
+        logLine(
+          engine,
+          'info',
+          `前回の作業場に戻ります: ${shorten(title)} — 途中まで進んだ内容はそのまま残っています(${reuse.branch})`,
+          'dispatch',
+        )
+      }
+
       let spawn: SpawnSwarmWorkerResponse
       try {
-        spawn = await deps.spawnWorker({ projectPath: engine.path, title, notes, hint: title, priorFailure, liveWorkers: engine.workers })
+        spawn = await deps.spawnWorker({
+          projectPath: engine.path,
+          title,
+          notes,
+          hint: title,
+          priorFailure,
+          liveWorkers: engine.workers,
+          ...(reuse ? { worktree: reuse.worktree } : {}),
+        })
       } catch (e) {
         logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
         continue
@@ -8604,9 +8970,18 @@ export const runIntegratePass = async (
     return
   }
   // Only the swarm's OWN branches are ever a subject — the hard ownership line.
+  //
+  // …and NEVER a card the owner said to drop (`abandoned`). This is where
+  // 「B: この作業は見送る（できあがった分も取り込みません）」 actually takes effect:
+  // everything downstream of `swarmCards` is the machinery that gets the work
+  // INTEGRATED — the readiness snapshot the pane shows, the 「統合してください」
+  // notice typed into the commander's desk, and the resurrection reflex that
+  // keeps a desk alive because work is waiting. Answering used to record the
+  // owner's words and change none of it, so the commander went on to merge the
+  // branch the owner had just declined — onto the trunk, irreversibly.
   const swarmCards = reviews.filter(
     (c): c is ProjectTask & { branch: string } =>
-      typeof c.branch === 'string' && isSwarmBranch(c.branch),
+      typeof c.branch === 'string' && isSwarmBranch(c.branch) && c.abandoned !== true,
   )
 
   // Forget conflict + verify-fail + review-fail memos for branches no longer in
@@ -9007,11 +9382,37 @@ export const runIntegratePass = async (
     }
     if (lastNudgeAt > 0 && now - lastNudgeAt < MANAGER_NUDGE_INTERVAL_MS) return
     const poked = await deps.nudgeManager(engine.path)
-    // Charge the budget BEFORE the stop check: the keystrokes are already in the desk's
-    // PTY, so bailing out un-counted would let a later pass poke again with the throttle
-    // disarmed. Only the log line below is worth skipping once the owner has stopped us.
-    rs.nudges = nudges + 1
+    // The THROTTLE is charged either way — a failed write must not turn into a
+    // hot loop. The BUDGET is charged only when something was actually typed.
+    //
+    // Charging it before the stop check is deliberate for a SUCCESSFUL poke: the
+    // keystrokes are already in the desk's PTY, so bailing out un-counted would
+    // let a later pass poke again with the throttle disarmed.
+    //
+    // ⚠ BUT AN UN-SENT POKE MUST NOT COST A TURN (2026-08-04, adversarial review).
+    // `nudgeManager` returns false without writing a byte when the session store
+    // no longer names the live desk — a state that heals only through the spawn
+    // path, so it persists. Three phantom pokes then burnt the whole budget and
+    // the engine fell into its permanent-mute branch having never addressed the
+    // commander at all: integration stopped, one warn line, no bell.
     rs.lastNudgeAt = now
+    if (poked) rs.nudges = nudges + 1
+    else {
+      rs.unaddressable = (rs.unaddressable ?? 0) + 1
+      // Say it ONCE per episode, and say the TRUE thing: this is not "the desk
+      // ignored us", it is "we could not reach the desk".
+      if (!rs.unaddressableLogged && rs.unaddressable >= MAX_MANAGER_NUDGES) {
+        rs.unaddressableLogged = true
+        logLine(
+          engine,
+          'error',
+          `司令官の卓に声をかけられません(${rs.unaddressable}回連続で書き込みに失敗) — ` +
+            `卓は動いているのに宛先が分からない状態です。Swarm タブ → マネージャーを開き直すと復旧します。` +
+            `統合待ち ${swarmCards.length} 件`,
+          'integrate',
+        )
+      }
+    }
     if (!engine.running) return
     logLine(
       engine,
@@ -9436,6 +9837,63 @@ export const detectAnomalies = async (
     })
   }
 
+  // ── The two LEVEL-TRIGGERED failures (2026-08-04) ────────────────────────
+  // `all-workers-down` and `manager-unrevivable` are published as one-shot
+  // NOTIFICATIONS: fireFatalNotifications dedups on `engine.notified` until the
+  // condition clears, and the manager one latches on `managerResume.fatalFired`
+  // until a desk actually comes back. That was survivable while the feed showed
+  // every notification forever — and became a hole the moment the owner could
+  // dismiss a row: one click on a STANDING failure and the pane returns to
+  // "nothing needs you" while integration is still dead. (Found by adversarial
+  // review the same night the dismissal shipped.)
+  //
+  // An anomaly is the right carrier because it is re-derived from live state on
+  // EVERY pass: dismissing the historical notification cannot hide it, and it
+  // disappears by itself the moment the condition actually clears. The
+  // notification stays as the one-shot wake-up (bell + OS toast); this is the
+  // "still true right now" line beside it.
+  const liveNow = engine.workers.filter((w) => deps.isAlive(w))
+  // `engine.workers.length > 0` is load-bearing: it means WE dispatched workers
+  // and every one of them is now dead. With an empty roster the same board looks
+  // identical to a card a MANUAL worker owns — the engine never counts those, and
+  // the orphan-doing arm above already refuses to call that a fault ("never a
+  // false orphan"). This row follows the same rule rather than inventing a
+  // second, louder answer to the same ambiguity.
+  // Same mid-teardown exemption as the notification arm (see fireFatalNotifications):
+  // a worker kept on the roster for a teardown retry is not a worker that died.
+  if (
+    engine.running &&
+    engine.workers.length > 0 &&
+    liveNow.length === 0 &&
+    (engine.teardownRetries?.size ?? 0) === 0
+  ) {
+    // Same condition as the notification arm — engine running, nothing alive,
+    // yet swarm cards still sitting in 'doing' (i.e. work is hanging, not done).
+    const hanging = tasks.filter(
+      (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
+    )
+    // …but say it ONCE. 'orphan-doing' already names a hanging card individually
+    // (it fires when the worktree is gone too); adding a second row for the same
+    // cards would make the feed repeat itself, and a feed that repeats itself is
+    // one the owner skims. This row is for the case orphan-doing CANNOT see: the
+    // worktrees are all still there, so nothing is orphaned per-card, yet every
+    // worker process is gone.
+    const alreadyNamed = new Set(out.filter((a) => a.kind === 'orphan-doing').map((a) => a.ref))
+    if (hanging.some((t) => !alreadyNamed.has(t.id))) {
+      out.push({
+        kind: 'all-workers-down',
+        ref: 'engine',
+        attempts: hanging.length, // how many cards are hanging (display-only)
+      })
+    }
+  }
+  if (engine.managerResume?.fatalFired) {
+    // Latched: the commander desk failed to come back MAX times in a row, so
+    // integration is stopped. `fatalFired` is cleared only when a desk is seen
+    // healthy again or review drains — i.e. exactly while the problem is live.
+    out.push({ kind: 'manager-unrevivable', ref: 'manager', attempts: engine.managerResume.attempts })
+  }
+
   return out
 }
 
@@ -9612,7 +10070,16 @@ export const fireFatalNotifications = (
 
   // 2c. all-workers-down — running, zero live workers, yet 'doing' swarm work left.
   const liveWorkers = engine.workers.filter((w) => deps.isAlive(w))
-  if (engine.running && liveWorkers.length === 0) {
+  // ⚠ NOT WHILE THE ENGINE IS MID-TEARDOWN (2026-08-04). recoverLost now KEEPS a
+  // dead worker on the roster while a refused teardown is retried, deliberately
+  // leaving its card in 'doing' — which for a single-worker engine is exactly
+  // "running, nothing alive, work hanging". Without this the engine would ring
+  // the bell + OS toast (and, with the overseer armed, raise an owner-facing
+  // question) about a transient it is in the middle of resolving by itself, a
+  // few seconds before it clears. The alarm is for workers that DIED, not for
+  // ones we are still putting away.
+  const tearingDown = (engine.teardownRetries?.size ?? 0) > 0
+  if (engine.running && liveWorkers.length === 0 && !tearingDown) {
     const doing = tasks.filter(
       (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
     )
@@ -9845,6 +10312,31 @@ export const startOrchestrator = async (
     // engine was off. (Same reasoning, same line: the stop/start boundary is where stale
     // in-memory beliefs about the review queue are dropped.)
     engine.managerNotice = null
+    // …and the COMMANDER RESURRECTION state, for the same reason (2026-08-04).
+    // `managerResume` is created once per engine object and survived stop→start,
+    // so its two latches outlived the problem they described:
+    //   • `fatalFired` is what the new 'manager-unrevivable' anomaly reads, and
+    //     that anomaly is re-derived every pass — so an owner who stopped the
+    //     engine, opened the commander desk by hand, fixed it and started again
+    //     saw 「司令官の卓が戻りません · 統合が止まっています」 from the FIRST tick,
+    //     about a desk that was up. (Only the integrate pass clears the latch,
+    //     and it is fire-and-forget + throttled, so the false claim can stand for
+    //     minutes.)
+    //   • `attempts` at the ceiling makes the reflex give up before it spawns
+    //     even once in the new epoch.
+    // A stop/start is exactly where stale beliefs about the desk are dropped —
+    // the same rule the three lines above follow. The nudge budget goes with it.
+    //
+    // ⚠ FIXED AS AN INVARIANT, NOT AS A REPRODUCED FAILURE (same wording as the
+    // sibling reset block in the integrate pass, for the same honest reason). I
+    // could not get a unit fixture to hold the latch across the start: the
+    // integrate pass the start kicks clears the whole revive block by itself
+    // whenever nothing is waiting, and the review list it judges that on comes
+    // from `fetchReview`, not from the board. A guard that stays green with this
+    // line deleted is worth nothing, so none was left behind — the reasoning
+    // above is the record. Reproducing it needs the pass to see work waiting AND
+    // the desk absent, which is an integration-level fixture.
+    engine.managerResume = undefined
     // New start epoch — supersedes any stale chain still settling from a prior
     // start (whose `.finally` will see the bumped generation and not re-arm).
     const gen = (engine.generation += 1)
@@ -10199,6 +10691,56 @@ export const stopOrchestratorWorker = async (
  *  is a no-op returning the current state. Best-effort writes (a kept move leaves
  *  the card in review — the owner retries); never throws. Owner-gated at the route.
  *  Works whether the engine is running or stopped. */
+/** The outcome of {@link abandonCardIntegration}. */
+export type AbandonIntegrationResult =
+  | { ok: true; alreadyParked?: true }
+  | { ok: false; reason: 'card-missing' | 'not-in-review' | 'write-failed' }
+
+/**
+ * 「B: この作業は見送る（できあがった分も取り込みません）」 — execute the owner's
+ * decision that this card's work must NOT be integrated.
+ *
+ * A THIN LAYER over {@link resolveOrchestratorReview}(…, 'blocked'), deliberately:
+ * that function already moves the card out of review, tears down any worker
+ * still counted for the branch (with the both-pools occupancy check), rewrites
+ * the roster in one pass and clears every memo. Re-implementing 8/10 of it beside
+ * it is exactly the duplicate-seam class this repo keeps paying for. What this
+ * adds is the ONE thing that makes the decision stick: the standing `abandoned`
+ * flag the publish path reads (see the `swarmCards` filter).
+ *
+ * ORDER IS DELIBERATE. Park first, then stamp. If the stamp fails, the card is
+ * already out of review — and a card that is not in review is never published,
+ * so a half-completed abandon fails to the SAFE side. The reverse order would
+ * leave a flagged card sitting in review, where nothing reads the flag.
+ *
+ * ⚠ The branch and its commits are KEPT. 「見送る」 means "do not integrate this",
+ * not "destroy it": the owner can change their mind, and the way back is to move
+ * the card out of 保留 (which clears the flag at the board route).
+ */
+export const abandonCardIntegration = async (
+  projectPath: string,
+  taskId: string,
+  deps: OrchestratorDeps & IntegrationDeps = defaultDeps(),
+): Promise<AbandonIntegrationResult> => {
+  let card: ProjectTask | undefined
+  try {
+    card = (await deps.fetchTasks(projectPath)).find((t) => t.id === taskId)
+  } catch {
+    return { ok: false, reason: 'card-missing' }
+  }
+  if (!card) return { ok: false, reason: 'card-missing' }
+
+  // Already parked (a second answer, a retry, or the owner moved it by hand):
+  // there is nothing to un-review, but the flag may still be missing — stamp it
+  // and report the idempotent case rather than fail for a decision already taken.
+  const inReview = columnOf(card) === 'review'
+  if (inReview) await resolveOrchestratorReview(projectPath, taskId, 'blocked', deps)
+
+  const stamped = await (deps.markAbandoned ?? defaultMarkAbandoned)(projectPath, taskId)
+  if (!stamped) return { ok: false, reason: 'write-failed' }
+  return inReview ? { ok: true } : { ok: true, alreadyParked: true }
+}
+
 export const resolveOrchestratorReview = async (
   projectPath: string,
   taskId: string,
@@ -10249,18 +10791,44 @@ export const resolveOrchestratorReview = async (
     // — for a 'todo' requeue — frees the card to be re-dispatched (its id leaves the
     // counted set, so selectDispatch's id gate no longer skips it).
     const owned = branch ? engine.workers.filter((w) => w.branch === branch) : []
+    // Did any of them refuse to let go? A worktree that still holds a LIVE desk
+    // means the old claude is still running in it (see removeSwarmWorktree).
+    let stillOccupied = false
     for (const w of owned) {
       try {
-        await deps.recoverWorker({
+        const res = await deps.recoverWorker({
           projectPath: key,
           worktree: w.worktree,
           terminalId: w.terminalId,
           ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
           reason: 'stopped', // salvage any uncommitted work onto the branch first
         })
+        if (res.stillOccupied === true) stillOccupied = true
       } catch {
         /* best-effort teardown — the card already left review, which is the point */
       }
+    }
+    // ⚠ A REQUEUE ON TOP OF A LIVE WORKER IS A TWIN (2026-08-04). The card is
+    // moved out of review BEFORE the teardown (that move is the must-succeed
+    // step), so by the time we learn the old desk would not stop, a 'todo' card
+    // is already sitting in the dispatch queue — and the next pass spawns a
+    // SECOND claude on a FRESH branch for the same card while the first one is
+    // still writing in the old worktree. That is the recorded field failure
+    // ("差し戻しが生きている worker を見落として同じ作業場に2本目を立てる"), and it
+    // is precisely what the engine's own recovery path refuses to do. Correct the
+    // move: park it instead, where a human decides.
+    if (stillOccupied && target === 'todo') {
+      const parked = await deps
+        .recoverCard(key, taskId, 'blocked')
+        .catch(() => false)
+      logLine(
+        engine,
+        'warn',
+        `差し戻しを保留に変更: ${shorten(card.title ?? '')} — 前の担当の作業場でまだ claude が動いているため、` +
+          `いま順番待ちに戻すと同じカードに2人目が立ちます。` +
+          (parked ? '' : '(カードの移動に失敗 — 次のパスで再試行します)'),
+        'cleanup',
+      )
     }
     if (owned.length) {
       engine.workers = engine.workers.filter((w) => !owned.includes(w))
@@ -10301,6 +10869,33 @@ export const resolveOrchestratorReview = async (
 }
 
 /** Current engine state for a project (never started ⇒ a stopped empty state). */
+/** DISPLAY-ONLY commander status ({@link SwarmManagerPresence}). PURE — no I/O,
+ *  no clock: it is handed the two facts {@link getOrchestratorState} has already
+ *  read, so publishing it costs nothing on the 5-second poll.
+ *
+ *  ⚠ WHY NOT `defaultManagerPresence` (the engine's reflex judgement):
+ *   • it stats transcripts under ~/.claude — this GET is polled per project by
+ *     both the Swarm pane and the Board worker map;
+ *   • it falls to 'absent' on ANY exception, which is the right direction for
+ *     "should I wake the desk?" and the wrong one for a sentence the owner
+ *     reads: one transient read failure would announce the commander is gone;
+ *   • its echo discount exists so our own keystrokes don't look like life —
+ *     a concept with no meaning in a status line.
+ *
+ *  THE ORDER IS THE FIX: desk-existence outranks the heartbeat. A heartbeat is
+ *  fresh for ten minutes after it is written, and the defect this replaces was
+ *  exactly a desk that beat once and then died — the pane kept saying it was
+ *  working, unattended, on the screen that decides whether the owner looks. */
+export const managerPresenceForDisplay = (input: {
+  /** A live commander desk exists in EITHER pool (stopping ones excluded). */
+  deskLive: boolean
+  /** The heartbeat file was written inside its freshness window. */
+  beatFresh: boolean
+}): SwarmManagerPresence => {
+  if (!input.deskLive) return 'missing'
+  return input.beatFresh ? 'working' : 'quiet'
+}
+
 export const getOrchestratorState = async (
   projectPath: string,
   deps: OrchestratorDeps = defaultDeps(),
@@ -10363,6 +10958,12 @@ export const getOrchestratorState = async (
         agentSessionId: supplyLive.agentSessionId ?? null,
       }
     : null
+  // DISPLAY presence — from the two facts this GET already holds. See the type's
+  // note for why the engine's own ManagerPresence reflex is NOT reused here.
+  const managerPresence = managerPresenceForDisplay({
+    deskLive: managerDeskFull !== null,
+    beatFresh: manager?.fresh === true,
+  })
   const engine = store.engines.get(key)
   if (!engine) {
     return {
@@ -10373,6 +10974,7 @@ export const getOrchestratorState = async (
       overseerRemembered: overseerIntent,
       manager,
       managerDesk,
+      managerPresence,
       supplyDesk,
     }
   }
@@ -10385,7 +10987,13 @@ export const getOrchestratorState = async (
   } catch {
     tasks = []
   }
-  return { ...stateOf(engine, deps.isAlive, tasks, remembered, stopped, overseerIntent), manager, managerDesk, supplyDesk }
+  return {
+    ...stateOf(engine, deps.isAlive, tasks, remembered, stopped, overseerIntent),
+    manager,
+    managerDesk,
+    managerPresence,
+    supplyDesk,
+  }
 }
 
 /** The Swarm surface's DRAIN-TICK (POST /api/swarm/orchestrator/drain-tick): return the
@@ -10749,7 +11357,27 @@ export const resumeEngines = async (
       if (!intent.desiredRunning) continue
       if (await isSwarmManualStopPersisted(key)) continue // supremacy — never override an explicit pause
       const pre = await claudeRunPreflight()
-      if (!pre.ok) continue // this project just doesn't resume this boot
+      if (!pre.ok) {
+        // ⚠ NOT SILENT (2026-08-04, adversarial review). This branch used to
+        // `continue` with no notification, no journal line, and no retry — and
+        // it is BEFORE getOrCreateEngine, so there was no engine log to write
+        // to either. The owner closed the app with autonomy ON, `claude`
+        // happened not to be ready for a moment at the next launch (a
+        // Finder-launched .app still resolving its login-shell PATH, a re-auth,
+        // a CLI upgrade), and the swarm stayed off for the whole session while
+        // they believed it was running. The two sibling branches above (disk
+        // fault, crash-loop breaker) both raise this same event; this one is
+        // the likeliest of the three and was the only mute one.
+        // Once per project per boot — the loop visits each path once.
+        await createSwarmFatalNotification({
+          event: 'engine-resume-suppressed',
+          projectPath,
+          detail:
+            'claude をすぐに使えなかったため、このプロジェクトの swarm 自動再開を見送りました' +
+            `(${pre.body?.error ?? '理由不明'})。Swarm タブから手動でオンにできます。`,
+        }).catch(() => {})
+        continue
+      }
       const engine = getOrCreateEngine(key)
       if (engine.running) continue // already running (defensive — fresh boot never hits this)
       engine.manualStop = false

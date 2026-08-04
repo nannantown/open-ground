@@ -133,7 +133,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
                   'group flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors',
                   i === active
                     ? 'bg-bg-inset'
-                    : 'hover:bg-bg-inset/60',
+                    : 'hover:bg-plane/60',
                 ].join(' ')}
               >
                 {p.missing ? (

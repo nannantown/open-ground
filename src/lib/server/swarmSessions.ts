@@ -338,6 +338,33 @@ export const isAgentSessionLiveAnywhere = (agentSessionId: string): boolean => {
 
 // ── the seam the desks call ─────────────────────────────────────────────────
 
+/** How long to wait for a desk that was asked to stop to actually finish before
+ *  handing its conversation to the next desk. Long enough for an ordinary
+ *  unwind (milliseconds), short enough that a wedged session does not block the
+ *  owner's restart. */
+export const CONVERSATION_RELEASE_GRACE_MS = 3_000
+const RELEASE_POLL_MS = 50
+
+/** Resolve once NO un-reaped SDK session still holds `agentSessionId`, or once
+ *  {@link CONVERSATION_RELEASE_GRACE_MS} has passed — whichever comes first.
+ *  Never throws, never rejects. Pure-ish (time + the SDK pool). */
+export const defaultAwaitRelease = async (
+  agentSessionId: string,
+  graceMs: number = CONVERSATION_RELEASE_GRACE_MS,
+): Promise<void> => {
+  if (!agentSessionId) return
+  const deadline = Date.now() + graceMs
+  // `reaped`, not `closed`: `closed` is the flag terminate sets synchronously,
+  // and waiting on it would return immediately — the very blindness this wait
+  // exists to cover. `reaped` means the pump's iterator returned, i.e. claude is
+  // actually done with the transcript.
+  const stillHolding = () =>
+    listSdkSessions().some((s) => s.agentSessionId === agentSessionId && !s.reaped)
+  while (stillHolding() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, RELEASE_POLL_MS))
+  }
+}
+
 /** Decide how `role`'s desk should start in `projectPath`: RESUME the persisted
  *  conversation, or open a fresh one. Never throws — every failure degrades to a
  *  fresh session id (see the fail-open contract in the module header).
@@ -349,7 +376,13 @@ export const isAgentSessionLiveAnywhere = (agentSessionId: string): boolean => {
 export const resolveSwarmSession = async (
   projectPath: string,
   role: SwarmSessionRole,
-  deps: { isLive?: (agentSessionId: string) => boolean } = {},
+  deps: {
+    isLive?: (agentSessionId: string) => boolean
+    /** Wait for a stopping-but-not-yet-finished holder of this conversation to
+     *  finish (see the call site). Injected for tests; default
+     *  {@link defaultAwaitRelease}. */
+    awaitRelease?: (agentSessionId: string) => Promise<void>
+  } = {},
 ): Promise<ResolvedSwarmSession> => {
   const isLive = deps.isLive ?? isAgentSessionLiveAnywhere
   const fresh = (reason: FreshSessionReason): ResolvedSwarmSession => ({
@@ -375,6 +408,23 @@ export const resolveSwarmSession = async (
   // seated): two claude processes appending to one transcript interleave-corrupt
   // it. Give the second desk its own session instead.
   if (isLive(rec.sessionId)) return fresh('live')
+  // A desk asked to STOP releases the conversation the moment `closed` is set —
+  // but the claude behind it is not dead yet. terminateSdkSession only sets the
+  // flag and fires a best-effort interrupt; the process keeps running until its
+  // iterator returns (that is what flips `reaped`), which on a mid-tool-call
+  // session can be seconds and on a WEDGED one is never. Restart is a DELETE
+  // and a POST milliseconds apart, so without this wait the new desk would
+  // `--resume` the same conversation while the old process is still appending
+  // to it — two claude processes on one transcript, the interleave the
+  // liveness predicate exists to prevent, arrived at through the stop door.
+  //
+  // So: give the old holder a SHORT, BOUNDED chance to finish unwinding. The
+  // normal stop reaps in milliseconds and this costs nothing. A wedged session
+  // never reaps, and after the grace we proceed anyway — deliberately: it
+  // produces no more turns, and refusing forever would strand the owner's
+  // days-long integration conversation, which is the failure this whole
+  // predicate was rewritten to stop. Bounded risk beats permanent loss.
+  await (deps.awaitRelease ?? defaultAwaitRelease)(rec.sessionId)
   if (!(await isSessionResumable(projectPath, rec.sessionId))) return fresh('missing')
   return { agentSessionId: rec.sessionId, resume: true }
 }

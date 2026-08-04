@@ -361,6 +361,8 @@ export interface OpenEscalationInput {
    *  question text arrives already-plain per the /order worker rules. */
   plainQuestion?: string
   whyEscalated: EscalationWhy
+  /** See EscalationRecord.declineEffect — what answering B actually does. */
+  declineEffect?: 'park' | 'drop-integration'
   /** Idempotency key; defaults to sha1(taskId|projectPath|normalized question). */
   receiptKey?: string
   taskId?: string
@@ -574,6 +576,11 @@ export const openEscalation = async (
       ...(screenshotRef ? { screenshotRef } : {}),
       ...(proxyDraft ? { proxyDraft } : {}),
       whyEscalated: input.whyEscalated,
+      // Narrowed, not trusted: an unknown value degrades to the safe default
+      // ('park' = leave the card alone), never to the acting one.
+      ...(input.declineEffect === 'drop-integration'
+        ? { declineEffect: 'drop-integration' as const }
+        : {}),
       status: 'open',
     }
     all.push(escalation)
@@ -906,10 +913,18 @@ export interface AnswerEscalationDeps {
     projectPath: string,
     taskId: string,
     line: string,
-    opts?: { workerAddressed?: boolean },
+    opts?: { workerAddressed?: boolean; answer?: string },
   ) => Promise<void>
   /** DI for tests: the registry allowlist check (default validateProjectPath). */
   isPathAllowed?: (p: string) => Promise<boolean>
+  /** DI for tests: execute a declared 「見送る」 (default
+   *  {@link import('./swarmOrchestrator').abandonCardIntegration}). Declared here
+   *  so a test can observe the ARGUMENTS; the board effect itself is pinned in
+   *  swarmOrchestrator's own suite, where the fake board can be read back. */
+  dropIntegration?: (
+    projectPath: string,
+    taskId: string,
+  ) => Promise<{ ok: boolean; reason?: string }>
   /** DI for tests: the PTY injection-target guard (default {@link defaultCanInjectInto}). */
   canInjectInto?: (terminalId: string, projectPath: string) => Promise<boolean>
   /** DI for tests: the SDK targeting guard (default {@link defaultCanPushIntoSdkWorker}).
@@ -1014,7 +1029,13 @@ const deliverAnswer = async (
           // menu), and `brief()` folds the menu onto this single line, so an `A:`
           // answer label would sit inline next to the question's own `A: …`.
           `Q: ${brief(record.question, 600)} → オーナーの回答: ${brief(answer, 900)} — この回答を前提に再開すること`,
-      { workerAddressed },
+      // ⚠ THE ANSWER GOES SEPARATELY. `line` is question+answer CONCATENATED —
+      // and the question carries the menu ("A: … B: …"), so a receiver that
+      // parses the owner's choice out of `line` reads the QUESTION's first
+      // option every time (measured 2026-08-04: 「B: このまま保留」 resolved as
+      // resume, and the card moved anyway). The line stays what the worker
+      // reads; the choice is read from the answer alone.
+      { workerAddressed, answer },
     )
     return 'queued'
   }
@@ -1121,6 +1142,35 @@ export const answerEscalation = async (
   // loses nothing: the record sits at 'answered' and the re-delivery escape
   // hatch above retries this leg.
   const { record, memoryWritten } = staged
+
+  // PHASE 2a — EXECUTE THE DECLARED DECLINE, before (and independently of)
+  // delivery. If the raiser said B means 「この作業は見送る」 and the owner chose
+  // B, the work must stop being integratable — that is the whole point of the
+  // question, and it must not depend on whether a worker was still around to
+  // receive a message. Placed before deliverAnswer for exactly that reason: the
+  // delivery lane can legitimately end in 'skipped'.
+  //
+  // ⚠ The CHOICE is read from the answer; the EFFECT comes from the record. The
+  // parser only has to tell A from B (readUnparkIntent already does), and the
+  // meaning of B is whatever the raiser declared.
+  if (record.declineEffect === 'drop-integration' && record.taskId) {
+    const { readUnparkIntent, abandonCardIntegration } = await import('./swarmOrchestrator')
+    if (readUnparkIntent(text) === 'hold') {
+      const res = await (deps?.dropIntegration ?? abandonCardIntegration)(
+        record.projectPath,
+        record.taskId,
+      ).catch(() => ({ ok: false, reason: 'write-failed' as const }))
+      if (!res.ok) {
+        // Say so in the record's own lane rather than swallowing it: the owner
+        // decided something irreversible-adjacent and it did not take.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[swarmEscalations] 見送りを実行できませんでした (${res.reason}): card=${record.taskId}`,
+        )
+      }
+    }
+  }
+
   if (deliveringIds.has(record.id)) {
     // A delivery for this very record is in flight; a second bracketed paste
     // would interleave inside the same worker's prompt. The first one stands.

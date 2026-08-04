@@ -584,7 +584,7 @@ export const BoardTab = ({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-between gap-3 px-8 py-3">
+      <div className="flex shrink-0 items-center justify-between gap-3 px-7 pb-2.5 pt-3.5">
         <div className="flex items-center gap-3">
           <p className="label-cap text-ink-muted">
             {t('board.toolbar.count', { count: visibleTasks.length })}
@@ -606,7 +606,7 @@ export const BoardTab = ({
                   ? 'cursor-not-allowed border-line text-ink-faint opacity-50'
                   : mineOnly
                     ? 'border-accent bg-accent text-bg-card hover:bg-accent-hover'
-                    : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink',
+                    : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink',
               ].join(' ')}
             >
               {t('board.toolbar.mineOnly')}
@@ -770,7 +770,10 @@ export const BoardTab = ({
           {t('board.empty.guide')}
         </p>
       )}
-      <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-8 pb-6">
+      {/* 案C: 5 equal columns filling the width (`.board { gap:14px; padding:0 20px 20px }`).
+          Fixed 260px columns + overflow-x meant the 5th column fell off a 1280px
+          window — the mock has no horizontal scroll. */}
+      <div className="flex min-h-0 flex-1 gap-3.5 px-5 pb-5">
         {COLUMNS.map(col => {
           const cards = byColumn[col.key]
           // The column's end-of-list drop index = count of non-source cards.
@@ -846,31 +849,39 @@ export const BoardTab = ({
                 // lightness difference (bg-inset vs the page) is the boundary.
                 // The drop target keeps its accent signal as a ring (no border,
                 // no layout shift).
-                'flex min-h-0 w-[260px] shrink-0 flex-col rounded-[6px] transition-colors',
+                'flex min-h-0 min-w-0 flex-1 flex-col rounded-xl px-2.5 pb-2.5 pt-3 transition-colors',
                 isDropTarget ? 'bg-accent/5 ring-1 ring-accent' : 'bg-bg-inset',
               ].join(' ')}
             >
-              <header className="flex shrink-0 items-baseline justify-between gap-2 px-3 pb-1 pt-2.5">
-                <span className="label-cap flex items-center gap-1.5 text-ink">
+              <header className="flex shrink-0 items-center justify-between gap-2 px-1.5 pb-1.5">
+                {/* NOT label-cap: the mock's column name is 11px / .14em / 600 and
+                    is never uppercased (it carries Japanese). */}
+                <span className="flex items-center gap-[7px] text-[11px] font-semibold tracking-[0.14em] text-ink-muted">
                   {/* Instrument lamp: lit only while the column carries work
                       that means something is HAPPENING or WAITING ON YOU —
                       doing=moss, review=azure, blocked=ochre. Neutral when
                       empty or for the passive lanes (todo/done). */}
-                  <span
-                    aria-hidden
-                    className={[
-                      'inline-block h-1.5 w-1.5 rounded-full',
-                      cards.length > 0 && col.key === 'doing'
-                        ? 'bg-moss'
-                        : cards.length > 0 && col.key === 'review'
-                          ? 'bg-azure'
-                          : cards.length > 0 && col.key === 'blocked'
-                            ? 'bg-ochre'
-                            : 'bg-line-strong',
-                    ].join(' ')}
-                  />
+                  {/* The mock draws a lamp ONLY on the lanes that can mean
+                      「動いている」/「あなた待ち」 — todo and done carry none at all.
+                      A lit lamp GLOWS; that glow is the 計器盤's signature. The
+                      colour vocabulary is three: 稼働=苔 / 待ち=黄土 / 高=朱. */}
+                  {(col.key === 'doing' || col.key === 'review' || col.key === 'blocked') && (
+                    <span
+                      aria-hidden
+                      className={[
+                        'inline-block h-1.5 w-1.5 rounded-full',
+                        cards.length === 0
+                          ? 'bg-ink/[0.18]'
+                          : col.key === 'doing'
+                            ? 'bg-moss shadow-lamp-moss'
+                            : 'bg-ochre shadow-lamp-ochre',
+                      ].join(' ')}
+                    />
+                  )}
                   {col.label}{' '}
-                  <span className="text-ink-faint tabular-nums">{cards.length}</span>
+                  <span className="font-mono text-[11px] font-normal tracking-normal text-ink-muted">
+                    {cards.length}
+                  </span>
                 </span>
                 {/* Text-diet: the todo mechanics note moved into a tooltip on the
                     column label; the blocked column's hint stays VISIBLE — it is a
@@ -891,7 +902,7 @@ export const BoardTab = ({
                     onClick={clearDone}
                     disabled={projectMissing}
                     title={t('board.toolbar.clearDoneTitle')}
-                    className="rounded-sm px-1 py-0.5 text-[10px] text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
+                    className="rounded-full px-2.5 py-[3px] text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
                   >
                     {t('board.toolbar.clearDone')}
                   </button>
@@ -901,7 +912,7 @@ export const BoardTab = ({
               {/* Empty columns show no placeholder text: dragging a card over a
                   column already highlights it as a drop target, and the
                   "+ Add a card" composer below covers authoring. */}
-              <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
+              <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
                 {(() => {
                   // While dragging: every card renders IN ITS ORIGINAL ARRAY
                   // POSITION (the drag-source node must never move in the DOM —
@@ -968,12 +979,16 @@ const AddCardButton = ({
 }) => {
   const { t } = useT()
   return (
-    <div className="px-1 pb-1 pt-1">
+    <div className="pt-2">
+      {/* 案C `.add-card`: a faint FACE of its own (cream 4%), 10px radius, 11px
+          padding, centred. It used to be transparent with a hover that filled it
+          with the CARD colour — which read as "a card appeared", not "a place to
+          add one". */}
       <button
         type="button"
         disabled={disabled}
         onClick={onAdd}
-        className="w-full rounded-[3px] border border-transparent bg-transparent px-2 py-1.5 text-left text-[12px] text-ink-faint transition-colors hover:bg-bg-card hover:text-ink active:bg-bg-card active:text-ink focus-visible:border-accent focus-visible:bg-bg-card focus-visible:text-ink focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+        className="w-full rounded-[10px] bg-ink/[0.04] p-[11px] text-center text-[12px] text-ink-muted transition-colors hover:bg-ink/[0.09] hover:text-ink active:bg-ink/[0.13] active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-ink/[0.04] disabled:hover:text-ink-muted"
       >
         {t('board.composer.placeholder')}
       </button>

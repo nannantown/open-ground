@@ -1138,7 +1138,7 @@ export const BoardModule = ({
           type="button"
           onClick={() => setOptionsOpen(o => !o)}
           aria-expanded={optionsOpen}
-          className="-mx-1 flex shrink-0 items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+          className="-mx-1 flex shrink-0 items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
         >
           <ChevronRight
             size={12}
@@ -1173,7 +1173,7 @@ export const BoardModule = ({
                 className={
                   active
                     ? 'shrink-0 rounded-sm border border-accent bg-accent px-2.5 py-1 text-[11px] text-bg-card transition-colors hover:bg-accent/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-                    : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+                    : 'shrink-0 rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
                 }
               >
                 {name}
@@ -1210,7 +1210,7 @@ export const BoardModule = ({
                   if (v) persistLocal(withRegisteredAssignee(data, task.id, v))
                   setAddingAssignee(false)
                 }}
-                className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="shrink-0 rounded-sm border border-line px-2 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 {t('board.detail.assigneeAddConfirm')}
               </button>
@@ -1219,7 +1219,7 @@ export const BoardModule = ({
             <button
               type="button"
               onClick={() => setAddingAssignee(true)}
-              className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               {t('board.detail.assigneeAdd')}
             </button>
@@ -1256,7 +1256,7 @@ export const BoardModule = ({
                     const next = (task.dependsOn ?? []).filter(id => id !== depId)
                     patchTask(task, { dependsOn: next.length ? next : undefined })
                   }}
-                  className="shrink-0 rounded-sm px-0.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                  className="shrink-0 rounded-sm px-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                 >
                   ✕
                 </button>
@@ -1300,7 +1300,7 @@ export const BoardModule = ({
                 onClick={() => setAddingDep(true)}
                 disabled={candidates.length === 0}
                 title={candidates.length === 0 ? t('board.detail.dependsNone') : undefined}
-                className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="shrink-0 rounded-sm border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-faint transition-colors hover:border-line hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 {t('board.detail.dependsAdd')}
               </button>
@@ -1337,7 +1337,7 @@ export const BoardModule = ({
               aria-label={t('board.detail.dueClear')}
               title={t('board.detail.dueClear')}
               onClick={() => patchTask(task, { dueDate: undefined })}
-              className="shrink-0 rounded-sm px-1.5 py-1 text-[11px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="shrink-0 rounded-sm px-1.5 py-1 text-[11px] text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               ✕
             </button>
@@ -1370,7 +1370,7 @@ export const BoardModule = ({
                   'shrink-0 rounded-sm border px-2.5 py-1 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
                   active
                     ? PRIORITY_META[p].pillSelectedClass
-                    : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink',
+                    : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink',
                 ].join(' ')}
               >
                 {t(PRIORITY_META[p].labelKey)}
@@ -1619,7 +1619,7 @@ export const BoardModule = ({
               onClick={closeDrawer}
               title={t('common.close')}
               aria-label={t('common.close')}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-plane hover:text-ink"
             >
               <X size={15} />
             </button>
@@ -1710,7 +1710,7 @@ export const BoardModule = ({
                       type="button"
                       onClick={() => setRunSettingsOpen(o => !o)}
                       aria-expanded={runSettingsOpen}
-                      className="-mx-1 flex items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                      className="-mx-1 flex items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
                     >
                       <ChevronRight
                         size={12}
@@ -1829,7 +1829,7 @@ export const BoardModule = ({
                     onClick={() => setFieldsOpen(o => !o)}
                     aria-expanded={fieldsOpen}
                     title={t('board.detail.fieldsToggle')}
-                    className="flex min-w-0 flex-1 items-center gap-1.5 px-5 py-2 text-left transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 px-5 py-2 text-left transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
                   >
                     <ChevronRight
                       size={13}
@@ -1853,7 +1853,7 @@ export const BoardModule = ({
                       onClick={() => void regenerateTitle(detailTask)}
                       disabled={regenBusy}
                       title={t('board.detail.regenTitle')}
-                      className="mr-3 shrink-0 rounded-sm px-1.5 py-0.5 text-[12px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="mr-3 shrink-0 rounded-sm px-1.5 py-0.5 text-[12px] text-ink-faint transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       {regenBusy ? '✦ …' : '✦'}
                     </button>

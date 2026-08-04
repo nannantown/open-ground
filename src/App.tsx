@@ -104,6 +104,30 @@ export function shouldShowEmptyState(args: {
   return args.ownedCount === 0 && (!args.collabEnabled || args.sharedCount === 0)
 }
 
+// Which of the お知らせ bell's three server reads may run, given sign-in and the
+// collab feature gate. ONE place, consumed by the three effects below, because
+// the gates must stay in a fixed relationship and drifted apart once already:
+// the READ-STATE load used to sit inside the collab-gated invite effect, so on a
+// collab-OFF build (the default) the seen-set was never fetched, the local set
+// stayed empty at every launch, and every fatal swarm notification the owner had
+// already read counted as unread on the badge again — while the fatal poll
+// itself, being auth-only, kept feeding the bell rows.
+//
+// INVARIANT (locked by App.notificationGates.test.ts): `readState` must be true
+// whenever ANY row-producing source is — a build that can show a notification
+// must also know which ones were already seen. Pure + exported for unit testing.
+export function bellDataGates(args: { signedIn: boolean; collabEnabled: boolean }): {
+  readState: boolean
+  invites: boolean
+  swarmFatals: boolean
+} {
+  return {
+    readState: args.signedIn,
+    invites: args.signedIn && args.collabEnabled,
+    swarmFatals: args.signedIn,
+  }
+}
+
 // The next selection state when the user OPENS AN OWNED project — via ⌘K jump,
 // New, Import, or clicking its Ground card. It always clears any open shared
 // (member) panel: ProjectPanel renders the owner body OR the member body, never
@@ -579,8 +603,34 @@ export default function App() {
     }
   }, [feedbackCanRead, settingsOpen, feedbackSourceId])
 
-  // Fetch the in-app notifications (collab invites) + the server-persisted read-
-  // state for the お知らせ bell. Gated on collabEnabled (NOT just auth): invites are
+  // Load the SERVER-PERSISTED read-state (seen ids) for the お知らせ bell. Gated on
+  // sign-in ALONE, deliberately: this used to live inside the collab-gated invite
+  // effect below, so in a collab-OFF build (the default — collab is feature-gated
+  // off) the seen-set was NEVER read, `readNotifIds` stayed empty at every launch,
+  // and every already-read fatal swarm notification counted as unread again on the
+  // badge. Fatal swarm notifications reach the bell with collab off (their own
+  // effect is auth-only), so the read-state must be loaded on the same condition.
+  // One-shot: read-state only grows via markNotificationsSeen, which updates local
+  // state at the same time — nothing to re-poll.
+  useEffect(() => {
+    if (!bellDataGates({ signedIn: !!authUser?.id, collabEnabled }).readState) {
+      setReadNotifIds(new Set())
+      return
+    }
+    let cancelled = false
+    fetch('/api/notifications')
+      .then((r) => (r.ok ? (r.json() as Promise<NotificationStateResponse>) : null))
+      .then((d) => {
+        if (!cancelled && d) setReadNotifIds(new Set(d.readIds ?? []))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [authUser?.id, collabEnabled])
+
+  // Fetch the in-app notifications (collab invites) for the お知らせ bell.
+  // Gated on collabEnabled (NOT just auth): invites are
   // a collab notification, and acting on one — opening the folder-less shared
   // project — needs the realtime transport, so we never surface a "Join" that would
   // dead-end in a collab-off build. The BELL itself stays present on authEnabled
@@ -588,7 +638,7 @@ export default function App() {
   // mount, on sign-in change, every 5 min, and on focus (throttled to once a minute,
   // like the feedback poll). The invites route is RLS-self-scoped server-side.
   useEffect(() => {
-    if (!collabEnabled || !authUser?.id) {
+    if (!bellDataGates({ signedIn: !!authUser?.id, collabEnabled }).invites) {
       setInvites([])
       return
     }
@@ -603,18 +653,7 @@ export default function App() {
         })
         .catch(() => {})
     }
-    // Load the server-persisted seen-set FIRST, then start polling invites — so the
-    // badge never briefly counts an already-read invite as unread on launch. Invites
-    // poll regardless of whether the seen-set read succeeds (.finally).
-    fetch('/api/notifications')
-      .then((r) => (r.ok ? (r.json() as Promise<NotificationStateResponse>) : null))
-      .then((d) => {
-        if (!cancelled && d) setReadNotifIds(new Set(d.readIds ?? []))
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) pollInvites()
-      })
+    pollInvites()
     const onFocus = () => {
       if (Date.now() - lastPoll >= 60_000) pollInvites()
     }
@@ -634,7 +673,7 @@ export default function App() {
   // should catch up quickly after the OS toast already fired server-side. Cleared
   // when signed out so a re-login starts clean.
   useEffect(() => {
-    if (!authUser?.id) {
+    if (!bellDataGates({ signedIn: !!authUser?.id, collabEnabled }).swarmFatals) {
       setSwarmNotifs([])
       return
     }
@@ -660,7 +699,7 @@ export default function App() {
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
     }
-  }, [authUser?.id])
+  }, [authUser?.id, collabEnabled])
 
   // Called by the Settings inbox once it has loaded submissions: record the
   // newest timestamp as "seen" (scoped per data source) and clear the gear dot.

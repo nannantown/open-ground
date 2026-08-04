@@ -132,7 +132,7 @@ export const Toolbar = ({
             type="button"
             onClick={onFeedback}
             title={t('toolbar.feedback')}
-            className="flex items-center gap-1.5 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] px-3 py-2 shadow-card text-[12px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="flex items-center gap-1.5 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] px-3 py-2 shadow-card text-[12px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <MessageSquare size={13} strokeWidth={1.75} />
             <span>{t('toolbar.feedback')}</span>
@@ -338,7 +338,7 @@ const AccountControl = ({
         title={t('toolbar.account')}
         aria-label={t('toolbar.account')}
         aria-pressed={open}
-        className="flex h-7 w-7 items-center justify-center rounded-sm transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        className="flex h-7 w-7 items-center justify-center rounded-sm transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
         {user.avatarUrl ? (
           <img
@@ -398,7 +398,7 @@ const MenuItem = ({
   <button
     type="button"
     onClick={onClick}
-    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
   >
     <span className="text-ink-faint">{icon}</span>
     {label}

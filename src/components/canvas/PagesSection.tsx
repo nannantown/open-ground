@@ -72,7 +72,7 @@ export const PagesSection = ({
           onClick={() => setCollapsed((v) => !v)}
           aria-expanded={!collapsed}
           title={collapsed ? t('canvas.expand') : t('canvas.collapse')}
-          className="flex min-w-0 items-center gap-1 rounded-[4px] px-1 py-0.5 text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex min-w-0 items-center gap-1 rounded-[4px] px-1 py-0.5 text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           {collapsed ? (
             <ChevronRight size={12} strokeWidth={2.25} className="shrink-0" />
@@ -89,7 +89,7 @@ export const PagesSection = ({
             type="button"
             onClick={onCreate}
             title={t('canvas.newCanvas')}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <Plus size={13} strokeWidth={2} />
           </button>
@@ -152,7 +152,7 @@ export const PagesSection = ({
                   'group flex items-center gap-1 pr-1.5 transition-colors',
                   isActive
                     ? 'bg-accent text-bg-card hover:bg-accent-hover'
-                    : 'text-ink-muted hover:bg-bg-inset hover:text-ink',
+                    : 'text-ink-muted hover:bg-plane hover:text-ink',
                   isDragOver ? 'ring-1 ring-inset ring-accent' : '',
                 ].join(' ')}
               >

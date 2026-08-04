@@ -227,7 +227,7 @@ export const CustomTabPickerDialog = ({
                         'before:absolute before:inset-y-0 before:left-[74px] before:w-px before:bg-line-soft/70',
                         locked
                           ? 'cursor-not-allowed'
-                          : 'cursor-pointer hover:bg-bg-inset active:bg-bg-elevated',
+                          : 'cursor-pointer hover:bg-plane active:bg-bg-elevated',
                         n.enabled ? '' : 'opacity-60',
                         'focus-visible:outline focus-visible:outline-[1.5px] focus-visible:-outline-offset-2 focus-visible:outline-accent',
                       ].join(' ')}
@@ -333,7 +333,7 @@ export const CustomTabPickerDialog = ({
                         'before:absolute before:inset-y-0 before:left-[74px] before:w-px before:bg-line-soft/70',
                         attached
                           ? 'cursor-default opacity-60'
-                          : 'cursor-pointer hover:bg-bg-inset active:bg-bg-elevated',
+                          : 'cursor-pointer hover:bg-plane active:bg-bg-elevated',
                         confirming ? 'bg-accent-soft before:bg-accent/20' : '',
                         deleting ? 'opacity-40' : '',
                         'focus-visible:outline focus-visible:outline-[1.5px] focus-visible:-outline-offset-2 focus-visible:outline-accent',
@@ -474,7 +474,7 @@ export const CustomTabPickerDialog = ({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="rounded-[5px] border border-line-strong px-4 py-1.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-ink-faint hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {t('common.close')}
           </button>

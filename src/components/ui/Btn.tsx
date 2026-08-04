@@ -39,14 +39,14 @@ export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
         break
       case 'ghost':
         variantCls =
-          'border border-line bg-transparent text-ink-muted label-cap rounded-[2px] hover:border-accent hover:text-accent active:bg-bg-inset active:text-accent'
+          'border border-line bg-transparent text-ink-muted label-cap rounded-[2px] hover:border-accent hover:text-accent active:bg-plane active:text-accent'
         break
       case 'icon':
         variantCls = c(
           'rounded-sm',
           danger
             ? 'text-ink-muted hover:text-accent hover:bg-accent-soft'
-            : 'text-ink-muted hover:text-ink hover:bg-bg-inset',
+            : 'text-ink-muted hover:text-ink hover:bg-plane',
         )
         break
       case 'subtle':
@@ -54,7 +54,7 @@ export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
           'label-cap rounded-[2px]',
           danger
             ? 'text-ink-muted hover:text-accent hover:bg-accent-soft'
-            : 'text-ink-muted hover:text-ink hover:bg-bg-inset',
+            : 'text-ink-muted hover:text-ink hover:bg-plane',
         )
         break
     }

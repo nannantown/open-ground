@@ -437,7 +437,7 @@ export const CustomFrameHost = () => {
                     onClick={() => destroyFrame(f.moduleId)}
                     title="Stop background audio"
                     aria-label={`Stop ${f.label}`}
-                    className="rounded-full p-0.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    className="rounded-full p-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                   >
                     <X size={10} strokeWidth={2.25} />
                   </button>

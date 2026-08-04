@@ -462,7 +462,7 @@ export function useInspectTweak({
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
             inspecting
               ? 'border-accent bg-accent text-bg-card hover:bg-accent-hover'
-              : 'border-line bg-bg-card/95 text-ink-muted hover:bg-bg-inset hover:text-ink',
+              : 'border-line bg-bg-card/95 text-ink-muted hover:bg-plane hover:text-ink',
           ].join(' ')}
         >
           <Sparkles size={10} strokeWidth={2} />
@@ -558,7 +558,7 @@ export function useInspectTweak({
               type="button"
               onClick={close}
               title={t('canvasEl.tweak.close')}
-              className="flex h-5 w-5 items-center justify-center rounded-[3px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-5 w-5 items-center justify-center rounded-[3px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <X size={12} strokeWidth={2} />
             </button>

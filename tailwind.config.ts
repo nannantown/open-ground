@@ -23,6 +23,8 @@ const config: Config = {
           elevated: 'rgb(var(--og-bg-elevated) / <alpha-value>)',
           card: 'rgb(var(--og-bg-card) / <alpha-value>)',
           inset: 'rgb(var(--og-bg-inset) / <alpha-value>)',
+          cardHover: 'rgb(var(--og-bg-card-hover) / <alpha-value>)',
+          glow: 'rgb(var(--og-bg-glow) / <alpha-value>)',
           deep: 'rgb(var(--og-bg-deep) / <alpha-value>)',
         },
         ink: {
@@ -32,6 +34,14 @@ const config: Config = {
           faint: 'rgb(var(--og-ink-faint) / <alpha-value>)',
           inverse: 'rgb(var(--og-ink-inverse) / <alpha-value>)',
         },
+        /** The LIFT a hover puts on top of a surface — the opposite of bg-inset,
+         *  which is a well pressed INTO one. They look alike on paper and
+         *  invert at night, which is why `hover:bg-bg-inset` made dark-mode
+         *  hovers sink into a hole. */
+        plane: 'rgb(var(--og-plane) / <alpha-value>)',
+        /** Vermillion FILL (the 高 chip). Never used as text, so it carries no
+         *  text-contrast obligation — that is what `accent` is for. */
+        verm: 'rgb(var(--og-verm) / <alpha-value>)',
         line: {
           DEFAULT: 'rgb(var(--og-line) / <alpha-value>)',
           soft: 'rgb(var(--og-line-soft) / <alpha-value>)',
@@ -45,6 +55,8 @@ const config: Config = {
         },
         moss: {
           DEFAULT: 'rgb(var(--og-moss) / <alpha-value>)',
+          /** Text-grade running colour (the lamp's fill is too dark to read). */
+          text: 'rgb(var(--og-moss-text) / <alpha-value>)',
           soft: 'rgb(var(--og-moss-soft) / <alpha-value>)',
         },
         azure: {
@@ -66,7 +78,7 @@ const config: Config = {
         },
       },
       fontFamily: {
-        display: ['var(--font-fraunces)', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'Noto Sans JP', 'ui-serif', 'Georgia', 'serif'],
+        display: ['var(--font-fraunces)', 'Hiragino Mincho ProN', 'Yu Mincho', 'Noto Serif JP', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'Noto Sans JP', 'ui-serif', 'Georgia', 'serif'],
         body: ['var(--font-instrument-sans)', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'Noto Sans JP', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         sans: ['var(--font-instrument-sans)', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'Noto Sans JP', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         mono: ['var(--font-jetbrains-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
@@ -76,6 +88,10 @@ const config: Config = {
         'cartographic': '0.18em',
       },
       boxShadow: {
+        /** The instrument lamps GLOW. Without this they are just dots, and the
+         *  whole 計器盤 reading of the board goes with them. */
+        'lamp-moss': '0 0 7px rgb(var(--og-moss) / 0.55)',
+        'lamp-ochre': '0 0 7px rgb(var(--og-ochre) / 0.55)',
         card: '0 1px 0 rgb(var(--og-shadow) / 0.04), 0 1px 2px rgb(var(--og-shadow) / 0.06)',
         'card-hover': '0 1px 0 rgb(var(--og-shadow) / 0.06), 0 6px 14px rgb(var(--og-shadow) / 0.08)',
         'card-active': '0 1px 0 rgb(var(--og-accent) / 0.20), 0 8px 24px rgb(var(--og-accent) / 0.18)',

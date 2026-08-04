@@ -1919,11 +1919,16 @@ const OwnedProjectBody = ({
   }
 
   return (
-    <Overlay position="fixed" layer="panel" backdrop="surface" placement="fill" escOverlay={false}>
+    // 案C: the panel sits on the GROUND (`--bg`), not on the card face. It was
+    // `surface` (= bg-card), which flattened every surface relationship below it
+    // — the board's wells, the cards and the ground all measured from the wrong
+    // zero, so the 「面の明度差のみ」 language had nothing to differ from.
+    <Overlay position="fixed" layer="panel" backdrop="paper" placement="fill" escOverlay={false}>
       {/* flex-wrap: when the window is too narrow to fit the title column and
           the controls cluster side by side, the controls drop to their own row
           below instead of crushing the title / overflowing the viewport. */}
-      <header className="rule-double flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-8 pt-3 pb-2.5">
+      {/* 罫線なし・面の明度差のみ — the double rule is not in the language. */}
+      <header className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-7 pb-0 pt-5">
         {/* flex-1 so this column has a definite width: the description box caps
             at max-w-[560px] in BOTH read and edit modes. Without it the column
             shrank to its content, so swapping the wide <p> for a <textarea>
@@ -1946,7 +1951,7 @@ const OwnedProjectBody = ({
               disabled={project.missing}
               title={t(revealLabelKey())}
               aria-label={t(revealLabelKey())}
-              className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+              className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
             >
               <FolderOpen size={16} strokeWidth={1.75} />
             </button>
@@ -1970,7 +1975,7 @@ const OwnedProjectBody = ({
                 className={`flex shrink-0 items-center gap-0.5 rounded-sm p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
                   editorMenuOpen
                     ? 'bg-bg-inset text-ink-muted'
-                    : 'text-ink-faint hover:bg-bg-inset hover:text-ink-muted active:bg-bg-inset active:text-ink-muted'
+                    : 'text-ink-faint hover:bg-plane hover:text-ink-muted active:bg-plane active:text-ink-muted'
                 }`}
               >
                 <SquareCode size={16} strokeWidth={1.75} />
@@ -2008,7 +2013,7 @@ const OwnedProjectBody = ({
                         <button
                           role="menuitem"
                           onClick={() => void openInEditorWith(ed)}
-                          className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                          className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
                         >
                           {ed.name}
                         </button>
@@ -2043,7 +2048,7 @@ const OwnedProjectBody = ({
                     <button
                       role="menuitem"
                       onClick={() => void pickEditor()}
-                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
                     >
                       {t('projectPanel.editorPickOther')}
                     </button>
@@ -2052,7 +2057,7 @@ const OwnedProjectBody = ({
                     <button
                       role="menuitem"
                       onClick={() => void saveDefaultEditor(null)}
-                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
+                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
                     >
                       {t('projectPanel.editorClearDefault')}
                     </button>
@@ -2079,7 +2084,7 @@ const OwnedProjectBody = ({
                   className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
                     branchMenuOpen
                       ? 'border-line bg-bg-inset text-ink'
-                      : 'border-line text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink'
+                      : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink'
                   }`}
                 >
                   <GitBranch size={11} strokeWidth={2} className="shrink-0" />
@@ -2169,7 +2174,7 @@ const OwnedProjectBody = ({
                         setBranchMenuOpen(false)
                         setBranchModalOpen(true)
                       }}
-                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                      className="block w-full px-3 py-1.5 text-left text-[13px] text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
                     >
                       {t('projectPanel.branchChangesTitle')}
                     </button>
@@ -2199,7 +2204,7 @@ const OwnedProjectBody = ({
                       ? t('projectPanel.cancelDescription')
                       : t('projectPanel.regenerateDescription')
                   }
-                  className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                  className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
                 >
                   {describing ? (
                     <Loader2 size={11} className="animate-spin" />
@@ -2227,7 +2232,7 @@ const OwnedProjectBody = ({
                       ? t('projectPanel.cancelDescription')
                       : t('projectPanel.generateDescription')
                   }
-                  className="rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                  className="rounded-sm border border-line px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
                 >
                   {describing
                     ? t('projectPanel.generating')
@@ -3114,7 +3119,7 @@ const ProjectSettingsDialog = ({
                     <button
                       type="button"
                       onClick={onBrowseMarket}
-                      className="mt-1.5 inline-flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="mt-1.5 inline-flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       <Store size={13} strokeWidth={2} className="shrink-0" />
                       {t('customTabs.marketBrowse')}
@@ -3146,7 +3151,7 @@ const ProjectSettingsDialog = ({
                       type="button"
                       onClick={cleanWorktrees}
                       disabled={wtCleaning}
-                      className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      className="mt-1.5 rounded-sm border border-line px-2.5 py-1.5 text-[11px] text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
                       {wtCleaning
                         ? t('projectPanel.settingsWorktreesCleaning')
@@ -3382,7 +3387,7 @@ const ViewTabs = ({
     // is spacing, and the active tab is an INVERSE PILL (ink surface, inverse
     // text — cream-on-ink in light, ink-on-cream in dark) instead of the old
     // red underline. Background+text change together (ui-interactive-states).
-    <div className="flex shrink-0 items-center gap-1 px-6 py-2">
+    <div className="flex shrink-0 items-center gap-1 px-7 pb-0 pt-[18px]">
       {tabs.map((m, i) => {
         const active = m.id === view
         const dimmed = dragFrom === i
@@ -3440,7 +3445,7 @@ const ViewTabs = ({
               'relative flex items-center gap-1.5 rounded-full px-3 py-1.5 label-cap transition-colors',
               active
                 ? 'bg-ink text-ink-inverse'
-                : 'text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-inset',
+                : 'text-ink-muted hover:bg-plane hover:text-ink active:bg-plane',
               dimmed ? 'opacity-40' : '',
               dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
             ].join(' ')}
@@ -3488,7 +3493,7 @@ const ViewTabs = ({
           onClick={onAddTab}
           title={t('customTabs.addTabHint')}
           aria-label={t('customTabs.addTab')}
-          className="mb-1 rounded-sm p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="mb-1 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           <Plus size={12} strokeWidth={2.25} />
         </button>
@@ -3529,7 +3534,7 @@ const ViewTabs = ({
                 void menuAction.run()
                 setTabMenu(null)
               }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-bg-inset active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-plane active:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
             >
               {menuAction.kind === 'detach' ? (
                 <Minus size={13} strokeWidth={2} className="shrink-0" />
@@ -3626,7 +3631,7 @@ const MoreMenu = ({
               setOpen(false)
               onProjectSettings()
             }}
-            className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
           >
             {t('projectPanel.projectSettingsMenu')}
           </button>
@@ -3636,7 +3641,7 @@ const MoreMenu = ({
               setOpen(false)
               onRemove()
             }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-bg-inset"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink transition-colors hover:bg-plane"
           >
             <Archive size={12} strokeWidth={1.75} />
             {t('projectPanel.removeFromCanvas')}
@@ -3671,9 +3676,12 @@ const TITLE_CSS = {
   fullscreen: {
     // min-w-0 + break-words: a long folder name wraps inside the header
     // column instead of widening it past the viewport.
-    text: 'mt-1 min-w-0 break-words font-display text-[26px] leading-[1.05] tracking-tightest text-ink',
-    style: { fontVariationSettings: "'opsz' 30, 'SOFT' 40" } as React.CSSProperties,
-    input: 'mt-1 font-display text-[26px] leading-[1.05] tracking-tightest',
+    // 案C `h1`: 30px / 600 / letter-spacing 0.005em / line-height 1.1. The old
+    // `tracking-tightest` (-0.04em) pulled the letters ~1.2px tighter at this
+    // size, which is the single most visible difference in the wordmark.
+    text: 'mt-1.5 min-w-0 break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[0.005em] text-ink',
+    style: { fontVariationSettings: "'opsz' 30, 'SOFT' 40, 'wght' 600" } as React.CSSProperties,
+    input: 'mt-1.5 font-display text-[30px] font-semibold leading-[1.1] tracking-[0.005em]',
   },
   sidebar: {
     text: 'font-display text-[24px] text-ink leading-[1.05] tracking-tightest truncate',

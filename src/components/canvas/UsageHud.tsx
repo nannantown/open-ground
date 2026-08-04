@@ -161,9 +161,12 @@ export const UsageHud = () => {
         onClick={() => setOpen((o) => !o)}
         title={tooltip}
         aria-label={t('misc.usage.heading')}
-        className="flex items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] tabular-nums tracking-[0.04em] select-none transition-colors hover:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        // 案C `.gauge`: a WELL of its own (the darkest face), 8px radius,
+        // 8/14px padding, mono. It used to be a transparent 3px-radius strip, so
+        // the instrument read as loose text rather than a gauge.
+        className="mx-2 flex items-center gap-2.5 whitespace-nowrap rounded-lg bg-bg-inset px-3.5 py-2 font-mono text-[11px] tabular-nums text-ink-muted select-none transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
-        {model && <span className="hidden md:inline text-ink-subtle">{model}</span>}
+        {model && <span className="hidden md:inline text-ink">{model}</span>}
         <div className="relative h-1.5 w-24 rounded-full bg-line-soft overflow-hidden">
           <div
             className={`absolute inset-y-0 left-0 ${fillTone} transition-[width] duration-500 ease-out`}
@@ -260,7 +263,7 @@ export const UsageHud = () => {
               type="button"
               onClick={refresh}
               disabled={refreshing}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-[2px] border border-line px-2 py-1 label-cap text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink hover:border-line-strong disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-[2px] border border-line px-2 py-1 label-cap text-ink-muted transition-colors hover:bg-plane hover:text-ink hover:border-line-strong disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} />
               {t('misc.usage.refresh')}

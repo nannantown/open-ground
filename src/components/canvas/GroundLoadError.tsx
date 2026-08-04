@@ -28,7 +28,7 @@ export const GroundLoadError = ({
         type="button"
         onClick={onRetry}
         disabled={retrying}
-        className="rounded-[3px] border border-line bg-bg-card px-4 py-2 text-[12px] text-ink-muted shadow-card transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-inset disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-bg-card disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        className="rounded-[3px] border border-line bg-bg-card px-4 py-2 text-[12px] text-ink-muted shadow-card transition-colors hover:bg-plane hover:text-ink active:bg-plane disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-bg-card disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
         {retrying ? t('misc.ground.retrying') : t('misc.ground.retry')}
       </button>

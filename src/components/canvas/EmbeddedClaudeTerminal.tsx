@@ -281,7 +281,7 @@ export const TerminalDock = ({
         type="button"
         onClick={() => update({ ...state, open: true })}
         title={t('projectPanel.dockOpen', { title: dockTitle })}
-        className="flex shrink-0 items-center border-l border-line bg-bg-card px-2.5 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
+        className="flex shrink-0 items-center border-l border-line bg-bg-card px-2.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
       >
         <TerminalSquare size={15} />
       </button>
@@ -299,7 +299,7 @@ export const TerminalDock = ({
                 key={id}
                 className={[
                   'flex shrink-0 items-center gap-1 rounded-[3px] px-1.5 py-1 text-[10px] transition-colors',
-                  on ? 'bg-accent/15 text-ink' : 'text-ink-faint hover:bg-bg-inset hover:text-ink',
+                  on ? 'bg-accent/15 text-ink' : 'text-ink-faint hover:bg-plane hover:text-ink',
                 ].join(' ')}
               >
                 <button
@@ -327,7 +327,7 @@ export const TerminalDock = ({
             type="button"
             onClick={addTab}
             title={t('projectPanel.dockAddTab')}
-            className="shrink-0 rounded-[3px] p-1 text-ink-faint transition-colors hover:bg-bg-inset hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="shrink-0 rounded-[3px] p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           >
             <Plus size={11} />
           </button>

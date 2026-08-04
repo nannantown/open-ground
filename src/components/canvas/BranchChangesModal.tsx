@@ -162,7 +162,7 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
           className={[
             'flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors',
             'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-            isOpen ? 'bg-bg-inset text-ink' : 'text-ink-muted hover:bg-bg-inset hover:text-ink',
+            isOpen ? 'bg-bg-inset text-ink' : 'text-ink-muted hover:bg-plane hover:text-ink',
           ].join(' ')}
         >
           {leading}

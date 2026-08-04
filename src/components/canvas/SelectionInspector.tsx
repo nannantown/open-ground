@@ -253,7 +253,7 @@ const AlignRow = ({
           onClick={() => onAlign(op)}
           className={[
             'flex h-7 min-w-0 flex-1 items-center justify-center rounded-[4px] text-ink-muted transition-colors',
-            'hover:bg-bg-inset hover:text-ink active:bg-bg-elevated',
+            'hover:bg-plane hover:text-ink active:bg-bg-elevated',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
             'disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-ink-muted',
           ].join(' ')}
@@ -516,7 +516,7 @@ const AutoLayoutProperties = ({
         }
         className={[
           'flex h-7 w-full items-center justify-center rounded-[4px] border border-line bg-bg text-[12px] text-ink-subtle',
-          'transition-colors hover:border-line-strong hover:bg-bg-elevated hover:text-ink active:bg-bg-inset',
+          'transition-colors hover:border-line-strong hover:bg-bg-elevated hover:text-ink active:bg-plane',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
         ].join(' ')}
       >
@@ -802,7 +802,7 @@ const AlignGrid = ({
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30',
                 active
                   ? 'bg-accent text-bg-card hover:bg-accent/90'
-                  : 'text-ink-faint hover:bg-bg-inset hover:text-ink',
+                  : 'text-ink-faint hover:bg-plane hover:text-ink',
               ].join(' ')}
             >
               {spaceBetween && active ? (

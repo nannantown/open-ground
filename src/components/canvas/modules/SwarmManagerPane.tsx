@@ -48,9 +48,15 @@ import { Activity, AlertTriangle, BarChart3, ChevronRight, ClipboardCheck, Cpu, 
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
+import type { MessageKey } from '@/i18n/messages'
 import type { SdkSessionStatus } from '@/lib/server/sdkEvents'
 import type { WorkerStatus } from './SwarmWorkerPane'
-import { commanderPresence, engineWorkerKey, type SwarmEngineState } from './useSwarmEngine'
+import {
+  commanderPresence,
+  engineWorkerKey,
+  type CommanderPresence,
+  type SwarmEngineState,
+} from './useSwarmEngine'
 
 /** The commander CONVERSATION (/manage) session, owned by SwarmModule (exactly
  *  like the supply session). null = not launched — the stage shows the launch
@@ -229,6 +235,29 @@ const KpiRow = ({
   </div>
 )
 
+/** One row per commander status. Keyed by {@link CommanderPresence} so a new
+ *  state cannot be added without a label — the compiler names the omission
+ *  instead of the pane silently falling back to "resting", which is how the
+ *  defect this replaces read for ten minutes at a time. */
+const PRESENCE_VIEW: Record<CommanderPresence, { label: MessageKey; hint: MessageKey }> = {
+  working: {
+    label: 'projectPanel.swarm.manager.presenceActive',
+    hint: 'projectPanel.swarm.manager.presenceActiveHint',
+  },
+  quiet: {
+    label: 'projectPanel.swarm.manager.presenceStandby',
+    hint: 'projectPanel.swarm.manager.presenceStandbyHint',
+  },
+  missing: {
+    label: 'projectPanel.swarm.manager.presenceMissing',
+    hint: 'projectPanel.swarm.manager.presenceMissingHint',
+  },
+  unknown: {
+    label: 'projectPanel.swarm.manager.presenceUnknown',
+    hint: 'projectPanel.swarm.manager.presenceUnknownHint',
+  },
+}
+
 export const SwarmManagerPane = ({
   session,
   sessionBusy,
@@ -330,7 +359,7 @@ export const SwarmManagerPane = ({
   // standby (fail-safe on absent/unreadable). The review count is the inspection
   // queue — how many finished jobs wait for the commander's check before landing.
   const manager = engine.manager
-  const presence = commanderPresence(manager)
+  const presence = commanderPresence(manager, engine.managerPresence)
   const reviewCount = engine.reviews.length
 
   // KPI roll-up (the analytics layer). "Empty" = the engine has neither logged a
@@ -650,27 +679,21 @@ export const SwarmManagerPane = ({
                 the why is a hover away). */}
             <span
               className={`h-[6px] w-[6px] shrink-0 rounded-full ${
-                presence === 'active' ? 'bg-azure' : 'bg-ink-faint'
+                presence === 'working' ? 'bg-azure' : 'bg-ink-faint'
               }`}
               aria-hidden
             />
             <span
               className="cursor-help text-[12px] font-medium text-ink"
-              title={
-                presence === 'active'
-                  ? t('projectPanel.swarm.manager.presenceActiveHint')
-                  : t('projectPanel.swarm.manager.presenceStandbyHint')
-              }
+              title={t(PRESENCE_VIEW[presence].hint)}
             >
-              {presence === 'active'
-                ? t('projectPanel.swarm.manager.presenceActive')
-                : t('projectPanel.swarm.manager.presenceStandby')}
+              {t(PRESENCE_VIEW[presence].label)}
             </span>
           </div>
           {/* The commander's own one-line note — its self-reported "doing now"
               (free-form, often Japanese). Shown only while fresh: a stale note
               describes a PAST episode and would read as a live claim. */}
-          {presence === 'active' && manager?.note && (
+          {presence === 'working' && manager?.note && (
             <p className="mt-1.5 truncate text-[11px] text-ink-muted" title={manager.note}>
               {manager.note}
             </p>
@@ -867,7 +890,7 @@ const ControlRow = ({
               'disabled:cursor-not-allowed disabled:opacity-40',
               active
                 ? 'border-accent bg-accent text-bg-card'
-                : 'border-line bg-transparent text-ink-muted enabled:hover:border-line-strong enabled:hover:bg-bg-inset enabled:hover:text-ink',
+                : 'border-line bg-transparent text-ink-muted enabled:hover:border-line-strong enabled:hover:bg-plane enabled:hover:text-ink',
             ].join(' ')}
           >
             {vLabel}

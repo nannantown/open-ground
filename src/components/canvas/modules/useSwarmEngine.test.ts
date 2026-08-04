@@ -192,16 +192,34 @@ describe('sanitizeEngineState — engine workers survive the poll', () => {
   })
 })
 
-describe('commanderPresence — the inspection line two-state rule (完了条件2)', () => {
+describe('commanderPresence — the heartbeat alone is NOT life (2026-08-04)', () => {
   const beat = { updatedAt: '2026-07-17T09:00:00.000Z', ageMs: 60_000, fresh: true }
 
-  it('active ONLY on a server-confirmed fresh heartbeat', () => {
-    expect(commanderPresence(beat)).toBe('active')
+  it('MEASURED DEFECT: a fresh heartbeat with no live desk is NOT "working"', () => {
+    // This is the whole fix. `fresh` only means the heartbeat FILE was written
+    // inside its ten-minute window, so a commander that beat once and then died
+    // (context overflow, an owner stop, a crash) kept the pane saying
+    // 「マネージャーが動いています / 1件あたり数分かかるのが普通です」 for the rest
+    // of that window. On an unattended run that sentence is an instruction not to
+    // look. Only the SERVER can see whether a desk is actually seated, so the
+    // server's verdict decides and the heartbeat no longer votes.
+    expect(commanderPresence(beat, 'missing')).toBe('missing')
   })
 
-  it('stale or absent degrades to standby — never an error (fail-safe)', () => {
-    expect(commanderPresence({ ...beat, fresh: false, ageMs: 30 * 60_000 })).toBe('standby')
-    expect(commanderPresence(null)).toBe('standby')
+  it('reports what the server says', () => {
+    expect(commanderPresence(beat, 'working')).toBe('working')
+    expect(commanderPresence(null, 'quiet')).toBe('quiet')
+    expect(commanderPresence(null, 'missing')).toBe('missing')
+  })
+
+  it('a server that did not say is UNKNOWN — never "missing"', () => {
+    // An older server, or a route that failed to answer. "We do not know" must
+    // not be rendered as 「マネージャーがいません」, which would send the owner to
+    // open a desk that is already there.
+    expect(commanderPresence(beat, undefined)).toBe('unknown')
+    expect(commanderPresence(null, undefined)).toBe('unknown')
+    // …and a value outside the union degrades the same way.
+    expect(commanderPresence(beat, 'bogus' as never)).toBe('unknown')
   })
 })
 
@@ -224,13 +242,13 @@ describe('sanitizeEngineState — log / anomalies / kpis / consumption survive t
     expect(state.log.map((l) => l.kind)).toEqual(['dispatch', 'crash', 'routine', undefined, undefined])
   })
 
-  it('sanitizes anomalies — keeps known kinds with a ref, drops malformed', () => {
+  it('sanitizes anomalies — drops malformed rows, keeps the rest', () => {
     const state = sanitizeEngineState({
       anomalies: [
         { kind: 'orphan-doing', ref: 't1', branch: 'swarm/a', taskTitle: 'Card A' },
         { kind: 'worker-stale', ref: 'swarm/b', branch: 'swarm/b', staleMinutes: 42 },
-        { kind: 'bogus', ref: 't2' }, // unknown kind → dropped
-        { kind: 'orphan-doing' }, // no ref → dropped
+        { kind: 'orphan-doing' }, // no ref → dropped (nothing to key or point at)
+        { kind: '   ', ref: 't3' }, // no kind → dropped
         'nope', // not an object → dropped
       ],
     })
@@ -238,6 +256,20 @@ describe('sanitizeEngineState — log / anomalies / kpis / consumption survive t
       { kind: 'orphan-doing', ref: 't1', branch: 'swarm/a', taskTitle: 'Card A' },
       { kind: 'worker-stale', ref: 'swarm/b', branch: 'swarm/b', staleMinutes: 42 },
     ])
+  })
+
+  it('KEEPS a kind this build does not know — the allowlist here dropped real ones TWICE', () => {
+    // ⚠ THIS TEST CHANGED SIDES (2026-08-04). It used to assert that an unknown
+    // kind is DROPPED. The hand-kept set that did the dropping was measured
+    // wrong twice on record: 'no-heartbeat' was emitted by the server and
+    // invisible in the UI until 2026-07-14, and 'recover-review' repeated it
+    // four days later. A registration list fails by SILENCE — the row simply
+    // never appears — while an unfamiliar row is something the owner can ask
+    // about. The pane renders an unlabelled kind with its raw name, and
+    // swarmOverseerFatalLabels.test.ts fails LOUDLY when a server kind has no
+    // label, which is where that gap belongs.
+    const state = sanitizeEngineState({ anomalies: [{ kind: 'brand-new-server-kind', ref: 't9' }] })
+    expect(state.anomalies).toEqual([{ kind: 'brand-new-server-kind', ref: 't9' }])
   })
 
   it('degrades to empty anomalies on a garbage response', () => {
@@ -397,12 +429,12 @@ describe('sanitizeFatalNotifications — the fatal-event source (条件3)', () =
     })
   })
 
-  it('drops non-swarm-fatal kinds, unknown events, and malformed rows', () => {
+  it('drops non-swarm-fatal kinds and malformed rows', () => {
     const out = sanitizeFatalNotifications(
       wrap([
         { id: 'a', kind: 'collab-invite', collabInvite: {} }, // wrong kind
-        { id: 'b', kind: 'swarm-fatal', swarmFatal: { event: 'made-up', detail: 'x' } }, // unknown event
         { id: 'c', kind: 'swarm-fatal' }, // no swarmFatal payload
+        { id: 'd', kind: 'swarm-fatal', swarmFatal: { event: '   ' } }, // no event name
         null,
         'nope',
       ]),
@@ -410,12 +442,63 @@ describe('sanitizeFatalNotifications — the fatal-event source (条件3)', () =
     expect(out).toEqual([])
   })
 
-  it('accepts every one of the five known events', () => {
-    const events = ['rework-exhausted', 'all-workers-down', 'exec-timeout', 'rollback', 'canary-failed']
+  it('KEEPS an event this build has no label for — dropping it is how a real alert vanished', () => {
+    // ⚠ THIS TEST CHANGED SIDES (2026-08-04). It used to assert that an
+    // unrecognised event is DROPPED. That allowlist held 7 names while the
+    // server's SwarmFatalEvent union has 11 and no compile-time link joins
+    // them, so four live alerts were discarded in silence — including
+    // `guard-unwired`, which means the deny veto could not be verified and NO
+    // worker can spawn at all. The pane then drew its "all quiet, nothing for
+    // you to do" state. A registration list fails by silence; this channel is
+    // the owner's only notice of a swarm failure, so the unknown row is kept
+    // (the pane labels it with its raw name). Malformed rows are still dropped
+    // — the test above keeps that half.
     const out = sanitizeFatalNotifications(
-      wrap(events.map((event, i) => ({ id: `n${i}`, kind: 'swarm-fatal', createdAt: i, swarmFatal: { event } }))),
+      wrap([{ id: 'b', kind: 'swarm-fatal', swarmFatal: { event: 'guard-unwired', detail: 'x' } }]),
     )
-    expect(out.map((n) => n.event).sort()).toEqual([...events].sort())
+    expect(out).toHaveLength(1)
+    expect(out[0].event).toBe('guard-unwired')
+  })
+
+  it('carries every display field through the coercion, for any event', () => {
+    // This used to be "accepts every one of the five known events", which after
+    // the allowlist removal was satisfied by a sanitizer that returned every row
+    // unconditionally — a green that proved nothing. What is still worth pinning
+    // is the FIELD MAPPING: each of these is a line the owner reads, and a typo
+    // in one key would blank it with no other symptom.
+    const out = sanitizeFatalNotifications(
+      wrap([
+        {
+          id: 'n1',
+          kind: 'swarm-fatal',
+          createdAt: 1_700_000_000_000,
+          handledAt: 1_700_000_050_000,
+          swarmFatal: {
+            event: 'guard-unwired',
+            detail: '拒否ベトを確認できませんでした',
+            branch: 'swarm/w3',
+            taskTitle: 'カードの題',
+            taskId: 'card-3',
+            logHint: 'engine log の dispatch 行',
+            projectPath: '/proj',
+          },
+        },
+      ]),
+    )
+    expect(out).toEqual([
+      {
+        id: 'n1',
+        event: 'guard-unwired',
+        detail: '拒否ベトを確認できませんでした',
+        branch: 'swarm/w3',
+        taskTitle: 'カードの題',
+        taskId: 'card-3',
+        logHint: 'engine log の dispatch 行',
+        projectPath: '/proj',
+        createdAt: 1_700_000_000_000,
+        handled: true,
+      },
+    ])
   })
 
   it('sorts newest-first and tolerates a non-array / non-object input', () => {

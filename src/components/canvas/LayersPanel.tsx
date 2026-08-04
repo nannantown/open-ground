@@ -512,7 +512,7 @@ export const LayersPanel = memo(({
                       ? 'bg-accent text-bg-card'
                       : isCanvasHover
                         ? 'bg-bg-inset text-ink'
-                        : 'text-ink hover:bg-bg-inset',
+                        : 'text-ink hover:bg-plane',
                     isDropInto ? 'ring-2 ring-inset ring-accent' : '',
                     isRenaming ? 'cursor-text' : 'cursor-pointer',
                   ].join(' ')}
@@ -710,7 +710,7 @@ const RowButton = ({
       forceVisible ? 'opacity-100' : '',
       selected
         ? 'text-bg-card/85 hover:bg-bg-card/20 hover:text-bg-card active:bg-bg-card/30'
-        : 'text-ink-faint hover:bg-bg-elevated hover:text-ink active:bg-bg-inset',
+        : 'text-ink-faint hover:bg-bg-elevated hover:text-ink active:bg-plane',
     ].join(' ')}
   >
     {children}

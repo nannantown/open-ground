@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
-import type { SwarmWorkerRecord } from '@/lib/types'
+import type { SwarmManagerPresence, SwarmWorkerRecord } from '@/lib/types'
 
 // ── Engine contract (mirrors the server's SwarmOrchestratorState) ─────────────
 // Kept as a LOCAL mirror (not imported from src/lib/types.ts) on purpose: the
@@ -135,9 +135,31 @@ export interface EngineManagerHeartbeat {
  *  unreadable one degrades to standby — never an error (fail-safe). Which desk
  *  (human-opened vs engine-woken) is not distinguished — the heartbeat file is
  *  shared, so this is "the last active commander desk" by design. */
-export type CommanderPresence = 'active' | 'standby'
-export const commanderPresence = (manager: EngineManagerHeartbeat | null): CommanderPresence =>
-  manager?.fresh ? 'active' : 'standby'
+export type CommanderPresence = 'working' | 'quiet' | 'missing' | 'unknown'
+
+/** ⚠ THE HEARTBEAT ALONE IS NOT LIFE (2026-08-04). This used to be
+ *  `manager?.fresh ? 'active' : 'standby'` — and `fresh` only means the
+ *  heartbeat FILE was written inside its ten-minute window. A commander that
+ *  beat once and then died (context overflow, an owner stop, a crash) kept the
+ *  pane saying 「マネージャーが動いています / 1件あたり数分かかるのが普通です」
+ *  for the rest of that window. On an unattended run that sentence is an
+ *  instruction not to look.
+ *
+ *  The server now decides, from a fact the client cannot see — whether a live
+ *  desk exists in either pool — and sends it as `managerPresence`. This reads
+ *  that, and falls back to the heartbeat ONLY to tell 'quiet' from 'unknown'.
+ *
+ *  'unknown' is a real state, not a default: an older server (or a route that
+ *  did not answer) says nothing, and "we do not know" must never be rendered as
+ *  「卓がありません」. */
+export const commanderPresence = (
+  manager: EngineManagerHeartbeat | null,
+  serverPresence?: SwarmManagerPresence,
+): CommanderPresence => {
+  if (serverPresence === 'working' || serverPresence === 'quiet' || serverPresence === 'missing')
+    return serverPresence
+  return 'unknown'
+}
 
 /** A state inconsistency the engine detected (mirrors the server's
  *  OrchestratorAnomaly) — surfaced as a warning so a drift the autonomy loop
@@ -151,6 +173,10 @@ export type EngineAnomalyKind =
   | 'rework-exhausted'
   | 'review-panel-failed'
   | 'high-risk-hold'
+  // Mirrors of the two LEVEL-TRIGGERED fatals (2026-08-04) — see the server's
+  // OrchestratorAnomalyKind for why they exist as anomalies at all.
+  | 'all-workers-down'
+  | 'manager-unrevivable'
 
 export interface EngineAnomaly {
   kind: EngineAnomalyKind
@@ -270,6 +296,10 @@ export interface SwarmEngineState {
    *  response that omits it — the GET poll refills it within seconds). The UI
    *  degrades to the standby wording on null — never an error (fail-safe). */
   manager: EngineManagerHeartbeat | null
+  /** The SERVER's display verdict about the commander desk (missing/quiet/working).
+   *  Absent ⇒ the server did not say; the pane must read that as "unknown", never
+   *  as "no desk". See commanderPresence. */
+  managerPresence?: SwarmManagerPresence
   /** The LIVE commander desk handle from the server's both-pools read, or null
    *  (none live) / undefined (old server — field absent). What the tab's
    *  reconcile (deskReconcile.ts) adopts so an engine-woken desk attaches
@@ -317,14 +347,20 @@ const KNOWN_REVIEW_STATUS: ReadonlySet<string> = new Set(['ff', 'rebase', 'confl
 const KNOWN_LOG_KINDS: ReadonlySet<string> = new Set([
   'routine', 'dispatch', 'promote', 'integrate', 'conflict', 'cleanup', 'crash',
 ])
-// NOTE: 'no-heartbeat' was missing here until 2026-07-14 — the server emitted it
-// but this sanitize filter silently dropped it, so the overseer pane (whose label
-// map always knew the kind) never showed it. Keep this set in lockstep with
-// EngineAnomalyKind above.
-const KNOWN_ANOMALY_KINDS: ReadonlySet<string> = new Set([
-  'orphan-doing', 'worktree-missing', 'worker-stale', 'no-heartbeat', 'move-stuck',
-  'rework-exhausted', 'review-panel-failed', 'high-risk-hold',
-])
+// THERE IS NO ANOMALY ALLOWLIST ANY MORE (2026-08-04). There was, and it dropped
+// a kind the server emitted TWICE: 'no-heartbeat' was invisible from whenever it
+// shipped until 2026-07-14, and the same lockstep broke again for
+// 'recover-review' four days later. A hand-kept registration list fails by
+// SILENCE — the row simply never appears — which CLAUDE.md names as the
+// direction to convert away. The identical hole was found in the fatal-event
+// list the same night (four of eleven events discarded, including the one that
+// means no worker can start at all).
+//
+// So any anomaly with a non-empty kind is now KEPT, and the pane renders an
+// unlabelled kind with its raw name. Label coverage is checked by
+// swarmOverseerFatalLabels.test.ts, which parses the server's union out of
+// types.ts and fails LOUDLY on a missing entry.
+const isRenderableAnomalyKind = (kind: string): boolean => kind.trim().length > 0
 // Same lockstep rule as KNOWN_ANOMALY_KINDS above, and it was broken the same way
 // on 2026-07-18: 'recover-review' was added to the type, to MOVE_INTENT_LABEL and
 // to both locales, but NOT here — so this filter stripped it, `a.intent` went
@@ -490,7 +526,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
         .filter(
           (a) =>
             typeof a.kind === 'string' &&
-            KNOWN_ANOMALY_KINDS.has(a.kind) &&
+            isRenderableAnomalyKind(a.kind) &&
             typeof a.ref === 'string' &&
             a.ref.length > 0,
         )
@@ -552,6 +588,14 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     }
   }
   const managerDesk = parseDesk(o.managerDesk)
+  // The server's display verdict. An unknown / absent value stays UNDEFINED, which
+  // the pane reads as "we don't know" — never as "no desk". Narrowed against the
+  // shared union so a typo on either side degrades to unknown rather than to a
+  // confident wrong sentence.
+  const managerPresence: SwarmManagerPresence | undefined =
+    o.managerPresence === 'missing' || o.managerPresence === 'quiet' || o.managerPresence === 'working'
+      ? o.managerPresence
+      : undefined
   const supplyDeskRaw = parseDesk(o.supplyDesk)
   const supplyDesk =
     supplyDeskRaw && supplyDeskRaw.runtime === 'pty'
@@ -561,6 +605,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
         : null
 
   return {
+    ...(managerPresence !== undefined ? { managerPresence } : {}),
     running: o.running === true,
     // Strict boolean like `running`: a forged / absent value folds to FALSE — the
     // fail-safe direction (no spurious "stopped by hand" badge).
@@ -594,6 +639,11 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
 // the engine state at all. Mirrors the server's SwarmFatalEvent /
 // SwarmFatalNotification (a LOCAL mirror keeps this front-end decoupled, like the
 // engine-state mirror above).
+/** The events this client can NAME. `string` is deliberately part of the union:
+ *  the server's list is longer and grows independently, and dropping the rest
+ *  meant losing the alerts that matter most (see isRenderableFatalEvent). The
+ *  named members keep autocomplete and the label map exhaustive-checkable; the
+ *  `string` arm is what stops an unknown event from being discarded. */
 export type SwarmFatalEventKind =
   | 'rework-exhausted'
   | 'all-workers-down'
@@ -602,6 +652,7 @@ export type SwarmFatalEventKind =
   | 'canary-failed'
   | 'review-panel-failed'
   | 'high-risk-hold'
+  | (string & {})
 
 export interface SwarmFatalView {
   /** Stable React key (the persisted notification id). */
@@ -621,12 +672,29 @@ export interface SwarmFatalView {
   projectPath?: string
   /** Epoch ms — newest-first ordering + the relative-time token. */
   createdAt?: number
+  /** The owner marked this row handled (server-side `handledAt`), so the
+   *  needs-attention feed hides it. NOT the bell's read-state: opening the bell
+   *  marks everything SEEN, which must not empty a work list. */
+  handled?: boolean
 }
 
-const KNOWN_FATAL_EVENTS: ReadonlySet<string> = new Set([
-  'rework-exhausted', 'all-workers-down', 'exec-timeout', 'rollback', 'canary-failed',
-  'review-panel-failed', 'high-risk-hold',
-])
+/** ⚠ THE ALLOWLIST USED TO DROP ROWS, AND THAT IS THE WRONG DIRECTION.
+ *
+ *  This is the SAFETY channel — the one place a swarm failure reaches the owner.
+ *  It filtered on a hand-written list of 7 events while the server's
+ *  SwarmFatalEvent union has 11, with no compile-time link between them, so four
+ *  real alerts were discarded in silence: `guard-unwired` (the deterministic
+ *  deny veto could not be verified — every worker spawn is now refused),
+ *  `manager-unrevivable`, `engine-resume-suppressed` (autonomy did not come back
+ *  after a restart) and `data-integrity` (home data lost entries). With none of
+ *  them rendered the pane showed its "all quiet — nothing for you to do" state
+ *  while the engine could not start a single worker.
+ *
+ *  A registration list fails by SILENCE, which CLAUDE.md names as the direction
+ *  to avoid. So an unrecognised event is now KEPT and rendered with its raw
+ *  event string as the label: a row the owner does not recognise is a question
+ *  they can ask, where a missing row is a failure they never learn about. */
+const isRenderableFatalEvent = (event: string): boolean => event.trim().length > 0
 
 // The notifications file is untrusted on disk (hand-editable), so coerce every
 // field and drop malformed rows — the SAME defensive discipline as
@@ -645,7 +713,7 @@ export const sanitizeFatalNotifications = (raw: unknown): SwarmFatalView[] => {
     const f = o.swarmFatal
     if (!f || typeof f !== 'object') continue
     const sf = f as Record<string, unknown>
-    if (typeof sf.event !== 'string' || !KNOWN_FATAL_EVENTS.has(sf.event)) continue
+    if (typeof sf.event !== 'string' || !isRenderableFatalEvent(sf.event)) continue
     const createdAt =
       typeof o.createdAt === 'number' && Number.isFinite(o.createdAt) ? o.createdAt : undefined
     out.push({
@@ -658,6 +726,9 @@ export const sanitizeFatalNotifications = (raw: unknown): SwarmFatalView[] => {
       ...(typeof sf.logHint === 'string' && sf.logHint ? { logHint: sf.logHint } : {}),
       ...(typeof sf.projectPath === 'string' && sf.projectPath ? { projectPath: sf.projectPath } : {}),
       ...(createdAt !== undefined ? { createdAt } : {}),
+      // Marked handled by the owner from the needs-attention feed (server-side
+      // `handledAt`, NOT the bell's read-state — see markSwarmNotificationHandled).
+      ...(typeof o.handledAt === 'number' && Number.isFinite(o.handledAt) ? { handled: true } : {}),
     })
   }
   // Newest-first (the route already sorts, but don't trust on-disk order).
@@ -890,6 +961,14 @@ export interface UseSwarmEngine {
    *  safety valve's authoritative source, polled on the same cadence as `engine`.
    *  Empty until the owner-only route answers (a 403 / 404 / throw → empty). */
   fatalNotifications: SwarmFatalView[]
+  /** Ids dismissed from the needs-attention feed in THIS session — the optimistic
+   *  half, so a clicked row vanishes immediately rather than on the next lap. The
+   *  durable record is `SwarmFatalView.handled` (server-side `handledAt`). */
+  handledFatalIds: ReadonlySet<string>
+  /** Mark ONE fatal notification handled: optimistic locally, then persisted via
+   *  POST /api/swarm/notifications/handled. Deliberately NOT the bell's
+   *  read-state — "seen the bell" must not empty this work list. */
+  markFatalHandled: (id: string) => void
   /** The SERVER-TRUTH worker list (GET /api/swarm/workers, polled on the same
    *  cadence) — the single source the Swarm worker tab renders, so a worker
    *  started ANY way (engine dispatch, the Board 実行 button, or a direct
@@ -947,6 +1026,11 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // Persisted fatal-event notifications for THIS project (条件3), polled alongside
   // the engine state in the same poll loop below (one interval, two endpoints).
   const [fatalNotifications, setFatalNotifications] = useState<SwarmFatalView[]>([])
+  // Ids dismissed from the needs-attention feed during THIS session, held only so
+  // the row disappears under the click instead of on the next 5s lap. The durable
+  // record is the notification's own server-side `handledAt` (sanitized into
+  // SwarmFatalView.handled), so nothing here needs to survive a reload.
+  const [handledFatalIds, setHandledFatalIds] = useState<ReadonlySet<string>>(() => new Set())
   // The server-truth worker list, polled alongside the engine state (one
   // interval, three endpoints) so the worker tab never needs a second poll.
   const [realWorkers, setRealWorkers] = useState<SwarmWorkerRecord[]>([])
@@ -982,6 +1066,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   useEffect(() => {
     setEngine(DEFAULT_ENGINE)
     setFatalNotifications([])
+    setHandledFatalIds(new Set())
     setRealWorkers([])
     setAvailable(false)
     setBusy(false)
@@ -1337,9 +1422,32 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     [busy, projectPath, t],
   )
 
+  // Mark one fatal notification handled. Optimistic first (the row disappears
+  // under the click, no waiting on a round-trip), then persisted server-side as
+  // `handledAt` on the notification itself — NOT the bell's read-state, which
+  // means "seen" and is written wholesale when the bell opens. A lost POST only
+  // means the row returns after a reload: an alert can be re-dismissed, never
+  // silently destroyed.
+  const markFatalHandled = useCallback((id: string) => {
+    if (!id) return
+    setHandledFatalIds((prev) => {
+      if (prev.has(id)) return prev
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+    void fetch('/api/swarm/notifications/handled', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).catch(() => {})
+  }, [])
+
   return {
     engine,
     fatalNotifications,
+    handledFatalIds,
+    markFatalHandled,
     realWorkers,
     available,
     busy,

@@ -80,7 +80,7 @@ export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
               tool === t.id
                 ? 'bg-accent text-bg-card'
-                : 'text-ink-muted hover:bg-bg-inset hover:text-ink active:bg-bg-elevated',
+                : 'text-ink-muted hover:bg-plane hover:text-ink active:bg-bg-elevated',
             ].join(' ')}
           >
             {t.icon}
@@ -99,7 +99,7 @@ export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }
               onClick={onGenerate}
               title={tr('canvas.generate.button')}
               className={[
-                'flex h-9 w-9 items-center justify-center text-ink-muted transition-colors hover:bg-bg-inset hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                'flex h-9 w-9 items-center justify-center text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
                 buttonShape,
               ].join(' ')}
             >

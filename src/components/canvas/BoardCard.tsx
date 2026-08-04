@@ -13,23 +13,28 @@ import type { MessageKey } from '@/i18n/messages'
 // Display-only (the strip carries no interactions) — these are status colours,
 // so contrast on the paper card (azure/ochre/moss/ink-faint all clear AA) is the
 // only CLAUDE.md rule that bites here.
+// ⚠ THE COLOUR VOCABULARY IS THREE (案C: 「色は状態だけ — 稼働=苔・待ち=黄土・高=朱」).
+// Azure is not in it. Running used to be azure here, which read as a FOURTH
+// state colour on the one screen the design language was drawn for.
 const WORKER_BAND: Record<WorkerActivity, string> = {
-  working: 'bg-azure',
+  working: 'bg-moss',
   waiting: 'bg-ochre',
   starting: 'bg-ink-faint',
   done: 'bg-moss',
 }
 const WORKER_DOT: Record<WorkerActivity, string> = {
-  working: 'bg-azure',
-  waiting: 'bg-ochre',
+  // The lamps carry their glow (shadow-lamp-*) — a dot without it is a bullet.
+  working: 'bg-moss shadow-lamp-moss',
+  waiting: 'bg-ochre shadow-lamp-ochre',
   starting: 'bg-ink-faint',
   done: 'bg-moss',
 }
 const WORKER_LABEL_CLS: Record<WorkerActivity, string> = {
-  working: 'text-azure',
+  // moss-TEXT, not moss: the lamp's fill is too dark to read as a label.
+  working: 'text-moss-text',
   waiting: 'text-[var(--beacon-waiting)]',
   starting: 'text-ink-faint',
-  done: 'text-moss',
+  done: 'text-moss-text',
 }
 // Localized via the SAME keys the Swarm Manager monitor + worker pane use, so a
 // JA owner sees 稼働中 / 待機中 / 起動中 / 完了 — not a board-only English island.
@@ -192,18 +197,18 @@ const BoardCardInner = ({
       className={[
         // 計器盤 language: the resting card is a borderless raised surface
         // (bg-card + shadow on the inset well); hover deepens the shadow.
-        // The border stays in the layout as TRANSPARENT so the accent border
-        // of the editing/selected states appears without a layout shift.
-        'group relative rounded-[4px] border p-2.5 shadow-card transition-[box-shadow,border-color,background-color]',
+        // 罫線なし・面の明度差のみ (案C). The selected/editing states use an
+        // INSET ring rather than a border: a ring does not occupy layout, so the
+        // card keeps the mock's 12/13px padding in every state instead of
+        // reserving a transparent 1px for a border it usually does not draw.
+        'group relative rounded-[10px] px-[13px] py-3 transition-[background-color,transform,box-shadow]',
         isEditing
-          ? 'cursor-default border-accent'
-          : 'cursor-grab hover:shadow-card-hover active:cursor-grabbing',
-        // The card whose detail drawer is open reads as selected: accent border
+          ? 'cursor-default ring-1 ring-inset ring-accent'
+          : 'cursor-grab hover:bg-bg-card-hover active:scale-[0.99] active:cursor-grabbing',
+        // The card whose detail drawer is open reads as selected: accent ring
         // + a light accent wash.
-        isSelected && !isEditing
-          ? 'border-accent bg-accent/15'
-          : 'border-transparent bg-bg-card',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg-inset',
+        isSelected && !isEditing ? 'bg-accent/15 ring-1 ring-inset ring-accent' : 'bg-bg-card',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink',
         isDragHidden ? 'hidden' : '',
       ].join(' ')}
     >
@@ -229,7 +234,7 @@ const BoardCardInner = ({
           <div
             className={[
               'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-              claudeStatus === 'working' ? 'bg-azure' : 'bg-ochre',
+              claudeStatus === 'working' ? 'bg-moss' : 'bg-ochre',
             ].join(' ')}
           >
             {claudeStatus === 'working' && (
@@ -262,7 +267,7 @@ const BoardCardInner = ({
             'absolute right-1 top-1 rounded-sm p-1 text-ink-faint transition-[opacity,color,background-color] focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
             projectMissing
               ? 'cursor-not-allowed opacity-0 group-hover:opacity-40'
-              : 'opacity-0 hover:bg-bg-inset hover:text-ink active:bg-bg-inset active:text-ink group-hover:opacity-100',
+              : 'opacity-0 hover:bg-plane hover:text-ink active:bg-plane active:text-ink group-hover:opacity-100',
           ].join(' ')}
         >
           <Copy size={12} />
@@ -297,17 +302,17 @@ const BoardCardInner = ({
               className="w-full resize-none rounded-[3px] border border-line bg-bg px-2 py-1.5 text-[12.5px] leading-snug text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
             />
           ) : (
-            <p className="text-[12.5px] leading-snug text-ink line-clamp-2">
+            <p className="text-[13px] leading-[1.55] text-ink line-clamp-3 [overflow-wrap:anywhere]">
               {/* Drawer-claude stamp — suppressed when a swarm worker owns the
                   card (its strip below is the authoritative status), so the two
                   never show conflicting states on one card. */}
               {!hasWorker && claudeStatus === 'working' && (
                 <span
                   title={t('board.card.sessionWorking')}
-                  className="label-cap mr-1.5 inline-flex items-center gap-1 align-middle text-azure"
+                  className="mr-1.5 inline-flex items-center gap-1 align-middle text-[11px] tracking-[0.1em] text-moss-text"
                 >
-                  <span className="run-pulse h-[5px] w-[5px] rounded-full bg-azure" />
-                  Running
+                  <span className="run-pulse h-1.5 w-1.5 rounded-full bg-moss shadow-lamp-moss" />
+                  {t('board.card.sessionWorkingLabel')}
                 </span>
               )}
               {!hasWorker && claudeStatus === 'waiting' && (
@@ -315,17 +320,17 @@ const BoardCardInner = ({
                 // (same register as the Ground card's Waiting stamp).
                 <span
                   title={t('board.card.sessionWaiting')}
-                  className="label-cap mr-1.5 inline-flex items-center gap-1 align-middle text-[var(--beacon-waiting)]"
+                  className="mr-1.5 inline-flex items-center gap-1 align-middle text-[11px] tracking-[0.1em] text-[var(--beacon-waiting)]"
                 >
-                  <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
-                  Waiting
+                  <span className="h-1.5 w-1.5 rounded-full bg-ochre shadow-lamp-ochre" />
+                  {t('board.card.sessionWaitingLabel')}
                 </span>
               )}
               {task.title || t('board.card.untitledParen')}
             </p>
           )}
           {!isEditing && task.notes?.trim() && (
-            <p className="mt-1 text-[11px] leading-snug line-clamp-2 text-ink-muted">
+            <p className="mt-[7px] text-[12px] leading-[1.6] line-clamp-2 text-ink-muted [overflow-wrap:anywhere]">
               {task.notes.trim()}
             </p>
           )}
@@ -336,22 +341,29 @@ const BoardCardInner = ({
               breathes only while working so "your worker is busy" reads at a
               glance without a second moving element competing with the band. */}
           {!isEditing && hasWorker && (
-            <div className="mt-1 flex min-w-0 items-center gap-1.5">
+            <div className="mt-[9px] flex min-w-0 items-center gap-1.5">
               <span
                 aria-hidden
                 className={[
-                  'h-[5px] w-[5px] shrink-0 rounded-full',
+                  // 6px with a glow — the mock's instrument lamp. A dot without
+                  // the glow reads as a bullet, not a lamp.
+                  'h-1.5 w-1.5 shrink-0 rounded-full',
                   WORKER_DOT[workerActivity],
                   workerActivity === 'working' ? 'run-pulse' : '',
                 ].join(' ')}
               />
               <span
-                className={['label-cap shrink-0', WORKER_LABEL_CLS[workerActivity]].join(' ')}
+                className={[
+                  // NOT label-cap: the mock's state line is 11px / .1em and is
+                  // never uppercased (it carries Japanese).
+                  'shrink-0 text-[11px] tracking-[0.1em]',
+                  WORKER_LABEL_CLS[workerActivity],
+                ].join(' ')}
               >
                 {t(WORKER_LABEL_KEY[workerActivity])}
               </span>
               <span
-                className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted"
+                className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-muted"
                 title={
                   workerNote
                     ? `${workerBranch} — ${workerNote}`
@@ -446,7 +458,7 @@ const BoardCardInner = ({
                   if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
                 }}
                 title={t('board.card.mergedToDoneTitle')}
-                className="min-w-0 truncate rounded-sm px-1 py-0.5 text-[10px] text-ink-muted transition-colors hover:bg-bg-inset hover:text-moss active:bg-bg-inset active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                className="min-w-0 truncate rounded-sm px-1 py-0.5 text-[10px] text-ink-muted transition-colors hover:bg-plane hover:text-moss active:bg-plane active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
               >
                 {t('board.card.mergedToDone')}
               </button>
@@ -481,7 +493,7 @@ const BoardCardInner = ({
                         title={t('board.card.priorityTitle', {
                           label: t(PRIORITY_META[task.priority].labelKey),
                         })}
-                        className={`shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium ${PRIORITY_META[task.priority].chipClass}`}
+                        className={`shrink-0 rounded-full px-[9px] py-0.5 text-[11px] font-semibold ${PRIORITY_META[task.priority].chipClass}`}
                       >
                         {t(PRIORITY_META[task.priority].labelKey)}
                       </span>

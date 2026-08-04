@@ -184,7 +184,7 @@ export const ExecutionModeMenu = () => {
           'disabled:cursor-not-allowed disabled:opacity-40',
           open
             ? 'border-line-strong bg-bg-inset text-ink'
-            : 'border-line bg-transparent text-ink-muted enabled:hover:border-line-strong enabled:hover:bg-bg-inset enabled:hover:text-ink',
+            : 'border-line bg-transparent text-ink-muted enabled:hover:border-line-strong enabled:hover:bg-plane enabled:hover:text-ink',
         ].join(' ')}
       >
         <SlidersHorizontal size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
@@ -225,7 +225,7 @@ export const ExecutionModeMenu = () => {
                   'flex w-full items-start gap-2 px-3 py-2 text-left transition-colors duration-150',
                   'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
                   'disabled:cursor-not-allowed disabled:opacity-50',
-                  active ? 'bg-bg-inset' : 'enabled:hover:bg-bg-inset',
+                  active ? 'bg-bg-inset' : 'enabled:hover:bg-plane',
                 ].join(' ')}
               >
                 <Check
@@ -274,7 +274,7 @@ export const ExecutionModeMenu = () => {
                     'flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors duration-150',
                     'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
                     'disabled:cursor-not-allowed disabled:opacity-50',
-                    'enabled:hover:bg-bg-inset',
+                    'enabled:hover:bg-plane',
                   ].join(' ')}
                 >
                   {/* A real checkbox shape (not the radio check) so the two groups
