@@ -24,6 +24,7 @@ import { applyAutoLayout, addAutoLayout, insertIntoLayoutAtPoint } from '@/lib/c
 import { pickStyle, applyStyle, type CopiedStyle } from '@/lib/canvasStyleClipboard'
 import { elementBounds } from '@/lib/canvasBounds'
 import { jobLostToRestart, readBootSignature } from '@/lib/canvasAiRestart'
+import { canvasShouldHandleShortcut } from '@/lib/canvasKeyTargets'
 import type {
   CanvasAiActiveResponse,
   CanvasAiJobState,
@@ -961,11 +962,24 @@ export const CanvasWorkspace = ({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return // another surface claimed it (a modal, ⌘K…)
-      const ae = document.activeElement
-      const inField =
-        !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')
       if (!(e.metaKey || e.ctrlKey)) return
-      if (inField) return
+      const ae = document.activeElement as HTMLElement | null
+      // "Does THIS field want THIS key?" — not "am I in a field?". See
+      // src/lib/canvasKeyTargets.ts for the measurement that forced the change.
+      // ⚠ Do NOT blur the field first. The obvious-looking `ae.blur()` here made
+      // the bug WORSE while looking like the fix simply failing: blurring a
+      // numeric inspector box COMMITS its value, which pushes a fresh history
+      // entry, and the undo that follows then unwinds that commit instead of the
+      // edit the user meant — same visible outcome as doing nothing. Leave focus
+      // alone; the field re-reads its value once the undo lands.
+      if (
+        !canvasShouldHandleShortcut(e.key.toLowerCase(), {
+          tagName: ae?.tagName,
+          type: (ae as HTMLInputElement | null)?.type,
+          isContentEditable: ae?.isContentEditable,
+        })
+      )
+        return
       // ⌥⌘C / ⌥⌘V — copy / paste STYLE only (Figma). Matched on e.code:
       // Option remaps e.key ('ç' / '√'). Copy reads the single selected
       // element; paste stamps every selected element through the type-aware
