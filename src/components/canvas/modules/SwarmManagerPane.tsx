@@ -44,12 +44,13 @@
 // extra gating is needed here; the server /api/swarm/* routes are owner-only too.
 
 import { useCallback, useRef, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, ChevronRight, ClipboardCheck, Cpu, Gauge, MessageSquare, Power, Send } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, ChevronRight, ClipboardCheck, Cpu, Gauge, MessageSquare, Power, Send, TrendingUp } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
 import type { SdkSessionStatus } from '@/lib/server/sdkEvents'
+import type { SwarmLandedKpi } from '@/lib/types'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import {
   commanderPresence,
@@ -127,6 +128,12 @@ interface Props {
   runtimeDials: { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number } | null
   /** Persist one dial (POST /api/settings, merged server-side by SwarmModule). */
   onToggleRuntime: (which: 'worker' | 'manager', next: boolean) => void
+  /** The durable 「外向き着地/週」 KPI — GET /api/swarm/kpi/landed, fetched by
+   *  SwarmModule's useLandedKpi and threaded down (this pane never fetches).
+   *  Aggregated across ALL registered projects, not just this one. null while
+   *  loading / server silent → the section doesn't render. Optional so every
+   *  existing caller and test keeps compiling. */
+  landed?: SwarmLandedKpi | null
 }
 
 // Commander-session status dot — the SAME beacon vocabulary as the supply tile
@@ -235,6 +242,99 @@ const KpiRow = ({
   </div>
 )
 
+// ── Landed / week (the durable outward-KPI chart) ────────────────────────────
+// Weekly stacked bars over ALL registered projects: 外部 (other projects, moss —
+// the metric) sits ON the baseline so its magnitude reads positionally; OG 自身
+// (self, the line token — context) stacks above. NOT a categorical palette:
+// this is emphasis-vs-context encoding inside the app's muted 3-color language
+// (the dataviz validator scores moss+line ΔE 32/38 — strongly separable — but
+// flags the low chroma the 計器盤 idiom chooses on purpose). Identity therefore
+// never rides on color alone: fixed stacking order + the legend + per-week
+// tooltips + the visible window totals carry it (which also discharges the
+// low-contrast relief obligation for the pale context series).
+const LANDED_BAR_W = 12
+const LANDED_BAR_GAP = 2
+const LANDED_PLOT_H = 44
+
+const LandedChart = ({ data }: { data: SwarmLandedKpi }) => {
+  const { t } = useT()
+  const weeks = data.weeks
+  const max = Math.max(1, ...weeks.map((w) => w.self + w.external))
+  const width = weeks.length * (LANDED_BAR_W + LANDED_BAR_GAP) - LANDED_BAR_GAP
+  const height = LANDED_PLOT_H + 1 // + the 1px baseline
+  const sumExternal = weeks.reduce((n, w) => n + w.external, 0)
+  const sumSelf = weeks.reduce((n, w) => n + w.self, 0)
+  const monthDay = (iso: string): string => {
+    const [, m, d] = iso.split('-')
+    return m && d ? `${Number(m)}/${Number(d)}` : iso
+  }
+  return (
+    <div>
+      <svg
+        width={width}
+        height={height}
+        role="img"
+        aria-label={`${t('projectPanel.swarm.manager.landedExternal')} ${sumExternal} · ${t('projectPanel.swarm.manager.landedSelf')} ${sumSelf}`}
+        className="block"
+      >
+        {weeks.map((w, i) => {
+          const x = i * (LANDED_BAR_W + LANDED_BAR_GAP)
+          const hExt = w.external > 0 ? Math.max(2, Math.round((LANDED_PLOT_H * w.external) / max)) : 0
+          const hSelf = w.self > 0 ? Math.max(2, Math.round((LANDED_PLOT_H * w.self) / max)) : 0
+          // 2px surface gap between stacked segments (mark spec) — only when both exist.
+          const gap = hExt > 0 && hSelf > 0 ? 2 : 0
+          const yExt = LANDED_PLOT_H - hExt
+          const ySelf = yExt - gap - hSelf
+          return (
+            <g key={w.weekStart}>
+              <title>
+                {t('projectPanel.swarm.manager.landedWeekTip', {
+                  week: w.weekStart,
+                  external: w.external,
+                  self: w.self,
+                })}
+              </title>
+              {/* An invisible full-height hit target so the tooltip works on empty weeks too. */}
+              <rect x={x} y={0} width={LANDED_BAR_W} height={LANDED_PLOT_H} fill="transparent" />
+              {hExt > 0 && (
+                <rect x={x} y={yExt} width={LANDED_BAR_W} height={hExt} rx={1} fill="rgb(var(--og-moss))" />
+              )}
+              {hSelf > 0 && (
+                <rect x={x} y={ySelf} width={LANDED_BAR_W} height={hSelf} rx={1} fill="rgb(var(--og-line))" />
+              )}
+            </g>
+          )
+        })}
+        {/* Baseline — recessive, under the bars. */}
+        <rect x={0} y={LANDED_PLOT_H} width={width} height={1} fill="rgb(var(--og-line-soft))" />
+      </svg>
+      {/* First / last week-start under the axis — the only two labels the width affords. */}
+      <div className="flex justify-between text-micro tabular-nums text-ink-faint" style={{ width }}>
+        <span>{weeks.length > 0 ? monthDay(weeks[0].weekStart) : ''}</span>
+        <span>{weeks.length > 0 ? monthDay(weeks[weeks.length - 1].weekStart) : ''}</span>
+      </div>
+      {/* Legend + window totals (visible values — the text carries what the pale
+          context color can't; text wears ink tokens, never the series color). */}
+      <div className="mt-1.5 flex flex-col gap-0.5">
+        <div className="flex items-center gap-1.5 text-micro text-ink-muted">
+          <span className="h-[8px] w-[8px] shrink-0 rounded-[2px]" style={{ background: 'rgb(var(--og-moss))' }} aria-hidden />
+          <span className="min-w-0 flex-1 truncate">{t('projectPanel.swarm.manager.landedExternal')}</span>
+          <span className="shrink-0 font-medium tabular-nums text-ink">{sumExternal}</span>
+        </div>
+        <div className="flex items-center gap-1.5 text-micro text-ink-muted">
+          <span
+            className="h-[8px] w-[8px] shrink-0 rounded-[2px] border border-line"
+            style={{ background: 'rgb(var(--og-line))' }}
+            aria-hidden
+          />
+          <span className="min-w-0 flex-1 truncate">{t('projectPanel.swarm.manager.landedSelf')}</span>
+          <span className="shrink-0 font-medium tabular-nums text-ink">{sumSelf}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** One row per commander status. Keyed by {@link CommanderPresence} so a new
  *  state cannot be added without a label — the compiler names the omission
  *  instead of the pane silently falling back to "resting", which is how the
@@ -273,6 +373,7 @@ export const SwarmManagerPane = ({
   sandboxWarning,
   runtimeDials,
   onToggleRuntime,
+  landed = null,
   projectPath,
 }: Props) => {
   const { t } = useT()
@@ -770,6 +871,36 @@ export const SwarmManagerPane = ({
             </div>
           )}
         </div>
+        )}
+
+        {/* ── Landed / week (the durable outward-KPI) ──────────────────────────
+            THE dial (2026-08-12):「swarm は自分自身以外に何を着地させているか」.
+            Fed by the on-disk ledger (swarm-landed.json via useLandedKpi in
+            SwarmModule), so unlike the in-memory Metrics above it SURVIVES
+            restarts and shows a 12-week trend. Cross-project by design — the
+            scope line says so, since this pane is otherwise per-project. Hidden
+            until the server answers; once it has, an empty ledger shows its
+            one-line explainer (a brand-new dial IS news the owner needs once —
+            unlike the Metrics block, whose empty state was pure 散乱). */}
+        {landed && (
+          <div className="shrink-0 px-4 py-3">
+            <div className="mb-1 flex items-center gap-2">
+              <TrendingUp size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+              <span className="label-cap text-ink-faint">
+                {t('projectPanel.swarm.manager.landedHeading')}
+              </span>
+            </div>
+            <p className="mb-2 text-micro text-ink-faint">
+              {t('projectPanel.swarm.manager.landedScope', { weeks: landed.weeks.length })}
+            </p>
+            {landed.totals.self + landed.totals.external === 0 ? (
+              <p className="text-micro leading-snug text-ink-faint">
+                {t('projectPanel.swarm.manager.landedEmpty')}
+              </p>
+            ) : (
+              <LandedChart data={landed} />
+            )}
+          </div>
         )}
 
         {/* ── Consumption (the budget layer) ────────────────────────────────────

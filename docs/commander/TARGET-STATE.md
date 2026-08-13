@@ -17,6 +17,7 @@
 | 5 | **統合は司令官専任 — engine は ready 検知で司令官を起こすだけ(main を FF する経路が engine に1つも無い)+ 落ちた司令官を蘇生する反射** | ◐ **実装済み(2026-07-15 マネージャ専任化 + 2026-07-16 manager 蘇生 card B)・実運用での検証待ち** | 本カード + 蘇生 card B(§5 が正典) |
 | 6 | 司令塔ドキュメントが変更に追随する | ✓ **検知2点(verify soft-warn + og-manage 起動時の 00-INDEX §6-1 チェック)+ 起票テンプレ組込み(supply / order / og-manage、2026-07-11)実装済み+テンプレ経由の運用実績 1 件**(カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂) | 案 B(検知2点)+案 B'(テンプレ)完了。実績 1 件(2026-07-11) |
 | 7 | 再起動が無イベント化している(desiredRunning が人手ゼロで復元・owner の手動停止が常に勝つ・crash-loop breaker で新コードの暴走を受ける) | ◐ **実装済み(2026-07-22, card 2)・単体/統合テスト緑・main 未着地・実機の「本物の再起動」実測待ち** | docs/ENGINE_PERSISTENCE_PLAN.md card 2(本カード) |
+| 9 | worker ランタイムは SDK 一系統(PTY は fallback 専用・凍結 — 新機能/新センサーは SDK 側のみ・fallback 0 の 4 週で PTY センサー層を削除) | ◐ **方針宣言(2026-08-12・§9)** — SDK 既定化は済み(0801-02)・削除条件の実測待ち | §9 + [PLATFORM-GAP-LEDGER.md](PLATFORM-GAP-LEDGER.md) |
 
 (◐ = 実装は main 入り・到達判定コマンドでの実測が未。✓ にするのは実運用の観測のみ。)
 
@@ -501,6 +502,60 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
 - [ ] §5: エンジン ON(起こし反射は常時 — 2026-07-16 トグル廃止)7 日間で、ready 放置ゼロ・engine 由来の main FF ゼロ・蘇生反射が実事象で機能 — **部分実測(2026-07-19〜22)・未達**: ① 蘇生反射は**実事象で作動を確認**(7/19〜20 に多数発火)。ただし当時は presence が生きた卓を `absent` と誤読する欠陥があり**誤蘇生**だった(司令官卓が 2 晩連続で 11 卓まで増殖)。真因=記録スロット desync で卓が「名前を失う」/ 修正は 0.11.32 で着地(PTY プールを存在の権威に + 同時 spawn の TOCTOU を per-project ロックで封鎖)。**修正後の正常作動はまだ観測できていない** ② engine 由来の main FF は**ゼロ**(engine は 2026-07-15 以降そもそも統合しない — `runIntegratePass` に push/merge 経路なし。同期間の main 着地はすべて司令官卓の手動統合) ③ **ready 放置は発生した** — 司令官が長時間不在の間、ready worker が滞留(7/20 朝の give-up ラッチ発火時にも統合待ちが残置)④ **7 日連続 ON を達成していない** — 増殖対応のため複数回 OFF にしたため。→ 再カウントは 0.11.32(増殖修正入り)での ON 継続開始日から
 - [x] §6: swarm コア変更カードに文書更新が組み込まれ、実績 1 件以上 — **仕組み**(検知2点+テンプレ組込み)実装済み+**テンプレ経由の運用実績 1 件**(2026-07-11、カード「SWARM_CODE_PATHS に server/routes/project.ts を追加」= 本改訂。手動追随の前例は 2026-07-10 改訂)
 - [ ] §8: 再起動が無イベント化している(docs/ENGINE_PERSISTENCE_PLAN.md card 2) — 観測可能条件: ①`desiredRunning:true` の project を再起動しても人手ゼロで自動運転が再開する ②owner の手動停止記録(`Settings.swarmManualStop`)が resume より必ず勝つ ③同一バージョンで 10 分に 3 boot 以上なら crash-loop breaker が抑止 + fatal 通知 ④再開時は必ずベル通知(`engine-resumed`)で視認できる。**実装済み・単体/統合テスト緑(2026-07-22, swarmEnginePersistence.test.ts 18件 + swarmOrchestrator.resumeEngines.test.ts 11件 — 2 回の差し戻し対応で追加された分含む。実測値はテストファイルの `it(` 件数で都度裏取りすること、この文書の数字は鮮度が落ちやすい)。実機の「本物の再起動」での実測はまだ(このカードは main 未着地 — 統合後、次の実リリース再起動で①〜④を確認してここに追記する)**。card 4(死んだ worker PTY の `--resume` 会話復元)・card 5(Electron respawn スーパーバイザ)は別カードで未着手
+- [ ] §9: worker spawn の PTY fallback が実運用 4 週間 0 → PTY worker センサー層の削除カード起票(§9 の削除条件。方針宣言 2026-08-12 — 経過観測はここに追記する)
 - [ ] §8b: worker roster が再起動を跨いで照合される(docs/ENGINE_PERSISTENCE_PLAN.md card 3) — 観測可能条件: ①roster が `~/.openground/swarm/<repoキー>/roster.json` へ**状態遷移点でのみ** write-through される(spawn/promote/reclaim/rework/teardown — tick 毎ではない)②boot の `resumeEngines()` が roster を現実と突合し 4 分岐(worktree 消滅 / ready / 作業途中 / カード消滅)に分類し、**照合が完了するまで新規 dispatch を凍結**する ③teardown が roster エントリを消す ④roster 破損は「外部 worker 扱い」に degrade してサーバを落とさない ⑤`workedMs` の永続で実作業時間会計が再起動で若返らない。**実装済み・単体/統合テスト緑(2026-07-23, swarmWorkerRoster.test.ts + swarmOrchestrator.roster.test.ts + resumeEngines の凍結テスト — 件数はテストファイルの `it(` で都度裏取り。凍結は「await を外すと dispatch が照合前に走る」変異で赤を実測済み)。main 未着地・実機の本物の再起動での実測はまだ**。実際の会話 `--resume` 復元は card 4(未着手)
 
 **未到達の間の司令塔の構え**(各章の運用節の要約): 最初の実枯渇イベントで検知 2 分を実測し、それまで journal の沈黙を無実と読まない(§1)・大 diff の review カードは手動統合が唯一の経路 — 実測境界を負荷感覚の照合点に(§2)・S3/S10 は実発生として裏取り、増殖パターンを見たら回帰を疑う(§3)・鮮度はディスク(§4)・エンジン ON 運用で起こし/蘇生の実事象を見届ける(§5)・セッション開始時に文書鮮度チェック(§6)。
+
+---
+
+## 9. worker ランタイムは SDK 一系統(PTY は fallback 専用・凍結)— 2026-08-12 方針
+
+> **これは機能の理想ではなく「工事の止めどころ」の理想。** 二重ランタイム(PTY/SDK)は
+> 観測・質問・証拠・表示のすべての面を 2 倍にし、0802 の事故群(盤面 SDK / 実効 PTY、
+> 読めない settings.json でキルスイッチ反転、CJS→ESM で配布ビルドの SDK 全滅)は
+> ほぼ全部 parity 欠陥だった — 00-INDEX 冒頭の 0802 追記 2 本がその記録。
+> SDK 既定化(0801-02 に worker / manager とも不在既定 sdk へ反転)が済んだ今、
+> **PTY worker 系統は「SDK が安定するまでの保険」であって投資先ではない**。
+> 凍結のもう一つの面(プラットフォーム補償工事の棚卸しと投資禁止)は
+> [PLATFORM-GAP-LEDGER.md](PLATFORM-GAP-LEDGER.md) が正典。
+
+### 理想(観測可能条件)
+
+1. **新機能・新センサーは SDK 系統にのみ足す。** PTY worker 系統(PTY spawn・画面
+   スクレイプ・nudge の ESC 送出・onset 窓)への変更は修理のみ(バグ修正・安全修正は
+   通常どおり)。レビュー観点: PTY 専用コードへの**機能追加**が diff に現れたら、それ自体を
+   設計のスメルとして扱い、カードに「なぜ SDK 側では足りないか」を書かせる。
+2. **parity 面を新設しない。** presence / questions / 証拠の尾 / 表示の実効値のように
+   「PTY と SDK で取り方が違う」面(00-INDEX 症状表の SDK 行群)をこれ以上増やさない —
+   新しい観測が要るときは SDK 側だけに実装する。
+3. **fallback 率が観測できる。** worker spawn が PTY に落ちた理由は spawn レスポンスの
+   `fellBackBecause` が一次情報(配布版でサーバ log は見えない — 00-INDEX 症状表)。
+   live の実効比率は workers API の `runtime` 内訳で読む(レコードの `runtime` 不在 ⇒ pty —
+   02 章 §2.4-0 の掟)。
+4. **削除条件(この節の終着)**: 実運用 4 週間、worker spawn の PTY fallback が 0
+   (または理由がすべて一時故障)なら、**PTY worker 専用センサー層を削除するカードを
+   起票する** — `swarmRateLimitText` の worker 画面経路・orchestrator の `limitScreen`
+   クランプ / onset 窓(`RATE_LIMIT_EARLY_ONSET_MS` 系)・PTY nudge。削除がゴールで、
+   保守はゴールではない。⚠ 削除対象は **worker 系統のみ** — 補給官の PTY(外部窓口・
+   リモコン)と `ownerDeskLimit`(人間の卓の監視)は**残る**。人間が座る卓は SDK 化しない。
+
+### 現状とのギャップ
+
+- PTY 系統は fallback として現役。fallback 率の自動集計は無い(目視: spawn レスポンス /
+  engine-journal.jsonl)。必要が立証されたら台帳方式(`swarmLandedLedger` の型)を流用する —
+  立証前に作るのはこの節自身への違反。
+- `swarmEngineSdkBlindspots.test.ts` / `swarmRuntimeDialParity.test.ts` が既知の parity 面を
+  ピンしている — 新しい parity 欠陥が出たら、直す前にこの節の条件 2 に照らして
+  「その面ごと消せないか」を先に問う。
+
+### 到達判定コマンド
+
+```bash
+# live worker の runtime 内訳(sdk 一色なら凍結が効いている)
+curl -s "http://127.0.0.1:47776/api/swarm/workers?path=<PATH>" | jq '[.workers[] | (.runtime // "pty")] | group_by(.) | map({runtime: .[0], n: length})'
+# ダイヤルの実効値(サーバが実際に使う値 — パネルと同源。00-INDEX 0802 追記)
+curl -s http://127.0.0.1:47776/api/settings | jq .runtimeDialsEffective
+# PTY 専用コードに「機能追加」が入っていないか(修理は可) — 直近の diff を目視
+git log --oneline -10 -- src/lib/server/swarmRateLimitText.ts src/lib/server/claudeScreen.ts
+```

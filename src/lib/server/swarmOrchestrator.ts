@@ -127,6 +127,7 @@ import {
 // one swarmSessions' isSessionResumable uses), with the SIGKILL-orphan mtime guard
 // enabled for the worker resume path. See adoptResumeCandidates().
 import { proveTranscriptLoadable, ORPHAN_MTIME_WINDOW_MS } from './swarmTranscriptProof'
+import { recordPromoted, sweepLanded } from './swarmLandedLedger'
 // App version, read from package.json at BUILD time (same pattern as
 // server/routes/health.ts) — the crash-loop breaker keys its window on it so a
 // self-update's own cutover restarts don't count against the NEW build.
@@ -7246,6 +7247,14 @@ const monitorWorkers = async (
       return true
     }
     clearKeptMove(engine, w.taskId) // the recovery write landed — forget the stuck tracking
+    if (col === 'review') {
+      // The ready-worker recovery promote ('integration-wait') is ALSO the
+      // engine carrying a card into review — record it in the landed ledger
+      // like the ordinary promote. This path's journal line has no 'promote'
+      // kind (it logs as a reclaim), so the in-memory KPI pairing misses it;
+      // the durable ledger must not. Fail-open by contract.
+      await recordPromoted(engine.path, { taskId: w.taskId, title: w.taskTitle, branch: w.branch })
+    }
     // A 'rate-limit' requeue is ORTHOGONAL to the crash/stall retry budget: it is a
     // transient WAIT, not a failed attempt, so it must neither consume that budget
     // (else a real later crash would skip its retries) nor be capped by it (a
@@ -7502,6 +7511,11 @@ const monitorWorkers = async (
       }
       if (moved) {
         logLine(engine, 'info', `promoted to review: ${shorten(w.taskTitle)} → ${w.branch}`, 'promote')
+        // 着地台帳 (swarm-landed.json): the DURABLE twin of that promote line —
+        // the journal ring dies with the process, the weekly landed KPI must
+        // not. Awaited (one small JSON write) and fail-open by contract, so a
+        // broken disk can never keep the promote (or the pass) from completing.
+        await recordPromoted(engine.path, { taskId: w.taskId, title: w.taskTitle, branch: w.branch })
         // Consumption meter (card swarm-token): the done moment is the one point
         // the card's cost is complete, so record its one-line summary here. No
         // structured kind — the line has no metrics counter (classifyMetricEvent
@@ -8641,6 +8655,12 @@ export const runDispatchPass = async (
   }
   const byId = new Map(tasks.map((t) => [t.id, t]))
   const todos = tasks.filter(isTodoCard)
+
+  // 1b. 着地台帳 sweep: stamp landedAt on engine-promoted cards the Board now
+  //     shows done (the commander's merge + markDone is a Board write the engine
+  //     only ever OBSERVES — there is no land event to hook since 2026-07-15).
+  //     Never throws by contract; one small readFile when nothing is pending.
+  await sweepLanded(engine.path, tasks, new Date(now).toISOString())
 
   // 2. Monitor existing workers: advance stages, promote the done ones
   //    doing→review, recover crashed AND stalled ones, and prune dead/finished

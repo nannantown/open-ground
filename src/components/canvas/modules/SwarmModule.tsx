@@ -63,6 +63,7 @@ import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmManagerPane } from './SwarmManagerPane'
+import { useLandedKpi } from './useLandedKpi'
 import { SwarmOverseerPane } from './SwarmOverseerPane'
 import { deriveOverseerAlerts } from './swarmOverseerFeed'
 import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
@@ -424,6 +425,11 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     sandboxWarning: engineSandboxWarning,
     envIssues,
   } = useSwarmEngine(project.path)
+
+  // The durable 「外向き着地/週」 KPI (GET /api/swarm/kpi/landed) — cross-project
+  // by design, fetched ONCE here and threaded into the manager dashboard (the
+  // pane never fetches — its stated contract).
+  const landed = useLandedKpi()
 
   // The "autonomy was restored by the restart" notice (card 2b) is dismissed LOCALLY
   // — unlike the two banners below it, there is no server marker to clear here. The
@@ -1867,6 +1873,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               sandboxWarning={engineSandboxWarning}
               runtimeDials={runtimeDials}
               onToggleRuntime={toggleRuntime}
+              landed={landed}
             />
           </div>
         ) : allWorkers.length === 0 ? (

@@ -114,7 +114,13 @@ import {
   MODEL_TIER_LADDER,
 } from '@/lib/server/swarmQuota'
 import { highestSpawnableTier } from '@/lib/server/swarmAllowedModels'
-import { getAllowedModelTiers } from '@/lib/server/store'
+import { getAllowedModelTiers, getSettings } from '@/lib/server/store'
+import {
+  readLandedLedger,
+  weeklyLandedSeries,
+  isSelfProject,
+} from '@/lib/server/swarmLandedLedger'
+import { basename } from 'path'
 import type { SwarmAllowedModels } from '@/lib/types'
 import type {
   AppNotificationsResponse,
@@ -125,6 +131,8 @@ import type {
   EscalationProxyDraft,
   EscalationWhy,
   SwarmQuotaResponse,
+  SwarmLandedKpi,
+  SwarmLandedWeek,
   SpawnSwarmWorkerResponse,
 } from '@/lib/types'
 
@@ -1290,4 +1298,58 @@ export const swarmRoutes = new Hono()
       )
     }
     return c.json<SwarmQuotaResponse>(quotaSnapshot(now, await getAllowedModelTiers()))
+  })
+  // --- GET /api/swarm/kpi/landed — the durable landed KPI (外向き着地/週) -----
+  // Aggregates every registered project's swarm-landed.json (the ledger the
+  // engine writes at promote + land — swarmLandedLedger.ts is the canon) into
+  // fixed-length weekly buckets, split 自プロジェクト (self = a checkout of OG
+  // itself, by package.json name) vs 外向き (every other project). THE dial the
+  // owner steers by:「swarm が自分自身以外に何を着地させているか」. READ-ONLY —
+  // it never sweeps, never writes; a project whose folder vanished degrades to
+  // zero rows (fail-quiet), never a 500. No `path` param: the registry IS the
+  // scope, so there is nothing for a caller to widen.
+  .get('/api/swarm/kpi/landed', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    const weeksRaw = Number(c.req.query('weeks') ?? '12')
+    const weeks = Number.isFinite(weeksRaw) ? Math.min(26, Math.max(4, Math.floor(weeksRaw))) : 12
+    const now = Date.now()
+    const settings = await getSettings()
+    const projects = settings.projects ?? []
+    const empty = weeklyLandedSeries([], { weeks, now })
+    const buckets: SwarmLandedWeek[] = empty.map((w) => ({
+      weekStart: w.weekStart,
+      self: 0,
+      external: 0,
+    }))
+    const perProject: SwarmLandedKpi['perProject'] = []
+    const totals = { self: 0, external: 0 }
+    const recentCutoff = now - 28 * 24 * 60 * 60 * 1000
+    for (const entry of projects) {
+      const ledger = await readLandedLedger(entry.path)
+      const landed = ledger.filter((e) => e.landedAt)
+      if (landed.length === 0) continue
+      const self = await isSelfProject(entry.path)
+      const series = weeklyLandedSeries(ledger, { weeks, now })
+      for (let i = 0; i < buckets.length; i++) {
+        if (self) buckets[i].self += series[i].landed
+        else buckets[i].external += series[i].landed
+      }
+      const recent = landed.filter((e) => {
+        const t = Date.parse(e.landedAt ?? '')
+        return Number.isFinite(t) && t >= recentCutoff
+      }).length
+      perProject.push({
+        id: entry.id,
+        name: entry.displayName?.trim() || basename(entry.path),
+        path: entry.path,
+        self,
+        total: landed.length,
+        recent,
+      })
+      if (self) totals.self += landed.length
+      else totals.external += landed.length
+    }
+    // Busiest projects first so the panel's list reads as a ranking.
+    perProject.sort((a, b) => b.total - a.total)
+    return c.json<SwarmLandedKpi>({ weeks: buckets, perProject, totals })
   })

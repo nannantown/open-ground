@@ -334,6 +334,17 @@ export const projectPanel = {
     'projectPanel.swarm.manager.kpiReworkRate': 'Rework rate',
     'projectPanel.swarm.manager.kpiConflictRate': 'Conflict rate',
     'projectPanel.swarm.manager.kpiEmpty': 'No completed work yet — metrics appear as the engine runs.',
+    // Landed / week (the durable outward-KPI) — fed by GET /api/swarm/kpi/landed
+    // (swarm-landed.json, survives restarts), aggregated across ALL registered
+    // projects, split external vs OG itself. The one line that answers whether
+    // the swarm produces anything beyond its own repairs.
+    'projectPanel.swarm.manager.landedHeading': 'Landed / week',
+    'projectPanel.swarm.manager.landedScope': 'All projects · last {weeks} weeks',
+    'projectPanel.swarm.manager.landedExternal': 'Other projects',
+    'projectPanel.swarm.manager.landedSelf': 'OPEN GROUND itself',
+    'projectPanel.swarm.manager.landedEmpty':
+      'No landed work recorded yet — the ledger starts counting from now (promote → merged).',
+    'projectPanel.swarm.manager.landedWeekTip': 'Week of {week}: {external} other · {self} OG',
     // Consumption (the budget layer) — the unattended loop's live load + session
     // spend + its ceiling. A SEPARATE section from the KPI metrics above.
     'projectPanel.swarm.manager.consumptionHeading': 'Consumption',
@@ -1066,6 +1077,16 @@ export const projectPanel = {
     'projectPanel.swarm.manager.kpiReworkRate': '差し戻し率',
     'projectPanel.swarm.manager.kpiConflictRate': 'コンフリクト率',
     'projectPanel.swarm.manager.kpiEmpty': 'まだ完了タスクがありません — エンジン稼働とともに集計されます。',
+    // 着地/週(永続の外向き KPI)— GET /api/swarm/kpi/landed(swarm-landed.json、
+    // 再起動を生き延びる)を全登録プロジェクトで集計し、外部と OG 自身に分ける。
+    // 「swarm は自分の修理以外に何かを生産しているか」に答える1本の線。
+    'projectPanel.swarm.manager.landedHeading': '着地 / 週',
+    'projectPanel.swarm.manager.landedScope': '全プロジェクト ・ 直近 {weeks} 週',
+    'projectPanel.swarm.manager.landedExternal': '外部プロジェクト',
+    'projectPanel.swarm.manager.landedSelf': 'OPEN GROUND 自身',
+    'projectPanel.swarm.manager.landedEmpty':
+      'まだ着地の記録がありません — 台帳はここから数え始めます(promote → マージ確定)。',
+    'projectPanel.swarm.manager.landedWeekTip': '{week} の週: 外部 {external} ・ OG {self}',
     // 消費（バジェットレイヤ）— 無人ループの稼働負荷＋セッション消費＋上限。上の
     // KPI メトリクスとは別セクション。
     'projectPanel.swarm.manager.consumptionHeading': '消費',

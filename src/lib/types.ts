@@ -1591,6 +1591,38 @@ export interface SwarmKpis {
   }
 }
 
+/** One weekly bucket of GET /api/swarm/kpi/landed — landed swarm cards in the
+ *  Monday-start UTC week beginning `weekStart` ('YYYY-MM-DD'), split self
+ *  (a checkout of OG itself, by package.json name) vs external (外向き —
+ *  every other registered project). */
+export interface SwarmLandedWeek {
+  weekStart: string
+  self: number
+  external: number
+}
+
+/** GET /api/swarm/kpi/landed — the DURABLE landed KPI, aggregated across every
+ *  registered project (the whole registry — no path param). Fed by the on-disk
+ *  ledger `~/.openground/projects/<uuid>/swarm-landed.json` the engine writes at
+ *  promote + land (swarmLandedLedger.ts), so unlike {@link SwarmKpis} (in-memory
+ *  counters + the journal ring) it SURVIVES restarts and can be charted over
+ *  time. `weeks` is fixed-length, oldest→newest, empty weeks zero. This is the
+ *  「外向き着地/週」dial: the one line that answers whether the swarm produces
+ *  anything beyond its own repairs. */
+export interface SwarmLandedKpi {
+  weeks: SwarmLandedWeek[]
+  /** Busiest-first. `recent` = lands in the last 28 days. */
+  perProject: {
+    id: string
+    name: string
+    path: string
+    self: boolean
+    total: number
+    recent: number
+  }[]
+  totals: { self: number; external: number }
+}
+
 /** Consumption snapshot of the UNATTENDED loop (the BUDGET layer, distinct from
  *  the KPI analytics above): "how much is the loop SPENDING right now, and has it
  *  crossed a ceiling I should look at?". READ-ONLY of state the engine already
