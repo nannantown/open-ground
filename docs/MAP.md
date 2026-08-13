@@ -422,13 +422,20 @@
   一次資料を取り込む・取得失敗は `【資料取得できず】` で degrade)。どちらも WORKER_ORDER_RULES
   (`swarmWorker.ts`)に追記され、後者は `skills/og-manage/SKILL.md`「マージ」手順4 とも同一正典。
   テスト: 同名 `*.test.ts` + `ogManageSkill.test.ts`(出荷 SKILL.md への verbatim 照合)
-- worker/補給官の道具(`/order`・`/supply` スキルと心拍 `swarm-beat.sh`+`openground-swarm-lib.sh`)は
+- worker/補給官の道具(`/order`・`/supply`・`/research` スキルと心拍 `swarm-beat.sh`+
+  `openground-swarm-lib.sh`+調査診断 `openground-research-doctor.sh`)は
   `~/.claude/` へ boot 自動配備される: `managedFileInstall.ts`(og-manage/order/supply/script
   共通の idempotent installer — missing→install / marker+差分→refresh / marker無→kept-user)
   を `ogManageSkill.ts` と `swarmToolingInstall.ts` の両方が使う。正典テキストは repo の
-  `skills/order/SKILL.md` `skills/supply/SKILL.md` `scripts/swarm-beat.sh`
-  `scripts/openground-swarm-lib.sh`(tmux 依存ゼロ)。配備 seam は
+  `skills/order/SKILL.md` `skills/supply/SKILL.md` `skills/research/SKILL.md`
+  `scripts/swarm-beat.sh` `scripts/openground-swarm-lib.sh`
+  `scripts/openground-research-doctor.sh`(tmux 依存ゼロ)。配備 seam は
   `server/index.ts` の boot IIFE(`installSwarmTooling()`)。テスト: `swarmToolingInstall.test.ts`
+- 調査系カードのマルチプラットフォーム調査システム(Agent-Reach 蒸留、2026-08-13):
+  `/order` スキルの調査系ゴール節が唯一のトリガ → doctor(ローカル専用診断・ネットワーク
+  不実行は curl 囮で行動保証)→ `skills/research/SKILL.md` のルーティング表+フォールバック
+  階段(専用ツール→Jina→素fetch)+Cookie ローカル限定則。正典 doc:
+  `docs/RESEARCH_REACH_NOTES.md`、番人: `researchSystem.test.ts`
 - 罠: シェル補助の配備名は `openground-` 接頭辞つき(`SWARM_LIB_BASENAME`)。ユーザの
   `~/.claude/swarm-lib.sh` は**旧 tmux コックピット版(手書き・12 関数)で OG 管理外**、
   ~/.claude 配下の別スクリプト群が source している。同名で配備すると kept-user が外れた

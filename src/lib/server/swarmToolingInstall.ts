@@ -2,8 +2,10 @@
 // user's global claude scope at boot:
 //   ~/.claude/skills/order/SKILL.md     (the /order skill a spawned worker uses)
 //   ~/.claude/skills/supply/SKILL.md    (the /supply skill the supply-officer session uses)
+//   ~/.claude/skills/research/SKILL.md  (the /research routing skill for research-shaped goals)
 //   ~/.claude/openground-swarm-lib.sh   (shared helper sourced BY swarm-beat.sh)
 //   ~/.claude/swarm-beat.sh             (the heartbeat CLI every worker calls)
+//   ~/.claude/openground-research-doctor.sh (the /research skill's local-only channel doctor)
 //
 // WHY the server installs these (same rationale as ogManageSkill.ts): a
 // spawned worker PTY resolves `/order` and `bash ~/.claude/swarm-beat.sh` in
@@ -30,6 +32,8 @@ export const ORDER_SKILL_MARKER = 'managed-by: openground'
 export const SUPPLY_SKILL_MARKER = 'managed-by: openground'
 export const SWARM_BEAT_MARKER = 'managed-by: openground'
 export const SWARM_LIB_MARKER = 'managed-by: openground'
+export const RESEARCH_SKILL_MARKER = 'managed-by: openground'
+export const RESEARCH_DOCTOR_MARKER = 'managed-by: openground'
 
 /** Basename of the shared shell helper, in BOTH places it lives: the shipped
  *  source (`scripts/<basename>`) and the install target (`~/.claude/<basename>`).
@@ -53,6 +57,14 @@ export const SWARM_LIB_MARKER = 'managed-by: openground'
  *  orphan: nothing sources it once swarm-beat.sh is refreshed, and deleting
  *  files out of a user's home is a bigger risk class than leaving one behind. */
 export const SWARM_LIB_BASENAME = 'openground-swarm-lib.sh'
+
+/** Basename of the /research skill's channel-diagnosis CLI, in both places it
+ *  lives (`scripts/<basename>` shipped, `~/.claude/<basename>` installed).
+ *  openground-prefixed for the same reason as {@link SWARM_LIB_BASENAME}: a
+ *  name no user file can already own, so the installer never has to decide
+ *  between clobbering and stranding (the 2026-07 swarm-lib.sh collision
+ *  lesson). The /research skill invokes it by this exact installed path. */
+export const RESEARCH_DOCTOR_BASENAME = 'openground-research-doctor.sh'
 
 /** SHA-256 of the PRE-MARKER `~/.claude/skills/order/SKILL.md` — the tmux-era
  *  copy that existing machines received by hand, before 19e19e0f (2026-07-22)
@@ -110,6 +122,11 @@ const TOOLING_FILES: ToolingFile[] = [
   // sources the lib, so the lib must already be on disk when it lands.
   { name: SWARM_LIB_BASENAME, sourceRel: ['scripts', SWARM_LIB_BASENAME], targetRel: ['.claude', SWARM_LIB_BASENAME], marker: SWARM_LIB_MARKER, mode: 0o755 },
   { name: 'swarm-beat.sh', sourceRel: ['scripts', 'swarm-beat.sh'], targetRel: ['.claude', 'swarm-beat.sh'], marker: SWARM_BEAT_MARKER, mode: 0o755, adoptDigests: SWARM_BEAT_ADOPT_DIGESTS },
+  // The multi-platform research system (docs/RESEARCH_REACH_NOTES.md,
+  // 2026-08-13): the /research routing skill + its local-only channel doctor.
+  // Brand-new names — no pre-marker vintages exist, so no adoptDigests.
+  { name: 'research', sourceRel: ['skills', 'research', 'SKILL.md'], targetRel: ['.claude', 'skills', 'research', 'SKILL.md'], marker: RESEARCH_SKILL_MARKER },
+  { name: RESEARCH_DOCTOR_BASENAME, sourceRel: ['scripts', RESEARCH_DOCTOR_BASENAME], targetRel: ['.claude', RESEARCH_DOCTOR_BASENAME], marker: RESEARCH_DOCTOR_MARKER, mode: 0o755 },
 ]
 
 export interface SwarmToolingInstallResult {

@@ -9,6 +9,9 @@ import {
   SWARM_BEAT_MARKER,
   SWARM_LIB_MARKER,
   SWARM_LIB_BASENAME,
+  RESEARCH_SKILL_MARKER,
+  RESEARCH_DOCTOR_MARKER,
+  RESEARCH_DOCTOR_BASENAME,
   SWARM_TOOLING_TARGET_PATHS,
 } from './swarmToolingInstall'
 import { __setHookSourceModuleDirForTests } from './hooksInstall'
@@ -28,6 +31,10 @@ const orderText = `---\nname: order\n---\n<!-- ${ORDER_SKILL_MARKER} -->\n\n# or
 const supplyText = `---\nname: supply\n---\n<!-- ${SUPPLY_SKILL_MARKER} -->\n\n# supply\n`
 const beatText = `#!/usr/bin/env bash\n# ${SWARM_BEAT_MARKER}\necho beat\n`
 const libText = `#!/usr/bin/env bash\n# ${SWARM_LIB_MARKER}\nsw_hbdir() { :; }\n`
+const researchText = `---\nname: research\n---\n<!-- ${RESEARCH_SKILL_MARKER} -->\n\n# research\n`
+const doctorText = `#!/usr/bin/env bash\n# ${RESEARCH_DOCTOR_MARKER}\necho doctor\n`
+
+const ALL_TOOLING_NAMES = ['order', 'supply', 'research', 'swarm-beat.sh', SWARM_LIB_BASENAME, RESEARCH_DOCTOR_BASENAME]
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'og-swarm-tooling-'))
@@ -35,11 +42,14 @@ beforeEach(async () => {
   home = join(dir, 'home')
   await mkdir(join(root, 'skills', 'order'), { recursive: true })
   await mkdir(join(root, 'skills', 'supply'), { recursive: true })
+  await mkdir(join(root, 'skills', 'research'), { recursive: true })
   await mkdir(join(root, 'scripts'), { recursive: true })
   await writeFile(join(root, 'skills', 'order', 'SKILL.md'), orderText, 'utf8')
   await writeFile(join(root, 'skills', 'supply', 'SKILL.md'), supplyText, 'utf8')
+  await writeFile(join(root, 'skills', 'research', 'SKILL.md'), researchText, 'utf8')
   await writeFile(join(root, 'scripts', 'swarm-beat.sh'), beatText, 'utf8')
   await writeFile(join(root, 'scripts', SWARM_LIB_BASENAME), libText, 'utf8')
+  await writeFile(join(root, 'scripts', RESEARCH_DOCTOR_BASENAME), doctorText, 'utf8')
 })
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
@@ -48,20 +58,26 @@ afterEach(async () => {
 const run = () => installSwarmTooling({ sourceRoot: root, homeDir: home })
 
 describe('installSwarmTooling', () => {
-  it('installs all 4 files when targets are missing', async () => {
+  it('installs all 6 files when targets are missing', async () => {
     const results = await run()
-    expect(results.map((r) => r.name).sort()).toEqual(['order', 'supply', 'swarm-beat.sh', SWARM_LIB_BASENAME].sort())
+    expect(results.map((r) => r.name).sort()).toEqual([...ALL_TOOLING_NAMES].sort())
     for (const { result: r } of results) expect(r.outcome).toBe('installed')
     expect(await readFile(join(home, '.claude', 'skills', 'order', 'SKILL.md'), 'utf8')).toBe(orderText)
     expect(await readFile(join(home, '.claude', 'skills', 'supply', 'SKILL.md'), 'utf8')).toBe(supplyText)
+    expect(await readFile(join(home, '.claude', 'skills', 'research', 'SKILL.md'), 'utf8')).toBe(researchText)
     expect(await readFile(join(home, '.claude', 'swarm-beat.sh'), 'utf8')).toBe(beatText)
     expect(await readFile(join(home, '.claude', SWARM_LIB_BASENAME), 'utf8')).toBe(libText)
+    expect(await readFile(join(home, '.claude', RESEARCH_DOCTOR_BASENAME), 'utf8')).toBe(doctorText)
   })
 
   it('installs the scripts as executable (mode 0o755)', async () => {
     await run()
     const st = await stat(join(home, '.claude', 'swarm-beat.sh'))
     expect(st.mode & 0o111).not.toBe(0)
+    // The research doctor is invoked as `bash …` by the skill text, but it is a
+    // CLI like swarm-beat.sh — same exec-bit contract.
+    const doc = await stat(join(home, '.claude', RESEARCH_DOCTOR_BASENAME))
+    expect(doc.mode & 0o111).not.toBe(0)
   })
 
   it('is idempotent — a second run on identical targets is unchanged', async () => {
@@ -157,6 +173,11 @@ describe('shipped tooling sources', () => {
   it('order/supply skills carry the managed-by marker', async () => {
     expect(await readFile(orderPath, 'utf8')).toContain(ORDER_SKILL_MARKER)
     expect(await readFile(supplyPath, 'utf8')).toContain(SUPPLY_SKILL_MARKER)
+  })
+
+  it('research skill + doctor carry the managed-by marker (contents pinned in researchSystem.test.ts)', async () => {
+    expect(await readFile(join(process.cwd(), 'skills', 'research', 'SKILL.md'), 'utf8')).toContain(RESEARCH_SKILL_MARKER)
+    expect(await readFile(join(process.cwd(), 'scripts', RESEARCH_DOCTOR_BASENAME), 'utf8')).toContain(RESEARCH_DOCTOR_MARKER)
   })
 
   it('swarm-beat.sh / the shell helper carry the managed-by marker and never mention tmux', async () => {

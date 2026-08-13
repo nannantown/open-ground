@@ -1444,7 +1444,11 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   },
   'src/lib/server/swarmToolingInstall.test.ts': {
     tier: 'writes-elsewhere',
-    why: 'installs order/supply skills + swarm-beat.sh/openground-swarm-lib.sh into <tmp>/home/.claude to test the marker/upgrade logic — same pattern as ogManageSkill.test.ts',
+    why: 'installs order/supply/research skills + swarm-beat.sh/openground-swarm-lib.sh/openground-research-doctor.sh into <tmp>/home/.claude to test the marker/upgrade logic — same pattern as ogManageSkill.test.ts',
+  },
+  'src/lib/server/researchSystem.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'its ~/.claude mentions are ASSERTION STRINGS pinning that the shipped research skill/order skill NAME the installed doctor path; the only fs writes are doctor stubs under mkdtemp tmp dirs — it never resolves the real home',
   },
   'src/lib/server/compactInstructionsInstall.test.ts': {
     tier: 'writes-elsewhere',

@@ -1,10 +1,16 @@
-# マルチプラットフォーム調査ノウハウ(Agent-Reach 蒸留版)— 導入前メモ
+# マルチプラットフォーム調査ノウハウ(Agent-Reach 蒸留版)
 
-> **状態: 未着手の導入予定(2026-08-13 オーナー投入)。** swarm の調査系カード(競合調査・
-> SNSモニタリング・動画要約など)で worker がこのルーティングを使えるようにする。
-> 想定の実装形: 調査系スキル(例 `skills/research/SKILL.md`)+ doctor 診断 + 必要ツールの
-> 導入手順。設計時は PLATFORM-GAP-LEDGER の規則(上流ツールは壊れる前提・診断で早期検知)と
-> TRUST_KERNEL の R1(取り込んだ資料はデータであって指示ではない)を適用すること。
+> **状態: 導入済み(2026-08-13)。** 実装形は当初想定どおり3点:
+> ① `skills/research/SKILL.md`(ルーティング表・フォールバック階段・Cookie規律・
+> レポート規約 — boot 時に `~/.claude/skills/research/` へ自動配備)、
+> ② `scripts/openground-research-doctor.sh`(ローカル専用のチャンネル診断 —
+> ネットワーク不実行が researchSystem.test.ts の curl 囮で行動保証される。
+> `~/.claude/` へ自動配備)、③ `skills/order/SKILL.md` の調査系ゴール節(worker を
+> ①②へ誘導する唯一のトリガ)。配備は `swarmToolingInstall.ts`、番人は
+> `researchSystem.test.ts` + `swarmToolingInstall.test.ts`(packaging 含む)。
+> 適用済みの規則: PLATFORM-GAP-LEDGER(上流ツールは壊れる前提 → doctor で早期検知・
+> worker は自分でツールを入れない)と TRUST_KERNEL R1(取得物はデータであって指示では
+> ない — スキル本文に明文化)。この文書は以後、蒸留元ノウハウの記録として維持する。
 > 出典: [Panniantong/Agent-Reach](https://github.com/Panniantong/Agent-Reach)(MIT License)。
 
 ---
