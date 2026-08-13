@@ -3,9 +3,12 @@ import { describe, it, expect } from 'vitest'
 // style as updateMenu.test.ts / autoUpdate.test.ts.
 import {
   AUTO_APPLY_UNFOCUSED_MIN_MS,
+  AUTO_APPLY_POLL_MS,
+  NUDGE_MIN_GAP_MS,
   autoUpdateFromSettingsRaw,
   decideAutoApply,
   decideDownloadedAction,
+  shouldNudgeCheck,
 } from '../../electron/autoUpdatePolicy'
 
 // The hands-free apply decision (electron/autoUpdatePolicy.js). Every input is
@@ -119,5 +122,33 @@ describe('decideDownloadedAction — hands-free never means silent', () => {
       expect(r.notify, `waitedDays=${waitedDays}`).toBe(true)
       expect(['quiet', 'banner', 'dialog']).toContain(r.escalation)
     }
+  })
+})
+
+// The release-time bell (POST /api/update/check-now → IPC → maybeCheck). The
+// route is reachable by anything on loopback, so without this gap a tight loop
+// could drive one GitHub fetch per request through the MAIN process — the gap
+// is the ONLY thing standing between the two.
+describe('shouldNudgeCheck', () => {
+  it('the first ring ever passes (lastNudgeAt starts at 0)', () => {
+    expect(shouldNudgeCheck({ lastNudgeAt: 0, now: Date.now() })).toBe(true)
+  })
+
+  it('a second ring inside the gap is swallowed', () => {
+    const now = 1_000_000
+    expect(shouldNudgeCheck({ lastNudgeAt: now - NUDGE_MIN_GAP_MS + 1, now })).toBe(false)
+  })
+
+  it('rings exactly at and past the gap pass', () => {
+    const now = 1_000_000
+    expect(shouldNudgeCheck({ lastNudgeAt: now - NUDGE_MIN_GAP_MS, now })).toBe(true)
+    expect(shouldNudgeCheck({ lastNudgeAt: now - NUDGE_MIN_GAP_MS * 10, now })).toBe(true)
+  })
+
+  it('the gap is long enough to matter and short enough not to', () => {
+    // Shorter than ~10s stops being a rate limit; longer than the ~5min apply
+    // poll would start swallowing legitimate consecutive releases.
+    expect(NUDGE_MIN_GAP_MS).toBeGreaterThanOrEqual(10_000)
+    expect(NUDGE_MIN_GAP_MS).toBeLessThanOrEqual(AUTO_APPLY_POLL_MS)
   })
 })

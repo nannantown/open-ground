@@ -36,6 +36,7 @@ import {
 } from '@/lib/server/homeIntegrity'
 import { writeProjectData } from '@/lib/server/projectData'
 import { updateRestartSafety } from '@/lib/server/liveDesks'
+import { requestUpdateCheck } from '@/lib/server/updateNudge'
 import {
   ensureProjectsMigrated,
   addCreatedProjectEntry,
@@ -436,6 +437,15 @@ export const miscRoutes = new Hono()
   // (treats fetch error as unsafe). Pure read, no path input → no
   // validateProjectPath needed.
   .get('/api/update/restart-safety', async (c) => c.json(await updateRestartSafety()))
+  // --- POST /api/update/check-now -------------------------------------------
+  // Release-time bell: after publishing a version, the runbook rings this so
+  // the app on THIS machine checks GitHub in seconds instead of at the next
+  // periodic tick. Relayed to the Electron MAIN process over the fork's IPC
+  // channel (updateNudge.ts); main rate-limits (shouldNudgeCheck) and keeps its
+  // lockdown / hands-free policy — `queued` only means the request was
+  // delivered. Honest no-op (`no-electron-parent`) under dev/tsx/vitest. No
+  // path input → no validateProjectPath needed.
+  .post('/api/update/check-now', (c) => c.json(requestUpdateCheck()))
   // --- POST /api/sound/test -------------------------------------------------
   // The Settings「試聴」button: play the completion chime ONCE at the given
   // volume so the slider is auditable before a claude turn ever ends. Local

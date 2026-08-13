@@ -63,16 +63,28 @@ npm run dist           # electron-builder → signed arm64 .dmg (dist-electron/)
 - **asar: false** (package.json `build`): node-pty 1.2.x mangles its
   spawn-helper path inside an asar (`app.asar.unpacked.unpacked`), so the app
   ships unpacked. Local single-user tool — asar tamper-protection isn't a goal.
-- Signing + notarization: `scripts/sign-and-notarize.sh` / `docs/DISTRIBUTION.md`
-  (Developer ID cert + `openground-notary` keychain profile already set up).
+- Signing + notarization: **CI (`release.yml`) on a tag push**, or `npm run dist`
+  locally — electron-builder signs, notarizes and staples in one step. See
+  `docs/DISTRIBUTION.md` (Developer ID cert + `openground-notary` keychain
+  profile already set up).
 
-> **Legacy shell launcher (`scripts/openground-launch.sh` + `make-app.sh` →
-> `OPEN GROUND.app`) is DEPRECATED.** It ran `npm run dev` and opened a Chrome
-> `--app` window at :47776 — but that assumed the Next.js dev server served the
-> UI there. After the Hono migration :47776 is the API and the SPA is on Vite
-> :5174, so the old `.app` no longer shows the UI. Use `npm run electron:dev`
-> (or open <http://127.0.0.1:5174> directly) instead. The shell scripts are
-> kept only until the Electron path is dogfood-proven, then removed.
+> **The legacy shell launcher is GONE (removed 2026-08-06).**
+> `scripts/openground-launch.sh`, `make-app.sh`, `openground-activate.sh`,
+> `sign-and-notarize.sh` and `entitlements.plist` built and signed a shell-script
+> `.app` from the Next.js era. This note used to say they were "kept only until
+> the Electron path is dogfood-proven" — it is proven, and they were removed the
+> day the leftover bundle bit.
+>
+> **How it bit, because it is the reason to delete rather than deprecate.** The
+> built `OPEN GROUND.app` sat in the repo root registering the bundle id
+> `local.openground.launcher`. macOS resolves an app by DISPLAY NAME, and both
+> bundles are called "OPEN GROUND" — so the name pointed at the dead launcher
+> instead of `/Applications/OPEN GROUND.app` (`local.openground.app`). Launching
+> "OPEN GROUND" by name started the corpse, which announced
+> 「already running from another checkout」 and quit. A deprecated artifact does
+> not sit quietly out of the way; it shadows the live one.
+>
+> Use `npm run electron:dev` (or open <http://127.0.0.1:5174> directly).
 
 ## Legacy migration
 

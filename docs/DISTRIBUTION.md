@@ -2,7 +2,7 @@
 
 How to ship OPEN GROUND to other people's machines (macOS + Windows).
 
-The `.app` you get from `scripts/make-app.sh` runs **on your own machine**
+The `.app` you get from `npm run dist` runs **on your own machine**
 fine because macOS doesn't quarantine apps you built locally. The moment
 that bundle is downloaded by another user, however, Gatekeeper will block
 it as "from an unidentified developer" — they need a signed + notarized
@@ -122,6 +122,23 @@ named after the tag. Both `latest-mac.yml` (macOS) and `latest.yml` (Windows)
 land on that one Release, which is exactly what **electron-updater** and the
 **in-app update banner** read (§3).
 
+**After publishing, ring the local app's bell (optional but free):**
+
+```bash
+curl -s -X POST http://127.0.0.1:47776/api/update/check-now || true
+```
+
+Installed apps discover a release at their next periodic check (hourly since
+0.11.73; 4h before that). This nudge makes the app on *this* machine — the one
+that just ran the release — check immediately instead, so it downloads within
+seconds and applies at the next safe moment (`settings.autoUpdate` policy,
+electron/autoUpdatePolicy.js). It only reaches this machine; everyone else
+waits for their poll. Best-effort: if no app is running the curl just fails
+quietly, and in dev the server answers `{"queued":false,"reason":"no-electron-parent"}`
+because there is no Electron main process to ring (the relay is
+src/lib/server/updateNudge.ts → fork IPC → electron/main.js, rate-limited to
+one real check per minute).
+
 ### Required GitHub repo Secrets (macOS signing only)
 
 Set these in the repo's **Settings → Secrets and variables → Actions**. They
@@ -209,11 +226,11 @@ You need:
    `latest-mac.yml` that electron-updater reads). Export it as
    `GH_TOKEN`.
 
-The modern path is **`npm run dist`** — electron-builder signs, notarizes,
+The path is **`npm run dist`** — electron-builder signs, notarizes,
 staples, and (optionally) publishes in one command, reading the Apple
-credentials from env vars. The legacy `scripts/sign-and-notarize.sh` is
-kept as a manual fallback (it signs the `make-app.sh`-built bundle using a
-keychain profile instead).
+credentials from env vars. (A `scripts/sign-and-notarize.sh` used to sit
+beside it as a manual fallback; it signed the `make-app.sh` bundle, and both
+were removed on 2026-08-06 together with the shell launcher — see §2.)
 
 ---
 
@@ -271,19 +288,38 @@ absent (e.g. a CI machine, or a plain local build), electron-builder logs
 failing. Set `CSC_IDENTITY_AUTO_DISCOVERY=false` to force-skip signing on a
 machine that happens to have a cert but shouldn't use it.
 
-### Legacy fallback: `scripts/sign-and-notarize.sh`
+### Removed: the shell launcher and its signer (2026-08-06)
 
-Still works against a `scripts/make-app.sh`-built `OPEN GROUND.app`, using a
-keychain profile rather than env vars:
+`scripts/make-app.sh`, `scripts/openground-launch.sh`,
+`scripts/openground-activate.sh`, `scripts/sign-and-notarize.sh` and
+`scripts/entitlements.plist` are gone. They built and signed a shell-script
+`.app` that predates Electron, and CLAUDE.md had them marked "kept only until
+the Electron path is dogfood-proven". It is proven — the packaged app is the
+owner's daily driver.
+
+They were removed the day the leftover bundle caused a real problem: a built
+`OPEN GROUND.app` sitting in the repo root registered the bundle id
+`local.openground.launcher`, so macOS resolved the DISPLAY NAME "OPEN GROUND"
+to IT rather than to `/Applications/OPEN GROUND.app` (`local.openground.app`).
+Launching by name — from Spotlight, from a script, from anything that asks the
+OS by name — started the dead launcher, which then showed
+「OPEN GROUND is already running from another checkout」 and quit. A deprecated
+artifact does not sit quietly; it shadows the real one.
+
+**The keychain-profile setup those scripts documented is still worth keeping**,
+because it is the fallback if the CI secrets ever lapse. electron-builder can
+read the same credentials from env vars:
 
 ```bash
-# Fill in YOUR OWN Apple ID + Team ID:
+# One-time, if you want a keychain profile rather than env vars:
 xcrun notarytool store-credentials "openground-notary" \
   --apple-id "you@example.com" --team-id "YOUR_TEAM_ID" \
   --password "xxxx-xxxx-xxxx-xxxx"
-scripts/make-app.sh
-export DEVELOPER_ID="Developer ID Application: Your Name (YOUR_TEAM_ID)"
-scripts/sign-and-notarize.sh
+
+# The actual local build — signs, notarizes and staples in one step:
+export APPLE_ID="you@example.com" APPLE_TEAM_ID="YOUR_TEAM_ID"
+export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+npm run dist
 ```
 
 ---

@@ -52,6 +52,7 @@ const {
   autoUpdateFromSettingsRaw,
   decideAutoApply,
   decideDownloadedAction,
+  shouldNudgeCheck,
 } = require('./autoUpdatePolicy')
 const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath } = require('./lockdown')
 const { decideCrashResponse } = require('./crashRespawn')
@@ -148,6 +149,13 @@ const SELF_UPDATE_MESSAGE = 'openground:self-update'
 // canary failure (main→server — events only Electron observes).
 const OS_NOTIFY_MESSAGE = 'openground:notify'
 const CREATE_NOTIFICATION_MESSAGE = 'openground:create-notification'
+
+// Release-time update bell. MUST match UPDATE_CHECK_MESSAGE in
+// src/lib/server/updateNudge.ts: the server relays POST /api/update/check-now
+// here so a just-published release is discovered in seconds instead of at the
+// next periodic tick. Rate-limited below (shouldNudgeCheck) because the route
+// is reachable by anything on loopback.
+const UPDATE_CHECK_MESSAGE = 'openground:update-check'
 
 // Self-update cycles that DID NOT switch (rebuild/canary/regression failure) in a
 // row — when this reaches the threshold we escalate "canary昇格失敗の連続" to the
@@ -1667,6 +1675,16 @@ function onServerMessage(msg) {
     showOsNotification(msg.title, msg.body)
     return
   }
+  // Release-time bell: check for updates now instead of at the next periodic
+  // tick. Rate-limited (the route is open to loopback), and a no-op until
+  // initAutoUpdater has armed nudgeUpdateCheck (dev/unpackaged stay silent).
+  if (msg.type === UPDATE_CHECK_MESSAGE) {
+    const now = Date.now()
+    if (!nudgeUpdateCheck || !shouldNudgeCheck({ lastNudgeAt: lastUpdateNudgeAt, now })) return
+    lastUpdateNudgeAt = now
+    nudgeUpdateCheck()
+    return
+  }
   if (msg.type !== SELF_UPDATE_MESSAGE) return
   if (!SELF_UPDATE_ARMED) {
     selfUpdateLog('info', 'trigger received but self-update is not armed — ignoring')
@@ -1891,12 +1909,22 @@ async function start() {
 // ASK, and no way to see the two honest answers ("you are current", "work mode is
 // suppressing checks"), which were console.log lines in a packaged app.
 // ---------------------------------------------------------------------------
-const AUTO_UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4h
+// 1h, down from 4h (2026-08-13): the poll is one CDN-cached yml fetch, and it is
+// every user's ONLY discovery path — the check-now bell below only reaches the
+// machine that ran the release.
+const AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000 // 1h
 
 // The live electron-updater handle, hoisted so the MENU's manual check can reach
 // it. Null in dev / unpackaged (initAutoUpdater never loads the module there) and
 // null if the require fails — both of which the precondition below answers for.
 let autoUpdaterHandle = null
+
+// Release-time bell (UPDATE_CHECK_MESSAGE): initAutoUpdater points this at its
+// maybeCheck closure so onServerMessage can trigger a lockdown-aware check.
+// Null until the updater initialises (and forever in dev/unpackaged, where a
+// nudge is meaningless) — the handler treats null as "nothing to ring".
+let nudgeUpdateCheck = null
+let lastUpdateNudgeAt = 0
 // Has initAutoUpdater run yet, and did it succeed? 'pending' is a REAL state the
 // user can reach: the menu is installed at the top of start() while
 // initAutoUpdater runs at the bottom, after a health poll that may take up to
@@ -2289,6 +2317,9 @@ function initAutoUpdater() {
       console.error(`[updater] ${label} check failed:`, err && err.message)
     })
   }
+  // Arm the release-time bell: onServerMessage rings this on the server's
+  // UPDATE_CHECK_MESSAGE (rate limit + null guard live over there).
+  nudgeUpdateCheck = () => maybeCheck('nudge')
   maybeCheck('initial')
   setInterval(() => {
     maybeCheck('periodic')

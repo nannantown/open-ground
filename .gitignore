@@ -53,13 +53,14 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# generated desktop launcher (rebuild with scripts/make-app.sh)
+# shell-era desktop launcher bundles (generator scripts removed 2026-08-06;
+# patterns kept so stray bundles on old checkouts never get committed)
 /OPEN GROUND.app
 /OpenGround.app
 /Hove.app
 /PMmap.app
 
-# distributable bundles (produced by scripts/sign-and-notarize.sh)
+# shell-era distributable zip (same removal — pattern kept for strays)
 /OPEN-GROUND.app.zip
 
 # electron-builder output

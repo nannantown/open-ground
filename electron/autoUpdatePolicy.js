@@ -110,11 +110,29 @@ function decideDownloadedAction(input) {
   return { armLoop: true, notify: true, escalation }
 }
 
+/** Two release-nudges inside this window collapse into one GitHub fetch. */
+const NUDGE_MIN_GAP_MS = 60 * 1000
+
+/**
+ * Pure decision: honour a server-sent "check for updates now" nudge?
+ * The nudge endpoint (POST /api/update/check-now) is reachable by anything on
+ * loopback, so without this gap a tight loop could drive one GitHub fetch per
+ * request through the MAIN process. Time comes in as an input so the decision
+ * stays clock-free and testable.
+ * @param {{ lastNudgeAt: number, now: number }} input
+ * @returns {boolean}
+ */
+function shouldNudgeCheck(input) {
+  return input.now - input.lastNudgeAt >= NUDGE_MIN_GAP_MS
+}
+
 module.exports = {
   AUTO_APPLY_UNFOCUSED_MIN_MS,
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
+  NUDGE_MIN_GAP_MS,
   autoUpdateFromSettingsRaw,
   decideDownloadedAction,
   decideAutoApply,
+  shouldNudgeCheck,
 }
